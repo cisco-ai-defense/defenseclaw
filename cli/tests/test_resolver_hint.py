@@ -51,6 +51,7 @@ def test_authenticated_resolver_hint_is_copy_pasteable_and_fail_closed() -> None
     assert "sha256sum" in output and "shasum -a 256" in output
     assert "--proto-redir '=https'" in output
     assert "DefenseClaw upgrade resolver complete v1" in output
+    assert "unset VERSION" in output
     assert "raw.githubusercontent.com" not in output
     assert "upgrade.sh | bash" not in output
     assert "--version" not in output
@@ -73,6 +74,7 @@ def test_authenticated_resolver_hint_is_copy_pasteable_and_fail_closed() -> None
     assert "$matches" not in windows
 
     posix = output.split("POSIX:\n", 1)[1].split("\nWindows PowerShell:", 1)[0]
+    assert posix.index("unset VERSION") < posix.index("bash \"$d/defenseclaw-upgrade.sh\" --yes")
     completed = subprocess.run(
         [_bash_executable(), "-n"],
         input=posix,

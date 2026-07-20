@@ -595,6 +595,217 @@ def test_permission_preflight_failure_occurs_before_backup_or_mutation(
     assert not (fixture["data_dir"] / "backups").exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission-mode assertion")
+@pytest.mark.parametrize("legacy_mode", [0o500, 0o555])
+def test_read_only_preflight_accepts_legacy_backup_root_target_can_tighten(
+    tmp_path: Path,
+    legacy_mode: int,
+) -> None:
+    fixture = _fixture(tmp_path)
+    backup_root = fixture["data_dir"] / "backups"
+    backup_root.mkdir()
+    os.chmod(backup_root, legacy_mode)
+    config_before = fixture["config_path"].read_bytes()
+    environment_before = fixture["environment_path"].read_bytes()
+
+    activation_module.preflight_v8_migration_activation(
+        fixture["migration"],
+        data_dir=fixture["data_dir"],
+        config_path=fixture["config_path"],
+        environment_path=fixture["environment_path"],
+        tighten_legacy_backup_root=True,
+        environment={},
+    )
+
+    assert stat.S_IMODE(backup_root.stat().st_mode) == legacy_mode
+    assert fixture["config_path"].read_bytes() == config_before
+    assert fixture["environment_path"].read_bytes() == environment_before
+    assert list(backup_root.iterdir()) == []
+
+    result = activate_v8_migration(
+        fixture["migration"],
+        validator=_validator(fixture["candidate"], fixture["secret"]),
+        data_dir=fixture["data_dir"],
+        config_path=fixture["config_path"],
+        tighten_legacy_backup_root=True,
+        environment={},
+    )
+
+    assert result.activated is True
+    assert stat.S_IMODE(backup_root.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX advisory-lock mode semantics")
+def test_read_only_preflight_rejects_unwritable_existing_lock_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture(tmp_path)
+    lock_path = Path(f"{fixture['config_path']}.lock")
+    lock_path.write_bytes(b"")
+    os.chmod(lock_path, 0o400)
+    config_before = fixture["config_path"].read_bytes()
+    environment_before = fixture["environment_path"].read_bytes()
+    original_open = activation_module.os.open
+
+    def deny_lock_update(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        if os.fspath(path) == str(lock_path) and flags & os.O_RDWR:
+            raise PermissionError(errno.EACCES, "fixture lock is read-only")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(activation_module.os, "open", deny_lock_update)
+    with pytest.raises(V8ActivationError) as captured:
+        activation_module.preflight_v8_migration_activation(
+            fixture["migration"],
+            data_dir=fixture["data_dir"],
+            config_path=fixture["config_path"],
+            environment_path=fixture["environment_path"],
+            tighten_legacy_backup_root=True,
+            environment={},
+        )
+
+    assert captured.value.code == "lock_file_unwritable"
+    assert fixture["config_path"].read_bytes() == config_before
+    assert fixture["environment_path"].read_bytes() == environment_before
+    assert lock_path.read_bytes() == b""
+    assert stat.S_IMODE(lock_path.stat().st_mode) == 0o400
+    assert not (fixture["data_dir"] / "backups").exists()
+
+
+def test_held_update_lock_is_rejected_pre_stop_and_bounded_in_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture(tmp_path)
+    config_before = fixture["config_path"].read_bytes()
+    environment_before = fixture["environment_path"].read_bytes()
+    child_environment = dict(os.environ)
+    child_environment["PYTHONPATH"] = os.pathsep.join(
+        entry for entry in sys.path if isinstance(entry, str) and entry
+    )
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys\n"
+                "from defenseclaw.file_lock import locked_file_update\n"
+                "with locked_file_update(sys.argv[1]):\n"
+                "    print('locked', flush=True)\n"
+                "    sys.stdin.read(1)\n"
+            ),
+            str(fixture["config_path"]),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=child_environment,
+    )
+    assert child.stdout is not None
+    assert child.stdin is not None
+    try:
+        assert child.stdout.readline().strip() == "locked"
+        with pytest.raises(V8ActivationError) as preflight_error:
+            activation_module.preflight_v8_migration_activation(
+                fixture["migration"],
+                data_dir=fixture["data_dir"],
+                config_path=fixture["config_path"],
+                environment_path=fixture["environment_path"],
+                tighten_legacy_backup_root=True,
+                environment={},
+            )
+        assert preflight_error.value.code == "lock_file_busy"
+
+        monkeypatch.setattr(activation_module, "_ACTIVATION_LOCK_TIMEOUT_SECONDS", 0.1)
+        with pytest.raises(V8ActivationError) as activation_error:
+            activate_v8_migration(
+                fixture["migration"],
+                validator=lambda _candidate, _environment: pytest.fail(
+                    "validator must not run while the source lock is held"
+                ),
+                data_dir=fixture["data_dir"],
+                config_path=fixture["config_path"],
+                tighten_legacy_backup_root=True,
+                environment={},
+            )
+        assert activation_error.value.code == "lock_unavailable"
+        assert activation_error.value.stage == "acquire_update_lock"
+    finally:
+        try:
+            child.stdin.write("x")
+            child.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+        try:
+            child.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.communicate(timeout=5)
+
+    assert child.returncode == 0
+    assert fixture["config_path"].read_bytes() == config_before
+    assert fixture["environment_path"].read_bytes() == environment_before
+    assert not (fixture["data_dir"] / "backups").exists()
+
+
+def test_read_only_preflight_atomic_probe_failure_cleans_private_probes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture(tmp_path)
+    config_before = fixture["config_path"].read_bytes()
+    environment_before = fixture["environment_path"].read_bytes()
+    config_entries_before = set(fixture["config_path"].parent.iterdir())
+    data_entries_before = set(fixture["data_dir"].iterdir())
+
+    def reject_exchange(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.ENOTSUP, "fixture exchange unsupported")
+
+    monkeypatch.setattr(activation_module, "_exchange_probe_entries", reject_exchange)
+    with pytest.raises(V8ActivationError) as captured:
+        activation_module.preflight_v8_migration_activation(
+            fixture["migration"],
+            data_dir=fixture["data_dir"],
+            config_path=fixture["config_path"],
+            environment_path=fixture["environment_path"],
+            tighten_legacy_backup_root=True,
+            environment={},
+        )
+
+    assert captured.value.code == "permission_preflight_failed"
+    assert fixture["config_path"].read_bytes() == config_before
+    assert fixture["environment_path"].read_bytes() == environment_before
+    assert set(fixture["config_path"].parent.iterdir()) == config_entries_before
+    assert set(fixture["data_dir"].iterdir()) == data_entries_before
+    assert not (fixture["data_dir"] / "backups").exists()
+
+
+def test_read_only_preflight_rejects_promoted_secret_in_readable_environment(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path)
+    os.chmod(fixture["environment_path"], 0o644)
+    config_before = fixture["config_path"].read_bytes()
+    environment_before = fixture["environment_path"].read_bytes()
+
+    with pytest.raises(V8ActivationError) as captured:
+        activation_module.preflight_v8_migration_activation(
+            fixture["migration"],
+            data_dir=fixture["data_dir"],
+            config_path=fixture["config_path"],
+            environment_path=fixture["environment_path"],
+            tighten_legacy_backup_root=True,
+            environment={},
+        )
+
+    assert captured.value.code == "environment_permissions_unsafe"
+    assert fixture["config_path"].read_bytes() == config_before
+    assert fixture["environment_path"].read_bytes() == environment_before
+    assert stat.S_IMODE(fixture["environment_path"].stat().st_mode) == 0o644
+    assert not (fixture["data_dir"] / "backups").exists()
+
+
 @POSIX_PERMISSION_CONTRACT
 def test_refuses_to_append_promoted_secret_to_world_readable_environment(
     tmp_path: Path,

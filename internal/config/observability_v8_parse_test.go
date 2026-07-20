@@ -11,6 +11,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -21,14 +22,15 @@ import (
 )
 
 func TestParseCompileObservabilityV8Minimal(t *testing.T) {
-	wantDataDir, err := normalizeObservabilityV8FilePath("data_dir", "/var/lib/defenseclaw")
+	defaultDataDir := t.TempDir()
+	wantDataDir, err := normalizeObservabilityV8FilePath("data_dir", defaultDataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	compiled, err := ParseCompileObservabilityV8(
 		"config.yaml",
 		[]byte("config_version: 8\nobservability: {}\n"),
-		ObservabilityV8CompileOptions{DefaultDataDir: "/var/lib/defenseclaw"},
+		ObservabilityV8CompileOptions{DefaultDataDir: defaultDataDir},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -51,10 +53,19 @@ func TestParseCompileObservabilityV8ReferenceConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	caPath := filepath.Join(t.TempDir(), "otel-ca.pem")
+	if err := os.WriteFile(caPath, []byte("test CA fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixtureCAPath := []byte("/etc/defenseclaw/otel-ca.pem")
+	if count := bytes.Count(raw, fixtureCAPath); count != 1 {
+		t.Fatalf("reference CA path occurrences = %d, want 1", count)
+	}
+	raw = bytes.Replace(raw, fixtureCAPath, []byte(filepath.ToSlash(caPath)), 1)
 	compiled, err := ParseCompileObservabilityV8(
 		"observability.yaml",
 		raw,
-		ObservabilityV8CompileOptions{DefaultDataDir: "/var/lib/defenseclaw"},
+		ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir()},
 	)
 	if err != nil {
 		t.Fatal(err)

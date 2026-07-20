@@ -24,8 +24,10 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pytest
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_upgrade import (
+    _clear_local_bundle_restart_custody,
     _LocalBundleUpgradeInvocationError,
     _run_installed_local_observability_bundle_upgrade,
     _start_and_verify_services,
@@ -33,14 +35,27 @@ from defenseclaw.commands.cmd_upgrade import (
 )
 from defenseclaw.config import Config
 from defenseclaw.context import AppContext
+from defenseclaw.upgrade_receipt import (
+    begin_upgrade_receipt,
+    load_local_bundle_restart_intent,
+    record_local_bundle_restart_intent,
+)
 
 
 def test_absent_install_skips_target_interpreter(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    receipt_path = begin_upgrade_receipt(
+        str(data_dir),
+        from_version="7.9.0",
+        target_version="8.0.0",
+        artifacts_verified=True,
+    )
     with patch("defenseclaw.commands.cmd_upgrade.subprocess.run") as run:
         result = _run_installed_local_observability_bundle_upgrade(
-            str(tmp_path / "data"),
+            str(data_dir),
             str(tmp_path / "backup"),
             "8.0.0",
+            receipt_path=receipt_path,
             os_name="darwin",
         )
     assert result == {"installed": False}
@@ -54,6 +69,12 @@ def test_target_interpreter_returns_validated_refresh_result(tmp_path: Path) -> 
     python = home / ".defenseclaw/.venv/bin/python"
     python.parent.mkdir(parents=True)
     python.write_text("python\n", encoding="utf-8")
+    receipt_path = begin_upgrade_receipt(
+        str(data_dir),
+        from_version="7.9.0",
+        target_version="8.0.0",
+        artifacts_verified=True,
+    )
 
     def child(args, **_kwargs):
         result_path = args[-1]
@@ -81,17 +102,70 @@ def test_target_interpreter_returns_validated_refresh_result(tmp_path: Path) -> 
             str(data_dir),
             str(tmp_path / "backup"),
             "8.0.0",
+            receipt_path=receipt_path,
             os_name="darwin",
         )
 
     assert result["installed"] is True
     assert result["changed_paths"] == ["docker-compose.yml"]
     command = run.call_args.args[0]
-    assert command[0] == str(python)
-    assert command[4] == "refresh"
-    assert command[5] == str(data_dir)
-    assert command[6] == str(tmp_path / "backup")
-    assert command[7] == "8.0.0"
+    assert command[:4] == [str(python), "-I", "-B", "-c"]
+    operation_index = command.index("-c") + 2
+    assert command[operation_index:] == [
+        "refresh",
+        str(data_dir),
+        str(tmp_path / "backup"),
+        "8.0.0",
+        str(receipt_path),
+        command[-1],
+    ]
+
+
+def test_refresh_preserves_durable_restart_intent_across_retry(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    (data_dir / "observability-stack").mkdir(parents=True)
+    home = tmp_path / "home"
+    python = home / ".defenseclaw/.venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text("python\n", encoding="utf-8")
+    receipt_path = begin_upgrade_receipt(
+        str(data_dir),
+        from_version="7.9.0",
+        target_version="8.0.0",
+        artifacts_verified=True,
+    )
+    record_local_bundle_restart_intent(receipt_path, restart_required=True)
+
+    def child(args, **_kwargs):
+        Path(args[-1]).write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "result": {
+                        "installed": True,
+                        "refreshed": False,
+                        "restart_required": False,
+                        "changed_paths": [],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return Mock(returncode=0, stdout="", stderr="")
+
+    with (
+        patch.dict(os.environ, {"DEFENSECLAW_HOME": str(home / ".defenseclaw")}),
+        patch("defenseclaw.commands.cmd_upgrade.subprocess.run", side_effect=child),
+    ):
+        result = _run_installed_local_observability_bundle_upgrade(
+            str(data_dir),
+            str(tmp_path / "backup"),
+            "8.0.0",
+            receipt_path=receipt_path,
+            os_name="darwin",
+        )
+
+    assert result["restart_required"] is True
 
 
 def test_local_stack_restart_occurs_only_when_preupgrade_stack_was_running() -> None:
@@ -128,6 +202,94 @@ def test_local_stack_restart_occurs_only_when_preupgrade_stack_was_running() -> 
     )
 
 
+def test_successful_restart_releases_receipt_bound_restart_custody(tmp_path: Path) -> None:
+    app = AppContext()
+    app.cfg = Config(data_dir=str(tmp_path))
+    receipt_path = begin_upgrade_receipt(
+        str(tmp_path),
+        from_version="7.9.0",
+        target_version="8.0.0",
+        artifacts_verified=True,
+    )
+    record_local_bundle_restart_intent(receipt_path, restart_required=True)
+
+    with (
+        patch("defenseclaw.commands.cmd_upgrade._run_silent", return_value=True),
+        patch("defenseclaw.commands.cmd_upgrade._poll_health"),
+        patch(
+            "defenseclaw.commands.cmd_upgrade._run_installed_local_observability_bundle_restart",
+            return_value={"installed": True, "restarted": True, "degraded_errors": []},
+        ),
+    ):
+        _start_and_verify_services(
+            app,
+            5,
+            data_dir=str(tmp_path),
+            local_bundle_upgrade={
+                "installed": True,
+                "restart_required": True,
+                "_restart_intent_receipt": str(receipt_path),
+            },
+            os_name="darwin",
+        )
+
+    assert load_local_bundle_restart_intent(receipt_path) is None
+
+
+def test_successful_restart_custody_cleanup_failure_is_deferred() -> None:
+    with (
+        patch(
+            "defenseclaw.commands.cmd_upgrade.clear_local_bundle_restart_intent",
+            side_effect=OSError("temporary filesystem failure"),
+        ),
+        patch("defenseclaw.commands.cmd_upgrade.ux.warn") as warn,
+    ):
+        cleared = _clear_local_bundle_restart_custody(
+            {"_restart_intent_receipt": "/tmp/restart-receipt.json"}
+        )
+
+    assert cleared is False
+    warn.assert_called_once()
+
+
+def test_strict_restart_custody_cleanup_failure_prevents_success(tmp_path: Path) -> None:
+    app = AppContext()
+    app.cfg = Config(data_dir=str(tmp_path))
+    receipt_path = begin_upgrade_receipt(
+        str(tmp_path),
+        from_version="7.9.0",
+        target_version="8.0.0",
+        artifacts_verified=True,
+    )
+    record_local_bundle_restart_intent(receipt_path, restart_required=True)
+
+    with (
+        patch("defenseclaw.commands.cmd_upgrade._run_silent", return_value=True),
+        patch("defenseclaw.commands.cmd_upgrade._poll_health"),
+        patch(
+            "defenseclaw.commands.cmd_upgrade._run_installed_local_observability_bundle_restart",
+            return_value={"installed": True, "restarted": True, "degraded_errors": []},
+        ),
+        patch(
+            "defenseclaw.commands.cmd_upgrade.clear_local_bundle_restart_intent",
+            side_effect=OSError("temporary filesystem failure"),
+        ),
+        pytest.raises(SystemExit),
+    ):
+        _start_and_verify_services(
+            app,
+            5,
+            data_dir=str(tmp_path),
+            local_bundle_upgrade={
+                "installed": True,
+                "restart_required": True,
+                "_restart_intent_receipt": str(receipt_path),
+            },
+            os_name="darwin",
+            strict_local_observability=True,
+        )
+
+
 def test_bundle_refresh_failure_prevents_all_target_restarts(tmp_path: Path) -> None:
     runner = CliRunner()
     app = AppContext()
@@ -148,21 +310,15 @@ def test_bundle_refresh_failure_prevents_all_target_restarts(tmp_path: Path) -> 
                 return_value=("darwin", "arm64"),
             )
         )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._preflight_installed_source_coherence")
-        )
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_installed_source_coherence"))
         stack.enter_context(
             patch(
                 "defenseclaw.commands.cmd_upgrade._download_release_provenance",
                 return_value=Mock(),
             )
         )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._require_hard_cut_manifest_contract")
-        )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._enforce_upgrade_source_contract")
-        )
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._require_hard_cut_manifest_contract"))
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._enforce_upgrade_source_contract"))
         stack.enter_context(
             patch(
                 "defenseclaw.commands.cmd_upgrade._manifest_release_artifact_names",
@@ -172,12 +328,8 @@ def test_bundle_refresh_failure_prevents_all_target_restarts(tmp_path: Path) -> 
                 ),
             )
         )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._is_bridge_to_hard_cut_phase", return_value=True)
-        )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._require_release_owned_hard_cut_handoff")
-        )
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._is_bridge_to_hard_cut_phase", return_value=True))
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._require_release_owned_hard_cut_handoff"))
         stack.enter_context(
             patch(
                 "defenseclaw.commands.cmd_upgrade._acquire_bridge_rollback_artifacts",
@@ -190,9 +342,7 @@ def test_bundle_refresh_failure_prevents_all_target_restarts(tmp_path: Path) -> 
                 return_value=({}, "/tmp/bridge.dcwheel", "/tmp/bridge.dcgateway"),
             )
         )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._require_bridge_checksums_provenance")
-        )
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._require_bridge_checksums_provenance"))
         stack.enter_context(
             patch(
                 "defenseclaw.commands.cmd_upgrade._materialize_bridge_source_wheel_for_preflight",
@@ -211,19 +361,22 @@ def test_bundle_refresh_failure_prevents_all_target_restarts(tmp_path: Path) -> 
                 return_value=tmp_path / "phase-two-active.json",
             )
         )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._hold_phase_two_lease_for_command_lifetime")
-        )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._mark_hard_cut_bundle_mutation_intent")
-        )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._assert_gateway_quiesced")
-        )
-        stack.enter_context(
-            patch("defenseclaw.commands.cmd_upgrade._execute_hard_cut_rollback", return_value=True)
-        )
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._hold_phase_two_lease_for_command_lifetime"))
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._mark_hard_cut_bundle_mutation_intent"))
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._assert_gateway_quiesced"))
+        stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._execute_hard_cut_rollback", return_value=True))
         stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_check"))
+        stack.enter_context(
+            patch(
+                "defenseclaw.commands.cmd_upgrade._read_hard_cut_observability_preflight_binding",
+                return_value=None,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "defenseclaw.commands.cmd_upgrade._require_hard_cut_preflight_state_unchanged"
+            )
+        )
         stack.enter_context(
             patch(
                 "defenseclaw.commands.cmd_upgrade._download_checksums",

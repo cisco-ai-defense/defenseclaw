@@ -41,6 +41,20 @@ _REFERENCE_FORMATS: Final = frozenset({"yaml", "markdown"})
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _DIAGNOSTIC_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_EXEC_CONTROL_ENVIRONMENT_NAMES = frozenset(
+    {
+        "PATH",
+        "NODE_PATH",
+        "NODE_OPTIONS",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONSTARTUP",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+    }
+)
+_EXEC_CONTROL_ENVIRONMENT_PREFIXES = ("LD_", "DYLD_")
 
 
 class ConfigInspectError(RuntimeError):
@@ -72,12 +86,18 @@ def inspect_v8_config(
     config_path: str,
     data_dir: str | None = None,
     environment_overrides: Mapping[str, str] | None = None,
+    gateway_binary: str | None = None,
 ) -> ConfigV8WireResult:
     """Run one versioned Go helper operation and validate its JSON wire."""
 
     if operation not in _OPERATIONS:
         raise ValueError(f"unsupported config-v8 operation {operation!r}")
-    argv = _helper_argv(operation, config_path=config_path, data_dir=data_dir)
+    argv = _helper_argv(
+        operation,
+        config_path=config_path,
+        data_dir=data_dir,
+        gateway_binary=gateway_binary,
+    )
     completed = _run(argv, environment_overrides=environment_overrides)
     if completed.returncode != 0:
         failure = _decode_validation_failure(completed.stdout, operation)
@@ -135,9 +155,10 @@ def _helper_argv(
     *,
     config_path: str | None = None,
     data_dir: str | None = None,
+    gateway_binary: str | None = None,
     extra: tuple[str, ...] = (),
 ) -> list[str]:
-    binary = resolve_gateway_binary()
+    binary = gateway_binary if gateway_binary is not None else resolve_gateway_binary()
     if not binary:
         raise ConfigInspectError(
             "defenseclaw-gateway is required for canonical v8 configuration inspection; run defenseclaw upgrade"
@@ -193,7 +214,11 @@ def _validation_environment(overrides: Mapping[str, str]) -> dict[str, str]:
 
     if len(overrides) > 4_096:
         raise ConfigInspectError("configuration helper environment overrides are invalid")
-    result = os.environ.copy()
+    result = {
+        name: value
+        for name, value in os.environ.items()
+        if not _is_exec_control_environment_name(name)
+    }
     for name in overrides:
         value = overrides[name]
         if (
@@ -203,8 +228,17 @@ def _validation_environment(overrides: Mapping[str, str]) -> dict[str, str]:
             or "\x00" in value
         ):
             raise ConfigInspectError("configuration helper environment overrides are invalid")
+        if _is_exec_control_environment_name(name):
+            continue
         result[name] = value
     return result
+
+
+def _is_exec_control_environment_name(name: str) -> bool:
+    upper = name.upper()
+    return upper in _EXEC_CONTROL_ENVIRONMENT_NAMES or upper.startswith(
+        _EXEC_CONTROL_ENVIRONMENT_PREFIXES
+    )
 
 
 def _decode_wire(payload: dict[str, Any], operation: str) -> ConfigV8WireResult:

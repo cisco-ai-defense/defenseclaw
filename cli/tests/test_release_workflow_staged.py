@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -19,6 +20,7 @@ WORKFLOW = ROOT / ".github/workflows/release.yaml"
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 CERTIFICATION_WORKFLOW = ROOT / ".github/workflows/pre-release-certification.yml"
 PROTOCOL_GATE = ROOT / "scripts/test-upgrade-protocol-release.sh"
+RECEIPT_CHECK = ROOT / "scripts/check_upgrade_receipt.py"
 WINDOWS_PROTOCOL_GATE = ROOT / "scripts/test-upgrade-release-windows.ps1"
 MACOS_BUILD = ROOT / "scripts/build-macos-app-release.sh"
 POSIX_INSTALLER = ROOT / "scripts/install.sh"
@@ -58,9 +60,7 @@ def _ci_workflow() -> dict[str, object]:
 
 
 def _certification_workflow() -> dict[str, object]:
-    return yaml.load(
-        CERTIFICATION_WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader
-    )
+    return yaml.load(CERTIFICATION_WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
 def test_sensitive_plan_installs_cosign_before_historical_authentication() -> None:
@@ -69,11 +69,7 @@ def test_sensitive_plan_installs_cosign_before_historical_authentication() -> No
     cosign = next(
         index for index, step in enumerate(steps) if step.get("uses", "").startswith("sigstore/cosign-installer@")
     )
-    resolver = next(
-        index
-        for index, step in enumerate(steps)
-        if "resolve_upgrade_baselines.py" in step.get("run", "")
-    )
+    resolver = next(index for index, step in enumerate(steps) if "resolve_upgrade_baselines.py" in step.get("run", ""))
 
     assert steps[cosign]["uses"] == ("sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da")
     assert cosign < resolver
@@ -88,6 +84,27 @@ def test_sensitive_plan_installs_cosign_before_historical_authentication() -> No
     assert "release.yaml@refs/heads/main" in workflow_text
     assert "cannot mint" in workflow_text
     assert "nightly/manual certification" in workflow_text
+
+
+def test_installed_release_artifacts_mount_the_full_tui() -> None:
+    ci = CI_WORKFLOW.read_text(encoding="utf-8")
+    smoke = (ROOT / "scripts/test-upgrade-release.sh").read_text(encoding="utf-8")
+
+    for source, marker in (
+        (ci, "installed_wheel_tui_mount=ok"),
+        (ci, "installed_wheel_tui_origin=venv"),
+        (smoke, "installed_target_tui_mount=ok"),
+        (smoke, "installed_target_tui_origin=venv"),
+    ):
+        assert "import defenseclaw.tui.app as tui_app" in source
+        assert "TUI imported outside wheel environment" in source
+        assert "app.run_test(size=(120, 40))" in source
+        assert marker in source
+    assert "fresh_080_default_migration=ok" in smoke
+    assert "legacy_unconfigured_generic_otlp_placeholder_omitted" in smoke
+    assert "load_packaged_v7_compatibility_selection" in smoke
+    assert "compatibility_selection=compatibility_selection" in smoke
+    assert "post_status_mandatory_sqlite_write=ok" in smoke
 
 
 def test_release_supports_nightly_certification_and_manual_promotion() -> None:
@@ -111,7 +128,7 @@ def test_release_jobs_pin_the_bundle_verifier_binary() -> None:
         if step.get("uses", "").startswith("sigstore/cosign-installer@")
     ]
 
-    assert len(installers) == 10
+    assert len(installers) == 9
     assert all(step["uses"] == COSIGN_INSTALLER_ACTION for step in installers)
     assert all(step.get("with") == {"cosign-release": "v2.6.2"} for step in installers)
 
@@ -123,8 +140,10 @@ def test_release_immutability_preflight_uses_operator_confirmation_without_admin
     assert "IMMUTABLE_RELEASES_CONFIRMED" in text
     assert "inputs.immutable_releases_confirmed" in text
     assert "Immutable Releases confirmation required" in text
-    assert "--json tagName,isDraft,isImmutable,assets" in text
-    assert "scripts/release_candidate.py verify-published" in text
+    assert "scripts/release_api_retry.py prove-published" in text
+    helper = (ROOT / "scripts/release_api_retry.py").read_text(encoding="utf-8")
+    assert '"isImmutable": payload.get("immutable")' in helper
+    assert "verify_published_release" in helper
 
 
 def test_release_automation_never_publishes_runtime_to_python_package_indexes() -> None:
@@ -213,12 +232,10 @@ def test_native_windows_setup_is_required_while_raw_archives_remain_omitted() ->
     assert "windows-unpublished-refusal" in certification
     assert "windows-fresh-install" not in certification
     assert "windows-upgrade" not in certification
-    assert "windows_prebridge_baselines == '[]'" in certification[
-        "windows-unpublished-refusal"
-    ]["if"]
+    assert "windows_prebridge_baselines == '[]'" in certification["windows-unpublished-refusal"]["if"]
 
     workflow_text = WORKFLOW.read_text(encoding="utf-8")
-    assert workflow_text.count("--omit-windows-binaries") == 2
+    assert workflow_text.count("--omit-windows-binaries") == 4
     assert "publish_windows_binaries" not in workflow_text
     assert "Legacy raw Windows archives remain omitted" in workflow_text
     assert "signed, certified DefenseClawSetup-x64.exe is published" in workflow_text
@@ -340,6 +357,24 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
     assert "sigstore/cosign-installer@" in assemble_rendered
     assert "cosign sign-blob" in assemble_rendered
     assert text.count("cosign sign-blob") == 1
+    candidate_upload_index = next(
+        index
+        for index, step in enumerate(assemble_job["steps"])
+        if step.get("id") == "upload"
+    )
+    candidate_upload = assemble_job["steps"][candidate_upload_index]
+    assert candidate_upload["uses"] == (
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+    )
+    assert assemble_job["outputs"]["artifact_digest"] == (
+        "${{ steps.upload.outputs.artifact-digest }}"
+    )
+    digest_guard = assemble_job["steps"][candidate_upload_index + 1]
+    assert digest_guard["name"] == "Require candidate artifact digest output"
+    assert digest_guard["env"]["CANDIDATE_ARTIFACT_DIGEST"] == (
+        "${{ steps.upload.outputs.artifact-digest }}"
+    )
+    assert "Missing candidate artifact digest" in digest_guard["run"]
 
     macos_job = str(jobs["macos-app"])
     assert "scripts/release_candidate.py extract-gateway" in macos_job
@@ -350,7 +385,6 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
     for name in (
         "linux-upgrade",
         "macos-upgrade",
-        "historical-dependency-canary",
         "windows-unpublished-refusal",
         "posix-fresh-install",
         "live-continuity",
@@ -358,9 +392,7 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
         rendered = str(certification[name])
         assert "inputs.candidate_artifact" in rendered
         assert "scripts/release_candidate.py verify" in rendered
-    assert "needs.select-candidate.outputs.artifact_name" in str(
-        jobs["publish-release"]
-    )
+    assert "needs.select-candidate.outputs.artifact_name" in str(jobs["publish-release"])
 
 
 def test_runtime_candidate_keeps_generated_policy_outside_goreleaser_checkout() -> None:
@@ -368,29 +400,18 @@ def test_runtime_candidate_keeps_generated_policy_outside_goreleaser_checkout() 
     steps = job["steps"]
     rendered = str(job)
 
-    baseline_download = next(
-        step
-        for step in steps
-        if step.get("uses", "").startswith("actions/download-artifact@")
-    )
+    baseline_download = next(step for step in steps if step.get("uses", "").startswith("actions/download-artifact@"))
     assert baseline_download["with"]["path"] == "${{ runner.temp }}/effective-baselines"
     baseline_binding = next(
-        step
-        for step in steps
-        if step.get("name") == "Bind effective baseline outside the source checkout"
+        step for step in steps if step.get("name") == "Bind effective baseline outside the source checkout"
     )
     assert (
-        "UPGRADE_BASELINE_POLICY=$RUNNER_TEMP/effective-baselines/"
-        "effective-upgrade-baselines.json"
+        "UPGRADE_BASELINE_POLICY=$RUNNER_TEMP/effective-baselines/effective-upgrade-baselines.json"
     ) in baseline_binding["run"]
 
     first_stamp = rendered.index('scripts/stamp-version.sh "$RELEASE_TAG"')
     extension_build = rendered.index("make extensions", first_stamp)
-    clean_step = next(
-        step
-        for step in steps
-        if step.get("name") == "Restore a clean source checkout before GoReleaser"
-    )
+    clean_step = next(step for step in steps if step.get("name") == "Restore a clean source checkout before GoReleaser")
     clean = rendered.index(clean_step["name"])
     goreleaser = rendered.index("goreleaser/goreleaser-action@")
     second_stamp = rendered.index('scripts/stamp-version.sh "$RELEASE_TAG"', first_stamp + 1)
@@ -431,9 +452,7 @@ def test_release_certificate_is_canonicalized_and_authenticated_before_seal() ->
     seal_script = seal_step["run"]
 
     sign = sign_script.index("cosign sign-blob")
-    canonicalize = sign_script.index(
-        "scripts/release_candidate.py canonicalize-certificate"
-    )
+    canonicalize = sign_script.index("scripts/release_candidate.py canonicalize-certificate")
     authenticate = sign_script.index("scripts/verify-sigstore-blob.py")
     assert sign < canonicalize < authenticate
     assert sign_index + 1 == seal_index
@@ -456,7 +475,7 @@ def test_sealed_candidate_must_pass_native_fresh_install_and_second_run_refusal(
         "linux-amd64",
         "darwin-arm64",
     ]
-    assert "scripts/test-fresh-install-release.sh" in posix
+    assert "bash scripts/test-fresh-install-release.sh" in posix
     assert "inputs.candidate_artifact" in posix
     assert "scripts/release_candidate.py verify" in posix
 
@@ -485,15 +504,37 @@ def test_posix_fresh_install_gates_temporary_and_external_cosign_paths() -> None
     assert "the ambient Cosign binary changed during fresh-install testing" in text
 
 
-def test_real_historical_dependency_canaries_cover_common_oldest_and_running_source() -> None:
-    job = _certification_workflow()["jobs"]["historical-dependency-canary"]
-    assert job["strategy"]["matrix"] == "${{ fromJSON(inputs.historical_matrix) }}"
-    rendered = str(job)
-    assert "--baseline-dependencies published" in rendered
-    assert "--success-path-only" in rendered
-    assert "--start-source-gateway" in rendered
-    assert "scripts/test-upgrade-protocol-release.sh" in rendered
-    assert "scripts/release_candidate.py verify" in rendered
+def test_full_historical_matrix_limits_mutable_dependencies_to_required_bridge() -> None:
+    workflow = _certification_workflow()
+    rendered = str(workflow)
+
+    # Linux and macOS still exercise every behavior-class baseline through the
+    # signed resolver. Only the required bridge gets its published dependency
+    # environment, which proves target-only promotion without re-resolving every
+    # older wheel against today's mutable package index.
+    assert "historical-dependency-canary" not in workflow["jobs"]
+    assert "historical_matrix" not in workflow["on"]["workflow_call"]["inputs"]
+    linux = workflow["jobs"]["linux-upgrade"]
+    linux_rendered = str(linux)
+    assert linux["strategy"]["matrix"] == "${{ fromJSON(inputs.upgrade_cases) }}"
+    assert "matrix.start_source_gateway" in linux_rendered
+    assert "--start-source-gateway" in linux_rendered
+    assert "scripts/test-upgrade-protocol-release.sh" in linux_rendered
+    assert "--baseline-dependencies published" in linux_rendered
+    assert '"$BASELINE" == "$REQUIRED_BRIDGE_VERSION"' in linux_rendered
+    assert rendered.count("--baseline-dependencies published") == 1
+
+    macos = workflow["jobs"]["macos-upgrade"]
+    assert macos["strategy"]["matrix"]["baseline"] == "${{ fromJSON(inputs.baselines) }}"
+    assert "scripts/test-upgrade-protocol-release.sh" in str(macos)
+
+    release = _workflow()
+    assert release["jobs"]["release-preflight"]["outputs"]["certification_cases"] == (
+        "${{ steps.selection.outputs.matrix }}"
+    )
+    assert release["jobs"]["full-certification"]["with"]["upgrade_cases"] == (
+        "${{ needs.release-preflight.outputs.certification_cases }}"
+    )
 
 
 def test_macos_app_consumes_and_validates_sealed_runtime_gateway() -> None:
@@ -570,10 +611,10 @@ def test_upgrade_matrix_is_manifest_and_reviewed_data_driven() -> None:
     assert "CurrentConfigVersion" in text
     assert "ObservabilityV8ConfigVersion" in text
     assert "compatibility ceiling" in text
-    for name in ("linux-upgrade", "macos-upgrade"):
-        assert certification_jobs[name]["strategy"]["matrix"]["baseline"] == (
-            "${{ fromJSON(inputs.baselines) }}"
-        )
+    assert certification_jobs["linux-upgrade"]["strategy"]["matrix"] == ("${{ fromJSON(inputs.upgrade_cases) }}")
+    assert certification_jobs["macos-upgrade"]["strategy"]["matrix"]["baseline"] == (
+        "${{ fromJSON(inputs.baselines) }}"
+    )
     certification_text = CERTIFICATION_WORKFLOW.read_text(encoding="utf-8")
     assert "scripts/test-upgrade-protocol-release.sh" in certification_text
     assert "scripts/test-upgrade-release-windows.ps1" in certification_text
@@ -601,7 +642,42 @@ def test_only_final_step_can_create_remote_release_or_tag() -> None:
     assert "git push" not in text
     assert "push:\n" not in text
     assert "Publish tag and selected sealed assets" in text
-    assert "verify-published" in text
+    assert "prove-published" in text
+
+
+def test_release_publish_retries_only_after_absence_and_reconciles_ambiguity() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    publish = _workflow()["jobs"]["publish-release"]
+    rendered = "\n".join(step.get("run", "") for step in publish["steps"])
+    namespace_step = next(step for step in publish["steps"] if step.get("id") == "release-namespace")
+    create_step = next(
+        step for step in publish["steps"] if step.get("name") == "Publish tag and selected sealed assets"
+    )
+
+    assert publish["timeout-minutes"] == "45"
+    assert text.count("scripts/release_api_retry.py require-absent") == 1
+    assert "scripts/release_api_retry.py reconcile-create" in namespace_step["run"]
+    assert "--candidate-root release-candidate" in namespace_step["run"]
+    assert "--omit-windows-binaries" in namespace_step["run"]
+    assert "--check-main" in namespace_step["run"]
+    assert "create_required=false" in namespace_step["run"]
+    assert "create_required=true" in namespace_step["run"]
+    assert create_step["if"] == "steps.release-namespace.outputs.create_required == 'true'"
+    assert "for attempt in 1 2 3" in rendered
+    assert "timeout --signal=TERM --kill-after=30s 10m" in rendered
+    assert "scripts/release_api_retry.py reconcile-create" in rendered
+    assert rendered.count("--check-main") == 2
+    assert 'reconcile_status" != "10"' in rendered
+    assert "refusing another create" in rendered
+    assert "Release API retries exhausted" in rendered
+    assert "scripts/release_api_retry.py prove-published" in rendered
+    create_index = rendered.index('gh release create "$RELEASE_TAG"')
+    precheck_index = rendered.index("scripts/release_api_retry.py reconcile-create")
+    reconcile_index = rendered.rindex("scripts/release_api_retry.py reconcile-create")
+    prove_index = rendered.index("scripts/release_api_retry.py prove-published")
+    assert precheck_index < create_index < reconcile_index < prove_index
+    assert 'git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG"' not in rendered
+    assert 'gh release view "$RELEASE_TAG"' not in rendered
 
 
 def test_every_remote_action_is_commit_pinned() -> None:
@@ -624,7 +700,6 @@ def test_every_ci_remote_action_is_commit_pinned() -> None:
 
 def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
     text = PROTOCOL_GATE.read_text(encoding="utf-8")
-    assert 'receipt.get("migration_status") != "completed"' in text
     for contract in (
         "CANDIDATE_MIN_PROTOCOL",
         "CANDIDATE_SCHEMA_VERSION",
@@ -638,14 +713,12 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
         'patch_installed_upgrade_endpoint "${TARGET_VERSION}"',
         'defenseclaw "${command_args[@]}"',
         "run_candidate_updater_refusal",
-        "run_candidate_explicit_bridge_refusal",
         "run_candidate_updater_staged_success",
         "run_candidate_updater_direct_success",
         "manifest_windows_sources_are_empty",
         "immutable-bridge-empty-windows",
         "prepare_required_bridge_assets",
         "DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL",
-        "assert_staged_success_receipt",
         "UPGRADE_GATE_STOP_MARKER",
         "gateway sentinel PID changed",
         "assert_no_success_receipt",
@@ -655,7 +728,8 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
         "manifest_array_contains tested_source_versions",
         "canonical gateway refusal envelope",
         "artifact-envelope",
-        "there is intentionally no --version argument",
+        'resolver_args+=(--version "${TARGET_VERSION}")',
+        'run_candidate_updater_staged_success "${baseline}" explicit',
         "stage_authenticated_baseline",
         "SUCCESS_PATH_ONLY",
         "REFUSAL_CONTRACT_ONLY",
@@ -673,19 +747,23 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
     ):
         assert contract in text
     sealed_resolver = 'bash "${RELEASE_ROOT}/${TARGET_VERSION}/defenseclaw-upgrade.sh"'
-    assert text.count(sealed_resolver) >= 4
+    assert text.count(sealed_resolver) >= 3
     assert 'scripts/upgrade.sh" --yes' not in text
     assert not re.search(r"TARGET_VERSION[^\n]*0\.8\.", text)
     smoke = (ROOT / "scripts/test-upgrade-release.sh").read_text(encoding="utf-8")
     assert "force_latest_version" in smoke
     assert 'target_version = "{force_latest_version}"' in smoke
+    assert "scripts/check_upgrade_receipt.py" in smoke
+    assert "assert_staged_success_receipt" not in text
+    verifier = RECEIPT_CHECK.read_text(encoding="utf-8")
+    assert 'facts.get("migration_status") != "completed"' in verifier
+    assert "FROM audit_events" in verifier
 
 
 def test_external_resolver_boundaries_disable_python_bytecode() -> None:
     text = PROTOCOL_GATE.read_text(encoding="utf-8")
     for function_name in (
         "run_candidate_updater_refusal",
-        "run_candidate_explicit_bridge_refusal",
         "run_candidate_updater_staged_success",
         "run_candidate_updater_direct_success",
     ):
@@ -700,6 +778,104 @@ def test_external_resolver_boundaries_disable_python_bytecode() -> None:
         assert 'bash "${RELEASE_ROOT}/${TARGET_VERSION}/defenseclaw-upgrade.sh"' in body
 
 
+def test_posix_refusal_snapshot_preserves_python_bytecode_paths(
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        return
+
+    protocol = PROTOCOL_GATE.read_text(encoding="utf-8")
+    function_start = protocol.index("snapshot_state() {")
+    program_marker = "\"${output}\" <<'PY'\n"
+    program_start = protocol.index(program_marker, function_start) + len(program_marker)
+    program_end = protocol.index("\nPY\n}", program_start)
+    program = protocol[program_start:program_end]
+
+    data_dir = tmp_path / "data"
+    openclaw_home = tmp_path / "openclaw"
+    package_dir = tmp_path / "package"
+    cli_target = tmp_path / "cli-target"
+    cli_link = tmp_path / "defenseclaw"
+    gateway = tmp_path / "gateway"
+    real_gateway = tmp_path / "gateway-real"
+    for directory in (
+        data_dir / "state",
+        data_dir / ".venv" / "lib",
+        openclaw_home,
+        package_dir / "runtime",
+        package_dir / "native",
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    cli_target.write_text("cli\n", encoding="utf-8")
+    cli_link.symlink_to(cli_target)
+    gateway.write_text("gateway\n", encoding="utf-8")
+    real_gateway.write_text("real gateway\n", encoding="utf-8")
+
+    real_cache_files = []
+    for cache_dir in (
+        data_dir / "state" / "__pycache__",
+        data_dir / ".venv" / "lib" / "__pycache__",
+        openclaw_home / "__pycache__",
+        package_dir / "runtime" / "__pycache__",
+    ):
+        cache_dir.mkdir()
+        cache_file = cache_dir / "module.cpython-312.pyc"
+        cache_file.write_bytes(b"runtime bytecode")
+        real_cache_files.append(cache_file)
+    standalone_pyc = package_dir / "module.pyc"
+    standalone_pyc.write_bytes(b"standalone bytecode")
+
+    def take_snapshot(output: Path) -> dict[str, object]:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-",
+                str(data_dir),
+                str(openclaw_home),
+                str(package_dir),
+                str(cli_link),
+                str(gateway),
+                str(real_gateway),
+                str(output),
+            ],
+            input=program,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        return json.loads(output.read_text(encoding="utf-8"))
+
+    before = take_snapshot(tmp_path / "before.json")
+    for protected in (
+        "data/state/__pycache__",
+        "data/state/__pycache__/module.cpython-312.pyc",
+        "venv/lib/__pycache__",
+        "venv/lib/__pycache__/module.cpython-312.pyc",
+        "openclaw/__pycache__",
+        "openclaw/__pycache__/module.cpython-312.pyc",
+        "installed-cli/runtime/__pycache__",
+        "installed-cli/runtime/__pycache__/module.cpython-312.pyc",
+        "installed-cli/module.pyc",
+    ):
+        assert protected in before
+
+    for cache_file in real_cache_files:
+        cache_file.write_bytes(b"new runtime bytecode")
+    standalone_pyc.write_bytes(b"new standalone bytecode")
+    after_cache_writes = take_snapshot(tmp_path / "after-cache-writes.json")
+    assert after_cache_writes != before
+    for protected in (
+        "data/state/__pycache__/module.cpython-312.pyc",
+        "venv/lib/__pycache__/module.cpython-312.pyc",
+        "openclaw/__pycache__/module.cpython-312.pyc",
+        "installed-cli/runtime/__pycache__/module.cpython-312.pyc",
+        "installed-cli/module.pyc",
+    ):
+        assert after_cache_writes[protected]["sha256"] != before[protected]["sha256"]
+
+
 def test_protocol_gate_detects_an_empty_windows_source_matrix(tmp_path: Path) -> None:
     release_dir = tmp_path / "0.8.5"
     release_dir.mkdir()
@@ -710,10 +886,7 @@ def test_protocol_gate_detects_an_empty_windows_source_matrix(tmp_path: Path) ->
             [
                 _bash_executable(),
                 "-c",
-                (
-                    'source "$1"; RELEASE_ROOT="$2"; TARGET_VERSION="0.8.5"; '
-                    "manifest_windows_sources_are_empty"
-                ),
+                ('source "$1"; RELEASE_ROOT="$2"; TARGET_VERSION="0.8.5"; manifest_windows_sources_are_empty'),
                 "windows-source-matrix-test",
                 str(PROTOCOL_GATE),
                 str(tmp_path),
@@ -743,7 +916,7 @@ def test_empty_windows_matrix_uses_bridge_refusal_then_current_resolver() -> Non
         [
             _bash_executable(),
             "-c",
-            r'''
+            r"""
 source "$1"
 TARGET_VERSION="0.8.5"
 CANDIDATE_MIN_PROTOCOL=2
@@ -764,7 +937,7 @@ run_candidate_explicit_bridge_refusal() { return 95; }
 run_candidate_updater_staged_success() { return 94; }
 run_candidate_updater_direct_success() { printf 'direct=%s\n' "$1"; }
 run_protocol_case "0.8.4"
-''',
+""",
             "bridge-empty-windows-test",
             str(PROTOCOL_GATE),
         ],

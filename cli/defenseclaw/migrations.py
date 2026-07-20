@@ -36,6 +36,7 @@ Design contract for every migration:
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import os
@@ -46,8 +47,9 @@ import stat
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import click
 import yaml
@@ -63,6 +65,15 @@ from defenseclaw.file_permissions import (
 )
 
 _OBSERVABILITY_V8_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+if TYPE_CHECKING:
+    from defenseclaw.observability.v8_migration import V8MigrationResult
+
+_OBSERVABILITY_V8_PREFLIGHT_BINDING_ENV = "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING"
+_UPGRADE_MUTATION_TOKEN_ENV = "DEFENSECLAW_UPGRADE_MUTATION_TOKEN"
+_MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES = 4 * 1024 * 1024
+_WINDOWS_REPARSE_POINT_ATTRIBUTE = 0x00000400
+_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # These target-wheel dependencies are resolved lazily. Older upgrade clients
@@ -80,6 +91,14 @@ def activate_v8_migration(*args, **kwargs):
     from defenseclaw.observability.v8_activation import activate_v8_migration as activate
 
     return activate(*args, **kwargs)
+
+
+def preflight_v8_migration_activation(*args, **kwargs):
+    from defenseclaw.observability.v8_activation import (
+        preflight_v8_migration_activation as preflight,
+    )
+
+    return preflight(*args, **kwargs)
 
 
 def inspect_v8_config(*args, **kwargs):
@@ -216,6 +235,349 @@ class ObservabilityV8UpgradeMigrationError(RuntimeError):
         super().__init__(f"observability v8 upgrade migration failed ({code})")
 
 
+@dataclass(frozen=True)
+class _PreparedObservabilityV8Migration:
+    """One read-only conversion snapshot shared by preflight and activation."""
+
+    migration: V8MigrationResult
+    environment: dict[str, str] = field(repr=False)
+    environment_file_present: bool
+    environment_file_sha256: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class ObservabilityV8PreflightBinding:
+    """Value-free identity of the source proven safe before mutation."""
+
+    source_sha256: str = field(repr=False)
+    candidate_sha256: str = field(repr=False)
+    environment_file_present: bool
+    environment_file_sha256: str = field(repr=False)
+    environment_dependencies_sha256: str = field(repr=False)
+    environment_edits_sha256: str = field(repr=False)
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "source_sha256": self.source_sha256,
+            "candidate_sha256": self.candidate_sha256,
+            "environment_file_present": self.environment_file_present,
+            "environment_file_sha256": self.environment_file_sha256,
+            "environment_dependencies_sha256": self.environment_dependencies_sha256,
+            "environment_edits_sha256": self.environment_edits_sha256,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: object) -> ObservabilityV8PreflightBinding:
+        fields = {
+            "schema_version",
+            "source_sha256",
+            "candidate_sha256",
+            "environment_file_present",
+            "environment_file_sha256",
+            "environment_dependencies_sha256",
+            "environment_edits_sha256",
+        }
+        if not isinstance(payload, dict) or set(payload) != fields or payload.get("schema_version") != 1:
+            raise ObservabilityV8UpgradeMigrationError("preflight_binding_invalid")
+        present = payload.get("environment_file_present")
+        digests = {key: payload.get(key) for key in fields if key.endswith("_sha256")}
+        if not isinstance(present, bool) or any(
+            not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None for value in digests.values()
+        ):
+            raise ObservabilityV8UpgradeMigrationError("preflight_binding_invalid")
+        return cls(
+            source_sha256=digests["source_sha256"],
+            candidate_sha256=digests["candidate_sha256"],
+            environment_file_present=present,
+            environment_file_sha256=digests["environment_file_sha256"],
+            environment_dependencies_sha256=digests["environment_dependencies_sha256"],
+            environment_edits_sha256=digests["environment_edits_sha256"],
+        )
+
+
+def _prepare_observability_v8_migration(
+    *,
+    data_dir: str,
+    config_path: str,
+) -> _PreparedObservabilityV8Migration | None:
+    """Read and convert the active v7 source without mutating installed state."""
+
+    environment_path = os.path.join(data_dir, ".env")
+    source = _read_observability_v8_upgrade_source(config_path)
+    if source is None:
+        # An unconfigured installation has no schema to convert. A later setup
+        # command creates a native v8 document.
+        return None
+
+    environment, environment_file_present, environment_file_sha256 = _observability_v8_upgrade_environment_snapshot(
+        environment_path
+    )
+    environment.pop(_OBSERVABILITY_V8_PREFLIGHT_BINDING_ENV, None)
+    environment.pop(_UPGRADE_MUTATION_TOKEN_ENV, None)
+    migration = convert_v7_observability_to_v8(
+        source,
+        environment,
+        source_name=config_path,
+        effective_data_dir=data_dir,
+    )
+    return _PreparedObservabilityV8Migration(
+        migration=migration,
+        environment=environment,
+        environment_file_present=environment_file_present,
+        environment_file_sha256=environment_file_sha256,
+    )
+
+
+def _read_observability_v8_upgrade_source(config_path: str) -> bytes | None:
+    """Read one bounded regular config leaf without following a symlink."""
+
+    return _read_stable_observability_v8_upgrade_file(
+        config_path,
+        missing_ok=True,
+        failure_code="source_read_failed",
+        allow_oversize_sentinel=True,
+    )
+
+
+def _observability_v8_upgrade_file_snapshot_unchanged(
+    before: os.stat_result,
+    after: os.stat_result,
+) -> bool:
+    return (
+        os.path.samestat(before, after)
+        and before.st_mode == after.st_mode
+        and before.st_size == after.st_size
+        and before.st_mtime_ns == after.st_mtime_ns
+        and before.st_ctime_ns == after.st_ctime_ns
+        and getattr(before, "st_uid", None) == getattr(after, "st_uid", None)
+    )
+
+
+def _observability_v8_upgrade_named_snapshot_unchanged(
+    opened: os.stat_result,
+    named: os.stat_result,
+) -> bool:
+    """Compare descriptor and named views without Windows ctime conversion drift."""
+
+    return (
+        os.path.samestat(opened, named)
+        and opened.st_mode == named.st_mode
+        and opened.st_size == named.st_size
+        and opened.st_mtime_ns == named.st_mtime_ns
+        and (os.name == "nt" or opened.st_ctime_ns == named.st_ctime_ns)
+        and getattr(opened, "st_uid", None) == getattr(named, "st_uid", None)
+    )
+
+
+def _read_stable_observability_v8_upgrade_file(
+    path: str,
+    *,
+    missing_ok: bool,
+    failure_code: str,
+    allow_oversize_sentinel: bool = False,
+) -> bytes | None:
+    """Read one stable, bounded regular file through a no-follow descriptor."""
+
+    try:
+        named_before = os.lstat(path)
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise ObservabilityV8UpgradeMigrationError(failure_code) from None
+    except OSError:
+        raise ObservabilityV8UpgradeMigrationError(failure_code) from None
+    if (
+        stat.S_ISLNK(named_before.st_mode)
+        or getattr(named_before, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT_ATTRIBUTE
+        or not stat.S_ISREG(named_before.st_mode)
+        or (not allow_oversize_sentinel and named_before.st_size > _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES)
+    ):
+        raise ObservabilityV8UpgradeMigrationError(failure_code)
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        opened_before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened_before.st_mode)
+            or not _observability_v8_upgrade_named_snapshot_unchanged(
+                opened_before,
+                named_before,
+            )
+            or (not allow_oversize_sentinel and opened_before.st_size > _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES)
+        ):
+            raise ObservabilityV8UpgradeMigrationError(failure_code)
+
+        payload = bytearray()
+        while len(payload) <= _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES:
+            block = os.read(
+                descriptor,
+                min(
+                    1024 * 1024,
+                    _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES + 1 - len(payload),
+                ),
+            )
+            if not block:
+                break
+            payload.extend(block)
+
+        opened_after = os.fstat(descriptor)
+        try:
+            named_after = os.lstat(path)
+        except OSError:
+            raise ObservabilityV8UpgradeMigrationError(failure_code) from None
+        if (
+            (len(payload) > _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES and not allow_oversize_sentinel)
+            or not _observability_v8_upgrade_file_snapshot_unchanged(
+                opened_before,
+                opened_after,
+            )
+            or not _observability_v8_upgrade_file_snapshot_unchanged(
+                named_before,
+                named_after,
+            )
+            or stat.S_ISLNK(named_after.st_mode)
+            or getattr(named_after, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT_ATTRIBUTE
+            or not stat.S_ISREG(named_after.st_mode)
+            or not _observability_v8_upgrade_named_snapshot_unchanged(
+                opened_after,
+                named_after,
+            )
+            or (len(payload) <= _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES and len(payload) != opened_after.st_size)
+        ):
+            raise ObservabilityV8UpgradeMigrationError(failure_code)
+        return bytes(payload)
+    except ObservabilityV8UpgradeMigrationError:
+        raise
+    except OSError:
+        raise ObservabilityV8UpgradeMigrationError(failure_code) from None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def preflight_observability_v8_upgrade(
+    *,
+    data_dir: str,
+    config_path: str,
+    gateway_binary: str,
+    candidate_directory: str,
+) -> ObservabilityV8PreflightBinding | None:
+    """Prove the active v7 source is migratable before stopping its gateway.
+
+    This invokes the same pure conversion implementation later used by the
+    installed migration. The returned value-free binding lets the controller
+    reject config or consulted-environment drift at the mutation boundary.
+    The generated candidate is validated by the authenticated, downloaded
+    target gateway and exists only as an owner-only staging file. No managed
+    state, backup, receipt, service, or installed artifact is changed here.
+    """
+
+    normalized_data_dir = os.path.abspath(os.path.expanduser(data_dir))
+    normalized_config_path = os.path.abspath(os.path.expanduser(config_path))
+    prepared = _prepare_observability_v8_migration(
+        data_dir=normalized_data_dir,
+        config_path=normalized_config_path,
+    )
+    if prepared is None:
+        return None
+
+    validation_environment = dict(prepared.environment)
+    validation_environment.update({edit.name: edit.value for edit in prepared.migration.environment_edits})
+    _validate_observability_v8_candidate(
+        prepared.migration.candidate,
+        validation_environment,
+        data_dir=normalized_data_dir,
+        candidate_directory=candidate_directory,
+        gateway_binary=gateway_binary,
+    )
+    preflight_v8_migration_activation(
+        prepared.migration,
+        data_dir=normalized_data_dir,
+        config_path=normalized_config_path,
+        environment_path=os.path.join(normalized_data_dir, ".env"),
+        tighten_legacy_backup_root=True,
+        environment=prepared.environment,
+    )
+    return _observability_v8_preflight_binding(prepared)
+
+
+def _observability_v8_preflight_binding(
+    prepared: _PreparedObservabilityV8Migration,
+) -> ObservabilityV8PreflightBinding:
+    return ObservabilityV8PreflightBinding(
+        source_sha256=prepared.migration.source_sha256,
+        candidate_sha256=prepared.migration.candidate_sha256,
+        environment_file_present=prepared.environment_file_present,
+        environment_file_sha256=prepared.environment_file_sha256,
+        environment_dependencies_sha256=_observability_v8_binding_rows_sha256(
+            (
+                dependency.name,
+                dependency.present,
+                dependency.value_sha256,
+            )
+            for dependency in prepared.migration.environment_dependencies
+        ),
+        environment_edits_sha256=_observability_v8_binding_rows_sha256(
+            (edit.name, edit.value_sha256, edit.operation) for edit in prepared.migration.environment_edits
+        ),
+    )
+
+
+def _observability_v8_binding_rows_sha256(
+    rows: Iterable[tuple[object, ...]],
+) -> str:
+    """Hash sorted value-free binding rows into one bounded transport value."""
+
+    encoded = json.dumps(
+        sorted(tuple(row) for row in rows),
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _valid_upgrade_mutation_token() -> bool:
+    """Return whether the controller supplied one filename-safe capability."""
+
+    token = os.environ.get(_UPGRADE_MUTATION_TOKEN_ENV)
+    return isinstance(token, str) and re.fullmatch(r"[0-9a-f]{32}", token) is not None
+
+
+def _expected_observability_v8_preflight_binding() -> tuple[bool, ObservabilityV8PreflightBinding | None]:
+    if not _valid_upgrade_mutation_token():
+        return False, None
+    raw = os.environ.get(_OBSERVABILITY_V8_PREFLIGHT_BINDING_ENV)
+    if raw is None:
+        raise ObservabilityV8UpgradeMigrationError("preflight_binding_missing")
+    if len(raw) > 4_096:
+        raise ObservabilityV8UpgradeMigrationError("preflight_binding_invalid")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ObservabilityV8UpgradeMigrationError("preflight_binding_invalid") from None
+    if payload is None:
+        return True, None
+    return True, ObservabilityV8PreflightBinding.from_payload(payload)
+
+
+def _controller_has_hard_cut_bundle_custody() -> bool:
+    """Return whether the child received the paired hard-cut capability."""
+
+    if not _valid_upgrade_mutation_token():
+        return False
+    try:
+        binding_present, _binding = _expected_observability_v8_preflight_binding()
+    except ObservabilityV8UpgradeMigrationError:
+        return False
+    return binding_present
+
+
 def _migrate_observability_v8(ctx: MigrationContext) -> None:
     """Convert, target-validate, and transactionally activate config v8.
 
@@ -236,21 +598,19 @@ def _migrate_observability_v8(ctx: MigrationContext) -> None:
     config_path = os.path.abspath(os.path.expanduser(ctx.active_config_path()))
     environment_path = os.path.join(data_dir, ".env")
     _assert_observability_v8_upgrade_quiesced(data_dir)
-
-    source = _read_observability_v8_upgrade_source(config_path, data_dir)
-    if source is None:
-        # An unconfigured installation has no schema to convert. This is a
-        # deliberate no-op rather than a post-install migration failure; a
-        # later setup command will create a native v8 document.
-        return
-
-    environment = _observability_v8_upgrade_environment(environment_path)
-    migration = convert_v7_observability_to_v8(
-        source,
-        environment,
-        source_name=config_path,
-        effective_data_dir=data_dir,
+    expected_binding_present, expected_binding = _expected_observability_v8_preflight_binding()
+    prepared = _prepare_observability_v8_migration(
+        data_dir=data_dir,
+        config_path=config_path,
     )
+    if expected_binding_present:
+        current_binding = _observability_v8_preflight_binding(prepared) if prepared is not None else None
+        if current_binding != expected_binding:
+            raise ObservabilityV8UpgradeMigrationError("preflight_source_changed")
+    if prepared is None:
+        return
+    environment = prepared.environment
+    migration = prepared.migration
 
     def validate_candidate(candidate: bytes, protected_overrides: Mapping[str, str]) -> None:
         validation_environment = dict(environment)
@@ -261,15 +621,33 @@ def _migrate_observability_v8(ctx: MigrationContext) -> None:
             data_dir=data_dir,
         )
 
-    activation = activate_v8_migration(
-        migration,
-        validator=validate_candidate,
-        data_dir=data_dir,
-        config_path=config_path,
-        environment_path=environment_path,
-        tighten_legacy_backup_root=True,
-        environment=environment,
-    )
+    locked_binding = None
+    if expected_binding is not None:
+        locked_binding = (
+            expected_binding.source_sha256,
+            expected_binding.environment_file_present,
+            expected_binding.environment_file_sha256,
+        )
+    from defenseclaw.observability.v8_activation import V8ActivationError as _V8ActivationError
+
+    try:
+        activation = activate_v8_migration(
+            migration,
+            validator=validate_candidate,
+            data_dir=data_dir,
+            config_path=config_path,
+            environment_path=environment_path,
+            tighten_legacy_backup_root=True,
+            environment=environment,
+            preflight_source_binding=locked_binding,
+        )
+    except _V8ActivationError as exc:
+        # The bridge's public migration contract is intentionally independent
+        # of target-private exception classes. Preserve the value-free refusal
+        # code used by the controller when a source changed after preflight.
+        if getattr(exc, "code", None) == "preflight_source_changed":
+            raise ObservabilityV8UpgradeMigrationError("preflight_source_changed") from None
+        raise
     _refresh_observability_v8_bundle_for_legacy_upgrader(ctx, data_dir, activation)
     if activation.activated:
         ctx.changes.append("activated observability configuration schema v8")
@@ -339,7 +717,7 @@ def _preflight_observability_v8(ctx: MigrationContext, scratch_dir: str) -> None
         raise ObservabilityV8UpgradeMigrationError("preflight_path_escape") from None
     if common != os.path.normcase(data_dir):
         raise ObservabilityV8UpgradeMigrationError("preflight_path_escape")
-    source = _read_observability_v8_upgrade_source(config_path, data_dir)
+    source = _read_observability_v8_upgrade_source(config_path)
     if source is None:
         return
     environment = _observability_v8_upgrade_environment(environment_path)
@@ -363,6 +741,8 @@ def _refresh_observability_v8_bundle_for_legacy_upgrader(
     ctx: MigrationContext,
     data_dir: str,
     activation,
+    *,
+    restart_intent_receipt: str | None = None,
 ) -> None:
     """Bridge released upgrade clients to the target bundle transaction.
 
@@ -385,6 +765,7 @@ def _refresh_observability_v8_bundle_for_legacy_upgrader(
         data_dir,
         backup_directory,
         ctx.to_version,
+        restart_intent_receipt=restart_intent_receipt,
     )
     if result.get("installed") is True:
         ctx.changes.append("refreshed local observability bundle for the target release")
@@ -452,6 +833,8 @@ def _run_observability_v8_bundle_upgrade_in_target(
     data_dir: str,
     backup_directory: str,
     target_version: str,
+    *,
+    restart_intent_receipt: str | None = None,
 ) -> dict[str, object]:
     """Refresh/restart through a clean interpreter from the installed wheel."""
 
@@ -460,34 +843,59 @@ def _run_observability_v8_bundle_upgrade_in_target(
     script = """
 import json
 import sys
+from pathlib import Path
 
 from defenseclaw.bundle_refresh import (
     LocalObservabilityUpgradeError,
     restart_upgraded_local_observability_stack,
     upgrade_local_observability_stack,
 )
+from defenseclaw.upgrade_receipt import (
+    clear_local_bundle_restart_intent,
+    record_local_bundle_restart_intent,
+)
 
 try:
+    receipt = Path(sys.argv[4]) if sys.argv[4] else None
     result = upgrade_local_observability_stack(
         sys.argv[1],
         sys.argv[2],
         bundle_version=sys.argv[3],
+        restart_intent_recorder=(
+            None
+            if receipt is None
+            else lambda required: record_local_bundle_restart_intent(
+                receipt,
+                restart_required=required,
+            )
+        ),
     )
     payload = result.to_dict()
     payload["ok"] = True
+    restart_succeeded = not result.restart_required
     if result.restart_required:
         try:
             restarted = restart_upgraded_local_observability_stack(sys.argv[1])
             payload["restarted"] = restarted.restarted
             payload["degraded_errors"] = list(restarted.degraded_errors)
+            restart_succeeded = restarted.restarted and not restarted.degraded_errors
         except LocalObservabilityUpgradeError as exc:
             payload["degraded_errors"] = [f"{exc.code}:{exc.phase}"]
+    if receipt is not None and restart_succeeded:
+        try:
+            clear_local_bundle_restart_intent(receipt)
+        except Exception:
+            degraded_errors = payload.setdefault("degraded_errors", [])
+            if isinstance(degraded_errors, list):
+                degraded_errors.append("restart_intent_cleanup_failed")
+            else:
+                payload["degraded_errors"] = ["restart_intent_cleanup_failed"]
 except LocalObservabilityUpgradeError as exc:
     payload = {"ok": False, "code": exc.code, "phase": exc.phase}
 except Exception:
     payload = {"ok": False, "code": "unexpected_failure", "phase": "invoke"}
 
-with open(sys.argv[4], "w", encoding="utf-8") as handle:
+with open(sys.argv[5], "w", encoding="utf-8") as handle:
     json.dump(payload, handle, sort_keys=True)
 sys.exit(0 if payload["ok"] else 1)
 """
@@ -495,11 +903,14 @@ sys.exit(0 if payload["ok"] else 1)
         completed = subprocess.run(
             [
                 sys.executable,
+                "-I",
+                "-B",
                 "-c",
                 script,
                 data_dir,
                 backup_directory,
                 target_version,
+                restart_intent_receipt or "",
                 result_path,
             ],
             capture_output=True,
@@ -561,102 +972,54 @@ def _assert_observability_v8_upgrade_quiesced(data_dir: str) -> None:
 def _observability_v8_upgrade_environment(environment_path: str) -> dict[str, str]:
     """Return the active dotenv plus ambient overrides without mutation."""
 
-    snapshot = _read_observability_v8_upgrade_dotenv(environment_path)
-    # Standard Windows environments contain names such as ProgramFiles(x86)
-    # that cannot be referenced by the v8 environment grammar. They are
-    # unrelated to DefenseClaw and must not poison an otherwise valid upgrade.
-    snapshot.update(
-        (name, value) for name, value in os.environ.items() if _OBSERVABILITY_V8_ENVIRONMENT_NAME.fullmatch(name)
-    )
+    snapshot, _present, _sha256 = _observability_v8_upgrade_environment_snapshot(environment_path)
     return snapshot
 
 
-def _read_observability_v8_upgrade_source(config_path: str, data_dir: str) -> bytes | None:
-    """Read the canonical config without following a reparse/path escape."""
+def _observability_v8_upgrade_environment_snapshot(
+    environment_path: str,
+) -> tuple[dict[str, str], bool, str]:
+    """Return parsed values and a value-free identity of the exact dotenv bytes."""
 
-    del data_dir  # Native Setup separately binds the canonical path below its data root.
-
-    descriptor = -1
-    flags = os.O_RDONLY
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        metadata = os.lstat(config_path)
-    except FileNotFoundError:
-        return None
-    except OSError:
-        raise ObservabilityV8UpgradeMigrationError("source_read_failed") from None
-    if _observability_v8_reparse(metadata) or not stat.S_ISREG(metadata.st_mode):
-        raise ObservabilityV8UpgradeMigrationError("source_reparse_forbidden")
-    try:
-        descriptor = os.open(config_path, flags)
-        opened_metadata = os.fstat(descriptor)
-        if _observability_v8_reparse(opened_metadata) or not stat.S_ISREG(opened_metadata.st_mode):
-            raise ObservabilityV8UpgradeMigrationError("source_reparse_forbidden")
-        if (metadata.st_dev, metadata.st_ino) != (opened_metadata.st_dev, opened_metadata.st_ino):
-            raise ObservabilityV8UpgradeMigrationError("source_changed")
-        with os.fdopen(descriptor, "rb") as source_file:
-            descriptor = -1
-            source = source_file.read(64 * 1024 * 1024 + 1)
-        if len(source) > 64 * 1024 * 1024:
-            raise ObservabilityV8UpgradeMigrationError("source_read_failed")
-        return source
-    except ObservabilityV8UpgradeMigrationError:
-        raise
-    except OSError:
-        raise ObservabilityV8UpgradeMigrationError("source_read_failed") from None
-    finally:
-        if descriptor >= 0:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-
-
-def _observability_v8_reparse(metadata: os.stat_result) -> bool:
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return stat.S_ISLNK(metadata.st_mode) or bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
+    snapshot, present, digest = _read_observability_v8_upgrade_dotenv_snapshot(environment_path)
+    # POSIX permits exported shell functions and other ambient entries whose
+    # names cannot be referenced by the v8 ``$NAME`` grammar (for example,
+    # ``BASH_FUNC_which%%``). They are unrelated to config conversion and must
+    # not make an otherwise valid upgrade fail. The managed dotenv remains
+    # strict: its parser rejects every malformed assignment before this merge.
+    snapshot.update(
+        (name, value)
+        for name, value in os.environ.items()
+        if _ENVIRONMENT_NAME.fullmatch(name) is not None
+    )
+    return snapshot, present, digest
 
 
 def _read_observability_v8_upgrade_dotenv(environment_path: str) -> dict[str, str]:
     """Read the exact active dotenv without the legacy parser's silent loss."""
 
-    if not os.path.lexists(environment_path):
-        return {}
-    flags = os.O_RDONLY
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = -1
+    snapshot, _present, _sha256 = _read_observability_v8_upgrade_dotenv_snapshot(environment_path)
+    return snapshot
+
+
+def _read_observability_v8_upgrade_dotenv_snapshot(
+    environment_path: str,
+) -> tuple[dict[str, str], bool, str]:
+    """Read and bind the exact active dotenv without exposing its values."""
+
     try:
-        metadata = os.lstat(environment_path)
-        if _observability_v8_reparse(metadata) or not stat.S_ISREG(metadata.st_mode):
-            raise ObservabilityV8UpgradeMigrationError("environment_read_failed")
-        descriptor = os.open(environment_path, flags)
-        opened_metadata = os.fstat(descriptor)
-        if _observability_v8_reparse(opened_metadata) or not stat.S_ISREG(opened_metadata.st_mode):
-            raise ObservabilityV8UpgradeMigrationError("environment_read_failed")
-        if (metadata.st_dev, metadata.st_ino) != (opened_metadata.st_dev, opened_metadata.st_ino):
-            raise ObservabilityV8UpgradeMigrationError("environment_read_failed")
-        with os.fdopen(descriptor, "rb") as environment_file:
-            descriptor = -1
-            payload = environment_file.read(4 * 1024 * 1024 + 1)
-        if len(payload) > 4 * 1024 * 1024:
-            raise ObservabilityV8UpgradeMigrationError("environment_read_failed")
+        payload = _read_stable_observability_v8_upgrade_file(
+            environment_path,
+            missing_ok=True,
+            failure_code="environment_read_failed",
+        )
+        if payload is None:
+            return {}, False, hashlib.sha256(b"").hexdigest()
         lines = payload.decode("utf-8").splitlines(keepends=True)
     except ObservabilityV8UpgradeMigrationError:
         raise
-    except (OSError, UnicodeError):
+    except UnicodeError:
         raise ObservabilityV8UpgradeMigrationError("environment_read_failed") from None
-    finally:
-        if descriptor >= 0:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
 
     snapshot: dict[str, str] = {}
     for raw in lines:
@@ -672,7 +1035,7 @@ def _read_observability_v8_upgrade_dotenv(environment_path: str) -> dict[str, st
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
         snapshot[key] = value
-    return snapshot
+    return snapshot, True, hashlib.sha256(payload).hexdigest()
 
 
 def _validate_observability_v8_candidate(
@@ -681,13 +1044,15 @@ def _validate_observability_v8_candidate(
     *,
     data_dir: str,
     candidate_directory: str | None = None,
+    gateway_binary: str | None = None,
 ) -> None:
-    """Compile exact candidate bytes with the installed target Go binary.
+    """Compile exact candidate bytes with a selected target Go binary.
 
-    Candidate content is held in an owner-only file under the active data
-    directory. Only the path is placed on argv; protected values are supplied
-    through ``inspect_v8_config``'s validated child environment. The file is
-    removed on every success and failure path.
+    Candidate content is held in an owner-only file under the supplied staging
+    directory (or the active data directory during activation). Only the path
+    is placed on argv; protected values are supplied through
+    ``inspect_v8_config``'s validated child environment. The file is removed
+    on every success and failure path.
     """
 
     descriptor = -1
@@ -712,6 +1077,7 @@ def _validate_observability_v8_candidate(
                 config_path=candidate_path,
                 data_dir=data_dir,
                 environment_overrides=protected_environment,
+                gateway_binary=gateway_binary,
             )
         except Exception as exc:
             from defenseclaw.config_inspect import ConfigInspectError
@@ -2853,6 +3219,7 @@ def run_migrations(
     *,
     upgrade_handles_local_bundle: bool = False,
     strict_required: tuple[str, ...] = (),
+    controller_owns_local_bundle_transaction: bool = False,
 ) -> int:
     """Run all applicable migrations up to ``to_version``.
 
@@ -2905,6 +3272,15 @@ def run_migrations(
     commits an unusable target runtime. Ordinary CLI callers preserve the
     historical continue-and-retry behavior.
 
+    ``controller_owns_local_bundle_transaction`` is a capability handshake,
+    not a release-version check. Controllers that advertise it reconcile the
+    installed local-observability bundle after migrations. A controller that
+    only advertises the older ``upgrade_handles_local_bundle`` boolean is the
+    published v8 controller whose normal v8-to-v8 path skipped that phase; the
+    target wheel repairs the omission after the migration loop. Authenticated
+    hard-cut controllers retain exclusive rollback custody and are never
+    repaired from inside the migration runner.
+
     Returns the number of migrations actually executed (excludes
     cursor-skipped ones). Failures don't increment the counter and
     don't leave a cursor entry — the next upgrade will retry them.
@@ -2939,6 +3315,7 @@ def run_migrations(
         raise ValueError("strict required migrations must be version strings")
     same_version_reapply = from_t == to_t
     applied_count = 0
+    migration_failed = False
 
     # Load the cursor; treat "missing" / "unparseable" / "future
     # schema" as "first upgrade on this host" and bootstrap from
@@ -3020,12 +3397,13 @@ def run_migrations(
             data_dir=data_dir,
             from_version=from_version,
             to_version=to_version,
-            upgrade_handles_local_bundle=upgrade_handles_local_bundle,
+            upgrade_handles_local_bundle=(upgrade_handles_local_bundle or controller_owns_local_bundle_transaction),
         )
         try:
             fn(ctx)
             ux.ok(f"Migration {ver} applied.", indent="    ")
         except Exception as exc:  # noqa: BLE001 - strict native setup must retain exact refusal
+            migration_failed = True
             ux.err(f"migration {ver} failed: {exc}", indent="    ")
             if ver in strict:
                 raise
@@ -3071,5 +3449,61 @@ def run_migrations(
         # recorded by bootstrap. This also covers a same-version packaged run
         # where no registry callable executes and therefore cannot save state.
         migration_state.save(data_dir, state)
+
+    normalized_data_dir = os.path.abspath(os.path.expanduser(data_dir))
+    local_bundle_installed = os.path.lexists(os.path.join(normalized_data_dir, "observability-stack"))
+    if (
+        upgrade_handles_local_bundle
+        and not controller_owns_local_bundle_transaction
+        and not _controller_has_hard_cut_bundle_custody()
+        and not migration_failed
+        and local_bundle_installed
+    ):
+        # Compatibility with the immutable first v8 controller. It claimed
+        # ownership of bundle refresh but only executed that phase for a
+        # hard-cut rollback plan, so ordinary v8-to-v8 upgrades left the
+        # installed bundle stamped at the source release. Reconcile from the
+        # authenticated target wheel without naming either release. The
+        # mutation token suppresses this fallback during a staged hard cut,
+        # where the bridge controller owns the recovery journal and performs
+        # the refresh after required migrations.
+        legacy_context = MigrationContext(
+            openclaw_home=openclaw_home,
+            data_dir=normalized_data_dir,
+            from_version=from_version,
+            to_version=to_version,
+        )
+        try:
+            from defenseclaw.upgrade_receipt import find_resumable_upgrade_receipt
+
+            restart_intent_receipt = find_resumable_upgrade_receipt(
+                normalized_data_dir,
+                target_version=to_version,
+            )
+        except (OSError, ValueError):
+            raise ObservabilityV8UpgradeMigrationError("local_bundle_receipt_invalid") from None
+        if restart_intent_receipt is None:
+            # Every published controller that advertises the legacy bundle
+            # ownership flag creates this authenticated receipt before target
+            # mutation. Older pre-receipt controllers do not advertise the
+            # flag and run the migration-owned refresh path above instead.
+            raise ObservabilityV8UpgradeMigrationError("local_bundle_receipt_missing")
+        _refresh_observability_v8_bundle_for_legacy_upgrader(
+            legacy_context,
+            normalized_data_dir,
+            None,
+            restart_intent_receipt=os.fspath(restart_intent_receipt),
+        )
+    elif (
+        migration_failed
+        and upgrade_handles_local_bundle
+        and not controller_owns_local_bundle_transaction
+        and not _controller_has_hard_cut_bundle_custody()
+        and local_bundle_installed
+    ):
+        ux.warn(
+            "local observability bundle refresh was deferred because a target migration failed",
+            indent="    ",
+        )
 
     return applied_count

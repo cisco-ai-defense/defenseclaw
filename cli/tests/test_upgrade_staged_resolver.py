@@ -173,9 +173,7 @@ def resolver_env(tmp_path: Path):
                     assert isinstance(gateway_name, str)
                     gateway = release_dir / gateway_name
                     gateway.write_bytes(f"gateway fixture {gateway_name}\n".encode())
-                    checksum_rows.append(
-                        f"{hashlib.sha256(gateway.read_bytes()).hexdigest()}  {gateway.name}"
-                    )
+                    checksum_rows.append(f"{hashlib.sha256(gateway.read_bytes()).hexdigest()}  {gateway.name}")
             if version == "0.8.5":
                 provenance = (
                     json.dumps(
@@ -380,25 +378,24 @@ def _rewrite_manifest(env: dict[str, str], version: str, payload: dict[str, obje
     )
 
 
-def test_explicit_hard_cut_from_0_8_3_refuses_before_mutation(resolver_env) -> None:
-    env, mutation_log, _curl_log = resolver_env("0.8.3")
+@pytest.mark.parametrize("current_version", ("0.8.3", "0.8.0"))
+def test_explicit_final_target_still_resolves_verified_two_hop_plan(
+    resolver_env,
+    current_version: str,
+) -> None:
+    env, mutation_log, curl_log = resolver_env(current_version)
 
     result = _run(env, "--version", "0.8.5", "--plan")
 
     output = result.stdout + result.stderr
-    assert result.returncode != 0
-    assert "0.8.5 requires the 0.8.4 upgrade bridge" in output
+    assert result.returncode == 0, output
+    assert f"{current_version} → 0.8.4 bridge → fresh controller → 0.8.5" in output
     assert "No changes were made" in output
-    assert "there is intentionally no --version argument" in output
-    assert "defenseclaw-upgrade.XXXXXX" in output
-    assert "releases/download/0.8.5/" in output
-    assert "defenseclaw-upgrade.sh" in output
-    assert "cosign verify-blob" in output
-    assert "DefenseClaw upgrade resolver complete v1" in output
-    assert 'bash "$d/defenseclaw-upgrade.sh" --yes' in output
-    assert "upgrade.sh | bash" not in output
     assert not mutation_log.exists()
     assert not Path(env["DEFENSECLAW_HOME"]).exists()
+    downloads = curl_log.read_text(encoding="utf-8")
+    assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
+    assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
 
 
 def test_bridge_manifest_runtime_config_boundary_is_fail_closed(resolver_env) -> None:
@@ -584,9 +581,24 @@ def test_bridge_source_resolves_direct_hard_cut(resolver_env) -> None:
     assert "/releases/download/0.8.4/upgrade-manifest.json" not in downloads
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX release-owned resolver")
 def test_modern_resolver_bootstraps_cosign_before_mutation(resolver_env) -> None:
     env, mutation_log, _curl_log = resolver_env("0.8.3")
-    (Path(env["PATH"].split(os.pathsep, 1)[0]) / "cosign").unlink()
+    fake_bin = Path(env["PATH"].split(os.pathsep, 1)[0])
+    (fake_bin / "cosign").unlink()
+    controlled_system_bin = fake_bin.parent / "system-bin"
+    controlled_system_bin.mkdir()
+    for directory in os.defpath.split(os.pathsep):
+        source_directory = Path(directory)
+        if not source_directory.is_dir():
+            continue
+        for candidate in source_directory.iterdir():
+            destination = controlled_system_bin / candidate.name
+            if candidate.name == "cosign" or destination.exists() or not os.access(candidate, os.X_OK):
+                continue
+            destination.symlink_to(candidate)
+    env["PATH"] = f"{fake_bin}:{controlled_system_bin}"
+    assert shutil.which("cosign", path=env["PATH"]) is None
 
     result = _run(env, "--plan")
 

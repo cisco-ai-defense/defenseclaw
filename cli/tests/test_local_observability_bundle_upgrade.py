@@ -406,6 +406,120 @@ def test_post_stop_backup_failure_retains_exact_restart_intent_before_descriptor
     assert run.call_args.args[0][-1] == "down"
 
 
+def test_receipt_restart_intent_is_recorded_before_stack_stop(
+    installed_bundle: tuple[Path, Path, Path],
+    tmp_path: Path,
+) -> None:
+    source, data_dir, _destination = installed_bundle
+    recorded: list[bool] = []
+
+    def fail_after_intent(event: str, _path: str | None) -> None:
+        if event == "after_restart_intent":
+            raise OSError("stop before stack mutation")
+
+    with (
+        patch("defenseclaw.bundle_refresh.bundled_local_observability_dir", return_value=source),
+        patch("defenseclaw.bundle_refresh._strict_compose_project_running", return_value=True),
+        patch("defenseclaw.bundle_refresh.subprocess.run") as run,
+        pytest.raises(LocalObservabilityUpgradeError, match="backup_failed"),
+    ):
+        upgrade_local_observability_stack(
+            str(data_dir),
+            str(tmp_path / "backup"),
+            bundle_version="8.0.0",
+            fault_injector=fail_after_intent,
+            restart_intent_recorder=recorded.append,
+        )
+
+    assert recorded == [True]
+    run.assert_not_called()
+
+
+def test_failed_receipt_recorder_discards_only_new_custody_and_allows_retry(
+    installed_bundle: tuple[Path, Path, Path],
+    tmp_path: Path,
+) -> None:
+    source, data_dir, destination = installed_bundle
+    before = _managed_snapshot(destination)
+    backup_dir = tmp_path / "backup"
+    recorder_error = OSError("receipt write failed")
+
+    def fail_recorder(_required: bool) -> None:
+        raise recorder_error
+
+    with (
+        patch("defenseclaw.bundle_refresh.bundled_local_observability_dir", return_value=source),
+        patch("defenseclaw.bundle_refresh._strict_compose_project_running", return_value=True),
+        patch("defenseclaw.bundle_refresh.subprocess.run") as run,
+        pytest.raises(LocalObservabilityUpgradeError, match="backup_failed") as raised,
+    ):
+        upgrade_local_observability_stack(
+            str(data_dir),
+            str(backup_dir),
+            bundle_version="8.0.0",
+            restart_intent_recorder=fail_recorder,
+        )
+
+    assert raised.value.__cause__ is recorder_error
+    assert not (backup_dir / "local-observability-stack").exists()
+    assert _managed_snapshot(destination) == before
+    run.assert_not_called()
+
+    with (
+        patch("defenseclaw.bundle_refresh.bundled_local_observability_dir", return_value=source),
+        patch("defenseclaw.bundle_refresh._strict_compose_project_running", return_value=False),
+    ):
+        retried = upgrade_local_observability_stack(
+            str(data_dir),
+            str(backup_dir),
+            bundle_version="8.0.0",
+            restart_intent_recorder=lambda _required: None,
+        )
+
+    assert retried.installed is True
+    assert (backup_dir / "local-observability-stack/refresh-backup.json").is_file()
+
+
+def test_failed_receipt_recorder_cleanup_does_not_follow_replaced_intent_symlink(
+    installed_bundle: tuple[Path, Path, Path],
+    tmp_path: Path,
+) -> None:
+    if os.name != "posix":
+        pytest.skip("symlink race regression requires POSIX")
+    source, data_dir, destination = installed_bundle
+    before = _managed_snapshot(destination)
+    backup_dir = tmp_path / "backup"
+    backup_root = backup_dir / "local-observability-stack"
+    intent = backup_root / "restart-intent.json"
+    sentinel = tmp_path / "must-not-delete"
+    sentinel.write_text("sentinel\n", encoding="utf-8")
+    recorder_error = OSError("receipt write failed")
+
+    def replace_intent_then_fail(_required: bool) -> None:
+        intent.unlink()
+        intent.symlink_to(sentinel)
+        raise recorder_error
+
+    with (
+        patch("defenseclaw.bundle_refresh.bundled_local_observability_dir", return_value=source),
+        patch("defenseclaw.bundle_refresh._strict_compose_project_running", return_value=True),
+        patch("defenseclaw.bundle_refresh.subprocess.run") as run,
+        pytest.raises(LocalObservabilityUpgradeError, match="backup_failed") as raised,
+    ):
+        upgrade_local_observability_stack(
+            str(data_dir),
+            str(backup_dir),
+            bundle_version="8.0.0",
+            restart_intent_recorder=replace_intent_then_fail,
+        )
+
+    assert raised.value.__cause__ is recorder_error
+    assert intent.is_symlink()
+    assert sentinel.read_text(encoding="utf-8") == "sentinel\n"
+    assert _managed_snapshot(destination) == before
+    run.assert_not_called()
+
+
 def test_backup_source_race_fails_before_descriptor_or_bundle_mutation(
     installed_bundle: tuple[Path, Path, Path],
     tmp_path: Path,

@@ -165,7 +165,7 @@ def process_argv0_basename(pid: int) -> str | None:
     """Best-effort basename of a running process's argv0.
 
     Reads ``/proc/<pid>/cmdline`` (Linux) and falls back to
-    ``ps -p <pid> -o command=`` (macOS/BSD). Returns the lowercased-free
+    ``ps -p <pid> -o comm=`` (macOS/BSD). Returns the lowercased
     basename, or ``None`` when the process identity cannot be determined
     (so callers can fail closed).
     """
@@ -187,7 +187,7 @@ def process_argv0_basename(pid: int) -> str | None:
         # /proc not present (macOS/BSD) — fall back to ps.
         try:
             out = subprocess.run(
-                ["ps", "-p", str(pid), "-o", "command="],
+                ["ps", "-p", str(pid), "-o", "comm="],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -198,7 +198,10 @@ def process_argv0_basename(pid: int) -> str | None:
             return None
         if out.returncode != 0:
             return None
-        argv0 = out.stdout.strip().split(None, 1)[0] if out.stdout.strip() else ""
+        # ``comm`` is the executable path/name without arguments.  Keep the
+        # whole line so managed install paths containing spaces remain
+        # verifiable; exact basename matching below still fails closed.
+        argv0 = out.stdout.strip()
     except OSError:
         return None
     base = os.path.basename(argv0.strip()).strip()

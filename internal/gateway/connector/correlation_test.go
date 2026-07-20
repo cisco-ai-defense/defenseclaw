@@ -676,6 +676,12 @@ func TestCodexUndocumentedLineageAndResponseAliasesFailClosed(t *testing.T) {
 	if spec.Allows(CorrelationInferenceSubagentIdentity) {
 		t.Fatal("Codex subagent identity inference remains enabled without parent/depth evidence")
 	}
+	if !spec.Allows(CorrelationInferenceUniqueActivePromptBoundary) {
+		t.Fatal("Codex native OTLP cannot attach to one durable active prompt boundary")
+	}
+	if spec.Allows(CorrelationInferencePromptBoundaryTurn) {
+		t.Fatal("Codex native prompt-boundary attachment must not authorize minting a hook turn")
+	}
 	if spec.Completeness.AgentLifecycle != CorrelationCompletenessPartial || spec.Completeness.Model != CorrelationCompletenessPartial {
 		t.Fatalf("Codex completeness overclaims hook evidence: %+v", spec.Completeness)
 	}

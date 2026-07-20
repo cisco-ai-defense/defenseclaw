@@ -3,10 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Validate the reviewed source-release and source-install identity.
 
-Release assets are built from a reviewed commit and the published Git tag points
-to that same commit.  Consequently the checked-in version sources must already
-match the requested release; an ephemeral workflow-only version stamp is not a
-valid source-distribution identity.
+Release assets are built from an isolated checkout of a reviewed commit, stamped
+with the manually selected release version, while the published Git tag points
+to the original reviewed commit. The checked-in version is development metadata;
+release verification projects the requested version onto the validated source
+compatibility identity instead of requiring a routine version-bump commit.
 
 The source-install marker is deliberately separate from release-managed upgrade
 state.  It permits rebuilds only while the checkout remains in the same reviewed

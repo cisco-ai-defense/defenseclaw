@@ -176,7 +176,7 @@ print(json.dumps({"data_dir": data_dir, "config_path": os.path.abspath(config_pa
     $openClawFlag=if($openClawWasExplicit){"1"}else{"0"}
     try{
         $env:DEFENSECLAW_HOME=$controllerHome;$env:DEFENSECLAW_CONFIG=$configPath
-        $output=@(& (Get-Python) -I -c $resolver $controllerHome $configPath $openClawFlag $requestedOpenClaw 2>&1)
+        $output=@(& (Get-Python) -I -B -c $resolver $controllerHome $configPath $openClawFlag $requestedOpenClaw 2>&1)
         $contracts=@($output|Where-Object{[string]$_ -match '^\{"data_dir":"'})
         if($LASTEXITCODE -ne 0 -or $contracts.Count -ne 1){Fail "Could not resolve a stable controller-home/data-dir/config-path split from the installed source controller. No changes were made. $($output -join ' ')"}
     }finally{
@@ -200,7 +200,7 @@ function Get-OpenClawHome {
         return [IO.Path]::GetFullPath($env:OPENCLAW_HOME)
     }
     $python=Get-Python
-    $resolved=@(& $python -I -c "import os; from defenseclaw.config import load; print(os.path.abspath(os.path.expanduser(load().claw.home_dir)))" 2>$null)
+    $resolved=@(& $python -I -B -c "import os; from defenseclaw.config import load; print(os.path.abspath(os.path.expanduser(load().claw.home_dir)))" 2>$null)
     if($LASTEXITCODE -ne 0 -or $resolved.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$resolved[0]) -or -not [IO.Path]::IsPathRooted([string]$resolved[0])){
         Fail "Could not resolve the configured OpenClaw home before preparing rollback custody."
     }
@@ -246,12 +246,20 @@ function Exit-UpgradeMutex {
     try { $Mutex.ReleaseMutex() } finally { $Mutex.Dispose() }
 }
 function Get-InstalledVersion {
-    $cli=Get-Cli
-    return (Get-CanonicalVersionOutput -Command $cli -Label "installed CLI")
+    # Resolve the canonical launcher so a markerless or incomplete managed
+    # installation still fails closed, but do not execute it here.  Console
+    # launchers import the package without Python's -B switch and can create
+    # __pycache__ before a pre-mutation refusal reports "No changes were
+    # made".  Query the same managed environment through isolated Python.
+    [void](Get-Cli)
+    return (Get-CanonicalVersionOutput `
+        -Command (Get-Python) `
+        -Arguments @("-I", "-B", "-c", "from defenseclaw import __version__; print(__version__)") `
+        -Label "installed CLI")
 }
 function Get-CanonicalVersionOutput {
-    param([string]$Command,[string]$Label)
-    $output=(& $Command --version 2>&1|Out-String)
+    param([string]$Command,[string[]]$Arguments=@("--version"),[string]$Label)
+    $output=(& $Command @Arguments 2>&1|Out-String)
     $exitCode=$LASTEXITCODE
     $versionMatches=[regex]::Matches(
         $output,
@@ -1632,7 +1640,7 @@ if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400 
     raise RuntimeError("phase-one identity root is unsafe")
 print(json.dumps({"device": str(info.st_dev), "inode": str(info.st_ino)}, separators=(",", ":")))
 '@
-    $output=@(& $Python -I -c $identity $Path 2>&1)
+    $output=@(& $Python -I -B -c $identity $Path 2>&1)
     if($LASTEXITCODE -ne 0 -or $output.Count -ne 1){Fail "Could not bind phase-one directory identity for $Path; no installed state changed. $($output -join ' ')"}
     try{$resolved=[string]$output[0]|ConvertFrom-Json}catch{Fail "Phase-one directory identity is invalid for $Path."}
     Assert-ExactJsonKeys $resolved @("device","inode") "Phase-one directory identity"
@@ -1770,7 +1778,7 @@ finally:
     close_handle(handle)
 '@
     $mode=if($InheritLeaseHandle){"inherit"}else{"wrapper"}
-    $output=@(& $Plan.BasePython -I -c $leaseWrapper $Plan.MutatorLease ([string]$HealthTimeout) $mode @Command 2>&1)
+    $output=@(& $Plan.BasePython -I -B -c $leaseWrapper $Plan.MutatorLease ([string]$HealthTimeout) $mode @Command 2>&1)
     return [pscustomobject]@{ExitCode=[int]$LASTEXITCODE;Output=$output}
 }
 function Sync-PhaseOneBridgeVenv {
@@ -1809,7 +1817,7 @@ for current, directories, files in os.walk(root, topdown=True, followlinks=False
             os.close(descriptor)
 print(count)
 '@
-    $execution=Invoke-PhaseOneLeasedCommand -Plan $Plan -Command @($Plan.BasePython,"-I","-c",$sync,$Plan.ActiveVenv) -InheritLeaseHandle
+    $execution=Invoke-PhaseOneLeasedCommand -Plan $Plan -Command @($Plan.BasePython,"-I","-B","-c",$sync,$Plan.ActiveVenv) -InheritLeaseHandle
     if($execution.ExitCode -ne 0){Fail "Could not durably flush the healthy bridge controller: $($execution.Output -join ' ')"}
     if($execution.Output.Count -ne 1 -or [string]$execution.Output[0] -notmatch '^\d+$'){Fail "Bridge controller durability flush returned an invalid contract."}
     Assert-PhaseOneOwnedBridgeVenv -Plan $Plan -Venv $Plan.ActiveVenv
@@ -1836,7 +1844,7 @@ function New-PhaseOneRollbackPlan {
         $activeVenvItem=Get-Item -LiteralPath $activeVenv -Force
         if(-not $activeVenvItem.PSIsContainer -or ($activeVenvItem.Attributes -band [IO.FileAttributes]::ReparsePoint)){Fail "Installed source venv must be a real directory; no state changed."}
         $venvSddl=Get-OwnerDaclSddl $activeVenv
-        $baseOutput=@(& (Get-Python) -I -c 'import os,sys; print(os.path.realpath(getattr(sys,"_base_executable","") or sys.executable))' 2>$null)
+        $baseOutput=@(& (Get-Python) -I -B -c 'import os,sys; print(os.path.realpath(getattr(sys,"_base_executable","") or sys.executable))' 2>$null)
         if($LASTEXITCODE -ne 0 -or $baseOutput.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$baseOutput[0]) -or -not [IO.Path]::IsPathRooted([string]$baseOutput[0])){Fail "Could not resolve an external base Python for bridge activation; no state changed."}
         $basePython=[IO.Path]::GetFullPath([string]$baseOutput[0])
         Assert-RealFile $basePython "Bridge base Python"
@@ -1883,10 +1891,11 @@ function New-PhaseOneRollbackPlan {
         if($LASTEXITCODE -ne 0){Fail "Could not resolve and install bridge dependencies before stopping services; no state changed."}
         & $uv.Source --no-config pip check --python $preflightPython *> $null
         if($LASTEXITCODE -ne 0){Fail "The resolved bridge dependency environment is inconsistent; no state changed."}
-        $preflightVersion=@(& $preflightPython -I -c 'from defenseclaw import __version__; print(__version__)' 2>$null)
+        $preflightVersion=@(& $preflightPython -I -B -c 'from defenseclaw import __version__; print(__version__)' 2>$null)
         if($LASTEXITCODE -ne 0 -or $preflightVersion.Count -ne 1 -or [string]$preflightVersion[0] -ne $Bridge.Version){Fail "Bridge CLI dependency preflight installed the wrong version; no state changed."}
         Remove-Item -LiteralPath $preflight -Recurse -Force
-        Assert-VersionOutput (Get-Cli) $SourceVersion "source CLI"
+        $verifiedSourceVersion=Get-InstalledVersion
+        if($verifiedSourceVersion -ne $SourceVersion){Fail "source CLI does not report $SourceVersion."}
         $sourceWasRunning=Get-PhaseOneSourceRunningState -Gateway $gateway -ControllerHome $controllerHome -DataDir $dataDir -ConfigPath $configPath -ExpectedVersion $SourceVersion
         $venvIdentity=Get-PhaseOneVenvIdentity $activeVenv
         $gatewaySddl=Get-OwnerDaclSddl $gateway
@@ -2248,7 +2257,7 @@ if any(not migration_state.is_applied(state, item) for item in required):
     raise RuntimeError("fresh bridge controller did not apply every required migration")
 print(json.dumps({"count": count}, separators=(",", ":")))
 '@
-    $execution=Invoke-PhaseOneLeasedCommand -Plan $Plan -Command @((Get-Python),"-I","-c",$activation,$Plan.SourceVersion,$Plan.BridgeVersion,$Plan.OpenClawHome,$Plan.DataDir,$requiredJson) -InheritLeaseHandle
+    $execution=Invoke-PhaseOneLeasedCommand -Plan $Plan -Command @((Get-Python),"-I","-B","-c",$activation,$Plan.SourceVersion,$Plan.BridgeVersion,$Plan.OpenClawHome,$Plan.DataDir,$requiredJson) -InheritLeaseHandle
     $result=@($execution.Output)
     if($execution.ExitCode -ne 0){Fail "Fresh bridge controller migration process failed: $($result -join ' ')"}
     $contracts=@($result|Where-Object{[string]$_ -match '^\{"count":\d+\}$'})
@@ -2291,7 +2300,7 @@ path = begin_upgrade_receipt(sys.argv[1], from_version=sys.argv[2], target_versi
 record_upgrade_migrations(path, migration_count=int(sys.argv[4]), degraded=False)
 complete_upgrade_receipt(path, status="succeeded")
 '@
-    & (Get-Python) -I -c $receipt $Plan.DataDir $Plan.SourceVersion $Plan.BridgeVersion ([string]$MigrationCount)
+    & (Get-Python) -I -B -c $receipt $Plan.DataDir $Plan.SourceVersion $Plan.BridgeVersion ([string]$MigrationCount)
     if($LASTEXITCODE -ne 0){Fail "Fresh bridge controller could not commit its health-proven receipt."}
     [void](Success-Receipt $Plan.BridgeVersion)
     }finally{
@@ -2550,7 +2559,7 @@ while time.monotonic() < deadline:
     time.sleep(min(0.25, max(deadline - time.monotonic(), 0.0)))
 raise SystemExit(1)
 '@
-        & (Get-Python) -I -c $probe $DataDir ([string][Math]::Max($TimeoutSeconds,1)) $ExpectedVersion *> $null
+        & (Get-Python) -I -B -c $probe $DataDir ([string][Math]::Max($TimeoutSeconds,1)) $ExpectedVersion *> $null
         return $LASTEXITCODE -eq 0
     }finally{
         [Environment]::SetEnvironmentVariable("DEFENSECLAW_HOME",$savedHome,"Process")
@@ -2625,7 +2634,7 @@ try:
 finally:
     close_handle(handle)
 '@
-    & (Get-Python) -I -c $leaseWrapper $leasePath ([string]$HealthTimeout) $Uv pip install --python (Get-Python) --quiet --offline --no-deps --reinstall $Wheel *> $null
+    & (Get-Python) -I -B -c $leaseWrapper $leasePath ([string]$HealthTimeout) $Uv pip install --python (Get-Python) --quiet --offline --no-deps --reinstall $Wheel *> $null
     if($LASTEXITCODE -ne 0){Fail "Could not reinstall the retained bridge recovery wheel; phase-two journal remains active."}
 }
 function Recover-InterruptedPhaseTwo {
@@ -2656,7 +2665,7 @@ function Recover-InterruptedPhaseTwo {
     $savedConfig=[Environment]::GetEnvironmentVariable("DEFENSECLAW_CONFIG","Process")
     try{
         $env:DEFENSECLAW_HOME=$plan.RecoveryHome;$env:DEFENSECLAW_CONFIG=$plan.ConfigPath
-        & (Get-Python) -I -c $recoveryCode
+        & (Get-Python) -I -B -c $recoveryCode
         $recoveryExitCode=$LASTEXITCODE
     }finally{
         [Environment]::SetEnvironmentVariable("DEFENSECLAW_HOME",$savedHome,"Process")
@@ -2765,7 +2774,7 @@ function Invoke-FreshHardCut {
     try{
         $env:DEFENSECLAW_HOME=$script:RuntimePaths.ControllerHome;$env:DEFENSECLAW_CONFIG=$script:RuntimePaths.ConfigPath
         $env:DEFENSECLAW_STAGED_UPGRADE="1";$env:DEFENSECLAW_STAGED_BRIDGE_VERSION=$Source;$env:DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR=$Artifacts
-        & (Get-Python) -I -m defenseclaw.main upgrade --yes --version $Target --health-timeout $HealthTimeout
+        & (Get-Python) -I -B -m defenseclaw.main upgrade --yes --version $Target --health-timeout $HealthTimeout
         if($LASTEXITCODE -ne 0){Fail "Fresh controller failed upgrading to $Target."}
     }finally{
         [Environment]::SetEnvironmentVariable("DEFENSECLAW_HOME",$savedHome,"Process")

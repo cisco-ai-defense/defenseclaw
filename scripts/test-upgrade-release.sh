@@ -27,6 +27,7 @@ UPGRADE_BASELINE_POLICY="${UPGRADE_BASELINE_POLICY:-${ROOT}/release/upgrade-base
 FROM_VERSION="${FROM_VERSION:-0.7.2}"
 FROM_VERSIONS="${FROM_VERSIONS:-}"
 TARGET_VERSION="${TARGET_VERSION:-}"
+REQUIRED_BRIDGE_VERSION="${REQUIRED_BRIDGE_VERSION:-}"
 V8_ACTIVATION_VERSION="0.8.5"
 PROTECTED_ARTIFACT_VERSION="0.8.4"
 RELEASE_ROOT="${RELEASE_ROOT:-}"
@@ -79,7 +80,7 @@ Options:
 
 Examples:
   make upgrade-legacy-smoke
-  make upgrade-legacy-smoke-matrix
+  make upgrade-legacy-smoke-matrix ARGS="--target-version X.Y.Z"
   scripts/test-upgrade-release.sh --from-version 0.7.2
   scripts/test-upgrade-release.sh --from-versions "0.8.5,0.8.4,0.8.3,0.8.2,0.8.1,0.8.0,0.7.2,0.7.1"
   scripts/test-upgrade-release.sh --release-dir dist --baseline-mode seed
@@ -817,6 +818,76 @@ start_release_server() {
     die "could not start local release server; see ${WORKDIR}/release-server.log"
 }
 
+install_curl_rewrite_probe() {
+    local shim_dir="$1"
+    local curl_command real_curl
+    curl_command="$(type -P curl)" \
+        || die "an external curl executable is required for the upgrade release gate"
+    real_curl="$(abs_path "${curl_command}")" \
+        || die "could not resolve the external curl executable for the upgrade release gate"
+    [[ -f "${real_curl}" && -x "${real_curl}" ]] \
+        || die "the resolved curl path is not an executable file: ${real_curl}"
+    mkdir -p "${shim_dir}"
+    cat > "${shim_dir}/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${UPGRADE_GATE_REAL_CURL:?}"
+: "${UPGRADE_GATE_RELEASE_URL:?}"
+prefix="https://github.com/cisco-ai-defense/defenseclaw/releases/download"
+latest="https://api.github.com/repos/cisco-ai-defense/defenseclaw/releases/latest"
+args=()
+for argument in "$@"; do
+    if [[ "${argument}" == "${latest}" ]]; then
+        printf '{"tag_name":"%s"}\n' "${UPGRADE_GATE_TARGET_VERSION:?}"
+        exit 0
+    fi
+    argument="${argument//${prefix}/${UPGRADE_GATE_RELEASE_URL}}"
+    args+=("${argument}")
+done
+exec "${UPGRADE_GATE_REAL_CURL}" "${args[@]}"
+SH
+    chmod 700 "${shim_dir}/curl"
+    printf '%s\n' "${real_curl}"
+}
+
+prepare_required_bridge_assets() {
+    [[ -n "${REQUIRED_BRIDGE_VERSION}" ]] || return 0
+    [[ "${REQUIRED_BRIDGE_VERSION}" != "${TARGET_VERSION}" ]] || return 0
+
+    local bridge_dir="${RELEASE_ROOT}/${REQUIRED_BRIDGE_VERSION}"
+    local previous_from="${FROM_VERSION}"
+    local asset
+    local bridge_wheel="defenseclaw-${REQUIRED_BRIDGE_VERSION}-2-py3-none-any.dcwheel"
+    local bridge_gateway="defenseclaw_${REQUIRED_BRIDGE_VERSION}_protocol2_${OS_NAME}_${ARCH_NAME}.dcgateway"
+    mkdir -p "${bridge_dir}"
+    for asset in \
+        "${bridge_wheel}" \
+        "${bridge_gateway}" \
+        checksums.txt \
+        checksums.txt.sig \
+        checksums.txt.pem \
+        upgrade-manifest.json; do
+        download_old_asset "${asset}" "${bridge_dir}/${asset}" \
+            "${REQUIRED_BRIDGE_VERSION}" \
+            || die "required bridge asset is unavailable: ${REQUIRED_BRIDGE_VERSION}/${asset}"
+    done
+    local cosign_command cosign_path
+    cosign_command="$(command -v cosign)" \
+        || die "cosign is required to authenticate published bridge ${REQUIRED_BRIDGE_VERSION}"
+    cosign_path="$(abs_path "${cosign_command}")" \
+        || die "cosign is required to authenticate published bridge ${REQUIRED_BRIDGE_VERSION}"
+    python3 "${ROOT}/scripts/historical_release_auth.py" \
+        --version "${REQUIRED_BRIDGE_VERSION}" \
+        --release-dir "${bridge_dir}" \
+        --cosign "${cosign_path}" \
+        --asset "${bridge_wheel}" \
+        --asset "${bridge_gateway}" \
+        --asset upgrade-manifest.json \
+        || die "required bridge authentication failed: ${REQUIRED_BRIDGE_VERSION}"
+    FROM_VERSION="${previous_from}"
+    ok "Authenticated published bridge assets: ${REQUIRED_BRIDGE_VERSION} (${OS_NAME}/${ARCH_NAME})"
+}
+
 tail_log() {
     local file="$1"
     if [[ -f "${file}" ]]; then
@@ -829,12 +900,13 @@ tail_v8_upgrade_log_secret_safe() {
     local file="$1"
     [[ -f "${file}" ]] || return 0
     printf '\n--- %s redacted tail ---\n' "${file}" >&2
-    python3 - "${file}" <<'PY' >&2
+    python3 - "${file}" "${SMOKE_HOME}/fixture-evidence/environment.historical.source" <<'PY' >&2
 from pathlib import Path
+import re
 import sys
 
 text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
-protected = (
+protected = [
     "upgrade-smoke-flat-protected-value",
     "upgrade-smoke-splunk-protected-value",
     "upgrade-smoke-http-protected-value",
@@ -843,7 +915,15 @@ protected = (
     "Bearer upgrade-smoke-v8-otlp-value",
     "upgrade-smoke-v8-otlp-value",
     "upgrade-smoke-v8-http-value",
-)
+]
+environment_path = Path(sys.argv[2])
+if environment_path.is_file() and not environment_path.is_symlink():
+    for line in environment_path.read_text(encoding="utf-8", errors="strict").splitlines():
+        name, separator, value = line.partition("=")
+        if name == "DEFENSECLAW_GATEWAY_TOKEN" and separator:
+            if re.fullmatch(r"[0-9a-f]{64}", value):
+                protected.append(value)
+            break
 for value in protected:
     text = text.replace(value, "[REDACTED]")
 print("\n".join(text.splitlines()[-80:]))
@@ -915,7 +995,7 @@ write_flags = (
     | getattr(os, "O_NOFOLLOW", 0)
 )
 source_fd = os.open(source, read_flags)
-destination_fd: int | None = None
+destination_fd = None
 created = False
 try:
     opened = os.fstat(source_fd)
@@ -1049,8 +1129,10 @@ stage_authenticated_baseline() {
                 || die "published baseline asset is unavailable: ${version}/${name}"
         fi
     done
-    local cosign_path
-    cosign_path="$(abs_path "$(command -v cosign)")" \
+    local cosign_command cosign_path
+    cosign_command="$(command -v cosign)" \
+        || die "cosign is required to authenticate published baseline ${version}"
+    cosign_path="$(abs_path "${cosign_command}")" \
         || die "cosign is required to authenticate published baseline ${version}"
     python3 "${ROOT}/scripts/historical_release_auth.py" \
         --version "${version}" \
@@ -1229,6 +1311,16 @@ EOF
 EOF
 }
 
+assert_source_gateway_canary_preserved_fixture() {
+    local data_dir="${SMOKE_HOME}/.defenseclaw"
+    local evidence_dir="${SMOKE_HOME}/fixture-evidence"
+    [[ -f "${evidence_dir}/config.historical.source" ]] || return 0
+    cmp -s "${evidence_dir}/config.historical.source" "${data_dir}/config.yaml" \
+        || die "source gateway canary changed the historical config before resolver handoff"
+    cmp -s "${evidence_dir}/environment.historical.source" "${data_dir}/.env" \
+        || die "source gateway canary changed the historical environment before resolver handoff"
+}
+
 seed_v8_observability_fixture() {
     resolve_baseline_config_version
     log "Seeding representative comment-heavy config-v${FROM_CONFIG_VERSION} observability fixture for ${FROM_VERSION}"
@@ -1327,10 +1419,17 @@ ai_discovery:
 notifications:
   enabled: true # unrelated section survives
 YAML
-    cat >"${data_dir}/.env" <<'ENV'
+    local gateway_token
+    gateway_token="$(python3 -I -B -c 'import secrets; print(secrets.token_hex(32))')" \
+        || die "could not generate the isolated fixture gateway token"
+    [[ "${gateway_token}" =~ ^[0-9a-f]{64}$ ]] \
+        || die "isolated fixture gateway token has an invalid shape"
+    cat >"${data_dir}/.env" <<ENV
 # exact pre-upgrade environment bytes must be recoverable
 PRESERVE_UPGRADE_SMOKE_ENV=preserved
+DEFENSECLAW_GATEWAY_TOKEN=${gateway_token}
 ENV
+    unset gateway_token
     finalize_observability_upgrade_fixture
 }
 
@@ -1395,26 +1494,19 @@ observability:
 notifications:
   enabled: true # unrelated section survives
 YAML
-    cat >"${data_dir}/.env" <<'ENV'
+    local gateway_token
+    gateway_token="$(python3 -I -B -c 'import secrets; print(secrets.token_hex(32))')" \
+        || die "could not generate the isolated fixture gateway token"
+    [[ "${gateway_token}" =~ ^[0-9a-f]{64}$ ]] \
+        || die "isolated fixture gateway token has an invalid shape"
+    cat >"${data_dir}/.env" <<ENV
 # exact native-v8 environment bytes must survive later upgrades
 PRESERVE_UPGRADE_SMOKE_ENV=preserved
-# an initialized source profile completed gateway first boot before upgrading
-DEFENSECLAW_GATEWAY_TOKEN=upgrade-smoke-v8-gateway-fixture
+DEFENSECLAW_GATEWAY_TOKEN=${gateway_token}
 DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION=Bearer upgrade-smoke-v8-otlp-value
 DEFENSECLAW_V8_FIXTURE_HTTP_BEARER=upgrade-smoke-v8-http-value
 ENV
-    # A working native-v8 host has already completed gateway first boot. Seed
-    # one canonical gateway credential before the continuity snapshot so the
-    # target runtime cannot manufacture an unrelated dotenv mutation.
-    "${baseline_python}" -I - "${data_dir}/.env" <<'PY'
-from pathlib import Path
-import secrets
-import sys
-
-environment_path = Path(sys.argv[1])
-with environment_path.open("a", encoding="utf-8", newline="") as stream:
-    stream.write(f"DEFENSECLAW_GATEWAY_TOKEN={secrets.token_hex(32)}\n")
-PY
+    unset gateway_token
 
     # A real config-v8 host already has the v8 activation recorded. Seed the
     # cursor through the authenticated published baseline's own state API so a
@@ -1626,12 +1718,18 @@ run_v8_source_contract_tests() {
     touch "${result_log}"
     chmod 600 "${result_log}"
     log "Proving v8 permission, retry, rollback, and bundle contracts"
-    if ! PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -q \
+    python3 "${ROOT}/scripts/telemetry_runtime_assets.py" \
+        --root "${ROOT}" \
+        --stage "${ROOT}/cli/defenseclaw/_data/telemetry/v8" \
+        >"${result_log}" 2>&1 \
+        || { tail_log "${result_log}"; die "could not stage checked telemetry resources for v8 source tests"; }
+    if ! PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -q --tb=short \
         cli/tests/test_observability_v8_activation.py \
         cli/tests/test_observability_v8_upgrade_migration.py \
         cli/tests/test_local_observability_bundle_upgrade.py \
         cli/tests/test_local_observability_upgrade_wiring.py \
-        >"${result_log}" 2>&1; then
+        >>"${result_log}" 2>&1; then
+        tail_log "${result_log}"
         die "v8 source contract tests failed (private log: ${result_log})"
     fi
     ok "v8 source contracts passed (permission, retry, rollback, bundle)"
@@ -1763,7 +1861,11 @@ run_upgrade() {
     # freshly installed CLI/gateway as new processes and catches real drift.
     if grep -E "Traceback|AttributeError|Required migration\\(s\\).*not recorded" \
         "${SMOKE_HOME}/upgrade.log" >/dev/null; then
-        tail_log "${SMOKE_HOME}/upgrade.log"
+        if target_uses_observability_v8; then
+            tail_v8_upgrade_log_secret_safe "${SMOKE_HOME}/upgrade.log"
+        else
+            tail_log "${SMOKE_HOME}/upgrade.log"
+        fi
         die "upgrade log contains a known regression marker"
     fi
 }
@@ -1822,6 +1924,94 @@ print("cursor_applied=" + ",".join(cursor.get("applied", [])))
 PY
 
     if target_uses_observability_v8; then
+        "${venv_python}" -I -B - "${SMOKE_HOME}/.defenseclaw" <<'PY'
+from pathlib import Path
+import sys
+
+from defenseclaw.observability.v8_compatibility import load_packaged_v7_compatibility_selection
+from defenseclaw.observability.v8_config import load_validate_v8
+from defenseclaw.observability.v8_migration import convert_v7_observability_to_v8
+
+data_dir = Path(sys.argv[1])
+source = b"""config_version: 7
+otel:
+  enabled: false
+  endpoint: ''
+  protocol: grpc
+  headers: {}
+  tls: {ca_cert: '', insecure: false}
+  batch:
+    max_queue_size: 2048
+    max_export_batch_size: 512
+    scheduled_delay_ms: 5000
+  traces:
+    enabled: true
+    sampler: always_on
+    sampler_arg: '1.0'
+    endpoint: ''
+    protocol: ''
+    url_path: ''
+  logs:
+    enabled: true
+    emit_individual_findings: false
+    endpoint: ''
+    protocol: ''
+    url_path: ''
+  metrics:
+    enabled: true
+    export_interval_s: 60
+    endpoint: ''
+    protocol: ''
+    url_path: ''
+  resource:
+    attributes: {}
+"""
+named_source = b"""config_version: 7
+otel:
+  enabled: false
+  traces:
+    sampler: always_on
+    sampler_arg: '1.0'
+  logs:
+    emit_individual_findings: false
+  destinations:
+    - name: generic-otlp
+      preset: generic-otlp
+      enabled: false
+      endpoint: ''
+      protocol: grpc
+      tls: {ca_cert: '', insecure: false}
+      batch:
+        max_queue_size: 2048
+        max_export_batch_size: 512
+        scheduled_delay_ms: 5000
+      traces: {enabled: true, endpoint: '', protocol: '', url_path: ''}
+      logs: {enabled: true, endpoint: '', protocol: '', url_path: ''}
+      metrics: {enabled: true, endpoint: '', protocol: '', url_path: '', export_interval_s: 60}
+  resource:
+    attributes: {}
+"""
+compatibility_selection = load_packaged_v7_compatibility_selection()
+for label, historical_source in (("flat", source), ("named", named_source)):
+    result = convert_v7_observability_to_v8(
+        historical_source,
+        {},
+        compatibility_selection=compatibility_selection,
+        effective_data_dir=str(data_dir),
+    )
+    candidate = load_validate_v8(result.candidate).source
+    destinations = {
+        item.get("name")
+        for item in (candidate.get("observability") or {}).get("destinations", [])
+        if isinstance(item, dict)
+    }
+    if "generic-otlp" in destinations:
+        raise SystemExit(f"fresh 0.8.0 {label} endpointless OTLP placeholder survived artifact migration")
+    if "legacy_unconfigured_generic_otlp_placeholder_omitted" not in result.warnings:
+        raise SystemExit(f"fresh 0.8.0 {label} artifact migration omitted no explicit diagnostic")
+print("fresh_080_default_migration=ok")
+PY
+
         if (( FROM_CONFIG_VERSION == 8 )); then
             "${venv_python}" - \
                 "${SMOKE_HOME}/.defenseclaw" \
@@ -1832,6 +2022,7 @@ PY
 import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 import stat
 import sys
@@ -1890,9 +2081,12 @@ if destinations["existing-otlp"].get("headers") != {
 if destinations["v8-http-protected"].get("bearer_env") != "DEFENSECLAW_V8_FIXTURE_HTTP_BEARER":
     raise SystemExit("native-v8 HTTP secret reference changed across the upgrade")
 
+historical_environment_values = dotenv_values(evidence_dir / "environment.historical.source")
+historical_gateway_token = historical_environment_values.get("DEFENSECLAW_GATEWAY_TOKEN")
+if not isinstance(historical_gateway_token, str) or re.fullmatch(r"[0-9a-f]{64}", historical_gateway_token) is None:
+    raise SystemExit("historical fixture gateway token is missing or invalid")
 expected_environment = {
     "PRESERVE_UPGRADE_SMOKE_ENV": "preserved",
-    "DEFENSECLAW_GATEWAY_TOKEN": "upgrade-smoke-v8-gateway-fixture",
     "DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION": "Bearer upgrade-smoke-v8-otlp-value",
     "DEFENSECLAW_V8_FIXTURE_HTTP_BEARER": "upgrade-smoke-v8-http-value",
     "DEFENSECLAW_GATEWAY_TOKEN": historical_gateway_token,
@@ -1934,25 +2128,6 @@ if not any(
     for path in normal_backups
 ):
     raise SystemExit("native-v8 upgrade retained no byte-exact source backup")
-
-receipts = [
-    json.loads(path.read_text(encoding="utf-8"))
-    for path in sorted((data_dir / ".upgrade-receipts").glob("*.json"))
-    if path.is_file() and not path.is_symlink()
-]
-terminal = [item for item in receipts if item.get("target_version") == target_version]
-if len(terminal) != 1:
-    raise SystemExit(f"expected one native-v8 target receipt, got {len(terminal)}")
-receipt = terminal[0]
-if receipt.get("from_version") != source_version:
-    raise SystemExit("native-v8 target receipt has the wrong source version")
-if (
-    receipt.get("status") != "succeeded"
-    or receipt.get("migration_status") != "completed"
-    or receipt.get("artifacts_verified") is not True
-    or receipt.get("failure_code")
-):
-    raise SystemExit("native-v8 target receipt is not fully successful")
 
 for comment in (
     "# ┌──── OBSERVABILITY UPGRADE SMOKE ────┐",
@@ -2035,6 +2210,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import stat
 import sys
@@ -2223,9 +2399,18 @@ actual_environment = dotenv_values(data_dir / ".env")
 for name, value in expected_environment.items():
     if actual_environment.get(name) != value:
         raise SystemExit(f"protected environment promotion mismatch for {name}")
+historical_environment_values = dotenv_values(evidence_dir / "environment.historical.source")
+historical_gateway_token = historical_environment_values.get("DEFENSECLAW_GATEWAY_TOKEN")
+if not isinstance(historical_gateway_token, str) or re.fullmatch(r"[0-9a-f]{64}", historical_gateway_token) is None:
+    raise SystemExit("historical fixture gateway token is missing or invalid")
+if actual_environment.get("DEFENSECLAW_GATEWAY_TOKEN") != historical_gateway_token:
+    raise SystemExit("gateway token changed across the staged upgrade")
 if os.name != "nt" and stat.S_IMODE((data_dir / ".env").stat().st_mode) != 0o600:
     raise SystemExit("promoted .env is not mode 0600")
-protected_values = tuple(value for name, value in expected_environment.items() if name != "PRESERVE_UPGRADE_SMOKE_ENV")
+protected_values = (
+    *(value for name, value in expected_environment.items() if name != "PRESERVE_UPGRADE_SMOKE_ENV"),
+    historical_gateway_token,
+)
 log_text = upgrade_log.read_text(encoding="utf-8", errors="replace")
 if any(value in config_text or value in log_text for value in protected_values):
     raise SystemExit("protected fixture value escaped into v8 YAML or upgrade output")
@@ -2307,25 +2492,6 @@ if source_is_older_than_bridge:
     if not phase_two_backups:
         raise SystemExit("phase two retained no distinct byte-exact config-v7 bridge backup")
 
-    receipt_root = data_dir / ".upgrade-receipts"
-    receipts = [
-        json.loads(path.read_text(encoding="utf-8"))
-        for path in sorted(receipt_root.glob("*.json"))
-        if path.is_file() and not path.is_symlink()
-    ]
-    terminal_receipts = [item for item in receipts if item.get("target_version") == target_version]
-    if len(terminal_receipts) != 1:
-        raise SystemExit(f"expected exactly one terminal target receipt, got {len(terminal_receipts)}")
-    terminal_receipt = terminal_receipts[0]
-    if terminal_receipt.get("from_version") != bridge_version:
-        raise SystemExit(f"target activation did not originate from bridge {bridge_version}")
-    if (
-        terminal_receipt.get("status") != "succeeded"
-        or terminal_receipt.get("migration_status") != "completed"
-        or terminal_receipt.get("artifacts_verified") is not True
-        or terminal_receipt.get("failure_code")
-    ):
-        raise SystemExit("terminal bridge-to-target receipt is not fully successful")
 else:
     if not historical_backups:
         raise SystemExit("direct bridge upgrade retained no byte-exact historical config/.env backup")
@@ -2395,6 +2561,18 @@ print("v8_recovery_backups=historical_and_bridge_byte_exact")
 print("local_bundle_manifest=target_exact_custom_preserved")
 PY
         fi
+
+        local receipt_from="${FROM_VERSION}"
+        if [[ -n "${REQUIRED_BRIDGE_VERSION}" ]] \
+            && ! version_lte "${REQUIRED_BRIDGE_VERSION}" "${FROM_VERSION}"; then
+            receipt_from="${REQUIRED_BRIDGE_VERSION}"
+        fi
+        "${venv_python}" "${ROOT}/scripts/check_upgrade_receipt.py" \
+            --data-dir "${SMOKE_HOME}/.defenseclaw" \
+            --from-version "${receipt_from}" \
+            --target-version "${TARGET_VERSION}" \
+            --timeout-seconds 10 \
+            || die "target gateway did not admit and acknowledge the successful upgrade receipt"
     else
         "${venv_python}" - "${SMOKE_HOME}/.defenseclaw" <<'PY'
 from pathlib import Path
@@ -2438,24 +2616,154 @@ PY
     fi
     ok "Fresh target gateway is running and healthy"
 
-    "${venv_python}" - <<'PY'
-import textual
-from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile
+    HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+        PYTHONNOUSERSITE=1 PYTHONPATH='' "${venv_python}" - <<'PY'
+import asyncio
+import sys
+from pathlib import Path
 
-metric = MetricDatum(
-    key="hook_calls",
-    label="Hook Calls",
-    value=0,
-    progress=0.0,
-    detail="gateway offline",
-    state="error",
-    target_panel="logs",
-)
-tile = MetricTile(metric)
-tile.refresh_metric(metric)
+import textual
+import defenseclaw.tui.app as tui_app
+
+module_path = Path(tui_app.__file__).resolve()
+if not module_path.is_relative_to(Path(sys.prefix).resolve()):
+    raise SystemExit(f"TUI imported outside wheel environment: {module_path}")
+DefenseClawTUI = tui_app.DefenseClawTUI
+
+async def main() -> None:
+    app = DefenseClawTUI()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+
+asyncio.run(main())
 print("textual_version=" + getattr(textual, "__version__", "unknown"))
-print("metric_tile_refresh=ok")
+print("installed_target_tui_origin=venv")
+print("installed_target_tui_mount=ok")
 PY
+
+    if target_uses_observability_v8; then
+        "${venv_python}" -I -B - "${SMOKE_HOME}/.defenseclaw" <<'PY'
+import json
+from pathlib import Path
+import sqlite3
+import sys
+import time
+import uuid
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+import yaml
+
+data_dir = Path(sys.argv[1])
+config = yaml.safe_load((data_dir / "config.yaml").read_text(encoding="utf-8")) or {}
+port = int((config.get("gateway") or {}).get("api_port") or 18970)
+token = ""
+for line in (data_dir / ".env").read_text(encoding="utf-8").splitlines():
+    name, separator, value = line.partition("=")
+    if separator and name.strip() == "DEFENSECLAW_GATEWAY_TOKEN":
+        token = value.strip()
+        break
+if not token:
+    raise SystemExit("target gateway token is unavailable for the post-status write probe")
+
+probe_id = str(uuid.uuid4())
+body = json.dumps(
+    {
+        "id": probe_id,
+        "action": "policy-reload",
+        "target": "release-upgrade-smoke:" + probe_id,
+        "actor": "release-upgrade-smoke",
+        "details": "synthetic post-status SQLite continuity probe; no policy state changed",
+        "severity": "INFO",
+    }
+).encode("utf-8")
+request = Request(
+    f"http://127.0.0.1:{port}/audit/event",
+    data=body,
+    method="POST",
+    headers={
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+        "X-DefenseClaw-Client": "release-upgrade-smoke",
+        "X-DefenseClaw-Token": token,
+    },
+)
+try:
+    with urlopen(request, timeout=10) as response:
+        response_body = response.read(4097)
+        if len(response_body) > 4096:
+            raise SystemExit("post-status audit write returned an oversized response")
+        result = json.loads(response_body)
+        if response.status != 200 or result != {"status": "ok"}:
+            raise SystemExit("post-status audit write was not acknowledged")
+except HTTPError as exc:
+    try:
+        response_body = exc.read(4096).decode("utf-8", errors="replace")
+    except OSError:
+        response_body = "<response body unavailable after read timeout>"
+    raise SystemExit(
+        f"post-status audit write returned HTTP {exc.code}: {response_body}"
+    ) from exc
+except (URLError, OSError) as exc:
+    reason = getattr(exc, "reason", type(exc).__name__)
+    raise SystemExit(f"post-status audit write request/read failed: {reason}") from exc
+except (json.JSONDecodeError, UnicodeError) as exc:
+    raise SystemExit("post-status audit write returned invalid JSON") from exc
+
+local = (config.get("observability") or {}).get("local") or {}
+configured = local.get("path")
+if configured is None:
+    database = data_dir / "audit.db"
+elif not isinstance(configured, str) or not configured.strip():
+    raise SystemExit("configured audit database path is invalid")
+else:
+    database = Path(configured).expanduser()
+    if not database.is_absolute():
+        database = data_dir / database
+deadline = time.monotonic() + 10
+while True:
+    connection = None
+    try:
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=0.2)
+        after = connection.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE id = ? AND action = 'policy-reload' "
+            "AND event_name = 'policy.updated' AND mandatory = 1",
+            (probe_id,),
+        ).fetchone()[0]
+    except sqlite3.OperationalError as exc:
+        code = getattr(exc, "sqlite_errorcode", None)
+        busy_code = getattr(sqlite3, "SQLITE_BUSY", 5)
+        locked_code = getattr(sqlite3, "SQLITE_LOCKED", 6)
+        retryable = code is not None and (code & 0xFF) in {
+            busy_code,
+            locked_code,
+        }
+        if code is None:
+            message = str(exc).lower()
+            retryable = message == "database is busy" or message.startswith(
+                ("database is locked", "database table is locked", "database schema is locked")
+            )
+        if not retryable:
+            raise
+        after = 0
+    finally:
+        if connection is not None:
+            connection.close()
+    if after == 1:
+        break
+    if time.monotonic() >= deadline:
+        raise SystemExit("fresh SQLite readers cannot see the mandatory write made after status")
+    time.sleep(0.1)
+print("post_status_mandatory_sqlite_write=ok")
+PY
+        "${venv_python}" "${ROOT}/scripts/check_upgrade_receipt.py" \
+            --data-dir "${SMOKE_HOME}/.defenseclaw" \
+            --from-version "${receipt_from}" \
+            --target-version "${TARGET_VERSION}" \
+            --timeout-seconds 10 \
+            || die "read-only status/TUI commands detached the target gateway audit WAL"
+    fi
 }
 
 run_one_upgrade_smoke() {
@@ -2468,6 +2776,7 @@ run_one_upgrade_smoke() {
     install_baseline
     seed_upgrade_fixture
     start_source_gateway_canary
+    assert_source_gateway_canary_preserved_fixture
     patch_installed_upgrade_endpoint
     run_upgrade
     verify_upgrade

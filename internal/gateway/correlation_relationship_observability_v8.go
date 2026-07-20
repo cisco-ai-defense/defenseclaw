@@ -105,10 +105,15 @@ func emitCorrelationRelationshipsV8WithEmitter(
 				observedAt = observability.Present(relationship.CreatedAt.UTC())
 			}
 			status := relationshipExportStatus(relationship.Status)
+			envelope := audit.EnvelopeFromContext(ctx)
 			correlation := observability.Correlation{
 				SemanticEventID: string(semantic), LogicalEventID: string(logical),
 				ConnectorInstanceID: string(instance), ConnectorID: connector,
 				RunID: gatewaylog.ProcessRunID(), SidecarInstanceID: gatewaylog.SidecarInstanceID(),
+				TraceID: envelope.TraceID, RequestID: envelope.RequestID,
+				SessionID: envelope.SessionID, TurnID: envelope.TurnID,
+				AgentID: envelope.AgentID, AgentInstanceID: envelope.AgentInstanceID,
+				PolicyID: envelope.PolicyID, ToolInvocationID: envelope.ToolID,
 			}
 			return builder.BuildLogCorrelationRelationshipChanged(
 				observability.LogCorrelationRelationshipChangedInput{

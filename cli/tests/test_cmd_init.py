@@ -1864,8 +1864,19 @@ class TestIntegrateOpenclawHomeIdempotent(unittest.TestCase):
         # symlink target for the legitimate (untampered) case to succeed.
         cfg.claw.openclaw_home_original = self.oc_home
 
-        result = _integrate_openclaw_home(cfg, self.sandbox_home)
+        # The idempotency path performs post-transfer ACL/traversal repair in
+        # production.  This unit test owns only temporary paths, so exercise
+        # the wiring without letting it mutate parent permissions or invoke
+        # sudo against the host's shared temporary root.
+        with (
+            patch("defenseclaw.commands.cmd_init_sandbox._ensure_parent_traversal") as traversal,
+            patch("defenseclaw.commands.cmd_init_sandbox._ensure_sandbox_acls", return_value=True) as acls,
+        ):
+            result = _integrate_openclaw_home(cfg, self.sandbox_home)
         self.assertTrue(result)
+        canonical_home = os.path.realpath(self.oc_home)
+        traversal.assert_called_once_with(canonical_home)
+        acls.assert_called_once_with(canonical_home)
 
     def test_returns_false_when_no_openclaw(self):
         from defenseclaw.commands.cmd_init_sandbox import _integrate_openclaw_home

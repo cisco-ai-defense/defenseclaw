@@ -513,9 +513,32 @@ jobs:
             install --disable-pip-version-check "$whl"
           uvx --from pip pip --isolated --python "$tmp/venv/bin/python" check
           "$tmp/venv/bin/defenseclaw" --help >/dev/null
+          HOME="$tmp/home" DEFENSECLAW_HOME="$tmp/home/.defenseclaw" \
+            PYTHONNOUSERSITE=1 PYTHONPATH='' "$tmp/venv/bin/python" - <<'PY'
+          import asyncio
+          import sys
+          from pathlib import Path
+
+          import textual
+          import defenseclaw.tui.app as tui_app
+
+          module_path = Path(tui_app.__file__).resolve()
+          if not module_path.is_relative_to(Path(sys.prefix).resolve()):
+              raise SystemExit(f"TUI imported outside wheel environment: {module_path}")
+          DefenseClawTUI = tui_app.DefenseClawTUI
+
+          async def main() -> None:
+              app = DefenseClawTUI()
+              async with app.run_test(size=(120, 40)) as pilot:
+                  await pilot.pause()
+
+          asyncio.run(main())
+          print("installed_wheel_tui_origin=venv")
+          print("installed_wheel_tui_mount=ok textual=" + getattr(textual, "__version__", "unknown"))
+          PY
           (
             cd "$tmp"
-            PYTHONNOUSERSITE=1 PYTHONPATH= "$tmp/venv/bin/python" - "$tmp/telemetry-resource-digests.json" <<'PY'
+            PYTHONNOUSERSITE=1 PYTHONPATH='' "$tmp/venv/bin/python" - "$tmp/telemetry-resource-digests.json" <<'PY'
           import hashlib
           import json
           import sys
@@ -559,6 +582,7 @@ jobs:
             cli/tests/test_verify_sigstore_blob.py \
             cli/tests/test_observability_v8_upgrade_continuity_checker.py \
             cli/tests/test_resolve_upgrade_baselines.py \
+            cli/tests/test_release_api_retry.py \
             cli/tests/test_release_workflow_staged.py \
             cli/tests/test_upgrade_smoke_static.py \
             cli/tests/test_upgrade_release_smoke_contract.py \

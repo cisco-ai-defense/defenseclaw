@@ -42,11 +42,12 @@ copy POSIX artifacts onto Windows.
 
 Do not use the built-in form to cross a manifest-required bridge. A
 `0.8.3`-or-older POSIX host must use the authenticated current release-owned
-shell resolver in latest mode, as shown below. Its immutable built-in
-command and an explicit hard-cut target both refuse before stopping services or
-changing installed state. Some frozen controllers then print an obsolete raw
-network-to-shell hint; do not execute it. Use the authenticated bootstrap from
-this page instead.
+shell resolver, as shown below. Its immutable built-in command refuses before
+stopping services or changing installed state. Some frozen controllers then
+print an obsolete raw network-to-shell hint; do not execute it. Use the
+authenticated bootstrap from this page instead. Release `0.8.5` is immutable,
+so its resolver must be invoked in latest mode with no `VERSION` environment
+variable and no `--version` argument.
 
 <Callout title="Never re-run the fresh installer over an existing host">
 The install scripts are fresh-install-only and refuse an existing DefenseClaw
@@ -64,12 +65,13 @@ Release `0.8.4` deliberately keeps configuration and runtime schema v7. It does
 not contain or run the observability-v8 migration. Its purpose is to install a
 protocol-2 upgrade controller that can safely drive the later v8 hard cut.
 
-For an existing `0.8.3`-or-older installation, run the release-owned resolver
-without a target version. Latest mode is allowed to follow a manifest-declared
-bridge; an explicit request that skips a required bridge is refused before
-services or installed files change. A host already on `0.8.4` uses that same
-target-release resolver; the frozen built-in parser cannot accept the truthful
-empty Windows matrix.
+For an existing `0.8.3`-or-older installation, prefer the release-owned resolver
+without a target version. A current resolver also treats `--version` as the
+final target selection, never as permission to skip a manifest-declared bridge;
+this keeps the immutable handoff printed by older controllers usable. Direct
+installer and manual-artifact paths still refuse a hard cut that bypasses the
+bridge. A host already on `0.8.4` uses that same target-release resolver; the
+frozen built-in parser cannot accept the truthful empty Windows matrix.
 
 Installed users must download and authenticate the release-owned resolver
 asset before running it. Use the complete POSIX `cosign` and SHA-256 bootstrap in the

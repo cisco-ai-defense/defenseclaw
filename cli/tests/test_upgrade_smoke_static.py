@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -44,30 +46,135 @@ UPGRADE_SMOKE_BASELINES = (
 
 def test_makefile_upgrade_smoke_matrix_tracks_supported_baselines() -> None:
     text = (ROOT / "Makefile").read_text(encoding="utf-8")
-    match = re.search(r"^UPGRADE_SMOKE_FROM \?= (.+)$", text, re.MULTILINE)
+    match = re.search(r"^UPGRADE_SMOKE_FROM \?=\s*$", text, re.MULTILINE)
     assert match is not None
-    assert tuple(match.group(1).split()) == UPGRADE_SMOKE_BASELINES
 
     policy = json.loads(
         (ROOT / "release" / "upgrade-baselines.json").read_text(encoding="utf-8")
     )
     assert tuple(policy["published_baselines"]) == UPGRADE_SMOKE_BASELINES
+    assert "scripts/resolve_upgrade_baselines.py" in text
+    assert "from_versions='$(strip $(UPGRADE_SMOKE_FROM))'" in text
+    assert "target_version=''" in text
+    assert "dynamic upgrade matrix requires" in text
+    assert '--target-version "$$target_version"' in text
+    assert '--target-version=*) target_version="$${1#--target-version=}"' in text
 
     assert "upgrade-refusal-contract-matrix: upgrade-smoke-matrix" in text
     assert "upgrade-developer-activation:" in text
     assert "scripts/test-developer-target-activation.sh $(ARGS)" in text
-    assert (
-        'scripts/test-upgrade-protocol-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" '
-        "--refusal-contract-only $(ARGS)"
-    ) in text
+    assert "$(call run_upgrade_matrix,scripts/test-upgrade-protocol-release.sh,--refusal-contract-only)" in text
     assert "upgrade-legacy-smoke-matrix:" in text
-    assert 'scripts/test-upgrade-release.sh --from-versions "$(UPGRADE_SMOKE_FROM)" $(ARGS)' in text
+    assert "$(call run_upgrade_matrix,scripts/test-upgrade-release.sh,)" in text
     assert "upgrade-signed-protocol-matrix:" in text
+
+
+def test_makefile_upgrade_matrix_executes_dynamic_and_explicit_baselines(tmp_path: Path) -> None:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    resolver = scripts / "resolve_upgrade_baselines.py"
+    resolver.write_text(
+        """import json, pathlib, sys
+args = sys.argv[1:]
+target = args[args.index('--target-version') + 1]
+output = pathlib.Path(args[args.index('--output') + 1])
+pathlib.Path('resolver-observed.json').write_text(json.dumps({'target': target, 'output': str(output)}))
+output.write_text(json.dumps({'published_baselines': ['0.8.5', '0.8.4']}))
+""",
+        encoding="utf-8",
+    )
+    runner = scripts / "test-upgrade-protocol-release.sh"
+    runner.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > runner-args.txt\n",
+        encoding="utf-8",
+    )
+    runner.chmod(0o700)
+
+    environment = os.environ.copy()
+    environment.pop("UPGRADE_SMOKE_FROM", None)
+
+    subprocess.run(
+        [
+            "make",
+            "-s",
+            "-f",
+            str(ROOT / "Makefile"),
+            "upgrade-smoke-matrix",
+            "ARGS=--target-version 0.8.6 --health-timeout 3",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        timeout=30,
+        check=True,
+    )
+    observed = json.loads((tmp_path / "resolver-observed.json").read_text(encoding="utf-8"))
+    assert observed["target"] == "0.8.6"
+    assert not Path(observed["output"]).parent.exists()
+    assert (tmp_path / "runner-args.txt").read_text(encoding="utf-8").splitlines() == [
+        "--from-versions",
+        "0.8.5 0.8.4",
+        "--refusal-contract-only",
+        "--target-version",
+        "0.8.6",
+        "--health-timeout",
+        "3",
+    ]
+
+    (tmp_path / "resolver-observed.json").unlink()
+    subprocess.run(
+        [
+            "make",
+            "-s",
+            "-f",
+            str(ROOT / "Makefile"),
+            "upgrade-smoke-matrix",
+            "ARGS=--target-version=0.8.6 --health-timeout 4",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        timeout=30,
+        check=True,
+    )
+    observed = json.loads((tmp_path / "resolver-observed.json").read_text(encoding="utf-8"))
+    assert observed["target"] == "0.8.6"
+    assert not Path(observed["output"]).parent.exists()
+    assert (tmp_path / "runner-args.txt").read_text(encoding="utf-8").splitlines() == [
+        "--from-versions",
+        "0.8.5 0.8.4",
+        "--refusal-contract-only",
+        "--target-version=0.8.6",
+        "--health-timeout",
+        "4",
+    ]
+
+    (tmp_path / "resolver-observed.json").unlink()
+    subprocess.run(
+        [
+            "make",
+            "-s",
+            "-f",
+            str(ROOT / "Makefile"),
+            "upgrade-smoke-matrix",
+            "UPGRADE_SMOKE_FROM=0.8.3 0.8.2",
+            "ARGS=--target-version=0.8.6",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        timeout=30,
+        check=True,
+    )
+    assert not (tmp_path / "resolver-observed.json").exists()
+    assert (tmp_path / "runner-args.txt").read_text(encoding="utf-8").splitlines() == [
+        "--from-versions",
+        "0.8.3 0.8.2",
+        "--refusal-contract-only",
+        "--target-version=0.8.6",
+    ]
 
 
 def test_upgrade_smoke_docs_cover_default_matrix() -> None:
     text = (ROOT / "docs" / "TESTING.md").read_text(encoding="utf-8")
-    default_line = next(line for line in text.splitlines() if line.startswith("The default matrix covers"))
+    default_line = next(line for line in text.splitlines() if "default matrix covers" in line)
     for version in UPGRADE_SMOKE_BASELINES:
         assert f"`{version}`" in default_line
 
@@ -109,6 +216,9 @@ def test_historical_baselines_are_authenticated_and_real_dependency_mode_is_expl
     )
 
     assert "stage_authenticated_baseline" in smoke
+    assert "prepare_required_bridge_assets()" in smoke
+    assert 'cosign_command="$(command -v cosign)"' in smoke
+    assert 'cosign_path="$(abs_path "${cosign_command}")"' in smoke
     assert 'scripts/historical_release_auth.py"' in smoke
     assert "checksums.txt.sig" in smoke
     assert "checksums.txt.pem" in smoke
@@ -121,8 +231,38 @@ def test_historical_baselines_are_authenticated_and_real_dependency_mode_is_expl
     assert "start_source_gateway_canary" in smoke
     assert "is version-bound healthy before resolver handoff" in smoke
     assert 'stage_authenticated_baseline "${baseline}"' in protocol
-    assert "required bridge authentication failed" in protocol
+    assert "required bridge authentication failed" in smoke
     assert 'if [[ "${SUCCESS_PATH_ONLY}" == "1" ]]' in protocol
+
+
+def test_bridge_auth_resolves_a_symlinked_cosign_binary(tmp_path: Path) -> None:
+    real_bin = tmp_path / "real-bin"
+    command_dir = tmp_path / "commands"
+    real_bin.mkdir()
+    command_dir.mkdir()
+    real_cosign = real_bin / "cosign"
+    real_cosign.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real_cosign.chmod(0o700)
+    (command_dir / "cosign").symlink_to(real_cosign)
+
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source scripts/test-upgrade-release.sh; trap - EXIT; "
+            'PATH="$1:$PATH"; resolved="$(abs_path "$(command -v cosign)")"; '
+            'test "$resolved" = "$2"',
+            "bridge-cosign-resolution",
+            str(command_dir),
+            str(real_cosign.resolve()),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_unsigned_refusal_contract_distinguishes_modern_provenance_from_legacy_schema() -> None:
@@ -132,10 +272,7 @@ def test_unsigned_refusal_contract_distinguishes_modern_provenance_from_legacy_s
 
     assert 'installed_refusal_mode="artifact-provenance"' in protocol
     assert 'elif [[ "${REFUSAL_CONTRACT_ONLY}" == "1" ]] && ! candidate_has_checksum_signature' in protocol
-    assert (
-        "--allow-unverified cannot bypass mandatory 0.8.4+ manifest or artifact provenance checks"
-        in protocol
-    )
+    assert "--allow-unverified cannot bypass mandatory 0.8.4+ manifest or artifact provenance checks" in protocol
     assert "checksums.txt is not signed (no Sigstore signature/certificate assets were published)" in protocol
     assert "Modern release provenance is mandatory; --allow-unverified cannot override it." in protocol
 
@@ -146,9 +283,7 @@ def test_live_continuity_local_candidate_models_strict_sigstore_boundary_only() 
     ).read_text(encoding="utf-8")
 
     fixture_start = continuity.index("prepare_local_candidate_provenance_fixture() {")
-    fixture_end = continuity.index(
-        "\n}\n\nassert_local_candidate_provenance_verified()", fixture_start
-    )
+    fixture_end = continuity.index("\n}\n\nassert_local_candidate_provenance_verified()", fixture_start)
     fixture = continuity[fixture_start:fixture_end]
     main = continuity[continuity.index("main_continuity() {") :]
 
@@ -156,23 +291,159 @@ def test_live_continuity_local_candidate_models_strict_sigstore_boundary_only() 
     assert 'if [[ -z "${RELEASE_ROOT}" && -z "${RELEASE_DIR}" ]]' in main
     assert 'LOCAL_CANDIDATE_PROVENANCE_FIXTURE="1"' in main
     assert "--certificate-identity" in fixture
-    assert (
-        "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/"
-        "release.yaml@refs/heads/main"
-    ) in fixture
+    assert ("https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main") in fixture
     assert "--certificate-oidc-issuer" in fixture
     assert "https://token.actions.githubusercontent.com" in fixture
     assert '[[ "$#" -eq 10 ]]' in fixture
+    assert "RELEASE_PROVENANCE_FILENAME" in fixture
+    assert "RELEASE_SOURCE_MAP_FILENAME" in fixture
+    assert "_release_identity_documents" in fixture
+    assert "bridge_checksums_sha256=hashlib.sha256(bridge_payload).hexdigest()" in fixture
+    assert 'excluded = {"checksums.txt", "checksums.txt.pem", "checksums.txt.sig"}' in fixture
+    assert "prepare_required_bridge_assets" in main
+    assert main.index("prepare_required_bridge_assets") < main.index("prepare_local_candidate_provenance_fixture")
     assert "assert_local_candidate_provenance_verified" in main
 
 
-def test_live_continuity_reopens_v8_database_with_actual_published_bridge_binary() -> None:
-    continuity = (
-        ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh"
-    ).read_text(encoding="utf-8")
-    start = continuity.index(
-        "assert_published_bridge_binary_sqlite_rollback_compatibility() {"
+def test_live_continuity_fixture_binds_provenance_into_checksums(tmp_path: Path) -> None:
+    continuity = (ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh").read_text(encoding="utf-8")
+    function_start = continuity.index("prepare_local_candidate_provenance_fixture() {")
+    marker = 'python3 - "${release_dir}" "${bridge_checksums}" "${TARGET_VERSION}" <<\'PY\'\n'
+    program_start = continuity.index(marker, function_start) + len(marker)
+    program_end = continuity.index("\nPY\n", program_start)
+    program = continuity[program_start:program_end]
+
+    release_dir = tmp_path / "0.8.5"
+    release_dir.mkdir()
+    artifact = release_dir / "candidate.bin"
+    artifact.write_bytes(b"candidate bytes")
+    initial_checksum = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    (release_dir / "checksums.txt").write_text(f"{initial_checksum}  {artifact.name}\n", encoding="utf-8")
+    bridge_checksums = tmp_path / "bridge-checksums.txt"
+    bridge_checksums.write_text(f"{'a' * 64}  bridge.bin\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-",
+            str(release_dir),
+            str(bridge_checksums),
+            "0.8.5",
+        ],
+        cwd=ROOT,
+        input=program,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
     )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+    provenance_path = release_dir / "release-provenance.json"
+    source_map_path = release_dir / "release-source-map.json"
+    assert provenance_path.is_file()
+    assert source_map_path.is_file()
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    assert provenance["release_version"] == "0.8.5"
+    assert provenance["bridge"]["version"] == "0.8.4"
+    assert provenance["bridge"]["checksums_sha256"] == hashlib.sha256(bridge_checksums.read_bytes()).hexdigest()
+    checksums = (release_dir / "checksums.txt").read_text(encoding="utf-8")
+    checksum_rows = {name: digest for row in checksums.splitlines() for digest, name in [row.split()]}
+    assert checksum_rows[provenance_path.name] == hashlib.sha256(provenance_path.read_bytes()).hexdigest()
+    assert checksum_rows[source_map_path.name] == hashlib.sha256(source_map_path.read_bytes()).hexdigest()
+
+
+def test_live_continuity_cosign_fixture_delegates_published_signatures(
+    tmp_path: Path,
+) -> None:
+    continuity = (ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh").read_text(encoding="utf-8")
+    function_start = continuity.index("prepare_local_candidate_provenance_fixture() {")
+    marker = 'python3 - "${fixture_bin}/cosign" "${verifier_log}" "${real_cosign}" <<\'PY\'\n'
+    program_start = continuity.index(marker, function_start) + len(marker)
+    program_end = continuity.index("\nPY\n", program_start)
+    program = continuity[program_start:program_end]
+
+    wrapper = tmp_path / "cosign"
+    verifier_log = tmp_path / "fixture-verifier.log"
+    delegated_log = tmp_path / "delegated.log"
+    real_cosign = tmp_path / "real-cosign"
+    real_cosign.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' delegated > {str(delegated_log)!r}\n",
+        encoding="utf-8",
+    )
+    real_cosign.chmod(0o700)
+    generated = subprocess.run(
+        [sys.executable, "-", str(wrapper), str(verifier_log), str(real_cosign)],
+        cwd=ROOT,
+        input=program,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert generated.returncode == 0, generated.stdout + generated.stderr
+
+    certificate = tmp_path / "checksums.txt.pem"
+    certificate.write_text(
+        "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n",
+        encoding="utf-8",
+    )
+    signature = tmp_path / "checksums.txt.sig"
+    checksums = tmp_path / "checksums.txt"
+    checksums.write_text(f"{'a' * 64}  candidate.bin\n", encoding="utf-8")
+    command = [
+        str(wrapper),
+        "verify-blob",
+        "--certificate",
+        str(certificate),
+        "--signature",
+        str(signature),
+        "--certificate-identity",
+        "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main",
+        "--certificate-oidc-issuer",
+        "https://token.actions.githubusercontent.com",
+        str(checksums),
+    ]
+
+    signature.write_text("defenseclaw-continuity-fixture-signature-v1\n", encoding="utf-8")
+    target = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+    assert target.returncode == 0, target.stdout + target.stderr
+    assert verifier_log.read_text(encoding="utf-8").splitlines() == [
+        "verified exact release workflow identity and issuer"
+    ]
+    assert not delegated_log.exists()
+
+    signature.write_text("published bridge signature\n", encoding="utf-8")
+    bridge = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+    assert bridge.returncode == 0, bridge.stdout + bridge.stderr
+    assert delegated_log.read_text(encoding="utf-8") == "delegated\n"
+
+
+def test_live_continuity_uses_the_release_owned_resolver_for_the_positive_path() -> None:
+    continuity = (ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh").read_text(encoding="utf-8")
+    release_gate = (ROOT / "scripts" / "test-upgrade-release.sh").read_text(encoding="utf-8")
+    start = continuity.index("run_live_upgrade() {")
+    end = continuity.index("\n}\n\nprepare_local_candidate_provenance_fixture()", start)
+    upgrade = continuity[start:end]
+
+    assert 'resolver="${RELEASE_ROOT}/${TARGET_VERSION}/defenseclaw-upgrade.sh"' in upgrade
+    assert 'bash "${resolver}" --yes --version "${TARGET_VERSION}"' in upgrade
+    assert 'DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL="${RELEASE_URL}"' in upgrade
+    assert 'real_curl="$(install_curl_rewrite_probe "${curl_shim}")"' in upgrade
+    assert 'UPGRADE_GATE_REAL_CURL="${real_curl}"' in upgrade
+    assert 'UPGRADE_GATE_RELEASE_URL="${RELEASE_URL}"' in upgrade
+    assert 'UPGRADE_GATE_TARGET_VERSION="${TARGET_VERSION}"' in upgrade
+    assert 'PATH="${curl_shim}:${SMOKE_HOME}/.local/bin:${PATH}"' in upgrade
+    assert "PYTHONDONTWRITEBYTECODE=1" in upgrade
+    assert 'defenseclaw "${args[@]}"' not in upgrade
+    assert 'curl_command="$(type -P curl)"' in release_gate
+    assert 'real_curl="$(abs_path "${curl_command}")"' in release_gate
+    assert '[[ -f "${real_curl}" && -x "${real_curl}" ]]' in release_gate
+
+
+def test_live_continuity_reopens_v8_database_with_actual_published_bridge_binary() -> None:
+    continuity = (ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh").read_text(encoding="utf-8")
+    start = continuity.index("assert_published_bridge_binary_sqlite_rollback_compatibility() {")
     end = continuity.index("\n}\n\nresolve_continuity_upgrade_contract()", start)
     compatibility = continuity[start:end]
     main = continuity[continuity.index("main_continuity() {") :]
@@ -180,17 +451,24 @@ def test_live_continuity_reopens_v8_database_with_actual_published_bridge_binary
     # The gate is specifically bound to the immutable POSIX 0.8.4 bridge and
     # the material retained only after historical_release_auth.py succeeds.
     assert '[[ "${FROM_VERSION}" == "0.8.4" ]]' in compatibility
-    assert 'darwin|linux) ;;' in compatibility
-    assert (
-        'bridge_gateway="${WORKDIR}/old-gateway/${FROM_VERSION}/defenseclaw"'
-        in compatibility
-    )
+    assert "darwin|linux) ;;" in compatibility
+    assert 'bridge_gateway="${WORKDIR}/old-gateway/${FROM_VERSION}/defenseclaw"' in compatibility
     assert (
         'auth_marker="${WORKDIR}/published-release/${FROM_VERSION}/'
-        '.authenticated-${OS_NAME}-${ARCH_NAME}"'
-        in compatibility
+        '.authenticated-${OS_NAME}-${ARCH_NAME}"' in compatibility
     )
-    assert '"${bridge_gateway}" --version | grep -F "${FROM_VERSION}"' in compatibility
+    assert 'bridge_probe_name="dcb084probe${POST_STAMP}"' in compatibility
+    assert '[[ "${bridge_probe_name}" =~ ^[A-Za-z0-9]+$' in compatibility
+    assert '"${bridge_probe_name}" != *defenseclaw*' in compatibility
+    assert 'ln "${bridge_gateway}" "${bridge_probe}"' in compatibility
+    assert "source_stat.st_ino" in compatibility
+    assert "probe_stat.st_ino" in compatibility
+    assert "hashlib.sha256(source.read_bytes()).digest()" in compatibility
+    assert '"${bridge_probe}" --version | grep -F "${FROM_VERSION}"' in compatibility
+    assert '"${bridge_probe}" start' in compatibility
+    assert '"${bridge_probe}" stop' in compatibility
+    assert '"${bridge_gateway}" start' not in compatibility
+    assert '"${bridge_gateway}" stop' not in compatibility
 
     # It restores the byte-preserved source config while keeping one exact DB
     # path, then proves target-created correlation tables exist before boot.
@@ -217,7 +495,12 @@ def test_live_continuity_reopens_v8_database_with_actual_published_bridge_binary
     assert '"http://127.0.0.1:18970/audit/event"' in compatibility
     assert '"http://127.0.0.1:18970/alerts?limit=500"' in compatibility
     assert '"X-DefenseClaw-Client": "upgrade-continuity-gate"' in compatibility
-    assert 'event.get("binary_version") == "0.8.4"' in compatibility
+    assert '"SELECT COUNT(*) FROM audit_events WHERE target = ?"' in compatibility
+    assert 'event.get("target") == probe_target' in compatibility
+    assert 'event.get("details") == marker' not in compatibility
+    api_read_start = compatibility.index("read = urllib.request.Request(")
+    api_read_end = compatibility.index("\nPY\n", api_read_start)
+    assert 'event.get("binary_version")' not in compatibility[api_read_start:api_read_end]
     assert "SELECT COUNT(*), COALESCE(MAX(binary_version), '')" in compatibility
 
     # The target config and binary are restored and health-checked before the
@@ -225,11 +508,33 @@ def test_live_continuity_reopens_v8_database_with_actual_published_bridge_binary
     assert 'cp -p "${v8_config}" "${data_dir}/config.yaml"' in compatibility
     assert '"${target_gateway}" start' in compatibility
     activation = main.index("verify_target_activation")
-    old_binary_probe = main.index(
-        "assert_published_bridge_binary_sqlite_rollback_compatibility"
-    )
+    old_binary_probe = main.index("assert_published_bridge_binary_sqlite_rollback_compatibility")
     post_emit = main.index("emit_continuity_phase post")
     assert activation < old_binary_probe < post_emit
+
+
+def test_live_continuity_fixture_has_no_implicit_openclaw_fleet_dependency() -> None:
+    continuity = (ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh").read_text(encoding="utf-8")
+    start = continuity.index("write_continuity_v7_config() {")
+    end = continuity.index("\n}\n\nstart_baseline_stack()", start)
+    fixture = continuity[start:end]
+    verify_start = continuity.index("verify_target_activation() {")
+    verify_end = continuity.index(
+        "\n}\n\nassert_published_bridge_binary_sqlite_rollback_compatibility()",
+        verify_start,
+    )
+    verification = continuity[verify_start:verify_end]
+
+    assert '"claw:\\n"' in fixture
+    assert "\"  mode: ''\\n\"" in fixture
+    assert '"  connector:' not in fixture
+    assert '"gateway:\\n"' in fixture
+    assert '"  fleet_mode: disabled\\n"' in fixture
+    assert '"    enabled: false\\n"' in fixture
+    assert 'gateway.get("fleet_mode") != "disabled"' in verification
+    assert 'gateway.get("watcher") or {}' in verification
+    assert '(config.get("claw") or {}).get("mode") != ""' in verification
+    assert '(config.get("guardrail") or {}).get("connector") or ""' in verification
 
 
 def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
@@ -258,7 +563,7 @@ def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
             "bridge_phase1_state_transaction snapshot"
         )
     ]
-    assert 'post_stop_state="${post_stop_health%%$\'\\t\'*}"' in post_stop
+    assert "post_stop_state=\"${post_stop_health%%$'\\t'*}\"" in post_stop
     assert '[[ "${post_stop_state}" == "unreachable" ]]' in post_stop
     assert "remains live without PID custody after stop" in post_stop
 
@@ -502,6 +807,144 @@ def test_posix_resolver_bootstraps_recovery_under_fixed_mutator_lease() -> None:
     assert "_recover_interrupted_hard_cut" in text
 
 
+def test_release_resolver_isolated_python_never_writes_bytecode() -> None:
+    posix = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
+    windows = (ROOT / "scripts" / "upgrade.ps1").read_text(encoding="utf-8")
+
+    # Isolated mode ignores PYTHONDONTWRITEBYTECODE. Every installed-runtime
+    # probe must therefore pass -B explicitly so a pre-mutation refusal cannot
+    # create __pycache__ entries inside snapshotted state.
+    for source in (posix, windows):
+        normalized = re.sub(r'["\'`,()]', " ", source)
+        normalized = re.sub(r"\s+", " ", normalized)
+        assert re.search(r"(?<!\S)-I\s+(?!-B(?:\s|$))\S+", normalized) is None
+    assert "-I -B -" in posix
+    assert "-I -B -c" in posix
+    assert "-I -B -c" in windows
+    assert '"${DEFENSECLAW_VENV}"/bin/python -I -B -c' in posix
+    assert "${DEFENSECLAW_VENV}/bin/python -c" not in posix
+    assert '"${preflight_venv}/bin/python" -c' not in posix
+    assert '"${DEFENSECLAW_VENV}/bin/python" -c' not in posix
+    assert '"${DEFENSECLAW_VENV}/bin/python" - <<' not in posix
+
+    installed_version = windows[
+        windows.index("function Get-InstalledVersion") : windows.index("function Get-CanonicalVersionOutput")
+    ]
+    assert "[void](Get-Cli)" in installed_version
+    assert '-Arguments @("-I", "-B", "-c"' in installed_version
+    assert "Get-CanonicalVersionOutput -Command $cli" not in installed_version
+    assert 'Assert-VersionOutput (Get-Cli) $SourceVersion "source CLI"' not in windows
+
+
+def test_release_owned_embedded_python_remains_apple_python39_compatible() -> None:
+    paths = (
+        ROOT / "scripts" / "upgrade.sh",
+        ROOT / "scripts" / "test-upgrade-release.sh",
+        ROOT / "scripts" / "test-upgrade-protocol-release.sh",
+        ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh",
+        ROOT / "scripts" / "test-fresh-install-release.sh",
+    )
+    programs: list[tuple[Path, str]] = []
+    marker_count = 0
+    for path in paths:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        marker_count += sum("<<'PY'" in line for line in lines)
+        index = 0
+        while index < len(lines):
+            if "<<'PY'" in lines[index]:
+                body_start = index + 1
+                while body_start < len(lines) and lines[body_start - 1].rstrip().endswith("\\"):
+                    body_start += 1
+                end = body_start
+                while end < len(lines) and lines[end] != "PY":
+                    end += 1
+                assert end < len(lines), f"unterminated Python heredoc in {path} after line {index + 1}"
+                programs.append((path, "\n".join(lines[body_start:end]) + "\n"))
+                index = end
+            index += 1
+
+    assert len(programs) == marker_count
+    incompatible_annotations: list[str] = []
+    incompatible_calls: list[str] = []
+    for path, program in programs:
+        # Release recovery/certification can run before the managed venv is
+        # trustworthy, so these programs support stock Apple Python 3.9.
+        tree = ast.parse(program, filename=str(path), feature_version=(3, 9))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "zip"
+                and any(keyword.arg == "strict" for keyword in node.keywords)
+            ):
+                incompatible_calls.append(f"{path.name}: {ast.unparse(node)}")
+            annotations: list[ast.expr | None] = []
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                arguments = (
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                )
+                annotations.extend(argument.annotation for argument in arguments)
+                annotations.append(node.returns)
+                if node.args.vararg is not None:
+                    annotations.append(node.args.vararg.annotation)
+                if node.args.kwarg is not None:
+                    annotations.append(node.args.kwarg.annotation)
+            elif isinstance(node, ast.AnnAssign):
+                annotations.append(node.annotation)
+
+            for annotation in (value for value in annotations if value is not None):
+                if any(
+                    isinstance(candidate, ast.BinOp) and isinstance(candidate.op, ast.BitOr)
+                    for candidate in ast.walk(annotation)
+                ):
+                    incompatible_annotations.append(f"{path.name}: {ast.unparse(annotation)}")
+
+    assert not incompatible_annotations, (
+        "release-owned embedded Python may execute under bare python3 and must remain compatible "
+        f"with Apple Python 3.9: {incompatible_annotations}"
+    )
+    assert not incompatible_calls, (
+        f"release-owned embedded Python cannot use zip(strict=...) before Python 3.10: {incompatible_calls}"
+    )
+
+
+def test_posix_upgrade_fixture_seeds_gateway_token_before_historical_evidence() -> None:
+    smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text(encoding="utf-8")
+    legacy_start = smoke.index("seed_v8_observability_fixture() {")
+    legacy_end = smoke.index("\n}\n\nseed_native_v8_observability_fixture()", legacy_start)
+    native_start = legacy_end
+    native_end = smoke.index("\n}\n\nseed_upgrade_fixture()", native_start)
+
+    legacy_fixture = smoke[legacy_start:legacy_end]
+    native_fixture = smoke[native_start:native_end]
+    assert "python3 -I -B -c 'import secrets" in legacy_fixture
+    assert legacy_fixture.index("DEFENSECLAW_GATEWAY_TOKEN=${gateway_token}") < legacy_fixture.index(
+        "finalize_observability_upgrade_fixture"
+    )
+    assert "python3 -I -B -c 'import secrets" in native_fixture
+    assert native_fixture.index("DEFENSECLAW_GATEWAY_TOKEN=${gateway_token}") < native_fixture.index(
+        "environment.historical.source"
+    )
+    invariant_start = smoke.index("assert_source_gateway_canary_preserved_fixture() {")
+    invariant_end = smoke.index("\n}\n", invariant_start)
+    invariant = smoke[invariant_start:invariant_end]
+    assert 'cmp -s "${evidence_dir}/config.historical.source" "${data_dir}/config.yaml"' in invariant
+    assert 'cmp -s "${evidence_dir}/environment.historical.source" "${data_dir}/.env"' in invariant
+    run_one = smoke[smoke.index("run_one_upgrade_smoke() {") : smoke.index("\n}\n\nmain()")]
+    assert (
+        run_one.index("start_source_gateway_canary")
+        < run_one.index("assert_source_gateway_canary_preserved_fixture")
+        < run_one.index("patch_installed_upgrade_endpoint")
+    )
+    assert 'actual_environment.get("DEFENSECLAW_GATEWAY_TOKEN") != historical_gateway_token' in smoke
+    assert 'raise SystemExit("gateway token changed across the staged upgrade")' in smoke
+    assert "historical_gateway_token," in smoke
+    assert '"DEFENSECLAW_GATEWAY_TOKEN": historical_gateway_token' in smoke
+    assert '"${SMOKE_HOME}/fixture-evidence/environment.historical.source"' in smoke
+
+
 def test_posix_same_version_noop_reports_actual_provenance_before_mutation() -> None:
     text = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
     contract = text.rindex(
@@ -526,8 +969,16 @@ def test_bridge_controller_hard_cut_establishes_rollback_custody_before_mutation
     command = (ROOT / "cli/defenseclaw/commands/cmd_upgrade.py").read_text(encoding="utf-8")
     gate_call = command.index("_require_release_owned_hard_cut_handoff(", command.index("def upgrade("))
     acquisition = command.index("_acquire_bridge_rollback_artifacts(", gate_call)
+    migration_preflight = command.index("_preflight_hard_cut_observability_migration(", acquisition)
     backup = command.index('ux.banner("Creating Backup")', acquisition)
-    assert gate_call < acquisition < backup
+    assert gate_call < acquisition < migration_preflight < backup
+    pre_stop = command[migration_preflight:backup]
+    assert pre_stop.count("_preflight_hard_cut_observability_migration(") == 2
+    assert "gateway_binary=gw_binary_path" in pre_stop
+    assert "config_path=active_config_path" in pre_stop
+    assert "expected_binding=hard_cut_preflight_binding" in pre_stop
+    assert "including --yes" in pre_stop
+    assert "No backup, receipt, service stop, artifact install, or migration was performed" in command
 
     main = (ROOT / "cli/defenseclaw/main.py").read_text(encoding="utf-8")
     journal_guard = main.index("if any(os.path.lexists(path) for path in recovery_journals):")
@@ -559,13 +1010,601 @@ def test_posix_resolver_hands_both_hard_cut_paths_to_authenticated_target_contro
     capture = resolver.index("capture_hard_cut_target_controller_contract")
     bridge_switch = resolver.index('RELEASE_VERSION="${MANIFEST_REQUIRED_BRIDGE}"', capture)
     assert capture < bridge_switch
-    assert resolver.count('exec "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}"') == 2
-    assert resolver.count(
-        'export DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION="${final_version}"'
-    ) == 2
+    target_command = '"${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}"'
+    assert resolver.count(target_command) == 2
+    assert f"exec {target_command}" not in resolver
+    assert resolver.count("|| target_status=$?") == 2
+    assert resolver.count('exit "${target_status}"') == 2
+    assert resolver.count('export DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION="${final_version}"') == 2
     assert 'exec "${INSTALL_DIR}/defenseclaw" upgrade --yes --version "${final_version}"' not in resolver
     assert "verify_hard_cut_target_controller_handoff" in resolver
     assert 'TARGET_CONTROLLER_VENV="${STAGING_DIR}/target-controller-venv"' in resolver
+
+
+def _posix_resolver_lock_functions() -> str:
+    resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
+    functions_start = resolver.index("acquire_upgrade_lock() {")
+    release_start = resolver.index("release_upgrade_lock() {", functions_start)
+    functions_end = resolver.index(
+        "\n}\n\nregister_bridge_phase1_recovery_journal() {",
+        release_start,
+    ) + len("\n}\n")
+    return resolver[functions_start:functions_end]
+
+
+def _posix_resolver_lock_harness() -> str:
+    return f"""
+set -euo pipefail
+umask 077
+DEFENSECLAW_HOME="$TEST_DATA_HOME"
+UPGRADE_RECOVERY_ROOT="${{DEFENSECLAW_HOME}}/.upgrade-recovery"
+UPGRADE_LOCK_FILE="${{UPGRADE_RECOVERY_ROOT}}/upgrade.lock"
+UPGRADE_ADVISORY_LOCK_FILE="${{UPGRADE_RECOVERY_ROOT}}/upgrade.advisory.lock"
+UPGRADE_LOCK_TOKEN=""
+UPGRADE_ADVISORY_LOCK_HELD=0
+UPGRADE_ADVISORY_LOCK_OPEN=0
+UPGRADE_RECOVERY_ROOT_CREATED=0
+UPGRADE_ADVISORY_LOCK_CREATED=0
+UPGRADE_RECOVERY_ROOT_DEVICE=""
+UPGRADE_RECOVERY_ROOT_INODE=""
+UPGRADE_ADVISORY_LOCK_DEVICE=""
+UPGRADE_ADVISORY_LOCK_INODE=""
+die() {{ printf '%s\n' "$*" >&2; exit 1; }}
+{_posix_resolver_lock_functions()}
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+@pytest.mark.parametrize("preexisting_recovery_root", (False, True))
+def test_posix_resolver_releases_only_the_lock_custody_it_created(
+    tmp_path: Path,
+    preexisting_recovery_root: bool,
+) -> None:
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    recovery_root = data_home / ".upgrade-recovery"
+    advisory_lock = recovery_root / "upgrade.advisory.lock"
+    if preexisting_recovery_root:
+        recovery_root.mkdir(mode=0o700)
+        advisory_lock.write_bytes(b"")
+        advisory_lock.chmod(0o600)
+
+    script = (
+        _posix_resolver_lock_harness()
+        + """
+acquire_upgrade_lock
+test -f "${UPGRADE_LOCK_FILE}"
+test -f "${UPGRADE_ADVISORY_LOCK_FILE}"
+release_upgrade_lock
+test ! -e "${UPGRADE_LOCK_FILE}"
+"""
+    )
+    if preexisting_recovery_root:
+        script += """
+test -d "${UPGRADE_RECOVERY_ROOT}"
+test -f "${UPGRADE_ADVISORY_LOCK_FILE}"
+"""
+    else:
+        script += 'test ! -e "${UPGRADE_RECOVERY_ROOT}"\n'
+
+    environment = os.environ.copy()
+    environment["TEST_DATA_HOME"] = str(data_home)
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+def test_posix_resolver_parent_wait_refusal_runs_exit_cleanup(tmp_path: Path) -> None:
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    script = (
+        _posix_resolver_lock_harness()
+        + """
+trap release_upgrade_lock EXIT
+acquire_upgrade_lock
+target_status=0
+bash -c 'exit 42' || target_status=$?
+exit "${target_status}"
+"""
+    )
+    environment = os.environ.copy()
+    environment["TEST_DATA_HOME"] = str(data_home)
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 42, completed.stdout + completed.stderr
+    assert not (data_home / ".upgrade-recovery").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+def test_posix_resolver_never_deletes_replacement_advisory_inode(tmp_path: Path) -> None:
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    script = (
+        _posix_resolver_lock_harness()
+        + """
+acquire_upgrade_lock
+mv "${UPGRADE_ADVISORY_LOCK_FILE}" "${UPGRADE_ADVISORY_LOCK_FILE}.displaced"
+printf 'replacement\n' >"${UPGRADE_ADVISORY_LOCK_FILE}"
+chmod 600 "${UPGRADE_ADVISORY_LOCK_FILE}"
+release_upgrade_lock
+test ! -e "${UPGRADE_LOCK_FILE}"
+test -f "${UPGRADE_ADVISORY_LOCK_FILE}"
+test -f "${UPGRADE_ADVISORY_LOCK_FILE}.displaced"
+"""
+    )
+    environment = os.environ.copy()
+    environment["TEST_DATA_HOME"] = str(data_home)
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recovery_root = data_home / ".upgrade-recovery"
+    assert (recovery_root / "upgrade.advisory.lock").read_bytes() == b"replacement\n"
+    assert (recovery_root / "upgrade.advisory.lock.displaced").read_bytes() == b""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+def test_posix_resolver_keeps_kernel_lease_until_created_path_is_removed(
+    tmp_path: Path,
+) -> None:
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    ready = tmp_path / "observer-ready"
+    result = tmp_path / "observer-result"
+    script = (
+        _posix_resolver_lock_harness()
+        + """
+acquire_upgrade_lock
+(
+    exec 9>&-
+    python3 - "${UPGRADE_ADVISORY_LOCK_FILE}" "$TEST_READY" "$TEST_RESULT" <<'PY'
+import fcntl
+import os
+from pathlib import Path
+import sys
+import time
+
+path, ready, result = sys.argv[1:]
+descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    Path(ready).write_text("ready\\n", encoding="utf-8")
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise SystemExit("timed out waiting for resolver lease")
+            time.sleep(0.005)
+    Path(result).write_text(
+        "present\\n" if os.path.lexists(path) else "absent\\n",
+        encoding="utf-8",
+    )
+finally:
+    os.close(descriptor)
+PY
+) &
+observer_pid=$!
+for _attempt in $(seq 1 500); do
+    [[ -f "$TEST_READY" ]] && break
+    sleep 0.01
+done
+test -f "$TEST_READY"
+release_upgrade_lock
+wait "${observer_pid}"
+    # Cleanup and this fresh descriptor can acquire immediately after the
+    # parent releases FD 9 in either order. If this observer wins first it sees
+    # the name; otherwise it observes an already-unlinked inode. In both cases
+    # cleanup must finish by reclaiming the resolver-created inode/root.
+    case "$(cat "$TEST_RESULT")" in
+        present|absent) ;;
+        *) exit 1 ;;
+    esac
+    test ! -e "${UPGRADE_RECOVERY_ROOT}"
+"""
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "TEST_DATA_HOME": str(data_home),
+            "TEST_READY": str(ready),
+            "TEST_RESULT": str(result),
+        }
+    )
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+def test_posix_resolver_retry_waits_for_surviving_mutation_child(tmp_path: Path) -> None:
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    ready = tmp_path / "parent-ready"
+    child_pid_path = tmp_path / "child-pid"
+    parent_script = (
+        _posix_resolver_lock_harness()
+        + """
+acquire_upgrade_lock
+bash -c 'sleep 4' &
+child_pid=$!
+printf '%s\n' "${child_pid}" >"$TEST_CHILD_PID"
+printf 'ready\n' >"$TEST_READY"
+wait "${child_pid}"
+"""
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "TEST_DATA_HOME": str(data_home),
+            "TEST_READY": str(ready),
+            "TEST_CHILD_PID": str(child_pid_path),
+        }
+    )
+    parent = subprocess.Popen(
+        ["bash", "-c", parent_script],
+        cwd=ROOT,
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 5
+    while not ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ready.exists()
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+
+    parent.kill()
+    assert parent.wait(timeout=5) != 0
+    os.kill(child_pid, 0)
+
+    retry_script = (
+        _posix_resolver_lock_harness()
+        + """
+trap release_upgrade_lock EXIT
+acquire_upgrade_lock
+"""
+    )
+    refused = subprocess.run(
+        ["bash", "-c", retry_script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert "surviving mutation child" in refused.stderr
+
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("mutation child did not exit")
+
+    completed = subprocess.run(
+        ["bash", "-c", retry_script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+def test_posix_resolver_exit_cleanup_keeps_surviving_child_advisory_lease(tmp_path: Path) -> None:
+    """Exit cleanup must not unlink an inode still locked by an inherited FD."""
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    ready = tmp_path / "parent-ready"
+    child_pid_path = tmp_path / "child-pid"
+    parent_script = (
+        _posix_resolver_lock_harness()
+        + """
+trap release_upgrade_lock EXIT
+acquire_upgrade_lock
+bash -c 'sleep 4' &
+child_pid=$!
+printf '%s\n' "${child_pid}" >"$TEST_CHILD_PID"
+printf 'ready\n' >"$TEST_READY"
+exit 0
+"""
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "TEST_DATA_HOME": str(data_home),
+            "TEST_READY": str(ready),
+            "TEST_CHILD_PID": str(child_pid_path),
+        }
+    )
+    parent = subprocess.Popen(
+        ["bash", "-c", parent_script],
+        cwd=ROOT,
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 5
+    while not ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ready.exists()
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    assert parent.wait(timeout=5) == 0
+    os.kill(child_pid, 0)
+
+    advisory_lock = data_home / ".upgrade-recovery" / "upgrade.advisory.lock"
+    assert advisory_lock.is_file()
+    retry_script = (
+        _posix_resolver_lock_harness()
+        + """
+trap release_upgrade_lock EXIT
+acquire_upgrade_lock
+"""
+    )
+    refused = subprocess.run(
+        ["bash", "-c", retry_script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert "surviving mutation child" in refused.stderr
+    assert advisory_lock.is_file()
+
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("mutation child did not exit")
+
+    completed = subprocess.run(
+        ["bash", "-c", retry_script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc process-start identity")
+def test_posix_resolver_reclaims_reused_pid_schema_v2_claim(tmp_path: Path) -> None:
+    """A reused PID must not permanently block a stale diagnostic claim."""
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    script = (
+        _posix_resolver_lock_harness()
+        + """
+mkdir -p "${UPGRADE_RECOVERY_ROOT}"
+chmod 700 "${UPGRADE_RECOVERY_ROOT}"
+python3 - "${UPGRADE_LOCK_FILE}" "$$" <<'PY'
+import json
+import sys
+
+path, pid = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(
+        {
+            "schema_version": 2,
+            "pid": int(pid),
+            "process_start": "linux:0",
+            "token": "a" * 64,
+        },
+        stream,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    stream.write("\\n")
+PY
+chmod 600 "${UPGRADE_LOCK_FILE}"
+acquire_upgrade_lock
+python3 - "${UPGRADE_LOCK_FILE}" <<'PY'
+import json
+import sys
+
+claim = json.loads(open(sys.argv[1], encoding="utf-8").read())
+assert claim["schema_version"] == 2
+assert claim["process_start"] != "linux:0"
+PY
+release_upgrade_lock
+"""
+    )
+    environment = os.environ.copy()
+    environment["TEST_DATA_HOME"] = str(data_home)
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+def test_posix_resolver_schema1_live_pid_claim_fails_closed(tmp_path: Path) -> None:
+    """Platforms without a precise start identity never reclaim a live PID."""
+
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    script = (
+        _posix_resolver_lock_harness()
+        + """
+mkdir -p "${UPGRADE_RECOVERY_ROOT}"
+chmod 700 "${UPGRADE_RECOVERY_ROOT}"
+python3 - "${UPGRADE_LOCK_FILE}" "$$" <<'PY'
+import json
+import sys
+
+path, pid = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(
+        {"schema_version": 1, "pid": int(pid), "token": "a" * 64},
+        stream,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    stream.write("\\n")
+PY
+chmod 600 "${UPGRADE_LOCK_FILE}"
+acquire_upgrade_lock
+"""
+    )
+    environment = os.environ.copy()
+    environment["TEST_DATA_HOME"] = str(data_home)
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert (data_home / ".upgrade-recovery" / "upgrade.lock").is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+def test_posix_resolver_legacy_schema2_live_pid_claim_fails_closed(tmp_path: Path) -> None:
+    """Legacy second-resolution claims are not reclaimed while their PID lives."""
+
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    script = (
+        _posix_resolver_lock_harness()
+        + """
+mkdir -p "${UPGRADE_RECOVERY_ROOT}"
+chmod 700 "${UPGRADE_RECOVERY_ROOT}"
+python3 - "${UPGRADE_LOCK_FILE}" "$$" <<'PY'
+import json
+import sys
+
+path, pid = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(
+        {
+            "schema_version": 2,
+            "pid": int(pid),
+            "process_start": "Thu Jul 17 12:34:56 2026",
+            "token": "a" * 64,
+        },
+        stream,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    stream.write("\\n")
+PY
+chmod 600 "${UPGRADE_LOCK_FILE}"
+acquire_upgrade_lock
+"""
+    )
+    environment = os.environ.copy()
+    environment["TEST_DATA_HOME"] = str(data_home)
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert (data_home / ".upgrade-recovery" / "upgrade.lock").is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX resolver lock cleanup")
+def test_posix_resolver_preserves_nonempty_created_recovery_root_in_place(
+    tmp_path: Path,
+) -> None:
+    data_home = tmp_path / "data"
+    data_home.mkdir(mode=0o700)
+    script = (
+        _posix_resolver_lock_harness()
+        + """
+acquire_upgrade_lock
+printf '{"schema_version":4}\n' >"${UPGRADE_RECOVERY_ROOT}/phase-two-active.json"
+chmod 600 "${UPGRADE_RECOVERY_ROOT}/phase-two-active.json"
+release_upgrade_lock
+test -d "${UPGRADE_RECOVERY_ROOT}"
+test -f "${UPGRADE_RECOVERY_ROOT}/phase-two-active.json"
+test ! -e "${UPGRADE_LOCK_FILE}"
+test ! -e "${UPGRADE_ADVISORY_LOCK_FILE}"
+"""
+    )
+    environment = os.environ.copy()
+    environment["TEST_DATA_HOME"] = str(data_home)
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    recovery_root = data_home / ".upgrade-recovery"
+    assert (recovery_root / "phase-two-active.json").is_file()
+    assert not list(data_home.glob(".upgrade-recovery.released-*"))
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX resolver terminal proof")

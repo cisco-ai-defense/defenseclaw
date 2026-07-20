@@ -22,6 +22,153 @@ cases:
             enabled: false
             endpoint: https://collector.example.test
 
+  - name: plaintext-otlp-explicit-insecure
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: http://collector.example.test
+            tls: {insecure: true}
+
+  - name: plaintext-otlp-missing-insecure
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: http://collector.example.test
+
+  - name: secure-otlp-marked-insecure
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test
+            tls: {insecure: true}
+
+  - name: insecure-otlp-with-ca-cert
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: http://collector.example.test
+            tls:
+              insecure: true
+              ca_cert: /tmp/collector-ca.pem
+
+  - name: otlp-ca-cert-must-be-absolute
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: grpc
+            endpoint: collector.example.test:4317
+            tls: {ca_cert: relative/collector-ca.pem}
+
+  - name: otlp-ca-cert-must-not-be-whitespace
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: grpc
+            endpoint: collector.example.test:4317
+            tls: {ca_cert: " "}
+
+  - name: otlp-endpoint-query-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test?tenant=example
+
+  - name: otlp-endpoint-fragment-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test#fragment
+
+  - name: grpc-otlp-endpoint-path-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: grpc
+            endpoint: https://collector.example.test/ignored
+
+  - name: plaintext-otlp-signal-override-missing-insecure
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            signal_overrides:
+              logs: {endpoint: http://collector.example.test}
+            send: {signals: [logs], buckets: ['*']}
+
+  - name: secure-otlp-signal-override-marked-insecure
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            tls: {insecure: true}
+            signal_overrides:
+              logs: {endpoint: https://collector.example.test}
+            send: {signals: [logs], buckets: ['*']}
+
+  - name: shadowed-base-otlp-tls-mismatch
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: collector
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: http://unused.example.test
+            signal_overrides:
+              logs: {endpoint: https://collector.example.test}
+            send: {signals: [logs], buckets: ['*']}
+
   - name: explicit-console-logs
     valid: true
     source: |
@@ -68,6 +215,18 @@ cases:
               max_export_batch_size: 512
               max_export_batch_bytes: 4263936
               scheduled_delay_ms: 1
+
+  - name: non-otlp-relative-ca-path-is-normalized
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: archive
+            kind: http_jsonl
+            endpoint: https://archive.example.test/events
+            tls:
+              ca_cert: relative/archive-ca.pem
 
   - name: push-batch-maximums
     valid: true
@@ -246,6 +405,90 @@ cases:
               traces: {path: v1/traces}
             send: {signals: [traces], buckets: ['*']}
 
+  - name: http-signal-path-encoded-delimiters
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: traces
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test
+            signal_overrides:
+              traces: {path: /base%2Ftenant%3Fscope%23fragment}
+            send: {signals: [traces], buckets: ['*']}
+
+  - name: http-signal-path-literal-query-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: traces
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test
+            signal_overrides:
+              traces: {path: '/base?tenant'}
+            send: {signals: [traces], buckets: ['*']}
+
+  - name: http-signal-path-literal-fragment-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: traces
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test
+            signal_overrides:
+              traces: {path: '/base#fragment'}
+            send: {signals: [traces], buckets: ['*']}
+
+  - name: http-signal-path-malformed-percent-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: traces
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test
+            signal_overrides:
+              traces: {path: /base%ZZtenant}
+            send: {signals: [traces], buckets: ['*']}
+
+  - name: http-signal-path-control-character-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: traces
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test
+            signal_overrides:
+              traces: {path: "/base\u000btenant"}
+            send: {signals: [traces], buckets: ['*']}
+
+  - name: http-signal-path-unicode-control-character-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: traces
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: https://collector.example.test
+            signal_overrides:
+              traces: {path: "/base\u0085tenant"}
+            send: {signals: [traces], buckets: ['*']}
+
   - name: resource-home-path-is-prohibited
     valid: false
     source: |
@@ -254,6 +497,36 @@ cases:
         resource:
           attributes:
             defenseclaw.claw.home_dir: /Users/operator/private
+
+  - name: malformed-url-like-resource-text-is-valid
+    valid: true
+    source: |
+      config_version: 8
+      observability:
+        resource:
+          attributes:
+            custom.note: 'http://[malformed-resource-note]'
+
+  - name: malformed-url-like-resource-userinfo-is-prohibited
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        resource:
+          attributes:
+            custom.note: 'http://review-user:review-secret@[malformed-resource-note]'
+
+  - name: otlp-empty-fragment-delimiter-is-rejected
+    valid: false
+    source: |
+      config_version: 8
+      observability:
+        destinations:
+          - name: traces
+            kind: otlp
+            protocol: http/protobuf
+            endpoint: 'https://collector.example.test#'
+            send: {signals: [traces], buckets: ['*']}
 
   - name: unknown-profile-reference
     valid: false

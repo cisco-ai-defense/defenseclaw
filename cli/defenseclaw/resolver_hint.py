@@ -42,6 +42,7 @@ def authenticated_resolver_instructions(
         "POSIX:\n"
         "(\n"
         "  set -eu\n"
+        "  unset VERSION\n"
         "  umask 077\n"
         '  d="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-upgrade.XXXXXX")"\n'
         "  trap 'rm -rf \"$d\"' EXIT\n"

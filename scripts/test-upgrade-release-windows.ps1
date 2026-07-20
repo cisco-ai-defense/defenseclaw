@@ -1112,6 +1112,30 @@ function Assert-SnapshotsEqual {
     $beforeHash = (Get-FileHash -LiteralPath $Before -Algorithm SHA256).Hash
     $afterHash = (Get-FileHash -LiteralPath $After -Algorithm SHA256).Hash
     if ($beforeHash -ne $afterHash) {
+        $beforeByPath = @{}
+        foreach ($row in @(Get-Content -LiteralPath $Before -Raw -Encoding UTF8 | ConvertFrom-Json)) {
+            $beforeByPath[[string]$row.path] = $row
+        }
+        $afterByPath = @{}
+        foreach ($row in @(Get-Content -LiteralPath $After -Raw -Encoding UTF8 | ConvertFrom-Json)) {
+            $afterByPath[[string]$row.path] = $row
+        }
+        $allPaths = @($beforeByPath.Keys) + @($afterByPath.Keys)
+        foreach ($path in @($allPaths | Sort-Object -Unique)) {
+            if (-not $beforeByPath.ContainsKey($path)) {
+                Write-Host ("snapshot added: {0}" -f $path)
+                continue
+            }
+            if (-not $afterByPath.ContainsKey($path)) {
+                Write-Host ("snapshot removed: {0}" -f $path)
+                continue
+            }
+            $beforeRow = [string]($beforeByPath[$path] | ConvertTo-Json -Depth 6 -Compress)
+            $afterRow = [string]($afterByPath[$path] | ConvertTo-Json -Depth 6 -Compress)
+            if ($beforeRow -cne $afterRow) {
+                Write-Host ("snapshot changed: {0}" -f $path)
+            }
+        }
         Fail "$Label changed installed bytes, ACLs, configuration, cursor, receipts, or artifacts"
     }
 }
@@ -1227,14 +1251,27 @@ function Test-HardCutExplicitRefusal {
     $after = Join-Path $Case.Root "resolver-refusal.after.json"
     $log = Join-Path $Case.Root "resolver-refusal.log"
     $userPathBefore = [Environment]::GetEnvironmentVariable("Path", "User")
+    $bytecodeEnvironment = [Environment]::GetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "Process")
     try {
+        # Exercise the production cold-cache contract.  The resolver itself
+        # must use isolated Python with -B; a test-wide environment override
+        # must not be what keeps a refused upgrade mutation-free.
+        $packageRoot = Join-Path (Join-Path (Join-Path $Case.Venv "Lib") "site-packages") "defenseclaw"
+        foreach ($cache in @(Get-ChildItem -LiteralPath $packageRoot -Directory -Filter "__pycache__" -Recurse -Force)) {
+            Remove-Item -LiteralPath $cache.FullName -Recurse -Force -ErrorAction Stop
+        }
+        foreach ($bytecode in @(Get-ChildItem -LiteralPath $packageRoot -File -Filter "*.pyc" -Recurse -Force)) {
+            Remove-Item -LiteralPath $bytecode.FullName -Force -ErrorAction Stop
+        }
         Write-InstalledStateSnapshot -Case $Case -Output $before
+        [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $null, "Process")
         $arguments = @(
             "-NoProfile", "-NonInteractive", "-File", (Get-CandidateResolverPath),
             "-Version", $TargetVersion, "-Yes", "-HealthTimeout", [string]$HealthTimeout,
             "-ReleaseBaseUrl", $script:ServerBaseUrl, "-TestMode"
         )
         $status = Invoke-ExternalLogged -Command $script:Commandpwsh -Arguments $arguments -LogPath $log
+        [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $bytecodeEnvironment, "Process")
         if ($status -eq 0) { Show-LogTail $log; Fail "Explicit hard-cut request unexpectedly succeeded" }
         if ($sentinel.HasExited -or -not (Get-Process -Id $sentinel.Id -ErrorAction SilentlyContinue)) {
             Fail "Explicit hard-cut refusal crossed the service-stop boundary"
@@ -1255,6 +1292,7 @@ function Test-HardCutExplicitRefusal {
             Fail "Explicit refusal did not explain the signed bridge requirement"
         }
     } finally {
+        [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $bytecodeEnvironment, "Process")
         Stop-RefusalSentinel -Case $Case -Sentinel $sentinel
     }
     Write-Ok "Explicit hard-cut request left PID, service, config, cursor, ACLs, CLI, and gateway unchanged"

@@ -72,7 +72,7 @@ make upgrade-smoke ARGS="--from-version 0.7.2"
 
 # Optional developer diagnostic across the complete reviewed historical floor.
 # Ordinary PR CI uses a smaller path-sensitive behavior-class selection.
-make upgrade-smoke-matrix
+make upgrade-smoke-matrix ARGS="--target-version X.Y.Z"
 
 # Fast positive target-owned migration/health check for an unsigned local
 # candidate. This never calls or weakens the production upgrade resolver.
@@ -81,7 +81,7 @@ make upgrade-developer-activation ARGS="--release-root /path/to/candidate-root -
 # Full positive protocol matrix. This requires the sealed, release-workflow-
 # signed candidate; it must not be pointed at unsigned local artifacts.
 make upgrade-signed-protocol-matrix \
-  ARGS="--release-dir release-candidate/dist --baseline-mode seed"
+  ARGS="--target-version X.Y.Z --release-dir release-candidate/dist --baseline-mode seed"
 
 # Legacy schema-1 positive harness, retained only for old release fixtures.
 make upgrade-legacy-smoke-matrix \
@@ -100,10 +100,28 @@ ssh openclaw-vineeth 'scripts/test-developer-target-activation.sh --release-root
 ssh openclaw-vineeth 'scripts/test-upgrade-protocol-release.sh --release-root /tmp/candidate-release --target-version 0.8.6 --from-version 0.8.4 --baseline-mode seed --refusal-contract-only'
 ```
 
-The default matrix covers the checked-in reviewed floor: the required schema-v7 bridge plus every supported 0.4.0+ historical source, namely `0.8.4`, `0.8.3`, `0.8.2`, `0.8.1`, `0.8.0`, `0.7.2`, `0.7.1`, `0.6.6`, `0.6.5`, `0.6.4`, `0.6.3`, `0.6.2`, `0.6.1`, `0.6.0`, `0.5.0`, and `0.4.0`. Its reviewed floor is `release/upgrade-baselines.json`; the Make target and smoke-contract tests must match that data exactly. Candidate certification materializes an effective snapshot that adds every newer immutable stable release only after authenticating its signed checksums and upgrade manifest, so the 0.8.6 candidate includes config-v8 baseline `0.8.5` without baking unpublished assets into the reviewed floor. Release `0.7.0` has no downloadable release assets, and `0.2.0` predates the upgrade command, so neither is eligible for automatic staging. Targets before `0.8.5` retain schema-v7 checks. A hard-cut manifest (`min_upgrade_protocol >= 2`) must prove pre-mutation refusal for incapable baselines, a verified `0.8.4` bridge handoff for every listed older POSIX source, and full v7-to-v8 observability, private-secret, rollback, local-bundle, SQLite, and fresh-process health checks from the bridge.
+For routine candidates newer than the reviewed support list, the default matrix covers the required schema-v7 bridge plus every supported 0.4.0+ historical source: `0.8.4`, `0.8.3`, `0.8.2`, `0.8.1`, `0.8.0`, `0.7.2`, `0.7.1`, `0.6.6`, `0.6.5`, `0.6.4`, `0.6.3`, `0.6.2`, `0.6.1`, `0.6.0`, `0.5.0`, and `0.4.0`.
+That reviewed floor lives in `release/upgrade-baselines.json`;
+the Make target and smoke-contract tests must match it exactly. At execution
+time the resolver authenticates and prepends every newer immutable stable
+release older than the exact `--target-version`, and candidate certification
+seals that effective snapshot with its signed checksums and upgrade manifest.
+This tests newly published sources such as config-v8 `0.8.5` without baking
+unpublished assets into the reviewed floor. Legacy fixture candidates exclude
+reviewed sources that are not older than the candidate and fail clearly when no
+supported predecessor remains. Dynamic matrix targets require the candidate
+argument because the checked-in development version is not release selection;
+set `UPGRADE_SMOKE_FROM` only for an intentional developer subset. Release
+`0.7.0` has no downloadable assets, and `0.2.0` predates the upgrade command,
+so neither is eligible for automatic staging. Targets before `0.8.5` retain
+schema-v7 checks. A hard-cut manifest (`min_upgrade_protocol >= 2`) must prove
+pre-mutation refusal for incapable baselines, a verified `0.8.4` bridge handoff
+for every listed older POSIX source, and full v7-to-v8 observability,
+private-secret, rollback, local-bundle, SQLite, and fresh-process health checks
+from the bridge.
 
-After 0.8.5 is published, the effective baseline resolver adds it dynamically
-as config version 8. The harness then seeds canonical v8 config, migration
+The effective baseline resolver adds published 0.8.5 dynamically as config
+version 8. The harness then seeds canonical v8 config, migration
 cursor, and baseline-owned bundle state; it requires later targets to preserve
 config/environment bytes, avoid replaying the one-time v8 activation, refresh
 managed bundle bytes, and retain operator files. Unknown future config families

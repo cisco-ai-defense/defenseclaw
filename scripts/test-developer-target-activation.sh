@@ -276,6 +276,7 @@ count = run_migrations(
     sys.argv[3],
     sys.argv[4],
     upgrade_handles_local_bundle=True,
+    controller_owns_local_bundle_transaction=True,
 )
 print(f"developer_target_migrations={count}")
 PY

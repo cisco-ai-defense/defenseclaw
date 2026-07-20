@@ -149,7 +149,7 @@ jobs:
       latest_stable: ${{ needs.release-mode.outputs.latest_stable }}
       baselines: ${{ steps.baselines.outputs.baselines }}
       certification_baselines: ${{ steps.selection.outputs.versions }}
-      historical_matrix: ${{ steps.selection.outputs.matrix }}
+      certification_cases: ${{ steps.selection.outputs.matrix }}
       workflow_version: ${{ steps.selection.outputs.workflow_version }}
       platform_set: ${{ steps.selection.outputs.platform_set }}
       windows_baselines: ${{ steps.baselines.outputs.windows_baselines }}
@@ -189,6 +189,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION_INPUT: ${{ needs.release-mode.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.release-mode.outputs.commit }}
         run: |
           set -euo pipefail
           TAG="$RELEASE_VERSION_INPUT"
@@ -200,14 +201,10 @@ jobs:
             echo "::error title=Tag already exists::Tag '$TAG' already exists locally."
             exit 1
           fi
-          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "::error title=Tag already exists on remote::Tag '$TAG' already exists on origin."
-            exit 1
-          fi
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::error title=Release already exists::A draft or published release for '$TAG' already exists."
-            exit 1
-          fi
+          python3 scripts/release_api_retry.py require-absent \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --commit "$RELEASE_COMMIT"
           gh api --paginate --slurp \
             -H "Accept: application/vnd.github+json" \
             "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
@@ -1344,6 +1341,8 @@ jobs:
               )
           PY
 
+      # v4.5.0+ is required here because certification binds the GitHub
+      # artifact archive through the action's artifact-digest output.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         id: upload
         with:
@@ -1352,6 +1351,16 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+
+      - name: Require candidate artifact digest output
+        env:
+          CANDIDATE_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$CANDIDATE_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ ]]; then
+            echo "::error title=Missing candidate artifact digest::The pinned upload action did not return a lowercase SHA-256 digest."
+            exit 1
+          fi
 
   full-certification:
     name: Run full signed pre-release certification
@@ -1380,7 +1389,7 @@ jobs:
       version: ${{ needs.release-preflight.outputs.tag }}
       commit: ${{ needs.release-preflight.outputs.commit }}
       baselines: ${{ needs.release-preflight.outputs.certification_baselines }}
-      historical_matrix: ${{ needs.release-preflight.outputs.historical_matrix }}
+      upgrade_cases: ${{ needs.release-preflight.outputs.certification_cases }}
       min_upgrade_protocol: ${{ needs.assemble-release-candidate.outputs.min_upgrade_protocol }}
       required_bridge_version: ${{ needs.assemble-release-candidate.outputs.required_bridge_version }}
       windows_prebridge_baselines: ${{ needs.assemble-release-candidate.outputs.windows_prebridge_baselines }}
@@ -1547,6 +1556,7 @@ jobs:
         needs.select-candidate.result == 'success'
       }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     environment: release
     permissions:
       contents: write
@@ -1584,32 +1594,34 @@ jobs:
             release-candidate/dist/checksums.txt
 
       - name: Recheck remote release namespace
+        id: release-namespace
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
           RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
         run: |
           set -euo pipefail
-          remote_main="$(
-            gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha
-          )"
-          if [[ "$remote_main" != "$RELEASE_COMMIT" ]]; then
-            echo "::error title=Main advanced during certification::Expected $RELEASE_COMMIT but protected main is now $remote_main. Certify the new exact main SHA before publishing."
-            exit 1
-          fi
-          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "::error title=Tag appeared during release gates::$RELEASE_TAG already exists."
-            exit 1
-          fi
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::error title=Release appeared during release gates::$RELEASE_TAG already exists."
-            exit 1
-          fi
+          set +e
+          python3 scripts/release_api_retry.py reconcile-create \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --commit "$RELEASE_COMMIT" \
+            --candidate-root release-candidate \
+            --omit-windows-binaries \
+            --check-main
+          namespace_status=$?
+          set -e
+          case "$namespace_status" in
+            0) echo "create_required=false" >> "$GITHUB_OUTPUT" ;;
+            10) echo "create_required=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error title=Release namespace conflict::Remote custody is neither absent nor the exact immutable candidate."; exit 1 ;;
+          esac
 
       # With Immutable Releases enabled, current gh creates a draft, uploads
       # every selected sealed asset, and only then publishes. This is the only step
       # in the workflow that can create the remote release or tag.
       - name: Publish tag and selected sealed assets
+        if: steps.release-namespace.outputs.create_required == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
@@ -1634,12 +1646,45 @@ jobs:
             notes_args=(--generate-notes)
           fi
 
-          gh release create "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$RELEASE_COMMIT" \
-            --title "$RELEASE_TAG" \
-            "${notes_args[@]}" \
-            "${assets[@]}"
+          published=0
+          for attempt in 1 2 3; do
+            if timeout --signal=TERM --kill-after=30s 10m \
+              gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$RELEASE_COMMIT" \
+              --title "$RELEASE_TAG" \
+              "${notes_args[@]}" \
+              "${assets[@]}"; then
+              published=1
+              break
+            fi
+
+            echo "::warning title=Release create returned an error::Reconciling remote custody before considering attempt $((attempt + 1))."
+            set +e
+            python3 scripts/release_api_retry.py reconcile-create \
+              --repository "$GITHUB_REPOSITORY" \
+              --tag "$RELEASE_TAG" \
+              --commit "$RELEASE_COMMIT" \
+              --candidate-root release-candidate \
+              --omit-windows-binaries \
+              --check-main
+            reconcile_status=$?
+            set -e
+            if [[ "$reconcile_status" == "0" ]]; then
+              published=1
+              break
+            fi
+            if [[ "$reconcile_status" != "10" ]]; then
+              echo "::error title=Ambiguous release create::Remote custody is neither absent nor the exact immutable candidate; refusing another create."
+              exit 1
+            fi
+            if [[ "$attempt" == "3" ]]; then
+              echo "::error title=Release API retries exhausted::The tag and release remained absent after three bounded create attempts."
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
+          [[ "$published" == "1" ]]
 
       - name: Prove published asset custody
         env:
@@ -1648,26 +1693,10 @@ jobs:
           RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
         run: |
           set -euo pipefail
-          verified=0
-          for attempt in 1 2 3 4 5 6; do
-            gh release view "$RELEASE_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --json tagName,isDraft,isImmutable,assets > published-release.json
-            if python3 scripts/release_candidate.py verify-published \
-              --root release-candidate \
-              --release-json published-release.json \
-              --version "$RELEASE_TAG" \
-              --commit "$RELEASE_COMMIT" \
-              --omit-windows-binaries; then
-              verified=1
-              break
-            fi
-            sleep 5
-          done
-          [[ "$verified" == "1" ]] || {
-            echo "::error title=Published custody proof failed::GitHub asset digests did not converge to the sealed candidate."
-            exit 1
-          }
-          remote_commit="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha)"
-          test "$remote_commit" = "$RELEASE_COMMIT"
+          python3 scripts/release_api_retry.py prove-published \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --commit "$RELEASE_COMMIT" \
+            --candidate-root release-candidate \
+            --omit-windows-binaries
           echo "Release $RELEASE_TAG published from tested commit $RELEASE_COMMIT"

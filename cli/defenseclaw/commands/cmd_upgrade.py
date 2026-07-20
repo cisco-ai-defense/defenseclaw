@@ -65,10 +65,17 @@ from defenseclaw.platform_support import (
 from defenseclaw.resolver_hint import authenticated_resolver_instructions
 from defenseclaw.upgrade_receipt import (
     begin_upgrade_receipt,
+    clear_local_bundle_restart_intent,
     complete_upgrade_receipt,
+    delegate_prior_upgrade_receipts,
     finalize_interrupted_upgrade_receipts,
+    find_resumable_upgrade_receipt,
+    find_verified_installed_upgrade_receipt,
+    load_local_bundle_restart_intent,
     load_upgrade_receipt,
+    record_local_bundle_restart_intent,
     record_upgrade_migrations,
+    supersede_prior_upgrade_receipts,
 )
 
 if TYPE_CHECKING:
@@ -153,17 +160,20 @@ async def smoke():
 
 asyncio.run(smoke())
 """
+_OBSERVABILITY_V8_PREFLIGHT_BINDING_ENV = "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING"
+_NO_OBSERVABILITY_V8_PREFLIGHT_BINDING = object()
 _MAX_WHEEL_MIGRATIONS_BYTES = 8 * 1024 * 1024
 _MAX_WHEEL_METADATA_BYTES = 256 * 1024
 _MAX_WHEEL_MUTATOR_WRAPPER_BYTES = 256 * 1024
-_HARD_CUT_PROMOTED_REQUIREMENTS = {
-    ("0.8.4", "0.8.5"): ("jsonschema<5,>=4.23.0",),
-}
+_MAX_INSTALLED_DISTRIBUTIONS = 4096
+_MAX_WHEEL_DESCRIPTOR_BYTES = 64 * 1024
+_DEPENDENCY_PREFLIGHT_TIMEOUT_SECONDS = 120
 _MACOS_GATEWAY_CODESIGN_IDENTIFIER = "com.cisco.defenseclaw.gateway"
 _PROTECTED_ARTIFACT_MAGIC = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
 _V8_RECOVERY_ENTRY_RE = re.compile(r"^observability-v8-[0-9a-f]{32}$")
 _MAX_PREEXISTING_V8_RECOVERY_ENTRIES = 256
 _MAX_V8_RECOVERY_FILE_BYTES = 64 * 1024 * 1024
+_MAX_HARD_CUT_MIGRATION_SOURCE_BYTES = 4 * 1024 * 1024
 _HELD_PHASE_TWO_MUTATOR_LEASE: object | None = None
 _PHASE_TWO_MUTATOR_SURVIVED_TIMEOUT = False
 
@@ -286,6 +296,14 @@ if bundle_parameter is not None and bundle_parameter.kind in (
     inspect.Parameter.KEYWORD_ONLY,
 ):
     kwargs["upgrade_handles_local_bundle"] = True
+bundle_transaction_parameter = inspect.signature(run_migrations).parameters.get(
+    "controller_owns_local_bundle_transaction"
+)
+if bundle_transaction_parameter is not None and bundle_transaction_parameter.kind in (
+    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    inspect.Parameter.KEYWORD_ONLY,
+):
+    kwargs["controller_owns_local_bundle_transaction"] = True
 count = run_migrations(
     sys.argv[1],
     sys.argv[2],
@@ -456,6 +474,8 @@ def upgrade(
     staged_bridge_artifact_dir: str | None = None
     hard_cut_source_wheel: str | None = None
     hard_cut_provenance: _ReleaseProvenance | None = None
+    hard_cut_phase = False
+    hard_cut_preflight_binding: object | None = None
     try:
         # Resolve checksums.txt FIRST so any download we accept is verified
         # against a published manifest. Returns None for old releases that
@@ -554,7 +574,20 @@ def upgrade(
             explicit_target=target_was_explicit,
             os_name=os_name,
         )
-        if _is_bridge_to_hard_cut_phase(upgrade_manifest, current_version, target_version):
+        hard_cut_phase = _is_bridge_to_hard_cut_phase(
+            upgrade_manifest,
+            current_version,
+            target_version,
+        )
+        # Keep this guard as the direct reviewed bridge predicate. The sealed
+        # runtime verifier deliberately requires the release-owned handoff to
+        # be the first guarded bridge call; a cached boolean is semantically
+        # equivalent at runtime but obscures that invariant from verification.
+        if _is_bridge_to_hard_cut_phase(
+            upgrade_manifest,
+            current_version,
+            target_version,
+        ):
             _require_release_owned_hard_cut_handoff(
                 source_version=current_version,
                 target_version=target_version,
@@ -673,16 +706,140 @@ def upgrade(
             hard_cut_source_wheel=hard_cut_source_wheel,
             source_version=current_version if hard_cut_source_wheel is not None else None,
         )
+        if hard_cut_phase:
+            hard_cut_preflight_binding = _preflight_hard_cut_observability_migration(
+                data_dir=data_dir,
+                config_path=active_config_path,
+                gateway_binary=gw_binary_path,
+                candidate_directory=staging_dir,
+            )
     except BaseException:
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise
 
     if target_version == current_version:
-        # Recovery and installed-source coherence have already run, and the
-        # signed release contract plus target artifacts were authenticated
-        # above.  A same-version resolver request is therefore a verified
-        # no-op, never a repair reinstall: there is no rollback transaction
-        # capable of making an in-place hard-cut reinstall safe.
+        try:
+            recovery_authority = find_resumable_upgrade_receipt(
+                data_dir,
+                target_version=current_version,
+            )
+        except ValueError:
+            try:
+                abandoned = finalize_interrupted_upgrade_receipts(
+                    data_dir,
+                    current_version=current_version,
+                )
+            except (OSError, ValueError):
+                abandoned = 0
+            ux.err("Pending upgrade recovery authority was unverified or ambiguous; refusing same-version activation.")
+            if abandoned:
+                ux.subhead(
+                    f"Marked {abandoned} abandoned attempt(s) interrupted; rerun the authenticated resolver.",
+                    indent="    ",
+                )
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise SystemExit(1) from None
+        except OSError:
+            ux.err("Could not inspect the durable upgrade compliance receipts; installed state was not changed.")
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise SystemExit(1) from None
+        try:
+            bundle_needs_reconciliation = _installed_local_observability_bundle_needs_reconciliation(
+                data_dir,
+                target_version,
+            )
+        except OSError:
+            ux.err(
+                "Could not safely inspect the installed local-observability bundle; installed state was not changed."
+            )
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise SystemExit(1) from None
+        installed_authority: Path | None = None
+        if recovery_authority is None and bundle_needs_reconciliation:
+            try:
+                installed_authority = find_verified_installed_upgrade_receipt(
+                    data_dir,
+                    target_version=current_version,
+                )
+            except (OSError, ValueError):
+                ux.err(
+                    "Could not authenticate the installed target from its durable "
+                    "upgrade receipts; bundle reconciliation was refused."
+                )
+                shutil.rmtree(staging_dir, ignore_errors=True)
+                raise SystemExit(1) from None
+            if installed_authority is None:
+                ux.err(
+                    "The local-observability bundle does not match the installed "
+                    "version, but no verified target-install receipt exists."
+                )
+                ux.subhead(
+                    "No installed files or services were changed; reinstall through "
+                    "the authenticated release resolver.",
+                    indent="    ",
+                )
+                shutil.rmtree(staging_dir, ignore_errors=True)
+                raise SystemExit(1)
+
+        if recovery_authority is not None or installed_authority is not None:
+            ux.warn(
+                "Found an incomplete target transaction; reconciling the installed release before declaring success."
+            )
+            try:
+                recovery_receipt = recovery_authority
+                if recovery_receipt is not None:
+                    authority = load_upgrade_receipt(recovery_receipt)
+                    if authority.status != "pending":
+                        durable_bundle_restart = load_local_bundle_restart_intent(recovery_receipt)
+                        recovery_receipt = begin_upgrade_receipt(
+                            data_dir,
+                            from_version=authority.from_version,
+                            target_version=target_version,
+                            artifacts_verified=checksums is not None and not effective_allow_unverified,
+                        )
+                        if durable_bundle_restart is not None:
+                            record_local_bundle_restart_intent(
+                                recovery_receipt,
+                                restart_required=durable_bundle_restart,
+                            )
+                else:
+                    authority = load_upgrade_receipt(installed_authority)
+                    if (
+                        authority.target_version != target_version
+                        or not authority.artifacts_verified
+                        or authority.status not in {"succeeded", "partial"}
+                    ):
+                        raise ValueError("installed recovery authority changed")
+                    recovery_receipt = begin_upgrade_receipt(
+                        data_dir,
+                        from_version=target_version,
+                        target_version=target_version,
+                        artifacts_verified=True,
+                    )
+                delegate_prior_upgrade_receipts(recovery_receipt)
+            except (OSError, ValueError):
+                ux.err("Could not establish durable target-recovery authority; installed state was not changed.")
+                shutil.rmtree(staging_dir, ignore_errors=True)
+                raise SystemExit(1) from None
+            try:
+                _recover_interrupted_same_version_upgrade(
+                    app,
+                    receipt_path=recovery_receipt,
+                    data_dir=data_dir,
+                    target_version=target_version,
+                    os_name=os_name,
+                    health_timeout=health_timeout,
+                    config_path=active_config_path,
+                    recovery_home=recovery_home,
+                    upgrade_manifest=upgrade_manifest,
+                )
+            finally:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            return
+
+        # The signed release contract plus target artifacts were authenticated
+        # above. With no interrupted transaction to resume, a same-version
+        # request is a verified no-op rather than an unsafe repair reinstall.
         ux.banner("Version Already Verified")
         ux.ok(
             f"Authenticated the {target_version} release contract; "
@@ -712,6 +869,24 @@ def upgrade(
             shutil.rmtree(staging_dir, ignore_errors=True)
             return
 
+    if hard_cut_phase:
+        # Re-read and target-validate unconditionally at the mutation boundary,
+        # including --yes. The value-free binding rejects config/dotenv drift
+        # since artifact acquisition or an interactive confirmation delay.
+        try:
+            _preflight_hard_cut_observability_migration(
+                data_dir=data_dir,
+                config_path=active_config_path,
+                gateway_binary=gw_binary_path,
+                candidate_directory=staging_dir,
+                expected_binding=hard_cut_preflight_binding,
+                enforce_binding=True,
+                announce=False,
+            )
+        except BaseException:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+
     # ── Create backup ────────────────────────────────────────────────────────
 
     ux.banner("Creating Backup")
@@ -732,6 +907,7 @@ def upgrade(
                 recovery_home=recovery_home,
                 config_path=active_config_path,
                 release_provenance=hard_cut_provenance,
+                observability_v8_preflight_binding=hard_cut_preflight_binding,
             )
         except BaseException:
             ux.err(
@@ -746,6 +922,21 @@ def upgrade(
             raise
         ux.ok(f"Retained authenticated {current_version} rollback artifacts")
 
+    if rollback_plan is not None:
+        try:
+            _require_hard_cut_preflight_state_unchanged(rollback_plan)
+        except OSError:
+            ux.err(
+                "Configuration changed after target migration preflight; refusing to stop services.",
+                indent="  ",
+            )
+            ux.subhead(
+                "No receipt, service stop, artifact install, or migration was performed.",
+                indent="    ",
+            )
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise SystemExit(1) from None
+
     try:
         interrupted = finalize_interrupted_upgrade_receipts(data_dir, current_version=current_version)
         receipt_path = begin_upgrade_receipt(
@@ -754,6 +945,8 @@ def upgrade(
             target_version=target_version,
             artifacts_verified=checksums is not None and not effective_allow_unverified,
         )
+        if checksums is not None and not effective_allow_unverified:
+            delegate_prior_upgrade_receipts(receipt_path)
     except (OSError, ValueError):
         ux.err("Could not create the durable upgrade compliance receipt; installed state was not changed.")
         shutil.rmtree(staging_dir, ignore_errors=True)
@@ -775,6 +968,49 @@ def upgrade(
             raise SystemExit(1) from None
         _hold_phase_two_lease_for_command_lifetime(recovery_home)
         ux.ok("Durable hard-cut recovery journal committed before mutation")
+
+        # Close the receipt/journal creation window before stopping the source
+        # service. Repeat the complete target-owned preflight here, not only
+        # the value-free source hash. Parent permissions, ACLs, lock leaves,
+        # extended metadata, backup-root custody, and atomic-replace support
+        # can all drift after rollback capture while config bytes remain the
+        # same. The target migration repeats the binding check after install;
+        # this is the last controller-owned boundary before service stop.
+        try:
+            final_preflight_binding = _read_hard_cut_observability_preflight_binding(
+                data_dir=data_dir,
+                config_path=active_config_path,
+                gateway_binary=gw_binary_path,
+                candidate_directory=staging_dir,
+            )
+            if final_preflight_binding != hard_cut_preflight_binding:
+                raise OSError("hard-cut migration preflight source changed")
+            _require_hard_cut_preflight_state_unchanged(rollback_plan)
+        except BaseException:
+            _record_failed_upgrade_receipt(receipt_path, "install_failed")
+            try:
+                if hard_cut_recovery_journal is not None:
+                    try:
+                        _remove_hard_cut_recovery_journal(hard_cut_recovery_journal)
+                    except OSError:
+                        ux.warn(
+                            "Pre-stop refusal is durable, but stale recovery-journal cleanup "
+                            "was deferred to the next release-owned resolver run.",
+                            indent="  ",
+                        )
+                    else:
+                        hard_cut_recovery_journal = None
+            finally:
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            ux.err(
+                "Configuration changed after rollback custody was committed; refusing to stop services.",
+                indent="  ",
+            )
+            ux.subhead(
+                "No service stop, artifact install, or migration was performed.",
+                indent="    ",
+            )
+            raise SystemExit(1) from None
 
     # ── Stop gateway, install, migrate, restart ──────────────────────────────
 
@@ -879,6 +1115,9 @@ def upgrade(
                 mutation_token=(
                     _hard_cut_mutation_token(rollback_plan) if isinstance(rollback_plan, _HardCutRollbackPlan) else None
                 ),
+                observability_v8_preflight_binding=(
+                    hard_cut_preflight_binding if hard_cut_phase else _NO_OBSERVABILITY_V8_PREFLIGHT_BINDING
+                ),
             )
         except subprocess.CalledProcessError:
             migration_failed = True
@@ -927,31 +1166,32 @@ def upgrade(
             raise
 
         upgrade_phase = "local_observability"
-        if rollback_plan is not None:
-            try:
-                bundle_destination = os.path.join(data_dir, "observability-stack")
-                if os.path.lexists(bundle_destination):
+        try:
+            bundle_destination = os.path.join(data_dir, "observability-stack")
+            if os.path.lexists(bundle_destination):
+                if rollback_plan is not None:
                     if hard_cut_recovery_journal is None:
                         raise OSError("hard-cut bundle refresh lacks durable recovery authority")
                     _mark_hard_cut_bundle_mutation_intent(hard_cut_recovery_journal)
                     local_bundle_mutation_intent = True
-                    local_bundle_upgrade = _run_installed_local_observability_bundle_upgrade(
-                        data_dir,
-                        backup_dir,
-                        target_version,
-                        os_name=os_name,
-                    )
-                else:
-                    local_bundle_upgrade = {"installed": False}
-            except _LocalBundleUpgradeInvocationError as exc:
-                restart_services = False
-                ux.err("Local observability bundle refresh failed; target services remain stopped.")
-                ux.subhead(
-                    f"failure={exc.code} phase={exc.phase}",
-                    indent="    ",
+                local_bundle_upgrade = _run_installed_local_observability_bundle_upgrade(
+                    data_dir,
+                    backup_dir,
+                    target_version,
+                    receipt_path=receipt_path,
+                    os_name=os_name,
                 )
-                ux.subhead(f"Recovery backup: {backup_dir}", indent="    ")
-                raise SystemExit(1) from None
+            else:
+                local_bundle_upgrade = {"installed": False}
+        except _LocalBundleUpgradeInvocationError as exc:
+            restart_services = False
+            ux.err("Local observability bundle refresh failed; target services remain stopped.")
+            ux.subhead(
+                f"failure={exc.code} phase={exc.phase}",
+                indent="    ",
+            )
+            ux.subhead(f"Recovery backup: {backup_dir}", indent="    ")
+            raise SystemExit(1) from None
 
         if local_bundle_upgrade and local_bundle_upgrade.get("installed"):
             changed = local_bundle_upgrade.get("changed_paths", [])
@@ -1073,6 +1313,8 @@ def upgrade(
                     raise
             else:
                 if not upgrade_body_failed:
+                    if checksums is not None and not effective_allow_unverified:
+                        supersede_prior_upgrade_receipts(receipt_path)
                     complete_upgrade_receipt(
                         receipt_path,
                         status="partial" if migration_failed else "succeeded",
@@ -1103,6 +1345,165 @@ def upgrade(
     _check_post_upgrade_drift(target_version)
     click.echo()
 
+def _recover_interrupted_same_version_upgrade(
+    app: AppContext,
+    *,
+    receipt_path: Path,
+    data_dir: str,
+    target_version: str,
+    os_name: str,
+    health_timeout: int,
+    config_path: str | None,
+    recovery_home: str,
+    upgrade_manifest: dict[str, object] | None,
+) -> None:
+    """Finish target-owned bundle and health phases after an updater crash.
+
+    A normal v8-to-v8 controller installs the target wheel before the target
+    bundle refresh. If the controller is killed in that gap, the next resolver
+    invocation sees ``installed == target``. The pending receipt is the durable
+    authority to run only the unfinished target-owned reconciliation; ordinary
+    same-version requests remain authenticated no-ops.
+    """
+
+    ux.banner("Recovering Interrupted Upgrade")
+    try:
+        receipt = load_upgrade_receipt(receipt_path)
+        if (
+            receipt.status != "pending"
+            or receipt.target_version != target_version
+            or not receipt.artifacts_verified
+            or (
+                _version_key(target_version) >= _version_key(_OBSERVABILITY_V8_MIGRATION_VERSION)
+                and _version_key(receipt.from_version) < _version_key(_OBSERVABILITY_V8_MIGRATION_VERSION)
+            )
+        ):
+            raise ValueError("interrupted upgrade receipt is not resumable")
+        backup_dir = _create_backup(app.cfg, data_dir=data_dir)
+    except (OSError, ValueError):
+        ux.err("Could not establish durable custody for interrupted-upgrade recovery; installed state was not changed.")
+        raise SystemExit(1) from None
+
+    local_bundle_upgrade: dict[str, object] | None = None
+    migration_failed = receipt.migration_status == "degraded"
+    try:
+        if receipt.migration_status in {"pending", "degraded"}:
+            migration_failed = False
+            gateway_command = os.path.join(
+                os.path.expanduser("~/.local/bin"),
+                _installed_gateway_filename(os_name),
+            )
+            gateway_stop_ok = _run_silent(
+                [gateway_command, "stop"],
+                "Gateway stopped for interrupted migration recovery",
+                "Could not stop gateway for interrupted migration recovery",
+                env=_gateway_process_environment(data_dir, config_path=config_path),
+            )
+            _assert_gateway_quiesced(data_dir, gateway_path=gateway_command)
+            if not gateway_stop_ok:
+                ux.warn(
+                    "Gateway stop reported failure, but quiescence verification succeeded.",
+                    indent="  ",
+                )
+            openclaw_home = os.path.expanduser(app.cfg.claw.home_dir if app.cfg else "~/.openclaw")
+            try:
+                count = _run_installed_migrations(
+                    receipt.from_version,
+                    target_version,
+                    openclaw_home,
+                    data_dir,
+                    os_name=os_name,
+                    config_path=config_path,
+                    recovery_home=recovery_home,
+                )
+            except subprocess.CalledProcessError:
+                migration_failed = True
+                count = 0
+            record_upgrade_migrations(
+                receipt_path,
+                migration_count=count,
+                degraded=migration_failed,
+            )
+        try:
+            _assert_required_cli_migrations(upgrade_manifest, data_dir)
+        except BaseException:
+            # A migration child can exit successfully without recording every
+            # release-required cursor. Keep the pending receipt retryable so a
+            # later authenticated recovery reruns the target migrations.
+            latest_receipt = load_upgrade_receipt(receipt_path)
+            if latest_receipt.status == "pending" and latest_receipt.migration_status == "completed":
+                record_upgrade_migrations(
+                    receipt_path,
+                    migration_count=latest_receipt.migration_count or 0,
+                    degraded=True,
+                )
+            raise
+
+        bundle_destination = os.path.join(data_dir, "observability-stack")
+        if os.path.lexists(bundle_destination):
+            local_bundle_upgrade = _run_installed_local_observability_bundle_upgrade(
+                data_dir,
+                backup_dir,
+                target_version,
+                receipt_path=receipt_path,
+                os_name=os_name,
+            )
+
+        # Verify the already-installed target without reinstalling its wheel or
+        # rerunning migrations. Local-observability readiness is checked below
+        # as a fatal recovery condition instead of the ordinary degraded mode.
+        _start_and_verify_services(
+            app,
+            health_timeout,
+            data_dir=data_dir,
+            local_bundle_upgrade=local_bundle_upgrade,
+            os_name=os_name,
+            expected_version=target_version,
+            strict_local_observability=True,
+            config_path=config_path,
+            recovery_home=recovery_home,
+        )
+        supersede_prior_upgrade_receipts(receipt_path)
+        complete_upgrade_receipt(
+            receipt_path,
+            status="partial" if migration_failed else "succeeded",
+        )
+    except _LocalBundleUpgradeInvocationError as exc:
+        # Keep the recovery receipt pending. The next authenticated invocation
+        # will finalize it as interrupted and retry this bounded phase.
+        ux.err("Interrupted-upgrade local observability recovery did not complete.")
+        ux.subhead(f"failure={exc.code} phase={exc.phase}", indent="    ")
+        ux.subhead(f"Recovery backup: {backup_dir}", indent="    ")
+        raise SystemExit(1) from None
+    except BaseException:
+        # The pending receipt is deliberately retained for the same retry path.
+        ux.err("Interrupted-upgrade health recovery did not complete.")
+        ux.subhead(f"Recovery backup: {backup_dir}", indent="    ")
+        raise
+
+    ux.banner("Upgrade Recovery Complete")
+    ux.ok(f"DefenseClaw {target_version} artifacts, services, and local bundle are healthy")
+    ux.subhead(f"Recovery backup: {backup_dir}", indent="  ")
+
+
+def _installed_local_observability_bundle_needs_reconciliation(
+    data_dir: str,
+    target_version: str,
+) -> bool:
+    """Detect a stale installed bundle without changing operator state."""
+
+    from defenseclaw.bundle_refresh import (
+        LocalObservabilityUpgradeError,
+        installed_local_observability_bundle_version,
+    )
+
+    try:
+        installed_version = installed_local_observability_bundle_version(data_dir)
+    except LocalObservabilityUpgradeError as exc:
+        raise OSError("installed local-observability bundle is not safely readable") from exc
+    return installed_version is not None and installed_version != target_version
+
+
 def _print_hard_cut_rollback_outcome(*, succeeded: bool, backup_dir: str) -> None:
     """Emit one truthful summary for either rollback entry point."""
 
@@ -1132,6 +1533,7 @@ def _start_and_verify_services(
     rollback_plan: _HardCutRollbackPlan | None = None,
     config_path: str | None = None,
     recovery_home: str | None = None,
+    strict_local_observability: bool = False,
 ) -> None:
     """Restart and verify services after every required migration succeeds."""
 
@@ -1178,6 +1580,7 @@ def _start_and_verify_services(
         ["openclaw", "gateway", "restart"],
         "OpenClaw gateway restarted — DefenseClaw plugin loaded",
         "Could not restart OpenClaw gateway automatically",
+        failure_output_markers=("gateway service disabled",),
     ):
         ux.subhead("Run manually: openclaw gateway restart")
 
@@ -1208,9 +1611,9 @@ def _start_and_verify_services(
                 os_name=os_name,
             )
         except _LocalBundleUpgradeInvocationError as exc:
-            if rollback_plan is not None:
+            if rollback_plan is not None or strict_local_observability:
                 ux.err(
-                    "Hard-cut local observability readiness failed; refusing target activation.",
+                    "Local observability readiness failed; refusing target activation.",
                     indent="  ",
                 )
                 ux.subhead(f"failure={exc.code} phase={exc.phase}", indent="    ")
@@ -1227,11 +1630,14 @@ def _start_and_verify_services(
         else:
             errors = restart.get("degraded_errors", [])
             if restart.get("restarted") is True and not errors:
+                custody_released = _clear_local_bundle_restart_custody(local_bundle_upgrade)
+                if not custody_released and (rollback_plan is not None or strict_local_observability):
+                    raise SystemExit(1)
                 ux.ok("Local observability restarted; services and dashboard inventory verified")
             else:
-                if rollback_plan is not None:
+                if rollback_plan is not None or strict_local_observability:
                     ux.err(
-                        "Hard-cut local observability stack did not reach the target readiness contract; "
+                        "Local observability stack did not reach the target readiness contract; "
                         "refusing target activation.",
                         indent="  ",
                     )
@@ -1248,9 +1654,36 @@ def _start_and_verify_services(
                     "Recover with: defenseclaw setup local-observability up",
                     indent="    ",
                 )
+    elif local_bundle_upgrade:
+        custody_released = _clear_local_bundle_restart_custody(local_bundle_upgrade)
+        if not custody_released and (rollback_plan is not None or strict_local_observability):
+            raise SystemExit(1)
 
     if isinstance(rollback_plan, _HardCutRollbackPlan):
         _cleanup_hard_cut_mutation_temporaries(rollback_plan)
+
+
+def _clear_local_bundle_restart_custody(local_bundle_upgrade: dict[str, object]) -> bool:
+    receipt_value = local_bundle_upgrade.get("_restart_intent_receipt")
+    if receipt_value is None:
+        return True
+    if not isinstance(receipt_value, str) or not receipt_value:
+        ux.warn(
+            "Local observability is healthy, but its restart custody metadata is invalid; "
+            "a later authenticated upgrade will reconcile it.",
+            indent="  ",
+        )
+        return False
+    try:
+        clear_local_bundle_restart_intent(Path(receipt_value))
+    except (OSError, ValueError, json.JSONDecodeError):
+        ux.warn(
+            "Local observability is healthy, but restart custody cleanup was deferred; "
+            "a later authenticated upgrade will reconcile it.",
+            indent="  ",
+        )
+        return False
+    return True
 
 
 def _reload_post_upgrade_config(
@@ -1740,9 +2173,7 @@ def _preflight_staged_target_controller_source(
     try:
         prefix_info = os.lstat(running_prefix)
     except OSError:
-        _fail_staged_target_controller_handoff(
-            "The staged target-controller environment is unavailable."
-        )
+        _fail_staged_target_controller_handoff("The staged target-controller environment is unavailable.")
     if (
         running_inside_installed
         or stat.S_ISLNK(prefix_info.st_mode)
@@ -1754,24 +2185,18 @@ def _preflight_staged_target_controller_source(
             "The target controller is not running from a private out-of-place environment."
         )
 
-    staged_dir = os.path.abspath(
-        os.path.expanduser(os.environ[_STAGED_BRIDGE_ARTIFACT_DIR_ENV])
-    )
+    staged_dir = os.path.abspath(os.path.expanduser(os.environ[_STAGED_BRIDGE_ARTIFACT_DIR_ENV]))
     try:
         staged_info = os.lstat(staged_dir)
     except OSError:
-        _fail_staged_target_controller_handoff(
-            "The staged bridge artifact directory is unavailable."
-        )
+        _fail_staged_target_controller_handoff("The staged bridge artifact directory is unavailable.")
     if (
         stat.S_ISLNK(staged_info.st_mode)
         or not stat.S_ISDIR(staged_info.st_mode)
         or staged_info.st_uid != os.getuid()
         or stat.S_IMODE(staged_info.st_mode) != 0o700
     ):
-        _fail_staged_target_controller_handoff(
-            "The staged bridge artifact directory is not private and caller-owned."
-        )
+        _fail_staged_target_controller_handoff("The staged bridge artifact directory is not private and caller-owned.")
 
     installed_cli = os.path.join(installed_venv, "bin", "defenseclaw")
     launcher = os.path.expanduser("~/.local/bin/defenseclaw")
@@ -1779,9 +2204,7 @@ def _preflight_staged_target_controller_source(
         installed_info = os.lstat(installed_cli)
         launcher_info = os.lstat(launcher)
     except OSError:
-        _fail_staged_target_controller_handoff(
-            "The canonical installed bridge CLI is unavailable."
-        )
+        _fail_staged_target_controller_handoff("The canonical installed bridge CLI is unavailable.")
     if (
         stat.S_ISLNK(installed_info.st_mode)
         or not stat.S_ISREG(installed_info.st_mode)
@@ -1793,9 +2216,7 @@ def _preflight_staged_target_controller_source(
         or launcher_info.st_uid != os.getuid()
         or os.path.realpath(launcher) != installed_cli
     ):
-        _fail_staged_target_controller_handoff(
-            "The canonical installed bridge CLI lost release-managed custody."
-        )
+        _fail_staged_target_controller_handoff("The canonical installed bridge CLI lost release-managed custody.")
 
     child_env = dict(os.environ)
     child_env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -1809,15 +2230,11 @@ def _preflight_staged_target_controller_source(
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        _fail_staged_target_controller_handoff(
-            "The canonical installed bridge CLI version could not be verified."
-        )
+        _fail_staged_target_controller_handoff("The canonical installed bridge CLI version could not be verified.")
     output = (result.stdout or "") + (result.stderr or "")
     reported = _VERSION_TOKEN_RE.findall(output)
     if result.returncode != 0 or reported != [source_version]:
-        _fail_staged_target_controller_handoff(
-            "The canonical installed CLI does not match the staged bridge source."
-        )
+        _fail_staged_target_controller_handoff("The canonical installed CLI does not match the staged bridge source.")
 
 
 def _fail_installed_source_coherence(message: str) -> NoReturn:
@@ -2498,9 +2915,7 @@ def _download_bootstrap_cosign(destination_dir: str) -> str:
     os_name, arch = _detect_platform()
     expected = _COSIGN_BOOTSTRAP_SHA256.get((os_name, arch))
     if expected is None or os.name != "posix":
-        raise OSError(
-            f"automatic Cosign bootstrap is unavailable for {os_name}/{arch}"
-        )
+        raise OSError(f"automatic Cosign bootstrap is unavailable for {os_name}/{arch}")
 
     root_info = os.lstat(destination_dir)
     if (
@@ -2512,10 +2927,7 @@ def _download_bootstrap_cosign(destination_dir: str) -> str:
         raise OSError("Cosign bootstrap directory is not private and caller-owned")
 
     filename = f"cosign-{os_name}-{arch}"
-    url = (
-        "https://github.com/sigstore/cosign/releases/download/"
-        f"v{_COSIGN_BOOTSTRAP_VERSION}/{filename}"
-    )
+    url = f"https://github.com/sigstore/cosign/releases/download/v{_COSIGN_BOOTSTRAP_VERSION}/{filename}"
     response = None
     for _redirect in range(6):
         _validate_cosign_bootstrap_url(url)
@@ -2632,8 +3044,7 @@ def _cosign_verifier(*, strict: bool):
         if os.name == "posix":
             os.chmod(directory, 0o700)
         click.echo(
-            f"  {ux.dim('→')} Cosign was not found; authenticating temporary "
-            f"Cosign {_COSIGN_BOOTSTRAP_VERSION} ..."
+            f"  {ux.dim('→')} Cosign was not found; authenticating temporary Cosign {_COSIGN_BOOTSTRAP_VERSION} ..."
         )
         verifier = _download_bootstrap_cosign(directory)
         ux.ok("Temporary Cosign verifier authenticated")
@@ -4210,7 +4621,39 @@ def _canonicalize_macos_gateway_for_coherence(path: str) -> None:
 
 
 def _verify_macos_rollback_gateway_signature(path: str) -> None:
-    """Require a valid fixed-identifier signature on the exact rollback bytes."""
+    """Verify exact rollback bytes under the signed or ad-hoc release contract.
+
+    Developer-ID/native-app gateways must retain DefenseClaw's fixed signing
+    identifier.  The documented unsigned macOS release fallback is instead
+    linker/ad-hoc signed and the published 0.8.4 artifact used the linker's
+    ``a.out`` identifier.  For that explicit fallback, strict code-integrity
+    verification plus the authenticated artifact/coherence digest comparison
+    performed by the caller is the identity boundary.
+    """
+
+    try:
+        subprocess.run(
+            ["/usr/bin/codesign", "--verify", "--strict", path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        details = subprocess.run(
+            ["/usr/bin/codesign", "-d", "--verbose=4", path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError("installed bridge gateway code signature is invalid") from exc
+
+    detail_lines = {line.strip() for line in f"{details.stdout}\n{details.stderr}".splitlines() if line.strip()}
+    if "Signature=adhoc" in detail_lines:
+        if "TeamIdentifier=not set" not in detail_lines or any(line.startswith("Authority=") for line in detail_lines):
+            raise OSError("installed bridge gateway ad-hoc signature metadata is invalid")
+        return
 
     requirement = f'=identifier "{_MACOS_GATEWAY_CODESIGN_IDENTIFIER}"'
     try:
@@ -4222,7 +4665,7 @@ def _verify_macos_rollback_gateway_signature(path: str) -> None:
             check=True,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise OSError("installed bridge gateway signature or identifier is invalid") from exc
+        raise OSError("installed bridge gateway signature identifier is invalid") from exc
 
 
 def _verify_installed_gateway_version(binary_path: str, expected: str) -> None:
@@ -4434,10 +4877,10 @@ def _install_wheel(
         "--quiet",
     ]
     if exact_environment:
-        # The hard-cut bridge and target carry an authenticated identical
-        # Requires-Dist contract.  Keep the bridge environment byte-for-byte
-        # dependency-stable in both directions; this phase must not contact an
-        # index or rewrite shared packages.
+        # Preflight already proved that the authenticated target metadata is
+        # satisfied by the installed bridge graph. Keep that graph byte-for-byte
+        # stable during the rollback-capable phase: do not contact an index or
+        # rewrite shared packages.
         install_args.extend(("--offline", "--no-deps", "--reinstall"))
     else:
         install_args.extend(("--reinstall", "--no-cache", "--strict"))
@@ -4538,6 +4981,7 @@ def _run_installed_migrations(
     config_path: str | None = None,
     recovery_home: str | None = None,
     mutation_token: str | None = None,
+    observability_v8_preflight_binding: object = _NO_OBSERVABILITY_V8_PREFLIGHT_BINDING,
 ) -> int:
     """Run migrations in the freshly installed managed venv.
 
@@ -4549,6 +4993,10 @@ def _run_installed_migrations(
     if os_name is None:
         os_name = platform.system().lower()
 
+    binding_supplied = observability_v8_preflight_binding is not _NO_OBSERVABILITY_V8_PREFLIGHT_BINDING
+    if (mutation_token is not None) != binding_supplied:
+        raise ValueError("hard-cut mutation token and observability v8 preflight binding must be supplied together")
+
     venv = _managed_venv_path()
     venv_python = _venv_python_path(venv, os_name)
     if not os.path.isfile(venv_python):
@@ -4558,6 +5006,8 @@ def _run_installed_migrations(
     os.close(fd)
     try:
         child_env = _sanitized_python_child_environment()
+        child_env.pop(_OBSERVABILITY_V8_PREFLIGHT_BINDING_ENV, None)
+        child_env.pop("DEFENSECLAW_UPGRADE_MUTATION_TOKEN", None)
         child_env["DEFENSECLAW_HOME"] = os.path.abspath(os.path.expanduser(recovery_home or _upgrade_recovery_home()))
         child_env["DEFENSECLAW_CONFIG"] = os.path.abspath(
             os.path.expanduser(config_path or _active_upgrade_config_path())
@@ -4566,10 +5016,28 @@ def _run_installed_migrations(
             if re.fullmatch(r"[0-9a-f]{32}", mutation_token) is None:
                 raise ValueError("hard-cut mutation token is invalid")
             child_env["DEFENSECLAW_UPGRADE_MUTATION_TOKEN"] = mutation_token
+        if binding_supplied:
+            if observability_v8_preflight_binding is None:
+                binding_payload: object = None
+            else:
+                to_payload = getattr(observability_v8_preflight_binding, "to_payload", None)
+                if not callable(to_payload):
+                    raise ValueError("observability v8 preflight binding is invalid")
+                binding_payload = to_payload()
+            serialized_binding = json.dumps(
+                binding_payload,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            if len(serialized_binding) > 4_096:
+                raise ValueError("observability v8 preflight binding is invalid")
+            child_env[_OBSERVABILITY_V8_PREFLIGHT_BINDING_ENV] = serialized_binding
         _run_phase_two_mutator(
             [
                 venv_python,
                 "-I",
+                "-B",
                 "-c",
                 _INSTALLED_MIGRATION_SCRIPT,
                 from_version,
@@ -4599,20 +5067,38 @@ def _run_installed_local_observability_bundle_upgrade(
     backup_dir: str,
     target_version: str,
     *,
+    receipt_path: Path,
     os_name: str | None = None,
 ) -> dict[str, object]:
     """Run the target wheel's fail-closed bundle transaction when installed."""
 
+    try:
+        receipt = load_upgrade_receipt(receipt_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise _LocalBundleUpgradeInvocationError("receipt_invalid", "invoke") from exc
+    if receipt.status != "pending" or not receipt.artifacts_verified or receipt.target_version != target_version:
+        raise _LocalBundleUpgradeInvocationError("receipt_invalid", "invoke")
+
     destination = os.path.join(data_dir, "observability-stack")
     if not os.path.lexists(destination):
-        return {"installed": False}
-    return _run_installed_local_observability_operation(
-        "refresh",
-        data_dir,
-        backup_dir,
-        target_version,
-        os_name=os_name,
-    )
+        result: dict[str, object] = {"installed": False}
+    else:
+        result = _run_installed_local_observability_operation(
+            "refresh",
+            data_dir,
+            backup_dir,
+            target_version,
+            receipt_path=str(receipt_path),
+            os_name=os_name,
+        )
+    durable_restart = load_local_bundle_restart_intent(receipt_path)
+    if durable_restart is not None:
+        reported_restart = result.get("restart_required")
+        if reported_restart is not None and not isinstance(reported_restart, bool):
+            raise _LocalBundleUpgradeInvocationError("result_invalid", "invoke")
+        result["restart_required"] = durable_restart or reported_restart is True
+        result["_restart_intent_receipt"] = str(receipt_path)
+    return result
 
 
 def _run_installed_local_observability_bundle_restart(
@@ -4628,6 +5114,7 @@ def _run_installed_local_observability_bundle_restart(
         data_dir,
         "",
         str(health_timeout),
+        receipt_path="",
         os_name=os_name,
     )
 
@@ -4638,6 +5125,7 @@ def _run_installed_local_observability_operation(
     backup_dir: str,
     value: str,
     *,
+    receipt_path: str,
     os_name: str | None,
 ) -> dict[str, object]:
     if os_name is None:
@@ -4659,19 +5147,26 @@ def _run_installed_local_observability_operation(
     script = """
 import json
 import sys
+from pathlib import Path
 
 from defenseclaw.bundle_refresh import (
     LocalObservabilityUpgradeError,
     restart_upgraded_local_observability_stack,
     upgrade_local_observability_stack,
 )
+from defenseclaw.upgrade_receipt import record_local_bundle_restart_intent
 
 try:
     if sys.argv[1] == "refresh":
+        receipt_path = Path(sys.argv[5])
         result = upgrade_local_observability_stack(
             sys.argv[2],
             sys.argv[3],
             bundle_version=sys.argv[4],
+            restart_intent_recorder=lambda required: record_local_bundle_restart_intent(
+                receipt_path,
+                restart_required=required,
+            ),
         )
     elif sys.argv[1] == "restart":
         result = restart_upgraded_local_observability_stack(
@@ -4686,7 +5181,7 @@ except LocalObservabilityUpgradeError as exc:
 except Exception:
     payload = {"ok": False, "code": "unexpected_failure", "phase": "invoke"}
 
-with open(sys.argv[5], "w", encoding="utf-8") as handle:
+with open(sys.argv[6], "w", encoding="utf-8") as handle:
     json.dump(payload, handle, sort_keys=True)
 sys.exit(0 if payload["ok"] else 1)
 """
@@ -4695,12 +5190,14 @@ sys.exit(0 if payload["ok"] else 1)
             [
                 venv_python,
                 "-I",
+                "-B",
                 "-c",
                 script,
                 operation,
                 data_dir,
                 backup_dir,
                 value,
+                receipt_path,
                 result_path,
             ],
             capture_output=True,
@@ -4783,6 +5280,7 @@ def _handoff_to_installed_upgrade(
     argv = [
         venv_python,
         "-I",
+        "-B",
         "-m",
         "defenseclaw.main",
         "upgrade",
@@ -4817,6 +5315,88 @@ def _fail_wheel_preflight(message: str, exc: subprocess.CalledProcessError | Non
             ux.subhead(tail, indent="    ")
     ux.subhead("No services were stopped and no installed artifacts were changed.", indent="    ")
     raise SystemExit(1)
+
+
+def _preflight_hard_cut_observability_migration(
+    *,
+    data_dir: str,
+    config_path: str,
+    gateway_binary: str,
+    candidate_directory: str,
+    expected_binding: object | None = None,
+    enforce_binding: bool = False,
+    announce: bool = True,
+) -> object | None:
+    """Prove v7-to-v8 conversion with target code before installed mutation."""
+
+    from defenseclaw.config_inspect import ConfigInspectError
+    from defenseclaw.migrations import ObservabilityV8UpgradeMigrationError
+    from defenseclaw.observability.v8_activation import V8ActivationError
+    from defenseclaw.observability.v8_migration import V8MigrationError
+
+    try:
+        binding = _read_hard_cut_observability_preflight_binding(
+            data_dir=data_dir,
+            config_path=config_path,
+            gateway_binary=gateway_binary,
+            candidate_directory=candidate_directory,
+        )
+        if enforce_binding and binding != expected_binding:
+            raise ObservabilityV8UpgradeMigrationError("preflight_source_changed")
+    except (
+        ConfigInspectError,
+        ObservabilityV8UpgradeMigrationError,
+        V8ActivationError,
+        V8MigrationError,
+    ) as exc:
+        ux.err(
+            "Target observability migration preflight failed; refusing to change installed state.",
+            indent="  ",
+        )
+        ux.subhead(str(exc), indent="    ")
+        ux.subhead(
+            "No backup, receipt, service stop, artifact install, or migration was performed.",
+            indent="    ",
+        )
+        raise SystemExit(1) from None
+    except OSError:
+        ux.err(
+            "Target observability migration preflight could not complete safely; refusing to change installed state.",
+            indent="  ",
+        )
+        ux.subhead(
+            "No backup, receipt, service stop, artifact install, or migration was performed.",
+            indent="    ",
+        )
+        raise SystemExit(1) from None
+    if announce:
+        ux.ok("Target observability migration validated before service stop")
+    return binding
+
+
+def _read_hard_cut_observability_preflight_binding(
+    *,
+    data_dir: str,
+    config_path: str,
+    gateway_binary: str,
+    candidate_directory: str,
+) -> object | None:
+    """Run the target-owned preflight without emitting controller UX.
+
+    The upgrade command uses this raw form after its durable receipt and
+    recovery journal exist so it can clean those controller-only records if
+    the last pre-stop validation fails. Earlier call sites use the bounded UX
+    wrapper above.
+    """
+
+    from defenseclaw.migrations import preflight_observability_v8_upgrade
+
+    return preflight_observability_v8_upgrade(
+        data_dir=data_dir,
+        config_path=config_path,
+        gateway_binary=gateway_binary,
+        candidate_directory=candidate_directory,
+    )
 
 
 def _assigned_module_value(module: ast.Module, name: str) -> ast.expr:
@@ -5007,51 +5587,189 @@ def _wheel_dependency_contract(whl_path: str, expected_version: str) -> tuple[st
     return tuple(sorted(item.strip() for item in requirements))
 
 
-def _require_hard_cut_dependency_contract(
-    source_wheel: str,
-    target_wheel: str,
-    *,
-    source_version: str,
-    target_version: str,
-) -> None:
-    source = _wheel_dependency_contract(source_wheel, source_version)
-    target = _wheel_dependency_contract(target_wheel, target_version)
-    promoted = _HARD_CUT_PROMOTED_REQUIREMENTS.get((source_version, target_version), ())
-    expected = tuple(sorted((*source, *promoted)))
-    if target != expected:
-        raise ValueError(
-            "hard-cut target Requires-Dist differs from the authenticated bridge plus "
-            "the reviewed pre-existing runtime promotion; "
-            "publish an explicit dependency migration instead of mutating the bridge environment"
-        )
+def _venv_site_package_directories(python_path: str) -> tuple[str, ...]:
+    """Read the interpreter's import roots without importing target code."""
 
-
-def _require_hard_cut_preexisting_jsonschema(python_path: str) -> None:
-    """Prove the bridge already satisfies v8 schema validation without mutation."""
-
-    script = r"""
-from importlib.metadata import version
-import re
-
-from jsonschema import Draft202012Validator
-
-value = version("jsonschema")
-match = re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:[.+-].*)?", value)
-if match is None:
-    raise SystemExit("installed jsonschema version is not canonical")
-major, minor = (int(match.group(1)), int(match.group(2)))
-if major != 4 or minor < 23:
-    raise SystemExit("installed jsonschema runtime is outside 4.23 <= version < 5")
-if Draft202012Validator.META_SCHEMA.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
-    raise SystemExit("installed jsonschema lacks the Draft 2020-12 validator contract")
-"""
-    subprocess.run(
-        [python_path, "-I", "-c", script],
+    completed = subprocess.run(
+        [
+            python_path,
+            "-I",
+            "-B",
+            "-c",
+            (
+                "import json, sysconfig; "
+                "print(json.dumps(sorted({sysconfig.get_path('purelib'), sysconfig.get_path('platlib')})))"
+            ),
+        ],
         check=True,
         capture_output=True,
         text=True,
         timeout=10,
     )
+    try:
+        raw = json.loads(completed.stdout)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("Python environment paths are unreadable") from exc
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 2 or any(not isinstance(item, str) for item in raw):
+        raise ValueError("Python environment paths are invalid")
+    if any(not os.path.isabs(item) or os.path.islink(item) or not os.path.isdir(item) for item in raw):
+        raise ValueError("Python environment paths are unsafe")
+    paths = tuple(dict.fromkeys(os.path.realpath(item) for item in raw))
+    return paths
+
+
+def _read_stable_distribution_metadata(path: Path, limit: int) -> bytes:
+    """Read one bounded regular metadata file without following replacements."""
+
+    before = path.lstat()
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= limit:
+        raise ValueError("installed dependency metadata is incomplete")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(before, opened):
+            raise ValueError("installed dependency metadata changed while opening")
+        payload = bytearray()
+        while len(payload) <= limit:
+            block = os.read(descriptor, min(64 * 1024, limit + 1 - len(payload)))
+            if not block:
+                break
+            payload.extend(block)
+        after = os.fstat(descriptor)
+        named_after = path.lstat()
+        stable_fields = ("st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (
+            len(payload) > limit
+            or len(payload) != opened.st_size
+            or any(getattr(opened, field, None) != getattr(after, field, None) for field in stable_fields)
+            or stat.S_ISLNK(named_after.st_mode)
+            or not stat.S_ISREG(named_after.st_mode)
+            or not os.path.samestat(after, named_after)
+        ):
+            raise ValueError("installed dependency metadata changed while reading")
+        return bytes(payload)
+    finally:
+        os.close(descriptor)
+
+
+def _copy_distribution_metadata(source_directories: tuple[str, ...], destination: str) -> None:
+    """Build a metadata-only image of the installed dependency environment."""
+
+    destination_path = Path(destination)
+    seen: set[str] = set()
+    count = 0
+    for source in source_directories:
+        for entry in sorted(Path(source).iterdir(), key=lambda item: item.name):
+            if not entry.name.endswith(".dist-info"):
+                continue
+            count += 1
+            if count > _MAX_INSTALLED_DISTRIBUTIONS:
+                raise ValueError("installed dependency environment exceeds its distribution bound")
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+!-]*[.]dist-info", entry.name) is None:
+                raise ValueError("installed dependency metadata has an unsafe name")
+            info = entry.lstat()
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise ValueError("installed dependency metadata is unsafe")
+            metadata_path = entry / "METADATA"
+            wheel_path = entry / "WHEEL"
+            payloads: dict[str, bytes] = {}
+            for name, path, limit in (
+                ("METADATA", metadata_path, _MAX_WHEEL_METADATA_BYTES),
+                ("WHEEL", wheel_path, _MAX_WHEEL_DESCRIPTOR_BYTES),
+            ):
+                payloads[name] = _read_stable_distribution_metadata(path, limit)
+            try:
+                message = email.parser.Parser().parsestr(payloads["METADATA"].decode("utf-8"))
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise ValueError("installed dependency metadata is unreadable") from exc
+            distribution_name = message.get("Name")
+            if not isinstance(distribution_name, str) or not distribution_name.strip():
+                raise ValueError("installed dependency metadata lacks a package name")
+            normalized = re.sub(r"[-_.]+", "-", distribution_name).lower()
+            if normalized == "defenseclaw":
+                continue
+            if normalized in seen:
+                raise ValueError("installed dependency metadata contains duplicate packages")
+            seen.add(normalized)
+            target = destination_path / entry.name
+            target.mkdir(mode=0o700)
+            for name, payload in payloads.items():
+                output = target / name
+                output.write_bytes(payload)
+                os.chmod(output, 0o600)
+
+
+def _require_bridge_environment_accepts_target_wheel(
+    uv: str,
+    venv_python: str,
+    source_wheel: str,
+    target_wheel: str,
+    *,
+    os_name: str,
+) -> None:
+    """Prove source and target metadata against one dependency graph offline.
+
+    The authenticated target wheel may add or tighten any reviewed direct
+    requirement. The handoff remains rollback-safe only when the installed
+    bridge dependency graph already satisfies that exact target metadata, so
+    validate both wheels in a private metadata-only shadow environment. This
+    delegates PEP 440/508 and marker evaluation to uv without release-number
+    or package-name allowlists and never mutates the live bridge venv.
+    """
+
+    shadow_root = tempfile.mkdtemp(prefix="defenseclaw-hard-cut-dependencies-")
+    shadow_venv = os.path.join(shadow_root, "venv")
+    try:
+        subprocess.run(
+            [
+                uv,
+                "--no-config",
+                "venv",
+                shadow_venv,
+                "--python",
+                venv_python,
+                "--offline",
+                "--quiet",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_DEPENDENCY_PREFLIGHT_TIMEOUT_SECONDS,
+        )
+        shadow_python = _venv_python_path(shadow_venv, os_name)
+        source_directories = _venv_site_package_directories(venv_python)
+        shadow_directories = _venv_site_package_directories(shadow_python)
+        _copy_distribution_metadata(source_directories, shadow_directories[0])
+        for wheel in (source_wheel, target_wheel):
+            subprocess.run(
+                [
+                    uv,
+                    "--no-config",
+                    "pip",
+                    "install",
+                    "--python",
+                    shadow_python,
+                    "--offline",
+                    "--no-deps",
+                    "--reinstall",
+                    "--quiet",
+                    wheel,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=_DEPENDENCY_PREFLIGHT_TIMEOUT_SECONDS,
+            )
+            subprocess.run(
+                [uv, "--no-config", "pip", "check", "--python", shadow_python],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=_DEPENDENCY_PREFLIGHT_TIMEOUT_SECONDS,
+            )
+    finally:
+        shutil.rmtree(shadow_root, ignore_errors=True)
 
 
 def _require_target_phase_two_mutator_wrapper(whl_path: str) -> None:
@@ -5180,39 +5898,21 @@ def _preflight_wheel_install(
         if not os.path.isfile(venv_python):
             _fail_wheel_preflight("Hard-cut bridge managed environment is missing.")
         try:
-            _require_hard_cut_dependency_contract(
-                hard_cut_source_wheel,
-                whl_path,
-                source_version=source_version,
-                target_version=target_version,
-            )
-            _require_hard_cut_preexisting_jsonschema(venv_python)
             subprocess.run(
                 [uv, "--no-config", "pip", "check", "--python", venv_python],
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=_DEPENDENCY_PREFLIGHT_TIMEOUT_SECONDS,
             )
-            subprocess.run(
-                [
-                    uv,
-                    "--no-config",
-                    "pip",
-                    "install",
-                    "--python",
-                    venv_python,
-                    "--dry-run",
-                    "--offline",
-                    "--no-deps",
-                    "--reinstall",
-                    "--quiet",
-                    whl_path,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
+            _require_bridge_environment_accepts_target_wheel(
+                uv,
+                venv_python,
+                hard_cut_source_wheel,
+                whl_path,
+                os_name=os_name,
             )
-        except (ValueError, subprocess.CalledProcessError) as exc:
+        except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             _fail_wheel_preflight(
                 "Hard-cut target cannot preserve the authenticated bridge dependency environment.",
                 exc if isinstance(exc, subprocess.CalledProcessError) else None,
@@ -5229,10 +5929,14 @@ def _preflight_wheel_install(
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=_DEPENDENCY_PREFLIGHT_TIMEOUT_SECONDS,
             )
-        except subprocess.CalledProcessError as exc:
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             shutil.rmtree(cleanup_dir, ignore_errors=True)
-            _fail_wheel_preflight("Could not create Python CLI preflight environment.", exc)
+            _fail_wheel_preflight(
+                "Could not create Python CLI preflight environment.",
+                exc if isinstance(exc, subprocess.CalledProcessError) else None,
+            )
         venv_python = _venv_python_path(preflight_venv, os_name)
 
     try:
@@ -5241,9 +5945,13 @@ def _preflight_wheel_install(
             check=True,
             capture_output=True,
             text=True,
+            timeout=_DEPENDENCY_PREFLIGHT_TIMEOUT_SECONDS,
         )
-    except subprocess.CalledProcessError as exc:
-        _fail_wheel_preflight("Python CLI wheel dependencies are unsatisfiable.", exc)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        _fail_wheel_preflight(
+            "Python CLI wheel dependencies are unsatisfiable.",
+            exc if isinstance(exc, subprocess.CalledProcessError) else None,
+        )
     finally:
         if cleanup_dir is not None:
             shutil.rmtree(cleanup_dir, ignore_errors=True)
@@ -5689,9 +6397,7 @@ def _acquire_bridge_rollback_artifacts(
             from defenseclaw import __version__ as controller_version
 
             if staged_target != controller_version:
-                raise OSError(
-                    f"{_STAGED_TARGET_CONTROLLER_VERSION_ENV} does not match the running controller"
-                )
+                raise OSError(f"{_STAGED_TARGET_CONTROLLER_VERSION_ENV} does not match the running controller")
         staged = os.environ.get(_STAGED_BRIDGE_ARTIFACT_DIR_ENV, "")
         if not staged:
             raise OSError(f"{_STAGED_BRIDGE_ARTIFACT_DIR_ENV} is required for staged handoff")
@@ -5823,6 +6529,7 @@ def _prepare_hard_cut_rollback_plan(
     recovery_home: str | None = None,
     config_path: str | None = None,
     release_provenance: _ReleaseProvenance | None = None,
+    observability_v8_preflight_binding: object = _NO_OBSERVABILITY_V8_PREFLIGHT_BINDING,
 ) -> _HardCutRollbackPlan:
     """Retain authenticated bridge artifacts and exact mutable state.
 
@@ -5979,7 +6686,7 @@ def _prepare_hard_cut_rollback_plan(
     state_files = tuple(
         _capture_rollback_file(active, os.path.join(state_root, label), required=required)
         for label, active, required in (
-            ("config.yaml", config_path, True),
+            ("config.yaml", config_path, False),
             (
                 "config.pre-observability-migration.bak",
                 config_path + ".pre-observability-migration.bak",
@@ -5995,7 +6702,7 @@ def _prepare_hard_cut_rollback_plan(
     backup_root_snapshot = _capture_hard_cut_backup_root(os.path.dirname(backup_dir))
     if gateway_snapshot.backup_path is None or gateway_snapshot.sha256 is None:
         raise OSError("exact bridge gateway snapshot is unavailable")
-    return _HardCutRollbackPlan(
+    plan = _HardCutRollbackPlan(
         source_version=source_version,
         source_gateway_was_running=source_gateway_was_running,
         data_dir=data_dir,
@@ -6014,6 +6721,158 @@ def _prepare_hard_cut_rollback_plan(
         backup_root_snapshot=backup_root_snapshot,
         release_provenance=release_provenance,
     )
+    if observability_v8_preflight_binding is not _NO_OBSERVABILITY_V8_PREFLIGHT_BINDING:
+        _require_hard_cut_preflight_binding_matches_rollback(
+            plan,
+            observability_v8_preflight_binding,
+        )
+    return plan
+
+
+def _require_hard_cut_preflight_binding_matches_rollback(
+    plan: _HardCutRollbackPlan,
+    binding: object | None,
+) -> None:
+    """Bind rollback custody to the exact config/dotenv preflight bytes."""
+
+    config_path = _hard_cut_plan_config_path(plan)
+    environment_path = os.path.join(plan.data_dir, ".env")
+    snapshots = {os.path.abspath(snapshot.active_path): snapshot for snapshot in plan.state_files}
+    config_snapshot = snapshots.get(config_path)
+    environment_snapshot = snapshots.get(os.path.abspath(environment_path))
+    if config_snapshot is None:
+        raise OSError("hard-cut migration preflight source changed before rollback capture")
+    if binding is None:
+        if config_snapshot.existed:
+            raise OSError("hard-cut migration preflight source changed before rollback capture")
+        return
+
+    to_payload = getattr(binding, "to_payload", None)
+    if not callable(to_payload):
+        raise OSError("hard-cut migration preflight binding is invalid")
+    payload = to_payload()
+    if not isinstance(payload, dict):
+        raise OSError("hard-cut migration preflight binding is invalid")
+    if (
+        not config_snapshot.existed
+        or config_snapshot.sha256 != payload.get("source_sha256")
+        or environment_snapshot is None
+    ):
+        raise OSError("hard-cut migration preflight source changed before rollback capture")
+
+    expected_environment_present = payload.get("environment_file_present")
+    expected_environment_sha256 = payload.get("environment_file_sha256")
+    if (
+        not isinstance(expected_environment_present, bool)
+        or environment_snapshot.existed != expected_environment_present
+        or (expected_environment_present and environment_snapshot.sha256 != expected_environment_sha256)
+        or (not expected_environment_present and expected_environment_sha256 != hashlib.sha256(b"").hexdigest())
+    ):
+        raise OSError("hard-cut migration preflight environment changed before rollback capture")
+
+
+def _require_hard_cut_preflight_state_unchanged(plan: _HardCutRollbackPlan) -> None:
+    """Reject source drift after rollback capture and before receipt/service stop."""
+
+    config_path = _hard_cut_plan_config_path(plan)
+    environment_path = os.path.abspath(os.path.join(plan.data_dir, ".env"))
+    for snapshot in plan.state_files:
+        active_path = os.path.abspath(snapshot.active_path)
+        if active_path not in {config_path, environment_path}:
+            continue
+        if not snapshot.existed:
+            if os.path.lexists(active_path):
+                raise OSError("hard-cut migration source changed after rollback capture")
+            continue
+        if snapshot.sha256 is None or snapshot.mode is None:
+            raise OSError("hard-cut migration source changed after rollback capture")
+        digest = _hash_stable_hard_cut_migration_source(active_path, snapshot)
+        if digest != snapshot.sha256:
+            raise OSError("hard-cut migration source changed after rollback capture")
+
+
+def _hash_stable_hard_cut_migration_source(
+    path: str,
+    snapshot: _RollbackFileSnapshot,
+) -> str:
+    """Hash one bounded no-follow source while pinning bytes and security."""
+
+    try:
+        named_before = os.lstat(path)
+    except OSError:
+        raise OSError("hard-cut migration source changed after rollback capture") from None
+    if (
+        stat.S_ISLNK(named_before.st_mode)
+        or getattr(named_before, "st_file_attributes", 0) & 0x00000400
+        or not stat.S_ISREG(named_before.st_mode)
+        or named_before.st_size > _MAX_HARD_CUT_MIGRATION_SOURCE_BYTES
+        or stat.S_IMODE(named_before.st_mode) != snapshot.mode
+    ):
+        raise OSError("hard-cut migration source changed after rollback capture")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        raise OSError("hard-cut migration source changed after rollback capture") from None
+    windows_security = None
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        opened_before = os.fstat(descriptor)
+        opened_identity = _rollback_capture_identity(opened_before)
+        if (
+            not stat.S_ISREG(opened_before.st_mode)
+            or not _rollback_named_capture_matches(named_before, opened_before)
+            or opened_before.st_size > _MAX_HARD_CUT_MIGRATION_SOURCE_BYTES
+            or stat.S_IMODE(opened_before.st_mode) != snapshot.mode
+        ):
+            raise OSError("hard-cut migration source changed after rollback capture")
+        if os.name == "nt":
+            from defenseclaw import windows_acl
+
+            windows_security = windows_acl.capture_fd(descriptor)
+            if windows_security != snapshot.windows_security:
+                raise OSError("hard-cut migration source security changed after rollback capture")
+
+        while total <= _MAX_HARD_CUT_MIGRATION_SOURCE_BYTES:
+            block = os.read(
+                descriptor,
+                min(
+                    1024 * 1024,
+                    _MAX_HARD_CUT_MIGRATION_SOURCE_BYTES + 1 - total,
+                ),
+            )
+            if not block:
+                break
+            total += len(block)
+            digest.update(block)
+
+        opened_after = os.fstat(descriptor)
+        try:
+            named_after = os.lstat(path)
+        except OSError:
+            raise OSError("hard-cut migration source changed after rollback capture") from None
+        if (
+            total > _MAX_HARD_CUT_MIGRATION_SOURCE_BYTES
+            or total != opened_after.st_size
+            or _rollback_capture_identity(opened_after) != opened_identity
+            or stat.S_ISLNK(named_after.st_mode)
+            or getattr(named_after, "st_file_attributes", 0) & 0x00000400
+            or not stat.S_ISREG(named_after.st_mode)
+            or not _rollback_named_capture_matches(named_after, opened_after)
+            or (os.name == "nt" and _rollback_capture_identity(named_after) != _rollback_capture_identity(named_before))
+            or stat.S_IMODE(named_after.st_mode) != snapshot.mode
+        ):
+            raise OSError("hard-cut migration source changed after rollback capture")
+        if os.name == "nt":
+            from defenseclaw import windows_acl
+
+            if windows_acl.capture_fd(descriptor) != windows_security:
+                raise OSError("hard-cut migration source security changed after rollback capture")
+    finally:
+        os.close(descriptor)
+    return digest.hexdigest()
 
 
 def _upgrade_recovery_home() -> str:
@@ -6201,6 +7060,7 @@ def _run_phase_two_mutator(command: list[str], **kwargs) -> subprocess.Completed
     wrapper = [
         sys.executable,
         "-I",
+        "-B",
         str(Path(__file__).parent.parent / "phase_two_mutator.py"),
         "--defenseclaw-phase-two-mutator",
         lease_path,
@@ -6882,12 +7742,7 @@ def _read_bounded_bundle_rollback_json(path: Path) -> object:
     if os.name == "posix" and (named_before.st_uid != os.getuid() or stat.S_IMODE(named_before.st_mode) != 0o600):
         raise OSError("local observability rollback metadata must be owner-only")
 
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
@@ -7564,7 +8419,7 @@ def _handoff_hard_cut_recovery_to_source_controller(plan: _HardCutRollbackPlan) 
     try:
         os.execve(
             venv_python,
-            [venv_python, "-I", "-m", "defenseclaw.main", *sys.argv[1:]],
+            [venv_python, "-I", "-B", "-m", "defenseclaw.main", *sys.argv[1:]],
             child_env,
         )
     except OSError as exc:
@@ -8057,10 +8912,7 @@ def _capture_rollback_file(active_path: str, backup_path: str, *, required: bool
             # two lstat snapshots use the same API. Keep that exact
             # named-before/named-after comparison so a same-object, same-size
             # write after the descriptor read is still detected.
-            or (
-                os.name == "nt"
-                and _rollback_capture_identity(named) != _rollback_capture_identity(info)
-            )
+            or (os.name == "nt" and _rollback_capture_identity(named) != _rollback_capture_identity(info))
         ):
             raise OSError(f"rollback source changed while being read: {active_path}")
 
@@ -8188,6 +9040,7 @@ def _poll_installed_health(
             [
                 venv_python,
                 "-I",
+                "-B",
                 "-c",
                 _INSTALLED_HEALTH_SCRIPT,
                 data_dir,
@@ -8283,7 +9136,8 @@ def _execute_hard_cut_rollback(
         _restore_hard_cut_backup_root_contract(plan)
 
         if plan.source_gateway_was_running:
-            if not _run_silent(
+            rollback_start_timeout = max(health_timeout + 30, 90)
+            start_reported_success = _run_silent(
                 [plan.active_gateway_path, "start"],
                 "Restored bridge gateway started",
                 "Could not start restored bridge gateway",
@@ -8291,14 +9145,46 @@ def _execute_hard_cut_rollback(
                     plan.data_dir,
                     config_path=plan_config_path,
                 ),
-            ):
-                raise OSError("restored bridge gateway failed to start")
-            _poll_installed_health(
-                plan.data_dir,
-                health_timeout,
-                plan.source_version,
-                os_name=plan.os_name,
+                timeout_seconds=rollback_start_timeout,
             )
+            if not start_reported_success and _PHASE_TWO_MUTATOR_SURVIVED_TIMEOUT:
+                raise OSError("restored bridge gateway failed to start")
+            if start_reported_success:
+                try:
+                    _poll_installed_health(
+                        plan.data_dir,
+                        health_timeout,
+                        plan.source_version,
+                        os_name=plan.os_name,
+                    )
+                    bridge_healthy = True
+                except (OSError, SystemExit):
+                    bridge_healthy = False
+            else:
+                bridge_healthy = False
+
+            if not bridge_healthy:
+                ux.warn(
+                    "Restored bridge gateway was not healthy after its first start; retrying once.",
+                    indent="  ",
+                )
+                if not _run_silent(
+                    [plan.active_gateway_path, "start"],
+                    "Restored bridge gateway started on retry",
+                    "Could not start restored bridge gateway on retry",
+                    env=_gateway_process_environment(
+                        plan.data_dir,
+                        config_path=plan_config_path,
+                    ),
+                    timeout_seconds=rollback_start_timeout,
+                ):
+                    raise OSError("restored bridge gateway failed to start")
+                _poll_installed_health(
+                    plan.data_dir,
+                    health_timeout,
+                    plan.source_version,
+                    os_name=plan.os_name,
+                )
 
         else:
             _assert_gateway_quiesced(
@@ -8685,7 +9571,7 @@ def _verify_restored_bridge_artifacts(plan: _HardCutRollbackPlan) -> None:
     managed_venv = _managed_venv_path()
     venv_python = _venv_python_path(managed_venv, plan.os_name)
     cli = subprocess.run(
-        [venv_python, "-I", "-c", _INSTALLED_PACKAGE_METADATA_SCRIPT],
+        [venv_python, "-I", "-B", "-c", _INSTALLED_PACKAGE_METADATA_SCRIPT],
         capture_output=True,
         text=True,
         timeout=10,
@@ -8922,32 +9808,39 @@ def _run_silent(
     fail_msg: str,
     *,
     env: dict[str, str] | None = None,
+    failure_output_markers: tuple[str, ...] = (),
+    timeout_seconds: float = 30,
 ) -> bool:
     """Run a command, printing ok_msg on success and fail_msg on failure.
 
-    On non-zero exit, surface the first few stderr/stdout lines so an
-    operator can correlate with logs immediately instead of needing a
-    second debug pass with the same command. Exceptions (missing
-    binary, timeout) are caught and reported similarly so the upgrade
-    flow never raises mid-restart.
+    On non-zero exit, or when a command's successful exit output contains
+    a caller-declared failure marker, surface the first few stderr/stdout
+    lines so an operator can correlate with logs immediately instead of
+    needing a second debug pass with the same command. Exceptions (missing
+    binary, timeout) are caught and reported similarly so the upgrade flow
+    never raises mid-restart.
     """
     try:
         kwargs: dict[str, object] = {
             "capture_output": True,
             "text": True,
-            "timeout": 30,
+            "timeout": timeout_seconds,
             "check": False,
         }
         if env is not None:
             kwargs["env"] = env
         result = _run_phase_two_mutator(cmd, **kwargs)
-        if result.returncode == 0:
+        combined_output = "\n".join(
+            stripped for part in (result.stderr, result.stdout) if isinstance(part, str) and (stripped := part.strip())
+        )
+        output_casefold = combined_output.casefold()
+        matched_failure_marker = any(marker.casefold() in output_casefold for marker in failure_output_markers)
+        if result.returncode == 0 and not matched_failure_marker:
             ux.ok(ok_msg)
             return True
         ux.warn(fail_msg)
-        err = (result.stderr or result.stdout or "").strip()
-        if err:
-            for line in err.splitlines()[:5]:
+        if combined_output:
+            for line in combined_output.splitlines()[:5]:
                 ux.subhead(line, indent="    ")
         return False
     except (OSError, subprocess.SubprocessError) as exc:

@@ -914,6 +914,7 @@ extension AppState {
         return """
         (
           set -eu
+          unset VERSION
           umask 077
           command -v cosign >/dev/null
           checksums="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 '\(assetBase)/checksums.txt')"
