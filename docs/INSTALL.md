@@ -42,20 +42,17 @@ On **native Windows**, DefenseClaw is **hook-only**. The current Windows
 connector scope deliberately excludes WSL and requires both the upstream agent
 and the complete DefenseClaw hook path to run directly on Windows.
 
-- **Supported:** Codex, Claude Code, Cursor IDE hooks, Windsurf, Gemini CLI,
-  Copilot CLI, Antigravity, and OpenCode.
-- **Preview:** Hermes, because upstream labels native Windows support Early
-  Beta.
-- **Unsupported:** OpenHands and OmniGent. OpenHands CLI requires WSL;
-  OmniGent has no supported native Windows terminal/sandbox path.
+- **Supported and certified:** Codex and Claude Code.
+- **Not certified:** Cursor, Windsurf, Gemini CLI, Copilot CLI, Antigravity,
+  OpenCode, and Hermes. Their cross-platform setup code is not a native Windows
+  support commitment.
+- **Unsupported:** OpenHands, OmniGent, OpenClaw, and ZeptoClaw. Their required
+  WSL, terminal/sandbox, or local-proxy topology is not hosted by native
+  Windows DefenseClaw.
 
-Supported command-hook connectors invoke `defenseclaw hook --connector <name>
---event <event>` through the native `defenseclaw-gateway.exe`; OpenCode loads
-the native JavaScript bridge plugin. DefenseClaw's hook entrypoint does not add
-a WSL, Git Bash, `jq`, or POSIX-shell dependency; upstream agent prerequisites
-still apply (for example, Claude Code's native Windows setup requires Git for
-Windows). Cursor support here means the Windows IDE hook surface; Cursor's
-separate CLI remains WSL-only.
+The certified connectors invoke the native `defenseclaw-hook.exe` entrypoint;
+they do not add a WSL, Git Bash, `jq`, or POSIX-shell dependency. Upstream
+agent prerequisites still apply, including Git for Windows for Claude Code.
 
 WSL availability is tracked for upstream research in
 [`CONNECTOR-MATRIX.md`](CONNECTOR-MATRIX.md), but it is not part of the current
@@ -463,7 +460,8 @@ setup` defaults to it on the next invocation.
 
 Release `0.8.6` publishes the signed `DefenseClawSetup-x64.exe` for native x64
 Windows. Download the Setup artifact from the `0.8.6` GitHub release, then
-double-click it for the graphical wizard or run it silently:
+double-click it for the graphical wizard or run it quietly from the signed-in,
+non-elevated user's interactive desktop session:
 
 ```powershell
 .\DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1
@@ -474,6 +472,13 @@ managed Python runtime under `%LOCALAPPDATA%\Programs\DefenseClaw`, and adds its
 managed `bin` directory to the current user's `PATH`. Use
 `CONNECTOR=claudecode` for Claude Code or `CONNECTOR=none` to configure a
 connector later.
+
+Quiet mode does not authorize service, SYSTEM, session-zero, elevated, or
+background/batch installation. A configured Codex or Claude Code connector
+requires gateway startup; only `CONNECTOR=none STARTGATEWAY=0` is a supported
+stopped CLI-only install. See the complete
+[native Windows guide](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/)
+for lifecycle, support, security, and troubleshooting boundaries.
 
 Release `0.8.5` was POSIX-only and published no native Setup, gateway, or
 rollback artifact. It therefore remains outside the Windows upgrade-baseline

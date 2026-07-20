@@ -42,17 +42,22 @@ def test_windows_release_metadata_is_exact() -> None:
 
 
 def test_windows_guide_has_unambiguous_claims_and_powershell_examples() -> None:
-    text = (ROOT / "docs-site/content/docs/get-started/windows.mdx").read_text(encoding="utf-8")
+    guide_dir = ROOT / "docs-site/content/docs/get-started/windows"
+    raw_text = "\n".join(
+        page.read_text(encoding="utf-8") for page in sorted(guide_dir.glob("*.mdx"))
+    )
+    text = " ".join(raw_text.split())
     install_text = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
-    assert "WSL is unsupported" in text
-    assert "Native Windows x64 (`amd64`)" in text
-    assert "Windows ARM64 requires separate certification" in text
-    assert "Codex CLI | `codex` | certified" in text
-    assert "Claude Code | `claudecode` | certified" in text
+    assert "WSL is not supported" in text
+    assert "Windows x64" in text and "`amd64`" in text
+    assert "Windows ARM64" in text and "Not certified" in text
+    assert "| Codex | `codex` | **Supported**" in text
+    assert "| Claude Code | `claudecode` | **Supported**" in text
     assert "local observability" in text
     assert "Local Splunk" in text
     assert "Hyper-V backend" in text
-    assert "Docker Desktop per-user and WSL-only installations" in text
+    assert "per-user Docker Desktop" in text
+    assert "WSL2 engines" in text
     assert "Hermes remains preview" not in text
     assert "Hermes is preview" not in install_text
     assert "```bash" not in text and "```sh" not in text

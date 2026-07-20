@@ -1,6 +1,6 @@
 ---
 title: Codex
-description: Codex connector wires config.toml hooks (UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse, Stop, SessionStart), the native OTel exporter, and the notify bridge for agent-turn-complete events.
+description: Codex connector wires versioned lifecycle hooks, native OTel logs/metrics/traces, and the notify bridge without inserting a model proxy.
 keywords:
   - DefenseClaw Codex connector
   - Codex hooks
@@ -13,7 +13,10 @@ The Codex connector wires DefenseClaw into [Codex's documented hooks](https://gi
 <Callout type="info">
 The Codex connector is **hook-only**. There is no LLM-proxy data path — Codex talks directly to its native upstream (`api.openai.com` or the ChatGPT backend) and DefenseClaw observes via hooks + native OTel.
 
-**`mode=action` is fully supported here, hook-natively.** When `guardrail.mode=action` (or `defenseclaw setup codex --mode action`), the `PreToolUse` hook returns a `permissionDecision: "deny"` verdict on policy hits and Codex blocks the tool call inside its own permission flow. No proxy listener is involved.
+**`mode=action` is supported on Codex's declared blocking hook events.** For
+example, `PreToolUse` can return `permissionDecision: "deny"` before the tool.
+Observation-only events and agent activity outside the registered hook contract
+are not proxy-intercepted.
 </Callout>
 
 ## Setup
@@ -25,7 +28,12 @@ defenseclaw setup codex --mode action  # block on policy hits via PreToolUse den
 
 `setup codex` is shorthand for `setup guardrail --connector codex`: it adds or reconfigures Codex, wires hooks + OTel + notify bridge, and can join an existing hook-connector roster when you choose **Add**. No proxy listener binds for Codex in either mode.
 
-Native logs, metrics, and traces use three Codex-scoped loopback endpoints under `/otlp/codex/<scoped-token>/v1/...`. Setup generates the OTLP credential in `~/.defenseclaw/hooks/.otlp-codex.token` with owner-only permissions. It is separate from both the gateway master token and the Codex hook credential, is accepted only for the Codex OTLP namespace over loopback, and is redacted from gateway route telemetry. `config.toml` contains no gateway or hook credential in an exporter header. Teardown removes the credential only after the managed Codex config is restored successfully; a later setup creates a new credential.
+Native logs, metrics, and traces use Codex-scoped loopback OTLP endpoints and
+an Authorization bearer managed in Codex's exporter configuration. The
+credential is separate from both the gateway master token and the Codex hook
+credential, is accepted only for Codex OTLP over loopback, and cannot call
+management or another connector. DefenseClaw redacts it from route telemetry.
+Do not print or copy the managed exporter header or its protected sidecar.
 
 #### What this command sets vs. leaves at defaults
 
@@ -48,19 +56,37 @@ See [the full flag reference](/docs/setup/guardrail#every-flag) for the complete
 
 ## Files DefenseClaw will modify
 
+<Tabs items={['Native Windows', 'macOS/Linux']}>
+  <Tab value="Native Windows">
+
+`%CODEX_HOME%\managed_config.toml` carries the managed hook matrix.
+`%CODEX_HOME%\config.toml` carries DefenseClaw-marked OTLP and notify fields.
+Generated runtime and protected connector credentials live below
+`%USERPROFILE%\.defenseclaw\hooks`. Use setup/teardown commands; do not edit or
+copy those entries manually. See the
+[Windows path reference](/docs/get-started/windows/paths-troubleshooting#filesystem-reference).
+
+  </Tab>
+  <Tab value="macOS/Linux">
+
 <Files>
   <Folder name="~/.codex" defaultOpen>
-    <File name="config.toml ([hooks], [otel], [notify] blocks)" />
+    <File name="config.toml (DefenseClaw-managed hooks, OTel, and notify fields)" />
   </Folder>
   <Folder name="~/.defenseclaw" defaultOpen>
     <Folder name="hooks">
       <File name="codex-hook.sh" />
-      <File name=".otlp-codex.token (owner-only scoped OTLP credential)" />
+      <File name="protected connector credential sidecars" />
     </Folder>
   </Folder>
 </Files>
 
-The `[hooks]`, `[otel]`, and `[notify]` blocks are owned by DefenseClaw; everything else in `config.toml` is preserved verbatim.
+  </Tab>
+</Tabs>
+
+Everything outside DefenseClaw-marked fields is preserved. Teardown restores a
+pristine backup when its identity still matches; otherwise it removes only
+owned entries.
 
 ## Hook capabilities
 
@@ -78,7 +104,7 @@ Codex has no native ask surface here. Confirm verdicts become an alert/system me
   caption="Three independent channels make Codex one of the most thoroughly inspected agents."
 >
   <Node id="codex" kind="agent">Codex</Node>
-  <Node id="hooks" kind="connector">{`UserPromptSubmit / PreToolUse /\nPermissionRequest / PostToolUse /\nStop / SessionStart`}</Node>
+  <Node id="hooks" kind="connector">{`SessionStart / prompt / tool / permission /\nsubagent / compact / Stop hooks`}</Node>
   <Node id="otel" kind="connector">Native OTel exporter</Node>
   <Node id="notify" kind="connector">{`Notify bridge\nagent-turn-complete`}</Node>
   <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>
@@ -93,5 +119,8 @@ Codex has no native ask surface here. Confirm verdicts become an alert/system me
 ## Disable
 
 ```bash
-defenseclaw setup guardrail --disable
+defenseclaw guardrail disable --connector codex --yes
 ```
+
+For the exact native Windows event and fail-mode boundary, see
+[Connectors and enforcement](/docs/get-started/windows/connectors-enforcement#codex).
