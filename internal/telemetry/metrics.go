@@ -2558,8 +2558,21 @@ const (
 	ExporterHealthFailure ExporterHealthStatus = "failure"
 )
 
-// RecordExporterHealth records OTLP metric export outcomes and updates last-success timestamp.
+// RecordExporterHealth records OTLP metric export outcomes and updates
+// last-success timestamp. reason should be err.Error() on failure; empty
+// on success (unused). Silent-empty is still accepted so pre-existing
+// call sites keep compiling — see the wrapper helper below for the
+// error-carrying variant.
 func (p *Provider) RecordExporterHealth(ctx context.Context, exporter string, status ExporterHealthStatus) {
+	p.recordExporterHealthWithReason(ctx, exporter, status, "")
+}
+
+// recordExporterHealthWithReason is the internal variant that threads the
+// underlying error text into the gateway.jsonl / audit surface. New call
+// sites should use RecordExporterHealthErr below; direct users of the
+// legacy RecordExporterHealth still work but lose the cause on the
+// error emit.
+func (p *Provider) recordExporterHealthWithReason(ctx context.Context, exporter string, status ExporterHealthStatus, reason string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
@@ -2568,13 +2581,27 @@ func (p *Provider) RecordExporterHealth(ctx context.Context, exporter string, st
 			attribute.String("exporter", exporter),
 			attribute.String("signal", "metrics"),
 		))
-		p.emitExporterFailure(ctx, exporter)
+		p.emitExporterFailure(ctx, exporter, reason)
 		return
 	}
 	p.metrics.exporterLastExportSec.Record(ctx, float64(time.Now().Unix()), metric.WithAttributes(
 		attribute.String("exporter", exporter),
 		attribute.String("signal", "metrics"),
 	))
+}
+
+// RecordExporterHealthErr is the error-carrying variant of
+// RecordExporterHealth. When err is non-nil the underlying error text is
+// threaded into the emitExporterFailure event so gateway.jsonl and the
+// audit surface see the actual cause (auth vs network vs 5xx) instead of
+// a generic "export failed" line. err==nil is treated as
+// ExporterHealthSuccess.
+func (p *Provider) RecordExporterHealthErr(ctx context.Context, exporter string, err error) {
+	if err == nil {
+		p.recordExporterHealthWithReason(ctx, exporter, ExporterHealthSuccess, "")
+		return
+	}
+	p.recordExporterHealthWithReason(ctx, exporter, ExporterHealthFailure, err.Error())
 }
 
 // RecordDestinationSpanRoute records bounded-cardinality routing decisions for

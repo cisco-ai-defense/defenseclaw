@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
@@ -105,19 +106,32 @@ func (c *CiscoDefenseClawInspectClient) SetTelemetry(p *telemetry.Provider) {
 // normalized verdict. Returns nil on any error so the caller falls back
 // to local-only scanning — same fail-open contract as the API-key path.
 func (c *CiscoDefenseClawInspectClient) Inspect(messages []ChatMessage) *ScanVerdict {
-	if c == nil || c.provider == nil {
+	if c == nil {
 		return nil
 	}
-
 	// Refresh the token per call — cheap in-memory cache read after
 	// the first successful load. Caching semantics live in the managed
 	// cloud auth module registered via internal/managed/cloudreg.
 	tokenCtx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
+	if c.provider == nil {
+		// pickInspector should have refused to construct us in this
+		// state, but if we somehow reach Inspect with a nil provider
+		// emit rather than silently fail-open. Every managed inspection
+		// call needs a bearer, so a nil provider is a boot-time bug the
+		// operator must see in gateway.err.log.
+		EmitCiscoError(tokenCtx, c.tel, gatewaylog.ErrCodeAuthMissingToken,
+			"managed inspect client has no CMID provider — remote inspection disabled")
+		return nil
+	}
 	tok, err := c.provider.Token(tokenCtx)
 	if err != nil {
 		// Any error maps to a fail-open outcome for this request. The
 		// fail-closed decision was made at boot-time in the picker.
+		// Surface the specific failure though — silent nil here is what
+		// let an expired / revoked CMID enrollment ship undetected.
+		EmitCiscoError(tokenCtx, c.tel, gatewaylog.ErrCodeAuthMissingToken,
+			"managed inspect: CMID token mint failed: "+err.Error())
 		return nil
 	}
 
@@ -165,7 +179,20 @@ func (c *CiscoDefenseClawInspectClient) Inspect(messages []ChatMessage) *ScanVer
 			defer cancel()
 			fresh, err := c.provider.Token(ctx)
 			if err != nil || fresh == "" || fresh == currentToken {
-				// No new credential available; don't loop.
+				// No new credential available; don't loop. The
+				// eventual "HTTP 401" branch in doInspectHTTP emits
+				// the terminal AUTH_INVALID_TOKEN. Surface the
+				// re-mint failure reason too so operators can tell
+				// "no new token minted" from "cloud rejected the new
+				// token" when triaging.
+				reason := "same token returned after invalidate"
+				if err != nil {
+					reason = "provider.Token after invalidate: " + err.Error()
+				} else if fresh == "" {
+					reason = "provider.Token returned empty after invalidate"
+				}
+				EmitCiscoError(ctx, c.tel, gatewaylog.ErrCodeAuthInvalidToken,
+					"managed inspect 401 re-mint refused: "+reason)
 				return false
 			}
 			currentToken = fresh

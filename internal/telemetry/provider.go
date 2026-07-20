@@ -334,7 +334,7 @@ func installOpenTelemetryGlobals(p *Provider) {
 				attribute.String("signal", "otel_sdk"),
 				attribute.String("reason", reason),
 			))
-		p.emitExporterFailure(context.Background(), "otel_sdk")
+		p.emitExporterFailure(context.Background(), "otel_sdk", reason)
 	}))
 }
 

@@ -25,6 +25,11 @@ dependencies = [
     # resolving this package through /simple/.
     "cisco-ai-skill-scanner @ https://files.pythonhosted.org/packages/b4/cc/824d4033d5e684fd05a0e726fa32d2070c36bcaa9e99af49ed1014716613/cisco_ai_skill_scanner-2.0.11-py3-none-any.whl#sha256=9e0f2fd30150ab455005b9b1b288ab2047e89bf22056f7a68e9b8155c420edbe",
     "cisco-ai-mcp-scanner>=4.7.2; python_version>='3.11'",
+    # The MCP scanner installs this transitively. Keep the runtime above the
+    # fixes for CVE-2026-52869, CVE-2026-52870, and CVE-2026-59950. Mirrors
+    # the same top-level pin on main (0.8.5) so the release-branch CI stays
+    # green against pip-audit --vulnerability-service osv.
+    "mcp>=1.28.1,<2; python_version>='3.11'",
     # AWS Bedrock support is bundled. LiteLLM lazy-imports boto3 for
     # SigV4 (iam_credentials / profile / instance_role) and for the
     # Anthropic-on-Bedrock route used by ABSK bearer tokens. Bundling

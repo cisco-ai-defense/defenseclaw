@@ -102,25 +102,52 @@ discover_agent_version() {
   local home="$2"
   case "${connector}" in
     codex)
-      # Codex-cli is a Rust binary, not npm. We probe metadata paths
-      # first (safe, no exec), then fall back to `codex --version`
-      # exec'd AS THE TARGET USER via `sudo -u`. Running the user's
-      # own codex binary as their identity is not a privilege
-      # escalation — install.sh's outer sudo drops privileges for this
-      # subprocess, matching the security posture of the hook
-      # guardian's connector.Setup call.
-      local pkg
-      for pkg in \
-        "${home}"/.npm-global/lib/node_modules/@openai/codex/package.json \
-        /usr/local/lib/node_modules/@openai/codex/package.json \
-        /opt/homebrew/lib/node_modules/@openai/codex/package.json; do
-        [[ -f "${pkg}" ]] || continue
-        local v; v="$(_read_json_version "${pkg}")"
-        if [[ -n "${v}" ]]; then echo "${v}"; return; fi
+      # Codex-cli is a Rust binary that ships from three OpenAI-owned
+      # channels on macOS. Probe order picks the first-party
+      # ChatGPT.app bundled copy FIRST because it is the newest
+      # distribution (auto-updated with the desktop app) and it is
+      # what customers actually have on a fresh Mac — stray old
+      # `npm i -g @openai/codex` installs from an earlier engagement
+      # frequently linger and would otherwise win with a stale
+      # version that fails our MinAgentVersion contract gate.
+      #
+      # Order:
+      #   1. ChatGPT.app bundled binary       (Codex 0.145.0+ current)
+      #   2. Homebrew Caskroom                (versioned dir name)
+      #   3. npm module package.json         (user-global then system)
+      #   4. `command -v codex` last resort   (arbitrary PATH install)
+      #
+      # Every probe runs as the target user via sudo -u (not root).
+      # The app bundle is Gatekeeper-signed and world-readable by
+      # design; running its --version as an unprivileged user is
+      # safe. install.sh's outer sudo already dropped privs before
+      # calling this helper, matching the security posture of the
+      # hook guardian's connector.Setup call.
+      local vraw
+
+      # 1. ChatGPT.app bundled codex — /Applications/ChatGPT.app/
+      # Contents/Resources/codex is the current stable location; the
+      # older MacOS/ path is kept as a fallback for pre-2026 builds.
+      local chatgpt_codex
+      for chatgpt_codex in \
+        /Applications/ChatGPT.app/Contents/Resources/codex \
+        /Applications/ChatGPT.app/Contents/MacOS/codex; do
+        [[ -x "${chatgpt_codex}" ]] || continue
+        if [[ -n "${DC_INSTALLER_TARGET_USER:-}" ]]; then
+          vraw="$(sudo -n -u "${DC_INSTALLER_TARGET_USER}" "${chatgpt_codex}" --version 2>/dev/null | head -1 || true)"
+        else
+          vraw="$("${chatgpt_codex}" --version 2>/dev/null | head -1 || true)"
+        fi
+        # Codex prints "codex-cli X.Y.Z" (or "codex-cli X.Y.Z-alpha.N");
+        # take the first token that looks like a version.
+        vraw="$(printf '%s' "${vraw}" | awk '{for(i=NF;i>=1;i--) if ($i ~ /^[0-9]+\.[0-9]+/) {print $i; exit}}')"
+        if [[ -n "${vraw}" ]]; then echo "${vraw}"; return; fi
       done
-      # Homebrew cask keeps the binary under Caskroom with a version
-      # in the path itself: /opt/homebrew/Caskroom/codex/<version>/...
-      # Glob-based version pick (avoids shellcheck SC2010 on `ls | grep`).
+
+      # 2. Homebrew cask keeps the binary under Caskroom with a
+      # version in the path itself:
+      #   /opt/homebrew/Caskroom/codex/<version>/...
+      # Glob-based version pick (avoids shellcheck SC2010 on ls|grep).
       local caskroom ver dir dname
       for caskroom in /opt/homebrew/Caskroom/codex /usr/local/Caskroom/codex; do
         [[ -d "${caskroom}" ]] || continue
@@ -136,12 +163,23 @@ discover_agent_version() {
         done
         if [[ -n "${ver}" ]]; then echo "${ver}"; return; fi
       done
-      # Last resort: exec codex --version as the target user (not as
-      # root). Requires TARGET_USER to be known to the caller.
+
+      # 3. npm module package.json — user-global first (most likely
+      # up to date on developer boxes), then system dirs.
+      local pkg
+      for pkg in \
+        "${home}"/.npm-global/lib/node_modules/@openai/codex/package.json \
+        /usr/local/lib/node_modules/@openai/codex/package.json \
+        /opt/homebrew/lib/node_modules/@openai/codex/package.json; do
+        [[ -f "${pkg}" ]] || continue
+        local v; v="$(_read_json_version "${pkg}")"
+        if [[ -n "${v}" ]]; then echo "${v}"; return; fi
+      done
+
+      # 4. Last resort: exec codex --version as the target user (not
+      # as root). Requires TARGET_USER to be known to the caller.
       if [[ -n "${DC_INSTALLER_TARGET_USER:-}" ]] && command -v codex >/dev/null 2>&1; then
-        local vraw
         vraw="$(sudo -n -u "${DC_INSTALLER_TARGET_USER}" codex --version 2>/dev/null | head -1 || true)"
-        # Codex prints "codex-cli X.Y.Z"; take just the version token.
         vraw="$(printf '%s' "${vraw}" | awk '{for(i=NF;i>=1;i--) if ($i ~ /^[0-9]+\.[0-9]+/) {print $i; exit}}')"
         if [[ -n "${vraw}" ]]; then echo "${vraw}"; return; fi
       fi
@@ -242,6 +280,180 @@ prepare_userspace_for() {
     claudecode) prepare_claudecode_userspace "${home}";;
     cursor)     prepare_cursor_userspace     "${home}";;
   esac
+}
+
+# ---- local-user enumeration --------------------------------------------
+
+# _enumerate_users_warn — internal helper that emits a per-filter drop
+# reason when DC_INSTALLER_ENUMERATE_VERBOSE=1. install.sh flips this on
+# so its install.log records why user X was excluded from targets.yaml;
+# unit tests leave it off so the sourced-library harness stays quiet.
+_enumerate_users_warn() {
+  [[ "${DC_INSTALLER_ENUMERATE_VERBOSE:-}" == "1" ]] || return 0
+  printf '[install] WARN: enumerate_local_users skipping %s: %s\n' "$1" "$2" >&2
+}
+
+# enumerate_local_users -> stdout, one line per eligible user in the form:
+#   user:uid:gid:home
+#
+# Filters: UID >= 500, username does not start with `_`, home under /Users/,
+# home is a real directory (not a symlink), and home_perms_ok passes.
+# Reads OpenDirectory via dscl — same pattern the fresh-install preflight in
+# install.sh already uses (see the block that gates on _existing_install_markers).
+#
+# Pure: no writes, no sudo. When DC_INSTALLER_ENUMERATE_VERBOSE=1 each
+# filter drop emits a WARN on stderr so install.log captures why a
+# specific user was excluded. Off by default (tests source this library
+# and would otherwise emit spurious warns).
+enumerate_local_users() {
+  local names name uid gid home
+  names="$(dscl . -list /Users UniqueID 2>/dev/null)" || {
+    _enumerate_users_warn "(all users)" "dscl . -list /Users UniqueID failed — cannot enumerate local users"
+    return 0
+  }
+  # dscl output is "user   uid". Filter and normalize in one pass.
+  while IFS= read -r line; do
+    name="$(printf '%s' "${line}" | awk '{print $1}')"
+    uid="$(printf '%s' "${line}" | awk '{print $2}')"
+    if [[ -z "${name}" || -z "${uid}" ]]; then
+      _enumerate_users_warn "${name:-?}" "dscl row is missing name or uid: '${line}'"
+      continue
+    fi
+    # Filter system accounts.
+    case "${name}" in
+      _*|daemon|nobody|root)
+        _enumerate_users_warn "${name}" "system account (name matches system-user pattern)"
+        continue;;
+    esac
+    if ! [[ "${uid}" =~ ^[0-9]+$ ]]; then
+      _enumerate_users_warn "${name}" "uid '${uid}' is not numeric"
+      continue
+    fi
+    if (( uid < 500 )); then
+      _enumerate_users_warn "${name}" "uid ${uid} is below the local-user threshold (500)"
+      continue
+    fi
+
+    home="$(dscl . -read "/Users/${name}" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: //p')"
+    if [[ -z "${home}" ]]; then
+      _enumerate_users_warn "${name}" "NFSHomeDirectory is empty in Open Directory"
+      continue
+    fi
+    if [[ "${home}" != /Users/* ]]; then
+      _enumerate_users_warn "${name}" "home '${home}' is not under /Users/ (network / mobile / MDM account)"
+      continue
+    fi
+    if [[ ! -d "${home}" ]]; then
+      _enumerate_users_warn "${name}" "home '${home}' is not a directory (may not be mounted)"
+      continue
+    fi
+    if [[ -L "${home}" ]]; then
+      _enumerate_users_warn "${name}" "home '${home}' is a symlink — refusing to follow"
+      continue
+    fi
+    if ! home_perms_ok "${home}"; then
+      local _mode
+      _mode="$(stat -f '%Lp' "${home}" 2>/dev/null || stat -c '%a' "${home}" 2>/dev/null || echo '?')"
+      _enumerate_users_warn "${name}" "home '${home}' is group/other writable (mode ${_mode}) — hook guardian will refuse"
+      continue
+    fi
+
+    gid="$(dscl . -read "/Users/${name}" PrimaryGroupID 2>/dev/null | sed -n 's/^PrimaryGroupID: //p')"
+    [[ "${gid}" =~ ^[0-9]+$ ]] || gid="20"
+
+    printf '%s:%s:%s:%s\n' "${name}" "${uid}" "${gid}" "${home}"
+  done <<< "${names}"
+}
+
+# ---- targets.yaml rendering --------------------------------------------
+
+# render_targets_manifest SUPPORT_DIR CONNECTORS_CSV USER_LINES -> stdout
+#
+# Renders the hook-guardian manifest (`targets.yaml`) consumed by the
+# `enterprise hooks reconcile` command. Schema mirrors ManifestTarget in
+# internal/enterprisehooks/manifest.go.
+#
+# Args:
+#   SUPPORT_DIR    e.g. /opt/cisco/secureclient/defenseclaw
+#   CONNECTORS_CSV comma-separated list of connectors (e.g. codex,claudecode,cursor)
+#   USER_LINES     newline-separated user:uid:gid:home lines (as produced by
+#                  enumerate_local_users)
+#
+# One `- ` block per (user × supported connector). Unsupported connectors
+# are skipped (they have no per-user setup path in the CLI). Agent version
+# is discovered per (user, connector) via discover_agent_version; an empty
+# version is rendered as an empty string — the guardian's reconcile will
+# emit a per-target failure surfaced in hook_guardian_state.json without
+# affecting other targets in the manifest.
+yaml_double_quoted_scalar() {
+  local value="$1"
+  case "${value}" in
+    *$'\n'*|*$'\r'*|*$'\t'*) return 1;;
+  esac
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "${value}"
+}
+
+render_targets_manifest() {
+  local support_dir="$1"
+  local connectors_csv="$2"
+  local user_lines="$3"
+  local runtime_dir="${support_dir}/runtime"
+
+  local -a connectors=()
+  local c
+  while IFS= read -r c; do
+    [[ -z "${c}" ]] && continue
+    connectors+=("${c}")
+  done < <(parse_connectors "${connectors_csv}" 2>/dev/null || true)
+
+  printf 'version: 1\n'
+  printf 'targets:\n'
+
+  if [[ ${#connectors[@]} -eq 0 ]]; then
+    return 0
+  fi
+  if [[ -z "${user_lines}" ]]; then
+    return 0
+  fi
+
+  local line name uid gid home ver q_name q_home q_connector q_ver
+  while IFS= read -r line; do
+    [[ -z "${line}" ]] && continue
+    name="${line%%:*}"
+    local rest="${line#*:}"
+    uid="${rest%%:*}"
+    rest="${rest#*:}"
+    gid="${rest%%:*}"
+    home="${rest#*:}"
+    [[ -n "${name}" && -n "${uid}" && -n "${gid}" && -n "${home}" ]] || continue
+    q_name="$(yaml_double_quoted_scalar "${name}")" || continue
+    q_home="$(yaml_double_quoted_scalar "${home}")" || continue
+
+    for c in "${connectors[@]}"; do
+      is_supported_connector "${c}" || continue
+      q_connector="$(yaml_double_quoted_scalar "${c}")" || continue
+      ver="$(DC_INSTALLER_TARGET_USER="${name}" discover_agent_version "${c}" "${home}" 2>/dev/null || true)"
+      q_ver="$(yaml_double_quoted_scalar "${ver}")" || q_ver='""'
+      # data_dir is intentionally omitted from each target block: the
+      # guardian's validateUserDataDir requires the data_dir to be inside
+      # the target user's home (internal/enterprisehooks/installer.go),
+      # but ${runtime_dir} is machine-wide root storage under SUPPORT_DIR.
+      # Letting the Install() layer default to ~/.defenseclaw per user is
+      # correct — that is where the connector's hook script and scoped
+      # token per-user artifacts live.
+      cat <<EOF
+  - user: ${q_name}
+    user_home: ${q_home}
+    uid: ${uid}
+    gid: ${gid}
+    connector: ${q_connector}
+    agent_version: ${q_ver}
+    enabled: true
+EOF
+    done
+  done <<< "${user_lines}"
 }
 
 # ---- config rendering --------------------------------------------------
