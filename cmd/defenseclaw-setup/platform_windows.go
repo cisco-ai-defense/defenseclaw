@@ -1091,6 +1091,7 @@ func registerInstalledAppAt(
 		previousState,
 		nil,
 		nil,
+		nil,
 	)
 }
 
@@ -1111,6 +1112,7 @@ func registerInstalledAppAtWithHook(
 		previousState,
 		beforeMutation,
 		nil,
+		nil,
 	)
 }
 
@@ -1119,11 +1121,20 @@ func registerInstalledAppAtWithHooks(
 	unsigned bool,
 	previousState *installState,
 	beforeExistingMutation func(),
+	afterExistingMutation func(),
 	beforeFreshPublication func(),
 ) error {
 	if !validSetupTransactionID(transactionID) {
 		return errors.New("refusing Apps & Features registration without a valid transaction identity")
 	}
+	values := newInstalledAppValues(
+		maintenancePath,
+		installRoot,
+		version,
+		transactionID,
+		unsigned,
+		estimateInstallKB(installRoot),
+	)
 	key, err := registry.OpenKey(
 		registry.CURRENT_USER,
 		registryPath+`\`+registryKey,
@@ -1148,26 +1159,18 @@ func registerInstalledAppAtWithHooks(
 		if beforeExistingMutation != nil {
 			beforeExistingMutation()
 		}
-		writeErr := writeInstalledAppValues(
-			key,
-			maintenancePath,
-			installRoot,
-			version,
-			transactionID,
-			unsigned,
-		)
+		writeErr := writeInstalledAppValuesSnapshot(key, values)
 		closeErr := key.Close()
 		if writeErr != nil || closeErr != nil {
 			return errors.Join(writeErr, closeErr)
 		}
-		matches, verifyErr := installedAppValuesMatchAt(
+		if afterExistingMutation != nil {
+			afterExistingMutation()
+		}
+		matches, verifyErr := installedAppValuesMatchAtSnapshot(
 			registryPath,
 			registryKey,
-			maintenancePath,
-			installRoot,
-			version,
-			transactionID,
-			unsigned,
+			values,
 		)
 		if verifyErr != nil {
 			return verifyErr
@@ -1192,7 +1195,7 @@ func registerInstalledAppAtWithHooks(
 	if err != nil {
 		return err
 	}
-	writeErr := writeInstalledAppValues(key, maintenancePath, installRoot, version, transactionID, unsigned)
+	writeErr := writeInstalledAppValuesSnapshot(key, values)
 	closeErr := key.Close()
 	if writeErr != nil || closeErr != nil {
 		_ = registry.DeleteKey(registry.CURRENT_USER, stagingPath)
@@ -1219,14 +1222,10 @@ func registerInstalledAppAtWithHooks(
 		// RegRenameKey may become visible before a later registry I/O error.
 		// A complete transaction-owned destination can be re-flushed safely;
 		// anything else remains pending without touching the concurrent key.
-		matches, inspectErr := installedAppValuesMatchAt(
+		matches, inspectErr := installedAppValuesMatchAtSnapshot(
 			registryPath,
 			registryKey,
-			maintenancePath,
-			installRoot,
-			version,
-			transactionID,
-			unsigned,
+			values,
 		)
 		if inspectErr != nil || !matches {
 			// Retain the transaction-owned pending key as evidence. The next
@@ -1238,14 +1237,10 @@ func registerInstalledAppAtWithHooks(
 	if err := flushRegistryKey(parent); err != nil {
 		return err
 	}
-	matches, err := installedAppValuesMatchAt(
+	matches, err := installedAppValuesMatchAtSnapshot(
 		registryPath,
 		registryKey,
-		maintenancePath,
-		installRoot,
-		version,
-		transactionID,
-		unsigned,
+		values,
 	)
 	if err != nil {
 		return err
@@ -1256,47 +1251,88 @@ func registerInstalledAppAtWithHooks(
 	return nil
 }
 
+type installedAppValues struct {
+	strings  map[string]string
+	integers map[string]uint64
+}
+
+func newInstalledAppValues(
+	maintenancePath, installRoot, version, transactionID string,
+	unsigned bool,
+	estimatedSize uint32,
+) installedAppValues {
+	displayName := productName
+	if unsigned {
+		displayName += " (Unsigned Local Test Build)"
+	}
+	return installedAppValues{
+		strings: map[string]string{
+			installedAppOwnerValue: transactionID,
+			"InstallLocation":      installRoot,
+			"DisplayName":          displayName,
+			"DisplayVersion":       version,
+			"Publisher":            defaultPublisher,
+			"DisplayIcon":          filepath.Join(installRoot, "bin", "defenseclaw.exe"),
+			"UninstallString":      quote(maintenancePath) + " /uninstall",
+			"QuietUninstallString": quote(maintenancePath) + " /uninstall /quiet",
+			"ModifyPath":           quote(maintenancePath) + " /repair",
+			"URLInfoAbout":         "https://github.com/cisco-ai-defense/defenseclaw",
+		},
+		integers: map[string]uint64{
+			"NoModify":      0,
+			"EstimatedSize": uint64(estimatedSize),
+		},
+	}
+}
+
 func writeInstalledAppValues(
 	key registry.Key,
 	maintenancePath, installRoot, version, transactionID string,
 	unsigned bool,
 ) error {
-	displayName := productName
-	if unsigned {
-		displayName += " (Unsigned Local Test Build)"
-	}
+	return writeInstalledAppValuesSnapshot(key, newInstalledAppValues(
+		maintenancePath,
+		installRoot,
+		version,
+		transactionID,
+		unsigned,
+		estimateInstallKB(installRoot),
+	))
+}
+
+func writeInstalledAppValuesSnapshot(key registry.Key, values installedAppValues) error {
 	// Publish the ownership pair first and flush it before decorative values.
 	// Existing owned keys remain repairable after every subsequent boundary;
 	// fresh keys are not made visible until the entire staged key is complete.
-	for _, pair := range [][2]string{
-		{installedAppOwnerValue, transactionID},
-		{"InstallLocation", installRoot},
+	for _, name := range []string{
+		installedAppOwnerValue,
+		"InstallLocation",
 	} {
-		if err := key.SetStringValue(pair[0], pair[1]); err != nil {
+		if err := key.SetStringValue(name, values.strings[name]); err != nil {
 			return err
 		}
 	}
 	if err := flushRegistryKey(key); err != nil {
 		return err
 	}
-	for _, pair := range [][2]string{
-		{"DisplayName", displayName},
-		{"DisplayVersion", version},
-		{"Publisher", defaultPublisher},
-		{"DisplayIcon", filepath.Join(installRoot, "bin", "defenseclaw.exe")},
-		{"UninstallString", quote(maintenancePath) + " /uninstall"},
-		{"QuietUninstallString", quote(maintenancePath) + " /uninstall /quiet"},
-		{"ModifyPath", quote(maintenancePath) + " /repair"},
-		{"URLInfoAbout", "https://github.com/cisco-ai-defense/defenseclaw"},
+	for _, name := range []string{
+		"DisplayName",
+		"DisplayVersion",
+		"Publisher",
+		"DisplayIcon",
+		"UninstallString",
+		"QuietUninstallString",
+		"ModifyPath",
+		"URLInfoAbout",
 	} {
-		if err := key.SetStringValue(pair[0], pair[1]); err != nil {
+		if err := key.SetStringValue(name, values.strings[name]); err != nil {
 			return err
 		}
 	}
-	if err := key.SetDWordValue("NoModify", 0); err != nil {
+	if err := key.SetDWordValue("NoModify", uint32(values.integers["NoModify"])); err != nil {
 		return err
 	}
-	if err := key.SetDWordValue("EstimatedSize", estimateInstallKB(installRoot)); err != nil {
+	if err := key.SetDWordValue("EstimatedSize", uint32(values.integers["EstimatedSize"])); err != nil {
 		return err
 	}
 	return flushRegistryKey(key)
@@ -1307,23 +1343,18 @@ func installedAppValuesMatchKey(
 	maintenancePath, installRoot, version, transactionID string,
 	unsigned bool,
 ) (bool, error) {
-	displayName := productName
-	if unsigned {
-		displayName += " (Unsigned Local Test Build)"
-	}
-	expectedStrings := map[string]string{
-		installedAppOwnerValue: transactionID,
-		"InstallLocation":      installRoot,
-		"DisplayName":          displayName,
-		"DisplayVersion":       version,
-		"Publisher":            defaultPublisher,
-		"DisplayIcon":          filepath.Join(installRoot, "bin", "defenseclaw.exe"),
-		"UninstallString":      quote(maintenancePath) + " /uninstall",
-		"QuietUninstallString": quote(maintenancePath) + " /uninstall /quiet",
-		"ModifyPath":           quote(maintenancePath) + " /repair",
-		"URLInfoAbout":         "https://github.com/cisco-ai-defense/defenseclaw",
-	}
-	for name, want := range expectedStrings {
+	return installedAppValuesMatchKeySnapshot(key, newInstalledAppValues(
+		maintenancePath,
+		installRoot,
+		version,
+		transactionID,
+		unsigned,
+		estimateInstallKB(installRoot),
+	))
+}
+
+func installedAppValuesMatchKeySnapshot(key registry.Key, values installedAppValues) (bool, error) {
+	for name, want := range values.strings {
 		got, valueType, err := key.GetStringValue(name)
 		if err != nil {
 			if err == registry.ErrNotExist {
@@ -1335,10 +1366,7 @@ func installedAppValuesMatchKey(
 			return false, nil
 		}
 	}
-	for name, want := range map[string]uint64{
-		"NoModify":      0,
-		"EstimatedSize": uint64(estimateInstallKB(installRoot)),
-	} {
+	for name, want := range values.integers {
 		got, valueType, err := key.GetIntegerValue(name)
 		if err != nil {
 			if err == registry.ErrNotExist {
@@ -1357,6 +1385,24 @@ func installedAppValuesMatchAt(
 	registryPath, registryKey, maintenancePath, installRoot, version, transactionID string,
 	unsigned bool,
 ) (bool, error) {
+	return installedAppValuesMatchAtSnapshot(
+		registryPath,
+		registryKey,
+		newInstalledAppValues(
+			maintenancePath,
+			installRoot,
+			version,
+			transactionID,
+			unsigned,
+			estimateInstallKB(installRoot),
+		),
+	)
+}
+
+func installedAppValuesMatchAtSnapshot(
+	registryPath, registryKey string,
+	values installedAppValues,
+) (bool, error) {
 	key, err := registry.OpenKey(
 		registry.CURRENT_USER,
 		registryPath+`\`+registryKey,
@@ -1368,14 +1414,7 @@ func installedAppValuesMatchAt(
 	if err != nil {
 		return false, err
 	}
-	matches, matchErr := installedAppValuesMatchKey(
-		key,
-		maintenancePath,
-		installRoot,
-		version,
-		transactionID,
-		unsigned,
-	)
+	matches, matchErr := installedAppValuesMatchKeySnapshot(key, values)
 	return matches, errors.Join(matchErr, key.Close())
 }
 
