@@ -1604,9 +1604,10 @@ print('packaged TUI state and audit export DACLs are private')
 
 function Set-MinimalGatewayAcceptanceConfig([string]$Python) {
     # Installer lifecycle acceptance needs a real managed daemon, but it does
-    # not need to wait for connector scanners or the guardrail proxy. Those
-    # subsystems have their own required Windows suites and can make startup
-    # depend on unrelated host inventory.
+    # not need to wait for connector scanners, the guardrail proxy, or an
+    # external observability collector. Those subsystems have their own
+    # required Windows suites and can make startup depend on unrelated host
+    # inventory or intentionally absent test services.
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
     try {
         $listener.Start()
@@ -1616,13 +1617,33 @@ function Set-MinimalGatewayAcceptanceConfig([string]$Python) {
     }
     $code = @'
 import sys
-from defenseclaw.config import load
+from defenseclaw.config import config_path_for_data_dir, load
+from defenseclaw.observability.v8_config import load_validate_v8
+from defenseclaw.observability.v8_writer import mutate_v8_config
+from defenseclaw.observability.v8_yaml import V8YAMLMutation
 
 cfg = load()
 cfg.guardrail.enabled = False
 cfg.gateway.watcher.enabled = False
 cfg.gateway.api_port = int(sys.argv[1])
 cfg.save()
+config_path = config_path_for_data_dir(cfg.data_dir)
+source = load_validate_v8(
+    config_path.read_bytes(), source_name=str(config_path)
+).source
+destinations = (source.get("observability") or {}).get("destinations") or []
+network_destination_kinds = frozenset({"http_jsonl", "otlp", "splunk_hec"})
+mutations = tuple(
+    V8YAMLMutation.set(
+        ("observability", "destinations", index, "enabled"), False
+    )
+    for index, destination in enumerate(destinations)
+    if isinstance(destination, dict)
+    and destination.get("kind") in network_destination_kinds
+    and destination.get("enabled", True)
+)
+if mutations:
+    mutate_v8_config(config_path, mutations, data_dir=cfg.data_dir)
 print(f'packaged gateway fixture uses isolated API port {cfg.gateway.api_port}')
 '@
     Invoke-Installed $Python @('-I', '-c', $code, $apiPort) -Timeout 60 | Out-Null

@@ -262,6 +262,22 @@ def test_setup_acceptance_exercises_atomic_observability_v8_upgrade() -> None:
         assert contract in acceptance
 
 
+def test_minimal_gateway_fixture_disables_external_v8_destinations() -> None:
+    minimal = _function("Set-MinimalGatewayAcceptanceConfig")
+
+    for contract in (
+        "config_path_for_data_dir",
+        "load_validate_v8",
+        "mutate_v8_config",
+        "V8YAMLMutation.set",
+        '("observability", "destinations", index, "enabled")',
+        'frozenset({"http_jsonl", "otlp", "splunk_hec"})',
+        'destination.get("enabled", True)',
+    ):
+        assert contract in minimal
+    assert minimal.index("cfg.save()") < minimal.index("mutate_v8_config(")
+
+
 def test_setup_uninstall_acceptance_uses_validated_roster_and_backup_markers() -> None:
     acceptance = _function("Invoke-SetupAcceptance")
     authority = _function("Assert-NativeConnectorCleanupAuthorityPresent")
