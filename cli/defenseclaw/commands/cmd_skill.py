@@ -561,8 +561,10 @@ def _list_openclaw_skills_full(
     this module continues to work unchanged.
     """
     if app is not None:
-        active = app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
-        resolved = connector or active
+        active = _normalize_runtime_connector(
+            app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+        )
+        resolved = _normalize_runtime_connector(connector or active)
         if resolved != "openclaw":
             from defenseclaw.skill_list import list_skills as _adapter_list
             return {"skills": _adapter_list(app.cfg, connector=resolved)}
@@ -583,7 +585,8 @@ def _list_openclaw_skills_full(
         # `openclaw` binary isn't on PATH (sandbox installs, CI, etc.).
         if app is not None and hasattr(app.cfg, "skill_dirs"):
             from defenseclaw.skill_list import list_skills as _adapter_list
-            return {"skills": _adapter_list(app.cfg, prefer_cli=False, connector=connector or None)}
+            resolved = _normalize_runtime_connector(connector or "openclaw")
+            return {"skills": _adapter_list(app.cfg, prefer_cli=False, connector=resolved)}
         return None
     try:
         return json.loads(out)
@@ -605,8 +608,10 @@ def _get_openclaw_skill_info(
     configured connector's skill; defaults to the resolved connector context.
     """
     if app is not None:
-        resolved = connector or (
-            app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+        resolved = _normalize_runtime_connector(
+            connector or (
+                app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+            )
         )
         if resolved != "openclaw":
             from defenseclaw.skill_list import list_skills as _adapter_list
@@ -715,10 +720,10 @@ def _latest_skill_scan_for_connector(
 def _build_actions_map(store, connector: str = "") -> dict[str, Any]:
     """Build a map of skill-name -> effective ActionEntry from the DB.
 
-    Resolves most-specific-wins per name (SK-4): the connector-scoped row
-    overrides the global row when ``connector`` is given, so each connector's
-    table/card shows that connector's effective actions. ``connector=""``
-    returns only the global rows (today's behavior).
+    Resolves most-specific-wins per action field (SK-4): a non-empty field in
+    the connector-scoped row overrides that field in the global row. Empty
+    scoped fields inherit their global value. ``connector=""`` returns only
+    the global rows (today's behavior).
     """
     from defenseclaw.models import ActionEntry, ActionState
     actions_map: dict[str, ActionEntry] = {}
@@ -732,10 +737,34 @@ def _build_actions_map(store, connector: str = "") -> dict[str, Any]:
         if e.connector == "" and e.target_name not in actions_map:
             actions_map[e.target_name] = e
     if connector:
+        connector = _normalize_runtime_connector(connector)
         seen_scoped: set[str] = set()
         for e in entries:
             if e.connector == connector and e.target_name not in seen_scoped:
-                actions_map[e.target_name] = e
+                global_entry = actions_map.get(e.target_name)
+                if global_entry is None:
+                    actions_map[e.target_name] = e
+                else:
+                    scoped_file = e.actions.file
+                    actions_map[e.target_name] = ActionEntry(
+                        id=e.id,
+                        target_type=e.target_type,
+                        target_name=e.target_name,
+                        source_path=e.source_path or global_entry.source_path,
+                        actions=ActionState(
+                            file=scoped_file or global_entry.actions.file,
+                            runtime=e.actions.runtime or global_entry.actions.runtime,
+                            install=e.actions.install or global_entry.actions.install,
+                        ),
+                        reason=e.reason or global_entry.reason,
+                        updated_at=e.updated_at,
+                        # This metadata is used only to decide whether a
+                        # missing filesystem row may be a connector-owned
+                        # physical-quarantine phantom. Preserve the source of
+                        # the effective file field rather than relabeling a
+                        # global quarantine as connector-scoped.
+                        connector=e.connector if scoped_file else global_entry.connector,
+                    )
                 seen_scoped.add(e.target_name)
 
     # Physical quarantine is a lifecycle state, not an enforcement decision.
@@ -784,7 +813,7 @@ def _scan_entry_matches_connector(
         return False
     real_target = os.path.realpath(target)
     try:
-        roots = app.cfg.skill_dirs(connector)
+        roots = app.cfg.skill_dirs(_normalize_runtime_connector(connector))
     except Exception:  # noqa: BLE001 — fail closed for explicit connector scope.
         return False
     return any(
@@ -822,7 +851,9 @@ def _skill_info_card(
     scoped_action = None
     if suppress_global_action_only and connector and app.store is not None:
         try:
-            scoped_action = app.store.get_action("skill", skill_name, connector)
+            scoped_action = app.store.get_action(
+                "skill", skill_name, _normalize_runtime_connector(connector),
+            )
         except Exception:
             scoped_action = None
 
@@ -845,10 +876,12 @@ def _skill_info_card(
         info_map["connector"] = connector
     if scan_entry is not None:
         info_map["scan"] = scan_entry
-    if skill_name in actions_map:
-        ae = actions_map[skill_name]
+    action_entry = actions_map.get(skill_name)
+    if action_entry is not None:
+        ae = action_entry
         if not ae.actions.is_empty():
             info_map["actions"] = ae.actions.to_dict()
+    info_map["disabled"] = _skill_effectively_disabled(info_map, action_entry)
     return info_map
 
 
@@ -867,6 +900,7 @@ def _print_skill_info_card(
     if info_map.get("filePath"):
         click.echo(f"{ux.bold('File:')}        {info_map['filePath']}")
     click.echo(f"{ux.bold('Eligible:')}    {info_map.get('eligible', False)}")
+    click.echo(f"{ux.bold('Disabled:')}    {info_map.get('disabled', False)}")
     click.echo(f"{ux.bold('Bundled:')}     {info_map.get('bundled', False)}")
     if info_map.get("homepage"):
         click.echo(f"{ux.bold('Homepage:')}    {info_map['homepage']}")
@@ -912,6 +946,15 @@ def _skill_status(s: dict[str, Any]) -> str:
     if s.get("eligible"):
         return "active"
     return "inactive"
+
+
+def _skill_effectively_disabled(
+    skill_data: dict[str, Any], action_entry: Any = None,
+) -> bool:
+    """Combine connector discovery state with effective runtime policy."""
+    return bool(skill_data.get("disabled")) or bool(
+        action_entry and action_entry.actions.runtime == "disable"
+    )
 
 
 def _skill_status_display(
@@ -1055,7 +1098,7 @@ def _collect_skills_for_connector(
     as the single-connector path did.
     """
     oc_list = _list_openclaw_skills_full(app, connector=connector)
-    skills = oc_list.get("skills", []) if oc_list else []
+    skills = [dict(s) for s in oc_list.get("skills", [])] if oc_list else []
 
     known_names = {s.get("name", "") for s in skills}
     for name, ae in actions_map.items():
@@ -1064,7 +1107,8 @@ def _collect_skills_for_connector(
         # absent from that walk, so retain only that connector-owned phantom;
         # never leak a global/peer enforcement row into this connector.
         if connector != "openclaw" and not (
-            ae.connector == connector and ae.actions.file == "quarantine"
+            _normalize_runtime_connector(ae.connector) == _normalize_runtime_connector(connector)
+            and ae.actions.file == "quarantine"
         ):
             continue
         if name not in known_names:
@@ -1095,6 +1139,12 @@ def _collect_skills_for_connector(
                 "homepage": "",
             })
             known_names.add(name)
+
+    for discovered in skills:
+        name = discovered.get("name", "")
+        discovered["disabled"] = _skill_effectively_disabled(
+            discovered, actions_map.get(name),
+        )
 
     return skills
 

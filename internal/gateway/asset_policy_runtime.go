@@ -54,6 +54,11 @@ type skillRuntimeProbe struct {
 	RawName string
 	Surface string
 	Matched bool
+	// RuntimeDisableOnly limits an identity inferred from incomplete or
+	// ambiguous connector metadata to the exact durable runtime-disable
+	// lookup. It must not widen ordinary asset-policy matching or record a
+	// loaded asset when no disable record exists.
+	RuntimeDisableOnly bool
 }
 
 type runtimeAssetDecision struct {
@@ -87,6 +92,15 @@ func (a *APIServer) claudeCodePromptExpansionAssetDecisions(ctx context.Context,
 		return a.claudeCodeSlashCommandAssetDecisions(ctx, req)
 	case "mcp_prompt":
 		return a.claudeCodeMCPPromptAssetDecisions(ctx, req)
+	case "":
+		// command metadata is optional in the Claude hook contract. An exact
+		// leading slash token is sufficient for a runtime-disable-only lookup;
+		// the strict parser below keeps ordinary prompts and MCP/plugin-shaped
+		// names out of the standalone-skill namespace.
+		if claudeCodePromptSlashCommandName(req.Prompt) != "" {
+			return a.claudeCodeSlashCommandAssetDecisions(ctx, req)
+		}
+		return nil
 	default:
 		return nil
 	}
@@ -94,26 +108,72 @@ func (a *APIServer) claudeCodePromptExpansionAssetDecisions(ctx context.Context,
 
 func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, req claudeCodeHookRequest) []runtimeAssetDecision {
 	targetType := slashCommandAssetType(req.CommandSource)
-	if targetType == "" {
-		return nil
+	trustedAssetPolicySource := claudeCodeSlashSourceTrustsAssetPolicy(req.CommandSource)
+	commandName := strings.TrimSpace(req.CommandName)
+	promptName := claudeCodePromptSlashCommandName(req.Prompt)
+	commandIdentity, commandOK := claudeCodeSlashAssetIdentity(
+		targetType, commandName,
+	)
+	promptIdentity, promptOK := claudeCodeSlashAssetIdentity(
+		targetType, promptName,
+	)
+	promptPresent := strings.TrimSpace(req.Prompt) != ""
+	identityMalformed := trustedAssetPolicySource && (commandName == "" || !commandOK ||
+		(promptPresent && !promptOK) ||
+		(commandOK && promptOK && !commandIdentity.sameAsset(promptIdentity)))
+
+	identities := make([]claudeCodeSlashIdentity, 0, 2)
+	if commandOK {
+		identities = append(identities, commandIdentity)
 	}
-	name, rawName := claudeCodeSlashCommandAssetName(targetType, req.CommandName)
-	if name == "" {
-		return nil
+	if promptOK && (!commandOK || !commandIdentity.sameAsset(promptIdentity)) {
+		identities = append(identities, promptIdentity)
 	}
-	probe := skillRuntimeProbe{
-		TargetType: targetType,
-		SkillName:  name,
-		ToolName:   strings.TrimSpace(req.CommandName),
-		RawName:    rawName,
-		SourcePath: strings.TrimSpace(req.CommandSource),
-		Surface:    "prompt_expansion",
-		Matched:    true,
+
+	// Only literal skill/plugin provenance with a non-conflicting identity
+	// retains the existing full asset-policy behavior. User/project/missing
+	// provenance is shared with custom commands, so it may correlate only to
+	// an exact runtime-disable record. On disagreement, probe both strict
+	// candidates the same way so a spoofed benign field cannot bypass a
+	// disabled identity; neither candidate is attributed when neither is
+	// disabled.
+	runtimeDisableOnly := !trustedAssetPolicySource || identityMalformed
+	for _, identity := range identities {
+		probe := skillRuntimeProbe{
+			TargetType:         identity.targetType,
+			SkillName:          identity.name,
+			ToolName:           identity.toolName,
+			RawName:            identity.rawName,
+			SourcePath:         canonicalClaudeCodeSlashSource(req.CommandSource),
+			Surface:            "prompt_expansion",
+			Matched:            true,
+			RuntimeDisableOnly: runtimeDisableOnly,
+		}
+		if decision, matched := a.evaluateNativeRuntimeSkillSelection(
+			ctx, "claudecode", req.SessionID, req.HookEventName,
+			runtimeProvenanceClaudeExpansion, probe,
+		); matched {
+			return []runtimeAssetDecision{{targetType: identity.targetType, decision: decision}}
+		}
 	}
-	if decision, matched := a.evaluateNativeRuntimeSkillSelection(
-		ctx, "claudecode", req.SessionID, req.HookEventName,
-		runtimeProvenanceClaudeExpansion, probe,
-	); matched {
+	if identityMalformed {
+		name := "unresolved"
+		if len(identities) > 0 {
+			name = identities[0].name
+		}
+		probe := skillRuntimeProbe{
+			TargetType: targetType,
+			SkillName:  name,
+			SourcePath: targetType,
+			Surface:    "prompt_expansion",
+			Matched:    true,
+		}
+		decision := a.runtimeAssetIdentityDecision(
+			targetType, name, "claudecode", "prompt_expansion",
+		)
+		a.emitRuntimeSkillAssetPolicyDecision(
+			ctx, decision, "claudecode", req.HookEventName, probe,
+		)
 		return []runtimeAssetDecision{{targetType: targetType, decision: decision}}
 	}
 	return nil
@@ -222,8 +282,18 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 	}
 	targetType := runtimeSkillAssetTargetType(probe)
 	runtimeSurface := coalesceRuntimeSurface(probe.Surface, "hook")
+	if probe.RuntimeDisableOnly && (a == nil || a.store == nil) {
+		return runtimeAssetDisableBlockDecision(
+			targetType, probe.SkillName, connector, runtimeSurface,
+			"runtime provenance store is unavailable - failing closed",
+			"runtime-provenance-error",
+		), true
+	}
 	if decision, disabled := a.runtimeAssetDisableDecision(targetType, probe.SkillName, connector, runtimeSurface); disabled {
 		return decision, true
+	}
+	if probe.RuntimeDisableOnly {
+		return config.AssetPolicyDecision{}, false
 	}
 	if a.scannerCfg == nil {
 		return config.AssetPolicyDecision{}, false
@@ -286,6 +356,9 @@ func (a *APIServer) evaluateNativeRuntimeSkillSelection(
 	probe skillRuntimeProbe,
 ) (config.AssetPolicyDecision, bool) {
 	decision, matched := a.runtimeSkillAssetPolicyDecision(connector, probe)
+	if probe.RuntimeDisableOnly && !matched {
+		return decision, false
+	}
 	state := audit.RuntimeAssetSelected
 	// Claude's native expansion event is emitted only after the selected
 	// skill/command content has actually been expanded into the prompt. That
@@ -373,6 +446,36 @@ func runtimeAssetDisableBlockDecision(targetType, name, connector, runtimeSurfac
 		Reason:             reason,
 		Source:             source,
 		RegistryStatus:     "disabled",
+		RegistryConfigured: false,
+		TargetType:         targetType,
+		TargetName:         name,
+		Connector:          connector,
+		RuntimeSurface:     runtimeSurface,
+	}
+}
+
+func (a *APIServer) runtimeAssetIdentityDecision(targetType, name, connector, runtimeSurface string) config.AssetPolicyDecision {
+	mode := config.AssetPolicyModeObserve
+	if a != nil && a.scannerCfg != nil && assetRuntimeModeIsAction(
+		a.scannerCfg.EffectiveAssetPolicyModeForConnector(connector),
+	) {
+		mode = config.AssetPolicyModeAction
+	}
+	action := "allow"
+	wouldBlock := true
+	if mode == config.AssetPolicyModeAction {
+		action = "block"
+		wouldBlock = false
+	}
+	return config.AssetPolicyDecision{
+		Enabled:            true,
+		Mode:               mode,
+		Action:             action,
+		RawAction:          "block",
+		WouldBlock:         wouldBlock,
+		Reason:             "Claude Code slash-command asset identity is missing, malformed, or inconsistent - failing closed",
+		Source:             "runtime-identity-error",
+		RegistryStatus:     "invalid",
 		RegistryConfigured: false,
 		TargetType:         targetType,
 		TargetName:         name,
@@ -510,11 +613,81 @@ func mcpProbeFromFields(serverName, toolName string, toolInput map[string]interf
 
 func slashCommandAssetType(commandSource string) string {
 	switch strings.ToLower(strings.TrimSpace(commandSource)) {
-	case "skill", "plugin":
-		return strings.ToLower(strings.TrimSpace(commandSource))
+	case "skill", "policysettings", "usersettings", "projectsettings", "bundled":
+		return "skill"
+	case "plugin":
+		return "plugin"
 	default:
 		return ""
 	}
+}
+
+func claudeCodeSlashSourceTrustsAssetPolicy(commandSource string) bool {
+	switch strings.ToLower(strings.TrimSpace(commandSource)) {
+	case "skill", "plugin":
+		return true
+	default:
+		return false
+	}
+}
+
+func canonicalClaudeCodeSlashSource(commandSource string) string {
+	switch strings.ToLower(strings.TrimSpace(commandSource)) {
+	case "skill":
+		return "skill"
+	case "plugin":
+		return "plugin"
+	case "policysettings":
+		return "policySettings"
+	case "usersettings":
+		return "userSettings"
+	case "projectsettings":
+		return "projectSettings"
+	case "bundled":
+		return "bundled"
+	default:
+		return ""
+	}
+}
+
+type claudeCodeSlashIdentity struct {
+	targetType string
+	name       string
+	rawName    string
+	toolName   string
+	selector   string
+}
+
+func (i claudeCodeSlashIdentity) sameAsset(other claudeCodeSlashIdentity) bool {
+	return i.targetType == other.targetType && i.name == other.name && i.selector == other.selector
+}
+
+func claudeCodePromptSlashCommandName(prompt string) string {
+	fields := strings.Fields(strings.TrimSpace(prompt))
+	if len(fields) == 0 || !strings.HasPrefix(fields[0], "/") {
+		return ""
+	}
+	return fields[0]
+}
+
+func claudeCodeSlashAssetIdentity(targetType, rawName string) (claudeCodeSlashIdentity, bool) {
+	resolvedType := targetType
+	if resolvedType == "" {
+		resolvedType = "skill"
+	}
+	name, canonicalRawName := claudeCodeSlashCommandAssetName(resolvedType, rawName)
+	if name == "" {
+		return claudeCodeSlashIdentity{}, false
+	}
+	selector := strings.TrimSpace(rawName)
+	selector = strings.TrimPrefix(selector, "/")
+	return claudeCodeSlashIdentity{
+		targetType: resolvedType,
+		name:       name,
+		rawName:    canonicalRawName,
+		toolName:   strings.TrimSpace(rawName),
+		selector:   selector,
+	}, true
 }
 
 // claudeCodeSlashCommandAssetName returns the asset identifier used for
@@ -523,16 +696,40 @@ func slashCommandAssetType(commandSource string) string {
 // "plugin-id:command-id", while plugin policies are keyed by the bare plugin id.
 // Skill slash-command names retain their existing semantics.
 func claudeCodeSlashCommandAssetName(targetType, commandName string) (string, string) {
-	name := normalizeSkillRuntimeName(commandName)
+	rawName := strings.TrimSpace(commandName)
+	if rawName == "" {
+		return "", ""
+	}
+	name := rawName
+	if strings.HasPrefix(name, "/") {
+		name = strings.TrimPrefix(name, "/")
+	}
 	if !strings.EqualFold(strings.TrimSpace(targetType), "plugin") {
+		if !validNativeSkillSelectionName(name) {
+			return "", ""
+		}
+		if name != rawName {
+			return name, rawName
+		}
 		return name, ""
 	}
 	pluginID, commandID, namespaced := strings.Cut(name, ":")
-	pluginID = strings.TrimSpace(pluginID)
-	if !namespaced || pluginID == "" || strings.TrimSpace(commandID) == "" {
-		return name, ""
+	if namespaced {
+		if pluginID != strings.TrimSpace(pluginID) || commandID != strings.TrimSpace(commandID) {
+			return "", ""
+		}
+		if !validNativeSkillSelectionName(pluginID) || !validNativeSkillSelectionName(commandID) {
+			return "", ""
+		}
+		return pluginID, rawName
 	}
-	return pluginID, strings.TrimSpace(commandName)
+	if !validNativeSkillSelectionName(name) {
+		return "", ""
+	}
+	if name != rawName {
+		return name, rawName
+	}
+	return name, ""
 }
 
 func mcpPromptServerName(commandSource, commandName string) string {
