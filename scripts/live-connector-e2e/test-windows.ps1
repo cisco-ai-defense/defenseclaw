@@ -267,9 +267,13 @@ private-secret-name = "DefenseClaw must remain redacted"
     $originalCodexHome = [Environment]::GetEnvironmentVariable('CODEX_HOME')
     $originalClaudeHome = [Environment]::GetEnvironmentVariable('CLAUDE_CONFIG_DIR')
     try {
-        $resolverProfile = Join-Path $temp 'resolver-profile'
-        $resolverCodexHome = Join-Path $temp 'resolver-codex-home'
-        $resolverClaudeHome = Join-Path $temp 'resolver-claude-home'
+        $resolverRoot = Join-Path $temp 'resolver-root'
+        $resolverProfile = Join-Path $resolverRoot 'profile'
+        $resolverCodexHome = Join-Path $resolverRoot 'codex-home'
+        $resolverClaudeHome = Join-Path $resolverRoot 'claude-home'
+        foreach ($path in @($resolverProfile, $resolverCodexHome, $resolverClaudeHome)) {
+            [IO.Directory]::CreateDirectory($path) | Out-Null
+        }
         $env:USERPROFILE = $resolverProfile
         $env:CODEX_HOME = $resolverCodexHome
         $env:CLAUDE_CONFIG_DIR = $resolverClaudeHome
@@ -281,6 +285,16 @@ private-secret-name = "DefenseClaw must remain redacted"
             [IO.Path]::GetFullPath($resolverClaudeHome),
             [StringComparison]::OrdinalIgnoreCase
         )) 'Claude effective home honors CLAUDE_CONFIG_DIR'
+        Assert-PackagedConnectorHomes $resolverRoot $resolverProfile
+        Assert-True ($env:CODEX_HOME -eq [IO.Path]::GetFullPath($resolverCodexHome) -and
+            $env:CLAUDE_CONFIG_DIR -eq [IO.Path]::GetFullPath($resolverClaudeHome)) `
+            'packaged connector home guard preserves exact installer-recorded homes'
+        $env:CODEX_HOME = Join-Path $temp 'operator-codex-home'
+        [IO.Directory]::CreateDirectory($env:CODEX_HOME) | Out-Null
+        $escapedHomeRejected = $false
+        try { Assert-PackagedConnectorHomes $resolverRoot $resolverProfile }
+        catch { $escapedHomeRejected = $_.Exception.Message -match 'strict children of StateRoot' }
+        Assert-True $escapedHomeRejected 'packaged connector home guard rejects an operator path outside StateRoot'
         Remove-Item Env:CODEX_HOME -ErrorAction SilentlyContinue
         Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue
         Assert-True ((Resolve-EffectiveConnectorHome codex).Equals(
@@ -1211,9 +1225,14 @@ private-secret-name = "DefenseClaw must remain redacted"
     Assert-True ($ciWorkflowText -notmatch '(?m)^  windows-(hook-path|installer-smoke):') 'legacy partial Windows jobs were removed'
     Assert-True ($harnessText -notmatch '(?i)\bwsl(?:\.exe)?\b|git bash|/bin/|Get-Command\s+(?:jq|tail|curl)|Invoke-Tool\s+''(?:jq|tail|curl)''') 'native harness has no WSL, Git Bash, or Unix utility dependency'
     Assert-True ($harnessText.Contains('$env:DEFENSECLAW_CONFIG = Join-Path $env:DEFENSECLAW_HOME ''config.yaml''') -and
-        $harnessText.Contains('$env:CODEX_HOME = Join-Path $env:USERPROFILE ''.codex''') -and
-        $harnessText.Contains('$env:CLAUDE_CONFIG_DIR = Join-Path $env:USERPROFILE ''.claude''')) `
-        'native harness binds every authoritative config/home override to its disposable profile'
+        $harnessText -match '(?s)if \(\[string\]::IsNullOrWhiteSpace\(\$NativeDataRoot\)\) \{\s*\$env:CODEX_HOME = Join-Path \$env:USERPROFILE ''\.codex''\s*\$env:CLAUDE_CONFIG_DIR = Join-Path \$env:USERPROFILE ''\.claude''\s*\} else \{\s*Assert-PackagedConnectorHomes \$StateRoot \$HomeRoot\s*\}') `
+        'native harness preserves packaged connector homes and otherwise binds disposable defaults'
+    $packagedHomeGuard = [regex]::Match($harnessText, '(?s)function Assert-PackagedConnectorHomes\b.*?\n\}').Value
+    Assert-True ($packagedHomeGuard -match 'Assert-WindowsNativePathsDisjoint' -and
+        $packagedHomeGuard -match 'Test-PathWithin' -and
+        $packagedHomeGuard -match 'Assert-DisposableNoReparseAncestors' -and
+        $packagedHomeGuard -match '-RequireExists') `
+        'packaged connector homes are disjoint, contained, existing, and non-reparse'
     Assert-True ($harnessText -match 'timeout-handling' -and $harnessText -match 'telemetry pass') 'contract records timeout and telemetry evidence'
     foreach ($rule in @(
         'CMD-WIN-REMOVE-ITEM-RF', 'CMD-WIN-RMDIR-SQ', 'CMD-WIN-IWR-IEX', 'CMD-WIN-REG-PERSIST',

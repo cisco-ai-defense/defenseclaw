@@ -22,6 +22,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\windows-native-paths.ps1')
+. (Join-Path $PSScriptRoot '..\windows-disposable-user-safety.ps1')
 
 function Get-SecretValues {
     $names = @(
@@ -67,6 +69,29 @@ function Get-EffectiveConnectorConfigPath(
 ) {
     $fileName = if ($ConnectorName -eq 'codex') { 'managed_config.toml' } else { 'settings.json' }
     return Join-Path (Resolve-EffectiveConnectorHome $ConnectorName) $fileName
+}
+
+function Assert-PackagedConnectorHomes([string]$Root, [string]$ProfileHome) {
+    $codexHome = [Environment]::GetEnvironmentVariable('CODEX_HOME')
+    $claudeHome = [Environment]::GetEnvironmentVariable('CLAUDE_CONFIG_DIR')
+    $homes = @(Assert-WindowsNativePathsDisjoint @(
+        $ProfileHome,
+        $codexHome,
+        $claudeHome
+    ))
+    $rootPath = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    foreach ($connectorHome in $homes) {
+        if (-not (Test-PathWithin $connectorHome $rootPath)) {
+            throw "packaged connector homes must be strict children of StateRoot: $connectorHome"
+        }
+        $null = Assert-DisposableNoReparseAncestors -Path $connectorHome `
+            -AllowedRoot $rootPath -RequireExists
+        if (-not (Test-Path -LiteralPath $connectorHome -PathType Container)) {
+            throw "packaged connector home is not a directory: $connectorHome"
+        }
+    }
+    $env:CODEX_HOME = $homes[1]
+    $env:CLAUDE_CONFIG_DIR = $homes[2]
 }
 
 function Get-StableHookRuntimeExecutable {
@@ -1710,12 +1735,16 @@ if (-not $NoRun) {
         Join-Path $StateRoot 'defenseclaw'
     }
     # The smoke deliberately rewrites connector posture while exercising
-    # observe/action setup. Bind every authoritative override to the selected
-    # disposable profile so an inherited caller environment cannot redirect
-    # those writes into an operator or acceptance configuration.
+    # observe/action setup. The packaged contract pre-registers pairwise-disjoint
+    # connector homes with the native launcher; preserve those exact homes.
+    # Other runs bind both homes beneath their selected disposable profile.
     $env:DEFENSECLAW_CONFIG = Join-Path $env:DEFENSECLAW_HOME 'config.yaml'
-    $env:CODEX_HOME = Join-Path $env:USERPROFILE '.codex'
-    $env:CLAUDE_CONFIG_DIR = Join-Path $env:USERPROFILE '.claude'
+    if ([string]::IsNullOrWhiteSpace($NativeDataRoot)) {
+        $env:CODEX_HOME = Join-Path $env:USERPROFILE '.codex'
+        $env:CLAUDE_CONFIG_DIR = Join-Path $env:USERPROFILE '.claude'
+    } else {
+        Assert-PackagedConnectorHomes $StateRoot $HomeRoot
+    }
     if (-not $ReleaseCertification) { Protect-TestDirectory $env:USERPROFILE }
     $script:GatewayJsonl = Join-Path $env:DEFENSECLAW_HOME 'gateway.jsonl'
     $script:AuditDb = Join-Path $env:DEFENSECLAW_HOME 'audit.db'
