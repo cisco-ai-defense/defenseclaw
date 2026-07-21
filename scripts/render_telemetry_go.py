@@ -440,6 +440,7 @@ def _constraints_literal(value: Any, path: str) -> str:
     pieces: list[str] = []
     scalar_fields = (
         ("maxUTF8Bytes", "max_utf8_bytes"),
+        ("maxItemUTF8Bytes", "max_item_utf8_bytes"),
         ("minItems", "min_items"),
         ("maxItems", "max_items"),
     )

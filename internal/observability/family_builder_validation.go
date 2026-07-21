@@ -293,7 +293,8 @@ func familyDerivedSourceType(source familyValueSource) (familyFieldType, bool) {
 
 func validateFamilyFieldConstraintDescriptor(descriptor familyFieldDescriptor) error {
 	constraints := descriptor.constraints
-	if constraints.maxUTF8Bytes < 0 || constraints.minItems < 0 || constraints.maxItems < 0 ||
+	if constraints.maxUTF8Bytes < 0 || constraints.maxItemUTF8Bytes < 0 ||
+		constraints.minItems < 0 || constraints.maxItems < 0 ||
 		(constraints.maxItems > 0 && constraints.minItems > constraints.maxItems) ||
 		constraints.structured.maxEncodedBytes < 0 || constraints.structured.maxItemUTF8Bytes < 0 ||
 		constraints.structured.maxItems < 0 || constraints.structured.maxDepth < 0 ||
@@ -322,7 +323,8 @@ func validateFamilyFieldConstraintDescriptor(descriptor familyFieldDescriptor) e
 		constraints.hasFloatMax && !isFinite(constraints.floatMax) {
 		return familyBuildFailure(FamilyBuildInvalidDescriptor)
 	}
-	hasText := constraints.maxUTF8Bytes != 0 || constraints.pattern != "" || len(constraints.enum) != 0
+	hasText := constraints.maxUTF8Bytes != 0 || constraints.maxItemUTF8Bytes != 0 ||
+		constraints.pattern != "" || len(constraints.enum) != 0
 	hasItems := constraints.minItems != 0 || constraints.maxItems != 0
 	hasInt := constraints.hasIntMin || constraints.hasIntMax
 	hasUint := constraints.hasUintMin || constraints.hasUintMax
@@ -330,7 +332,7 @@ func validateFamilyFieldConstraintDescriptor(descriptor familyFieldDescriptor) e
 	hasStructured := constraints.structured != (familyStructuredLimits{})
 	switch descriptor.typeOf {
 	case familyFieldString:
-		if hasItems || hasInt || hasUint || hasFloat || hasStructured {
+		if constraints.maxItemUTF8Bytes != 0 || hasItems || hasInt || hasUint || hasFloat || hasStructured {
 			return familyBuildFailure(FamilyBuildInvalidDescriptor)
 		}
 	case familyFieldStringArray:
@@ -359,7 +361,11 @@ func validateFamilyFieldConstraintDescriptor(descriptor familyFieldDescriptor) e
 		}
 	}
 	for _, candidate := range constraints.enum {
-		if constraints.maxUTF8Bytes > 0 && len(candidate) > constraints.maxUTF8Bytes {
+		maximum := constraints.maxUTF8Bytes
+		if descriptor.typeOf == familyFieldStringArray {
+			maximum = constraints.maxItemUTF8Bytes
+		}
+		if maximum > 0 && len(candidate) > maximum {
 			return familyBuildFailure(FamilyBuildInvalidDescriptor)
 		}
 		if constraints.pattern != "" {
@@ -610,16 +616,28 @@ func validateFamilyFieldValue(descriptor familyFieldDescriptor, value any) error
 		}
 	case familyFieldStringArray:
 		items, ok := value.([]string)
-		if !ok {
+		if !ok || items == nil {
 			return familyBuildFailure(FamilyBuildInvalidType)
 		}
 		if len(items) < constraints.minItems || constraints.maxItems > 0 && len(items) > constraints.maxItems {
 			return familyBuildFailure(FamilyBuildConstraint)
 		}
+		itemConstraints := constraints
+		itemConstraints.maxUTF8Bytes = constraints.maxItemUTF8Bytes
+		itemConstraints.maxItemUTF8Bytes = 0
+		itemConstraints.minItems = 0
+		itemConstraints.maxItems = 0
 		for _, item := range items {
-			if err := validateFamilyString(item, constraints); err != nil {
+			if err := validateFamilyString(item, itemConstraints); err != nil {
 				return err
 			}
+		}
+		encoded, err := marshalMinimalJSON(items)
+		if err != nil {
+			return familyBuildFailure(FamilyBuildInvalidType)
+		}
+		if constraints.maxUTF8Bytes > 0 && len(encoded) > constraints.maxUTF8Bytes {
+			return familyBuildFailure(FamilyBuildConstraint)
 		}
 	case familyFieldStructured:
 		if err := validateFamilyStructuredValue(value, constraints.structured); err != nil {

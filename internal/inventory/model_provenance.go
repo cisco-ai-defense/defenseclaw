@@ -280,9 +280,11 @@ func resolveLocalModelProvenance(model LocalModelInfo, hints modelProvenanceHint
 		if provenance.Source == "" {
 			if hints.Source != "" {
 				provenance.Source = boundedProvenanceField(hints.Source, maxModelProvenanceSourceBytes)
-			} else if matchScore >= 400 {
-				provenance.Source = "catalog_exact"
 			} else {
+				// Publisher rules resolve an organization/family, not a reviewed
+				// model lineage. Keep catalog_exact reserved for the explicit
+				// lineage table so export boundaries can distinguish curated public
+				// roots from names derived from a local artifact ID.
 				provenance.Source = "catalog_family"
 			}
 		}

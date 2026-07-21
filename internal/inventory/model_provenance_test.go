@@ -93,6 +93,20 @@ func TestResolveLocalModelProvenanceFamiliesAndDerivatives(t *testing.T) {
 	}
 }
 
+func TestResolveLocalModelProvenanceReservesCatalogExactForReviewedLineages(t *testing.T) {
+	got := resolveLocalModelProvenance(
+		LocalModelInfo{ID: "meta-llama/customer-secret-llama"},
+		modelProvenanceHints{},
+	)
+	if got == nil {
+		t.Fatal("resolver returned nil")
+	}
+	if got.Publisher != "Meta" || got.CountryCode != "US" ||
+		got.RootModel != "meta-llama/customer-secret-llama" || got.Source != "catalog_family" {
+		t.Fatalf("namespace-derived provenance = %+v", got)
+	}
+}
+
 func TestResolveLocalModelProvenancePublisherNamespaceDerivatives(t *testing.T) {
 	tests := []struct {
 		name       string

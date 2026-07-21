@@ -136,10 +136,16 @@ exact lineage rules. It uses a fixed host, no redirects, bounded responses, and
 no private token; relative paths and family-derived filename guesses stay local.
 
 The local usage API retains model IDs for operator display and filtering.
-Outbound canonical records follow each v8 destination's field-class redaction
-profile. Normal discovery sanitization omits extended model metadata, model
-basenames, and path hashes while retaining an installation-scoped HMAC lifecycle
-pseudonym. Raw paths additionally require
+Canonical v8 `ai_component.*` logs carry the bounded provenance subset for
+`local_model` signals, but never the installed artifact's model ID and never as
+metric labels. Publisher, country, derivation flags, evidence source, and
+confidence are metadata fields. Root/base model names are exported only for a
+reviewed exact lineage or a successful public Hub lookup; root/base names and
+config-derived quantization text are log-only `content` fields so each
+destination's redaction profile can transform or remove them. Normal discovery
+sanitization otherwise omits extended operational
+model metadata, model basenames, and path hashes while retaining an
+installation-scoped HMAC lifecycle pseudonym. Raw paths additionally require
 `ai_discovery.store_raw_local_paths=true` and a selected v8 projection that
 preserves the `path` field class. Authenticated Lemonade discovery uses
 only `LEMONADE_API_KEY` after the configured origin passes a credential-free

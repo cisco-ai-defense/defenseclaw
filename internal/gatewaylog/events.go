@@ -909,9 +909,10 @@ type AIDiscoveryModel struct {
 	Provenance *AIDiscoveryModelProvenance `json:"provenance,omitempty"`
 }
 
-// AIDiscoveryModelProvenance mirrors inventory.LocalModelProvenance. Like the
-// containing model block, it is emitted to remote sinks only in the explicit
-// extended/disable-redaction mode.
+// AIDiscoveryModelProvenance mirrors inventory.LocalModelProvenance for
+// historical extended envelopes. Runtime v8 emits a bounded provenance subset
+// through canonical ai_component logs instead of serializing this legacy model
+// block.
 type AIDiscoveryModelProvenance struct {
 	Publisher    string   `json:"publisher,omitempty"`
 	CountryCode  string   `json:"country_code,omitempty"`
