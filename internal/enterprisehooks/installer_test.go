@@ -561,6 +561,7 @@ func TestWatchOwnedFilesReturnsSpecificFilesNotDirs(t *testing.T) {
 // customers with no enforcement until they opened each agent once —
 // see bootstrap.go for the rationale.
 func TestInstallBootstrapsMissingHookConfigFirstTime(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	cfgPath := filepath.Join(home, ".codex", "config.toml")
