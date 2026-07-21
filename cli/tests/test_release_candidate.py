@@ -2782,6 +2782,11 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
     [
         ("missing", "resource inventory is invalid.*missing="),
         ("unexpected", "resource inventory is invalid.*unexpected="),
+        ("backslash-alias", "resource inventory is invalid.*unexpected="),
+        ("absolute-alias", "resource inventory is invalid.*unexpected="),
+        ("dot-segment-alias", "resource inventory is invalid.*unexpected="),
+        ("case-alias", "resource inventory is invalid.*unexpected="),
+        ("windows-trailing-alias", "resource inventory is invalid.*unexpected="),
         ("altered", "runtime resource is altered"),
     ],
 )
@@ -2797,6 +2802,16 @@ def test_non_bridge_candidate_rejects_incomplete_or_altered_v8_resources(
         members.pop(config_schema)
     elif mutation == "unexpected":
         members["defenseclaw/_data/config/v8/unexpected.json"] = b"{}\n"
+    elif mutation == "backslash-alias":
+        members[r"defenseclaw\_data\config\v8\unexpected.json"] = b"{}\n"
+    elif mutation == "absolute-alias":
+        members["/defenseclaw/_data/config/v8/unexpected.json"] = b"{}\n"
+    elif mutation == "dot-segment-alias":
+        members["defenseclaw/_data/config/v8/../v8/unexpected.json"] = b"{}\n"
+    elif mutation == "case-alias":
+        members["DefenseClaw/_DATA/config/V8/unexpected.json"] = b"{}\n"
+    elif mutation == "windows-trailing-alias":
+        members["defenseclaw./_data./config/v8 /unexpected.json"] = b"{}\n"
     else:
         original = members[config_schema]
         members[config_schema] = b"[" + original[1:]

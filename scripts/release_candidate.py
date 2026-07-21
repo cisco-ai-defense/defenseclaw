@@ -2992,11 +2992,22 @@ def _canonical_v8_wheel_resources() -> dict[str, bytes]:
 
 
 def _is_v8_package_data_member(member_name: str) -> bool:
-    parts = PurePosixPath(member_name).parts
-    return (
-        len(parts) > 2
-        and parts[:2] == ("defenseclaw", "_data")
-        and any(part == "v8" or part.startswith(("v8_", "v8.")) for part in parts[2:])
+    # ZIP member names are specified with forward slashes, but readers on
+    # Windows can still assign path meaning to backslashes. Classify aliases
+    # from the entire normalized member so absolute, drive-prefixed, and
+    # dot-segment forms cannot hide an extra package-local v8 resource.
+    parts = tuple(
+        part.rstrip(" .").casefold()
+        for part in PurePosixPath(member_name.replace("\\", "/")).parts
+    )
+    return any(
+        "defenseclaw" in parts[:data_index]
+        and any(
+            part == "v8" or part.startswith(("v8_", "v8."))
+            for part in parts[data_index + 1 :]
+        )
+        for data_index, part in enumerate(parts)
+        if part == "_data"
     )
 
 
