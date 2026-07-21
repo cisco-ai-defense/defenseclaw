@@ -32,16 +32,17 @@ import (
 )
 
 const (
-	huggingFaceHubBaseURL          = "https://huggingface.co"
-	huggingFaceHubResponseBytes    = int64(256 << 10)
-	huggingFaceHubRequestTimeout   = 2 * time.Second
-	huggingFaceHubCacheTTL         = 24 * time.Hour
-	huggingFaceHubNegativeCacheTTL = time.Hour
-	huggingFaceHubMaxCacheEntries  = 512
-	huggingFaceHubMaxLineageDepth  = 4
-	huggingFaceHubModelsPerScan    = 8
-	huggingFaceHubScanTimeout      = 4 * time.Second
-	huggingFaceHubStaleGrace       = 7 * 24 * time.Hour
+	huggingFaceHubBaseURL           = "https://huggingface.co"
+	huggingFaceHubResponseBytes     = int64(256 << 10)
+	huggingFaceHubRequestTimeout    = 2 * time.Second
+	huggingFaceHubCacheTTL          = 24 * time.Hour
+	huggingFaceHubNegativeCacheTTL  = time.Hour
+	huggingFaceHubTransientCacheTTL = 5 * time.Minute
+	huggingFaceHubMaxCacheEntries   = 512
+	huggingFaceHubMaxLineageDepth   = 4
+	huggingFaceHubModelsPerScan     = 8
+	huggingFaceHubScanTimeout       = 4 * time.Second
+	huggingFaceHubStaleGrace        = 7 * 24 * time.Hour
 )
 
 var huggingFaceRepoSegmentPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9])?$`)
@@ -62,6 +63,7 @@ type huggingFaceModelInfoEnvelope struct {
 type huggingFaceCacheEntry struct {
 	info      huggingFaceModelInfo
 	found     bool
+	err       error
 	expiresAt time.Time
 }
 
@@ -359,7 +361,7 @@ func (r *huggingFaceProvenanceResolver) modelInfo(ctx context.Context, repoID st
 	r.mu.Lock()
 	if cached, exists := r.cache[cacheKey]; exists && now.Before(cached.expiresAt) {
 		r.mu.Unlock()
-		return cached.info, cached.found, nil
+		return cached.info, cached.found, cached.err
 	}
 	r.mu.Unlock()
 
@@ -388,7 +390,17 @@ func (r *huggingFaceProvenanceResolver) modelInfo(ctx context.Context, repoID st
 		return huggingFaceModelInfo{}, false, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return huggingFaceModelInfo{}, false, fmt.Errorf("Hugging Face model API returned HTTP %d", resp.StatusCode)
+		statusErr := fmt.Errorf("Hugging Face model API returned HTTP %d", resp.StatusCode)
+		switch resp.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+			// Authentication/gating and rate-limit responses are not proof that a
+			// repository does not exist. Cache the error briefly to avoid hammering
+			// the Hub, while returning an error so callers preserve prior lineage.
+			r.storeCache(cacheKey, huggingFaceCacheEntry{
+				err: statusErr, expiresAt: now.Add(huggingFaceHubTransientCacheTTL),
+			})
+		}
+		return huggingFaceModelInfo{}, false, statusErr
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, huggingFaceHubResponseBytes+1))
 	if err != nil {

@@ -806,20 +806,48 @@ struct AIUsageModel: Sendable, Hashable {
             recipe: (raw["recipe"] as? String) ?? "",
             modality: (raw["modality"] as? String) ?? "",
             device: (raw["device"] as? String) ?? "",
-            sizeBytes: nonnegativeInt64(raw["size_bytes"]),
-            pinned: (raw["pinned"] as? Bool) ?? false,
+            sizeBytes: AIUsageValueDecoding.nonnegativeInt64(raw["size_bytes"]),
+            pinned: AIUsageValueDecoding.boolean(raw["pinned"]),
             provenance: AIModelProvenance.fromMapping(raw["provenance"] as? [String: Any])
         )
     }
+}
 
-    private static func nonnegativeInt64(_ raw: Any?) -> Int64 {
+private enum AIUsageValueDecoding {
+    static func nonnegativeInt64(_ raw: Any?) -> Int64 {
+        // JSON booleans bridge through NSNumber, so reject Bool first.
         if raw is Bool { return 0 }
-        if let value = raw as? Int64 { return max(value, 0) }
-        if let value = raw as? Int { return value >= 0 ? Int64(value) : 0 }
-        guard let number = raw as? NSNumber else { return 0 }
-        let value = number.doubleValue
-        guard value.isFinite, value >= 0, value < Double(Int64.max) else { return 0 }
-        return Int64(value.rounded(.towardZero))
+        let value: Int64?
+        switch raw {
+        case let number as Int:
+            value = Int64(exactly: number)
+        case let number as Int64:
+            value = number
+        case let number as NSNumber:
+            let double = number.doubleValue
+            guard double.isFinite, let exact = Int64(exactly: double) else { return 0 }
+            value = exact
+        case let text as String:
+            value = Int64(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        default:
+            value = nil
+        }
+        guard let value, value >= 0 else { return 0 }
+        return value
+    }
+
+    static func boolean(_ raw: Any?) -> Bool {
+        if let value = raw as? Bool { return value }
+        if let value = raw as? NSNumber {
+            if value == 0 { return false }
+            if value == 1 { return true }
+            return false
+        }
+        guard let text = raw as? String else { return false }
+        switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "true", "1", "yes", "on": return true
+        default: return false
+        }
     }
 }
 
@@ -936,8 +964,8 @@ enum AISignalDecoding {
             recipe: string(raw["recipe"]),
             modality: string(raw["modality"]),
             device: string(raw["device"]),
-            sizeBytes: nonnegativeInt64(raw["size_bytes"]),
-            pinned: boolean(raw["pinned"]),
+            sizeBytes: AIUsageValueDecoding.nonnegativeInt64(raw["size_bytes"]),
+            pinned: AIUsageValueDecoding.boolean(raw["pinned"]),
             provenance: AIModelProvenance.fromMapping(
                 nonemptyDictionary(raw["provenance"])
             )
@@ -947,10 +975,10 @@ enum AISignalDecoding {
     private static func decodeRuntime(_ raw: [String: Any]?) -> AIUsageRuntime? {
         guard let raw else { return nil }
         return AIUsageRuntime(
-            pid: Int(clamping: nonnegativeInt64(raw["pid"])),
-            ppid: Int(clamping: nonnegativeInt64(raw["ppid"])),
+            pid: Int(clamping: AIUsageValueDecoding.nonnegativeInt64(raw["pid"])),
+            ppid: Int(clamping: AIUsageValueDecoding.nonnegativeInt64(raw["ppid"])),
             startedAt: DCDates.parse(raw["started_at"]),
-            uptimeSeconds: nonnegativeInt64(raw["uptime_sec"]),
+            uptimeSeconds: AIUsageValueDecoding.nonnegativeInt64(raw["uptime_sec"]),
             user: string(raw["user"]),
             command: string(raw["comm"])
         )
@@ -970,41 +998,6 @@ enum AISignalDecoding {
         return (raw as? [Any])?.compactMap { $0 as? String } ?? []
     }
 
-    private static func nonnegativeInt64(_ raw: Any?) -> Int64 {
-        // JSON booleans bridge through NSNumber, so reject Bool first.
-        if raw is Bool { return 0 }
-        let value: Int64?
-        switch raw {
-        case let number as Int:
-            value = Int64(exactly: number)
-        case let number as Int64:
-            value = number
-        case let number as NSNumber:
-            let double = number.doubleValue
-            guard double.isFinite, let exact = Int64(exactly: double) else { return 0 }
-            value = exact
-        case let text as String:
-            value = Int64(text.trimmingCharacters(in: .whitespacesAndNewlines))
-        default:
-            value = nil
-        }
-        guard let value, value >= 0 else { return 0 }
-        return value
-    }
-
-    private static func boolean(_ raw: Any?) -> Bool {
-        if let value = raw as? Bool { return value }
-        if let value = raw as? NSNumber {
-            if value == 0 { return false }
-            if value == 1 { return true }
-            return false
-        }
-        guard let text = raw as? String else { return false }
-        switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "true", "1", "yes", "on": return true
-        default: return false
-        }
-    }
 }
 
 /// Grouped product row — exact port of the TUI's AIDiscoveryRow (_rebuild()).
@@ -1078,8 +1071,14 @@ struct AIModelDiscoveryRow: Identifiable, Sendable, Hashable {
             [$0.publisher, $0.countryCode, $0.countryDisplay, $0.rootModel, $0.quantization,
              $0.derivation, $0.source, $0.confidence] + $0.baseModels
         } ?? []
-        let parts = [state, modelID] + statuses + formats + providers + products
-            + vendors + detectors + provenanceParts
+        var parts = [state, modelID]
+        parts.append(contentsOf: statuses)
+        parts.append(contentsOf: formats)
+        parts.append(contentsOf: providers)
+        parts.append(contentsOf: products)
+        parts.append(contentsOf: vendors)
+        parts.append(contentsOf: detectors)
+        parts.append(contentsOf: provenanceParts)
         return parts.joined(separator: " ").localizedCaseInsensitiveContains(query)
     }
 }

@@ -203,6 +203,48 @@ func TestHuggingFaceResolverTreatsParentServerFailureAsTransient(t *testing.T) {
 	}
 }
 
+func TestHuggingFaceResolverBacksOffAuthAndRateLimitsAsTransient(t *testing.T) {
+	for _, status := range []int{
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+		http.StatusTooManyRequests,
+	} {
+		status := status
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				http.Error(w, "temporary", status)
+			}))
+			defer server.Close()
+			resolver, err := newHuggingFaceProvenanceResolverForTest(server.URL, server.Client())
+			if err != nil {
+				t.Fatalf("new resolver: %v", err)
+			}
+			now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+			resolver.now = func() time.Time { return now }
+			model := LocalModelInfo{ID: "owner/model", Provider: "huggingface"}
+			for attempt := 0; attempt < 2; attempt++ {
+				got, outcome := resolver.resolveWithOutcome(context.Background(), model)
+				if got != nil || outcome != huggingFaceLookupTransientFailure {
+					t.Fatalf("HTTP %d resolved as provenance=%+v outcome=%v", status, got, outcome)
+				}
+			}
+			if got := requests.Load(); got != 1 {
+				t.Fatalf("HTTP %d requests during backoff = %d, want 1", status, got)
+			}
+			now = now.Add(huggingFaceHubTransientCacheTTL + time.Second)
+			_, outcome := resolver.resolveWithOutcome(context.Background(), model)
+			if outcome != huggingFaceLookupTransientFailure {
+				t.Fatalf("HTTP %d post-backoff outcome = %v", status, outcome)
+			}
+			if got := requests.Load(); got != 2 {
+				t.Fatalf("HTTP %d requests after backoff = %d, want 2", status, got)
+			}
+		})
+	}
+}
+
 func TestHuggingFaceResolverDoesNotInventSingleRootForMerge(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

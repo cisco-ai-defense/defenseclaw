@@ -111,6 +111,66 @@ func TestResolveLocalModelProvenanceUnknownAndTokenBoundaries(t *testing.T) {
 	}
 }
 
+func TestLineageMatchesRequiresTokenBoundaries(t *testing.T) {
+	match := "deepseek-r1-distill-qwen-7b"
+	for _, reference := range []string{
+		"deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+		"community/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
+	} {
+		if !lineageMatches(match, []string{reference}) {
+			t.Errorf("lineageMatches rejected valid derivative %q", reference)
+		}
+	}
+	for _, reference := range []string{
+		"community/MyDeepSeek-R1-Distill-Qwen-7B",
+		"deepseek-ai/DeepSeek-R1-Distill-Qwen-7Billion",
+		"deepseek-ai/DeepSeek-R1-Distill-Qwen-17B",
+	} {
+		if lineageMatches(match, []string{reference}) {
+			t.Errorf("lineageMatches accepted token lookalike %q", reference)
+		}
+	}
+}
+
+func TestResolveLocalModelProvenanceKeepsCuratedLineageParents(t *testing.T) {
+	got := resolveLocalModelProvenance(
+		LocalModelInfo{ID: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"},
+		modelProvenanceHints{
+			BaseModels: []string{"meta-llama/Llama-3.1-8B"},
+			Source:     "gguf_metadata",
+		},
+	)
+	if got == nil {
+		t.Fatal("resolver returned nil")
+	}
+	if got.RootModel != "Qwen/Qwen2.5-Math-7B" || got.Publisher != "Alibaba Cloud" ||
+		len(got.BaseModels) != 1 || got.BaseModels[0] != "Qwen/Qwen2.5-Math-7B" {
+		t.Fatalf("local hints replaced curated lineage: %+v", got)
+	}
+}
+
+func TestSplitModelReferenceHandlesOnlyUnambiguousRepositories(t *testing.T) {
+	tests := []struct {
+		name      string
+		reference string
+		owner     string
+		model     string
+	}{
+		{name: "repo id", reference: "Qwen/Qwen3-4B", owner: "Qwen", model: "Qwen3-4B"},
+		{name: "Hub URL", reference: "https://huggingface.co/meta-llama/Llama-3.1-8B/tree/main", owner: "meta-llama", model: "Llama-3.1-8B"},
+		{name: "Hub cache", reference: "/cache/hub/models--Qwen--Qwen3-4B/snapshots/deadbeef/model.safetensors", owner: "Qwen", model: "Qwen3-4B"},
+		{name: "arbitrary path", reference: "/private/owner/repository/model.gguf", model: "model.gguf"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			owner, model := splitModelReference(tc.reference)
+			if owner != tc.owner || model != tc.model {
+				t.Fatalf("splitModelReference(%q) = %q/%q, want %q/%q", tc.reference, owner, model, tc.owner, tc.model)
+			}
+		})
+	}
+}
+
 func TestResolveLocalModelProvenanceDoesNotInventRootForMerge(t *testing.T) {
 	got := resolveLocalModelProvenance(LocalModelInfo{ID: "local-merge"}, modelProvenanceHints{
 		BaseModels: []string{"Qwen/Qwen3-4B", "meta-llama/Llama-3.2-3B"},

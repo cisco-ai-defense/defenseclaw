@@ -104,6 +104,35 @@ def test_reference_source_validates_against_canonical_schema() -> None:
     assert len(validated.source["observability"]["destinations"]) == 7
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_exact_v8_accepts_online_model_provenance_boolean(enabled: bool) -> None:
+    validated = load_validate_v8(
+        {
+            "config_version": 8,
+            "ai_discovery": {"lookup_model_provenance_online": enabled},
+        }
+    )
+
+    assert (
+        validated.source["ai_discovery"]["lookup_model_provenance_online"]
+        is enabled
+    )
+
+
+@pytest.mark.parametrize("invalid", ["false", 0, None, []])
+def test_exact_v8_rejects_non_boolean_online_model_provenance(invalid: object) -> None:
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8(
+            {
+                "config_version": 8,
+                "ai_discovery": {"lookup_model_provenance_online": invalid},
+            }
+        )
+
+    assert captured.value.path == "$.ai_discovery.lookup_model_provenance_online"
+    assert captured.value.keyword == "type"
+
+
 def test_batch_source_round_trip_masking_and_independent_byte_domains() -> None:
     source = {
         "config_version": 8,

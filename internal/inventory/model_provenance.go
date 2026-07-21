@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -197,8 +198,10 @@ func resolveLocalModelProvenance(model LocalModelInfo, hints modelProvenanceHint
 
 	provenance := &LocalModelProvenance{}
 	confidence := ""
+	lineageMatched := false
 	for _, lineage := range catalog.Lineages {
 		if lineageMatches(lineage.Match, references) {
+			lineageMatched = true
 			provenance.Publisher = lineage.Publisher
 			provenance.CountryCode = lineage.CountryCode
 			provenance.RootModel = lineage.RootModel
@@ -213,8 +216,12 @@ func resolveLocalModelProvenance(model LocalModelInfo, hints modelProvenanceHint
 	}
 
 	rootReference := model.ID
-	ambiguousBaseModels := len(baseModels) > 1 && provenance.RootModel == ""
-	if len(baseModels) > 0 {
+	ambiguousBaseModels := len(baseModels) > 1 && !lineageMatched
+	if lineageMatched {
+		// Reviewed exact lineages are authoritative. Local metadata still adds
+		// derivation/quantization evidence below, but cannot replace curated roots.
+		rootReference = provenance.RootModel
+	} else if len(baseModels) > 0 {
 		provenance.BaseModels = append([]string(nil), baseModels...)
 		if ambiguousBaseModels {
 			rootReference = ""
@@ -231,8 +238,12 @@ func resolveLocalModelProvenance(model LocalModelInfo, hints modelProvenanceHint
 		rootReference = references[0]
 	}
 
+	publisherBaseModels := baseModels
+	if lineageMatched {
+		publisherBaseModels = provenance.BaseModels
+	}
 	matchedRule, matchScore := bestPublisherRule(
-		catalog.Publishers, references, hints.Organizations, hints.BaseOrganizations, baseModels,
+		catalog.Publishers, references, hints.Organizations, hints.BaseOrganizations, publisherBaseModels,
 	)
 	if ambiguousBaseModels {
 		// A merge can have unrelated roots. Preserve every immediate parent but
@@ -376,10 +387,39 @@ func bestPublisherRule(
 
 func lineageMatches(match string, references []string) bool {
 	match = normalizeModelMatchText(match)
+	if match == "" {
+		return false
+	}
 	for _, reference := range references {
-		if strings.Contains(normalizeModelMatchText(reference), match) {
+		if normalizedLineageContains(normalizeModelMatchText(reference), match) {
 			return true
 		}
+	}
+	return false
+}
+
+func normalizedLineageContains(value, match string) bool {
+	for offset := 0; offset <= len(value)-len(match); {
+		index := strings.Index(value[offset:], match)
+		if index < 0 {
+			return false
+		}
+		index += offset
+		beforeOK := index == 0
+		if !beforeOK {
+			r, _ := utf8.DecodeLastRuneInString(value[:index])
+			beforeOK = !isModelTokenRune(r)
+		}
+		after := index + len(match)
+		afterOK := after == len(value)
+		if !afterOK {
+			r, _ := utf8.DecodeRuneInString(value[after:])
+			afterOK = !isModelTokenRune(r)
+		}
+		if beforeOK && afterOK {
+			return true
+		}
+		offset = index + 1
 	}
 	return false
 }
@@ -404,11 +444,37 @@ func splitModelReference(value string) (string, string) {
 	value = modelReferenceFromURL(strings.TrimSpace(value))
 	value = strings.TrimPrefix(value, "hf.co/")
 	value = strings.TrimPrefix(value, "huggingface.co/")
-	parts := strings.Split(value, "/")
-	if len(parts) >= 2 {
-		return parts[len(parts)-2], parts[len(parts)-1]
+	parts := strings.Split(strings.Trim(value, "/"), "/")
+	for _, part := range parts {
+		if !strings.HasPrefix(part, "models--") {
+			continue
+		}
+		encoded := strings.TrimPrefix(part, "models--")
+		pair := strings.SplitN(encoded, "--", 2)
+		if len(pair) == 2 {
+			if repoID, ok := credibleHuggingFaceRepoID(pair[0] + "/" + pair[1]); ok {
+				return splitExactModelRepoID(repoID)
+			}
+		}
+	}
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	if len(parts) > 2 {
+		// An arbitrary filesystem path does not identify which adjacent pair is a
+		// repository. Retain only its basename for offline family matching rather
+		// than manufacturing a high-confidence namespace claim from path segments.
+		return "", parts[len(parts)-1]
 	}
 	return "", value
+}
+
+func splitExactModelRepoID(repoID string) (string, string) {
+	parts := strings.SplitN(repoID, "/", 2)
+	if len(parts) != 2 {
+		return "", repoID
+	}
+	return parts[0], parts[1]
 }
 
 func modelReferenceFromURL(value string) string {
@@ -609,7 +675,6 @@ func normalizeLocalModelProvenance(provenance *LocalModelProvenance) {
 	provenance.RootModel = boundedProvenanceField(provenance.RootModel, maxModelRootBytes)
 	provenance.BaseModels = uniqueBoundedModelReferences(provenance.BaseModels, maxModelBaseModels)
 	provenance.Quantization = boundedProvenanceField(provenance.Quantization, maxModelQuantizationBytes)
-	provenance.Derivation = boundedProvenanceField(provenance.Derivation, maxModelDerivationBytes)
 	provenance.Source = boundedProvenanceField(provenance.Source, maxModelProvenanceSourceBytes)
 	switch provenance.Confidence {
 	case "high", "medium", "low":

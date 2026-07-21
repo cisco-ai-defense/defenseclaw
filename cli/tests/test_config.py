@@ -426,6 +426,19 @@ class TestAIDiscoveryConfig(unittest.TestCase):
         self.assertFalse(disabled.lookup_model_provenance_online)
         self.assertTrue(enabled.lookup_model_provenance_online)
 
+    def test_merge_online_model_provenance_uses_fail_closed_bool_parsing(self):
+        for raw_value in ("false", "no", "invalid", [], None):
+            with self.subTest(raw_value=raw_value):
+                cfg = config_mod._merge_ai_discovery(
+                    {"lookup_model_provenance_online": raw_value}
+                )
+                self.assertFalse(cfg.lookup_model_provenance_online)
+
+        cfg = config_mod._merge_ai_discovery(
+            {"lookup_model_provenance_online": "true"}
+        )
+        self.assertTrue(cfg.lookup_model_provenance_online)
+
     def test_online_model_provenance_opt_in_is_serialized(self):
         cfg = default_config()
         cfg.ai_discovery.lookup_model_provenance_online = True

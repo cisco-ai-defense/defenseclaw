@@ -18,11 +18,17 @@ import Foundation
 
 @main
 struct AIDiscoveryModelTests {
+    private static var failureCount = 0
+
     static func main() {
         parsesCanonicalModelProvenance()
         preservesUnknownLineageBooleansAndRejectsInvalidCountries()
         partitionsModelsFromProductsAndAggregatesSources()
         searchesModelLineageMetadata()
+        guard failureCount == 0 else {
+            fputs("AI discovery model provenance tests failed: \(failureCount)\n", stderr)
+            exit(1)
+        }
         print("AI discovery model provenance tests passed")
     }
 
@@ -107,7 +113,15 @@ struct AIDiscoveryModelTests {
             "pinned": "true",
         ])
         expect(malformed?.sizeBytes == 0, "non-finite size is rejected")
-        expect(malformed?.pinned == false, "non-boolean pinned value is rejected")
+        expect(malformed?.pinned == true, "compatible string boolean parses consistently")
+
+        let invalid = AIUsageModel.fromMapping([
+            "id": "invalid-model",
+            "size_bytes": 1.5,
+            "pinned": "maybe",
+        ])
+        expect(invalid?.sizeBytes == 0, "fractional size is rejected consistently")
+        expect(invalid?.pinned == false, "invalid pinned value is rejected")
     }
 
     private static func partitionsModelsFromProductsAndAggregatesSources() {
@@ -207,10 +221,13 @@ struct AIDiscoveryModelTests {
             return
         }
         expect(row.matches("FR"), "country code is searchable")
+        expect(row.matches("fr"), "country code search is case-insensitive")
         expect(row.matches("Mistral AI"), "publisher is searchable")
+        expect(row.matches("mistral ai"), "publisher search is case-insensitive")
         expect(row.matches("Mistral-7B"), "root model is searchable")
         expect(row.matches("Q4_K_M"), "quantization is searchable")
         expect(row.matches("filesystem"), "provider is searchable")
+        expect(row.matches("FILESYSTEM"), "provider search is case-insensitive")
         expect(!row.matches("Anthropic"), "unrelated provenance does not match")
     }
 
@@ -251,8 +268,9 @@ struct AIDiscoveryModelTests {
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ label: String) {
         guard condition() else {
+            failureCount += 1
             fputs("FAILED: \(label)\n", stderr)
-            exit(1)
+            return
         }
     }
 }

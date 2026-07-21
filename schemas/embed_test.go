@@ -331,6 +331,14 @@ func TestDefenseClawConfigV8SchemaIdentityAndClosure(t *testing.T) {
 	if got := schemaMap(t, guardrailProperties, "hook_fail_mode")["default"]; got != "closed" {
 		t.Errorf("guardrail.hook_fail_mode default = %v, want closed", got)
 	}
+	aiDiscoveryProperties := schemaMap(t, schemaMap(t, defs, "aiDiscovery"), "properties")
+	modelProvenance := schemaMap(t, aiDiscoveryProperties, "lookup_model_provenance_online")
+	if got := modelProvenance["type"]; got != "boolean" {
+		t.Errorf("ai_discovery.lookup_model_provenance_online type = %v, want boolean", got)
+	}
+	if got := modelProvenance["default"]; got != false {
+		t.Errorf("ai_discovery.lookup_model_provenance_online default = %v, want false", got)
+	}
 	localProperties := schemaMap(t, schemaMap(t, defs, "localStore"), "properties")
 	for _, name := range []string{"path", "judge_bodies_path"} {
 		if _, ok := schemaMap(t, localProperties, name)["default"]; ok {

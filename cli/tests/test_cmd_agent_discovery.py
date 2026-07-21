@@ -336,6 +336,112 @@ class DiscoveryStatusTests(unittest.TestCase):
         self.assertTrue(payload["live"]["reachable"])
         self.assertFalse(payload["live"]["enabled"])
         self.assertTrue(payload["drift"])
+        self.assertEqual(payload["comparison"]["checked_fields"], ["enabled"])
+        self.assertEqual(payload["comparison"]["drift_fields"], ["enabled"])
+        self.assertIn(
+            "lookup_model_provenance_online",
+            payload["comparison"]["unverified_fields"],
+        )
+
+    def test_json_does_not_claim_unreported_provenance_is_in_sync(self):
+        import json
+
+        runner = CliRunner()
+        app = _make_ctx(enabled=True)
+        app.cfg.ai_discovery.lookup_model_provenance_online = True
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def ai_usage(self):
+                return {"enabled": True, "summary": {}}
+
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   side_effect=_resolve_target_stub), \
+                patch("defenseclaw.commands.cmd_agent.OrchestratorClient", FakeClient):
+            result = runner.invoke(
+                cmd_agent.discovery_status,
+                ["--json"],
+                obj=app,
+                catch_exceptions=False,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        payload = json.loads(result.output)
+        self.assertFalse(payload["drift"])
+        self.assertIsNone(payload["live"]["lookup_model_provenance_online"])
+        self.assertEqual(payload["comparison"]["checked_fields"], ["enabled"])
+        self.assertIn(
+            "lookup_model_provenance_online",
+            payload["comparison"]["unverified_fields"],
+        )
+
+    def test_json_compares_provenance_when_live_api_reports_it(self):
+        import json
+
+        runner = CliRunner()
+        app = _make_ctx(enabled=True)
+        app.cfg.ai_discovery.lookup_model_provenance_online = True
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def ai_usage(self):
+                return {
+                    "enabled": True,
+                    "lookup_model_provenance_online": False,
+                    "summary": {},
+                }
+
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   side_effect=_resolve_target_stub), \
+                patch("defenseclaw.commands.cmd_agent.OrchestratorClient", FakeClient):
+            result = runner.invoke(
+                cmd_agent.discovery_status,
+                ["--json"],
+                obj=app,
+                catch_exceptions=False,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        payload = json.loads(result.output)
+        self.assertTrue(payload["drift"])
+        self.assertEqual(
+            payload["comparison"]["checked_fields"],
+            ["enabled", "lookup_model_provenance_online"],
+        )
+        self.assertEqual(
+            payload["comparison"]["drift_fields"],
+            ["lookup_model_provenance_online"],
+        )
+        self.assertNotIn(
+            "lookup_model_provenance_online",
+            payload["comparison"]["unverified_fields"],
+        )
+
+    def test_table_does_not_render_malformed_live_enabled_as_disabled(self):
+        runner = CliRunner()
+        app = _make_ctx(enabled=True)
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def ai_usage(self):
+                return {"enabled": "false", "summary": {}}
+
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   side_effect=_resolve_target_stub), \
+                patch("defenseclaw.commands.cmd_agent.OrchestratorClient", FakeClient):
+            result = runner.invoke(
+                cmd_agent.discovery_status,
+                [],
+                obj=app,
+                catch_exceptions=False,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("not reported", result.output)
+        self.assertNotIn("Service  disabled", result.output)
 
     def test_table_warns_on_drift(self):
         runner = CliRunner()
