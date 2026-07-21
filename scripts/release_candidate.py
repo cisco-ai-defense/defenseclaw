@@ -68,6 +68,7 @@ RELEASE_PROVENANCE_SCHEMA_VERSION = 1
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+WINDOWS_NUMERIC_SHORT_NAME_RE = re.compile(r"^[a-z0-9]{1,6}~[0-9]+$")
 MAX_GATEWAY_BINARY_BYTES = 512 * 1024 * 1024
 PROTECTED_ARTIFACT_MAGIC = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
 PROTECTED_ARTIFACT_XOR_BYTE = 0xA5
@@ -3000,11 +3001,20 @@ def _is_v8_package_data_member(member_name: str) -> bool:
         part.rstrip(" .").casefold()
         for part in PurePosixPath(member_name.replace("\\", "/")).parts
     )
-    return any(
-        any(
-            re.fullmatch(r"(?:[a-z]:)?(?:defenseclaw|defens~[0-9]+)", root) is not None
-            for root in parts[:data_index]
+    # An NTFS 8.3 alias may use either a stem-derived form (DEFENS~1) or a
+    # volume-assigned/hash-derived form. Without the destination volume there
+    # is no safe way to prove which package directory a numeric short name
+    # resolves to, so treat every valid numeric 8.3 directory component before
+    # ``_data`` as a potential alias for the DefenseClaw package root.
+    def is_package_root(part: str) -> bool:
+        candidate = re.sub(r"^[a-z]:", "", part, count=1)
+        return candidate == "defenseclaw" or (
+            len(candidate) <= 8
+            and WINDOWS_NUMERIC_SHORT_NAME_RE.fullmatch(candidate) is not None
         )
+
+    return any(
+        any(is_package_root(part) for part in parts[:data_index])
         and any(
             part == "v8" or part.startswith(("v8_", "v8."))
             for part in parts[data_index + 1 :]

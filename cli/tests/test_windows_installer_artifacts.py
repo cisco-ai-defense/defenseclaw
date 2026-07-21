@@ -13,7 +13,6 @@ import re
 import shutil
 import stat
 import subprocess
-import sys
 import time
 import warnings
 import zipfile
@@ -24,6 +23,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 HELPER_PATH = ROOT / "scripts" / "windows_installer_artifacts.py"
 BUILD_PS1 = ROOT / "scripts" / "build-windows-installer.ps1"
+PACKAGED_V8_VALIDATOR = ROOT / "scripts" / "validate_packaged_v8_resources.py"
 AUTHENTICODE_PS1 = ROOT / "scripts" / "windows-authenticode.ps1"
 BINARY_IDENTITY_PS1 = ROOT / "scripts" / "windows-binary-identity.ps1"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yaml"
@@ -56,6 +56,38 @@ def _write_zip_entries(
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for name, data in files:
                 archive.writestr(name, data)
+
+
+def _rewrite_zip_member_name_bytes(path: Path, old: str, new: str) -> None:
+    old_bytes = old.encode("utf-8")
+    new_bytes = new.encode("utf-8")
+    assert len(old_bytes) == len(new_bytes)
+    payload = path.read_bytes()
+    assert payload.count(old_bytes) == 2
+    path.write_bytes(payload.replace(old_bytes, new_bytes))
+
+
+WIN32_FORBIDDEN_WHEEL_MEMBERS = {
+    "forbidden-less-than": "defenseclaw/_data/config/v8/bad<name.json",
+    "forbidden-greater-than": "defenseclaw/_data/config/v8/bad>name.json",
+    "forbidden-quote": 'defenseclaw/_data/config/v8/bad"name.json',
+    "forbidden-pipe": "defenseclaw/_data/config/v8/bad|name.json",
+    "forbidden-question": "defenseclaw/_data/config/v8/bad?name.json",
+    "forbidden-star": "defenseclaw/_data/config/v8/bad*name.json",
+}
+
+RESERVED_DOS_WHEEL_MEMBERS = {
+    "device-con": "defenseclaw/_data/config/v8/con.json",
+    "device-con-space-extension": "defenseclaw/_data/config/v8/Con .json",
+    "device-prn": "defenseclaw/_data/config/v8/PrN.txt",
+    "device-aux": "defenseclaw/_data/config/v8/AUX",
+    "device-nul": "defenseclaw/_data/config/v8/nul.data",
+    "device-clock": "defenseclaw/_data/config/v8/clock$.txt",
+    "device-com1": "defenseclaw/_data/config/v8/com1.json",
+    "device-com9": "defenseclaw/_data/config/v8/COM9.data",
+    "device-lpt1": "defenseclaw/_data/config/v8/lpt1.json",
+    "device-lpt9": "defenseclaw/_data/config/v8/LPT9.data",
+}
 
 
 def _canonical_v8_wheel_entries() -> dict[str, bytes]:
@@ -112,6 +144,8 @@ def _run_v8_wheel_gate(tmp_path: Path, wheel: Path) -> subprocess.CompletedProce
             "Test-PathWithin",
             "Read-BoundedStreamBytes",
             "Read-CanonicalGzipBytes",
+            "Get-ValidatedWheelMemberPath",
+            "Test-DefenseClawV8WheelMember",
             "Assert-DefenseClawWheelV8Resources",
         )
     )
@@ -120,9 +154,14 @@ def _run_v8_wheel_gate(tmp_path: Path, wheel: Path) -> subprocess.CompletedProce
         "$ErrorActionPreference = 'Stop'\n"
         "Add-Type -AssemblyName System.IO.Compression.FileSystem\n"
         f"{functions}\n"
-        "Assert-DefenseClawWheelV8Resources "
+        "try {\n"
+        "    Assert-DefenseClawWheelV8Resources "
         "-WheelPath ([Environment]::GetEnvironmentVariable('DC_TEST_V8_WHEEL')) "
-        "-RepositoryRoot ([Environment]::GetEnvironmentVariable('DC_TEST_V8_REPOSITORY'))\n",
+        "-RepositoryRoot ([Environment]::GetEnvironmentVariable('DC_TEST_V8_REPOSITORY'))\n"
+        "} catch {\n"
+        "    [Console]::Error.WriteLine($_.Exception.Message)\n"
+        "    exit 1\n"
+        "}\n",
         encoding="utf-8",
     )
     env = os.environ.copy()
@@ -422,13 +461,15 @@ def test_v8_config_sources_are_pinned_to_cross_platform_lf_bytes() -> None:
 def test_builder_gates_exact_v8_wheel_resources_before_dependency_or_network_work() -> None:
     build = BUILD_PS1.read_text(encoding="utf-8")
     validator = _builder_function("Assert-DefenseClawWheelV8Resources")
+    raw_path_validator = _builder_function("Get-ValidatedWheelMemberPath")
+    packaged_validator = PACKAGED_V8_VALIDATOR.read_text(encoding="utf-8")
     required = tuple(_canonical_v8_wheel_entries())
 
     for member in required:
         assert member in validator
     for contract in (
         "duplicate v8 resource",
-        "colliding v8 extraction destinations",
+        "OrdinalIgnoreCase path collision",
         "non-file v8 resource",
         "unexpected v8 resources",
         "missing required v8 resources",
@@ -437,84 +478,40 @@ def test_builder_gates_exact_v8_wheel_resources_before_dependency_or_network_wor
         "CryptographicOperations]::FixedTimeEquals",
     ):
         assert contract in validator
+    for rejected_alias in (
+        "backslash",
+        "absolute or UNC",
+        "drive-qualified",
+        "dot or empty",
+        "trailing-dot-or-space",
+        "DOS short-name",
+        "Win32-forbidden",
+        "reserved DOS device",
+    ):
+        assert rejected_alias in raw_path_validator
+    assert ".Replace('\\', '/')" not in validator
 
     gate = "Assert-DefenseClawWheelV8Resources $wheel $repoRoot"
     assert build.index(gate) < build.index("$yaraCompatSource")
     assert build.index(gate) < build.index("Invoke-WebRequest")
+    staged_probe = build.index("'-I', $PackagedV8ResourceValidator")
     dependency_probe = build.index("$dependencyCheck = @'")
-    staged_probe = build.index("_schema_validator()", dependency_probe)
     site_archive = build.index("$siteZip = Join-Path $payload")
-    assert staged_probe < site_archive
+    assert staged_probe < dependency_probe < site_archive
+    assert "'--site-packages', $validationSite" in build[staged_probe:dependency_probe]
+    assert "'--runtime-root', $validationRuntime" in build[staged_probe:dependency_probe]
+    assert "'--label', 'staged'" in build[staged_probe:dependency_probe]
     for loader in (
         "telemetry_v8_schema_bytes()",
         "telemetry_v8_catalog_bytes()",
         "v7_exporter_selection_bytes()",
-        "telemetry_v8_compatibility_profile_bytes('galileo-rich-v2')",
-        "telemetry_v8_compatibility_profile_bytes('local-observability-v1')",
-        "telemetry_v8_compatibility_profile_bytes('openinference-v1')",
+        '"galileo-rich-v2"',
+        '"local-observability-v1"',
+        '"openinference-v1"',
     ):
-        assert loader in build[staged_probe:site_archive]
-    assert (
-        "staged runtime unexpectedly contains a Lib/schemas fallback tree"
-        in build[dependency_probe:site_archive]
-    )
-    staged_contract = build[dependency_probe:site_archive]
-    assert "children = list(directory.iterdir())" in staged_contract
-    assert "entry.is_symlink() or not entry.is_file()" in staged_contract
-    assert "if non_files or actual_names != expected_names:" in staged_contract
-
-
-def test_staged_v8_inventory_behaviorally_rejects_unexpected_directory(tmp_path: Path) -> None:
-    build = BUILD_PS1.read_text(encoding="utf-8")
-    here_string = re.search(r"(?ms)^\$dependencyCheck = @'\n(.*?)\n'@", build)
-    assert here_string
-    source = here_string.group(1)
-    start = source.index("expected_v8 = {")
-    end = source.index("\nfrom defenseclaw.observability", start)
-    inventory_probe = (
-        "import pathlib\n"
-        "import sys\n"
-        "package_root = pathlib.Path(sys.argv[1])\n"
-        f"{source[start:end]}\n"
-    )
-
-    package_root = tmp_path / "defenseclaw"
-    for relative in (
-        "_data/config/v8/defenseclaw-config.schema.json",
-        "_data/config/v8/observability.yaml",
-        "_data/config/v8/observability.md",
-        "_data/telemetry/v8/telemetry.schema.json",
-        "_data/telemetry/v8/catalog.json",
-        "_data/telemetry/v8/v7-exporter-selection.json",
-        "_data/telemetry/v8/galileo-rich-v2.json",
-        "_data/telemetry/v8/local-observability-v1.json",
-        "_data/telemetry/v8/openinference-v1.json",
-    ):
-        destination = package_root / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(b"fixture\n")
-
-    valid = subprocess.run(
-        [sys.executable, "-I", "-c", inventory_probe, str(package_root)],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert valid.returncode == 0, valid.stdout + valid.stderr
-
-    (package_root / "_data/config/v8/unexpected").mkdir()
-    invalid = subprocess.run(
-        [sys.executable, "-I", "-c", inventory_probe, str(package_root)],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    combined = invalid.stdout + invalid.stderr
-    assert invalid.returncode != 0
-    assert "staged DefenseClaw v8 resource inventory mismatch" in combined
-    assert "non_files=['unexpected']" in combined
+        assert loader in packaged_validator
+    assert "runtime unexpectedly contains a Lib/schemas fallback tree" in packaged_validator
+    assert "entry.is_symlink() or not entry.is_file()" in packaged_validator
 
 
 @pytest.mark.parametrize(
@@ -524,17 +521,21 @@ def test_staged_v8_inventory_behaviorally_rejects_unexpected_directory(tmp_path:
         ("missing", "missing required v8 resources"),
         ("duplicate", "duplicate v8 resource"),
         ("unexpected", "unexpected v8 resources"),
-        ("backslash-alias", "unexpected v8 resources"),
-        ("absolute-alias", "colliding v8 extraction destinations"),
-        ("drive-absolute-alias", "unexpected v8 resources"),
-        ("drive-relative-alias", "unexpected v8 resources"),
-        ("unc-alias", "unexpected v8 resources"),
-        ("parent-alias", "colliding v8 extraction destinations"),
-        ("dot-segment-alias", "colliding v8 extraction destinations"),
-        ("case-collision", "colliding v8 extraction destinations"),
-        ("windows-trailing-collision", "colliding v8 extraction destinations"),
-        ("ntfs-short-name-alias-1", "colliding v8 extraction destinations"),
-        ("ntfs-short-name-alias-2", "colliding v8 extraction destinations"),
+        ("backslash", "non-canonical wheel member path with a backslash"),
+        ("absolute", "non-canonical absolute or UNC wheel member path"),
+        ("drive", "non-canonical drive-qualified wheel member path"),
+        ("drive-relative", "non-canonical drive-qualified wheel member path"),
+        ("unc", "non-canonical absolute or UNC wheel member path"),
+        ("parent", "non-canonical dot or empty path component"),
+        ("dot", "non-canonical dot or empty path component"),
+        ("case-alias", "unexpected v8 resources"),
+        ("trailing-dot", "non-canonical trailing-dot-or-space alias"),
+        ("trailing-space", "non-canonical trailing-dot-or-space alias"),
+        ("case-collision", "OrdinalIgnoreCase path collision"),
+        ("short-name", "non-canonical DOS short-name alias"),
+        *((mutation, "non-canonical Win32-forbidden character") for mutation in WIN32_FORBIDDEN_WHEEL_MEMBERS),
+        *((mutation, "non-canonical reserved DOS device name") for mutation in RESERVED_DOS_WHEEL_MEMBERS),
+        ("device-boundaries-allowed", None),
         ("directory-entry", "non-file v8 resource"),
         ("directory-attribute-entry", "non-file v8 resource"),
         ("symlink-entry", "non-file v8 resource"),
@@ -557,41 +558,49 @@ def test_installer_v8_wheel_gate_fails_closed(
         files.append(canonical[0])
     elif mutation == "unexpected":
         files.append(("defenseclaw/_data/config/v8/unexpected.json", b"{}\n"))
-    elif mutation == "absolute-alias":
-        target, payload = canonical[1]
-        files.append((f"/{target}", payload))
-    elif mutation == "drive-absolute-alias":
-        target, payload = canonical[1]
-        files.append((f"C:/{target}", payload))
-    elif mutation == "drive-relative-alias":
-        target, payload = canonical[1]
-        files.append((f"C:{target}", payload))
-    elif mutation == "unc-alias":
-        target, payload = canonical[1]
-        files.append((f"//server/share/{target}", payload))
-    elif mutation == "parent-alias":
-        target, payload = canonical[1]
-        files.append((f"../{target}", payload))
-    elif mutation == "dot-segment-alias":
-        target, payload = canonical[1]
-        alias = target.replace("defenseclaw/_data", "defenseclaw/staging/../_data")
-        files.append((alias, payload))
+    elif mutation == "backslash":
+        # Write a canonical same-length name first, then patch the raw local
+        # and central-directory bytes below. ``zipfile`` normalizes a
+        # backslash name on Windows but preserves it on POSIX, so passing the
+        # malformed name directly would make the fixture host-dependent.
+        files.append(("defenseclaw/_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation == "absolute":
+        files.append(("/defenseclaw/_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation == "drive":
+        files.append(("C:/defenseclaw/_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation == "drive-relative":
+        files.append(("C:defenseclaw/_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation == "unc":
+        files.append(("//server/share/defenseclaw/_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation == "parent":
+        files.append(("defenseclaw/_data/config/v8/../v8/unexpected.json", b"{}\n"))
+    elif mutation == "dot":
+        files.append(("defenseclaw/./_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation == "case-alias":
+        files.append(("DefenseClaw/_DATA/config/V8/unexpected.json", b"{}\n"))
+    elif mutation == "trailing-dot":
+        files.append(("defenseclaw./_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation == "trailing-space":
+        files.append(("defenseclaw/_data/config/v8 /unexpected.json", b"{}\n"))
     elif mutation == "case-collision":
-        target, payload = canonical[1]
-        files.append((target.replace("defenseclaw", "DefenseClaw"), payload))
-    elif mutation == "windows-trailing-collision":
-        target, payload = canonical[1]
-        alias = target.replace(
-            "defenseclaw/_data/config/v8",
-            "defenseclaw./_data./config./v8 ",
+        files.append((canonical[0][0].upper(), canonical[0][1]))
+    elif mutation == "short-name":
+        files.append(("DEFENS~1/_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation in WIN32_FORBIDDEN_WHEEL_MEMBERS:
+        files.append((WIN32_FORBIDDEN_WHEEL_MEMBERS[mutation], b"{}\n"))
+    elif mutation in RESERVED_DOS_WHEEL_MEMBERS:
+        files.append((RESERVED_DOS_WHEEL_MEMBERS[mutation], b"{}\n"))
+    elif mutation == "device-boundaries-allowed":
+        files.extend(
+            (name, b"allowed boundary\n")
+            for name in (
+                "metadata/COM0.txt",
+                "metadata/COM10.txt",
+                "metadata/LPT0.txt",
+                "metadata/LPT10.txt",
+                "metadata/CLOCK.txt",
+            )
         )
-        files.append((alias, payload))
-    elif mutation == "ntfs-short-name-alias-1":
-        target, payload = canonical[1]
-        files.append((target.replace("defenseclaw", "DEFENS~1"), payload))
-    elif mutation == "ntfs-short-name-alias-2":
-        target, payload = canonical[1]
-        files.append((target.replace("defenseclaw", "DEFENS~2"), payload))
     elif mutation == "directory-entry":
         files.append(("defenseclaw/_data/config/v8/unexpected/", b""))
     elif mutation == "directory-attribute-entry":
@@ -620,14 +629,12 @@ def test_installer_v8_wheel_gate_fails_closed(
         wheel.write_bytes(b"not a wheel")
     if mutation != "malformed":
         _write_zip_entries(wheel, files)
-        if mutation == "backslash-alias":
-            # ZipFile treats backslashes differently by host OS, so patch the
-            # canonical local-header and central-directory names directly.
-            canonical_name = canonical[1][0].encode("ascii")
-            alias_name = canonical[1][0].replace("/", "\\").encode("ascii")
-            archive_bytes = wheel.read_bytes()
-            assert archive_bytes.count(canonical_name) == 2
-            wheel.write_bytes(archive_bytes.replace(canonical_name, alias_name))
+    if mutation == "backslash":
+        _rewrite_zip_member_name_bytes(
+            wheel,
+            "defenseclaw/_data/config/v8/unexpected.json",
+            r"defenseclaw\_data\config\v8\unexpected.json",
+        )
 
     result = _run_v8_wheel_gate(tmp_path, wheel)
 

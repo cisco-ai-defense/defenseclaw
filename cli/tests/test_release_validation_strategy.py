@@ -105,7 +105,12 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
         ".github/workflows/macos-app.yml",
         "scripts/export-uv-overrides.py",
         "scripts/telemetry_runtime_assets.py",
+        "scripts/validate_packaged_v8_resources.py",
     }.issubset(sensitive)
+    assert release_certification._is_sensitive(
+        ["scripts/validate_packaged_v8_resources.py"],
+        list(sensitive),
+    )
 
 
 def test_no_pull_request_workflow_can_run_full_or_signed_certification() -> None:

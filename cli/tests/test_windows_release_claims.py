@@ -134,3 +134,18 @@ def test_disposable_connector_workspace_includes_the_v8_jsonl_validator() -> Non
     ]
 
     assert "'assert-observability-v8-jsonl.py'" in contract_files
+
+
+def test_disposable_setup_workspace_includes_the_packaged_v8_validator() -> None:
+    launcher = (ROOT / "scripts/invoke-windows-setup-standard-user-ci.ps1").read_text(
+        encoding="utf-8"
+    )
+    harness_files_start = launcher.index("$harnessFiles = @(")
+    harness_files = launcher[
+        harness_files_start : launcher.index(
+            "if ($Mode -eq 'contract')", harness_files_start
+        )
+    ]
+
+    assert "'windows-native-ci.ps1'" in harness_files
+    assert "'validate_packaged_v8_resources.py'" in harness_files
