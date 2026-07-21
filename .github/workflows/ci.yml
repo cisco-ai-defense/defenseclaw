@@ -336,9 +336,9 @@ jobs:
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: npm ci
       # Production-only audit (--omit=dev excludes vitest/vite dev vulns).
-      # --audit-level=high: ignore moderate-severity js-yaml ReDoS which
-      # is a devDependency transitive, not shipped in the extension bundle.
-      - run: npm audit --omit=dev --audit-level=high || npm audit --omit=dev --audit-level=critical
+      # --audit-level=high: moderate-severity js-yaml ReDoS is a devDependency
+      # transitive, not shipped in the extension bundle, so it is excluded.
+      - run: npm audit --omit=dev --audit-level=high
 
   rego-test:
     name: Rego Policy Tests
