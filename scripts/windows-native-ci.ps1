@@ -1501,11 +1501,16 @@ expected_v8 = {
 }
 for relative, expected_names in expected_v8.items():
     directory = package_root.joinpath(relative)
-    actual_names = {entry.name for entry in directory.iterdir() if entry.is_file()}
-    if actual_names != expected_names:
+    children = list(directory.iterdir())
+    actual_names = {entry.name for entry in children}
+    non_files = sorted(
+        entry.name for entry in children if entry.is_symlink() or not entry.is_file()
+    )
+    if non_files or actual_names != expected_names:
         raise SystemExit(
             f'packaged DefenseClaw v8 resource inventory mismatch in {relative}: '
-            f'actual={sorted(actual_names)!r} expected={sorted(expected_names)!r}'
+            f'actual={sorted(actual_names)!r} expected={sorted(expected_names)!r} '
+            f'non_files={non_files!r}'
         )
 
 from defenseclaw.observability.v8_config import _schema_validator

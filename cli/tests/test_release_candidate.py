@@ -10,6 +10,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -2787,6 +2788,9 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
         ("dot-segment-alias", "resource inventory is invalid.*unexpected="),
         ("case-alias", "resource inventory is invalid.*unexpected="),
         ("windows-trailing-alias", "resource inventory is invalid.*unexpected="),
+        ("ntfs-short-name-alias-1", "resource inventory is invalid.*unexpected="),
+        ("ntfs-short-name-alias-2", "resource inventory is invalid.*unexpected="),
+        ("directory-entry", "non-file v8 runtime resources"),
         ("altered", "runtime resource is altered"),
     ],
 )
@@ -2812,12 +2816,39 @@ def test_non_bridge_candidate_rejects_incomplete_or_altered_v8_resources(
         members["DefenseClaw/_DATA/config/V8/unexpected.json"] = b"{}\n"
     elif mutation == "windows-trailing-alias":
         members["defenseclaw./_data./config/v8 /unexpected.json"] = b"{}\n"
+    elif mutation == "ntfs-short-name-alias-1":
+        members["DEFENS~1/_data/telemetry/v8/catalog.json"] = members[
+            "defenseclaw/_data/telemetry/v8/catalog.json"
+        ]
+    elif mutation == "ntfs-short-name-alias-2":
+        members["DEFENS~2/_data/config/v8/defenseclaw-config.schema.json"] = members[
+            config_schema
+        ]
+    elif mutation == "directory-entry":
+        members["defenseclaw/_data/config/v8/unexpected/"] = b""
     else:
         original = members[config_schema]
         members[config_schema] = b"[" + original[1:]
     _write_wheel_members(wheel, members)
 
     with pytest.raises(release_candidate.CandidateError, match=message):
+        release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
+
+
+def test_non_bridge_candidate_rejects_symlink_v8_resource(tmp_path: Path) -> None:
+    wheel = _non_bridge_candidate_wheel(tmp_path)
+    members = _read_wheel_members(wheel)
+    member_name = "defenseclaw/_data/config/v8/observability.yaml"
+    payload = members.pop(member_name)
+    symlink = zipfile.ZipInfo(member_name)
+    symlink.create_system = 3
+    symlink.external_attr = (stat.S_IFLNK | 0o777) << 16
+    with zipfile.ZipFile(wheel, mode="w") as archive:
+        for name, member_payload in members.items():
+            archive.writestr(name, member_payload)
+        archive.writestr(symlink, payload)
+
+    with pytest.raises(release_candidate.CandidateError, match="non-file v8 runtime resources"):
         release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
 
 

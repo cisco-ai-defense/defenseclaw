@@ -3001,7 +3001,10 @@ def _is_v8_package_data_member(member_name: str) -> bool:
         for part in PurePosixPath(member_name.replace("\\", "/")).parts
     )
     return any(
-        "defenseclaw" in parts[:data_index]
+        any(
+            root == "defenseclaw" or re.fullmatch(r"defens~[0-9]+", root) is not None
+            for root in parts[:data_index]
+        )
         and any(
             part == "v8" or part.startswith(("v8_", "v8."))
             for part in parts[data_index + 1 :]
@@ -3016,6 +3019,24 @@ def _validate_v8_wheel_resources(
     member_names: list[str],
 ) -> None:
     expected = _canonical_v8_wheel_resources()
+    non_files = sorted(
+        info.filename
+        for info in archive.infolist()
+        if _is_v8_package_data_member(info.filename)
+        and (
+            info.is_dir()
+            or bool(info.external_attr & 0x10)
+            or (
+                info.create_system == 3
+                and stat.S_IFMT(info.external_attr >> 16) not in {0, stat.S_IFREG}
+            )
+        )
+    )
+    if non_files:
+        raise CandidateError(
+            "0.8.5+ candidate wheel contains non-file v8 runtime resources: "
+            f"{non_files!r}"
+        )
     observed = {name for name in member_names if _is_v8_package_data_member(name)}
     missing = sorted(set(expected) - observed)
     unexpected = sorted(observed - set(expected))

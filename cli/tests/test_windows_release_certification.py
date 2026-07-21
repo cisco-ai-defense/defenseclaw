@@ -269,6 +269,9 @@ def test_packaged_v8_resources_are_loaded_before_hooks_and_after_installer_maint
     ):
         assert loader in resource_contract
     assert "packaged runtime unexpectedly contains a Lib/schemas fallback tree" in resource_contract
+    assert "children = list(directory.iterdir())" in resource_contract
+    assert "entry.is_symlink() or not entry.is_file()" in resource_contract
+    assert "if non_files or actual_names != expected_names:" in resource_contract
 
     probe = "Assert-PackagedV8ResourceContract $python (Join-Path $installRoot 'runtime\\python')"
     assert acceptance.index(probe) < acceptance.index("'init', '--skip-install'")

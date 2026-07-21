@@ -387,30 +387,107 @@ function Assert-DefenseClawWheelV8Resources(
         $entries = [Collections.Generic.Dictionary[string, IO.Compression.ZipArchiveEntry]]::new(
             [StringComparer]::Ordinal
         )
-        $unexpected = [Collections.Generic.List[string]]::new()
-        $prefixes = @(
-            'defenseclaw/_data/config/v8/',
-            'defenseclaw/_data/telemetry/v8/'
+        $windowsDestinations = [Collections.Generic.Dictionary[string, string]]::new(
+            [StringComparer]::OrdinalIgnoreCase
         )
+        $unexpected = [Collections.Generic.List[string]]::new()
         foreach ($entry in $archive.Entries) {
-            $name = $entry.FullName.Replace('\', '/')
-            if ($name.EndsWith('/', [StringComparison]::Ordinal)) { continue }
-            $isV8Resource = $false
-            foreach ($prefix in $prefixes) {
-                if ($name.StartsWith($prefix, [StringComparison]::Ordinal)) {
-                    $isV8Resource = $true
-                    break
+            # Use Windows-equivalent components only to classify unsafe aliases
+            # and collisions. Acceptance below always uses the untouched ZIP name.
+            $rawName = [string]$entry.FullName
+            $rawComponents = [Collections.Generic.List[string]]::new()
+            $resolvedComponents = [Collections.Generic.List[string]]::new()
+            foreach ($rawComponent in $rawName.Replace('\', '/').Split(
+                [char[]]@('/'),
+                [StringSplitOptions]::None
+            )) {
+                if ($rawComponent.Length -eq 0) { continue }
+                $dotComponent = $rawComponent.TrimEnd([char[]]@(' '))
+                if ($dotComponent -eq '.') { continue }
+                if ($dotComponent -eq '..') {
+                    [void]$rawComponents.Add('..')
+                    if ($resolvedComponents.Count -gt 0) {
+                        $resolvedComponents.RemoveAt($resolvedComponents.Count - 1)
+                    }
+                    continue
                 }
+                $component = $rawComponent.TrimEnd([char[]]@(' ', '.')).ToLowerInvariant()
+                if ($component.Length -eq 0) { continue }
+                if (
+                    $component.Length -gt 2 -and
+                    [char]::IsLetter($component[0]) -and
+                    $component[1] -eq [char]':'
+                ) {
+                    $drivePrefix = $component.Substring(0, 2)
+                    [void]$rawComponents.Add($drivePrefix)
+                    [void]$resolvedComponents.Add($drivePrefix)
+                    $component = $component.Substring(2)
+                }
+                if ([Text.RegularExpressions.Regex]::IsMatch(
+                    $component,
+                    '\Adefens~[0-9]+\z',
+                    [Text.RegularExpressions.RegexOptions]::CultureInvariant
+                )) {
+                    $component = 'defenseclaw'
+                } elseif ([Text.RegularExpressions.Regex]::IsMatch(
+                    $component,
+                    '\Ateleme~[0-9]+\z',
+                    [Text.RegularExpressions.RegexOptions]::CultureInvariant
+                )) {
+                    $component = 'telemetry'
+                }
+                [void]$rawComponents.Add($component)
+                [void]$resolvedComponents.Add($component)
+            }
+
+            $isV8Resource = $false
+            $componentSets = [Collections.Generic.List[object]]::new()
+            [void]$componentSets.Add($rawComponents.ToArray())
+            [void]$componentSets.Add($resolvedComponents.ToArray())
+            foreach ($componentSet in $componentSets) {
+                [string[]]$components = $componentSet
+                for ($index = 0; $index -le $components.Length - 4; $index++) {
+                    if (
+                        $components[$index] -ceq 'defenseclaw' -and
+                        $components[$index + 1] -ceq '_data' -and
+                        (
+                            $components[$index + 2] -ceq 'config' -or
+                            $components[$index + 2] -ceq 'telemetry'
+                        ) -and
+                        $components[$index + 3] -ceq 'v8'
+                    ) {
+                        $isV8Resource = $true
+                        break
+                    }
+                }
+                if ($isV8Resource) { break }
             }
             if (-not $isV8Resource) { continue }
-            if (-not $expectedNames.Contains($name)) {
-                [void]$unexpected.Add($name)
+
+            $destinationKey = [string]::Join('/', $resolvedComponents.ToArray())
+            if ($windowsDestinations.ContainsKey($destinationKey)) {
+                $owner = $windowsDestinations[$destinationKey]
+                if ($owner.Equals($rawName, [StringComparison]::Ordinal)) {
+                    throw "DefenseClaw wheel contains a duplicate v8 resource: $rawName"
+                }
+                throw "DefenseClaw wheel contains colliding v8 extraction destinations: $owner, $rawName"
+            }
+            $windowsDestinations.Add($destinationKey, $rawName)
+
+            $unixFileType = (($entry.ExternalAttributes -shr 16) -band 0xF000)
+            if (
+                $rawName.EndsWith('/', [StringComparison]::Ordinal) -or
+                $rawName.EndsWith('\', [StringComparison]::Ordinal) -or
+                (($entry.ExternalAttributes -band 0x10) -ne 0) -or
+                ($unixFileType -ne 0 -and $unixFileType -ne 0x8000)
+            ) {
+                throw "DefenseClaw wheel contains a non-file v8 resource: $rawName"
+            }
+            if (-not $expectedNames.Contains($rawName)) {
+                [void]$unexpected.Add($rawName)
                 continue
             }
-            if ($entries.ContainsKey($name)) {
-                throw "DefenseClaw wheel contains a duplicate v8 resource: $name"
-            }
-            $entries.Add($name, $entry)
+            $entries.Add($rawName, $entry)
         }
         if ($unexpected.Count -gt 0) {
             $names = @($unexpected | Sort-Object -Unique) -join ', '
@@ -857,11 +934,16 @@ expected_v8 = {
 }
 for relative, expected_names in expected_v8.items():
     directory = package_root.joinpath(relative)
-    actual_names = {entry.name for entry in directory.iterdir() if entry.is_file()}
-    if actual_names != expected_names:
+    children = list(directory.iterdir())
+    actual_names = {entry.name for entry in children}
+    non_files = sorted(
+        entry.name for entry in children if entry.is_symlink() or not entry.is_file()
+    )
+    if non_files or actual_names != expected_names:
         raise SystemExit(
             f'staged DefenseClaw v8 resource inventory mismatch in {relative}: '
-            f'actual={sorted(actual_names)!r} expected={sorted(expected_names)!r}'
+            f'actual={sorted(actual_names)!r} expected={sorted(expected_names)!r} '
+            f'non_files={non_files!r}'
         )
 
 from defenseclaw.observability.v8_config import _schema_validator

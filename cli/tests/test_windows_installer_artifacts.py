@@ -11,7 +11,9 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
+import sys
 import time
 import warnings
 import zipfile
@@ -45,7 +47,10 @@ def _write_zip(path: Path, files: dict[str, bytes]) -> None:
     path.write_bytes(_zip_bytes(files))
 
 
-def _write_zip_entries(path: Path, files: list[tuple[str, bytes]]) -> None:
+def _write_zip_entries(
+    path: Path,
+    files: list[tuple[str | zipfile.ZipInfo, bytes]],
+) -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -423,6 +428,8 @@ def test_builder_gates_exact_v8_wheel_resources_before_dependency_or_network_wor
         assert member in validator
     for contract in (
         "duplicate v8 resource",
+        "colliding v8 extraction destinations",
+        "non-file v8 resource",
         "unexpected v8 resources",
         "missing required v8 resources",
         "does not match its canonical source",
@@ -451,6 +458,63 @@ def test_builder_gates_exact_v8_wheel_resources_before_dependency_or_network_wor
         "staged runtime unexpectedly contains a Lib/schemas fallback tree"
         in build[dependency_probe:site_archive]
     )
+    staged_contract = build[dependency_probe:site_archive]
+    assert "children = list(directory.iterdir())" in staged_contract
+    assert "entry.is_symlink() or not entry.is_file()" in staged_contract
+    assert "if non_files or actual_names != expected_names:" in staged_contract
+
+
+def test_staged_v8_inventory_behaviorally_rejects_unexpected_directory(tmp_path: Path) -> None:
+    build = BUILD_PS1.read_text(encoding="utf-8")
+    here_string = re.search(r"(?ms)^\$dependencyCheck = @'\n(.*?)\n'@", build)
+    assert here_string
+    source = here_string.group(1)
+    start = source.index("expected_v8 = {")
+    end = source.index("\nfrom defenseclaw.observability", start)
+    inventory_probe = (
+        "import pathlib\n"
+        "import sys\n"
+        "package_root = pathlib.Path(sys.argv[1])\n"
+        f"{source[start:end]}\n"
+    )
+
+    package_root = tmp_path / "defenseclaw"
+    for relative in (
+        "_data/config/v8/defenseclaw-config.schema.json",
+        "_data/config/v8/observability.yaml",
+        "_data/config/v8/observability.md",
+        "_data/telemetry/v8/telemetry.schema.json",
+        "_data/telemetry/v8/catalog.json",
+        "_data/telemetry/v8/v7-exporter-selection.json",
+        "_data/telemetry/v8/galileo-rich-v2.json",
+        "_data/telemetry/v8/local-observability-v1.json",
+        "_data/telemetry/v8/openinference-v1.json",
+    ):
+        destination = package_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"fixture\n")
+
+    valid = subprocess.run(
+        [sys.executable, "-I", "-c", inventory_probe, str(package_root)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert valid.returncode == 0, valid.stdout + valid.stderr
+
+    (package_root / "_data/config/v8/unexpected").mkdir()
+    invalid = subprocess.run(
+        [sys.executable, "-I", "-c", inventory_probe, str(package_root)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    combined = invalid.stdout + invalid.stderr
+    assert invalid.returncode != 0
+    assert "staged DefenseClaw v8 resource inventory mismatch" in combined
+    assert "non_files=['unexpected']" in combined
 
 
 @pytest.mark.parametrize(
@@ -460,6 +524,20 @@ def test_builder_gates_exact_v8_wheel_resources_before_dependency_or_network_wor
         ("missing", "missing required v8 resources"),
         ("duplicate", "duplicate v8 resource"),
         ("unexpected", "unexpected v8 resources"),
+        ("backslash-alias", "unexpected v8 resources"),
+        ("absolute-alias", "colliding v8 extraction destinations"),
+        ("drive-absolute-alias", "unexpected v8 resources"),
+        ("drive-relative-alias", "unexpected v8 resources"),
+        ("unc-alias", "unexpected v8 resources"),
+        ("parent-alias", "colliding v8 extraction destinations"),
+        ("dot-segment-alias", "colliding v8 extraction destinations"),
+        ("case-collision", "colliding v8 extraction destinations"),
+        ("windows-trailing-collision", "colliding v8 extraction destinations"),
+        ("ntfs-short-name-alias-1", "colliding v8 extraction destinations"),
+        ("ntfs-short-name-alias-2", "colliding v8 extraction destinations"),
+        ("directory-entry", "non-file v8 resource"),
+        ("directory-attribute-entry", "non-file v8 resource"),
+        ("symlink-entry", "non-file v8 resource"),
         ("altered", "does not match its canonical source"),
         ("newline", "does not match its canonical source"),
         ("malformed", "not a readable ZIP archive"),
@@ -479,6 +557,62 @@ def test_installer_v8_wheel_gate_fails_closed(
         files.append(canonical[0])
     elif mutation == "unexpected":
         files.append(("defenseclaw/_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation == "backslash-alias":
+        target, _ = canonical[1]
+        files = [
+            (name.replace("/", "\\") if name == target else name, data)
+            for name, data in files
+        ]
+    elif mutation == "absolute-alias":
+        target, payload = canonical[1]
+        files.append((f"/{target}", payload))
+    elif mutation == "drive-absolute-alias":
+        target, payload = canonical[1]
+        files.append((f"C:/{target}", payload))
+    elif mutation == "drive-relative-alias":
+        target, payload = canonical[1]
+        files.append((f"C:{target}", payload))
+    elif mutation == "unc-alias":
+        target, payload = canonical[1]
+        files.append((f"//server/share/{target}", payload))
+    elif mutation == "parent-alias":
+        target, payload = canonical[1]
+        files.append((f"../{target}", payload))
+    elif mutation == "dot-segment-alias":
+        target, payload = canonical[1]
+        alias = target.replace("defenseclaw/_data", "defenseclaw/staging/../_data")
+        files.append((alias, payload))
+    elif mutation == "case-collision":
+        target, payload = canonical[1]
+        files.append((target.replace("defenseclaw", "DefenseClaw"), payload))
+    elif mutation == "windows-trailing-collision":
+        target, payload = canonical[1]
+        alias = target.replace(
+            "defenseclaw/_data/config/v8",
+            "defenseclaw./_data./config./v8 ",
+        )
+        files.append((alias, payload))
+    elif mutation == "ntfs-short-name-alias-1":
+        target, payload = canonical[1]
+        files.append((target.replace("defenseclaw", "DEFENS~1"), payload))
+    elif mutation == "ntfs-short-name-alias-2":
+        target, payload = canonical[1]
+        files.append((target.replace("defenseclaw", "DEFENS~2"), payload))
+    elif mutation == "directory-entry":
+        files.append(("defenseclaw/_data/config/v8/unexpected/", b""))
+    elif mutation == "directory-attribute-entry":
+        target, _ = canonical[1]
+        directory = zipfile.ZipInfo(target)
+        directory.create_system = 3
+        directory.external_attr = ((stat.S_IFDIR | 0o755) << 16) | 0x10
+        files = [(directory if name == target else name, data) for name, data in files]
+    elif mutation == "symlink-entry":
+        target, payload = canonical[1]
+        symlink = zipfile.ZipInfo(target)
+        symlink.create_system = 3
+        symlink.external_attr = (stat.S_IFLNK | 0o777) << 16
+        files = [(symlink if name == target else name, data) for name, data in files]
+        assert payload == canonical[1][1]
     elif mutation == "altered":
         target, payload = canonical[2]
         files = [(name, b"altered\n" if name == target else data) for name, data in files]
@@ -492,6 +626,12 @@ def test_installer_v8_wheel_gate_fails_closed(
         wheel.write_bytes(b"not a wheel")
     if mutation != "malformed":
         _write_zip_entries(wheel, files)
+        if mutation == "backslash-alias":
+            canonical_name = canonical[1][0].encode("ascii")
+            alias_name = canonical[1][0].replace("/", "\\").encode("ascii")
+            archive_bytes = wheel.read_bytes()
+            assert archive_bytes.count(canonical_name) == 2
+            wheel.write_bytes(archive_bytes.replace(canonical_name, alias_name))
 
     result = _run_v8_wheel_gate(tmp_path, wheel)
 
