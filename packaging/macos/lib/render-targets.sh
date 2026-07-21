@@ -14,8 +14,13 @@
 # Writes:
 #   ${SUPPORT_DIR}/hook-guardian/targets.yaml (root:wheel 0640, atomic swap)
 #
-# The hook-guardian LaunchDaemon polls the file it writes here on every
-# tick (StartInterval 300), so no signal / restart is needed.
+# The hook-guardian LaunchDaemon is a long-running `enterprise hooks
+# watch` process: it holds an fsnotify subscription on the manifest
+# path and on every per-user hook artifact, and re-reads the file
+# within ~1 s of an atomic replacement. A 60 s periodic backstop
+# reconcile covers events fsnotify might miss (WAL replay after
+# reboot, symlink swap, watcher errors). No signal / restart is
+# needed here — atomic-swap the file and the guardian picks it up.
 
 set -euo pipefail
 

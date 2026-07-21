@@ -4,8 +4,9 @@
 # The manifest schema is defined by ManifestTarget in
 # internal/enterprisehooks/manifest.go — LoadManifest requires that every
 # enabled target carry both `connector` and (`user` or `user_home`). The
-# fields we render (user, user_home, uid, gid, connector, data_dir,
+# fields we render (user, user_home, uid, gid, connector,
 # agent_version, enabled) mirror the struct's yaml tags 1:1.
+# (data_dir is intentionally omitted — see t_rows_omit_data_dir.)
 
 . "${PKG_DIR}/lib/installer_lib.sh"
 

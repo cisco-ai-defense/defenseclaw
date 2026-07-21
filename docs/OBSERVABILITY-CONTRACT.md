@@ -155,7 +155,7 @@ Complete enumeration (must match `AllErrorCodes()`):
 
 Complete enumeration (must match `AllSubsystems()`):
 
-`sidecar`, `watcher`, `gateway`, `scanner`, `policy`, `guardrail`, `auth`, `config`, `inspect`, `approvals`, `sink`, `telemetry`, `correlation`, `stream`, `cisco-inspect`, `openshell`, `webhook`, `quarantine`, `agent-registry`, `sqlite`, `admission`, `config_mutation`, `gatewaylog`
+`sidecar`, `watcher`, `gateway`, `scanner`, `policy`, `guardrail`, `auth`, `config`, `inspect`, `approvals`, `sink`, `telemetry`, `correlation`, `stream`, `cisco-inspect`, `cisco-aid-export`, `openshell`, `webhook`, `quarantine`, `agent-registry`, `sqlite`, `admission`, `config_mutation`, `gatewaylog`
 
 ---
 

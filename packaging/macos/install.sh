@@ -452,7 +452,7 @@ fi
 # installer renders a machine-wide `targets.yaml` covering every eligible
 # local user, and the hook-guardian LaunchDaemon reconciles that manifest
 # reactively via fsnotify — user tampering with a hook config or hook
-# script under a watched dir triggers a repair within ~1 s. A 5 min
+# script under a watched dir triggers a repair within ~1 s. A 60 s
 # periodic reconcile is retained as a backstop for missed events. Fresh
 # users added after install are picked up by the hook-enumerator daemon
 # that re-renders the same manifest on its own 5 min tick. --user is
@@ -705,7 +705,7 @@ install_file_no_replace "${PLIST_SRC}" "${PLIST_DST}" root wheel 0644
 # Guardian + enumerator plists: the two subsystems together do all
 # per-user hook wiring (enumerator re-renders targets.yaml on a 5 min
 # tick; guardian is long-running under `enterprise hooks watch` — fsnotify
-# on every per-user hook artifact with a 5-min periodic backstop).
+# on every per-user hook artifact with a 60 s periodic backstop).
 [[ -f "${GUARDIAN_PLIST_SRC}" ]] \
   || die "hook-guardian plist source not found (expected ${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist)"
 [[ -f "${ENUMERATOR_PLIST_SRC}" ]] \
@@ -763,7 +763,7 @@ fi
 #
 # The current flow uses the hook-guardian LaunchDaemon (long-running
 # `enterprise hooks watch`: fsnotify on every per-user hook artifact +
-# 5-min backstop reconcile) with a machine-wide `targets.yaml` manifest
+# 60 s backstop reconcile) with a machine-wide `targets.yaml` manifest
 # that lists every eligible local user × requested connector. A
 # companion hook-enumerator LaunchDaemon (5-min tick) re-renders the
 # manifest so users provisioned AFTER install are picked up on the next
