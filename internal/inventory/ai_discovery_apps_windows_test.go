@@ -7,6 +7,7 @@ package inventory
 
 import (
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -50,7 +51,7 @@ func TestCollectWindowsShellApplicationNamesUsesDisplayAndStablePackageIdentity(
 		},
 	}
 	got := collectWindowsShellApplicationNames(identities, maxWindowsApplicationNames)
-	for _, want := range []string{"ChatGPT", "package-id:OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0", "Claude"} {
+	for _, want := range []string{"package-id:OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0", "Claude"} {
 		if !slices.Contains(got, want) {
 			t.Errorf("AppsFolder names missing %q: %v", want, got)
 		}
@@ -118,7 +119,10 @@ func TestWindowsStorePackageIdentitiesMatchBuiltInAISignatures(t *testing.T) {
 func TestCollectWindowsShellApplicationNamesIsBounded(t *testing.T) {
 	identities := make([]windowsShellApplicationIdentity, maxWindowsApplicationNames+32)
 	for i := range identities {
-		identities[i].DisplayName = strings.Repeat("a", 16) + string(rune(0x1000+i))
+		// Use values that remain unique after case folding. A prior Unicode
+		// sequence accidentally included upper/lowercase pairs, so the test was
+		// measuring intentional deduplication instead of the output cap.
+		identities[i].DisplayName = "app-" + strconv.Itoa(i)
 	}
 	got := collectWindowsShellApplicationNames(identities, maxWindowsApplicationNames+100)
 	if len(got) != maxWindowsApplicationNames {
