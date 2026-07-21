@@ -11,6 +11,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 HARNESS = (ROOT / "scripts" / "windows-native-ci.ps1").read_text(encoding="utf-8")
+PACKAGED_V8_VALIDATOR = (
+    ROOT / "scripts" / "validate_packaged_v8_resources.py"
+).read_text(encoding="utf-8")
 LIVE = (ROOT / "scripts" / "live-connector-e2e" / "run-windows.ps1").read_text(encoding="utf-8")
 RELEASE = (ROOT / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8")
 
@@ -257,21 +260,24 @@ def test_packaged_v8_resources_are_loaded_before_hooks_and_after_installer_maint
         "local-observability-v1.json",
         "openinference-v1.json",
     ):
-        assert resource in resource_contract
+        assert resource in PACKAGED_V8_VALIDATOR
     for loader in (
         "_schema_validator()",
         "telemetry_v8_schema_bytes()",
         "telemetry_v8_catalog_bytes()",
         "v7_exporter_selection_bytes()",
-        "telemetry_v8_compatibility_profile_bytes('galileo-rich-v2')",
-        "telemetry_v8_compatibility_profile_bytes('local-observability-v1')",
-        "telemetry_v8_compatibility_profile_bytes('openinference-v1')",
+        '"galileo-rich-v2"',
+        '"local-observability-v1"',
+        '"openinference-v1"',
     ):
-        assert loader in resource_contract
-    assert "packaged runtime unexpectedly contains a Lib/schemas fallback tree" in resource_contract
-    assert "children = list(directory.iterdir())" in resource_contract
-    assert "entry.is_symlink() or not entry.is_file()" in resource_contract
-    assert "if non_files or actual_names != expected_names:" in resource_contract
+        assert loader in PACKAGED_V8_VALIDATOR
+    assert "runtime unexpectedly contains a Lib/schemas fallback tree" in PACKAGED_V8_VALIDATOR
+    assert "scripts\\validate_packaged_v8_resources.py" in resource_contract
+    assert "Test-Path -LiteralPath $validator -PathType Leaf" in resource_contract
+    assert "'-I', $validator" in resource_contract
+    assert "'--site-packages', $sitePackages" in resource_contract
+    assert "'--runtime-root', $RuntimeRoot" in resource_contract
+    assert "'--label', 'packaged'" in resource_contract
 
     probe = "Assert-PackagedV8ResourceContract $python (Join-Path $installRoot 'runtime\\python')"
     assert acceptance.index(probe) < acceptance.index("'init', '--skip-install'")

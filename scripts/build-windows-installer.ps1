@@ -49,6 +49,7 @@ $CosignSha256 = 'DD6C61E510DA627BCAED4CD9DB844EC11CACD09826D814D89F7F68D40FEB07B
 $WindowsArtifactHelper = Join-Path $PSScriptRoot 'windows_installer_artifacts.py'
 $WindowsAuthenticodeHelper = Join-Path $PSScriptRoot 'windows-authenticode.ps1'
 $WindowsBinaryIdentityHelper = Join-Path $PSScriptRoot 'windows-binary-identity.ps1'
+$PackagedV8ResourceValidator = Join-Path $PSScriptRoot 'validate_packaged_v8_resources.py'
 
 function Resolve-FullPath([string]$Path) {
     return [IO.Path]::GetFullPath($Path)
@@ -318,6 +319,92 @@ function Read-CanonicalGzipBytes([string]$Path, [long]$MaximumBytes) {
     return ,$decoded
 }
 
+function Get-ValidatedWheelMemberPath([string]$RawName) {
+    if ([string]::IsNullOrEmpty($RawName)) {
+        throw 'DefenseClaw wheel contains an empty member path.'
+    }
+    if ($RawName.Contains('\')) {
+        throw "DefenseClaw wheel contains a non-canonical wheel member path with a backslash: $RawName"
+    }
+    if ($RawName.StartsWith('/', [StringComparison]::Ordinal)) {
+        throw "DefenseClaw wheel contains a non-canonical absolute or UNC wheel member path: $RawName"
+    }
+    if ($RawName.IndexOf(':') -ge 0) {
+        throw "DefenseClaw wheel contains a non-canonical drive-qualified wheel member path: $RawName"
+    }
+    foreach ($character in $RawName.ToCharArray()) {
+        if ([char]::IsControl($character)) {
+            throw "DefenseClaw wheel contains a non-canonical control character in a member path: $RawName"
+        }
+    }
+
+    $isDirectory = $RawName.EndsWith('/', [StringComparison]::Ordinal)
+    $identity = if ($isDirectory) {
+        $RawName.Substring(0, $RawName.Length - 1)
+    } else {
+        $RawName
+    }
+    if ([string]::IsNullOrEmpty($identity) -or
+        $identity.Contains('//')) {
+        throw "DefenseClaw wheel contains a non-canonical empty path component: $RawName"
+    }
+    foreach ($component in $identity.Split([char]'/', [StringSplitOptions]::None)) {
+        if ([string]::IsNullOrEmpty($component) -or $component -eq '.' -or $component -eq '..') {
+            throw "DefenseClaw wheel contains a non-canonical dot or empty path component: $RawName"
+        }
+        if ($component.IndexOfAny([char[]]'<>"|?*') -ge 0) {
+            throw "DefenseClaw wheel contains a non-canonical Win32-forbidden character: $RawName"
+        }
+        if ($component.EndsWith('.', [StringComparison]::Ordinal) -or
+            $component.EndsWith(' ', [StringComparison]::Ordinal)) {
+            throw "DefenseClaw wheel contains a non-canonical trailing-dot-or-space alias: $RawName"
+        }
+        $stem = $component
+        $extensionIndex = $component.IndexOf('.')
+        if ($extensionIndex -ge 0) {
+            $stem = $component.Substring(0, $extensionIndex)
+        }
+        $stem = $stem.TrimEnd([char[]]' .')
+        if ($stem -match '(?i)^(?:CON|PRN|AUX|NUL|CLOCK\$|COM[1-9]|LPT[1-9])$') {
+            throw "DefenseClaw wheel contains a non-canonical reserved DOS device name: $RawName"
+        }
+        if ($component -match '(?i)^[A-Z0-9_]{1,6}~[1-9][0-9]*(?:\.[A-Z0-9_]{0,3})?$') {
+            throw "DefenseClaw wheel contains a non-canonical DOS short-name alias: $RawName"
+        }
+    }
+    return [pscustomobject]@{
+        Name = $RawName
+        Identity = $identity
+        IsDirectory = $isDirectory
+    }
+}
+
+function Test-DefenseClawV8WheelMember([string]$Name) {
+    $parts = @($Name.Split([char]'/', [StringSplitOptions]::None))
+    for ($dataIndex = 0; $dataIndex -lt $parts.Count; $dataIndex++) {
+        if (-not $parts[$dataIndex].Equals('_data', [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        $hasPackageRoot = $false
+        for ($packageIndex = 0; $packageIndex -lt $dataIndex; $packageIndex++) {
+            if ($parts[$packageIndex].Equals('defenseclaw', [StringComparison]::OrdinalIgnoreCase)) {
+                $hasPackageRoot = $true
+                break
+            }
+        }
+        if (-not $hasPackageRoot) { continue }
+        for ($resourceIndex = $dataIndex + 1; $resourceIndex -lt $parts.Count; $resourceIndex++) {
+            $component = $parts[$resourceIndex]
+            if ($component.Equals('v8', [StringComparison]::OrdinalIgnoreCase) -or
+                $component.StartsWith('v8_', [StringComparison]::OrdinalIgnoreCase) -or
+                $component.StartsWith('v8.', [StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
 function Assert-DefenseClawWheelV8Resources(
     [string]$WheelPath,
     [string]$RepositoryRoot
@@ -387,107 +474,39 @@ function Assert-DefenseClawWheelV8Resources(
         $entries = [Collections.Generic.Dictionary[string, IO.Compression.ZipArchiveEntry]]::new(
             [StringComparer]::Ordinal
         )
-        $windowsDestinations = [Collections.Generic.Dictionary[string, string]]::new(
+        $pathIdentities = [Collections.Generic.Dictionary[string, string]]::new(
             [StringComparer]::OrdinalIgnoreCase
         )
         $unexpected = [Collections.Generic.List[string]]::new()
         foreach ($entry in $archive.Entries) {
-            # Use Windows-equivalent components only to classify unsafe aliases
-            # and collisions. Acceptance below always uses the untouched ZIP name.
-            $rawName = [string]$entry.FullName
-            $rawComponents = [Collections.Generic.List[string]]::new()
-            $resolvedComponents = [Collections.Generic.List[string]]::new()
-            foreach ($rawComponent in $rawName.Replace('\', '/').Split(
-                [char[]]@('/'),
-                [StringSplitOptions]::None
-            )) {
-                if ($rawComponent.Length -eq 0) { continue }
-                $dotComponent = $rawComponent.TrimEnd([char[]]@(' '))
-                if ($dotComponent -eq '.') { continue }
-                if ($dotComponent -eq '..') {
-                    [void]$rawComponents.Add('..')
-                    if ($resolvedComponents.Count -gt 0) {
-                        $resolvedComponents.RemoveAt($resolvedComponents.Count - 1)
-                    }
-                    continue
+            $member = Get-ValidatedWheelMemberPath ([string]$entry.FullName)
+            $name = [string]$member.Name
+            $identity = [string]$member.Identity
+            if ($pathIdentities.ContainsKey($identity)) {
+                $existingName = $pathIdentities[$identity]
+                if (Test-DefenseClawV8WheelMember $name) {
+                    throw "DefenseClaw wheel contains a duplicate v8 resource or OrdinalIgnoreCase path collision: '$name' conflicts with '$existingName'"
                 }
-                $component = $rawComponent.TrimEnd([char[]]@(' ', '.')).ToLowerInvariant()
-                if ($component.Length -eq 0) { continue }
-                if (
-                    $component.Length -gt 2 -and
-                    [char]::IsLetter($component[0]) -and
-                    $component[1] -eq [char]':'
-                ) {
-                    $drivePrefix = $component.Substring(0, 2)
-                    [void]$rawComponents.Add($drivePrefix)
-                    [void]$resolvedComponents.Add($drivePrefix)
-                    $component = $component.Substring(2)
-                }
-                if ([Text.RegularExpressions.Regex]::IsMatch(
-                    $component,
-                    '\Adefens~[0-9]+\z',
-                    [Text.RegularExpressions.RegexOptions]::CultureInvariant
-                )) {
-                    $component = 'defenseclaw'
-                } elseif ([Text.RegularExpressions.Regex]::IsMatch(
-                    $component,
-                    '\Ateleme~[0-9]+\z',
-                    [Text.RegularExpressions.RegexOptions]::CultureInvariant
-                )) {
-                    $component = 'telemetry'
-                }
-                [void]$rawComponents.Add($component)
-                [void]$resolvedComponents.Add($component)
+                throw "DefenseClaw wheel contains an OrdinalIgnoreCase path collision: '$name' conflicts with '$existingName'"
             }
+            $pathIdentities.Add($identity, $name)
 
-            $isV8Resource = $false
-            $componentSets = [Collections.Generic.List[object]]::new()
-            [void]$componentSets.Add($rawComponents.ToArray())
-            [void]$componentSets.Add($resolvedComponents.ToArray())
-            foreach ($componentSet in $componentSets) {
-                [string[]]$components = $componentSet
-                for ($index = 0; $index -le $components.Length - 4; $index++) {
-                    if (
-                        $components[$index] -ceq 'defenseclaw' -and
-                        $components[$index + 1] -ceq '_data' -and
-                        (
-                            $components[$index + 2] -ceq 'config' -or
-                            $components[$index + 2] -ceq 'telemetry'
-                        ) -and
-                        $components[$index + 3] -ceq 'v8'
-                    ) {
-                        $isV8Resource = $true
-                        break
-                    }
-                }
-                if ($isV8Resource) { break }
-            }
-            if (-not $isV8Resource) { continue }
-
-            $destinationKey = [string]::Join('/', $resolvedComponents.ToArray())
-            if ($windowsDestinations.ContainsKey($destinationKey)) {
-                $owner = $windowsDestinations[$destinationKey]
-                if ($owner.Equals($rawName, [StringComparison]::Ordinal)) {
-                    throw "DefenseClaw wheel contains a duplicate v8 resource: $rawName"
-                }
-                throw "DefenseClaw wheel contains colliding v8 extraction destinations: $owner, $rawName"
-            }
-            $windowsDestinations.Add($destinationKey, $rawName)
-
+            $isV8Resource = Test-DefenseClawV8WheelMember $name
             $unixFileType = (($entry.ExternalAttributes -shr 16) -band 0xF000)
-            if (
-                $rawName.EndsWith('/', [StringComparison]::Ordinal) -or
-                $rawName.EndsWith('\', [StringComparison]::Ordinal) -or
+            if ($isV8Resource -and (
+                [bool]$member.IsDirectory -or
                 (($entry.ExternalAttributes -band 0x10) -ne 0) -or
                 ($unixFileType -ne 0 -and $unixFileType -ne 0x8000)
-            ) {
-                throw "DefenseClaw wheel contains a non-file v8 resource: $rawName"
+            )) {
+                throw "DefenseClaw wheel contains a non-file v8 resource: $name"
             }
-            if (-not $expectedNames.Contains($rawName)) {
-                [void]$unexpected.Add($rawName)
+            if ([bool]$member.IsDirectory) { continue }
+            if (-not $isV8Resource) { continue }
+            if (-not $expectedNames.Contains($name)) {
+                [void]$unexpected.Add($name)
                 continue
             }
-            $entries.Add($rawName, $entry)
+            $entries.Add($name, $entry)
         }
         if ($unexpected.Count -gt 0) {
             $names = @($unexpected | Sort-Object -Unique) -join ', '
@@ -697,7 +716,7 @@ Set-Location $repoRoot
 $resourceIcon = Join-Path $repoRoot 'macos\DefenseClawMac\DefenseClawMac\Assets.xcassets\AppIcon.appiconset\icon_256.png'
 foreach ($requiredSetupInput in @(
     $resourceIcon, $WindowsArtifactHelper, $WindowsAuthenticodeHelper,
-    $WindowsBinaryIdentityHelper
+    $WindowsBinaryIdentityHelper, $PackagedV8ResourceValidator
 )) {
     if (-not (Test-Path -LiteralPath $requiredSetupInput -PathType Leaf)) {
         throw "Required Windows installer input is missing: $requiredSetupInput"
@@ -902,75 +921,18 @@ $validationSite = Join-Path $validationRuntime 'Lib\site-packages'
 foreach ($item in Get-ChildItem -LiteralPath $sitePackages -Force) {
     Copy-Item -LiteralPath $item.FullName -Destination $validationSite -Recurse -Force
 }
+Invoke-CheckedProcess $validationPython @(
+    '-I', $PackagedV8ResourceValidator,
+    '--site-packages', $validationSite,
+    '--runtime-root', $validationRuntime,
+    '--label', 'staged'
+)
 $dependencyCheck = @'
 import importlib.metadata as metadata
-import json
-import pathlib
 import platform
-import sys
-from importlib import resources
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
-
-site_packages = pathlib.Path(sys.argv[1]).resolve()
-runtime_root = pathlib.Path(sys.argv[2]).resolve()
-package_root = pathlib.Path(str(resources.files('defenseclaw'))).resolve()
-try:
-    package_root.relative_to(site_packages)
-except ValueError as exc:
-    raise SystemExit(f'DefenseClaw resources resolved outside staged site-packages: {package_root}') from exc
-if (runtime_root / 'Lib' / 'schemas').exists():
-    raise SystemExit('staged runtime unexpectedly contains a Lib/schemas fallback tree')
-
-expected_v8 = {
-    '_data/config/v8': {
-        'defenseclaw-config.schema.json', 'observability.yaml', 'observability.md',
-    },
-    '_data/telemetry/v8': {
-        'telemetry.schema.json', 'catalog.json', 'v7-exporter-selection.json',
-        'galileo-rich-v2.json', 'local-observability-v1.json', 'openinference-v1.json',
-    },
-}
-for relative, expected_names in expected_v8.items():
-    directory = package_root.joinpath(relative)
-    children = list(directory.iterdir())
-    actual_names = {entry.name for entry in children}
-    non_files = sorted(
-        entry.name for entry in children if entry.is_symlink() or not entry.is_file()
-    )
-    if non_files or actual_names != expected_names:
-        raise SystemExit(
-            f'staged DefenseClaw v8 resource inventory mismatch in {relative}: '
-            f'actual={sorted(actual_names)!r} expected={sorted(expected_names)!r} '
-            f'non_files={non_files!r}'
-        )
-
-from defenseclaw.observability.v8_config import _schema_validator
-from defenseclaw.observability.schema_resources import (
-    telemetry_v8_catalog_bytes,
-    telemetry_v8_compatibility_profile_bytes,
-    telemetry_v8_schema_bytes,
-    v7_exporter_selection_bytes,
-)
-
-_schema_validator()
-for reference in ('observability.yaml', 'observability.md'):
-    if not package_root.joinpath('_data/config/v8', reference).read_bytes():
-        raise SystemExit(f'staged DefenseClaw v8 reference is empty: {reference}')
-telemetry_payloads = {
-    'telemetry.schema.json': telemetry_v8_schema_bytes(),
-    'catalog.json': telemetry_v8_catalog_bytes(),
-    'v7-exporter-selection.json': v7_exporter_selection_bytes(),
-    'galileo-rich-v2.json': telemetry_v8_compatibility_profile_bytes('galileo-rich-v2'),
-    'local-observability-v1.json': telemetry_v8_compatibility_profile_bytes('local-observability-v1'),
-    'openinference-v1.json': telemetry_v8_compatibility_profile_bytes('openinference-v1'),
-}
-for name, payload in telemetry_payloads.items():
-    try:
-        json.loads(payload)
-    except (TypeError, ValueError) as exc:
-        raise SystemExit(f'staged DefenseClaw v8 resource is not valid JSON: {name}') from exc
 
 installed = {canonicalize_name(dist.metadata['Name']): dist.version for dist in metadata.distributions() if dist.metadata.get('Name')}
 problems = []
@@ -1004,9 +966,9 @@ if not magika_result.ok or not magika_result.output.is_text:
 findings = asyncio.run(YaraAnalyzer().analyze('os.system("calc.exe")', {'tool_name': 'release-probe'}))
 if not findings or not any(finding.analyzer == 'YARA' for finding in findings):
     raise SystemExit('MCP Scanner YARA compatibility probe did not return the expected finding')
-print(f'validated nine DefenseClaw v8 resources and {len(installed)} embedded distributions')
+print(f'validated {len(installed)} embedded distributions')
 '@
-Invoke-CheckedProcess $validationPython @('-I', '-c', $dependencyCheck, $validationSite, $validationRuntime)
+Invoke-CheckedProcess $validationPython @('-I', '-c', $dependencyCheck)
 
 $siteZip = Join-Path $payload "site-packages.zip"
 Write-ZipFromDirectory $sitePackages $siteZip $validationPython $sourceDateEpoch $reproducibilityRoot

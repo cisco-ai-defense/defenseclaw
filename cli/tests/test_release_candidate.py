@@ -2861,6 +2861,31 @@ def test_non_bridge_candidate_rejects_symlink_v8_resource(tmp_path: Path) -> Non
         release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
 
 
+@pytest.mark.parametrize(
+    "package_root",
+    [
+        "DEFENS~1",
+        "defens~9",
+        "DEFEN~12",
+        "DE2C6E~1",
+    ],
+)
+def test_non_bridge_candidate_rejects_numeric_short_name_v8_package_root(
+    tmp_path: Path,
+    package_root: str,
+) -> None:
+    wheel = _non_bridge_candidate_wheel(tmp_path)
+    members = _read_wheel_members(wheel)
+    members[f"{package_root}/_data/telemetry/v8/catalog.json"] = b"{}\n"
+    _write_wheel_members(wheel, members)
+
+    with pytest.raises(
+        release_candidate.CandidateError,
+        match="resource inventory is invalid.*unexpected=",
+    ):
+        release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
+
+
 def test_non_bridge_candidate_rejects_duplicate_v8_resource(tmp_path: Path) -> None:
     wheel = _non_bridge_candidate_wheel(tmp_path)
     member_name = "defenseclaw/_data/telemetry/v8/catalog.json"
