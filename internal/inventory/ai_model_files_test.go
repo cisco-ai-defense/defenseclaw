@@ -431,6 +431,41 @@ func TestDetectModelFilesRotatesRootsUnderGlobalMatchCap(t *testing.T) {
 	findLocalModelSignal(t, second, "later")
 }
 
+func TestModelFileLifecycleKeepsSpecializedOwnershipAcrossRootRotation(t *testing.T) {
+	home := t.TempDir()
+	modelDir := filepath.Join(home, ".lmstudio", "models", "Qwen", "Qwen3-4B")
+	writeModelTestFile(t, filepath.Join(modelDir, "Qwen3-4B-Q4_K_M.gguf"), "model")
+	for _, name := range []string{"HF_HUB_CACHE", "HF_HOME", "OLLAMA_MODELS", "LM_STUDIO_HOME", "FLM_MODEL_PATH"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("LEMONADE_CACHE_DIR", filepath.Join(t.TempDir(), "empty-lemonade-cache"))
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, Mode: "enhanced", HomeDir: home, ScanRoots: []string{home},
+		DataDir: t.TempDir(), MaxFilesPerScan: 100, MaxFileBytes: 64 << 10,
+	}, nil)
+	cleanupPreparedDiscoveryService(t, svc)
+
+	firstReport, err := svc.runScan(context.Background(), true, "test")
+	if err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	first := findLocalModelSignal(t, firstReport.Signals, "Qwen3-4B-Q4_K_M")
+	if first.State != AIStateNew || first.Model.Provider != "lmstudio" || first.Product != "LM Studio" {
+		t.Fatalf("first specialized model ownership = %+v", first)
+	}
+
+	secondReport, err := svc.runScan(context.Background(), true, "test")
+	if err != nil {
+		t.Fatalf("second scan: %v", err)
+	}
+	second := findLocalModelSignal(t, secondReport.Signals, "Qwen3-4B-Q4_K_M")
+	if second.State != AIStateSeen || second.Model.Provider != first.Model.Provider ||
+		second.Product != first.Product || second.EvidenceHash != first.EvidenceHash ||
+		second.WorkspaceHash != first.WorkspaceHash {
+		t.Fatalf("root rotation changed specialized ownership: first=%+v second=%+v", first, second)
+	}
+}
+
 func TestDetectModelFilesCursorAdvancesAcrossIrrelevantVisitPage(t *testing.T) {
 	root := t.TempDir()
 	for i := 0; i < minModelFileVisitsPerRoot+50; i++ {

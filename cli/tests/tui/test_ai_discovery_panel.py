@@ -637,6 +637,37 @@ def test_ai_discovery_model_cursor_and_scroll_use_model_viewport() -> None:
     assert panel.scroll_offset() == 0
 
 
+def test_ai_discovery_table_toggle_is_keyboard_reachable_and_closes_stale_detail() -> None:
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(signal_id="agent", state="seen", product="Codex"),
+                AIUsageSignal(
+                    signal_id="model",
+                    state="seen",
+                    category="local_model",
+                    model=AIUsageModel(id="Qwen/Qwen3"),
+                ),
+            ),
+        )
+    )
+    panel.toggle_detail()
+    assert panel.detail_open is True
+
+    action = panel.handle_key("t")
+    assert action.handled is True
+    assert action.table_changed is True
+    assert panel.active_table == "models"
+    assert panel.detail_open is False
+    assert "Local models" in action.hint
+
+    action = panel.handle_key("t")
+    assert action.table_changed is True
+    assert panel.active_table == "agents"
+
+
 def test_format_confidence_state_weight_and_humanize_age() -> None:
     assert format_confidence(0.91, "high") == "high (91%)"
     assert format_confidence(0.5, "") == "50%"

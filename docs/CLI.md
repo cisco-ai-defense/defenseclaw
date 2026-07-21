@@ -125,6 +125,14 @@ tensor payloads; only bounded GGUF header metadata and small adjacent JSON/Ollam
 metadata are read.
 Inference and model-control API routes are never called.
 
+On Windows, discovery resolves Profile/AppData/Program Files through token-bound
+Known Folders, covers unique exact process aliases from the full catalog (shared
+aliases fail closed), classic desktop apps and current-user Store/MSIX/UWP apps
+through the supported AppsFolder Shell API, PowerShell history, AppData
+editor-extension stores, and specialized GPT4All, Jan, and AnythingLLM model
+roots. Only bounded display and path-free package identity names enter the
+existing hashed application matcher.
+
 The nested `model.provenance` block reports the root publisher and ISO country,
 root/base model IDs, quantization/distillation, derivation, evidence source, and
 confidence. Country refers to the root-weight publisher rather than a quantizer,

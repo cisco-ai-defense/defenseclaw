@@ -409,6 +409,11 @@ func TestApplicationNameMatchesExactOrReverseDNSName(t *testing.T) {
 	}{
 		{have: "Notion.app", want: "Notion.app"},
 		{have: "dev.zed.Zed.desktop", want: "Zed.app"},
+		{have: "Cursor.lnk", want: "Cursor.app"},
+		{have: "Claude.app.lnk", want: "Claude.app"},
+		{have: "LM Studio.exe", want: "LM Studio"},
+		{have: "Jan.appref-ms", want: "Jan.app"},
+		{have: "package-id:OpenAI.ChatGPT-Desktop", want: "package-id:OpenAI.ChatGPT-Desktop"},
 	} {
 		if !applicationNameMatches(tc.have, tc.want) {
 			t.Errorf("expected application %q to match %q", tc.have, tc.want)
@@ -420,6 +425,8 @@ func TestApplicationNameMatchesExactOrReverseDNSName(t *testing.T) {
 	}{
 		{have: "Notion Calendar.app", want: "Notion.app"},
 		{have: "WaveSomething.desktop", want: "Wave.app"},
+		{have: "Cursor Helper.exe", want: "Cursor.app"},
+		{have: "package-id:Fake.OpenAI.ChatGPT-Desktop", want: "package-id:OpenAI.ChatGPT-Desktop"},
 	} {
 		if applicationNameMatches(tc.have, tc.want) {
 			t.Errorf("unexpected substring application match: %q matched %q", tc.have, tc.want)
@@ -515,6 +522,41 @@ func TestHermesSignatureIncludesNativeWindowsPaths(t *testing.T) {
 	}
 	if !stringSliceContains(hermes.EnvVarNames, "HERMES_HOME") {
 		t.Errorf("Hermes environment variables missing HERMES_HOME: %v", hermes.EnvVarNames)
+	}
+}
+
+func TestDesktopSignaturesIncludeNativeWindowsPaths(t *testing.T) {
+	sigs, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	byID := make(map[string]AISignature, len(sigs))
+	for _, sig := range sigs {
+		byID[sig.ID] = sig
+	}
+	wants := map[string][]string{
+		"claude-desktop": {"$APPDATA/Claude/claude_desktop_config.json"},
+		"jan":            {"$APPDATA/Jan/data"},
+		"msty":           {"$APPDATA/Msty"},
+		"wave-terminal":  {"$APPDATA/waveterm"},
+		"gpt4all":        {"$LOCALAPPDATA/nomic.ai/GPT4All"},
+		"anythingllm":    {"$APPDATA/anythingllm-desktop/storage"},
+	}
+	for id, paths := range wants {
+		sig, ok := byID[id]
+		if !ok {
+			t.Errorf("signature %q missing", id)
+			continue
+		}
+		for _, want := range paths {
+			if !stringSliceContains(sig.ConfigPaths, want) {
+				t.Errorf("%s config paths missing %q: %v", id, want, sig.ConfigPaths)
+			}
+		}
+	}
+	claude := byID["claude-desktop"]
+	if !stringSliceContains(claude.MCPPaths, "$APPDATA/Claude/claude_desktop_config.json") {
+		t.Errorf("claude-desktop MCP paths missing native Windows config: %v", claude.MCPPaths)
 	}
 }
 

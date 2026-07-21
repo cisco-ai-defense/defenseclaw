@@ -470,6 +470,7 @@ class AIDiscoveryPanelAction:
     hint: str = ""
     detail_opened: bool = False
     detail_closed: bool = False
+    table_changed: bool = False
 
 
 class AIDiscoveryPanelModel:
@@ -556,6 +557,24 @@ class AIDiscoveryPanelModel:
         if self.filtered_models:
             self.active_table = "models"
 
+    def toggle_table(self) -> bool:
+        """Switch between populated product and model viewports."""
+
+        previous = self.active_table
+        if self.active_table == "agents" and self.filtered_models:
+            self.active_table = "models"
+        elif self.active_table == "models" and self.filtered:
+            self.active_table = "agents"
+        elif self.filtered_models:
+            self.active_table = "models"
+        elif self.filtered:
+            self.active_table = "agents"
+        changed = self.active_table != previous
+        if changed and self.detail_open:
+            self.detail_open = False
+            self.detail_row = None
+        return changed
+
     def cursor_at(self) -> int:
         if self.active_table == "models":
             return self.model_cursor
@@ -609,6 +628,14 @@ class AIDiscoveryPanelModel:
         if key in {"k", "up"}:
             self.cursor_up()
             return AIDiscoveryPanelAction(True)
+        if key == "t":
+            changed = self.toggle_table()
+            selected = "Local models" if self.active_table == "models" else "AI products"
+            return AIDiscoveryPanelAction(
+                True,
+                hint=f"{selected} table selected.",
+                table_changed=changed,
+            )
         if key == "esc" and self.detail_open:
             self.toggle_detail()
             return AIDiscoveryPanelAction(True, detail_closed=True)

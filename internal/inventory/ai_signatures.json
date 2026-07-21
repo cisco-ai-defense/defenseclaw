@@ -42,7 +42,11 @@
         "codex",
         "openai"
       ],
-      "application_names": [],
+      "application_names": [
+        "Codex",
+        "package-id:OpenAI.Codex_2p2nqsd0c76g0",
+        "package-id:OpenAI.CodexBeta_2p2nqsd0c76g0"
+      ],
       "local_endpoints": []
     },
     {
@@ -91,9 +95,7 @@
         "claude",
         "anthropic"
       ],
-      "application_names": [
-        "Claude.app"
-      ],
+      "application_names": [],
       "local_endpoints": []
     },
     {
@@ -1103,12 +1105,14 @@
       ],
       "config_paths": [
         "~/Library/Application Support/Claude/claude_desktop_config.json",
-        "~/.config/Claude/claude_desktop_config.json"
+        "~/.config/Claude/claude_desktop_config.json",
+        "$APPDATA/Claude/claude_desktop_config.json"
       ],
       "extension_ids": [],
       "mcp_paths": [
         "~/Library/Application Support/Claude/claude_desktop_config.json",
-        "~/.config/Claude/claude_desktop_config.json"
+        "~/.config/Claude/claude_desktop_config.json",
+        "$APPDATA/Claude/claude_desktop_config.json"
       ],
       "package_names": [],
       "env_var_names": [],
@@ -1135,7 +1139,8 @@
       ],
       "application_names": [
         "ChatGPT.app",
-        "ChatGPT"
+        "ChatGPT",
+        "package-id:OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0"
       ],
       "config_paths": [
         "~/Library/Application Support/com.openai.chat",
@@ -1328,7 +1333,8 @@
       "config_paths": [
         "~/Library/Application Support/Jan/data",
         "~/.config/Jan/data",
-        "~/.local/share/Jan/data"
+        "~/.local/share/Jan/data",
+        "$APPDATA/Jan/data"
       ],
       "extension_ids": [],
       "mcp_paths": [],
@@ -1909,7 +1915,7 @@
       "binary_names": ["msty"],
       "process_names": ["Msty", "msty-local"],
       "application_names": ["Msty.app"],
-      "config_paths": ["~/Library/Application Support/Msty", "~/.config/Msty"]
+      "config_paths": ["~/Library/Application Support/Msty", "~/.config/Msty", "$APPDATA/Msty"]
     },
     {
       "id": "boltai",
@@ -1943,7 +1949,7 @@
       "binary_names": ["wsh", "waveterm"],
       "process_names": ["waveterm"],
       "application_names": ["Wave.app", "Wave Terminal.app"],
-      "config_paths": ["~/.config/waveterm", "~/.config/waveterm/settings.json", "~/.config/waveterm/waveai.json"]
+      "config_paths": ["~/.config/waveterm", "~/.config/waveterm/settings.json", "~/.config/waveterm/waveai.json", "$APPDATA/waveterm"]
     },
     {
       "id": "tabby-terminal",

@@ -1385,15 +1385,56 @@ print('managed imports:', ', '.join(('defenseclaw', 'skill_scanner', 'mcpscanner
 function Invoke-HeadlessTui([string]$Python) {
     $code = @'
 import asyncio
+from textual.widgets import DataTable
+
 from defenseclaw.tui.app import DefenseClawTUI
+from defenseclaw.tui.panels.ai_discovery import AIDiscoveryPanelModel
+from defenseclaw.tui.services.ai_discovery_state import (
+    AIUsageModel,
+    AIUsageModelProvenance,
+    AIUsageSignal,
+    AIUsageSnapshot,
+)
 
 async def smoke():
-    app = DefenseClawTUI()
-    async with app.run_test(size=(100, 30)) as pilot:
+    discovery = AIDiscoveryPanelModel()
+    discovery.set_snapshot(AIUsageSnapshot(enabled=True, signals=(
+        AIUsageSignal(signal_id='agent', state='seen', product='Codex'),
+        AIUsageSignal(
+            signal_id='model', state='seen', category='local_model',
+            model=AIUsageModel(
+                id='Qwen/Qwen3-4B-GGUF', status='installed', format='gguf',
+                provenance=AIUsageModelProvenance(
+                    publisher='Alibaba Cloud', country_code='CN',
+                    root_model='Qwen/Qwen3-4B', quantized=True,
+                    quantization='Q4_K_M', derivation='quantized',
+                    source='catalog_exact', confidence='high',
+                ),
+            ),
+        ),
+    )))
+    app = DefenseClawTUI(ai_discovery_model=discovery)
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press('V')
         await pilot.pause()
+        products = app.query_one('#panel-table', DataTable)
+        models = app.query_one('#ai-model-table', DataTable)
+        if products.row_count != 1 or models.row_count != 1:
+            raise RuntimeError(
+                f'packaged AI table split failed: products={products.row_count} models={models.row_count}'
+            )
+        model_cells = tuple(str(cell) for cell in models.get_row_at(0))
+        if not any('Qwen/Qwen3-4B-GGUF' in cell for cell in model_cells):
+            raise RuntimeError(f'packaged model row missing model ID: {model_cells}')
+        if not any('CN' in cell for cell in model_cells):
+            raise RuntimeError(f'packaged model row missing accessible country code: {model_cells}')
+        await pilot.press('t')
+        await pilot.pause()
+        if app.focused is not models or discovery.active_table != 'models':
+            raise RuntimeError('packaged keyboard could not focus the local-model table')
 
 asyncio.run(asyncio.wait_for(smoke(), timeout=20))
-print('headless TUI started and stopped cleanly')
+print('headless TUI rendered separate AI product/model tables with provenance')
 '@
     Invoke-Installed $Python @('-I', '-c', $code) -Timeout 30 | Out-Null
 }
@@ -1592,6 +1633,13 @@ import sys
 
 from defenseclaw.file_permissions import windows_acl_write_error
 from defenseclaw.tui.app import DefenseClawTUI
+from defenseclaw.tui.panels.ai_discovery import AIDiscoveryPanelModel
+from defenseclaw.tui.services.ai_discovery_state import (
+    AIUsageModel,
+    AIUsageModelProvenance,
+    AIUsageSignal,
+    AIUsageSnapshot,
+)
 from defenseclaw.tui.services.tui_state import TUIState, TUIStateStore
 
 root = pathlib.Path(sys.argv[1]).resolve()
@@ -1601,13 +1649,30 @@ if before is None:
 store = TUIStateStore(root)
 if not store.save(TUIState(palette_mru=('doctor',))):
     raise SystemExit('packaged TUI state save failed')
-app = DefenseClawTUI(data_dir=root)
+discovery = AIDiscoveryPanelModel()
+discovery.set_snapshot(AIUsageSnapshot(enabled=True, signals=(
+    AIUsageSignal(
+        signal_id='model', state='seen', category='local_model',
+        model=AIUsageModel(
+            id='Qwen/Qwen3-4B-GGUF',
+            provenance=AIUsageModelProvenance(
+                publisher='Alibaba Cloud', country_code='CN',
+                root_model='Qwen/Qwen3-4B', source='catalog_exact', confidence='high',
+            ),
+        ),
+    ),
+)))
+app = DefenseClawTUI(data_dir=root, ai_discovery_model=discovery)
 audit = app._export_audit(pathlib.Path('packaged-audit-export.json'))
-for path in (root, store.path, audit):
+app._export_ai_discovery_snapshot()
+ai_exports = tuple(root.glob('defenseclaw-ai-usage-*.json'))
+if len(ai_exports) != 1:
+    raise SystemExit(f'packaged AI export count was {len(ai_exports)}, want one')
+for path in (root, store.path, audit, ai_exports[0]):
     problem = windows_acl_write_error(path)
     if problem is not None:
         raise SystemExit(f'unsafe packaged DACL for {path}: {problem}')
-print('packaged TUI state and audit export DACLs are private')
+print('packaged TUI state, audit export, and AI provenance export DACLs are private')
 '@
     Invoke-Installed $Python @('-I', '-c', $code, $exportRoot) -Timeout 120 | Out-Null
 }

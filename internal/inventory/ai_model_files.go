@@ -111,6 +111,7 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 	if len(roots) == 0 {
 		return nil, 0, outcome, nil
 	}
+	delegatedRoots := nestedModelScanRoots(roots)
 	if len(roots) > 1 {
 		start := int((s.modelFileRootCursor.Add(1) - 1) % uint64(len(roots)))
 		if start > 0 {
@@ -197,6 +198,13 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 				return filepath.SkipAll
 			}
 			if d.IsDir() {
+				if path != root.path && modelPathInSet(path, delegatedRoots[root.path]) {
+					// A more specific configured root owns this subtree. Skipping it
+					// here keeps provider/evidence identity stable even when the
+					// fairness cursor rotates the root traversal order.
+					lastCompleted = path
+					return filepath.SkipDir
+				}
 				macOSHomeLibrary := runtime.GOOS == "darwin" && !root.specialized &&
 					filepath.Clean(path) == filepath.Join(filepath.Clean(s.opts.HomeDir), "Library")
 				if path != root.path && (shouldSkipModelDirectory(d.Name(), root.specialized) || macOSHomeLibrary) {
@@ -631,13 +639,76 @@ func (s *ContinuousDiscoveryService) modelFileScanRoots() []modelScanRoot {
 			add(filepath.Join(home, "Library", "Caches", "mlx"), "mlx", true)
 		}
 	}
+	for _, root := range platformModelScanRoots(home) {
+		add(root.path, root.provider, root.specialized)
+	}
 	for _, dir := range s.lemonadeConfiguredModelDirs() {
 		add(dir, "lemonade", true)
 	}
 	for _, root := range s.scanRoots() {
 		add(root, "filesystem", false)
 	}
-	return roots
+	return normalizeModelScanRoots(roots)
+}
+
+// normalizeModelScanRoots removes a broad root that is fully contained by a
+// specialized store. The specialized root retains provider semantics and
+// independently participates in the fairness rotation, so keeping the broad
+// duplicate would only make artifact ownership order-dependent.
+func normalizeModelScanRoots(roots []modelScanRoot) []modelScanRoot {
+	out := make([]modelScanRoot, 0, len(roots))
+	for i, root := range roots {
+		drop := false
+		if !root.specialized {
+			for j, owner := range roots {
+				if i != j && owner.specialized && modelPathWithin(root.path, owner.path) {
+					drop = true
+					break
+				}
+			}
+		}
+		if !drop {
+			out = append(out, root)
+		}
+	}
+	return out
+}
+
+// nestedModelScanRoots delegates each nested subtree to its more specific
+// root. This prevents an ancestor from claiming the same model first when the
+// root fairness cursor rotates, while still allowing every retained root to
+// make bounded progress.
+func nestedModelScanRoots(roots []modelScanRoot) map[string][]string {
+	out := make(map[string][]string)
+	for i, parent := range roots {
+		for j, child := range roots {
+			if i == j || !modelPathWithin(child.path, parent.path) {
+				continue
+			}
+			out[parent.path] = append(out[parent.path], child.path)
+		}
+		sort.Strings(out[parent.path])
+	}
+	return out
+}
+
+func modelPathWithin(path, parent string) bool {
+	relative, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(path))
+	if err != nil || relative == "." || relative == ".." {
+		return false
+	}
+	return !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
+}
+
+func modelPathInSet(path string, candidates []string) bool {
+	path = filepath.Clean(path)
+	for _, candidate := range candidates {
+		candidate = filepath.Clean(candidate)
+		if path == candidate || (runtime.GOOS == "windows" && strings.EqualFold(path, candidate)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *ContinuousDiscoveryService) lemonadeConfiguredModelDirs() []string {
@@ -1065,6 +1136,12 @@ func localModelArtifactProduct(provider string) (string, string) {
 		return "LM Studio", "LM Studio"
 	case "llamacpp":
 		return "llama.cpp", "ggml.ai"
+	case "jan":
+		return "Jan", "Jan"
+	case "gpt4all":
+		return "GPT4All", "Nomic AI"
+	case "anythingllm":
+		return "AnythingLLM", "Mintplex Labs"
 	default:
 		return "Local Model Artifact", "Local"
 	}

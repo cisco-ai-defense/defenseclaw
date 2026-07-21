@@ -69,8 +69,8 @@ from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistriesTa
 from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupPanelModel
 from defenseclaw.tui.panels.skills import SkillRow, SkillsPanelModel
 from defenseclaw.tui.panels.tools import ToolsPanelModel
-from defenseclaw.tui.services.ai_discovery_state import AIUsageModelProvenance
 from defenseclaw.tui.screens.mode_picker import ModePickerScreen
+from defenseclaw.tui.services.ai_discovery_state import AIUsageModelProvenance
 from defenseclaw.tui.services.gateway_log_views import GatewayLogRow
 from defenseclaw.tui.services.setup_state import ConfigField, ConfigSection, CredentialRow
 from defenseclaw.tui.services.tui_state import STATE_FILENAME
@@ -3377,6 +3377,104 @@ async def test_ai_discovery_renders_models_in_separate_table_with_detail() -> No
 
 
 @pytest.mark.asyncio
+async def test_ai_discovery_keyboard_focus_selects_the_matching_table() -> None:
+    ai_model = AIDiscoveryPanelModel()
+    ai_model.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(signal_id="agent-a", state="seen", product="Claude"),
+                AIUsageSignal(signal_id="agent-b", state="seen", product="Codex"),
+                AIUsageSignal(
+                    signal_id="model-a",
+                    state="seen",
+                    category="local_model",
+                    model=AIUsageModel(id="Model-A"),
+                ),
+                AIUsageSignal(
+                    signal_id="model-b",
+                    state="seen",
+                    category="local_model",
+                    model=AIUsageModel(id="Model-B"),
+                ),
+            ),
+        )
+    )
+    app = DefenseClawTUI(ai_discovery_model=ai_model)
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("V")
+        await pilot.pause()
+
+        product_table = app.query_one("#panel-table", DataTable)
+        model_table = app.query_one("#ai-model-table", DataTable)
+
+        assert ai_model.active_table == "agents"
+        product_cursor = ai_model.cursor
+
+        await pilot.press("t")
+        await pilot.pause()
+        assert ai_model.active_table == "models"
+        assert app.focused is model_table
+        await pilot.press("down")
+        await pilot.pause()
+        assert ai_model.model_cursor == 1
+        assert ai_model.cursor == product_cursor
+
+        # Change both row sets so neither table can take its idempotent render
+        # fast path. Late product focus/highlight events from the redraw must
+        # not steal the model viewport that visibly owns keyboard focus.
+        previous_product_signature = app._last_table_signature
+        previous_model_signature = app._last_ai_model_table_signature
+        ai_model.set_snapshot(
+            AIUsageSnapshot(
+                enabled=True,
+                signals=(
+                    AIUsageSignal(
+                        signal_id="agent-a", state="changed", product="Claude"
+                    ),
+                    AIUsageSignal(signal_id="agent-b", state="seen", product="Codex"),
+                    AIUsageSignal(
+                        signal_id="model-a",
+                        state="seen",
+                        category="local_model",
+                        model=AIUsageModel(id="Model-A"),
+                    ),
+                    AIUsageSignal(
+                        signal_id="model-b",
+                        state="seen",
+                        category="local_model",
+                        model=AIUsageModel(id="Model-B", status="loaded"),
+                    ),
+                ),
+            )
+        )
+        app._render_chrome()
+        await pilot.pause()
+        assert app._last_table_signature != previous_product_signature
+        assert app._last_ai_model_table_signature != previous_model_signature
+        assert ai_model.active_table == "models"
+        assert app.focused is model_table
+        assert ai_model.model_cursor == 1
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert ai_model.detail_open is True
+        assert "Model-B" in ai_model.detail_header()
+
+        await pilot.press("enter")
+        await pilot.press("t")
+        await pilot.pause()
+        assert ai_model.active_table == "agents"
+        assert app.focused is product_table
+        await pilot.press("enter")
+        await pilot.pause()
+        assert ai_model.detail_open is True
+        assert ai_model.selected_agent() is not None
+        assert ai_model.selected_agent().product in ai_model.detail_header()
+
+
+@pytest.mark.asyncio
 async def test_ai_discovery_enter_toggles_detail_exactly_once_per_press() -> None:
     """Each ``enter`` press flips the detail panel exactly once.
 
@@ -3481,6 +3579,7 @@ async def test_ai_discovery_export_button_writes_snapshot(tmp_path) -> None:
         matches = list(tmp_path.glob("defenseclaw-ai-usage-*.json"))
         assert len(matches) == 1, f"expected exactly one export, got {matches}"
         target = matches[0]
+        _assert_sensitive_export_is_owner_only(target)
         body = json.loads(target.read_text(encoding="utf-8"))
         assert body["enabled"] is True
         assert body["summary"]["scan_id"] == "scan-1"

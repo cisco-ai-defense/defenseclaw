@@ -33,7 +33,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -587,7 +586,7 @@ func buildSignatureSpecificityIndex(catalog []AISignature) map[string]float64 {
 }
 
 func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
-	home, _ := os.UserHomeDir()
+	home, _ := platformDiscoveryHomeDir()
 	ad := cfg.AIDiscovery
 	return normalizeAIDiscoveryOptions(AIDiscoveryOptions{
 		Enabled:                     ad.Enabled,
@@ -639,7 +638,7 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 		opts.ConfidencePolicyPath = filepath.Join(opts.DataDir, "confidence.yaml")
 	}
 	if opts.HomeDir == "" {
-		opts.HomeDir, _ = os.UserHomeDir()
+		opts.HomeDir, _ = platformDiscoveryHomeDir()
 	}
 	if len(opts.ScanRoots) == 0 && opts.HomeDir != "" {
 		opts.ScanRoots = []string{"~"}
@@ -1675,6 +1674,7 @@ func (s *ContinuousDiscoveryService) detectEditorExtensions() []AISignal {
 			roots = append(roots, matches...)
 		}
 	}
+	roots = append(roots, platformEditorExtensionRoots(s.opts.HomeDir)...)
 	var entries []string
 	for _, root := range roots {
 		children, err := os.ReadDir(root)
@@ -2349,6 +2349,7 @@ func (s *ContinuousDiscoveryService) detectShellHistory() ([]AISignal, int, erro
 		filepath.Join(s.opts.HomeDir, ".bash_history"),
 		filepath.Join(s.opts.HomeDir, ".config", "fish", "fish_history"),
 	}
+	paths = append(paths, platformShellHistoryPaths(s.opts.HomeDir)...)
 	var out []AISignal
 	files := 0
 	for _, path := range paths {
@@ -2539,7 +2540,7 @@ func (s *ContinuousDiscoveryService) expandCandidatePath(candidate string) []str
 	}
 	missingEnv := false
 	candidate = os.Expand(candidate, func(name string) string {
-		value, ok := os.LookupEnv(name)
+		value, ok := platformDiscoveryVariable(name, s.opts.HomeDir)
 		if !ok || strings.TrimSpace(value) == "" {
 			missingEnv = true
 		}
@@ -3359,51 +3360,22 @@ func processNameMatches(have, want string) bool {
 }
 
 func installedApplicationNames(home string) []string {
-	roots := []string{}
-	switch runtime.GOOS {
-	case "darwin":
-		roots = append(roots, "/Applications", "/System/Applications")
-		if home != "" {
-			roots = append(roots, filepath.Join(home, "Applications"))
-		}
-	case "linux":
-		roots = append(roots, "/usr/share/applications")
-		if home != "" {
-			roots = append(roots, filepath.Join(home, ".local", "share", "applications"))
-		}
-	default:
-		return nil
-	}
-	seen := map[string]bool{}
-	var out []string
-	for _, root := range roots {
-		children, err := os.ReadDir(root)
-		if err != nil {
-			continue
-		}
-		for _, child := range children {
-			name := strings.ToLower(strings.TrimSpace(child.Name()))
-			if name == "" {
-				continue
-			}
-			if runtime.GOOS == "darwin" && !strings.HasSuffix(name, ".app") {
-				continue
-			}
-			if runtime.GOOS == "linux" && !strings.HasSuffix(name, ".desktop") {
-				continue
-			}
-			if !seen[name] {
-				seen[name] = true
-				out = append(out, name)
-			}
-		}
-	}
-	return out
+	return platformInstalledApplicationNames(home)
 }
 
 func applicationNameMatches(have, want string) bool {
-	have = strings.TrimSuffix(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(have)), ".app"), ".desktop")
-	want = strings.TrimSuffix(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(want)), ".app"), ".desktop")
+	// Package identities carry an internal source marker and match only exact,
+	// reviewed catalog aliases. The reverse-DNS suffix convenience below is for
+	// ordinary desktop/display names; applying it here would let a package named
+	// "Fake.OpenAI.ChatGPT-Desktop" inherit ChatGPT's identity.
+	const packageIdentityPrefix = "package-id:"
+	rawHave := strings.ToLower(strings.TrimSpace(have))
+	rawWant := strings.ToLower(strings.TrimSpace(want))
+	if strings.HasPrefix(rawHave, packageIdentityPrefix) || strings.HasPrefix(rawWant, packageIdentityPrefix) {
+		return rawHave != "" && rawHave == rawWant
+	}
+	have = normalizeApplicationName(have)
+	want = normalizeApplicationName(want)
 	if have == "" || want == "" {
 		return false
 	}
@@ -3412,6 +3384,20 @@ func applicationNameMatches(have, want string) bool {
 	// without allowing adjacent products such as "Notion Calendar" to match
 	// the "Notion" signature.
 	return have == want || strings.HasSuffix(have, "."+want)
+}
+
+func normalizeApplicationName(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	for {
+		previous := value
+		for _, suffix := range []string{".appref-ms", ".desktop", ".app", ".lnk", ".exe", ".url"} {
+			value = strings.TrimSuffix(value, suffix)
+		}
+		if value == previous {
+			break
+		}
+	}
+	return strings.TrimSpace(value)
 }
 
 func isSafeLoopbackEndpoint(endpoint string) bool {

@@ -2027,8 +2027,8 @@ class DefenseClawTUI(App[None]):
             return sum(len(rows) for rows in lines.values())
         if panel == "ai":
             snapshot = getattr(self.ai_discovery_model, "snapshot", None)
-            agents = getattr(snapshot, "agents", ()) if snapshot else ()
-            return len(agents)
+            signals = getattr(snapshot, "signals", ()) if snapshot else ()
+            return len(signals)
         return 0
 
     def _panel_unread_count(self, panel: str) -> int:
@@ -3359,6 +3359,11 @@ class DefenseClawTUI(App[None]):
         # events Textual delivers a tick later (e.g. after clear()+add_row()).
         if self._restoring_table_cursor:
             return
+        if self.active_panel == "ai" and self.focused is not event.control:
+            # The AI panel has two simultaneously mounted tables. A delayed
+            # product-table refresh must not take selection away from the
+            # model table that still visibly owns keyboard focus.
+            return
         if event.cursor_row == self._active_table_cursor():
             return
         if self.active_panel == "alerts":
@@ -3378,9 +3383,40 @@ class DefenseClawTUI(App[None]):
         elif self.active_panel == "setup":
             self._set_setup_cursor(event.cursor_row)
 
+    @on(events.DescendantFocus, "#panel-table")
+    def _on_panel_table_focused(self, event: events.DescendantFocus) -> None:
+        """Keep AI row actions aligned with the table that owns focus."""
+
+        if (
+            self.active_panel != "ai"
+            or not isinstance(event.widget, DataTable)
+            or self.focused is not event.widget
+        ):
+            return
+        self.ai_discovery_model.set_cursor(event.widget.cursor_row)
+        self._sync_ai_controls()
+
+    @on(events.DescendantFocus, "#ai-model-table")
+    def _on_ai_model_table_focused(self, event: events.DescendantFocus) -> None:
+        """Select the model viewport when keyboard focus enters its table."""
+
+        if (
+            self.active_panel != "ai"
+            or not isinstance(event.widget, DataTable)
+            or self.focused is not event.widget
+        ):
+            return
+        self.ai_discovery_model.set_model_cursor(event.widget.cursor_row)
+        self._sync_ai_controls()
+
     @on(DataTable.RowHighlighted, "#ai-model-table")
     def _on_ai_model_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if self._restoring_table_cursor or self.active_panel != "ai":
+            return
+        # ``move_cursor`` posts RowHighlighted after a render as well as after
+        # user navigation. A late programmatic event from the unfocused model
+        # table must not steal the active viewport from the product table.
+        if self.focused is not event.control:
             return
         if event.cursor_row == self.ai_discovery_model.model_cursor:
             if self.ai_discovery_model.active_table != "models":
@@ -3901,7 +3937,8 @@ class DefenseClawTUI(App[None]):
                 ("Ctrl+S", "Save selected output to file"),
             ],
             "ai": [
-                ("j/k or Up/Down", "Navigate agents"),
+                ("j/k or Up/Down", "Navigate the selected table"),
+                ("t", "Switch product / model table"),
                 ("r", "Refresh discovery"),
                 ("e", "Export snapshot"),
             ],
@@ -4033,7 +4070,7 @@ class DefenseClawTUI(App[None]):
             suffix = f"\n\n{detail}" if detail else f"\n\n{empty}" if empty else ""
             self.body_text = (
                 f"[bold #22D3EE]AI Discovery[/]  {header}\n"
-                "Keys: r refresh usage, s scan, Enter detail, / filter. "
+                "Keys: r refresh usage, s scan, t switch table, Enter detail, / filter. "
                 "Click either table to select a row."
                 f"{filter_prompt}"
                 f"{suffix}"
@@ -9504,6 +9541,16 @@ class DefenseClawTUI(App[None]):
                     thread=False,
                 )
         self._render_chrome()
+        if getattr(action, "table_changed", False):
+            selector = (
+                "#ai-model-table"
+                if self.ai_discovery_model.active_table == "models"
+                else "#panel-table"
+            )
+            try:
+                self.query_one(selector, DataTable).focus()
+            except NoMatches:
+                pass
         return True
 
     def _apply_setup_action(self, action: SetupPanelAction) -> bool:

@@ -84,6 +84,15 @@ def test_running_section_includes_signal_keys() -> None:
     assert "D" in keys
 
 
+def test_ai_panel_help_includes_table_switch_shortcut() -> None:
+    app = DefenseClawTUI(config=_config_for())
+    app.active_panel = "ai"
+    ai_shortcuts = dict(app._help_sections()[1][1])
+
+    assert ai_shortcuts["t"] == "Switch product / model table"
+    assert ai_shortcuts["j/k or Up/Down"] == "Navigate the selected table"
+
+
 def test_help_body_text_includes_section_titles() -> None:
     app = DefenseClawTUI(config=_config_for())
     body = app._render_help_body()
