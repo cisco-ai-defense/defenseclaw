@@ -25,23 +25,21 @@ import (
 // representation throughout the proxy. Content can be a plain string or an
 // array of content blocks ([{"type":"text","text":"..."}]).
 type ChatMessage struct {
-	Role         string          `json:"role"`
-	Content      string          `json:"-"`
-	RawContent   json.RawMessage `json:"content,omitempty"`
-	ToolCalls    json.RawMessage `json:"tool_calls,omitempty"`
-	ToolCallID   string          `json:"tool_call_id,omitempty"`
-	Name         string          `json:"name,omitempty"`
-	ExtraContent json.RawMessage `json:"extra_content,omitempty"`
+	Role       string          `json:"role"`
+	Content    string          `json:"-"`
+	RawContent json.RawMessage `json:"content,omitempty"`
+	ToolCalls  json.RawMessage `json:"tool_calls,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+	Name       string          `json:"name,omitempty"`
 }
 
 func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 	type plain struct {
-		Role         string          `json:"role"`
-		Content      json.RawMessage `json:"content,omitempty"`
-		ToolCalls    json.RawMessage `json:"tool_calls,omitempty"`
-		ToolCallID   string          `json:"tool_call_id,omitempty"`
-		Name         string          `json:"name,omitempty"`
-		ExtraContent json.RawMessage `json:"extra_content,omitempty"`
+		Role       string          `json:"role"`
+		Content    json.RawMessage `json:"content,omitempty"`
+		ToolCalls  json.RawMessage `json:"tool_calls,omitempty"`
+		ToolCallID string          `json:"tool_call_id,omitempty"`
+		Name       string          `json:"name,omitempty"`
 	}
 	var p plain
 	if err := json.Unmarshal(data, &p); err != nil {
@@ -52,7 +50,6 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 	m.ToolCalls = p.ToolCalls
 	m.ToolCallID = p.ToolCallID
 	m.Name = p.Name
-	m.ExtraContent = p.ExtraContent
 
 	if len(p.Content) == 0 {
 		return nil
@@ -94,19 +91,17 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 
 func (m ChatMessage) MarshalJSON() ([]byte, error) {
 	type alias struct {
-		Role         string          `json:"role,omitempty"`
-		Content      json.RawMessage `json:"content,omitempty"`
-		ToolCalls    json.RawMessage `json:"tool_calls,omitempty"`
-		ToolCallID   string          `json:"tool_call_id,omitempty"`
-		Name         string          `json:"name,omitempty"`
-		ExtraContent json.RawMessage `json:"extra_content,omitempty"`
+		Role       string          `json:"role,omitempty"`
+		Content    json.RawMessage `json:"content,omitempty"`
+		ToolCalls  json.RawMessage `json:"tool_calls,omitempty"`
+		ToolCallID string          `json:"tool_call_id,omitempty"`
+		Name       string          `json:"name,omitempty"`
 	}
 	a := alias{
-		Role:         m.Role,
-		ToolCalls:    m.ToolCalls,
-		ToolCallID:   m.ToolCallID,
-		Name:         m.Name,
-		ExtraContent: m.ExtraContent,
+		Role:       m.Role,
+		ToolCalls:  m.ToolCalls,
+		ToolCallID: m.ToolCallID,
+		Name:       m.Name,
 	}
 	if m.RawContent != nil {
 		a.Content = m.RawContent
