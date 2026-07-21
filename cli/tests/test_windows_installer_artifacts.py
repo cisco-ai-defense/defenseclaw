@@ -154,9 +154,14 @@ def _run_v8_wheel_gate(tmp_path: Path, wheel: Path) -> subprocess.CompletedProce
         "$ErrorActionPreference = 'Stop'\n"
         "Add-Type -AssemblyName System.IO.Compression.FileSystem\n"
         f"{functions}\n"
-        "Assert-DefenseClawWheelV8Resources "
+        "try {\n"
+        "    Assert-DefenseClawWheelV8Resources "
         "-WheelPath ([Environment]::GetEnvironmentVariable('DC_TEST_V8_WHEEL')) "
-        "-RepositoryRoot ([Environment]::GetEnvironmentVariable('DC_TEST_V8_REPOSITORY'))\n",
+        "-RepositoryRoot ([Environment]::GetEnvironmentVariable('DC_TEST_V8_REPOSITORY'))\n"
+        "} catch {\n"
+        "    [Console]::Error.WriteLine($_.Exception.Message)\n"
+        "    exit 1\n"
+        "}\n",
         encoding="utf-8",
     )
     env = os.environ.copy()
@@ -554,7 +559,11 @@ def test_installer_v8_wheel_gate_fails_closed(
     elif mutation == "unexpected":
         files.append(("defenseclaw/_data/config/v8/unexpected.json", b"{}\n"))
     elif mutation == "backslash":
-        files.append((r"defenseclaw\_data\config\v8\unexpected.json", b"{}\n"))
+        # Write a canonical same-length name first, then patch the raw local
+        # and central-directory bytes below. ``zipfile`` normalizes a
+        # backslash name on Windows but preserves it on POSIX, so passing the
+        # malformed name directly would make the fixture host-dependent.
+        files.append(("defenseclaw/_data/config/v8/unexpected.json", b"{}\n"))
     elif mutation == "absolute":
         files.append(("/defenseclaw/_data/config/v8/unexpected.json", b"{}\n"))
     elif mutation == "drive":
