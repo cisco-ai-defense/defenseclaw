@@ -22,7 +22,7 @@
 # No Go, Node.js, or git required — only Python and uv.
 #
 #   # From GitHub release:
-#   VERSION=0.8.4
+#   VERSION=0.8.6
 #   INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 #   curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 #
@@ -69,6 +69,8 @@ readonly INSTALL_ATTEMPT_MARKER=".defenseclaw-install-in-progress-v1"
 readonly INSTALL_ATTEMPT_MARKER_CONTENT="DefenseClaw authenticated fresh install in progress v1"
 readonly REPO="cisco-ai-defense/defenseclaw"
 readonly OPENCLAW_VERSION="2026.3.24"
+readonly MIN_PYTHON_VERSION="3.10"
+readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"
 readonly COSIGN_BOOTSTRAP_VERSION="2.6.3"
 readonly COSIGN_BOOTSTRAP_MAX_BYTES="209715200"
 VERIFIED_CHECKSUM=""
@@ -906,7 +908,8 @@ ensure_python() {
         if has "$cmd"; then
             local ver
             ver="$(extract_version "$("$cmd" --version 2>&1)")"
-            if version_gte "$ver" "3.10"; then
+            if version_gte "$ver" "${MIN_PYTHON_VERSION}" \
+                && ! version_gte "$ver" "${MAX_PYTHON_VERSION_EXCLUSIVE}"; then
                 PYTHON_VERSION="$ver"
                 POLICY_PYTHON="$(command -v "$cmd")"
                 ok "Python ${ver}"
@@ -1461,6 +1464,9 @@ install_python_cli() {
         warn "Legacy wheel download residue was preserved because exact retirement is unavailable"
     fi
 
+    "${DEFENSECLAW_VENV}/bin/defenseclaw" --help &>/dev/null \
+        || die "CLI validation failed before launcher publication"
+
     if [[ "${MODERN_RELEASE:-false}" == true ]]; then
         CLI_PUBLISHED_ID="$(
             "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-symlink \
@@ -1476,12 +1482,7 @@ install_python_cli() {
     fi
     [[ "${CLI_PUBLISHED_ID}" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]] \
         || die "Installed DefenseClaw CLI returned an invalid identity"
-
-    if "${DEFENSECLAW_VENV}/bin/defenseclaw" --help &>/dev/null; then
-        ok "CLI installed"
-    else
-        warn "CLI installed but verification failed — check dependencies"
-    fi
+    ok "CLI installed"
 }
 
 # ── Install: OpenClaw Plugin (from tarball) ───────────────────────────────────
@@ -1827,7 +1828,7 @@ while [[ $# -gt 0 ]]; do
         --help|-h)
             echo ""
             echo "Usage:"
-            echo '  VERSION=0.8.4'
+            echo '  VERSION=0.8.6'
             echo '  INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"'
             echo '  curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash'
             echo "  ./scripts/install.sh --local /path/to/release-assets  # complete authenticated assets"

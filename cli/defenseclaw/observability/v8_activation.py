@@ -96,6 +96,15 @@ FaultInjector = Callable[[str], None]
 PrivateFileTransform = Callable[[bytes], bytes | None]
 
 
+class V8CandidateValidationError(RuntimeError):
+    """A target-compiler refusal containing only reviewed safe diagnostics."""
+
+    def __init__(self, field_path: str, reason: str) -> None:
+        self.field_path = field_path
+        self.reason = reason
+        super().__init__(f"candidate field={field_path}; reason={reason}")
+
+
 class V8ActivationError(RuntimeError):
     """A value-safe activation failure.
 
@@ -112,6 +121,8 @@ class V8ActivationError(RuntimeError):
         target_path: str | None = None,
         backup_directory: str | None = None,
         recovery_paths: tuple[str, ...] = (),
+        field_path: str | None = None,
+        reason: str | None = None,
     ) -> None:
         self.code = code
         self.stage = stage
@@ -120,6 +131,8 @@ class V8ActivationError(RuntimeError):
         self.recovery_paths = tuple(
             dict.fromkeys(path for path in ((backup_directory,) if backup_directory else ()) + recovery_paths if path)
         )
+        self.field_path = field_path
+        self.reason = reason
         message = f"observability v8 activation failed ({code}) at {stage}"
         if target_path:
             message += f"; target={target_path}"
@@ -128,6 +141,8 @@ class V8ActivationError(RuntimeError):
         additional_recovery = tuple(path for path in self.recovery_paths if path != backup_directory)
         if additional_recovery:
             message += f"; recovery paths={','.join(additional_recovery)}"
+        if field_path and reason:
+            message += f"; field={field_path}; reason={reason}"
         super().__init__(message)
 
 
@@ -383,6 +398,14 @@ def activate_v8_migration(
         _inject_fault(fault_injector, "before_validator")
         try:
             validator(migration.candidate, validator_environment)
+        except V8CandidateValidationError as exc:
+            raise V8ActivationError(
+                "candidate_validation_failed",
+                "target_go_validation",
+                target_path=active_config,
+                field_path=exc.field_path,
+                reason=exc.reason,
+            ) from None
         except Exception:
             raise V8ActivationError(
                 "candidate_validation_failed",
@@ -750,7 +773,23 @@ def _preflight_existing_update_lock(
 ) -> None:
     """Prove an existing advisory-lock leaf is safely openable for update."""
 
-    snapshot = _snapshot_regular_file(path, required=False)
+    try:
+        snapshot = _snapshot_regular_file(path, required=False)
+    except (OSError, V8ActivationError) as exc:
+        # A Windows byte-range lock can deny the snapshot reader access to the
+        # held sentinel byte before the non-blocking lock probe runs. Treat
+        # that platform-specific sharing violation as contention. The
+        # preflight still fails closed and the target transaction performs its
+        # own bounded acquisition after the gateway stops.
+        if _is_windows() and (
+            isinstance(exc, OSError) or exc.code == "source_unreadable"
+        ):
+            raise V8ActivationError(
+                "lock_file_busy",
+                "read_only_activation_preflight",
+                target_path=path,
+            ) from None
+        raise
     if not snapshot.existed:
         return
     _assert_leaf_owner(snapshot, trusted_owners)
@@ -2324,9 +2363,9 @@ def _atomic_replace_windows(
     discard_path = os.path.join(parent, f".{basename}.observability-v8-discard-{uuid.uuid4().hex}.tmp")
     preserve_transients = False
     try:
-        windows_acl.write_new_file(temporary_path, payload, security)
+        staged_security = windows_acl.write_new_file(temporary_path, payload, security) or security.staging_copy()
         staged = _snapshot_regular_file(temporary_path, required=True)
-        _assert_windows_staged_snapshot(staged, payload, security)
+        _assert_windows_staged_snapshot(staged, payload, staged_security)
         _assert_snapshot_current(snapshot, "locked_publish_check")
 
         if snapshot.existed:
@@ -2357,7 +2396,7 @@ def _atomic_replace_windows(
             try:
                 windows_acl.move_file_no_replace(temporary_path, snapshot.path)
             except windows_acl.WindowsAclError:
-                _restore_absent_windows_target(snapshot, payload, security)
+                _restore_absent_windows_target(snapshot, payload, staged_security)
                 preserve_transients = False
                 raise
 
@@ -2388,7 +2427,7 @@ def _atomic_replace_windows(
                     target_path=snapshot.path,
                 )
 
-        expected_security = security if snapshot.existed else security.staging_copy()
+        expected_security = security if snapshot.existed else staged_security
         expected = _ExpectedFileState(
             existed=True,
             sha256=_sha256(payload),
@@ -2436,7 +2475,7 @@ def _atomic_replace_windows(
                         discard_path=discard_path,
                     )
                 else:
-                    _restore_absent_windows_target(snapshot, payload, security)
+                    _restore_absent_windows_target(snapshot, payload, staged_security)
             except BaseException:
                 raise _windows_rollback_incomplete(
                     "windows_publish_verification",
@@ -2466,14 +2505,18 @@ def _repair_and_verify_windows_publication(
     path: str,
     staged: _FileSnapshot,
     expected: _ExpectedFileState,
+    *,
+    allow_staged_dacl_representation: bool = False,
 ) -> None:
     """Verify, repair, and flush one exact published Windows file object.
 
     ``ReplaceFileW`` can preserve the raw DACL while intermittently clearing
-    ``SE_DACL_PROTECTED``.  Repair is safe only after an exclusive handle has
-    proved that the public path still names the staged file object and that no
-    non-security state changed.  All subsequent verification and the durable
-    flush stay on that same handle.
+    ``SE_DACL_PROTECTED``.  For the disposable protected preflight only, it can
+    also clear every ``INHERITED_ACE`` provenance bit while preserving all
+    other security bytes. Repair or representation selection is safe only
+    after an exclusive handle has proved that the public path still names the
+    staged file object and that no non-security state changed. All subsequent
+    verification and the durable flush stay on that same handle.
     """
 
     descriptor = windows_acl.open_regular_security_mutation_fd(path)
@@ -2487,18 +2530,26 @@ def _repair_and_verify_windows_publication(
             or not _same_windows_publication_metadata(published, staged)
         ):
             raise _WindowsPublicationVerificationError
-        expected_without_security = replace(expected, windows_security=published.windows_security)
+        selected_expected = expected
+        if allow_staged_dacl_representation:
+            selected_security = _select_replacefile_staged_security(
+                published.windows_security,
+                expected.windows_security,
+            )
+            if selected_security is not None:
+                selected_expected = replace(expected, windows_security=selected_security)
+        expected_without_security = replace(selected_expected, windows_security=published.windows_security)
         if not _matches_expected_state(published, expected_without_security):
             raise _WindowsPublicationVerificationError
 
-        if published.windows_security != expected.windows_security:
+        if published.windows_security != selected_expected.windows_security:
             if not _is_replacefile_dacl_protection_drop(
                 published.windows_security,
-                expected.windows_security,
+                selected_expected.windows_security,
             ):
                 raise _WindowsPublicationVerificationError
-            assert expected.windows_security is not None
-            windows_acl.apply_fd(descriptor, expected.windows_security)
+            assert selected_expected.windows_security is not None
+            windows_acl.apply_fd(descriptor, selected_expected.windows_security)
 
         try:
             verified = _snapshot_claimed_windows_file(path, descriptor)
@@ -2507,7 +2558,7 @@ def _repair_and_verify_windows_publication(
         if (
             not _same_windows_publication_identity(verified, staged)
             or not _same_windows_publication_metadata(verified, staged)
-            or not _matches_expected_state(verified, expected)
+            or not _matches_expected_state(verified, selected_expected)
         ):
             raise _WindowsPublicationVerificationError
         windows_acl.flush_fd(descriptor)
@@ -2519,7 +2570,7 @@ def _repair_and_verify_windows_publication(
         if (
             not _same_windows_publication_identity(durable, staged)
             or not _same_windows_publication_metadata(durable, staged)
-            or not _matches_expected_state(durable, expected)
+            or not _matches_expected_state(durable, selected_expected)
         ):
             raise _WindowsPublicationVerificationError
     finally:
@@ -2565,12 +2616,26 @@ def _is_replacefile_dacl_protection_drop(
     )
 
 
+def _select_replacefile_staged_security(
+    actual: windows_acl.WindowsFileSecurity | None,
+    expected: windows_acl.WindowsFileSecurity | None,
+) -> windows_acl.WindowsFileSecurity | None:
+    """Select only an exact staged DACL representation ReplaceFile produced."""
+
+    if actual is None or expected is None:
+        return None
+    selected = windows_acl._staged_security_for_observed_dacl(expected, actual.dacl)
+    if actual == selected or _is_replacefile_dacl_protection_drop(actual, selected):
+        return selected
+    return None
+
+
 def _assert_windows_staged_snapshot(
     snapshot: _FileSnapshot,
     payload: bytes,
-    security: windows_acl.WindowsFileSecurity,
+    staged_security: windows_acl.WindowsFileSecurity,
 ) -> None:
-    if snapshot.sha256 != _sha256(payload) or snapshot.windows_security != security.staging_copy():
+    if snapshot.sha256 != _sha256(payload) or snapshot.windows_security != staged_security:
         raise OSError(errno.EPERM, "staged Windows file does not match the security contract")
 
 
@@ -2639,7 +2704,7 @@ def _restore_windows_original(
 def _restore_absent_windows_target(
     original: _FileSnapshot,
     payload: bytes,
-    security: windows_acl.WindowsFileSecurity,
+    staged_security: windows_acl.WindowsFileSecurity,
 ) -> None:
     expected = _ExpectedFileState(
         existed=True,
@@ -2649,7 +2714,7 @@ def _restore_absent_windows_target(
         gid=None,
         xattrs=(),
         allow_platform_xattrs=True,
-        windows_security=security.staging_copy(),
+        windows_security=staged_security,
     )
     _delete_expected_windows_file(original.path, expected)
 
@@ -3093,10 +3158,12 @@ def _preflight_atomic_replace_windows(
     replacement = os.path.join(parent, f".{basename}.observability-v8-preflight-new-{uuid.uuid4().hex}.tmp")
     backup = os.path.join(parent, f".{basename}.observability-v8-preflight-old-{uuid.uuid4().hex}.tmp")
     try:
-        windows_acl.write_new_file(target, b"preflight-target", security)
-        windows_acl.write_new_file(replacement, b"preflight-replacement", security)
+        target_security = windows_acl.write_new_file(target, b"preflight-target", security) or security.staging_copy()
+        replacement_security = (
+            windows_acl.write_new_file(replacement, b"preflight-replacement", security) or security.staging_copy()
+        )
         staged_replacement = _snapshot_regular_file(replacement, required=True)
-        _assert_windows_staged_snapshot(staged_replacement, b"preflight-replacement", security)
+        _assert_windows_staged_snapshot(staged_replacement, b"preflight-replacement", replacement_security)
         windows_acl.replace_file(target, replacement, backup)
         _repair_and_verify_windows_publication(
             target,
@@ -3107,11 +3174,12 @@ def _preflight_atomic_replace_windows(
                 mode=None,
                 uid=None,
                 gid=None,
-                windows_security=security.staging_copy(),
+                windows_security=replacement_security,
             ),
+            allow_staged_dacl_representation=True,
         )
         retained = _snapshot_regular_file(backup, required=True)
-        _assert_windows_staged_snapshot(retained, b"preflight-target", security)
+        _assert_windows_staged_snapshot(retained, b"preflight-target", target_security)
         _assert_parent_identity(snapshot.path, snapshot.parent_device, snapshot.parent_inode)
     finally:
         for path in (target, replacement, backup):
@@ -3686,6 +3754,7 @@ __all__ = [
     "V8ActivationError",
     "V8ActivationResult",
     "V8ActivationRollbackError",
+    "V8CandidateValidationError",
     "activate_v8_migration",
     "resolve_active_config_path",
     "update_private_file",

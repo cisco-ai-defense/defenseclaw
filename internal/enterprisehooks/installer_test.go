@@ -8,6 +8,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +16,33 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
+func requireEnterpriseHookInstaller(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("enterprise hook guardian internals are unsupported on native Windows; early rejection is covered separately")
+	}
+}
+
+func TestInstallRejectsInvalidNativeWindowsRequestBeforeSideEffects(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows rejection contract")
+	}
+	scope := t.TempDir()
+	sentinel := filepath.Join(scope, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("unchanged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Install(context.Background(), InstallOptions{UserHome: filepath.Join(scope, "home")})
+	if err == nil {
+		t.Fatal("Install error = nil, want preflight/validation rejection")
+	}
+	if got, readErr := os.ReadFile(sentinel); readErr != nil || string(got) != "unchanged" {
+		t.Fatalf("sentinel changed: data=%q err=%v", got, readErr)
+	}
+}
+
 func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -26,6 +53,7 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 		t.Fatalf("write codex config: %v", err)
 	}
 
+	otlpToken := strings.Repeat("d", 64)
 	result, err := Install(context.Background(), InstallOptions{
 		ConnectorName: "codex",
 		UserHome:      home,
@@ -34,6 +62,7 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 		APIAddr:       "127.0.0.1:18970",
 		ProxyAddr:     "127.0.0.1:4000",
 		APIToken:      "test-token",
+		OTLPPathToken: otlpToken,
 		GuardrailMode: "action",
 		HookFailMode:  "closed",
 		AgentVersion:  "codex-cli 0.142.0",
@@ -58,12 +87,28 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 	if !strings.Contains(string(data), filepath.Join(home, ".defenseclaw", "hooks", "codex-hook.sh")) {
 		t.Fatalf("codex config does not reference per-user hook script:\n%s", string(data))
 	}
+	if strings.Contains(string(data), "/otlp/codex/"+otlpToken) {
+		t.Fatalf("codex config leaked the supplied service OTLP token in an endpoint:\n%s", string(data))
+	}
+	doubleQuotedBearer := `authorization = "Bearer ` + otlpToken + `"`
+	singleQuotedBearer := `authorization = 'Bearer ` + otlpToken + `'`
+	if !strings.Contains(string(data), doubleQuotedBearer) && !strings.Contains(string(data), singleQuotedBearer) {
+		t.Fatalf("codex config does not carry the supplied service OTLP token as an Authorization bearer:\n%s", string(data))
+	}
+	userOTLPToken, err := connector.OTLPPathTokenFilePath(filepath.Join(home, ".defenseclaw"), connector.OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(userOTLPToken); !os.IsNotExist(err) {
+		t.Fatalf("managed install minted a per-user OTLP token sidecar: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(home, ".defenseclaw", "hook_contract_lock.json")); err != nil {
 		t.Fatalf("hook contract lock missing: %v", err)
 	}
 }
 
 func TestInstallOmnigentPolicyModuleThroughGuardian(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	configPath := filepath.Join(home, ".omnigent", "config.yaml")
@@ -116,6 +161,7 @@ func TestInstallOmnigentPolicyModuleThroughGuardian(t *testing.T) {
 }
 
 func TestInstallMultipleConnectorsKeepsScopedHookTokens(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -201,6 +247,7 @@ func TestInstallMultipleConnectorsKeepsScopedHookTokens(t *testing.T) {
 }
 
 func TestInstallAuthorizedRepairNormalizesWritableArtifacts(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -253,6 +300,7 @@ func TestInstallAuthorizedRepairNormalizesWritableArtifacts(t *testing.T) {
 }
 
 func TestInstallMultipleConnectorsNoOpRepairPreservesModificationTimes(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -330,6 +378,7 @@ func TestInstallMultipleConnectorsNoOpRepairPreservesModificationTimes(t *testin
 }
 
 func TestWatchDirsIncludesHookConfigAndRuntimeDirs(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -377,6 +426,7 @@ func TestWatchDirsIncludesHookConfigAndRuntimeDirs(t *testing.T) {
 // (session sqlite churn, cache writes) would once again be treated
 // as tamper signals.
 func TestWatchOwnedFilesReturnsSpecificFilesNotDirs(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -544,6 +594,7 @@ func TestInstallBootstrapsMissingHookConfigFirstTime(t *testing.T) {
 }
 
 func TestInstallRepairsMissingHookConfigWhenPreviouslyProtected(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 
@@ -576,6 +627,7 @@ func TestInstallRepairsMissingHookConfigWhenPreviouslyProtected(t *testing.T) {
 }
 
 func TestInstallRepairsHookConfigSymlinkWhenPreviouslyProtected(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	outside := filepath.Join(t.TempDir(), "outside.toml")
@@ -618,6 +670,7 @@ func TestInstallRepairsHookConfigSymlinkWhenPreviouslyProtected(t *testing.T) {
 }
 
 func TestInstallRefusesHookConfigSymlinkOutsideHome(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	outside := filepath.Join(t.TempDir(), "config.toml")
@@ -650,6 +703,7 @@ func TestInstallRefusesHookConfigSymlinkOutsideHome(t *testing.T) {
 }
 
 func TestInstallRefusesHookConfigSymlinkInsideHome(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	realConfig := filepath.Join(home, "real-config.toml")
@@ -682,6 +736,7 @@ func TestInstallRefusesHookConfigSymlinkInsideHome(t *testing.T) {
 }
 
 func TestInstallRefusesHookConfigSymlinkParent(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	realDir := filepath.Join(home, "real-codex")
@@ -710,6 +765,7 @@ func TestInstallRefusesHookConfigSymlinkParent(t *testing.T) {
 }
 
 func TestInstallRefusesDataDirSymlink(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -745,6 +801,7 @@ func TestInstallRefusesDataDirSymlink(t *testing.T) {
 }
 
 func TestInstallRefusesExistingHookScriptSymlinkBeforeSetup(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -786,6 +843,7 @@ func TestInstallRefusesExistingHookScriptSymlinkBeforeSetup(t *testing.T) {
 }
 
 func TestInstallRepairsExistingHookScriptSymlinkWhenPreviouslyProtected(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -836,6 +894,7 @@ func TestInstallRepairsExistingHookScriptSymlinkWhenPreviouslyProtected(t *testi
 }
 
 func TestInstallRefusesExistingHookTokenSymlinkBeforeSetup(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -877,6 +936,7 @@ func TestInstallRefusesExistingHookTokenSymlinkBeforeSetup(t *testing.T) {
 }
 
 func TestInstallRefusesExistingHookHelperSymlinkBeforeSetup(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -918,6 +978,7 @@ func TestInstallRefusesExistingHookHelperSymlinkBeforeSetup(t *testing.T) {
 }
 
 func TestInstallRefusesExistingGeneratedExecutableSymlinkBeforeSetup(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -959,6 +1020,7 @@ func TestInstallRefusesExistingGeneratedExecutableSymlinkBeforeSetup(t *testing.
 }
 
 func TestValidateInstallFootprintRefusesGeneratedFileSymlinkBeforeSetup(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	dataDir := filepath.Join(home, ".defenseclaw")
@@ -986,6 +1048,7 @@ func TestValidateInstallFootprintRefusesGeneratedFileSymlinkBeforeSetup(t *testi
 }
 
 func TestInstallRefusesHomeOwnerMismatch(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -1011,6 +1074,7 @@ func TestInstallRefusesHomeOwnerMismatch(t *testing.T) {
 }
 
 func TestHardenInstallFootprintRefusesCreatedDirOutsideHome(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	dataDir := filepath.Join(home, ".defenseclaw")
@@ -1031,6 +1095,7 @@ func TestHardenInstallFootprintRefusesCreatedDirOutsideHome(t *testing.T) {
 }
 
 func TestInstallRefusesProxyConnector(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	_, err := Install(context.Background(), InstallOptions{
@@ -1048,6 +1113,7 @@ func TestInstallRefusesProxyConnector(t *testing.T) {
 }
 
 func TestInstallRefusesRootTarget(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	home := newTestHome(t)
 	_, err := Install(context.Background(), InstallOptions{
 		ConnectorName: "codex",

@@ -26,9 +26,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
+
+pytestmark = pytest.mark.supported_connector_host
 from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import (
     _api_url_from_ingest_endpoint,
     _resolve_api_url,
@@ -455,10 +459,17 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
 
     def test_missing_token_reports_actionable_error(self) -> None:
         # Seed the home variables Path.home() requires on Windows without
-        # inheriting unrelated Click environment options from the host.
+        # inheriting unrelated Click options or Splunk credentials from the host.
         with tempfile.TemporaryDirectory() as td, patch.dict(
             os.environ,
-            {"HOME": td, "USERPROFILE": td, "SFX_AUTH_TOKEN": ""},
+            {
+                "HOME": td,
+                "USERPROFILE": td,
+                "SFX_AUTH_TOKEN": "",
+                "SPLUNK_ACCESS_TOKEN": "",
+                "SPLUNK_O11Y_TOKEN": "",
+                "SPLUNK_REALM": "",
+            },
             clear=True,
         ):
             result = CliRunner().invoke(

@@ -17,7 +17,7 @@
 
 <p>
   <a href="https://opensource.org/licenses/Apache-2.0"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" /></a>
-  <a href="https://www.python.org/downloads/"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue.svg" /></a>
+  <a href="https://www.python.org/downloads/"><img alt="Python 3.10-3.13" src="https://img.shields.io/badge/python-3.10--3.13-blue.svg" /></a>
   <a href="https://go.dev/"><img alt="Go 1.26.4" src="https://img.shields.io/badge/go-1.26.4-00ADD8.svg" /></a>
   <a href="https://github.com/cisco-ai-defense/defenseclaw/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/cisco-ai-defense/defenseclaw/actions/workflows/ci.yml/badge.svg" /></a>
   <a href="https://discord.com/invite/nKWtDcXxtx"><img alt="Discord: Join us" src="https://img.shields.io/badge/Discord-Join%20Us-7289DA?logo=discord&amp;logoColor=white" /></a>
@@ -62,7 +62,8 @@ High-risk deployments should pair DefenseClaw with human review, least-privilege
 | Guide | Description |
 |-------|-------------|
 | [Quick Start](docs/QUICKSTART.md) | First successful local setup and scan flow |
-| [Install](docs/INSTALL.md) | macOS, Linux, DGX Spark, source builds, and release installation |
+| [Install](docs/INSTALL.md) | Windows, macOS, Linux, DGX Spark, source builds, and release installation |
+| [Native Windows](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/) | Certified x64 scope, signed Setup lifecycle, connectors, commands, security, and troubleshooting |
 | [CLI Reference](docs/CLI.md) | Python CLI commands and operator workflows |
 | [API Reference](docs/API.md) | Gateway REST API and sidecar endpoints |
 | [Architecture](docs/ARCHITECTURE.md) | Component model, data flow, and responsibilities |
@@ -90,7 +91,7 @@ Project Markdown documentation is centralized under [docs/](docs/). Package-loca
 
 | Requirement | Version |
 |-------------|---------|
-| Python | 3.10+ |
+| Python | 3.10-3.13 |
 | Go | 1.26.4+ |
 | Node.js | 18+ for the OpenClaw plugin |
 | uv | Recommended for Python installs |
@@ -129,13 +130,17 @@ normal repeated-development command.
 ### Install with the release script
 
 ```bash
-VERSION=0.8.4
+VERSION=0.8.6
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 defenseclaw init --enable-guardrail
 ```
 
 For platform-specific steps, see [docs/INSTALL.md](docs/INSTALL.md).
+
+On native Windows x64, use the signed native Setup EXE and hook-only connector path in
+the [Native Windows guide](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/).
+WSL is unsupported. Codex CLI and Claude Code are the only certified Windows connectors.
 
 ---
 

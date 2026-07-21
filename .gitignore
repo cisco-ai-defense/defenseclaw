@@ -13,6 +13,9 @@ extensions/defenseclaw/src/providers.json
 internal/gateway/connector/openclaw_extension/*
 !internal/gateway/connector/openclaw_extension/.placeholder
 
+# Generated only while building DefenseClawSetup-x64.exe.
+cmd/defenseclaw-setup/payload/*.zip
+
 # Editor and IDE metadata
 .idea/
 .vscode/
@@ -96,6 +99,7 @@ temp/
 
 # Telemetry updater staging directories.
 /telemetry-upstream-update-*/
+/.defenseclaw-telemetry-upstream.lock
 
 # Reproducible telemetry reports and test corpora. The registry compiler
 # validates these in memory and can materialize them for release/debug work;
@@ -174,3 +178,6 @@ outputs/
 # Locally built mock AI Defense ingest server (scripts/build-managed-bundle.sh
 # / manual testing). Compiled artifact — never commit.
 /mock-aid-ingest
+
+# Local native-Windows manual acceptance walkthrough.
+/WINDOWS_NATIVE_MANUAL_TEST.md

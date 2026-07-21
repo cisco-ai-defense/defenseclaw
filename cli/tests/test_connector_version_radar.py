@@ -17,6 +17,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -119,7 +120,8 @@ class ConnectorVersionRadarTests(unittest.TestCase):
         self.assertEqual(persisted["connectors"]["codex"]["installed_seed_version"], "0.142.5")
         self.assertNotIn("last_attempted_version", persisted["connectors"]["codex"])
         self.assertNotIn("last_passed_version", persisted["connectors"]["codex"])
-        self.assertEqual(self.state.stat().st_mode & 0o777, 0o600)
+        if os.name != "nt":
+            self.assertEqual(self.state.stat().st_mode & 0o777, 0o600)
 
         commands = [call[0] for call in runner.calls]
         self.assertIn(("codex", "--version"), commands)

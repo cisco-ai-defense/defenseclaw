@@ -96,11 +96,29 @@ separate claims:
 ```bash
 scripts/test-upgrade-release.sh --prepare-only --platform linux/arm64 --keep-workdir
 scp -r /tmp/defenseclaw-upgrade-smoke.xxxxxx/candidate-release openclaw-vineeth:/tmp/
-ssh openclaw-vineeth 'scripts/test-developer-target-activation.sh --release-root /tmp/candidate-release --target-version 0.8.5 --from-version 0.8.4 --baseline-mode seed'
-ssh openclaw-vineeth 'scripts/test-upgrade-protocol-release.sh --release-root /tmp/candidate-release --target-version 0.8.5 --from-version 0.8.3 --baseline-mode seed --refusal-contract-only'
+ssh openclaw-vineeth 'scripts/test-developer-target-activation.sh --release-root /tmp/candidate-release --target-version 0.8.6 --from-version 0.8.5 --baseline-mode seed'
+ssh openclaw-vineeth 'scripts/test-upgrade-protocol-release.sh --release-root /tmp/candidate-release --target-version 0.8.6 --from-version 0.8.4 --baseline-mode seed --refusal-contract-only'
 ```
 
-For routine candidates newer than the reviewed support list, the default matrix covers the required schema-v7 bridge plus every supported 0.4.0+ historical source: `0.8.4`, `0.8.3`, `0.8.2`, `0.8.1`, `0.8.0`, `0.7.2`, `0.7.1`, `0.6.6`, `0.6.5`, `0.6.4`, `0.6.3`, `0.6.2`, `0.6.1`, `0.6.0`, `0.5.0`, and `0.4.0`. That reviewed floor lives in `release/upgrade-baselines.json`; at execution time the Make target also authenticates and prepends every newer immutable stable release that is older than the exact `--target-version` in `ARGS`, so a newly published source version is tested without editing the Makefile. Legacy fixture candidates dynamically exclude reviewed sources that are not older than the candidate, and fail clearly if no supported predecessor remains. Dynamic matrix targets require that candidate argument because the checked-in development version is not release selection; set `UPGRADE_SMOKE_FROM` only when intentionally selecting an explicit developer subset. Release `0.7.0` has no downloadable release assets, and `0.2.0` predates the upgrade command, so neither is eligible for automatic staging. Targets before `0.8.5` retain schema-v7 checks. A hard-cut manifest (`min_upgrade_protocol >= 2`) must prove pre-mutation refusal for incapable baselines, a verified `0.8.4` bridge handoff for every listed older POSIX source, and full v7-to-v8 observability, private-secret, rollback, local-bundle, SQLite, and fresh-process health checks from the bridge.
+For routine candidates newer than the reviewed support list, the default matrix covers the required schema-v7 bridge plus every supported 0.4.0+ historical source: `0.8.4`, `0.8.3`, `0.8.2`, `0.8.1`, `0.8.0`, `0.7.2`, `0.7.1`, `0.6.6`, `0.6.5`, `0.6.4`, `0.6.3`, `0.6.2`, `0.6.1`, `0.6.0`, `0.5.0`, and `0.4.0`.
+That reviewed floor lives in `release/upgrade-baselines.json`;
+the Make target and smoke-contract tests must match it exactly. At execution
+time the resolver authenticates and prepends every newer immutable stable
+release older than the exact `--target-version`, and candidate certification
+seals that effective snapshot with its signed checksums and upgrade manifest.
+This tests newly published sources such as config-v8 `0.8.5` without baking
+unpublished assets into the reviewed floor. Legacy fixture candidates exclude
+reviewed sources that are not older than the candidate and fail clearly when no
+supported predecessor remains. Dynamic matrix targets require the candidate
+argument because the checked-in development version is not release selection;
+set `UPGRADE_SMOKE_FROM` only for an intentional developer subset. Release
+`0.7.0` has no downloadable assets, and `0.2.0` predates the upgrade command,
+so neither is eligible for automatic staging. Targets before `0.8.5` retain
+schema-v7 checks. A hard-cut manifest (`min_upgrade_protocol >= 2`) must prove
+pre-mutation refusal for incapable baselines, a verified `0.8.4` bridge handoff
+for every listed older POSIX source, and full v7-to-v8 observability,
+private-secret, rollback, local-bundle, SQLite, and fresh-process health checks
+from the bridge.
 
 The effective baseline resolver adds published 0.8.5 dynamically as config
 version 8. The harness then seeds canonical v8 config, migration
@@ -111,13 +129,13 @@ fail closed until their fixture and verifier are reviewed.
 
 Nightly/manual certification seals one candidate, then runs
 `scripts/test-upgrade-protocol-release.sh` for the selected behavior-class
-Linux/macOS baselines plus the native fresh-install and live-continuity gates.
+Linux/macOS baselines plus native fresh-install and live-continuity gates.
 The final release reuses those exact certified bytes, or invokes that complete
-certification workflow on a cache miss. Windows runtime publication and upgrade
-jobs remain disabled; certification instead proves that no Windows gateway,
-rollback, or SBOM binary is emitted and that the signed PowerShell resolver
-refuses before mutation. A broken refusal, bridge handoff, migration, rollback,
-health, or history path therefore aborts before any release asset is published.
+certification workflow on a cache miss. Legacy raw Windows runtime archives
+remain omitted, while the signed `DefenseClawSetup-x64.exe` and its custody
+sidecars are built, certified with real Codex and Claude clients, and promoted
+from the same sealed candidate. A broken refusal, bridge handoff, migration,
+rollback, installer lifecycle, health, or history path aborts before publication.
 
 ### 0.8.4 bridge rollout order
 

@@ -124,8 +124,21 @@ class HintEngine:
         return ""
 
     def _overview_hint(self, state: HintState, status: StatusModel | None) -> str:
-        if status and status.gateway.state != "running":
-            return 'Gateway is offline. Open the command palette and run "doctor" to diagnose.'
+        if status:
+            gateway_state = status.gateway.state.strip().lower()
+            if gateway_state in {"starting", "reconnecting"}:
+                return "Gateway is starting. Health checks will retry automatically."
+            if gateway_state in {"error", "failed"}:
+                detail = status.gateway.detail.strip()
+                if "authentication" in detail.lower() or "token" in detail.lower():
+                    return "Gateway authentication error. Check the configured sidecar API token."
+                if "config" in detail.lower() or "port" in detail.lower():
+                    return "Gateway configuration error. Check the sidecar API bind, port, and token."
+                return "Gateway health check failed. Open the command palette and run doctor to diagnose."
+            if gateway_state in {"", "unknown"}:
+                return "Gateway status is not available yet. Health checks will retry automatically."
+            if gateway_state in {"offline", "stopped", "down"}:
+                return 'Gateway is offline. Open the command palette and run "doctor" to diagnose.'
         if status and status.guardrail.state in {"disabled", "offline", "unknown"}:
             return 'LLM guardrail is not configured. Press "g" to set it up.'
         if state.critical_alerts > 0:
@@ -164,16 +177,22 @@ class HintEngine:
         if hint := self._filter_hint(state):
             return hint
         if state.unscanned_skills > 0:
-            return f'{state.unscanned_skills} skills unscanned. Press "s" on a skill, or : scan skill --all.'
+            return (
+                f'{state.unscanned_skills} skills unscanned. Press "s" on a skill, '
+                'or : scan skill --all. Press "u" to unblock a blocked skill.'
+            )
         return (
             "KEYS  j/k move | Enter detail | o actions | s scan | b block | "
-            "a allow | R registries | r refresh | / filter."
+            "a allow | u unblock | R registries | r refresh | / filter."
         )
 
     def _mcps_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):
             return hint
-        return "KEYS  j/k move | Enter detail | o actions | s scan | b block | a allow | n add server | R registries."
+        return (
+            "KEYS  j/k move | Enter detail | o actions | s scan | b block | "
+            "a allow | u unblock | n add server | R registries."
+        )
 
     def _plugins_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):

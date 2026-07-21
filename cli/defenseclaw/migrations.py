@@ -57,6 +57,14 @@ import yaml
 from defenseclaw import migration_state as migration_state_helpers
 from defenseclaw import ux
 from defenseclaw.file_lock import locked_file_update
+from defenseclaw.file_permissions import (
+    copy_windows_dacl,
+    delete_file_durable,
+    replace_file_durable,
+    set_file_mode,
+)
+
+_OBSERVABILITY_V8_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 if TYPE_CHECKING:
     from defenseclaw.observability.v8_migration import V8MigrationResult
@@ -645,6 +653,90 @@ def _migrate_observability_v8(ctx: MigrationContext) -> None:
         ctx.changes.append("activated observability configuration schema v8")
 
 
+def preflight_required_migrations(
+    from_version: str,
+    to_version: str,
+    openclaw_home: str,
+    data_dir: str,
+    required_versions: list[str] | tuple[str, ...],
+    scratch_dir: str,
+) -> int:
+    """Exercise required target migrations without mutating live state.
+
+    Native Setup calls this from the staged target interpreter while the old
+    runtime is still live.  Each supported preflight may read a bounded secure
+    snapshot, but candidate files are confined to ``scratch_dir`` and no
+    migration cursor, config, environment, service, or connector state is
+    published.
+    """
+
+    del openclaw_home  # Reserved for future required-migration preflights.
+    if not isinstance(required_versions, (list, tuple)) or any(
+        not isinstance(version, str) for version in required_versions
+    ):
+        raise ObservabilityV8UpgradeMigrationError("preflight_manifest_invalid")
+    scratch = os.path.abspath(os.path.expanduser(scratch_dir))
+    if not os.path.isabs(scratch_dir) or not os.path.isdir(scratch):
+        raise ObservabilityV8UpgradeMigrationError("preflight_root_invalid")
+    scratch_metadata = os.lstat(scratch)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if stat.S_ISLNK(scratch_metadata.st_mode) or (
+        getattr(scratch_metadata, "st_file_attributes", 0) & reparse_flag
+    ):
+        raise ObservabilityV8UpgradeMigrationError("preflight_root_invalid")
+
+    selected = [
+        version
+        for version in dict.fromkeys(required_versions)
+        if _ver_tuple(from_version) < _ver_tuple(version) <= _ver_tuple(to_version)
+    ]
+    for version in selected:
+        if version != "0.8.5":
+            raise ObservabilityV8UpgradeMigrationError("required_preflight_unsupported")
+        ctx = MigrationContext(
+            openclaw_home="",
+            data_dir=data_dir,
+            from_version=from_version,
+            to_version=to_version,
+            config_path=os.path.join(data_dir, "config.yaml"),
+            upgrade_handles_local_bundle=True,
+        )
+        _preflight_observability_v8(ctx, scratch)
+    return len(selected)
+
+
+def _preflight_observability_v8(ctx: MigrationContext, scratch_dir: str) -> None:
+    """Convert and target-validate a read-only snapshot in staged custody."""
+
+    data_dir = os.path.abspath(os.path.expanduser(ctx.data_dir))
+    config_path = os.path.abspath(os.path.expanduser(ctx.active_config_path()))
+    environment_path = os.path.join(data_dir, ".env")
+    try:
+        common = os.path.commonpath((os.path.normcase(data_dir), os.path.normcase(config_path)))
+    except ValueError:
+        raise ObservabilityV8UpgradeMigrationError("preflight_path_escape") from None
+    if common != os.path.normcase(data_dir):
+        raise ObservabilityV8UpgradeMigrationError("preflight_path_escape")
+    source = _read_observability_v8_upgrade_source(config_path)
+    if source is None:
+        return
+    environment = _observability_v8_upgrade_environment(environment_path)
+    migration = convert_v7_observability_to_v8(
+        source,
+        environment,
+        source_name=config_path,
+        effective_data_dir=data_dir,
+    )
+    protected = dict(environment)
+    protected.update({edit.name: edit.value for edit in migration.environment_edits})
+    _validate_observability_v8_candidate(
+        migration.candidate,
+        protected,
+        data_dir=data_dir,
+        candidate_directory=scratch_dir,
+    )
+
+
 def _refresh_observability_v8_bundle_for_legacy_upgrader(
     ctx: MigrationContext,
     data_dir: str,
@@ -979,13 +1071,21 @@ def _validate_observability_v8_candidate(
             candidate_file.write(candidate)
             candidate_file.flush()
             os.fsync(candidate_file.fileno())
-        inspected = inspect_v8_config(
-            "validate",
-            config_path=candidate_path,
-            data_dir=data_dir,
-            environment_overrides=protected_environment,
-            gateway_binary=gateway_binary,
-        )
+        try:
+            inspected = inspect_v8_config(
+                "validate",
+                config_path=candidate_path,
+                data_dir=data_dir,
+                environment_overrides=protected_environment,
+                gateway_binary=gateway_binary,
+            )
+        except Exception as exc:
+            from defenseclaw.config_inspect import ConfigInspectError
+            from defenseclaw.observability.v8_activation import V8CandidateValidationError
+
+            if isinstance(exc, ConfigInspectError) and exc.field_path and exc.reason:
+                raise V8CandidateValidationError(exc.field_path, exc.reason) from None
+            raise
         if inspected.valid is not True or inspected.config_version != 8:
             raise ObservabilityV8UpgradeMigrationError("target_validation_invalid")
     finally:
@@ -1125,7 +1225,7 @@ def _migrate_0_3_0_surgical(oc_json: str) -> None:
     # follow-up: the previous implementation used a non-atomic
     # ``open(..., "w") + json.dump`` pair which could leave the user's
     # Codex MCP config truncated mid-write if the process was killed.
-    # Route through the atomic temp-file + os.replace helper used for
+    # Route through the durable same-directory replacement helper used for
     # every other migration write so a crash here is harmless: either
     # the new content is fully present or the old file is intact. We
     # use mode=0o644 (not 0o600) because openclaw.json is a regular
@@ -1335,16 +1435,7 @@ def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
         new_lines.append(line)
     if rewritten == 0:
         return
-    try:
-        # Atomic rewrite via tempfile + rename to avoid a partial
-        # write if the operator interrupts us mid-migration.
-        tmp = config_path + ".tmp-f3395"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.writelines(new_lines)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, config_path)
-    except OSError as exc:
-        ux.warn(f"could not migrate token_env in {config_path}: {exc}", indent="    ")
+    if not _atomic_write_text(config_path, "".join(new_lines), mode=0o600):
         return
     ctx.changes.append(f"migrated {rewritten} stale gateway.token_env reference(s) in config.yaml")
 
@@ -1377,6 +1468,14 @@ def _migrate_0_4_0_tighten_perms(ctx: MigrationContext) -> None:
         if not os.path.isfile(path):
             continue
         try:
+            if os.name == "nt":
+                from defenseclaw.file_permissions import protect_private_file, windows_acl_write_error
+
+                problem = windows_acl_write_error(path)
+                protect_private_file(path)
+                if problem is not None:
+                    ctx.changes.append(f"tightened Windows DACL on {name}")
+                continue
             current = os.stat(path).st_mode & 0o777
             if current == 0o600:
                 continue
@@ -1392,6 +1491,15 @@ def _migrate_0_4_0_tighten_perms(ctx: MigrationContext) -> None:
         for filename in files:
             path = os.path.join(root, filename)
             try:
+                if os.name == "nt":
+                    from defenseclaw.file_permissions import protect_private_file, windows_acl_write_error
+
+                    problem = windows_acl_write_error(path)
+                    protect_private_file(path)
+                    if problem is not None:
+                        rel = os.path.relpath(path, ctx.data_dir)
+                        ctx.changes.append(f"tightened Windows DACL on {rel}")
+                    continue
                 current = os.stat(path).st_mode & 0o777
                 if current == 0o600:
                     continue
@@ -1414,7 +1522,7 @@ def _migrate_0_4_0_remove_legacy_codex_env(ctx: MigrationContext) -> None:
         if not os.path.isfile(path):
             continue
         try:
-            os.remove(path)
+            delete_file_durable(path)
             ctx.changes.append(
                 f"removed legacy codex env override {name} (S8.1: replaced by ~/.codex/config.toml patch)"
             )
@@ -1585,14 +1693,8 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
     if not os.path.isfile(cfg_path):
         return
 
-    try:
-        # newline="" preserves the file's existing line endings (CRLF on a
-        # Windows operator's config) so the surgical insert below does not
-        # silently normalize the whole file to LF.
-        with open(cfg_path, newline="") as f:
-            text = f.read()
-    except OSError as exc:
-        ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
+    text = _read_config_text(cfg_path)
+    if text is None:
         return
 
     block_match = _GUARDRAIL_HOOK_FAIL_MODE_RE.search(text)
@@ -1859,8 +1961,9 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
     in the *target* directory so the bytes never exist on disk under a
     predictable name, applies the file mode from creation, refuses to
     write through a pre-existing symlink at ``path``, and calls
-    :func:`os.fsync` before :func:`os.replace` so a crash mid-rename
-    cannot leave a half-written file. For secret-bearing writes
+    :func:`os.fsync` before the write-through native replacement so a crash
+    cannot leave a half-written file or an uncommitted Windows rename. For
+    secret-bearing writes
     (``mode <= 0o600``) the parent directory is tightened to 0o700 first,
     even when it already exists with a more permissive mode. Non-secret
     writes (``mode > 0o600``, e.g. the surgical ``openclaw.json``
@@ -1917,7 +2020,10 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
             suffix=os.path.basename(path) or ".tmp",
             dir=parent,
         )
-        os.fchmod(fd, effective_mode)
+        if os.name == "nt" and mode > 0o600 and os.path.exists(path):
+            copy_windows_dacl(path, tmp_path)
+        else:
+            set_file_mode(fd, tmp_path, effective_mode, set_owner=True)
         # newline="" writes ``body`` byte-for-byte (no \n -> os.linesep
         # translation), so a caller that preserved a file's CRLF endings
         # does not get them doubled to \r\r\n on Windows.
@@ -1926,7 +2032,7 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
             f.write(body)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, path)
+        replace_file_durable(tmp_path, path)
         # Re-apply the effective mode after replace in case the FS quirks
         # restored a different mode (e.g. tmpfs ACL inheritance).
         try:
@@ -1966,7 +2072,7 @@ def _read_config_text(cfg_path: str) -> str | None:
     (and occasionally forgotten) per migration.
     """
     try:
-        with open(cfg_path, newline="") as f:
+        with open(cfg_path, encoding="utf-8", newline="") as f:
             return f.read()
     except OSError as exc:
         ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
@@ -2208,9 +2314,10 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
        flat path that is NOT in ``_LEGACY_FLAT_REGO_FILENAMES`` is left
        alone so a hand-curated custom rule never disappears mid-upgrade.
 
-    3. Atomic on a per-file basis: each ``os.remove`` either succeeds or
-       leaves the file in place; we never half-delete a file. A failure
-       to remove one file does not abort the migration.
+    3. Durable on a per-file basis: each live name is atomically renamed to an
+       inert tombstone before deletion. A crash cannot resurrect a legacy
+       filename that a downgraded process would consume again. A failure to
+       remove one file does not abort the migration.
 
     4. Idempotent: re-running on a clean install (no flat residue) is a
        no-op.
@@ -2246,7 +2353,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
         if not os.path.isfile(flat_path):
             continue
         try:
-            os.remove(flat_path)
+            delete_file_durable(flat_path)
             removed_rego.append(name)
         except OSError as exc:
             ux.warn(f"could not remove {flat_path}: {exc}", indent="    ")
@@ -2286,7 +2393,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
         return
 
     # Skip symlinks: filecmp on a symlink would resolve through it and
-    # potentially short-circuit to "identical", but then ``os.remove``
+    # potentially short-circuit to "identical", but then durable deletion
     # would unlink the symlink while the operator's intent was a live
     # alias. Leave symlinks for operators to retire manually.
     if os.path.islink(flat_data):
@@ -2305,7 +2412,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
 
     if identical:
         try:
-            os.remove(flat_data)
+            delete_file_durable(flat_data)
             ctx.changes.append(f"removed duplicate {flat_data} (canonical {nested_data} is the one the loader reads)")
         except OSError as exc:
             ux.warn(f"could not remove {flat_data}: {exc}", indent="    ")
@@ -2328,7 +2435,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
             )
             return
     try:
-        os.replace(flat_data, backup_path)
+        replace_file_durable(flat_data, backup_path)
         ctx.changes.append(
             f"preserved operator-edited {flat_data} as {backup_path} "
             f"(differed from canonical {nested_data}; the gateway no longer "
@@ -2701,7 +2808,7 @@ def _migrate_0_8_0_guardrail_runtime_json(ctx: MigrationContext) -> None:
         return
 
     try:
-        os.remove(runtime_path)
+        delete_file_durable(runtime_path)
     except OSError as exc:
         ux.warn(f"could not delete {runtime_path}: {exc}", indent="    ")
         return
@@ -3111,6 +3218,7 @@ def run_migrations(
     data_dir: str | None = None,
     *,
     upgrade_handles_local_bundle: bool = False,
+    strict_required: tuple[str, ...] = (),
     controller_owns_local_bundle_transaction: bool = False,
 ) -> int:
     """Run all applicable migrations up to ``to_version``.
@@ -3158,6 +3266,12 @@ def run_migrations(
     so that operators with a non-default ``DEFENSECLAW_HOME`` get
     their migration applied at the right path.
 
+    ``strict_required`` is reserved for authenticated upgrade controllers.
+    A listed migration retains its bounded exception instead of being reduced
+    to a later missing-cursor error, so native Setup can roll back before it
+    commits an unusable target runtime. Ordinary CLI callers preserve the
+    historical continue-and-retry behavior.
+
     ``controller_owns_local_bundle_transaction`` is a capability handshake,
     not a release-version check. Controllers that advertise it reconcile the
     installed local-observability bundle after migrations. A controller that
@@ -3196,6 +3310,9 @@ def run_migrations(
 
     from_t = _ver_tuple(from_version)
     to_t = _ver_tuple(to_version)
+    strict = frozenset(strict_required)
+    if any(not isinstance(version, str) for version in strict_required):
+        raise ValueError("strict required migrations must be version strings")
     same_version_reapply = from_t == to_t
     applied_count = 0
     migration_failed = False
@@ -3207,6 +3324,7 @@ def run_migrations(
     # ``from_version`` so we don't replay history on a host that's
     # already in steady state.
     state = migration_state.load(data_dir)
+    deferred_strict_bootstrap = state is None and bool(strict)
     if state is None:
         # ``load`` collapses several cases to ``None``. Most of them
         # (missing / empty / corrupt cursor) are safe to bootstrap. But a
@@ -3232,14 +3350,15 @@ def run_migrations(
             package_version=to_version,
             registry_versions=[v for v, _, _ in MIGRATIONS],
         )
-        # Persist the bootstrap snapshot eagerly so a crash mid-run
-        # still leaves the host with a usable cursor for next time.
-        # save() failure is non-fatal: we'll just bootstrap again
-        # next upgrade (still idempotent).
-        try:
-            migration_state.save(data_dir, state)
-        except OSError as exc:
-            ux.warn(f"could not persist migration cursor: {exc}", indent="    ")
+        # Ordinary CLI upgrades persist the bootstrap snapshot eagerly so a
+        # crash mid-run leaves a usable cursor. A strict native-Setup run must
+        # not write even this metadata before its required migration succeeds:
+        # a candidate refusal must leave the old runtime's data byte-identical.
+        if not strict:
+            try:
+                migration_state.save(data_dir, state)
+            except OSError as exc:
+                ux.warn(f"could not persist migration cursor: {exc}", indent="    ")
 
     for ver, desc, fn in MIGRATIONS:
         ver_t = _ver_tuple(ver)
@@ -3283,9 +3402,11 @@ def run_migrations(
         try:
             fn(ctx)
             ux.ok(f"Migration {ver} applied.", indent="    ")
-        except Exception as exc:  # noqa: BLE001 — never abort upgrade on migration error
+        except Exception as exc:  # noqa: BLE001 - strict native setup must retain exact refusal
             migration_failed = True
             ux.err(f"migration {ver} failed: {exc}", indent="    ")
+            if ver in strict:
+                raise
             ux.subhead(
                 "upgrade will continue; run 'defenseclaw doctor --fix' afterwards",
                 indent="    ",
@@ -3310,7 +3431,24 @@ def run_migrations(
         try:
             migration_state.save(data_dir, state)
         except OSError as exc:
+            if ver in strict:
+                raise
             ux.warn(f"could not persist migration cursor after {ver}: {exc}", indent="    ")
+
+    if deferred_strict_bootstrap:
+        missing_required = sorted(
+            version for version in strict if not migration_state.is_applied(state, version)
+        )
+        if missing_required:
+            raise RuntimeError(
+                "required migrations are missing: " + ", ".join(missing_required)
+            )
+        # Strict native Setup must preserve refusal atomicity, including for a
+        # host with no prior cursor. Persist the bootstrap only after every
+        # required migration has either completed or been conservatively
+        # recorded by bootstrap. This also covers a same-version packaged run
+        # where no registry callable executes and therefore cannot save state.
+        migration_state.save(data_dir, state)
 
     normalized_data_dir = os.path.abspath(os.path.expanduser(data_dir))
     local_bundle_installed = os.path.lexists(os.path.join(normalized_data_dir, "observability-stack"))

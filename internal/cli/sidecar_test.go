@@ -12,7 +12,61 @@ package cli
 
 import (
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
+
+func TestMaterializeSidecarGatewayTokenUsesResolvedPrecedence(t *testing.T) {
+	t.Run("canonical environment replaces stale inline config", func(t *testing.T) {
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "current-environment-token")
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "legacy-environment-token")
+		gatewayConfig := config.GatewayConfig{Token: "stale-inline-token"}
+
+		materializeSidecarGatewayToken(&gatewayConfig, "")
+
+		if got := gatewayConfig.Token; got != "current-environment-token" {
+			t.Fatalf("materialized token = %q, want canonical environment token", got)
+		}
+	})
+
+	t.Run("custom environment remains highest priority", func(t *testing.T) {
+		t.Setenv("CUSTOM_GATEWAY_TOKEN", "custom-environment-token")
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "canonical-environment-token")
+		gatewayConfig := config.GatewayConfig{
+			TokenEnv: "CUSTOM_GATEWAY_TOKEN",
+			Token:    "stale-inline-token",
+		}
+
+		materializeSidecarGatewayToken(&gatewayConfig, "")
+
+		if got := gatewayConfig.Token; got != "custom-environment-token" {
+			t.Fatalf("materialized token = %q, want custom environment token", got)
+		}
+	})
+
+	t.Run("deprecated explicit flag still wins", func(t *testing.T) {
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "canonical-environment-token")
+		gatewayConfig := config.GatewayConfig{Token: "inline-token"}
+
+		materializeSidecarGatewayToken(&gatewayConfig, "explicit-flag-token")
+
+		if got := gatewayConfig.Token; got != "explicit-flag-token" {
+			t.Fatalf("materialized token = %q, want explicit flag token", got)
+		}
+	})
+
+	t.Run("inline config remains the final fallback", func(t *testing.T) {
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+		gatewayConfig := config.GatewayConfig{Token: "inline-token"}
+
+		materializeSidecarGatewayToken(&gatewayConfig, "")
+
+		if got := gatewayConfig.Token; got != "inline-token" {
+			t.Fatalf("materialized token = %q, want inline token", got)
+		}
+	})
+}
 
 // TestFormatDetailValue_Scalars locks in the rendering contract used
 // by the gateway status panel. JSON unmarshalling reduces every numeric

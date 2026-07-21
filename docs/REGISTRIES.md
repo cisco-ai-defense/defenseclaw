@@ -164,7 +164,7 @@ and CI/CD pipelines call, with `--json` for machine-readable output.
 | `registry entries <id> [--approved/--rejected]` | Show cached entries (after sync) |
 | `registry approve <id> <name> --type {skill\|mcp}` | Mark approved |
 | `registry reject <id> <name> --type {skill\|mcp}` | Mark rejected (sets status to `blocked`) |
-| `registry require --type <t> --enabled/--disabled` | Toggle `asset_policy.<t>.registry_required` |
+| `registry require --type <t> --enabled/--disabled [--connector <name>]` | Toggle `asset_policy.<t>.registry_required` for one connector or reconcile every active connector |
 | `registry wizard` | Interactive add+sync convenience flow |
 | `setup registry` | Discoverable shortcut from `defenseclaw setup` that drops into the wizard |
 
@@ -243,6 +243,18 @@ Tighten admission so only registry-approved skills are allowed:
 ```bash
 defenseclaw registry require --type skill --enabled
 ```
+
+Without `--connector`, the command updates the global default and removes only
+the `registry_required` override for each active connector so every active
+connector inherits the requested value. Other connector policy fields and the
+global registry rule/filter lists are preserved. With `--connector`, only that
+connector's explicit override changes; the global default and peer connectors
+remain untouched.
+
+Overrides belonging to known but inactive connectors are deliberately
+preserved. This avoids silently changing their saved enforcement posture if
+they are activated later; a future unscoped operation reconciles them once
+they join the active roster.
 
 ---
 

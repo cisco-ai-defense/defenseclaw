@@ -28,6 +28,7 @@ func TestCodexTeardownRevokesCachedOTLPTokenAndReinstallRotates(t *testing.T) {
 
 	conn := connector.NewCodexConnector()
 	opts := connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "hook-token"}
+	prepareCodexSetupPolicyFixture(t, dir, &opts)
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("initial Setup: %v", err)
 	}
@@ -58,12 +59,22 @@ func TestCodexTeardownRevokesCachedOTLPTokenAndReinstallRotates(t *testing.T) {
 	if got := request(first); got != http.StatusOK || !*called {
 		t.Fatal("initial scoped Codex token was not accepted")
 	}
+	tokenPath, err := connector.OTLPPathTokenFilePath(dir, connector.OTLPScopeCodex)
+	if err != nil {
+		t.Fatalf("resolve scoped Codex token path: %v", err)
+	}
+	legacyTempPath := tokenPath + ".tmp"
+	if err := os.WriteFile(legacyTempPath, []byte("legacy-staged-token\n"), 0o600); err != nil {
+		t.Fatalf("seed legacy scoped-token temp file: %v", err)
+	}
 
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(dir, "hooks", ".otlp-codex.token")); !os.IsNotExist(err) {
-		t.Fatal("Teardown did not remove the scoped Codex token file")
+	for _, path := range []string{tokenPath, legacyTempPath} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("Teardown did not remove scoped Codex token artifact %s: %v", filepath.Base(path), err)
+		}
 	}
 	// Expire the bounded stat throttle so the running gateway observes the
 	// on-disk revocation and drops its cached credential.

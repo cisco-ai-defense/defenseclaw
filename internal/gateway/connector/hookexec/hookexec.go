@@ -19,18 +19,18 @@
 // where agents invoke the DefenseClaw binary directly (no Git Bash, no .cmd
 // wrapper, no jq, and no PATH lockdown — because Go never shells out).
 //
-// The behavior here intentionally mirrors the .sh hooks under
-// internal/gateway/connector/hooks line-for-line: the same gateway endpoint
-// per connector, the same per-connector stdout shape and exit code, and the
-// same fail-open-on-outage / fail-closed-on-misconfig policy. Unix keeps using
-// the .sh hooks unchanged; this package is the parity implementation so the
-// two paths cannot drift (the golden tests pin the contract on every OS).
+// The behavior here mirrors the .sh hooks under internal/gateway/connector/hooks:
+// the same gateway endpoint, per-connector stdout shape and exit code, and the
+// same fail-open-on-outage / fail-closed-on-misconfig policy. Native transport
+// deadlines may follow the agent's registered event budget. Unix keeps using
+// the .sh hooks unchanged; golden tests pin the shared decision contract.
 package hookexec
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -52,19 +52,27 @@ const blockExit = 2
 // and silently truncating it would yield a confusing downstream parse error.
 const defaultMaxBody int64 = 1 << 20
 
+const (
+	defaultHookRequestTimeout = 10 * time.Second
+	hookResponseGrace         = time.Second
+)
+
+var errInvalidHookRequest = errors.New("invalid hook request")
+
 // Options configures a single hook invocation. The CLI entrypoint fills these
 // from flags + environment; tests construct them directly so the full decision
 // matrix can be exercised without a real gateway or agent.
 type Options struct {
 	// Connector is the logical connector name, e.g. "claudecode", "codex".
 	Connector string
-	// Event is the agent hook event (informational; recorded in failure logs).
+	// Event is the agent hook event used for deadlines and failure logs. Claude
+	// Code supplies it in the payload when the CLI flag is omitted.
 	Event string
 	// APIAddr is the gateway "host:port" the hook posts to.
 	APIAddr string
 	// FailMode is "open" or "closed"; it governs response-layer failures
-	// (4xx / bad JSON). Transport failures always fail open unless
-	// StrictAvailability is set. Empty defaults to "open".
+	// (4xx / bad JSON) and transport failures. StrictAvailability forces
+	// closed independently. Empty defaults to "open".
 	FailMode string
 
 	// Home is DEFENSECLAW_HOME (default ~/.defenseclaw). If it does not exist
@@ -81,6 +89,9 @@ type Options struct {
 	// StrictAvailability mirrors DEFENSECLAW_STRICT_AVAILABILITY: when true,
 	// transport failures and a missing token fail closed instead of open.
 	StrictAvailability bool
+	// ManagedEnterprise marks an administrator-managed runtime. User-owned
+	// Home/.disabled state must never turn that policy into a no-op.
+	ManagedEnterprise bool
 
 	// MaxBody overrides the stdin cap in bytes (default defaultMaxBody).
 	MaxBody int64
@@ -94,9 +105,14 @@ type Options struct {
 	Stdout io.Writer
 	Stderr io.Writer
 
-	// HTTPClient lets tests inject a stub transport. When nil a client with
-	// the same 2s-connect / 10s-total budget as the .sh `curl` call is used.
+	// HTTPClient lets tests inject a stub transport. When nil a client with a
+	// 2s connect timeout and a connector/event-specific total budget is used.
 	HTTPClient *http.Client
+	// GatewayRecovery is installed only by the protected native Windows hook
+	// launcher. After an exact connection-refused result, it may start and wait
+	// for the installer-owned gateway. Run invokes it at most once and retries
+	// the original authenticated hook request once within the same deadline.
+	GatewayRecovery func(context.Context, error) error
 	// Now is injectable for deterministic failure-log timestamps in tests.
 	Now func() time.Time
 }
@@ -105,6 +121,7 @@ type Options struct {
 // (0 = allow / no-op, 2 = block / fail-closed). It never returns other codes
 // so callers can pass the result straight to os.Exit.
 func Run(ctx context.Context, opts Options) int {
+	startedAt := time.Now()
 	opts = withDefaults(opts)
 
 	sp, ok := specFor(opts.Connector)
@@ -117,13 +134,15 @@ func Run(ctx context.Context, opts Options) int {
 		return blockExit
 	}
 
-	// DEFENSECLAW_HOME guard: if the data dir is gone or the operator dropped
-	// a .disabled file, do nothing. Mirrors the top-of-script guard.
+	// DEFENSECLAW_HOME guard: an ordinary removed/disabled installation is an
+	// intentional no-op. Administrator-managed hooks carry ManagedEnterprise
+	// (and invalid runtimes also set StrictAvailability), so a missing or
+	// disabled machine-policy home must block instead of bypassing enforcement.
 	if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
-		return 0
+		return handleUnavailableHome(opts, sp, "DefenseClaw home is unavailable")
 	}
 	if _, err := os.Stat(filepath.Join(opts.Home, ".disabled")); err == nil {
-		return 0
+		return handleUnavailableHome(opts, sp, "DefenseClaw home is disabled")
 	}
 
 	failMode := normalizeFailMode(opts.FailMode)
@@ -135,6 +154,17 @@ func Run(ctx context.Context, opts Options) int {
 	}
 	if overflow {
 		return handleOversized(opts, sp, failMode)
+	}
+	opts.Event = resolveHookEvent(opts.Event, payload)
+	if opts.HTTPClient == nil {
+		requestTimeout := hookRequestTimeout(opts.Connector, opts.Event) - time.Since(startedAt)
+		if requestTimeout <= 0 {
+			return failUnreachable(opts, sp, failMode, "hook request budget exhausted before gateway contact")
+		}
+		opts.HTTPClient = defaultHTTPClient(requestTimeout)
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, requestTimeout)
+		defer cancel()
 	}
 
 	// Cursor 2.4+ imports Claude Code hooks while also running its native
@@ -165,17 +195,41 @@ func Run(ctx context.Context, opts Options) int {
 	return doRequest(ctx, opts, sp, failMode, payload, token)
 }
 
-// doRequest performs the gateway POST and dispatches the response through the
-// connector-specific decision logic, applying the transport vs response
-// failure split exactly like the .sh hooks.
-func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payload []byte, token string) int {
-	url := "http://" + opts.APIAddr + sp.endpoint
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+// RunCodexNotify forwards the JSON payload Codex appends to its configured
+// `notify` argv array. Notifications are telemetry-only and deliberately
+// best-effort: every local/configuration/transport/response failure returns 0,
+// matching the legacy Bash bridge's `curl ... || true` contract.
+func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
+	opts = withDefaults(opts)
+	if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
+		return 0
+	}
+	if _, err := os.Stat(filepath.Join(opts.Home, ".disabled")); err == nil {
+		return 0
+	}
+	if len(payload) == 0 || int64(len(payload)) > opts.MaxBody {
+		return 0
+	}
+
+	tokenFile, scopedTokenFile := hookTokenFile(opts.HookDir, "codex")
+	if opts.Token == "" && !fileExists(tokenFile) {
+		return 0
+	}
+	token := opts.Token
+	if scopedTokenFile || token == "" {
+		token = readTokenFile(tokenFile, scopedTokenFile)
+	}
+
+	notifyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(notifyCtx, http.MethodPost,
+		"http://"+opts.APIAddr+"/api/v1/codex/notify", bytes.NewReader(payload))
 	if err != nil {
-		return failResponse(opts, sp, failMode, "invalid request: "+err.Error())
+		return 0
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-DefenseClaw-Client", sp.hookName+"/1.0")
+	req.Header.Set("X-DefenseClaw-Client", "codex-notify/1.0")
+	req.Header.Set("x-defenseclaw-source", "codex-notify")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -185,8 +239,37 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	if v := strings.TrimSpace(opts.TraceState); v != "" && validTracestate(v) {
 		req.Header.Set("tracestate", v)
 	}
+	if opts.HTTPClient == nil {
+		opts.HTTPClient = defaultHTTPClient(defaultHookRequestTimeout)
+	}
 
 	resp, err := opts.HTTPClient.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, defaultMaxBody))
+	return 0
+}
+
+// doRequest performs the gateway POST and dispatches the response through the
+// connector-specific decision logic, applying the transport vs response
+// failure split exactly like the .sh hooks.
+func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payload []byte, token string) int {
+	resp, err := sendHookRequest(ctx, opts, sp, payload, token)
+	if errors.Is(err, errInvalidHookRequest) {
+		return failResponse(opts, sp, failMode, err.Error())
+	}
+	if err != nil && opts.GatewayRecovery != nil && connectionRefused(err) {
+		if recoveryErr := opts.GatewayRecovery(ctx, err); recoveryErr == nil && ctx.Err() == nil {
+			// The initial request proved no listener was present. Recovery verifies
+			// and starts the exact installer-owned gateway, including authenticated
+			// readiness, before this single retry.
+			resp, err = sendHookRequest(ctx, opts, sp, payload, token)
+		} else {
+			return failUnreachable(opts, sp, failMode, "gateway cold start failed")
+		}
+	}
 	if err != nil {
 		return failUnreachable(opts, sp, failMode, "gateway unreachable")
 	}
@@ -204,6 +287,33 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	return sp.decide(opts, body)
 }
 
+func sendHookRequest(
+	ctx context.Context,
+	opts Options,
+	sp spec,
+	payload []byte,
+	token string,
+) (*http.Response, error) {
+	url := "http://" + opts.APIAddr + sp.endpoint
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errInvalidHookRequest, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DefenseClaw-Client", sp.hookName+"/1.0")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if v := strings.TrimSpace(opts.TraceParent); v != "" && validTraceparent(v) {
+		req.Header.Set("traceparent", v)
+	}
+	if v := strings.TrimSpace(opts.TraceState); v != "" && validTracestate(v) {
+		req.Header.Set("tracestate", v)
+	}
+
+	return opts.HTTPClient.Do(req)
+}
+
 // decide shapes the connector-native stdout + exit code from a 2xx gateway
 // response body, returning a fail_response result if the body is not JSON.
 func (sp spec) decide(opts Options, body []byte) int {
@@ -212,7 +322,13 @@ func (sp spec) decide(opts Options, body []byte) int {
 		return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid JSON response")
 	}
 
-	action := rawStringOr(fields, "action", "allow")
+	action, ok := rawString(fields, "action")
+	if !ok || (action != "allow" && action != "block" && action != "confirm") {
+		if sp.style == styleClaudeCode || sp.style == styleCodex || sp.style == styleActionStderr {
+			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid or missing action in gateway response")
+		}
+		action = "allow"
+	}
 	reason := rawStringOr(fields, "reason", "")
 	output := compactField(fields, sp.outputField)
 
@@ -255,6 +371,8 @@ func (sp spec) decide(opts Options, body []byte) int {
 	case styleHookEcho:
 		if output != "" {
 			fmt.Fprintln(opts.Stdout, output)
+		} else {
+			return emit(opts.Stdout, sp.openAllow)
 		}
 		return 0
 
@@ -288,12 +406,20 @@ func (sp spec) decide(opts Options, body []byte) int {
 func handleMissingToken(opts Options, sp spec, failMode string) int {
 	const reason = "missing gateway token (connector-scoped and legacy token sidecars absent; DEFENSECLAW_GATEWAY_TOKEN unset)"
 	logHookFailure(opts, sp, reason, "transport", failMode)
-	if opts.StrictAvailability {
+	if opts.StrictAvailability || failMode == "closed" {
 		fmt.Fprintf(opts.Stderr,
-			"defenseclaw: %s, blocking %s (DEFENSECLAW_STRICT_AVAILABILITY=1)\n", reason, sp.subject)
-		return blockExit
+			"defenseclaw: %s, blocking %s (fail mode closed)\n", reason, sp.subject)
+		return emit(opts.Stdout, sp.unreachableStrict)
 	}
-	return 0
+	return emit(opts.Stdout, sp.openAllow)
+}
+
+func handleUnavailableHome(opts Options, sp spec, reason string) int {
+	if opts.StrictAvailability || opts.ManagedEnterprise {
+		fmt.Fprintf(opts.Stderr, "defenseclaw: %s, blocking %s (managed/strict availability)\n", reason, sp.subject)
+		return emit(opts.Stdout, sp.unreachableStrict)
+	}
+	return emit(opts.Stdout, sp.openAllow)
 }
 
 // handleOversized mirrors the per-connector oversized-payload branch.
@@ -303,20 +429,33 @@ func handleOversized(opts Options, sp spec, failMode string) int {
 	if failMode == "closed" {
 		return emit(opts.Stdout, sp.oversizedClosed)
 	}
-	return 0
+	return emit(opts.Stdout, sp.openAllow)
 }
 
-// failUnreachable mirrors the transport-layer failure path: always allow
-// unless the operator opted into strict availability.
+// failUnreachable applies the connector's effective fail mode to native hook
+// transport failures. Strict availability remains an unconditional closed
+// override for compatibility with existing deployments.
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	logHookFailure(opts, sp, reason, "transport", failMode)
-	if opts.StrictAvailability {
+	if opts.StrictAvailability || failMode == "closed" {
 		fmt.Fprintf(opts.Stderr,
-			"defenseclaw: gateway unreachable, blocking %s (DEFENSECLAW_STRICT_AVAILABILITY=1): %s\n", sp.subject, reason)
+			"defenseclaw: gateway unreachable, blocking %s (fail mode closed): %s\n", sp.subject, reason)
 		return emit(opts.Stdout, sp.unreachableStrict)
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: gateway unreachable, allowing %s: %s\n", sp.subject, reason)
-	return 0
+	return emit(opts.Stdout, sp.openAllow)
+}
+
+func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
+	raw, ok := fields[key]
+	if !ok {
+		return "", false
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", false
+	}
+	return strings.ToLower(strings.TrimSpace(value)), true
 }
 
 // failResponse mirrors the response-layer failure path: honor FAIL_MODE.
@@ -325,7 +464,7 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 	logHookFailure(opts, sp, reason, "response", failMode)
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
 	if failMode == "open" {
-		return 0
+		return emit(opts.Stdout, sp.openAllow)
 	}
 	return emit(opts.Stdout, sp.responseClosed)
 }
@@ -369,13 +508,58 @@ func withDefaults(o Options) Options {
 	if o.HookDir == "" {
 		o.HookDir = filepath.Join(o.Home, "hooks")
 	}
-	if o.HTTPClient == nil {
-		o.HTTPClient = defaultHTTPClient()
-	}
 	return o
 }
 
-// defaultHTTPClient matches the .sh `curl --connect-timeout 2 --max-time 10`.
+// ClaudeCodeHookTimeoutSeconds returns the timeout written into Claude Code's
+// hook registration for event. The native HTTP path uses the same source of
+// truth so a 60- or 90-second registered event is never capped at 10 seconds.
+func ClaudeCodeHookTimeoutSeconds(event string) int {
+	switch strings.TrimSpace(event) {
+	case "MessageDisplay":
+		return 10
+	case "SessionEnd":
+		return 60
+	case "PostToolBatch", "Stop", "SubagentStop":
+		return 90
+	default:
+		return 30
+	}
+}
+
+func resolveHookEvent(explicit string, payload []byte) string {
+	if event := strings.TrimSpace(explicit); event != "" {
+		return event
+	}
+	var envelope struct {
+		HookEventName string `json:"hook_event_name"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(envelope.HookEventName)
+}
+
+func hookRequestTimeout(connector, event string) time.Duration {
+	if !strings.EqualFold(strings.TrimSpace(connector), "claudecode") {
+		return defaultHookRequestTimeout
+	}
+	if strings.TrimSpace(event) == "" {
+		// A malformed/unknown payload may still be a 10-second MessageDisplay
+		// event. Use the shortest registered budget so Claude can receive our
+		// failure response instead of killing the hook first.
+		return 10*time.Second - hookResponseGrace
+	}
+	registeredBudget := time.Duration(ClaudeCodeHookTimeoutSeconds(event)) * time.Second
+	if registeredBudget <= hookResponseGrace {
+		return registeredBudget
+	}
+	// Return control before Claude Code reaches its own process deadline so the
+	// hook can still emit the configured fail-open/fail-closed response.
+	return registeredBudget - hookResponseGrace
+}
+
+// defaultHTTPClient applies the supplied total request budget.
 //
 // CheckRedirect refuses to follow redirects, mirroring `curl` without `-L`
 // (the .sh hooks never passed -L). The gateway hook endpoints never legitimately
@@ -384,9 +568,12 @@ func withDefaults(o Options) Options {
 // redirect to a different host/port — which would otherwise widen the SSRF
 // surface and could leak the gateway bearer token to an unintended target if the
 // configured gateway address were ever tampered with.
-func defaultHTTPClient() *http.Client {
+func defaultHTTPClient(timeout time.Duration) *http.Client {
+	if timeout <= 0 {
+		timeout = defaultHookRequestTimeout
+	}
 	return &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: timeout,
 		Transport: &http.Transport{
 			DialContext: (&net.Dialer{Timeout: 2 * time.Second}).DialContext,
 		},

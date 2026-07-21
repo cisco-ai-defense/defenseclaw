@@ -7470,6 +7470,8 @@ else
     VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"
     "${UV_BIN}" --no-config pip install --python "${VENV_PYTHON}" --quiet "${STAGING_DIR}/${whl_name}" \
         || die "Failed to install CLI wheel"
+    "${DEFENSECLAW_VENV}/bin/defenseclaw" --help >/dev/null 2>&1 \
+        || die "CLI validation failed before launcher publication"
     ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"
     ok "Python CLI installed"
 fi

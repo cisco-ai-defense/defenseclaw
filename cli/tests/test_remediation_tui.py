@@ -24,7 +24,8 @@ One test per finding fixed in the ``cli/defenseclaw/tui`` package:
 from __future__ import annotations
 
 import json
-import os
+import sys
+from unittest.mock import patch
 
 import pytest
 from defenseclaw.models import Event
@@ -46,6 +47,8 @@ from defenseclaw.tui.services.catalog_state import (
     plugin_direct_scan_intent,
 )
 
+from tests.permissions import assert_owner_only_file
+
 
 def _set_wizard_field(model: SetupPanelModel, label: str, value: str) -> None:
     for index, field in enumerate(model.form_fields):
@@ -55,7 +58,7 @@ def _set_wizard_field(model: SetupPanelModel, label: str, value: str) -> None:
     raise AssertionError(f"missing wizard field: {label}")
 
 
-def _write_capture_shim(directory, capture, body: str) -> None:
+def _write_capture_shim(directory, capture, body: str):
     """Drop an executable ``defenseclaw`` shim that records how it was run."""
 
     shim = directory / "defenseclaw"
@@ -69,6 +72,7 @@ def _write_capture_shim(directory, capture, body: str) -> None:
     )
     shim.chmod(0o700)
     _ = capture  # capture path is referenced by the shim body.
+    return shim
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +124,7 @@ async def test_f0801_credentials_secret_fed_via_stdin_not_argv(tmp_path) -> None
     assert action.intent.secret_stdin == secret + "\n"
 
     capture = tmp_path / "capture.json"
-    _write_capture_shim(
+    shim = _write_capture_shim(
         tmp_path,
         capture,
         "data = sys.stdin.readline()\n"
@@ -128,17 +132,18 @@ async def test_f0801_credentials_secret_fed_via_stdin_not_argv(tmp_path) -> None
         ".write(json.dumps({'argv': sys.argv, 'stdin': data}))",
     )
 
-    original_path = os.environ.get("PATH", "")
-    os.environ["PATH"] = str(tmp_path) + os.pathsep + original_path
-    try:
+    resolved = (sys.executable, str(shim), *action.intent.args)
+    with patch(
+        "defenseclaw.tui.executor.resolve_subprocess_argv",
+        return_value=resolved,
+    ) as resolver:
         async for _event in CommandExecutor(use_pty=False).run(
             action.intent.binary,
             action.intent.args,
             stdin_input=action.intent.secret_stdin,
         ):
             pass
-    finally:
-        os.environ["PATH"] = original_path
+    resolver.assert_called_once_with(action.intent.binary, action.intent.args)
 
     payload = json.loads(capture.read_text(encoding="utf-8"))
     assert secret not in payload["argv"]
@@ -175,24 +180,25 @@ async def test_f0803_mcp_env_secret_via_environment_not_argv(tmp_path) -> None:
     assert result.env == (("API_KEY", secret),)
 
     capture = tmp_path / "capture.json"
-    _write_capture_shim(
+    shim = _write_capture_shim(
         tmp_path,
         capture,
         f"open({str(capture)!r}, 'w', encoding='utf-8')"
         ".write(json.dumps({'argv': sys.argv, 'api_key': os.environ.get('API_KEY', '')}))",
     )
 
-    original_path = os.environ.get("PATH", "")
-    os.environ["PATH"] = str(tmp_path) + os.pathsep + original_path
-    try:
+    resolved = (sys.executable, str(shim), *result.argv)
+    with patch(
+        "defenseclaw.tui.executor.resolve_subprocess_argv",
+        return_value=resolved,
+    ) as resolver:
         async for _event in CommandExecutor(use_pty=False).run(
             result.binary,
             result.argv,
             env_overrides=dict(result.env),
         ):
             pass
-    finally:
-        os.environ["PATH"] = original_path
+    resolver.assert_called_once_with(result.binary, result.argv)
 
     payload = json.loads(capture.read_text(encoding="utf-8"))
     assert all(secret not in arg for arg in payload["argv"])
@@ -231,7 +237,7 @@ def test_f0781_audit_export_is_owner_only(tmp_path) -> None:
 
     target = app._export_audit(None)  # noqa: SLF001 - direct sync export
     assert target.exists()
-    assert (target.stat().st_mode & 0o777) == 0o600
+    assert_owner_only_file(target)
 
 
 # ---------------------------------------------------------------------------
@@ -252,4 +258,4 @@ async def test_f0782_activity_save_is_owner_only(tmp_path) -> None:
 
     saved = list(tmp_path.glob("defenseclaw-activity-*-defenseclaw-doctor.txt"))
     assert len(saved) == 1
-    assert (saved[0].stat().st_mode & 0o777) == 0o600
+    assert_owner_only_file(saved[0])

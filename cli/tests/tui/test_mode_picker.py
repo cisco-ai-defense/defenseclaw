@@ -19,6 +19,7 @@ from defenseclaw.tui.screens.mode_picker import (
     choice_for_hotkey,
     choice_for_wire,
     preview_for_switch,
+    visible_mode_picker_choices,
 )
 from textual.app import App, ComposeResult
 from textual.widgets import Static

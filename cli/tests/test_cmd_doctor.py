@@ -24,6 +24,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from tests.environment import isolated_home_env
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands.cmd_doctor import (
@@ -36,7 +38,9 @@ from defenseclaw.commands.cmd_doctor import (
     _check_copilot_hooks,
     _check_custom_provider_overlay,
     _check_guardrail_proxy,
+    _check_hermes_legacy_config,
     _check_hilt_support,
+    _check_hook_health,
     _check_llm_api_key,
     _check_openhands_hooks,
     _check_security_overrides,
@@ -118,6 +122,75 @@ class DoctorMultiConnectorInventoryTests(unittest.TestCase):
         self.assertEqual(seen["skill"], ["codex"])
         self.assertEqual(seen["plugin"], ["codex"])
         self.assertEqual(seen["mcp"], ["codex"])
+
+
+class DoctorHermesMigrationTests(unittest.TestCase):
+    def test_hook_health_uses_resolved_hermes_config_without_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = os.path.join(tmp, "LocalAppData", "hermes", "config.yaml")
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            with open(config_path, "w", encoding="utf-8") as fh:
+                fh.write('command: "defenseclaw-gateway.exe hook --connector hermes"\n')
+
+            result = _DoctorResult()
+            cfg = SimpleNamespace(data_dir=os.path.join(tmp, "defenseclaw"))
+            with patch(
+                "defenseclaw.commands.cmd_doctor.hermes_config_path",
+                return_value=config_path,
+            ):
+                _check_hook_health(cfg, "hermes", result)
+
+            self.assertEqual(result.passed, 1, result.checks)
+            self.assertEqual(result.failed, 0, result.checks)
+            self.assertIn(config_path, result.checks[0]["detail"])
+
+    def test_warns_without_mutating_legacy_windows_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            current = os.path.join(tmp, "LocalAppData", "hermes", "config.yaml")
+            legacy = os.path.join(tmp, "home", ".hermes", "config.yaml")
+            os.makedirs(os.path.dirname(current), exist_ok=True)
+            os.makedirs(os.path.dirname(legacy), exist_ok=True)
+            with open(current, "w", encoding="utf-8") as fh:
+                fh.write("hooks: {}\n")
+            legacy_body = "api_key: keep-secret\n"
+            with open(legacy, "w", encoding="utf-8") as fh:
+                fh.write(legacy_body)
+
+            result = _DoctorResult()
+            with patch(
+                "defenseclaw.commands.cmd_doctor.hermes_config_path",
+                return_value=current,
+            ), patch(
+                "defenseclaw.commands.cmd_doctor.hermes_legacy_config_path",
+                return_value=legacy,
+            ):
+                _check_hermes_legacy_config(result, platform_name="nt")
+
+            self.assertEqual(result.warned, 1, result.checks)
+            self.assertIn(legacy, result.checks[0]["detail"])
+            self.assertIn(current, result.checks[0]["detail"])
+            self.assertIn("will not copy or delete", result.checks[0]["detail"])
+            with open(legacy, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), legacy_body)
+
+    def test_skips_non_windows_and_same_effective_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, ".hermes", "config.yaml")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("{}\n")
+
+            for platform_name in ("posix", "nt"):
+                result = _DoctorResult()
+                with patch(
+                    "defenseclaw.commands.cmd_doctor.hermes_config_path",
+                    return_value=path,
+                ), patch(
+                    "defenseclaw.commands.cmd_doctor.hermes_legacy_config_path",
+                    return_value=path,
+                ):
+                    _check_hermes_legacy_config(result, platform_name=platform_name)
+                self.assertEqual(result.warned, 0, result.checks)
 
 
 class DoctorGuardrailTests(unittest.TestCase):
@@ -593,7 +666,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                 )
             cfg = self._cfg(tmp, "openhands")
             cfg.claw.workspace_dir = workspace
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
                 _check_openhands_hooks(cfg, result)
             self.assertEqual(result.failed, 0, result.checks)
@@ -661,13 +734,13 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             home = os.path.join(tmp, "home")
             os.makedirs(home, exist_ok=True)
             cfg = self._cfg(tmp, "antigravity")
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
                 _check_antigravity_hooks(cfg, result)
             self.assertEqual(result.passed, 0, result.checks)
             self.assertEqual(result.failed, 1)
             detail = result.checks[0]["detail"]
-            self.assertIn(".gemini/config/hooks.json", detail)
+            self.assertIn(os.path.join(".gemini", "config", "hooks.json"), detail)
             # Sanity: should NOT point at the legacy
             # antigravity-cli/ path now that we've pivoted.
             self.assertNotIn("antigravity-cli", detail)
@@ -694,7 +767,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                     fh,
                 )
             cfg = self._cfg(tmp, "antigravity")
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
                 _check_antigravity_hooks(cfg, result)
             self.assertEqual(result.passed, 0, result.checks)
@@ -714,7 +787,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             with open(hook_path, "w", encoding="utf-8") as fh:
                 json.dump(self._antigravity_hooks_payload(script_path), fh)
             cfg = self._cfg(tmp, "antigravity")
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
                 _check_antigravity_hooks(cfg, result)
             self.assertEqual(result.failed, 0, result.checks)
@@ -741,7 +814,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                 with open(path, "w", encoding="utf-8") as fh:
                     json.dump(payload, fh)
             cfg = self._cfg(tmp, "antigravity")
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
                 _check_antigravity_hooks(cfg, result)
             self.assertEqual(result.failed, 0, result.checks)
@@ -768,7 +841,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                 with open(path, "w", encoding="utf-8") as fh:
                     json.dump(payload, fh)
             cfg = self._cfg(tmp, "antigravity")
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
                 _check_antigravity_hooks(cfg, result)
             self.assertEqual(result.failed, 0, result.checks)
@@ -1451,7 +1524,7 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
             self._write_hook(tmp, "_hardening.sh", "defenseclaw_read_stdin_capped() { cat; }\n")
             result = _DoctorResult()
 
-            cmd_doctor._check_codex_hooks(cfg, result)
+            cmd_doctor._check_codex_hooks(cfg, result, platform_name="posix")
 
         freshness = [c for c in result.checks if c["label"] == "Codex hooks freshness"]
         self.assertEqual(len(freshness), 1, result.checks)
@@ -1497,12 +1570,12 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
                 )
             result = _DoctorResult()
 
-            with patch.object(
-                cmd_doctor.os.path,
-                "expanduser",
-                side_effect=lambda p: p.replace("~", home, 1) if p.startswith("~") else p,
-            ):
-                cmd_doctor._check_claudecode_hooks(cfg, result)
+            cmd_doctor._check_claudecode_hooks(
+                cfg,
+                result,
+                platform_name="posix",
+                config_path=os.path.join(settings_dir, "settings.json"),
+            )
 
         freshness = [c for c in result.checks if c["label"] == "Claude Code hooks freshness"]
         self.assertEqual(len(freshness), 1, result.checks)
@@ -1880,6 +1953,22 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
         # prove the auth header was NOT replayed to the redirect target.
         self.requests: list[dict] = []
         recorder = self.requests
+        self.health_body = json.dumps(
+            {
+                "gateway": {
+                    "state": "running",
+                    "details": {"inventory": "x" * 2200},
+                },
+                "watcher": {"state": "running"},
+                "guardrail": {"state": "running"},
+                "api": {"state": "running"},
+                "connectors": [
+                    {"name": "codex", "state": "running"},
+                    {"name": "claudecode", "state": "running"},
+                ],
+            }
+        ).encode("utf-8")
+        health_body = self.health_body
 
         class _Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self, *args):  # silence test output
@@ -1897,7 +1986,7 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
                     self.send_header("Location", "/leaked")
                     self.end_headers()
                 else:
-                    body = b"reached"
+                    body = health_body if self.path == "/health" else b"reached"
                     self.send_response(200)
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
@@ -1970,6 +2059,60 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
         status, body = _http_probe(self._url("/ok"), timeout=5.0)
         self.assertEqual(status, 200, (status, body))
         self.assertIn("reached", body)
+
+    def test_sidecar_health_parses_complete_large_multi_connector_document(self):
+        self.assertGreater(len(self.health_body), 2_000)
+        cfg = SimpleNamespace(
+            openshell=None,
+            gateway=SimpleNamespace(api_port=self.port),
+        )
+        result = _DoctorResult()
+
+        _check_sidecar(cfg, result)
+
+        self.assertFalse(
+            any(c["label"] == "Sidecar health JSON" for c in result.checks),
+            result.checks,
+        )
+        subsystem_rows = {
+            c["label"].strip().removeprefix("└─ "): c["status"]
+            for c in result.checks
+            if "└─" in c["label"]
+        }
+        self.assertEqual(subsystem_rows["gateway"], "pass")
+        self.assertEqual(subsystem_rows["watcher"], "pass")
+        self.assertEqual(subsystem_rows["guardrail"], "pass")
+        self.assertEqual(subsystem_rows["api"], "pass")
+
+    def test_structured_probe_rejects_response_over_its_byte_bound(self):
+        from defenseclaw.commands.cmd_doctor import _http_probe
+
+        status, body = _http_probe(
+            self._url("/health"),
+            timeout=5.0,
+            response_limit=128,
+            allow_truncation=False,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body, "response exceeds 128-byte limit")
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor._http_probe",
+        return_value=(200, "response exceeds 1048576-byte limit"),
+    )
+    def test_sidecar_health_surfaces_oversized_document_reason(self, _probe):
+        cfg = SimpleNamespace(
+            openshell=None,
+            gateway=SimpleNamespace(api_port=self.port),
+        )
+        result = _DoctorResult()
+
+        _check_sidecar(cfg, result)
+
+        row = next(c for c in result.checks if c["label"] == "Sidecar health JSON")
+        self.assertEqual(row["status"], "warn")
+        self.assertEqual(row["detail"], "response exceeds 1048576-byte limit")
 
 
 class GuardrailProxyMultiConnectorTests(unittest.TestCase):

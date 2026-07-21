@@ -27,7 +27,9 @@ existing aliases/scripts keep working.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import uuid
 
 import click
@@ -342,41 +344,205 @@ def _alerts_default(
 
 
 @alerts.command("acknowledge")
+@click.option("--id", "alert_ids", multiple=True, help="Exact alert ID; repeat for multiple alerts.")
+@click.option("--connector", default=None, help="Select active alerts from this exact connector.")
+@click.option("--target", default=None, help="Select active alerts with this exact target.")
 @click.option(
     "--severity",
-    type=click.Choice(["all", "CRITICAL", "HIGH", "MEDIUM", "LOW"]),
+    type=click.Choice(["all", "CRITICAL", "HIGH", "MEDIUM", "LOW", "ERROR", "INFO"]),
     default="all",
     show_default=True,
     help="Limit which severities are acknowledged.",
 )
+@click.option("--since", default=None, help="Select alerts at or after this RFC3339 timestamp.")
+@click.option("--before", default=None, help="Select alerts before this RFC3339 timestamp.")
+@click.option("--dry-run", is_flag=True, help="Preview the exact matched IDs without mutating them.")
+@click.option(
+    "-y",
+    "--yes",
+    is_flag=True,
+    help="Confirm a mutation affecting more than one exact ID or a broad selector.",
+)
 @pass_ctx
-def alerts_acknowledge(app: AppContext, severity: str) -> None:
+def alerts_acknowledge(
+    app: AppContext,
+    alert_ids: tuple[str, ...],
+    connector: str | None,
+    target: str | None,
+    severity: str,
+    since: str | None,
+    before: str | None,
+    dry_run: bool,
+    yes: bool,
+) -> None:
     """Mark alerts acknowledged through the canonical protected-state API."""
-    n = _set_alert_disposition(app, severity, "acknowledged")
-    ux.ok(f"Acknowledged {n} alert(s).")
+    n = _set_alert_disposition(
+        app,
+        "acknowledged",
+        alert_ids=alert_ids,
+        connector=connector,
+        target=target,
+        severity=severity,
+        since=since,
+        before=before,
+        dry_run=dry_run,
+        yes=yes,
+    )
+    if n is not None:
+        ux.ok(f"Acknowledged {n} alert(s).")
 
 
 @alerts.command("dismiss")
+@click.option("--id", "alert_ids", multiple=True, help="Exact alert ID; repeat for multiple alerts.")
+@click.option("--connector", default=None, help="Select active alerts from this exact connector.")
+@click.option("--target", default=None, help="Select active alerts with this exact target.")
 @click.option(
     "--severity",
-    type=click.Choice(["all", "CRITICAL", "HIGH", "MEDIUM", "LOW"]),
+    type=click.Choice(["all", "CRITICAL", "HIGH", "MEDIUM", "LOW", "ERROR", "INFO"]),
     default="all",
     show_default=True,
     help="Limit which severities are cleared from the active list.",
 )
+@click.option("--since", default=None, help="Select alerts at or after this RFC3339 timestamp.")
+@click.option("--before", default=None, help="Select alerts before this RFC3339 timestamp.")
+@click.option("--dry-run", is_flag=True, help="Preview the exact matched IDs without mutating them.")
+@click.option(
+    "-y",
+    "--yes",
+    is_flag=True,
+    help="Confirm a mutation affecting more than one exact ID or a broad selector.",
+)
 @pass_ctx
-def alerts_dismiss(app: AppContext, severity: str) -> None:
+def alerts_dismiss(
+    app: AppContext,
+    alert_ids: tuple[str, ...],
+    connector: str | None,
+    target: str | None,
+    severity: str,
+    since: str | None,
+    before: str | None,
+    dry_run: bool,
+    yes: bool,
+) -> None:
     """Dismiss alerts through the canonical protected-state API."""
-    n = _set_alert_disposition(app, severity, "dismissed")
-    ux.ok(f"Dismissed {n} alert(s) from the active list.")
+    n = _set_alert_disposition(
+        app,
+        "dismissed",
+        alert_ids=alert_ids,
+        connector=connector,
+        target=target,
+        severity=severity,
+        since=since,
+        before=before,
+        dry_run=dry_run,
+        yes=yes,
+    )
+    if n is not None:
+        ux.ok(f"Dismissed {n} alert(s) from the active list.")
 
 
-def _set_alert_disposition(app: AppContext, severity: str, disposition: str) -> int:
+_ALERT_DB_IDENTITY_DOMAIN = b"defenseclaw.alert-disposition.audit-db.v1\x00"
+
+
+def _alert_audit_db_identity(path: str) -> str:
+    if not path or not path.strip():
+        raise click.ClickException("The resolved audit database path is unavailable.")
+    normalized = os.path.realpath(os.path.abspath(path))
+    normalized = os.path.normcase(os.path.normpath(normalized)).replace("\\", "/")
+    digest = hashlib.sha256()
+    digest.update(_ALERT_DB_IDENTITY_DOMAIN)
+    digest.update(normalized.encode("utf-8"))
+    return f"sha256:v1:{digest.hexdigest()}"
+
+
+def _alert_selector(
+    *,
+    alert_ids: tuple[str, ...],
+    connector: str | None,
+    target: str | None,
+    severity: str,
+    since: str | None,
+    before: str | None,
+) -> dict[str, object]:
+    normalized_ids = [alert_id.strip() for alert_id in alert_ids]
+    if any(not alert_id for alert_id in normalized_ids):
+        raise click.ClickException("Alert IDs must be non-empty.")
+    ids = sorted(set(normalized_ids))
+    broad_values = [connector, target, since, before]
+    if ids:
+        if any(value and value.strip() for value in broad_values) or severity != "all":
+            raise click.ClickException("--id cannot be combined with connector, target, severity, or time selectors.")
+        return {"ids": ids}
+    selector: dict[str, object] = {}
+    if connector and connector.strip():
+        selector["connector"] = connector.strip()
+    if target and target.strip():
+        selector["target"] = target.strip()
+    if severity != "all":
+        selector["severity"] = severity
+    if since and since.strip():
+        selector["since"] = since.strip()
+    if before and before.strip():
+        selector["before"] = before.strip()
+    return selector
+
+
+def _response_count(response: dict[str, object], field: str) -> int:
+    value = response.get(field, 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise click.ClickException("Gateway returned a malformed alert disposition response.")
+    return value
+
+
+def _raise_alert_response_error(response: dict[str, object]) -> None:
+    matched = _response_count(response, "matched")
+    applied = _response_count(response, "applied")
+    no_change = _response_count(response, "no_change")
+    rejected = _response_count(response, "rejected")
+    failed = _response_count(response, "failed")
+    click.echo(
+        f"Result: matched={matched} applied={applied} no_change={no_change} "
+        f"rejected={rejected} failed={failed}",
+        err=True,
+    )
+    failures = response.get("failures", [])
+    if isinstance(failures, list):
+        for failure in failures[:20]:
+            if isinstance(failure, dict):
+                alert_id = str(failure.get("id", ""))
+                code = str(failure.get("code", "failed"))
+                click.echo(f"  {alert_id}: {code}", err=True)
+    message = str(response.get("error") or "Alert disposition was not fully applied.")
+    raise click.ClickException(message)
+
+
+def _set_alert_disposition(
+    app: AppContext,
+    disposition: str,
+    *,
+    alert_ids: tuple[str, ...] = (),
+    connector: str | None = None,
+    target: str | None = None,
+    severity: str = "all",
+    since: str | None = None,
+    before: str | None = None,
+    dry_run: bool = False,
+    yes: bool = False,
+) -> int | None:
     if app.cfg is None or getattr(app.cfg, "_source_config_version", None) != 8:
         raise click.ClickException("Configuration schema v8 is required — run 'defenseclaw upgrade' first.")
     from defenseclaw.gateway import OrchestratorClient
     from defenseclaw.logger import _gateway_api_host
 
+    selector = _alert_selector(
+        alert_ids=alert_ids,
+        connector=connector,
+        target=target,
+        severity=severity,
+        since=since,
+        before=before,
+    )
+    audit_db_identity = _alert_audit_db_identity(app.cfg.audit_db)
     token = app.cfg.gateway.resolved_token()
     if not token:
         raise click.ClickException("Gateway authentication is unavailable; start or reconfigure the v8 gateway.")
@@ -386,14 +552,58 @@ def _set_alert_disposition(app: AppContext, severity: str, disposition: str) -> 
         timeout=10,
         token=token,
     )
+    operation_id = f"alert-review-{uuid.uuid4().hex}"
     try:
-        response = client.set_alert_disposition(
-            operation_id=f"alert-review-{uuid.uuid4().hex}",
+        preview = client.set_alert_disposition(
+            operation_id=operation_id,
+            audit_db_identity=audit_db_identity,
             disposition=disposition,
-            severity=severity,
+            selector=selector,
+            preview=True,
         )
+        if int(preview.get("_http_status", 0)) != 200:
+            _raise_alert_response_error(preview)
+        matched = _response_count(preview, "matched")
+        selection_digest = preview.get("selection_digest")
+        if not isinstance(selection_digest, str) or not selection_digest.startswith("sha256:v1:"):
+            raise click.ClickException("Gateway returned a malformed alert selection preview.")
+        click.echo(f"Preview: {matched} alert(s) matched; digest={selection_digest}")
+        targets = preview.get("targets", [])
+        if isinstance(targets, list):
+            for item in targets[:20]:
+                if isinstance(item, dict):
+                    click.echo(
+                        f"  {item.get('id', '')} version={item.get('projection_version', '')}"
+                    )
+            if len(targets) > 20:
+                click.echo(f"  … and {len(targets) - 20} more")
+        if dry_run:
+            ux.ok("Dry run complete; no alerts were changed.")
+            return None
+        if matched == 0:
+            return 0
+        exact_ids = selector.get("ids", [])
+        broad = not isinstance(exact_ids, list) or len(exact_ids) != 1
+        if broad and not yes:
+            click.confirm(f"Apply {disposition} to {matched} matched alert(s)?", abort=True)
+        response = client.set_alert_disposition(
+            operation_id=operation_id,
+            audit_db_identity=audit_db_identity,
+            disposition=disposition,
+            selector=selector,
+            preview=False,
+            selection_digest=selection_digest,
+        )
+        if (
+            int(response.get("_http_status", 0)) != 200
+            or _response_count(response, "rejected") > 0
+            or _response_count(response, "failed") > 0
+        ):
+            _raise_alert_response_error(response)
     except Exception as exc:
+        if isinstance(exc, (click.ClickException, click.Abort)):
+            raise
         raise click.ClickException("Canonical alert disposition was not confirmed by the gateway.") from exc
     finally:
         client.close()
-    return int(response.get("applied", 0)) + int(response.get("no_change", 0))
+    return _response_count(response, "applied") + _response_count(response, "no_change")

@@ -149,6 +149,22 @@ describe("bootstrapProviderOverlay", () => {
     expect(isLLMUrl(`https://${host}/v1/chat/completions`, 4000)).toBe(true);
   });
 
+  it("authenticates the compatibility proxy endpoint", async () => {
+    let seenInit: RequestInit | undefined;
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      seenInit = init;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ providers: [], ollama_ports: [] }),
+      } as unknown as Response;
+    }) as typeof fetch;
+
+    await bootstrapProviderOverlay(4000, { fetchImpl, token: "sidecar-token" });
+
+    expect(seenInit?.headers).toEqual({ "X-DC-Auth": "Bearer sidecar-token" });
+  });
+
   it("does NOT throw when the sidecar is unreachable", async () => {
     await expect(
       bootstrapProviderOverlay(4000, { fetchImpl: makeFetchThrows() }),

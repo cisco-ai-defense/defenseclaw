@@ -34,10 +34,11 @@ asset in latest mode:
 bash defenseclaw-upgrade.sh --yes
 ```
 
-This hard-cut release remains POSIX-only because `0.8.4` published no Windows
-gateway, rollback, or SBOM binaries. The signed PowerShell resolver may be
-present as a refusal surface, but it must not claim or attempt a Windows bridge
-path. Do not copy POSIX artifacts onto Windows.
+Release `0.8.5` was POSIX-only because `0.8.4` published no Windows gateway,
+rollback, or SBOM binaries. Its signed PowerShell resolver was a refusal
+surface, not a Windows bridge path. Release `0.8.6` now publishes signed native
+Setup, but `0.8.5` remains outside the Windows upgrade-baseline matrix. Do not
+copy POSIX artifacts onto Windows.
 
 Do not use the built-in form to cross a manifest-required bridge. A
 `0.8.3`-or-older POSIX host must use the authenticated current release-owned
@@ -77,8 +78,8 @@ asset before running it. Use the complete POSIX `cosign` and SHA-256 bootstrap i
 [repository CLI reference](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade);
 it does not require a source checkout. From a checkout of the current release,
 the equivalent local command is `./scripts/upgrade.sh --yes` on macOS/Linux.
-The signed PowerShell resolver is refusal-only because no Windows bridge
-binary was published.
+For the `0.8.5` hard cut, the signed PowerShell resolver was refusal-only because
+no Windows bridge binary had been published.
 
 When a hard-cut manifest requires `0.8.4`, the resolver first authenticates and
 health-checks the bridge for a pre-bridge source, then hands control to its
@@ -139,8 +140,10 @@ Install scripts are for a fresh host. `defenseclaw upgrade` adds artifact
 verification, exact state backups, required migrations, atomic activation,
 service restart, local-bundle refresh, and post-upgrade health checks.
 The POSIX installer refuses an existing installation before dependency
-installation or artifact replacement. The PowerShell surface has no installable
-Windows runtime for this cut.
+installation or artifact replacement. For the historical `0.8.5` hard cut, the
+PowerShell surface had no installable Windows runtime. Release `0.8.6` uses the
+signed native Setup for fresh install, repair, same-version servicing, and
+uninstall.
 </Callout>
 
 ## Supported installation paths at the hard cut
@@ -148,8 +151,8 @@ Windows runtime for this cut.
 | Path | Existing installation behavior |
 | --- | --- |
 | Built-in `defenseclaw upgrade` | The immutable `0.8.4` command cannot parse the truthful hard-cut manifest with an empty Windows bridge matrix, regardless of whether Cosign is installed. Frozen pre-bridge controllers also cannot learn the staged handoff. Use the target-release POSIX resolver to cross into `0.8.5`; from `0.8.5` onward, the built-in command may drive later compatible manifests and can authenticate a temporary pinned verifier. |
-| Release-owned shell resolver | Tested old POSIX sources auto-hop through `0.8.4` from one command and automatically authenticate a temporary pinned Cosign when needed; unsupported sources fail closed with the exact bridge-first path. The signed PowerShell resolver is refusal-only because Windows publication remains disabled. |
-| Fresh-install shell script | Refuses to overwrite an existing installation and points to the resolver. No Windows fresh-install binary is published for this cut. |
+| Release-owned shell resolver | Tested old POSIX sources auto-hop through `0.8.4` from one command and automatically authenticate a temporary pinned Cosign when needed; unsupported sources fail closed with the exact bridge-first path. For `0.8.5`, the signed PowerShell resolver was refusal-only because no Windows bridge was published. |
+| Fresh-install shell script | Refuses to overwrite an existing installation and points to the resolver. Release `0.8.6` publishes signed native Setup for Windows; it does not make `0.8.5` a Windows upgrade baseline. |
 | Package manager | No in-place package-manager hard-cut path is supported unless that package invokes the same resolver; direct replacement must be disabled. |
 | Manual wheel/gateway artifacts | Direct copying is not a supported upgrade. Use the POSIX resolver's `--plan`, then let that resolver perform the transaction. |
 
@@ -181,6 +184,38 @@ Windows runtime for this cut.
 The migration cursor records success only after the atomic write. Retrying an
 interrupted upgrade is idempotent: it does not duplicate destinations, routes,
 comments, environment entries, or schema work.
+
+## Native Windows servicing in 0.8.6
+
+<Callout title="0.8.5 is not a Windows upgrade baseline">
+Release `0.8.5` published no native Windows runtime. Release `0.8.6`, the first
+signed Setup release, therefore qualifies fresh install, repair, same-version
+servicing, and uninstall on Windows; it does not advertise an upgrade from
+`0.8.5`. A later manifest may enable cross-release Windows upgrades only for
+source versions whose exact published Setup artifacts passed the native
+lifecycle matrix.
+</Callout>
+
+`DefenseClawSetup-x64.exe` is the signed graphical and silent installation and
+servicing surface for `0.8.6`. It installs the existing CLI/TUI, gateway,
+no-console hook launcher, and embedded managed Python runtime; it is not a
+separate native DefenseClaw GUI application.
+
+For a future manifest-authorized native Windows upgrade, `defenseclaw upgrade`
+will download the exact Setup artifact named by the signed manifest, verify its
+release checksum and exact Authenticode publisher, create the normal managed
+state backup, copy Setup to its trusted maintenance cache, and start it with the
+preserved install scope, connector, and mode. The CLI exits before replacement
+so its embedded runtime is not locked. Setup then validates and stops only the
+owned gateway/watchdog process, replaces product-owned files, applies and
+verifies required migrations with the new embedded runtime, rolls application
+files back on failure, and restarts only services that were already running or
+explicitly requested.
+
+Enterprise-managed Windows deployments can service through their software
+channel instead. Managed update policy prevents the self-updater from competing
+with Intune or SCCM rollout. The per-user Setup does not publish an MSI or accept
+machine scope.
 
 ## What changes in config v8
 

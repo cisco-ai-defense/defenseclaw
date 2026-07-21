@@ -80,6 +80,11 @@ func AllNativeOTLPSignals() []NativeOTLPSignal {
 //     OTLP request. Used for tenant-aware tokens. Keys are canonicalized
 //     (lower-case) by the installer so equality checks downstream are
 //     case-insensitive.
+//   - LiteralHeaders: render OTEL_EXPORTER_OTLP_HEADERS values literally
+//     after validating the comma-separated header grammar. The default URI
+//     encoding remains appropriate for exporters that decode header
+//     components; Claude Code's managed-settings parser requires the literal
+//     `Authorization=Bearer <token>` form documented by the vendor.
 //   - PerSignal: when true the installer emits per-signal exporter env
 //     vars (OTEL_TRACES_EXPORTER / OTEL_METRICS_EXPORTER /
 //     OTEL_LOGS_EXPORTER) and per-signal endpoint env vars. Required
@@ -113,6 +118,7 @@ type NativeOTLPSpec struct {
 	Endpoint           string
 	Protocol           string
 	Headers            map[string]string
+	LiteralHeaders     bool
 	PerSignal          bool
 	SignalPaths        map[NativeOTLPSignal]string
 	PathToken          string
@@ -187,6 +193,33 @@ func (s NativeOTLPSpec) signalEndpoint(signal NativeOTLPSignal) string {
 	return strings.TrimRight(strings.TrimSpace(s.Endpoint), "/") + path
 }
 
+func isScopedOTLPEndpoint(endpoint, apiAddr string, scope OTLPPathTokenScope, signal NativeOTLPSignal) bool {
+	wantBase, err := url.Parse("http://" + apiAddr)
+	if err != nil {
+		return false
+	}
+	got, err := url.Parse(endpoint)
+	if err != nil || got.Scheme != wantBase.Scheme || !strings.EqualFold(got.Host, wantBase.Host) {
+		return false
+	}
+	parts := strings.Split(strings.Trim(got.Path, "/"), "/")
+	return len(parts) == 5 && parts[0] == "otlp" && parts[1] == string(scope) &&
+		parts[2] != "" && parts[3] == "v1" && parts[4] == string(signal)
+}
+
+func isScopedOTLPBaseEndpoint(endpoint, apiAddr string, scope OTLPPathTokenScope) bool {
+	wantBase, err := url.Parse("http://" + apiAddr)
+	if err != nil {
+		return false
+	}
+	got, err := url.Parse(endpoint)
+	if err != nil || got.Scheme != wantBase.Scheme || !strings.EqualFold(got.Host, wantBase.Host) {
+		return false
+	}
+	parts := strings.Split(strings.Trim(got.Path, "/"), "/")
+	return len(parts) == 3 && parts[0] == "otlp" && parts[1] == string(scope) && parts[2] != ""
+}
+
 // pathTokenBaseEndpoint returns the path-token endpoint WITHOUT a
 // signal suffix. Vendor exporters that auto-append /v1/<signal> to
 // their configured base (Gemini CLI's settings.json otlpEndpoint
@@ -209,9 +242,10 @@ func (s NativeOTLPSpec) pathTokenBaseEndpoint() string {
 // ~/.config/goose/config.yaml, etc. The returned map is a fresh copy.
 //
 // When PerSignal is true the renderer emits the three per-signal exporter
-// vars AND OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT vars in addition to the
-// combined endpoint. This matches what Claude Code, Copilot CLI, and
-// Goose all accept.
+// vars and the higher-precedence OTEL_EXPORTER_OTLP_<SIGNAL>_{ENDPOINT,
+// PROTOCOL,HEADERS} vars in addition to the combined values. Emitting the
+// complete signal tuple prevents an inherited or previously configured
+// per-signal value from silently overriding the managed collector.
 //
 // Returns an error if the spec is not an env-block. Callers that want a
 // non-strict renderer (e.g. tests that check parity across kinds) should
@@ -226,13 +260,20 @@ func (s NativeOTLPSpec) EnvBlock() (map[string]string, error) {
 	out := map[string]string{}
 
 	endpoint := strings.TrimRight(strings.TrimSpace(s.Endpoint), "/")
+	if strings.TrimSpace(s.PathToken) != "" {
+		endpoint = s.pathTokenBaseEndpoint()
+	}
 	if endpoint != "" {
 		out["OTEL_EXPORTER_OTLP_ENDPOINT"] = endpoint
 	}
 	out["OTEL_EXPORTER_OTLP_PROTOCOL"] = s.normalizedProtocol()
 
-	if len(s.Headers) > 0 {
-		out["OTEL_EXPORTER_OTLP_HEADERS"] = serializeOTLPHeaders(s.Headers)
+	serializedHeaders, err := s.serializedHeaders()
+	if err != nil {
+		return nil, err
+	}
+	if serializedHeaders != "" {
+		out["OTEL_EXPORTER_OTLP_HEADERS"] = serializedHeaders
 	}
 
 	if s.PerSignal {
@@ -240,12 +281,15 @@ func (s NativeOTLPSpec) EnvBlock() (map[string]string, error) {
 		out["OTEL_LOGS_EXPORTER"] = "otlp"
 		out["OTEL_TRACES_EXPORTER"] = "otlp"
 		for _, signal := range AllNativeOTLPSignals() {
+			prefix := "OTEL_EXPORTER_OTLP_" + strings.ToUpper(string(signal))
 			ep := s.signalEndpoint(signal)
-			if ep == "" {
-				continue
+			if ep != "" {
+				out[prefix+"_ENDPOINT"] = ep
 			}
-			key := "OTEL_EXPORTER_OTLP_" + strings.ToUpper(string(signal)) + "_ENDPOINT"
-			out[key] = ep
+			out[prefix+"_PROTOCOL"] = s.normalizedProtocol()
+			if serializedHeaders != "" {
+				out[prefix+"_HEADERS"] = serializedHeaders
+			}
 		}
 	}
 
@@ -263,6 +307,16 @@ func (s NativeOTLPSpec) EnvBlock() (map[string]string, error) {
 		out[k] = v
 	}
 	return out, nil
+}
+
+func (s NativeOTLPSpec) serializedHeaders() (string, error) {
+	if len(s.Headers) == 0 {
+		return "", nil
+	}
+	if s.LiteralHeaders {
+		return serializeLiteralOTLPHeaders(s.Headers)
+	}
+	return serializeOTLPHeaders(s.Headers), nil
 }
 
 // TOMLBlock renders a TOML-block spec into a map suitable for embedding
@@ -340,10 +394,12 @@ func (s NativeOTLPSpec) FileSinkPath() (string, error) {
 }
 
 // serializeOTLPHeaders renders Headers as the comma-separated key=value
-// string the OTel spec defines for OTEL_EXPORTER_OTLP_HEADERS. Sorted
-// by lowercase key so the output is deterministic across runs (env
-// blocks are written into agent config files that operators read and
-// diff).
+// string the OTel spec defines for OTEL_EXPORTER_OTLP_HEADERS. Header
+// components use URI percent-encoding because OpenTelemetry JS parses
+// them with decodeURIComponent; query/form encoding would turn a space
+// into '+', which that parser preserves as a literal plus. Sorted by
+// lowercase key so the output is deterministic across runs (env blocks
+// are written into agent config files that operators read and diff).
 func serializeOTLPHeaders(h map[string]string) string {
 	keys := make([]string, 0, len(h))
 	for k := range h {
@@ -359,12 +415,57 @@ func serializeOTLPHeaders(h map[string]string) string {
 		// for the value; only the key is canonicalized to lower-case.
 		for origKey, v := range h {
 			if strings.ToLower(origKey) == k {
-				parts = append(parts, url.QueryEscape(k)+"="+url.QueryEscape(v))
+				parts = append(parts, url.PathEscape(k)+"="+url.PathEscape(v))
 				break
 			}
 		}
 	}
 	return strings.Join(parts, ",")
+}
+
+// serializeLiteralOTLPHeaders renders the literal key=value grammar used by
+// Claude Code managed settings. Literal rendering is intentionally opt-in:
+// commas delimit entries, so unsafe names or values must fail closed instead
+// of producing an ambiguous or header-injecting configuration.
+func serializeLiteralOTLPHeaders(h map[string]string) (string, error) {
+	values := make(map[string]string, len(h))
+	keys := make([]string, 0, len(h))
+	for originalName, value := range h {
+		name := strings.ToLower(strings.TrimSpace(originalName))
+		if !validLiteralOTLPHeaderName(name) {
+			return "", fmt.Errorf("NativeOTLPSpec: invalid literal OTLP header name")
+		}
+		if _, exists := values[name]; exists {
+			return "", fmt.Errorf("NativeOTLPSpec: duplicate literal OTLP header name")
+		}
+		if value == "" || strings.ContainsAny(value, ",\r\n") {
+			return "", fmt.Errorf("NativeOTLPSpec: invalid literal OTLP header value for %s", name)
+		}
+		values[name] = value
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, name := range keys {
+		parts = append(parts, name+"="+values[name])
+	}
+	return strings.Join(parts, ","), nil
+}
+
+func validLiteralOTLPHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for index := 0; index < len(name); index++ {
+		character := name[index]
+		if (character >= 'a' && character <= 'z') ||
+			(character >= '0' && character <= '9') ||
+			strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character)) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // serializeOTLPAttributes renders ResourceAttributes as the

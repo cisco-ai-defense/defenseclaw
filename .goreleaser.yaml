@@ -15,15 +15,41 @@ builds:
     goarch:
       - amd64
       - arm64
+    flags:
+      - -trimpath
+      - -buildvcs=false
     ldflags:
-      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+      - -s -w -buildid=defenseclaw-{{.Commit}}-{{.Os}}-{{.Arch}} -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    hooks:
+      post:
+        - cmd: go run ./internal/tools/windowsresources -target {{ .Os }}_{{ .Arch }} -executable "{{ .Path }}" -component gateway -version {{ .Version }} -icon macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png
+          output: true
+
+  - id: defenseclaw-hook
+    main: ./cmd/defenseclaw-hook
+    binary: defenseclaw-hook
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+    flags:
+      - -trimpath
+      - -buildvcs=false
+    ldflags:
+      - -s -w -buildid=defenseclaw-hook-{{.Commit}}-{{.Os}}-{{.Arch}} -H=windowsgui -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    hooks:
+      post:
+        - cmd: go run ./internal/tools/windowsresources -target {{ .Os }}_{{ .Arch }} -executable "{{ .Path }}" -component hook -version {{ .Version }} -icon macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png
+          output: true
 
 archives:
   - id: default
     # tar.gz everywhere except Windows, which ships .zip (the native archive
-    # format Windows users and PowerShell's Expand-Archive expect). The binary
-    # inside the Windows archive is defenseclaw.exe; scripts/install.ps1
-    # extracts and installs it as defenseclaw-gateway.exe.
+    # format Windows users and PowerShell's Expand-Archive expect). Windows
+    # archives contain defenseclaw.exe plus the GUI-subsystem
+    # defenseclaw-hook.exe; scripts/install.ps1 installs both.
     formats:
       - tar.gz
     format_overrides:

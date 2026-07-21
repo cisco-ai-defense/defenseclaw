@@ -29,8 +29,8 @@ class TestAlertsSubcommands(unittest.TestCase):
     """Alert review must use the canonical v8 protected-state API."""
 
     CASES = [
-        (["acknowledge", "--severity", "all"], "acknowledged", "Acknowledged"),
-        (["dismiss", "--severity", "HIGH"], "dismissed", "Dismissed"),
+        (["acknowledge", "--severity", "all", "--yes"], "acknowledged", "Acknowledged"),
+        (["dismiss", "--severity", "HIGH", "--yes"], "dismissed", "Dismissed"),
     ]
 
     def test_subcommands_route_through_protected_state_api(self) -> None:
@@ -42,12 +42,29 @@ class TestAlertsSubcommands(unittest.TestCase):
             with self.subTest(args=args, disposition=disposition, substr=substr):
                 app = AppContext()
                 app.cfg = prepare_fresh_v8_config(default_config())
+                app.cfg.audit_db = str(Path(tempfile.mkdtemp(prefix="dc-alert-db-")) / "audit.db")
                 app.cfg.gateway.token = "test-alert-review-token"
                 client = MagicMock()
-                client.set_alert_disposition.return_value = {
-                    "applied": 2,
-                    "no_change": 1,
-                }
+                client.set_alert_disposition.side_effect = [
+                    {
+                        "_http_status": 200,
+                        "matched": 3,
+                        "selection_digest": "sha256:v1:" + "1" * 64,
+                        "targets": [
+                            {"id": "alert-a", "projection_version": 0},
+                            {"id": "alert-b", "projection_version": 1},
+                            {"id": "alert-c", "projection_version": 0},
+                        ],
+                    },
+                    {
+                        "_http_status": 200,
+                        "matched": 3,
+                        "applied": 2,
+                        "no_change": 1,
+                        "rejected": 0,
+                        "failed": 0,
+                    },
+                ]
 
                 runner = CliRunner()
                 with unittest.mock.patch(
@@ -59,12 +76,115 @@ class TestAlertsSubcommands(unittest.TestCase):
                     )
                 self.assertEqual(result.exit_code, 0, msg=result.output)
                 self.assertIn(substr, result.output)
-                client.set_alert_disposition.assert_called_once()
+                self.assertIn("Preview: 3 alert(s)", result.output)
+                self.assertEqual(client.set_alert_disposition.call_count, 2)
                 self.assertEqual(
-                    client.set_alert_disposition.call_args.kwargs["disposition"],
+                    client.set_alert_disposition.call_args_list[1].kwargs["disposition"],
                     disposition,
                 )
+                self.assertTrue(client.set_alert_disposition.call_args_list[0].kwargs["preview"])
+                self.assertFalse(client.set_alert_disposition.call_args_list[1].kwargs["preview"])
                 client.close.assert_called_once_with()
+
+    def test_exact_id_dry_run_and_partial_failure_contracts(self) -> None:
+        from defenseclaw.commands.cmd_alerts import alerts
+        from defenseclaw.config import default_config, prepare_fresh_v8_config
+        from defenseclaw.context import AppContext
+
+        app = AppContext()
+        app.cfg = prepare_fresh_v8_config(default_config())
+        app.cfg.audit_db = str(Path(tempfile.mkdtemp(prefix="dc-alert-exact-")) / "audit.db")
+        app.cfg.gateway.token = "test-alert-review-token"
+        preview = {
+            "_http_status": 200,
+            "matched": 1,
+            "selection_digest": "sha256:v1:" + "2" * 64,
+            "targets": [{"id": "alert-a", "projection_version": 4}],
+        }
+
+        dry_client = MagicMock()
+        dry_client.set_alert_disposition.return_value = preview
+        with unittest.mock.patch("defenseclaw.gateway.OrchestratorClient", return_value=dry_client):
+            result = CliRunner().invoke(
+                alerts,
+                ["dismiss", "--id", "alert-a", "--dry-run"],
+                obj=app,
+                catch_exceptions=False,
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Dry run complete", result.output)
+        dry_client.set_alert_disposition.assert_called_once()
+
+        partial_client = MagicMock()
+        partial_client.set_alert_disposition.side_effect = [
+            preview,
+            {
+                "_http_status": 409,
+                "matched": 1,
+                "applied": 0,
+                "no_change": 0,
+                "rejected": 1,
+                "failed": 0,
+                "error": "one or more alert dispositions were rejected",
+                "failures": [{"id": "alert-a", "code": "stale_projection_version"}],
+            },
+        ]
+        with unittest.mock.patch("defenseclaw.gateway.OrchestratorClient", return_value=partial_client):
+            result = CliRunner().invoke(
+                alerts,
+                ["acknowledge", "--id", "alert-a"],
+                obj=app,
+                catch_exceptions=False,
+            )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("matched=1 applied=0 no_change=0 rejected=1 failed=0", result.output)
+        self.assertIn("stale_projection_version", result.output)
+
+    def test_broad_mutation_requires_confirmation(self) -> None:
+        from defenseclaw.commands.cmd_alerts import alerts
+        from defenseclaw.config import default_config, prepare_fresh_v8_config
+        from defenseclaw.context import AppContext
+
+        app = AppContext()
+        app.cfg = prepare_fresh_v8_config(default_config())
+        app.cfg.audit_db = str(Path(tempfile.mkdtemp(prefix="dc-alert-confirm-")) / "audit.db")
+        app.cfg.gateway.token = "test-alert-review-token"
+        client = MagicMock()
+        client.set_alert_disposition.return_value = {
+            "_http_status": 200,
+            "matched": 2,
+            "selection_digest": "sha256:v1:" + "3" * 64,
+            "targets": [],
+        }
+        with unittest.mock.patch("defenseclaw.gateway.OrchestratorClient", return_value=client):
+            result = CliRunner().invoke(
+                alerts,
+                ["dismiss", "--connector", "codex"],
+                input="n\n",
+                obj=app,
+                catch_exceptions=False,
+            )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Apply dismissed to 2 matched alert(s)?", result.output)
+        client.set_alert_disposition.assert_called_once()
+
+    def test_audit_database_identity_distinguishes_disposable_homes(self) -> None:
+        from defenseclaw.commands.cmd_alerts import _alert_audit_db_identity
+
+        with tempfile.TemporaryDirectory(prefix="dc-home-a-") as home_a, tempfile.TemporaryDirectory(
+            prefix="dc-home-b-"
+        ) as home_b:
+            first = _alert_audit_db_identity(str(Path(home_a) / "audit.db"))
+            second = _alert_audit_db_identity(str(Path(home_b) / "audit.db"))
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.startswith("sha256:v1:"))
+        if os.name == "nt":
+            vector_path = r"D:\__defenseclaw_identity_vector__\audit.db"
+            expected = "sha256:v1:1991f13803f4111a45620ecb5426c7c2363444d9b961a312eacc86d851aed03f"
+        else:
+            vector_path = "/__defenseclaw_identity_vector__/audit.db"
+            expected = "sha256:v1:edf22eb16e6d1bf09331b1581c9a33b4694ced26bf3f6c6085a7b06f83291c60"
+        self.assertEqual(_alert_audit_db_identity(vector_path), expected)
 
 
 class TestSettingsSave(unittest.TestCase):
@@ -156,7 +276,11 @@ class TestGoScanCodeJSONSchema(unittest.TestCase):
             cwd=str(ROOT),
             capture_output=True,
             text=True,
-            timeout=30,
+            # Hosted Windows runners execute the Python and Go matrices in
+            # parallel and can take more than 30 seconds merely to schedule a
+            # new Go process. Keep a firm bound, but allow the same headroom as
+            # other metadata/bootstrap subprocesses before declaring a hang.
+            timeout=90,
             check=True,
         )
         go_cache = json.loads(go_paths.stdout)

@@ -12,10 +12,17 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
+from defenseclaw.connector_paths import (
+    connector_config_files,
+    connector_home,
+    hermes_config_path,
+    hermes_home,
+)
 from defenseclaw.observability.display import redact_endpoint_for_display
 from defenseclaw.observability.v8_status import (
     V8OperatorStatus,
@@ -43,6 +50,7 @@ class ConnectorHealth:
     name: str = ""
     state: str = ""
     since: str = ""
+    last_activity_at: str = ""
     tool_inspection_mode: str = ""
     subprocess_policy: str = ""
     requests: int = 0
@@ -69,6 +77,9 @@ class ConnectorOverviewRow:
     blocks: int
     alerts: int
     status: str
+    # Raw source timestamp retained separately from the human label so the
+    # shell can distinguish a new event from the normal passage of time.
+    last_activity_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -381,6 +392,11 @@ class OverviewPanelModel:
         self.cfg = cfg
         self.version = version
         self.health: HealthSnapshot | None = None
+        # Availability of the sidecar management endpoint is deliberately
+        # tracked separately from ``health.gateway``.  That payload field is
+        # the optional OpenClaw fleet uplink and is ``disabled`` in healthy
+        # hook-only installs (including Windows); it is not daemon liveness.
+        self.gateway_probe: SubsystemHealth | None = None
         self.doctor: DoctorCache | None = None
         self.enforcement = EnforcementCounts()
         self.silent_bypass = 0
@@ -402,6 +418,25 @@ class OverviewPanelModel:
 
     def set_health(self, health: HealthSnapshot | None) -> None:
         self.health = health
+
+    def set_gateway_probe(self, state: str, detail: str = "") -> None:
+        """Record the latest authenticated sidecar API probe result."""
+
+        self.gateway_probe = SubsystemHealth(state=state, last_error=detail)
+
+    def gateway_availability(self) -> SubsystemHealth:
+        """Return sidecar availability, independent of the fleet uplink.
+
+        New polling code records an explicit authenticated API probe.  The
+        health-derived fallback keeps models/tests created without a live
+        poll compatible and treats ``gateway=disabled`` as the healthy final
+        state documented by the Go daemon readiness checks for hook-only
+        topology.
+        """
+
+        if self.gateway_probe is not None:
+            return self.gateway_probe
+        return gateway_availability_from_health(self.health)
 
     def set_doctor_cache(self, cache: DoctorCache | None) -> None:
         self.doctor = cache
@@ -441,7 +476,9 @@ class OverviewPanelModel:
     def build_notices(self, *, now: datetime | None = None) -> tuple[OverviewNotice, ...]:
         now = now or datetime.now(timezone.utc)
         notices: list[OverviewNotice] = []
-        gateway_broken = self.health is None or gateway_health_is_broken(self.health.gateway.state)
+        gateway_availability = self.gateway_availability()
+        gateway_state = gateway_availability.state.strip().lower()
+        gateway_broken = gateway_state in {"", "unknown", "offline", "stopped", "error", "failed"}
         gateway_standalone = self.health is not None and self.health.gateway.state.strip().lower() == "disabled"
         guardrail_off = self.cfg is None or not self.cfg.guardrail_enabled
 
@@ -453,7 +490,16 @@ class OverviewPanelModel:
                 )
             )
         if gateway_broken:
-            notices.append(OverviewNotice("error", 'Gateway is offline - press : then "start" to launch'))
+            if gateway_state in {"error", "failed"}:
+                detail = gateway_availability.last_error.strip()
+                suffix = f": {detail}" if detail else ""
+                notices.append(OverviewNotice("error", f"Gateway health check failed{suffix}"))
+            elif gateway_state == "unknown":
+                notices.append(OverviewNotice("warn", "Gateway status is not available yet"))
+            else:
+                notices.append(OverviewNotice("error", 'Gateway is offline - press : then "start" to launch'))
+        elif gateway_state in {"starting", "reconnecting"}:
+            notices.append(OverviewNotice("info", "Gateway is starting - health checks will retry automatically"))
         elif gateway_standalone:
             hint = self.gateway_standalone_hint()
             if hint:
@@ -1056,6 +1102,39 @@ def gateway_health_is_broken(state: str) -> bool:
     return state.strip().lower() not in {"running", "disabled"}
 
 
+def gateway_availability_from_health(health: HealthSnapshot | None) -> SubsystemHealth:
+    """Derive daemon availability for callers without an explicit probe.
+
+    ``HealthSnapshot.gateway`` describes the optional fleet uplink.  A
+    successful ``/health`` response with that uplink disabled still proves
+    the local sidecar is online, which is the normal hook-only topology.
+    """
+
+    if health is None:
+        return SubsystemHealth(state="unknown")
+    api = health.api
+    api_state = api.state.strip().lower()
+    api_detail = api.last_error.strip() or string_detail(api.details, "summary")
+    if api_state in {"stopped", "offline", "down"}:
+        return SubsystemHealth(state="offline", last_error=api_detail)
+    if api_state in {"error", "failed"}:
+        return SubsystemHealth(state="error", last_error=api_detail)
+    if api_state in {"starting", "reconnecting"}:
+        return SubsystemHealth(state="starting", last_error=api_detail)
+    raw = health.gateway
+    state = raw.state.strip().lower()
+    detail = raw.last_error.strip() or string_detail(raw.details, "summary")
+    if state in {"running", "ready", "healthy", "ok", "active", "disabled"}:
+        return SubsystemHealth(state="running", last_error=detail)
+    if state in {"starting", "reconnecting"}:
+        return SubsystemHealth(state="starting", last_error=detail)
+    if state in {"stopped", "offline", "down"}:
+        return SubsystemHealth(state="offline", last_error=detail)
+    if state in {"error", "failed"}:
+        return SubsystemHealth(state="error", last_error=detail)
+    return SubsystemHealth(state="unknown", last_error=detail)
+
+
 def string_detail(details: dict[str, Any] | None, key: str) -> str:
     if details is None:
         return ""
@@ -1076,7 +1155,7 @@ def live_health_contradicts(check: DoctorCheck, health: HealthSnapshot | None) -
     if label == "guardrail proxy":
         return health.guardrail.state.lower() == "running"
     if label in {"openclaw gateway", "gateway"}:
-        return health.gateway.state.lower() == "running"
+        return gateway_availability_from_health(health).state == "running"
     if label.startswith("otel"):
         return health.telemetry.state.lower() == "running"
     return False
@@ -1109,7 +1188,8 @@ def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> st
         case "codex":
             return (
                 f"{name} connector has seen 0 hook events after {formatted} - "
-                "normal until Codex emits a hook/notify event; verify ~/.codex hooks if this persists"
+                "normal until Codex emits a hook/notify event; verify "
+                f"{connector_config_files('codex')[0]} hooks if this persists"
             )
         case "claudecode":
             return (
@@ -1167,12 +1247,18 @@ def friendly_connector_name(connector: str) -> str:
 
 def connector_source_label(connector: str, category: str) -> str:
     connector = (connector or "").strip().lower()
+    hermes_root = hermes_home()
+    hermes_config = hermes_config_path()
+    claude_root = connector_home("claudecode")
+    codex_root = connector_home("codex")
+    claude_config = connector_config_files("claudecode")[0]
+    codex_config = connector_config_files("codex")[0]
     sources = {
         ("openclaw", "skills"): ("./skills", "~/.openclaw/skills"),
-        ("claudecode", "skills"): ("~/.claude/skills", "./.claude/skills"),
-        ("codex", "skills"): ("~/.codex/skills", "./.codex/skills"),
+        ("claudecode", "skills"): (os.path.join(claude_root, "skills"), "./.claude/skills"),
+        ("codex", "skills"): (os.path.join(codex_root, "skills"), "./.codex/skills"),
         ("zeptoclaw", "skills"): ("~/.zeptoclaw/skills", "./.zeptoclaw/skills"),
-        ("hermes", "skills"): ("~/.hermes/skills",),
+        ("hermes", "skills"): (os.path.join(hermes_root, "skills"),),
         ("cursor", "skills"): ("./.cursor/skills", "./.agents/skills", "~/.cursor/skills", "~/.agents/skills"),
         ("windsurf", "skills"): ("unsupported/documented paths only",),
         ("geminicli", "skills"): ("./.gemini/skills", "./.agents/skills"),
@@ -1186,10 +1272,10 @@ def connector_source_label(connector: str, category: str) -> str:
         ("opencode", "skills"): ("unsupported/hooks-only surface",),
         ("omnigent", "skills"): ("unsupported by the OmniGent connector",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
-        ("claudecode", "mcps"): ("~/.claude/settings.json (mcpServers)", "./.mcp.json"),
-        ("codex", "mcps"): ("~/.codex/config.toml ([mcp_servers])", "./.mcp.json"),
+        ("claudecode", "mcps"): (f"{claude_config} (mcpServers)", "./.mcp.json"),
+        ("codex", "mcps"): (f"{codex_config} ([mcp_servers])", "./.mcp.json"),
         ("zeptoclaw", "mcps"): ("~/.zeptoclaw/config.json (mcp.servers)", "./.mcp.json"),
-        ("hermes", "mcps"): ("~/.hermes/config.yaml (mcp.servers)",),
+        ("hermes", "mcps"): (f"{hermes_config} (mcp.servers)",),
         ("cursor", "mcps"): ("./.cursor/mcp.json", "~/.cursor/mcp.json"),
         ("windsurf", "mcps"): ("~/.codeium/windsurf/mcp_config.json", "~/.codeium/windsurf/mcp.json"),
         ("geminicli", "mcps"): ("~/.gemini/settings.json (mcpServers)", "./.mcp.json"),
@@ -1203,27 +1289,30 @@ def connector_source_label(connector: str, category: str) -> str:
         ("opencode", "mcps"): ("~/.config/opencode/opencode.json (mcp)", "./opencode.json (mcp)"),
         ("omnigent", "mcps"): ("managed by OmniGent; not modified by DefenseClaw",),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
-        ("claudecode", "plugins"): ("~/.claude/plugins",),
-        ("codex", "plugins"): ("~/.codex/plugins",),
+        ("claudecode", "plugins"): (os.path.join(claude_root, "plugins"),),
+        ("codex", "plugins"): (os.path.join(codex_root, "plugins"),),
         ("zeptoclaw", "plugins"): ("~/.zeptoclaw/plugins",),
-        ("hermes", "plugins"): ("~/.hermes/plugins", "./.hermes/plugins (discovery-only)"),
+        ("hermes", "plugins"): (
+            os.path.join(hermes_root, "plugins"),
+            "./.hermes/plugins (discovery-only)",
+        ),
         ("cursor", "plugins"): ("unsupported",),
         ("windsurf", "plugins"): ("unsupported",),
         ("geminicli", "plugins"): ("./.gemini/extensions",),
         ("copilot", "plugins"): ("copilot plugin list",),
         ("openhands", "plugins"): ("unsupported",),
         ("antigravity", "plugins"): (
-            "~/.gemini/config/plugins/<plugin>/ (discovery-only)",
+            "~/.gemini/config/plugins/<plugin>/ (read/write)",
             "~/.gemini/antigravity-cli/plugins/<plugin>/ (discovery-only)",
-            "<workspace>/.agents/plugins/<plugin>/ (discovery-only)",
+            "<workspace>/.agents/plugins/<plugin>/ (read/write)",
         ),
         ("opencode", "plugins"): ("~/.config/opencode/plugins/defenseclaw.js (DefenseClaw bridge)",),
         ("omnigent", "plugins"): ("unsupported by the OmniGent connector",),
         ("openclaw", "config"): ("~/.openclaw/openclaw.json",),
-        ("claudecode", "config"): ("~/.claude/settings.json",),
-        ("codex", "config"): ("~/.codex/config.toml",),
+        ("claudecode", "config"): (claude_config,),
+        ("codex", "config"): (codex_config,),
         ("zeptoclaw", "config"): ("~/.zeptoclaw/config.json",),
-        ("hermes", "config"): ("~/.hermes/config.yaml",),
+        ("hermes", "config"): (hermes_config,),
         ("cursor", "config"): ("~/.cursor/hooks.json",),
         ("windsurf", "config"): ("~/.codeium/windsurf/hooks.json",),
         ("geminicli", "config"): ("~/.gemini/settings.json",),

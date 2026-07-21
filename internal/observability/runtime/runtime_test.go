@@ -82,6 +82,7 @@ func newRuntimeTestDependencies(t *testing.T) runtimeTestDependencies {
 	if err != nil {
 		t.Fatal(err)
 	}
+	retentionReaper.stop = retentionController.stopRequested
 	return runtimeTestDependencies{
 		storePath: storePath,
 		judgePath: filepath.Join(directory, "judge-bodies.db"),

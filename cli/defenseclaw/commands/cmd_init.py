@@ -25,11 +25,12 @@ import json
 import os
 import shutil
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
 
-from defenseclaw import connector_paths, platform_support, ux
+from defenseclaw import connector_paths, platform_support, terminal_checkbox, ux
 
 if TYPE_CHECKING:
     from defenseclaw.bootstrap import StepResult
@@ -42,6 +43,11 @@ from defenseclaw.paths import (
     bundled_splunk_bridge_dir,
 )
 from defenseclaw.safety import DotenvValueError, sanitize_dotenv_value
+
+_stdout_is_tty = terminal_checkbox.stdout_is_tty
+_supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
+_checkbox_key_name = terminal_checkbox.checkbox_key_name
+_render_checkbox_menu = terminal_checkbox.render_checkbox_menu
 
 
 @click.command("init")
@@ -215,6 +221,18 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     """
     import platform
 
+    requested_connectors = []
+    if connector:
+        requested_connectors.append(_normalize_connector_arg(connector))
+    requested_connectors.extend(_parse_connector_list(action_connectors))
+    for requested in requested_connectors:
+        support = platform_support.connector_platform_support(requested)
+        if not support.available:
+            raise click.ClickException(
+                f"connector {requested!r} is {support.status} on "
+                f"{platform_support.host_os()}: {support.reason}"
+            )
+
     if _use_guided_first_run(
         non_interactive=non_interactive,
         yes=yes,
@@ -326,16 +344,16 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     # leaking audit state to other local users. Force 0700 on creation
     # *and* tighten any pre-existing directory so the perms are
     # deterministic regardless of umask.
+    from defenseclaw.file_permissions import make_private_directory
+
     for d in dirs:
-        os.makedirs(d, mode=0o700, exist_ok=True)
-        os.chmod(d, 0o700)
+        make_private_directory(d)
 
     external_dirs = list(cfg.skill_dirs())
     for d in external_dirs:
         d_real = os.path.realpath(d)
         if d_real.startswith(data_dir_real + os.sep):
-            os.makedirs(d, mode=0o700, exist_ok=True)
-            os.chmod(d, 0o700)
+            make_private_directory(d)
     click.echo("  Directories:   " + ux._style("created", fg="green"))
 
     _seed_rego_policies(cfg.policy_dir)
@@ -641,6 +659,37 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
 
     primary = connector_settings[0]
     extras = connector_settings[1:]
+    # The short-lived executable receipt authorizes the Windows-only Codex
+    # app-server policy probe. It is not part of the macOS/Linux connector
+    # lifecycle, and Claude Code never consumes this authority. Keeping the
+    # gate this narrow avoids making an installed agent executable a new
+    # prerequisite for those otherwise-supported setup paths.
+    selected_agent_connectors = [
+        item["connector"]
+        for item in connector_settings
+        if platform_support.host_os() == "windows"
+        and connector_paths.normalize(item["connector"]) == "codex"
+    ]
+    if selected_agent_connectors:
+        from defenseclaw.agent_selection import record_setup_agent_selections
+
+        try:
+            _selections, selection_errors = record_setup_agent_selections(
+                data_dir,
+                selected_agent_connectors,
+            )
+        except OSError as exc:
+            raise click.ClickException(
+                f"could not protect explicit agent executable selection: {exc}"
+            ) from exc
+        if selection_errors:
+            details = "; ".join(
+                f"{name}: {detail}" for name, detail in sorted(selection_errors.items())
+            )
+            raise click.ClickException(
+                "cannot configure native hooks without a freshly verified selected agent executable "
+                f"({details})"
+            )
     # When extra connectors will be merged in after the primary bootstrap,
     # defer the gateway start to a single reconcile at the end so its
     # set-difference setup wires hooks for EVERY connector in one pass
@@ -763,46 +812,6 @@ def _parse_connector_list(raw: str | None) -> list[str]:
     return out
 
 
-def _stdout_is_tty() -> bool:
-    try:
-        return click.get_text_stream("stdout").isatty()
-    except Exception:
-        return False
-
-
-def _checkbox_key_name(ch: str) -> str:
-    if ch in ("\r", "\n"):
-        return "enter"
-    if ch in (" ", "\t"):
-        return "toggle"
-    if ch in ("\x1b[A", "k", "K"):
-        return "up"
-    if ch in ("\x1b[B", "j", "J"):
-        return "down"
-    if ch == "a":
-        return "all"
-    if ch == "n":
-        return "none"
-    return ""
-
-
-def _render_checkbox_menu(
-    options: list[str],
-    selected: set[str],
-    cursor: int,
-    *,
-    redraw: bool,
-) -> None:
-    if redraw:
-        click.echo(f"\x1b[{len(options)}F", nl=False)
-    for idx, name in enumerate(options):
-        if redraw:
-            click.echo("\r\x1b[2K", nl=False)
-        pointer = ">" if idx == cursor else " "
-        mark = "x" if name in selected else " "
-        click.echo(f"  {pointer} [{mark}] {name}")
-
-
 def _prompt_checkbox_selection(
     options: list[str],
     *,
@@ -810,44 +819,14 @@ def _prompt_checkbox_selection(
     title: str,
     empty_ok: bool,
 ) -> list[str]:
-    """Tiny checkbox selector for first-run terminal prompts.
-
-    Click gives us portable raw-key reads but not a full list widget. This keeps
-    the interaction small: j/k moves, Space toggles, Enter accepts.
-    """
-    if not options:
-        return []
-
-    selected = {name for name in default_selected if name in options}
-    cursor = 0
-    ux.subhead(title)
-    ux.subhead("  Space toggles, j/k moves, a selects all, n clears, Enter continues.")
-
-    redraw = _stdout_is_tty()
-    rendered = False
-    while True:
-        _render_checkbox_menu(options, selected, cursor, redraw=redraw and rendered)
-        rendered = True
-        key = _checkbox_key_name(click.getchar())
-        if key == "enter":
-            if selected or empty_ok:
-                return [name for name in options if name in selected]
-            ux.warn("Select at least one connector.", indent="  ")
-            continue
-        if key == "toggle":
-            name = options[cursor]
-            if name in selected:
-                selected.remove(name)
-            else:
-                selected.add(name)
-        elif key == "up":
-            cursor = (cursor - 1) % len(options)
-        elif key == "down":
-            cursor = (cursor + 1) % len(options)
-        elif key == "all":
-            selected = set(options)
-        elif key == "none":
-            selected.clear()
+    return terminal_checkbox.prompt_checkbox_selection(
+        options,
+        default_selected=default_selected,
+        title=title,
+        empty_ok=empty_ok,
+        redraw=_supports_terminal_redraw(),
+        getchar=click.getchar,
+    )
 
 
 def _installed_hook_connectors(disc) -> list[str]:
@@ -863,7 +842,13 @@ def _installed_hook_connectors(disc) -> list[str]:
     names: list[str] = []
     for name in order:
         sig = disc.agents.get(name)
-        if sig and sig.installed and name in _HOOK_ENFORCED_CONNECTORS and name not in names:
+        if (
+            sig
+            and sig.installed
+            and name in _HOOK_ENFORCED_CONNECTORS
+            and platform_support.connector_supported_on_os(name)
+            and name not in names
+        ):
             names.append(name)
     return names
 
@@ -1004,9 +989,12 @@ def _prompt_connector_selection(
 
     fallback = agent_discovery.first_installed(disc, "codex")
     ux.subhead("No hook connectors were detected. Choose one active connector to configure.")
+    choices = platform_support.supported_connectors(sorted(connector_paths.KNOWN_CONNECTORS))
+    if fallback not in choices:
+        fallback = choices[0] if choices else "codex"
     raw = click.prompt(
         "  Connector",
-        type=click.Choice(sorted(connector_paths.KNOWN_CONNECTORS), case_sensitive=False),
+        type=click.Choice(choices, case_sensitive=False),
         default=fallback,
         show_default=True,
     )
@@ -1021,12 +1009,23 @@ def _note_proxy_connectors(disc) -> None:
     their dedicated setup so a detected proxy agent isn't silently skipped."""
     order = getattr(agent_discovery, "DISCOVERY_PRECEDENCE", None) or sorted(disc.agents)
     detected: list[str] = []
+    unavailable: list[str] = []
     for name in order:
         if not platform_support.is_proxy_connector(name):
             continue
         signal = disc.agents.get(name)
         if signal is not None and signal.installed:
-            detected.append(name)
+            if platform_support.connector_supported_on_os(name):
+                detected.append(name)
+            else:
+                unavailable.append(name)
+    for name in unavailable:
+        support = platform_support.connector_platform_support(name)
+        ux.warn(
+            f"Detected {name}, but it is {support.status} on "
+            f"{platform_support.host_os()}: {support.reason}",
+            indent="  ",
+        )
     if not detected:
         return
     ux.subhead(
@@ -1746,7 +1745,12 @@ def _normalize_connector_arg(
     if connector is None and discover_default:
         try:
             disc = agent_discovery.discover_agents(refresh=refresh_agents)
-            connector = agent_discovery.first_installed(disc, "codex")
+            discovered = agent_discovery.first_installed(disc, "codex")
+            if platform_support.connector_supported_on_os(discovered):
+                connector = discovered
+            else:
+                installed = _installed_hook_connectors(disc)
+                connector = installed[0] if installed else "codex"
         except Exception:
             connector = "codex"
     value = (connector or "codex").strip().lower()
@@ -1841,7 +1845,10 @@ def _resolve_splunk_bridge_bundle():
     return bundled_splunk_bridge_dir()
 
 
-_OBSERVABILITY_STACK_REFRESH_PATHS: tuple[str, ...] = ("bin", "run.sh")
+_OBSERVABILITY_STACK_REFRESH_PATHS: tuple[str, ...] = (
+    os.path.join("bin", "openclaw-observability-bridge"),
+    "run.sh",
+)
 
 
 def _seed_local_observability_stack(data_dir: str) -> None:
@@ -1855,11 +1862,9 @@ def _seed_local_observability_stack(data_dir: str) -> None:
     On a fresh data dir we copy the entire bundle. On a re-init, we
     *preserve* operator-editable config (dashboards, prom rules,
     compose overrides, OTel collector config) but *refresh* the
-    maintainer-owned bridge entry points (``bin/`` and ``run.sh``) so
+    maintainer-owned compatibility entry points (``bin/`` and ``run.sh``) so
     bug fixes shipped in the wheel actually reach previously-seeded
-    installs. Without this, a stale seeded bridge (e.g. one missing
-    the bash 3.2 ``set -u`` empty-array guard on macOS) would keep
-    crashing even after ``pip install --upgrade``.
+    installs continue to delegate to the packaged Python controller.
     """
     bundled = bundled_local_observability_dir()
     if not bundled.is_dir():
@@ -1867,7 +1872,24 @@ def _seed_local_observability_stack(data_dir: str) -> None:
 
     dest = os.path.join(data_dir, "observability-stack")
     if not os.path.isdir(dest):
-        shutil.copytree(str(bundled), dest)
+        from defenseclaw.bundle_refresh import (
+            _assert_safe_bundle_destination,
+            _rsync_overwrite,
+        )
+
+        try:
+            _assert_safe_bundle_destination(Path(data_dir), Path(dest))
+            Path(dest).mkdir(parents=False)
+        except OSError as exc:
+            click.echo(f"  warning: could not seed observability stack: {exc}", err=True)
+            return
+        _refreshed, _preserved, errors = _rsync_overwrite(
+            src=Path(bundled), dest=Path(dest), preserve=()
+        )
+        if errors:
+            for error in errors[:3]:
+                click.echo(f"  warning: could not seed observability stack: {error}", err=True)
+            return
         _ensure_observability_stack_executables(dest)
         click.echo(f"  Observability stack: seeded in {dest}")
         return
@@ -1889,9 +1911,8 @@ def _seed_local_observability_stack(data_dir: str) -> None:
 def _refresh_observability_stack_scripts(bundled, dest: str) -> list[str]:
     """Overwrite maintainer-owned scripts in ``dest`` from ``bundled``.
 
-    Only files under :data:`_OBSERVABILITY_STACK_REFRESH_PATHS` are
-    refreshed — these are pure code (the ``openclaw-observability-bridge``
-    bash entry point and its ``run.sh`` shim) and have no operator
+    Only files in :data:`_OBSERVABILITY_STACK_REFRESH_PATHS` are
+    refreshed — these are compatibility shims and have no operator
     config baked in, so unconditional overwrite is safe.
 
     Returns the list of relative paths that were actually rewritten so
@@ -1899,20 +1920,30 @@ def _refresh_observability_stack_scripts(bundled, dest: str) -> list[str]:
     sources are skipped silently and copy failures are surfaced as
     warnings rather than failing ``init`` outright.
     """
+    from defenseclaw.bundle_refresh import (
+        _assert_safe_bundle_destination,
+        _atomic_copy_file,
+    )
+
     refreshed: list[str] = []
+    dest_root = Path(dest)
+    try:
+        _assert_safe_bundle_destination(dest_root.parent, dest_root)
+    except OSError as exc:
+        click.echo(
+            f"  warning: could not refresh observability stack: {exc}", err=True
+        )
+        return refreshed
     for rel in _OBSERVABILITY_STACK_REFRESH_PATHS:
         src = bundled / rel
-        if not src.exists():
+        if not src.is_file():
             continue
-        target = os.path.join(dest, rel)
+        target = dest_root / rel
         try:
-            if src.is_dir():
-                if os.path.isdir(target):
-                    shutil.rmtree(target)
-                shutil.copytree(str(src), target)
-            else:
-                os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
-                shutil.copy2(str(src), target)
+            _assert_safe_bundle_destination(dest_root, target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _assert_safe_bundle_destination(dest_root, target)
+            _atomic_copy_file(str(src), str(target), root=dest_root)
         except OSError as exc:
             click.echo(
                 f"  warning: could not refresh observability stack {rel}: {exc}",
@@ -2568,9 +2599,12 @@ def _is_sidecar_running(pid_file: str) -> bool:
     pid = _read_pid(pid_file)
     if pid is None or pid <= 1:
         return False
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError, OSError):
+    # POSIX can probe with kill(pid, 0), but CPython maps that call to a
+    # console control event on Windows and can interrupt the calling process.
+    # The shared helper uses a real Win32 process handle there.
+    from defenseclaw.process_liveness import pid_alive
+
+    if not pid_alive(pid):
         return False
     return _pid_looks_like_gateway(pid)
 

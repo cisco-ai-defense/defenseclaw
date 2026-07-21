@@ -29,6 +29,11 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 UPGRADE_SCRIPT = ROOT / "scripts" / "upgrade.sh"
 
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="upgrade.sh staged-resolver contracts require a native POSIX shell; Windows upgrades use the native installer",
+)
+
 
 def _write_executable(path: Path, body: str) -> None:
     path.write_text(body, encoding="utf-8")

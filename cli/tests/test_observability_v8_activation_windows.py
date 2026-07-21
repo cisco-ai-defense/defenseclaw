@@ -98,6 +98,67 @@ BROAD_DIRECTORY_SECURITY = WindowsFileSecurity(
 )
 
 
+@pytest.mark.parametrize("clear_inherited_markers", [False, True])
+@pytest.mark.parametrize("drop_dacl_protection", [False, True])
+def test_replacefile_staged_security_selects_only_exact_provider_forms(
+    clear_inherited_markers: bool,
+    drop_dacl_protection: bool,
+) -> None:
+    expected = WindowsFileSecurity(
+        OWNER,
+        _dacl(
+            (0, 0x10, 0x001F01FF, OWNER),
+            (0, 0x10, 0x00020089, SYSTEM),
+        ),
+        True,
+        HIGH_MANDATORY_LABEL,
+        True,
+    )
+    observed_dacl = (
+        activation.windows_acl._dacl_with_inherited_markers_cleared(expected.dacl)
+        if clear_inherited_markers
+        else expected.dacl
+    )
+    observed = WindowsFileSecurity(
+        expected.owner,
+        observed_dacl,
+        not drop_dacl_protection,
+        expected.mandatory_label,
+        expected.sacl_protected,
+    )
+
+    selected = activation._select_replacefile_staged_security(observed, expected)
+
+    assert selected == WindowsFileSecurity(
+        expected.owner,
+        observed_dacl,
+        True,
+        expected.mandatory_label,
+        expected.sacl_protected,
+    )
+
+
+@pytest.mark.parametrize(
+    "drifted_dacl",
+    [
+        _dacl((0, 0, 0x00020089, OWNER), (0, 0, 0x00020089, SYSTEM)),
+        _dacl((0, 0, 0x001F01FF, USERS), (0, 0, 0x00020089, SYSTEM)),
+        _dacl((0, 0, 0x00020089, SYSTEM), (0, 0, 0x001F01FF, OWNER)),
+    ],
+)
+def test_replacefile_staged_security_rejects_mask_sid_and_order_drift(
+    drifted_dacl: bytes,
+) -> None:
+    expected = WindowsFileSecurity(
+        OWNER,
+        _dacl((0, 0, 0x001F01FF, OWNER), (0, 0, 0x00020089, SYSTEM)),
+        True,
+    )
+    observed = WindowsFileSecurity(expected.owner, drifted_dacl, True)
+
+    assert activation._select_replacefile_staged_security(observed, expected) is None
+
+
 class _MockWindowsAcl:
     """Path-backed Win32 API model used while pytest itself runs on POSIX."""
 

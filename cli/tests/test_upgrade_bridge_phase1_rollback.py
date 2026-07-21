@@ -21,6 +21,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 UPGRADE_SCRIPT = ROOT / "scripts" / "upgrade.sh"
+POSIX_UPGRADE_RUNTIME_ONLY = pytest.mark.skipif(
+    os.name == "nt",
+    reason="upgrade.sh phase-one runtime contracts require POSIX signals, ownership, symlinks, and executables",
+)
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -393,6 +397,7 @@ esac
     (release / "checksums.txt.pem").write_text("test certificate\n", encoding="utf-8")
 
 
+@POSIX_UPGRADE_RUNTIME_ONLY
 @pytest.mark.parametrize(
     (
         "crash_point",
@@ -1096,6 +1101,7 @@ def test_bridge_rollback_health_is_version_bound_and_custody_is_collision_safe()
     assert 'probe_environment["PYTHONDONTWRITEBYTECODE"] = "1"' in script
 
 
+@POSIX_UPGRADE_RUNTIME_ONLY
 def test_gateway_pid_parser_accepts_legacy_integer_with_live_binary_identity(tmp_path: Path) -> None:
     gateway = tmp_path / "defenseclaw-gateway"
     _compile_source_gateway(gateway)
@@ -1128,6 +1134,7 @@ def test_gateway_pid_parser_accepts_legacy_integer_with_live_binary_identity(tmp
             process.wait(timeout=10)
 
 
+@POSIX_UPGRADE_RUNTIME_ONLY
 def test_source_venv_identity_rejects_same_version_substitution(tmp_path: Path) -> None:
     script = UPGRADE_SCRIPT.read_text(encoding="utf-8")
     match = re.search(
@@ -1154,6 +1161,7 @@ def test_source_venv_identity_rejects_same_version_substitution(tmp_path: Path) 
     assert identity(str(source)) != identity(str(substitute))
 
 
+@POSIX_UPGRADE_RUNTIME_ONLY
 def test_path_shadow_cli_is_refused_before_service_stop(tmp_path: Path) -> None:
     home = tmp_path / "home"
     controller = home / ".defenseclaw"

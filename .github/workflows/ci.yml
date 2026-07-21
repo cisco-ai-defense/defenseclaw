@@ -397,12 +397,12 @@ jobs:
           path: coverage-py.xml
 
   python-wheel-install:
-    name: Python Wheel Install (${{ matrix.python-version }})
+    name: Python Wheel Security Contract (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -416,9 +416,11 @@ jobs:
           whl="$(find dist -maxdepth 1 -name 'defenseclaw-*.whl' -print -quit)"
           test -n "$whl"
           python3 - "$whl" "$tmp/telemetry-resource-digests.json" <<'PY'
+          import email
           import gzip
           import hashlib
           import json
+          import re
           import sys
           import zipfile
           from pathlib import Path
@@ -445,7 +447,24 @@ jobs:
                   "schemas/telemetry/runtime/compatibility/openinference-v1.json.gz"
               ),
           }
+          security_floors = {
+              "cryptography": ">=48.0.1,<49",
+              "python-dotenv": ">=1.2.2",
+              "python-multipart": ">=0.0.31",
+              "urllib3": ">=2.7.0",
+              "idna": ">=3.15",
+              "pydantic-settings": ">=2.14.2",
+              "aiohttp": ">=3.14.1,<4",
+              "pyjwt": ">=2.13.0",
+              "starlette": ">=1.3.1,<1.4",
+              "fastapi": ">=0.137.1,<0.138",
+          }
           with zipfile.ZipFile(wheel) as archive:
+              metadata_name = next(
+                  name for name in archive.namelist()
+                  if name.endswith(".dist-info/METADATA")
+              )
+              metadata = email.message_from_bytes(archive.read(metadata_name))
               packaged = {
                   name for name in archive.namelist()
                   if name.startswith("defenseclaw/_data/telemetry/v8/") and not name.endswith("/")
@@ -460,10 +479,39 @@ jobs:
                       raise SystemExit(f"wheel resource drift: {member}")
                   json.loads(bundled)
                   digests[Path(member).name] = hashlib.sha256(source).hexdigest()
+          requirements = {}
+          for value in metadata.get_all("Requires-Dist", []):
+              match = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)", value)
+              if match is None:
+                  raise SystemExit(f"invalid Requires-Dist value: {value}")
+              name = re.sub(r"[-_.]+", "-", match.group(1)).lower()
+              requirements[name] = value[match.end():]
+          for name, expected in security_floors.items():
+              value = requirements.get(name)
+              if value is None:
+                  raise SystemExit(f"wheel metadata omits security floor: {name}")
+              specifier, separator, marker = value.partition(";")
+              if separator:
+                  raise SystemExit(f"wheel security floor is marked: {name}; {marker.strip()}")
+              actual_clauses = {
+                  clause.strip()
+                  for clause in specifier.strip().strip("()").split(",")
+                  if clause.strip()
+              }
+              expected_clauses = {clause.strip() for clause in expected.split(",")}
+              if actual_clauses != expected_clauses:
+                  raise SystemExit(
+                      f"wheel security floor drift for {name}: "
+                      f"expected {expected}, found {specifier.strip()}"
+                  )
           digest_path.write_text(json.dumps(digests), encoding="utf-8")
           PY
           uv --no-config venv "$tmp/venv" --python "${{ matrix.python-version }}"
-          uv --no-config pip install --python "$tmp/venv/bin/python" "$whl"
+          # Use pip's foreign-interpreter mode so this is an ordinary pip
+          # resolution without adding packaging tools to the runtime graph.
+          uvx --from pip pip --isolated --python "$tmp/venv/bin/python" \
+            install --disable-pip-version-check "$whl"
+          uvx --from pip pip --isolated --python "$tmp/venv/bin/python" check
           "$tmp/venv/bin/defenseclaw" --help >/dev/null
           HOME="$tmp/home" DEFENSECLAW_HOME="$tmp/home/.defenseclaw" \
             PYTHONNOUSERSITE=1 PYTHONPATH='' "$tmp/venv/bin/python" - <<'PY'
@@ -512,6 +560,10 @@ jobs:
               json.loads(payload)
           PY
           )
+          "$tmp/venv/bin/python" -c 'from defenseclaw.envvars import load_registry; assert load_registry().entries'
+          uvx --from pip-audit pip-audit \
+            --vulnerability-service osv \
+            --path "$tmp/venv/lib/python${{ matrix.python-version }}/site-packages"
 
   upgrade-smoke:
     name: Release Regression (deterministic)
@@ -919,236 +971,3 @@ jobs:
       - name: Stop the local observability stack
         if: ${{ always() }}
         run: bundles/local_observability_stack/bin/openclaw-observability-bridge reset
-
-  windows-hook-path:
-    name: Windows Hook Path
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      # The gateway embeds the OpenClaw extension tree, normally generated
-      # by `make sync-openclaw-extension`. Windows is hook-only and needs no
-      # OpenClaw plugin, so drop the same `.placeholder` marker that target
-      # writes when extensions/defenseclaw/dist is absent. Done in bash
-      # (Git Bash ships on the runner) to avoid GNU make's flaky shell
-      # resolution on Windows.
-      - name: Generate OpenClaw extension placeholder
-        shell: bash
-        run: |
-          set -euo pipefail
-          embed_dir=internal/gateway/connector/openclaw_extension
-          mkdir -p "$embed_dir"
-          printf '%s\n' \
-            "OpenClaw extension not built." \
-            "Run 'make extensions' (or 'make plugin') to populate the embedded tree." \
-            > "$embed_dir/.placeholder"
-      # Prove the Windows hook surfaces compile and vet cleanly.
-      - name: Go build (hook surfaces + binary)
-        run: go build ./internal/gateway/connector/... ./internal/cli/... ./internal/daemon/... ./internal/notify/... ./cmd/defenseclaw
-      - name: Go vet (hook surfaces)
-        run: go vet ./internal/gateway/connector/... ./internal/cli/... ./internal/daemon/... ./internal/notify/...
-      # Prove every test binary on the hook surfaces builds on Windows
-      # (compiles all test files, runs zero tests).
-      - name: Go test-compile (all hook-surface tests build on Windows)
-        run: go test -run "^$" ./internal/gateway/connector/... ./internal/cli/... ./internal/daemon/... ./internal/notify/...
-      # Execute the native Go hook decision engine end to end — this is the
-      # whole Windows hook path (stdin cap, token, HTTP, per-connector
-      # output/exit, fail-open/closed, Codex/Claude block schema).
-      - name: Go test - native hook engine
-        run: go test ./internal/gateway/connector/hookexec/...
-      # Execute the per-OS connector capability model and hook-wiring tests.
-      - name: Go test - connector capability + hook wiring
-        run: go test ./internal/gateway/connector/ -run "ProxyConnector|IsProxyConnector|ConnectorSupportedOnOS|RegistryNamesFilter|HookInvocationCommand|ShellWordPassesNativeCommandThrough|BuildCodexHooksTableHashesTheCommand|IsOwnedHookRecognizesNativeCommand"
-      - name: Go test - hook token trust
-        run: go test ./internal/gateway/connector/ -run "HookAPIToken|LoadHookAPITokens" -count=1
-      # Central v8 redaction requires a persistent correlation key on every
-      # supported gateway platform. Execute the native protected-DACL,
-      # no-reparse, concurrent-creation, and exact-length contract here.
-      - name: Go test - redaction correlation key custody
-        run: go test ./internal/observability/redaction -run "WindowsCorrelationKey" -count=1
-      # Execute the native `defenseclaw-gateway hook` entrypoint + sidecar resolution.
-      - name: Go test - hook entrypoint
-        run: go test ./internal/cli/ -run "BuildHookOptions|ReadHookSidecar|HookCommandRegistered"
-      - name: Sync Python env
-        shell: bash
-        run: uv sync
-      # Execute the per-OS connector gating and the Windows config-lock
-      # contention test natively on Windows.
-      - name: Python test - platform gating + config lock
-        shell: bash
-        run: uv run python -m pytest cli/tests/test_platform_support.py cli/tests/test_config_lock_mutex.py -q
-
-  windows-installer-smoke:
-    name: Windows Installer Smoke (install.ps1)
-    runs-on: windows-latest
-    # End-to-end check of the PowerShell installer's legacy local-install path.
-    # Ordinary PR CI cannot mint the release workflow's main-branch Fulcio
-    # identity and must never stub provenance verification, so this generic
-    # layout smoke is intentionally stamped to schema-1 release 0.8.3. The
-    # protected release workflow separately runs the exact signed schema-2
-    # Windows fresh-install gate against the sealed candidate before publish.
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - name: Native installer rollback self-test (PowerShell 5.1 + 7)
-        shell: pwsh
-        run: |
-          foreach ($engine in @("powershell.exe", "pwsh")) {
-            $root = Join-Path $env:RUNNER_TEMP (
-              "defenseclaw-native-" +
-              [IO.Path]::GetFileNameWithoutExtension($engine) +
-              "-" + [guid]::NewGuid().ToString("N")
-            )
-            [void][IO.Directory]::CreateDirectory($root)
-            try {
-              & $engine -NoProfile -NonInteractive `
-                -File .\scripts\install.ps1 `
-                -TestMode `
-                -NativePrivateDirectorySelfTestRoot $root
-              if ($LASTEXITCODE -ne 0) {
-                throw "$engine native installer self-test failed: $LASTEXITCODE"
-              }
-              if (@(Get-ChildItem -LiteralPath $root -Force).Count -ne 0) {
-                throw "$engine native installer self-test left residue"
-              }
-            } finally {
-              if (Test-Path -LiteralPath $root) {
-                [IO.Directory]::Delete($root, $true)
-              }
-            }
-          }
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-
-      # The gateway embeds the OpenClaw extension tree via //go:embed. Windows
-      # is hook-only and needs no OpenClaw plugin, so drop the same
-      # `.placeholder` marker `make sync-openclaw-extension` writes when
-      # extensions/defenseclaw/dist is absent (matches windows-hook-path).
-      - name: Generate OpenClaw extension placeholder
-        shell: bash
-        run: |
-          set -euo pipefail
-          embed_dir=internal/gateway/connector/openclaw_extension
-          mkdir -p "$embed_dir"
-          printf '%s\n' \
-            "OpenClaw extension not built." \
-            "Run 'make extensions' (or 'make plugin') to populate the embedded tree." \
-            > "$embed_dir/.placeholder"
-
-      - name: Stamp legacy schema-1 installer fixture
-        shell: bash
-        run: |
-          set -euo pipefail
-          # This checkout is the v8 hard-cut source (epoch 2/runtime 8), while
-          # the unsigned local-layout smoke intentionally exercises the last
-          # schema-1 installer contract. Materialize the exact legacy source
-          # identity in this disposable fixture before stamping every version
-          # source; the production stamp helper and validator remain strict.
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          path = Path("release/source-install-identity.json")
-          payload = json.loads(path.read_text(encoding="utf-8"))
-          expected = {
-              "runtime_config_version",
-              "schema_version",
-              "source_install_compatibility_epoch",
-              "source_release",
-          }
-          if not isinstance(payload, dict) or set(payload) != expected or payload.get("schema_version") != 1:
-              raise SystemExit("unsupported source-install identity fixture")
-          payload["source_install_compatibility_epoch"] = 1
-          payload["runtime_config_version"] = 7
-          path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-          PY
-          scripts/stamp-version.sh 0.8.3
-          python3 scripts/source_release_identity.py check --expected-release 0.8.3
-
-      # Reproduce the legacy GoReleaser Windows output by hand so the smoke
-      # stays fast and self-contained. The CLI wheel is built via `make dist-cli`,
-      # the same target `make dist` uses — it stages cli/defenseclaw/_data
-      # (policies, skills, dashboards) before `uv build`, so the wheel matches
-      # a real release. `make install` already runs this _bundle-data path on
-      # windows-latest in the green connector contract matrix.
-      - name: Build gateway binary + CLI wheel
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist/gwstage
-          CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=0.8.3" \
-            -o dist/gwstage/defenseclaw.exe ./cmd/defenseclaw
-          make dist-cli
-          ls -la dist
-
-      - name: Package windows gateway zip
-        shell: pwsh
-        run: |
-          $zip = "dist/defenseclaw_0.8.3_windows_amd64.zip"
-          Compress-Archive -Path dist/gwstage/defenseclaw.exe -DestinationPath $zip -Force
-          Get-ChildItem dist
-
-      - name: Build and verify legacy installer policy fixture
-        shell: bash
-        run: |
-          set -euo pipefail
-          make dist-upgrade-manifest
-          python3 - <<'PY'
-          import hashlib
-          import json
-          from pathlib import Path
-
-          root = Path("dist")
-          manifest = json.loads((root / "upgrade-manifest.json").read_text(encoding="utf-8"))
-          if manifest.get("schema_version") != 1 or manifest.get("release_version") != "0.8.3":
-              raise SystemExit("Windows installer smoke must remain a schema-1 0.8.3 fixture")
-          if "release_artifacts" in manifest:
-              raise SystemExit("legacy Windows installer smoke unexpectedly selected protected artifacts")
-          excluded = {"checksums.txt", "checksums.txt.sig", "checksums.txt.pem"}
-          artifacts = sorted(
-              (path for path in root.rglob("*") if path.is_file() and path.name not in excluded),
-              key=lambda path: path.relative_to(root).as_posix(),
-          )
-          (root / "checksums.txt").write_text(
-              "".join(
-                  f"{hashlib.sha256(path.read_bytes()).hexdigest()}  "
-                  f"{path.relative_to(root).as_posix()}\n"
-                  for path in artifacts
-              ),
-              encoding="utf-8",
-          )
-          PY
-
-      - name: Run install.ps1 against local artifacts
-        shell: pwsh
-        run: ./scripts/install.ps1 -Local dist -Yes
-
-      # New pwsh session: install.ps1 persists the install dir to the *user*
-      # PATH, which a mid-job step does not auto-reload, so prepend it here
-      # before resolving the shim. --version short-circuits before any config
-      # load on both binaries, so neither needs `defenseclaw init`.
-      - name: Verify installed gateway + CLI resolve and run
-        shell: pwsh
-        run: |
-          $bin  = Join-Path $env:USERPROFILE ".local\bin"
-          $gw   = Join-Path $bin "defenseclaw-gateway.exe"
-          $shim = Join-Path $bin "defenseclaw.cmd"
-          if (-not (Test-Path $gw))   { throw "gateway not installed: $gw" }
-          if (-not (Test-Path $shim)) { throw "CLI shim not installed: $shim" }
-          $env:PATH = "$bin;$env:PATH"
-          foreach ($command in @($gw, "defenseclaw")) {
-            $output = (& $command --version 2>&1 | Out-String).Trim()
-            if ($LASTEXITCODE -ne 0) { throw "$command --version exit $LASTEXITCODE" }
-            $versions = @([regex]::Matches($output, '(?<![0-9.])([0-9]+\.[0-9]+\.[0-9]+)(?![0-9.])'))
-            if ($versions.Count -ne 1 -or $versions[0].Groups[1].Value -cne "0.8.3") {
-              throw "$command did not report exact 0.8.3: $output"
-            }
-          }

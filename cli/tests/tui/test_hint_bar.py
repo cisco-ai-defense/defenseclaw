@@ -42,6 +42,14 @@ def test_skills_hint_surfaces_unscanned_count() -> None:
 
     assert "3 skills unscanned" in hint
     assert "scan skill --all" in hint
+    assert 'Press "u" to unblock' in hint
+
+
+@pytest.mark.parametrize("panel", ("skills", "mcps"))
+def test_skill_and_mcp_hints_expose_unblock_shortcut(panel: str) -> None:
+    hint = HintEngine().hint_for(HintState(active_panel=panel))
+
+    assert "u unblock" in hint
 
 
 def test_new_panel_filter_hints_keep_generic_filter_style() -> None:

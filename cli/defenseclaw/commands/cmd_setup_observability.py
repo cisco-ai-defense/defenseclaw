@@ -74,6 +74,15 @@ from defenseclaw.observability.v8_presets import (
 from defenseclaw.observability.v8_presets import (
     resolve_inputs as _resolve_inputs,
 )
+from defenseclaw.platform_support import (
+    LOCAL_OBSERVABILITY_UNSUPPORTED_REASON,
+    LOCAL_SPLUNK_UNSUPPORTED_REASON,
+    destination_platform_unsupported,
+    is_local_observability_stack_destination,
+    is_local_splunk_stack_destination,
+    local_observability_stack_supported,
+    local_splunk_stack_supported,
+)
 
 # All prompt keys across all presets. Exposed as Click options so the
 # same command surface covers every preset; the writer ignores unknown
@@ -205,11 +214,17 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
         signal_tuple = parsed  # type: ignore[assignment]
 
     try:
+        resolved_inputs = _resolve_inputs(preset, inputs)
+        _gate_local_preset(
+            preset,
+            resolved_inputs,
+            name=name or "",
+        )
         _require_v8_operator_status(app.cfg.data_dir)
         result, warnings = _add_v8_destination(
             app.cfg.data_dir,
             preset,
-            inputs,
+            resolved_inputs,
             name=name,
             enabled=enabled,
             signals=signal_tuple,
@@ -326,6 +341,7 @@ def _add_v8_destination(
     token_value: str | None,
     target: str | None,
     dry_run: bool,
+    extra_mutations=(),
 ):
     """Add or update one v8 destination through the surgical writer."""
 
@@ -369,6 +385,7 @@ def _add_v8_destination(
                 destination,
             )
         ]
+    mutations.extend(extra_mutations)
 
     stored_secret = token_value
     warnings: list[str] = []
@@ -584,6 +601,7 @@ def _print_v8_destination_list(status, *, emit_json: bool) -> None:
             "bucket_count": len(destination.buckets),
             "redaction": destination.redaction_label,
             "target": destination.endpoint,
+            "platform_status": _destination_platform_status(destination),
         }
         for destination in status.destinations
     ]
@@ -597,7 +615,11 @@ def _print_v8_destination_list(status, *, emit_json: bool) -> None:
         f"{'BUCKETS':<8} {'POLICY':<20} REDACTION"
     )
     for row in rows:
-        state = "enabled" if row["enabled"] else "disabled"
+        state = (
+            "unsupported"
+            if row["platform_status"] == "unsupported"
+            else "enabled" if row["enabled"] else "disabled"
+        )
         signals = ",".join(row["signals"]) or "none"
         click.echo(
             f"  {row['name'][:23]:<24} {row['kind'][:11]:<12} {state:<9} "
@@ -611,6 +633,44 @@ def _print_v8_destination_list(status, *, emit_json: bool) -> None:
     )
     click.echo(f"  Plan digest: {status.plan_digest}")
     click.echo()
+
+
+def _gate_local_preset(
+    preset: Preset,
+    resolved_inputs: dict[str, str],
+    *,
+    name: str,
+) -> None:
+    """Reject only bundled local destinations unavailable on this host."""
+
+    endpoint = resolved_inputs.get("endpoint") or resolved_inputs.get("host", "")
+    kind = preset.adapter_kind or "otlp"
+    if not local_observability_stack_supported() and is_local_observability_stack_destination(
+        name=name,
+        preset_id=preset.id,
+        kind=kind,
+        endpoint=endpoint,
+    ):
+        raise click.ClickException(LOCAL_OBSERVABILITY_UNSUPPORTED_REASON)
+    if not local_splunk_stack_supported() and is_local_splunk_stack_destination(
+        preset_id=preset.id,
+        kind=kind,
+        endpoint=endpoint,
+    ):
+        raise click.ClickException(LOCAL_SPLUNK_UNSUPPORTED_REASON)
+
+
+def _destination_platform_status(destination) -> str:
+    return (
+        "unsupported"
+        if destination_platform_unsupported(
+            name=destination.name,
+            preset_id=getattr(destination, "preset", ""),
+            kind=destination.kind,
+            endpoint=destination.endpoint,
+        )
+        else "supported"
+    )
 
 
 def _v8_source_destination_index(data_dir: str, name: str) -> int:

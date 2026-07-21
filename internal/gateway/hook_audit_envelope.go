@@ -23,6 +23,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 )
 
 // HookAuditEnvelopeSchema identifies the audit-envelope shape. Bumped
@@ -104,6 +106,16 @@ type HookAuditEnvelope struct {
 	Enforced    bool   `json:"enforced,omitempty"`
 	RulePackDir string `json:"rule_pack_dir,omitempty"`
 
+	// Agent lifecycle correlation is copied from the same phase snapshot used
+	// by native lifecycle/tool/hook-decision events. These additive fields let
+	// the durable audit row identify the transition that produced the decision.
+	AgentPhase         string `json:"agent_phase,omitempty"`
+	AgentPreviousPhase string `json:"agent_previous_phase,omitempty"`
+	AgentSequence      int64  `json:"agent_sequence,omitempty"`
+	AgentLifecycleID   string `json:"agent_lifecycle_id,omitempty"`
+	AgentExecutionID   string `json:"agent_execution_id,omitempty"`
+	AgentOperationID   string `json:"agent_operation_id,omitempty"`
+
 	// AuditActionOverride steers the audit ROW action (not the
 	// envelope JSON). When non-empty, the audit.Logger writes the
 	// row under this action constant instead of
@@ -145,6 +157,19 @@ func renderHookAuditEnvelope(env HookAuditEnvelope) string {
 	// configured redaction profile after routing.
 	env.Reason = sanitizeEnvelopeFreeForm(env.Reason)
 	env.RulePackDir = stripLogInjectionRunes(env.RulePackDir)
+	if phase, ok := gatewaylog.NormalizeAgentPhase(env.AgentPhase); ok {
+		env.AgentPhase = phase
+	} else {
+		env.AgentPhase = stripLogInjectionRunes(env.AgentPhase)
+	}
+	if previous, ok := gatewaylog.NormalizeAgentPhase(env.AgentPreviousPhase); ok {
+		env.AgentPreviousPhase = previous
+	} else {
+		env.AgentPreviousPhase = ""
+	}
+	env.AgentLifecycleID = stripLogInjectionRunes(env.AgentLifecycleID)
+	env.AgentExecutionID = stripLogInjectionRunes(env.AgentExecutionID)
+	env.AgentOperationID = stripLogInjectionRunes(env.AgentOperationID)
 	env.RawOrigin = stripLogInjectionRunes(env.RawOrigin)
 	for i, id := range env.RawEventIDs {
 		env.RawEventIDs[i] = stripLogInjectionRunes(id)

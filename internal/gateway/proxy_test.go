@@ -36,11 +36,15 @@ type mockProvider struct {
 	streamChunks []StreamChunk
 	streamUsage  *ChatUsage
 	err          error
+	delay        time.Duration
 }
 
 func (m *mockProvider) ChatCompletion(_ context.Context, req *ChatRequest) (*ChatResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.delay > 0 {
+		time.Sleep(m.delay)
+	}
 
 	m.lastReq = req
 	if req.RawBody != nil {
