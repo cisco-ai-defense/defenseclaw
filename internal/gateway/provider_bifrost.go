@@ -276,18 +276,18 @@ func newTenantAccount(
 	key := schemas.Key{
 		ID:     keyID,
 		Name:   string(providerKey) + "-key",
-		Value:  schemas.EnvVar{Val: apiKey},
+		Value:  schemas.SecretVar{Val: apiKey},
 		Models: schemas.WhiteList{"*"},
 		Weight: 1.0,
 	}
 	if providerKey == schemas.VLLM {
 		key.VLLMKeyConfig = &schemas.VLLMKeyConfig{
-			URL: schemas.EnvVar{Val: vllmServerURL(baseURL)},
+			URL: schemas.SecretVar{Val: vllmServerURL(baseURL)},
 		}
 	}
 	if providerKey == schemas.Ollama {
 		key.OllamaKeyConfig = &schemas.OllamaKeyConfig{
-			URL: schemas.EnvVar{Val: ollamaServerURL(baseURL)},
+			URL: schemas.SecretVar{Val: ollamaServerURL(baseURL)},
 		}
 	}
 
@@ -302,10 +302,11 @@ func newTenantAccount(
 		mode := strings.ToLower(strings.TrimSpace(bedrock.AuthMode))
 		switch mode {
 		case "iam_credentials":
-			bcfg.AccessKey = schemas.EnvVar{Val: envOr(bedrock.AccessKeyEnv), EnvVar: bedrock.AccessKeyEnv, FromEnv: bedrock.AccessKeyEnv != ""}
-			bcfg.SecretKey = schemas.EnvVar{Val: envOr(bedrock.SecretKeyEnv), EnvVar: bedrock.SecretKeyEnv, FromEnv: bedrock.SecretKeyEnv != ""}
+			bcfg.AccessKey = schemas.SecretVar{Val: envOr(bedrock.AccessKeyEnv)}
+			bcfg.SecretKey = schemas.SecretVar{Val: envOr(bedrock.SecretKeyEnv)}
 			if bedrock.SessionTokenEnv != "" {
-				bcfg.SessionToken = &schemas.EnvVar{Val: envOr(bedrock.SessionTokenEnv), EnvVar: bedrock.SessionTokenEnv, FromEnv: true}
+				sv := schemas.SecretVar{Val: envOr(bedrock.SessionTokenEnv)}
+				bcfg.SessionToken = &sv
 			}
 		case "profile":
 			applyAWSProfile(bedrock.ProfileName)
@@ -316,7 +317,7 @@ func newTenantAccount(
 			// "api_key" or unspecified — key.Value already carries the bearer token.
 		}
 		if bedrock.Region != "" {
-			bcfg.Region = &schemas.EnvVar{Val: bedrock.Region}
+			bcfg.Region = &schemas.SecretVar{Val: bedrock.Region}
 		}
 		key.BedrockKeyConfig = bcfg
 		if len(bedrock.DeploymentAliases) > 0 {
@@ -330,16 +331,12 @@ func newTenantAccount(
 	//     Bifrost falls through to the default credential chain.
 	if providerKey == schemas.Vertex && vertex != nil {
 		vcfg := &schemas.VertexKeyConfig{
-			ProjectID: schemas.EnvVar{Val: vertex.ProjectID},
-			Region:    schemas.EnvVar{Val: vertex.Region},
+			ProjectID: schemas.SecretVar{Val: vertex.ProjectID},
+			Region:    schemas.SecretVar{Val: vertex.Region},
 		}
 		mode := strings.ToLower(strings.TrimSpace(vertex.AuthMode))
 		if mode == "service_account" && vertex.ServiceAccountJSONEnv != "" {
-			vcfg.AuthCredentials = schemas.EnvVar{
-				Val:     envOr(vertex.ServiceAccountJSONEnv),
-				EnvVar:  vertex.ServiceAccountJSONEnv,
-				FromEnv: true,
-			}
+			vcfg.AuthCredentials = schemas.SecretVar{Val: envOr(vertex.ServiceAccountJSONEnv)}
 		}
 		key.VertexKeyConfig = vcfg
 	}
@@ -350,7 +347,7 @@ func newTenantAccount(
 	//                         nil so the default-credential chain runs.
 	if providerKey == schemas.Azure && azure != nil {
 		acfg := &schemas.AzureKeyConfig{
-			Endpoint: schemas.EnvVar{Val: azure.Endpoint},
+			Endpoint: schemas.SecretVar{Val: azure.Endpoint},
 		}
 		key.AzureKeyConfig = acfg
 		key.Aliases = azureAliasesToBifrost(model, azure)
@@ -366,7 +363,7 @@ func newTenantAccount(
 		nc.InsecureSkipVerify = true
 	}
 	if tls.CACertPEM != "" {
-		nc.CACertPEM = &schemas.EnvVar{Val: tls.CACertPEM}
+		nc.CACertPEM = &schemas.SecretVar{Val: tls.CACertPEM}
 	}
 	if len(extraHeaders) > 0 {
 		nc.ExtraHeaders = extraHeaders
