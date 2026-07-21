@@ -700,6 +700,54 @@ func refreshHuggingFaceProvenanceHashes(signals []AISignal) {
 	}
 }
 
+// preserveHuggingFaceComparisonHashes carries the last authoritative Hub hash
+// through scans that did not obtain an authoritative Hub result. This includes
+// offline and non-full scans (no outcomes), page-deferred or otherwise
+// unattempted lookups, transient failures, and models that were not eligible
+// for an outbound lookup. A found result -- including an explicit merge with
+// no singular root -- and a definitive not-found result are authoritative, so
+// their freshly computed (or intentionally empty) hash must win.
+//
+// Only the internal comparison hash is carried. The prior Hub-derived model
+// payload and freshness timestamp are deliberately not restored here, and a
+// local evidence change always invalidates the old comparison baseline.
+func preserveHuggingFaceComparisonHashes(
+	signals []AISignal,
+	previous map[string]aiStoredSignal,
+	outcomes []huggingFaceLookupOutcome,
+) {
+	for index := range signals {
+		current := &signals[index]
+		if current.Model == nil {
+			continue
+		}
+		if index < len(outcomes) {
+			switch outcomes[index] {
+			case huggingFaceLookupFound, huggingFaceLookupNotFound:
+				continue
+			}
+		}
+		old, ok := previous[current.Fingerprint]
+		if !ok {
+			continue
+		}
+		storedEvidenceHash := old.EvidenceHash
+		if storedEvidenceHash == "" {
+			storedEvidenceHash = old.StoredEvidenceHash
+		}
+		if storedEvidenceHash == "" || storedEvidenceHash != current.EvidenceHash {
+			continue
+		}
+		storedHubHash := old.ModelProvenanceHubHash
+		if storedHubHash == "" {
+			storedHubHash = old.StoredModelProvenanceHubHash
+		}
+		if storedHubHash != "" {
+			current.ModelProvenanceHubHash = storedHubHash
+		}
+	}
+}
+
 func signalHasHuggingFaceProvenance(signal AISignal) bool {
 	if signal.Model == nil || signal.Model.Provenance == nil || signal.ModelProvenanceHubResolvedAt.IsZero() {
 		return false

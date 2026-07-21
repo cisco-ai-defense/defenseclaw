@@ -610,8 +610,12 @@ func TestHubProvenanceRevisionTriggersChangedLifecycle(t *testing.T) {
 		Fingerprint: "model", EvidenceHash: "same-local-evidence", ModelProvenanceHubHash: "new-hub",
 		Detector: "model_file", Model: &LocalModelInfo{ID: "owner/model", Status: "installed"},
 	}
+	signals := []AISignal{signal}
+	preserveHuggingFaceComparisonHashes(
+		signals, previous.Signals, []huggingFaceLookupOutcome{huggingFaceLookupFound},
+	)
 	report := service.classifyAndPersist(
-		"scan", "sidecar", time.Now(), []AISignal{signal}, scanStats{}, previous, true,
+		"scan", "sidecar", time.Now(), signals, scanStats{}, previous, true,
 	)
 	if len(report.Signals) != 1 || report.Signals[0].State != AIStateChanged || report.Summary.ChangedSignals != 1 {
 		t.Fatalf("Hub metadata revision was not classified changed: %+v", report)
@@ -644,15 +648,16 @@ func TestDisabledHubProvenancePreservesOnlyComparisonHashForUnchangedModel(t *te
 	currentOfflineProvenance := &LocalModelProvenance{
 		RootModel: "owner/current-offline-root", Source: "model_config", Confidence: "medium",
 	}
-	signal := AISignal{
+	signals := []AISignal{{
 		Fingerprint: "model", EvidenceHash: "same-local-evidence", Detector: "model_file",
 		Model: &LocalModelInfo{
 			ID: "owner/model", Status: "installed", Provenance: currentOfflineProvenance,
 		},
-	}
+	}}
+	preserveHuggingFaceComparisonHashes(signals, previous.Signals, nil)
 
 	report := service.classifyAndPersist(
-		"scan", "sidecar", time.Now(), []AISignal{signal}, scanStats{}, previous, true,
+		"scan", "sidecar", time.Now(), signals, scanStats{}, previous, true,
 	)
 	if len(report.Signals) != 1 || report.Signals[0].State != AIStateSeen || report.Summary.ChangedSignals != 0 {
 		t.Fatalf("disabled Hub lookup changed an unchanged model: %+v", report)
@@ -684,6 +689,117 @@ func TestDisabledHubProvenancePreservesOnlyComparisonHashForUnchangedModel(t *te
 	}
 }
 
+func TestReenabledHubProvenancePreservesComparisonHashWithoutAuthoritativeLookup(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		outcomes []huggingFaceLookupOutcome
+		full     bool
+	}{
+		{name: "transient failure", outcomes: []huggingFaceLookupOutcome{huggingFaceLookupTransientFailure}, full: true},
+		{name: "outside rotating page", outcomes: []huggingFaceLookupOutcome{huggingFaceLookupUnattempted}, full: true},
+		{name: "not eligible", outcomes: []huggingFaceLookupOutcome{huggingFaceLookupNotEligible}, full: true},
+		{name: "non-full scan has no refresh", full: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			previous := aiStateFile{Signals: map[string]aiStoredSignal{"model": {
+				AISignal: AISignal{
+					Fingerprint: "model", FirstSeen: time.Now().Add(-time.Hour),
+					Model: &LocalModelInfo{
+						ID: "owner/model", Status: "installed",
+						Provenance: &LocalModelProvenance{
+							RootModel: "owner/current-offline-root", Source: "model_config", Confidence: "medium",
+						},
+					},
+				},
+				// A prior disabled scan retained only these comparison baselines.
+				StoredEvidenceHash:           "same-local-evidence",
+				StoredModelProvenanceHubHash: "old-hub-hash",
+			}}}
+			signals := []AISignal{{
+				Fingerprint: "model", EvidenceHash: "same-local-evidence", Detector: "model_file",
+				Model: &LocalModelInfo{
+					ID: "owner/model", Status: "installed",
+					Provenance: &LocalModelProvenance{
+						RootModel: "owner/current-offline-root", Source: "model_config", Confidence: "medium",
+					},
+				},
+			}}
+			refreshHuggingFaceProvenanceHashes(signals)
+			preserveHuggingFaceComparisonHashes(signals, previous.Signals, tc.outcomes)
+
+			if signals[0].ModelProvenanceHubHash != "old-hub-hash" {
+				t.Fatalf("comparison hash = %q, want prior authoritative baseline", signals[0].ModelProvenanceHubHash)
+			}
+			if !signals[0].ModelProvenanceHubResolvedAt.IsZero() ||
+				signals[0].Model == nil || signals[0].Model.Provenance == nil ||
+				signals[0].Model.Provenance.Source != "model_config" {
+				t.Fatalf("hash retention restored stale Hub payload or freshness: %+v", signals[0])
+			}
+
+			service := &ContinuousDiscoveryService{
+				opts:               AIDiscoveryOptions{Mode: "balanced", MaxFilesPerScan: 1},
+				store:              NewAIStateStore(""),
+				modelProvenanceHub: &huggingFaceProvenanceResolver{},
+			}
+			report := service.classifyAndPersist(
+				"scan", "sidecar", time.Now(), signals, scanStats{}, previous, tc.full,
+			)
+			if len(report.Signals) != 1 || report.Signals[0].State != AIStateSeen ||
+				report.Summary.ChangedSignals != 0 {
+				t.Fatalf("non-authoritative lookup changed an unchanged model: %+v", report)
+			}
+		})
+	}
+}
+
+func TestAuthoritativeHubMissOrEmptyMergeDoesNotPreserveComparisonHash(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		outcome huggingFaceLookupOutcome
+	}{
+		{name: "definitive miss", outcome: huggingFaceLookupNotFound},
+		{name: "found merge with no usable root", outcome: huggingFaceLookupFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			previous := aiStateFile{Signals: map[string]aiStoredSignal{"model": {
+				AISignal: AISignal{
+					Fingerprint: "model", FirstSeen: time.Now().Add(-time.Hour),
+					Model: &LocalModelInfo{ID: "owner/model", Status: "installed"},
+				},
+				StoredEvidenceHash:           "same-local-evidence",
+				StoredModelProvenanceHubHash: "old-hub-hash",
+			}}}
+			signals := []AISignal{{
+				Fingerprint: "model", EvidenceHash: "same-local-evidence", Detector: "model_file",
+				Model: &LocalModelInfo{ID: "owner/model", Status: "installed"},
+			}}
+			preserveHuggingFaceComparisonHashes(
+				signals, previous.Signals, []huggingFaceLookupOutcome{tc.outcome},
+			)
+			if signals[0].ModelProvenanceHubHash != "" {
+				t.Fatalf("authoritative outcome retained stale comparison hash %q", signals[0].ModelProvenanceHubHash)
+			}
+
+			service := &ContinuousDiscoveryService{
+				opts:               AIDiscoveryOptions{Mode: "balanced", MaxFilesPerScan: 1},
+				store:              NewAIStateStore(""),
+				modelProvenanceHub: &huggingFaceProvenanceResolver{},
+			}
+			report := service.classifyAndPersist(
+				"scan", "sidecar", time.Now(), signals, scanStats{}, previous, true,
+			)
+			if len(report.Signals) != 1 || report.Signals[0].State != AIStateChanged ||
+				report.Summary.ChangedSignals != 1 {
+				t.Fatalf("authoritative Hub removal was not classified changed: %+v", report)
+			}
+		})
+	}
+}
+
 func TestDisabledHubProvenanceDoesNotMaskChangedLocalEvidence(t *testing.T) {
 	t.Parallel()
 	store := NewAIStateStore(t.TempDir() + "/state.json")
@@ -708,15 +824,16 @@ func TestDisabledHubProvenanceDoesNotMaskChangedLocalEvidence(t *testing.T) {
 	currentOfflineProvenance := &LocalModelProvenance{
 		RootModel: "owner/current-offline-root", Source: "model_config", Confidence: "medium",
 	}
-	signal := AISignal{
+	signals := []AISignal{{
 		Fingerprint: "model", EvidenceHash: "new-local-evidence", Detector: "model_file",
 		Model: &LocalModelInfo{
 			ID: "owner/model", Status: "installed", Provenance: currentOfflineProvenance,
 		},
-	}
+	}}
+	preserveHuggingFaceComparisonHashes(signals, previous.Signals, nil)
 
 	report := service.classifyAndPersist(
-		"scan", "sidecar", time.Now(), []AISignal{signal}, scanStats{}, previous, true,
+		"scan", "sidecar", time.Now(), signals, scanStats{}, previous, true,
 	)
 	if len(report.Signals) != 1 || report.Signals[0].State != AIStateChanged || report.Summary.ChangedSignals != 1 {
 		t.Fatalf("changed local evidence was not classified changed: %+v", report)

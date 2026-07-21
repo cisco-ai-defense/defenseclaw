@@ -878,19 +878,22 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 		full,
 		priorModelAPIFingerprints(prev.Signals),
 	)
+	var hubOutcomes []huggingFaceLookupOutcome
 	if full && s.modelProvenanceHub != nil {
 		started := time.Now()
 		pageStart := s.modelProvenanceHubCursor.Load()
-		outcomes, attempted := enrichModelSignalsFromHuggingFace(
+		var attempted int
+		hubOutcomes, attempted = enrichModelSignalsFromHuggingFace(
 			ctx, s.modelProvenanceHub, signals, pageStart,
 		)
 		if attempted > 0 {
 			s.modelProvenanceHubCursor.Add(uint64(attempted))
 		}
-		preserveHuggingFaceProvenance(signals, prev.Signals, outcomes, time.Now().UTC())
+		preserveHuggingFaceProvenance(signals, prev.Signals, hubOutcomes, time.Now().UTC())
 		refreshHuggingFaceProvenanceHashes(signals)
 		stats.DetectorDurations["model_provenance_huggingface"] = int(time.Since(started).Milliseconds())
 	}
+	preserveHuggingFaceComparisonHashes(signals, prev.Signals, hubOutcomes)
 	if err := ctx.Err(); err != nil {
 		// A canceled refresh/client request is not a complete inventory
 		// observation. The deferred v8 abort terminates the scan trace; do not
@@ -1200,17 +1203,6 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 			storedHubHash := old.ModelProvenanceHubHash
 			if storedHubHash == "" {
 				storedHubHash = old.StoredModelProvenanceHubHash
-			}
-			// Disabling optional Hub lookups must not turn the absence of a
-			// freshly computed Hub hash into a provenance change. When the
-			// model's local evidence is identical, carry only the prior internal
-			// comparison hash. Do not restore the old Hub-derived Model payload or
-			// freshness marker: the public signal must continue to reflect the
-			// current offline detector result while network enrichment is disabled.
-			if s.modelProvenanceHub == nil && sig.Model != nil &&
-				sig.ModelProvenanceHubHash == "" && storedHubHash != "" &&
-				storedHash != "" && storedHash == sig.EvidenceHash {
-				sig.ModelProvenanceHubHash = storedHubHash
 			}
 			// v1 → v2 grace: if the stored hash is empty (v1 migration
 			// or first scan), treat as `seen` to avoid a flood of
