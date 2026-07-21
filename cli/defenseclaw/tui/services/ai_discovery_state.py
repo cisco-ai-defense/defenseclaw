@@ -819,7 +819,13 @@ class AIDiscoveryPanelModel:
         model_groups: dict[str, _MutableAIDiscoveryRow] = {}
         model_order: list[str] = []
         for signal in self.snapshot.signals:
-            if signal.model is not None and signal.model.id:
+            # Model metadata can accompany other product signals. Only the
+            # dedicated local-model category belongs in the separate table.
+            if (
+                signal.category == "local_model"
+                and signal.model is not None
+                and signal.model.id
+            ):
                 model_key = signal.model.id.casefold()
                 model_row = model_groups.get(model_key)
                 if model_row is None:

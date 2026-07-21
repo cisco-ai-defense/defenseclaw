@@ -224,7 +224,7 @@ def test_ai_discovery_groups_and_details_local_models() -> None:
                     signal_id="loaded",
                     detector="model_runtime",
                     model=AIUsageModel(
-                        id="Qwen3-0.6B-GGUF",
+                        id="qWEN3-0.6b-gguf",
                         status="loaded",
                         format="gguf",
                         provider="lemonade",
@@ -282,6 +282,38 @@ def test_ai_discovery_groups_and_details_local_models() -> None:
     assert "status=loaded" in detail
     assert "recipe=llamacpp" in detail
     assert "runtime: pid=4321" in detail
+
+
+def test_non_local_signal_with_model_metadata_stays_in_product_table() -> None:
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(
+                    signal_id="desktop-model",
+                    state="seen",
+                    category="desktop_app",
+                    product="Acme Model Studio",
+                    vendor="Acme",
+                    detector="application",
+                    model=AIUsageModel(
+                        id="acme/embedded-model",
+                        status="available",
+                        format="safetensors",
+                    ),
+                ),
+            ),
+        )
+    )
+
+    assert panel.model_rows == ()
+    assert len(panel.rows) == 1
+    row = panel.rows[0]
+    assert row.product == "Acme Model Studio"
+    assert row.categories == ("desktop_app",)
+    assert row.model_statuses == ("available",)
+    assert row.model_formats == ("safetensors",)
 
 
 def test_ai_usage_model_metadata_is_safely_coerced() -> None:

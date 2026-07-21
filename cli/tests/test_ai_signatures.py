@@ -43,6 +43,9 @@ def test_ai_signature_catalog_contains_supported_and_shadow_agents():
         "lmstudio",
         "lemonade",
         "claude-desktop",
+        "perplexity-comet",
+        "zed",
+        "zia-search",
     }:
         assert expected in ids
 
@@ -83,13 +86,16 @@ def test_lemonade_signature_tracks_server_surface():
     assert "local_model" in ALLOWED_CATEGORIES
 
 
-def test_packaged_catalog_matches_go_catalog():
+def test_packaged_catalog_is_byte_identical_to_go_authority():
     repo = Path(__file__).resolve().parents[2]
-    go_catalog = json.loads((repo / "internal" / "inventory" / "ai_signatures.json").read_text(encoding="utf-8"))
+    go_catalog_path = repo / "internal" / "inventory" / "ai_signatures.json"
     py_catalog_path = repo / "cli" / "defenseclaw" / "inventory" / "ai_signatures.json"
-    py_catalog = json.loads(py_catalog_path.read_text(encoding="utf-8"))
 
-    assert py_catalog == go_catalog
+    assert py_catalog_path.read_bytes() == go_catalog_path.read_bytes()
+
+    go_catalog = json.loads(go_catalog_path.read_text(encoding="utf-8"))
+    ids = {entry["id"] for entry in go_catalog["signatures"]}
+    assert {"perplexity-comet", "zed", "zia-search"} <= ids
 
 
 def test_antigravity_signature_tracks_mcp_and_customization_paths():

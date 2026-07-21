@@ -391,7 +391,7 @@ type aiStoredSignal struct {
 	StoredEvidenceHash                 string       `json:"evidence_hash,omitempty"`
 	StoredEvidence                     []AIEvidence `json:"evidence,omitempty"`
 	StoredModelAPISourceHash           string       `json:"model_api_source_hash,omitempty"`
-	StoredModelProvenanceHubResolvedAt time.Time    `json:"model_provenance_hub_resolved_at,omitempty"`
+	StoredModelProvenanceHubResolvedAt *time.Time   `json:"model_provenance_hub_resolved_at,omitempty"`
 	StoredModelProvenanceHubHash       string       `json:"model_provenance_hub_hash,omitempty"`
 	// ModelAPIMisses provides one-scan hysteresis for model inventory read
 	// failures. A valid empty provider response is still conclusive and marks
@@ -3198,8 +3198,13 @@ func (s *AIStateStore) Load() (aiStateFile, error) {
 		if stored.AISignal.ModelAPISourceHash == "" && stored.StoredModelAPISourceHash != "" {
 			stored.AISignal.ModelAPISourceHash = stored.StoredModelAPISourceHash
 		}
-		if stored.AISignal.ModelProvenanceHubResolvedAt.IsZero() && !stored.StoredModelProvenanceHubResolvedAt.IsZero() {
-			stored.AISignal.ModelProvenanceHubResolvedAt = stored.StoredModelProvenanceHubResolvedAt
+		if stored.StoredModelProvenanceHubResolvedAt != nil && stored.StoredModelProvenanceHubResolvedAt.IsZero() {
+			// Older builds serialized time.Time's zero value despite omitempty.
+			// Normalize it to nil so the next save can omit the absent marker.
+			stored.StoredModelProvenanceHubResolvedAt = nil
+		}
+		if stored.AISignal.ModelProvenanceHubResolvedAt.IsZero() && stored.StoredModelProvenanceHubResolvedAt != nil {
+			stored.AISignal.ModelProvenanceHubResolvedAt = *stored.StoredModelProvenanceHubResolvedAt
 		}
 		if stored.AISignal.ModelProvenanceHubHash == "" && stored.StoredModelProvenanceHubHash != "" {
 			stored.AISignal.ModelProvenanceHubHash = stored.StoredModelProvenanceHubHash
@@ -3231,8 +3236,12 @@ func (s *AIStateStore) Save(state aiStateFile) error {
 		if stored.StoredModelAPISourceHash == "" && stored.AISignal.ModelAPISourceHash != "" {
 			stored.StoredModelAPISourceHash = stored.AISignal.ModelAPISourceHash
 		}
-		if stored.StoredModelProvenanceHubResolvedAt.IsZero() && !stored.AISignal.ModelProvenanceHubResolvedAt.IsZero() {
-			stored.StoredModelProvenanceHubResolvedAt = stored.AISignal.ModelProvenanceHubResolvedAt
+		if stored.StoredModelProvenanceHubResolvedAt != nil && stored.StoredModelProvenanceHubResolvedAt.IsZero() {
+			stored.StoredModelProvenanceHubResolvedAt = nil
+		}
+		if stored.StoredModelProvenanceHubResolvedAt == nil && !stored.AISignal.ModelProvenanceHubResolvedAt.IsZero() {
+			resolvedAt := stored.AISignal.ModelProvenanceHubResolvedAt
+			stored.StoredModelProvenanceHubResolvedAt = &resolvedAt
 		}
 		if stored.StoredModelProvenanceHubHash == "" && stored.AISignal.ModelProvenanceHubHash != "" {
 			stored.StoredModelProvenanceHubHash = stored.AISignal.ModelProvenanceHubHash

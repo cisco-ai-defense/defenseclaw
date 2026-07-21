@@ -106,6 +106,55 @@ func TestGatewayEventSchemasEmbeddedExactly(t *testing.T) {
 	}
 }
 
+func TestGatewayEventEnvelopeInternalCopyMatchesCanonical(t *testing.T) {
+	t.Parallel()
+	canonical, err := os.ReadFile("gateway-event-envelope.json")
+	if err != nil {
+		t.Fatalf("read canonical gateway envelope: %v", err)
+	}
+	internal, err := os.ReadFile("../internal/gatewaylog/schemas/gateway-event-envelope.json")
+	if err != nil {
+		t.Fatalf("read internal gateway envelope: %v", err)
+	}
+	if !bytes.Equal(internal, canonical) {
+		t.Fatal("internal gateway envelope differs from canonical schema bytes")
+	}
+}
+
+func TestGatewayEventEnvelopeDocumentsModelProvenanceAuthority(t *testing.T) {
+	t.Parallel()
+	var root map[string]any
+	if err := json.Unmarshal(GatewayEventEnvelopeSchema(), &root); err != nil {
+		t.Fatalf("decode gateway envelope schema: %v", err)
+	}
+	definitions := schemaMap(t, root, "$defs")
+	discovery := schemaMap(t, definitions, "AIDiscoveryPayload")
+	discoveryProperties := schemaMap(t, discovery, "properties")
+	model := schemaMap(t, discoveryProperties, "model")
+	modelProperties := schemaMap(t, model, "properties")
+	provenance := schemaMap(t, modelProperties, "provenance")
+	provenanceProperties := schemaMap(t, provenance, "properties")
+
+	for _, name := range []string{"quantized", "distilled"} {
+		description, _ := schemaMap(t, provenanceProperties, name)["description"].(string)
+		if !strings.Contains(description, "Authoritative when non-null") ||
+			!strings.Contains(description, "null means unknown") {
+			t.Errorf("%s authority/null contract is not explicit: %q", name, description)
+		}
+	}
+	derivationDescription, _ := schemaMap(t, provenanceProperties, "derivation")["description"].(string)
+	for _, phrase := range []string{
+		"Normalized summary of the authoritative flags",
+		"distilled+quantized means both are true",
+		"null means neither flag is true",
+		"must not infer false from null",
+	} {
+		if !strings.Contains(derivationDescription, phrase) {
+			t.Errorf("derivation contract is missing %q: %q", phrase, derivationDescription)
+		}
+	}
+}
+
 func TestTelemetryV8GeneratedArtifactsEmbeddedExactly(t *testing.T) {
 	t.Parallel()
 	for _, fixture := range []struct {

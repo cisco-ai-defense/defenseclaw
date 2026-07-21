@@ -2329,6 +2329,7 @@ func TestAIStateStorePersistsInternalModelProvenanceLifecycle(t *testing.T) {
 	}
 	if !got.ModelProvenanceHubResolvedAt.Equal(resolvedAt) ||
 		got.ModelProvenanceHubHash != wantHash ||
+		got.StoredModelProvenanceHubResolvedAt == nil ||
 		!got.StoredModelProvenanceHubResolvedAt.Equal(resolvedAt) ||
 		got.StoredModelProvenanceHubHash != wantHash {
 		t.Fatalf("Hub lifecycle fields did not round trip: %+v", got)
@@ -2342,5 +2343,51 @@ func TestAIStateStorePersistsInternalModelProvenanceLifecycle(t *testing.T) {
 		strings.Contains(publicText, "model_provenance_hub_hash") ||
 		strings.Contains(publicText, wantHash) {
 		t.Fatalf("public signal leaked internal Hub lifecycle fields: %s", publicJSON)
+	}
+}
+
+func TestAIStoredSignalModelProvenanceHubResolvedAtJSON(t *testing.T) {
+	t.Parallel()
+	resolvedAt := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	zero := time.Time{}
+
+	for _, tc := range []struct {
+		name       string
+		resolvedAt *time.Time
+		want       string
+	}{
+		{name: "absent"},
+		{name: "legacy zero", resolvedAt: &zero},
+		{name: "populated", resolvedAt: &resolvedAt, want: `"2026-07-20T12:00:00Z"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "ai-discovery-state.json")
+			store := NewAIStateStore(path)
+			if err := store.Save(aiStateFile{Signals: map[string]aiStoredSignal{
+				"model": {StoredModelProvenanceHubResolvedAt: tc.resolvedAt},
+			}}); err != nil {
+				t.Fatalf("save state: %v", err)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read state: %v", err)
+			}
+			var state struct {
+				Signals map[string]map[string]json.RawMessage `json:"signals"`
+			}
+			if err := json.Unmarshal(raw, &state); err != nil {
+				t.Fatalf("decode state: %v", err)
+			}
+			got, present := state.Signals["model"]["model_provenance_hub_resolved_at"]
+			if tc.want == "" {
+				if present {
+					t.Fatalf("absent Hub timestamp serialized as %s", got)
+				}
+				return
+			}
+			if !present || string(got) != tc.want {
+				t.Fatalf("Hub timestamp JSON = %s (present %t), want %s", got, present, tc.want)
+			}
+		})
 	}
 }

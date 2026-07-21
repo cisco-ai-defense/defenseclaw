@@ -670,8 +670,8 @@ func preserveHuggingFaceProvenance(
 		}
 		old, ok := previous[current.Fingerprint]
 		resolvedAt := old.ModelProvenanceHubResolvedAt
-		if resolvedAt.IsZero() {
-			resolvedAt = old.StoredModelProvenanceHubResolvedAt
+		if resolvedAt.IsZero() && old.StoredModelProvenanceHubResolvedAt != nil {
+			resolvedAt = *old.StoredModelProvenanceHubResolvedAt
 		}
 		if !ok || old.Model == nil || old.Model.Provenance == nil ||
 			current.EvidenceHash != old.EvidenceHash ||

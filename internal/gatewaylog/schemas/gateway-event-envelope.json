@@ -289,10 +289,10 @@
                 "country_code": { "type": ["string", "null"], "pattern": "^[A-Z]{2}$" },
                 "root_model":   { "type": ["string", "null"], "maxLength": 512 },
                 "base_models":  { "type": ["array", "null"], "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "maxItems": 8, "uniqueItems": true },
-                "quantized":    { "type": ["boolean", "null"] },
+                "quantized":    { "type": ["boolean", "null"], "description": "Authoritative when non-null: true means the artifact is quantized, false means it is positively identified as not quantized, and null means unknown." },
                 "quantization": { "type": ["string", "null"], "maxLength": 64 },
-                "distilled":    { "type": ["boolean", "null"] },
-                "derivation":   { "type": ["string", "null"], "enum": ["distilled", "quantized", "distilled+quantized", null] },
+                "distilled":    { "type": ["boolean", "null"], "description": "Authoritative when non-null: true means the artifact is distilled, false means it is positively identified as not distilled, and null means unknown." },
+                "derivation":   { "type": ["string", "null"], "enum": ["distilled", "quantized", "distilled+quantized", null], "description": "Normalized summary of the authoritative flags: distilled means distilled=true and quantized is not true; quantized means quantized=true and distilled is not true; distilled+quantized means both are true. null means neither flag is true (each may be false or unknown/null), and consumers must not infer false from null." },
                 "source":       { "type": ["string", "null"], "maxLength": 64 },
                 "confidence":   { "type": ["string", "null"], "enum": ["high", "medium", "low", null] }
               }
