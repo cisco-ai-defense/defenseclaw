@@ -557,12 +557,6 @@ def test_installer_v8_wheel_gate_fails_closed(
         files.append(canonical[0])
     elif mutation == "unexpected":
         files.append(("defenseclaw/_data/config/v8/unexpected.json", b"{}\n"))
-    elif mutation == "backslash-alias":
-        target, _ = canonical[1]
-        files = [
-            (name.replace("/", "\\") if name == target else name, data)
-            for name, data in files
-        ]
     elif mutation == "absolute-alias":
         target, payload = canonical[1]
         files.append((f"/{target}", payload))
@@ -627,6 +621,8 @@ def test_installer_v8_wheel_gate_fails_closed(
     if mutation != "malformed":
         _write_zip_entries(wheel, files)
         if mutation == "backslash-alias":
+            # ZipFile treats backslashes differently by host OS, so patch the
+            # canonical local-header and central-directory names directly.
             canonical_name = canonical[1][0].encode("ascii")
             alias_name = canonical[1][0].replace("/", "\\").encode("ascii")
             archive_bytes = wheel.read_bytes()
