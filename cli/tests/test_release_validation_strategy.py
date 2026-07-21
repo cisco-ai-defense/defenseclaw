@@ -72,10 +72,13 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
 
     sensitive = set(json.loads(POLICY_PATH.read_text())["release_sensitive_paths"])
     assert {
+        ".gitattributes",
         ".goreleaser.yaml",
+        "MANIFEST.in",
         "go.mod",
         "go.sum",
         "pyproject.toml",
+        "setup.py",
         "uv.lock",
         "cli/defenseclaw/__init__.py",
         "cli/defenseclaw/migration_state.py",
@@ -96,9 +99,12 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
         "scripts/check_observability_v8_upgrade_continuity.py",
         "scripts/test-developer-target-activation.sh",
         "scripts/test-fresh-install-release.sh",
+        "scripts/build-windows-installer.ps1",
+        "scripts/windows-native-ci.ps1",
         "scripts/build-macos-app-release.sh",
         ".github/workflows/macos-app.yml",
         "scripts/export-uv-overrides.py",
+        "scripts/telemetry_runtime_assets.py",
     }.issubset(sensitive)
 
 

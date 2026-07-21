@@ -1473,6 +1473,71 @@ print(f'validated {len(projects)} unique managed distributions')
     Invoke-Installed $Python @('-I', '-c', $code, $VenvRoot) -Timeout 120 | Out-Null
 }
 
+function Assert-PackagedV8ResourceContract([string]$Python, [string]$RuntimeRoot) {
+    $code = @'
+import json
+import pathlib
+import sys
+from importlib import resources
+
+runtime_root = pathlib.Path(sys.argv[1]).resolve()
+site_packages = (runtime_root / 'Lib' / 'site-packages').resolve()
+package_root = pathlib.Path(str(resources.files('defenseclaw'))).resolve()
+try:
+    package_root.relative_to(site_packages)
+except ValueError as exc:
+    raise SystemExit(f'DefenseClaw resources resolved outside packaged site-packages: {package_root}') from exc
+if (runtime_root / 'Lib' / 'schemas').exists():
+    raise SystemExit('packaged runtime unexpectedly contains a Lib/schemas fallback tree')
+
+expected_v8 = {
+    '_data/config/v8': {
+        'defenseclaw-config.schema.json', 'observability.yaml', 'observability.md',
+    },
+    '_data/telemetry/v8': {
+        'telemetry.schema.json', 'catalog.json', 'v7-exporter-selection.json',
+        'galileo-rich-v2.json', 'local-observability-v1.json', 'openinference-v1.json',
+    },
+}
+for relative, expected_names in expected_v8.items():
+    directory = package_root.joinpath(relative)
+    actual_names = {entry.name for entry in directory.iterdir() if entry.is_file()}
+    if actual_names != expected_names:
+        raise SystemExit(
+            f'packaged DefenseClaw v8 resource inventory mismatch in {relative}: '
+            f'actual={sorted(actual_names)!r} expected={sorted(expected_names)!r}'
+        )
+
+from defenseclaw.observability.v8_config import _schema_validator
+from defenseclaw.observability.schema_resources import (
+    telemetry_v8_catalog_bytes,
+    telemetry_v8_compatibility_profile_bytes,
+    telemetry_v8_schema_bytes,
+    v7_exporter_selection_bytes,
+)
+
+_schema_validator()
+for reference in ('observability.yaml', 'observability.md'):
+    if not package_root.joinpath('_data/config/v8', reference).read_bytes():
+        raise SystemExit(f'packaged DefenseClaw v8 reference is empty: {reference}')
+telemetry_payloads = {
+    'telemetry.schema.json': telemetry_v8_schema_bytes(),
+    'catalog.json': telemetry_v8_catalog_bytes(),
+    'v7-exporter-selection.json': v7_exporter_selection_bytes(),
+    'galileo-rich-v2.json': telemetry_v8_compatibility_profile_bytes('galileo-rich-v2'),
+    'local-observability-v1.json': telemetry_v8_compatibility_profile_bytes('local-observability-v1'),
+    'openinference-v1.json': telemetry_v8_compatibility_profile_bytes('openinference-v1'),
+}
+for name, payload in telemetry_payloads.items():
+    try:
+        json.loads(payload)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f'packaged DefenseClaw v8 resource is not valid JSON: {name}') from exc
+print('validated nine package-local DefenseClaw v8 resources without a Lib/schemas fallback')
+'@
+    Invoke-Installed $Python @('-I', '-c', $code, $RuntimeRoot) -Timeout 120 | Out-Null
+}
+
 function Add-DamagedManagedEnvironmentFixture([object]$Profile) {
     $venvRoot = Split-Path -Parent $Profile.VenvScripts
     $sitePackages = Join-Path $venvRoot 'Lib\site-packages'
@@ -3104,6 +3169,7 @@ function Invoke-SetupAcceptance {
         Invoke-Installed (Join-Path $installRoot 'bin\skill-scanner.exe') @('--help') -Timeout 120 | Out-Null
         Invoke-Installed (Join-Path $installRoot 'bin\mcp-scanner.exe') @('--help') -Timeout 120 | Out-Null
         Assert-ManagedDistributionIntegrity $python (Join-Path $installRoot 'runtime\python')
+        Assert-PackagedV8ResourceContract $python (Join-Path $installRoot 'runtime\python')
         Invoke-HeadlessTui $python
 
         Invoke-Installed $launcher @(
@@ -4014,6 +4080,7 @@ function Invoke-WindowsReleaseCertification {
         $launcher = Join-Path $bin 'defenseclaw.exe'
         $gateway = Join-Path $bin 'defenseclaw-gateway.exe'
         $hook = Join-Path $bin 'defenseclaw-hook.exe'
+        $python = Join-Path $installRoot 'runtime\python\python.exe'
         foreach ($product in @($launcher, $gateway, $hook)) {
             if (-not (Test-Path -LiteralPath $product -PathType Leaf)) {
                 throw "exact signed Setup did not install required product executable: $product"
@@ -4035,6 +4102,7 @@ function Invoke-WindowsReleaseCertification {
             }
         }
         Assert-WindowsReleasePersistentPath $launcher $logs
+        Assert-PackagedV8ResourceContract $python (Join-Path $installRoot 'runtime\python')
         $env:PATH = "$bin;$(@($toolBins) -join ';');$($originalEnvironment['PATH'])"
 
         foreach ($connectorName in @('codex', 'claudecode')) {
@@ -4057,6 +4125,7 @@ function Invoke-WindowsReleaseCertification {
         Invoke-WindowsNativeProcess $setup @(
             '/upgrade', '/quiet', '/norestart', 'INSTALLSCOPE=user'
         ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'release-setup-upgrade.log') | Out-Null
+        Assert-PackagedV8ResourceContract $python (Join-Path $installRoot 'runtime\python')
         Assert-WindowsReleaseDoctorRows $launcher $logs
 
         # Uninstall must tear down both active connectors itself. A pre-teardown

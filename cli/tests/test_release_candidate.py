@@ -35,6 +35,17 @@ TEST_CERTIFICATE_PEM = (
 TEST_CERTIFICATE_WRAPPER = base64.b64encode(TEST_CERTIFICATE_PEM)
 HARD_CUT_VERSION = "0.8.5"
 WINDOWS_SETUP_VERSION = "0.8.6"
+EXPECTED_V8_WHEEL_RESOURCES = {
+    "defenseclaw/_data/config/v8/defenseclaw-config.schema.json",
+    "defenseclaw/_data/config/v8/observability.yaml",
+    "defenseclaw/_data/config/v8/observability.md",
+    "defenseclaw/_data/telemetry/v8/telemetry.schema.json",
+    "defenseclaw/_data/telemetry/v8/catalog.json",
+    "defenseclaw/_data/telemetry/v8/v7-exporter-selection.json",
+    "defenseclaw/_data/telemetry/v8/galileo-rich-v2.json",
+    "defenseclaw/_data/telemetry/v8/local-observability-v1.json",
+    "defenseclaw/_data/telemetry/v8/openinference-v1.json",
+}
 HARD_CUT_IDENTITY = {
     "schema_version": 1,
     "source_release": HARD_CUT_VERSION,
@@ -2677,8 +2688,8 @@ def test_bridge_candidate_rejects_post_bridge_migration(tmp_path: Path) -> None:
         release_candidate.verify_runtime(runtime, VERSION)
 
 
-def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> None:
-    version = "0.8.5"
+def _non_bridge_candidate_wheel(tmp_path: Path) -> Path:
+    version = HARD_CUT_VERSION
     wheel = tmp_path / f"defenseclaw-{version}-py3-none-any.whl"
     with zipfile.ZipFile(wheel, mode="w") as archive:
         archive.writestr(
@@ -2723,6 +2734,10 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
             f"defenseclaw-{version}.dist-info/METADATA",
             f"Metadata-Version: 2.4\nName: defenseclaw\nVersion: {version}\n",
         )
+        canonical_resources = release_candidate._canonical_v8_wheel_resources()
+        assert set(canonical_resources) == EXPECTED_V8_WHEEL_RESOURCES
+        for member_name, payload in canonical_resources.items():
+            archive.writestr(member_name, payload)
     (tmp_path / "upgrade-manifest.json").write_text(
         json.dumps(
             {
@@ -2742,7 +2757,13 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
         encoding="utf-8",
     )
 
-    release_candidate._validate_wheel(wheel, version)
+    return wheel
+
+
+def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> None:
+    wheel = _non_bridge_candidate_wheel(tmp_path)
+
+    release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
 
     members = _read_wheel_members(wheel)
     members["defenseclaw/commands/cmd_upgrade.py"] = members[
@@ -2753,7 +2774,63 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
     )
     _write_wheel_members(wheel, members)
     with pytest.raises(release_candidate.CandidateError, match="target-controller handoff contract"):
-        release_candidate._validate_wheel(wheel, version)
+        release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing", "resource inventory is invalid.*missing="),
+        ("unexpected", "resource inventory is invalid.*unexpected="),
+        ("altered", "runtime resource is altered"),
+    ],
+)
+def test_non_bridge_candidate_rejects_incomplete_or_altered_v8_resources(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    wheel = _non_bridge_candidate_wheel(tmp_path)
+    members = _read_wheel_members(wheel)
+    config_schema = "defenseclaw/_data/config/v8/defenseclaw-config.schema.json"
+    if mutation == "missing":
+        members.pop(config_schema)
+    elif mutation == "unexpected":
+        members["defenseclaw/_data/config/v8/unexpected.json"] = b"{}\n"
+    else:
+        original = members[config_schema]
+        members[config_schema] = b"[" + original[1:]
+    _write_wheel_members(wheel, members)
+
+    with pytest.raises(release_candidate.CandidateError, match=message):
+        release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
+
+
+def test_non_bridge_candidate_rejects_duplicate_v8_resource(tmp_path: Path) -> None:
+    wheel = _non_bridge_candidate_wheel(tmp_path)
+    member_name = "defenseclaw/_data/telemetry/v8/catalog.json"
+    payload = _read_wheel_members(wheel)[member_name]
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with zipfile.ZipFile(wheel, mode="a") as archive:
+            archive.writestr(member_name, payload)
+
+    with pytest.raises(release_candidate.CandidateError, match="duplicate member names"):
+        release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
+
+
+def test_non_bridge_candidate_rejects_malformed_canonical_telemetry_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def malformed_asset(_root: Path, _logical_name: str) -> bytes:
+        raise release_candidate.RuntimeAssetError("malformed fixture")
+
+    monkeypatch.setattr(release_candidate, "read_logical_asset", malformed_asset)
+
+    with pytest.raises(
+        release_candidate.CandidateError,
+        match="canonical v8 wheel resources are unavailable or malformed",
+    ):
+        release_candidate._canonical_v8_wheel_resources()
 
 
 @pytest.mark.parametrize(

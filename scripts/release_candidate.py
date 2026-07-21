@@ -54,6 +54,11 @@ try:
 except ModuleNotFoundError:  # Direct ``python scripts/release_candidate.py`` execution.
     from source_release_identity import SourceIdentityError, release_identity_for_version
 
+try:
+    from scripts.telemetry_runtime_assets import RuntimeAssetError, read_logical_asset
+except ModuleNotFoundError:  # Direct ``python scripts/release_candidate.py`` execution.
+    from telemetry_runtime_assets import RuntimeAssetError, read_logical_asset
+
 SCHEMA_VERSION = 2
 RUNTIME_ATTESTATION_FILENAME = "runtime-candidate-checksums.txt"
 RELEASE_SOURCE_MAP_FILENAME = "release-source-map.json"
@@ -71,6 +76,46 @@ PROTECTED_ARTIFACT_TRANSLATION = bytes(
 )
 MAX_PROTECTED_ARTIFACT_BYTES = MAX_GATEWAY_BINARY_BYTES + len(PROTECTED_ARTIFACT_MAGIC)
 ROOT = Path(__file__).resolve().parents[1]
+V8_CONFIG_WHEEL_RESOURCES = (
+    (
+        "defenseclaw/_data/config/v8/defenseclaw-config.schema.json",
+        "schemas/config/v8/defenseclaw-config.schema.json",
+    ),
+    (
+        "defenseclaw/_data/config/v8/observability.yaml",
+        "schemas/config/v8/reference/observability.yaml",
+    ),
+    (
+        "defenseclaw/_data/config/v8/observability.md",
+        "schemas/config/v8/reference/observability.md",
+    ),
+)
+V8_TELEMETRY_WHEEL_RESOURCES = (
+    (
+        "defenseclaw/_data/telemetry/v8/telemetry.schema.json",
+        "schemas/telemetry/generated/telemetry.schema.json",
+    ),
+    (
+        "defenseclaw/_data/telemetry/v8/catalog.json",
+        "schemas/telemetry/generated/catalog.json",
+    ),
+    (
+        "defenseclaw/_data/telemetry/v8/v7-exporter-selection.json",
+        "schemas/telemetry/generated/compatibility/v7-exporter-selection.json",
+    ),
+    (
+        "defenseclaw/_data/telemetry/v8/galileo-rich-v2.json",
+        "schemas/telemetry/generated/compatibility/galileo-rich-v2.json",
+    ),
+    (
+        "defenseclaw/_data/telemetry/v8/local-observability-v1.json",
+        "schemas/telemetry/generated/compatibility/local-observability-v1.json",
+    ),
+    (
+        "defenseclaw/_data/telemetry/v8/openinference-v1.json",
+        "schemas/telemetry/generated/compatibility/openinference-v1.json",
+    ),
+)
 UPGRADE_BASELINES_PATH = Path(
     os.environ.get(
         "UPGRADE_BASELINE_POLICY",
@@ -2917,6 +2962,81 @@ def _validate_hard_cut_bundle_transaction(source: str) -> None:
         _validate_fixture_hard_cut_bundle_transaction(source)
 
 
+def _canonical_v8_wheel_resources() -> dict[str, bytes]:
+    """Load the exact reviewed v8 payloads required in 0.8.5+ wheels."""
+
+    resources: dict[str, bytes] = {}
+    try:
+        for member_name, source_name in V8_CONFIG_WHEEL_RESOURCES:
+            resources[member_name] = (ROOT / source_name).read_bytes()
+        for member_name, logical_name in V8_TELEMETRY_WHEEL_RESOURCES:
+            resources[member_name] = read_logical_asset(ROOT, logical_name)
+    except (OSError, RuntimeAssetError) as exc:
+        raise CandidateError("canonical v8 wheel resources are unavailable or malformed") from exc
+
+    for member_name, payload in resources.items():
+        if not payload:
+            raise CandidateError(f"canonical v8 wheel resource is empty: {member_name}")
+        if member_name.endswith(".json"):
+            try:
+                document = json.loads(payload)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise CandidateError(
+                    f"canonical v8 wheel resource is malformed JSON: {member_name}"
+                ) from exc
+            if not isinstance(document, dict):
+                raise CandidateError(
+                    f"canonical v8 wheel resource must be a JSON object: {member_name}"
+                )
+    return resources
+
+
+def _is_v8_package_data_member(member_name: str) -> bool:
+    parts = PurePosixPath(member_name).parts
+    return (
+        len(parts) > 2
+        and parts[:2] == ("defenseclaw", "_data")
+        and any(part == "v8" or part.startswith(("v8_", "v8.")) for part in parts[2:])
+    )
+
+
+def _validate_v8_wheel_resources(
+    archive: zipfile.ZipFile,
+    member_names: list[str],
+) -> None:
+    expected = _canonical_v8_wheel_resources()
+    observed = {name for name in member_names if _is_v8_package_data_member(name)}
+    missing = sorted(set(expected) - observed)
+    unexpected = sorted(observed - set(expected))
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append(f"missing={missing!r}")
+        if unexpected:
+            details.append(f"unexpected={unexpected!r}")
+        raise CandidateError(
+            "0.8.5+ candidate wheel v8 runtime resource inventory is invalid: "
+            + "; ".join(details)
+        )
+
+    for member_name, canonical_payload in expected.items():
+        info = archive.getinfo(member_name)
+        if info.file_size != len(canonical_payload):
+            raise CandidateError(
+                f"0.8.5+ candidate wheel v8 runtime resource is altered: {member_name}"
+            )
+        try:
+            candidate_payload = archive.read(member_name)
+        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+            raise CandidateError(
+                f"0.8.5+ candidate wheel v8 runtime resource is unreadable: {member_name}"
+            ) from exc
+        if candidate_payload != canonical_payload:
+            raise CandidateError(
+                f"0.8.5+ candidate wheel v8 runtime resource is altered: {member_name}"
+            )
+
+
 def _validate_wheel(path: Path, version: str) -> None:
     metadata_name = f"defenseclaw-{version}.dist-info/METADATA"
     try:
@@ -2954,6 +3074,7 @@ def _validate_wheel(path: Path, version: str) -> None:
                     "defenseclaw/install_publish.py"
                 )
             if tuple(map(int, version.split("."))) >= (0, 8, 5):
+                _validate_v8_wheel_resources(archive, member_names)
                 bundle_transaction_source = archive.read(
                     "defenseclaw/bundle_refresh.py"
                 ).decode("utf-8", errors="strict")

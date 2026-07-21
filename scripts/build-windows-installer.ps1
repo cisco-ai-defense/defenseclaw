@@ -255,6 +255,208 @@ function Get-FileHashHex([string]$Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Read-BoundedStreamBytes(
+    [IO.Stream]$Stream,
+    [long]$MaximumBytes,
+    [string]$Description
+) {
+    if ($MaximumBytes -lt 0) {
+        throw "Invalid byte limit for ${Description}: $MaximumBytes"
+    }
+    $buffer = [byte[]]::new(65536)
+    $output = [IO.MemoryStream]::new()
+    try {
+        while (($count = $Stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            if ($output.Length + $count -gt $MaximumBytes) {
+                throw "$Description exceeds its decoded size limit of $MaximumBytes bytes."
+            }
+            $output.Write($buffer, 0, $count)
+        }
+        return ,$output.ToArray()
+    } finally {
+        $output.Dispose()
+    }
+}
+
+function Read-CanonicalGzipBytes([string]$Path, [long]$MaximumBytes) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Missing canonical gzip resource: $Path"
+    }
+    $sourceLength = (Get-Item -LiteralPath $Path).Length
+    if ($sourceLength -lt 18 -or $sourceLength -gt $MaximumBytes) {
+        throw "Canonical gzip resource has an invalid encoded size: $Path"
+    }
+    [byte[]]$encoded = [IO.File]::ReadAllBytes($Path)
+    [byte[]]$header = @(0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff)
+    for ($index = 0; $index -lt $header.Length; $index++) {
+        if ($encoded[$index] -ne $header[$index]) {
+            throw "Canonical gzip resource has an invalid header: $Path"
+        }
+    }
+
+    $encodedStream = [IO.MemoryStream]::new($encoded, $false)
+    $gzip = [IO.Compression.GZipStream]::new(
+        $encodedStream,
+        [IO.Compression.CompressionMode]::Decompress,
+        $false
+    )
+    try {
+        try {
+            [byte[]]$decoded = Read-BoundedStreamBytes $gzip $MaximumBytes "Canonical gzip resource $Path"
+        } catch {
+            throw "Canonical gzip resource is malformed: ${Path}: $($_.Exception.Message)"
+        }
+    } finally {
+        $gzip.Dispose()
+        $encodedStream.Dispose()
+    }
+    $trailerSize = [BitConverter]::ToUInt32($encoded, $encoded.Length - 4)
+    if ($decoded.Length -ne $trailerSize) {
+        throw "Canonical gzip resource has an invalid size trailer: $Path"
+    }
+    return ,$decoded
+}
+
+function Assert-DefenseClawWheelV8Resources(
+    [string]$WheelPath,
+    [string]$RepositoryRoot
+) {
+    $contracts = @(
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/config/v8/defenseclaw-config.schema.json'
+            Source = 'schemas\config\v8\defenseclaw-config.schema.json'
+            Gzip = $false
+        },
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/config/v8/observability.yaml'
+            Source = 'schemas\config\v8\reference\observability.yaml'
+            Gzip = $false
+        },
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/config/v8/observability.md'
+            Source = 'schemas\config\v8\reference\observability.md'
+            Gzip = $false
+        },
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/telemetry/v8/telemetry.schema.json'
+            Source = 'schemas\telemetry\runtime\telemetry.schema.json.gz'
+            Gzip = $true
+        },
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/telemetry/v8/catalog.json'
+            Source = 'schemas\telemetry\runtime\catalog.json.gz'
+            Gzip = $true
+        },
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/telemetry/v8/v7-exporter-selection.json'
+            Source = 'schemas\telemetry\runtime\compatibility\v7-exporter-selection.json.gz'
+            Gzip = $true
+        },
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/telemetry/v8/galileo-rich-v2.json'
+            Source = 'schemas\telemetry\runtime\compatibility\galileo-rich-v2.json.gz'
+            Gzip = $true
+        },
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/telemetry/v8/local-observability-v1.json'
+            Source = 'schemas\telemetry\runtime\compatibility\local-observability-v1.json.gz'
+            Gzip = $true
+        },
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/telemetry/v8/openinference-v1.json'
+            Source = 'schemas\telemetry\runtime\compatibility\openinference-v1.json.gz'
+            Gzip = $true
+        }
+    )
+    $maximumResourceBytes = 16 * 1024 * 1024
+    $expectedNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($contract in $contracts) {
+        if (-not $expectedNames.Add([string]$contract.Member)) {
+            throw "Duplicate internal v8 resource contract: $($contract.Member)"
+        }
+    }
+
+    $archive = $null
+    try {
+        $archive = [IO.Compression.ZipFile]::OpenRead($WheelPath)
+    } catch {
+        throw "DefenseClaw wheel is not a readable ZIP archive: $($_.Exception.Message)"
+    }
+    try {
+        $entries = [Collections.Generic.Dictionary[string, IO.Compression.ZipArchiveEntry]]::new(
+            [StringComparer]::Ordinal
+        )
+        $unexpected = [Collections.Generic.List[string]]::new()
+        $prefixes = @(
+            'defenseclaw/_data/config/v8/',
+            'defenseclaw/_data/telemetry/v8/'
+        )
+        foreach ($entry in $archive.Entries) {
+            $name = $entry.FullName.Replace('\', '/')
+            if ($name.EndsWith('/', [StringComparison]::Ordinal)) { continue }
+            $isV8Resource = $false
+            foreach ($prefix in $prefixes) {
+                if ($name.StartsWith($prefix, [StringComparison]::Ordinal)) {
+                    $isV8Resource = $true
+                    break
+                }
+            }
+            if (-not $isV8Resource) { continue }
+            if (-not $expectedNames.Contains($name)) {
+                [void]$unexpected.Add($name)
+                continue
+            }
+            if ($entries.ContainsKey($name)) {
+                throw "DefenseClaw wheel contains a duplicate v8 resource: $name"
+            }
+            $entries.Add($name, $entry)
+        }
+        if ($unexpected.Count -gt 0) {
+            $names = @($unexpected | Sort-Object -Unique) -join ', '
+            throw "DefenseClaw wheel contains unexpected v8 resources: $names"
+        }
+        $missing = @($contracts | Where-Object { -not $entries.ContainsKey([string]$_.Member) } |
+            ForEach-Object { [string]$_.Member })
+        if ($missing.Count -gt 0) {
+            throw "DefenseClaw wheel is missing required v8 resources: $($missing -join ', ')"
+        }
+
+        foreach ($contract in $contracts) {
+            $source = Resolve-FullPath (Join-Path $RepositoryRoot ([string]$contract.Source))
+            if (-not (Test-PathWithin $source $RepositoryRoot)) {
+                throw "Canonical v8 resource escapes the repository root: $source"
+            }
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+                throw "Canonical v8 resource is missing: $source"
+            }
+            if ($contract.Gzip) {
+                [byte[]]$expected = Read-CanonicalGzipBytes $source $maximumResourceBytes
+            } else {
+                $sourceLength = (Get-Item -LiteralPath $source).Length
+                if ($sourceLength -gt $maximumResourceBytes) {
+                    throw "Canonical v8 resource exceeds its size limit: $source"
+                }
+                [byte[]]$expected = [IO.File]::ReadAllBytes($source)
+            }
+            $entry = $entries[[string]$contract.Member]
+            if ($entry.Length -ne $expected.Length) {
+                throw "DefenseClaw wheel v8 resource does not match its canonical source: $($contract.Member)"
+            }
+            $entryStream = $entry.Open()
+            try {
+                [byte[]]$actual = Read-BoundedStreamBytes $entryStream $expected.Length "Wheel resource $($contract.Member)"
+            } finally {
+                $entryStream.Dispose()
+            }
+            if (-not [Security.Cryptography.CryptographicOperations]::FixedTimeEquals($actual, $expected)) {
+                throw "DefenseClaw wheel v8 resource does not match its canonical source: $($contract.Member)"
+            }
+        }
+    } finally {
+        $archive.Dispose()
+    }
+}
+
 function Set-WindowsExecutableResource(
     [string]$Executable,
     [ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup')][string]$Component,
@@ -452,6 +654,7 @@ Copy-RequiredFile $wheel $wheel
 Copy-RequiredFile $upgradeManifest $upgradeManifest
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+Assert-DefenseClawWheelV8Resources $wheel $repoRoot
 $wheelArchive = [IO.Compression.ZipFile]::OpenRead($wheel)
 try {
     $metadataEntries = @($wheelArchive.Entries | Where-Object { $_.FullName -match '\.dist-info/METADATA$' })
@@ -623,10 +826,68 @@ foreach ($item in Get-ChildItem -LiteralPath $sitePackages -Force) {
 }
 $dependencyCheck = @'
 import importlib.metadata as metadata
+import json
+import pathlib
 import platform
+import sys
+from importlib import resources
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
+
+site_packages = pathlib.Path(sys.argv[1]).resolve()
+runtime_root = pathlib.Path(sys.argv[2]).resolve()
+package_root = pathlib.Path(str(resources.files('defenseclaw'))).resolve()
+try:
+    package_root.relative_to(site_packages)
+except ValueError as exc:
+    raise SystemExit(f'DefenseClaw resources resolved outside staged site-packages: {package_root}') from exc
+if (runtime_root / 'Lib' / 'schemas').exists():
+    raise SystemExit('staged runtime unexpectedly contains a Lib/schemas fallback tree')
+
+expected_v8 = {
+    '_data/config/v8': {
+        'defenseclaw-config.schema.json', 'observability.yaml', 'observability.md',
+    },
+    '_data/telemetry/v8': {
+        'telemetry.schema.json', 'catalog.json', 'v7-exporter-selection.json',
+        'galileo-rich-v2.json', 'local-observability-v1.json', 'openinference-v1.json',
+    },
+}
+for relative, expected_names in expected_v8.items():
+    directory = package_root.joinpath(relative)
+    actual_names = {entry.name for entry in directory.iterdir() if entry.is_file()}
+    if actual_names != expected_names:
+        raise SystemExit(
+            f'staged DefenseClaw v8 resource inventory mismatch in {relative}: '
+            f'actual={sorted(actual_names)!r} expected={sorted(expected_names)!r}'
+        )
+
+from defenseclaw.observability.v8_config import _schema_validator
+from defenseclaw.observability.schema_resources import (
+    telemetry_v8_catalog_bytes,
+    telemetry_v8_compatibility_profile_bytes,
+    telemetry_v8_schema_bytes,
+    v7_exporter_selection_bytes,
+)
+
+_schema_validator()
+for reference in ('observability.yaml', 'observability.md'):
+    if not package_root.joinpath('_data/config/v8', reference).read_bytes():
+        raise SystemExit(f'staged DefenseClaw v8 reference is empty: {reference}')
+telemetry_payloads = {
+    'telemetry.schema.json': telemetry_v8_schema_bytes(),
+    'catalog.json': telemetry_v8_catalog_bytes(),
+    'v7-exporter-selection.json': v7_exporter_selection_bytes(),
+    'galileo-rich-v2.json': telemetry_v8_compatibility_profile_bytes('galileo-rich-v2'),
+    'local-observability-v1.json': telemetry_v8_compatibility_profile_bytes('local-observability-v1'),
+    'openinference-v1.json': telemetry_v8_compatibility_profile_bytes('openinference-v1'),
+}
+for name, payload in telemetry_payloads.items():
+    try:
+        json.loads(payload)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f'staged DefenseClaw v8 resource is not valid JSON: {name}') from exc
 
 installed = {canonicalize_name(dist.metadata['Name']): dist.version for dist in metadata.distributions() if dist.metadata.get('Name')}
 problems = []
@@ -660,9 +921,9 @@ if not magika_result.ok or not magika_result.output.is_text:
 findings = asyncio.run(YaraAnalyzer().analyze('os.system("calc.exe")', {'tool_name': 'release-probe'}))
 if not findings or not any(finding.analyzer == 'YARA' for finding in findings):
     raise SystemExit('MCP Scanner YARA compatibility probe did not return the expected finding')
-print(f'validated {len(installed)} embedded distributions')
+print(f'validated nine DefenseClaw v8 resources and {len(installed)} embedded distributions')
 '@
-Invoke-CheckedProcess $validationPython @('-I', '-c', $dependencyCheck)
+Invoke-CheckedProcess $validationPython @('-I', '-c', $dependencyCheck, $validationSite, $validationRuntime)
 
 $siteZip = Join-Path $payload "site-packages.zip"
 Write-ZipFromDirectory $sitePackages $siteZip $validationPython $sourceDateEpoch $reproducibilityRoot
