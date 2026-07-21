@@ -95,6 +95,7 @@ var (
 	modelProvenanceBuiltinErr error
 	quantizationTokenPattern  = regexp.MustCompile(`(?i)(^|[^a-z0-9])(iq[1-4](?:_[a-z0-9]+)*|q[2-8](?:_[a-z0-9]+)*|[2-8](?:\.[0-9]+)?bpw|awq|gptq|exl[23]|nf4|int[48]|[48]bit|fp8|nvfp4|mxfp[48]|w4a16|w8a8)($|[^a-z0-9])`)
 	distillationTokenPattern  = regexp.MustCompile(`(?i)(^|[^a-z0-9])distill(?:ed|ation)?($|[^a-z0-9])`)
+	mergeTokenPattern         = regexp.MustCompile(`(?i)(^|[^a-z0-9])(frankenmerge|mergekit|merged|merge)($|[^a-z0-9])`)
 )
 
 func loadModelProvenanceCatalog() (modelProvenanceCatalog, error) {
@@ -195,39 +196,43 @@ func resolveLocalModelProvenance(model LocalModelInfo, hints modelProvenanceHint
 	references = append(references, model.ID)
 	references = uniqueBoundedModelReferences(references, maxModelBaseModels+4)
 	baseModels := uniqueBoundedModelReferences(hints.BaseModels, maxModelBaseModels)
+	ambiguousOrigin := len(baseModels) > 1 || referencesContainMergeMarker(references)
 
 	provenance := &LocalModelProvenance{}
 	confidence := ""
 	lineageMatched := false
-	for _, lineage := range catalog.Lineages {
-		if lineageMatches(lineage.Match, references) {
-			lineageMatched = true
-			provenance.Publisher = lineage.Publisher
-			provenance.CountryCode = lineage.CountryCode
-			provenance.RootModel = lineage.RootModel
-			provenance.BaseModels = append([]string(nil), lineage.BaseModels...)
-			if lineage.Distilled {
-				provenance.Distilled = modelBool(true)
+	if !ambiguousOrigin {
+		for _, lineage := range catalog.Lineages {
+			if lineageMatches(lineage.Match, references) {
+				lineageMatched = true
+				provenance.Publisher = lineage.Publisher
+				provenance.CountryCode = lineage.CountryCode
+				provenance.RootModel = lineage.RootModel
+				provenance.BaseModels = append([]string(nil), lineage.BaseModels...)
+				if lineage.Distilled {
+					provenance.Distilled = modelBool(true)
+				}
+				provenance.Source = "catalog_exact"
+				confidence = "high"
+				break
 			}
-			provenance.Source = "catalog_exact"
-			confidence = "high"
-			break
 		}
 	}
 
 	rootReference := model.ID
-	ambiguousBaseModels := len(baseModels) > 1 && !lineageMatched
-	if lineageMatched {
+	if ambiguousOrigin {
+		// Explicit multi-parent metadata or a merge-marked artifact is not a
+		// singular lineage claim. Preserve every known parent, but do not let an
+		// exact-name rule or one family token invent a publisher, country, or root.
+		provenance.BaseModels = append([]string(nil), baseModels...)
+		rootReference = ""
+	} else if lineageMatched {
 		// Reviewed exact lineages are authoritative. Local metadata still adds
 		// derivation/quantization evidence below, but cannot replace curated roots.
 		rootReference = provenance.RootModel
 	} else if len(baseModels) > 0 {
 		provenance.BaseModels = append([]string(nil), baseModels...)
-		if ambiguousBaseModels {
-			rootReference = ""
-		} else {
-			rootReference = baseModels[0]
-		}
+		rootReference = baseModels[0]
 	} else if hints.Source != "ollama_metadata" && len(hints.References) > 0 {
 		// GGUF source/base keys, a Lemonade checkpoint, or a model config can
 		// recover identity after the artifact itself was renamed. Ollama's
@@ -238,19 +243,24 @@ func resolveLocalModelProvenance(model LocalModelInfo, hints modelProvenanceHint
 		rootReference = references[0]
 	}
 
-	publisherBaseModels := baseModels
-	if lineageMatched {
-		publisherBaseModels = provenance.BaseModels
+	var matchedRule *modelPublisherRule
+	matchScore := 0
+	if !ambiguousOrigin {
+		publisherBaseModels := baseModels
+		if lineageMatched {
+			publisherBaseModels = provenance.BaseModels
+		}
+		matchedRule, matchScore = bestPublisherRule(
+			catalog.Publishers, references, hints.Organizations, hints.BaseOrganizations, publisherBaseModels,
+		)
 	}
-	matchedRule, matchScore := bestPublisherRule(
-		catalog.Publishers, references, hints.Organizations, hints.BaseOrganizations, publisherBaseModels,
-	)
-	if ambiguousBaseModels {
+	if ambiguousOrigin {
 		// A merge can have unrelated roots. Preserve every immediate parent but
 		// do not invent one publisher/country/root by selecting the first row.
-		matchedRule, matchScore = nil, 0
-		provenance.Source = boundedProvenanceField(hints.Source, maxModelProvenanceSourceBytes)
-		confidence = "medium"
+		if len(baseModels) > 0 {
+			provenance.Source = boundedProvenanceField(hints.Source, maxModelProvenanceSourceBytes)
+			confidence = "medium"
+		}
 	}
 	if matchedRule != nil {
 		if provenance.Publisher == "" {
@@ -675,6 +685,15 @@ func isUnquantizedEncoding(value string) bool {
 func referencesContainDistillation(references []string) bool {
 	for _, reference := range references {
 		if distillationTokenPattern.MatchString(reference) {
+			return true
+		}
+	}
+	return false
+}
+
+func referencesContainMergeMarker(references []string) bool {
+	for _, reference := range references {
+		if mergeTokenPattern.MatchString(reference) {
 			return true
 		}
 	}

@@ -492,6 +492,126 @@
       "base_models": ["01-ai/Yi-1.5-34B"],
       "distilled": false,
       "source_url": "https://huggingface.co/dphn/dolphin-2.9.1-yi-1.5-34b"
+    },
+    {
+      "id": "distilbert-base-uncased",
+      "match": "distilbert-base-uncased",
+      "publisher": "Google",
+      "country_code": "US",
+      "root_model": "google-bert/bert-base-uncased",
+      "base_models": ["google-bert/bert-base-uncased"],
+      "distilled": true,
+      "source_url": "https://huggingface.co/distilbert/distilbert-base-uncased"
+    },
+    {
+      "id": "distilgpt2",
+      "match": "distilgpt2",
+      "publisher": "OpenAI",
+      "country_code": "US",
+      "root_model": "openai-community/gpt2",
+      "base_models": ["openai-community/gpt2"],
+      "distilled": true,
+      "source_url": "https://huggingface.co/distilbert/distilgpt2"
+    },
+    {
+      "id": "distilroberta-base",
+      "match": "distilroberta-base",
+      "publisher": "Meta",
+      "country_code": "US",
+      "root_model": "FacebookAI/roberta-base",
+      "base_models": ["FacebookAI/roberta-base"],
+      "distilled": true,
+      "source_url": "https://huggingface.co/distilbert/distilroberta-base"
+    },
+    {
+      "id": "distil-large-v3",
+      "match": "distil-large-v3",
+      "publisher": "OpenAI",
+      "country_code": "US",
+      "root_model": "openai/whisper-large-v3",
+      "base_models": ["openai/whisper-large-v3"],
+      "distilled": true,
+      "source_url": "https://huggingface.co/distil-whisper/distil-large-v3"
+    },
+    {
+      "id": "nemotron-3-embed-1b",
+      "match": "nemotron-3-embed-1b",
+      "publisher": "Mistral AI",
+      "country_code": "FR",
+      "root_model": "mistralai/Ministral-3-3B-Instruct-2512",
+      "base_models": ["mistralai/Ministral-3-3B-Instruct-2512"],
+      "distilled": true,
+      "source_url": "https://huggingface.co/nvidia/Nemotron-3-Embed-1B-BF16"
+    },
+    {
+      "id": "bge-m3-unsupervised",
+      "match": "bge-m3-unsupervised",
+      "publisher": "Meta",
+      "country_code": "US",
+      "root_model": "FacebookAI/xlm-roberta-large",
+      "base_models": [
+        "BAAI/bge-m3-retromae",
+        "FacebookAI/xlm-roberta-large"
+      ],
+      "distilled": false,
+      "source_url": "https://huggingface.co/BAAI/bge-m3-unsupervised"
+    },
+    {
+      "id": "bge-m3-retromae",
+      "match": "bge-m3-retromae",
+      "publisher": "Meta",
+      "country_code": "US",
+      "root_model": "FacebookAI/xlm-roberta-large",
+      "base_models": ["FacebookAI/xlm-roberta-large"],
+      "distilled": false,
+      "source_url": "https://huggingface.co/BAAI/bge-m3-retromae"
+    },
+    {
+      "id": "bge-m3",
+      "match": "bge-m3",
+      "publisher": "Meta",
+      "country_code": "US",
+      "root_model": "FacebookAI/xlm-roberta-large",
+      "base_models": [
+        "BAAI/bge-m3-unsupervised",
+        "BAAI/bge-m3-retromae",
+        "FacebookAI/xlm-roberta-large"
+      ],
+      "distilled": true,
+      "source_url": "https://huggingface.co/BAAI/bge-m3"
+    },
+    {
+      "id": "all-minilm-l6-v2",
+      "match": "all-minilm-l6-v2",
+      "publisher": "Microsoft",
+      "country_code": "US",
+      "root_model": "microsoft/MiniLM-L12-H384-uncased",
+      "base_models": [
+        "nreimers/MiniLM-L6-H384-uncased",
+        "microsoft/MiniLM-L12-H384-uncased"
+      ],
+      "distilled": true,
+      "source_url": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2"
+    },
+    {
+      "id": "multilingual-e5-large",
+      "match": "multilingual-e5-large",
+      "publisher": "Meta",
+      "country_code": "US",
+      "root_model": "FacebookAI/xlm-roberta-large",
+      "base_models": ["FacebookAI/xlm-roberta-large"],
+      "distilled": false,
+      "source_url": "https://huggingface.co/intfloat/multilingual-e5-large"
+    },
+    {
+      "id": "all-mpnet-base-v2",
+      "match": "all-mpnet-base-v2",
+      "publisher": "Microsoft",
+      "country_code": "US",
+      "root_model": "microsoft/mpnet-base",
+      "base_models": ["microsoft/mpnet-base"],
+      "distilled": false,
+      "source_url": "https://huggingface.co/sentence-transformers/all-mpnet-base-v2"
     }
   ]
 }

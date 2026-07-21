@@ -19,7 +19,7 @@ func TestModelProvenanceCatalogLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadModelProvenanceCatalog: %v", err)
 	}
-	if len(catalog.Publishers) < 10 || len(catalog.Lineages) < 6 {
+	if len(catalog.Publishers) < 10 || len(catalog.Lineages) != 19 {
 		t.Fatalf("catalog unexpectedly small: publishers=%d lineages=%d", len(catalog.Publishers), len(catalog.Lineages))
 	}
 	byID := make(map[string]modelPublisherRule)
@@ -233,6 +233,152 @@ func TestLineageMatchesRequiresTokenBoundaries(t *testing.T) {
 			t.Errorf("lineageMatches accepted token lookalike %q", reference)
 		}
 	}
+}
+
+func TestReviewedCommonLineagesRejectAttachedTokenLookalikes(t *testing.T) {
+	tests := []struct {
+		match     string
+		valid     string
+		lookalike string
+	}{
+		{match: "distilbert-base-uncased", valid: "community/distilbert-base-uncased-GGUF", lookalike: "community/distilbert-base-uncasedness"},
+		{match: "distilgpt2", valid: "community/distilgpt2-GGUF", lookalike: "community/distilgpt20"},
+		{match: "distilroberta-base", valid: "community/distilroberta-base-GGUF", lookalike: "community/distilroberta-baseline"},
+		{match: "distil-large-v3", valid: "community/distil-large-v3-GGUF", lookalike: "community/distil-large-v30"},
+		{match: "nemotron-3-embed-1b", valid: "community/Nemotron-3-Embed-1B-NVFP4", lookalike: "community/Nemotron-3-Embed-1Billion"},
+		{match: "bge-m3", valid: "community/bge-m3-GGUF", lookalike: "community/bge-m30"},
+		{match: "all-minilm-l6-v2", valid: "community/all-MiniLM-L6-v2-ONNX", lookalike: "community/all-MiniLM-L6-v20"},
+		{match: "multilingual-e5-large", valid: "community/multilingual-e5-large-ONNX", lookalike: "community/multilingual-e5-larger"},
+		{match: "all-mpnet-base-v2", valid: "community/all-mpnet-base-v2-ONNX", lookalike: "community/all-mpnet-base-v20"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.match, func(t *testing.T) {
+			if !lineageMatches(tc.match, []string{tc.valid}) {
+				t.Errorf("lineageMatches rejected valid derivative %q", tc.valid)
+			}
+			if lineageMatches(tc.match, []string{tc.lookalike}) {
+				t.Errorf("lineageMatches accepted attached-token lookalike %q", tc.lookalike)
+			}
+		})
+	}
+}
+
+func TestReferencesContainMergeMarkerUsesTokenBoundaries(t *testing.T) {
+	for _, reference := range []string{
+		"community/Qwen-Llama-Merge",
+		"community/Qwen-Llama-Merged-GGUF",
+		"mergekit-community/Qwen-Llama",
+		"community/Qwen-Llama-FrankenMerge-v2",
+	} {
+		if !referencesContainMergeMarker([]string{reference}) {
+			t.Errorf("merge marker was not detected in %q", reference)
+		}
+	}
+	for _, reference := range []string{
+		"community/emergency-model",
+		"community/submerged-model",
+		"community/merger-model",
+		"community/frankenmerger-model",
+		"community/mergekitten-model",
+	} {
+		if referencesContainMergeMarker([]string{reference}) {
+			t.Errorf("attached-token lookalike was treated as a merge: %q", reference)
+		}
+	}
+}
+
+func TestResolveLocalModelProvenanceSuppressesSingularIdentityForMerges(t *testing.T) {
+	assertNoSingularIdentity := func(t *testing.T, got *LocalModelProvenance) {
+		t.Helper()
+		if got == nil {
+			t.Fatal("resolver returned nil")
+		}
+		if got.Publisher != "" || got.CountryCode != "" || got.RootModel != "" {
+			t.Fatalf("ambiguous merge received singular identity: %+v", got)
+		}
+	}
+	assertBaseModels := func(t *testing.T, got *LocalModelProvenance, want ...string) {
+		t.Helper()
+		if len(got.BaseModels) != len(want) {
+			t.Fatalf("base_models = %v, want %v", got.BaseModels, want)
+		}
+		for _, baseModel := range want {
+			found := false
+			for _, gotBaseModel := range got.BaseModels {
+				if strings.EqualFold(gotBaseModel, baseModel) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("base_models is missing %q: %v", baseModel, got.BaseModels)
+			}
+		}
+	}
+
+	t.Run("exact lineage with two explicit parents", func(t *testing.T) {
+		got := resolveLocalModelProvenance(
+			LocalModelInfo{ID: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"},
+			modelProvenanceHints{
+				BaseModels: []string{"Qwen/Qwen2.5-Math-7B", "meta-llama/Llama-3.1-8B"},
+				Source:     "gguf_metadata",
+			},
+		)
+		assertNoSingularIdentity(t, got)
+		assertBaseModels(t, got, "Qwen/Qwen2.5-Math-7B", "meta-llama/Llama-3.1-8B")
+		if got.Source != "gguf_metadata" || got.Confidence != "medium" {
+			t.Fatalf("explicit merge evidence source/confidence = %q/%q", got.Source, got.Confidence)
+		}
+	})
+
+	t.Run("merge-marked multi-family name without parents", func(t *testing.T) {
+		got := resolveLocalModelProvenance(
+			LocalModelInfo{ID: "community/Qwen3-Llama3-FrankenMerge"}, modelProvenanceHints{},
+		)
+		if got != nil {
+			t.Fatalf("identity-free merge marker produced provenance: %+v", got)
+		}
+	})
+
+	t.Run("merge-marked exact lineage without parents", func(t *testing.T) {
+		got := resolveLocalModelProvenance(
+			LocalModelInfo{ID: "community/DeepSeek-R1-Distill-Qwen-7B-MergeKit"}, modelProvenanceHints{},
+		)
+		assertNoSingularIdentity(t, got)
+		assertBaseModels(t, got)
+		if got.Source != "model_id" || got.Confidence != "low" || got.Distilled == nil || !*got.Distilled {
+			t.Fatalf("merge-marked exact lineage retained curated claims: %+v", got)
+		}
+	})
+
+	t.Run("merge-marked exact lineage with one parent", func(t *testing.T) {
+		got := resolveLocalModelProvenance(
+			LocalModelInfo{ID: "community/DeepSeek-R1-Distill-Qwen-7B-Merged"},
+			modelProvenanceHints{
+				BaseModels: []string{"meta-llama/Llama-3.1-8B"},
+				Source:     "gguf_metadata",
+			},
+		)
+		assertNoSingularIdentity(t, got)
+		assertBaseModels(t, got, "meta-llama/Llama-3.1-8B")
+		if got.Source != "gguf_metadata" || got.Confidence != "medium" {
+			t.Fatalf("single-parent merge evidence source/confidence = %q/%q", got.Source, got.Confidence)
+		}
+	})
+
+	t.Run("ordinary quantized exact lineage remains exact", func(t *testing.T) {
+		got := resolveLocalModelProvenance(
+			LocalModelInfo{ID: "community/DeepSeek-R1-Distill-Qwen-7B-GGUF-Q4_K_M.gguf"},
+			modelProvenanceHints{},
+		)
+		if got == nil || got.Publisher != "Alibaba Cloud" || got.CountryCode != "CN" ||
+			got.RootModel != "Qwen/Qwen2.5-Math-7B" || got.Source != "catalog_exact" ||
+			got.Confidence != "high" || got.Derivation != "distilled+quantized" ||
+			got.Quantization != "Q4_K_M" {
+			t.Fatalf("ordinary quantized derivative lost exact lineage: %+v", got)
+		}
+	})
 }
 
 func TestResolveLocalModelProvenanceKeepsCuratedLineageParents(t *testing.T) {
