@@ -37,7 +37,7 @@ Schema returned: a list of dicts, each with::
         "eligible": True/False,        # has SKILL.md / skill.json / README.md
         "disabled": False,             # filesystem walks always return False
         "source": "<directory path>", # where the skill lives
-        "bundled": False,              # filesystem walks always return False
+        "bundled": False,              # True for Codex .system child skills
         "path": "<full path>",        # absolute path to the skill dir
     }
 
@@ -53,6 +53,10 @@ import subprocess
 from typing import TYPE_CHECKING, Any
 
 from defenseclaw.safety import is_symlink
+from defenseclaw.skill_discovery import (
+    discover_skill_directories,
+    skill_dir_is_eligible,
+)
 
 if TYPE_CHECKING:
     from defenseclaw.config import Config
@@ -160,7 +164,9 @@ def _list_skills_from_filesystem(
     cfg: Config, connector: str | None = None
 ) -> list[dict[str, Any]]:
     """Walk every directory in ``cfg.skill_dirs()`` and return one
-    row per immediate subdirectory.
+    row per immediate subdirectory. Codex's reserved ``.system`` container is
+    expanded into its marked child skills instead of being reported as one
+    ineligible skill.
 
     Mirrors the rules used by
     :func:`defenseclaw.inventory.claw_inventory._enumerate_skills_filesystem`
@@ -174,16 +180,13 @@ def _list_skills_from_filesystem(
     for skill_dir in cfg.skill_dirs(connector):
         if not os.path.isdir(skill_dir):
             continue
-        try:
-            entries = os.listdir(skill_dir)
-        except OSError:
-            continue
-        for entry in sorted(entries):
+        for discovered in discover_skill_directories(
+            skill_dir, connector=connector or cfg.active_connector()
+        ):
+            entry = discovered.name
             if _is_openhands_installed_container(skill_dir, entry):
                 continue
-            full = os.path.join(skill_dir, entry)
-            if not os.path.isdir(full):
-                continue
+            full = discovered.path
             if entry in seen:
                 continue
             seen.add(entry)
@@ -192,8 +195,8 @@ def _list_skills_from_filesystem(
                 "description": _read_skill_description(full),
                 "eligible": _skill_dir_is_eligible(full),
                 "disabled": False,
-                "source": skill_dir,
-                "bundled": False,
+                "source": discovered.source,
+                "bundled": discovered.bundled,
                 "baseDir": full,
                 "path": full,
             }
@@ -210,10 +213,7 @@ def _is_openhands_installed_container(skill_dir: str, entry: str) -> bool:
 
 
 def _skill_dir_is_eligible(path: str) -> bool:
-    for marker in ("SKILL.md", "skill.json", "README.md"):
-        if os.path.isfile(os.path.join(path, marker)):
-            return True
-    return False
+    return skill_dir_is_eligible(path)
 
 
 def _read_skill_description(path: str) -> str:

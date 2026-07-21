@@ -172,6 +172,22 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			return
 		}
 		req.CWD = sanitizeHookCWD(req.CWD)
+		// tokenAuth wraps this handler in APIServer.Run, so reaching this point
+		// proves the connector hook route authenticated the request. A fresh
+		// SessionStart is the last authoritative recovery signal before a
+		// Codex session proceeds; synchronously upsert a missing managed runtime
+		// registration through the Sidecar-owned guard. No other connector/event
+		// may mutate registration from hook input.
+		if connectorName == "codex" && req.HookEventName == "SessionStart" {
+			if err := a.ensureHookRegistration(r.Context(), connectorName); err != nil {
+				fmt.Fprintf(os.Stderr, "[gateway] Codex SessionStart registration recovery failed: %v\n", err)
+				a.recordConnectorHookRejection(r.Context(), connectorName, req.HookEventName, "registration_recovery", int64(len(b)))
+				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+					"error": "Codex runtime registration is unavailable",
+				})
+				return
+			}
+		}
 		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(r.Context(), profile, req, b)
 		if correlationErr != nil {
 			// Correlation persistence is fail-closed for export, not for policy
@@ -474,7 +490,7 @@ func (a *APIServer) hookDecisionMeta(
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
 	meta = a.reconcileHookParent(meta)
 	meta = a.mergeHookSessionLifecycle(meta)
-	if snapshot, ok := a.hookLifecycleSnapshot(meta.Source, meta.SessionID, meta.AgentID); ok {
+	if snapshot, ok := a.hookPhaseSnapshot(meta); ok {
 		// The lifecycle emitter advanced the execution cursor immediately
 		// before evaluation. Reuse its phase/sequence/operation identifiers
 		// so the decision nests beside that hook transition rather than
@@ -1629,7 +1645,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	rawActionBeforeAssets := rawAction
 	profile := a.hookProfileForConnector(req.ConnectorName)
 	caps := profile.Capabilities
-	action, wouldBlock := mapHookActionForProfile(rawAction, mode, req.HookEventName, caps, profile)
+	action, wouldBlock := mapHookActionForProfile(rawAction, mode, req.HookEventName, caps, profile, req.Payload)
 	severity := verdict.Severity
 	reason := verdict.Reason
 	findings := verdict.Findings
@@ -1647,7 +1663,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			action, rawAction, severity, reason, findings,
 		)
 		if mergedAction == "block" {
-			capable, capableWouldBlock := mapHookActionForProfile("block", mode, req.HookEventName, caps, profile)
+			capable, capableWouldBlock := mapHookActionForProfile("block", mode, req.HookEventName, caps, profile, req.Payload)
 			if capable != "block" {
 				mergedAction = capable
 				if capableWouldBlock {
@@ -1912,16 +1928,17 @@ func currentWorkingDir() string {
 }
 
 func mapHookAction(rawAction, mode, event string, caps connector.HookCapability) (string, bool) {
-	return mapHookActionForProfile(rawAction, mode, event, caps, connector.HookProfile{})
+	return mapHookActionForProfile(rawAction, mode, event, caps, connector.HookProfile{}, nil)
 }
 
-func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookCapability, profile connector.HookProfile) (string, bool) {
+func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookCapability, profile connector.HookProfile, payload map[string]interface{}) (string, bool) {
 	if profile.MapVerdict != nil {
 		out := profile.MapVerdict(connector.HookVerdictInput{
 			RawAction: rawAction,
 			Event:     event,
 			Mode:      mode,
 			Caps:      caps,
+			Payload:   payload,
 		})
 		return out.Action, out.WouldBlock
 	}

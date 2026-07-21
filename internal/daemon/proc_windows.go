@@ -19,13 +19,34 @@
 package daemon
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"syscall"
+	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+func processExecutableWindows(pid int) (string, error) {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return "", err
+	}
+	defer windows.CloseHandle(h)
+	buffer := make([]uint16, 32768)
+	size := uint32(len(buffer))
+	if err := windows.QueryFullProcessImageName(h, 0, &buffer[0], &size); err != nil {
+		return "", err
+	}
+	if size == 0 {
+		return "", fmt.Errorf("empty executable path for pid %d", pid)
+	}
+	return windows.UTF16ToString(buffer[:size]), nil
+}
 
 func setSysProcAttr(cmd *exec.Cmd) {
 	// Detach the gateway so it outlives the launching process and console.
@@ -34,10 +55,40 @@ func setSysProcAttr(cmd *exec.Cmd) {
 	// it becomes addressable by GenerateConsoleCtrlEvent for graceful stop.
 	// DETACHED_PROCESS drops the inherited console so a closing terminal
 	// cannot deliver CTRL_CLOSE and take the gateway down with it.
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
-	}
+	// CREATE_BREAKAWAY_FROM_JOB is intentionally limited to this managed
+	// daemon launch. It lets the PID-file-owned gateway survive a successful
+	// TUI command whose enclosing Job Object is closed, while ordinary TUI
+	// descendants remain in that kill-on-close job.
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: daemonCreationFlags()}
 }
+
+func daemonCreationFlags() uint32 {
+	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	err := windows.QueryInformationJobObject(
+		0,
+		windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(info)),
+		nil,
+	)
+	return daemonCreationFlagsForJob(err, info.BasicLimitInformation.LimitFlags)
+}
+
+func daemonCreationFlagsForJob(queryErr error, limitFlags uint32) uint32 {
+	flags := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS)
+	// CREATE_BREAKAWAY_FROM_JOB fails with ERROR_ACCESS_DENIED when the
+	// enclosing job does not opt into explicit breakaway. This is common in
+	// CI runners and other process supervisors. A process outside a job may
+	// request the flag harmlessly; a job that permits it preserves the
+	// long-lived gateway behavior. SILENT_BREAKAWAY needs no creation flag.
+	if errors.Is(queryErr, windows.ERROR_INVALID_HANDLE) ||
+		(queryErr == nil && limitFlags&windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK != 0) {
+		flags |= windows.CREATE_BREAKAWAY_FROM_JOB
+	}
+	return flags
+}
+
+func daemonChildRegistersPID() bool { return true }
 
 func sendTermSignal(proc *os.Process) error {
 	// The managed gateway is always launched with DETACHED_PROCESS (see
@@ -82,6 +133,28 @@ func processExists(pid int) bool {
 		return true
 	}
 	return code == stillActive
+}
+
+func waitForProcessExit(proc *os.Process, _ int, timeout time.Duration) bool {
+	millis := timeout.Milliseconds()
+	if millis < 0 {
+		millis = 0
+	} else if timeout > 0 && millis == 0 {
+		millis = 1
+	}
+	const maxFiniteWaitMillis = int64(^uint32(0) - 1)
+	if millis > maxFiniteWaitMillis {
+		millis = maxFiniteWaitMillis
+	}
+
+	var result uint32
+	var waitErr error
+	if err := proc.WithHandle(func(handle uintptr) {
+		result, waitErr = windows.WaitForSingleObject(windows.Handle(handle), uint32(millis))
+	}); err != nil {
+		return false
+	}
+	return waitErr == nil && result == windows.WAIT_OBJECT_0
 }
 
 // processStartIdentity returns an opaque string that uniquely identifies a

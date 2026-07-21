@@ -25,9 +25,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
+
+pytestmark = pytest.mark.supported_connector_host
 from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.config import PerConnectorGuardrailConfig
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
@@ -111,9 +115,21 @@ class TestInitFirstRunBackend(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-first-run-")
         self.runner = CliRunner()
+        self.selection_patcher = patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections",
+            return_value=({}, {}),
+        )
+        self.selection_mock = self.selection_patcher.start()
+        self.addCleanup(self.selection_patcher.stop)
+        self._had_llm_key = "DEFENSECLAW_LLM_KEY" in os.environ
+        self._llm_key = os.environ.get("DEFENSECLAW_LLM_KEY", "")
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
+        if self._had_llm_key:
+            os.environ["DEFENSECLAW_LLM_KEY"] = self._llm_key
+        else:
+            os.environ.pop("DEFENSECLAW_LLM_KEY", None)
 
     def _invoke(self, args):
         return self.runner.invoke(
@@ -171,22 +187,84 @@ class TestInitFirstRunBackend(unittest.TestCase):
             "regex_judge",
         )
 
+    def test_explicit_connector_requires_protected_executable_selection(self):
+        self.selection_mock.return_value = ({}, {"codex": "untrusted executable"})
+
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "codex",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--json-summary",
+            ])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("freshly verified selected agent executable", result.output)
+        self.assertIn("untrusted executable", result.output)
+
+    def test_non_windows_codex_init_does_not_require_windows_policy_receipt(self):
+        self.selection_mock.return_value = ({}, {"codex": "must not be consulted"})
+
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="linux"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "codex",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.selection_mock.assert_not_called()
+
+    def test_windows_claude_init_does_not_require_unused_codex_policy_receipt(self):
+        self.selection_mock.return_value = ({}, {"claudecode": "must not be consulted"})
+
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "claudecode",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.selection_mock.assert_not_called()
+
     def test_sandbox_flag_reports_explicit_scope(self):
-        result = self._invoke([
-            "--non-interactive",
-            "--yes",
-            "--connector",
-            "openclaw",
-            "--profile",
-            "observe",
-            "--scanner-mode",
-            "local",
-            "--skip-install",
-            "--sandbox",
-            "--no-start-gateway",
-            "--no-verify",
-            "--json-summary",
-        ])
+        with patch("defenseclaw.platform_support.host_os", return_value="linux"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "openclaw",
+                "--profile",
+                "observe",
+                "--scanner-mode",
+                "local",
+                "--skip-install",
+                "--sandbox",
+                "--no-start-gateway",
+                "--no-verify",
+                "--json-summary",
+            ])
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
 
         summary = json.loads(result.output)
@@ -1094,17 +1172,17 @@ class TestValidateGatewayToken(unittest.TestCase):
 
 
 class TestResolveSplunkBridgeBundle(unittest.TestCase):
-    def test_prefers_packaged_bundle_data(self):
+    def test_prefers_maintained_bundle_in_source_checkout(self):
         from defenseclaw.commands.cmd_init import _resolve_splunk_bridge_bundle
 
         def fake_is_dir(path):
-            path_str = str(path)
+            path_str = str(path).replace("\\", "/")
             return path_str.endswith("_data/splunk_local_bridge") or path_str.endswith("bundles/splunk_local_bridge")
 
         with patch("pathlib.Path.is_dir", autospec=True, side_effect=fake_is_dir):
             result = _resolve_splunk_bridge_bundle()
 
-        self.assertTrue(str(result).endswith("_data/splunk_local_bridge"))
+        self.assertTrue(str(result).replace("\\", "/").endswith("bundles/splunk_local_bridge"))
 
 
 class TestInitSeedsSplunkBridge(unittest.TestCase):
@@ -1628,6 +1706,7 @@ class TestIsSidecarRunning(unittest.TestCase):
         self.assertEqual(_read_pid(pid_file), os.getpid())
 
 
+@unittest.skipIf(os.name == "nt", "OpenShell sandbox ownership integration is Linux-only")
 class TestDetectOpenclawHome(unittest.TestCase):
     """Tests for _detect_openclaw_home helper."""
 
@@ -1713,7 +1792,44 @@ class TestSaveOwnershipBackup(unittest.TestCase):
         expected = os.path.join(self.data_dir, OPENCLAW_OWNERSHIP_BACKUP)
         self.assertEqual(backup_path, expected)
 
+    def test_backup_parent_walk_does_not_process_filesystem_root(self):
+        from defenseclaw.commands import cmd_init_sandbox
 
+        real_stat = os.stat
+        stat_paths = []
+
+        def recording_stat(path, *args, **kwargs):
+            stat_paths.append(os.path.normcase(os.path.realpath(path)))
+            return real_stat(path, *args, **kwargs)
+
+        with patch.object(cmd_init_sandbox.os, "stat", side_effect=recording_stat):
+            cmd_init_sandbox._save_ownership_backup(self.oc_home, self.data_dir)
+
+        filesystem_root = os.path.normcase(os.path.abspath(os.sep))
+        self.assertNotIn(filesystem_root, stat_paths)
+
+    @unittest.skipIf(os.name == "nt", "sandbox traversal permissions are POSIX-only")
+    def test_traversal_parent_walk_does_not_process_filesystem_root(self):
+        from defenseclaw.commands import cmd_init_sandbox
+
+        real_stat = os.stat
+        stat_paths = []
+
+        def recording_stat(path, *args, **kwargs):
+            stat_paths.append(os.path.normcase(os.path.realpath(path)))
+            return real_stat(path, *args, **kwargs)
+
+        with (
+            patch.object(cmd_init_sandbox.os, "stat", side_effect=recording_stat),
+            patch.object(cmd_init_sandbox.subprocess, "run", return_value=MagicMock(returncode=0)),
+        ):
+            cmd_init_sandbox._ensure_parent_traversal(os.path.join(self.oc_home, "target"))
+
+        filesystem_root = os.path.normcase(os.path.abspath(os.sep))
+        self.assertNotIn(filesystem_root, stat_paths)
+
+
+@unittest.skipIf(os.name == "nt", "OpenShell sandbox ownership integration is Linux-only")
 class TestIntegrateOpenclawHomeIdempotent(unittest.TestCase):
     """Tests for _integrate_openclaw_home idempotency."""
 
@@ -1773,6 +1889,7 @@ class TestIntegrateOpenclawHomeIdempotent(unittest.TestCase):
             self.assertFalse(result)
 
 
+@unittest.skipIf(os.name == "nt", "OpenShell sandbox ownership integration is Linux-only")
 class TestRestoreOpenclawOwnership(unittest.TestCase):
     """Tests for _restore_openclaw_ownership in cmd_setup."""
 
@@ -1837,6 +1954,12 @@ class TestInitFailModeFlag(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-failmode-")
         self.runner = CliRunner()
+        self.selection_patcher = patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections",
+            return_value=({}, {}),
+        )
+        self.selection_patcher.start()
+        self.addCleanup(self.selection_patcher.stop)
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
@@ -1963,6 +2086,12 @@ class TestInitHITLFlags(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-hilt-")
         self.runner = CliRunner()
+        self.selection_patcher = patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections",
+            return_value=({}, {}),
+        )
+        self.selection_patcher.start()
+        self.addCleanup(self.selection_patcher.stop)
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
@@ -2447,7 +2576,7 @@ class TestMultiConnectorInit(unittest.TestCase):
 
         keys = iter([" ", "j", " ", "\r"])
         with patch.object(cmd_init.click, "getchar", side_effect=lambda: next(keys)), \
-                patch.object(cmd_init, "_stdout_is_tty", return_value=False):
+                patch.object(cmd_init, "_supports_terminal_redraw", return_value=True):
             got = cmd_init._prompt_checkbox_selection(
                 ["codex", "claudecode"],
                 default_selected=["codex"],
@@ -2455,6 +2584,90 @@ class TestMultiConnectorInit(unittest.TestCase):
                 empty_ok=False,
             )
         self.assertEqual(got, ["claudecode"])
+
+    def test_checkbox_key_names_cover_windows_ansi_and_vi_navigation(self):
+        from defenseclaw.commands import cmd_init
+
+        cases = {
+            "\x1b[A": "up",
+            "\x1b[B": "down",
+            "\x00H": "up",
+            "\xe0H": "up",
+            "\x00P": "down",
+            "\xe0P": "down",
+            "k": "up",
+            "j": "down",
+        }
+        for key, expected in cases.items():
+            with self.subTest(key=list(map(ord, key))):
+                self.assertEqual(cmd_init._checkbox_key_name(key), expected)
+
+    def test_checkbox_selector_accepts_windows_extended_arrow(self):
+        from defenseclaw.commands import cmd_init
+
+        keys = iter(["\xe0P", " ", "\r"])
+        with patch.object(cmd_init.click, "getchar", side_effect=lambda: next(keys)), \
+                patch.object(cmd_init, "_supports_terminal_redraw", return_value=True):
+            got = cmd_init._prompt_checkbox_selection(
+                ["codex", "claudecode"],
+                default_selected=["codex"],
+                title="Select connectors",
+                empty_ok=False,
+            )
+        self.assertEqual(got, ["codex", "claudecode"])
+
+    def test_checkbox_no_vt_stays_key_driven_without_reprinting_menu(self):
+        from defenseclaw.commands import cmd_init
+
+        emitted: list[str] = []
+        keys = iter(["\xe0P", " ", "\r"])
+        with patch.object(cmd_init, "_supports_terminal_redraw", return_value=False), \
+                patch.object(cmd_init.click, "getchar", side_effect=lambda: next(keys)), \
+                patch.object(cmd_init.click, "echo", side_effect=lambda text="", **_kwargs: emitted.append(text)):
+            got = cmd_init._prompt_checkbox_selection(
+                ["codex", "claudecode"],
+                default_selected=["codex"],
+                title="Select connectors",
+                empty_ok=False,
+            )
+
+        self.assertEqual(got, ["codex", "claudecode"])
+        self.assertNotIn("comma-separated", "".join(emitted))
+        menu_rows = [line for line in emitted if line.startswith("    [")]
+        self.assertEqual(menu_rows, ["    [x] codex", "    [ ] claudecode"])
+        self.assertTrue(any(line.startswith("\r  Current 2/2: [x] claudecode") for line in emitted))
+
+    def test_checkbox_windows_tty_keeps_in_place_redraw(self):
+        from defenseclaw.commands import cmd_init
+
+        with patch.object(cmd_init.terminal_checkbox, "stdout_is_tty", return_value=True), \
+                patch.object(cmd_init.os, "name", "nt"):
+            self.assertTrue(cmd_init._supports_terminal_redraw())
+
+    def test_checkbox_windows_terminal_hint_keeps_redraw_when_stdout_is_wrapped(self):
+        from defenseclaw.commands import cmd_init
+
+        with patch.object(cmd_init.terminal_checkbox, "stdout_is_tty", return_value=False), \
+                patch.object(cmd_init.os, "name", "nt"), \
+                patch.dict(cmd_init.os.environ, {"WT_SESSION": "test-session"}, clear=True):
+            self.assertTrue(cmd_init._supports_terminal_redraw())
+
+    def test_checkbox_redraw_uses_ansi_cursor_and_line_controls(self):
+        from defenseclaw.commands import cmd_init
+
+        with patch.object(cmd_init.click, "echo") as echo:
+            cmd_init._render_checkbox_menu(
+                ["codex", "claudecode"],
+                {"codex"},
+                1,
+                redraw=True,
+            )
+
+        emitted = "".join(call.args[0] for call in echo.call_args_list)
+        self.assertIn("\x1b[2A\r", emitted)
+        self.assertEqual(emitted.count("\x1b[2K"), 2)
+        self.assertIn("    [x] codex", emitted)
+        self.assertIn("  > [ ] claudecode", emitted)
 
     def test_connector_selection_uses_checkbox_menu(self):
         from defenseclaw.commands import cmd_init
@@ -2510,6 +2723,12 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-observe-all-")
         self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
         self.runner = CliRunner()
+        self.selection_patcher = patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections",
+            return_value=({}, {}),
+        )
+        self.selection_patcher.start()
+        self.addCleanup(self.selection_patcher.stop)
 
     def _invoke(self, args, env=None):
         full_env = {"DEFENSECLAW_HOME": self.tmp_dir}
@@ -2876,11 +3095,24 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         from defenseclaw.commands import cmd_init
 
         disc = self._disc({"codex", "openclaw"})
-        with patch.object(cmd_init.ux, "subhead") as subhead:
+        with patch.object(cmd_init.platform_support, "host_os", return_value="linux"), \
+                patch.object(cmd_init.ux, "subhead") as subhead:
             cmd_init._note_proxy_connectors(disc)
         emitted = " ".join(call.args[0] for call in subhead.call_args_list if call.args)
         self.assertIn("openclaw", emitted)
         self.assertIn("defenseclaw setup openclaw", emitted)
+
+    def test_note_proxy_connectors_warns_when_unsupported_on_windows(self):
+        from defenseclaw.commands import cmd_init
+
+        disc = self._disc({"codex", "openclaw"})
+        with patch.object(cmd_init.platform_support, "host_os", return_value="windows"), \
+                patch.object(cmd_init.ux, "warn") as warn:
+            cmd_init._note_proxy_connectors(disc)
+        emitted = " ".join(call.args[0] for call in warn.call_args_list if call.args)
+        self.assertIn("openclaw", emitted)
+        self.assertIn("unsupported on windows", emitted)
+        self.assertIn("guardrail proxy", emitted)
 
     def test_note_proxy_connectors_silent_without_proxy(self):
         from defenseclaw.commands import cmd_init

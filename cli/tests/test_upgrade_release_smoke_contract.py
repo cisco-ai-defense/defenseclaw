@@ -22,6 +22,8 @@ import hashlib
 import json
 import os
 import re
+import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -43,11 +45,46 @@ MAKEFILE = ROOT / "Makefile"
 BASELINE_POLICY = ROOT / "release" / "upgrade-baselines.json"
 PRE_RELEASE_CERTIFICATION = ROOT / ".github" / "workflows" / "pre-release-certification.yml"
 RECEIPT_CHECK = ROOT / "scripts" / "check_upgrade_receipt.py"
+POSIX_UPGRADE_CUSTODY = pytest.mark.skipif(
+    os.name == "nt",
+    reason="descriptor-relative POSIX ownership, mode, exchange, and quarantine contract",
+)
+
+
+def _bash_executable() -> str:
+    """Select a real Bash runtime without invoking Windows' WSL app alias."""
+
+    if os.name != "nt":
+        return shutil.which("bash") or "bash"
+
+    candidates: list[Path] = []
+    git = shutil.which("git")
+    if git:
+        git_path = Path(git).resolve()
+        # A normal Git for Windows install exposes git.exe from either cmd/ or
+        # bin/.  Its Bash runtime is always under the sibling bin directory.
+        candidates.append(git_path.parent.parent / "bin" / "bash.exe")
+    for variable in ("ProgramFiles", "ProgramFiles(x86)", "LocalAppData"):
+        root = os.environ.get(variable)
+        if root:
+            candidates.append(Path(root) / "Git" / "bin" / "bash.exe")
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    pytest.skip("Git Bash is required for the POSIX upgrade-smoke contract on Windows")
 
 
 def _source_script(command: str, *arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", "-c", f'source "$1"; {command}', "upgrade-smoke-contract", str(SCRIPT), *arguments],
+        [
+            _bash_executable(),
+            "-c",
+            f'source "$1"; {command}',
+            "upgrade-smoke-contract",
+            str(SCRIPT),
+            *arguments,
+        ],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -103,7 +140,7 @@ def test_developer_activation_rejects_nonisolated_invocations_before_network(
     message: str,
 ) -> None:
     completed = subprocess.run(
-        [str(DEVELOPER_ACTIVATION_SCRIPT), *arguments],
+        [_bash_executable(), str(DEVELOPER_ACTIVATION_SCRIPT), *arguments],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -117,7 +154,7 @@ def test_developer_activation_rejects_nonisolated_invocations_before_network(
 def test_developer_activation_removes_ambient_runtime_overrides() -> None:
     completed = subprocess.run(
         [
-            "bash",
+            _bash_executable(),
             "-c",
             'source "$1"; '
             "export DEFENSECLAW_DISABLE_REDACTION=true "
@@ -319,9 +356,11 @@ def test_historical_canary_fixture_is_hermetic_before_gateway_start(
     openclaw_home = home / ".openclaw"
     assert openclaw_home.is_dir()
     assert not openclaw_home.is_symlink()
-    assert stat.S_IMODE(openclaw_home.stat().st_mode) == 0o700
+    if os.name != "nt":
+        assert stat.S_IMODE(openclaw_home.stat().st_mode) == 0o700
 
 
+@pytest.mark.skipif(os.name == "nt", reason="private POSIX mode/ownership contract")
 def test_protected_release_test_artifact_is_authenticated_before_private_decode(
     tmp_path: Path,
 ) -> None:
@@ -348,6 +387,7 @@ def test_protected_release_test_artifact_is_authenticated_before_private_decode(
     assert destination.stat().st_mode & 0o077 == 0
 
 
+@pytest.mark.skipif(os.name == "nt", reason="private POSIX mode/ownership contract")
 def test_protected_release_test_artifact_rejects_checksum_mismatch_without_output(
     tmp_path: Path,
 ) -> None:
@@ -507,6 +547,7 @@ def test_bridge_comment_restore_is_ordered_before_seal_and_uses_source_snapshot(
     assert "if len(members) == 100000:" in cleanup
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_bridge_comment_restore_keeps_semantics_order_and_mode(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     source = tmp_path / "source.yaml"
@@ -556,6 +597,7 @@ otel:
 
 
 @pytest.mark.parametrize("unsafe_kind", ["source-symlink", "source-hardlink", "source-oversize", "active-symlink"])
+@POSIX_UPGRADE_CUSTODY
 def test_bridge_comment_restore_rejects_unsafe_leaves(tmp_path: Path, unsafe_kind: str) -> None:
     tmp_path.chmod(0o700)
     source = tmp_path / "source.yaml"
@@ -585,6 +627,7 @@ def test_bridge_comment_restore_rejects_unsafe_leaves(tmp_path: Path, unsafe_kin
     assert "configuration source" in completed.stderr
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_bridge_comment_restore_cas_rejects_concurrent_active_edit(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     source = tmp_path / "source.yaml"
@@ -609,6 +652,7 @@ def test_bridge_comment_restore_cas_rejects_concurrent_active_edit(tmp_path: Pat
 
 
 @pytest.mark.parametrize("commit_check", ["pre-unlink", "final-readback"])
+@POSIX_UPGRADE_CUSTODY
 def test_bridge_comment_restore_commit_checks_include_metadata(
     tmp_path: Path,
     commit_check: str,
@@ -636,6 +680,7 @@ def test_bridge_comment_restore_commit_checks_include_metadata(
     assert "was not committed exactly" in completed.stderr
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_bridge_comment_restore_crash_temp_is_cleaned_before_resumed_custody_closes(
     tmp_path: Path,
 ) -> None:
@@ -682,6 +727,7 @@ def test_bridge_comment_restore_crash_temp_is_cleaned_before_resumed_custody_clo
     assert active.read_bytes() == b"# operator guide\n" + original_active
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_resumed_cleanup_root_replacement_cannot_redirect_unlink(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     token = "a" * 32
@@ -726,6 +772,7 @@ def test_resumed_cleanup_root_replacement_cannot_redirect_unlink(tmp_path: Path)
     assert replacement.read_text(encoding="utf-8") == "replacement-must-survive\n"
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_resumed_cleanup_entry_replacement_is_quarantined_not_deleted(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     token = "a" * 32
@@ -796,6 +843,7 @@ def test_resumed_cleanup_entry_replacement_is_quarantined_not_deleted(tmp_path: 
     assert quarantines[0].read_text(encoding="utf-8") == "replacement-must-survive\n"
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_resumed_cleanup_replays_matching_crash_left_quarantine(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     token = "a" * 32
@@ -913,7 +961,7 @@ def test_v8_fixture_covers_each_historical_config_family(
 
 @pytest.mark.parametrize(
     ("version", "config_version"),
-    [("0.8.3", "7"), ("0.8.2", "6"), ("0.6.6", "5")],
+    [("0.8.4", "7"), ("0.8.3", "7"), ("0.8.2", "6"), ("0.6.6", "5")],
 )
 def test_reviewed_baseline_config_version_lookup(
     version: str,
@@ -1060,6 +1108,7 @@ def test_future_candidate_fails_closed_for_unreviewed_source_config_family(
     assert "no reviewed upgrade fixture exists for config-v9 baseline 0.8.6" in completed.stderr
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_native_v8_fixture_is_strict_and_later_migration_preserves_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1068,10 +1117,9 @@ def test_native_v8_fixture_is_strict_and_later_migration_preserves_it(
     home = tmp_path / "home"
     baseline_python = home / ".defenseclaw/.venv/bin/python"
     baseline_python.parent.mkdir(parents=True)
+    interpreter = "python" if os.name == "nt" else shlex.quote(sys.executable)
     baseline_python.write_text(
-        f"""#!/bin/sh
-exec "{ROOT / ".venv/bin/python"}" "$@"
-""",
+        f"#!/bin/sh\nexec {interpreter} \"$@\"\n",
         encoding="utf-8",
     )
     baseline_python.chmod(0o700)
@@ -1089,11 +1137,18 @@ exec "{ROOT / ".venv/bin/python"}" "$@"
     openclaw_home = home / ".openclaw"
     assert openclaw_home.is_dir()
     assert not openclaw_home.is_symlink()
-    assert stat.S_IMODE(openclaw_home.stat().st_mode) == 0o700
+    if os.name != "nt":
+        assert stat.S_IMODE(openclaw_home.stat().st_mode) == 0o700
     config_path = data_dir / "config.yaml"
     environment_path = data_dir / ".env"
     config_before = config_path.read_bytes()
     environment_before = environment_path.read_bytes()
+    gateway_token_match = re.search(
+        rb"^DEFENSECLAW_GATEWAY_TOKEN=([0-9a-f]{64})$",
+        environment_before,
+        re.MULTILINE,
+    )
+    assert gateway_token_match is not None
     source = load_validate_v8(config_before, source_name=str(config_path)).source
     assert source["config_version"] == 8
     assert not {"otel", "audit_sinks", "privacy"}.intersection(source)
@@ -1102,7 +1157,8 @@ exec "{ROOT / ".venv/bin/python"}" "$@"
     assert destinations["existing-otlp"]["headers"] == {
         "Authorization": {"env": "DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION"}
     }
-    assert stat.S_IMODE(environment_path.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(environment_path.stat().st_mode) == 0o600
     assert (home / "fixture-evidence/config.historical.source").read_bytes() == config_before
     assert (home / "fixture-evidence/environment.historical.source").read_bytes() == environment_before
     baseline_bundle_manifest = json.loads(
@@ -1315,6 +1371,10 @@ def test_retired_named_otel_backup_is_checked_only_for_pre_v8_targets() -> None:
     assert script.count("config.yaml.pre-observability-migration.bak") == 1
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the isolated Docker shim exercises the POSIX upgrade harness",
+)
 def test_docker_isolation_reports_stopped_fixture_and_forbids_mutation(tmp_path: Path) -> None:
     home = tmp_path / "home"
     completed = _source_script(

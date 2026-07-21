@@ -156,6 +156,11 @@ class CliSmokeTests(unittest.TestCase):
             # binary (CI builds that in separate contract tests). Keep both
             # canonical validation seams successful and side-effect free.
             with (
+                patch.dict(
+                    os.environ,
+                    {"DEFENSECLAW_HOME": str(data_dir)},
+                    clear=False,
+                ),
                 patch("defenseclaw.config.default_data_path", return_value=data_dir),
                 patch(
                     "defenseclaw.commands.cmd_config.validate_config",

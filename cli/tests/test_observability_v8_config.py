@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -96,9 +97,15 @@ def test_extreme_mapping_depth_is_rejected_without_recursion_escape() -> None:
     assert captured.value.__cause__ is None
 
 
-def test_reference_source_validates_against_canonical_schema() -> None:
+def test_reference_source_validates_against_canonical_schema(tmp_path: Path) -> None:
     reference = ROOT / "schemas" / "config" / "v8" / "reference" / "observability.yaml"
-    validated = load_validate_v8(reference.read_bytes(), source_name=str(reference))
+    source = reference.read_bytes()
+    if os.name == "nt":
+        source = source.replace(
+            b"/etc/defenseclaw/otel-ca.pem",
+            (tmp_path / "otel-ca.pem").resolve().as_posix().encode(),
+        )
+    validated = load_validate_v8(source, source_name=str(reference))
 
     assert validated.source["config_version"] == 8
     assert len(validated.source["observability"]["destinations"]) == 7

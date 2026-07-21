@@ -921,6 +921,48 @@ func TestGuardrailAPIPatchCommitsDiskManagerSidecarAndProxyTogether(t *testing.T
 	}
 }
 
+func TestAPIServerHookPostureUsesPublishedRuntimeConfig(t *testing.T) {
+	boot := config.DefaultConfig()
+	boot.Guardrail.Enabled = true
+	boot.Guardrail.Connector = "codex"
+	boot.Guardrail.Mode = "observe"
+	boot.Guardrail.HookFailMode = "open"
+	boot.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex":      {Mode: "observe", HookFailMode: "open"},
+		"claudecode": {Mode: "observe", HookFailMode: "open"},
+	}
+
+	live := cloneConfig(boot)
+	live.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex":      {Mode: "action", HookFailMode: "closed"},
+		"claudecode": {Mode: "action", HookFailMode: "closed"},
+	}
+
+	api := NewAPIServer("", nil, nil, nil, nil, cloneConfig(boot))
+	api.SetConfigRuntime(nil, func() *config.Config { return live })
+
+	if got := api.codexMode(); got != "action" {
+		t.Fatalf("Codex mode = %q, want published action", got)
+	}
+	if got := api.claudeCodeMode(); got != "action" {
+		t.Fatalf("Claude Code mode = %q, want published action", got)
+	}
+	rows := api.connectorModesSummary()
+	if len(rows) != 2 {
+		t.Fatalf("connector mode rows = %d, want 2: %#v", len(rows), rows)
+	}
+	for _, row := range rows {
+		name, _ := row["connector"].(string)
+		if row["policy_mode"] != "action" || row["hook_fail_mode"] != "closed" || row["enabled"] != true {
+			t.Fatalf("%s published posture = %#v, want action/closed/enabled", name, row)
+		}
+	}
+	if boot.EffectiveGuardrailModeForConnector("codex") != "observe" ||
+		boot.EffectiveHookFailModeForConnector("codex") != "open" {
+		t.Fatal("API posture read mutated the immutable boot snapshot")
+	}
+}
+
 func TestReloadPredicatesRestartLLMConsumers(t *testing.T) {
 	oldCfg := &config.Config{}
 	newCfg := &config.Config{}

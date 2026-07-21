@@ -34,9 +34,11 @@ import (
 // Engine evaluates OPA Rego policies for admission, guardrail, firewall,
 // sandbox, audit, and skill_actions domains.
 type Engine struct {
-	mu      sync.RWMutex
-	regoDir string
-	store   storage.Store
+	mu                sync.RWMutex
+	regoDir           string
+	store             storage.Store
+	exactDataPath     bool
+	quarantineInvalid bool
 }
 
 // New creates an Engine. regoDir is the path to the directory containing
@@ -49,7 +51,19 @@ func New(regoDir string) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Engine{regoDir: regoDir, store: store}, nil
+	return &Engine{regoDir: regoDir, store: store, quarantineInvalid: true}, nil
+}
+
+// NewExact creates a read-only Engine for a caller that has already selected
+// the policy layout. It loads exactly <regoDir>/data.json, treats an existing
+// malformed supplemental data file as an error, and never quarantines or
+// removes a Rego module when parsing fails.
+func NewExact(regoDir string) (*Engine, error) {
+	store, err := loadStoreExact(regoDir)
+	if err != nil {
+		return nil, err
+	}
+	return &Engine{regoDir: regoDir, store: store, exactDataPath: true}, nil
 }
 
 // resolveRegoDir picks the directory the OPA store should load from when
@@ -88,23 +102,32 @@ func resolveRegoDir(dir string) string {
 }
 
 func hasRegoFiles(dir string) bool {
-	matches, err := filepath.Glob(filepath.Join(dir, "*.rego"))
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return false
+		// Only a genuinely absent directory permits legacy fallback. An
+		// inaccessible or non-directory canonical path is evidence that must
+		// fail closed when the engine attempts to load it.
+		_, statErr := os.Lstat(dir)
+		return !os.IsNotExist(statErr)
 	}
-	return len(matches) > 0
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) == ".rego" {
+			return true
+		}
+	}
+	return false
 }
 
 // Reload re-reads data.json and all .rego files, replacing the in-memory
 // store atomically. Returns a compilation error if the new modules fail
 // to compile so the caller can decide whether to keep the old state.
 func (e *Engine) Reload() error {
-	store, err := loadStore(e.regoDir)
+	store, err := e.loadStore()
 	if err != nil {
 		return err
 	}
 
-	modules, err := readModules(e.regoDir, e)
+	modules, err := readModules(e.regoDir, e.quarantineTarget())
 	if err != nil {
 		return err
 	}
@@ -246,11 +269,25 @@ func (e *Engine) EvaluateSkillActions(ctx context.Context, input SkillActionsInp
 // Compile performs a one-time compilation check of the Rego modules,
 // useful for fast-failing at startup.
 func (e *Engine) Compile() error {
-	modules, err := readModules(e.regoDir, e)
+	modules, err := readModules(e.regoDir, e.quarantineTarget())
 	if err != nil {
 		return err
 	}
 	return compileModules(modules)
+}
+
+func (e *Engine) loadStore() (storage.Store, error) {
+	if e.exactDataPath {
+		return loadStoreExact(e.regoDir)
+	}
+	return loadStore(e.regoDir)
+}
+
+func (e *Engine) quarantineTarget() *Engine {
+	if e.quarantineInvalid {
+		return e
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -266,7 +303,7 @@ func (e *Engine) eval(ctx context.Context, query string, input interface{}) (map
 	if err != nil {
 		return nil, fmt.Errorf("marshal input: %w", err)
 	}
-	modules, err := readModules(e.regoDir, e)
+	modules, err := readModules(e.regoDir, e.quarantineTarget())
 	if err != nil {
 		return nil, err
 	}
@@ -331,6 +368,60 @@ func loadStore(regoDir string) (storage.Store, error) {
 	return inmem.NewFromObject(data), nil
 }
 
+// LoadDataExact loads the effective OPA data from exactly regoDir. The base
+// data.json is required; data-sandbox.json is optional, but when present it
+// must be readable JSON object data. Supplemental top-level keys override the
+// base object exactly as the policy engine sees them.
+func LoadDataExact(regoDir string) (map[string]interface{}, error) {
+	raw, err := os.ReadFile(filepath.Join(regoDir, "data.json"))
+	if err != nil {
+		return nil, fmt.Errorf("policy: read data.json: %w", err)
+	}
+
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return nil, fmt.Errorf("policy: parse data.json: %w", err)
+	}
+	if data == nil {
+		return nil, fmt.Errorf("policy: parse data.json: top-level value must be an object")
+	}
+	if err := mergeSupplementalDataExact(regoDir, data, "data-sandbox.json"); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func loadStoreExact(regoDir string) (storage.Store, error) {
+	data, err := LoadDataExact(regoDir)
+	if err != nil {
+		return nil, err
+	}
+	return inmem.NewFromObject(data), nil
+}
+
+func mergeSupplementalDataExact(regoDir string, data map[string]interface{}, filename string) error {
+	path := filepath.Join(regoDir, filename)
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("policy: read %s: %w", filename, err)
+	}
+
+	var extra map[string]interface{}
+	if err := json.Unmarshal(raw, &extra); err != nil {
+		return fmt.Errorf("policy: parse %s: %w", filename, err)
+	}
+	if extra == nil {
+		return fmt.Errorf("policy: parse %s: top-level value must be an object", filename)
+	}
+	for key, value := range extra {
+		data[key] = value
+	}
+	return nil
+}
+
 // mergeSupplementalData reads a JSON file from regoDir and merges its
 // top-level keys into data. Missing files are silently skipped.
 func mergeSupplementalData(regoDir string, data map[string]interface{}, filename string) {
@@ -349,22 +440,30 @@ func mergeSupplementalData(regoDir string, data map[string]interface{}, filename
 }
 
 func readModules(regoDir string, eng *Engine) (map[string]string, error) {
-	pattern := filepath.Join(regoDir, "*.rego")
-	matches, err := filepath.Glob(pattern)
+	entries, err := os.ReadDir(regoDir)
 	if err != nil {
-		return nil, fmt.Errorf("policy: glob rego files: %w", err)
-	}
-	if len(matches) == 0 {
-		return nil, fmt.Errorf("policy: no .rego files found in %s", regoDir)
+		return nil, fmt.Errorf("policy: read rego directory: %w", err)
 	}
 
-	modules := make(map[string]string, len(matches))
-	for _, path := range matches {
+	modules := make(map[string]string)
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) != ".rego" {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			return nil, fmt.Errorf("policy: inspect %s: %w", entry.Name(), infoErr)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("policy: Rego module %s is not a regular file", entry.Name())
+		}
+
+		path := filepath.Join(regoDir, entry.Name())
 		raw, readErr := os.ReadFile(path)
 		if readErr != nil {
 			return nil, fmt.Errorf("policy: read %s: %w", path, readErr)
 		}
-		base := filepath.Base(path)
+		base := entry.Name()
 		if _, parseErr := ast.ParseModuleWithOpts(base, string(raw), ast.ParserOptions{RegoVersion: ast.RegoV1}); parseErr != nil {
 			if eng != nil {
 				_ = eng.quarantineBadRegoModule(path, raw)
@@ -372,6 +471,9 @@ func readModules(regoDir string, eng *Engine) (map[string]string, error) {
 			return nil, fmt.Errorf("policy: parse %s: %w", path, parseErr)
 		}
 		modules[base] = string(raw)
+	}
+	if len(modules) == 0 {
+		return nil, fmt.Errorf("policy: no .rego files found in %s", regoDir)
 	}
 	return modules, nil
 }

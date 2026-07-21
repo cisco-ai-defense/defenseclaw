@@ -486,6 +486,47 @@ func TestLoadAISignatures_LemonadeServerSurface(t *testing.T) {
 	)
 }
 
+func TestHermesSignatureIncludesNativeWindowsPaths(t *testing.T) {
+	sigs, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	var hermes *AISignature
+	for i := range sigs {
+		if sigs[i].ID == "hermes" {
+			hermes = &sigs[i]
+			break
+		}
+	}
+	if hermes == nil {
+		t.Fatal("Hermes signature missing")
+	}
+	for _, want := range []string{
+		"$HERMES_HOME/config.yaml",
+		"$LOCALAPPDATA/hermes/config.yaml",
+		"~/.hermes/config.yaml",
+	} {
+		if !stringSliceContains(hermes.ConfigPaths, want) {
+			t.Errorf("Hermes config paths missing %q: %v", want, hermes.ConfigPaths)
+		}
+		if !stringSliceContains(hermes.MCPPaths, want) {
+			t.Errorf("Hermes MCP paths missing %q: %v", want, hermes.MCPPaths)
+		}
+	}
+	if !stringSliceContains(hermes.EnvVarNames, "HERMES_HOME") {
+		t.Errorf("Hermes environment variables missing HERMES_HOME: %v", hermes.EnvVarNames)
+	}
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestExpandCandidatePath_ExpandsConfiguredEnvironment(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("OMNIGENT_CONFIG_HOME", root)

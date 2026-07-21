@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -746,26 +747,210 @@ func (w *InstallWatcher) takeActionFor(evt InstallEvent) bool {
 
 func (w *InstallWatcher) enforceBlock(ctx context.Context, evt InstallEvent) {
 	switch evt.Type {
-	case InstallSkill:
-		se := enforce.NewSkillEnforcer(w.cfg.QuarantineDir)
-		dest, err := se.Quarantine(evt.Path)
-		if err != nil {
-			w.emitQuarantineFailure(ctx, evt.Path, err)
-			return
-		}
-		w.recordQuarantineAudit(ctx, audit.ActionQuarantine, evt, dest)
 	case InstallMCP:
 		me := enforce.NewMCPEnforcer(w.shell)
 		_ = me.BlockEndpoint(evt.Name)
-	case InstallPlugin:
-		pe := enforce.NewPluginEnforcer(w.cfg.QuarantineDir, w.shell)
-		dest, err := pe.Quarantine(evt.Path)
-		if err != nil {
-			w.emitQuarantineFailure(ctx, evt.Path, err)
+	case InstallSkill, InstallPlugin:
+		w.quarantineAsset(ctx, evt)
+	}
+}
+
+func (w *InstallWatcher) quarantineAsset(ctx context.Context, evt InstallEvent) {
+	if w == nil || w.cfg == nil || w.store == nil {
+		w.emitQuarantineFailure(ctx, evt.Path, fmt.Errorf("watcher: quarantine provenance store is unavailable"))
+		return
+	}
+	if w.preserveRestoredBlockedAsset(evt) {
+		_ = w.logger.LogAction(string(audit.ActionWatcherBlock), evt.Path,
+			fmt.Sprintf("type=%s restored physical files retained while install block remains", evt.Type))
+		return
+	}
+	connector := w.eventConnector(evt)
+	plan, err := enforce.NewAssetQuarantinePlan(
+		w.cfg.QuarantineDir, w.sourceRootsFor(evt.Type), evt.Type.String(),
+		evt.Name, connector, evt.Path,
+	)
+	if err != nil {
+		w.emitQuarantineFailure(ctx, evt.Path, err)
+		return
+	}
+	record, err := w.store.CreateQuarantineRecord(ctx, audit.CreateQuarantineRecordInput{
+		TargetType: evt.Type.String(), TargetName: evt.Name,
+		OriginalPath: plan.SourcePath, QuarantinePath: plan.QuarantinePath,
+		ContentHash: plan.ContentHash, Reason: "watcher enforcement",
+		State: audit.QuarantineStatePending, OwnershipJSON: plan.OwnershipJSON,
+		// The physical owner and global action scope are committed together so
+		// either Go or Python restore clears the exact logical file decision.
+		Connectors: []string{connector, ""},
+	})
+	if err != nil {
+		w.emitQuarantineFailure(ctx, evt.Path, err)
+		return
+	}
+	if record.State == audit.QuarantineStateRestoring &&
+		sameWatcherPath(record.RestorePath, plan.SourcePath) {
+		matches, hashErr := enforce.AssetContentHashMatches(plan.SourcePath, record.ContentHash)
+		if hashErr == nil && matches {
+			_ = w.logger.LogAction(string(audit.ActionWatcherBlock), evt.Path,
+				fmt.Sprintf("type=%s restore in progress; physical files retained", evt.Type))
 			return
 		}
-		w.recordQuarantineAudit(ctx, audit.ActionQuarantine, evt, dest)
 	}
+	if err := enforce.ExecuteAssetQuarantine(plan, record.ID); err != nil {
+		// Roll back only an unmaterialized journal. A verified destination is
+		// authoritative recovery data and must retain its pending provenance.
+		if _, statErr := os.Lstat(plan.QuarantinePath); os.IsNotExist(statErr) {
+			_ = w.store.DeleteQuarantineRecord(ctx, record.ID)
+		}
+		w.emitQuarantineFailure(ctx, evt.Path, err)
+		return
+	}
+	if err := w.store.UpdateQuarantineRecordState(
+		ctx, record.ID, audit.QuarantineStateActive, "",
+	); err != nil {
+		// The pending write-ahead record is intentionally retained and can be
+		// finalized or restored after restart.
+		fmt.Fprintf(os.Stderr, "[watch] quarantine provenance remains pending for %s: %v\n", evt.Path, err)
+	}
+	w.recordQuarantineAudit(ctx, audit.ActionQuarantine, evt, plan.QuarantinePath)
+}
+
+// RestoreQuarantined restores one connector-owned watcher quarantine. The
+// physical file action is cleared transactionally at completion, while an
+// install block or runtime disable remains intact.
+func (w *InstallWatcher) RestoreQuarantined(
+	ctx context.Context,
+	targetType, targetName, connector, restorePath string,
+) error {
+	if w == nil || w.cfg == nil || w.store == nil {
+		return fmt.Errorf("watcher: quarantine provenance store is unavailable")
+	}
+	if ctx == nil {
+		return fmt.Errorf("watcher: restore context is required")
+	}
+	targetType = strings.TrimSpace(targetType)
+	targetName = strings.TrimSpace(targetName)
+	connector = strings.TrimSpace(connector)
+	if targetType != InstallSkill.String() && targetType != InstallPlugin.String() {
+		return fmt.Errorf("watcher: unsupported restore target type %q", targetType)
+	}
+	records, err := w.store.ListQuarantineRecordsForConnector(
+		ctx, targetType, targetName, connector,
+	)
+	if err != nil {
+		return err
+	}
+	if len(records) == 0 {
+		return fmt.Errorf("watcher: %s %q is not quarantined for connector %q", targetType, targetName, connector)
+	}
+	if len(records) != 1 {
+		return fmt.Errorf("watcher: restore is ambiguous for %s %q connector %q", targetType, targetName, connector)
+	}
+	record := records[0]
+	requestedRestorePath := strings.TrimSpace(restorePath)
+	boundRestorePath := strings.TrimSpace(record.RestorePath)
+	if record.State == audit.QuarantineStateRestoring && boundRestorePath != "" {
+		if requestedRestorePath == "" {
+			restorePath = boundRestorePath
+		} else if !sameWatcherPath(requestedRestorePath, boundRestorePath) {
+			return fmt.Errorf(
+				"watcher: explicit restore path does not match durable restoring destination",
+			)
+		} else {
+			restorePath = requestedRestorePath
+		}
+	} else if requestedRestorePath == "" {
+		restorePath = record.OriginalPath
+	} else {
+		restorePath = requestedRestorePath
+	}
+	if err := w.store.UpdateQuarantineRecordState(
+		ctx, record.ID, audit.QuarantineStateRestoring, restorePath,
+	); err != nil {
+		return fmt.Errorf("watcher: journal quarantine restore: %w", err)
+	}
+	plan := enforce.AssetRestorePlan{
+		RecordID: record.ID, TargetType: record.TargetType, TargetName: record.TargetName,
+		QuarantineRoot: w.cfg.QuarantineDir, QuarantinePath: record.QuarantinePath,
+		RestorePath: restorePath, AllowedRoots: w.sourceRootsFor(InstallType(record.TargetType)),
+		ContentHash: record.ContentHash,
+	}
+	if err := enforce.ExecuteAssetRestore(plan); err != nil {
+		if matches, matchErr := enforce.AssetContentHashMatches(
+			record.QuarantinePath, record.ContentHash,
+		); matchErr == nil && matches {
+			_ = w.store.UpdateQuarantineRecordState(
+				ctx, record.ID, audit.QuarantineStateActive, "",
+			)
+		}
+		if w.logger != nil {
+			_ = w.logger.RecordQuarantineActionMetric(ctx, "move_out", "error")
+		}
+		return fmt.Errorf("watcher: restore quarantined asset: %w", err)
+	}
+	if err := w.store.CompleteQuarantineRestore(ctx, record.ID, restorePath); err != nil {
+		return fmt.Errorf("watcher: finalize quarantine restore: %w", err)
+	}
+	if w.logger != nil {
+		_ = w.logger.RecordQuarantineActionMetric(ctx, "move_out", "ok")
+		w.recordQuarantineAudit(ctx, audit.ActionRestore, InstallEvent{
+			Type: InstallType(targetType), Name: targetName, Path: restorePath,
+			Connector: connector, Timestamp: time.Now().UTC(),
+		}, restorePath)
+	}
+	return nil
+}
+
+func (w *InstallWatcher) sourceRootsFor(targetType InstallType) []string {
+	switch targetType {
+	case InstallSkill:
+		return w.skillDirs
+	case InstallPlugin:
+		return w.pluginDirs
+	default:
+		return nil
+	}
+}
+
+func (w *InstallWatcher) preserveRestoredBlockedAsset(evt InstallEvent) bool {
+	if w == nil || w.store == nil {
+		return false
+	}
+	connector := w.eventConnector(evt)
+	pe := enforce.NewPolicyEngine(w.store)
+	blocked, err := pe.IsBlockedForConnector(evt.Type.String(), evt.Name, connector)
+	if err != nil || !blocked {
+		return false
+	}
+	connectors := []string{connector}
+	if connector != "" {
+		connectors = append(connectors, "")
+	}
+	for _, scope := range connectors {
+		entry, err := w.store.GetActionForConnector(evt.Type.String(), evt.Name, scope)
+		if err != nil || entry == nil {
+			continue
+		}
+		if entry.Actions.File == "" && entry.SourcePath != "" &&
+			sameWatcherPath(entry.SourcePath, evt.Path) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameWatcherPath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(strings.TrimSpace(left))
+	rightAbs, rightErr := filepath.Abs(strings.TrimSpace(right))
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	leftAbs = filepath.Clean(leftAbs)
+	rightAbs = filepath.Clean(rightAbs)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(leftAbs, rightAbs)
+	}
+	return leftAbs == rightAbs
 }
 
 func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, path string, err error) {

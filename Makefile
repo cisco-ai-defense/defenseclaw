@@ -1,14 +1,12 @@
 BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
-VERSION     := 0.8.5
+HOOK_LAUNCHER := defenseclaw-hook
+VERSION     := 0.8.6
 .DEFAULT_GOAL := help
 GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
-INSTALL_DIR := $(HOME)/.local/bin
 PLUGIN_DIR  := extensions/defenseclaw
-DC_EXT_DIR  := $(HOME)/.defenseclaw/extensions/defenseclaw
-OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
 RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
 SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-install,maybe-openclaw-plugin-install)
 # The race-enabled gateway package can exceed the default test deadline on
@@ -26,12 +24,31 @@ UPGRADE_SMOKE_FROM ?=
 # Linux/macOS. $(OS) is set to "Windows_NT" by Windows itself and inherited by
 # the MSYS/Git-Bash shell make runs there; it is unset elsewhere.
 ifeq ($(OS),Windows_NT)
+PYTHON ?= python
+# PowerShell's inherited PATH places System32 before MSYS. Make recipes rely on
+# POSIX utilities such as find, cp, ln, and rm, so prefer the MSYS toolchain;
+# otherwise Windows find.exe interprets GNU find arguments and prints
+# "FIND: Parameter format not correct" while silently skipping work.
+export PATH := /usr/bin:$(PATH)
+# GNU Make runs these recipes through MSYS, whose HOME defaults to
+# /home/<user>. Native PowerShell and the installed DefenseClaw CLI use
+# USERPROFILE instead, so deriving install paths from HOME silently places a
+# second copy under C:\msys64\home that PowerShell never executes. Convert the
+# native profile path to an MSYS path for recipe compatibility while keeping
+# every installed artifact in the real Windows user profile.
+USER_HOME := $(shell if [ -n "$$USERPROFILE" ]; then cygpath -u "$$USERPROFILE" 2>/dev/null || printf '%s' "$$USERPROFILE"; else printf '%s' "$$HOME"; fi)
 VENV_BIN := $(VENV)/Scripts
 EXE      := .exe
 else
+PYTHON ?= python3
+USER_HOME := $(HOME)
 VENV_BIN := $(VENV)/bin
 EXE      :=
 endif
+
+INSTALL_DIR := $(USER_HOME)/.local/bin
+DC_EXT_DIR  := $(USER_HOME)/.defenseclaw/extensions/defenseclaw
+OC_EXT_DIR  := $(USER_HOME)/.openclaw/extensions/defenseclaw
 
 # _bundle-data is a prerequisite of the target that creates $(VENV), so a
 # fresh checkout cannot use the project interpreter while staging its first
@@ -390,9 +407,15 @@ proto: proto-tools
 
 gateway: sync-openclaw-extension
 	go build $(GOFLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
+	$(if $(filter Windows_NT,$(OS)),go run ./internal/tools/windowsresources -target windows_amd64 -executable $(GATEWAY)$(EXE) -component gateway -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png",)
 	@echo "Built $(GATEWAY)$(EXE)"
 	@echo "  Run with: ./$(GATEWAY)$(EXE)"
 	@echo "  Check status: ./$(GATEWAY)$(EXE) status"
+ifeq ($(OS),Windows_NT)
+	go build -ldflags "-H=windowsgui -X main.version=$(VERSION)" -o $(HOOK_LAUNCHER).exe ./cmd/defenseclaw-hook
+	go run ./internal/tools/windowsresources -target windows_amd64 -executable $(HOOK_LAUNCHER).exe -component hook -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"
+	@echo "Built $(HOOK_LAUNCHER).exe (Windows GUI subsystem)"
+endif
 
 # sync-openclaw-extension copies the runtime files of the DefenseClaw
 # OpenClaw plugin into internal/gateway/connector/openclaw_extension so
@@ -463,7 +486,21 @@ extensions: plugin sync-openclaw-extension
 
 gateway-cross: sync-openclaw-extension
 	@test -n "$(GOOS)" -a -n "$(GOARCH)" || { echo "Usage: make gateway-cross GOOS=linux GOARCH=amd64"; exit 1; }
+	@if [ "$(GOOS)" = "windows" ] && [ "$(GOARCH)" != "amd64" ]; then \
+		echo "native Windows release resources currently certify only GOARCH=amd64" >&2; exit 1; \
+	fi
 	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -o $(BINARY)-$(GOOS)-$(GOARCH) ./cmd/defenseclaw
+	@if [ "$(GOOS)" = "windows" ]; then \
+		go run ./internal/tools/windowsresources -target windows_$(GOARCH) \
+			-executable $(BINARY)-$(GOOS)-$(GOARCH) -component gateway -version $(VERSION) \
+			-icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"; \
+		GOOS=$(GOOS) GOARCH=$(GOARCH) go build \
+			-ldflags "-H=windowsgui -X main.version=$(VERSION)" \
+			-o $(HOOK_LAUNCHER)-$(GOOS)-$(GOARCH).exe ./cmd/defenseclaw-hook; \
+		go run ./internal/tools/windowsresources -target windows_$(GOARCH) \
+			-executable $(HOOK_LAUNCHER)-$(GOOS)-$(GOARCH).exe -component hook -version $(VERSION) \
+			-icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"; \
+	fi
 	@echo "Built $(BINARY)-$(GOOS)-$(GOARCH)"
 
 gateway-run: gateway
@@ -594,13 +631,13 @@ gateway-install: _source-install-preflight cli-install
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
 	@echo "Installed $(GATEWAY)$(EXE) to $(INSTALL_DIR)"
-	@# If a sidecar is already running it kept the old inode; tell the
-	@# operator so they know a restart is needed to pick up the new build.
+	@# On Unix, a running sidecar kept the old inode; tell the operator so
+	@# they know a restart is needed to pick up the new build.
 	@# Use pgrep -x against the *basename* only — `pgrep -f "$(GATEWAY)"`
 	@# matches this very make invocation ("make gateway-install") and
 	@# any editor/tail window with the binary path on its cmdline, so
 	@# it would fire a false "sidecar is running" hint on every build.
-	@if pgrep -x "$(GATEWAY)" >/dev/null 2>&1; then \
+	@if [ "$(OS)" != "Windows_NT" ] && pgrep -x "$(GATEWAY)" >/dev/null 2>&1; then \
 		echo "  Gateway sidecar is running an older build — restart with:"; \
 		echo "    $(INSTALL_DIR)/$(GATEWAY)$(EXE) restart"; \
 	fi
@@ -646,13 +683,13 @@ plugin-install: _source-install-preflight gateway-install
 test: cli-test gateway-test
 
 cli-test: _bundle-data
-	$(VENV)/bin/python -m pytest cli/tests -q
+	$(VENV_BIN)/python$(EXE) -m pytest cli/tests -q
 
 cli-test-cov: _bundle-data
-	$(VENV)/bin/python -m pytest cli/tests/ -v --tb=short --cov=defenseclaw --cov-report=xml:coverage-py.xml
+	$(VENV_BIN)/python$(EXE) -m pytest cli/tests/ -v --tb=short --cov=defenseclaw --cov-report=xml:coverage-py.xml
 
 cli-test-snap:
-	$(VENV)/bin/python -m pytest cli/tests/tui -q $(if $(UPDATE),--snapshot-update,)
+	$(VENV_BIN)/python$(EXE) -m pytest cli/tests/tui -q $(if $(UPDATE),--snapshot-update,)
 
 gateway-test: sync-openclaw-extension
 	go test -race -timeout $(GO_TEST_TIMEOUT) ./internal/gateway/ ./test/... -v
@@ -798,7 +835,7 @@ go-connector-matrix-test: sync-openclaw-extension
 		-run 'Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|Setup|Teardown|Capability|Matrix'
 
 py-connector-matrix-test:
-	$(VENV)/bin/python -m pytest -q \
+	$(VENV_BIN)/python$(EXE) -m pytest -q \
 		cli/tests/test_agent_discovery.py \
 		cli/tests/test_cmd_guardrail_matrix.py \
 		cli/tests/test_cmd_init.py \
@@ -820,11 +857,11 @@ rego-test:
 	PATH="$(GOBIN):$(PATH)" opa test policies/rego/ -v
 
 test-verbose:
-	$(VENV)/bin/python -m unittest discover -s cli/tests -v --failfast
+	$(VENV_BIN)/python$(EXE) -m unittest discover -s cli/tests -v --failfast
 
 test-file:
 	@test -n "$(FILE)" || { echo "Usage: make test-file FILE=test_config"; exit 1; }
-	$(VENV)/bin/python -m unittest cli.tests.$(FILE) -v
+	$(VENV_BIN)/python$(EXE) -m unittest cli.tests.$(FILE) -v
 
 # ---------------------------------------------------------------------------
 # v7 parity gates — prevent drift between Go (source of truth),
@@ -839,35 +876,35 @@ check-v7: check-audit-actions check-audit-no-raw-literals check-error-codes chec
 	@echo "check-v7: all parity gates passed."
 
 check-audit-actions:
-	@$(VENV)/bin/python scripts/check_audit_actions.py
+	@$(VENV_BIN)/python$(EXE) scripts/check_audit_actions.py
 
 check-audit-no-raw-literals:
-	@$(VENV)/bin/python scripts/check_audit_no_raw_literals.py
+	@$(VENV_BIN)/python$(EXE) scripts/check_audit_no_raw_literals.py
 
 check-error-codes:
-	@$(VENV)/bin/python scripts/check_error_codes.py
+	@$(VENV_BIN)/python$(EXE) scripts/check_error_codes.py
 
 check-schemas:
-	@$(VENV)/bin/python scripts/check_schemas.py
+	@$(VENV_BIN)/python$(EXE) scripts/check_schemas.py
 
 telemetry-generate:
-	@$(VENV)/bin/python scripts/generate_telemetry_registry.py --write
+	@$(VENV_BIN)/python$(EXE) scripts/generate_telemetry_registry.py --write
 
 telemetry-check:
-	@$(VENV)/bin/python scripts/generate_telemetry_registry.py --check
+	@$(VENV_BIN)/python$(EXE) scripts/generate_telemetry_registry.py --check
 
 # Semantic hard-cut gate: v7 may remain only inside the explicit
 # upgrade/recovery boundaries. It checks forbidden ownership paths and
 # patterns, not fragile repository-wide inventory totals.
 check-observability-v8-hard-cut:
-	@$(VENV)/bin/python scripts/check_observability_v8_hard_cut.py
+	@$(VENV_BIN)/python$(EXE) scripts/check_observability_v8_hard_cut.py
 
 check-observability-v8-spec:
-	@$(VENV)/bin/python scripts/check_observability_v8_spec.py \
+	@$(VENV_BIN)/python$(EXE) scripts/check_observability_v8_spec.py \
 		--package docs/design/observability-v8
 
 check-grafana-dashboards: _bundle-data
-	@$(VENV)/bin/python scripts/check_grafana_dashboards.py --require-packaged
+	@$(VENV_BIN)/python$(EXE) scripts/check_grafana_dashboards.py --require-packaged
 
 # check-provider-coverage runs the shared test/testdata/llm-endpoints.json
 # corpus through both the Go shape detector (provider_coverage_test.go)
@@ -894,7 +931,7 @@ check-provider-coverage: sync-openclaw-extension
 # model (so it stays hand-maintained), but the model list still rots as
 # providers ship and retire models — this gate catches that drift.
 check-llm-catalog:
-	@$(VENV)/bin/python scripts/check_llm_catalog.py
+	@$(VENV_BIN)/python$(EXE) scripts/check_llm_catalog.py
 
 check-upgrade-manifest:
 	@python3 scripts/generate-upgrade-manifest.py --check
@@ -927,7 +964,7 @@ upgrade-signed-protocol-matrix:
 # ---------------------------------------------------------------------------
 
 lint: py-lint go-lint
-	$(VENV)/bin/python -m py_compile cli/defenseclaw/main.py
+	$(VENV_BIN)/python$(EXE) -m py_compile cli/defenseclaw/main.py
 
 py-lint:
 	$(RUFF) check cli/defenseclaw/
@@ -1016,7 +1053,8 @@ _bundle-data:
 	cp -r policies/guardrail/default cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail/strict cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/
-	cp internal/envvars/registry.json cli/defenseclaw/_data/envvars/
+	@# Use the canonical generator without repairing tracked docs before CI checks.
+	$(PYTHON) scripts/gen_envvars_docs.py --bundle-only
 	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
 	@# Curated LLM model catalog consumed by `defenseclaw setup llm` and the
@@ -1044,9 +1082,9 @@ _bundle-data:
 	@#
 	@# Hosted Windows runners ship no rsync (`make install` for the connector
 	@# contract matrix died here with CreateProcess failed). Fall back to a plain
-	@# mirror there. That fallback loses inode stability, but the obs Docker stack
-	@# — the only consumer of that property — never runs on those Windows build
-	@# hosts, so the tradeoff is safe. Mirrors the rsync-or-cp guard in
+	@# mirror there. That fallback loses inode stability during package staging;
+	@# the runtime controller refreshes the user's seeded stack with atomic file
+	@# replacement on every supported OS. Mirrors the rsync-or-cp guard in
 	@# sync-openclaw-extension above.
 	@for d in splunk_local_bridge local_observability_stack; do \
 	  if command -v rsync >/dev/null 2>&1; then \
@@ -1117,7 +1155,7 @@ dist-clean:
 	rm -rf sandbox-test-*
 
 clean:
-	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(BINARY)-linux-* $(BINARY)-darwin-*
+	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(HOOK_LAUNCHER).exe $(BINARY)-linux-* $(BINARY)-darwin-* $(HOOK_LAUNCHER)-windows-*.exe
 	rm -rf $(VENV) cli/*.egg-info
 	rm -rf $(PLUGIN_DIR)/dist $(PLUGIN_DIR)/node_modules
 	rm -f coverage.out coverage-py.xml

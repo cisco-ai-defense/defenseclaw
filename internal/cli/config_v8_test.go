@@ -19,8 +19,10 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -28,6 +30,59 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
+
+func TestLoadConfigV8FileValidatesTargetRuntimeConnectorRoster(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.yaml")
+	raw := []byte(`config_version: 8
+data_dir: ` + directory + `
+guardrail:
+  enabled: true
+  mode: observe
+  connectors:
+    codex: {}
+    claudecode: {}
+observability: {}
+`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadConfigV8File(path, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"claudecode", "codex"}
+	if got := loaded.runtime.ActiveConnectors(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("staged target runtime connectors = %v, want %v", got, want)
+	}
+}
+
+func TestValidateRuntimeV8ConnectorRosterReportsExactSafePath(t *testing.T) {
+	document, err := config.ParseV8YAML("candidate.yaml", []byte(`config_version: 8
+guardrail:
+  connectors:
+    codex: {}
+observability: {}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = validateRuntimeV8ConnectorRoster(document, &config.Config{})
+	var semanticError *config.V8SemanticError
+	if !errors.As(err, &semanticError) {
+		t.Fatalf("connector roster error = %T, want *config.V8SemanticError: %v", err, err)
+	}
+	if semanticError.Path != "$.guardrail.connectors.codex" ||
+		semanticError.Summary != "target runtime did not retain the configured connector" {
+		t.Fatalf("connector roster diagnostic = %+v", semanticError)
+	}
+	failure := configV8ValidationFailure(err)
+	if failure.Path != "$.guardrail.connectors.codex" ||
+		!strings.Contains(failure.Reason, "target runtime did not retain the configured connector") ||
+		!strings.Contains(failure.Reason, "refuse activation and keep the live configuration unchanged") {
+		t.Fatalf("connector roster wire diagnostic = %+v", failure)
+	}
+}
 
 func TestCompileConfigV8FileUsesCanonicalMaskedPlan(t *testing.T) {
 	directory := t.TempDir()
@@ -63,6 +118,43 @@ observability:
 	}
 	if got := compiled.Plan.Snapshot().Destinations[1].SelectedSignals; len(got) != 3 {
 		t.Fatalf("general OTLP selected signals = %v, want all three", got)
+	}
+}
+
+func TestConfigV8ValidateEmitsValueSafeStructuredFailure(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.yaml")
+	secretLikeInvalidValue := "private-invalid-temporality"
+	raw := "config_version: 8\nobservability:\n  metric_policy:\n    temporality: " + secretLikeInvalidValue + "\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousPath, previousDataDir := configV8ConfigPath, configV8DataDir
+	previousOutput := configV8ValidateCmd.OutOrStdout()
+	configV8ConfigPath, configV8DataDir = path, directory
+	t.Cleanup(func() {
+		configV8ConfigPath, configV8DataDir = previousPath, previousDataDir
+		configV8ValidateCmd.SetOut(previousOutput)
+	})
+	output := &strings.Builder{}
+	configV8ValidateCmd.SetOut(output)
+	err := configV8ValidateCmd.RunE(configV8ValidateCmd, nil)
+	if err == nil {
+		t.Fatal("config-v8 validate accepted an invalid candidate")
+	}
+	if strings.Contains(err.Error(), secretLikeInvalidValue) || strings.Contains(output.String(), secretLikeInvalidValue) {
+		t.Fatalf("structured validation failure leaked the rejected value: err=%v output=%s", err, output)
+	}
+	var failure configV8WireFailure
+	if decodeErr := json.Unmarshal([]byte(output.String()), &failure); decodeErr != nil {
+		t.Fatalf("decode structured failure: %v", decodeErr)
+	}
+	if failure.WireVersion != configV8WireVersion || failure.Kind != "validation_error" ||
+		failure.ConfigVersion != config.ObservabilityV8ConfigVersion ||
+		failure.Path != "$.observability.metric_policy.temporality" ||
+		!strings.Contains(failure.Reason, "config_schema_invalid") ||
+		!strings.Contains(failure.Reason, "expected one of") {
+		t.Fatalf("structured validation failure = %+v", failure)
 	}
 }
 

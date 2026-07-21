@@ -44,6 +44,7 @@ LEGACY_UPGRADE_PROTOCOL_VERSION = 1
 HARD_CUT_UPGRADE_PROTOCOL_VERSION = 2
 OBSERVABILITY_V8_BRIDGE_VERSION = "0.8.4"
 OBSERVABILITY_V8_HARD_CUT_VERSION = "0.8.5"
+WINDOWS_INSTALLER_START_VERSION = "0.8.6"
 UPGRADE_BASELINES_PATH = Path(
     os.environ.get(
         "UPGRADE_BASELINE_POLICY",
@@ -425,6 +426,22 @@ def build_manifest() -> dict[str, Any]:
         "required_cli_migrations": required,
         "generated_by": "scripts/generate-upgrade-manifest.py",
     }
+    if current_t >= _ver_tuple(WINDOWS_INSTALLER_START_VERSION):
+        manifest["windows_installer"] = {
+            "asset": "DefenseClawSetup-x64.exe",
+            "architectures": ["amd64"],
+            "handoff_args": [
+                "/upgrade",
+                "/quiet",
+                "/norestart",
+                "INSTALLSCOPE=user",
+            ],
+            "authenticode": {
+                "required": True,
+                "publisher": "Cisco Systems, Inc.",
+            },
+            "managed_policy": "respect",
+        }
     manifest.update(release_upgrade_policy(version))
     if manifest["schema_version"] == 2:
         compatibility_version = compatibility_config_version()

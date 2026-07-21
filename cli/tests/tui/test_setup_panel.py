@@ -12,10 +12,12 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
 from defenseclaw.observability.v8_status import (
     V8BucketStatus,
     V8DestinationStatus,
@@ -31,6 +33,7 @@ from defenseclaw.tui.panels.setup import (
     WizardGoal,
     _custom_providers_fields_for,
     _filter_fields_for_goal,
+    _guardrail_actions_wizard_fields,
     _guardrail_wizard_fields_for,
     _llm_wizard_fields_for,
     action_matrix_fields,
@@ -55,6 +58,7 @@ from defenseclaw.tui.panels.setup import (
     wizard_state_summary,
 )
 from defenseclaw.tui.screens.model_picker import filter_models, picker_rows
+from defenseclaw.tui.services.cli_choices import supported_connector_choices
 from defenseclaw.tui.services.setup_state import (
     ConfigDiffEntry,
     ConfigField,
@@ -209,6 +213,19 @@ def test_ai_discovery_config_editor_exposes_online_provenance_opt_in() -> None:
 
     assert field.kind == "bool"
     assert "Hugging Face" in field.hint
+
+
+def test_windows_notifications_enabled_field_is_native_and_editable() -> None:
+    section = _section(
+        build_setup_sections({"notifications": {"enabled": True}}, os_name="windows"),
+        "Notifications",
+    )
+    fields = {field.key: field for field in section.fields if field.key}
+    enabled = fields["notifications.enabled"]
+    assert enabled.interactive is True
+    assert enabled.kind == "bool"
+    assert "unsupported" not in enabled.label.lower()
+    assert "desktop toasts" in section.summary.lower()
 
 
 def test_action_matrix_has_header_and_severity_triplets() -> None:
@@ -608,7 +625,9 @@ def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
     fields = wizard_form_defs(SetupWizard.GUARDRAIL_ACTIONS)
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, fields) == ("guardrail", "status")
 
-    scoped_status = _with_field(fields, "Connector", "codex")
+    scoped_status = _guardrail_actions_wizard_fields(
+        {"@Scope": "selected-connector", "--connector": "codex"}
+    )
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, scoped_status) == (
         "guardrail",
         "status",
@@ -627,8 +646,10 @@ def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
         "--no-restart",
     )
 
-    fail_mode = _with_field(fields, "Action", "fail-mode")
-    fail_mode = _with_field(fail_mode, "Connector", "hermes")
+    fail_mode = _guardrail_actions_wizard_fields(
+        {"@Scope": "selected-connector", "--connector": "hermes"}
+    )
+    fail_mode = _with_field(fail_mode, "Action", "fail-mode")
     fail_mode = _with_field(fail_mode, "Fail Mode", "closed")
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, fail_mode) == (
         "guardrail",
@@ -653,10 +674,12 @@ def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
         "--no-restart",
     )
 
-    block = _with_field(fields, "Action", "block-message")
+    block = _guardrail_actions_wizard_fields(
+        {"@Scope": "selected-connector", "--connector": "antigravity"}
+    )
+    block = _with_field(block, "Action", "block-message")
     assert missing_required_fields(SetupWizard.GUARDRAIL_ACTIONS, block) == ("Block Message or Clear Message",)
     block = _with_field(block, "Block Message", "Blocked by policy.")
-    block = _with_field(block, "Connector", "antigravity")
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, block) == (
         "guardrail",
         "block-message",
@@ -943,7 +966,7 @@ def test_config_field_catalog_preserves_secret_kind_and_choice_options() -> None
 
     assert _field_by_key(sections, "llm.api_key").kind == "password"
     assert _field_by_key(sections, "openshell.auto_pair").options == ("", "true", "false")
-    assert _field_by_key(sections, "claw.mode").options == CONNECTORS
+    assert _field_by_key(sections, "claw.mode").options == supported_connector_choices()
 
 
 def test_setup_wizard_info_and_form_field_hints_are_complete() -> None:
@@ -1808,13 +1831,13 @@ def test_guardrail_wizard_regional_judge_families_and_llm_role() -> None:
     assert _pair_after(argv, "--judge-model") == "bedrock/us.anthropic.claude-sonnet-4-6"
 
 
-def test_guardrail_wizard_omits_action_only_block_message_and_scopes_bedrock_auth_rows() -> None:
+def test_guardrail_wizard_exposes_block_message_and_scopes_bedrock_auth_rows() -> None:
     fields = _guardrail_wizard_fields_for({"--detection-strategy": "regex_judge", "@Provider": "bedrock"}, None)
     labels = {f.label for f in fields}
     flags = {f.flag for f in fields}
 
-    assert "Block Message" not in labels
-    assert "--block-message" not in flags
+    assert "Block Message" in labels
+    assert "--block-message" in flags
     assert "--judge-bedrock-auth-mode" in flags
     assert "--judge-bedrock-secret-key-env" not in flags
     assert "--judge-bedrock-profile-name" not in flags
@@ -2309,7 +2332,15 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     # codex pins its own overrides — the editor shows the *effective* value.
     assert fields["guardrail.connectors.codex.enabled"].value == "false"
     assert fields["guardrail.connectors.codex.enabled"].kind == "bool"
-    assert fields["guardrail.connectors.codex.hook_fail_mode"].value == "closed"
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value.startswith(
+        "closed (provenance: config; status:"
+    )
+    policy_status = fields["guardrail.connectors.codex.hook_fail_mode"].value
+    if os.name == "nt":
+        assert "policy-unverified" in policy_status
+    else:
+        assert "policy-unverified" not in policy_status
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].kind == "header"
     assert fields["guardrail.connectors.codex.block_message"].value == "codex blocked"
     assert fields["guardrail.connectors.codex.hilt.enabled"].value == "true"
     assert fields["guardrail.connectors.codex.hilt.min_severity"].value == "LOW"
@@ -2373,6 +2404,44 @@ def test_per_connector_hook_fail_mode_normalizes() -> None:
     # Anything that is not "closed" normalizes to "open".
     apply_config_field(cfg, "guardrail.connectors.hermes.hook_fail_mode", "open")
     assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "open"
+
+
+def test_guardrail_editor_uses_runtime_fail_mode_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _multi_connector_cfg()
+    cfg.data_dir = "runtime-state"
+    report = {"effective": "open", "provenance": "process-env", "drift": []}
+    calls: list[dict[str, object]] = []
+
+    def resolve(*_args, **kwargs):
+        calls.append(kwargs)
+        return report
+
+    monkeypatch.setattr("defenseclaw.fail_mode.connector_fail_mode_report", resolve)
+
+    fields = {f.key: f for f in _section(build_setup_sections(cfg), "Guardrail").fields}
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value == (
+        "open (provenance: process-env)"
+    )
+    assert calls and all(call == {"inspect_effective_policy": False} for call in calls)
+
+
+def test_guardrail_editor_surfaces_passive_policy_uncertainty(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _multi_connector_cfg()
+    cfg.data_dir = "runtime-state"
+    monkeypatch.setattr(
+        "defenseclaw.fail_mode.connector_fail_mode_report",
+        lambda *_args, **_kwargs: {
+            "effective": "closed",
+            "provenance": "windows-sidecar",
+            "drift": ["policy-unverified"],
+        },
+    )
+
+    fields = {f.key: f for f in _section(build_setup_sections(cfg), "Guardrail").fields}
+
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value == (
+        "closed (provenance: windows-sidecar; status: policy-unverified)"
+    )
 
 
 def test_per_connector_block_message_writes_string() -> None:

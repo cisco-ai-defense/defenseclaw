@@ -5,9 +5,11 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -20,6 +22,9 @@ import (
 )
 
 func TestWriteEnterpriseHookGuardianState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
+	}
 	dir := t.TempDir()
 	authorizationDir := t.TempDir()
 	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
@@ -62,6 +67,9 @@ func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 }
 
 func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("enterprise hook guardian symlink writer is unreachable on native Windows; lifecycle gate coverage remains active")
+	}
 	dir := t.TempDir()
 	t.Setenv(hookGuardianAuthorizationDirEnv, t.TempDir())
 	outside := filepath.Join(t.TempDir(), "outside.json")
@@ -78,6 +86,9 @@ func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
 }
 
 func TestWriteEnterpriseHookGuardianStatePreservesProtectedTargets(t *testing.T) {
+	originalOwnershipSetter := enterpriseHookAuthorizationOwnershipSetter
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	t.Cleanup(func() { enterpriseHookAuthorizationOwnershipSetter = originalOwnershipSetter })
 	dir := t.TempDir()
 	authorizationDir := t.TempDir()
 	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
@@ -147,6 +158,9 @@ func TestPreviousEnterpriseHookSuccessIgnoresServiceWritableStatus(t *testing.T)
 }
 
 func TestEnterpriseHookScopedTokenUsesManagedDataDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("enterprise hook scoped tokens are unsupported on native Windows; lifecycle gate coverage remains active")
+	}
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatalf("chmod managed data dir: %v", err)
@@ -173,6 +187,42 @@ func TestEnterpriseHookScopedTokenUsesManagedDataDir(t *testing.T) {
 		t.Fatalf("stat scoped token: %v", err)
 	} else if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("scoped token mode = %o, want 600", got)
+	}
+}
+
+func TestEnterpriseHookScopedOTLPTokenUsesManagedDataDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("enterprise OTLP scoped tokens are unsupported on native Windows; lifecycle gate coverage remains active")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod managed data dir: %v", err)
+	}
+	token, err := enterpriseHookScopedOTLPToken(dir, "codex")
+	if err != nil {
+		t.Fatalf("enterpriseHookScopedOTLPToken: %v", err)
+	}
+	if len(token) != 64 {
+		t.Fatalf("token length = %d, want 64", len(token))
+	}
+	path, err := connector.OTLPPathTokenFilePath(dir, connector.OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read scoped OTLP token: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != token {
+		t.Fatalf("token file does not contain the returned token")
+	}
+	if info, err := os.Stat(path); err != nil {
+		t.Fatalf("stat scoped OTLP token: %v", err)
+	} else if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("scoped OTLP token mode = %o, want 600", got)
+	}
+	if token, err := enterpriseHookScopedOTLPToken(dir, "cursor"); err != nil || token != "" {
+		t.Fatalf("non-OTLP connector token = %q, %v; want empty", token, err)
 	}
 }
 
@@ -253,5 +303,65 @@ func TestEnterpriseHookManagedRuntimeRejectsUserOwnedDataDir(t *testing.T) {
 	err := validateEnterpriseHookManagedRuntime()
 	if err == nil || !strings.Contains(err.Error(), "data_dir trust check failed") {
 		t.Fatalf("validateEnterpriseHookManagedRuntime error = %v, want data_dir trust check failure", err)
+	}
+}
+
+func TestEnterpriseHooksUninstallAcceptsSIDWithoutDeletedProfile(t *testing.T) {
+	originalConnector := enterpriseHookConnector
+	originalUser := enterpriseHookUser
+	originalHome := enterpriseHookUserHome
+	originalSID := enterpriseHookSID
+	originalDataDir := enterpriseHookDataDir
+	originalJSON := enterpriseHookJSON
+	originalRemove := enterpriseHooksRemoveManagedPolicy
+	t.Cleanup(func() {
+		enterpriseHookConnector = originalConnector
+		enterpriseHookUser = originalUser
+		enterpriseHookUserHome = originalHome
+		enterpriseHookSID = originalSID
+		enterpriseHookDataDir = originalDataDir
+		enterpriseHookJSON = originalJSON
+		enterpriseHooksRemoveManagedPolicy = originalRemove
+	})
+
+	enterpriseHookConnector = "claudecode"
+	enterpriseHookUser = ""
+	enterpriseHookUserHome = ""
+	enterpriseHookSID = "S-1-5-21-111-222-333-1001"
+	enterpriseHookDataDir = ""
+	enterpriseHookJSON = false
+	called := false
+	enterpriseHooksRemoveManagedPolicy = func(_ context.Context, opts enterprisehooks.InstallOptions) error {
+		called = true
+		if opts.OwnerSID != enterpriseHookSID || opts.UserHome != "" || opts.ConnectorName != "claudecode" {
+			t.Fatalf("RemoveManagedPolicy opts = %+v", opts)
+		}
+		return nil
+	}
+	cmd := &cobra.Command{}
+	cmd.SetOut(&strings.Builder{})
+	if err := runEnterpriseHooksUninstall(cmd, nil); err != nil {
+		t.Fatalf("runEnterpriseHooksUninstall: %v", err)
+	}
+	if !called {
+		t.Fatal("RemoveManagedPolicy was not called")
+	}
+}
+
+func TestResolveEnterpriseHookTargetValuesResolvesSIDOnlyProfile(t *testing.T) {
+	original := enterpriseHookSIDProfilePath
+	t.Cleanup(func() { enterpriseHookSIDProfilePath = original })
+	enterpriseHookSIDProfilePath = func(sid string) (string, error) {
+		if sid != "S-1-5-21-111-222-333-1001" {
+			t.Fatalf("resolver SID = %q", sid)
+		}
+		return `C:\Users\alice`, nil
+	}
+	target, err := resolveEnterpriseHookTargetValues("", "", -1, -1, "S-1-5-21-111-222-333-1001", "")
+	if err != nil {
+		t.Fatalf("resolveEnterpriseHookTargetValues: %v", err)
+	}
+	if target.home != `C:\Users\alice` || target.sid != "S-1-5-21-111-222-333-1001" {
+		t.Fatalf("target = %+v, want resolved SID-only profile", target)
 	}
 }

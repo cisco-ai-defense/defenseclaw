@@ -362,6 +362,11 @@ def test_from_config_refreshes_token_created_after_logger_initialization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Register an undo entry even when the host process did not already carry
+    # this variable.  The production dotenv loader writes directly to
+    # os.environ after logger initialization, which pytest cannot otherwise
+    # know it needs to remove at teardown.
+    monkeypatch.setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
     monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
     gateway = SimpleNamespace(
         api_bind="127.0.0.1",
@@ -407,7 +412,8 @@ def test_no_runtime_capability_is_confined_to_bootstrap_and_recovery() -> None:
     callers = {
         path.relative_to(package).as_posix()
         for path in package.rglob("*.py")
-        if path.name != "logger.py" and "Logger.no_runtime()" in path.read_text()
+        if path.name != "logger.py"
+        and "Logger.no_runtime()" in path.read_text(encoding="utf-8")
     }
     assert callers == {
         "bootstrap.py",
@@ -462,10 +468,10 @@ def test_real_v8_config_reaches_an_ordinary_command(tmp_path: Path) -> None:
         "\n".join(
             (
                 "config_version: 8",
-                f'data_dir: "{tmp_path}"',
+                f'data_dir: "{tmp_path.as_posix()}"',
                 "observability:",
                 "  local:",
-                f'    path: "{tmp_path / "audit.db"}"',
+                f'    path: "{(tmp_path / "audit.db").as_posix()}"',
             )
         )
         + "\n",

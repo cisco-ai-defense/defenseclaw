@@ -4,6 +4,7 @@
 package connector
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -59,7 +60,16 @@ func TestCorrelationContractSourcesAndFixturesAreImmutable(t *testing.T) {
 					if err != nil {
 						t.Fatalf("read fixture %s: %v", fixture.ID, err)
 					}
-					digest := sha256.Sum256(raw)
+					// Git may materialize text fixtures with CRLF on Windows even
+					// though their reviewed Git blobs are LF. Canonicalize only that
+					// checkout-level transformation; a lone CR or any content change
+					// still fails the immutable digest check.
+					withoutCRLF := bytes.ReplaceAll(raw, []byte("\r\n"), nil)
+					if bytes.ContainsRune(withoutCRLF, '\r') {
+						t.Fatalf("fixture %s contains a non-CRLF carriage return", fixture.ID)
+					}
+					canonical := bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
+					digest := sha256.Sum256(canonical)
 					if got := "sha256:" + hex.EncodeToString(digest[:]); got != fixture.SHA256 {
 						t.Fatalf("fixture %s digest=%s want %s", fixture.ID, got, fixture.SHA256)
 					}
@@ -123,6 +133,43 @@ func TestCorrelationProfileVersionGateFailsClosed(t *testing.T) {
 	}
 	if err := spec.Validate(); err != nil {
 		t.Fatalf("fail-closed profile invalid: %v", err)
+	}
+}
+
+func TestCodexCorrelationProfileSupportsExactReviewedHookContracts(t *testing.T) {
+	tests := []struct {
+		contractID        string
+		wantSubagentStart bool
+	}{
+		{contractID: "codex-hooks-v1"},
+		{contractID: "codex-hooks-v2"},
+		{contractID: "codex-hooks-v3", wantSubagentStart: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.contractID, func(t *testing.T) {
+			spec, ok := CorrelationSpecForConnector("codex", tc.contractID)
+			if !ok {
+				t.Fatal("reviewed Codex contract rejected")
+			}
+			if spec.HookContractID != tc.contractID {
+				t.Fatalf("correlation contract=%q want %q", spec.HookContractID, tc.contractID)
+			}
+			if err := spec.Validate(); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			got, ok := spec.LifecycleForEvent("SubagentStart")
+			if tc.wantSubagentStart {
+				if !ok || got != CorrelationLifecycleSubagentStart {
+					t.Fatalf("SubagentStart lifecycle=(%q,%v)", got, ok)
+				}
+			} else if ok {
+				t.Fatalf("older contract unexpectedly maps SubagentStart to %q", got)
+			}
+		})
+	}
+
+	if _, ok := CorrelationSpecForConnector("codex", "codex-hooks-v999"); ok {
+		t.Fatal("unreviewed future Codex contract accepted")
 	}
 }
 

@@ -743,12 +743,23 @@ func parseOTLPPathToken(path string) (token string, source string, ok bool) {
 }
 
 func isOTLPEndpointPath(path string) bool {
+	if isUnscopedOTLPEndpointPath(path) {
+		return true
+	}
+	_, _, ok := parseOTLPPathToken(path)
+	return ok
+}
+
+// isUnscopedOTLPEndpointPath identifies the standard OTLP-HTTP signal routes
+// used by exporters that can carry connector-scoped authorization headers.
+// The name distinguishes them from the legacy /otlp/<source>/<token>/...
+// transport without implying that these endpoints are unauthenticated.
+func isUnscopedOTLPEndpointPath(path string) bool {
 	switch path {
 	case "/v1/logs", "/v1/metrics", "/v1/traces":
 		return true
 	default:
-		_, _, ok := parseOTLPPathToken(path)
-		return ok
+		return false
 	}
 }
 

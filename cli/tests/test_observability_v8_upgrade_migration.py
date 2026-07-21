@@ -16,6 +16,7 @@ from unittest.mock import ANY, Mock, patch
 
 import defenseclaw.observability.v8_activation as activation_module
 from defenseclaw import migration_state
+from defenseclaw.config_inspect import ConfigInspectError
 from defenseclaw.migrations import (
     MIGRATIONS,
     MigrationContext,
@@ -24,13 +25,15 @@ from defenseclaw.migrations import (
     _allocate_observability_v8_bundle_backup,
     _migrate_observability_v8,
     _observability_v8_upgrade_environment,
+    _preflight_observability_v8,
     _run_observability_v8_bundle_upgrade_in_target,
     _valid_upgrade_mutation_token,
     _validate_observability_v8_candidate,
     preflight_observability_v8_upgrade,
+    preflight_required_migrations,
     run_migrations,
 )
-from defenseclaw.observability.v8_activation import V8ActivationError
+from defenseclaw.observability.v8_activation import V8ActivationError, V8CandidateValidationError
 from defenseclaw.observability.v8_config import MAX_SOURCE_BYTES
 from defenseclaw.observability.v8_migration import V8MigrationError
 from defenseclaw.upgrade_receipt import begin_upgrade_receipt
@@ -777,6 +780,78 @@ audit_sinks:
         self.assertEqual(len(candidate_paths), 1)
         self.assertFalse(os.path.exists(candidate_paths[0]))
 
+    def test_staged_preflight_validates_without_mutating_live_config_or_data(self) -> None:
+        canonical_config = os.path.join(self.data_dir, "config.yaml")
+        source = b"config_version: 7\nobservability:\n  enabled: true\n"
+        with open(canonical_config, "wb") as config_file:
+            config_file.write(source)
+        with open(self.environment_path, "rb") as environment_file:
+            before_environment = environment_file.read()
+        scratch = os.path.join(self.root.name, "staged-runtime", "installer", ".migration-preflight")
+        os.makedirs(scratch, mode=0o700)
+        migration = SimpleNamespace(
+            candidate=b"config_version: 8\nobservability: {}\n",
+            environment_edits=(),
+        )
+        candidate_paths: list[str] = []
+
+        def inspect(operation, **kwargs):
+            self.assertEqual(operation, "validate")
+            self.assertEqual(kwargs["data_dir"], os.path.abspath(self.data_dir))
+            candidate_path = kwargs["config_path"]
+            candidate_paths.append(candidate_path)
+            self.assertEqual(os.path.commonpath((scratch, candidate_path)), scratch)
+            with open(candidate_path, "rb") as candidate_file:
+                self.assertEqual(candidate_file.read(), migration.candidate)
+            return SimpleNamespace(valid=True, config_version=8)
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("defenseclaw.migrations.convert_v7_observability_to_v8", return_value=migration),
+            patch("defenseclaw.migrations.inspect_v8_config", side_effect=inspect),
+            patch("defenseclaw.migrations.activate_v8_migration") as activate,
+        ):
+            count = preflight_required_migrations(
+                "0.8.0",
+                "0.8.6",
+                self.ctx.openclaw_home,
+                self.data_dir,
+                ["0.8.5"],
+                scratch,
+            )
+
+        self.assertEqual(count, 1)
+        activate.assert_not_called()
+        with open(canonical_config, "rb") as config_file:
+            self.assertEqual(config_file.read(), source)
+        with open(self.environment_path, "rb") as environment_file:
+            self.assertEqual(environment_file.read(), before_environment)
+        self.assertEqual(len(candidate_paths), 1)
+        self.assertFalse(os.path.exists(candidate_paths[0]))
+        self.assertEqual(os.listdir(scratch), [])
+
+    def test_staged_preflight_rejects_config_path_escape_before_read(self) -> None:
+        outside = os.path.join(self.root.name, "outside-config.yaml")
+        with open(outside, "wb") as config_file:
+            config_file.write(b"config_version: 7\n")
+        scratch = os.path.join(self.root.name, "staged-runtime", "installer", ".migration-preflight")
+        os.makedirs(scratch, mode=0o700)
+        ctx = MigrationContext(
+            openclaw_home=self.ctx.openclaw_home,
+            data_dir=self.data_dir,
+            from_version="0.8.0",
+            to_version="0.8.6",
+            config_path=outside,
+        )
+
+        with self.assertRaises(ObservabilityV8UpgradeMigrationError) as raised:
+            _preflight_observability_v8(ctx, scratch)
+
+        self.assertEqual(raised.exception.code, "preflight_path_escape")
+        with open(outside, "rb") as config_file:
+            self.assertEqual(config_file.read(), b"config_version: 7\n")
+        self.assertEqual(os.listdir(scratch), [])
+
     def test_activation_failure_propagates_without_claiming_change(self) -> None:
         with (
             patch.dict(os.environ, {}, clear=True),
@@ -848,6 +923,10 @@ audit_sinks:
                 os.environ,
                 {"DEFENSECLAW_UPGRADE_MUTATION_TOKEN": ""},
                 clear=True,
+            ),
+            patch(
+                "defenseclaw.migrations._allocate_observability_v8_bundle_backup",
+                return_value=os.path.join(self.data_dir, "backups", "bundle"),
             ),
             patch(
                 "defenseclaw.migrations._run_observability_v8_bundle_upgrade_in_target",
@@ -1024,6 +1103,10 @@ audit_sinks:
                 clear=True,
             ),
             patch(
+                "defenseclaw.migrations._allocate_observability_v8_bundle_backup",
+                return_value=os.path.join(self.data_dir, "backups", "bundle"),
+            ),
+            patch(
                 "defenseclaw.migrations._run_observability_v8_bundle_upgrade_in_target",
                 return_value={"installed": True, "degraded_errors": []},
             ) as refresh,
@@ -1051,6 +1134,10 @@ audit_sinks:
                     "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING": "{}",
                 },
                 clear=True,
+            ),
+            patch(
+                "defenseclaw.migrations._allocate_observability_v8_bundle_backup",
+                return_value=os.path.join(self.data_dir, "backups", "bundle"),
             ),
             patch(
                 "defenseclaw.migrations._run_observability_v8_bundle_upgrade_in_target",
@@ -1188,6 +1275,27 @@ audit_sinks:
             snapshot = _observability_v8_upgrade_environment(self.environment_path)
         self.assertEqual(snapshot, {"AMBIENT_ONLY": "present"})
 
+    def test_windows_ambient_names_outside_v8_grammar_are_ignored(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "AMBIENT_ONLY": "present",
+                "PROGRAMFILES(X86)": r"C:\Program Files (x86)",
+                "COMMONPROGRAMFILES(X86)": r"C:\Program Files (x86)\Common Files",
+            },
+            clear=True,
+        ):
+            snapshot = _observability_v8_upgrade_environment(self.environment_path)
+
+        self.assertEqual(
+            snapshot,
+            {
+                "AMBIENT_ONLY": "present",
+                "DOTENV_ONLY": "dotenv-value",
+                "SHARED": "dotenv-loses",
+            },
+        )
+
     def test_ambient_snapshot_ignores_unreferenceable_shell_function_names(self) -> None:
         os.remove(self.environment_path)
         with patch.dict(
@@ -1269,6 +1377,119 @@ audit_sinks:
         self.assertTrue(migration_state.is_applied(second_state, "0.8.5"))
         self.assertEqual(activation.call_count, 2)
 
+    def test_strict_required_migration_preserves_refusal_and_does_not_mark_cursor(self) -> None:
+        cursor_dir = os.path.join(self.root.name, "strict-cursor-data")
+        os.makedirs(cursor_dir)
+        with open(os.path.join(cursor_dir, "config.yaml"), "wb") as config_file:
+            config_file.write(b"config_version: 7\n")
+        refusal = V8ActivationError(
+            "candidate_validation_failed",
+            "target_go_validation",
+            field_path="$.observability.destinations[0].protocol",
+            reason="[config_schema_invalid] unsupported protocol",
+        )
+        with (
+            patch("defenseclaw.migrations.convert_v7_observability_to_v8", return_value=object()),
+            patch("defenseclaw.migrations.activate_v8_migration", side_effect=refusal),
+            self.assertRaises(V8ActivationError) as raised,
+        ):
+            run_migrations(
+                "0.8.0",
+                "0.8.6",
+                self.ctx.openclaw_home,
+                cursor_dir,
+                strict_required=("0.8.5",),
+            )
+        self.assertIs(raised.exception, refusal)
+        state = migration_state.load(cursor_dir)
+        self.assertIsNone(state)
+        self.assertFalse(os.path.exists(os.path.join(cursor_dir, ".migration_state.json")))
+
+    def test_strict_required_refusal_preserves_existing_cursor_bytes(self) -> None:
+        cursor_dir = os.path.join(self.root.name, "strict-existing-cursor-data")
+        os.makedirs(cursor_dir)
+        with open(os.path.join(cursor_dir, "config.yaml"), "wb") as config_file:
+            config_file.write(b"config_version: 7\n")
+        state = migration_state.bootstrap(
+            None,
+            from_version="0.8.0",
+            package_version="0.8.0",
+            registry_versions=[version for version, _description, _migration in MIGRATIONS],
+        )
+        migration_state.save(cursor_dir, state)
+        cursor_path = migration_state.state_path(cursor_dir)
+        with open(cursor_path, "rb") as cursor_file:
+            before = cursor_file.read()
+        refusal = V8ActivationError("candidate_validation_failed", "target_go_validation")
+
+        with (
+            patch("defenseclaw.migrations.convert_v7_observability_to_v8", return_value=object()),
+            patch("defenseclaw.migrations.activate_v8_migration", side_effect=refusal),
+            self.assertRaises(V8ActivationError),
+        ):
+            run_migrations(
+                "0.8.0",
+                "0.8.6",
+                self.ctx.openclaw_home,
+                cursor_dir,
+                strict_required=("0.8.5",),
+            )
+
+        with open(cursor_path, "rb") as cursor_file:
+            self.assertEqual(cursor_file.read(), before)
+
+    def test_strict_same_version_success_persists_deferred_bootstrap(self) -> None:
+        cursor_dir = os.path.join(self.root.name, "strict-same-version-data")
+        os.makedirs(cursor_dir)
+        required = tuple(version for version, _description, _migration in MIGRATIONS)
+
+        applied = run_migrations(
+            "0.8.6",
+            "0.8.6",
+            self.ctx.openclaw_home,
+            cursor_dir,
+            strict_required=required,
+        )
+
+        state = migration_state.load(cursor_dir)
+        self.assertEqual(applied, 0)
+        self.assertIsNotNone(state)
+        self.assertTrue(all(migration_state.is_applied(state, version) for version in required))
+
+    def test_strict_missing_requirement_refuses_before_cursor_persistence(self) -> None:
+        cursor_dir = os.path.join(self.root.name, "strict-missing-requirement-data")
+        os.makedirs(cursor_dir)
+
+        with self.assertRaisesRegex(RuntimeError, "required migrations are missing: 9.9.9"):
+            run_migrations(
+                "0.8.6",
+                "0.8.6",
+                self.ctx.openclaw_home,
+                cursor_dir,
+                strict_required=("9.9.9",),
+            )
+
+        self.assertFalse(os.path.exists(migration_state.state_path(cursor_dir)))
+
+    def test_strict_deferred_bootstrap_save_failure_is_fatal(self) -> None:
+        cursor_dir = os.path.join(self.root.name, "strict-bootstrap-save-failure-data")
+        os.makedirs(cursor_dir)
+        required = tuple(version for version, _description, _migration in MIGRATIONS)
+
+        with (
+            patch("defenseclaw.migration_state.save", side_effect=OSError("synthetic write refusal")),
+            self.assertRaisesRegex(OSError, "synthetic write refusal"),
+        ):
+            run_migrations(
+                "0.8.6",
+                "0.8.6",
+                self.ctx.openclaw_home,
+                cursor_dir,
+                strict_required=required,
+            )
+
+        self.assertFalse(os.path.exists(migration_state.state_path(cursor_dir)))
+
 
 class TestObservabilityV8CandidateFile(unittest.TestCase):
     def test_owner_only_candidate_is_removed_after_success(self) -> None:
@@ -1315,6 +1536,25 @@ class TestObservabilityV8CandidateFile(unittest.TestCase):
             self.assertIs(raised.exception, original)
             self.assertEqual(len(seen), 1)
             self.assertFalse(os.path.exists(seen[0]))
+
+    def test_structured_target_refusal_preserves_safe_path_and_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as data_dir:
+            secret = "must-not-be-rendered"
+            refusal = ConfigInspectError(
+                "safe diagnostic",
+                field_path="$.observability.destinations[0].protocol",
+                reason="[config_schema_invalid] unsupported protocol",
+            )
+            with patch("defenseclaw.migrations.inspect_v8_config", side_effect=refusal):
+                with self.assertRaises(V8CandidateValidationError) as raised:
+                    _validate_observability_v8_candidate(
+                        b"config_version: 8\n",
+                        {"SECRET": secret},
+                        data_dir=data_dir,
+                    )
+            self.assertEqual(raised.exception.field_path, refusal.field_path)
+            self.assertEqual(raised.exception.reason, refusal.reason)
+            self.assertNotIn(secret, str(raised.exception))
 
     def test_genuine_cleanup_failure_replaces_validator_exception_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as data_dir:

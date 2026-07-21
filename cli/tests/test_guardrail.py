@@ -853,6 +853,15 @@ class TestSetupGuardrailCommand(unittest.TestCase):
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
         self.runner = CliRunner()
+        # These tests cover guardrail configuration, prompts, and persistence.
+        # Native Windows Codex setup independently tests the required trusted
+        # executable receipt; do not make this suite depend on a host Codex
+        # installation merely because a case selects the Codex connector.
+        selection_patcher = patch(
+            "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections"
+        )
+        selection_patcher.start()
+        self.addCleanup(selection_patcher.stop)
         self.oc_path = os.path.join(self.tmp_dir, "openclaw.json")
         oc = {
             "agents": {"defaults": {"model": {"primary": "anthropic/claude-opus-4-5"}}},
@@ -1050,7 +1059,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
 
         self.app.cfg.claw.home_dir = self.tmp_dir
         signal = SimpleNamespace(version="", installed=False, error="", binary_path="")
-        disc = SimpleNamespace(agents={"copilot": signal})
+        disc = SimpleNamespace(agents={"claudecode": signal})
 
         with patch(
             "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
@@ -1065,7 +1074,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                     "guardrail",
                     "--non-interactive",
                     "--connector",
-                    "copilot",
+                    "claudecode",
                     "--mode",
                     "action",
                     "--no-restart",
@@ -1074,9 +1083,9 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("GitHub Copilot CLI: connector was not detected locally", result.output)
-        self.assertIn("GitHub Copilot CLI: requested action mode was refused", result.output)
-        self.assertEqual(self.app.cfg.guardrail.connector, "copilot")
+        self.assertIn("Claude Code: connector was not detected locally", result.output)
+        self.assertIn("Claude Code: requested action mode was refused", result.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "claudecode")
         self.assertEqual(self.app.cfg.guardrail.mode, "observe")
 
     def test_non_interactive_codex_observe_flag_enables_enforcement(self):
@@ -1109,12 +1118,12 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         result = self.runner.invoke(
             setup,
             ["guardrail",
-             "--non-interactive", "--agent", "zeptoclaw",
+             "--non-interactive", "--agent", "codex",
              "--mode", "observe", "--no-restart"],
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Connector: ZeptoClaw (zeptoclaw)", result.output)
+        self.assertIn("Connector: Codex (codex)", result.output)
 
     def test_picked_connector_hint_invalid_value_is_ignored(self):
         """Garbage in picked_connector falls back to openclaw, not a crash."""
@@ -1136,10 +1145,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_setup import setup
         with open(os.path.join(self.tmp_dir, "picked_connector"), "w") as f:
             f.write("codex\n")
-        # Operator previously ran `setup guardrail --connector zeptoclaw`
+        # Operator previously ran `setup guardrail --connector claudecode`
         # and saved it. The picked_connector hint must not silently
         # downgrade their explicit choice on the next bare re-run.
-        self.app.cfg.guardrail.connector = "zeptoclaw"
+        self.app.cfg.guardrail.connector = "claudecode"
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.claw.home_dir = self.tmp_dir
         result = self.runner.invoke(
@@ -1148,7 +1157,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Connector: ZeptoClaw (zeptoclaw)", result.output)
+        self.assertIn("Connector: Claude Code (claudecode)", result.output)
 
     def test_shows_disable_instructions(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1217,7 +1226,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertTrue(raw["guardrail"]["hilt"]["enabled"])
         self.assertEqual(raw["guardrail"]["hilt"]["min_severity"], "MEDIUM")
         self.assertNotIn("privacy", raw)
-        self.assertTrue(raw["guardrail"]["rule_pack_dir"].endswith("/policies/guardrail/strict"))
+        self.assertEqual(
+            Path(raw["guardrail"]["rule_pack_dir"]).parts[-3:],
+            ("policies", "guardrail", "strict"),
+        )
 
     def test_yes_alias_updates_rule_pack(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1240,22 +1252,23 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
             raw = yaml.safe_load(f)
-        self.assertTrue(raw["guardrail"]["rule_pack_dir"].endswith("/policies/guardrail/strict"))
+        self.assertEqual(
+            Path(raw["guardrail"]["rule_pack_dir"]).parts[-3:],
+            ("policies", "guardrail", "strict"),
+        )
 
     def test_unscoped_rule_pack_updates_global_for_all_connectors(self):
         from defenseclaw.commands.cmd_setup import setup
         from defenseclaw.config import PerConnectorGuardrailConfig
 
         gc = self.app.cfg.guardrail
-        gc.connector = "antigravity"
+        gc.connector = "codex"
         gc.connectors = {
-            "antigravity": PerConnectorGuardrailConfig(),
             "codex": PerConnectorGuardrailConfig(),
-            "hermes": PerConnectorGuardrailConfig(),
-            "opencode": PerConnectorGuardrailConfig(),
+            "claudecode": PerConnectorGuardrailConfig(),
         }
         gc.connectors["codex"].rule_pack_dir = "/tmp/old-codex-pack"
-        gc.connectors["hermes"].rule_pack_dir = "/tmp/old-hermes-pack"
+        gc.connectors["claudecode"].rule_pack_dir = "/tmp/old-claude-pack"
         self.app.cfg.claw.home_dir = self.tmp_dir
 
         result = self.runner.invoke(
@@ -1272,11 +1285,15 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
 
-        self.assertTrue(gc.rule_pack_dir.endswith("/policies/guardrail/strict"))
-        for connector in ("antigravity", "codex", "hermes", "opencode"):
+        self.assertEqual(
+            Path(gc.rule_pack_dir).parts[-3:],
+            ("policies", "guardrail", "strict"),
+        )
+        for connector in ("codex", "claudecode"):
             self.assertEqual(gc.connectors[connector].rule_pack_dir, "")
-            self.assertTrue(
-                gc.effective_rule_pack_dir(connector).endswith("/policies/guardrail/strict")
+            self.assertEqual(
+                Path(gc.effective_rule_pack_dir(connector)).parts[-3:],
+                ("policies", "guardrail", "strict"),
             )
 
     def test_scoped_rule_pack_updates_only_requested_connector(self):
@@ -1284,12 +1301,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         from defenseclaw.config import PerConnectorGuardrailConfig
 
         gc = self.app.cfg.guardrail
-        gc.connector = "antigravity"
+        gc.connector = "codex"
         gc.connectors = {
-            "antigravity": PerConnectorGuardrailConfig(),
             "codex": PerConnectorGuardrailConfig(),
-            "hermes": PerConnectorGuardrailConfig(),
-            "opencode": PerConnectorGuardrailConfig(),
+            "claudecode": PerConnectorGuardrailConfig(),
         }
         self.app.cfg.claw.home_dir = self.tmp_dir
 
@@ -1298,7 +1313,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             [
                 "guardrail",
                 "--connector",
-                "hermes",
+                "claudecode",
                 "--rule-pack",
                 "strict",
                 "--yes",
@@ -1310,10 +1325,11 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
 
         self.assertEqual(gc.rule_pack_dir, "")
-        self.assertEqual(gc.connectors["antigravity"].rule_pack_dir, "")
         self.assertEqual(gc.connectors["codex"].rule_pack_dir, "")
-        self.assertTrue(gc.connectors["hermes"].rule_pack_dir.endswith("/policies/guardrail/strict"))
-        self.assertEqual(gc.connectors["opencode"].rule_pack_dir, "")
+        self.assertEqual(
+            Path(gc.connectors["claudecode"].rule_pack_dir).parts[-3:],
+            ("policies", "guardrail", "strict"),
+        )
 
     def test_rule_pack_dir_missing_is_rejected_before_save(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1384,6 +1400,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--block-message", result.output)
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "guardrail proxy connectors are unsupported on native Windows",
+    )
     def test_interactive_action_mode_prompts_hilt_inline(self):
         """HILT is asked inline (not under advanced options) whenever
         the operator selects action mode, regardless of whether they
@@ -1451,6 +1471,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertNotIn("--disable-redaction", result.output)
         self.assertNotIn("--enable-redaction", result.output)
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "guardrail proxy connectors are unsupported on native Windows",
+    )
     def test_interactive_observe_mode_skips_hilt_entirely(self):
         """In observe mode the HILT prompt is skipped entirely.
 
@@ -1540,7 +1564,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 setup,
                 ["guardrail", "--no-restart"],
                 obj=self.app,
-                input="\n" * 15,
+                input="1\n" + "\n" * 15,
             )
 
         self.assertEqual(result.exit_code, 0, result.output)
@@ -1770,6 +1794,46 @@ class TestIsPidAlive(unittest.TestCase):
 
 
 class TestRestartDefenseGateway(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "native Windows package contract")
+    @patch(
+        "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
+        return_value=True,
+    )
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_packaged_restart_uses_verified_sibling_from_hostile_working_directory(
+        self,
+        mock_run,
+        mock_ready,
+    ):
+        from defenseclaw.commands.cmd_setup import _restart_defense_gateway
+
+        mock_run.return_value = MagicMock(returncode=0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir, "installed")
+            python = root / "runtime" / "python" / "python.exe"
+            gateway = root / "bin" / "defenseclaw-gateway.exe"
+            hostile = Path(tmpdir, "hostile")
+            python.parent.mkdir(parents=True)
+            gateway.parent.mkdir(parents=True)
+            hostile.mkdir()
+            python.write_bytes(b"python")
+            gateway.write_bytes(b"gateway")
+            (hostile / "defenseclaw-gateway.exe").write_bytes(b"shadow")
+
+            previous = os.getcwd()
+            try:
+                os.chdir(hostile)
+                with (
+                    patch.dict(os.environ, {"DEFENSECLAW_INSTALL_ROOT": str(root)}),
+                    patch.object(sys, "executable", str(python)),
+                ):
+                    self.assertTrue(_restart_defense_gateway(tmpdir))
+            finally:
+                os.chdir(previous)
+
+        self.assertEqual(mock_run.call_args.args[0], [str(gateway.resolve()), "start"])
+        mock_ready.assert_called_once_with(tmpdir)
+
     @patch(
         "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
         return_value=True,
@@ -1960,7 +2024,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             _restart_services(tmpdir, connector="codex", wait_for_connector_ready=True)
 
-        mock_wait.assert_called_once_with(tmpdir, ["codex"], None)
+        mock_wait.assert_called_once_with(tmpdir, ["codex"], None, None)
 
     @patch("defenseclaw.commands.cmd_setup._wait_for_connector_runtime", return_value=False)
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
@@ -1976,17 +2040,52 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
     def test_wait_for_connector_runtime_requires_fresh_matching_state(self):
         from defenseclaw.commands.cmd_setup import (
             _active_connector_state_marker,
+            _hook_contract_lock_marker,
             _wait_for_connector_runtime,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = os.path.join(tmpdir, "active_connector.json")
+            lock_path = os.path.join(tmpdir, "hook_contract_lock.json")
             with open(state_path, "w", encoding="utf-8") as state_file:
                 json.dump({"version": 2, "name": "codex", "names": ["codex"]}, state_file)
-            marker = _active_connector_state_marker(tmpdir)
-            self.assertIsNotNone(marker)
-            self.assertFalse(_wait_for_connector_runtime(tmpdir, ["codex"], marker, timeout=0.01))
-            self.assertTrue(_wait_for_connector_runtime(tmpdir, ["codex"], marker - 1, timeout=0.01))
+            with open(lock_path, "w", encoding="utf-8") as lock_file:
+                json.dump(
+                    {"version": 2, "connectors": {"codex": {"connector": "codex"}}},
+                    lock_file,
+                )
+            state_marker = _active_connector_state_marker(tmpdir)
+            lock_marker = _hook_contract_lock_marker(tmpdir)
+            self.assertIsNotNone(state_marker)
+            self.assertIsNotNone(lock_marker)
+
+            # A rollback refreshes active_connector.json but deliberately
+            # preserves the last good lock. That must never look ready.
+            self.assertFalse(
+                _wait_for_connector_runtime(
+                    tmpdir, ["codex"], state_marker - 1, lock_marker, timeout=0.01
+                )
+            )
+            self.assertTrue(
+                _wait_for_connector_runtime(
+                    tmpdir, ["codex"], state_marker - 1, lock_marker - 1, timeout=0.01
+                )
+            )
+
+            with open(lock_path, "w", encoding="utf-8") as lock_file:
+                json.dump(
+                    {"version": 2, "connectors": {"codex": {"connector": "codex"}}},
+                    lock_file,
+                )
+            self.assertFalse(
+                _wait_for_connector_runtime(
+                    tmpdir,
+                    ["codex", "claudecode"],
+                    state_marker - 1,
+                    lock_marker - 1,
+                    timeout=0.01,
+                )
+            )
 
 
 class TestCheckOpenclawGateway(unittest.TestCase):

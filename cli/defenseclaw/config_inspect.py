@@ -39,6 +39,7 @@ CONFIG_V8_HELPER_TIMEOUT_SECONDS: Final = 15
 _OPERATIONS: Final = frozenset({"validate", "effective"})
 _REFERENCE_FORMATS: Final = frozenset({"yaml", "markdown"})
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_DIAGNOSTIC_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _EXEC_CONTROL_ENVIRONMENT_NAMES = frozenset(
     {
@@ -58,6 +59,11 @@ _EXEC_CONTROL_ENVIRONMENT_PREFIXES = ("LD_", "DYLD_")
 
 class ConfigInspectError(RuntimeError):
     """A bounded, display-safe helper invocation or protocol failure."""
+
+    def __init__(self, message: str, *, field_path: str | None = None, reason: str | None = None) -> None:
+        self.field_path = field_path
+        self.reason = reason
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -94,6 +100,14 @@ def inspect_v8_config(
     )
     completed = _run(argv, environment_overrides=environment_overrides)
     if completed.returncode != 0:
+        failure = _decode_validation_failure(completed.stdout, operation)
+        if failure is not None:
+            field_path, reason = failure
+            raise ConfigInspectError(
+                f"candidate field={field_path}; reason={reason}",
+                field_path=field_path,
+                reason=reason,
+            )
         raise ConfigInspectError(_helper_failure(completed.stderr, operation))
     try:
         payload = json.loads(completed.stdout)
@@ -263,6 +277,38 @@ def _decode_wire(payload: dict[str, Any], operation: str) -> ConfigV8WireResult:
         valid=valid if isinstance(valid, bool) else None,
         effective=effective,
     )
+
+
+def _decode_validation_failure(value: str | None, operation: str) -> tuple[str, str] | None:
+    """Decode the target compiler's value-free structured failure."""
+
+    if operation != "validate" or not value:
+        return None
+    try:
+        payload = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("wire_version") != CONFIG_V8_WIRE_VERSION
+        or payload.get("kind") != "validation_error"
+        or payload.get("config_version") != 8
+    ):
+        return None
+    field_path = payload.get("path")
+    reason = payload.get("reason")
+    if (
+        not isinstance(field_path, str)
+        or not field_path.startswith("$")
+        or len(field_path) > 512
+        or _DIAGNOSTIC_CONTROL_CHARACTERS.search(field_path) is not None
+        or not isinstance(reason, str)
+        or not reason.strip()
+        or len(reason) > 1_000
+        or _DIAGNOSTIC_CONTROL_CHARACTERS.search(reason) is not None
+    ):
+        return None
+    return field_path, reason.strip()
 
 
 def _helper_failure(stderr: str | None, operation: str) -> str:

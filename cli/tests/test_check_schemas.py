@@ -32,6 +32,7 @@ validation, audit drill-down) silently depend on:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -272,7 +273,7 @@ class TestCheckSchemasCoversOtelTree(unittest.TestCase):
                 check=False,
             )
             self.assertNotEqual(res.returncode, 0)
-            self.assertIn("otel/metrics.schema.json", res.stderr)
+            self.assertIn(os.fspath(Path("otel") / "metrics.schema.json"), res.stderr)
 
 
 class TestCliEmbedSchemaMirrors(unittest.TestCase):

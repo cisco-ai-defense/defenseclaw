@@ -631,7 +631,9 @@ func TestMalformedAdapterItemCountsFailClosedWithoutRetry(t *testing.T) {
 					t.Fatalf("enqueue %q = %+v", id, result)
 				}
 			}
-			waitFor(t, func() bool { return dispatcher.Counters().Rejected == 3 })
+			waitFor(t, func() bool {
+				return dispatcher.Counters().Rejected == 3 && dispatcher.Health() == delivery.HealthFailing
+			})
 			if got := dispatcher.Counters(); got.Accepted != 3 || got.Delivered != 0 || got.Rejected != 3 || got.Retried != 0 {
 				t.Fatalf("malformed counters = %+v", got)
 			}

@@ -22,6 +22,7 @@ from pathlib import Path
 
 from defenseclaw.config import _assert_config_write_allowed, locked_config_yaml
 from defenseclaw.config_inspect import inspect_v8_config
+from defenseclaw.file_permissions import set_file_mode
 from defenseclaw.observability.v8_config import load_validate_v8
 from defenseclaw.observability.v8_yaml import V8YAMLMutation, prepare_v8_yaml_write
 
@@ -36,7 +37,8 @@ class V8PolicyWriteResult:
 
 
 V8CandidateValidator = Callable[[str, str | None], None]
-_CandidateIdentity = tuple[int, int, int, int, int, int]
+_StatIdentity = tuple[int, int, int, int, int, int]
+_CandidateIdentity = tuple[_StatIdentity, object | None]
 
 
 def mutate_v8_config(
@@ -115,17 +117,23 @@ def _assert_safe_target(path: str) -> None:
 
 def _stage_candidate(path: str, candidate: bytes) -> str:
     directory = os.path.dirname(path) or "."
-    existing_mode = stat.S_IMODE(os.stat(path, follow_symlinks=False).st_mode)
-    target_mode = existing_mode & 0o640
-    if target_mode not in {0o600, 0o640}:
-        target_mode = 0o600
+    target_mode = 0o600
+    if os.name != "nt":
+        existing_mode = stat.S_IMODE(os.stat(path, follow_symlinks=False).st_mode)
+        target_mode = existing_mode & 0o640
+        if target_mode not in {0o600, 0o640}:
+            target_mode = 0o600
     descriptor, staged = tempfile.mkstemp(
         prefix=f".{os.path.basename(path)}.observability-v8-",
         suffix=".tmp",
         dir=directory,
     )
     try:
-        os.fchmod(descriptor, target_mode)
+        # POSIX applies the retained 0600/0640 mode through the descriptor.
+        # Windows has no os.fchmod, so the shared helper installs a protected
+        # owner/SYSTEM DACL before any policy (and possible secret) bytes are
+        # written to the sibling candidate.
+        set_file_mode(descriptor, staged, target_mode, set_owner=True)
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(candidate)
             stream.flush()
@@ -152,9 +160,14 @@ def _candidate_snapshot(path: str) -> tuple[_CandidateIdentity, str]:
         path_before = os.lstat(path)
         if not stat.S_ISREG(opened_before.st_mode) or not stat.S_ISREG(path_before.st_mode):
             raise RuntimeError("staged observability candidate is not a regular file")
-        opened_identity = _stat_identity(opened_before)
-        if _stat_identity(path_before) != opened_identity:
+        opened_stat_identity = _stat_identity(opened_before)
+        if _stat_identity(path_before) != opened_stat_identity:
             raise RuntimeError("staged observability candidate changed while being opened")
+        windows_security = None
+        if os.name == "nt":
+            from defenseclaw import windows_acl
+
+            windows_security = windows_acl.capture_fd(descriptor)
 
         digest = hashlib.sha256()
         while chunk := os.read(descriptor, 1024 * 1024):
@@ -162,9 +175,14 @@ def _candidate_snapshot(path: str) -> tuple[_CandidateIdentity, str]:
 
         opened_after = os.fstat(descriptor)
         path_after = os.lstat(path)
-        if _stat_identity(opened_after) != opened_identity or _stat_identity(path_after) != opened_identity:
+        if _stat_identity(opened_after) != opened_stat_identity or _stat_identity(path_after) != opened_stat_identity:
             raise RuntimeError("staged observability candidate changed while being verified")
-        return opened_identity, digest.hexdigest()
+        if os.name == "nt":
+            from defenseclaw import windows_acl
+
+            if windows_acl.capture_fd(descriptor) != windows_security:
+                raise RuntimeError("staged observability candidate security changed while being verified")
+        return (opened_stat_identity, windows_security), digest.hexdigest()
     except OSError as exc:
         raise RuntimeError("staged observability candidate could not be verified safely") from exc
     finally:
@@ -172,14 +190,19 @@ def _candidate_snapshot(path: str) -> tuple[_CandidateIdentity, str]:
             os.close(descriptor)
 
 
-def _stat_identity(metadata: os.stat_result) -> _CandidateIdentity:
+def _stat_identity(metadata: os.stat_result) -> _StatIdentity:
+    # Windows' CRT handle and path stat calls can report different ctime values
+    # for the same NTFS file after a DACL update. Device/inode still bind the
+    # file identity, while mode/size/mtime plus the content digest bind its
+    # bytes. The exact Windows security descriptor is captured separately.
+    ctime_ns = 0 if os.name == "nt" else metadata.st_ctime_ns
     return (
         metadata.st_dev,
         metadata.st_ino,
         metadata.st_mode,
         metadata.st_size,
         metadata.st_mtime_ns,
-        metadata.st_ctime_ns,
+        ctime_ns,
     )
 
 

@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "scripts" / "install.ps1"
 RESOLVER = ROOT / "scripts" / "upgrade.ps1"
 RELEASE_HARNESS = ROOT / "scripts" / "test-upgrade-release-windows.ps1"
+LEGACY_INLINE_INSTALLER = "function Install-Uv {" in INSTALLER.read_text(encoding="utf-8")
 
 
 def _main_body(source: str) -> str:
@@ -279,6 +280,32 @@ def test_windows_checksum_parser_rejects_modern_or_unknown_nested_rows(
     assert "Invalid checksum artifact name." in completed.stderr
 
 
+def test_windows_native_bootstrap_delegates_authenticated_install_lifecycle() -> None:
+    source = INSTALLER.read_text(encoding="utf-8")
+    main = _main_body(source)
+    handoff = source[
+        source.index("function Invoke-NativeSetup") : source.index("function Main")
+    ]
+
+    assert not LEGACY_INLINE_INSTALLER
+    assert "function Ensure-Python {" not in source
+    assert 'SetEnvironmentVariable("Path"' not in source
+    assert "DefenseClawSetup-x64.exe" in source
+    assert main.index("Assert-NativeWindowsX64") < main.index("Stage-RemoteBundle")
+    assert main.index("Assert-CompatibleLayoutRequest") < main.index("Stage-RemoteBundle")
+    assert main.index("Stage-RemoteBundle") < main.index("Invoke-NativeSetup")
+    assert main.index("Stage-LocalBundle") < main.index("Invoke-NativeSetup")
+    assert "Remove-PrivateStageRoot -Path $bundle.Root" in main
+    assert handoff.index("Assert-Sha256") < handoff.index("Assert-SetupAuthenticode")
+    assert handoff.index("Assert-SetupAuthenticode") < handoff.index(
+        "Invoke-BoundedNativeProcess"
+    )
+
+
+@pytest.mark.skipif(
+    not LEGACY_INLINE_INSTALLER,
+    reason="0.8.6 delegates the install transaction to native Setup",
+)
 def test_windows_installer_refuses_existing_install_before_any_dependency_or_artifact_work() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
     main = _main_body(source)
@@ -309,6 +336,10 @@ def test_windows_installer_refuses_existing_install_before_any_dependency_or_art
     assert "if($count -eq 0){break}" in source
 
 
+@pytest.mark.skipif(
+    not LEGACY_INLINE_INSTALLER,
+    reason="0.8.6 delegates PATH and runtime ownership to native Setup",
+)
 def test_windows_fresh_installer_never_delegates_persistent_path_or_python_registration() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
     install_uv = source[source.index("function Install-Uv {") : source.index("function Ensure-Python {")]
@@ -329,6 +360,10 @@ def test_windows_fresh_installer_never_delegates_persistent_path_or_python_regis
     assert "Persistent PATH was not modified" in install_uv
 
 
+@pytest.mark.skipif(
+    not LEGACY_INLINE_INSTALLER,
+    reason="0.8.6 native Setup has its own rollback and lifecycle acceptance suite",
+)
 def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
     main = _main_body(source)
@@ -552,6 +587,10 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
     assert "bounded residual path inventory (names and kinds only)" in harness
 
 
+@pytest.mark.skipif(
+    not LEGACY_INLINE_INSTALLER,
+    reason="0.8.6 native Setup owns installation custody; the script only stages authenticated assets",
+)
 def test_windows_private_custody_cleanup_is_creation_bound_and_identity_exact() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
 
@@ -1511,18 +1550,15 @@ def test_windows_release_harness_accepts_both_reviewed_config_map_topologies() -
         assert set(config_versions) == set(published)
         for version in published:
             major, minor, patch = (int(component) for component in version.split("."))
-            expected = (
-                7
-                if (major, minor, patch) >= (0, 8, 3)
-                else 6
-                if (
-                    major,
-                    minor,
-                    patch,
-                )
-                >= (0, 7, 1)
-                else 5
-            )
+            expected = 8 if (major, minor, patch) >= (0, 8, 5) else 7 if (
+                major,
+                minor,
+                patch,
+            ) >= (0, 8, 3) else 6 if (
+                major,
+                minor,
+                patch,
+            ) >= (0, 7, 1) else 5
             assert config_versions[version] == expected
         if "0.8.4" in config_versions:
             assert config_versions["0.8.4"] == 7

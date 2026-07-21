@@ -13,12 +13,18 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Generic, Literal, TypeVar
 
+from defenseclaw.connector_paths import (
+    connector_config_files,
+    connector_home,
+    hermes_config_path,
+)
 from defenseclaw.tui.panels.registries import registry_badge
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
 
@@ -571,9 +577,7 @@ class CatalogListModel(Generic[RowT]):
 
     def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
         if self.show_connector_column:
-            return tuple(
-                (self.connector_cell(row), *catalog_row_cells(row)) for row in self.filtered
-            )
+            return tuple((self.connector_cell(row), *catalog_row_cells(row)) for row in self.filtered)
         return tuple(catalog_row_cells(row) for row in self.filtered)
 
     def connector_cell(self, row: RowT) -> str:
@@ -592,7 +596,8 @@ class CatalogListModel(Generic[RowT]):
             f"[bold #22D3EE]{title}[/]\n"
             f"{len(self.filtered)} of {len(self.items)} rows{filter_text}{detail}\n"
             "[dim]Navigate:[/] j/k move  ·  Enter detail  ·  / filter  ·  Esc close  ·  r refresh\n"
-            "[dim]Actions:[/]  o open menu  ·  s scan  ·  b block  ·  a allow  ·  R reveal in registry"
+            "[dim]Actions:[/]  o open menu  ·  s scan  ·  b block  ·  a allow  ·  "
+            "u unblock  ·  R reveal in registry"
         )
 
     def _haystack(self, row: RowT) -> str:
@@ -684,9 +689,7 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
         if key in {"s", "b", "a", "u"}:
             intent = (
-                self.action_intent(key, origin="skills")
-                if self.selected() and self.action_key_available(key)
-                else None
+                self.action_intent(key, origin="skills") if self.selected() and self.action_key_available(key) else None
             )
             return CatalogPanelAction(True, intent)
         if key == "r":
@@ -784,9 +787,7 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
         if key in {"s", "b", "a", "u"}:
             intent = (
-                self.action_intent(key, origin="mcps")
-                if self.selected() and self.action_key_available(key)
-                else None
+                self.action_intent(key, origin="mcps") if self.selected() and self.action_key_available(key) else None
             )
             return CatalogPanelAction(True, intent)
         if key in {"n", "+"}:
@@ -1013,9 +1014,7 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
         if key in {"b", "a", "u"}:
             intent = (
-                self.action_intent(key, origin="tools")
-                if self.selected() and self.action_key_available(key)
-                else None
+                self.action_intent(key, origin="tools") if self.selected() and self.action_key_available(key) else None
             )
             return CatalogPanelAction(True, intent)
         if key == "r":
@@ -1038,10 +1037,7 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
         )
 
     def empty_state(self) -> str:
-        return (
-            "No tool policy rows. This table only shows block/allow entries; "
-            "unblocked tools disappear here."
-        )
+        return "No tool policy rows. This table only shows block/allow entries; unblocked tools disappear here."
 
 
 def parse_skill_list_json(text: str) -> tuple[SkillRow, ...]:
@@ -1509,16 +1505,12 @@ def tool_actions(status: str) -> tuple[CatalogMenuAction, ...]:
 # Verb keys whose CLI subcommand accepts ``--connector``. In a filtered or
 # merged multi-connector table, row actions should target the selected
 # connector instead of writing an accidental global policy row.
-_SKILL_CONNECTOR_VERBS = frozenset(
-    {"s", "i", "b", "a", "u", "d", "e", "q", "r", "n"}
-)
+_SKILL_CONNECTOR_VERBS = frozenset({"s", "i", "b", "a", "u", "d", "e", "q", "r", "n"})
 _MCP_CONNECTOR_VERBS = frozenset({"s", "i", "b", "a", "u", "x"})
 _PLUGIN_CONNECTOR_VERBS = frozenset({"s", "i", "b", "a", "u", "d", "e", "q", "r", "x"})
 
 
-def skill_action_intent(
-    key: str, row: SkillRow, *, origin: str, connector: str = ""
-) -> CatalogCommandIntent | None:
+def skill_action_intent(key: str, row: SkillRow, *, origin: str, connector: str = "") -> CatalogCommandIntent | None:
     verbs = {
         "s": ("scan", "scan skill"),
         "i": ("info", "info skill"),
@@ -1544,9 +1536,7 @@ def skill_action_intent(
     )
 
 
-def mcp_action_intent(
-    key: str, row: MCPRow, *, origin: str, connector: str = ""
-) -> CatalogCommandIntent | None:
+def mcp_action_intent(key: str, row: MCPRow, *, origin: str, connector: str = "") -> CatalogCommandIntent | None:
     verbs = {
         "s": ("scan", "scan mcp"),
         "i": ("list", "list mcp"),
@@ -1577,9 +1567,7 @@ def plugin_direct_scan_intent(row: PluginRow, connector: str = "") -> CatalogCom
     )
 
 
-def plugin_action_intent(
-    key: str, row: PluginRow, *, origin: str, connector: str = ""
-) -> CatalogCommandIntent | None:
+def plugin_action_intent(key: str, row: PluginRow, *, origin: str, connector: str = "") -> CatalogCommandIntent | None:
     verbs = {
         "s": ("scan", "scan plugin"),
         "i": ("info", "info plugin"),
@@ -1609,9 +1597,7 @@ def plugin_action_intent(
     )
 
 
-def tool_action_intent(
-    key: str, row: ToolRow, *, origin: str, connector: str = ""
-) -> CatalogCommandIntent | None:
+def tool_action_intent(key: str, row: ToolRow, *, origin: str, connector: str = "") -> CatalogCommandIntent | None:
     verbs = {
         "i": ("status", "info tool"),
         "b": ("block", "block tool"),
@@ -1635,13 +1621,13 @@ def tool_action_intent(
 def mcp_unset_target_for_connector(connector: str) -> str:
     match normalized_connector(connector):
         case "claudecode":
-            return "~/.claude/settings.json"
+            return connector_config_files("claudecode")[0]
         case "codex":
-            return "./.mcp.json"
+            return connector_config_files("codex")[0]
         case "zeptoclaw":
             return "~/.zeptoclaw/config.json"
         case "hermes":
-            return "~/.hermes/config.yaml"
+            return hermes_config_path()
         case "cursor":
             return "./.cursor/mcp.json"
         case "windsurf":
@@ -1712,10 +1698,14 @@ def friendly_connector_name(connector: str) -> str:
 
 def connector_source_label(connector: str, category: str) -> str:
     connector = normalized_connector(connector)
+    claude_root = connector_home("claudecode")
+    codex_root = connector_home("codex")
+    claude_config = connector_config_files("claudecode")[0]
+    codex_config = connector_config_files("codex")[0]
     sources = {
         ("openclaw", "skills"): ("./skills", "~/.openclaw/skills"),
-        ("claudecode", "skills"): ("~/.claude/skills", "./.claude/skills"),
-        ("codex", "skills"): ("~/.codex/skills", "./.codex/skills"),
+        ("claudecode", "skills"): (os.path.join(claude_root, "skills"), "./.claude/skills"),
+        ("codex", "skills"): (os.path.join(codex_root, "skills"), "./.codex/skills"),
         ("zeptoclaw", "skills"): ("~/.zeptoclaw/skills", "./.zeptoclaw/skills"),
         ("antigravity", "skills"): (
             "~/.gemini/config/skills/<skill>/SKILL.md",
@@ -1724,8 +1714,8 @@ def connector_source_label(connector: str, category: str) -> str:
         ),
         ("omnigent", "skills"): ("unsupported by the OmniGent connector",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
-        ("claudecode", "mcps"): ("~/.claude/settings.json (mcpServers)", "./.mcp.json"),
-        ("codex", "mcps"): ("~/.codex/config.toml ([mcp_servers])", "./.mcp.json"),
+        ("claudecode", "mcps"): (f"{claude_config} (mcpServers)", "./.mcp.json"),
+        ("codex", "mcps"): (f"{codex_config} ([mcp_servers])", "./.mcp.json"),
         ("zeptoclaw", "mcps"): ("~/.zeptoclaw/config.json (mcp.servers)", "./.mcp.json"),
         ("antigravity", "mcps"): (
             "~/.gemini/config/mcp_config.json",
@@ -1735,9 +1725,9 @@ def connector_source_label(connector: str, category: str) -> str:
         ("omnigent", "mcps"): ("managed by OmniGent; not modified by DefenseClaw",),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
         ("antigravity", "plugins"): (
-            "~/.gemini/config/plugins/<plugin>/ (discovery-only)",
+            "~/.gemini/config/plugins/<plugin>/ (read/write)",
             "~/.gemini/antigravity-cli/plugins/<plugin>/ (discovery-only)",
-            "<workspace>/.agents/plugins/<plugin>/ (discovery-only)",
+            "<workspace>/.agents/plugins/<plugin>/ (read/write)",
         ),
         ("omnigent", "plugins"): ("unsupported by the OmniGent connector",),
         ("omnigent", "config"): ("$OMNIGENT_CONFIG_HOME/config.yaml or ~/.omnigent/config.yaml",),
@@ -1866,11 +1856,7 @@ def _format_decisions(file_action: str, install_action: str, runtime_action: str
     the current status, instead of guessing from the Actions column.
     """
 
-    return (
-        f"install={install_action or '-'}  "
-        f"runtime={runtime_action or '-'}  "
-        f"file={file_action or '-'}"
-    )
+    return f"install={install_action or '-'}  runtime={runtime_action or '-'}  file={file_action or '-'}"
 
 
 _SEVERITY_BUCKET_LABEL: Mapping[str, str] = {

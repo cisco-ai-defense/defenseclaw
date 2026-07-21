@@ -31,7 +31,6 @@ from __future__ import annotations
 import io
 import json
 import os
-import stat
 import tempfile
 import unittest
 import uuid
@@ -45,6 +44,8 @@ from defenseclaw import config
 from defenseclaw.context import AppContext
 from defenseclaw.observability.v8_config import load_validate_v8
 
+from tests.permissions import assert_owner_only_file
+
 
 def _make_app() -> tuple[AppContext, str]:
     """Build a Click context backed by a canonical-v8 throwaway data dir."""
@@ -55,6 +56,23 @@ def _make_app() -> tuple[AppContext, str]:
     app = AppContext()
     app.cfg = cfg
     return app, tmp_dir
+
+
+def _local_stack_controller() -> MagicMock:
+    controller = MagicMock()
+    controller.up.return_value = SimpleNamespace(
+        readiness_verified=True,
+        contract={
+            "otlp_endpoint": "127.0.0.1:4317",
+            "otlp_protocol": "grpc",
+            "grafana_url": "http://localhost:3000",
+            "prometheus_url": "http://localhost:9090",
+            "tempo_url": "http://localhost:3200",
+            "loki_url": "http://localhost:3100",
+            "otlp_http_endpoint": "127.0.0.1:4318",
+        },
+    )
+    return controller
 
 
 def _bridge_env_file(data_dir: str) -> str:
@@ -101,6 +119,12 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
     def setUp(self) -> None:
         self.runner = CliRunner()
         self.app, self.tmp_dir = _make_app()
+        self._native_local_splunk = patch(
+            "defenseclaw.commands.cmd_setup._native_windows_local_splunk",
+            return_value=False,
+        )
+        self._native_local_splunk.start()
+        self.addCleanup(self._native_local_splunk.stop)
 
     def tearDown(self) -> None:
         import shutil
@@ -170,7 +194,7 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
             ["/tmp/fake-splunk-claw-bridge", "up", "--env-file", env_file, "--output", "json"],
         )
 
-        self.assertEqual(stat.S_IMODE(os.stat(env_file).st_mode), 0o600)
+        assert_owner_only_file(env_file)
         entries = _read_dotenv(env_file)
         self.assertEqual(entries["SPLUNK_HEC_TOKEN"], entries["DEFENSECLAW_HEC_TOKEN"])
         uuid.UUID(entries["SPLUNK_HEC_TOKEN"])
@@ -343,58 +367,44 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
 
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        "._refresh_and_maybe_restart_local_observability",
-    )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability._preflight_docker",
-        return_value=True,
-    )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability._run_bridge_up",
-    )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability._resolve_bridge",
-        return_value="/fake/bin/openclaw-observability-bridge",
-    )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
-    )
-    def test_up_default_calls_refresh_helper(
-        self,
-        mock_otlp: MagicMock,
-        _resolve: MagicMock,
-        mock_run_up: MagicMock,
-        _preflight: MagicMock,
-        mock_refresh: MagicMock,
-    ) -> None:
+    def test_up_default_calls_refresh_helper(self) -> None:
         from defenseclaw.commands.cmd_setup_local_observability import (
             local_observability,
         )
 
-        mock_run_up.return_value = {
-            "otlp_endpoint": "127.0.0.1:4317",
-            "otlp_protocol": "grpc",
-            "grafana_url": "http://localhost:3000",
-            "prometheus_url": "http://localhost:9090",
-            "tempo_url": "http://localhost:3200",
-            "loki_url": "http://localhost:3100",
-            "otlp_http_endpoint": "127.0.0.1:4318",
-        }
-
-        result = self.runner.invoke(
-            local_observability,
-            ["up", "--no-wait"],
-            obj=self.app,
-            catch_exceptions=False,
-        )
+        controller = _local_stack_controller()
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability.resolve_stack_dir",
+                return_value="/fake/observability-stack",
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability.LocalStackController",
+                return_value=controller,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability"
+                "._refresh_and_maybe_restart_local_observability",
+            ) as mock_refresh,
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
+            ) as mock_otlp,
+        ):
+            result = self.runner.invoke(
+                local_observability,
+                ["up"],
+                obj=self.app,
+                catch_exceptions=False,
+            )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        mock_refresh.assert_called_once()
+        mock_refresh.assert_called_once_with(
+            self.tmp_dir,
+            refresh_config=True,
+            controller=controller,
+        )
         # The standard setup path should bring host-mounted dashboards,
         # rules, and collector config up to the latest bundled version.
-        self.assertTrue(mock_refresh.call_args.kwargs["refresh_config"])
         mock_otlp.assert_called_once_with(
             self.app,
             endpoint="127.0.0.1:4317",
@@ -402,145 +412,118 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
             signals=("traces", "metrics", "logs"),
             service_name="defenseclaw",
         )
+        controller.preflight.assert_called_once_with()
+        controller.up.assert_called_once_with(timeout=180, wait=True)
 
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        "._refresh_and_maybe_restart_local_observability",
-    )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability._preflight_docker",
-        return_value=True,
-    )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability._run_bridge_up",
-    )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability._resolve_bridge",
-        return_value="/fake/bin/openclaw-observability-bridge",
-    )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
-    )
-    def test_up_no_refresh_bundle_skips_refresh(
-        self,
-        mock_otlp: MagicMock,
-        _resolve: MagicMock,
-        mock_run_up: MagicMock,
-        _preflight: MagicMock,
-        mock_refresh: MagicMock,
-    ) -> None:
+    def test_up_no_refresh_bundle_skips_refresh(self) -> None:
         from defenseclaw.commands.cmd_setup_local_observability import (
             local_observability,
         )
 
-        mock_run_up.return_value = {
-            "otlp_endpoint": "127.0.0.1:4317",
-            "otlp_protocol": "grpc",
-        }
-
-        result = self.runner.invoke(
-            local_observability,
-            ["up", "--no-wait", "--no-refresh-bundle"],
-            obj=self.app,
-            catch_exceptions=False,
-        )
+        controller = _local_stack_controller()
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability.resolve_stack_dir",
+                return_value="/fake/observability-stack",
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability.LocalStackController",
+                return_value=controller,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability"
+                "._refresh_and_maybe_restart_local_observability",
+            ) as mock_refresh,
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
+            ) as mock_otlp,
+        ):
+            result = self.runner.invoke(
+                local_observability,
+                ["up", "--no-refresh-bundle"],
+                obj=self.app,
+                catch_exceptions=False,
+            )
 
         self.assertEqual(result.exit_code, 0, result.output)
         mock_refresh.assert_not_called()
         mock_otlp.assert_called_once()
+        controller.up.assert_called_once_with(timeout=180, wait=True)
 
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        "._refresh_and_maybe_restart_local_observability",
-    )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability._preflight_docker",
-        return_value=True,
-    )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability._run_bridge_up",
-    )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability._resolve_bridge",
-        return_value="/fake/bin/openclaw-observability-bridge",
-    )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
-    )
-    def test_up_refresh_config_propagates_flag(
-        self,
-        mock_otlp: MagicMock,
-        _resolve: MagicMock,
-        mock_run_up: MagicMock,
-        _preflight: MagicMock,
-        mock_refresh: MagicMock,
-    ) -> None:
+    def test_up_refresh_config_propagates_flag(self) -> None:
         from defenseclaw.commands.cmd_setup_local_observability import (
             local_observability,
         )
 
-        mock_run_up.return_value = {
-            "otlp_endpoint": "127.0.0.1:4317",
-            "otlp_protocol": "grpc",
-        }
-
-        result = self.runner.invoke(
-            local_observability,
-            ["up", "--no-wait", "--refresh-config"],
-            obj=self.app,
-            catch_exceptions=False,
-        )
+        controller = _local_stack_controller()
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability.resolve_stack_dir",
+                return_value="/fake/observability-stack",
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability.LocalStackController",
+                return_value=controller,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability"
+                "._refresh_and_maybe_restart_local_observability",
+            ) as mock_refresh,
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
+            ) as mock_otlp,
+        ):
+            result = self.runner.invoke(
+                local_observability,
+                ["up", "--refresh-config"],
+                obj=self.app,
+                catch_exceptions=False,
+            )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        mock_refresh.assert_called_once()
-        self.assertTrue(mock_refresh.call_args.kwargs["refresh_config"])
+        mock_refresh.assert_called_once_with(
+            self.tmp_dir,
+            refresh_config=True,
+            controller=controller,
+        )
         mock_otlp.assert_called_once()
 
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        "._refresh_and_maybe_restart_local_observability",
-    )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability._preflight_docker",
-        return_value=True,
-    )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability._run_bridge_up",
-    )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability._resolve_bridge",
-        return_value="/fake/bin/openclaw-observability-bridge",
-    )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
-    )
-    def test_up_no_refresh_config_preserves_local_config(
-        self,
-        mock_otlp: MagicMock,
-        _resolve: MagicMock,
-        mock_run_up: MagicMock,
-        _preflight: MagicMock,
-        mock_refresh: MagicMock,
-    ) -> None:
+    def test_up_no_refresh_config_preserves_local_config(self) -> None:
         from defenseclaw.commands.cmd_setup_local_observability import (
             local_observability,
         )
 
-        mock_run_up.return_value = {
-            "otlp_endpoint": "127.0.0.1:4317",
-            "otlp_protocol": "grpc",
-        }
-
-        result = self.runner.invoke(
-            local_observability,
-            ["up", "--no-wait", "--no-refresh-config"],
-            obj=self.app,
-            catch_exceptions=False,
-        )
+        controller = _local_stack_controller()
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability.resolve_stack_dir",
+                return_value="/fake/observability-stack",
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability.LocalStackController",
+                return_value=controller,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability"
+                "._refresh_and_maybe_restart_local_observability",
+            ) as mock_refresh,
+            patch(
+                "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
+            ) as mock_otlp,
+        ):
+            result = self.runner.invoke(
+                local_observability,
+                ["up", "--no-refresh-config"],
+                obj=self.app,
+                catch_exceptions=False,
+            )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        mock_refresh.assert_called_once()
-        self.assertFalse(mock_refresh.call_args.kwargs["refresh_config"])
+        mock_refresh.assert_called_once_with(
+            self.tmp_dir,
+            refresh_config=False,
+            controller=controller,
+        )
         mock_otlp.assert_called_once()
 
 
@@ -551,16 +534,7 @@ class TestRefreshAndMaybeRestartLocalObservability(unittest.TestCase):
         "defenseclaw.commands.cmd_setup_local_observability"
         ".refresh_local_observability_stack",
     )
-    @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        ".is_compose_project_running",
-        return_value=False,
-    )
-    def test_preserved_config_hint_is_printed(
-        self,
-        _running: MagicMock,
-        mock_refresh: MagicMock,
-    ) -> None:
+    def test_preserved_config_hint_is_printed(self, mock_refresh: MagicMock) -> None:
         from defenseclaw.bundle_refresh import RefreshResult
         from defenseclaw.commands.cmd_setup_local_observability import (
             _refresh_and_maybe_restart_local_observability,
@@ -574,13 +548,17 @@ class TestRefreshAndMaybeRestartLocalObservability(unittest.TestCase):
             preserved_paths=["grafana", "prometheus"],
         )
 
+        controller = MagicMock()
+        controller.is_running.return_value = False
         output = io.StringIO()
         with redirect_stdout(output):
             _refresh_and_maybe_restart_local_observability(
                 "/data",
                 refresh_config=False,
+                controller=controller,
             )
 
+        controller.is_running.assert_called_once_with()
         self.assertIn("Preserved local observability config", output.getvalue())
         self.assertIn("--refresh-config", output.getvalue())
         self.assertIn("--no-refresh-config", output.getvalue())

@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func setSysProcAttr(cmd *exec.Cmd) {
@@ -34,6 +35,8 @@ func setSysProcAttr(cmd *exec.Cmd) {
 		Setpgid: true,
 	}
 }
+
+func daemonChildRegistersPID() bool { return false }
 
 func sendTermSignal(proc *os.Process) error {
 	return proc.Signal(syscall.SIGTERM)
@@ -50,6 +53,23 @@ func processExists(pid int) bool {
 	}
 	err = proc.Signal(syscall.Signal(0))
 	return err == nil
+}
+
+func waitForProcessExit(_ *os.Process, pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !processExists(pid) {
+			return true
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		if remaining > 100*time.Millisecond {
+			remaining = 100 * time.Millisecond
+		}
+		time.Sleep(remaining)
+	}
 }
 
 // processStartIdentity returns an opaque string that uniquely identifies a

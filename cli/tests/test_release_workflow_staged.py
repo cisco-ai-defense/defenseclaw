@@ -6,11 +6,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,6 +25,30 @@ WINDOWS_PROTOCOL_GATE = ROOT / "scripts/test-upgrade-release-windows.ps1"
 MACOS_BUILD = ROOT / "scripts/build-macos-app-release.sh"
 POSIX_INSTALLER = ROOT / "scripts/install.sh"
 POSIX_FRESH_RELEASE = ROOT / "scripts/test-fresh-install-release.sh"
+DIGEST_CAPABLE_UPLOAD_ACTION = (
+    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+)
+COSIGN_INSTALLER_ACTION = (
+    "sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da"
+)
+
+
+def _bash_executable() -> str:
+    """Select Git Bash on Windows instead of the WSL launcher."""
+
+    if os.name != "nt":
+        return shutil.which("bash") or "bash"
+
+    candidates: list[Path] = []
+    if git := shutil.which("git"):
+        candidates.append(Path(git).resolve().parent.parent / "bin" / "bash.exe")
+    for variable in ("ProgramFiles", "ProgramFiles(x86)", "LocalAppData"):
+        if root := os.environ.get(variable):
+            candidates.append(Path(root) / "Git" / "bin" / "bash.exe")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    pytest.skip("Git Bash is required for the POSIX release-workflow contract on Windows")
 
 
 def _workflow() -> dict[str, object]:
@@ -93,6 +119,20 @@ def test_release_supports_nightly_certification_and_manual_promotion() -> None:
     assert workflow["permissions"] == {"contents": "read", "actions": "read"}
 
 
+def test_release_jobs_pin_the_bundle_verifier_binary() -> None:
+    jobs = [*_workflow()["jobs"].values(), *_certification_workflow()["jobs"].values()]
+    installers = [
+        step
+        for job in jobs
+        for step in job.get("steps", [])
+        if step.get("uses", "").startswith("sigstore/cosign-installer@")
+    ]
+
+    assert len(installers) == 9
+    assert all(step["uses"] == COSIGN_INSTALLER_ACTION for step in installers)
+    assert all(step.get("with") == {"cosign-release": "v2.6.2"} for step in installers)
+
+
 def test_release_immutability_preflight_uses_operator_confirmation_without_admin_token() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
 
@@ -150,6 +190,8 @@ def test_release_requires_current_main_without_prescribing_repository_governance
     jobs = _workflow()["jobs"]
     assert {name for name, job in jobs.items() if job.get("environment") == "release"} == {
         "macos-app",
+        "windows-installer",
+        "windows-real-client-certification",
         "publish-release",
     }
 
@@ -179,8 +221,13 @@ def test_publish_job_promotes_only_a_selected_certified_candidate() -> None:
             assert job.get("permissions") != {"contents": "write"}
 
 
-def test_windows_release_binaries_are_disabled_and_omitted() -> None:
+def test_native_windows_setup_is_required_while_raw_archives_remain_omitted() -> None:
     jobs = _workflow()["jobs"]
+    assert "windows-installer" in jobs
+    assert "windows-real-client-certification" in jobs
+    assert "windows-real-client-certification" in jobs["assemble-release-candidate"]["needs"]
+    assert "windows-real-client-certification" in jobs["full-certification"]["needs"]
+
     certification = _certification_workflow()["jobs"]
     assert "windows-unpublished-refusal" in certification
     assert "windows-fresh-install" not in certification
@@ -190,7 +237,101 @@ def test_windows_release_binaries_are_disabled_and_omitted() -> None:
     workflow_text = WORKFLOW.read_text(encoding="utf-8")
     assert workflow_text.count("--omit-windows-binaries") == 4
     assert "publish_windows_binaries" not in workflow_text
-    assert "Windows-specific binaries and SBOMs will not be published" in workflow_text
+    assert "Legacy raw Windows archives remain omitted" in workflow_text
+    assert "signed, certified DefenseClawSetup-x64.exe is published" in workflow_text
+
+
+def test_native_windows_setup_has_immutable_artifact_custody() -> None:
+    jobs = _workflow()["jobs"]
+    runtime = jobs["build-runtime-candidate"]
+    installer = jobs["windows-installer"]
+    certification = jobs["windows-real-client-certification"]
+    assemble = jobs["assemble-release-candidate"]
+
+    for job in (runtime, installer, certification, assemble):
+        upload_actions = [
+            step["uses"]
+            for step in job.get("steps", [])
+            if step.get("uses", "").startswith("actions/upload-artifact@")
+        ]
+        assert upload_actions
+        assert set(upload_actions) == {DIGEST_CAPABLE_UPLOAD_ACTION}
+
+    assert runtime["outputs"]["artifact_id"] == ("${{ steps.runtime-artifact.outputs.artifact-id }}")
+    assert runtime["outputs"]["artifact_digest"] == ("${{ steps.runtime-artifact.outputs.artifact-digest }}")
+    assert installer["outputs"] == {
+        "artifact_id": "${{ steps.windows-installer-artifact.outputs.artifact-id }}",
+        "artifact_digest": "${{ steps.windows-installer-artifact.outputs.artifact-digest }}",
+    }
+    assert certification["outputs"] == {
+        "artifact_id": "${{ steps.windows-certified-artifact.outputs.artifact-id }}",
+        "artifact_digest": "${{ steps.windows-certified-artifact.outputs.artifact-digest }}",
+    }
+
+    for job in (installer, certification):
+        assert job["environment"] == "release"
+        assert job["permissions"] == {"contents": "read"}
+        assert "continue-on-error" not in str(job)
+        assert job.get("if") != "${{ false }}"
+
+    installer_download = next(
+        step for step in installer["steps"] if step.get("uses", "").startswith("actions/download-artifact@")
+    )
+    assert installer_download["with"]["artifact-ids"] == ("${{ needs.build-runtime-candidate.outputs.artifact_id }}")
+    assert installer_download["with"]["merge-multiple"] == "true"
+    assert "needs.build-runtime-candidate.outputs.artifact_digest" in str(installer)
+
+    certification_download = next(
+        step for step in certification["steps"] if step.get("uses", "").startswith("actions/download-artifact@")
+    )
+    assert certification_download["with"]["artifact-ids"] == ("${{ needs.windows-installer.outputs.artifact_id }}")
+    assert certification_download["with"]["merge-multiple"] == "true"
+    assert "needs.windows-installer.outputs.artifact_digest" in str(certification)
+
+    certified_upload = next(step for step in certification["steps"] if step.get("id") == "windows-certified-artifact")
+    assert certified_upload["with"]["path"].splitlines() == [
+        "windows-certified/DefenseClawSetup-x64.exe",
+        "windows-certified/DefenseClawSetup-x64.exe.sha256",
+        "windows-certified/DefenseClawSetup-x64.exe.provenance.json",
+        "windows-certified/DefenseClawSetup-x64.exe.sbom.json",
+        "windows-certified/DefenseClawSetup-x64.exe.certification.json",
+    ]
+
+    assert set(assemble["needs"]) == {
+        "release-preflight",
+        "build-runtime-candidate",
+        "macos-app",
+        "windows-real-client-certification",
+    }
+    windows_download = next(
+        step for step in assemble["steps"] if step.get("with", {}).get("path") == "candidate-input/windows"
+    )
+    assert windows_download["with"]["artifact-ids"] == (
+        "${{ needs.windows-real-client-certification.outputs.artifact_id }}"
+    )
+    assert windows_download["with"]["merge-multiple"] == "true"
+    custody_step = next(
+        step
+        for step in assemble["steps"]
+        if step.get("name") == "Require immutable certified Windows artifact identity"
+    )
+    assert custody_step["env"]["WINDOWS_CERTIFIED_ARTIFACT_DIGEST"] == (
+        "${{ needs.windows-real-client-certification.outputs.artifact_digest }}"
+    )
+    assert "^(sha256:)?[0-9a-f]{64}$" in custody_step["run"]
+    assemble_step = next(step for step in assemble["steps"] if "release_candidate.py assemble" in step.get("run", ""))
+    assert "--windows-dir candidate-input/windows" in assemble_step["run"]
+
+    setup_acceptance = next(
+        step
+        for step in installer["steps"]
+        if step.get("name")
+        == "Validate the exact signed Setup lifecycle as a standard user"
+    )["run"]
+    assert "scripts/invoke-windows-setup-standard-user-ci.ps1" in setup_acceptance
+    assert "-Mode setup-acceptance" in setup_acceptance
+    assert "-ArtifactRoot windows-installer-output" in setup_acceptance
+    assert "-TimeoutSeconds 4500" in setup_acceptance
 
 
 def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
@@ -316,6 +457,7 @@ def test_release_certificate_is_canonicalized_and_authenticated_before_seal() ->
     assert sign < canonicalize < authenticate
     assert sign_index + 1 == seal_index
     assert sign_script.count("canonicalize-certificate") == 1
+    assert "--bundle=release-candidate/dist/checksums.txt.bundle" in sign_script
     assert "--certificate release-candidate/dist/checksums.txt.pem" in sign_script
     assert (
         '--certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main"'
@@ -742,7 +884,7 @@ def test_protocol_gate_detects_an_empty_windows_source_matrix(tmp_path: Path) ->
     def run_helper() -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
-                "bash",
+                _bash_executable(),
                 "-c",
                 ('source "$1"; RELEASE_ROOT="$2"; TARGET_VERSION="0.8.5"; manifest_windows_sources_are_empty'),
                 "windows-source-matrix-test",
@@ -772,7 +914,7 @@ def test_protocol_gate_detects_an_empty_windows_source_matrix(tmp_path: Path) ->
 def test_empty_windows_matrix_uses_bridge_refusal_then_current_resolver() -> None:
     completed = subprocess.run(
         [
-            "bash",
+            _bash_executable(),
             "-c",
             r"""
 source "$1"
@@ -812,6 +954,7 @@ run_protocol_case "0.8.4"
     assert "unexpected-installed-success" not in completed.stdout
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link permission contract")
 def test_historical_endpoint_patch_does_not_mutate_a_hardlinked_cache(
     tmp_path: Path,
 ) -> None:
@@ -829,7 +972,7 @@ def test_historical_endpoint_patch_does_not_mutate_a_hardlinked_cache(
 
     completed = subprocess.run(
         [
-            "bash",
+            _bash_executable(),
             "-c",
             ('source "$1"; SMOKE_HOME="$2"; RELEASE_URL="$3"; patch_installed_upgrade_endpoint "$4"'),
             "historical-endpoint-patch-test",
@@ -896,10 +1039,11 @@ def test_protocol_gate_treats_a_baseline_without_upgrade_module_as_no_schema_gat
     assert completed.stdout.strip() == "0"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="release protocol cleanup requires POSIX bash")
 def test_protocol_cleanup_accepts_an_empty_sentinel_array() -> None:
     completed = subprocess.run(
         [
-            "bash",
+            _bash_executable(),
             "-c",
             'source "$1"; REFUSAL_SENTINEL_PIDS=(); WORKDIR=""; SERVER_PID=""; protocol_cleanup',
             "protocol-cleanup-test",
@@ -914,6 +1058,7 @@ def test_protocol_cleanup_accepts_an_empty_sentinel_array() -> None:
     assert completed.returncode == 0, completed.stderr
 
 
+@pytest.mark.skipif(os.name == "nt", reason="resolver asset validation requires POSIX bash")
 def test_reviewed_resolver_asset_validation_fails_explicitly_without_errexit(
     tmp_path: Path,
 ) -> None:
@@ -921,7 +1066,7 @@ def test_reviewed_resolver_asset_validation_fails_explicitly_without_errexit(
     (release_root / "0.8.4").mkdir(parents=True)
     completed = subprocess.run(
         [
-            "bash",
+            _bash_executable(),
             "-c",
             (
                 'source "$1"; set +e; RELEASE_ROOT="$2"; TARGET_VERSION="0.8.4"; '
@@ -946,10 +1091,11 @@ def test_reviewed_resolver_asset_validation_fails_explicitly_without_errexit(
     assert "UNREACHABLE" not in completed.stdout
 
 
+@pytest.mark.skipif(os.name == "nt", reason="release refusal contract requires POSIX bash")
 def test_protocol_refusal_contract_option_preserves_shared_matrix_arguments() -> None:
     completed = subprocess.run(
         [
-            "bash",
+            _bash_executable(),
             "-c",
             (
                 'source "$1"; '

@@ -176,7 +176,8 @@ def test_f0322_local_scan_rejects_non_allowlisted_command():
 
 
 # ---------------------------------------------------------------------------
-# F-0342 — stdio launcher allowlist is positive (npx/uvx only)
+# F-0342 — stdio launcher allowlist is positive (package runners plus the
+# narrowly validated Codex Desktop native runtime)
 # ---------------------------------------------------------------------------
 
 def test_f0342_stdio_command_allowlist():
@@ -191,8 +192,54 @@ def test_f0342_stdio_command_allowlist():
     assert is_safe_stdio_scan_command("./npx", ["pkg"]) is False
     assert is_safe_stdio_scan_command("../evil", []) is False
     assert is_safe_stdio_scan_command("", []) is False
+    assert is_safe_stdio_scan_command("npx", []) is False
+    assert is_safe_stdio_scan_command("uvx", []) is False
+    assert is_safe_stdio_scan_command("uvx", ["--quiet"]) is False
     # Code-exec flags smuggled into an otherwise-allowed launcher.
     assert is_safe_stdio_scan_command("npx", ["-c", "rce"]) is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Codex native runtime is Windows-only")
+def test_codex_bundled_node_repl_is_admitted_only_from_trusted_layout(
+    monkeypatch, tmp_path,
+):
+    from defenseclaw.scanner import mcp as mcp_scanner
+
+    local_app_data = tmp_path / "Local"
+    runtime_root = local_app_data / "OpenAI" / "Codex" / "runtimes"
+    binary = runtime_root / "cua_node" / "runtime-id" / "bin" / "node_repl.exe"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"test executable fixture")
+
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(runtime_root))
+
+    assert mcp_scanner.is_safe_stdio_scan_command(str(binary), []) is True
+
+    wrong_layout = runtime_root / "other" / "runtime-id" / "bin" / "node_repl.exe"
+    wrong_layout.parent.mkdir(parents=True)
+    wrong_layout.write_bytes(b"test executable fixture")
+    assert mcp_scanner.is_safe_stdio_scan_command(str(wrong_layout), []) is False
+
+    outside = tmp_path / "outside" / "node_repl.exe"
+    outside.parent.mkdir()
+    outside.write_bytes(b"test executable fixture")
+    assert mcp_scanner.is_safe_stdio_scan_command(str(outside), []) is False
+
+    sibling_prefix = (
+        tmp_path
+        / "Local"
+        / "OpenAI"
+        / "Codex"
+        / "runtimes-evil"
+        / "cua_node"
+        / "runtime-id"
+        / "bin"
+        / "node_repl.exe"
+    )
+    sibling_prefix.parent.mkdir(parents=True)
+    sibling_prefix.write_bytes(b"test executable fixture")
+    assert mcp_scanner.is_safe_stdio_scan_command(str(sibling_prefix), []) is False
 
 
 # ---------------------------------------------------------------------------
@@ -637,7 +684,7 @@ def test_f0301_local_install_rejects_parent_traversal(app_ctx, tmp_path):
         )
 
     assert result.exit_code != 0, result.output
-    assert "invalid plugin name" in result.output.lower()
+    assert "invalid plugin identity" in result.output.lower()
     # The out-of-tree file and the managed dir must both be intact.
     assert marker.exists()
     assert plugin_dir.exists()
