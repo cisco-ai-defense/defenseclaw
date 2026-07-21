@@ -81,7 +81,19 @@ struct FirstRunView: View {
         return appState.activity.entries.first { $0.id == runID }
     }
 
-    private var isRunning: Bool { runningEntry?.status == .running }
+    private var isRunning: Bool { runningEntry?.status.isActive == true }
+    private var isCancelling: Bool { runningEntry?.status == .cancelling }
+    private var isFinishing: Bool { runningEntry?.status == .finishing }
+
+    private var runtimeInstallIsCancelling: Bool {
+        guard let id = appState.runtimeInstallRunID else { return false }
+        return appState.activity.entries.first(where: { $0.id == id })?.status == .cancelling
+    }
+
+    private var runtimeInstallIsFinishing: Bool {
+        guard let id = appState.runtimeInstallRunID else { return false }
+        return appState.activity.entries.first(where: { $0.id == id })?.status == .finishing
+    }
 
     private var registeredSelection: [String] {
         detectedConnectors.filter { registeredConnectors.contains($0) }
@@ -138,14 +150,24 @@ struct FirstRunView: View {
                     Button(role: .destructive) {
                         if let id = appState.runtimeInstallRunID { appState.activity.cancel(id) }
                     } label: {
-                        Label("Cancel Install", systemImage: "stop.fill")
+                        Label(
+                            runtimeInstallIsCancelling
+                                ? "Cancelling..."
+                                : (runtimeInstallIsFinishing ? "Finishing..." : "Cancel Install"),
+                            systemImage: runtimeInstallIsFinishing ? "hourglass" : "stop.fill"
+                        )
                     }
+                    .disabled(runtimeInstallIsCancelling || runtimeInstallIsFinishing)
                 } else if isRunning {
                     Button(role: .destructive) {
                         if let runID { appState.activity.cancel(runID) }
                     } label: {
-                        Label("Cancel", systemImage: "stop.fill")
+                        Label(
+                            isCancelling ? "Cancelling..." : (isFinishing ? "Finishing..." : "Cancel"),
+                            systemImage: isFinishing ? "hourglass" : "stop.fill"
+                        )
                     }
+                    .disabled(isCancelling || isFinishing)
                 } else if cliFound {
                     if detectedConnectors.isEmpty, !detectedProxyConnectors.isEmpty {
                         Button {
@@ -387,7 +409,7 @@ struct FirstRunView: View {
         GroupBox("Setup Output") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    if entry.status == .running { ProgressView().controlSize(.small) }
+                    if entry.status.isActive { ProgressView().controlSize(.small) }
                     Image(systemName: statusIcon(entry.status))
                         .foregroundStyle(entry.status == .failed ? Cisco.red : (entry.status == .succeeded ? Cisco.green : .secondary))
                     Text(entry.statusLabel).font(.callout.weight(.semibold))
@@ -554,6 +576,8 @@ struct FirstRunView: View {
     private func statusIcon(_ status: CommandActivityStatus) -> String {
         switch status {
         case .running: "hourglass"
+        case .cancelling: "stop.circle"
+        case .finishing: "hourglass.circle"
         case .succeeded: "checkmark.circle.fill"
         case .failed: "xmark.circle.fill"
         case .cancelled: "stop.circle.fill"

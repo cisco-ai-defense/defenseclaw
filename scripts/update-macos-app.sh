@@ -99,7 +99,9 @@ maintained_paths=(
     DefenseClawMac
     Tests
     script/build_and_run.sh
+    script/test_cli_cancellation.sh
     script/test_connector_onboarding.sh
+    script/test_structured_detail_parser.sh
     tools
     images
     .gitignore

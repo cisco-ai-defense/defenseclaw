@@ -189,6 +189,16 @@ actor AuditStore {
         ).map(decodeAuditEvent)
     }
 
+    /// Loads the complete record for an inspector selection. Alert list rows
+    /// intentionally carry only a bounded details preview.
+    func event(id: String) -> AuditEvent? {
+        guard tableExists("audit_events"), !id.isEmpty else { return nil }
+        return query(
+            "SELECT * FROM audit_events WHERE id = ? LIMIT 1",
+            binds: [id]
+        ).first.map(decodeAuditEvent)
+    }
+
     func scanFindings(runID: String? = nil, target: String? = nil, limit: Int = 20) -> [ScanFindingEvent] {
         guard tableExists("scan_results") else { return [] }
         var conditions = ["raw_json IS NOT NULL", "raw_json != ''"]
@@ -242,7 +252,8 @@ actor AuditStore {
     func alertQueueEvents(limit: Int = 500) -> [AuditEvent] {
         guard tableExists("audit_events") else { return [] }
         let rows = query("""
-            SELECT * FROM audit_events
+            SELECT *, substr(COALESCE(details, ''), 1, 4096) AS details
+            FROM audit_events
             WHERE UPPER(severity) IN ('CRITICAL','HIGH','MEDIUM','LOW','WARNING','ERROR','INFO')
               AND action NOT LIKE 'dismiss%'
             ORDER BY timestamp DESC LIMIT ?
