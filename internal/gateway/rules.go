@@ -313,10 +313,14 @@ var agentEscapeRules = []PatternRule{
 	{ID: "ESC-CLAUDE-HOOK", Pattern: regexp.MustCompile(`(?i)\.claude[\\/][^"\s]*?\.json[\s\S]{0,1000}?\bhooks\b[\s\S]{0,800}?\bcommand\b\s*\\?["']?\s*[:=]`), Title: "Workspace .claude hook installs a command", Severity: "CRITICAL", Confidence: 0.88, Tags: []string{"agent-escape", "write-then-execute"}},
 	// File written directly into .claude/hooks/, where hook scripts run.
 	{ID: "ESC-CLAUDE-HOOK-DIR", Pattern: regexp.MustCompile(`(?i)\.claude[\\/]hooks[\\/][\w.-]+`), Title: "Write into .claude/hooks directory", Severity: "HIGH", Confidence: 0.80, Tags: []string{"agent-escape", "write-then-execute"}},
-	// pyvenv.cfg redirects a virtualenv interpreter's home; the language
-	// extension then runs that interpreter unsandboxed. Rarely on a command
-	// line, so it stays specific. Binary tampering is left to the watcher.
-	{ID: "ESC-VENV-CFG", Pattern: regexp.MustCompile(`(?i)(?:^|["'\s/\\])(?:\.venv|venv|env)[\\/]pyvenv\.cfg`), Title: "Virtualenv interpreter redirect (pyvenv.cfg)", Severity: "HIGH", Confidence: 0.80, Tags: []string{"agent-escape", "write-then-execute"}},
+	// pyvenv.cfg under ANY parent dir (not just .venv/venv/env): the extension
+	// discovers the venv by pyvenv.cfg + bin/python, so a non-standard dir name
+	// still triggers it.
+	{ID: "ESC-VENV-CFG", Pattern: regexp.MustCompile(`(?i)[\w.\-]+[\\/]+pyvenv\.cfg`), Title: "Virtualenv marker write (pyvenv.cfg)", Severity: "HIGH", Confidence: 0.80, Tags: []string{"agent-escape", "write-then-execute"}},
+	// bin/python written as a shell wrapper (shebang or exec "$REAL") that the
+	// extension runs during discovery. A real interpreter is a binary, so this
+	// won't match normal venvs.
+	{ID: "ESC-VENV-INTERP", Pattern: regexp.MustCompile(`(?i)[\\/](?:bin[\\/]python[0-9.]*|Scripts[\\/]python[0-9.]*\.exe)\b[\s\S]{0,400}?(?:#!\s*/(?:usr/)?bin/(?:env\s+)?(?:ba)?sh|\bexec\s+\\?["']?\$)`), Title: "Virtualenv interpreter replaced with a shell wrapper", Severity: "HIGH", Confidence: 0.82, Tags: []string{"agent-escape", "write-then-execute"}},
 	// git config keys that turn an ordinary git op into code execution. Two
 	// forms: the command form `git config <dotted.key> <value>`, and the INI
 	// form (`[core]` + `fsmonitor = ...`). Prose lacks the assignment, so it
@@ -326,9 +330,23 @@ var agentEscapeRules = []PatternRule{
 	// helper (--ext-diff/--textconv). format-patch is excluded: -o output is
 	// its normal function and it runs no code.
 	{ID: "ESC-GIT-READ-WEAPONIZED", Pattern: regexp.MustCompile(`(?i)\bgit\b[^\n|;&]{0,80}\b(?:show|log|diff|whatchanged)\b[^\n|;&]{0,200}?(?:--output[= ]|(?:^|\s)-O\b|--ext-diff|--textconv)`), Title: "Read-only git command with file-writing/exec flag", Severity: "HIGH", Confidence: 0.85, Tags: []string{"agent-escape", "code-execution"}},
+	// --separate-git-dir=<name> puts git metadata off the literal .git path so a
+	// later config/hook write dodges a .git-only denylist.
+	{ID: "ESC-GIT-SEPARATE-DIR", Pattern: regexp.MustCompile(`(?i)--separate-git-dir[= ]`), Title: "Git metadata dir redirected off the .git path", Severity: "HIGH", Confidence: 0.80, Tags: []string{"agent-escape", "code-execution"}},
+	// Write to a git hook file; git runs these on ordinary operations. Named
+	// for the real hooks git runs, so unrelated hooks/ dirs won't match.
+	{ID: "ESC-GIT-HOOK-WRITE", Pattern: regexp.MustCompile(`(?i)[\\/]hooks[\\/](?:fsmonitor-watchman|pre-commit|post-commit|pre-push|post-checkout|post-merge|prepare-commit-msg|commit-msg|pre-receive|post-receive|update|post-update|pre-rebase|post-rewrite|reference-transaction)\b`), Title: "Write to a git hook file", Severity: "HIGH", Confidence: 0.82, Tags: []string{"agent-escape", "code-execution"}},
 	// Docker daemon socket: a root-equivalent, unsandboxed exec environment.
 	// Distinct from PATH-DOCKER, which covers the ~/.docker/config.json creds.
 	{ID: "ESC-DOCKER-SOCK", Pattern: regexp.MustCompile(`(?i)(?:/var/run/docker\.sock|\bdocker\.sock\b|DOCKER_HOST\s*=\s*unix:|\bdocker\s+-H\s+unix:|--unix-socket\s+\S*docker\.sock|-v\s+\S*docker\.sock:)`), Title: "Docker daemon socket access", Severity: "HIGH", Confidence: 0.85, Tags: []string{"agent-escape", "privilege-escalation"}},
+	// docker run --privileged: a privileged container is a host-root escape.
+	// The daemon-use path the socket rule misses (CLI reaches the daemon
+	// without naming the socket).
+	{ID: "ESC-DOCKER-PRIVILEGED", Pattern: regexp.MustCompile(`(?i)\bdocker\s+(?:run|create)\b[^\n|;&]{0,200}?--privileged\b`), Title: "Privileged Docker container (host-root escape)", Severity: "HIGH", Confidence: 0.82, Tags: []string{"agent-escape", "privilege-escalation"}},
+	// .vscode config that auto-runs on folder open: the host IDE runs it
+	// unsandboxed with no user action. A hand-triggered build task has no
+	// folderOpen/allowAutomaticTasks trigger.
+	{ID: "ESC-VSCODE-AUTORUN", Pattern: regexp.MustCompile(`(?i)(?:\.vscode[\\/](?:tasks|launch|settings)\.json[\s\S]{0,1000}?(?:folderOpen|allowAutomaticTasks)|(?:folderOpen|allowAutomaticTasks)[\s\S]{0,1000}?\.vscode[\\/])`), Title: "VSCode task auto-run on folder open", Severity: "HIGH", Confidence: 0.82, Tags: []string{"agent-escape", "write-then-execute"}},
 }
 
 // ---------------------------------------------------------------------------

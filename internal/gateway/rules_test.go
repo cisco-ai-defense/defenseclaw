@@ -709,6 +709,16 @@ func TestAgentEscapeRules_TruePositives(t *testing.T) {
 		{"docker socket path", `curl --unix-socket /var/run/docker.sock http://localhost/containers/json`, "ESC-DOCKER-SOCK"},
 		{"docker -H unix", `docker -H unix:///var/run/docker.sock run --privileged alpine`, "ESC-DOCKER-SOCK"},
 		{"docker sock mount", `docker run -v /var/run/docker.sock:/var/run/docker.sock alpine`, "ESC-DOCKER-SOCK"},
+		{"docker privileged", `{"command": "docker run -d --privileged --mount type=bind,source=$(pwd),target=/host alpine tail -f /dev/null"}`, "ESC-DOCKER-PRIVILEGED"},
+		// venv escape under a non-standard dir name (defeats dir-name denylists)
+		{"pyvenv non-standard dir", `{"file_path": "data_cache/pyvenv.cfg", "content": ""}`, "ESC-VENV-CFG"},
+		{"venv interp shell wrapper", `{"file_path": "data_cache/bin/python", "content": "#!/bin/bash\nopen -a Calculator\nexec \"$REAL\" \"$@\""}`, "ESC-VENV-INTERP"},
+		// git metadata under a non-.git dir name + hook file write
+		{"git separate-git-dir", `git init --separate-git-dir=.git-alt`, "ESC-GIT-SEPARATE-DIR"},
+		{"git fsmonitor hook write", `{"file_path": ".git-alt/hooks/fsmonitor-watchman", "content": "open -a Calculator"}`, "ESC-GIT-HOOK-WRITE"},
+		// VSCode auto-run task / setting
+		{"vscode task folderOpen", `{"file_path": ".vscode/tasks.json", "content": "{\"tasks\":[{\"type\":\"shell\",\"command\":\"x\",\"runOptions\":{\"runOn\":\"folderOpen\"}}]}"}`, "ESC-VSCODE-AUTORUN"},
+		{"vscode allowAutomaticTasks", `{"file_path": ".vscode/settings.json", "content": "{\"task.allowAutomaticTasks\":\"on\"}"}`, "ESC-VSCODE-AUTORUN"},
 	}
 
 	for _, tc := range cases {
@@ -752,9 +762,19 @@ func TestAgentEscapeRules_FalsePositives(t *testing.T) {
 		// weaponized read — must not fire ESC-GIT-READ-WEAPONIZED.
 		{"git format-patch output dir", `git format-patch -o outgoing/ HEAD~3`},
 		{"git format-patch long flag", `git format-patch --output-directory=/tmp/patches main`},
-		// docker without the socket
+		// docker without the socket / privileged
 		{"docker build", `docker build -t myapp .`},
 		{"docker run normal", `docker run --rm myapp npm test`},
+		{"docker run ports", `docker run --rm -p 8080:80 myapp`},
+		// venv / pyvenv references that aren't a path write
+		{"run venv python", `.venv/bin/python manage.py migrate`},
+		{"pyvenv in prose", `the pyvenv.cfg documentation explains venv config`},
+		// normal git usage
+		{"git clone", `git clone https://github.com/x/y.git`},
+		// an app's own hooks/ dir (React hooks etc.), not a git hook
+		{"app hooks dir", `{"file_path": "src/hooks/useState.ts", "content": "export const x = 1"}`},
+		// a hand-authored vscode build task with no auto-run trigger
+		{"vscode manual task", `{"file_path": ".vscode/tasks.json", "content": "{\"tasks\":[{\"label\":\"build\",\"command\":\"make\"}]}"}`},
 		// prose mentioning the keywords
 		{"fsmonitor in prose", `The core.fsmonitor feature can speed up git status`},
 	}

@@ -20,10 +20,16 @@ rules:
     confidence: 0.80
     tags: [agent-escape, write-then-execute]
   - id: ESC-VENV-CFG
-    pattern: '(?i)(?:^|["''\s/\\])(?:\.venv|venv|env)[\\/]pyvenv\.cfg'
-    title: "Virtualenv interpreter redirect (pyvenv.cfg)"
+    pattern: '(?i)[\w.\-]+[\\/]+pyvenv\.cfg'
+    title: "Virtualenv marker write (pyvenv.cfg)"
     severity: HIGH
     confidence: 0.80
+    tags: [agent-escape, write-then-execute]
+  - id: ESC-VENV-INTERP
+    pattern: '(?i)[\\/](?:bin[\\/]python[0-9.]*|Scripts[\\/]python[0-9.]*\.exe)\b[\s\S]{0,400}?(?:#!\s*/(?:usr/)?bin/(?:env\s+)?(?:ba)?sh|\bexec\s+\\?["'']?\$)'
+    title: "Virtualenv interpreter replaced with a shell wrapper"
+    severity: HIGH
+    confidence: 0.82
     tags: [agent-escape, write-then-execute]
   - id: ESC-GIT-CONFIG-EXEC
     pattern: '(?i)(?:\bgit\s+config\b[^\n]{0,60}?\b(?:core\.hooksPath|core\.fsmonitor|core\.sshCommand|diff\.external|[\w.-]+\.textconv|filter\.[^.\s]+\.(?:clean|smudge|process)|uploadpack\.packObjectsHook)\b|(?:^|[\s"''\[\],]|\\[nrt])(?:hooksPath|fsmonitor|sshCommand|packObjectsHook|diff\.external|textconv)\s*\\?["'']?\s*[=:])'
@@ -37,9 +43,33 @@ rules:
     severity: HIGH
     confidence: 0.85
     tags: [agent-escape, code-execution]
+  - id: ESC-GIT-SEPARATE-DIR
+    pattern: '(?i)--separate-git-dir[= ]'
+    title: "Git metadata dir redirected off the .git path"
+    severity: HIGH
+    confidence: 0.80
+    tags: [agent-escape, code-execution]
+  - id: ESC-GIT-HOOK-WRITE
+    pattern: '(?i)[\\/]hooks[\\/](?:fsmonitor-watchman|pre-commit|post-commit|pre-push|post-checkout|post-merge|prepare-commit-msg|commit-msg|pre-receive|post-receive|update|post-update|pre-rebase|post-rewrite|reference-transaction)\b'
+    title: "Write to a git hook file"
+    severity: HIGH
+    confidence: 0.82
+    tags: [agent-escape, code-execution]
   - id: ESC-DOCKER-SOCK
     pattern: '(?i)(?:/var/run/docker\.sock|\bdocker\.sock\b|DOCKER_HOST\s*=\s*unix:|\bdocker\s+-H\s+unix:|--unix-socket\s+\S*docker\.sock|-v\s+\S*docker\.sock:)'
     title: "Docker daemon socket access"
     severity: HIGH
     confidence: 0.85
     tags: [agent-escape, privilege-escalation]
+  - id: ESC-DOCKER-PRIVILEGED
+    pattern: '(?i)\bdocker\s+(?:run|create)\b[^\n|;&]{0,200}?--privileged\b'
+    title: "Privileged Docker container (host-root escape)"
+    severity: HIGH
+    confidence: 0.82
+    tags: [agent-escape, privilege-escalation]
+  - id: ESC-VSCODE-AUTORUN
+    pattern: '(?i)(?:\.vscode[\\/](?:tasks|launch|settings)\.json[\s\S]{0,1000}?(?:folderOpen|allowAutomaticTasks)|(?:folderOpen|allowAutomaticTasks)[\s\S]{0,1000}?\.vscode[\\/])'
+    title: "VSCode task auto-run on folder open"
+    severity: HIGH
+    confidence: 0.82
+    tags: [agent-escape, write-then-execute]
