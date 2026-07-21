@@ -1416,12 +1416,24 @@ async def smoke():
     app = DefenseClawTUI(ai_discovery_model=discovery)
     async with app.run_test(size=(180, 50)) as pilot:
         await pilot.press('V')
-        await pilot.pause()
         products = app.query_one('#panel-table', DataTable)
         models = app.query_one('#ai-model-table', DataTable)
-        if products.row_count != 1 or models.row_count != 1:
+
+        # Panel switching intentionally paints an acknowledgement frame before
+        # its deferred table projection. A single scheduler yield is racy on
+        # the installed Windows runtime, so wait on the observable rows with a
+        # strict local deadline instead of assuming one Textual frame is enough.
+        loop = asyncio.get_running_loop()
+        render_deadline = loop.time() + 10
+        while loop.time() < render_deadline:
+            await pilot.pause()
+            if app.active_panel == 'ai' and products.row_count == 1 and models.row_count == 1:
+                break
+            await asyncio.sleep(0.025)
+        else:
             raise RuntimeError(
-                f'packaged AI table split failed: products={products.row_count} models={models.row_count}'
+                'packaged AI table split failed: '
+                f'panel={app.active_panel} products={products.row_count} models={models.row_count}'
             )
         model_cells = tuple(str(cell) for cell in models.get_row_at(0))
         if not any('Qwen/Qwen3-4B-GGUF' in cell for cell in model_cells):
@@ -1429,8 +1441,13 @@ async def smoke():
         if not any('CN' in cell for cell in model_cells):
             raise RuntimeError(f'packaged model row missing accessible country code: {model_cells}')
         await pilot.press('t')
-        await pilot.pause()
-        if app.focused is not models or discovery.active_table != 'models':
+        focus_deadline = loop.time() + 5
+        while loop.time() < focus_deadline:
+            await pilot.pause()
+            if app.focused is models and discovery.active_table == 'models':
+                break
+            await asyncio.sleep(0.025)
+        else:
             raise RuntimeError('packaged keyboard could not focus the local-model table')
 
 asyncio.run(asyncio.wait_for(smoke(), timeout=20))

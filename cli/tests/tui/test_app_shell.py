@@ -3584,8 +3584,13 @@ async def test_ai_discovery_export_button_writes_snapshot(tmp_path) -> None:
         assert body["enabled"] is True
         assert body["summary"]["scan_id"] == "scan-1"
         assert body["signals"][0]["name"] == "local-model"
-        assert body["signals"][0]["model"]["provenance"]["country_code"] == "CN"
-        assert body["signals"][0]["model"]["provenance"]["quantized"] is False
+        provenance = body["signals"][0]["model"]["provenance"]
+        assert provenance["country_code"] == "CN"
+        assert provenance["quantized"] is False
+        assert provenance["distilled"] is False
+        assert provenance["derivation"] == "base"
+        assert provenance["source"] == "catalog_exact"
+        assert provenance["confidence"] == "high"
 
 
 def test_safe_body_renderable_falls_back_on_invalid_style() -> None:
