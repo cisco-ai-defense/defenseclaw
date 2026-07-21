@@ -704,8 +704,10 @@ func TestAgentEscapeRules_TruePositives(t *testing.T) {
 		// misses them, but the normalized pass decodes the escapes so the
 		// rule still fires. \\u0068 -> h ("hooks"), \\u0063 -> c ("command").
 		{"claude hook unicode-escaped", ".claude/settings.json \"\\u0068ooks\": [{\"\\u0063ommand\": \"evil\"}]", "ESC-CLAUDE-HOOK"},
-		{"git show output flag", `git show HEAD:file --output=/tmp/pwn`, "ESC-GIT-READ-WEAPONIZED"},
-		{"git log ext-diff", `git log -p --ext-diff`, "ESC-GIT-READ-WEAPONIZED"},
+		// GitPwned chain: a read-only git verb whose --output writes into git
+		// metadata (.git/config) — a self-contained arbitrary config write.
+		{"git show output into .git/config", `git show --format='[diff]external=bash' --no-patch --output=./.git/config HEAD`, "ESC-GIT-READ-WEAPONIZED"},
+		{"git show output into .git-alt/config", `git show --output=.git-alt/config HEAD`, "ESC-GIT-READ-WEAPONIZED"},
 		{"docker socket path", `curl --unix-socket /var/run/docker.sock http://localhost/containers/json`, "ESC-DOCKER-SOCK"},
 		{"docker -H unix", `docker -H unix:///var/run/docker.sock run --privileged alpine`, "ESC-DOCKER-SOCK"},
 		{"docker sock mount", `docker run -v /var/run/docker.sock:/var/run/docker.sock alpine`, "ESC-DOCKER-SOCK"},
@@ -758,23 +760,36 @@ func TestAgentEscapeRules_FalsePositives(t *testing.T) {
 		{"plain git show", `git show HEAD`},
 		{"git log oneline", `git log --oneline -n 20`},
 		{"git diff stat", `git diff --stat main`},
-		// format-patch writing to an output dir is its normal function, not a
-		// weaponized read — must not fire ESC-GIT-READ-WEAPONIZED.
+		// git log -O (orderfile) is a read option, not a file write.
+		{"git log orderfile", `git log -O order.txt`},
+		// enabling the builtin fsmonitor is a boolean, not an exec helper.
+		{"git fsmonitor true", `git config core.fsmonitor true`},
+		{"git fsmonitor false", `git config core.fsmonitor false`},
+		{"git fsmonitor true in config file", `{"file_path": ".git/config", "content": "[core]\n\tfsmonitor = true"}`},
+		// --output to a non-metadata path is a normal export, not a config write.
+		{"git show output to tmp", `git show HEAD --output=/tmp/patch.txt`},
+		// format-patch writing to an output dir is its normal function.
 		{"git format-patch output dir", `git format-patch -o outgoing/ HEAD~3`},
 		{"git format-patch long flag", `git format-patch --output-directory=/tmp/patches main`},
-		// docker without the socket / privileged
+		{"git clone", `git clone https://github.com/x/y.git`},
+		// docker without socket use / privileged
 		{"docker build", `docker build -t myapp .`},
 		{"docker run normal", `docker run --rm myapp npm test`},
 		{"docker run ports", `docker run --rm -p 8080:80 myapp`},
+		// inspecting the socket (not using it) must not match.
+		{"docker sock inspect", `ls -l /var/run/docker.sock`},
+		{"docker sock prose", `check docker.sock permissions before mounting`},
 		// venv / pyvenv references that aren't a path write
 		{"run venv python", `.venv/bin/python manage.py migrate`},
 		{"pyvenv in prose", `the pyvenv.cfg documentation explains venv config`},
-		// normal git usage
-		{"git clone", `git clone https://github.com/x/y.git`},
-		// an app's own hooks/ dir (React hooks etc.), not a git hook
+		// an app's own hooks/ dir (React hooks, husky) is not a git hook.
 		{"app hooks dir", `{"file_path": "src/hooks/useState.ts", "content": "export const x = 1"}`},
-		// a hand-authored vscode build task with no auto-run trigger
+		{"app hook named pre-commit", `{"file_path": "src/hooks/pre-commit-lint.js", "content": "export const x = 1"}`},
+		{"husky pre-commit", `{"file_path": ".husky/pre-commit", "content": "npm test"}`},
+		// a hand-authored vscode build task with no auto-run trigger.
 		{"vscode manual task", `{"file_path": ".vscode/tasks.json", "content": "{\"tasks\":[{\"label\":\"build\",\"command\":\"make\"}]}"}`},
+		// allowAutomaticTasks explicitly off must not match.
+		{"vscode allowAutomaticTasks off", `{"file_path": ".vscode/settings.json", "content": "{\"task.allowAutomaticTasks\":\"off\"}"}`},
 		// prose mentioning the keywords
 		{"fsmonitor in prose", `The core.fsmonitor feature can speed up git status`},
 	}
@@ -805,6 +820,28 @@ func TestAgentEscapeRules_BlockBoundary(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			findings := ScanAllRules(tc.input, "write_file")
 			assertRuleSeverity(t, findings, tc.wantID, "CRITICAL")
+		})
+	}
+}
+
+// TestAgentEscapeRules_StandaloneSignalsAreLow pins the rules that cannot be
+// accurate standalone to LOW so a future edit can't silently promote a
+// multi-turn prerequisite to a hard block. These fire as visible signals but
+// never block outside the strict pack.
+func TestAgentEscapeRules_StandaloneSignalsAreLow(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		wantID string
+	}{
+		{"pyvenv marker", `{"file_path": "data_cache/pyvenv.cfg", "content": ""}`, "ESC-VENV-CFG"},
+		{"venv shell shim", `{"file_path": "data_cache/bin/python", "content": "#!/bin/bash\nexec \"$REAL\" \"$@\""}`, "ESC-VENV-INTERP"},
+		{"separate-git-dir", `git init --separate-git-dir=.git-alt`, "ESC-GIT-SEPARATE-DIR"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := ScanAllRules(tc.input, "write_file")
+			assertRuleSeverity(t, findings, tc.wantID, "LOW")
 		})
 	}
 }

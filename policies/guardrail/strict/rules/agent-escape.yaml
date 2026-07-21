@@ -1,9 +1,13 @@
 version: 1
 category: agent-escape
 # Write-then-execute sandbox escapes: an agent writes a file or config that a
-# trusted, unsandboxed host component later executes. Each rule requires a
-# sensitive target AND a dangerous payload token to co-occur. Keep in sync with
-# the compiled-in defaults in `internal/gateway/rules.go` (agentEscapeRules).
+# trusted, unsandboxed host component later executes. These rules give
+# high-confidence detection of SELF-CONTAINED escape attempts (the whole
+# exploit visible in one tool call). Multi-turn chains — where a prerequisite
+# is written in one call and the trigger arrives in another — cannot be seen by
+# a stateless regex; the standalone-prerequisite rules below are LOW signals,
+# not blocks. Keep in sync with the compiled-in defaults in
+# `internal/gateway/rules.go` (agentEscapeRules).
 # Related advisories: CVE-2026-48124, GHSA-pc9j-3qc2-95wv,
 # GHSA-p9g2-cr55-cw9c, GHSA-v4xv-rqh3-w9mc.
 rules:
@@ -22,41 +26,41 @@ rules:
   - id: ESC-VENV-CFG
     pattern: '(?i)[\w.\-]+[\\/]+pyvenv\.cfg'
     title: "Virtualenv marker write (pyvenv.cfg)"
-    severity: HIGH
+    severity: LOW
     confidence: 0.80
     tags: [agent-escape, write-then-execute]
   - id: ESC-VENV-INTERP
     pattern: '(?i)[\\/](?:bin[\\/]python[0-9.]*|Scripts[\\/]python[0-9.]*\.exe)\b[\s\S]{0,400}?(?:#!\s*/(?:usr/)?bin/(?:env\s+)?(?:ba)?sh|\bexec\s+\\?["'']?\$)'
     title: "Virtualenv interpreter replaced with a shell wrapper"
-    severity: HIGH
+    severity: LOW
     confidence: 0.82
     tags: [agent-escape, write-then-execute]
   - id: ESC-GIT-CONFIG-EXEC
-    pattern: '(?i)(?:\bgit\s+config\b[^\n]{0,60}?\b(?:core\.hooksPath|core\.fsmonitor|core\.sshCommand|diff\.external|[\w.-]+\.textconv|filter\.[^.\s]+\.(?:clean|smudge|process)|uploadpack\.packObjectsHook)\b|(?:^|[\s"''\[\],]|\\[nrt])(?:hooksPath|fsmonitor|sshCommand|packObjectsHook|diff\.external|textconv)\s*\\?["'']?\s*[=:])'
+    pattern: '(?i)(?:\bgit\s+config\b[^\n]{0,40}?\b(?:core\.hooksPath|core\.sshCommand|diff\.external|[\w.-]+\.textconv|filter\.[^.\s]+\.(?:clean|smudge|process)|uploadpack\.packObjectsHook)\b|\bgit\s+config\b[^\n]{0,40}?\bcore\.fsmonitor\s+\\?["'']?[./~$]|(?:^|[\s"''\[\],]|\\[nrt])(?:hooksPath|sshCommand|packObjectsHook|diff\.external|textconv)\s*\\?["'']?\s*[=:]|(?:^|[\s"''\[\],]|\\[nrt])fsmonitor\s*\\?["'']?\s*[=:]\s*\\?["'']?[./~$])'
     title: "git config execution-indirection key set"
     severity: CRITICAL
     confidence: 0.90
     tags: [agent-escape, code-execution]
   - id: ESC-GIT-READ-WEAPONIZED
-    pattern: '(?i)\bgit\b[^\n|;&]{0,80}\b(?:show|log|diff|whatchanged)\b[^\n|;&]{0,200}?(?:--output[= ]|(?:^|\s)-O\b|--ext-diff|--textconv)'
-    title: "Read-only git command with file-writing/exec flag"
+    pattern: '(?i)\bgit\s+(?:show|log|diff|whatchanged)\b[^\n|;&]{0,200}?--output[= ]\\?["'']?\S*(?:\.git[\w.\-]*[\\/]config|[\\/]hooks[\\/])'
+    title: "git read command writing into git metadata (--output)"
     severity: HIGH
-    confidence: 0.85
+    confidence: 0.90
     tags: [agent-escape, code-execution]
   - id: ESC-GIT-SEPARATE-DIR
     pattern: '(?i)--separate-git-dir[= ]'
     title: "Git metadata dir redirected off the .git path"
-    severity: HIGH
+    severity: LOW
     confidence: 0.80
     tags: [agent-escape, code-execution]
   - id: ESC-GIT-HOOK-WRITE
-    pattern: '(?i)[\\/]hooks[\\/](?:fsmonitor-watchman|pre-commit|post-commit|pre-push|post-checkout|post-merge|prepare-commit-msg|commit-msg|pre-receive|post-receive|update|post-update|pre-rebase|post-rewrite|reference-transaction)\b'
+    pattern: '(?i)\.git[\w.\-]*[\\/]hooks[\\/](?:fsmonitor-watchman|pre-commit|post-commit|pre-push|post-checkout|post-merge|prepare-commit-msg|commit-msg|pre-receive|post-receive|update|post-update|pre-rebase|post-rewrite|reference-transaction)\b'
     title: "Write to a git hook file"
     severity: HIGH
     confidence: 0.82
     tags: [agent-escape, code-execution]
   - id: ESC-DOCKER-SOCK
-    pattern: '(?i)(?:/var/run/docker\.sock|\bdocker\.sock\b|DOCKER_HOST\s*=\s*unix:|\bdocker\s+-H\s+unix:|--unix-socket\s+\S*docker\.sock|-v\s+\S*docker\.sock:)'
+    pattern: '(?i)(?:--unix-socket\s+\S*docker\.sock|\bdocker\s+-H\s+unix:|DOCKER_HOST\s*=\s*unix:|-v\s+\S*docker\.sock:|--mount[^\n|;&]*?source=\S*docker\.sock)'
     title: "Docker daemon socket access"
     severity: HIGH
     confidence: 0.85
@@ -68,7 +72,7 @@ rules:
     confidence: 0.82
     tags: [agent-escape, privilege-escalation]
   - id: ESC-VSCODE-AUTORUN
-    pattern: '(?i)(?:\.vscode[\\/](?:tasks|launch|settings)\.json[\s\S]{0,1000}?(?:folderOpen|allowAutomaticTasks)|(?:folderOpen|allowAutomaticTasks)[\s\S]{0,1000}?\.vscode[\\/])'
+    pattern: '(?i)(?:allowAutomaticTasks\\?["'']?\s*[:=]\s*\\?["'']?on\b|\.vscode[\\/](?:tasks|launch)\.json[\s\S]{0,1000}?(?:folderOpen[\s\S]{0,1000}?\bcommand\b|\bcommand\b[\s\S]{0,1000}?folderOpen))'
     title: "VSCode task auto-run on folder open"
     severity: HIGH
     confidence: 0.82

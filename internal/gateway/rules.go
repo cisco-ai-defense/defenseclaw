@@ -313,40 +313,45 @@ var agentEscapeRules = []PatternRule{
 	{ID: "ESC-CLAUDE-HOOK", Pattern: regexp.MustCompile(`(?i)\.claude[\\/][^"\s]*?\.json[\s\S]{0,1000}?\bhooks\b[\s\S]{0,800}?\bcommand\b\s*\\?["']?\s*[:=]`), Title: "Workspace .claude hook installs a command", Severity: "CRITICAL", Confidence: 0.88, Tags: []string{"agent-escape", "write-then-execute"}},
 	// File written directly into .claude/hooks/, where hook scripts run.
 	{ID: "ESC-CLAUDE-HOOK-DIR", Pattern: regexp.MustCompile(`(?i)\.claude[\\/]hooks[\\/][\w.-]+`), Title: "Write into .claude/hooks directory", Severity: "HIGH", Confidence: 0.80, Tags: []string{"agent-escape", "write-then-execute"}},
-	// pyvenv.cfg under ANY parent dir (not just .venv/venv/env): the extension
-	// discovers the venv by pyvenv.cfg + bin/python, so a non-standard dir name
-	// still triggers it.
-	{ID: "ESC-VENV-CFG", Pattern: regexp.MustCompile(`(?i)[\w.\-]+[\\/]+pyvenv\.cfg`), Title: "Virtualenv marker write (pyvenv.cfg)", Severity: "HIGH", Confidence: 0.80, Tags: []string{"agent-escape", "write-then-execute"}},
-	// bin/python written as a shell wrapper (shebang or exec "$REAL") that the
-	// extension runs during discovery. A real interpreter is a binary, so this
-	// won't match normal venvs.
-	{ID: "ESC-VENV-INTERP", Pattern: regexp.MustCompile(`(?i)[\\/](?:bin[\\/]python[0-9.]*|Scripts[\\/]python[0-9.]*\.exe)\b[\s\S]{0,400}?(?:#!\s*/(?:usr/)?bin/(?:env\s+)?(?:ba)?sh|\bexec\s+\\?["']?\$)`), Title: "Virtualenv interpreter replaced with a shell wrapper", Severity: "HIGH", Confidence: 0.82, Tags: []string{"agent-escape", "write-then-execute"}},
-	// git config keys that turn an ordinary git op into code execution. Two
-	// forms: the command form `git config <dotted.key> <value>`, and the INI
-	// form (`[core]` + `fsmonitor = ...`). Prose lacks the assignment, so it
-	// won't match.
-	{ID: "ESC-GIT-CONFIG-EXEC", Pattern: regexp.MustCompile(`(?i)(?:\bgit\s+config\b[^\n]{0,60}?\b(?:core\.hooksPath|core\.fsmonitor|core\.sshCommand|diff\.external|[\w.-]+\.textconv|filter\.[^.\s]+\.(?:clean|smudge|process)|uploadpack\.packObjectsHook)\b|(?:^|[\s"'\[\],]|\\[nrt])(?:hooksPath|fsmonitor|sshCommand|packObjectsHook|diff\.external|textconv)\s*\\?["']?\s*[=:])`), Title: "git config execution-indirection key set", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"agent-escape", "code-execution"}},
-	// Read-only git verb with a flag that writes a file (--output/-O) or runs a
-	// helper (--ext-diff/--textconv). format-patch is excluded: -o output is
-	// its normal function and it runs no code.
-	{ID: "ESC-GIT-READ-WEAPONIZED", Pattern: regexp.MustCompile(`(?i)\bgit\b[^\n|;&]{0,80}\b(?:show|log|diff|whatchanged)\b[^\n|;&]{0,200}?(?:--output[= ]|(?:^|\s)-O\b|--ext-diff|--textconv)`), Title: "Read-only git command with file-writing/exec flag", Severity: "HIGH", Confidence: 0.85, Tags: []string{"agent-escape", "code-execution"}},
-	// --separate-git-dir=<name> puts git metadata off the literal .git path so a
-	// later config/hook write dodges a .git-only denylist.
-	{ID: "ESC-GIT-SEPARATE-DIR", Pattern: regexp.MustCompile(`(?i)--separate-git-dir[= ]`), Title: "Git metadata dir redirected off the .git path", Severity: "HIGH", Confidence: 0.80, Tags: []string{"agent-escape", "code-execution"}},
-	// Write to a git hook file; git runs these on ordinary operations. Named
-	// for the real hooks git runs, so unrelated hooks/ dirs won't match.
-	{ID: "ESC-GIT-HOOK-WRITE", Pattern: regexp.MustCompile(`(?i)[\\/]hooks[\\/](?:fsmonitor-watchman|pre-commit|post-commit|pre-push|post-checkout|post-merge|prepare-commit-msg|commit-msg|pre-receive|post-receive|update|post-update|pre-rebase|post-rewrite|reference-transaction)\b`), Title: "Write to a git hook file", Severity: "HIGH", Confidence: 0.82, Tags: []string{"agent-escape", "code-execution"}},
-	// Docker daemon socket: a root-equivalent, unsandboxed exec environment.
-	// Distinct from PATH-DOCKER, which covers the ~/.docker/config.json creds.
-	{ID: "ESC-DOCKER-SOCK", Pattern: regexp.MustCompile(`(?i)(?:/var/run/docker\.sock|\bdocker\.sock\b|DOCKER_HOST\s*=\s*unix:|\bdocker\s+-H\s+unix:|--unix-socket\s+\S*docker\.sock|-v\s+\S*docker\.sock:)`), Title: "Docker daemon socket access", Severity: "HIGH", Confidence: 0.85, Tags: []string{"agent-escape", "privilege-escalation"}},
+	// pyvenv.cfg write under any parent dir. pyvenv.cfg is normal by
+	// definition, so this is a LOW standalone signal (a venv-escape
+	// prerequisite): the escape needs the paired bin/python wrapper too.
+	{ID: "ESC-VENV-CFG", Pattern: regexp.MustCompile(`(?i)[\w.\-]+[\\/]+pyvenv\.cfg`), Title: "Virtualenv marker write (pyvenv.cfg)", Severity: "LOW", Confidence: 0.80, Tags: []string{"agent-escape", "write-then-execute"}},
+	// bin/python written as a shell wrapper (shebang or exec "$REAL"). Shell
+	// shims can be legitimate, so this is a LOW standalone signal; the escape
+	// is the combination with a venv marker and a host payload.
+	{ID: "ESC-VENV-INTERP", Pattern: regexp.MustCompile(`(?i)[\\/](?:bin[\\/]python[0-9.]*|Scripts[\\/]python[0-9.]*\.exe)\b[\s\S]{0,400}?(?:#!\s*/(?:usr/)?bin/(?:env\s+)?(?:ba)?sh|\bexec\s+\\?["']?\$)`), Title: "Virtualenv interpreter replaced with a shell wrapper", Severity: "LOW", Confidence: 0.82, Tags: []string{"agent-escape", "write-then-execute"}},
+	// git config keys that run a program. The always-executable keys
+	// (hooksPath/sshCommand/diff.external/textconv/filter helpers/
+	// packObjectsHook) match on assignment; fsmonitor matches only with a
+	// path/command value, never the builtin boolean core.fsmonitor=true|false.
+	{ID: "ESC-GIT-CONFIG-EXEC", Pattern: regexp.MustCompile(`(?i)(?:\bgit\s+config\b[^\n]{0,40}?\b(?:core\.hooksPath|core\.sshCommand|diff\.external|[\w.-]+\.textconv|filter\.[^.\s]+\.(?:clean|smudge|process)|uploadpack\.packObjectsHook)\b|\bgit\s+config\b[^\n]{0,40}?\bcore\.fsmonitor\s+\\?["']?[./~$]|(?:^|[\s"'\[\],]|\\[nrt])(?:hooksPath|sshCommand|packObjectsHook|diff\.external|textconv)\s*\\?["']?\s*[=:]|(?:^|[\s"'\[\],]|\\[nrt])fsmonitor\s*\\?["']?\s*[=:]\s*\\?["']?[./~$])`), Title: "git config execution-indirection key set", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"agent-escape", "code-execution"}},
+	// GitPwned: a read-only git verb with --output aimed at git metadata
+	// (.git/config, .git-alt/config, hooks) — a self-contained arbitrary write
+	// into a config that later executes. Scoped to metadata targets so a plain
+	// `--output=/tmp/x` (benign) does not match; -O (orderfile) is not a write.
+	{ID: "ESC-GIT-READ-WEAPONIZED", Pattern: regexp.MustCompile(`(?i)\bgit\s+(?:show|log|diff|whatchanged)\b[^\n|;&]{0,200}?--output[= ]\\?["']?\S*(?:\.git[\w.\-]*[\\/]config|[\\/]hooks[\\/])`), Title: "git read command writing into git metadata (--output)", Severity: "HIGH", Confidence: 0.90, Tags: []string{"agent-escape", "code-execution"}},
+	// --separate-git-dir=<name> puts git metadata off the literal .git path.
+	// The flag is legitimate on its own, so LOW: the escape needs a later
+	// config/hook write into the redirected dir.
+	{ID: "ESC-GIT-SEPARATE-DIR", Pattern: regexp.MustCompile(`(?i)--separate-git-dir[= ]`), Title: "Git metadata dir redirected off the .git path", Severity: "LOW", Confidence: 0.80, Tags: []string{"agent-escape", "code-execution"}},
+	// Write to a git hook file under a .git metadata dir (.git/hooks,
+	// .git-alt/hooks). Scoped to .git-looking parents so an app's own hooks/
+	// dir (React hooks, husky) does not match.
+	{ID: "ESC-GIT-HOOK-WRITE", Pattern: regexp.MustCompile(`(?i)\.git[\w.\-]*[\\/]hooks[\\/](?:fsmonitor-watchman|pre-commit|post-commit|pre-push|post-checkout|post-merge|prepare-commit-msg|commit-msg|pre-receive|post-receive|update|post-update|pre-rebase|post-rewrite|reference-transaction)\b`), Title: "Write to a git hook file", Severity: "HIGH", Confidence: 0.82, Tags: []string{"agent-escape", "code-execution"}},
+	// Docker daemon socket USE (not mere mention): a root-equivalent,
+	// unsandboxed exec environment. Inspecting socket permissions does not
+	// match. Distinct from PATH-DOCKER (the ~/.docker/config.json creds).
+	{ID: "ESC-DOCKER-SOCK", Pattern: regexp.MustCompile(`(?i)(?:--unix-socket\s+\S*docker\.sock|\bdocker\s+-H\s+unix:|DOCKER_HOST\s*=\s*unix:|-v\s+\S*docker\.sock:|--mount[^\n|;&]*?source=\S*docker\.sock)`), Title: "Docker daemon socket access", Severity: "HIGH", Confidence: 0.85, Tags: []string{"agent-escape", "privilege-escalation"}},
 	// docker run --privileged: a privileged container is a host-root escape.
 	// The daemon-use path the socket rule misses (CLI reaches the daemon
 	// without naming the socket).
 	{ID: "ESC-DOCKER-PRIVILEGED", Pattern: regexp.MustCompile(`(?i)\bdocker\s+(?:run|create)\b[^\n|;&]{0,200}?--privileged\b`), Title: "Privileged Docker container (host-root escape)", Severity: "HIGH", Confidence: 0.82, Tags: []string{"agent-escape", "privilege-escalation"}},
-	// .vscode config that auto-runs on folder open: the host IDE runs it
-	// unsandboxed with no user action. A hand-triggered build task has no
-	// folderOpen/allowAutomaticTasks trigger.
-	{ID: "ESC-VSCODE-AUTORUN", Pattern: regexp.MustCompile(`(?i)(?:\.vscode[\\/](?:tasks|launch|settings)\.json[\s\S]{0,1000}?(?:folderOpen|allowAutomaticTasks)|(?:folderOpen|allowAutomaticTasks)[\s\S]{0,1000}?\.vscode[\\/])`), Title: "VSCode task auto-run on folder open", Severity: "HIGH", Confidence: 0.82, Tags: []string{"agent-escape", "write-then-execute"}},
+	// Self-contained VSCode auto-run: either task.allowAutomaticTasks turned
+	// "on", or a tasks/launch.json that carries both a folderOpen trigger and a
+	// command. A hand-triggered build task (no folderOpen) does not match, and
+	// allowAutomaticTasks:"off" does not match.
+	{ID: "ESC-VSCODE-AUTORUN", Pattern: regexp.MustCompile(`(?i)(?:allowAutomaticTasks\\?["']?\s*[:=]\s*\\?["']?on\b|\.vscode[\\/](?:tasks|launch)\.json[\s\S]{0,1000}?(?:folderOpen[\s\S]{0,1000}?\bcommand\b|\bcommand\b[\s\S]{0,1000}?folderOpen))`), Title: "VSCode task auto-run on folder open", Severity: "HIGH", Confidence: 0.82, Tags: []string{"agent-escape", "write-then-execute"}},
 }
 
 // ---------------------------------------------------------------------------
