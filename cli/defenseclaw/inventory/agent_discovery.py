@@ -70,6 +70,7 @@ CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
 VERSION_TIMEOUT_SECONDS = 2.0
 PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS = 5.0
+_WINDOWS_LOCAL_APP_DATA_FOLDER_ID = "F1B32785-6FBA-4FCF-9D55-7B8E7F157091"
 
 # Canonical install prefixes that we trust enough to exec
 # `<binary> --version` against. Anything outside this allow-list is
@@ -235,6 +236,15 @@ def _windows_current_user_known_folder(identifier: str) -> str:
         kernel32.CloseHandle(token)
 
 
+def _windows_current_user_local_app_data_roots() -> tuple[str, ...]:
+    """Return token-bound LocalAppData first, with the environment as fallback."""
+
+    root = _windows_current_user_known_folder(_WINDOWS_LOCAL_APP_DATA_FOLDER_ID)
+    if not root:
+        root = os.environ.get("LOCALAPPDATA", "")
+    return (os.path.abspath(root),) if root else ()
+
+
 def _windows_native_system_directory() -> str:
     if os.name != "nt":  # pragma: no cover - native Windows boundary
         return ""
@@ -258,7 +268,7 @@ def _windows_package_manager_folders() -> _WindowsPackageManagerFolders:
         return _WindowsPackageManagerFolders("", "", "", "", "", "")
     return _WindowsPackageManagerFolders(
         profile=_windows_current_user_known_folder("5E6C858F-0E22-4760-9AFE-EA3317B67173"),
-        local_app_data=_windows_current_user_known_folder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091"),
+        local_app_data=_windows_current_user_known_folder(_WINDOWS_LOCAL_APP_DATA_FOLDER_ID),
         roaming_app_data=_windows_current_user_known_folder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D"),
         program_files=_windows_current_user_known_folder("6D809377-6AF0-444B-8957-A3773F02200E"),
         program_files_x86=_windows_current_user_known_folder("7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E"),
@@ -646,16 +656,20 @@ def _windows_default_trusted_bin_prefixes() -> tuple[str, ...]:
     )
 
     candidates: list[str] = []
+    # A packaged subprocess may redirect LOCALAPPDATA for isolated state, but
+    # the installed desktop CLI remains under the current token's Known Folder.
+    # Keep these product roots narrow; executable admission still checks ACLs.
+    for codex_local_app_data in _windows_current_user_local_app_data_roots():
+        candidates.extend(
+            (
+                os.path.join(codex_local_app_data, "Programs", "OpenAI", "Codex", "bin"),
+                os.path.join(codex_local_app_data, "OpenAI", "Codex", "bin"),
+                os.path.join(codex_local_app_data, "OpenAI", "Codex", "runtimes"),
+            )
+        )
     if local_app_data:
         candidates.extend(
             (
-                os.path.join(local_app_data, "Programs", "OpenAI", "Codex", "bin"),
-                os.path.join(local_app_data, "OpenAI", "Codex", "bin"),
-                # Codex Desktop installs its bundled native MCP executables
-                # below this product-specific runtime root.  Never trust all
-                # of LOCALAPPDATA; executable admission still validates the
-                # full owner/DACL chain through this narrow prefix.
-                os.path.join(local_app_data, "OpenAI", "Codex", "runtimes"),
                 os.path.join(
                     local_app_data,
                     "hermes",
@@ -1787,8 +1801,7 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
             candidates.append(os.path.abspath(candidate))
 
     if name == "codex":
-        local_app_data = os.environ.get("LOCALAPPDATA", "")
-        if local_app_data:
+        for local_app_data in _windows_current_user_local_app_data_roots():
             desktop_bin = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
             # Codex Desktop stores versioned native CLIs one directory below
             # the product bin root. Prefer a stable lexical order; the version
@@ -1855,8 +1868,11 @@ def _windows_binary_candidates(connector: str, binary_name: str) -> tuple[str, .
     if home:
         prefixes.extend((os.path.join(home, ".local", "bin"), os.path.join(home, "scoop", "shims")))
 
-    if connector == "codex" and local_app_data:
-        prefixes.insert(0, os.path.join(local_app_data, "Programs", "OpenAI", "Codex", "bin"))
+    if connector == "codex":
+        prefixes[0:0] = [
+            os.path.join(root, "Programs", "OpenAI", "Codex", "bin")
+            for root in _windows_current_user_local_app_data_roots()
+        ]
     elif connector == "hermes" and local_app_data:
         prefixes.insert(
             0,

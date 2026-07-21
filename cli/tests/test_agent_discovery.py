@@ -70,6 +70,7 @@ def isolate_configured_package_manager_roots(monkeypatch) -> None:
     """Keep unit scans independent of npm/pnpm installed on the test host."""
 
     monkeypatch.setattr(ad, "_windows_configured_package_manager_bin_prefixes", lambda: ())
+    monkeypatch.setattr(ad, "_windows_current_user_known_folder", lambda _identifier: "")
 
 
 def test_discovery_trust_config_honors_config_override(monkeypatch, tmp_path):
@@ -518,6 +519,45 @@ def test_codex_windows_discovery_skips_nonlaunchable_path_alias(
     assert ad._path_key(signal.binary_path) == ad._path_key(str(desktop))
     assert probes[0] == str(alias)
     assert str(desktop) in probes
+
+
+def test_codex_windows_discovery_uses_token_bound_local_app_data(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    known_local_app_data = tmp_path / "token-local-app-data"
+    redirected_local_app_data = tmp_path / "redirected-local-app-data"
+    desktop = known_local_app_data / "OpenAI" / "Codex" / "bin" / "release-hash" / "codex.exe"
+    desktop.parent.mkdir(parents=True)
+    desktop.write_bytes(b"desktop cli")
+    monkeypatch.setenv("LOCALAPPDATA", str(redirected_local_app_data))
+    monkeypatch.setattr(
+        ad,
+        "_windows_current_user_known_folder",
+        lambda identifier: (
+            str(known_local_app_data)
+            if identifier == "F1B32785-6FBA-4FCF-9D55-7B8E7F157091"
+            else ""
+        ),
+    )
+    monkeypatch.setattr(
+        ad,
+        "_version_for_agent_binary",
+        lambda name, path, _args, **_kwargs: (
+            ("codex-cli 0.133.0", "")
+            if name == "codex" and ad._path_key(path) == ad._path_key(str(desktop))
+            else ("", "not launchable")
+        ),
+    )
+
+    signal = ad._scan_agent("codex")
+    trusted = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
+
+    assert signal.installed is True
+    assert signal.version == "codex-cli 0.133.0"
+    assert ad._path_key(signal.binary_path) == ad._path_key(str(desktop))
+    assert ad._path_key(str(desktop.parents[1])) in trusted
 
 
 def test_codex_desktop_bin_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
