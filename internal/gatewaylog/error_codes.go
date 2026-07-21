@@ -195,6 +195,7 @@ func AllSubsystems() []Subsystem {
 		SubsystemSQLite,
 		SubsystemAdmission,
 		SubsystemConfigMutation,
+		SubsystemPlugin,
 		SubsystemGatewaylog,
 	}
 }

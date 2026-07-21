@@ -55,7 +55,7 @@ var (
 	enterpriseHookJSON          bool
 	enterpriseHookWatchInterval time.Duration
 	enterpriseHookWatchDebounce time.Duration
-	enterpriseHookWatchSettle time.Duration
+	enterpriseHookWatchSettle   time.Duration
 
 	enterpriseHooksRuntimeGOOS                 = func() string { return runtime.GOOS }
 	enterpriseHooksPlatformPreflight           = enterpriseHooksNativePlatformPreflight
