@@ -1201,6 +1201,17 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 			if storedHubHash == "" {
 				storedHubHash = old.StoredModelProvenanceHubHash
 			}
+			// Disabling optional Hub lookups must not turn the absence of a
+			// freshly computed Hub hash into a provenance change. When the
+			// model's local evidence is identical, carry only the prior internal
+			// comparison hash. Do not restore the old Hub-derived Model payload or
+			// freshness marker: the public signal must continue to reflect the
+			// current offline detector result while network enrichment is disabled.
+			if s.modelProvenanceHub == nil && sig.Model != nil &&
+				sig.ModelProvenanceHubHash == "" && storedHubHash != "" &&
+				storedHash != "" && storedHash == sig.EvidenceHash {
+				sig.ModelProvenanceHubHash = storedHubHash
+			}
 			// v1 → v2 grace: if the stored hash is empty (v1 migration
 			// or first scan), treat as `seen` to avoid a flood of
 			// spurious `changed` rows on the first post-upgrade scan.

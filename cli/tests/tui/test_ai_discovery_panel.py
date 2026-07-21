@@ -306,6 +306,39 @@ def test_ai_discovery_groups_and_details_local_models() -> None:
     assert "runtime: pid=4321" in detail
 
 
+def test_ai_discovery_detail_renders_ambiguous_multi_base_root_label() -> None:
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(
+                    signal_id="merged-model",
+                    state="seen",
+                    category="local_model",
+                    product="Local Model Artifact",
+                    detector="model_file",
+                    model=AIUsageModel(
+                        id="private/merged-model",
+                        provenance=AIUsageModelProvenance(
+                            base_models=("acme/base-a", "acme/base-b"),
+                            source="gguf_metadata",
+                            confidence="medium",
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+
+    panel.set_model_cursor(0)
+    panel.toggle_detail()
+    detail = "\n".join(panel.detail_lines())
+
+    assert "root=ambiguous (2)" in detail
+    assert "base_models=acme/base-a,acme/base-b" in detail
+
+
 def test_non_local_signal_with_model_metadata_stays_in_product_table() -> None:
     panel = AIDiscoveryPanelModel()
     panel.set_snapshot(
@@ -554,6 +587,54 @@ def test_ai_discovery_cursor_clamps_on_filter() -> None:
     assert panel.cursor_at() == 0
     panel.toggle_detail()
     assert panel.detail_open is True
+
+
+def test_ai_discovery_model_cursor_and_scroll_use_model_viewport() -> None:
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(
+                    signal_id="agent",
+                    state="seen",
+                    category="ai_cli",
+                    product="Codex",
+                    detector="binary",
+                ),
+                *(
+                    AIUsageSignal(
+                        signal_id=f"model-{index}",
+                        state="seen",
+                        category="local_model",
+                        product="Local Model Artifact",
+                        detector="model_file",
+                        model=AIUsageModel(id=f"Model-{index:02d}"),
+                    )
+                    for index in range(8)
+                ),
+            ),
+        )
+    )
+    panel.set_size(width=120, height=10)
+
+    panel.set_model_cursor(7)
+    assert panel.active_table == "models"
+    assert panel.cursor_at() == 7
+    assert panel.selected() is not None
+    assert panel.selected().model == "Model-07"
+    assert panel.scroll_offset() == 3
+
+    panel.cursor_up()
+    assert panel.cursor_at() == 6
+    assert panel.selected() is not None
+    assert panel.selected().model == "Model-06"
+    assert panel.scroll_offset() == 2
+
+    panel.set_cursor(0)
+    assert panel.active_table == "agents"
+    assert panel.cursor_at() == 0
+    assert panel.scroll_offset() == 0
 
 
 def test_format_confidence_state_weight_and_humanize_age() -> None:

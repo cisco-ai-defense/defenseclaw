@@ -557,18 +557,22 @@ class AIDiscoveryPanelModel:
             self.active_table = "models"
 
     def cursor_at(self) -> int:
+        if self.active_table == "models":
+            return self.model_cursor
         return self.cursor
 
     def scroll_offset(self) -> int:
+        rows = self.filtered_models if self.active_table == "models" else self.filtered
+        cursor = self.model_cursor if self.active_table == "models" else self.cursor
         visible = self.height - 6
         if visible < 5:
             visible = 5
-        if visible > len(self.filtered):
-            visible = len(self.filtered)
+        if visible > len(rows):
+            visible = len(rows)
         if visible <= 0:
             return 0
-        if self.cursor >= visible:
-            return self.cursor - visible + 1
+        if cursor >= visible:
+            return cursor - visible + 1
         return 0
 
     def toggle_detail(self) -> None:
@@ -699,7 +703,7 @@ class AIDiscoveryPanelModel:
             for label, value in (
                 ("publisher", provenance.publisher),
                 ("country", provenance.country_label),
-                ("root", provenance.root_model),
+                ("root", provenance.root_label),
                 ("base_models", ",".join(provenance.base_models)),
                 ("derivation", provenance.derivation),
                 ("quantization", provenance.quantization),

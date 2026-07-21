@@ -618,6 +618,132 @@ func TestHubProvenanceRevisionTriggersChangedLifecycle(t *testing.T) {
 	}
 }
 
+func TestDisabledHubProvenancePreservesOnlyComparisonHashForUnchangedModel(t *testing.T) {
+	t.Parallel()
+	store := NewAIStateStore(t.TempDir() + "/state.json")
+	service := &ContinuousDiscoveryService{
+		opts:  AIDiscoveryOptions{Mode: "balanced", MaxFilesPerScan: 1},
+		store: store,
+		// A nil resolver represents the default, offline-only configuration.
+		modelProvenanceHub: nil,
+	}
+	previousHubProvenance := &LocalModelProvenance{
+		RootModel: "owner/old-hub-root", Source: "huggingface_hub", Confidence: "high",
+	}
+	previous := aiStateFile{Signals: map[string]aiStoredSignal{"model": {
+		AISignal: AISignal{
+			Fingerprint: "model", FirstSeen: time.Now().Add(-time.Hour),
+			Model: &LocalModelInfo{
+				ID: "owner/model", Status: "installed", Provenance: previousHubProvenance,
+			},
+		},
+		// Exercise the persisted-wrapper fallbacks used after a state reload.
+		StoredEvidenceHash:           "same-local-evidence",
+		StoredModelProvenanceHubHash: "old-hub-hash",
+	}}}
+	currentOfflineProvenance := &LocalModelProvenance{
+		RootModel: "owner/current-offline-root", Source: "model_config", Confidence: "medium",
+	}
+	signal := AISignal{
+		Fingerprint: "model", EvidenceHash: "same-local-evidence", Detector: "model_file",
+		Model: &LocalModelInfo{
+			ID: "owner/model", Status: "installed", Provenance: currentOfflineProvenance,
+		},
+	}
+
+	report := service.classifyAndPersist(
+		"scan", "sidecar", time.Now(), []AISignal{signal}, scanStats{}, previous, true,
+	)
+	if len(report.Signals) != 1 || report.Signals[0].State != AIStateSeen || report.Summary.ChangedSignals != 0 {
+		t.Fatalf("disabled Hub lookup changed an unchanged model: %+v", report)
+	}
+	got := report.Signals[0]
+	if got.ModelProvenanceHubHash != "old-hub-hash" {
+		t.Fatalf("comparison hash = %q, want prior stored hash", got.ModelProvenanceHubHash)
+	}
+	if got.Model == nil || got.Model.Provenance == nil ||
+		got.Model.Provenance.RootModel != currentOfflineProvenance.RootModel ||
+		got.Model.Provenance.Source != currentOfflineProvenance.Source {
+		t.Fatalf("stale Hub provenance was restored into public model payload: %+v", got.Model)
+	}
+	if !got.ModelProvenanceHubResolvedAt.IsZero() {
+		t.Fatalf("stale Hub freshness marker was restored: %v", got.ModelProvenanceHubResolvedAt)
+	}
+
+	persisted, err := store.Load()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	stored, ok := persisted.Signals["model"]
+	if !ok {
+		t.Fatal("persisted unchanged model is missing")
+	}
+	if stored.StoredModelProvenanceHubHash != "old-hub-hash" ||
+		stored.ModelProvenanceHubHash != "old-hub-hash" {
+		t.Fatalf("comparison baseline did not persist through wrapper fields: %+v", stored)
+	}
+}
+
+func TestDisabledHubProvenanceDoesNotMaskChangedLocalEvidence(t *testing.T) {
+	t.Parallel()
+	store := NewAIStateStore(t.TempDir() + "/state.json")
+	service := &ContinuousDiscoveryService{
+		opts:               AIDiscoveryOptions{Mode: "balanced", MaxFilesPerScan: 1},
+		store:              store,
+		modelProvenanceHub: nil,
+	}
+	previous := aiStateFile{Signals: map[string]aiStoredSignal{"model": {
+		AISignal: AISignal{
+			Fingerprint: "model", FirstSeen: time.Now().Add(-time.Hour),
+			Model: &LocalModelInfo{
+				ID: "owner/model", Status: "installed",
+				Provenance: &LocalModelProvenance{
+					RootModel: "owner/old-hub-root", Source: "huggingface_hub", Confidence: "high",
+				},
+			},
+		},
+		StoredEvidenceHash:           "old-local-evidence",
+		StoredModelProvenanceHubHash: "old-hub-hash",
+	}}}
+	currentOfflineProvenance := &LocalModelProvenance{
+		RootModel: "owner/current-offline-root", Source: "model_config", Confidence: "medium",
+	}
+	signal := AISignal{
+		Fingerprint: "model", EvidenceHash: "new-local-evidence", Detector: "model_file",
+		Model: &LocalModelInfo{
+			ID: "owner/model", Status: "installed", Provenance: currentOfflineProvenance,
+		},
+	}
+
+	report := service.classifyAndPersist(
+		"scan", "sidecar", time.Now(), []AISignal{signal}, scanStats{}, previous, true,
+	)
+	if len(report.Signals) != 1 || report.Signals[0].State != AIStateChanged || report.Summary.ChangedSignals != 1 {
+		t.Fatalf("changed local evidence was not classified changed: %+v", report)
+	}
+	got := report.Signals[0]
+	if got.ModelProvenanceHubHash != "" {
+		t.Fatalf("changed model retained stale Hub comparison hash %q", got.ModelProvenanceHubHash)
+	}
+	if got.Model == nil || got.Model.Provenance == nil ||
+		got.Model.Provenance.RootModel != currentOfflineProvenance.RootModel ||
+		got.Model.Provenance.Source != currentOfflineProvenance.Source {
+		t.Fatalf("changed model did not retain current offline provenance: %+v", got.Model)
+	}
+
+	persisted, err := store.Load()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	stored, ok := persisted.Signals["model"]
+	if !ok {
+		t.Fatal("persisted changed model is missing")
+	}
+	if stored.StoredModelProvenanceHubHash != "" || stored.ModelProvenanceHubHash != "" {
+		t.Fatalf("changed model persisted stale Hub comparison baseline: %+v", stored)
+	}
+}
+
 func TestAIStateStorePersistsHubFreshnessMetadata(t *testing.T) {
 	t.Parallel()
 	resolvedAt := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
