@@ -56,9 +56,10 @@ function Resolve-FullPath([string]$Path) {
 
 function Test-PathWithin([string]$Path, [string]$Root) {
     $candidate = Resolve-FullPath $Path
-    $parent = (Resolve-FullPath $Root).TrimEnd('\')
+    $separator = [IO.Path]::DirectorySeparatorChar
+    $parent = (Resolve-FullPath $Root).TrimEnd($separator)
     return $candidate.Equals($parent, [StringComparison]::OrdinalIgnoreCase) -or
-        $candidate.StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase)
+        $candidate.StartsWith($parent + $separator, [StringComparison]::OrdinalIgnoreCase)
 }
 
 function Remove-SafeTree([string]$Path, [string]$Root) {
