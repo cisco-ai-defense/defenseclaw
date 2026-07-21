@@ -658,6 +658,22 @@ class TestPerConnectorModeAndPreserve(unittest.TestCase):
             return _invoke([*args, "--yes", "--no-restart"], self.app)
 
     # --- SU-01: per-connector mode ------------------------------------
+    def test_sequential_codex_claude_action_closed_preserves_promoted_codex_posture(self):
+        first = self._setup("codex", "--mode", "action", "--fail-mode", "closed")
+        self.assertEqual(first.exit_code, 0, msg=first.output)
+
+        second = self._setup("claude-code", "--mode", "action", "--fail-mode", "closed")
+        self.assertEqual(second.exit_code, 0, msg=second.output)
+
+        gc = self.app.cfg.guardrail
+        self.assertEqual(set(gc.connectors), {"codex", "claudecode"})
+        for connector in ("codex", "claudecode"):
+            with self.subTest(connector=connector):
+                self.assertEqual(gc.connectors[connector].mode, "action")
+                self.assertEqual(gc.connectors[connector].hook_fail_mode, "closed")
+                self.assertEqual(gc.effective_mode(connector), "action")
+                self.assertEqual(gc.effective_hook_fail_mode(connector), "closed")
+
     def test_toggling_one_connector_mode_lands_per_connector(self):
         # Configure two hook connectors (codex seeded into the map), then flip
         # codex to action. The action mode must land on codex's OWN override

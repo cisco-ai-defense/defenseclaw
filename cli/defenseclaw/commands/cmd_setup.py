@@ -4965,7 +4965,10 @@ def _write_connector_identity(cfg, connector: str, write_mode: str) -> None:
             and existing_single in _HOOK_ENFORCED_CONNECTORS
             and existing_single not in gc.connectors
         ):
-            gc.connectors[existing_single] = PerConnectorGuardrailConfig()
+            gc.connectors[existing_single] = PerConnectorGuardrailConfig(
+                mode=gc.effective_mode(existing_single),
+                hook_fail_mode=gc.effective_hook_fail_mode(existing_single),
+            )
         if connector not in gc.connectors:
             gc.connectors[connector] = PerConnectorGuardrailConfig()
         primary = sorted(gc.connectors)[0]
