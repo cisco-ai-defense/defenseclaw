@@ -35,6 +35,8 @@ from defenseclaw.safety import (
     sanitize_dotenv_value,
 )
 
+from tests.environment import requires_symlink_privilege
+
 
 class TestRejectSymlink(unittest.TestCase):
     def setUp(self) -> None:
@@ -50,6 +52,7 @@ class TestRejectSymlink(unittest.TestCase):
         self.assertFalse(is_symlink(p))
         self.assertEqual(reject_symlink(p), p)
 
+    @requires_symlink_privilege
     def test_symlink_rejected(self) -> None:
         target = os.path.join(self.tmp, "target")
         with open(target, "w") as fh:
@@ -86,6 +89,7 @@ class TestWithinRoots(unittest.TestCase):
         with self.assertRaises(SafetyError):
             assert_within_roots(outside, [root], what="skill dir")
 
+    @requires_symlink_privilege
     def test_symlink_escape_rejected(self) -> None:
         root = os.path.join(self.tmp, "root")
         os.makedirs(root)

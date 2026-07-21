@@ -28,8 +28,6 @@ default verdict := "scan"
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng.SetOTelProvider(nil)
-
 	bad := filepath.Join(dir, "bad.rego")
 	if err := os.WriteFile(bad, []byte(`package x
 this is not valid rego v1

@@ -163,9 +163,9 @@ Each entry is run through the MCP scanner (transport probe + behavioral introspe
       type: 'subcommand',
       description: 'Mark an entry rejected (always blocked, even if the scanner is clean). --type skill|mcp required.',
     },
-    'require --type skill|mcp|plugin --enabled|--disabled': {
+    'require --type skill|mcp --enabled|--disabled [--connector <name>]': {
       type: 'subcommand',
-      description: 'Toggle asset_policy.<type>.registry_required. When enabled, an asset must match a rule in the (type) registry list to bypass the default deny.',
+      description: 'Scope registry_required to one connector, or update the global default and reconcile every active connector. Inactive connector overrides are preserved.',
     },
     'wizard': {
       type: 'subcommand',
@@ -211,13 +211,25 @@ defenseclaw registry require --type skill --enabled
 defenseclaw registry require --type mcp   --enabled
 ```
 
+An unscoped operation is broad operator intent: it updates the global default
+and clears only the targeted `registry_required` override on every active
+connector, so stale opposite overrides cannot keep enforcement disabled. All
+other per-connector fields and the global registry rule/filter lists remain
+unchanged. `--connector <name>` changes only that connector's explicit
+override. Known but inactive connector overrides are preserved so future
+activation does not silently inherit a weaker or stronger posture than the one
+previously saved.
+
 When `registry_required=true`:
 
 - An asset whose name matches a rule in `asset_policy.<type>.registry` follows that rule.
 - An asset whose name does **not** match any rule falls through to the configured `registry_empty_action` (default `deny`).
 - An empty registry list with `require=on` blocks **every** asset of that class by default until the next `sync` populates it. Setting `registry_empty_action: warn` or `allow` relaxes only this empty-registry gate and falls through to the type default; `warn` is non-blocking. The CLI warns you in colour when you flip `require=on` against an empty list — read the warning carefully.
 
-The Go gateway tags every admission decision with `Reason="registry:<id>"` (or `"registry:operator-approved"` for manually approved entries) so you can grep `~/.defenseclaw/gateway.jsonl` to see which catalog won.
+The Go gateway tags every admission decision with `Reason="registry:<id>"` (or
+`"registry:operator-approved"` for manually approved entries). Inspect the TUI
+or run `defenseclaw-gateway audit export --output -` to see which catalog won;
+an optional JSONL destination contains only the records its v8 route selects.
 
 ## What `--auth-env`, `--allow-private`, and SHA-256 actually do
 

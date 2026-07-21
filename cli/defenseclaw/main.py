@@ -22,11 +22,13 @@ mirroring the Cobra root command in internal/cli/root.go.
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 
 import click
 
-from defenseclaw import __version__
+from defenseclaw import __version__, ux
 from defenseclaw.commands.cmd_agent import agent
 from defenseclaw.commands.cmd_aibom import aibom
 from defenseclaw.commands.cmd_alerts import alerts
@@ -39,6 +41,7 @@ from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.commands.cmd_keys import keys_cmd
 from defenseclaw.commands.cmd_mcp import mcp
 from defenseclaw.commands.cmd_migrations import migrations_cmd
+from defenseclaw.commands.cmd_observability import observability_cmd
 from defenseclaw.commands.cmd_plugin import plugin
 from defenseclaw.commands.cmd_policy import policy
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
@@ -54,10 +57,20 @@ from defenseclaw.commands.cmd_uninstall import reset_cmd, uninstall_cmd
 from defenseclaw.commands.cmd_upgrade import upgrade
 from defenseclaw.commands.cmd_version import version_cmd
 from defenseclaw.context import AppContext
+from defenseclaw.resolver_hint import authenticated_resolver_instructions
 
 SKIP_LOAD_COMMANDS = {
-    "agent", "init", "migrations", "quickstart", "sandbox", "tui",
-    "uninstall", "reset", "version",
+    "agent",
+    "config",
+    "init",
+    "migrations",
+    "observability",
+    "quickstart",
+    "sandbox",
+    "tui",
+    "uninstall",
+    "reset",
+    "version",
 }
 
 # Commands that may legitimately run before config.yaml exists or while
@@ -68,6 +81,27 @@ SKIP_LOAD_COMMANDS = {
 # config didn't validate would defeat its purpose.
 SKIP_AUTO_VALIDATE = SKIP_LOAD_COMMANDS | {"config", "keys", "doctor", "upgrade", "version"}
 
+# These commands are the only top-level boundaries permitted to operate on an
+# existing pre-v8 document. They either create/replace a configuration,
+# perform the explicit upgrade, remove an installation, or (for ``config``)
+# delegate the read-only/mutation boundary to that group's subcommand guard.
+# Every other group preflights the raw schema discriminator before a Python
+# compatibility dataclass can be constructed.
+LEGACY_CONFIG_BOUNDARY_COMMANDS = {
+    "config",
+    "init",
+    "migrations",
+    "reset",
+    "uninstall",
+    "upgrade",
+    "version",
+}
+
+# First-run/read-only groups may run before config.yaml exists, but must reject
+# an existing non-v8 document. The actual write boundary is independently
+# protected by Config.save().
+ALLOW_MISSING_V8_PREFLIGHT = {"agent", "config", "observability", "quickstart", "tui"}
+
 
 def _is_help_invocation(ctx: click.Context) -> bool:
     # Allow `defenseclaw --help` and `<cmd> --help` to work even before init.
@@ -77,8 +111,34 @@ def _is_help_invocation(ctx: click.Context) -> bool:
     return any(a in {"-h", "--help"} for a in argv)
 
 
+def _emit_version_json(ctx: click.Context, _param: click.Parameter | None, value: bool) -> None:
+    """Emit a stable installer-facing version record before config loading."""
+    if not value or ctx.resilient_parsing:
+        return
+    click.echo(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "defenseclaw-cli",
+                "version": __version__,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+    ctx.exit()
+
+
 @click.group()
 @click.version_option(version=__version__, prog_name="defenseclaw")
+@click.option(
+    "--version-json",
+    is_flag=True,
+    is_eager=True,
+    expose_value=False,
+    callback=_emit_version_json,
+    help="Emit the exact build version as JSON and exit.",
+)
 @click.pass_context
 def cli(ctx: click.Context) -> None:
     """Enterprise governance layer for AI coding agents.
@@ -100,21 +160,60 @@ def cli(ctx: click.Context) -> None:
     app = ctx.obj
 
     invoked = ctx.invoked_subcommand
-    if invoked in SKIP_LOAD_COMMANDS or _is_help_invocation(ctx):
+    if invoked == "upgrade" and not _is_help_invocation(ctx):
+        recovery_home = os.path.abspath(os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw"))
+        recovery_root = os.path.join(recovery_home, ".upgrade-recovery")
+        recovery_journals = tuple(
+            os.path.join(recovery_root, name) for name in ("phase-one-active.json", "phase-two-active.json")
+        )
+        if any(os.path.lexists(path) for path in recovery_journals):
+            ux.echo(
+                "Interrupted staged-upgrade recovery requires the release-owned resolver. "
+                "Use the target-tag command below without --version/-Version; "
+                "no recovery mutation was attempted.\n" + authenticated_resolver_instructions(__version__),
+                err=True,
+            )
+            raise SystemExit(1)
+    if _is_help_invocation(ctx):
         return
 
     from defenseclaw import config as cfg_mod
-    from defenseclaw.db import Store
-    from defenseclaw.logger import Logger
+
+    if invoked in SKIP_LOAD_COMMANDS:
+        if invoked not in LEGACY_CONFIG_BOUNDARY_COMMANDS:
+            try:
+                cfg_mod.require_v8_config(allow_missing=invoked in ALLOW_MISSING_V8_PREFLIGHT)
+            except cfg_mod.ConfigVersionError as exc:
+                ux.echo(str(exc), err=True)
+                raise SystemExit(1) from exc
+        return
+
+    if invoked not in SKIP_AUTO_VALIDATE:
+        try:
+            cfg_mod.require_v8_config()
+        except cfg_mod.ConfigVersionError as exc:
+            ux.echo(str(exc), err=True)
+            raise SystemExit(1) from exc
 
     try:
         app.cfg = cfg_mod.load()
     except Exception as exc:
-        click.echo(
+        ux.echo(
             f"Failed to load config — run 'defenseclaw init' first: {exc}",
             err=True,
         )
         raise SystemExit(1)
+
+    # The upgrade controller owns its authenticated preflight, receipts, and
+    # rollback transaction. Do not initialize generic audit state before that
+    # preflight: a refused direct upgrade must not create or alter audit.db.
+    if invoked == "upgrade":
+        return
+
+    from defenseclaw.db import Store
+    from defenseclaw.logger import Logger
+
+    source_is_v8 = getattr(app.cfg, "_source_config_version", None) == 8
 
     # Fast-fail on config errors before any command runs, so operators
     # see a clear diagnostic instead of a deep stack trace. Skipped for
@@ -125,23 +224,25 @@ def cli(ctx: click.Context) -> None:
 
         result = validate_config()
         if not result.ok:
-            click.echo("Config validation failed:", err=True)
+            ux.echo("Config validation failed:", err=True)
             if result.parse_error:
-                click.echo(f"  ✗ {result.parse_error}", err=True)
+                ux.echo(f"  ✗ {result.parse_error}", err=True)
             for issue in result.errors:
-                click.echo(f"  ✗ {issue}", err=True)
-            click.echo("  Run 'defenseclaw config validate' for details, or "
-                      "'defenseclaw doctor --fix' to auto-repair.", err=True)
+                ux.echo(f"  ✗ {issue}", err=True)
+            ux.echo(
+                "  Run 'defenseclaw config validate' for details, or 'defenseclaw doctor --fix' to auto-repair.",
+                err=True,
+            )
             raise SystemExit(1)
 
     try:
         app.store = Store(app.cfg.audit_db)
         app.store.init()
     except Exception as exc:
-        click.echo(f"Failed to open audit store: {exc}", err=True)
+        ux.echo(f"Failed to open audit store: {exc}", err=True)
         raise SystemExit(1)
 
-    app.logger = Logger(app.store, app.cfg.splunk)
+    app.logger = Logger.from_config(app.cfg) if source_is_v8 else Logger.no_runtime()
 
 
 @cli.result_callback()
@@ -179,6 +280,7 @@ cli.add_command(upgrade)
 cli.add_command(migrations_cmd, "migrations")
 cli.add_command(keys_cmd, "keys")
 cli.add_command(config_cmd, "config")
+cli.add_command(observability_cmd, "observability")
 cli.add_command(settings_cmd, "settings")
 cli.add_command(uninstall_cmd, "uninstall")
 cli.add_command(reset_cmd, "reset")
@@ -203,8 +305,12 @@ def _try_launch_tui() -> bool:
     argv = sys.argv[1:]
     if argv and not all(a.startswith("-") for a in argv):
         return False
-    if any(a in {"-h", "--help", "--version"} for a in argv):
+    if any(a in {"-h", "--help", "--version", "--version-json"} for a in argv):
         return False
+
+    if not ux.terminal_supports_tui():
+        ux.echo(ux.TUI_UNAVAILABLE_MESSAGE, err=True)
+        return True
 
     from defenseclaw.tui import run_textual_tui
 
@@ -235,6 +341,7 @@ def _force_utf8_io() -> None:
 
 def main() -> None:
     """Entrypoint: try TUI handoff first, fall back to Click CLI."""
+    ux.configure_console_output()
     _force_utf8_io()
     if not _try_launch_tui():
         cli()

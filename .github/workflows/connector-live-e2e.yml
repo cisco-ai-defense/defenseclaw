@@ -4,19 +4,19 @@
 # (an upstream agent shipped a breaking hook change) without blocking the
 # OpenClaw stack gate. It has two layers:
 #
-#   contract-matrix (Layer A) — deterministic, no LLM, no secrets, all OSes.
+#   contract-matrix (Layer A) — deterministic, no LLM, no secrets, Unix.
 #     Builds DefenseClaw, then feeds golden stdin payloads into the *installed*
 #     hook entrypoint for every registry connector and asserts the gateway
 #     received the event, the verdict was shaped correctly, and teardown is
 #     clean. Fork-safe; runs on pull requests as well — one always-on macOS
 #     cell (codex / macOS, intended as a required check) plus the full
-#     Linux + macOS + Windows matrix when connector code changes (see the
-#     `changes` gate job).
+#     Linux + macOS matrix when connector code changes. Deterministic native
+#     Windows x64 certification lives in windows-native.yml.
 #
 #   live-matrix (Layer B) — installs the real upstream agent at its latest
 #     version, wires it with `defenseclaw setup`, and drives lifecycle + forced
 #     tool events through the real harness. Asserts observe/block/OTLP/teardown
-#     using gateway.jsonl, audit.db, and filesystem sentinel side-effects.
+#     using canonical audit.db history and filesystem sentinel side-effects.
 #     Needs provider secrets, so it never runs for fork pull requests.
 #
 #     ROLLOUT STATUS: Layer B is currently manual-only (workflow_dispatch). The
@@ -32,11 +32,8 @@
 #     approved version (that stays a deliberate human edit of
 #     cli/defenseclaw/inventory/validated_versions.json).
 #
-# Native Windows hook execution (the agent invoking
-# `defenseclaw-gateway hook --connector <c> --event <e>`) depends on the
-# native Windows hook entrypoint. Until that is proven on hosted Windows
-# runners, all Windows cells (and Copilot everywhere) run with
-# continue-on-error so a flake does not turn the whole matrix red.
+# Native Windows x64 certification is intentionally limited to Codex and
+# Claude Code. Unsupported Windows connectors are not scheduled as green cells.
 
 name: Connector Live E2E
 
@@ -49,7 +46,7 @@ on:
   # cross-platform smoke cell (codex / macOS) so there is a required
   # connector signal on each change; when the PR touches connector, hook,
   # registry, contract-script, or this workflow, the run expands to the full
-  # Linux + macOS + Windows x 9-connector matrix (see the `changes` job).
+  # supported Linux + macOS matrix. Native Windows PR gates are separate.
   # Layer B (live) stays manual-only and never runs for pull requests.
   pull_request:
   workflow_dispatch:
@@ -111,11 +108,12 @@ jobs:
   # ---------------------------------------------------------------------------
   # Gate — decide which contract cells to run for this event.
   #
-  #   schedule / workflow_dispatch → full 3-OS x 9-connector matrix.
+  #   schedule / workflow_dispatch → full 2-OS x 9 Unix matrix.
   #   pull_request                 → just the always-on macOS smoke cell,
   #                                  unless the PR touches connector / hook /
   #                                  registry / contract-script / workflow
-  #                                  surfaces, in which case → full matrix.
+  #                                  surfaces or a Windows release-sensitive
+  #                                  surface, in which case → full matrix.
   # ---------------------------------------------------------------------------
   changes:
     name: Select contract cells
@@ -123,8 +121,9 @@ jobs:
     outputs:
       matrix: ${{ steps.decide.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
+          persist-credentials: false
           # Need history back to the PR base so the path diff below is accurate.
           fetch-depth: 0
       - id: decide
@@ -133,13 +132,13 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          # Full 3-OS x 9-connector matrix for nightly + manual runs and for
-          # pull requests that touch connector-relevant code.
-          full='{"os":["ubuntu-latest","macos-latest","windows-latest"],"connector":["codex","claudecode","geminicli","cursor","copilot","openhands","hermes","windsurf","antigravity"]}'
+          # The Unix harness retains the full supported connector matrix.
+          # Native Windows certification is a separate, explicit x64 matrix.
+          full='{"os":["ubuntu-latest","macos-latest"],"connector":["codex","claudecode","geminicli","cursor","copilot","openhands","hermes","windsurf","antigravity"]}'
           # Always-on PR smoke: one connector on one cross-platform OS. macOS is
-          # chosen because ci.yml already guards the Windows hook path on every
-          # PR but has no macOS coverage at all — this adds the missing native
-          # macOS connector signal and is the cell to mark "required" in branch
+          # chosen because windows-native.yml separately certifies the native
+          # Windows hook path on every PR. This adds the missing native macOS
+          # connector signal and is the cell to mark "required" in branch
           # protection. Its check name is "Contract codex / macos-latest".
           minimal='{"os":["macos-latest"],"connector":["codex"]}'
 
@@ -153,25 +152,44 @@ jobs:
           echo "Changed files in PR:"
           printf '%s\n' "${changed}"
 
-          # connector / hook / registry / contract-script / workflow surfaces.
+          # Keep this allowlist anchored and reviewable. The Windows entries are
+          # limited to canonical release workflows, native executable/resource
+          # payload sources, installer lifecycle/signing/setup helpers, and the
+          # native acceptance harness. Contract:
+          # cli/tests/test_connector_live_e2e_path_policy.py.
+          # BEGIN connector full-matrix path allowlist
           if printf '%s\n' "${changed}" | grep -qE \
             -e '^internal/gateway/connector/' \
+            -e '^internal/gateway/sidecar_observability_v8' \
+            -e '^internal/audit/' \
+            -e '^internal/observability/redaction/' \
             -e '^internal/cli/' \
             -e '^cli/defenseclaw/inventory/' \
             -e '^cli/defenseclaw/commands/cmd_setup\.py$' \
             -e '^cli/defenseclaw/commands/cmd_init\.py$' \
             -e '^test/e2e/' \
             -e '^scripts/live-connector-e2e/' \
+            -e '^\.goreleaser\.yaml$' \
+            -e '^\.github/workflows/release\.yaml$' \
+            -e '^\.github/workflows/windows-native\.yml$' \
+            -e '^cmd/(defenseclaw|defenseclaw-hook|defenseclaw-launcher|defenseclaw-setup|defenseclaw-startup)/' \
+            -e '^internal/(tools/)?windowsresources/' \
+            -e '^cli/defenseclaw/commands/windows_uninstall_helper\.py$' \
+            -e '^cli/defenseclaw/windows_acl\.py$' \
+            -e '^scripts/(build-windows-installer|initialize-windows-native-ci-paths|install|invoke-windows-setup-standard-user-ci|test-fresh-install-release-windows|test-upgrade-release-windows|test-windows-disposable-user-safety|test-windows-setup-wizard|upgrade|windows-authenticode|windows-binary-identity|windows-disposable-user-safety|windows-native-ci|windows-native-paths)\.ps1$' \
+            -e '^scripts/windows_installer_artifacts\.py$' \
+            -e '^scripts/windows-(disposable-file-guard|disposable-standard-user-launcher|setup-standard-user-launcher)\.cs$' \
             -e '^\.github/workflows/connector-live-e2e\.yml$'; then
             echo "matrix=${full}" >> "$GITHUB_OUTPUT"
-            echo "connector-relevant change -> full Linux + macOS + Windows matrix"
+            echo "connector/release-sensitive change -> full Linux + macOS matrix"
           else
             echo "matrix=${minimal}" >> "$GITHUB_OUTPUT"
-            echo "no connector-relevant change -> macOS codex smoke only"
+            echo "no connector/release-sensitive change -> macOS codex smoke only"
           fi
+          # END connector full-matrix path allowlist
 
   # ---------------------------------------------------------------------------
-  # Layer A — deterministic contract matrix (no secrets, every OS).
+  # Layer A — deterministic Unix contract matrix (no secrets).
   # ---------------------------------------------------------------------------
   contract-matrix:
     name: Contract ${{ matrix.connector }} / ${{ matrix.os }}
@@ -180,9 +198,6 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    # Native Windows hook execution is not yet proven on hosted runners;
-    # keep Windows cells advisory until they go consistently green.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     timeout-minutes: 25
     defaults:
       run:
@@ -190,36 +205,42 @@ jobs:
     env:
       DC_E2E_RESULTS: ${{ github.workspace }}/connector-live-e2e-results.jsonl
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
 
       - name: Select cell + resolve OS label
         id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_CONNECTOR: ${{ inputs.connector }}
+          INPUT_OS: ${{ inputs.os }}
+          MATRIX_CONNECTOR: ${{ matrix.connector }}
         run: |
           case "${RUNNER_OS}" in
             Linux)   dcos=linux ;;
             macOS)   dcos=macos ;;
-            Windows) dcos=windows ;;
             *)       dcos=unknown ;;
           esac
           echo "DC_E2E_OS=${dcos}" >> "$GITHUB_ENV"
 
           run=true
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            in_conn="${{ inputs.connector }}"
-            in_os="${{ inputs.os }}"
-            [ "${in_conn}" = "all" ] || [ "${in_conn}" = "${{ matrix.connector }}" ] || run=false
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            in_conn="${INPUT_CONNECTOR}"
+            in_os="${INPUT_OS}"
+            [ "${in_conn}" = "all" ] || [ "${in_conn}" = "${MATRIX_CONNECTOR}" ] || run=false
             [ "${in_os}" = "all" ] || [ "${in_os}" = "${dcos}" ] || run=false
           fi
           echo "run=${run}" >> "$GITHUB_OUTPUT"
           echo "cell ${{ matrix.connector }}/${dcos} selected=${run}"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         if: steps.select.outputs.run == 'true'
         with:
           go-version-file: go.mod
           cache: true
 
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         if: steps.select.outputs.run == 'true'
 
       # Build + install the Python CLI and Go gateway. `make install` runs
@@ -256,8 +277,8 @@ jobs:
             -run "TestConnectorLifecycle_Matrix/${{ matrix.connector }}|TestV7Observability_DestinationAppPerConnector/${{ matrix.connector }}|TestConnectorVerifyCleanOnFreshDataDir/${{ matrix.connector }}|TestGoldenPerConnectorLayout"
 
       # Golden-payload entrypoint smoke: feed each registry event into the
-      # installed hook entrypoint (Bash script on unix, `defenseclaw-gateway
-      # hook` on Windows) and assert fire + verdict shaping + clean teardown.
+      # installed Unix hook entrypoint and assert fire + verdict shaping +
+      # clean teardown. Native Windows uses the dedicated windows-native.yml.
       - name: Contract entrypoint smoke
         if: steps.select.outputs.run == 'true'
         # Layer A runs agent-less, so the cached agent version is empty and the
@@ -274,7 +295,7 @@ jobs:
 
       - name: Upload contract results
         if: ${{ always() && steps.select.outputs.run == 'true' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: connector-live-e2e-results-contract-${{ matrix.connector }}-${{ env.DC_E2E_OS }}
           path: ${{ env.DC_E2E_RESULTS }}
@@ -283,7 +304,7 @@ jobs:
 
       - name: Upload contract logs on failure
         if: ${{ failure() && steps.select.outputs.run == 'true' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: connector-live-e2e-logs-contract-${{ matrix.connector }}-${{ env.DC_E2E_OS }}
           path: ${{ runner.temp }}/defenseclaw-live-e2e-logs/**
@@ -307,8 +328,8 @@ jobs:
       matrix:
         # The reality matrix: which agents have a headless CLI that fires hooks
         # on which OS. Contract-only connectors (hermes, windsurf, antigravity)
-        # are absent here — they are covered by Layer A only. `experimental`
-        # cells run advisory (continue-on-error) until proven stable.
+        # are absent here — they are covered by Layer A only. Native Windows
+        # Codex/Claude certification is handled by windows-live below.
         #
         # Currently scoped to the connectors we can authenticate with Azure
         # OpenAI / Amazon Bedrock (Codex, Claude Code, OpenHands). Gemini CLI,
@@ -318,14 +339,11 @@ jobs:
         include:
           - { connector: codex,      os: ubuntu-latest,  dcos: linux }
           - { connector: codex,      os: macos-latest,   dcos: macos }
-          - { connector: codex,      os: windows-latest, dcos: windows, experimental: true }
           - { connector: claudecode, os: ubuntu-latest,  dcos: linux }
           - { connector: claudecode, os: macos-latest,   dcos: macos }
-          - { connector: claudecode, os: windows-latest, dcos: windows, experimental: true }
           # OpenHands needs the Docker runtime, so it is Linux-only.
           - { connector: openhands,  os: ubuntu-latest,  dcos: linux }
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental || false }}
     timeout-minutes: 40
     defaults:
       run:
@@ -372,33 +390,41 @@ jobs:
       DC_USE_AZURE: ${{ inputs.use_azure && '1' || vars.DC_USE_AZURE || '0' }}
       DC_USE_BEDROCK: ${{ inputs.use_bedrock && '1' || vars.DC_USE_BEDROCK || '0' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
 
       - name: Select cell
         id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_CONNECTOR: ${{ inputs.connector }}
+          INPUT_OS: ${{ inputs.os }}
+          MATRIX_CONNECTOR: ${{ matrix.connector }}
+          MATRIX_OS: ${{ matrix.dcos }}
         run: |
           run=true
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            in_conn="${{ inputs.connector }}"
-            in_os="${{ inputs.os }}"
-            [ "${in_conn}" = "all" ] || [ "${in_conn}" = "${{ matrix.connector }}" ] || run=false
-            [ "${in_os}" = "all" ] || [ "${in_os}" = "${{ matrix.dcos }}" ] || run=false
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            in_conn="${INPUT_CONNECTOR}"
+            in_os="${INPUT_OS}"
+            [ "${in_conn}" = "all" ] || [ "${in_conn}" = "${MATRIX_CONNECTOR}" ] || run=false
+            [ "${in_os}" = "all" ] || [ "${in_os}" = "${MATRIX_OS}" ] || run=false
           fi
           echo "run=${run}" >> "$GITHUB_OUTPUT"
           echo "cell ${{ matrix.connector }}/${{ matrix.dcos }} selected=${run}"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         if: steps.select.outputs.run == 'true'
         with:
           go-version-file: go.mod
           cache: true
 
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         if: steps.select.outputs.run == 'true'
 
       # Most live agents (codex, claude, gemini, copilot, cursor) ship as npm
       # packages; OpenHands installs via pipx. Node + uv cover both.
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         if: steps.select.outputs.run == 'true'
         with:
           node-version: "24"
@@ -458,7 +484,7 @@ jobs:
 
       - name: Upload live results
         if: ${{ always() && steps.select.outputs.run == 'true' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: connector-live-e2e-results-live-${{ matrix.connector }}-${{ matrix.dcos }}
           path: ${{ env.DC_E2E_RESULTS }}
@@ -467,7 +493,7 @@ jobs:
 
       - name: Upload live logs on failure
         if: ${{ failure() && steps.select.outputs.run == 'true' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: connector-live-e2e-logs-live-${{ matrix.connector }}-${{ matrix.dcos }}
           path: ${{ runner.temp }}/defenseclaw-live-e2e-logs/**
@@ -482,12 +508,104 @@ jobs:
           defenseclaw-gateway stop 2>/dev/null || true
           rm -rf "${HOME}/.defenseclaw" 2>/dev/null || true
 
+  windows-live:
+    name: Windows x64 live / ${{ matrix.connector }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.os == 'all' || inputs.os == 'windows') }}
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        connector: [codex, claudecode]
+    env:
+      DC_WINDOWS_STATE: ${{ github.workspace }}/.dc-e2e-${{ matrix.connector }}-live
+      DC_E2E_RESULTS: ${{ github.workspace }}/connector-live-e2e-results.jsonl
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      CODEX_VERSION: ${{ inputs.version }}
+      CLAUDE_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Select requested Windows connector
+        id: select
+        shell: pwsh
+        env:
+          INPUT_CONNECTOR: ${{ inputs.connector }}
+          MATRIX_CONNECTOR: ${{ matrix.connector }}
+        run: |
+          $selected = $env:INPUT_CONNECTOR -eq 'all' -or $env:INPUT_CONNECTOR -eq $env:MATRIX_CONNECTOR
+          "run=$($selected.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        if: steps.select.outputs.run == 'true'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        if: steps.select.outputs.run == 'true'
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        if: steps.select.outputs.run == 'true'
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        if: steps.select.outputs.run == 'true'
+        with:
+          node-version: '24'
+      - name: Build native DefenseClaw tools
+        if: steps.select.outputs.run == 'true'
+        shell: pwsh
+        run: |
+          $embed = Join-Path $env:GITHUB_WORKSPACE 'internal\gateway\connector\openclaw_extension'
+          New-Item -ItemType Directory -Force -Path $embed | Out-Null
+          Set-Content -LiteralPath (Join-Path $embed '.placeholder') -Value 'OpenClaw extension not built.'
+          $bin = Join-Path $env:RUNNER_TEMP 'defenseclaw-bin'
+          New-Item -ItemType Directory -Force -Path $bin | Out-Null
+          go build -o (Join-Path $bin 'defenseclaw-gateway.exe') ./cmd/defenseclaw
+          go build -ldflags '-H=windowsgui' -o (Join-Path $bin 'defenseclaw-hook.exe') ./cmd/defenseclaw-hook
+          uv sync
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          (Join-Path $env:GITHUB_WORKSPACE '.venv\Scripts') | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Native Windows live harness
+        if: steps.select.outputs.run == 'true'
+        shell: pwsh
+        run: |
+          ./scripts/live-connector-e2e/run-windows.ps1 `
+            -Layer live `
+            -Connector '${{ matrix.connector }}' `
+            -StateRoot $env:DC_WINDOWS_STATE `
+            -ResultsPath $env:DC_E2E_RESULTS `
+            -ArtifactPath (Join-Path $env:RUNNER_TEMP 'defenseclaw-live-e2e-logs')
+      - name: Upload Windows live results
+        if: ${{ always() && steps.select.outputs.run == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: connector-live-e2e-results-live-${{ matrix.connector }}-windows-x64
+          path: ${{ env.DC_E2E_RESULTS }}
+          if-no-files-found: error
+          retention-days: 7
+      - name: Capture Windows diagnostics
+        if: ${{ (failure() || cancelled()) && steps.select.outputs.run == 'true' }}
+        shell: pwsh
+        run: ./scripts/live-connector-e2e/run-windows.ps1 -Operation capture -Connector '${{ matrix.connector }}' -StateRoot $env:DC_WINDOWS_STATE -ArtifactPath (Join-Path $env:RUNNER_TEMP 'defenseclaw-live-e2e-logs')
+      - name: Upload Windows diagnostics on failure
+        if: ${{ (failure() || cancelled()) && steps.select.outputs.run == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: connector-live-e2e-logs-live-${{ matrix.connector }}-windows-x64
+          path: ${{ runner.temp }}/defenseclaw-live-e2e-logs/**
+          if-no-files-found: warn
+          retention-days: 7
+          include-hidden-files: true
+      - name: Windows cleanup safety net
+        if: ${{ always() && steps.select.outputs.run == 'true' }}
+        shell: pwsh
+        run: ./scripts/live-connector-e2e/run-windows.ps1 -Operation cleanup -Connector '${{ matrix.connector }}' -StateRoot $env:DC_WINDOWS_STATE
+
   # ---------------------------------------------------------------------------
   # Report — aggregate every cell, render the matrix, and alert on regressions.
   # ---------------------------------------------------------------------------
   report:
     name: Report + regression radar
-    needs: [contract-matrix, live-matrix]
+    needs: [contract-matrix, live-matrix, windows-live]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
@@ -496,10 +614,12 @@ jobs:
       # connector-regression issue. No write access to code.
       issues: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
 
       - name: Download all cell results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: connector-live-e2e-results-*
           path: results
@@ -509,10 +629,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           open_flag=""
           # Only the trusted, scheduled / manual contexts may file issues.
-          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "${EVENT_NAME}" = "schedule" ] || [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
             open_flag="--open-issue"
           fi
           python3 scripts/live-connector-e2e/report.py \

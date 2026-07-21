@@ -7,17 +7,32 @@
 package connector
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
+const hookAPIACLInspectionTimeout = 5 * time.Second
+
 func hookAPIValidateDirectoryACL(path string) error {
-	cmd := exec.Command("/bin/ls", "-lde", "--", path)
-	cmd.Env = []string{"LANG=C", "LC_ALL=C"}
-	output, err := cmd.Output()
+	return hookAPIValidateDirectoryACLWithInspector(path, hookAPIACLInspectionTimeout, func(ctx context.Context, path string) ([]byte, error) {
+		cmd := exec.CommandContext(ctx, "/bin/ls", "-lde", "--", path)
+		cmd.Env = []string{"LANG=C", "LC_ALL=C"}
+		return cmd.Output()
+	})
+}
+
+func hookAPIValidateDirectoryACLWithInspector(path string, timeout time.Duration, inspect func(context.Context, string) ([]byte, error)) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	output, err := inspect(ctx, path)
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("inspect macOS ACL for %s: timed out after %s", path, timeout)
+		}
 		return fmt.Errorf("inspect macOS ACL for %s: %w", path, err)
 	}
 	for _, line := range strings.Split(string(output), "\n") {

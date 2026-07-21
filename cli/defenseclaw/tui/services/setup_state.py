@@ -225,6 +225,7 @@ def build_readiness_checks(
     doctor: object | Mapping[str, Any] | None,
     credentials: Sequence[CredentialRow],
     queue: RestartQueue = RestartQueue(),
+    gateway_status: object | Mapping[str, Any] | None = None,
 ) -> tuple[ReadinessCheck, ...]:
     """Build Setup readiness rows using the same status/fix contract as Go."""
 
@@ -264,7 +265,36 @@ def build_readiness_checks(
 
     gateway_state = str(_get_path(health, "gateway.state", "") or "")
     api_state = str(_get_path(health, "api.state", "") or "")
-    if health is None:
+    availability_state = str(_get_path(gateway_status, "state", "") or "").strip().lower()
+    availability_detail = str(_get_path(gateway_status, "last_error", "") or "").strip()
+    if availability_state in {"error", "failed"}:
+        checks.append(
+            ReadinessCheck(
+                "Gateway / API Health",
+                availability_detail or "Gateway health probe failed.",
+                "fail",
+            ),
+        )
+    elif availability_state in {"offline", "stopped", "down"}:
+        checks.append(
+            ReadinessCheck(
+                "Gateway / API Health",
+                availability_detail or "Gateway health endpoint is offline.",
+                "fail",
+                _intent("defenseclaw-gateway", ("start",), "start", "daemon"),
+            ),
+        )
+    elif availability_state in {"starting", "reconnecting"}:
+        checks.append(
+            ReadinessCheck(
+                "Gateway / API Health",
+                availability_detail or "Gateway is starting.",
+                "warn",
+            ),
+        )
+    elif availability_state in {"running", "ready", "healthy", "ok", "disabled"}:
+        checks.append(ReadinessCheck("Gateway / API Health", "Gateway and API are healthy.", "pass"))
+    elif health is None:
         checks.append(
             ReadinessCheck(
                 "Gateway / API Health",
@@ -273,7 +303,7 @@ def build_readiness_checks(
                 _intent("defenseclaw-gateway", ("start",), "start", "daemon"),
             ),
         )
-    elif not _state_healthy(gateway_state) or not _state_healthy(api_state):
+    elif not _state_healthy_or_disabled(gateway_state) or not _state_healthy(api_state):
         checks.append(
             ReadinessCheck(
                 "Gateway / API Health",
@@ -411,23 +441,13 @@ def build_readiness_checks(
             ),
         )
 
-    audit_sinks = _get_path(cfg, "audit_sinks", ()) or ()
-    if bool(_get_path(cfg, "otel.enabled", False)) or len(audit_sinks) > 0:
-        checks.append(ReadinessCheck("Observability / Audit Sinks", "Telemetry or audit sink configured.", "pass"))
-    else:
-        checks.append(
-            ReadinessCheck(
-                "Observability / Audit Sinks",
-                "No OTel exporter or audit sink is configured.",
-                "warn",
-                _intent(
-                    "defenseclaw",
-                    ("setup", "local-observability", "status"),
-                    "setup local-observability status",
-                    "setup",
-                ),
-            ),
+    checks.append(
+        ReadinessCheck(
+            "Observability v8",
+            "Canonical routing is active; local SQLite collection is mandatory.",
+            "pass",
         )
+    )
 
     if bool(_get_path(cfg, "asset_policy.enabled", False)) and _registry_required_but_empty(cfg):
         checks.append(
@@ -615,6 +635,8 @@ def apply_config_field(cfg: object | dict[str, Any], key: str, value: str) -> No
     if key.startswith(("skill_actions.", "mcp_actions.", "plugin_actions.")):
         _apply_action_matrix_field(cfg, key, value)
         return
+    if _apply_global_registry_required_field(cfg, key, value):
+        return
     if key.startswith("asset_policy.connectors."):
         _apply_per_connector_asset_policy_field(cfg, key, value)
         return
@@ -631,6 +653,24 @@ def apply_config_field(cfg: object | dict[str, Any], key: str, value: str) -> No
         _apply_judge_hook_connector_toggle(cfg, key, value)
         return
     _apply_typed_field(cfg, key, value)
+
+
+def _apply_global_registry_required_field(cfg: object | dict[str, Any], key: str, value: str) -> bool:
+    """Route broad TUI registry-required edits through the shared resolver."""
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "asset_policy" or parts[2] != "registry_required":
+        return False
+    if parts[1] not in {"skill", "mcp", "plugin"}:
+        return False
+    try:
+        from defenseclaw.config import Config  # noqa: PLC0415
+        from defenseclaw.registry_policy import reconcile_registry_required  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - dict/test fixtures use the generic writer.
+        return False
+    if not isinstance(cfg, Config):
+        return False
+    reconcile_registry_required(cfg, parts[1], value.strip().lower() == "true")
+    return True
 
 
 # B4/E4c/E4d: the config editor exposes every per-connector guardrail override.
@@ -804,6 +844,10 @@ def _intent(binary: str, args: tuple[str, ...], label: str, category: str) -> Se
 
 def _state_healthy(state: str) -> bool:
     return state.strip().lower() in {"running", "ok", "healthy", "ready"}
+
+
+def _state_healthy_or_disabled(state: str) -> bool:
+    return state.strip().lower() == "disabled" or _state_healthy(state)
 
 
 def _doctor_missing_credentials(doctor: object | Mapping[str, Any] | None) -> tuple[str, ...]:
@@ -1031,6 +1075,18 @@ def _apply_per_connector_asset_policy_field(cfg: object | dict[str, Any], key: s
         set_config_value(cfg, key, _coerce_per_connector_asset_policy_value(field_name, value))
         return
 
+    coerced = _coerce_per_connector_asset_policy_value(field_name, value)
+    if field_name == "registry_required" and coerced is not None:
+        try:
+            from defenseclaw.config import Config  # noqa: PLC0415
+            from defenseclaw.registry_policy import reconcile_registry_required  # noqa: PLC0415
+        except Exception:  # noqa: BLE001 - continue through the typed fallback.
+            pass
+        else:
+            if isinstance(cfg, Config):
+                reconcile_registry_required(cfg, asset_type, coerced, connector=connector)
+                return
+
     try:
         from defenseclaw.config import PerConnectorAssetPolicy, PerConnectorAssetTypePolicy  # noqa: PLC0415
     except Exception:  # noqa: BLE001 - degrade to the dict fallback.
@@ -1059,12 +1115,11 @@ def _apply_per_connector_asset_policy_field(cfg: object | dict[str, Any], key: s
                     setattr(replacement_block, sib_key, sib_val)
         setattr(entry, asset_type, replacement_block)
         block = replacement_block
-    setattr(block, field_name, _coerce_per_connector_asset_policy_value(field_name, value))
+    setattr(block, field_name, coerced)
 
 
 _BOOL_FIELD_KEYS = frozenset(
     {
-        "privacy.disable_redaction",
         "notifications.enabled",
         "notifications.block_enforced",
         "notifications.block_would_block",
@@ -1104,7 +1159,6 @@ _BOOL_FIELD_KEYS = frozenset(
         "ai_discovery.include_package_manifests",
         "ai_discovery.include_env_var_names",
         "ai_discovery.include_network_domains",
-        "ai_discovery.emit_otel",
         "ai_discovery.store_raw_local_paths",
         "gateway.watcher.enabled",
         "gateway.watcher.skill.enabled",
@@ -1113,8 +1167,6 @@ _BOOL_FIELD_KEYS = frozenset(
         "gateway.watcher.plugin.take_action",
         "gateway.watcher.mcp.take_action",
         "gateway.watchdog.enabled",
-        "otel.enabled",
-        "otel.logs.emit_individual_findings",
         "watch.auto_block",
         "watch.allow_list_bypass_scan",
         "watch.rescan_enabled",
@@ -1161,10 +1213,6 @@ _INT_FIELD_KEYS = frozenset(
         "ai_discovery.max_file_bytes",
         "gateway.watchdog.interval",
         "gateway.watchdog.debounce",
-        "otel.metrics.export_interval_s",
-        "otel.batch.max_export_batch_size",
-        "otel.batch.scheduled_delay_ms",
-        "otel.batch.max_queue_size",
         "watch.debounce_ms",
         "watch.rescan_interval_min",
         "cisco_ai_defense.timeout_ms",
@@ -1187,6 +1235,6 @@ _CSV_FIELD_KEYS = frozenset(
     }
 )
 
-_KV_CSV_FIELD_KEYS = frozenset({"otel.resource.attributes"})
+_KV_CSV_FIELD_KEYS: frozenset[str] = frozenset()
 
 _TRISTATE_FIELD_KEYS = frozenset({"openshell.auto_pair", "openshell.host_networking"})

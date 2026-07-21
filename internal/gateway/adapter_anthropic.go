@@ -49,7 +49,7 @@ type anthropicAdapter struct{}
 // Name implements FormatAdapter.
 func (anthropicAdapter) Name() string { return "anthropic" }
 
-// InjectionSite is the gateway.jsonl label written when InjectSystem
+// InjectionSite is the canonical observability label used when InjectSystem
 // succeeds. "anthropic/system" — top-level `system` field, NOT a
 // prepended messages[] entry.
 func (anthropicAdapter) InjectionSite() string { return "anthropic/system" }

@@ -98,7 +98,7 @@ export function ScenarioPlayer({
   }, [autoplay, prefersReducedMotion]);
 
   useEffect(() => {
-    if (!state.isPlaying || prefersReducedMotion) return;
+    if (!state.isPlaying) return;
     if (safeStepIndex >= lastStep) {
       dispatch({ type: 'SHOW_FINAL', lastStep });
       return;
@@ -107,7 +107,7 @@ export function ScenarioPlayer({
       dispatch({ type: 'AUTOPLAY_NEXT', stepIndex: safeStepIndex + 1, lastStep });
     }, activeStep.dwellMs);
     return () => window.clearTimeout(timer);
-  }, [activeStep.dwellMs, lastStep, prefersReducedMotion, safeStepIndex, state.isPlaying]);
+  }, [activeStep.dwellMs, lastStep, safeStepIndex, state.isPlaying]);
 
   useEffect(() => {
     const onVisibilityChange = () => {

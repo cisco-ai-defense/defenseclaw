@@ -116,9 +116,7 @@ class TestObservabilityWizard(unittest.TestCase):
         Returns the post-run guardrail config namespace. The confirm
         prompts are driven by a sequence rather than a constant True
         so we can answer "yes" to the initial "Enable guardrail?"
-        gate but "no" to the advanced-options gate further down —
-        the advanced-options branch touches ``app.cfg.privacy`` which
-        our minimal SimpleNamespace stub deliberately doesn't carry.
+        gate but "no" to the advanced-options gate further down.
         We rely on click's ``confirm`` default-clamping for any
         additional prompts the wizard might add in the future: each
         unmatched call takes its default, which is the conservative
@@ -128,7 +126,7 @@ class TestObservabilityWizard(unittest.TestCase):
 
         # ``click.confirm`` answer order:
         #   1. "Enable guardrail?"               → True   (drive the wizard)
-        #   2. "Configure advanced options?"     → False  (skip; privacy attr absent)
+        #   2. "Configure advanced options?"     → False
         # Any further confirms fall back to their default via the
         # side_effect's "ran out of values" StopIteration which click
         # catches and treats as "take the default" — but we keep an
@@ -304,21 +302,18 @@ class TestObservabilityWizard(unittest.TestCase):
 
 
 class ObservabilitySecretDotenvInjectionTests(unittest.TestCase):
-    """F-1905: an observability/audit-sink token with an embedded newline
+    """F-1905: an observability destination token with an embedded newline
     must not inject a second KEY=VALUE line into ~/.defenseclaw/.env.
 
-    Audit-sink tokens (e.g. Splunk HEC ``DEFENSECLAW_SPLUNK_HEC_TOKEN``) are
-    persisted by ``observability/writer._apply_secret`` via ``_write_dotenv``,
-    which now sanitizes (``sanitize_dotenv_value``). A token carrying a newline
-    would otherwise add a second assignment (e.g. DEFENSECLAW_DISABLE_REDACTION)
-    that the line-by-line config loader would honor.
+    Canonical destination secrets are persisted through the v8 preset helper,
+    which sanitizes values before updating the dotenv file.
     """
 
     def test_newline_secret_rejected_and_no_entry_injected(self):
         import tempfile
 
-        from defenseclaw.observability import writer as obs_writer
         from defenseclaw.observability.presets import resolve_preset
+        from defenseclaw.observability.v8_presets import DOTENV_FILE_NAME, apply_secret
         from defenseclaw.safety import DotenvValueError
 
         preset = resolve_preset("splunk-hec")
@@ -326,17 +321,17 @@ class ObservabilitySecretDotenvInjectionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             # Seed an existing legit secret so we can prove it survives.
-            obs_writer._apply_secret(tmp, preset, "legit-token-value", dry_run=False)
+            apply_secret(tmp, preset, "legit-token-value", dry_run=False)
             self.addCleanup(os.environ.pop, preset.token_env, None)
 
-            malicious = "tok\nDEFENSECLAW_DISABLE_REDACTION=1"
+            malicious = "tok\nATTACKER_INJECTED=1"
             with self.assertRaises(DotenvValueError):
-                obs_writer._apply_secret(tmp, preset, malicious, dry_run=False)
+                apply_secret(tmp, preset, malicious, dry_run=False)
 
-            dotenv = os.path.join(tmp, obs_writer.DOTENV_FILE_NAME)
+            dotenv = os.path.join(tmp, DOTENV_FILE_NAME)
             body = open(dotenv, encoding="utf-8").read()
             # Injected entry never written; prior legit entry preserved intact.
-            self.assertNotIn("DEFENSECLAW_DISABLE_REDACTION", body)
+            self.assertNotIn("ATTACKER_INJECTED", body)
             self.assertIn("legit-token-value", body)
             keys = [
                 ln.split("=", 1)[0].strip()

@@ -167,6 +167,129 @@ defenseclaw_harden_env() {
   _defenseclaw_sweep_stale_hook_dirs
 }
 
+# Resolve optional connector identity for the shared inspect-* scripts.  The
+# selected connector is runtime state, never a render-time property of the one
+# physical shared script.  Reject anything outside the connector-name grammar
+# before it can participate in a token filename or HTTP header.
+defenseclaw_shared_runtime_connector() {
+  local connector="${DEFENSECLAW_CONNECTOR:-}"
+  # Non-managed shells may supply an ephemeral connector selection, matching
+  # the existing fail-mode/token override contract. Guardian-managed hooks do
+  # not trust process environment for connector identity and use only the
+  # installer-owned sidecars below.
+  if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = "1" ]; then
+    connector=""
+  fi
+  case "$connector" in
+    *[!a-z0-9_-]*) return 0 ;;
+    *) printf '%s' "$connector" ;;
+  esac
+  if [ -n "$connector" ]; then
+    return 0
+  fi
+  local hook_dir="${1:-}"
+  local candidate found="" suffix recorded
+  for candidate in "${hook_dir}"/.hookcfg.*; do
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+    suffix="${candidate##*.hookcfg.}"
+    [ "$suffix" != "legacy" ] && [ "$suffix" != "lock" ] || continue
+    case "$suffix" in
+      ""|*[!a-z0-9_-]*) continue ;;
+    esac
+    # Ignore lock files, interrupted atomic-write debris, and unrelated files
+    # that merely share the prefix. A valid record must identify itself with
+    # the exact connector encoded in its filename.
+    recorded="$(defenseclaw_flat_hookcfg_value "$candidate" DEFENSECLAW_CONNECTOR 2>/dev/null || true)"
+    [ "$recorded" = "$suffix" ] || continue
+    if [ -n "$found" ]; then
+      # Multiple connector records are intentionally ambiguous unless the
+      # caller supplies DEFENSECLAW_CONNECTOR.
+      return 0
+    fi
+    found="$suffix"
+  done
+  if [ -n "$found" ]; then
+    printf '%s' "$found"
+    return 0
+  fi
+  local config="${hook_dir}/.hookcfg"
+  if [ -f "$config" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      connector="$(jq -r '.fail_modes | keys | if length == 1 then .[0] else empty end' "$config" 2>/dev/null || true)"
+    elif command -v python3 >/dev/null 2>&1; then
+      connector="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); k=list((d.get("fail_modes") or {}).keys()); print(k[0] if len(k)==1 else "")' "$config" 2>/dev/null || true)"
+    fi
+    case "$connector" in
+      ""|*[!a-z0-9_-]*) return 0 ;;
+      *) printf '%s' "$connector" ;;
+    esac
+  fi
+}
+
+defenseclaw_flat_hookcfg_value() {
+  local config="$1"
+  local wanted="$2"
+  local key value
+  [ -f "$config" ] && [ ! -L "$config" ] || return 1
+  while IFS='=' read -r key value; do
+    if [ "$key" = "$wanted" ]; then
+      printf '%s' "$value"
+      return 0
+    fi
+  done < "$config"
+  return 1
+}
+
+# Return the shared legacy token path or the connector-scoped token path named
+# by runtime state.  This does not search token files and never embeds one
+# connector's credential path into shared script bytes.
+defenseclaw_shared_hook_token_file() {
+  local hook_dir="$1"
+  local connector="${2:-}"
+  if [ -n "$connector" ] && [ -f "${hook_dir}/.hook-${connector}.token" ]; then
+    printf '%s/.hook-%s.token' "$hook_dir" "$connector"
+  else
+    printf '%s/.token' "$hook_dir"
+  fi
+}
+
+# Resolve the selected connector's fail mode from the connector-aware shared
+# runtime state.  An explicit process value still wins for non-managed
+# ephemeral shells; guardian-managed hooks trust only installer-owned state.
+# Malformed, ambiguous, or missing state fails closed.
+defenseclaw_shared_runtime_fail_mode() {
+  local hook_dir="$1"
+  local connector="${2:-}"
+  local mode="${DEFENSECLAW_FAIL_MODE:-}"
+  if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = "1" ]; then
+    mode=""
+  fi
+  local config="${hook_dir}/.hookcfg"
+  local flat_config="${hook_dir}/.hookcfg.legacy"
+  if [ -n "$connector" ]; then
+    flat_config="${hook_dir}/.hookcfg.${connector}"
+  fi
+  if [ "$mode" != "open" ] && [ "$mode" != "closed" ]; then
+    mode="$(defenseclaw_flat_hookcfg_value "$flat_config" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)"
+  fi
+  if [ "$mode" != "open" ] && [ "$mode" != "closed" ] && [ -f "$config" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      if [ -n "$connector" ]; then
+        mode="$(jq -r --arg connector "$connector" '.fail_modes[$connector] // empty' "$config" 2>/dev/null || true)"
+      else
+        mode="$(jq -r '.legacy_fail_mode // empty' "$config" 2>/dev/null || true)"
+      fi
+    elif command -v python3 >/dev/null 2>&1; then
+      mode="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); c=sys.argv[2]; print((d.get("fail_modes") or {}).get(c, "") if c else d.get("legacy_fail_mode", ""))' "$config" "$connector" 2>/dev/null || true)"
+    fi
+  fi
+  if [ "$mode" = "open" ]; then
+    printf open
+  else
+    printf closed
+  fi
+}
+
 # _defenseclaw_sweep_stale_hook_dirs removes orphaned hook-tmp.*
 # directories under DEFENSECLAW_HOME that haven't been touched in 60+
 # minutes. The 60-minute floor is the longest the hook itself can run
@@ -522,17 +645,15 @@ defenseclaw_response_failure_reason() {
   esac
 }
 
-# defenseclaw_should_fail_closed_on_unreachable returns 0 (true) for
-# guardian-installed managed hooks, or when an unmanaged operator explicitly
-# opts into strict availability via DEFENSECLAW_STRICT_AVAILABILITY=1. The
-# unmanaged default is to fail open on
-# transport failures (gateway down / network error / 5xx) regardless
-# of FAIL_MODE — a DefenseClaw outage must NEVER brick the user's
-# coding agent. FAIL_MODE still governs response-layer failures (4xx,
-# bad JSON, missing action) where the gateway answered but its answer
-# was wrong; those represent likely misconfiguration that the operator
-# should be told about loudly.
+# defenseclaw_should_fail_closed_on_unreachable returns 0 (true) when the
+# connector's effective fail mode is closed, for guardian-installed managed
+# hooks, or when strict availability is enabled. Fail mode therefore has one
+# consistent meaning across malformed responses, auth failures, and transport
+# failures instead of silently opening only the latter class.
 defenseclaw_should_fail_closed_on_unreachable() {
+  case "${FAIL_MODE:-open}" in
+    closed) return 0 ;;
+  esac
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 0 ;;
   esac
@@ -562,7 +683,7 @@ defenseclaw_emit_unreachable_stderr() {
   local subject="${1:-tool}"
   local reason="${2:-unknown}"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    echo "defenseclaw: gateway unreachable, blocking ${subject} (DEFENSECLAW_STRICT_AVAILABILITY=1): ${reason}" >&2
+    echo "defenseclaw: gateway unreachable, blocking ${subject} (fail mode closed): ${reason}" >&2
   else
     echo "defenseclaw: gateway unreachable, allowing ${subject}: ${reason}" >&2
   fi
@@ -575,19 +696,15 @@ defenseclaw_emit_unreachable_stderr() {
 # the historical behaviour was to exit 0 ("can't talk to gateway →
 # don't brick the agent"). That bypassed FAIL_MODE entirely.
 #
-# This helper preserves the historical default (allow-and-warn) but
-# routes the bypass through the same DEFENSECLAW_STRICT_AVAILABILITY
-# escape hatch as transport failures: an operator who explicitly opts
-# into strict availability gets fail-closed even on a missing-token
-# misconfiguration, AND every bypass — strict or not — is recorded in
-# hook-failures.jsonl so the audit log is honest about the missed
-# inspection.
+# This helper routes the bypass through the connector's FAIL_MODE and
+# the DEFENSECLAW_STRICT_AVAILABILITY force-closed override. Every bypass
+# is recorded in hook-failures.jsonl so the audit log is honest about the
+# missed inspection.
 #
 # Usage:
 #   defenseclaw_handle_missing_token CONNECTOR HOOK_NAME SUBJECT
 #
-# Exits 0 (allow) on the historical default path or 2 (block) when
-# strict availability is set. Never returns to the caller.
+# Exits 0 for fail-open or 2 for fail-closed. Never returns to the caller.
 defenseclaw_handle_missing_token() {
   local connector="${1:-unknown}"
   local hook_name="${2:-unknown}"
@@ -595,7 +712,7 @@ defenseclaw_handle_missing_token() {
   local reason="missing gateway token (.token absent and DEFENSECLAW_GATEWAY_TOKEN unset)"
   defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-open}"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    echo "defenseclaw: ${reason}, blocking ${subject} (DEFENSECLAW_STRICT_AVAILABILITY=1)" >&2
+    echo "defenseclaw: ${reason}, blocking ${subject} (fail mode closed)" >&2
     exit 2
   fi
   exit 0

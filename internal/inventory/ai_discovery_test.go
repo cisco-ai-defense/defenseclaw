@@ -19,16 +19,139 @@ package inventory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
+
+func cleanupPreparedDiscoveryService(t *testing.T, svc *ContinuousDiscoveryService) {
+	t.Helper()
+	t.Cleanup(func() {
+		if closed, err := svc.CloseIfNeverStarted(); err != nil || !closed {
+			t.Errorf("close prepared AI discovery service = (%t, %v), want (true, nil)", closed, err)
+		}
+	})
+}
+
+func TestContinuousDiscoveryServiceRunClosesInventoryStoreAcrossRestarts(t *testing.T) {
+	dataDir := t.TempDir()
+	homeDir := t.TempDir()
+
+	for restart := 0; restart < 3; restart++ {
+		svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+			DataDir:         dataDir,
+			HomeDir:         homeDir,
+			ScanRoots:       []string{homeDir},
+			ScanInterval:    time.Hour,
+			ProcessInterval: time.Hour,
+		}, nil)
+		store := svc.InventoryStore()
+		if store == nil {
+			t.Fatalf("restart %d: inventory store was not opened", restart)
+		}
+		if _, err := store.SchemaVersion(); err != nil {
+			t.Fatalf("restart %d: inventory store unusable before Run: %v", restart, err)
+		}
+		if open := store.db.Stats().OpenConnections; open == 0 {
+			t.Fatalf("restart %d: inventory store did not retain an open pool before Run", restart)
+		}
+
+		startupComplete := make(chan struct{}, 1)
+		svc.AddReportObserver(func(context.Context, AIDiscoveryReport) {
+			select {
+			case startupComplete <- struct{}{}:
+			default:
+			}
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		runDone := make(chan error, 1)
+		go func() { runDone <- svc.Run(ctx) }()
+		select {
+		case <-startupComplete:
+		case <-time.After(5 * time.Second):
+			cancel()
+			t.Fatalf("restart %d: startup scan did not complete", restart)
+		}
+		cancel()
+		var runErr error
+		select {
+		case runErr = <-runDone:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("restart %d: Run did not stop after cancellation", restart)
+		}
+		if err := runErr; !errors.Is(err, context.Canceled) {
+			t.Fatalf("restart %d: Run error = %v, want context.Canceled", restart, err)
+		}
+		if open := store.db.Stats().OpenConnections; open != 0 {
+			t.Fatalf("restart %d: inventory DB retained %d open connections after Run", restart, open)
+		}
+		if _, err := store.SchemaVersion(); err == nil {
+			t.Fatalf("restart %d: inventory DB still accepted queries after Run", restart)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("restart %d: repeated Close was not idempotent: %v", restart, err)
+		}
+	}
+}
+
+func TestContinuousDiscoveryServiceCloseIfNeverStartedAndClaimRun(t *testing.T) {
+	newService := func(dataDir string) (*ContinuousDiscoveryService, *InventoryStore) {
+		t.Helper()
+		svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+			DataDir:         dataDir,
+			HomeDir:         t.TempDir(),
+			ScanRoots:       []string{t.TempDir()},
+			ScanInterval:    time.Hour,
+			ProcessInterval: time.Hour,
+		}, nil)
+		store := svc.InventoryStore()
+		if store == nil {
+			t.Fatal("inventory store was not opened")
+		}
+		if _, err := store.SchemaVersion(); err != nil {
+			t.Fatalf("inventory store unusable before lifecycle transition: %v", err)
+		}
+		return svc, store
+	}
+
+	dataDir := t.TempDir()
+	prepared, preparedStore := newService(dataDir)
+	closed, err := prepared.CloseIfNeverStarted()
+	if err != nil || !closed {
+		t.Fatalf("CloseIfNeverStarted() = (%v, %v), want (true, nil)", closed, err)
+	}
+	if open := preparedStore.db.Stats().OpenConnections; open != 0 {
+		t.Fatalf("prepared service retained %d open connections", open)
+	}
+	if err := prepared.Run(context.Background()); err == nil {
+		t.Fatal("closed prepared service unexpectedly started")
+	}
+
+	claimed, claimedStore := newService(dataDir)
+	runner, ok := claimed.ClaimRun()
+	if !ok || runner == nil {
+		t.Fatal("ClaimRun did not reserve prepared service")
+	}
+	if closed, err := claimed.CloseIfNeverStarted(); err != nil || closed {
+		t.Fatalf("claimed CloseIfNeverStarted() = (%v, %v), want (false, nil)", closed, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := runner(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("claimed runner error = %v, want context.Canceled", err)
+	}
+	if open := claimedStore.db.Stats().OpenConnections; open != 0 {
+		t.Fatalf("claimed service retained %d open connections after Run", open)
+	}
+}
 
 func TestLoadAISignatures_ContainsRequiredSurfaces(t *testing.T) {
 	sigs, err := LoadAISignatures()
@@ -39,11 +162,111 @@ func TestLoadAISignatures_ContainsRequiredSurfaces(t *testing.T) {
 	for _, sig := range sigs {
 		seen[sig.ID] = true
 	}
-	for _, id := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "ai-sdks"} {
+	for _, id := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "ai-sdks", "lemonade"} {
 		if !seen[id] {
 			t.Fatalf("signature %q missing", id)
 		}
 	}
+}
+
+func TestLoadAISignatures_LemonadeServerSurface(t *testing.T) {
+	sigs, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	var lemonade *AISignature
+	for i := range sigs {
+		if sigs[i].ID == "lemonade" {
+			lemonade = &sigs[i]
+			break
+		}
+	}
+	if lemonade == nil {
+		t.Fatal("lemonade signature missing")
+	}
+	if lemonade.Name != "Lemonade Server" || lemonade.Vendor != "Lemonade" || lemonade.Category != SignalAICLI {
+		t.Fatalf("lemonade identity mismatch: %+v", *lemonade)
+	}
+
+	assertContains := func(field string, values []string, expected ...string) {
+		t.Helper()
+		seen := make(map[string]bool, len(values))
+		for _, value := range values {
+			seen[value] = true
+		}
+		for _, want := range expected {
+			if !seen[want] {
+				t.Errorf("lemonade %s missing %q: %v", field, want, values)
+			}
+		}
+	}
+	assertContains("binary_names", lemonade.BinaryNames, "lemonade", "lemond", "lemonade-tray", "LemonadeServer.exe")
+	assertContains("process_names", lemonade.ProcessNames, "lemonade", "lemond", "lemonade-tray", "LemonadeServer.exe")
+	assertContains("application_names", lemonade.ApplicationNames, "Lemonade.app", "Lemonade")
+	assertContains("config_paths", lemonade.ConfigPaths,
+		"~/.cache/lemonade/config.json",
+		"/Library/Application Support/lemonade/.cache/config.json",
+		"/var/lib/lemonade/.cache/lemonade/config.json",
+		"/opt/var/lib/lemonade/.cache/lemonade/config.json",
+	)
+	assertContains("env_var_names", lemonade.EnvVarNames,
+		"LEMONADE_HOST", "LEMONADE_PORT", "LEMONADE_CACHE_DIR", "LEMONADE_API_KEY", "LEMONADE_ADMIN_API_KEY",
+	)
+	for _, generic := range []string{"HF_HOME", "HF_HUB_CACHE", "FLM_MODEL_PATH"} {
+		if slices.Contains(lemonade.EnvVarNames, generic) {
+			t.Errorf("lemonade env_var_names contains generic model-cache variable %q", generic)
+		}
+	}
+	assertContains("domain_patterns", lemonade.DomainPatterns, "localhost:13305", "127.0.0.1:13305")
+	assertContains("history_patterns", lemonade.HistoryPatterns, "lemonade", "lemond")
+	assertContains("local_endpoints", lemonade.LocalEndpoints,
+		"http://127.0.0.1:13305/live",
+		"http://127.0.0.1:13305/v1/models",
+		"http://127.0.0.1:13305/api/v1/models",
+		"http://127.0.0.1:13305/v1/health",
+		"http://127.0.0.1:13305/api/v1/health",
+	)
+}
+
+func TestHermesSignatureIncludesNativeWindowsPaths(t *testing.T) {
+	sigs, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	var hermes *AISignature
+	for i := range sigs {
+		if sigs[i].ID == "hermes" {
+			hermes = &sigs[i]
+			break
+		}
+	}
+	if hermes == nil {
+		t.Fatal("Hermes signature missing")
+	}
+	for _, want := range []string{
+		"$HERMES_HOME/config.yaml",
+		"$LOCALAPPDATA/hermes/config.yaml",
+		"~/.hermes/config.yaml",
+	} {
+		if !stringSliceContains(hermes.ConfigPaths, want) {
+			t.Errorf("Hermes config paths missing %q: %v", want, hermes.ConfigPaths)
+		}
+		if !stringSliceContains(hermes.MCPPaths, want) {
+			t.Errorf("Hermes MCP paths missing %q: %v", want, hermes.MCPPaths)
+		}
+	}
+	if !stringSliceContains(hermes.EnvVarNames, "HERMES_HOME") {
+		t.Errorf("Hermes environment variables missing HERMES_HOME: %v", hermes.EnvVarNames)
+	}
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestExpandCandidatePath_ExpandsConfiguredEnvironment(t *testing.T) {
@@ -188,13 +411,14 @@ func TestNewContinuousDiscoveryServiceUsesConfiguredSignaturePacks(t *testing.T)
 			Enabled: true,
 		},
 	}
-	svc, err := NewContinuousDiscoveryService(cfg, nil, nil)
+	svc, err := NewContinuousDiscoveryService(cfg)
 	if err != nil {
 		t.Fatalf("NewContinuousDiscoveryService: %v", err)
 	}
 	if svc == nil {
 		t.Fatal("service nil")
 	}
+	cleanupPreparedDiscoveryService(t, svc)
 	var found bool
 	for _, sig := range svc.catalog {
 		found = found || sig.ID == "custom-sidecar-ai"
@@ -224,10 +448,10 @@ func TestContinuousDiscoveryDetectsEnhancedSignalsWithoutRawEvidence(t *testing.
 		IncludeNetworkDomains:   true,
 		DataDir:                 dataDir,
 		HomeDir:                 home,
-		EmitOTel:                false,
 		MaxFilesPerScan:         20,
 		MaxFileBytes:            64 * 1024,
-	}, []AISignature{testAISignature()}, nil, nil)
+	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	report, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -264,8 +488,8 @@ detectors:
 		DataDir:              filepath.Join(tmp, "data"),
 		HomeDir:              filepath.Join(tmp, "home"),
 		ConfidencePolicyPath: policyPath,
-		EmitOTel:             false,
-	}, nil, nil, nil)
+	}, nil)
+	cleanupPreparedDiscoveryService(t, svc)
 
 	policy := svc.ConfidenceParams().Policy
 	if got := policy.Detectors["package_manifest"].IdentityLR; got != 7 {
@@ -342,10 +566,10 @@ func TestContinuousDiscoveryShellHistoryFingerprintIsStable(t *testing.T) {
 		IncludeShellHistory: true,
 		DataDir:             dataDir,
 		HomeDir:             home,
-		EmitOTel:            false,
 		MaxFilesPerScan:     20,
 		MaxFileBytes:        64 * 1024,
-	}, []AISignature{testAISignature()}, nil, nil)
+	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	first, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -407,12 +631,12 @@ func TestContinuousDiscoveryFullScanEmitsGone(t *testing.T) {
 	cfgPath := filepath.Join(home, ".shadowai", "config.json")
 	mustWrite(t, cfgPath, "{}")
 	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
-		Enabled:  true,
-		Mode:     "enhanced",
-		DataDir:  dataDir,
-		HomeDir:  home,
-		EmitOTel: false,
-	}, []AISignature{testAISignature()}, nil, nil)
+		Enabled: true,
+		Mode:    "enhanced",
+		DataDir: dataDir,
+		HomeDir: home,
+	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	first, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -452,10 +676,10 @@ func TestContinuousDiscoveryDetectsLoopbackEndpointWithoutRawURL(t *testing.T) {
 		IncludeNetworkDomains: true,
 		DataDir:               filepath.Join(tmp, "data"),
 		HomeDir:               filepath.Join(tmp, "home"),
-		EmitOTel:              false,
 		MaxFilesPerScan:       20,
 		MaxFileBytes:          64 * 1024,
-	}, []AISignature{sig}, nil, nil)
+	}, []AISignature{sig})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	report, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -501,16 +725,67 @@ func TestDetectLocalEndpoints_PrefersHEADToAvoidTriggeringInference(t *testing.T
 		IncludeNetworkDomains: true,
 		DataDir:               filepath.Join(tmp, "data"),
 		HomeDir:               filepath.Join(tmp, "home"),
-		EmitOTel:              false,
 		MaxFilesPerScan:       20,
 		MaxFileBytes:          64 * 1024,
-	}, []AISignature{sig}, nil, nil)
+	}, []AISignature{sig})
+	cleanupPreparedDiscoveryService(t, svc)
 
-	if _, err := svc.runScan(context.Background(), true, "test"); err != nil {
-		t.Fatalf("runScan: %v", err)
+	// Exercise the presence detector directly. A full scan now also runs the
+	// separate local-model inventory detector, which intentionally performs a
+	// bounded GET of this vetted metadata path to enumerate model IDs.
+	if got := svc.detectLocalEndpoints(); len(got) != 1 {
+		t.Fatalf("detectLocalEndpoints signals = %d, want 1", len(got))
 	}
 	if sawGet {
 		t.Fatalf("detectLocalEndpoints issued a GET when HEAD was accepted; this can trigger inference on the local server")
+	}
+}
+
+func TestDetectLocalEndpoints_LemonadeRequiresSuccessfulLive(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		liveStatus int
+		want       int
+	}{
+		{name: "unrelated listener", liveStatus: http.StatusNotFound, want: 0},
+		{name: "lemonade live", liveStatus: http.StatusOK, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/live":
+					w.WriteHeader(tc.liveStatus)
+				case "/v1/models":
+					// A generic OpenAI-compatible listener alone must not be
+					// attributed to Lemonade.
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			t.Setenv("LEMONADE_HOST", "")
+			t.Setenv("LEMONADE_PORT", "")
+			t.Setenv("LEMONADE_CACHE_DIR", t.TempDir())
+			sig := AISignature{
+				ID:             "lemonade",
+				Name:           "Lemonade Server",
+				Vendor:         "Lemonade",
+				Category:       SignalAICLI,
+				Confidence:     0.95,
+				LocalEndpoints: []string{server.URL + "/v1/models"},
+			}
+			svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+				Enabled: true, Mode: "enhanced", DataDir: t.TempDir(), HomeDir: t.TempDir(),
+			}, []AISignature{sig})
+			cleanupPreparedDiscoveryService(t, svc)
+
+			if got := len(svc.detectLocalEndpoints()); got != tc.want {
+				t.Fatalf("Lemonade endpoint signals = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -544,10 +819,10 @@ func TestDetectLocalEndpoints_FallsBackToGETWhenHEADUnsupported(t *testing.T) {
 		IncludeNetworkDomains: true,
 		DataDir:               filepath.Join(tmp, "data"),
 		HomeDir:               filepath.Join(tmp, "home"),
-		EmitOTel:              false,
 		MaxFilesPerScan:       20,
 		MaxFileBytes:          64 * 1024,
-	}, []AISignature{sig}, nil, nil)
+	}, []AISignature{sig})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	report, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
@@ -592,10 +867,10 @@ func TestDetectLocalEndpoints_SkipsPathsOutsideAllowList(t *testing.T) {
 		IncludeNetworkDomains: true,
 		DataDir:               filepath.Join(tmp, "data"),
 		HomeDir:               filepath.Join(tmp, "home"),
-		EmitOTel:              false,
 		MaxFilesPerScan:       20,
 		MaxFileBytes:          64 * 1024,
-	}, []AISignature{sig}, nil, nil)
+	}, []AISignature{sig})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	if _, err := svc.runScan(context.Background(), true, "test"); err != nil {
 		t.Fatalf("runScan: %v", err)
@@ -625,12 +900,12 @@ func TestProcessNameMatchesShortNamesExactly(t *testing.T) {
 func TestIngestExternalReport_ForcesExternalSourceAttribution(t *testing.T) {
 	tmp := t.TempDir()
 	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
-		Enabled:  true,
-		Mode:     "enhanced",
-		DataDir:  filepath.Join(tmp, "data"),
-		HomeDir:  filepath.Join(tmp, "home"),
-		EmitOTel: false,
-	}, []AISignature{testAISignature()}, nil, nil)
+		Enabled: true,
+		Mode:    "enhanced",
+		DataDir: filepath.Join(tmp, "data"),
+		HomeDir: filepath.Join(tmp, "home"),
+	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	// CLI is sending us a forged report claiming the sidecar produced it.
 	report := AIDiscoveryReport{
@@ -666,7 +941,8 @@ func TestIngestExternalReport_DoesNotNotifyAutomationObservers(t *testing.T) {
 		Mode:    "enhanced",
 		DataDir: t.TempDir(),
 		HomeDir: t.TempDir(),
-	}, []AISignature{testAISignature()}, nil, nil)
+	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
 	called := make(chan struct{}, 1)
 	svc.AddReportObserver(func(context.Context, AIDiscoveryReport) { called <- struct{}{} })
 	report := AIDiscoveryReport{
@@ -707,12 +983,12 @@ func TestRunScan_NonFullTickShipsFullInventoryConsistentWithSummary(t *testing.T
 	cfgPath := filepath.Join(home, ".shadowai", "config.json")
 	mustWrite(t, cfgPath, "{}")
 	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
-		Enabled:  true,
-		Mode:     "enhanced",
-		DataDir:  dataDir,
-		HomeDir:  home,
-		EmitOTel: false,
-	}, []AISignature{testAISignature()}, nil, nil)
+		Enabled: true,
+		Mode:    "enhanced",
+		DataDir: dataDir,
+		HomeDir: home,
+	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	// 1) Full scan: detect the config-path signal so it lands in
 	//    the persisted inventory.
@@ -762,6 +1038,166 @@ func TestRunScan_NonFullTickShipsFullInventoryConsistentWithSummary(t *testing.T
 		t.Fatalf("non-full tick must not re-fire lifecycle classification: new=%d changed=%d",
 			second.Summary.NewSignals, second.Summary.ChangedSignals)
 	}
+}
+
+func TestCarryForwardAccumulatorModelAPIRules(t *testing.T) {
+	const fingerprint = "model-api-fingerprint"
+	old := aiStoredSignal{AISignal: AISignal{
+		Fingerprint:        fingerprint,
+		Detector:           "model_api",
+		ModelAPISourceHash: "source-hash",
+		Model:              &LocalModelInfo{Provider: "test-provider"},
+	}}
+	coverageKey, ok := storedModelAPICoverageKey(old)
+	if !ok {
+		t.Fatal("test model did not produce an API coverage key")
+	}
+	newAccumulator := func() (carryForwardAccumulator, *[]AISignal) {
+		out := []AISignal{}
+		return carryForwardAccumulator{
+			current:    map[string]aiStoredSignal{},
+			out:        &out,
+			counts:     map[string]int{},
+			emittedFps: map[string]bool{},
+		}, &out
+	}
+
+	t.Run("deferred source carries", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 1
+		handled := carry.handleModelAPICarryForward(fingerprint, old, scanStats{
+			ModelAPIDeferred: map[string]bool{coverageKey: true},
+		}, &budget)
+		if !handled || budget != 0 || len(*out) != 1 || carry.current[fingerprint].State != AIStateSeen {
+			t.Fatalf("deferred carry = handled:%v budget:%d out:%d stored:%+v", handled, budget, len(*out), carry.current)
+		}
+	})
+
+	t.Run("attempted failure consumes grace", func(t *testing.T) {
+		carry, _ := newAccumulator()
+		budget := 1
+		handled := carry.handleModelAPICarryForward(fingerprint, old, scanStats{
+			ModelAPIAttempted: map[string]bool{coverageKey: true},
+		}, &budget)
+		if !handled || carry.current[fingerprint].ModelAPIMisses != 1 {
+			t.Fatalf("attempted carry = handled:%v stored:%+v", handled, carry.current[fingerprint])
+		}
+	})
+
+	t.Run("miss limit falls through", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 1
+		atLimit := old
+		atLimit.ModelAPIMisses = maxIndeterminateModelAPIMisses
+		handled := carry.handleModelAPICarryForward(fingerprint, atLimit, scanStats{
+			ModelAPIAttempted: map[string]bool{coverageKey: true},
+		}, &budget)
+		if handled || budget != 1 || len(*out) != 0 || len(carry.current) != 0 {
+			t.Fatalf("at-limit carry = handled:%v budget:%d out:%d stored:%+v", handled, budget, len(*out), carry.current)
+		}
+	})
+
+	t.Run("completed cycle membership carries and clears misses", func(t *testing.T) {
+		carry, _ := newAccumulator()
+		budget := 1
+		missed := old
+		missed.ModelAPIMisses = 1
+		handled := carry.handleModelAPICarryForward(fingerprint, missed, scanStats{
+			ModelAPIConclusive: map[string]bool{coverageKey: true},
+			ModelAPICycleSeen: map[string]map[string]struct{}{
+				coverageKey: {fingerprint: {}},
+			},
+		}, &budget)
+		if !handled || carry.current[fingerprint].ModelAPIMisses != 0 {
+			t.Fatalf("completed-cycle carry = handled:%v stored:%+v", handled, carry.current[fingerprint])
+		}
+	})
+
+	t.Run("completed cycle absence falls through", func(t *testing.T) {
+		carry, _ := newAccumulator()
+		budget := 1
+		handled := carry.handleModelAPICarryForward(fingerprint, old, scanStats{
+			ModelAPIConclusive: map[string]bool{coverageKey: true},
+			ModelAPICycleSeen:  map[string]map[string]struct{}{coverageKey: {}},
+		}, &budget)
+		if handled {
+			t.Fatal("model absent from a completed cycle was carried")
+		}
+	})
+
+	t.Run("exhausted budget suppresses unsupported gone", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 0
+		handled := carry.handleModelAPICarryForward(fingerprint, old, scanStats{
+			ModelAPIDeferred: map[string]bool{coverageKey: true},
+		}, &budget)
+		if !handled || len(*out) != 0 || len(carry.current) != 0 {
+			t.Fatalf("budget-zero carry = handled:%v out:%d stored:%+v", handled, len(*out), carry.current)
+		}
+	})
+
+	t.Run("completed membership respects exhausted budget", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 0
+		handled := carry.handleModelAPICarryForward(fingerprint, old, scanStats{
+			ModelAPIConclusive: map[string]bool{coverageKey: true},
+			ModelAPICycleSeen: map[string]map[string]struct{}{
+				coverageKey: {fingerprint: {}},
+			},
+		}, &budget)
+		if !handled || len(*out) != 0 || len(carry.current) != 0 {
+			t.Fatalf("budget-zero completed carry = handled:%v out:%d stored:%+v", handled, len(*out), carry.current)
+		}
+	})
+}
+
+func TestCarryForwardAccumulatorModelFileRules(t *testing.T) {
+	const fingerprint = "model-file-fingerprint"
+	old := aiStoredSignal{AISignal: AISignal{
+		Fingerprint:   fingerprint,
+		Detector:      "model_file",
+		WorkspaceHash: "root-hash",
+		Model:         &LocalModelInfo{Format: "gguf"},
+	}}
+	newAccumulator := func() (carryForwardAccumulator, *[]AISignal) {
+		out := []AISignal{}
+		return carryForwardAccumulator{
+			current:    map[string]aiStoredSignal{},
+			out:        &out,
+			counts:     map[string]int{},
+			emittedFps: map[string]bool{},
+		}, &out
+	}
+
+	t.Run("deferred root carries", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 1
+		handled := carry.handleModelFileCarryForward(fingerprint, old, scanStats{
+			ModelFileDeferred: map[string]bool{"root-hash": true},
+		}, &budget)
+		if !handled || budget != 0 || len(*out) != 1 || carry.current[fingerprint].State != AIStateSeen {
+			t.Fatalf("file carry = handled:%v budget:%d out:%d stored:%+v", handled, budget, len(*out), carry.current)
+		}
+	})
+
+	t.Run("conclusive root falls through", func(t *testing.T) {
+		carry, _ := newAccumulator()
+		budget := 1
+		if carry.handleModelFileCarryForward(fingerprint, old, scanStats{}, &budget) {
+			t.Fatal("model from a non-deferred root was carried")
+		}
+	})
+
+	t.Run("exhausted budget suppresses unsupported gone", func(t *testing.T) {
+		carry, out := newAccumulator()
+		budget := 0
+		handled := carry.handleModelFileCarryForward(fingerprint, old, scanStats{
+			ModelFileDeferred: map[string]bool{"root-hash": true},
+		}, &budget)
+		if !handled || len(*out) != 0 || len(carry.current) != 0 {
+			t.Fatalf("budget-zero file carry = handled:%v out:%d stored:%+v", handled, len(*out), carry.current)
+		}
+	})
 }
 
 // TestEnrichSignalsWithComponentConfidence pins the Bug B fix:
@@ -1046,6 +1482,49 @@ func TestValidateSanitizedAIDiscoveryReportRejectsRawPath(t *testing.T) {
 	}
 }
 
+func TestValidateSanitizedAIDiscoveryReportValidatesModelMetadata(t *testing.T) {
+	base := AIDiscoveryReport{
+		Summary: AIDiscoverySummary{ScanID: "scan-model"},
+		Signals: []AISignal{{
+			Category: SignalLocalModel,
+			Model:    &LocalModelInfo{ID: "Qwen3-0.6B-GGUF", Status: "installed", Format: "gguf"},
+		}},
+	}
+	if err := ValidateSanitizedAIDiscoveryReport(base); err != nil {
+		t.Fatalf("valid model metadata rejected: %v", err)
+	}
+
+	badStatus := cloneAIDiscoveryReport(base)
+	badStatus.Signals[0].Model.Status = "executing"
+	if err := ValidateSanitizedAIDiscoveryReport(badStatus); err == nil {
+		t.Fatal("unsupported model status accepted")
+	}
+
+	badID := cloneAIDiscoveryReport(base)
+	badID.Signals[0].Model.ID = "private\nmodel"
+	if err := ValidateSanitizedAIDiscoveryReport(badID); err == nil {
+		t.Fatal("model id containing control characters accepted")
+	}
+	badUnicodeControl := cloneAIDiscoveryReport(base)
+	badUnicodeControl.Signals[0].Model.ID = "private\u009bmodel"
+	if err := ValidateSanitizedAIDiscoveryReport(badUnicodeControl); err == nil {
+		t.Fatal("model id containing a Unicode C1 control accepted")
+	}
+
+	missingModel := cloneAIDiscoveryReport(base)
+	missingModel.Signals[0].Model = nil
+	missingModel.Signals[0].Basenames = []string{"private-model.gguf"}
+	if err := ValidateSanitizedAIDiscoveryReport(missingModel); err == nil {
+		t.Fatal("local_model signal without model metadata accepted")
+	}
+
+	wrongCategory := cloneAIDiscoveryReport(base)
+	wrongCategory.Signals[0].Category = SignalAICLI
+	if err := ValidateSanitizedAIDiscoveryReport(wrongCategory); err == nil {
+		t.Fatal("model metadata on non-local_model signal accepted")
+	}
+}
+
 func testAISignature() AISignature {
 	return AISignature{
 		ID:              "shadowai",
@@ -1163,7 +1642,7 @@ func TestProjectRootForManifest_WalksPastDependencyCacheSegments(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := projectRootForManifest(tc.path)
-			if got != tc.want {
+			if filepath.ToSlash(filepath.Clean(got)) != filepath.ToSlash(filepath.Clean(tc.want)) {
 				t.Fatalf("projectRootForManifest(%q) = %q; want %q", tc.path, got, tc.want)
 			}
 		})
@@ -1204,8 +1683,8 @@ mainly_for_demo = "0.1"
 		ScanRoots:       []string{tmp},
 		MaxFilesPerScan: 100,
 		MaxFileBytes:    1 << 20,
-		EmitOTel:        false,
-	}, catalog, nil, nil)
+	}, catalog)
+	cleanupPreparedDiscoveryService(t, svc)
 	signals, _, err := svc.detectPackageManifests(context.Background())
 	if err != nil {
 		t.Fatalf("detectPackageManifests: %v", err)
@@ -1283,8 +1762,8 @@ func TestDetectPackageManifests_CollapsesTransitiveNodeModules(t *testing.T) {
 		ScanRoots:       []string{tmp},
 		MaxFilesPerScan: 1000,
 		MaxFileBytes:    1 << 20,
-		EmitOTel:        false,
-	}, catalog, nil, nil)
+	}, catalog)
+	cleanupPreparedDiscoveryService(t, svc)
 	signals, _, err := svc.detectPackageManifests(context.Background())
 	if err != nil {
 		t.Fatalf("detectPackageManifests: %v", err)
@@ -1349,13 +1828,13 @@ func TestRunScan_SingleFlight(t *testing.T) {
 		Mode:            "enhanced",
 		DataDir:         dataDir,
 		HomeDir:         home,
-		EmitOTel:        false,
 		MaxFilesPerScan: 5,
 		MaxFileBytes:    32 * 1024,
-	}, []AISignature{testAISignature()}, nil, nil)
+	}, []AISignature{testAISignature()})
 	if svc == nil {
 		t.Fatal("expected non-nil service")
 	}
+	cleanupPreparedDiscoveryService(t, svc)
 
 	// Spawn N concurrent runScan goroutines; if the mutex is wired
 	// correctly all of them should complete without races (a -race
@@ -1397,10 +1876,10 @@ func TestRunScan_RespectsCancelledContext(t *testing.T) {
 		Mode:            "enhanced",
 		DataDir:         dataDir,
 		HomeDir:         home,
-		EmitOTel:        false,
 		MaxFilesPerScan: 1,
 		MaxFileBytes:    1024,
-	}, []AISignature{testAISignature()}, nil, nil)
+	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

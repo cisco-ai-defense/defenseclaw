@@ -1,351 +1,1702 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 name: Release
 
-# Two trigger paths, both converge into the same job:
-#
-# 1. workflow_dispatch — operator clicks "Run workflow" in the Actions UI
-#    and provides a `version` input (X.Y.Z, no v prefix). The workflow
-#    refuses to run when the tag or a release for it already exists, so
-#    you can't accidentally clobber a previous release. The tag is
-#    created atomically alongside the GitHub release at job end via
-#    `gh release create --target $GITHUB_SHA`.
-#
-# 2. push: tags — `git push origin 0.4.0` from a developer machine. Same
-#    job, same artifacts. The pre-existing-release pre-flight still
-#    applies because Immutable Releases would freeze any pre-created
-#    empty release on creation.
-#
-# Both paths use the resolved tag value to stamp Makefile, pyproject.toml,
-# cli/defenseclaw/__init__.py, and extensions/defenseclaw/package.json so
-# every published artifact (gateway tarball, wheel, plugin tarball) is
-# named with the same X.Y.Z that scripts/install.sh and `defenseclaw
-# upgrade` look up at GitHub Releases.
-
+# This workflow is the only release-signing authority because published
+# installers pin its Fulcio identity. A nightly/manual certification run seals
+# and fully exercises candidate bytes. A release dispatch promotes matching,
+# recent certified bytes, or runs the same full certification when no usable
+# certification exists.
 on:
-  push:
-    tags:
-      - "*.*.*"
+  schedule:
+    - cron: "17 5 * * *"
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version to release (X.Y.Z, no v prefix). Tag must NOT already exist."
+      operation:
+        description: "Certify main, or publish it after reusing/running full certification."
         required: true
+        type: choice
+        default: release
+        options:
+          - release
+          - certify
+      version:
+        description: "Candidate version (X.Y.Z). Optional for nightly certification."
+        required: false
         type: string
+      candidate_ref:
+        description: "Optional reviewed main ancestor to certify. Releases always use current main."
+        required: false
+        type: string
+      immutable_releases_confirmed:
+        description: "Confirm repository release immutability is enabled in Settings."
+        required: true
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
-  id-token: write
-  packages: write
+  contents: read
+  actions: read
 
-# Serialize all releases for the same version regardless of trigger.
-# `github.ref_name` is `0.4.1` for both `refs/tags/0.4.1` (push:tags) and
-# the branch name on workflow_dispatch — combined with `inputs.version`
-# (set only on workflow_dispatch), this produces the same `release-0.4.1`
-# group key whether you cut the release from the Actions UI or by pushing
-# the tag from your machine. Using `github.ref` here would have stamped
-# `release-refs/tags/0.4.1` for tag pushes vs `release-0.4.1` for manual
-# runs, letting two jobs for the same version race each other.
 concurrency:
-  group: release-${{ inputs.version || github.ref_name }}
+  group: release-promotion-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  release-mode:
+    name: Resolve certification operation
     runs-on: ubuntu-latest
-    # GitHub Environments protect the production secrets (cosign
-    # OIDC trust, GH release token scope) used by this pipeline.
-    # The `release` environment has the production reviewers list
-    # and the org-level deployment branch policy that pins this
-    # workflow to `main` and the v* release branches; even if a
-    # malicious push reached the workflow file the environment
-    # gate would refuse to release without an authorized approval.
-    environment: release
+    outputs:
+      operation: ${{ steps.mode.outputs.operation }}
+      commit: ${{ steps.ref.outputs.commit }}
+      version: ${{ steps.version.outputs.candidate_version }}
+      latest_stable: ${{ steps.version.outputs.latest_stable }}
     steps:
-      # Action refs are SHA-pinned (with the human tag in a trailing
-      # comment) so a compromise of upstream tag signing cannot
-      # rewrite a v* tag to inject code into the release pipeline,
-      # which holds the contents:write + id-token:write permissions.
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 0
-
-      # Single source of truth for the target tag: ${{ steps.tag.outputs.tag }}.
-      # Validates strict X.Y.Z, refuses to overwrite a pre-existing tag or
-      # release, and works for both trigger paths.
-      #
-      # Security: workflow inputs are passed via `env` so they reach the
-      # shell as `$RELEASE_VERSION_INPUT` (a normal env var) rather than
-      # being string-interpolated into the script body before bash parses
-      # it. Direct `${{ inputs.version }}` substitution would let an
-      # operator-supplied quote/newline turn into shell syntax before the
-      # validation regex below could reject it. See:
-      # https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-an-intermediate-environment-variable
-      - name: Resolve and validate target tag
-        id: tag
+          persist-credentials: false
+      - id: mode
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_VERSION_INPUT: ${{ inputs.version }}
           EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_OPERATION: ${{ inputs.operation }}
         run: |
           set -euo pipefail
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            TAG="$RELEASE_VERSION_INPUT"
-            if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "::error title=Invalid version input::version must be X.Y.Z with no v prefix (got: '$TAG')"
-              exit 1
-            fi
-            # Refuse if a tag with this name already exists either locally
-            # in the fetched history or on the remote. Atomicity guarantee:
-            # we never create a duplicate tag, and we never re-tag a
-            # different SHA than the operator expects.
-            if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
-              echo "::error title=Tag already exists::Tag '$TAG' already exists at $(git rev-parse "refs/tags/$TAG"). Pick a fresh version (e.g. patch bump) or delete the existing tag."
-              exit 1
-            fi
-            if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
-              echo "::error title=Tag already exists on remote::Tag '$TAG' already exists on origin. Pick a fresh version."
-              exit 1
-            fi
-          else
-            TAG="${GITHUB_REF#refs/tags/}"
-            if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "::error title=Invalid pushed tag::pushed tag must be X.Y.Z (got: '$TAG')"
-              exit 1
-            fi
+          operation="$REQUESTED_OPERATION"
+          if [[ "$EVENT_NAME" == "schedule" ]]; then
+            operation=certify
           fi
+          case "$operation" in release|certify) ;; *)
+            echo "::error title=Invalid release operation::$operation"
+            exit 1
+          esac
+          echo "operation=$operation" >> "$GITHUB_OUTPUT"
+      - id: ref
+        name: Resolve reviewed candidate ref
+        env:
+          RELEASE_OPERATION: ${{ steps.mode.outputs.operation }}
+          REQUESTED_REF: ${{ inputs.candidate_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          selected="${REQUESTED_REF:-$GITHUB_SHA}"
+          commit="$(git rev-parse --verify "${selected}^{commit}" 2>/dev/null || true)"
+          if [[ -z "$commit" ]]; then
+            commit="$(git rev-parse --verify "origin/${selected}^{commit}" 2>/dev/null || true)"
+          fi
+          if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]] || \
+             ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "::error title=Unreviewed candidate ref::$selected is not a commit reachable from origin/main."
+            exit 1
+          fi
+          if [[ "$RELEASE_OPERATION" == "release" && "$commit" != "$(git rev-parse origin/main)" ]]; then
+            echo "::error title=Release must use current main::Certify older reviewed SHAs separately; publishing always targets current origin/main."
+            exit 1
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - id: version
+        name: Resolve candidate version from live published state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          RELEASE_OPERATION: ${{ steps.mode.outputs.operation }}
+          SELECTED_COMMIT: ${{ steps.ref.outputs.commit }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_OPERATION" == "release" && -z "$REQUESTED_VERSION" ]]; then
+            echo "::error title=Release version required::Publishing remains dispatch-driven; enter the X.Y.Z version to release."
+            exit 1
+          fi
+          gh api --paginate --slurp \
+            -H "Accept: application/vnd.github+json" \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            > published-releases.json
+          source_version="$(
+            git show "$SELECTED_COMMIT:release/source-install-identity.json" \
+              | python3 -c 'import json, sys; print(json.load(sys.stdin)["source_release"])'
+          )"
+          args=(
+            --source-version "$source_version"
+            --published-releases published-releases.json
+            --github-output "$GITHUB_OUTPUT"
+          )
+          if [[ -n "$REQUESTED_VERSION" ]]; then
+            args+=(--requested "$REQUESTED_VERSION")
+          fi
+          python3 scripts/release_certification.py resolve-version "${args[@]}"
 
-          # Pre-existing-release guard. Immutable Releases freezes a release
-          # on creation, so a release for this tag would block atomic asset
-          # upload — same trap that broke 0.3.1.
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::error title=Release already exists::A release for '$TAG' already exists at https://github.com/${GITHUB_REPOSITORY}/releases/tag/$TAG"
-            echo "::error::With Immutable Releases enabled, the workflow cannot attach assets to a pre-existing release."
-            echo "::error::Either delete that release and re-run with a fresh version, or pick a different tag (e.g. patch bump). Do NOT manually create the GitHub release before this workflow runs."
+  release-preflight:
+    name: Validate release provenance
+    needs: release-mode
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      commit: ${{ steps.provenance.outputs.commit }}
+      latest_stable: ${{ needs.release-mode.outputs.latest_stable }}
+      baselines: ${{ steps.baselines.outputs.baselines }}
+      certification_baselines: ${{ steps.selection.outputs.versions }}
+      certification_cases: ${{ steps.selection.outputs.matrix }}
+      workflow_version: ${{ steps.selection.outputs.workflow_version }}
+      platform_set: ${{ steps.selection.outputs.platform_set }}
+      windows_baselines: ${{ steps.baselines.outputs.windows_baselines }}
+      previous_baseline: ${{ steps.baselines.outputs.previous_baseline }}
+      baseline_artifact: ${{ steps.baseline-name.outputs.name }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-mode.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require reviewed macOS app source
+        # A DefenseClaw release must build the macOS source that was reviewed
+        # and merged with this exact main commit. Upstream freshness is tracked
+        # independently by macos-upstream.yml and must not make an unrelated
+        # product release fail after its PR checks have already passed.
+        run: python3 scripts/check-macos-upstream.py --offline
+
+      - name: Require immutable GitHub releases
+        env:
+          IMMUTABLE_RELEASES_CONFIRMED: ${{ inputs.immutable_releases_confirmed }}
+          RELEASE_OPERATION: ${{ needs.release-mode.outputs.operation }}
+        run: |
+          set -euo pipefail
+          # GitHub's immutable-release settings endpoint requires repository
+          # Administration: read, which is not available to GITHUB_TOKEN. Keep
+          # this preflight fail-closed without introducing an administrator PAT;
+          # the publish job separately proves the resulting release is immutable.
+          if [[ "$RELEASE_OPERATION" == "release" && "$IMMUTABLE_RELEASES_CONFIRMED" != "true" ]]; then
+            echo "::error title=Immutable Releases confirmation required::Verify repository release immutability in Settings, then confirm it when dispatching the workflow."
             exit 1
           fi
 
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Resolved release tag: $TAG (commit: $GITHUB_SHA)"
-
-      # CRITICAL provenance gate: the released commit MUST be reachable
-      # from origin/main (or an authorized release branch matching
-      # release/*), otherwise an attacker who got a feature branch
-      # merged would be able to push a release tag from that branch
-      # and ship arbitrary code with our signing identity.
-      #
-      # We resolve the commit (`$GITHUB_SHA` for workflow_dispatch
-      # targets HEAD; `refs/tags/$TAG` for push:tags) and verify it
-      # appears in `git rev-list origin/main` OR in `origin/release/*`.
-      # The fetch-depth: 0 above gives us the full ancestry needed
-      # for the merge-base check.
-      - name: Verify release commit is on main / release branch
+      - name: Resolve and validate target version
+        id: tag
         env:
-          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
-          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION_INPUT: ${{ needs.release-mode.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.release-mode.outputs.commit }}
         run: |
           set -euo pipefail
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            COMMIT="$GITHUB_SHA"
-          else
-            COMMIT=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          TAG="$RELEASE_VERSION_INPUT"
+          if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error title=Invalid version input::version must be X.Y.Z with no v prefix (got: '$TAG')"
+            exit 1
           fi
-          echo "Release target commit: $COMMIT"
-          git fetch --no-tags origin main "+refs/heads/release/*:refs/remotes/origin/release/*" 2>/dev/null || true
-          if git merge-base --is-ancestor "$COMMIT" origin/main; then
-            echo "OK: $COMMIT is reachable from origin/main"
+          if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+            echo "::error title=Tag already exists::Tag '$TAG' already exists locally."
+            exit 1
+          fi
+          python3 scripts/release_api_retry.py require-absent \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --commit "$RELEASE_COMMIT"
+          gh api --paginate --slurp \
+            -H "Accept: application/vnd.github+json" \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            > published-releases.json
+          python3 scripts/release_candidate.py validate-version \
+            --target "$TAG" \
+            --releases-json published-releases.json
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release version stamping
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git ls-files --error-unmatch -- \
+            Makefile \
+            pyproject.toml \
+            uv.lock \
+            cli/defenseclaw/__init__.py \
+            extensions/defenseclaw/package.json \
+            extensions/defenseclaw/package-lock.json \
+            macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj \
+            release/source-install-identity.json >/dev/null
+          SOURCE_DEFAULT="$(python3 scripts/source_release_identity.py check --machine | cut -f1)"
+          if [[ "$SOURCE_DEFAULT" != "$RELEASE_TAG" ]]; then
+            echo "::warning title=GitHub source snapshot uses development version::Installable assets will be stamped $RELEASE_TAG, while GitHub's automatic source archive remains the reviewed main snapshot with development version $SOURCE_DEFAULT."
+          fi
+          # The workflow-dispatch input is the release version authority. Prove
+          # the reviewed stamping code can apply it before native builders run.
+          scripts/stamp-version.sh "$RELEASE_TAG"
+
+      - name: Verify release commit is reviewed and branch-owned
+        id: provenance
+        env:
+          RELEASE_OPERATION: ${{ needs.release-mode.outputs.operation }}
+          SELECTED_COMMIT: ${{ needs.release-mode.outputs.commit }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error title=Untrusted release ref::Run this workflow from protected main, not $GITHUB_REF."
+            exit 1
+          fi
+
+          COMMIT="$SELECTED_COMMIT"
+          test "$(git rev-parse HEAD)" = "$COMMIT"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$COMMIT" origin/main || {
+            echo "::error title=Provenance gate failed::$COMMIT is not reachable from reviewed origin/main."
+            exit 1
+          }
+          if [[ "$RELEASE_OPERATION" == "release" && "$(git rev-parse origin/main)" != "$COMMIT" ]]; then
+            echo "::error title=Provenance gate failed::$COMMIT is not the current origin/main tip."
+            exit 1
+          fi
+          echo "OK: $COMMIT is reviewed on origin/main ($RELEASE_OPERATION)"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
+
+      - name: Name effective baseline snapshot
+        id: baseline-name
+        run: echo "name=effective-upgrade-baselines-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve one authenticated effective baseline snapshot
+        id: baselines
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 scripts/resolve_upgrade_baselines.py \
+            --target-version "$RELEASE_TAG" \
+            --output effective-upgrade-baselines.json
+          python3 - effective-upgrade-baselines.json "$RELEASE_TAG" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          policy_path, target, output_path = sys.argv[1:]
+          document = json.loads(Path(policy_path).read_text(encoding="utf-8"))
+          baselines = document["published_baselines"]
+          windows = document["platform_published_baselines"]["windows"]
+          key = lambda value: tuple(map(int, value.split(".")))
+          older = [item for item in baselines if key(item) < key(target)]
+          windows_older = [item for item in windows if key(item) < key(target)]
+          if not older:
+              raise SystemExit(f"no authenticated published baseline is older than target {target}")
+          with open(output_path, "a", encoding="utf-8") as output:
+              output.write("baselines=" + json.dumps(older, separators=(",", ":")) + "\n")
+              output.write(
+                  "windows_baselines="
+                  + json.dumps(windows_older, separators=(",", ":"))
+                  + "\n"
+              )
+              output.write(f"previous_baseline={older[0]}\n")
+          PY
+
+      - name: Preserve exact effective baseline snapshot
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: ${{ steps.baseline-name.outputs.name }}
+          path: effective-upgrade-baselines.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Select full baselines by release behavior class
+        id: selection
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          LATEST_STABLE: ${{ needs.release-mode.outputs.latest_stable }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_certification.py select-baselines \
+            --baselines effective-upgrade-baselines.json \
+            --scope full \
+            --candidate-version "$RELEASE_TAG" \
+            --latest-stable "$LATEST_STABLE" \
+            --format document \
+            --github-output "$GITHUB_OUTPUT" >/dev/null
+
+  lookup-certification:
+    name: Find exact recent pre-release certification
+    needs: [release-mode, release-preflight]
+    runs-on: ubuntu-latest
+    outputs:
+      reuse: ${{ steps.find.outputs.reuse }}
+      artifact_name: ${{ steps.name.outputs.artifact_name }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.release-preflight.outputs.baseline_artifact }}
+          path: .
+      - name: Materialize the certification workflow executed by this run
+        env:
+          EXECUTED_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "${EXECUTED_WORKFLOW_SHA}^{commit}"
+          git show \
+            "$EXECUTED_WORKFLOW_SHA:.github/workflows/pre-release-certification.yml" \
+            > executed-pre-release-certification.yml
+          test -s executed-pre-release-certification.yml
+      - id: name
+        run: echo "artifact_name=release-candidate-reused-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - id: find
+        name: Locate and verify certification bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_OPERATION: ${{ needs.release-mode.outputs.operation }}
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+          LATEST_STABLE: ${{ needs.release-preflight.outputs.latest_stable }}
+        run: |
+          set -euo pipefail
+          echo "reuse=false" >> "$GITHUB_OUTPUT"
+          # Explicit certification always produces fresh evidence. Only the
+          # final release operation may promote an earlier golden candidate.
+          if [[ "$RELEASE_OPERATION" != "release" ]]; then
             exit 0
           fi
-          for branch in $(git for-each-ref --format='%(refname)' refs/remotes/origin/release/); do
-            if git merge-base --is-ancestor "$COMMIT" "$branch"; then
-              echo "OK: $COMMIT is reachable from $branch"
-              exit 0
-            fi
-          done
-          echo "::error title=Provenance gate failed::Release commit $COMMIT is NOT an ancestor of origin/main or any origin/release/* branch."
-          echo "::error::Releasing from off-tree commits is forbidden — this would let an attacker ship code that never went through PR review and CI."
-          exit 1
+          workflow_version="$(
+            python3 scripts/release_certification.py policy-info \
+              --baselines effective-upgrade-baselines.json \
+              | python3 -c 'import json, sys; print(json.load(sys.stdin)["workflow_version"])'
+          )"
+          workflow_key="${workflow_version#sha256:}"
+          certification_name="dc-cert-${RELEASE_COMMIT}-${RELEASE_TAG}-${workflow_key}"
+          if ! gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$certification_name&per_page=100" \
+            > certification-artifacts.json; then
+            echo "::warning title=Certification lookup unavailable::Running the full certification fallback."
+            exit 0
+          fi
+          if ! candidate="$(python3 - certification-artifacts.json "$certification_name" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          document = json.loads(Path(sys.argv[1]).read_text())
+          expected = sys.argv[2]
+          candidates = [
+              item for item in document.get("artifacts", [])
+              if item.get("name") == expected and not item.get("expired", True)
+          ]
+          candidates.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+          if candidates:
+              selected = candidates[0]
+              print(selected["archive_download_url"] + "\t" + str(selected["workflow_run"]["id"]))
+          PY
+          )"; then
+            echo "::warning title=Certification index rejected::Running the full certification fallback."
+            exit 0
+          fi
+          archive_url="${candidate%%$'\t'*}"
+          certification_run="${candidate##*$'\t'}"
+          if [[ -z "$archive_url" ]]; then
+            echo "No reusable certification exists for $RELEASE_COMMIT / $RELEASE_TAG."
+            exit 0
+          fi
+          if ! gh api "repos/$GITHUB_REPOSITORY/actions/runs/$certification_run" \
+            > certification-run.json; then
+            echo "::warning title=Certification run unavailable::Running the full certification fallback."
+            exit 0
+          fi
+          if ! python3 - certification-run.json "$RELEASE_COMMIT" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          run = json.loads(Path(sys.argv[1]).read_text())
+          expected_sha = sys.argv[2]
+          if run.get("conclusion") != "success":
+              raise SystemExit("certification workflow did not complete successfully")
+          if run.get("path") != ".github/workflows/release.yaml":
+              raise SystemExit("certification artifact was not produced by release.yaml")
+          if run.get("head_sha") != expected_sha:
+              raise SystemExit("certification workflow SHA does not match the release SHA")
+          if run.get("event") not in {"schedule", "workflow_dispatch"}:
+              raise SystemExit("certification workflow event is not trusted")
+          PY
+          then
+            echo "::warning title=Certification run rejected::Previous evidence failed or came from an unexpected workflow. Running the full certification fallback."
+            exit 0
+          fi
+          reject_cache() {
+            echo "::warning title=Certification cache rejected::The cached bundle was missing, stale, invalid, or unavailable. Running the full certification fallback."
+            exit 0
+          }
+          gh api "$archive_url" > certification.zip || reject_cache
+          unzip -q certification.zip -d certification-bundle || reject_cache
+          cmp --silent \
+            effective-upgrade-baselines.json \
+            certification-bundle/release-candidate/effective-upgrade-baselines.json \
+            || reject_cache
+          python3 scripts/release_certification.py verify-metadata \
+            --baselines effective-upgrade-baselines.json \
+            --scope full \
+            --candidate-version "$RELEASE_TAG" \
+            --latest-stable "$LATEST_STABLE" \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "$RELEASE_COMMIT" \
+            --candidate-root certification-bundle/release-candidate \
+            --workflow-file executed-pre-release-certification.yml \
+            --metadata certification-bundle/certification.json \
+            > verified-certification.json || reject_cache
+          python3 - verified-certification.json certification-run.json <<'PY' || reject_cache
+          import json
+          import sys
+          from pathlib import Path
+          receipt = json.loads(Path(sys.argv[1]).read_text())
+          run = json.loads(Path(sys.argv[2]).read_text())
+          if receipt["certification_run_id"] != str(run.get("id")):
+              raise SystemExit("certification metadata run does not match its artifact run")
+          if receipt["certification_run_attempt"] != str(run.get("run_attempt")):
+              raise SystemExit("certification metadata attempt does not match its artifact run")
+          PY
+          certified_artifact_id="$(
+            python3 -c 'import json; print(json.load(open("verified-certification.json"))["artifact_id"])'
+          )" || reject_cache
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$certified_artifact_id" \
+            > certified-candidate-artifact.json || reject_cache
+          python3 - certified-candidate-artifact.json verified-certification.json <<'PY' || reject_cache
+          import json
+          import sys
+          from pathlib import Path
+          artifact = json.loads(Path(sys.argv[1]).read_text())
+          receipt = json.loads(Path(sys.argv[2]).read_text())
+          if str(artifact.get("id")) != receipt["artifact_id"]:
+              raise SystemExit("certified candidate artifact id mismatch")
+          if artifact.get("name") != receipt["artifact_name"]:
+              raise SystemExit("certified candidate artifact name mismatch")
+          if artifact.get("digest") != receipt["artifact_digest"]:
+              raise SystemExit("certified candidate artifact digest mismatch")
+          if artifact.get("expired", True):
+              raise SystemExit("certified candidate artifact has expired")
+          PY
+          python3 scripts/release_candidate.py verify \
+            --root certification-bundle/release-candidate \
+            --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
+            || reject_cache
+          python3 scripts/verify-sigstore-blob.py \
+            --certificate certification-bundle/release-candidate/dist/checksums.txt.pem \
+            --signature certification-bundle/release-candidate/dist/checksums.txt.sig \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            certification-bundle/release-candidate/dist/checksums.txt \
+            || reject_cache
+          echo "reuse=true" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        if: ${{ steps.find.outputs.reuse == 'true' }}
+        with:
+          name: ${{ steps.name.outputs.artifact_name }}
+          path: certification-bundle/release-candidate/
+          if-no-files-found: error
+          retention-days: 2
 
-      # workflow_dispatch path only: create a local lightweight tag at HEAD
-      # so GoReleaser sees a real tag pointing at the commit it's releasing.
-      # This is the canonical pattern documented by the GoReleaser author:
-      # https://carlosbecker.com/posts/goreleaser-create-tag-action/
-      #
-      # Why not GORELEASER_CURRENT_TAG: that env var is documented as a
-      # selector when one commit has multiple tags, not a substitute for a
-      # missing tag. It's also been buggy across goreleaser-action versions
-      # (e.g. ignored entirely in v2.4 — goreleaser/goreleaser-action#260),
-      # whereas a real local tag is unambiguous.
-      #
-      # The tag is local-only — it's never pushed to origin in this step.
-      # If anything later in the job fails, the workflow VM is destroyed
-      # and no remote tag is left dangling. The remote tag is created
-      # atomically alongside the GitHub release in the final step via
-      # `gh release create --target $GITHUB_SHA`, so a failed run leaves
-      # neither a remote tag nor an empty release behind.
-      #
-      # Skipped on push:tags because the tag is already in the fetched
-      # history (GITHUB_REF resolves it).
-      - name: Create local tag for GoReleaser (workflow_dispatch only)
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        env:
-          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          set -euo pipefail
-          git tag "$RELEASE_TAG"
-          echo "Created local tag $RELEASE_TAG at $(git rev-parse HEAD)"
+  build-runtime-candidate:
+    name: Build runtime candidate once
+    needs: [release-preflight, lookup-certification]
+    if: >-
+      ${{
+        always() &&
+        needs.release-preflight.result == 'success' &&
+        (
+          needs.lookup-certification.result != 'success' ||
+          needs.lookup-certification.outputs.reuse != 'true'
+        )
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.names.outputs.runtime }}
+      artifact_id: ${{ steps.runtime-artifact.outputs.artifact-id }}
+      artifact_digest: ${{ steps.runtime-artifact.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Name immutable runtime artifact
+        id: names
+        run: echo "runtime=release-runtime-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.release-preflight.outputs.baseline_artifact }}
+          path: ${{ runner.temp }}/effective-baselines
+
+      - name: Bind effective baseline outside the source checkout
+        run: echo "UPGRADE_BASELINE_POLICY=$RUNNER_TEMP/effective-baselines/effective-upgrade-baselines.json" >> "$GITHUB_ENV"
 
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
 
-      - uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
 
-      - uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
-
-      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           python-version: "3.13"
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: "20"
+      - uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
 
-      # Build the OpenClaw plugin and sync its runtime files into
-      # internal/gateway/connector/openclaw_extension/ so the gateway's
-      # `//go:embed all:openclaw_extension` directive (openclaw.go:40)
-      # resolves at compile time.
-      #
-      # Without this step GoReleaser fails the cross-build with:
-      #   internal/gateway/connector/openclaw.go:40:12:
-      #     pattern all:openclaw_extension: no matching files found
-      # (release run #7 / 25533484548 hit this exactly).
-      #
-      # The embed dir is gitignored (.gitignore:75) and so is
-      # extensions/defenseclaw/{node_modules,dist,src/providers.json}, so
-      # this step does NOT dirty the working tree from git's perspective —
-      # GoReleaser's clean-tree check still passes.
-      #
-      # `make extensions` is `plugin + sync-openclaw-extension`. We use the
-      # full target rather than just `sync-openclaw-extension` (placeholder
-      # mode) so the released gateway binary actually contains the OpenClaw
-      # plugin runtime, not just a "not built" marker — operators get a
-      # working OpenClaw connector out of the curl-to-bash installer.
+      - name: Create local release tag
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+        run: |
+          set -euo pipefail
+          git tag "$RELEASE_TAG"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$RELEASE_COMMIT"
+
+      - name: Stamp runtime source version before native builds
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git ls-files --error-unmatch -- \
+            Makefile \
+            pyproject.toml \
+            uv.lock \
+            cli/defenseclaw/__init__.py \
+            extensions/defenseclaw/package.json \
+            extensions/defenseclaw/package-lock.json \
+            macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj \
+            release/source-install-identity.json >/dev/null
+          scripts/stamp-version.sh "$RELEASE_TAG"
+          python3 scripts/source_release_identity.py check \
+            --expected-release "$RELEASE_TAG"
+
       - name: Build OpenClaw plugin and populate embed tree
         run: make extensions
 
-      # ORDERING NOTE: GoReleaser MUST run before scripts/stamp-version.sh.
-      # GoReleaser refuses to release from a dirty working tree
-      # (https://goreleaser.com/errors/dirty/), and the stamp script edits
-      # tracked files (Makefile, pyproject.toml, cli/__init__.py,
-      # package.json) whenever the tag differs from the in-repo defaults —
-      # the common case for any release after the next planned one. So we
-      # run GoReleaser first against the clean checkout, then stamp, then
-      # build the wheel + plugin tarball (which DO need the stamped
-      # metadata for filenames and embedded __version__).
-      #
-      # GoReleaser picks the version from the local tag (created above on
-      # workflow_dispatch, or already present from push:tags). It never
-      # reads pyproject.toml / package.json / the Makefile, so leaving
-      # those at their in-repo defaults during this step is fine.
-      #
-      # release.disable: true in .goreleaser.yaml means GoReleaser produces
-      # signed, sbom'd artifacts in dist/ but does NOT publish a GitHub
-      # release. We must instead create the release atomically with all
-      # assets at the end of the job, because Immutable Releases rejects
-      # post-create asset uploads.
-      # Privileged release pipeline integrity: the goreleaser-action binary
-      # is SHA-pinned above, but the `version:` parameter previously
-      # selected a mutable semver range ("~> v2"), which lets a
-      # compromised GoReleaser v2.x release execute inside this
-      # job and tamper with signed/SBOM'd artifacts. Pin to an exact
-      # released version. Bump deliberately by editing this string and
-      # verifying the matching GoReleaser release notes — never widen back
-      # to a range.
-      - name: Build artifacts with GoReleaser
+      - name: Restore a clean source checkout before GoReleaser
+        run: |
+          set -euo pipefail
+          git restore --worktree -- \
+            Makefile \
+            pyproject.toml \
+            uv.lock \
+            cli/defenseclaw/__init__.py \
+            extensions/defenseclaw/dist \
+            extensions/defenseclaw/package.json \
+            extensions/defenseclaw/package-lock.json \
+            internal/gateway/connector/openclaw_extension/.placeholder \
+            macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj \
+            release/source-install-identity.json
+          dirty="$(git status --porcelain --untracked-files=all)"
+          if [[ -n "$dirty" ]]; then
+            echo "::error title=Dirty GoReleaser source checkout::Generated release inputs must stay outside the source checkout."
+            printf '%s\n' "$dirty"
+            exit 1
+          fi
+
+      - name: Build gateway archives and SBOMs
         uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.1.0
         with:
           version: "v2.15.4"
-          args: release --clean
+          # These archives are transformed into protected runtime envelopes
+          # below. Sign only the final sealed candidate, never transient bytes.
+          args: release --clean --skip=sign
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
 
-      # Stamp AFTER GoReleaser has finished (so the working tree was clean
-      # for it) but BEFORE building the wheel + plugin tarball, since the
-      # wheel filename comes from pyproject.toml and the plugin tarball
-      # filename comes from the Makefile's VERSION. The stamped
-      # __init__.py is what makes `defenseclaw --version` report the
-      # right value on the installed CLI.
-      #
-      # `steps.tag.outputs.tag` is regex-validated to ^[0-9]+\.[0-9]+\.[0-9]+$
-      # in the resolve step above (no shell metacharacters possible), but
-      # we still pass it via env to keep the script-injection-resistant
-      # style consistent across every step that consumes a workflow
-      # expression in shell.
-      - name: Stamp release version
+      - name: Build stamped CLI, plugin, and upgrade policy
         env:
-          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
         run: |
           set -euo pipefail
           scripts/stamp-version.sh "$RELEASE_TAG"
-
-      - name: Build CLI wheel and plugin tarball
-        run: |
           make dist-cli
           make dist-plugin
-
-      - name: Finalize upgrade manifest and checksums
-        run: |
-          set -euo pipefail
           make dist-upgrade-manifest
-          rm -f dist/checksums.txt.sig dist/checksums.txt.pem
-          make dist-checksums
-          cosign sign-blob \
-            --yes \
-            --output-certificate=dist/checksums.txt.pem \
-            --output-signature=dist/checksums.txt.sig \
-            dist/checksums.txt
+          python3 scripts/release_candidate.py prepare-runtime \
+            --release-dir dist \
+            --version "$RELEASE_TAG"
 
-      - name: Pre-publish upgrade smoke
-        run: make upgrade-smoke-matrix ARGS="--release-dir dist --baseline-mode seed"
-
-      # Atomic: tag + release + every asset are created in a single API
-      # call. On workflow_dispatch, --target $GITHUB_SHA tells gh to create
-      # the tag at this commit if it doesn't yet exist. On push:tags the
-      # tag already points at the right commit, so --target is a no-op
-      # but harmless to pass.
-      - name: Publish GitHub release with all assets
+      - name: Validate and stage publishable runtime bytes
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+        run: |
+          python3 scripts/release_candidate.py stage-runtime \
+            --release-dir dist \
+            --output-dir runtime-candidate \
+            --version "$RELEASE_TAG"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: runtime-artifact
+        with:
+          name: ${{ steps.names.outputs.runtime }}
+          path: runtime-candidate/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  macos-app:
+    name: Build and conditionally notarize unified macOS app
+    needs: [release-preflight, build-runtime-candidate]
+    runs-on: macos-15
+    env:
+      UPGRADE_BASELINE_POLICY: ${{ github.workspace }}/effective-upgrade-baselines.json
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.names.outputs.macos }}
+      verification_status: ${{ steps.app.outputs.verification_status }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Name immutable macOS artifact
+        id: names
+        run: echo "macos=release-macos-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.release-preflight.outputs.baseline_artifact }}
+          path: .
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.build-runtime-candidate.outputs.artifact_name }}
+          path: dist
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+          # This job consumes already-built runtime artifacts and never creates
+          # a uv dependency cache. Avoid a failing post-job upload of an absent
+          # cache directory.
+          enable-cache: false
+
+      - name: Verify and extract exact runtime inputs
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
         run: |
           set -euo pipefail
-          TAG="$RELEASE_TAG"
+          python3 scripts/release_candidate.py verify-runtime --release-dir dist --version "$RELEASE_TAG"
+          python3 scripts/release_candidate.py extract-gateway \
+            --release-dir dist \
+            --output macos-runtime/defenseclaw \
+            --version "$RELEASE_TAG" \
+            --os darwin \
+            --arch arm64
 
-          shopt -s nullglob
-          assets=(
-            dist/*.tar.gz
-            dist/*.zip
-            dist/*.sbom.json
-            dist/checksums.txt
-            dist/checksums.txt.sig
-            dist/checksums.txt.pem
-            dist/*.whl
-            dist/upgrade-manifest.json
+      - name: Build, sign, notarize, and package app
+        id: app
+        env:
+          RELEASE_VERSION: ${{ needs.release-preflight.outputs.tag }}
+          MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_NOTARY_KEY_BASE64: ${{ secrets.MACOS_NOTARY_KEY_BASE64 }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          # The build script notarizes when all five Apple credentials exist,
+          # emits explicitly suffixed ad-hoc assets when none exist, and rejects
+          # partial or invalid credential sets.
+          MACOS_REQUIRE_NOTARIZATION: "false"
+          MACOS_GATEWAY_INPUT: ${{ github.workspace }}/macos-runtime/defenseclaw
+        run: scripts/build-macos-app-release.sh "$RELEASE_VERSION" macos-candidate
+
+      - name: Require explicit macOS trust status
+        env:
+          VERIFICATION_STATUS: ${{ steps.app.outputs.verification_status }}
+        run: |
+          case "$VERIFICATION_STATUS" in
+            notarized)
+              echo "Developer ID signed and notarized macOS assets are ready."
+              ;;
+            unverified)
+              echo "::warning title=Unverified macOS assets::Apple credentials are unavailable; publishing only explicitly suffixed -unverified app assets."
+              ;;
+            *)
+              echo "::error title=Invalid macOS trust status::status=$VERIFICATION_STATUS"
+              exit 1
+              ;;
+          esac
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.names.outputs.macos }}
+          path: macos-candidate/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  windows-installer:
+    name: Build and test signed native Windows Setup
+    needs: [release-preflight, build-runtime-candidate]
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.windows-installer-artifact.outputs.artifact-id }}
+      artifact_digest: ${{ steps.windows-installer-artifact.outputs.artifact-digest }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.28"
+          python-version: "3.13"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.build-runtime-candidate.outputs.artifact_id }}
+          path: candidate-input/runtime
+          merge-multiple: true
+
+      - name: Extract authenticated Windows installer inputs
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RUNTIME_ARTIFACT_DIGEST: ${{ needs.build-runtime-candidate.outputs.artifact_digest }}
+        run: |
+          if ($env:RUNTIME_ARTIFACT_DIGEST -cnotmatch '^(?:sha256:)?[0-9a-f]{64}$') {
+            throw 'The protected runtime artifact has no immutable SHA-256 digest.'
+          }
+          python scripts/release_candidate.py extract-windows-installer-inputs `
+            --release-dir candidate-input/runtime `
+            --output-dir windows-installer-inputs `
+            --version "$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Require real Authenticode release credentials
+        env:
+          WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)) {
+            throw 'Authenticode credentials are required for DefenseClawSetup-x64.exe.'
+          }
+
+      - name: Build and Authenticode-sign native Setup
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+          WINDOWS_SIGNING_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGNING_TIMESTAMP_URL }}
+        run: >-
+          ./scripts/build-windows-installer.ps1
+          -DistRoot windows-installer-inputs
+          -OutRoot windows-installer-output
+          -StateRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-windows-installer-build')
+          -Version $env:RELEASE_TAG
+          -DistributionFlavor oss
+
+      - name: Validate the exact signed Setup lifecycle as a standard user
+        run: >-
+          ./scripts/invoke-windows-setup-standard-user-ci.ps1
+          -Mode setup-acceptance
+          -ArtifactRoot windows-installer-output
+          -StateRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-signed-setup-acceptance')
+          -DiagnosticsRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-signed-setup-diagnostics')
+          -TimeoutSeconds 4500
+
+      - name: Upload exact signed Windows Setup metadata
+        id: windows-installer-artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-windows-installer-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            windows-installer-output/DefenseClawSetup-x64.exe
+            windows-installer-output/DefenseClawSetup-x64.exe.sha256
+            windows-installer-output/DefenseClawSetup-x64.exe.provenance.json
+            windows-installer-output/DefenseClawSetup-x64.exe.sbom.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  windows-real-client-certification:
+    name: Certify signed Setup with real Windows clients
+    needs: [release-preflight, windows-installer]
+    runs-on: windows-latest
+    timeout-minutes: 180
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.windows-certified-artifact.outputs.artifact-id }}
+      artifact_digest: ${{ steps.windows-certified-artifact.outputs.artifact-digest }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.28"
+          python-version: "3.13"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.windows-installer.outputs.artifact_id }}
+          path: windows-certified
+          merge-multiple: true
+
+      - name: Require both real-client provider credentials
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:OPENAI_API_KEY) -or
+              [string]::IsNullOrWhiteSpace($env:ANTHROPIC_API_KEY)) {
+            throw 'OPENAI_API_KEY and ANTHROPIC_API_KEY are required for Windows release certification.'
+          }
+
+      - name: Certify the exact signed Setup with pinned Codex and Claude Code
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          WINDOWS_RELEASE_ARTIFACT_DIGEST: ${{ needs.windows-installer.outputs.artifact_digest }}
+          WINDOWS_RELEASE_VERSION: ${{ needs.release-preflight.outputs.tag }}
+        run: >-
+          ./scripts/windows-native-ci.ps1
+          -Operation release-certification
+          -ArtifactRoot windows-certified
+          -StateRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-real-client-certification')
+
+      - name: Upload real-client diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-windows-real-client-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/defenseclaw-real-client-certification/diagnostics/**
+            ${{ runner.temp }}/defenseclaw-real-client-certification/logs/**
+            ${{ runner.temp }}/defenseclaw-real-client-certification/real-client-results.jsonl
+          if-no-files-found: ignore
+          retention-days: 7
+          include-hidden-files: true
+
+      - name: Upload certified native Windows Setup assets
+        id: windows-certified-artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-windows-certified-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            windows-certified/DefenseClawSetup-x64.exe
+            windows-certified/DefenseClawSetup-x64.exe.sha256
+            windows-certified/DefenseClawSetup-x64.exe.provenance.json
+            windows-certified/DefenseClawSetup-x64.exe.sbom.json
+            windows-certified/DefenseClawSetup-x64.exe.certification.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  assemble-release-candidate:
+    name: Seal exact release candidate
+    needs: [release-preflight, build-runtime-candidate, macos-app, windows-real-client-certification]
+    runs-on: ubuntu-latest
+    env:
+      UPGRADE_BASELINE_POLICY: ${{ github.workspace }}/effective-upgrade-baselines.json
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      artifact_name: ${{ steps.names.outputs.candidate }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      min_upgrade_protocol: ${{ steps.policy.outputs.min_upgrade_protocol }}
+      required_bridge_version: ${{ steps.policy.outputs.required_bridge_version }}
+      windows_baselines: ${{ steps.policy.outputs.windows_baselines }}
+      windows_prebridge_baselines: ${{ steps.policy.outputs.windows_prebridge_baselines }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Name immutable candidate artifact
+        id: names
+        run: echo "candidate=release-candidate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.release-preflight.outputs.baseline_artifact }}
+          path: .
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.build-runtime-candidate.outputs.artifact_name }}
+          path: candidate-input/runtime
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.macos-app.outputs.artifact_name }}
+          path: candidate-input/macos
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.windows-real-client-certification.outputs.artifact_id }}
+          path: candidate-input/windows
+          merge-multiple: true
+
+      - name: Require immutable certified Windows artifact identity
+        env:
+          WINDOWS_CERTIFIED_ARTIFACT_DIGEST: ${{ needs.windows-real-client-certification.outputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          [[ "$WINDOWS_CERTIFIED_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ ]] || {
+            echo "::error title=Missing Windows custody digest::The certified Setup artifact has no immutable SHA-256 digest."
+            exit 1
+          }
+
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
+
+      - name: Resolve immutable published bridge provenance
+        id: bridge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BRIDGE_VERSION="$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(
+              Path("candidate-input/runtime/upgrade-manifest.json").read_text(encoding="utf-8")
+          )
+          bridge = manifest.get("required_bridge_version", "")
+          if not isinstance(bridge, str):
+              raise SystemExit("required_bridge_version must be a string")
+          print(bridge)
+          PY
+          )"
+          echo "version=$BRIDGE_VERSION" >> "$GITHUB_OUTPUT"
+          if [[ -z "$BRIDGE_VERSION" ]]; then
+            echo "Candidate does not require a published bridge."
+            exit 0
+          fi
+
+          git fetch --force --no-tags origin \
+            "refs/tags/$BRIDGE_VERSION:refs/tags/$BRIDGE_VERSION"
+          BRIDGE_COMMIT="$(git rev-parse "refs/tags/$BRIDGE_VERSION^{commit}")"
+          BRIDGE_TREE="$(git show -s --format=%T "$BRIDGE_COMMIT")"
+          gh release view "$BRIDGE_VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,isDraft,isPrerelease,isImmutable,assets \
+            > published-bridge.json
+          mkdir -p candidate-input/bridge
+          gh release download "$BRIDGE_VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir candidate-input/bridge \
+            --pattern checksums.txt \
+            --pattern checksums.txt.pem \
+            --pattern checksums.txt.sig
+
+          python3 - "$BRIDGE_VERSION" published-bridge.json candidate-input/bridge \
+            effective-upgrade-baselines.json <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import re
+          import sys
+
+          from scripts.release_candidate import (
+              MACOS_VERIFICATION_STATUSES,
+              _parse_checksums,
+              payload_asset_names,
+              published_asset_names,
+              windows_release_binary_names,
           )
 
+          expected, release_path, assets_path, baseline_policy_path = sys.argv[1:]
+          release = json.loads(Path(release_path).read_text(encoding="utf-8"))
+          baseline_policy = json.loads(
+              Path(baseline_policy_path).read_text(encoding="utf-8")
+          )
+          platform_baselines = baseline_policy.get("platform_published_baselines")
+          if not isinstance(platform_baselines, dict) or set(platform_baselines) != {"windows"}:
+              raise SystemExit("bridge platform baseline policy must contain exactly windows")
+          windows_baselines = platform_baselines["windows"]
+          if (
+              not isinstance(windows_baselines, list)
+              or any(not isinstance(item, str) for item in windows_baselines)
+              or len(windows_baselines) != len(set(windows_baselines))
+          ):
+              raise SystemExit("bridge Windows baseline policy is invalid")
+          omit_windows_binaries = expected not in windows_baselines
+          expected_state = {
+              "tagName": expected,
+              "isDraft": False,
+              "isPrerelease": False,
+              "isImmutable": True,
+          }
+          for name, value in expected_state.items():
+              if release.get(name) != value or type(release.get(name)) is not type(value):
+                  raise SystemExit(f"required bridge release state mismatch: {name}")
+          rows = release.get("assets")
+          if not isinstance(rows, list):
+              raise SystemExit("required bridge assets must be a list")
+          assets = {}
+          for row in rows:
+              if not isinstance(row, dict):
+                  raise SystemExit("required bridge contains an invalid asset row")
+              name = row.get("name")
+              digest = row.get("digest")
+              if not isinstance(name, str) or name in assets:
+                  raise SystemExit("required bridge contains an invalid or duplicate asset name")
+              if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+                  raise SystemExit(f"required bridge lacks a SHA-256 digest for {name!r}")
+              assets[name] = digest.removeprefix("sha256:")
+          names = set(assets)
+          variants = {
+              status: set(
+                  published_asset_names(
+                      expected,
+                      status,
+                      omit_windows_binaries=omit_windows_binaries,
+                  )
+              )
+              for status in MACOS_VERIFICATION_STATUSES
+          }
+          matches = [status for status, required in variants.items() if names == required]
+          if len(matches) != 1:
+              raise SystemExit("required bridge does not match one complete reviewed asset set")
+          status = matches[0]
+          root = Path(assets_path)
+          checksums = _parse_checksums(root / "checksums.txt")
+          if tuple(sorted(checksums)) != payload_asset_names(expected, status):
+              raise SystemExit("required bridge checksums do not cover the exact payload")
+          omitted_windows = (
+              set(windows_release_binary_names(expected))
+              if omit_windows_binaries
+              else set()
+          )
+          for name, digest in checksums.items():
+              if name in omitted_windows:
+                  if name in assets:
+                      raise SystemExit(f"required bridge unexpectedly published {name}")
+                  continue
+              if assets.get(name) != digest:
+                  raise SystemExit(f"required bridge GitHub digest differs for {name}")
+          for name in ("checksums.txt", "checksums.txt.pem", "checksums.txt.sig"):
+              actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              if assets.get(name) != actual:
+                  raise SystemExit(f"downloaded required bridge digest differs for {name}")
+          publication = "POSIX-only" if omit_windows_binaries else "all-platform"
+          print(f"immutable published bridge verified: {expected} ({status}, {publication})")
+          PY
+
+          python3 scripts/verify-sigstore-blob.py \
+            --certificate candidate-input/bridge/checksums.txt.pem \
+            --signature candidate-input/bridge/checksums.txt.sig \
+            --certificate-identity \
+              "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            candidate-input/bridge/checksums.txt
+          BRIDGE_CHECKSUMS_SHA256="$(sha256sum candidate-input/bridge/checksums.txt | awk '{print $1}')"
+          echo "commit=$BRIDGE_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "tree=$BRIDGE_TREE" >> "$GITHUB_OUTPUT"
+          echo "checksums_sha256=$BRIDGE_CHECKSUMS_SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble checksummed candidate
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+          MACOS_STATUS: ${{ needs.macos-app.outputs.verification_status }}
+          BRIDGE_VERSION: ${{ steps.bridge.outputs.version }}
+          BRIDGE_COMMIT: ${{ steps.bridge.outputs.commit }}
+          BRIDGE_TREE: ${{ steps.bridge.outputs.tree }}
+          BRIDGE_CHECKSUMS_SHA256: ${{ steps.bridge.outputs.checksums_sha256 }}
+        run: |
+          set -euo pipefail
+          provenance_args=()
+          if [[ -n "$BRIDGE_VERSION" ]]; then
+            SOURCE_TREE="$(git show -s --format=%T "$RELEASE_COMMIT")"
+            provenance_args=(
+              --source-tree "$SOURCE_TREE"
+              --bridge-commit "$BRIDGE_COMMIT"
+              --bridge-tree "$BRIDGE_TREE"
+              --bridge-checksums-sha256 "$BRIDGE_CHECKSUMS_SHA256"
+            )
+          fi
+          python3 scripts/release_candidate.py assemble \
+            --runtime-dir candidate-input/runtime \
+            --macos-dir candidate-input/macos \
+            --windows-dir candidate-input/windows \
+            --root release-candidate \
+            --version "$RELEASE_TAG" \
+            --commit "$RELEASE_COMMIT" \
+            --macos-verification-status "$MACOS_STATUS" \
+            --baseline-policy effective-upgrade-baselines.json \
+            "${provenance_args[@]}"
+
+      - name: Sign and authenticate public checksum manifest
+        run: |
+          set -euo pipefail
+          cosign sign-blob \
+            --yes \
+            --bundle=release-candidate/dist/checksums.txt.bundle \
+            --output-certificate=release-candidate/dist/checksums.txt.pem \
+            --output-signature=release-candidate/dist/checksums.txt.sig \
+            release-candidate/dist/checksums.txt
+          python3 scripts/release_candidate.py canonicalize-certificate \
+            --certificate release-candidate/dist/checksums.txt.pem
+          python3 scripts/verify-sigstore-blob.py \
+            --certificate release-candidate/dist/checksums.txt.pem \
+            --signature release-candidate/dist/checksums.txt.sig \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            release-candidate/dist/checksums.txt
+
+      - name: Seal all candidate bytes
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py seal \
+            --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
+          python3 scripts/release_candidate.py verify \
+            --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
+
+      - name: Expose signed upgrade policy
+        id: policy
+        run: |
+          python3 - \
+            release-candidate/dist/upgrade-manifest.json \
+            "$GITHUB_OUTPUT" \
+            '${{ needs.release-preflight.outputs.baselines }}' \
+            '${{ needs.release-preflight.outputs.windows_baselines }}' <<'PY'
+          import json
+          import re
+          import sys
+
+          manifest_path, output_path, reviewed_json, reviewed_windows_json = sys.argv[1:]
+          with open(manifest_path, encoding="utf-8") as handle:
+              manifest = json.load(handle)
+          reviewed = json.loads(reviewed_json)
+          reviewed_windows = json.loads(reviewed_windows_json)
+          schema = manifest.get("schema_version")
+          protocol = manifest.get("min_upgrade_protocol", 1)
+          bridge = manifest.get("required_bridge_version", "")
+          automatic = manifest.get("auto_bridge_from")
+          tested = manifest.get("tested_source_versions")
+          platform_tested = manifest.get("platform_tested_source_versions")
+          runtime_config = manifest.get("runtime_config_version")
+          release_artifacts = manifest.get("release_artifacts")
+          if schema != 2:
+              raise SystemExit("modern release candidate must use upgrade manifest schema 2")
+          if not isinstance(protocol, int) or isinstance(protocol, bool) or protocol < 1:
+              raise SystemExit("invalid min_upgrade_protocol")
+          if bridge and (not isinstance(bridge, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", bridge)):
+              raise SystemExit("invalid required_bridge_version")
+          if not isinstance(reviewed, list) or not reviewed:
+              raise SystemExit("reviewed release baseline matrix is empty or invalid")
+          if not isinstance(reviewed_windows, list) or not reviewed_windows:
+              raise SystemExit("reviewed Windows release baseline matrix is empty or invalid")
+          if tested != reviewed:
+              raise SystemExit("tested_source_versions does not match the reviewed release matrix")
+          if not isinstance(platform_tested, dict) or set(platform_tested) != {"windows"}:
+              raise SystemExit("signed platform tested-source policy must contain exactly windows")
+          if not isinstance(platform_tested["windows"], list):
+              raise SystemExit("platform_tested_source_versions.windows must be a list")
+          windows_bridge_available = not bridge or bridge in reviewed_windows
+          expected_windows = reviewed_windows if windows_bridge_available else []
+          if platform_tested["windows"] != expected_windows:
+              raise SystemExit(
+                  "platform_tested_source_versions.windows does not match the reviewed Windows matrix"
+              )
+          def config_literal(path, name):
+              with open(path, encoding="utf-8") as handle:
+                  source = handle.read()
+              matches = re.findall(
+                  rf"^\s*(?:const[ \t]+)?{re.escape(name)}[ \t]*=[ \t]*([0-9]+)[ \t]*$",
+                  source,
+                  re.MULTILINE,
+              )
+              if len(matches) != 1:
+                  raise SystemExit(f"gateway source must declare one literal {name}")
+              return int(matches[0])
+
+          compatibility_runtime = config_literal(
+              "internal/config/config.go",
+              "CurrentConfigVersion",
+          )
+          if compatibility_runtime != 7:
+              raise SystemExit(
+                  "schema-2 source must retain CurrentConfigVersion=7 as its compatibility ceiling"
+              )
+          source_runtime = compatibility_runtime
+          if bridge:
+              source_runtime = config_literal(
+                  "internal/config/observability_v8_types.go",
+                  "ObservabilityV8ConfigVersion",
+              )
+          expected_runtime = 8 if bridge else 7
+          if source_runtime != expected_runtime or runtime_config != expected_runtime:
+              raise SystemExit(
+                  "runtime_config_version does not attest the expected bridge/hard-cut runtime"
+              )
+          release_version = manifest.get("release_version")
+          expected_gateways = {}
+          for os_name in ("darwin", "linux", "windows"):
+              expected_gateways[os_name] = {
+                  arch: f"defenseclaw_{release_version}_protocol2_{os_name}_{arch}.dcgateway"
+                  for arch in ("amd64", "arm64")
+              }
+          expected_artifacts = {
+              "wheel": f"defenseclaw-{release_version}-2-py3-none-any.dcwheel",
+              "gateways": expected_gateways,
+          }
+          if release_artifacts != expected_artifacts:
+              raise SystemExit(
+                  "release_artifacts does not bind the exact protected candidate payload"
+              )
+          windows_prebridge = list(platform_tested["windows"])
+          if bridge and windows_bridge_available:
+              if bridge not in platform_tested["windows"]:
+                  raise SystemExit("required bridge is absent from the signed Windows matrix")
+              bridge_key = tuple(map(int, bridge.split(".")))
+              windows_prebridge = [
+                  item
+                  for item in windows_prebridge
+                  if tuple(map(int, item.split("."))) < bridge_key
+              ]
+              if not windows_prebridge:
+                  raise SystemExit("signed Windows matrix has no pre-bridge source")
+          elif bridge:
+              if platform_tested["windows"]:
+                  raise SystemExit(
+                      "unpublished Windows bridge requires an empty signed Windows matrix"
+                  )
+              windows_prebridge = []
+          if automatic is not None:
+              if not isinstance(automatic, list) or not automatic:
+                  raise SystemExit("hard-cut auto_bridge_from must be a non-empty list")
+              bridge_key = tuple(map(int, bridge.split(".")))
+              expected_automatic = [
+                  item
+                  for item in reviewed
+                  if tuple(map(int, item.split("."))) < bridge_key
+              ]
+              if automatic != expected_automatic:
+                  raise SystemExit(
+                      "hard-cut auto_bridge_from does not match the reviewed pre-bridge matrix"
+                  )
+          with open(output_path, "a", encoding="utf-8") as output:
+              output.write(f"min_upgrade_protocol={protocol}\n")
+              output.write(f"required_bridge_version={bridge}\n")
+              output.write(
+                  "windows_baselines="
+                  + json.dumps(platform_tested["windows"], separators=(",", ":"))
+                  + "\n"
+              )
+              output.write(
+                  "windows_prebridge_baselines="
+                  + json.dumps(windows_prebridge, separators=(",", ":"))
+                  + "\n"
+              )
+          PY
+
+      # v4.5.0+ is required here because certification binds the GitHub
+      # artifact archive through the action's artifact-digest output.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload
+        with:
+          name: ${{ steps.names.outputs.candidate }}
+          path: release-candidate/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Require candidate artifact digest output
+        env:
+          CANDIDATE_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$CANDIDATE_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ ]]; then
+            echo "::error title=Missing candidate artifact digest::The pinned upload action did not return a lowercase SHA-256 digest."
+            exit 1
+          fi
+
+  full-certification:
+    name: Run full signed pre-release certification
+    needs:
+      - release-preflight
+      - lookup-certification
+      - windows-real-client-certification
+      - assemble-release-candidate
+    if: >-
+      ${{
+        always() &&
+        needs.release-preflight.result == 'success' &&
+        needs.windows-real-client-certification.result == 'success' &&
+        needs.assemble-release-candidate.result == 'success' &&
+        (
+          needs.lookup-certification.result != 'success' ||
+          needs.lookup-certification.outputs.reuse != 'true'
+        )
+      }}
+    uses: ./.github/workflows/pre-release-certification.yml
+    permissions:
+      contents: read
+      actions: read
+    with:
+      candidate_artifact: ${{ needs.assemble-release-candidate.outputs.artifact_name }}
+      version: ${{ needs.release-preflight.outputs.tag }}
+      commit: ${{ needs.release-preflight.outputs.commit }}
+      baselines: ${{ needs.release-preflight.outputs.certification_baselines }}
+      upgrade_cases: ${{ needs.release-preflight.outputs.certification_cases }}
+      min_upgrade_protocol: ${{ needs.assemble-release-candidate.outputs.min_upgrade_protocol }}
+      required_bridge_version: ${{ needs.assemble-release-candidate.outputs.required_bridge_version }}
+      windows_prebridge_baselines: ${{ needs.assemble-release-candidate.outputs.windows_prebridge_baselines }}
+
+  record-certification:
+    name: Record exact golden candidate
+    needs:
+      - release-preflight
+      - lookup-certification
+      - assemble-release-candidate
+      - full-certification
+    if: >-
+      ${{
+        always() &&
+        (
+          needs.lookup-certification.result != 'success' ||
+          needs.lookup-certification.outputs.reuse != 'true'
+        ) &&
+        needs.assemble-release-candidate.result == 'success' &&
+        needs.full-certification.result == 'success'
+      }}
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ steps.names.outputs.certification }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.assemble-release-candidate.outputs.artifact_name }}
+          path: release-candidate
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.release-preflight.outputs.baseline_artifact }}
+          path: .
+      - name: Materialize the certification workflow executed by this run
+        env:
+          EXECUTED_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "${EXECUTED_WORKFLOW_SHA}^{commit}"
+          git show \
+            "$EXECUTED_WORKFLOW_SHA:.github/workflows/pre-release-certification.yml" \
+            > executed-pre-release-certification.yml
+          test -s executed-pre-release-certification.yml
+      - name: Require candidate and certification to use one baseline snapshot
+        run: cmp --silent effective-upgrade-baselines.json release-candidate/effective-upgrade-baselines.json
+      - id: names
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+        run: |
+          set -euo pipefail
+          workflow_version="$(
+            python3 scripts/release_certification.py policy-info \
+              --baselines effective-upgrade-baselines.json \
+              | python3 -c 'import json, sys; print(json.load(sys.stdin)["workflow_version"])'
+          )"
+          workflow_key="${workflow_version#sha256:}"
+          echo "certification=dc-cert-${RELEASE_COMMIT}-${RELEASE_TAG}-${workflow_key}" >> "$GITHUB_OUTPUT"
+      - name: Bind certification metadata to candidate bytes
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+          LATEST_STABLE: ${{ needs.release-preflight.outputs.latest_stable }}
+          TESTED_BASELINES: ${{ needs.release-preflight.outputs.certification_baselines }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.assemble-release-candidate.outputs.artifact_id }}
+          CANDIDATE_ARTIFACT_NAME: ${{ needs.assemble-release-candidate.outputs.artifact_name }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.assemble-release-candidate.outputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          mapfile -t tested < <(
+            python3 -c 'import json, os; print(*json.loads(os.environ["TESTED_BASELINES"]), sep="\n")'
+          )
+          tested_args=()
+          for baseline in "${tested[@]}"; do
+            tested_args+=(--tested-baseline "$baseline")
+          done
+          python3 scripts/release_certification.py write-metadata \
+            --baselines effective-upgrade-baselines.json \
+            --scope full \
+            --candidate-version "$RELEASE_TAG" \
+            --latest-stable "$LATEST_STABLE" \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "$RELEASE_COMMIT" \
+            --candidate-root release-candidate \
+            --artifact-id "$CANDIDATE_ARTIFACT_ID" \
+            --artifact-name "$CANDIDATE_ARTIFACT_NAME" \
+            --artifact-digest "$CANDIDATE_ARTIFACT_DIGEST" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --workflow-file executed-pre-release-certification.yml \
+            "${tested_args[@]}" \
+            --output certification.json
+          mkdir certification-bundle
+          cp -R release-candidate certification-bundle/release-candidate
+          cp certification.json certification-bundle/certification.json
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: ${{ steps.names.outputs.certification }}
+          path: certification-bundle/
+          if-no-files-found: error
+          retention-days: 30
+
+  select-candidate:
+    name: Select certified candidate for promotion
+    needs:
+      - release-preflight
+      - lookup-certification
+      - assemble-release-candidate
+      - full-certification
+      - record-certification
+    if: >-
+      ${{
+        always() &&
+        needs.release-preflight.result == 'success' &&
+        (
+          (
+            needs.lookup-certification.result == 'success' &&
+            needs.lookup-certification.outputs.reuse == 'true'
+          ) ||
+          (
+            needs.assemble-release-candidate.result == 'success' &&
+            needs.full-certification.result == 'success' &&
+            needs.record-certification.result == 'success'
+          )
+        )
+      }}
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ steps.select.outputs.artifact_name }}
+      source: ${{ steps.select.outputs.source }}
+    steps:
+      - id: select
+        env:
+          REUSE: ${{ needs.lookup-certification.result == 'success' && needs.lookup-certification.outputs.reuse == 'true' }}
+          REUSED_ARTIFACT: ${{ needs.lookup-certification.outputs.artifact_name }}
+          FRESH_ARTIFACT: ${{ needs.assemble-release-candidate.outputs.artifact_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$REUSE" == "true" ]]; then
+            echo "artifact_name=$REUSED_ARTIFACT" >> "$GITHUB_OUTPUT"
+            echo "source=recent-certification" >> "$GITHUB_OUTPUT"
+          else
+            test -n "$FRESH_ARTIFACT"
+            echo "artifact_name=$FRESH_ARTIFACT" >> "$GITHUB_OUTPUT"
+            echo "source=full-certification-fallback" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish-release:
+    name: Promote exact certified candidate
+    needs:
+      - release-mode
+      - release-preflight
+      - select-candidate
+    if: >-
+      ${{
+        always() &&
+        needs.release-mode.outputs.operation == 'release' &&
+        needs.release-preflight.result == 'success' &&
+        needs.select-candidate.result == 'success'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.select-candidate.outputs.artifact_name }}
+          path: release-candidate
+
+      - name: Verify the exact tested candidate
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+          CERTIFICATION_SOURCE: ${{ needs.select-candidate.outputs.source }}
+        run: |
+          set -euo pipefail
+          echo "Promoting candidate from $CERTIFICATION_SOURCE."
+          python3 scripts/release_candidate.py verify \
+            --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
+          python3 scripts/verify-sigstore-blob.py \
+            --certificate release-candidate/dist/checksums.txt.pem \
+            --signature release-candidate/dist/checksums.txt.sig \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            release-candidate/dist/checksums.txt
+
+      - name: Recheck remote release namespace
+        id: release-namespace
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+        run: |
+          set -euo pipefail
+          set +e
+          python3 scripts/release_api_retry.py reconcile-create \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --commit "$RELEASE_COMMIT" \
+            --candidate-root release-candidate \
+            --omit-windows-binaries \
+            --check-main
+          namespace_status=$?
+          set -e
+          case "$namespace_status" in
+            0) echo "create_required=false" >> "$GITHUB_OUTPUT" ;;
+            10) echo "create_required=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error title=Release namespace conflict::Remote custody is neither absent nor the exact immutable candidate."; exit 1 ;;
+          esac
+
+      # With Immutable Releases enabled, current gh creates a draft, uploads
+      # every selected sealed asset, and only then publishes. This is the only step
+      # in the workflow that can create the remote release or tag.
+      - name: Publish tag and selected sealed assets
+        if: steps.release-namespace.outputs.create_required == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+        run: |
+          set -euo pipefail
+          echo "::notice title=Native Windows Setup included::Legacy raw Windows archives remain omitted; the signed, certified DefenseClawSetup-x64.exe is published."
+          mapfile -t names < <(
+            python3 scripts/release_candidate.py list-assets \
+              --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
+              --omit-windows-binaries
+          )
+          assets=()
+          for name in "${names[@]}"; do
+            assets+=("release-candidate/dist/$name")
+          done
+
           notes_args=()
-          if [ -f dist/CHANGELOG.md ]; then
-            notes_args=(--notes-file dist/CHANGELOG.md)
+          if [[ -f release-candidate/RELEASE_NOTES.md ]]; then
+            notes_args=(--notes-file release-candidate/RELEASE_NOTES.md)
           else
             notes_args=(--generate-notes)
           fi
 
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "$TAG" \
-            "${notes_args[@]}" \
-            "${assets[@]}"
+          published=0
+          for attempt in 1 2 3; do
+            if timeout --signal=TERM --kill-after=30s 10m \
+              gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$RELEASE_COMMIT" \
+              --title "$RELEASE_TAG" \
+              "${notes_args[@]}" \
+              "${assets[@]}"; then
+              published=1
+              break
+            fi
 
-          echo ""
-          echo "Release $TAG created with ${#assets[@]} assets at $GITHUB_SHA"
-          echo "https://github.com/${GITHUB_REPOSITORY}/releases/tag/$TAG"
+            echo "::warning title=Release create returned an error::Reconciling remote custody before considering attempt $((attempt + 1))."
+            set +e
+            python3 scripts/release_api_retry.py reconcile-create \
+              --repository "$GITHUB_REPOSITORY" \
+              --tag "$RELEASE_TAG" \
+              --commit "$RELEASE_COMMIT" \
+              --candidate-root release-candidate \
+              --omit-windows-binaries \
+              --check-main
+            reconcile_status=$?
+            set -e
+            if [[ "$reconcile_status" == "0" ]]; then
+              published=1
+              break
+            fi
+            if [[ "$reconcile_status" != "10" ]]; then
+              echo "::error title=Ambiguous release create::Remote custody is neither absent nor the exact immutable candidate; refusing another create."
+              exit 1
+            fi
+            if [[ "$attempt" == "3" ]]; then
+              echo "::error title=Release API retries exhausted::The tag and release remained absent after three bounded create attempts."
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
+          [[ "$published" == "1" ]]
+
+      - name: Prove published asset custody
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_api_retry.py prove-published \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --commit "$RELEASE_COMMIT" \
+            --candidate-root release-candidate \
+            --omit-windows-binaries
+          echo "Release $RELEASE_TAG published from tested commit $RELEASE_COMMIT"

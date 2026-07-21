@@ -20,10 +20,10 @@ ships in this folder.
 
 | Path                            | Purpose                                             |
 | ------------------------------- | --------------------------------------------------- |
-| \`defenseclaw-gateway\`           | Prebuilt gateway binary (installed root:wheel 0755) |
+| \`defenseclaw\`                   | Prebuilt gateway binary (installed root:wheel 0755) |
 | \`install.sh\`                    | Orchestrator: config, LaunchDaemon, per-user hooks  |
 | \`uninstall.sh\`                  | Bootout daemon + scrub agent hook configs           |
-| \`com.defenseclaw.gateway.plist\` | LaunchDaemon plist                                  |
+| \`com.cisco.secureclient.defenseclaw.plist\` | LaunchDaemon plist                                  |
 | \`lib/installer_lib.sh\`          | Pure helpers (sourced by install.sh)                |
 | \`lib/scrub_agent_configs.py\`    | Agent hook config scrubber (stdlib Python)          |
 
@@ -43,7 +43,7 @@ place it.
 
 Two paths are supported for the LaunchDaemon plist source:
 
-- **Bundle default** (\`com.defenseclaw.gateway.plist\` next to
+- **Bundle default** (\`com.cisco.secureclient.defenseclaw.plist\` next to
   \`install.sh\`) — used automatically. The bundled plist inherits the
   extracting user's uid when you unpack the tarball; that's fine
   because its content came from this signed bundle.

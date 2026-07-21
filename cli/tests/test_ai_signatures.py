@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from defenseclaw.inventory.ai_signatures import (
+    ALLOWED_CATEGORIES,
     SignaturePackError,
     install_signature_pack,
     load_ai_signatures,
@@ -40,9 +41,46 @@ def test_ai_signature_catalog_contains_supported_and_shadow_agents():
         "openhands",
         "antigravity",
         "lmstudio",
+        "lemonade",
         "claude-desktop",
     }:
         assert expected in ids
+
+
+def test_lemonade_signature_tracks_server_surface():
+    signatures = {sig.id: sig for sig in load_ai_signatures()}
+    lemonade = signatures["lemonade"]
+
+    assert lemonade.name == "Lemonade Server"
+    assert lemonade.vendor == "Lemonade"
+    assert lemonade.category == "ai_cli"
+    assert {"lemonade", "lemond", "lemonade-tray", "LemonadeServer.exe"} <= set(lemonade.binary_names)
+    assert {"lemonade", "lemond", "lemonade-tray", "LemonadeServer.exe"} <= set(lemonade.process_names)
+    assert {"Lemonade.app", "Lemonade"} <= set(lemonade.application_names)
+    assert {
+        "~/.cache/lemonade/config.json",
+        "/Library/Application Support/lemonade/.cache/config.json",
+        "/var/lib/lemonade/.cache/lemonade/config.json",
+        "/opt/var/lib/lemonade/.cache/lemonade/config.json",
+    } <= set(lemonade.config_paths)
+    assert {
+        "LEMONADE_HOST",
+        "LEMONADE_PORT",
+        "LEMONADE_CACHE_DIR",
+        "LEMONADE_API_KEY",
+        "LEMONADE_ADMIN_API_KEY",
+    } <= set(lemonade.env_var_names)
+    assert {"HF_HOME", "HF_HUB_CACHE", "FLM_MODEL_PATH"}.isdisjoint(lemonade.env_var_names)
+    assert {"localhost:13305", "127.0.0.1:13305"} <= set(lemonade.domain_patterns)
+    assert {"lemonade", "lemond"} <= set(lemonade.history_patterns)
+    assert {
+        "http://127.0.0.1:13305/live",
+        "http://127.0.0.1:13305/v1/models",
+        "http://127.0.0.1:13305/api/v1/models",
+        "http://127.0.0.1:13305/v1/health",
+        "http://127.0.0.1:13305/api/v1/health",
+    } <= set(lemonade.local_endpoints)
+    assert "local_model" in ALLOWED_CATEGORIES
 
 
 def test_packaged_catalog_matches_go_catalog():

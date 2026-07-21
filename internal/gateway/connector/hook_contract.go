@@ -97,6 +97,82 @@ var builtinHookContracts = map[string][]HookContract{
 		Connector:               "codex",
 		ContractID:              "codex-hooks-v1",
 		MinAgentVersion:         "0.124.0",
+		MaxAgentVersion:         "0.129.0",
+		HookScriptVersion:       "v6",
+		HookConfigPathTemplates: []string{"~/.codex/config.toml"},
+		ResponseFieldName:       "codex_output",
+		Events: []string{
+			"SessionStart",
+			"UserPromptSubmit",
+			"PreToolUse",
+			"PermissionRequest",
+			"PostToolUse",
+			"Stop",
+		},
+		AIDSurfaces: []string{"prompt", "tool_call", "tool_result"},
+		Capabilities: HookCapability{
+			CanBlock:     true,
+			CanAskNative: false,
+			BlockEvents: []string{
+				"UserPromptSubmit",
+				"PreToolUse",
+				"PermissionRequest",
+				"PostToolUse",
+				"Stop",
+			},
+			SupportsFailClosed: true,
+			Scope:              "user",
+		},
+		SupportsTraceparent: true,
+		NativeOTLP:          true,
+		Notes: []string{
+			"Codex 0.124.0 through 0.128.x expose six stable hook events. They have no hooks/list trust introspection and ignore hooks.state; validate them only as legacy no-bypass execution.",
+			"DefenseClaw may preseed inert hook state for upgrade continuity, but does not describe 0.124.0 through 0.128.x as trust-certified.",
+			"Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage.",
+		},
+	}, {
+		Connector:               "codex",
+		ContractID:              "codex-hooks-v2",
+		MinAgentVersion:         "0.129.0",
+		MaxAgentVersion:         "0.133.0",
+		HookScriptVersion:       "v6",
+		HookConfigPathTemplates: []string{"~/.codex/config.toml"},
+		ResponseFieldName:       "codex_output",
+		Events: []string{
+			"SessionStart",
+			"UserPromptSubmit",
+			"PreToolUse",
+			"PermissionRequest",
+			"PostToolUse",
+			"PreCompact",
+			"PostCompact",
+			"Stop",
+		},
+		AIDSurfaces: []string{"prompt", "tool_call", "tool_result"},
+		Capabilities: HookCapability{
+			CanBlock:     true,
+			CanAskNative: false,
+			BlockEvents: []string{
+				"UserPromptSubmit",
+				"PreToolUse",
+				"PermissionRequest",
+				"PostToolUse",
+				"Stop",
+			},
+			SupportsFailClosed: true,
+			Scope:              "user",
+		},
+		SupportsTraceparent: true,
+		NativeOTLP:          true,
+		Notes: []string{
+			"Codex 0.129.x through 0.132.x add PreCompact and PostCompact plus hooks/list trust introspection, for eight supported events.",
+			"On native Windows the generic and command_windows values must remain byte-identical so 0.129.x and newer clients derive the same trusted hook identity.",
+			"Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage.",
+		},
+	}, {
+		Connector:               "codex",
+		ContractID:              "codex-hooks-v3",
+		MinAgentVersion:         "0.133.0",
 		DefaultForUnversioned:   true,
 		HookScriptVersion:       "v6",
 		HookConfigPathTemplates: []string{"~/.codex/config.toml"},
@@ -130,16 +206,17 @@ var builtinHookContracts = map[string][]HookContract{
 		SupportsTraceparent: true,
 		NativeOTLP:          true,
 		Notes: []string{
-			"Codex hooks were made stable in 0.124.0. DefenseClaw leaves the upper bound open until upstream publishes a breaking hook change.",
+			"Codex 0.133.0 is the first release with the complete ten-event DefenseClaw matrix, adding SubagentStart and SubagentStop.",
+			"Native release certification verifies hooks/list reports every owned handler enabled and trusted without a manual approval step.",
 			"Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage.",
 		},
 	}},
 	"claudecode": {{
 		Connector:               "claudecode",
 		ContractID:              "claudecode-hooks-v1",
-		MinAgentVersion:         "2.1.144",
+		MinAgentVersion:         "2.1.152",
 		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v6",
+		HookScriptVersion:       "v7",
 		HookConfigPathTemplates: []string{"~/.claude/settings.json"},
 		ResponseFieldName:       "claude_code_output",
 		Events: []string{
@@ -182,13 +259,13 @@ var builtinHookContracts = map[string][]HookContract{
 				"UserPromptExpansion",
 				"PreToolUse",
 				"PermissionRequest",
-				"PostToolUse",
 				"PostToolBatch",
 				"TaskCreated",
 				"TaskCompleted",
 				"TeammateIdle",
 				"Stop",
 				"SubagentStop",
+				"ConfigChange",
 				"PreCompact",
 				"Elicitation",
 				"ElicitationResult",
@@ -199,8 +276,11 @@ var builtinHookContracts = map[string][]HookContract{
 		SupportsTraceparent: true,
 		NativeOTLP:          true,
 		Notes: []string{
-			"Pinned to the current documented Claude Code hook surface as of 2.1.144; older Claude Code releases exposed smaller hook event sets.",
+			"Pinned to the documented Claude Code hook surface as of 2.1.152, which introduced MessageDisplay; older releases exposed smaller hook event sets.",
 			"Claude Code PreToolUse supports native HITL via permissionDecision=ask.",
+			"PostToolUse findings are advisory because the inspected tool side effects have already occurred.",
+			"PostToolBatch can block continuation before the next model call, but cannot undo completed batch side effects.",
+			"ConfigChange is blockable except when source=policy_settings, where Claude Code ignores blocking decisions.",
 		},
 	}},
 	"hermes": {{
@@ -209,7 +289,7 @@ var builtinHookContracts = map[string][]HookContract{
 		MinAgentVersion:         "0.11.0",
 		DefaultForUnversioned:   true,
 		HookScriptVersion:       "v6",
-		HookConfigPathTemplates: []string{"~/.hermes/config.yaml"},
+		HookConfigPathTemplates: []string{"$HERMES_HOME/config.yaml", "%LOCALAPPDATA%/hermes/config.yaml", "~/.hermes/config.yaml"},
 		ResponseFieldName:       "hook_output",
 		// Hermes' shell-hook surface (cli-config.yaml `hooks:` block).
 		// Only pre_tool_call can block; pre_llm_call injects context;
@@ -259,7 +339,7 @@ var builtinHookContracts = map[string][]HookContract{
 		ContractID:              "cursor-hooks-v1",
 		MinAgentVersion:         "1.7.0",
 		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v6",
+		HookScriptVersion:       "v8",
 		HookConfigPathTemplates: []string{"~/.cursor/hooks.json"},
 		ResponseFieldName:       "hook_output",
 		Events: []string{
@@ -309,6 +389,7 @@ var builtinHookContracts = map[string][]HookContract{
 		Notes: []string{
 			"Cursor 1.7 introduced beta hooks for the agent loop.",
 			"Cursor native ask is limited to beforeShellExecution and beforeMCPExecution.",
+			"Every command-hook invocation returns a non-empty JSON object; beforeSubmitPrompt uses continue while permission gates use permission.",
 		},
 	}},
 	"windsurf": {{
@@ -727,6 +808,7 @@ func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
 	profile.CompatibilityStatus = resolution.Status
 	profile.CompatibilityReason = resolution.Reason
 	if resolution.Contract.ContractID == "" {
+		profile.Correlation = ExplicitCanonicalCorrelationSpec(profile.Name)
 		return profile
 	}
 	contract := resolution.Contract
@@ -738,6 +820,13 @@ func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
 	profile.SupportsTraceparent = contract.SupportsTraceparent
 	profile.ResponseFieldName = contract.ResponseFieldName
 	profile.ContentEnvelopeKey = contract.ContentEnvelopeKey
+	if spec, ok := CorrelationSpecForConnector(profile.Name, contract.ContractID); ok {
+		profile.Correlation = spec
+	} else {
+		// Unknown/mismatched contracts fail closed for identity mapping. The
+		// hook can still be inspected, but only exact canonical IDs are read.
+		profile.Correlation = ExplicitCanonicalCorrelationSpec(profile.Name)
+	}
 
 	contractCaps := contract.Capabilities
 	if profile.Capabilities.ConfigPath != "" && contractCaps.ConfigPath == "" {

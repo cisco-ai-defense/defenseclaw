@@ -18,7 +18,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Supersede old commits within one PR, but never cancel a previous main
+  # merge's exact-SHA release canary when another merge lands.
+  group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -33,22 +35,117 @@ jobs:
           # push or fetch on our behalf if a transient compromise
           # injects shell.
           persist-credentials: false
-      # Catches drift between the four in-repo version sources (Makefile,
-      # pyproject.toml, cli/__init__.py, package.json) before it can ship
-      # in a release. The release workflow restamps from the git tag, but
-      # PRs still need to keep the in-repo defaults in sync so local dev
-      # builds (`make dist`) produce artifacts whose names match what
-      # install.sh / `defenseclaw upgrade` will look up at the next tag.
+      # Keep local-development package metadata internally consistent. The
+      # release workflow dynamically stamps its dispatch version, so this
+      # check does not pin or preselect the next release number.
       - run: make check-version-sync
 
   upgrade-manifest:
     name: Upgrade Manifest Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
       # Ensures future releases carry a release-owned migration contract
       # before the release workflow publishes upgrade-manifest.json.
       - run: make check-upgrade-manifest
+
+  release-validation-plan:
+    name: Release Validation Plan
+    runs-on: ubuntu-latest
+    outputs:
+      sensitive: ${{ steps.paths.outputs.sensitive }}
+      pr_matrix: ${{ steps.pr.outputs.matrix }}
+      medium_matrix: ${{ steps.medium.outputs.matrix }}
+      candidate_version: ${{ steps.version.outputs.candidate_version }}
+      latest_stable: ${{ steps.version.outputs.latest_stable }}
+      baseline_artifact: ${{ steps.baseline-name.outputs.name }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: paths
+        name: Detect release-sensitive paths without network access
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            python3 scripts/release_certification.py paths \
+              --base "$BASE_SHA" --head "$HEAD_SHA" \
+              --github-output "$GITHUB_OUTPUT"
+          else
+            echo 'sensitive=false' >> "$GITHUB_OUTPUT"
+          fi
+      - id: version
+        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
+        name: Resolve candidate against live stable state when needed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp \
+            -H "Accept: application/vnd.github+json" \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            > published-releases.json
+          source_version="$(python3 scripts/source_release_identity.py check --machine | cut -f1)"
+          python3 scripts/release_certification.py resolve-version \
+            --source-version "$source_version" \
+            --published-releases published-releases.json \
+            --github-output "$GITHUB_OUTPUT" >/dev/null
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
+      - id: baseline-name
+        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
+        run: echo "name=ci-effective-upgrade-baselines-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - id: baselines
+        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
+        name: Resolve one authenticated effective baseline snapshot
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_VERSION: ${{ steps.version.outputs.candidate_version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/resolve_upgrade_baselines.py \
+            --target-version "$CANDIDATE_VERSION" \
+            --output effective-upgrade-baselines.json
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
+        with:
+          name: ${{ steps.baseline-name.outputs.name }}
+          path: effective-upgrade-baselines.json
+          if-no-files-found: error
+          retention-days: 2
+      - id: pr
+        if: ${{ github.event_name == 'pull_request' && steps.paths.outputs.sensitive == 'true' }}
+        name: Select risky-PR baselines by behavior class
+        env:
+          CANDIDATE_VERSION: ${{ steps.version.outputs.candidate_version }}
+          LATEST_STABLE: ${{ steps.version.outputs.latest_stable }}
+        run: |
+          python3 scripts/release_certification.py select-baselines \
+            --baselines effective-upgrade-baselines.json \
+            --scope pr \
+            --candidate-version "$CANDIDATE_VERSION" \
+            --latest-stable "$LATEST_STABLE" \
+            --github-output "$GITHUB_OUTPUT" >/dev/null
+      - id: medium
+        if: ${{ github.event_name == 'push' }}
+        name: Select main-merge smoke by behavior class
+        env:
+          CANDIDATE_VERSION: ${{ steps.version.outputs.candidate_version }}
+          LATEST_STABLE: ${{ steps.version.outputs.latest_stable }}
+        run: |
+          python3 scripts/release_certification.py select-baselines \
+            --baselines effective-upgrade-baselines.json \
+            --scope medium \
+            --candidate-version "$CANDIDATE_VERSION" \
+            --latest-stable "$LATEST_STABLE" \
+            --github-output "$GITHUB_OUTPUT" >/dev/null
 
   go-lint:
     name: Go Lint
@@ -68,9 +165,14 @@ jobs:
       - run: make plugin
       - run: make go-lint
 
-  go-test:
-    name: Go Test
+  go-test-gateway:
+    name: Go Gateway Test (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -84,7 +186,94 @@ jobs:
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
-      - run: make go-test-cov
+      - name: Run gateway race/coverage shard
+        env:
+          GO_TEST_SHARD: ${{ matrix.shard }}
+          GO_TEST_SHARDS: 4
+        run: |
+          set -euo pipefail
+          test_regex="$(python3 scripts/go_test_shards.py \
+            --package-dir internal/gateway \
+            --shard-count "$GO_TEST_SHARDS" \
+            --shard-index "$GO_TEST_SHARD")"
+          go test -race -count=1 -timeout 45m \
+            -coverprofile="coverage-go-gateway-$GO_TEST_SHARD.out" \
+            -run "$test_regex" \
+            ./internal/gateway
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: go-coverage-gateway-${{ matrix.shard }}
+          path: coverage-go-gateway-${{ matrix.shard }}.out
+          retention-days: 1
+
+  go-test-other:
+    name: Go Test (remaining packages)
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - run: make plugin
+      - name: Run remaining Go race/coverage suite once
+        run: |
+          set -euo pipefail
+          mapfile -t packages < <(
+            go list ./... | grep -v '^github.com/defenseclaw/defenseclaw/internal/gateway$'
+          )
+          test "${#packages[@]}" -gt 0
+          go test -race -count=1 -timeout 45m \
+            -coverprofile=coverage-go-other.out \
+            "${packages[@]}"
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: go-coverage-other
+          path: coverage-go-other.out
+          retention-days: 1
+
+  go-test:
+    # Preserve the existing required-check name while combining the complete
+    # race/coverage suite from the gateway shards and all remaining packages.
+    name: Go Test
+    needs: [go-test-gateway, go-test-other]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Go test partition
+        env:
+          GATEWAY_RESULT: ${{ needs.go-test-gateway.result }}
+          OTHER_RESULT: ${{ needs.go-test-other.result }}
+        run: test "$GATEWAY_RESULT" = success && test "$OTHER_RESULT" = success
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: go-coverage-*
+          path: coverage-parts
+          merge-multiple: true
+      - name: Combine Go coverage
+        run: |
+          set -euo pipefail
+          mapfile -t coverage_parts < <(
+            find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
+          )
+          test "${#coverage_parts[@]}" -eq 5
+          python3 scripts/merge_go_coverage.py \
+            --output coverage.out \
+            "${coverage_parts[@]}"
+          go tool cover -func=coverage.out >/dev/null
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: go-coverage
@@ -116,8 +305,49 @@ jobs:
           name: defenseclaw-${{ matrix.goos }}-${{ matrix.goarch }}
           path: defenseclaw-${{ matrix.goos }}-${{ matrix.goarch }}
 
-  python-lint-test:
-    name: Python Lint & Test
+  python-test:
+    name: Python Test (shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - run: uv sync
+      - run: make _bundle-data
+      - name: Run Python coverage shard
+        env:
+          PYTHON_TEST_SHARD: ${{ matrix.shard }}
+          PYTHON_TEST_SHARDS: 4
+        run: |
+          set -euo pipefail
+          mapfile -t test_files < <(
+            python3 scripts/python_test_shards.py \
+              --shard-count "$PYTHON_TEST_SHARDS" \
+              --shard-index "$PYTHON_TEST_SHARD" \
+              --exclude cli/tests/test_telemetry_registry_generator.py \
+              --exclude cli/tests/test_telemetry_registry_candidate_renderer.py
+          )
+          test "${#test_files[@]}" -gt 0
+          COVERAGE_FILE="coverage-py-shard-$PYTHON_TEST_SHARD" \
+            .venv/bin/python -m pytest "${test_files[@]}" \
+              -q --tb=short \
+              --durations=25 \
+              --cov=defenseclaw \
+              --cov-report=
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: python-coverage-part-regular-${{ matrix.shard }}
+          path: coverage-py-shard-${{ matrix.shard }}
+          retention-days: 1
+
+  python-lint:
+    name: Python Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -126,19 +356,53 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: uv sync
       - run: make py-lint
-      - run: make cli-test-cov
+
+  python-lint-test:
+    # Preserve the existing required-check name while making it the single
+    # authority over lint, every isolated test partition, and combined coverage.
+    name: Python Lint & Test
+    needs: [python-test, python-lint]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require lint and every Python test partition
+        env:
+          PYTHON_REGULAR_RESULT: ${{ needs.python-test.result }}
+          PYTHON_LINT_RESULT: ${{ needs.python-lint.result }}
+        run: |
+          test "$PYTHON_REGULAR_RESULT" = success
+          test "$PYTHON_LINT_RESULT" = success
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - run: uv sync
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: python-coverage-part-*
+          path: coverage-parts
+          merge-multiple: true
+      - name: Combine Python coverage
+        run: |
+          set -euo pipefail
+          mapfile -t coverage_parts < <(
+            find coverage-parts -type f -name 'coverage-py-*' -print | sort
+          )
+          test "${#coverage_parts[@]}" -eq 4
+          .venv/bin/coverage combine "${coverage_parts[@]}"
+          .venv/bin/coverage xml -o coverage-py.xml
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: python-coverage
           path: coverage-py.xml
 
   python-wheel-install:
-    name: Python Wheel Install (${{ matrix.python-version }})
+    name: Python Wheel Security Contract (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -151,13 +415,194 @@ jobs:
           tmp="$(mktemp -d)"
           whl="$(find dist -maxdepth 1 -name 'defenseclaw-*.whl' -print -quit)"
           test -n "$whl"
+          python3 - "$whl" "$tmp/telemetry-resource-digests.json" <<'PY'
+          import email
+          import gzip
+          import hashlib
+          import json
+          import re
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          wheel = Path(sys.argv[1])
+          digest_path = Path(sys.argv[2])
+          sources = {
+              "defenseclaw/_data/telemetry/v8/telemetry.schema.json": Path(
+                  "schemas/telemetry/runtime/telemetry.schema.json.gz"
+              ),
+              "defenseclaw/_data/telemetry/v8/catalog.json": Path(
+                  "schemas/telemetry/runtime/catalog.json.gz"
+              ),
+              "defenseclaw/_data/telemetry/v8/v7-exporter-selection.json": Path(
+                  "schemas/telemetry/runtime/compatibility/v7-exporter-selection.json.gz"
+              ),
+              "defenseclaw/_data/telemetry/v8/galileo-rich-v2.json": Path(
+                  "schemas/telemetry/runtime/compatibility/galileo-rich-v2.json.gz"
+              ),
+              "defenseclaw/_data/telemetry/v8/local-observability-v1.json": Path(
+                  "schemas/telemetry/runtime/compatibility/local-observability-v1.json.gz"
+              ),
+              "defenseclaw/_data/telemetry/v8/openinference-v1.json": Path(
+                  "schemas/telemetry/runtime/compatibility/openinference-v1.json.gz"
+              ),
+          }
+          security_floors = {
+              "cryptography": ">=48.0.1,<49",
+              "python-dotenv": ">=1.2.2",
+              "python-multipart": ">=0.0.31",
+              "urllib3": ">=2.7.0",
+              "idna": ">=3.15",
+              "pydantic-settings": ">=2.14.2",
+              "aiohttp": ">=3.14.1,<4",
+              "pyjwt": ">=2.13.0",
+              "starlette": ">=1.3.1,<1.4",
+              "fastapi": ">=0.137.1,<0.138",
+          }
+          with zipfile.ZipFile(wheel) as archive:
+              metadata_name = next(
+                  name for name in archive.namelist()
+                  if name.endswith(".dist-info/METADATA")
+              )
+              metadata = email.message_from_bytes(archive.read(metadata_name))
+              packaged = {
+                  name for name in archive.namelist()
+                  if name.startswith("defenseclaw/_data/telemetry/v8/") and not name.endswith("/")
+              }
+              if packaged != set(sources):
+                  raise SystemExit(f"unexpected telemetry wheel resources: {sorted(packaged)}")
+              digests = {}
+              for member, source_path in sources.items():
+                  source = gzip.decompress(source_path.read_bytes())
+                  bundled = archive.read(member)
+                  if bundled != source:
+                      raise SystemExit(f"wheel resource drift: {member}")
+                  json.loads(bundled)
+                  digests[Path(member).name] = hashlib.sha256(source).hexdigest()
+          requirements = {}
+          for value in metadata.get_all("Requires-Dist", []):
+              match = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)", value)
+              if match is None:
+                  raise SystemExit(f"invalid Requires-Dist value: {value}")
+              name = re.sub(r"[-_.]+", "-", match.group(1)).lower()
+              requirements[name] = value[match.end():]
+          for name, expected in security_floors.items():
+              value = requirements.get(name)
+              if value is None:
+                  raise SystemExit(f"wheel metadata omits security floor: {name}")
+              specifier, separator, marker = value.partition(";")
+              if separator:
+                  raise SystemExit(f"wheel security floor is marked: {name}; {marker.strip()}")
+              actual_clauses = {
+                  clause.strip()
+                  for clause in specifier.strip().strip("()").split(",")
+                  if clause.strip()
+              }
+              expected_clauses = {clause.strip() for clause in expected.split(",")}
+              if actual_clauses != expected_clauses:
+                  raise SystemExit(
+                      f"wheel security floor drift for {name}: "
+                      f"expected {expected}, found {specifier.strip()}"
+                  )
+          digest_path.write_text(json.dumps(digests), encoding="utf-8")
+          PY
           uv --no-config venv "$tmp/venv" --python "${{ matrix.python-version }}"
-          uv --no-config pip install --python "$tmp/venv/bin/python" "$whl"
+          # Use pip's foreign-interpreter mode so this is an ordinary pip
+          # resolution without adding packaging tools to the runtime graph.
+          uvx --from pip pip --isolated --python "$tmp/venv/bin/python" \
+            install --disable-pip-version-check "$whl"
+          uvx --from pip pip --isolated --python "$tmp/venv/bin/python" check
           "$tmp/venv/bin/defenseclaw" --help >/dev/null
+          HOME="$tmp/home" DEFENSECLAW_HOME="$tmp/home/.defenseclaw" \
+            PYTHONNOUSERSITE=1 PYTHONPATH='' "$tmp/venv/bin/python" - <<'PY'
+          import asyncio
+          import sys
+          from pathlib import Path
+
+          import textual
+          import defenseclaw.tui.app as tui_app
+
+          module_path = Path(tui_app.__file__).resolve()
+          if not module_path.is_relative_to(Path(sys.prefix).resolve()):
+              raise SystemExit(f"TUI imported outside wheel environment: {module_path}")
+          DefenseClawTUI = tui_app.DefenseClawTUI
+
+          async def main() -> None:
+              app = DefenseClawTUI()
+              async with app.run_test(size=(120, 40)) as pilot:
+                  await pilot.pause()
+
+          asyncio.run(main())
+          print("installed_wheel_tui_origin=venv")
+          print("installed_wheel_tui_mount=ok textual=" + getattr(textual, "__version__", "unknown"))
+          PY
+          (
+            cd "$tmp"
+            PYTHONNOUSERSITE=1 PYTHONPATH='' "$tmp/venv/bin/python" - "$tmp/telemetry-resource-digests.json" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+
+          import defenseclaw.observability.schema_resources as resource_module
+
+          expected = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          module_path = Path(resource_module.__file__).resolve()
+          if not module_path.is_relative_to(Path(sys.prefix).resolve()):
+              raise SystemExit(f"telemetry resource API was not imported from the installed wheel: {module_path}")
+          resources = {
+              "telemetry.schema.json": resource_module.telemetry_v8_schema_bytes(),
+              "catalog.json": resource_module.telemetry_v8_catalog_bytes(),
+          }
+          for name, payload in resources.items():
+              if hashlib.sha256(payload).hexdigest() != expected[name]:
+                  raise SystemExit(f"installed telemetry resource drift: {name}")
+              json.loads(payload)
+          PY
+          )
+          "$tmp/venv/bin/python" -c 'from defenseclaw.envvars import load_registry; assert load_registry().entries'
+          uvx --from pip-audit pip-audit \
+            --vulnerability-service osv \
+            --path "$tmp/venv/lib/python${{ matrix.python-version }}/site-packages"
 
   upgrade-smoke:
-    name: Upgrade Smoke
+    name: Release Regression (deterministic)
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      # A PR cannot mint release.yaml@refs/heads/main's Fulcio identity. Keep
+      # ordinary CI deterministic and exercise the signed positive/live paths
+      # only in nightly/manual certification.
+      - name: Run fast release regression contracts
+        run: |
+          uv run python -m pytest -q \
+            cli/tests/test_verify_sigstore_blob.py \
+            cli/tests/test_observability_v8_upgrade_continuity_checker.py \
+            cli/tests/test_resolve_upgrade_baselines.py \
+            cli/tests/test_release_api_retry.py \
+            cli/tests/test_release_workflow_staged.py \
+            cli/tests/test_upgrade_smoke_static.py \
+            cli/tests/test_upgrade_release_smoke_contract.py \
+            cli/tests/test_release_certification.py \
+            cli/tests/test_release_validation_strategy.py
+
+  unsigned-upgrade-candidate:
+    name: Build selective exact-SHA upgrade candidate once
+    needs: release-validation-plan
+    if: >-
+      ${{
+        (github.event_name == 'pull_request' && needs.release-validation-plan.outputs.sensitive == 'true') ||
+        (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      }}
+    runs-on: ubuntu-latest
+    env:
+      UPGRADE_BASELINE_POLICY: ${{ github.workspace }}/effective-upgrade-baselines.json
+    timeout-minutes: 25
+    outputs:
+      artifact_name: ${{ steps.name.outputs.artifact_name }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -166,11 +611,149 @@ jobs:
         with:
           go-version-file: go.mod
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      # Exercises real historical `defenseclaw upgrade` commands against a
-      # localhost-served candidate release before a tag exists. The seeded
-      # baselines keep the test stable even when an old release's dependency
-      # pins become unsatisfiable in today's resolver.
-      - run: make upgrade-smoke-matrix ARGS="--baseline-mode seed"
+      - id: name
+        run: echo "artifact_name=unsigned-upgrade-candidate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.release-validation-plan.outputs.baseline_artifact }}
+          path: .
+      - id: prepare
+        name: Build exact PR SHA developer candidate
+        run: |
+          set -euo pipefail
+          scripts/test-upgrade-release.sh \
+            --prepare-only \
+            --platform linux/amd64 \
+            --target-version "${{ needs.release-validation-plan.outputs.candidate_version }}" \
+            --keep-workdir | tee prepare-candidate.log
+          root="$(sed -n 's/^OK: Prepared candidate release root: //p' prepare-candidate.log | tail -1)"
+          test -d "$root"
+          echo "root=$root" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: ${{ steps.name.outputs.artifact_name }}
+          path: ${{ steps.prepare.outputs.root }}/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  selective-upgrade-smoke:
+    name: Selective upgrade (${{ matrix.class }} / ${{ matrix.baseline }})
+    needs: [release-validation-plan, unsigned-upgrade-candidate]
+    if: >-
+      ${{
+        github.event_name == 'pull_request' &&
+        needs.release-validation-plan.outputs.sensitive == 'true'
+      }}
+    runs-on: ubuntu-latest
+    env:
+      UPGRADE_BASELINE_POLICY: ${{ github.workspace }}/effective-upgrade-baselines.json
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.release-validation-plan.outputs.pr_matrix) }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.unsigned-upgrade-candidate.outputs.artifact_name }}
+          path: unsigned-candidate
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.release-validation-plan.outputs.baseline_artifact }}
+          path: .
+      - name: Run selected deterministic success/refusal contract
+        env:
+          BASELINE: ${{ matrix.baseline }}
+          CANDIDATE_VERSION: ${{ needs.release-validation-plan.outputs.candidate_version }}
+          RISK_CLASS: ${{ matrix.class }}
+          VALIDATION_MODE: ${{ matrix.mode }}
+          EXPECTED_RESULT: ${{ matrix.expected }}
+        run: |
+          set -euo pipefail
+          echo "Selected release risk class: $RISK_CLASS ($VALIDATION_MODE → $EXPECTED_RESULT)"
+          # An unsigned PR cannot prove production resolver success. Exercise
+          # the target-owned migration and fresh-process health in a throwaway
+          # HOME, while the production protocol harness proves pre-mutation
+          # refusal. Signed resolver/handoff success belongs to certification.
+          run_success() {
+            scripts/test-developer-target-activation.sh \
+              --from-version "$BASELINE" \
+              --target-version "$CANDIDATE_VERSION" \
+              --release-root "$GITHUB_WORKSPACE/unsigned-candidate" \
+              --baseline-mode seed \
+              --health-timeout 60
+          }
+          run_refusal() {
+            scripts/test-upgrade-protocol-release.sh \
+              --from-version "$BASELINE" \
+              --target-version "$CANDIDATE_VERSION" \
+              --release-root "$GITHUB_WORKSPACE/unsigned-candidate" \
+              --baseline-mode seed \
+              --refusal-contract-only
+          }
+          case "$EXPECTED_RESULT" in
+            success) run_success ;;
+            refusal-before-mutation) run_refusal ;;
+            success-and-refusal) run_success; run_refusal ;;
+            *)
+              echo "::error title=Unknown selective validation result::$EXPECTED_RESULT"
+              exit 1
+              ;;
+          esac
+
+  main-release-smoke:
+    name: Main Release Candidate Smoke (${{ matrix.class }})
+    needs: [release-validation-plan, unsigned-upgrade-candidate]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    env:
+      UPGRADE_BASELINE_POLICY: ${{ github.workspace }}/effective-upgrade-baselines.json
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.release-validation-plan.outputs.medium_matrix) }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.unsigned-upgrade-candidate.outputs.artifact_name }}
+          path: unsigned-candidate
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.release-validation-plan.outputs.baseline_artifact }}
+          path: .
+      - name: Run exact-SHA candidate representative upgrade canary
+        env:
+          BASELINE: ${{ matrix.baseline }}
+          RISK_CLASS: ${{ matrix.class }}
+          CANDIDATE_VERSION: ${{ needs.release-validation-plan.outputs.candidate_version }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          make check-upgrade-manifest
+          scripts/test-developer-target-activation.sh \
+            --from-version "$BASELINE" \
+            --target-version "$CANDIDATE_VERSION" \
+            --release-root "$GITHUB_WORKSPACE/unsigned-candidate" \
+            --baseline-mode seed \
+            --baseline-dependencies published \
+            --health-timeout 60
 
   connector-matrix:
     name: Connector Matrix
@@ -261,6 +844,12 @@ jobs:
       # pip-audit here, not by DefenseClaw at runtime, and we install
       # exclusively from PyPI via uv with locked hashes (uv.lock).
       #
+      # TODO: Remove --ignore-vuln PYSEC-2026-2132 once
+      # cisco-ai-mcp-scanner's litellm dependency no longer pins click==8.1.8.
+      # The advisory affects click.edit(), which DefenseClaw does not call;
+      # requiring the fixed Click 8.3.3 currently makes wheel installation
+      # unsatisfiable because litellm==1.83.7 requires Click 8.1.8 exactly.
+      #
       # Previously ignored, now fixed by bumping cisco-ai-skill-scanner to
       # >=2.0.11 + overriding starlette>=1.0.1 and python-dotenv>=1.2.2 in
       # pyproject.toml:
@@ -284,6 +873,7 @@ jobs:
           --ignore-vuln CVE-2026-4539
           --ignore-vuln CVE-2026-3219
           --ignore-vuln PYSEC-2026-196
+          --ignore-vuln PYSEC-2026-2132
           --ignore-vuln CVE-2026-48818
           --ignore-vuln CVE-2026-48817
           --ignore-vuln CVE-2026-54283
@@ -363,6 +953,10 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
+          # This one gate explicitly proves the PR #403/#412 compatibility
+          # commits remain ancestors. Portable unit/source-archive validation
+          # checks their documented SHAs without requiring Git history.
+          fetch-depth: 0
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
@@ -374,11 +968,17 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: make plugin
       - run: make dev-pycli
-      - run: make check
+      # Keep the ordinary gate small: compile the real registry once and prove
+      # that every checked-in runtime/Go output is current. Exhaustive mutation
+      # coverage runs only when its inputs change, plus nightly/manual.
+      - name: Verify canonical telemetry registry outputs
+        run: make telemetry-check
+      - run: make check VERIFY_OBSERVABILITY_BASELINE_ANCESTRY=1
 
-  make-test:
-    name: make test (unified)
+  local-observability-golden:
+    name: Local Observability Golden
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -386,153 +986,23 @@ jobs:
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: extensions/defenseclaw/package-lock.json
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - run: make plugin
-      # dev-pycli installs the [dev] group (pytest, jsonschema, ruff)
-      # which `make test → cli-test` indirectly needs at import time:
-      # several cli/tests/*.py files use pytest fixtures/parametrize
-      # and `python -m unittest discover` aborts on the first failed
-      # import. The non-dev `make pycli` target only installs runtime
-      # deps and broke this job after the S4.1/S4.2 connector_paths
-      # tests landed.
       - run: make dev-pycli
-      - run: make test
-
-  windows-hook-path:
-    name: Windows Hook Path
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - uses: astral-sh/setup-uv@v8.1.0
-      # The gateway embeds the OpenClaw extension tree, normally generated
-      # by `make sync-openclaw-extension`. Windows is hook-only and needs no
-      # OpenClaw plugin, so drop the same `.placeholder` marker that target
-      # writes when extensions/defenseclaw/dist is absent. Done in bash
-      # (Git Bash ships on the runner) to avoid GNU make's flaky shell
-      # resolution on Windows.
-      - name: Generate OpenClaw extension placeholder
-        shell: bash
+      - name: Start the local observability stack
+        run: bundles/local_observability_stack/bin/openclaw-observability-bridge up --timeout 180
+      - name: Emit and verify native v8 telemetry
+        env:
+          DEFENSECLAW_LOCAL_OBSERVABILITY_OTLP_ENDPOINT: http://127.0.0.1:4318
         run: |
-          set -euo pipefail
-          embed_dir=internal/gateway/connector/openclaw_extension
-          mkdir -p "$embed_dir"
-          printf '%s\n' \
-            "OpenClaw extension not built." \
-            "Run 'make extensions' (or 'make plugin') to populate the embedded tree." \
-            > "$embed_dir/.placeholder"
-      # Prove the Windows hook surfaces compile and vet cleanly.
-      - name: Go build (hook surfaces + binary)
-        run: go build ./internal/gateway/connector/... ./internal/cli/... ./internal/daemon/... ./internal/notify/... ./cmd/defenseclaw
-      - name: Go vet (hook surfaces)
-        run: go vet ./internal/gateway/connector/... ./internal/cli/... ./internal/daemon/... ./internal/notify/...
-      # Prove every test binary on the hook surfaces builds on Windows
-      # (compiles all test files, runs zero tests).
-      - name: Go test-compile (all hook-surface tests build on Windows)
-        run: go test -run "^$" ./internal/gateway/connector/... ./internal/cli/... ./internal/daemon/... ./internal/notify/...
-      # Execute the native Go hook decision engine end to end — this is the
-      # whole Windows hook path (stdin cap, token, HTTP, per-connector
-      # output/exit, fail-open/closed, Codex/Claude block schema).
-      - name: Go test - native hook engine
-        run: go test ./internal/gateway/connector/hookexec/...
-      # Execute the per-OS connector capability model and hook-wiring tests.
-      - name: Go test - connector capability + hook wiring
-        run: go test ./internal/gateway/connector/ -run "ProxyConnector|IsProxyConnector|ConnectorSupportedOnOS|RegistryNamesFilter|HookInvocationCommand|ShellWordPassesNativeCommandThrough|BuildCodexHooksTableHashesTheCommand|IsOwnedHookRecognizesNativeCommand"
-      - name: Go test - hook token trust
-        run: go test ./internal/gateway/connector/ -run "HookAPIToken|LoadHookAPITokens" -count=1
-      # Execute the native `defenseclaw-gateway hook` entrypoint + sidecar resolution.
-      - name: Go test - hook entrypoint
-        run: go test ./internal/cli/ -run "BuildHookOptions|ReadHookSidecar|HookCommandRegistered"
-      - name: Sync Python env
-        shell: bash
-        run: uv sync
-      # Execute the per-OS connector gating and the Windows config-lock
-      # contention test natively on Windows.
-      - name: Python test - platform gating + config lock
-        shell: bash
-        run: uv run python -m pytest cli/tests/test_platform_support.py cli/tests/test_config_lock_mutex.py -q
-
-  windows-installer-smoke:
-    name: Windows Installer Smoke (install.ps1)
-    runs-on: windows-latest
-    # End-to-end check of the PowerShell installer's local-install path:
-    # build the two release artifacts it consumes (the windows gateway .zip
-    # and the CLI wheel), run scripts/install.ps1 -Local against them, then
-    # assert the gateway binary and CLI shim land on PATH and respond to
-    # --version. Guards scripts/install.ps1, the .goreleaser.yaml windows
-    # archive shape, and the install layout `defenseclaw upgrade` relies on.
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - uses: astral-sh/setup-uv@v8.1.0
-
-      # The gateway embeds the OpenClaw extension tree via //go:embed. Windows
-      # is hook-only and needs no OpenClaw plugin, so drop the same
-      # `.placeholder` marker `make sync-openclaw-extension` writes when
-      # extensions/defenseclaw/dist is absent (matches windows-hook-path).
-      - name: Generate OpenClaw extension placeholder
-        shell: bash
-        run: |
-          set -euo pipefail
-          embed_dir=internal/gateway/connector/openclaw_extension
-          mkdir -p "$embed_dir"
-          printf '%s\n' \
-            "OpenClaw extension not built." \
-            "Run 'make extensions' (or 'make plugin') to populate the embedded tree." \
-            > "$embed_dir/.placeholder"
-
-      # Reproduce GoReleaser's windows outputs by hand so the smoke test stays
-      # fast and self-contained: the in-archive binary is defenseclaw.exe and
-      # the archive is defenseclaw_<ver>_windows_amd64.zip (the name
-      # install.ps1 -Local globs). The CLI wheel is built via `make dist-cli`,
-      # the same target `make dist` uses — it stages cli/defenseclaw/_data
-      # (policies, skills, dashboards) before `uv build`, so the wheel matches
-      # a real release. `make install` already runs this _bundle-data path on
-      # windows-latest in the green connector contract matrix.
-      - name: Build gateway binary + CLI wheel
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist/gwstage
-          CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=0.0.0-smoke" \
-            -o dist/gwstage/defenseclaw.exe ./cmd/defenseclaw
-          make dist-cli
-          ls -la dist
-
-      - name: Package windows gateway zip
-        shell: pwsh
-        run: |
-          $zip = "dist/defenseclaw_0.0.0-smoke_windows_amd64.zip"
-          Compress-Archive -Path dist/gwstage/defenseclaw.exe -DestinationPath $zip -Force
-          Get-ChildItem dist
-
-      - name: Run install.ps1 against local artifacts
-        shell: pwsh
-        run: ./scripts/install.ps1 -Local dist -Yes
-
-      # New pwsh session: install.ps1 persists the install dir to the *user*
-      # PATH, which a mid-job step does not auto-reload, so prepend it here
-      # before resolving the shim. --version short-circuits before any config
-      # load on both binaries, so neither needs `defenseclaw init`.
-      - name: Verify installed gateway + CLI resolve and run
-        shell: pwsh
-        run: |
-          $bin  = Join-Path $env:USERPROFILE ".local\bin"
-          $gw   = Join-Path $bin "defenseclaw-gateway.exe"
-          $shim = Join-Path $bin "defenseclaw.cmd"
-          if (-not (Test-Path $gw))   { throw "gateway not installed: $gw" }
-          if (-not (Test-Path $shim)) { throw "CLI shim not installed: $shim" }
-          $env:PATH = "$bin;$env:PATH"
-          & $gw --version
-          if ($LASTEXITCODE -ne 0) { throw "defenseclaw-gateway --version exit $LASTEXITCODE" }
-          & defenseclaw --version
-          if ($LASTEXITCODE -ne 0) { throw "defenseclaw --version exit $LASTEXITCODE" }
+          go test ./internal/gateway -run TestLocalObservabilityGoldenProducerScenario -count=1
+          .venv/bin/python scripts/check_grafana_dashboards.py \
+            --require-packaged \
+            --live \
+            --inventory \
+            --inventory-hours 1 \
+            --live-golden \
+            --golden-lookback-minutes 15 \
+            --golden-wait-seconds 60
+      - name: Stop the local observability stack
+        if: ${{ always() }}
+        run: bundles/local_observability_stack/bin/openclaw-observability-bridge reset

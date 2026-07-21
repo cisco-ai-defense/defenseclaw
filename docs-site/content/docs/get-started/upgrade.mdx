@@ -1,184 +1,378 @@
 ---
 title: Upgrade DefenseClaw
-description: Safely upgrade DefenseClaw with verified artifacts, automatic schema migrations, backups, health checks, and durable OTel destination conversion.
+description: Upgrade DefenseClaw safely with verified artifacts, automatic v7-to-v8 observability migration, backups, rollback, local-dashboard refresh, and health checks.
 keywords:
   - defenseclaw upgrade
   - DefenseClaw migration
-  - config version 7
-  - migrate OTel destinations
+  - config version 8
+  - observability v8
   - DefenseClaw rollback
 ---
 
-Use `defenseclaw upgrade` for an existing installation. It treats a release as
-one transaction across the Python CLI, Go gateway, operator configuration, and
-release-owned migrations:
+On every supported POSIX source, including an installed `0.8.4` bridge, use the
+authenticated resolver asset owned by the current target release. It
+automatically authenticates an ephemeral Cosign verifier when the host does not
+already have one, then privately acquires the exact published `0.8.4` rollback
+artifacts before backup, service stop, or target mutation:
 
 ```bash
-defenseclaw upgrade --yes
+bash defenseclaw-upgrade.sh --yes
 ```
 
-To install a specific release:
+The frozen `0.8.4` built-in `defenseclaw upgrade --yes` cannot cross this hard
+cut, even when Cosign is already on `PATH`: its immutable manifest parser
+requires a nonempty Windows bridge matrix, while the truthful target manifest
+has `platform_tested_source_versions.windows: []` because no Windows `0.8.4`
+bridge was published. Use the target-release resolver above in latest mode,
+without a version override.
+
+For `0.8.3` or older, follow the complete Sigstore and SHA-256 bootstrap in the
+linked CLI reference below, then run the authenticated target-release resolver
+asset in latest mode:
 
 ```bash
-defenseclaw upgrade --version X.Y.Z --yes
+bash defenseclaw-upgrade.sh --yes
 ```
 
-<Callout title="Prefer the upgrade command over re-running the installer">
-The install scripts are appropriate for a fresh host. `defenseclaw upgrade`
-adds the safety work an existing host needs: artifact verification, a state
-backup, release-manifest validation, migrations, service restart, and a health
-check.
+Release `0.8.5` was POSIX-only because `0.8.4` published no Windows gateway,
+rollback, or SBOM binaries. Its signed PowerShell resolver was a refusal
+surface, not a Windows bridge path. Release `0.8.6` now publishes signed native
+Setup, but `0.8.5` remains outside the Windows upgrade-baseline matrix. Do not
+copy POSIX artifacts onto Windows.
+
+Do not use the built-in form to cross a manifest-required bridge. A
+`0.8.3`-or-older POSIX host must use the authenticated current release-owned
+shell resolver, as shown below. Its immutable built-in command refuses before
+stopping services or changing installed state. Some frozen controllers then
+print an obsolete raw network-to-shell hint; do not execute it. Use the
+authenticated bootstrap from this page instead. Release `0.8.5` is immutable,
+so its resolver must be invoked in latest mode with no `VERSION` environment
+variable and no `--version` argument.
+
+<Callout title="Never re-run the fresh installer over an existing host">
+The install scripts are fresh-install-only and refuse an existing DefenseClaw
+installation before making host changes. The release-owned resolver supplies
+the safety work an old host needs: bridge selection, artifact verification,
+state backup, fresh-controller handoff, migrations, restart, health checks, and
+exact rollback. An already-published `0.8.3`-or-older built-in command cannot
+learn that orchestration retroactively; it therefore fails closed rather than
+attempting a partial hard-cut upgrade.
 </Callout>
+
+## The 0.8.4 bridge release
+
+Release `0.8.4` deliberately keeps configuration and runtime schema v7. It does
+not contain or run the observability-v8 migration. Its purpose is to install a
+protocol-2 upgrade controller that can safely drive the later v8 hard cut.
+
+For an existing `0.8.3`-or-older installation, prefer the release-owned resolver
+without a target version. A current resolver also treats `--version` as the
+final target selection, never as permission to skip a manifest-declared bridge;
+this keeps the immutable handoff printed by older controllers usable. Direct
+installer and manual-artifact paths still refuse a hard cut that bypasses the
+bridge. A host already on `0.8.4` uses that same target-release resolver; the
+frozen built-in parser cannot accept the truthful empty Windows matrix.
+
+Installed users must download and authenticate the release-owned resolver
+asset before running it. Use the complete POSIX `cosign` and SHA-256 bootstrap in the
+[repository CLI reference](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade);
+it does not require a source checkout. From a checkout of the current release,
+the equivalent local command is `./scripts/upgrade.sh --yes` on macOS/Linux.
+For the `0.8.5` hard cut, the signed PowerShell resolver was refusal-only because
+no Windows bridge binary had been published.
+
+When a hard-cut manifest requires `0.8.4`, the resolver first authenticates and
+health-checks the bridge for a pre-bridge source, then hands control to its
+freshly installed controller. A host already on `0.8.4` skips only that first
+installation hop. In both cases the resolver authenticates the exact published
+rollback artifacts before target mutation and retains exact snapshots of the
+active gateway, `config.yaml`, `.env`, and migration cursor. It stops and proves
+the target gateway quiescent, runs target migrations in a fresh target-wheel
+process, verifies reported binary provenance, and records a durable receipt. A
+target install, migration, start, or health failure triggers restoration of the
+bridge wheel, gateway, managed state, and any refreshed local-observability
+bundle files; rollback is only reported successful after the restored `0.8.4`
+gateway passes the same exact-version health check.
+
+The first hop is transactional too. Before stopping an older source, the
+resolver durably journals its exact CLI, gateway, managed configuration and
+state, source health endpoint, and prior running state. A caught failure or
+abrupt termination restores that source and proves its version-bound health
+before the journal is cleared or another upgrade begins.
+
+Rollback never deletes a bridge-state inode solely because it owns the
+temporary name: another process may still hold that inode open and append after
+the atomic restore. Such evidence is retained under a plan-scoped, mode-0700
+custody directory on the same filesystem as its original path, and a private
+`phase1-state/retained-quarantines.json` in the timestamped backup records its
+location. Keep that custody directory and index together until the upgrade has
+been validated; inspect them before any manual cleanup.
+
+Immediately before phase two, the bridge also commits a private recovery
+journal and a fixed mutator lease. Every wheel install, migration, bundle
+refresh, and service mutation inherits that lease, so killing only the upgrade
+controller cannot let recovery race a child that is still writing. On the next
+resolver invocation, recovery waits for that child, reinstalls the retained
+authenticated `0.8.4` wheel without importing a possibly partial target wheel,
+restores exact bridge state, and then retries only after bridge health passes.
+
+Release `0.8.4` and later require Cosign verification against the exact
+protected release workflow identity. The current POSIX resolver and fresh
+installer prefer an existing `cosign`; when it is absent, they download pinned
+Cosign `2.6.3` into an owner-only temporary directory, authenticate it against a
+hard-coded platform SHA-256, use it once, and retire it. They never install it
+system-wide or modify `PATH`. `--allow-unverified` cannot weaken this boundary.
+
+<Callout title="Release order is part of the safety contract">
+Release engineering must publish and soak immutable `0.8.4`, with the complete
+historical baseline matrix green, before cutting `0.8.5`. The hard cut must
+consume the published `0.8.4` bridge—not an unpublished branch artifact.
+</Callout>
+
+`0.8.4+` releases require Cosign to verify the exact GitHub release-workflow
+identity. A missing system Cosign triggers the authenticated temporary POSIX
+bootstrap; a download, platform, digest, or signature failure exits before
+service stop or installed mutation. SHA-256 coverage of DefenseClaw artifacts
+alone is not treated as authenticated provenance.
+
+<Callout title="Prefer upgrade over re-running the installer">
+Install scripts are for a fresh host. `defenseclaw upgrade` adds artifact
+verification, exact state backups, required migrations, atomic activation,
+service restart, local-bundle refresh, and post-upgrade health checks.
+The POSIX installer refuses an existing installation before dependency
+installation or artifact replacement. For the historical `0.8.5` hard cut, the
+PowerShell surface had no installable Windows runtime. Release `0.8.6` uses the
+signed native Setup for fresh install, repair, same-version servicing, and
+uninstall.
+</Callout>
+
+## Supported installation paths at the hard cut
+
+| Path | Existing installation behavior |
+| --- | --- |
+| Built-in `defenseclaw upgrade` | The immutable `0.8.4` command cannot parse the truthful hard-cut manifest with an empty Windows bridge matrix, regardless of whether Cosign is installed. Frozen pre-bridge controllers also cannot learn the staged handoff. Use the target-release POSIX resolver to cross into `0.8.5`; from `0.8.5` onward, the built-in command may drive later compatible manifests and can authenticate a temporary pinned verifier. |
+| Release-owned shell resolver | Tested old POSIX sources auto-hop through `0.8.4` from one command and automatically authenticate a temporary pinned Cosign when needed; unsupported sources fail closed with the exact bridge-first path. For `0.8.5`, the signed PowerShell resolver was refusal-only because no Windows bridge was published. |
+| Fresh-install shell script | Refuses to overwrite an existing installation and points to the resolver. Release `0.8.6` publishes signed native Setup for Windows; it does not make `0.8.5` a Windows upgrade baseline. |
+| Package manager | No in-place package-manager hard-cut path is supported unless that package invokes the same resolver; direct replacement must be disabled. |
+| Manual wheel/gateway artifacts | Direct copying is not a supported upgrade. Use the POSIX resolver's `--plan`, then let that resolver perform the transaction. |
 
 ## What the upgrade does
 
-1. Resolves the target release and downloads its checksum, provenance, gateway,
-   and CLI artifacts.
-2. Verifies the release manifest and SHA-256 checksums. When `cosign` is
-   installed, it also verifies Sigstore provenance.
-3. Saves managed state under
-   `~/.defenseclaw/backups/upgrade-<timestamp>/`, including `config.yaml`,
-   `.env`, policies, connector backups, device identity, and the previous
-   gateway binary.
-4. Stops the gateway, installs the matched CLI and gateway artifacts, and
-   verifies the installed gateway version.
-5. Runs every release-required migration through the durable migration cursor
-   at `~/.defenseclaw/.migration_state.json`.
-6. Restarts services and polls gateway health.
+1. Detects the installed version before service interruption, resolves the target
+   manifest, and selects any signed bridge requirement.
+2. Verifies the target and bridge checksums, CLI, gateway, manifest, and Sigstore
+   provenance before mutation. Unsupported sources fail with an exact path.
+3. Installs and health-checks `0.8.4` when needed, then starts a fresh `0.8.4`
+   controller process for the hard cut; it does not continue under stale imports.
+4. Prints a content-free summary of the v7-to-v8 observability conversion in the
+   existing confirmation prompt.
+5. Backs up `config.yaml`, any ancillary `.env` that needs a promoted secret, the
+   migration cursor, managed policy/connector state, the verified bridge CLI and
+   gateway, and owned local observability files under
+   `~/.defenseclaw/backups/upgrade-<timestamp>/`.
+6. Stops the gateway, installs the matched artifacts, and runs required migrations
+   through the existing durable migration cursor.
+7. Builds the complete config-v8 candidate in memory, validates it, and atomically
+   replaces the source only after validation succeeds.
+8. Refreshes DefenseClaw-owned Collector, datasource, dashboard, rule, and bundle
+   files while preserving operator-created files and Prometheus/Loki/Tempo/Grafana
+   volumes.
+9. Restarts the gateway and any previously running local stack, requires a
+   fresh-process gateway health check, and performs bounded local-stack
+   readiness/query checks before declaring success.
 
-The migration cursor records each successful version independently. If one
-step fails, it remains unapplied and can be retried without replaying unrelated
-successful migrations. The release manifest is checked before the command
-reports success.
+The migration cursor records success only after the atomic write. Retrying an
+interrupted upgrade is idempotent: it does not duplicate destinations, routes,
+comments, environment entries, or schema work.
 
-## Configuration schema v7 and OTel
+## Native Windows servicing in 0.8.6
 
-Configuration v7 replaces the legacy single-exporter fields with named fan-out
-routes under `otel.destinations[]`. A legacy installation such as:
-
-```yaml
-config_version: 6
-otel:
-  enabled: true
-  protocol: grpc
-  endpoint: 127.0.0.1:4317
-  traces: { enabled: true }
-```
-
-is persisted during upgrade as:
-
-```yaml
-config_version: 7
-otel:
-  enabled: true
-  destinations:
-    - name: local-observability
-      preset: local-otlp
-      enabled: true
-      protocol: grpc
-      endpoint: 127.0.0.1:4317
-      traces: { enabled: true }
-      metrics: { enabled: false }
-      logs: { enabled: false }
-```
-
-The conversion preserves global and per-signal endpoints, protocols, headers,
-TLS policy, batching, signal enablement, process-wide sampling/log policy, and
-all existing named destinations. Environment-backed legacy endpoints are
-materialized into the matching named route. The writer creates
-`config.yaml.pre-observability-migration.bak` and is idempotent.
-
-There are three layers of protection:
-
-| Layer | Purpose |
-| --- | --- |
-| Configuration migration | Persists the named-destination shape during every compatible `defenseclaw upgrade`, even when an older release cursor is already applied. |
-| Runtime compatibility | Converts the old shape in memory before validation if persistence was interrupted. It does not write on read. |
-| Manual repair | `migrate-otel` previews or reapplies the same shared conversion. |
-
-```bash
-defenseclaw setup observability migrate-otel          # preview only
-defenseclaw setup observability migrate-otel --apply  # persist/repair
-```
-
-<Callout title="Multi-OTLP routes survive the upgrade">
-The converted legacy route is inserted beside existing destinations. For
-example, an existing local collector remains active when Galileo is present;
-neither route replaces the other.
+<Callout title="0.8.5 is not a Windows upgrade baseline">
+Release `0.8.5` published no native Windows runtime. Release `0.8.6`, the first
+signed Setup release, therefore qualifies fresh install, repair, same-version
+servicing, and uninstall on Windows; it does not advertise an upgrade from
+`0.8.5`. A later manifest may enable cross-release Windows upgrades only for
+source versions whose exact published Setup artifacts passed the native
+lifecycle matrix.
 </Callout>
 
-## Refresh the bundled observability stack
+`DefenseClawSetup-x64.exe` is the signed graphical and silent installation and
+servicing surface for `0.8.6`. It installs the existing CLI/TUI, gateway,
+no-console hook launcher, and embedded managed Python runtime; it is not a
+separate native DefenseClaw GUI application.
 
-The local Grafana dashboards and collector configuration are host-mounted
-files, not container image contents. After upgrading, refresh them from the
-new CLI bundle:
+For a future manifest-authorized native Windows upgrade, `defenseclaw upgrade`
+will download the exact Setup artifact named by the signed manifest, verify its
+release checksum and exact Authenticode publisher, create the normal managed
+state backup, copy Setup to its trusted maintenance cache, and start it with the
+preserved install scope, connector, and mode. The CLI exits before replacement
+so its embedded runtime is not locked. Setup then validates and stops only the
+owned gateway/watchdog process, replaces product-owned files, applies and
+verifies required migrations with the new embedded runtime, rolls application
+files back on failure, and restarts only services that were already running or
+explicitly requested.
 
-```bash
-defenseclaw setup local-observability up
+Enterprise-managed Windows deployments can service through their software
+channel instead. Managed update policy prevents the self-updater from competing
+with Intune or SCCM rollout. The per-user Setup does not publish an MSI or accept
+machine scope.
+
+## What changes in config v8
+
+V8 replaces the separate `otel`, `audit_sinks`, and global redaction controls with
+one `observability` graph:
+
+```yaml
+config_version: 8
+observability:
+  destinations:
+    - name: local-observability
+      kind: otlp
+      protocol: grpc
+      endpoint: 127.0.0.1:4317
+      network_safety:
+        allow_private_networks: true
 ```
 
-This refresh is the default. Use `--no-refresh-config` only when you
-intentionally maintain a local fork of the Compose, collector, or dashboard
-files. The refresh overwrites current bundled dashboards and removes only
-explicitly retired DefenseClaw dashboard files; destination-only team and
-operator dashboards are preserved. Historical events are not backfilled with newly introduced schema
-attributes; generate a new agent turn when validating Agent360 after an
-upgrade.
+Fresh v8 defaults collect every registered log, trace, and metric; keep every
+collected log in mandatory local SQLite; and export all capabilities of an enabled
+destination unredacted when `send`/`routes` are omitted.
+
+An upgrade does **not** silently adopt broader fresh-install behavior. It
+materializes the effective v7 choices that are needed to preserve:
+
+- signal enablement and narrower destination eligibility;
+- local SQLite, judge-body, JSONL, console, Splunk, generic HTTP, OTLP, and Galileo
+  behavior;
+- endpoints, protocols, per-signal transport differences, TLS, headers, batching,
+  resource attributes, sampling, and metric policy;
+- Splunk sourcetype overrides and OTLP log instrumentation scope;
+- effective v7 redaction through immutable `legacy-v7`, or `none` when the v7
+  global bypass was active;
+- root-agent/subagent lifecycle, turns, executions, phases, operations, and the
+  local Agent360/dashboard query contract.
+
+When a v7 destination used different protocols for different signals, migration
+creates deterministic signal-specific destinations instead of guessing. Conflicting
+metric interval/temporality policies fail before write with an actionable message.
+
+## Credentials and private endpoints
+
+The converter never writes a resolved credential into v8 YAML, a diff, migration
+summary, doctor output, or compliance event. Inline v7 tokens and interpolated
+secret headers become deterministic environment references; their values are
+written only through the locked, backed-up ancillary `.env` transaction.
+
+An explicitly configured v7 loopback, RFC1918, or IPv6 ULA exporter becomes a
+per-destination `network_safety.allow_private_networks: true` choice. RFC 6598 has
+its own opt-in. Metadata, link-local, unspecified, multicast, reserved, and inline
+URL-credential targets remain invalid.
+
+## Galileo behavior
+
+Explicit v7 Galileo batch delays are preserved. Where v7 merely inherited the old
+5,000 ms default, the v8 `galileo` preset materializes its deliberate 1,000 ms
+delay and the upgrade summary calls out that preset-default change. Project,
+logstream, authentication reference, endpoint, eligible trace families, and
+redaction behavior are preserved.
+
+## Local observability and Agent360
+
+The upgrade backs up and refreshes all DefenseClaw-owned local-stack assets as one
+versioned set. It preserves custom files and persistent volumes, and it restarts a
+previously running bundle without resetting history.
+
+The `local-observability-v1` compatibility profile preserves root/subagent
+identity, lifecycle/execution correlation, token/duration metrics, log fields,
+trace topology, Collector pipelines, and Grafana queries. Historical data is not
+backfilled with fields introduced by the new release; generate a new agent turn
+when validating a newly introduced panel.
+
+If local-stack refresh or readiness fails after a healthy gateway/config migration,
+the upgrade reports that optional stack as degraded and gives the normal recovery
+command. It does not erase volumes or roll back a healthy local SQLite/gateway
+migration. The immediately previous dashboard query contract remains available
+through declared compatibility aliases for the compatibility window.
+
+## Failure and rollback
+
+Observability v8 is a required migration. If candidate construction, validation,
+backup, installation, ancillary activation, atomic replacement, gateway start, or
+health verification fails:
+
+- a first-hop bridge failure restores the old source gateway, whole managed CLI
+  environment, migration-touched state, permissions/ACLs, prior running state,
+  and version-bound source health before returning nonzero;
+- original source bytes remain unchanged or are restored from the same backup;
+- the migration cursor is not marked successful;
+- the v8 gateway is not started against v7 configuration;
+- the verified `0.8.4` CLI, gateway, config, environment, cursor, and managed local
+  bundle are restored and the bridge gateway is health-checked in a fresh process;
+- phase-one and phase-two recovery journals are written and flushed before
+  mutation, and are checked before version/config loading on the next invocation;
+- a surviving wheel, migration, bundle, or service child keeps a private mutator
+  lease, so recovery waits instead of racing that orphan after a parent-only kill;
+- the command exits nonzero and prints the original error plus rollback outcome;
+- retrying the same authenticated target-release resolver in latest mode reruns
+  only unapplied work.
+
+The gateway itself is strict: it neither rewrites v7 configuration during startup
+or reload nor runs v7 and v8 observability pipelines side by side.
+
+An unavailable optional remote exporter is different from a migration failure. If
+the v8 graph compiles, mandatory SQLite is writable, and the gateway starts, that
+remote destination is reported as degraded and retries independently.
+
+## Optional support preview
+
+Release/support tooling may expose the same deterministic converter as a
+read-only, secret-free preview. Such a preview is optional, is never a
+prerequisite for the target-release resolver, and has no second apply protocol.
 
 ## Verify the result
 
 ```bash
 defenseclaw --version
 defenseclaw migrations status
+defenseclaw config validate
+defenseclaw config show --effective --section observability
+defenseclaw observability plan
 defenseclaw doctor
-defenseclaw setup observability list
 defenseclaw-gateway status
 ```
 
-If Galileo is configured, verify both OTLP acceptance and runtime routing:
+For the local stack:
+
+```bash
+defenseclaw setup local-observability status
+defenseclaw observability destination test local-observability
+defenseclaw setup local-observability logs --service otel-collector
+```
+
+The destination test is a protocol handshake, not synthetic dashboard traffic.
+Its probe payload does not enter normal collection/routing, SQLite event history,
+or dashboard counts, including when `--write-probe` is requested; only a bounded
+local compliance attempt/outcome record is persisted. Run a real agent turn,
+tool call, scan, or approval after the upgrade and verify the matching dashboard
+panels separately.
+
+For Galileo:
 
 ```bash
 defenseclaw setup galileo status
 defenseclaw setup galileo test
 ```
 
-For local observability, send a canary and inspect the collector if needed:
-
-```bash
-defenseclaw setup observability test local-observability
-defenseclaw setup local-observability status
-defenseclaw setup local-observability logs --service otel-collector
-```
-
-## Recover an interrupted migration
-
-Start with read-only checks:
-
-```bash
-defenseclaw migrations status
-defenseclaw doctor
-defenseclaw setup observability migrate-otel
-```
-
-If only the OTel write is missing, apply the focused repair command. If a
-release migration remains unapplied, mark only that version for retry and run
-the same-version upgrade again:
-
-```bash
-defenseclaw migrations unmark 0.8.0
-defenseclaw upgrade --version 0.8.0 --yes
-```
-
-The upgrade summary prints the timestamped backup directory. Preserve it until
-the new gateway, connectors, and observability destinations have been
-validated. Restore individual managed files from that directory when needed;
-do not replace the whole data directory because it also contains newer audit
-and migration state.
+Keep the timestamped upgrade backup until the gateway, connectors, destination
+plan, local dashboards, and any external backend have been validated. Restore
+individual managed files from that directory if necessary; do not replace the
+whole data directory because it can contain newer audit and migration state.
 
 ## Next
 
 <Cards>
-  <Card title="Configuration reference" href="/docs/reference/configuration" description="Current config.yaml shape, named OTel destinations, and ownership boundaries." />
-  <Card title="Local observability" href="/docs/observability/local-observability" description="Refresh and verify Grafana, Prometheus, Loki, Tempo, and the OTel Collector." />
-  <Card title="Galileo" href="/docs/observability/galileo" description="Verify cloud or self-hosted Galileo delivery after schema migration." />
+  <Card title="Configuration reference" href="/docs/reference/configuration" description="V8 config shape, defaults, destinations, routing, and ownership boundaries." />
+  <Card title="Observability" href="/docs/observability" description="Buckets, capabilities, fan-out, redaction, and local history." />
+  <Card title="Local observability" href="/docs/observability/local-observability" description="Verify Grafana, Prometheus, Loki, Tempo, and the OTel Collector." />
+  <Card title="Galileo" href="/docs/observability/galileo" description="Verify the generated rich trace projection after migration." />
 </Cards>

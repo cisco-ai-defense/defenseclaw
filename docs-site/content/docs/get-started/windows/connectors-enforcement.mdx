@@ -1,0 +1,219 @@
+---
+title: Connectors and enforcement
+description: Exact native Windows Codex and Claude Code hook coverage, action boundaries, fail modes, and runtime controls.
+keywords:
+  - DefenseClaw Windows Codex
+  - DefenseClaw Windows Claude Code
+  - DefenseClaw Windows action mode
+  - DefenseClaw Windows fail closed
+  - DefenseClaw Windows hooks
+---
+
+Native Windows enforcement is connector-native and hook-only. A supported
+agent invokes `defenseclaw-hook.exe`, the hook authenticates to the same-user
+loopback gateway, and the gateway maps a policy verdict back into that event's
+documented response shape.
+
+<Callout type="warning" title="Coverage stops at the agent surface">
+DefenseClaw does not proxy Codex or Claude Code model traffic on Windows. A
+prompt, tool, subprocess, file change, or response that the agent does not emit
+through a registered hook or native telemetry surface is not silently
+intercepted by DefenseClaw.
+</Callout>
+
+## Observe and action
+
+| Mode | Runtime behavior |
+| --- | --- |
+| `observe` | Evaluate supported events, persist the decision, and report `would_block` where applicable, but return allow to the agent. |
+| `action` | Return block or ask only when the connector and event have a matching native decision surface. Observation-only and already-completed events remain advisory. |
+
+Start with observe:
+
+```powershell
+defenseclaw setup codex --mode observe
+defenseclaw setup claude-code --mode observe
+```
+
+After reviewing the event inventory and policy, promote one connector at a
+time:
+
+```powershell
+defenseclaw setup codex --mode action
+defenseclaw setup claude-code --mode action
+defenseclaw guardrail status
+```
+
+Action mode is not a promise that a post-action hook can undo a completed side
+effect. `PostToolUse` and other result surfaces can record a finding or stop a
+later agentic step, but the original tool action has already occurred.
+
+## Codex
+
+On native Windows, DefenseClaw writes hook policy to
+`%CODEX_HOME%\managed_config.toml`. It may also manage its marked telemetry and
+notify fields in `%CODEX_HOME%\config.toml`. The default Codex home is
+`%USERPROFILE%\.codex`.
+
+The current hook contract registers ten events:
+
+| Codex event | Action-mode role |
+| --- | --- |
+| `SessionStart` | Observe lifecycle. |
+| `UserPromptSubmit` | Can return a block decision. |
+| `PreToolUse` | Can return a deny decision before the tool. |
+| `PermissionRequest` | Can return a deny decision in the permission flow. |
+| `PostToolUse` | Can report/block the later loop, but cannot undo the completed tool. |
+| `SubagentStart`, `SubagentStop` | Observe lifecycle; not declared block surfaces. |
+| `PreCompact`, `PostCompact` | Observe context compaction; not declared block surfaces. |
+| `Stop` | Can return a block-shaped stop decision. |
+
+Setup selects a hook contract that matches the installed Codex version; older
+supported contracts can have a smaller event set. Verify the detected contract
+with `defenseclaw doctor` and the
+[connector compatibility table](/docs/connectors/compatibility).
+
+Codex has no native hook ask/HITL response. If policy returns `confirm`,
+DefenseClaw records and surfaces an alert, but that alert cannot resume the
+original hook call. Do not describe it as an approval dialog.
+
+## Claude Code
+
+DefenseClaw manages its marked hook and native OTLP entries in
+`%CLAUDE_CONFIG_DIR%\settings.json`. The default Claude configuration directory
+is `%USERPROFILE%\.claude`.
+
+The current contract registers these 28 events:
+
+| Category | Registered events |
+| --- | --- |
+| Session and prompt | `SessionStart`, `SessionEnd`, `InstructionsLoaded`, `UserPromptSubmit`, `UserPromptExpansion`, `MessageDisplay` |
+| Tool and permission | `PreToolUse`, `PermissionRequest`, `PermissionDenied`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch` |
+| Agent and task | `SubagentStart`, `SubagentStop`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `Stop`, `StopFailure` |
+| Configuration and workspace | `ConfigChange`, `CwdChanged`, `FileChanged`, `WorktreeRemove`, `PreCompact`, `PostCompact` |
+| Interaction | `Notification`, `Elicitation`, `ElicitationResult` |
+
+`Setup` and `WorktreeCreate` are deliberately not owned by the generic security
+hook. `MessageDisplay` is asynchronous observation. `FileChanged` is narrowed
+to agent, project, dependency, environment-file, and MCP configuration names
+rather than every source edit.
+
+The declared block-capable events are:
+
+`UserPromptSubmit`, `UserPromptExpansion`, `PreToolUse`,
+`PermissionRequest`, `PostToolBatch`, `TaskCreated`, `TaskCompleted`,
+`TeammateIdle`, `Stop`, `SubagentStop`, `ConfigChange`, `PreCompact`,
+`Elicitation`, and `ElicitationResult`.
+
+`PreToolUse` is the only native ask surface. A `confirm` verdict can become a
+Claude Code permission prompt there. `PostToolUse` is advisory because the
+tool already ran; `PostToolBatch` can stop the loop before another model call.
+`ConfigChange` cannot override Claude Code's higher-authority policy-settings
+source.
+
+## Fail behavior
+
+A fresh installation defaults to `closed`; a migrated older configuration may
+retain an explicit `open` posture. The effective connector setting applies to
+both:
+
+- transport failures such as missing authentication, connection refusal,
+  timeout, or gateway 5xx; and
+- response failures such as unauthorized 4xx, malformed JSON, or a missing
+  decision field.
+
+`open` allows the event and records the failure. `closed` returns the
+connector's block response. `DEFENSECLAW_STRICT_AVAILABILITY=1` remains an
+additional force-closed override, but the persisted connector policy is the
+normal control:
+
+```powershell
+defenseclaw guardrail fail-mode
+defenseclaw guardrail fail-mode closed --connector codex --yes
+defenseclaw guardrail fail-mode closed --connector claudecode --yes
+defenseclaw guardrail status
+```
+
+Changing fail mode normally restarts the gateway and reconciles the native
+runtime. `--no-restart` only persists desired state; the running connector can
+remain on the prior value until restart. Status reports configured and runtime
+posture so that drift is visible.
+
+One boundary is intentionally separate: if the gateway's internal evaluator
+panics, it returns allow with warning/telemetry rather than claiming a proven
+block. Treat that as degraded security and investigate the local gateway log.
+The hook fail-mode setting does not turn an unknown internal evaluation result
+into an authoritative denial.
+
+See [Fail modes](/docs/reference/fail-modes) for the cross-platform reference.
+
+## Enable, disable, and remove
+
+Connector-scoped controls preserve the other active peer:
+
+```powershell
+defenseclaw guardrail disable --connector codex --yes
+defenseclaw guardrail enable --connector codex --yes
+defenseclaw setup remove codex --yes
+```
+
+- **Disable** retains connector policy for later re-enable but tears down that
+  connector's active registration after restart.
+- **Enable** reconciles the retained registration.
+- **Remove** drops the connector from the configured roster. Removing the final
+  connector requires explicit `--force`; uninstall is the full product-removal
+  path.
+- Omitting `--connector` from guardrail enable/disable is the global switch.
+
+These controls are not the same as skill or plugin runtime disable.
+
+## Skill and plugin runtime enforcement
+
+Runtime disable is proven only on exact agent events:
+
+| Asset control | Codex | Claude Code |
+| --- | --- | --- |
+| Skill runtime disable | **Limited** — blocks an exact disabled skill identity at a leading `$skill` selection in `UserPromptSubmit`. | **Limited** — blocks an exact disabled skill identity at the native `UserPromptExpansion` load. |
+| Plugin runtime disable | **Limited** — policy is recorded, but no certified hard plugin-expansion event exists. Use quarantine for hard filesystem enforcement. | **Limited** — blocks the native slash-command/plugin expansion event. |
+| Skill quarantine/restore | **Supported** — validated root, journaled provenance/content hash, copy-verify-remove, and verified restore. | **Supported** with the same DefenseClaw quarantine contract. |
+| Plugin quarantine/restore | **Limited** — validated filesystem move/restore; do not assume the stronger skill transaction/hash guarantees. | **Limited** for the same reason. |
+
+Runtime disable does not block future installation and does not move files.
+Restore removes only quarantine; a separate install block or runtime-disable
+row remains in force until explicitly changed.
+
+The identity must be present in DefenseClaw's connector-scoped asset inventory.
+Do not infer coverage for an arbitrary path-qualified or nested alias that does
+not resolve to that exact listed identity. Check `skill list` or `plugin list`
+and the connector scope before relying on runtime disable.
+
+## Verify connector enforcement safely
+
+Use product status and registration checks; do not use real secrets or a
+destructive tool call as a test payload.
+
+```powershell
+defenseclaw version
+defenseclaw-gateway status
+defenseclaw status
+defenseclaw guardrail status
+defenseclaw doctor
+```
+
+Use `defenseclaw-gateway connector verify --connector <name>` only after
+teardown or removal: it verifies that DefenseClaw-owned connector state is
+absent. On an active connector, that state is expected, so use `doctor` and
+`guardrail status` instead. After setup or mode changes, fully restart the
+agent so it reloads its native hook configuration.
+
+Protection is established only when all of the following agree:
+
+1. the intended native agent and DefenseClaw run as the same Windows user;
+2. the connector appears active with the expected mode and fail mode;
+3. the gateway reports ready and authenticated;
+4. doctor recognizes the agent version and full hook contract; and
+5. a new non-sensitive prompt produces connector-attributed local activity.
+
+For configuration details, see [Codex](/docs/connectors/codex),
+[Claude Code](/docs/connectors/claudecode), and
+[multi-connector setup](/docs/setup/guardrail/multi-connector).

@@ -44,7 +44,7 @@ type openaiResponsesAdapter struct{}
 // Name implements FormatAdapter.
 func (openaiResponsesAdapter) Name() string { return "openai-responses" }
 
-// InjectionSite returns the stable label written to gateway.jsonl (and
+// InjectionSite returns the stable canonical observability label (also
 // asserted by TestInjectNotificationForPassthrough_Dispatch). Kept
 // byte-identical to the pre-registry behavior.
 func (openaiResponsesAdapter) InjectionSite() string { return "responses-api/instructions" }

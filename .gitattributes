@@ -1,0 +1,10 @@
+# Release-candidate gates compare these reviewed sources byte-for-byte across
+# Linux, macOS, and Windows runners. Keep their checkout representation stable.
+scripts/upgrade.sh text eol=lf
+scripts/upgrade.ps1 text eol=lf
+cli/defenseclaw/install_publish.py text eol=lf
+
+# These pinned upstream snapshots are authenticated by SHA256 over their exact
+# bytes. Disable checkout-time newline conversion so Windows materializes the
+# same payload that the dependency lock reviewed.
+schemas/telemetry/v8/upstream/** -text

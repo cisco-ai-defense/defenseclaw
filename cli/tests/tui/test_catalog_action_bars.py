@@ -18,8 +18,12 @@ the broader shell tests.
 
 from __future__ import annotations
 
+import asyncio
+
+import defenseclaw.tui.app as app_mod
 import pytest
 from defenseclaw.tui.app import DefenseClawTUI
+from defenseclaw.tui.services.catalog_state import SkillRow
 from textual.containers import Horizontal
 from textual.widgets import Button, Input
 
@@ -46,9 +50,7 @@ async def test_catalog_control_bar_visible_on_panel(panel: str) -> None:
         app.workers.cancel_all()
         await pilot.pause()
         bar = app.query_one(f"#{panel}-controls", Horizontal)
-        assert bar.has_class("hidden") is False, (
-            f"{panel}-controls should be visible while the {panel} panel is active"
-        )
+        assert bar.has_class("hidden") is False, f"{panel}-controls should be visible while the {panel} panel is active"
         # Switching to another catalog panel hides the previous bar.
         other = next(other for other in CATALOG_PANELS if other != panel)
         # Plugins is hidden when the active connector doesn't expose
@@ -60,9 +62,7 @@ async def test_catalog_control_bar_visible_on_panel(panel: str) -> None:
         await pilot.pause()
         app.workers.cancel_all()
         await pilot.pause()
-        assert bar.has_class("hidden") is True, (
-            f"{panel}-controls must be hidden after switching to {other}"
-        )
+        assert bar.has_class("hidden") is True, f"{panel}-controls must be hidden after switching to {other}"
 
 
 @pytest.mark.asyncio
@@ -84,9 +84,7 @@ async def test_catalog_filter_input_mounted_and_constrained(panel: str) -> None:
         inp = app.query_one(f"#{panel}-filter", Input)
         # 24 is the CSS-set width; min-width 16 is the floor. Anything
         # above 32 means the constraint was dropped.
-        assert inp.region.width <= 32, (
-            f"{panel}-filter width={inp.region.width} — Input should be CSS-constrained"
-        )
+        assert inp.region.width <= 32, f"{panel}-filter width={inp.region.width} — Input should be CSS-constrained"
 
 
 @pytest.mark.asyncio
@@ -102,6 +100,11 @@ async def test_catalog_filter_input_live_filters_model(panel: str) -> None:
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause()
         app.action_switch_panel(panel)
+        await pilot.pause()
+        # First entry starts a catalog loader that may redraw the controls.
+        # End that unrelated worker before mutating Input.value so this test
+        # observes only the Input.Changed -> model filter contract.
+        app.workers.cancel_all()
         await pilot.pause()
         model = app.catalog_models[panel]
         inp = app.query_one(f"#{panel}-filter", Input)
@@ -126,6 +129,8 @@ async def test_catalog_filter_clear_button_resets_model_and_input(panel: str) ->
         await pilot.pause()
         app.action_switch_panel(panel)
         await pilot.pause()
+        app.workers.cancel_all()
+        await pilot.pause()
         model = app.catalog_models[panel]
         inp = app.query_one(f"#{panel}-filter", Input)
         inp.value = "needle"
@@ -134,6 +139,78 @@ async def test_catalog_filter_clear_button_resets_model_and_input(panel: str) ->
         # Direct handler call dodges click-coordinate flakiness on
         # narrow viewports without weakening the contract under test.
         app._handle_catalog_control(panel, f"{panel}-filter-clear")  # noqa: SLF001
+        await pilot.pause()
+        assert model.filter_text == ""
+        assert inp.value == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("panel", CATALOG_PANELS)
+async def test_catalog_sync_does_not_resurrect_unfocused_filter_after_clear(panel: str) -> None:
+    """A late failed initial load must not restore pre-Clear input text.
+
+    Catalog loading can finish after the operator clears a filter.  Error
+    loads deliberately leave ``model.loaded`` false; that state used to make
+    the next chrome sync copy any stale Input value back into the model even
+    though the Input no longer owned focus.  Under a busy full-suite runner
+    this made the MCP Clear button intermittently appear to do nothing.
+    """
+
+    app = DefenseClawTUI()
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        app.action_switch_panel(panel)
+        await pilot.pause()
+        app.workers.cancel_all()
+        await pilot.pause()
+        model = app.catalog_models[panel]
+        inp = app.query_one(f"#{panel}-filter", Input)
+        model.set_filter("needle")
+        inp.value = "needle"
+        await pilot.pause()
+        assert model.filter_text == "needle"
+
+        # Model a failed initial loader repainting just after Clear: the model
+        # remains unloaded while the old widget still temporarily displays its
+        # previous bytes.  Since that widget is not focused, model state wins.
+        app.set_focus(None)
+        await pilot.pause()
+        model.loaded = False
+        model.clear_filter()
+        assert inp.value == "needle"
+        app._sync_catalog_controls(panel)  # noqa: SLF001
+        await pilot.pause()
+        assert model.filter_text == ""
+        assert inp.value == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("panel", CATALOG_PANELS)
+async def test_catalog_sync_keeps_focused_empty_filter_authoritative(panel: str) -> None:
+    """A repaint before Input.Changed must not undo a focused clear."""
+
+    app = DefenseClawTUI()
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        app.action_switch_panel(panel)
+        await pilot.pause()
+        app.workers.cancel_all()
+        await pilot.pause()
+        model = app.catalog_models[panel]
+        inp = app.query_one(f"#{panel}-filter", Input)
+        inp.focus()
+        await pilot.pause()
+        inp.value = "needle"
+        await pilot.pause()
+        assert model.filter_text == "needle"
+
+        # Simulate Textual changing the widget before its Input.Changed event
+        # reaches the model while a failed/slow loader triggers a repaint.
+        model.loaded = False
+        inp.value = ""
+        app._sync_catalog_controls(panel)  # noqa: SLF001
+        assert model.filter_text == ""
+        assert inp.value == ""
         await pilot.pause()
         assert model.filter_text == ""
         assert inp.value == ""
@@ -158,6 +235,30 @@ async def test_catalog_clear_filter_button_disabled_when_no_filter(panel: str) -
         await pilot.pause()
         clear = app.query_one(f"#{panel}-filter-clear", Button)
         assert clear.disabled is True
+
+
+@pytest.mark.asyncio
+async def test_catalog_loader_does_not_render_after_shutdown_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker finishing during Textual teardown must not query removed widgets."""
+
+    app = DefenseClawTUI()
+    load_started = asyncio.Event()
+
+    async def _finish_during_shutdown(*_args: object, **_kwargs: object) -> tuple[int, bytes, bytes]:
+        load_started.set()
+        while app.is_running:
+            await asyncio.sleep(0)
+        return 1, b"", b"Failed to open audit store"
+
+    monkeypatch.setattr(app_mod, "_communicate_captured", _finish_during_shutdown)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        app.action_switch_panel("plugins")
+        await asyncio.wait_for(load_started.wait(), timeout=2)
+        await pilot.pause()
+    assert "Failed to open audit store" in str(app.plugins_model.message)
 
 
 @pytest.mark.asyncio
@@ -191,9 +292,7 @@ async def test_catalog_refresh_button_routes_to_reload_intent(panel: str, monkey
         loaded.clear()
         app._handle_catalog_control(panel, f"{panel}-refresh")  # noqa: SLF001
         await pilot.pause()
-        assert loaded == [panel], (
-            f"Refresh on {panel} bar should re-run _load_catalog_model({panel!r})"
-        )
+        assert loaded == [panel], f"Refresh on {panel} bar should re-run _load_catalog_model({panel!r})"
 
 
 @pytest.mark.asyncio
@@ -228,9 +327,7 @@ async def test_catalog_row_only_buttons_disabled_when_no_row(panel: str) -> None
         # Every catalog bar has at least these row-only suffixes.
         for suffix in ("detail", "menu"):
             btn = app.query_one(f"#{panel}-{suffix}", Button)
-            assert btn.disabled is True, (
-                f"{panel}-{suffix} should be disabled while the table is empty"
-            )
+            assert btn.disabled is True, f"{panel}-{suffix} should be disabled while the table is empty"
 
 
 @pytest.mark.asyncio
@@ -246,11 +343,11 @@ async def test_skills_reveal_button_focuses_registries_panel(monkeypatch) -> Non
         await pilot.pause()
         app.action_switch_panel("skills")
         await pilot.pause()
-        # Skip the test if the user has no skills loaded — the click
-        # only does anything when there's a selected row, and we'd
-        # rather skip than fake catalog-loading machinery here.
-        if app.skills_model.selected() is None:
-            pytest.skip("no skills loaded in the test environment")
+        app.workers.cancel_all()
+        app.skills_model.apply_loaded(
+            [SkillRow(name="fixture-skill", status="active", registry_source="fixture-registry")]
+        )
+        app._sync_catalog_controls("skills")  # noqa: SLF001
         app._handle_catalog_control("skills", "skills-reveal")  # noqa: SLF001
         await pilot.pause()
         assert app.active_panel == "registries"

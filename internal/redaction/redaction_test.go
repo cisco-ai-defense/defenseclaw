@@ -510,3 +510,52 @@ func TestDeterministicHash(t *testing.T) {
 		t.Fatalf("hash collided across distinct inputs: %q == %q", a, c)
 	}
 }
+
+// TestForSinkReason_TrustedAIDPrefix pins the whitelist behavior for
+// the "Cisco AI Defense: <rule>" reason shape emitted by the AID
+// normalizer (see internal/gateway/cisco_inspect.go). Redaction must
+// leave those reasons intact so operators + agent-side surfaces
+// display the cloud rule name; otherwise Codex/Claude/etc. show a
+// wall of <redacted len=... sha=...> tokens for what are actually
+// hand-authored, ship-controlled labels.
+func TestForSinkReason_TrustedAIDPrefix(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"Cisco AI Defense: Prompt Injection", "Cisco AI Defense: Prompt Injection"},
+		{"Cisco AI Defense: PII Detection", "Cisco AI Defense: PII Detection"},
+		{"Cisco AI Defense: Prompt Injection, Jailbreak", "Cisco AI Defense: Prompt Injection, Jailbreak"},
+		{"Cisco AI Defense custom policy block", "Cisco AI Defense custom policy block"},
+	}
+	for _, tc := range cases {
+		got := ForSinkReason(tc.in)
+		if got != tc.want {
+			t.Errorf("ForSinkReason(%q) = %q; want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestForSinkReason_TrustedAIDPrefix_RejectsBadShapes verifies the
+// whitelist is narrow: any user-controllable content after "Cisco AI
+// Defense: " that contains characters outside the catalog charset
+// (letters/digits/space/hyphen/underscore/comma/period/&) must still
+// be redacted. Prevents a prompt injection like
+// "Cisco AI Defense: sk-ant-<literal secret>" from riding through.
+func TestForSinkReason_TrustedAIDPrefix_RejectsBadShapes(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
+	badShapes := []string{
+		"Cisco AI Defense: sk-ant-api03-secret-KEY_XYZ!!!", // '!' rejected
+		"Cisco AI Defense: /etc/passwd content leaked",     // '/' rejected
+		"Cisco AI Defense: some=key value",                 // '=' rejected
+		"Cisco AI Defense:noSpace",                         // wrong shape (no ": ")
+		"NotCisco AI Defense: Prompt Injection",            // wrong prefix
+	}
+	for _, in := range badShapes {
+		got := ForSinkReason(in)
+		if got == in {
+			t.Errorf("ForSinkReason(%q) MUST have redacted, but got the input verbatim", in)
+		}
+	}
+}

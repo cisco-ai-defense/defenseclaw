@@ -96,7 +96,7 @@
           "instant": true
         }
       ],
-      "description": "covered_by:\n  - defenseclaw_http_request_count → internal/gateway/router.go (otelhttp middleware)"
+      "description": "covered_by:\n  - defenseclaw_http_request_count → internal/gateway/api_operational_metrics_v8.go (generated v8 middleware)"
     },
     {
       "type": "stat",
@@ -140,7 +140,7 @@
           }
         }
       },
-      "description": "covered_by:\n  - defenseclaw_http_request_count → internal/gateway/router.go (otelhttp middleware)"
+      "description": "covered_by:\n  - defenseclaw_http_request_count → internal/gateway/api_operational_metrics_v8.go (generated v8 middleware)"
     },
     {
       "type": "stat",
@@ -199,7 +199,7 @@
           "unit": "reqps"
         }
       },
-      "description": "covered_by:\n  - defenseclaw_http_request_count → internal/gateway/router.go (otelhttp middleware)"
+      "description": "covered_by:\n  - defenseclaw_http_request_count → internal/gateway/api_operational_metrics_v8.go (generated v8 middleware)"
     },
     {
       "type": "timeseries",
@@ -226,7 +226,7 @@
           "unit": "ms"
         }
       },
-      "description": "covered_by:\n  - defenseclaw_http_request_duration_milliseconds → internal/gateway/router.go (otelhttp middleware)"
+      "description": "covered_by:\n  - defenseclaw_http_request_duration_milliseconds → internal/gateway/api_operational_metrics_v8.go (generated v8 middleware)"
     },
     {
       "type": "timeseries",
@@ -257,7 +257,7 @@
           }
         }
       },
-      "description": "covered_by:\n  - defenseclaw_http_request_count → internal/gateway/router.go (otelhttp middleware)"
+      "description": "covered_by:\n  - defenseclaw_http_request_count → internal/gateway/api_operational_metrics_v8.go (generated v8 middleware)"
     },
     {
       "type": "table",
@@ -297,7 +297,7 @@
           }
         }
       ],
-      "description": "covered_by:\n  - defenseclaw_http_request_duration_milliseconds → internal/gateway/router.go (otelhttp middleware)"
+      "description": "covered_by:\n  - defenseclaw_http_request_duration_milliseconds → internal/gateway/api_operational_metrics_v8.go (generated v8 middleware)"
     },
     {
       "type": "row",
@@ -324,7 +324,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (defenseclaw_tool_name) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"tool_invocation\" [$__interval]))",
+          "expr": "sum by (tool_name) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"tool.invocation.completed\" | label_format tool_name=\"{{.body_gen_ai_tool_name}}\" [$__interval]))",
           "legendFormat": "{{defenseclaw_tool_name}}",
           "refId": "A",
           "datasource": {
@@ -382,7 +382,7 @@
           "refId": "A"
         }
       ],
-      "description": "covered_by:\n  - defenseclaw_gateway_errors → internal/telemetry/gateway_events.go (EventError)"
+      "description": "covered_by:\n  - defenseclaw_gateway_errors → internal/gateway/platform_health_observability_v8.go (generated structured failure metrics)"
     },
     {
       "type": "timeseries",
@@ -399,12 +399,113 @@
       },
       "targets": [
         {
-          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total[$__rate_interval]))",
+          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total[$__rate_interval]) or label_replace(rate(defenseclaw_guardrail_evaluations_total[$__rate_interval]), \"action\", \"$1\", \"guardrail_action_taken\", \"(.*)\") or label_replace(rate(defenseclaw_admission_decisions_total[$__rate_interval]), \"action\", \"$1\", \"decision\", \"(.*)\"))",
           "legendFormat": "{{action}}",
           "refId": "A"
         }
       ],
-      "description": "covered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations → internal/gateway/hook_decision_metrics_v8.go; internal/gateway/inspect_metrics_v8.go\n  - defenseclaw_guardrail_evaluations → internal/gateway/proxy_guardrail_observability_v8.go; internal/gateway/api_guardrail_event_observability_v8.go; internal/gateway/api_guardrail_evaluate_observability_v8.go\n  - defenseclaw_admission_decisions → internal/gateway/api_policy_observability_v8.go"
+    },
+    {
+      "type": "row",
+      "title": "Streaming responses",
+      "gridPos": {
+        "x": 0,
+        "y": 69,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Stream transitions by outcome",
+      "description": "SSE stream opens and terminal closes. Open uses outcome=attempted; close reports completed, blocked, failed, cancelled, or timed_out.\n\ncovered_by:\n  - defenseclaw_stream_lifecycle → internal/gateway/proxy_operational_metrics_v8.go",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 70,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (transition, outcome) (rate(defenseclaw_stream_lifecycle_total[$__rate_interval])) or on() vector(0)",
+          "legendFormat": "{{transition}} · {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Stream duration by outcome",
+      "description": "p50 and p95 completed or terminated SSE duration, measured through the final byte and correlated to the generated model span.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 70,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, outcome) (rate(defenseclaw_stream_duration_ms_milliseconds_bucket[$__rate_interval])))",
+          "legendFormat": "p50 · {{outcome}}",
+          "refId": "P50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(defenseclaw_stream_duration_ms_milliseconds_bucket[$__rate_interval])))",
+          "legendFormat": "p95 · {{outcome}}",
+          "refId": "P95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Stream bytes by outcome",
+      "description": "p50 and p95 bytes written before stream close. Blocked streams include any bytes delivered before enforcement plus the terminal block frame.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 70,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, outcome) (rate(defenseclaw_stream_bytes_sent_bucket[$__rate_interval])))",
+          "legendFormat": "p50 · {{outcome}}",
+          "refId": "P50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(defenseclaw_stream_bytes_sent_bucket[$__rate_interval])))",
+          "legendFormat": "p95 · {{outcome}}",
+          "refId": "P95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      }
     },
     {
       "type": "row",
@@ -431,7 +532,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action!~\"allow|none\"}[5m])) * 60 or vector(0)",
+          "expr": "((sum(rate(defenseclaw_inspect_evaluations_total{action!~\"allow|none\"}[5m])) or vector(0)) + (sum(rate(defenseclaw_guardrail_evaluations_total{guardrail_action_taken!~\"allow|none\"}[5m])) or vector(0))) * 60",
           "refId": "A",
           "instant": true
         }
@@ -445,7 +546,7 @@
         "colorMode": "value",
         "graphMode": "area"
       },
-      "description": "covered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations → internal/gateway/hook_decision_metrics_v8.go; internal/gateway/inspect_metrics_v8.go\n  - defenseclaw_guardrail_evaluations → internal/gateway/proxy_guardrail_observability_v8.go; internal/gateway/api_guardrail_event_observability_v8.go; internal/gateway/api_guardrail_evaluate_observability_v8.go"
     },
     {
       "type": "timeseries",
@@ -462,17 +563,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(defenseclaw_inspect_latency_milliseconds_bucket[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(defenseclaw_inspect_latency_milliseconds_bucket[$__rate_interval]) or rate(defenseclaw_guardrail_latency_milliseconds_bucket[$__rate_interval])))",
           "legendFormat": "p50",
           "refId": "p50"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(defenseclaw_inspect_latency_milliseconds_bucket[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(defenseclaw_inspect_latency_milliseconds_bucket[$__rate_interval]) or rate(defenseclaw_guardrail_latency_milliseconds_bucket[$__rate_interval])))",
           "legendFormat": "p95",
           "refId": "p95"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(defenseclaw_inspect_latency_milliseconds_bucket[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(defenseclaw_inspect_latency_milliseconds_bucket[$__rate_interval]) or rate(defenseclaw_guardrail_latency_milliseconds_bucket[$__rate_interval])))",
           "legendFormat": "p99",
           "refId": "p99"
         }
@@ -482,7 +583,7 @@
           "unit": "ms"
         }
       },
-      "description": "covered_by:\n  - defenseclaw_inspect_latency_milliseconds → internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_latency_milliseconds → internal/gateway/hook_decision_metrics_v8.go; internal/gateway/inspect_metrics_v8.go\n  - defenseclaw_guardrail_latency_milliseconds → internal/gateway/proxy_guardrail_observability_v8.go; internal/gateway/api_guardrail_event_observability_v8.go; internal/gateway/api_guardrail_evaluate_observability_v8.go"
     },
     {
       "type": "timeseries",
@@ -499,7 +600,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{action!~\"allow|none\"}[$__rate_interval])) or on() vector(0)",
+          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{action!~\"allow|none\"}[$__rate_interval]) or label_replace(rate(defenseclaw_guardrail_evaluations_total{guardrail_action_taken!~\"allow|none\"}[$__rate_interval]), \"action\", \"$1\", \"guardrail_action_taken\", \"(.*)\")) or on() vector(0)",
           "legendFormat": "{{action}}",
           "refId": "A"
         }
@@ -509,7 +610,7 @@
           "unit": "ops"
         }
       },
-      "description": "covered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations → internal/gateway/hook_decision_metrics_v8.go; internal/gateway/inspect_metrics_v8.go\n  - defenseclaw_guardrail_evaluations → internal/gateway/proxy_guardrail_observability_v8.go; internal/gateway/api_guardrail_event_observability_v8.go; internal/gateway/api_guardrail_evaluate_observability_v8.go"
     },
     {
       "type": "row",
@@ -536,17 +637,17 @@
       },
       "targets": [
         {
-          "expr": "sum by (gen_ai_token_type, gen_ai_request_model) (rate(gen_ai_client_token_usage_sum[$__rate_interval]))",
+          "expr": "sum by (gen_ai_token_type, gen_ai_request_model) ((((increase(gen_ai_client_token_usage_sum[$__rate_interval]) or (last_over_time(gen_ai_client_token_usage_sum[$__rate_interval]) * 0)) and gen_ai_client_token_usage_sum offset $__rate_interval) or (last_over_time(gen_ai_client_token_usage_sum[$__rate_interval]) unless gen_ai_client_token_usage_sum offset $__rate_interval))) / ($__rate_interval_ms / 1000)",
           "legendFormat": "{{gen_ai_request_model}} {{gen_ai_token_type}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "ops"
+          "unit": "suffix: tokens/sec"
         }
       },
-      "description": "covered_by:\n  - gen_ai_client_token_usage → OTel GenAI semconv via internal/telemetry/metrics.go (only proxy connectors)"
+      "description": "Window-average reported token rate by model and direction. Established series use counter delta divided by the window; a series first published inside the window uses its latest cumulative completion value divided by the window. It is not an instantaneous rate; absent series mean token usage was not reported.\n\ncovered_by:\n  - gen_ai_client_token_usage → generated OTel GenAI v8 metrics via internal/gateway/proxy_observability_v8.go and internal/gateway/hook_lifecycle_metrics_v8.go"
     },
     {
       "type": "timeseries",
@@ -583,7 +684,7 @@
           "unit": "s"
         }
       },
-      "description": "covered_by:\n  - gen_ai_client_operation_duration_seconds → OTel GenAI semconv via internal/telemetry/metrics.go (only proxy connectors)"
+      "description": "covered_by:\n  - gen_ai_client_operation_duration_seconds → generated OTel GenAI v8 metrics via internal/gateway/proxy_observability_v8.go and internal/gateway/hook_lifecycle_metrics_v8.go"
     },
     {
       "type": "row",
@@ -666,6 +767,6 @@
   "timezone": "",
   "title": "DefenseClaw — Proxy & LLM Guard",
   "uid": "defenseclaw-traffic",
-  "version": 5,
+  "version": 10,
   "weekStart": ""
 }

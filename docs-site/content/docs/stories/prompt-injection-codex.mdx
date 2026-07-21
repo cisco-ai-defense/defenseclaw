@@ -70,12 +70,14 @@ The bundled `TRUST-IGNORE-PREVIOUS` rule is CRITICAL. The `UserPromptSubmit` hoo
 
 ```bash
 defenseclaw alerts --limit 10
-# or inspect structured events as they arrive:
-tail -f ~/.defenseclaw/gateway.jsonl \
+# or inspect the latest structured events from mandatory SQLite history:
+defenseclaw-gateway audit export --limit 200 --output - \
   | jq 'select(.connector == "codex" and .severity == "CRITICAL")'
 ```
 
-Look for `TRUST-IGNORE-PREVIOUS`, connector `codex`, event `UserPromptSubmit`, and an effective block action. Field placement differs between the compact gateway JSONL envelope and the SQLite audit export, so filter on the stable top-level connector and severity fields first.
+Look for the matching rule, connector `codex`, event `UserPromptSubmit`, and an
+effective block action. Filter on stable top-level connector and severity fields
+before drilling into the canonical structured body.
 
 </Step>
 

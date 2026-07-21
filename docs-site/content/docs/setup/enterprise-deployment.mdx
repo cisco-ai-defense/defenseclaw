@@ -92,7 +92,7 @@ The gateway is intentionally unable to write broadly into user homes. The guardi
 The durable controls live outside the agent user's authority:
 
 1. **The gateway is a system service.** It runs as the dedicated `defenseclaw` identity, not as the interactive Codex or Claude Code user. Killing the agent process does not kill the gateway.
-2. **The executable and service definition are administrator-owned.** A standard user cannot replace `/opt/defenseclaw/bin/defenseclaw-gateway`, edit the systemd unit, replace `/Library/DefenseClaw/bin/defenseclaw-gateway`, or unload a system LaunchDaemon.
+2. **The executable and service definition are administrator-owned.** A standard user cannot replace `/opt/defenseclaw/bin/defenseclaw-gateway`, edit the systemd unit, replace `/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway`, or unload a system LaunchDaemon.
 3. **Policy is administrator-owned and mode-pinned.** The service sets `DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise`; changing a user environment variable or user config cannot downgrade the running service.
 4. **Runtime mutation is denied.** Authenticated non-admin clients receive HTTP 403 for managed-enterprise config changes. Security-critical changes require an administrator edit and service restart.
 5. **Guardian authorization is root-owned.** Service-writable status is not sufficient to authorize repair or claim readiness. The gateway trusts the separate administrator-owned authorization record.
@@ -129,14 +129,13 @@ The important qualifier is **permanently**. A standard user—or an AI agent exe
 
 ## What moves to system scope
 
-| Surface | Linux path | macOS path | Owner |
-| --- | --- | --- | --- |
-| Binaries | `/opt/defenseclaw/bin` | `/Library/DefenseClaw/bin` | root/admin |
-| Config | `/etc/defenseclaw/config.yaml` | `/Library/Application Support/DefenseClaw/config.yaml` | root/admin |
-| Runtime state | `/var/lib/defenseclaw` | `/Library/Application Support/DefenseClaw/runtime` | `defenseclaw` service identity |
-| Logs | `/var/log/defenseclaw` | `/Library/Logs/DefenseClaw` | service identity |
-| Linux service | `/etc/systemd/system/defenseclaw-gateway.service` | n/a | root |
-| macOS service | n/a | `/Library/LaunchDaemons/com.defenseclaw.gateway.plist` | root |
+| Surface | Linux path | Linux owner | macOS path | macOS owner |
+| --- | --- | --- | --- | --- |
+| Binaries | `/opt/defenseclaw/bin` | `root:root` | `/opt/cisco/secureclient/defenseclaw/bin` | `root:wheel` |
+| Config | `/etc/defenseclaw/config.yaml` | `root:defenseclaw` | `/opt/cisco/secureclient/defenseclaw/etc/config.yaml` | `root:wheel` |
+| Runtime state | `/var/lib/defenseclaw` | `defenseclaw:defenseclaw` | `/opt/cisco/secureclient/defenseclaw/runtime` | `root:wheel` |
+| Logs | `/var/log/defenseclaw` | `defenseclaw:defenseclaw` | `/Library/Logs/Cisco/SecureClient/DefenseClaw` | `root:wheel` |
+| Service definition | `/etc/systemd/system/defenseclaw-gateway.service` | `root:root` | `/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist` | `root:wheel` |
 
 User-owned agent configuration remains in user space. Examples include `~/.codex/config.toml`, `~/.claude/settings.json`, and `~/.gemini/settings.json`. DefenseClaw can only harden those files by installing and repairing hooks through a privileged enterprise controller; users still own the agent's native configuration file.
 
@@ -157,7 +156,7 @@ Use a staged deployment rather than enabling action mode everywhere at once:
 
 - A supported DefenseClaw build and its matching packaging files.
 - Root or MDM access through a channel unavailable to the protected AI agent.
-- A dedicated non-login `defenseclaw` service identity.
+- A daemon identity for the gateway: on Linux, a dedicated non-login `defenseclaw` service user; on macOS, the LaunchDaemon runs as root (the managed cloud auth provider requires root to read its on-disk credential store).
 - An initialized native config for every protected user/connector.
 - A policy decision for response failure mode and availability behavior.
 - Central collection for service health, guardian failures, and audit events.
@@ -210,13 +209,18 @@ stat -c '%U:%G %a %n' \
 Create `/etc/defenseclaw/config.yaml`:
 
 ```yaml
-config_version: 7
+config_version: 8
 deployment_mode: managed_enterprise
 data_dir: /var/lib/defenseclaw
-audit_db: /var/lib/defenseclaw/audit.db
-judge_bodies_db: /var/lib/defenseclaw/judge_bodies.db
 plugin_dir: /var/lib/defenseclaw/plugins
 policy_dir: /var/lib/defenseclaw/policies
+observability:
+  local:
+    path: /var/lib/defenseclaw/audit.db
+    judge_bodies_path: /var/lib/defenseclaw/judge_bodies.db
+    retention_days: 90
+  defaults:
+    redaction_profile: sensitive
 gateway:
   device_key_file: /var/lib/defenseclaw/device.key
   api_bind: 127.0.0.1
@@ -267,6 +271,87 @@ DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml
 `DEFENSECLAW_CONFIG` lets the service keep administrator policy in `/etc` while runtime state remains in `/var/lib`.
 
 The unit also pins `StateDirectoryMode=0750`, `RuntimeDirectoryMode=0750`, and `LogsDirectoryMode=0750`; do not rely on systemd's default directory modes for secret-bearing runtime state. It enables a restrictive service sandbox (`ProtectSystem=strict`, `ProtectHome=true`, private devices/tmp, kernel and control-group protections, hidden non-service `/proc` entries, the `@system-service` syscall allow-list, no realtime scheduling, no SUID/namespace escalation, and an empty capability bounding set). If your deployment needs host-wide user discovery or hook repair, run that as the enterprise guardian component rather than widening the gateway service sandbox.
+
+## Native Windows Claude Code managed hooks
+
+Native Windows supports administrator-managed Claude Code hooks without
+writing `~/.claude/settings.json`. Run the installed gateway from an elevated
+PowerShell window (or as LocalSystem) for each approved interactive user:
+
+The gateway and sibling `defenseclaw-hook.exe` must first be deployed in an
+Administrator-, LocalSystem-, or TrustedInstaller-owned machine path (normally
+under `C:\Program Files`) with no standard-user write ACEs. The per-user public
+installer under `%LOCALAPPDATA%` is deliberately rejected as an enterprise
+policy command source; elevating a user-writable executable would make the
+machine policy unsafe.
+
+```powershell
+defenseclaw-gateway enterprise hooks install `
+  --user alice `
+  --connector claudecode `
+  --agent-version "2.1.187 (Claude Code)" `
+  --json
+```
+
+The command validates the target profile's exact SID, rejects service/system
+identities, unsafe DACLs, foreign owners, symlinks, junctions, and other
+reparse points, then writes the user's scoped runtime beneath
+`<profile>\.defenseclaw`. The native hook resolves that runtime from the
+invoking process SID; it does not use the administrator account's install data
+root or project-controlled environment. The administrator policy is published
+atomically as:
+
+```text
+C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json
+```
+
+The adjacent protected `.defenseclaw-managed-hooks.state` binds the exact
+policy digest, native hook executable, and allow-listed target SIDs. Claude
+loads hooks from this tier when `allowManagedHooksOnly: true`; no manual hook
+trust prompt is required. Users not present in the protected SID allow-list
+receive a verified no-op from the shared machine hook. Invalid or tampered
+ownership metadata fails closed for registered hook invocations.
+
+Native Windows managed hooks deliberately pin their per-user runtime to
+`<profile>\.defenseclaw`. `--data-dir` may only repeat that exact path; custom
+DefenseClaw data directories are rejected because a standard-user hook cannot
+securely discover an administrator-selected redirect. The managed hook also
+ignores inherited `DEFENSECLAW_HOME` and `CLAUDE_CONFIG_DIR`. The latter may
+relocate Claude's user configuration, but it does not relocate the machine
+policy under `C:\Program Files\ClaudeCode`, so no user or project environment
+can redirect this managed registration.
+
+DefenseClaw refuses to overwrite a foreign drop-in, an administrator-edited
+policy whose digest no longer matches its sidecar, `disableAllHooks: true`, or
+a file policy superseded by `policyHelper`. It also refuses installation when
+an HKLM `Settings` policy has higher precedence. In those environments, merge
+the DefenseClaw hook matrix through the active GPO/MDM/policy-helper source;
+local file installation cannot override it. Remotely delivered policy is an
+external management boundary and must likewise include the hook matrix at its
+authoritative source.
+
+Remove one owned target registration with the same elevated identity:
+
+```powershell
+defenseclaw-gateway enterprise hooks uninstall `
+  --user alice `
+  --connector claudecode `
+  --json
+```
+
+If the account and profile have already been removed, pass the recorded
+`--sid S-1-5-21-...` without `--user` or `--user-home` to remove the stale
+allow-list entry.
+
+Cleanup verifies the protected digest and ownership metadata before mutation.
+It removes the machine drop-in after the last target and otherwise updates the
+SID allow-list atomically. Per-user runtime files remain as inert repair and
+forensic evidence; a removed SID is no longer activated by the shared policy.
+Re-running install repairs those files and re-registers the SID.
+
+This endpoint hook-policy support does not turn the public Windows package
+into the private `managed-enterprise` distribution flavor or provide private
+CMID credentials; those release/provider boundaries remain unchanged.
 
 ## Per-user hook guardian
 
@@ -371,7 +456,7 @@ targets:
     agent_version: "2.1.187 (Claude Code)"
   - user: alice
     connector: claudecode
-    agent_version: "Claude Code v2.1.144"
+    agent_version: "Claude Code v2.1.152"
   - user: disabled-user
     connector: codex
     enabled: false
@@ -422,9 +507,17 @@ Each reconcile run writes `/var/lib/defenseclaw/hook_guardian_state.json`. `defe
 
 ## macOS LaunchDaemon layout
 
-Install the binary under `/Library/DefenseClaw/bin`, create the managed config and guardian manifest under `/Library/Application Support/DefenseClaw`, then install both packaged LaunchDaemons. Create the `defenseclaw` service account and group before running the packaged installer. The managed config must set `data_dir: "/Library/Application Support/DefenseClaw/runtime"` so mutable service state stays separate from the administrator-owned config.
+The macOS design uses two privilege domains — mirroring the Linux table above but collapsed to root for the daemon side, because the managed cloud auth provider requires root to read and re-perm its on-disk credential store. There is no dedicated `defenseclaw` service user on macOS.
 
-Create the non-login service identity through your MDM, directory service, or endpoint bootstrap package. Use a stable UID/GID that does not collide with local users, hide it from the login UI, and do not grant interactive login or administrator membership. Account creation differs across enterprise macOS management products, so the packaged plist intentionally assumes the identity already exists.
+| Component | Identity | Writable scope | Purpose |
+| --- | --- | --- | --- |
+| Gateway | root (uid 0) | `/opt/cisco/secureclient/defenseclaw/runtime`, `/Library/Logs/Cisco/SecureClient/DefenseClaw` | Inspection, policy, audit, hook API, and health. |
+| Hook guardian | root (uid 0), same daemon-level authority | Allow-listed user homes plus guardian/runtime state | Install and repair native user hooks after trusted path validation. |
+| AI agent | Interactive standard user | Its normal user profile | Invoke native hooks; cannot manage the LaunchDaemon or administrator assets. |
+
+macOS launchd does not offer the fine-grained sandbox directives systemd exposes (`ProtectSystem`, `ProtectHome`, capability bounding set, syscall filters, etc.), so isolation is enforced through the surrounding endpoint boundary — code-signing/notarization policy, MDM file ownership and ACL enforcement, launchd system-domain control, Endpoint Security/EDR, and restricted local-admin membership — instead of by narrowing the daemon's process privileges. Both packaged plists deliberately omit `UserName` and `GroupName` so launchd runs the daemons as root by default; the installer refuses to load a plist that pins them to any other identity.
+
+Install the binary under `/opt/cisco/secureclient/defenseclaw/bin`, create the managed config and guardian manifest under `/opt/cisco/secureclient/defenseclaw/etc`, then install both packaged LaunchDaemons. The managed config must set `data_dir: "/opt/cisco/secureclient/defenseclaw/runtime"` so mutable service state stays separate from the administrator-owned config.
 
 Prepare the administrator-approved config and guardian manifest outside the managed destination. From the extracted DefenseClaw release archive, run:
 
@@ -439,32 +532,38 @@ The installer refuses symlinked sources or managed destinations, verifies the ro
 
 | Path | Owner | Mode |
 | --- | --- | --- |
-| `/Library/DefenseClaw/bin/defenseclaw-gateway` | `root:wheel` | `0755` |
-| `/Library/Application Support/DefenseClaw` | `root:defenseclaw` | `0750` |
-| `/Library/Application Support/DefenseClaw/config.yaml` | `root:defenseclaw` | `0640` |
-| `/Library/Application Support/DefenseClaw/hook-guardian/targets.yaml` | `root:defenseclaw` | `0640` |
-| `/Library/Application Support/DefenseClaw/runtime` | `defenseclaw:defenseclaw` | `0750` |
-| `/Library/LaunchDaemons/com.defenseclaw.*.plist` | `root:wheel` | `0644` |
+| `/opt/cisco/secureclient/defenseclaw` | `root:wheel` | `0755` |
+| `/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway` | `root:wheel` | `0755` |
+| `/opt/cisco/secureclient/defenseclaw/etc` | `root:wheel` | `0755` |
+| `/opt/cisco/secureclient/defenseclaw/etc/config.yaml` | `root:wheel` | `0640` |
+| `/opt/cisco/secureclient/defenseclaw/runtime` | `root:wheel` | `0750` |
+| `/opt/cisco/secureclient/defenseclaw/hook-guardian` | `root:wheel` | `0750` |
+| `/opt/cisco/secureclient/defenseclaw/hook-guardian/targets.yaml` | `root:wheel` | `0640` |
+| `/opt/cisco/secureclient/defenseclaw/hook-guardian-state` | `root:wheel` | `0750` |
+| `/Library/Logs/Cisco/SecureClient/DefenseClaw` | `root:wheel` | `0750` |
+| `/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw*.plist` | `root:wheel` | `0644` |
+
+Before replacing files, the installer snapshots the existing deployment and records which LaunchDaemons are loaded. A failure after jobs are stopped restores the previous binary, config, manifest, and plists, then re-bootstraps only the jobs that were loaded before the attempt. A failed fresh install removes files created by that attempt instead of leaving persistent LaunchDaemon plists.
 
 Use `--no-start` when MDM or a package transaction must install and verify the files before a separate orchestration step loads the jobs. Even in that mode, an already loaded DefenseClaw job is unloaded before replacement and remains stopped until the administrator starts it.
 
-The gateway LaunchDaemon runs as `defenseclaw:defenseclaw`; the installer keeps the base directory and config root-owned and group-readable, while runtime and log directories are service-owned. `/Library/Application Support/DefenseClaw/hook-guardian-state` is the root-owned authorization-record directory selected by `DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR`; it is distinct from `hook_guardian_state.json`, which the guardian writes under the configured `data_dir`. The hook guardian remains a separate privileged job so it can drop credentials and repair explicitly allow-listed user hooks. Both jobs pin `DEFENSECLAW_HOME`, `DEFENSECLAW_CONFIG`, `WorkingDirectory`, and `Umask=077`, and the installer loads both jobs in the system domain unless `--no-start` is selected.
+Both LaunchDaemons run as root. `/opt/cisco/secureclient/defenseclaw/hook-guardian-state` is the authorization-record directory selected by `DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR`; it is distinct from `hook_guardian_state.json`, which the guardian writes under the configured `data_dir`. The hook guardian remains a separate periodic job so its lifecycle stays independent of the gateway. Both jobs pin `DEFENSECLAW_HOME`, `DEFENSECLAW_CONFIG`, `WorkingDirectory`, and `Umask=077`, and the installer loads both jobs in the system domain unless `--no-start` is selected.
 
 The packaged macOS guardian runs a reconcile every 300 seconds. It is a periodic repair backstop, not the Linux `fsnotify` watcher. For a shorter repair window or prevention, deploy an MDM/EDR policy that monitors or locks the native agent config and DefenseClaw hook footprint.
 
 Verify the system-domain jobs and filesystem trust:
 
 ```bash
-sudo launchctl print system/com.defenseclaw.gateway
-sudo launchctl print system/com.defenseclaw.hook-guardian
+sudo launchctl print system/com.cisco.secureclient.defenseclaw
+sudo launchctl print system/com.cisco.secureclient.defenseclaw.hook-guardian
 sudo stat -f '%Su:%Sg %OLp %N' \
-  /Library/DefenseClaw/bin/defenseclaw-gateway \
-  "/Library/Application Support/DefenseClaw/config.yaml" \
-  /Library/LaunchDaemons/com.defenseclaw.gateway.plist \
-  /Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist
+  /opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway \
+  /opt/cisco/secureclient/defenseclaw/etc/config.yaml \
+  /Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist \
+  /Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-guardian.plist
 sudo lsof -nP -iTCP:18970 -sTCP:LISTEN
-sudo tail -n 100 /Library/Logs/DefenseClaw/gateway.err.log
-sudo tail -n 100 /Library/Logs/DefenseClaw/hook-guardian.err.log
+sudo tail -n 100 /Library/Logs/Cisco/SecureClient/DefenseClaw/gateway.err.log
+sudo tail -n 100 /Library/Logs/Cisco/SecureClient/DefenseClaw/hook-guardian.err.log
 ```
 
 macOS does not apply the Linux systemd sandbox directives. Use code-signing/notarization policy, MDM file ownership and ACL enforcement, launchd system-domain control, Endpoint Security/EDR, and restricted local-admin membership as the surrounding endpoint boundary.
@@ -498,9 +597,9 @@ sudo systemctl start defenseclaw-hook-guardian.service
 On macOS, edit the root-owned config, kick-start the gateway LaunchDaemon, and run the guardian LaunchDaemon immediately instead of waiting for its next periodic reconcile:
 
 ```bash
-sudoedit "/Library/Application Support/DefenseClaw/config.yaml"
-sudo launchctl kickstart -k system/com.defenseclaw.gateway
-sudo launchctl kickstart -k system/com.defenseclaw.hook-guardian
+sudoedit /opt/cisco/secureclient/defenseclaw/etc/config.yaml
+sudo launchctl kickstart -k system/com.cisco.secureclient.defenseclaw
+sudo launchctl kickstart -k system/com.cisco.secureclient.defenseclaw.hook-guardian
 ```
 
 Do not use the user CLI or HTTP PATCH as an enterprise automation shortcut; managed mode rejects that path by design.

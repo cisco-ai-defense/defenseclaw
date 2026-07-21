@@ -23,6 +23,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 )
 
 func newTestStore(t *testing.T) (*Store, func()) {
@@ -404,6 +406,7 @@ func TestLogger_LogNetworkEgress(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
 	logger := NewLogger(store)
+	logger.SetRuntimeV8Emitter(newTestRuntimeV8Emitter(t, store, router.AdmissionOrdinary))
 	ctx := context.Background()
 
 	t.Run("allowed call stored, no alert", func(t *testing.T) {
@@ -425,10 +428,10 @@ func TestLogger_LogNetworkEgress(t *testing.T) {
 		if rows[0].Severity != "INFO" {
 			t.Errorf("severity = %q, want INFO", rows[0].Severity)
 		}
-		alerts, _ := store.ListAlerts(10)
-		for _, a := range alerts {
+		events, _ := store.ListEvents(10)
+		for _, a := range events {
 			if a.Action == "network-egress-blocked" {
-				t.Error("unexpected blocked alert for allowed egress call")
+				t.Error("unexpected blocked projection for allowed egress call")
 			}
 		}
 	})
@@ -453,15 +456,15 @@ func TestLogger_LogNetworkEgress(t *testing.T) {
 		if rows[0].Severity != "HIGH" {
 			t.Errorf("severity = %q, want HIGH", rows[0].Severity)
 		}
-		alerts, _ := store.ListAlerts(10)
+		events, _ := store.ListEvents(10)
 		var found bool
-		for _, a := range alerts {
-			if a.Action == "network-egress-blocked" && a.Target == "exfil.bad" {
+		for _, a := range events {
+			if a.Action == "network-egress-blocked" && a.Structured["defenseclaw.network.target_ref"] == "exfil.bad" {
 				found = true
 			}
 		}
 		if !found {
-			t.Error("expected a network-egress-blocked alert in audit_events")
+			t.Error("expected a canonical network-egress-blocked event-history projection")
 		}
 	})
 
@@ -507,16 +510,14 @@ func TestLogger_LogNetworkEgress(t *testing.T) {
 	})
 }
 
-func TestLogger_LogNetworkEgress_BlockedAlertFansOutWithCorrelationDefaults(t *testing.T) {
+func TestLogger_LogNetworkEgress_BlockedProjectionHasDefaultsWithoutLegacyFanout(t *testing.T) {
 	t.Setenv("DEFENSECLAW_RUN_ID", "network-egress-run")
 
 	store, cleanup := newTestStore(t)
 	defer cleanup()
 
 	logger := NewLogger(store)
-	sink := installCaptureSink(t, logger)
-	emitter := &captureEmitter{}
-	logger.SetStructuredEmitter(emitter)
+	logger.SetRuntimeV8Emitter(newTestRuntimeV8Emitter(t, store, router.AdmissionOrdinary))
 
 	err := logger.LogNetworkEgress(context.Background(), NetworkEgressEvent{
 		Hostname:      "blocked.example",
@@ -531,29 +532,11 @@ func TestLogger_LogNetworkEgress_BlockedAlertFansOutWithCorrelationDefaults(t *t
 		t.Fatalf("LogNetworkEgress: %v", err)
 	}
 
-	sinkEvents := sink.snapshot()
-	if len(sinkEvents) != 1 {
-		t.Fatalf("sink events = %d, want 1", len(sinkEvents))
-	}
-	if sinkEvents[0].Action != "network-egress-blocked" {
-		t.Fatalf("sink action = %q, want network-egress-blocked", sinkEvents[0].Action)
-	}
-	if sinkEvents[0].Target != "blocked.example" {
-		t.Fatalf("sink target = %q, want blocked.example", sinkEvents[0].Target)
-	}
-	if sinkEvents[0].ID == "" || sinkEvents[0].RunID == "" || sinkEvents[0].Actor == "" {
-		t.Fatalf("sink event missing defaults: %+v", sinkEvents[0])
-	}
-
-	emitted := emitter.snapshot()
-	if len(emitted) != 1 {
-		t.Fatalf("structured events = %d, want 1", len(emitted))
-	}
-	if emitted[0].Action != "network-egress-blocked" {
-		t.Fatalf("structured action = %q, want network-egress-blocked", emitted[0].Action)
-	}
-	if emitted[0].ID == "" || emitted[0].RunID == "" || emitted[0].Actor == "" {
-		t.Fatalf("structured event missing defaults: %+v", emitted[0])
+	events, listErr := store.ListEvents(10)
+	if listErr != nil || len(events) != 1 || events[0].Action != "network-egress-blocked" ||
+		events[0].Structured["defenseclaw.network.target_ref"] != "blocked.example" ||
+		events[0].ID == "" || events[0].RunID == "" || events[0].Actor == "" {
+		t.Fatalf("local canonical projection = %#v error=%v", events, listErr)
 	}
 }
 
@@ -577,7 +560,17 @@ func TestAgent360NetworkEgressMigrationUpgradesAlreadyMigratedDatabase(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	for version := 1; version < len(migrations); version++ {
+	agent360Version := 0
+	for index, candidate := range migrations {
+		if candidate.description == "agent360: correlate network egress with root agent, parent agent, and root session" {
+			agent360Version = index + 1
+			break
+		}
+	}
+	if agent360Version == 0 {
+		t.Fatal("agent360 migration not found")
+	}
+	for version := 1; version < agent360Version; version++ {
 		if _, err := db.Exec(`INSERT INTO schema_version(version, applied_at) VALUES (?, CURRENT_TIMESTAMP)`, version); err != nil {
 			t.Fatal(err)
 		}
@@ -591,8 +584,12 @@ func TestAgent360NetworkEgressMigrationUpgradesAlreadyMigratedDatabase(t *testin
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if err := store.Init(); err != nil {
-		t.Fatalf("Init upgrade: %v", err)
+	// This is deliberately a table-scoped component fixture, not a production
+	// audit database. Apply the migration under test directly; Store.Init now
+	// enforces the mandatory v8 audit_events readiness anchor and correctly
+	// rejects partial schemas.
+	if err := store.applyMigration(agent360Version, migrations[agent360Version-1]); err != nil {
+		t.Fatalf("apply agent360 upgrade: %v", err)
 	}
 	for _, column := range []string{"root_agent_id", "parent_agent_id", "root_session_id"} {
 		exists, err := store.hasColumn("network_egress_events", column)

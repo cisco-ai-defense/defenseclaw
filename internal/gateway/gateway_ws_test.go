@@ -419,7 +419,7 @@ func TestConnectHandshakeApprovalEventBeforeOK(t *testing.T) {
 
 	client := clientForServer(t, srv)
 	store, logger := testStoreAndLogger(t)
-	router := NewEventRouter(client, store, logger, true, nil)
+	router := NewEventRouter(client, store, logger, true)
 	client.OnEvent = router.Route
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -753,7 +753,7 @@ func TestRouteApprovalDangerousCommand(t *testing.T) {
 	client := connectToMockGW(t, srv)
 	store, logger := testStoreAndLogger(t)
 
-	r := NewEventRouter(client, store, logger, false, nil)
+	r := NewEventRouter(client, store, logger, false)
 
 	payload, _ := json.Marshal(ApprovalRequestPayload{
 		ID: "approval-1",
@@ -787,7 +787,7 @@ func TestRouteApprovalDangerousArgvOnly(t *testing.T) {
 	client := connectToMockGW(t, srv)
 	store, logger := testStoreAndLogger(t)
 
-	r := NewEventRouter(client, store, logger, true, nil)
+	r := NewEventRouter(client, store, logger, true)
 
 	payload, _ := json.Marshal(ApprovalRequestPayload{
 		ID: "approval-argv-only",
@@ -819,7 +819,7 @@ func TestRouteApprovalSafeArgvAutoApproved(t *testing.T) {
 	client := connectToMockGW(t, srv)
 	store, logger := testStoreAndLogger(t)
 
-	r := NewEventRouter(client, store, logger, true, nil)
+	r := NewEventRouter(client, store, logger, true)
 
 	payload, _ := json.Marshal(ApprovalRequestPayload{
 		ID: "approval-safe-argv",
@@ -848,7 +848,7 @@ func TestRouteApprovalAutoApprove(t *testing.T) {
 	client := connectToMockGW(t, srv)
 	store, logger := testStoreAndLogger(t)
 
-	r := NewEventRouter(client, store, logger, true, nil)
+	r := NewEventRouter(client, store, logger, true)
 
 	payload, _ := json.Marshal(ApprovalRequestPayload{
 		ID: "approval-2",
@@ -882,7 +882,7 @@ func TestRouteApprovalNoAutoApprove(t *testing.T) {
 	client := connectToMockGW(t, srv)
 	store, logger := testStoreAndLogger(t)
 
-	r := NewEventRouter(client, store, logger, false, nil)
+	r := NewEventRouter(client, store, logger, false)
 
 	payload, _ := json.Marshal(ApprovalRequestPayload{
 		ID: "approval-3",
@@ -915,7 +915,7 @@ func TestRouteApprovalEmptyContextDenied(t *testing.T) {
 	client := connectToMockGW(t, srv)
 	store, logger := testStoreAndLogger(t)
 
-	r := NewEventRouter(client, store, logger, true, nil)
+	r := NewEventRouter(client, store, logger, true)
 
 	payload, _ := json.Marshal(ApprovalRequestPayload{ID: "approval-4"})
 
@@ -938,7 +938,7 @@ func TestRouteApprovalDangerousCommandNestedRequest(t *testing.T) {
 	client := connectToMockGW(t, srv)
 	store, logger := testStoreAndLogger(t)
 
-	r := NewEventRouter(client, store, logger, false, nil)
+	r := NewEventRouter(client, store, logger, false)
 
 	payload, _ := json.Marshal(ApprovalRequestPayload{
 		ID: "approval-5",
@@ -1153,7 +1153,7 @@ func TestHandleAdmissionResultBlocked(t *testing.T) {
 		client: client,
 		logger: logger,
 		notify: NewNotificationQueue(),
-		router: NewEventRouter(client, nil, logger, false, nil),
+		router: NewEventRouter(client, nil, logger, false),
 	}
 
 	s.handleAdmissionResult(watcher.AdmissionResult{
@@ -1216,7 +1216,7 @@ func TestHandleAdmissionResultBlocked_StandaloneSkipsFleetRPC(t *testing.T) {
 		client: client,
 		logger: logger,
 		notify: NewNotificationQueue(),
-		router: NewEventRouter(client, nil, logger, false, nil),
+		router: NewEventRouter(client, nil, logger, false),
 	}
 
 	s.handleAdmissionResult(watcher.AdmissionResult{
@@ -1256,7 +1256,7 @@ func TestHandleAdmissionResultRejected(t *testing.T) {
 		client: client,
 		logger: logger,
 		notify: NewNotificationQueue(),
-		router: NewEventRouter(client, nil, logger, false, nil),
+		router: NewEventRouter(client, nil, logger, false),
 	}
 
 	s.handleAdmissionResult(watcher.AdmissionResult{

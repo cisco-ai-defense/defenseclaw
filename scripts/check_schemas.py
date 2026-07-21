@@ -28,17 +28,29 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_DIR = ROOT / "schemas"
+OBSERVABILITY_V8_REFERENCE_GENERATOR = (
+    ROOT / "scripts" / "generate_observability_v8_reference.py"
+)
+OBSERVABILITY_REDACTION_UNICODE_GENERATOR = (
+    ROOT / "scripts" / "generate_unicode13_repertoire.py"
+)
+OBSERVABILITY_REDACTION_CATALOG_GENERATOR = (
+    ROOT / "scripts" / "generate_observability_redaction_catalog.py"
+)
+TELEMETRY_REGISTRY_GENERATOR = ROOT / "scripts" / "generate_telemetry_registry.py"
 
 EXPECTED_ENVELOPE_EVENT_TYPES = {
     "verdict", "judge", "lifecycle", "error", "diagnostic",
     "scan", "scan_finding", "activity", "egress",
     "llm_prompt", "llm_response", "tool_invocation",
     "hook_decision", "ai_discovery",
+    "connector_inventory", "mcp_inventory", "agent_inventory",
 }
 
 EXPECTED_PROVENANCE_FIELDS = {
@@ -90,6 +102,30 @@ RUNTIME_SPAN_SCHEMA_NAMES = (
     "runtime-tool-span.schema.json",
 )
 
+PUBLIC_SCHEMA_PATHS = (
+    "activity-event.json",
+    "audit-event.json",
+    "gateway-event-envelope.json",
+    "hook-audit-envelope.json",
+    "network-egress-event.json",
+    "otel/agent-lifecycle-event.schema.json",
+    "otel/asset-lifecycle-event.schema.json",
+    "otel/connector-telemetry-event.schema.json",
+    "otel/galileo-export-profile.schema.json",
+    "otel/metrics.schema.json",
+    "otel/resource.schema.json",
+    "otel/runtime-agent-span.schema.json",
+    "otel/runtime-alert-event.schema.json",
+    "otel/runtime-approval-span.schema.json",
+    "otel/runtime-llm-span.schema.json",
+    "otel/runtime-tool-span.schema.json",
+    "otel/scan-finding-event.schema.json",
+    "otel/scan-result-event.schema.json",
+    "scan-event.json",
+    "scan-finding-event.json",
+    "scan-result.json",
+)
+
 
 def load_json(path: Path) -> dict:
     def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
@@ -134,6 +170,16 @@ def ensure_valid_meta(doc: dict, path: Path) -> bool:
     except jsonschema.exceptions.SchemaError as exc:
         print(f"check_schemas: {path} fails Draft 2020-12 meta-validation: {exc.message}", file=sys.stderr)
         return False
+
+
+def check_public_schema_inventory() -> bool:
+    """Require every directly owned public schema without duplicating its content."""
+
+    missing = [relative for relative in PUBLIC_SCHEMA_PATHS if not (SCHEMA_DIR / relative).is_file()]
+    if missing:
+        print(f"check_schemas: missing public schemas {missing}", file=sys.stderr)
+        return False
+    return True
 
 
 def check_audit_event(doc: dict) -> bool:
@@ -546,12 +592,54 @@ def check_schema_mirrors() -> bool:
     return ok
 
 
+def check_observability_v8_reference() -> bool:
+    """Reject generated reference, docs mirror, or staged wheel-data drift."""
+    result = subprocess.run(
+        [sys.executable, str(OBSERVABILITY_V8_REFERENCE_GENERATOR), "--check"],
+        cwd=ROOT,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def check_observability_redaction_unicode() -> bool:
+    """Reject Unicode repertoire manifest or generated-language drift."""
+    result = subprocess.run(
+        [sys.executable, str(OBSERVABILITY_REDACTION_UNICODE_GENERATOR), "--check"],
+        cwd=ROOT,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def check_observability_redaction_catalog() -> bool:
+    """Reject detector catalog manifest or generated-Go drift."""
+    result = subprocess.run(
+        [sys.executable, str(OBSERVABILITY_REDACTION_CATALOG_GENERATOR), "--check"],
+        cwd=ROOT,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def check_telemetry_registry() -> bool:
+    """Reject canonical telemetry input, provenance, or generated-output drift."""
+    result = subprocess.run(
+        [sys.executable, str(TELEMETRY_REGISTRY_GENERATOR), "--check"],
+        cwd=ROOT,
+        check=False,
+    )
+    return result.returncode == 0
+
+
 def main() -> int:
     if not SCHEMA_DIR.is_dir():
         print(f"check_schemas: schema dir not found: {SCHEMA_DIR}", file=sys.stderr)
         return 2
 
     ok = True
+    if not check_public_schema_inventory():
+        ok = False
     # Validate top-level schemas/*.json plus subtree schemas (e.g.
     # schemas/otel/*.json). The recursive walk catches additions like
     # the OTel resource/metrics/span schemas that ship in nested
@@ -627,11 +715,31 @@ def main() -> int:
         print("check_schemas: Galileo export profile or runtime span schema missing", file=sys.stderr)
         ok = False
 
-    if not check_schema_mirrors():
-        ok = False
+    # Cross-artifact drift checks are meaningful only for the repository's
+    # canonical schema tree. Unit tests deliberately point SCHEMA_DIR at a
+    # tampered copy to exercise schema validation; rerunning the unrelated
+    # reference/Unicode/registry generators in those subprocesses used to add
+    # more than 30 seconds per case and checked the real tree, not the supplied
+    # one. The canonical `make check-schemas` path still executes every gate.
+    canonical_schema_dir = (ROOT / "schemas").resolve()
+    if SCHEMA_DIR.resolve() == canonical_schema_dir:
+        if not check_schema_mirrors():
+            ok = False
 
-    if not check_cli_embed_mirrors():
-        ok = False
+        if not check_cli_embed_mirrors():
+            ok = False
+
+        if not check_observability_v8_reference():
+            ok = False
+
+        if not check_observability_redaction_unicode():
+            ok = False
+
+        if not check_observability_redaction_catalog():
+            ok = False
+
+        if not check_telemetry_registry():
+            ok = False
 
     return 0 if ok else 1
 

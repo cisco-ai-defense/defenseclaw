@@ -163,15 +163,15 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 	}
 
 	auditAction := "inspect-request-" + verdict.Action
-	if a.otel != nil {
-		elapsedMs := float64(elapsed.Milliseconds())
-		tool := a.connectorName() + ":pre-request"
-		a.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity)
-		a.otel.RecordInspectLatency(context.Background(), tool, elapsedMs)
-	}
+	connectorName := a.connectorName()
+	a.recordInspectMetricsV8(
+		r.Context(), connectorName, connectorName+":pre-request",
+		verdict.Action, verdict.Severity, elapsed,
+	)
 
 	evalCtx := a.emitInspectVerdictFindings(r.Context(), "inspect-http",
 		"/api/v1/inspect/request", "prompt", verdict, elapsed, "emit_inspect_request")
+	a.emitInspectTraceV8(r.Context(), "", "prompt", verdict, elapsed, evalCtx)
 
 	requestID := RequestIDFromContext(r.Context())
 	auditDetails := fmt.Sprintf("severity=%s elapsed=%s mode=%s would_block=%v raw_action=%s model=%s",
@@ -233,15 +233,15 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 	}
 
 	auditAction := "inspect-response-" + verdict.Action
-	if a.otel != nil {
-		elapsedMs := float64(elapsed.Milliseconds())
-		tool := a.connectorName() + ":post-response"
-		a.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity)
-		a.otel.RecordInspectLatency(context.Background(), tool, elapsedMs)
-	}
+	connectorName := a.connectorName()
+	a.recordInspectMetricsV8(
+		r.Context(), connectorName, connectorName+":post-response",
+		verdict.Action, verdict.Severity, elapsed,
+	)
 
 	evalCtx := a.emitInspectVerdictFindings(r.Context(), "inspect-http",
 		"/api/v1/inspect/response", "completion", verdict, elapsed, "emit_inspect_response")
+	a.emitInspectTraceV8(r.Context(), "", "completion", verdict, elapsed, evalCtx)
 
 	requestID := RequestIDFromContext(r.Context())
 	auditDetails := fmt.Sprintf("severity=%s elapsed=%s mode=%s would_block=%v raw_action=%s model=%s",
@@ -321,16 +321,16 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 	}
 
 	auditAction := "inspect-tool-response-" + verdict.Action
-	if a.otel != nil {
-		elapsedMs := float64(elapsed.Milliseconds())
-		tool := a.connectorName() + ":post-tool-" + req.Tool
-		a.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity)
-		a.otel.RecordInspectLatency(context.Background(), tool, elapsedMs)
-	}
+	connectorName := a.connectorName()
+	a.recordInspectMetricsV8(
+		r.Context(), connectorName, connectorName+":post-tool-"+req.Tool,
+		verdict.Action, verdict.Severity, elapsed,
+	)
 
 	evalCtx := a.emitInspectVerdictFindings(r.Context(), "inspect-http",
 		"/api/v1/inspect/tool-response:"+req.Tool, "tool_response", verdict, elapsed,
 		"emit_inspect_tool_response")
+	a.emitInspectTraceV8(r.Context(), req.Tool, "tool_response", verdict, elapsed, evalCtx)
 
 	requestID := RequestIDFromContext(r.Context())
 	auditDetails := fmt.Sprintf("tool=%s severity=%s elapsed=%s mode=%s would_block=%v raw_action=%s exit_code=%d",

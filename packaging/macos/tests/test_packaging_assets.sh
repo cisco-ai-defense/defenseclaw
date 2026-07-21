@@ -2,7 +2,7 @@
 # Sanity-check the packaging assets that install.sh expects to ship.
 
 t_plist_exists_and_parses() {
-  local plist="${REPO_ROOT}/packaging/launchd/com.defenseclaw.gateway.plist"
+  local plist="${REPO_ROOT}/packaging/launchd/com.cisco.secureclient.defenseclaw.plist"
   assert_file_exists "${plist}"
   if command -v plutil >/dev/null 2>&1; then
     local out rc=0
@@ -13,30 +13,38 @@ t_plist_exists_and_parses() {
 }
 
 t_plist_contains_managed_paths() {
-  local plist="${REPO_ROOT}/packaging/launchd/com.defenseclaw.gateway.plist"
+  local plist="${REPO_ROOT}/packaging/launchd/com.cisco.secureclient.defenseclaw.plist"
   local body; body="$(cat "${plist}")"
-  assert_contains "${body}" "/Library/DefenseClaw/bin/defenseclaw-gateway" "binary path"
-  assert_contains "${body}" "DEFENSECLAW_CONFIG"                          "config env var"
-  assert_contains "${body}" "/Library/Application Support/DefenseClaw"    "support dir path"
-  assert_contains "${body}" "com.defenseclaw.gateway"                     "launchd label"
-  assert_contains "${body}" "<key>KeepAlive</key>"                         "KeepAlive set"
-  assert_contains "${body}" "<key>RunAtLoad</key>"                         "RunAtLoad set"
+  assert_contains "${body}" "/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway" "binary path"
+  assert_contains "${body}" "DEFENSECLAW_CONFIG"                                          "config env var"
+  assert_contains "${body}" "/opt/cisco/secureclient/defenseclaw"                          "support dir path"
+  assert_contains "${body}" "com.cisco.secureclient.defenseclaw"                          "launchd label"
+  assert_contains "${body}" "<key>KeepAlive</key>"                                        "KeepAlive set"
+  assert_contains "${body}" "<key>RunAtLoad</key>"                                        "RunAtLoad set"
 }
 
-t_plist_service_user_matches_gateway_expectation() {
-  # The gateway binary hardcodes trustedRuntimeOwner to look up a user
-  # literally named "defenseclaw" (see internal/managed/trust_unix.go).
-  # The shipped plist MUST reference that exact name or the daemon will
-  # reject the managed_enterprise data_dir trust check on boot.
-  local plist="${REPO_ROOT}/packaging/launchd/com.defenseclaw.gateway.plist"
-  local uname gname
+t_plist_runs_as_root_by_default() {
+  # DefenseClaw's macOS daemon runs as root — the managed cloud auth
+  # provider requires root to read + re-perm its on-disk credential
+  # store. The shipped plist deliberately OMITS UserName and GroupName
+  # so launchd defaults to root (uid 0). If a future edit reintroduces
+  # those keys, this test catches it — the daemon would silently break
+  # managed cloud auth.
+  local plist="${REPO_ROOT}/packaging/launchd/com.cisco.secureclient.defenseclaw.plist"
   if ! command -v plutil >/dev/null 2>&1; then
     return 0
   fi
-  uname="$(plutil -extract UserName  raw "${plist}" 2>/dev/null || true)"
-  gname="$(plutil -extract GroupName raw "${plist}" 2>/dev/null || true)"
-  assert_eq "${uname}" "defenseclaw" "shipped plist UserName is 'defenseclaw' (got: ${uname})"
-  assert_eq "${gname}" "defenseclaw" "shipped plist GroupName is 'defenseclaw' (got: ${gname})"
+  local uname_rc=0 gname_rc=0
+  plutil -extract UserName  raw "${plist}" >/dev/null 2>&1 || uname_rc=$?
+  plutil -extract GroupName raw "${plist}" >/dev/null 2>&1 || gname_rc=$?
+  if [[ "${uname_rc}" == "0" ]]; then
+    _fail "shipped plist has a UserName key; daemon must run as root (managed cloud auth requires it). Remove UserName + GroupName from the plist template."
+    return 1
+  fi
+  if [[ "${gname_rc}" == "0" ]]; then
+    _fail "shipped plist has a GroupName key; daemon must run as root (managed cloud auth requires it). Remove UserName + GroupName from the plist template."
+    return 1
+  fi
 }
 
 t_install_lib_syntax() {
@@ -79,28 +87,20 @@ t_scrub_py_exists_and_executable() {
   fi
 }
 
-t_install_has_service_user_helper() {
-  # We can't invoke dscl in tests (needs root, mutates system state), so
-  # instead we lock in the contract: install.sh must define an
-  # ensure_service_user function and its execution path must actually
-  # call ensure_service_user before touching the LaunchDaemon plist.
+t_install_does_not_create_service_user() {
+  # The service-user creation machinery (ensure_service_user,
+  # dscl_ensure_prop, dseditgroup, sysadminctl invocations, and the
+  # numeric UID scan) was removed with the switch to running the
+  # daemon as root. Guard against reintroduction — a reappearance
+  # means someone is trying to work around the managed cloud auth
+  # provider's root requirement by resurrecting a service user, which
+  # does NOT work (see the plist comment for the full rationale).
   local body
   body="$(cat "${PKG_DIR}/install.sh")"
-  assert_contains "${body}" "ensure_service_user()"       "ensure_service_user function defined"
-  assert_contains "${body}" "ensure_service_user \""      "ensure_service_user is invoked"
-  # ensure_service_user must run before we bootstrap launchd, otherwise
-  # launchd will spawn a service whose UserName references a missing user.
-  local user_line boot_line
-  user_line=$(grep -n 'ensure_service_user "'  "${PKG_DIR}/install.sh" | head -1 | cut -d: -f1)
-  boot_line=$(grep -n 'launchctl bootstrap system "\${PLIST_DST}"' "${PKG_DIR}/install.sh" | head -1 | cut -d: -f1)
-  if [[ -z "${user_line}" || -z "${boot_line}" ]]; then
-    _fail "could not locate ensure_service_user or launchctl bootstrap line"
-    return 1
-  fi
-  if (( user_line >= boot_line )); then
-    _fail "ensure_service_user (line ${user_line}) must run before launchctl bootstrap (line ${boot_line})"
-    return 1
-  fi
+  assert_not_contains "${body}" "ensure_service_user"    "install.sh must not create a service user (daemon runs as root)"
+  assert_not_contains "${body}" "find_free_system_uid"   "install.sh must not scan for a free UID (no service user)"
+  assert_not_contains "${body}" "dscl_ensure_record"     "install.sh must not manipulate dscl records (no service user)"
+  assert_not_contains "${body}" "dscl_ensure_prop"       "install.sh must not manipulate dscl props (no service user)"
 }
 
 t_install_passes_guardian_auth_dir_to_cli() {
@@ -171,7 +171,8 @@ t_scrub_py_syntax() {
 # _setup_bundle_fixture WITH_BINARY
 #   Prints the fresh tmpdir path on stdout, populated with the installer
 #   scaffolding (install.sh, installer_lib.sh, plist stub). When
-#   WITH_BINARY=true, also drops in a stub defenseclaw-gateway. Tests
+#   WITH_BINARY=true, also drops in a stub defenseclaw (the bundle artifact
+#   name; install.sh resolves the bundle binary under this name). Tests
 #   drive install.sh with DC_INSTALLER_SKIP_ROOT_CHECK=1 (an explicit
 #   test-only env seam in install.sh) so no sudo is needed AND the
 #   fixture doesn't have to keep chasing changes to the production
@@ -198,11 +199,11 @@ _setup_bundle_fixture() {
   mkdir -p "${bundle}/lib"
   cp "${PKG_DIR}/install.sh"           "${bundle}/install.sh"
   cp "${PKG_DIR}/lib/installer_lib.sh" "${bundle}/lib/installer_lib.sh"
-  printf '<?xml version="1.0"?><plist/>' > "${bundle}/com.defenseclaw.gateway.plist"
+  printf '<?xml version="1.0"?><plist/>' > "${bundle}/com.cisco.secureclient.defenseclaw.plist"
   chmod 0755 "${bundle}/install.sh"
   if [[ "${with_binary}" == "true" ]]; then
-    printf '#!/bin/sh\nexit 0\n' > "${bundle}/defenseclaw-gateway"
-    chmod 0755 "${bundle}/defenseclaw-gateway"
+    printf '#!/bin/sh\nexit 0\n' > "${bundle}/defenseclaw"
+    chmod 0755 "${bundle}/defenseclaw"
   fi
   printf '%s\n' "${bundle}"
 }
@@ -223,8 +224,8 @@ t_bundle_layout_resolves_locally() {
     --connector codex --skip-launchd --skip-connector 2>&1 | \
     grep -E "PLIST_SRC=|BINARY_SRC=/" || true)"
 
-  assert_contains "${trace}" "PLIST_SRC=${bundle}/com.defenseclaw.gateway.plist" "plist resolved from bundle"
-  assert_contains "${trace}" "BINARY_SRC=${bundle}/defenseclaw-gateway"          "binary resolved from bundle"
+  assert_contains "${trace}" "PLIST_SRC=${bundle}/com.cisco.secureclient.defenseclaw.plist" "plist resolved from bundle"
+  assert_contains "${trace}" "BINARY_SRC=${bundle}/defenseclaw"          "binary resolved from bundle"
 }
 
 # Complementary: with NO bundle-local binary AND no repo tree, install.sh
@@ -256,7 +257,7 @@ t_plist_validator_accepts_bundle_default_owned_by_user() {
   bundle="$(_setup_bundle_fixture true)"
   # Bundle default plist is owned by the current (non-root) uid — this
   # models the extracted-tarball flow. Mode is 0644 (safe).
-  chmod 0644 "${bundle}/com.defenseclaw.gateway.plist"
+  chmod 0644 "${bundle}/com.cisco.secureclient.defenseclaw.plist"
   # Run under `bash -x` so we can positively confirm two things:
   #   1. PLIST_SRC actually resolved to the bundle-local plist (not the
   #      repo default or an earlier candidate).
@@ -270,7 +271,7 @@ t_plist_validator_accepts_bundle_default_owned_by_user() {
     --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
   local trace
   trace="$(printf '%s' "${out}" | grep -E 'PLIST_SRC=|PLIST_SRC_ORIGIN=' || true)"
-  assert_contains "${trace}" "PLIST_SRC=${bundle}/com.defenseclaw.gateway.plist" "plist resolved from bundle"
+  assert_contains "${trace}" "PLIST_SRC=${bundle}/com.cisco.secureclient.defenseclaw.plist" "plist resolved from bundle"
   assert_contains "${trace}" "PLIST_SRC_ORIGIN=bundle"                            "origin is bundle (relaxed policy)"
   # And the ownership branch must not have fired.
   assert_not_contains "${out}" "must be owned by root" "bundle default plist accepted"
@@ -279,7 +280,7 @@ t_plist_validator_accepts_bundle_default_owned_by_user() {
 t_plist_validator_rejects_bundle_default_that_is_world_writable() {
   local bundle
   bundle="$(_setup_bundle_fixture true)"
-  chmod 0646 "${bundle}/com.defenseclaw.gateway.plist"
+  chmod 0646 "${bundle}/com.cisco.secureclient.defenseclaw.plist"
   local out rc=0
   out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 "${bundle}/install.sh" \
     --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
@@ -322,7 +323,7 @@ t_plist_validator_rejects_missing_env_override() {
   assert_contains "${out}" "DEFENSECLAW_PLIST_SRC" "error names the env var"
   assert_contains "${out}" "does not exist"        "error names the missing state"
   # Must NOT silently install the bundle default.
-  assert_not_contains "${out}" "com.defenseclaw.gateway.plist installed" "no silent fallback"
+  assert_not_contains "${out}" "com.cisco.secureclient.defenseclaw.plist installed" "no silent fallback"
 }
 
 t_plist_validator_fails_closed_when_stat_output_empty() {
@@ -342,9 +343,114 @@ t_plist_validator_fails_closed_when_stat_output_empty() {
   assert_contains "${out}" "cannot stat plist source" "explains why"
 }
 
+t_install_does_not_precreate_cmid_log_file() {
+  # Running the daemon as root means the managed cloud auth provider
+  # can create its own log file without any installer help. The earlier
+  # stop-gap (pre-creating the file with defenseclaw ownership) was
+  # removed with the root switch. Guard against reintroducing it — a
+  # chown of that file to a service uid is a strong signal someone
+  # regressed to a non-root daemon.
+  local body; body="$(cat "${REPO_ROOT}/packaging/macos/install.sh")"
+  assert_not_contains "${body}" 'chown "${SERVICE_UID}:${SERVICE_GID}" "${CMID_LOG_FILE}"' \
+    "install.sh must not pre-create the managed-auth log with service-user ownership (daemon runs as root)"
+  assert_not_contains "${body}" 'CMID_LOG_FILE=' \
+    "install.sh must not declare CMID_LOG_FILE (no log-file stop-gap needed as root)"
+}
+
+t_install_does_not_relax_cmid_store_perms() {
+  # Same rationale as the log file. The managed cloud auth provider
+  # can read + fchmod its credential store without any installer help
+  # when the caller is root. The earlier stop-gap (chgrp to service
+  # group + 0640) was removed. Guard against re-adding it — messing
+  # with the perms of a file the provider actively rewrites is fragile
+  # and unnecessary.
+  local body; body="$(cat "${REPO_ROOT}/packaging/macos/install.sh")"
+  assert_not_contains "${body}" '/opt/cisco/secureclient/cloudmanagement/etc/cmidstore.json' \
+    "install.sh must not touch the managed-auth credential store (daemon runs as root)"
+  assert_not_contains "${body}" 'CMID_STORE=' \
+    "install.sh must not declare CMID_STORE (no store-perm stop-gap needed as root)"
+}
+
+t_uninstall_still_sweeps_legacy_cmid_log_file() {
+  # Even in root-mode we keep the sweep so upgrades from a pre-root
+  # DefenseClaw install don't leave a defenseclaw-owned log file
+  # dangling under a shared log dir.
+  local body; body="$(cat "${REPO_ROOT}/packaging/macos/uninstall.sh")"
+  assert_contains "${body}" "/Library/Logs/Cisco/SecureClient/CloudManagement/defenseclaw-gateway_cmidapi.log" \
+    "uninstall sweeps the legacy managed-auth log file"
+  # Never rm above the specific file — that dir is shared.
+  assert_not_contains "${body}" 'rm -rf "/Library/Logs/Cisco' \
+    "uninstall MUST NOT recurse into the shared log tree"
+  assert_not_contains "${body}" 'rm -rf /Library/Logs/Cisco' \
+    "uninstall MUST NOT recurse into the shared log tree (no-quote form)"
+}
+
+t_install_refuses_existing_state_before_build_or_launchd_mutation() {
+  local body; body="$(cat "${REPO_ROOT}/packaging/macos/install.sh")"
+  assert_contains "${body}" "existing DefenseClaw installation detected at" \
+    "managed bundle refuses an in-place hard-cut bypass"
+  assert_contains "${body}" "no changes were made. This installer is fresh-install-only" \
+    "managed bundle gives an explicit no-change refusal"
+  assert_contains "${body}" "remain on the current version" \
+    "managed bundle gives a fail-closed path when no staged enterprise upgrader exists"
+  assert_contains "${body}" "dscl . -list /Users" \
+    "managed bundle checks every local home even when a target user is selected"
+  assert_not_contains "${body}" 'elif [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]' \
+    "all-user dscl enumeration must not be conditional on TARGET_HOME being empty"
+  assert_contains "${body}" "command -v \"\${_installed_command}\"" \
+    "managed bundle checks package-manager/custom PATH installations"
+  assert_contains "${body}" '"${GUARDIAN_PLIST_DST}"' \
+    "managed bundle detects the current guardian plist"
+  assert_contains "${body}" '"${LEGACY_GUARDIAN_PLIST_DST}"' \
+    "managed bundle detects the legacy guardian plist"
+  assert_contains "${body}" '"${GUARDIAN_LAUNCHD_LABEL}"' \
+    "managed bundle detects the current guardian job"
+  assert_contains "${body}" '"${LEGACY_GUARDIAN_LAUNCHD_LABEL}"' \
+    "managed bundle detects the legacy guardian job"
+
+  local guard_line build_line mutation_line
+  guard_line="$(grep -n "existing DefenseClaw installation detected at" \
+    "${REPO_ROOT}/packaging/macos/install.sh" | head -1 | cut -d: -f1)"
+  build_line="$(grep -n 'go build -o defenseclaw-gateway' \
+    "${REPO_ROOT}/packaging/macos/install.sh" | head -1 | cut -d: -f1)"
+  mutation_line="$(grep -n 'create_install_directory_no_replace "${INSTALL_PREFIX}"' \
+    "${REPO_ROOT}/packaging/macos/install.sh" | head -1 | cut -d: -f1)"
+  if [[ -z "${guard_line}" || -z "${build_line}" || -z "${mutation_line}" \
+     || "${guard_line}" -ge "${build_line}" \
+     || "${guard_line}" -ge "${mutation_line}" ]]; then
+    _fail "existing-install guard must precede build and installed-file writes"
+  fi
+  assert_not_contains "${body}" 'mv -f -- "${temporary}" "${destination}"' \
+    "managed bundle publication must not force-replace a concurrent destination"
+  assert_contains "${body}" 'ln "${temporary}" "${destination}"' \
+    "managed bundle uses no-replace publication"
+  assert_contains "${body}" "appeared concurrently and was preserved" \
+    "managed bundle reports concurrent-state preservation"
+
+  # The final boundary after a potentially slow local build must repeat every
+  # current and legacy gateway/guardian job+plist pair from the initial
+  # preflight. Merely mentioning these variables in the initial marker list is
+  # insufficient: a guardian can appear while the binary is being built.
+  local final_boundary
+  final_boundary="$(sed -n '/# Repeat the launchd\/path boundary immediately before mutation/,/unset _lbl_plist/p' \
+    "${REPO_ROOT}/packaging/macos/install.sh")"
+  for expected in \
+    '"${LAUNCHD_LABEL}:${PLIST_DST}"' \
+    '"${GUARDIAN_LAUNCHD_LABEL}:${GUARDIAN_PLIST_DST}"' \
+    '"${LEGACY_LAUNCHD_LABEL}:${LEGACY_PLIST_DST}"' \
+    '"${LEGACY_GUARDIAN_LAUNCHD_LABEL}:${LEGACY_GUARDIAN_PLIST_DST}"'; do
+    assert_contains "${final_boundary}" "${expected}" \
+      "final mutation boundary repeats ${expected}"
+  done
+}
+
 run_case "plist exists and lints"     t_plist_exists_and_parses
 run_case "plist references managed paths" t_plist_contains_managed_paths
-run_case "plist service user matches gateway expectation" t_plist_service_user_matches_gateway_expectation
+run_case "install does not pre-create CMID log file (root daemon owns lifecycle)"    t_install_does_not_precreate_cmid_log_file
+run_case "install does not relax CMID store perms (root daemon owns lifecycle)"      t_install_does_not_relax_cmid_store_perms
+run_case "uninstall still sweeps legacy CMID log file from pre-root installs"        t_uninstall_still_sweeps_legacy_cmid_log_file
+run_case "install refuses existing state before build or launchd mutation"           t_install_refuses_existing_state_before_build_or_launchd_mutation
+run_case "plist runs as root by default (managed CMID needs it)" t_plist_runs_as_root_by_default
 run_case "installer_lib.sh syntax"    t_install_lib_syntax
 run_case "install.sh syntax"          t_install_sh_syntax
 run_case "uninstall.sh syntax"        t_uninstall_sh_syntax
@@ -352,7 +458,7 @@ run_case "install.sh executable"      t_install_sh_is_executable
 run_case "uninstall.sh executable"    t_uninstall_sh_is_executable
 run_case "scrub_agent_configs.py present and +x" t_scrub_py_exists_and_executable
 run_case "scrub_agent_configs.py syntax"          t_scrub_py_syntax
-run_case "install.sh has ensure_service_user + calls it before launchd" t_install_has_service_user_helper
+run_case "install.sh does NOT create a service user (root-mode daemon)" t_install_does_not_create_service_user
 run_case "install.sh passes DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR on every hooks-install call" \
   t_install_passes_guardian_auth_dir_to_cli
 run_case "bundle layout: plist + binary resolve locally" t_bundle_layout_resolves_locally

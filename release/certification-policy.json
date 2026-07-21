@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "max_age_hours": 72,
+  "bridge_boundary_version": "0.8.4",
+  "profiles": {
+    "pr": [
+      "latest_stable",
+      "previous_stable",
+      "bridge_boundary",
+      "explicit_skip_refusal",
+      "oldest_supported"
+    ],
+    "medium": [
+      "latest_stable",
+      "pre_v8_hard_cut_source"
+    ],
+    "full": [
+      "latest_stable",
+      "previous_stable",
+      "bridge_boundary",
+      "explicit_skip_refusal",
+      "pre_v8_hard_cut_source",
+      "oldest_supported",
+      "protocol_installer_boundaries"
+    ]
+  },
+  "profile_platform_sets": {
+    "pr": [
+      "linux-amd64"
+    ],
+    "medium": [
+      "linux-amd64"
+    ],
+    "full": [
+      "darwin-arm64",
+      "linux-amd64",
+      "windows-resolver-refusal"
+    ]
+  },
+  "release_sensitive_paths": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/macos-app.yml",
+    ".github/workflows/release.yaml",
+    ".github/workflows/pre-release-certification.yml",
+    ".goreleaser.yaml",
+    "Makefile",
+    "go.mod",
+    "go.sum",
+    "pyproject.toml",
+    "uv.lock",
+    "release/**",
+    "scripts/install.sh",
+    "scripts/install.ps1",
+    "scripts/upgrade.sh",
+    "scripts/upgrade.ps1",
+    "scripts/release_candidate.py",
+    "scripts/release_certification.py",
+    "scripts/release_api_retry.py",
+    "scripts/resolve_upgrade_baselines.py",
+    "scripts/generate-upgrade-manifest.py",
+    "scripts/historical_release_auth.py",
+    "scripts/verify-sigstore-blob.py",
+    "scripts/test-developer-target-activation.sh",
+    "scripts/test-fresh-install-release.sh",
+    "scripts/test-fresh-install-release-windows.ps1",
+    "scripts/build-macos-app-release.sh",
+    "scripts/export-uv-overrides.py",
+    "scripts/verify-macos-app-release.sh",
+    "scripts/check-macos-upstream.py",
+    "scripts/source_release_identity.py",
+    "scripts/stamp-version.sh",
+    "scripts/test-upgrade-**",
+    "scripts/check_observability_v8_upgrade_continuity.py",
+    "scripts/test-observability-v8-upgrade-continuity.sh",
+    "cli/tests/test_release_**",
+    "cli/tests/test_upgrade_**",
+    "cli/defenseclaw/__init__.py",
+    "cli/defenseclaw/config.py",
+    "cli/defenseclaw/commands/cmd_upgrade.py",
+    "cli/defenseclaw/bundle_refresh.py",
+    "cli/defenseclaw/migration_state.py",
+    "cli/defenseclaw/migrations.py",
+    "cli/defenseclaw/paths.py",
+    "cli/defenseclaw/upgrade_receipt.py",
+    "cli/defenseclaw/observability/v8_*.py",
+    "cli/defenseclaw/observability/v8_activation.py",
+    "cli/defenseclaw/observability/v8_config.py",
+    "cli/defenseclaw/observability/v8_migration.py",
+    "cli/defenseclaw/upgrade/**",
+    "internal/config/**",
+    "internal/cli/**",
+    "internal/audit/**",
+    "internal/observability/**",
+    "bundles/local_observability_stack/**",
+    "schemas/config/v8/**",
+    "schemas/telemetry/**",
+    "extensions/defenseclaw/package.json",
+    "extensions/defenseclaw/package-lock.json",
+    "macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj",
+    "macos/DefenseClawMac/DefenseClawMac/DataLayer/RuntimeInstaller.swift"
+  ],
+  "protocol_installer_boundaries": {
+    "explicit_versions": [
+      "0.8.4",
+      "0.8.3"
+    ],
+    "include_config_transitions": true,
+    "include_historical_auth_transition": true
+  }
+}

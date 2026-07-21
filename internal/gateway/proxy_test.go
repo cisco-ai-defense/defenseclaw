@@ -18,6 +18,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"golang.org/x/time/rate"
 )
 
@@ -34,11 +36,15 @@ type mockProvider struct {
 	streamChunks []StreamChunk
 	streamUsage  *ChatUsage
 	err          error
+	delay        time.Duration
 }
 
 func (m *mockProvider) ChatCompletion(_ context.Context, req *ChatRequest) (*ChatResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.delay > 0 {
+		time.Sleep(m.delay)
+	}
 
 	m.lastReq = req
 	if req.RawBody != nil {
@@ -564,7 +570,7 @@ func TestProxyPreCallInspection(t *testing.T) {
 			Findings: []string{"high-signal"},
 		})
 		proxy := newTestProxy(t, prov, insp, "action")
-		proxy.SetHILTApprovalManager(NewHILTApprovalManager(nil, nil, nil))
+		proxy.SetHILTApprovalManager(NewHILTApprovalManager(nil))
 
 		reqBody := mustJSON(t, map[string]interface{}{
 			"model":    "gpt-4",
@@ -595,7 +601,7 @@ func TestProxyPreCallInspection(t *testing.T) {
 		received := make(chan receivedRequest, 5)
 		srv := startMockGW(t, rpcRecordingLoop(received))
 		client := connectToMockGW(t, srv)
-		hilt := NewHILTApprovalManager(client, nil, nil)
+		hilt := NewHILTApprovalManager(client)
 		hilt.TrackSession("session-1")
 
 		prov := &mockProvider{}
@@ -2810,9 +2816,11 @@ func TestHandlePassthrough_SSRFHardening(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRateLimitMiddleware(t *testing.T) {
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	prov := &mockProvider{}
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "observe")
+	proxy.bindObservabilityV8Trace(runtime)
 
 	// Tight limiter: 1 req/s, burst 2
 	proxy.limiter = rate.NewLimiter(rate.Limit(1), 2)
@@ -2848,6 +2856,16 @@ func TestRateLimitMiddleware(t *testing.T) {
 	}
 	if rec.Header().Get("Retry-After") == "" {
 		t.Error("429 response should include Retry-After header")
+	}
+	var breaches []telemetry.V8ProjectedMetric
+	for _, metric := range capture.metricSnapshot() {
+		if metric.Descriptor().Name == observability.TelemetryInstrumentDefenseClawHTTPRateLimitBreaches {
+			breaches = append(breaches, metric)
+		}
+	}
+	if len(breaches) != 1 || breaches[0].Attributes()["http.route"] != "/v1/chat/completions" ||
+		breaches[0].Attributes()["defenseclaw.metric.client.kind"] != "global" {
+		t.Fatalf("generated rate-limit metrics=%v", breaches)
 	}
 }
 

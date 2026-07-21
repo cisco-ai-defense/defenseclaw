@@ -26,6 +26,7 @@ from click.testing import CliRunner
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands.cmd_agent import agent
+from defenseclaw.config import PerConnectorGuardrailConfig
 from defenseclaw.context import AppContext
 from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
 
@@ -78,6 +79,65 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         self.assertTrue(payload["cache_hit"])
         self.assertTrue(payload["agents"]["codex"]["installed"])
         self.assertEqual(payload["otel"], {"attempted": False, "emitted": False, "error": ""})
+
+    def test_json_separates_installed_configured_active_and_mode(self):
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.guardrail.connectors = {
+            "hermes": PerConnectorGuardrailConfig(mode="observe"),
+            "windsurf": PerConnectorGuardrailConfig(mode="observe"),
+        }
+        disc = _discovery()
+        disc.agents["hermes"] = AgentSignal(
+            name="hermes",
+            installed=False,
+            config_path="C:/Users/alice/.hermes/config.yaml",
+            binary_path="",
+            version="",
+            error="",
+            configured=True,
+        )
+        disc.agents["windsurf"] = AgentSignal(
+            name="windsurf",
+            installed=False,
+            config_path="C:/Users/alice/.codeium/windsurf/hooks.json",
+            binary_path="",
+            version="",
+            error="",
+            configured=True,
+        )
+        disc.agents["cursor"] = AgentSignal(
+            name="cursor",
+            installed=True,
+            config_path="",
+            binary_path="C:/Program Files/Cursor/cursor.exe",
+            version="3.9.16",
+            error="",
+        )
+
+        try:
+            with patch(
+                "defenseclaw.commands.cmd_agent.agent_discovery.discover_agents",
+                return_value=disc,
+            ):
+                result = self.runner.invoke(
+                    agent,
+                    ["discover", "--json", "--no-emit-otel"],
+                    obj=app,
+                    catch_exceptions=False,
+                )
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)["agents"]
+        for name in ("hermes", "windsurf"):
+            self.assertFalse(payload[name]["installed"])
+            self.assertTrue(payload[name]["configured"])
+            self.assertTrue(payload[name]["active"])
+            self.assertEqual(payload[name]["mode"], "observe")
+        self.assertTrue(payload["cursor"]["installed"])
+        self.assertFalse(payload["cursor"]["active"])
+        self.assertEqual(payload["cursor"]["mode"], "")
 
     def test_default_emits_sanitized_report(self):
         app, tmp_dir, db_path = make_app_context()
@@ -475,6 +535,167 @@ class AiUsageRendererTests(unittest.TestCase):
             [],
         )
 
+    def test_seen_and_active_state_filters_are_backward_compatible_aliases(self):
+        from defenseclaw.commands import cmd_agent
+
+        signals = [
+            {"signal_id": "current", "state": "seen"},
+            {"signal_id": "legacy", "state": "active"},
+            {"signal_id": "changed", "state": "changed"},
+        ]
+        for requested in ("seen", "active"):
+            with self.subTest(requested=requested):
+                filtered = cmd_agent._filter_ai_usage_signals(
+                    signals,
+                    states=(requested,),
+                    categories=(),
+                    products=(),
+                    show_gone=False,
+                )
+                self.assertEqual(
+                    [signal["signal_id"] for signal in filtered],
+                    ["current", "legacy"],
+                )
+
+    def test_local_models_group_by_id_and_render_status(self):
+        from defenseclaw.commands import cmd_agent
+
+        signals = [
+            {
+                "state": "seen",
+                "category": "local_model",
+                "product": "Lemonade Server",
+                "vendor": "Lemonade",
+                "detector": "model_api",
+                "model": {
+                    "id": "Qwen3-0.6B-GGUF",
+                    "status": "installed",
+                    "format": "gguf",
+                    "provider": "lemonade",
+                },
+                "basenames": [],
+            },
+            {
+                "state": "seen",
+                "category": "local_model",
+                "product": "Lemonade Server",
+                "vendor": "Lemonade",
+                "detector": "model_runtime",
+                "model": {
+                    "id": "Qwen3-0.6B-GGUF",
+                    "status": "loaded",
+                    "format": "gguf",
+                    "provider": "lemonade",
+                    "device": "gpu",
+                },
+                "runtime": {"pid": 1234},
+                "basenames": [],
+            },
+            {
+                "state": "seen",
+                "category": "local_model",
+                "product": "Lemonade Server",
+                "vendor": "Lemonade",
+                "detector": "model_api",
+                "model": {"id": "Whisper-Tiny", "status": "installed", "format": "onnx"},
+                "basenames": [],
+            },
+        ]
+
+        groups = cmd_agent._summarize_ai_usage_signals_full(signals)
+        self.assertEqual(len(groups), 2)
+        qwen = next(group for group in groups if group["model"] == "Qwen3-0.6B-GGUF")
+        self.assertEqual(qwen["count"], 2)
+        self.assertEqual(set(qwen["model_statuses"]), {"installed", "loaded"})
+        self.assertEqual(qwen["model_formats"], ["gguf"])
+
+        filtered = cmd_agent._filter_ai_usage_signals(
+            signals,
+            states=(),
+            categories=(),
+            products=(),
+            components=("qwen3",),
+            show_gone=False,
+        )
+        self.assertEqual(len(filtered), 2)
+        product_only = cmd_agent._filter_ai_usage_signals(
+            signals,
+            states=(),
+            categories=(),
+            products=(),
+            components=("lemonade",),
+            show_gone=False,
+        )
+        self.assertEqual(product_only, [])
+
+        payload = {"enabled": True, "summary": {"active_signals": 3}, "signals": signals}
+        rendered = cmd_agent._render_ai_usage_table(payload)
+        # Rich may wrap the two-word header at 120 columns.
+        self.assertIn("Model", rendered)
+        self.assertIn("status", rendered)
+        self.assertIn("Qwen3", rendered)
+        self.assertIn("Whisper", rendered)
+        self.assertIn("installed", rendered)
+        self.assertIn("loaded", rendered)
+
+        plain = cmd_agent._render_ai_usage_plain(payload)
+        self.assertIn("Qwen3-0.6B-GGUF", plain)
+        self.assertIn("installed, loaded", plain)
+
+    def test_plain_renderer_keeps_legacy_non_model_field_positions(self):
+        from defenseclaw.commands import cmd_agent
+
+        payload = {
+            "summary": {"active_signals": 1},
+            "signals": [
+                {
+                    "state": "seen",
+                    "category": "ai_cli",
+                    "product": "Codex",
+                    "vendor": "OpenAI",
+                    "detector": "binary",
+                    "basenames": ["codex"],
+                },
+            ],
+        }
+        grouped = cmd_agent._render_ai_usage_plain(payload)
+        grouped_fields = grouped.splitlines()[1].split(" | ")
+        self.assertEqual(len(grouped_fields), 10, grouped)
+        self.assertEqual(grouped_fields[:3], ["seen", "ai_cli", "Codex"])
+
+        detail = cmd_agent._render_ai_usage_plain(payload, detail=True)
+        detail_fields = detail.splitlines()[1].split(" | ")
+        self.assertEqual(len(detail_fields), 12, detail)
+        self.assertEqual(detail_fields[:3], ["seen", "ai_cli", "Codex"])
+
+    def test_malformed_structured_blocks_do_not_crash_usage_rendering(self):
+        from defenseclaw.commands import cmd_agent
+
+        signals = [
+            {
+                "state": "seen",
+                "category": "local_model",
+                "product": "Local Model Artifact",
+                "vendor": "Local",
+                "detector": "model_file",
+                "component": ["not", "an", "object"],
+                "model": "not-an-object",
+                "runtime": 42,
+            },
+        ]
+        filtered = cmd_agent._filter_ai_usage_signals(
+            signals,
+            states=(),
+            categories=(),
+            products=(),
+            components=("local model",),
+            show_gone=False,
+        )
+        self.assertEqual(filtered, signals)
+        payload = {"summary": {"active_signals": 1}, "signals": signals}
+        self.assertIn("Local Model Artifact", cmd_agent._render_ai_usage_table(payload, detail=True))
+        self.assertIn("Local Model Artifact", cmd_agent._render_ai_usage_plain(payload, detail=True))
+
     def test_summary_sort_orders_by_state_then_count(self):
         from defenseclaw.commands import cmd_agent
 
@@ -831,6 +1052,15 @@ class AiUsageCommandFlagsTests(unittest.TestCase):
             cleanup_app(app, db_path, tmp_dir)
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("Invalid value for '--state'", result.output)
+
+    def test_state_flag_accepts_gateway_seen_spelling(self):
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.gateway.token = "secret-token-123"
+        try:
+            result = self._invoke(app, ["--state", "seen"])
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+        self.assertEqual(result.exit_code, 0, result.output)
 
     def test_negative_limit_is_rejected(self):
         app, tmp_dir, db_path = make_app_context()

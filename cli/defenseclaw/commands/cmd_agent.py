@@ -24,6 +24,7 @@ import ipaddress
 import json
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -31,9 +32,15 @@ from typing import Any
 import click
 import requests
 
+from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.gateway import OrchestratorClient
 from defenseclaw.inventory import agent_discovery, ai_signatures
+
+
+def _mapping_block(value: Any) -> Mapping[str, Any]:
+    """Return JSON object-like values and safely discard malformed blocks."""
+    return value if isinstance(value, Mapping) else {}
 
 
 @click.group()
@@ -122,6 +129,7 @@ def discover(
     _load_dotenv_into_os(str(default_data_path()))
     started = time.monotonic()
     disc = agent_discovery.discover_agents(use_cache=not no_cache, refresh=refresh)
+    _apply_discovery_config_state(app, disc)
     duration_ms = int((time.monotonic() - started) * 1000)
 
     otel_result = {"attempted": False, "emitted": False, "error": ""}
@@ -152,7 +160,7 @@ def discover(
             click.echo(f"  OTel: not emitted ({otel_result['error']})", err=True)
 
 
-_AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "active", "gone")
+_AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "seen", "active", "gone")
 
 
 @agent.command("usage")
@@ -172,7 +180,10 @@ _AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "active", "gone")
     "states",
     multiple=True,
     type=click.Choice(_AI_USAGE_STATES),
-    help="Filter signals by state. Repeatable. When omitted, 'gone' is hidden.",
+    help=(
+        "Filter signals by state. Repeatable; 'active' is a backward-compatible "
+        "alias for 'seen'. When omitted, 'gone' is hidden."
+    ),
 )
 @click.option(
     "--category",
@@ -191,7 +202,7 @@ _AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "active", "gone")
     "components",
     multiple=True,
     help=(
-        "Filter by component/SDK name from the parsed manifest "
+        "Filter by component/SDK name or discovered local model ID "
         "(repeatable, case-insensitive substring). Falls back to "
         "matching against product when a signal has no component block."
     ),
@@ -366,7 +377,10 @@ def processes(
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
 
     raw_signals = payload.get("signals", []) or []
-    process_signals = [s for s in raw_signals if s.get("runtime")]
+    process_signals = [
+        s for s in raw_signals
+        if s.get("runtime") and str(s.get("state", "")).lower() != "gone"
+    ]
     # Most-recently-seen first so an operator hunting a runaway agent
     # sees fresh activity at the top.
     process_signals.sort(
@@ -374,9 +388,21 @@ def processes(
         reverse=True,
     )
 
+    process_error = str(
+        ((payload.get("summary") or {}).get("detector_errors") or {}).get("process", "")
+    )
+
     if as_json:
-        click.echo(json.dumps({"processes": process_signals}, indent=2, sort_keys=True))
+        output: dict[str, Any] = {"processes": process_signals}
+        if process_error:
+            output["errors"] = [{"detector": "process", "message": process_error}]
+        click.echo(json.dumps(output, indent=2, sort_keys=True))
+        if process_error:
+            raise click.exceptions.Exit(1)
         return
+
+    if process_error:
+        raise click.ClickException(f"process snapshot failed: {process_error}")
 
     click.echo(_render_ai_processes_table(process_signals, limit=limit).rstrip())
 
@@ -971,13 +997,10 @@ def discovery() -> None:
     "--include-network-domains/--no-include-network-domains",
     "include_network_domains",
     default=None,
-    help="Inspect /etc/hosts and SSH configs for AI provider domains (default: on).",
-)
-@click.option(
-    "--emit-otel/--no-emit-otel",
-    "emit_otel",
-    default=None,
-    help="Forward sanitized discovery telemetry through the sidecar (default: on).",
+    help=(
+        "Inspect /etc/hosts and SSH configs for AI provider domains, and probe "
+        "vetted loopback model metadata APIs (default: on)."
+    ),
 )
 @click.option(
     "--allow-workspace-signatures/--no-allow-workspace-signatures",
@@ -1024,7 +1047,6 @@ def discovery_enable(
     include_package_manifests: bool | None,
     include_env_var_names: bool | None,
     include_network_domains: bool | None,
-    emit_otel: bool | None,
     allow_workspace_signatures: bool | None,
     store_raw_local_paths: bool | None,
     restart: bool,
@@ -1062,7 +1084,6 @@ def discovery_enable(
         include_package_manifests=include_package_manifests,
         include_env_var_names=include_env_var_names,
         include_network_domains=include_network_domains,
-        emit_otel=emit_otel,
         allow_workspace_signatures=allow_workspace_signatures,
         store_raw_local_paths=store_raw_local_paths,
     )
@@ -1140,7 +1161,10 @@ def discovery_enable(
         ux.subhead("Re-run after fixing the underlying I/O error.", indent="    ")
         raise SystemExit(1)
 
+    connectors = _resolve_connectors_for_restart(cfg)
     connector = _resolve_connector_for_restart(cfg)
+    if connector not in connectors:
+        connector = connectors[0] if connectors else ""
     if restart:
         from defenseclaw.commands import cmd_setup
 
@@ -1149,8 +1173,16 @@ def discovery_enable(
             cfg.gateway.host,
             cfg.gateway.port,
             connector=connector,
+            connectors=connectors,
         )
-        ux.ok("Sidecar restarted; AI discovery is live.", indent="  ")
+        if len(connectors) > 1:
+            ux.ok(
+                f"Sidecar restarted for {len(connectors)} active connectors "
+                f"({', '.join(connectors)}); AI discovery is live.",
+                indent="  ",
+            )
+        else:
+            ux.ok("Sidecar restarted; AI discovery is live.", indent="  ")
         click.echo()
 
         if scan:
@@ -1167,7 +1199,8 @@ def discovery_enable(
         action=f"ai_discovery-{action_suffix}",
         details=(
             f"mode={ad.mode} scan_interval_min={ad.scan_interval_min} "
-            f"restart={restart} scan={scan} changes={len(diff)}"
+            f"restart={restart} scan={scan} changes={len(diff)} "
+            f"connectors={','.join(connectors) or 'none'}"
         ),
     )
 
@@ -1220,6 +1253,10 @@ def discovery_disable(app: AppContext, restart: bool, yes: bool) -> None:
         ux.subhead("Re-run after fixing the underlying I/O error.", indent="    ")
         raise SystemExit(1)
 
+    connectors = _resolve_connectors_for_restart(cfg)
+    connector = _resolve_connector_for_restart(cfg)
+    if connector not in connectors:
+        connector = connectors[0] if connectors else ""
     if restart:
         from defenseclaw.commands import cmd_setup
 
@@ -1227,15 +1264,23 @@ def discovery_disable(app: AppContext, restart: bool, yes: bool) -> None:
             cfg.data_dir,
             cfg.gateway.host,
             cfg.gateway.port,
-            connector=_resolve_connector_for_restart(cfg),
+            connector=connector,
+            connectors=connectors,
         )
-        ux.ok("Sidecar restarted; AI discovery is stopped.", indent="  ")
+        if len(connectors) > 1:
+            ux.ok(
+                f"Sidecar restarted for {len(connectors)} active connectors "
+                f"({', '.join(connectors)}); AI discovery is stopped.",
+                indent="  ",
+            )
+        else:
+            ux.ok("Sidecar restarted; AI discovery is stopped.", indent="  ")
         click.echo()
 
     _log_discovery_action(
         app,
         action="ai_discovery-disable",
-        details=f"restart={restart}",
+        details=f"restart={restart} connectors={','.join(connectors) or 'none'}",
     )
 
 
@@ -1275,7 +1320,6 @@ def discovery_status(
         "include_package_manifests": bool(ad.include_package_manifests),
         "include_env_var_names": bool(ad.include_env_var_names),
         "include_network_domains": bool(ad.include_network_domains),
-        "emit_otel": bool(ad.emit_otel),
     }
 
     live: dict[str, Any] = {"reachable": False, "enabled": None, "summary": None, "error": ""}
@@ -1474,17 +1518,13 @@ def discovery_setup(
         default=bool(ad.include_env_var_names),
     )
     include_network_domains = click.confirm(
-        "  Inspect /etc/hosts and SSH config for AI provider domains?",
+        "  Inspect provider domains and vetted loopback model metadata APIs?",
         default=bool(ad.include_network_domains),
     )
 
-    # ----- Output ---------------------------------------------------------
+    # ----- Safety ---------------------------------------------------------
     click.echo()
-    ux.section("Output")
-    emit_otel = click.confirm(
-        "  Forward sanitized telemetry through the sidecar (OTel)?",
-        default=bool(ad.emit_otel),
-    )
+    ux.section("Safety")
     allow_workspace_signatures = click.confirm(
         "  Honor signature packs found inside scanned workspaces? "
         "(off is safer)",
@@ -1508,7 +1548,6 @@ def discovery_setup(
         include_package_manifests=include_package_manifests,
         include_env_var_names=include_env_var_names,
         include_network_domains=include_network_domains,
-        emit_otel=emit_otel,
         allow_workspace_signatures=allow_workspace_signatures,
         store_raw_local_paths=store_raw_local_paths,
     )
@@ -1708,7 +1747,6 @@ def _build_discovery_overrides(
     include_package_manifests: bool | None = None,
     include_env_var_names: bool | None = None,
     include_network_domains: bool | None = None,
-    emit_otel: bool | None = None,
     allow_workspace_signatures: bool | None = None,
     store_raw_local_paths: bool | None = None,
 ) -> dict[str, Any]:
@@ -1746,8 +1784,6 @@ def _build_discovery_overrides(
         overrides["include_env_var_names"] = bool(include_env_var_names)
     if include_network_domains is not None:
         overrides["include_network_domains"] = bool(include_network_domains)
-    if emit_otel is not None:
-        overrides["emit_otel"] = bool(emit_otel)
     if allow_workspace_signatures is not None:
         overrides["allow_workspace_signatures"] = bool(allow_workspace_signatures)
     if store_raw_local_paths is not None:
@@ -1803,20 +1839,48 @@ def _resolve_connector_for_restart(cfg: Any) -> str:
     try:
         active = cfg.active_connector()
         if active:
-            return str(active).strip().lower()
+            return normalize_connector(str(active))
     except Exception:
         pass
     gc = getattr(cfg, "guardrail", None)
     if gc is not None:
         connector = getattr(gc, "connector", "")
         if connector:
-            return str(connector).strip().lower()
+            return normalize_connector(str(connector))
     claw = getattr(cfg, "claw", None)
     if claw is not None:
         mode = getattr(claw, "mode", "")
         if mode:
-            return str(mode).strip().lower()
+            return normalize_connector(str(mode))
     return "openclaw"
+
+
+def _resolve_connectors_for_restart(cfg: Any) -> list[str]:
+    """Return the authoritative active connector roster for a restart.
+
+    Config.active_connectors() is authoritative when present, including its
+    explicit empty-list result for an unconfigured install. The singular
+    resolver remains only as compatibility for older Config-like objects.
+    """
+    resolver = getattr(cfg, "active_connectors", None)
+    if callable(resolver):
+        try:
+            raw_connectors = resolver()
+        except Exception:
+            pass
+        else:
+            roster: list[str] = []
+            seen: set[str] = set()
+            for raw in raw_connectors or []:
+                connector = normalize_connector(str(raw))
+                if not connector or connector in seen:
+                    continue
+                seen.add(connector)
+                roster.append(connector)
+            return roster
+
+    connector = normalize_connector(_resolve_connector_for_restart(cfg))
+    return [connector] if connector else []
 
 
 def _trigger_post_enable_scan(
@@ -1960,7 +2024,7 @@ def signatures_install(app: AppContext, pack_path: Path, replace: bool) -> None:
 @pass_ctx
 def signatures_disable(app: AppContext, signature_id: str) -> None:
     """Disable one signature id in ai_discovery.disabled_signature_ids."""
-    cfg = _load_config_best_effort(app)
+    cfg = _require_loaded_config(app)
     normalized = ai_signatures.normalize_signature_id(signature_id)
     if not normalized:
         raise click.ClickException("signature id must not be empty")
@@ -1977,7 +2041,7 @@ def signatures_disable(app: AppContext, signature_id: str) -> None:
 @pass_ctx
 def signatures_enable(app: AppContext, signature_id: str) -> None:
     """Re-enable one signature id previously disabled in config."""
-    cfg = _load_config_best_effort(app)
+    cfg = _require_loaded_config(app)
     normalized = ai_signatures.normalize_signature_id(signature_id)
     disabled = list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
     if normalized in disabled:
@@ -1998,6 +2062,37 @@ def _load_config_best_effort(app: AppContext):
         cfg = cfg_mod.default_config()
     app.cfg = cfg
     return cfg
+
+
+def _apply_discovery_config_state(
+    app: AppContext,
+    disc: agent_discovery.AgentDiscovery,
+) -> agent_discovery.AgentDiscovery:
+    """Annotate discovery with active/mode state when config.yaml exists.
+
+    ``agent discover`` remains safe before ``init``: a missing or invalid
+    config simply leaves every connector inactive instead of manufacturing
+    the default OpenClaw state.
+    """
+    cfg = getattr(app, "cfg", None)
+    if cfg is None:
+        from defenseclaw import config as cfg_mod  # noqa: PLC0415
+
+        cfg_path = cfg_mod.default_data_path() / cfg_mod.CONFIG_FILE_NAME
+        if not cfg_path.is_file():
+            return disc
+        try:
+            # Discovery should not mix unrelated migration/deprecation prose
+            # into its table or JSON output. Config loading is read-only here;
+            # any warning remains available on commands that manage config.
+            from contextlib import redirect_stderr  # noqa: PLC0415
+            from io import StringIO  # noqa: PLC0415
+
+            with redirect_stderr(StringIO()):
+                cfg = cfg_mod.load()
+        except Exception:
+            return disc
+    return agent_discovery.apply_config_state(disc, cfg)
 
 
 def _require_loaded_config(app: AppContext):
@@ -2022,10 +2117,15 @@ def _require_loaded_config(app: AppContext):
     """
     cfg = getattr(app, "cfg", None)
     if cfg is not None:
+        if getattr(cfg, "_source_config_version", None) != 8:
+            raise click.ClickException(
+                "Configuration schema v8 is required — run 'defenseclaw upgrade' first."
+            )
         return cfg
     from defenseclaw import config as cfg_mod
 
     try:
+        cfg_mod.require_v8_config()
         cfg = cfg_mod.load()
     except Exception as exc:
         raise click.ClickException(
@@ -2255,9 +2355,22 @@ def _format_missing_token_error(app: AppContext) -> str:
 _AI_USAGE_STATE_ORDER: dict[str, int] = {
     "new": 0,
     "changed": 1,
+    "seen": 2,
     "active": 2,
     "gone": 3,
 }
+
+
+def _canonical_ai_usage_state(value: Any) -> str:
+    """Normalize the former ``active`` spelling to the gateway's ``seen``.
+
+    ``active`` shipped as the CLI filter spelling before the gateway snapshot
+    contract settled on ``seen``. Normalizing both the requested state and the
+    payload preserves old scripts and also lets current/legacy sidecars be
+    queried with either spelling.
+    """
+    state = str(value or "").lower()
+    return "seen" if state == "active" else state
 
 
 def _filter_ai_usage_signals(
@@ -2276,9 +2389,10 @@ def _filter_ai_usage_signals(
     call, so re-querying with different filters would only burn round
     trips. The matching rules:
 
-    * ``states`` — exact, case-insensitive set membership. When empty,
-      ``gone`` is suppressed unless ``show_gone`` is set; this is the
-      "default == not-noisy" behavior the rest of the command relies on.
+    * ``states`` — exact, case-insensitive set membership after treating the
+      former CLI spelling ``active`` as an alias for gateway state ``seen``.
+      When empty, ``gone`` is suppressed unless ``show_gone`` is set; this is
+      the "default == not-noisy" behavior the rest of the command relies on.
     * ``categories`` — exact, case-insensitive set membership against
       ``signal.category``.
     * ``products`` — case-insensitive **substring** match against
@@ -2286,19 +2400,19 @@ def _filter_ai_usage_signals(
       type ``--product claude`` and catch both ``Claude Code`` and
       ``Claude Desktop`` without memorising the exact catalog spelling.
     * ``components`` — case-insensitive substring match against
-      ``signal.component.name`` (or ``signal.product`` for legacy
-      signatures that don't carry a component block). Lets the
+      ``signal.component.name`` or ``signal.model.id`` (then
+      ``signal.product`` for legacy signatures that carry neither block). Lets the
       operator type ``--component openai`` and pick out every
-      OpenAI-named SDK install across npm/pypi/go.
+      OpenAI-named SDK install across npm/pypi/go, or type a local model ID.
     """
-    state_set = {s.lower() for s in states} if states else set()
+    state_set = {_canonical_ai_usage_state(s) for s in states} if states else set()
     category_set = {c.lower() for c in categories} if categories else set()
     product_needles = [p.lower() for p in products] if products else []
     component_needles = [c.lower() for c in components] if components else []
 
     out: list[dict[str, Any]] = []
     for sig in signals or []:
-        state = str(sig.get("state", "")).lower()
+        state = _canonical_ai_usage_state(sig.get("state", ""))
         if state_set:
             if state not in state_set:
                 continue
@@ -2311,9 +2425,13 @@ def _filter_ai_usage_signals(
             if not any(needle in product for needle in product_needles):
                 continue
         if component_needles:
-            comp = sig.get("component") or {}
+            comp = _mapping_block(sig.get("component"))
+            model = _mapping_block(sig.get("model"))
             comp_name = str(comp.get("name", "")).lower()
-            haystack = comp_name or str(sig.get("product", "")).lower()
+            model_id = str(model.get("id", "")).lower()
+            haystack = " ".join(item for item in (comp_name, model_id) if item)
+            if not haystack:
+                haystack = str(sig.get("product", "")).lower()
             if not any(needle in haystack for needle in component_needles):
                 continue
         out.append(sig)
@@ -2383,10 +2501,12 @@ def _summarize_ai_usage_signals_full(
     # axes to fold into the key.
     groups: dict[tuple, dict[str, Any]] = {}
     for sig in signals:
-        comp = sig.get("component") or {}
+        comp = _mapping_block(sig.get("component"))
+        model = _mapping_block(sig.get("model"))
         ecosystem = str(comp.get("ecosystem", "")).lower()
         comp_name = str(comp.get("name", "")).lower()
         version = str(comp.get("version", "") or sig.get("version", "") or "")
+        model_id = str(model.get("id", ""))
         category = str(sig.get("category", ""))
         detector = str(sig.get("detector", ""))
         if by_detector:
@@ -2399,6 +2519,7 @@ def _summarize_ai_usage_signals_full(
                 ecosystem,
                 comp_name,
                 version,
+                model_id.lower(),
             )
         else:
             # Drop category and detector from the key -- "Claude
@@ -2412,6 +2533,7 @@ def _summarize_ai_usage_signals_full(
                 ecosystem,
                 comp_name,
                 version,
+                model_id.lower(),
             )
         slot = groups.get(key)
         if slot is None:
@@ -2435,6 +2557,9 @@ def _summarize_ai_usage_signals_full(
                 "component": comp.get("name", ""),
                 "framework": comp.get("framework", ""),
                 "version": version,
+                "model": model_id,
+                "model_statuses": [],
+                "model_formats": [],
                 "last_active_at": "",
                 # Aggregated lists -- we always populate these so
                 # downstream renderers can show a "Categories" /
@@ -2464,6 +2589,12 @@ def _summarize_ai_usage_signals_full(
             slot["categories"].append(category)
         if detector and detector not in slot["detectors"]:
             slot["detectors"].append(detector)
+        model_status = str(model.get("status", ""))
+        if model_status and model_status not in slot["model_statuses"]:
+            slot["model_statuses"].append(model_status)
+        model_format = str(model.get("format", ""))
+        if model_format and model_format not in slot["model_formats"]:
+            slot["model_formats"].append(model_format)
         # Preserve insertion order so the sample reflects what the
         # detector saw first; dedupe so we do not show the same file
         # twice for groups that span multiple matching signatures.
@@ -2508,6 +2639,7 @@ def _summarize_ai_usage_signals_full(
             -row["count"],
             row["key"][1],
             row["key"][2],
+            row.get("model", ""),
         )
     )
     return rows
@@ -2689,9 +2821,10 @@ def _render_ai_usage_table(
         # actually has them. Keeps the legacy detail view compact for
         # operators on signature packs that haven't been promoted to
         # the v2 component schema yet.
-        has_component = any((sig.get("component") or {}).get("name") for sig in displayed)
+        has_component = any(_mapping_block(sig.get("component")).get("name") for sig in displayed)
+        has_model = any(_mapping_block(sig.get("model")).get("id") for sig in displayed)
         has_version = any(
-            ((sig.get("component") or {}).get("version") or sig.get("version"))
+            (_mapping_block(sig.get("component")).get("version") or sig.get("version"))
             for sig in displayed
         )
         has_runtime = any(sig.get("runtime") for sig in displayed)
@@ -2712,6 +2845,10 @@ def _render_ai_usage_table(
         table.add_column("State")
         table.add_column("Category")
         table.add_column("Product")
+        if has_model:
+            table.add_column("Model")
+            table.add_column("Model status")
+            table.add_column("Format")
         if has_component:
             table.add_column("Component")
         if has_version:
@@ -2736,11 +2873,13 @@ def _render_ai_usage_table(
         # Falls back to product/vendor for legacy signals that
         # have no Component block so we still dedup something
         # sensible there too.
-        def _conf_group_key(s: dict[str, Any]) -> tuple[str, str, str, str]:
-            c = s.get("component") or {}
+        def _conf_group_key(s: dict[str, Any]) -> tuple[str, str, str, str, str]:
+            c = _mapping_block(s.get("component"))
+            model = _mapping_block(s.get("model"))
             return (
                 str(c.get("ecosystem", "")),
                 str(c.get("name", "")),
+                str(model.get("id", "")),
                 str(s.get("product", "")),
                 str(s.get("vendor", "")),
             )
@@ -2749,15 +2888,22 @@ def _render_ai_usage_table(
         # caller's incoming state/category ordering inside each
         # group so the rest of the table still reads naturally.
         displayed = sorted(displayed, key=_conf_group_key)
-        prev_conf_key: tuple[str, str, str, str] | None = None
+        prev_conf_key: tuple[str, str, str, str, str] | None = None
         for sig in displayed:
-            comp = sig.get("component") or {}
-            runtime = sig.get("runtime") or {}
+            comp = _mapping_block(sig.get("component"))
+            model = _mapping_block(sig.get("model"))
+            runtime = _mapping_block(sig.get("runtime"))
             row: list[str] = [
                 str(sig.get("state", "")),
                 str(sig.get("category", "")),
                 str(sig.get("product", "")),
             ]
+            if has_model:
+                row.extend([
+                    str(model.get("id", "")),
+                    str(model.get("status", "")),
+                    str(model.get("format", "")),
+                ])
             if has_component:
                 ecosystem = str(comp.get("ecosystem", ""))
                 comp_name = str(comp.get("name", ""))
@@ -2816,6 +2962,7 @@ def _render_ai_usage_table(
     full_groups = _summarize_ai_usage_signals_full(filtered, by_detector=by_detector)
     displayed_full = full_groups[:limit] if limit > 0 else full_groups
     has_component = any(g.get("component") for g in displayed_full)
+    has_model = any(g.get("model") for g in displayed_full)
     has_version = any(g.get("version") for g in displayed_full)
     has_last_active = any(g.get("last_active_at") for g in displayed_full)
     # Surface confidence in the default grouped view so operators
@@ -2839,6 +2986,10 @@ def _render_ai_usage_table(
         cat_header, det_header = "Categories", "Detectors"
     table.add_column(cat_header)
     table.add_column("Product")
+    if has_model:
+        table.add_column("Model")
+        table.add_column("Model status")
+        table.add_column("Format")
     if has_component:
         table.add_column("Component")
     if has_version:
@@ -2867,6 +3018,12 @@ def _render_ai_usage_table(
             cat_cell = category_join
             det_cell = detector_join
         row: list[str] = [state, cat_cell, product]
+        if has_model:
+            row.extend([
+                str(g.get("model", "")),
+                _format_csv_truncated(g.get("model_statuses") or [], limit=2),
+                _format_csv_truncated(g.get("model_formats") or [], limit=2),
+            ])
         if has_component:
             ecosystem = str(g.get("ecosystem", ""))
             comp_name = str(g.get("component", ""))
@@ -2901,7 +3058,7 @@ def _render_ai_usage_table(
     footer += (
         " Use --detail for per-signal rows, --by-detector to split by "
         "category/detector, --json for raw, --state/--category/--product"
-        "/--component to filter."
+        "/--component to filter (component also matches local model IDs)."
     )
     console.print(footer)
     return stream.getvalue()
@@ -2932,9 +3089,11 @@ def _render_ai_usage_plain(
 
     if detail:
         rows = signals[:limit] if limit > 0 else signals
+        has_model = any(_mapping_block(sig.get("model")).get("id") for sig in rows)
         for sig in rows:
-            comp = sig.get("component") or {}
-            runtime = sig.get("runtime") or {}
+            comp = _mapping_block(sig.get("component"))
+            model = _mapping_block(sig.get("model"))
+            runtime = _mapping_block(sig.get("runtime"))
             ver = str(comp.get("version", "") or sig.get("version", "") or "")
             comp_name = str(comp.get("name", ""))
             ecosystem = str(comp.get("ecosystem", ""))
@@ -2948,6 +3107,14 @@ def _render_ai_usage_plain(
                 str(sig.get("state", "")),
                 str(sig.get("category", "")),
                 str(sig.get("product", "")),
+            ]
+            if has_model:
+                fields.extend([
+                    str(model.get("id", "")),
+                    str(model.get("status", "")),
+                    str(model.get("format", "")),
+                ])
+            fields.extend([
                 comp_label,
                 ver,
                 str(sig.get("vendor", "")),
@@ -2957,11 +3124,12 @@ def _render_ai_usage_plain(
                 _format_runtime(runtime),
                 _format_relative_time(sig.get("last_active_at", "")),
                 evidence_cell,
-            ]
+            ])
             lines.append(" | ".join(fields))
     else:
         full_groups = _summarize_ai_usage_signals_full(signals, by_detector=by_detector)
         rows_full = full_groups[:limit] if limit > 0 else full_groups
+        has_model = any(g.get("model") for g in rows_full)
         for g in rows_full:
             state, category_join, product, vendor, detector_join = g["key"]
             ecosystem = str(g.get("ecosystem", ""))
@@ -2970,10 +3138,18 @@ def _render_ai_usage_plain(
             # Plain renderer keeps the joined string format -- it is
             # log-scrape friendly and operators piping through awk
             # already handle commas inside fields.
-            lines.append(" | ".join([
+            fields = [
                 state,
                 category_join,
                 product,
+            ]
+            if has_model:
+                fields.extend([
+                    str(g.get("model", "")),
+                    ", ".join(g.get("model_statuses") or []),
+                    ", ".join(g.get("model_formats") or []),
+                ])
+            fields.extend([
                 comp_label,
                 str(g.get("version", "")),
                 vendor,
@@ -2981,7 +3157,8 @@ def _render_ai_usage_plain(
                 str(g["count"]),
                 _format_relative_time(g.get("last_active_at", "")),
                 _format_evidence_sample(g["basenames"]),
-            ]))
+            ])
+            lines.append(" | ".join(fields))
 
     lines.append(
         f"active={summary.get('active_signals', 0)} "
@@ -3022,7 +3199,7 @@ def _render_ai_processes_table(
     table.add_column("Comm")
     table.add_column("Last active")
     for sig in displayed:
-        runtime = sig.get("runtime") or {}
+        runtime = _mapping_block(sig.get("runtime"))
         table.add_row(
             str(runtime.get("pid", "") or ""),
             str(runtime.get("ppid", "") or ""),
@@ -3046,7 +3223,7 @@ def _render_ai_processes_table(
 def _render_ai_processes_plain(process_signals: list[dict[str, Any]]) -> str:
     lines = [f"AI processes ({len(process_signals)} live)"]
     for sig in process_signals:
-        runtime = sig.get("runtime") or {}
+        runtime = _mapping_block(sig.get("runtime"))
         lines.append(
             " | ".join([
                 str(runtime.get("pid", "") or ""),
@@ -3431,8 +3608,7 @@ def _render_component_show(
                 cells.append(str(loc.get("raw_path", "")))
             plain.append(" | ".join(cells))
         if not has_raw:
-            plain.append("(raw paths hidden — flip privacy.disable_redaction "
-                         "and ai_discovery.store_raw_local_paths to surface them)")
+            plain.append("(raw paths hidden — set ai_discovery.store_raw_local_paths=true to surface them)")
         return "\n".join(plain) + "\n"
 
     from io import StringIO
@@ -3465,10 +3641,7 @@ def _render_component_show(
         table.add_row(*cells)
     console.print(table)
     if not has_raw:
-        console.print(
-            "(raw paths hidden — flip privacy.disable_redaction and "
-            "ai_discovery.store_raw_local_paths to surface them)"
-        )
+        console.print("(raw paths hidden — set ai_discovery.store_raw_local_paths=true to surface them)")
     return stream.getvalue()
 
 
@@ -3682,6 +3855,9 @@ def _sanitized_discovery_report(disc: agent_discovery.AgentDiscovery, *, duratio
     for name, signal in disc.agents.items():
         agents[name] = {
             "installed": bool(signal.installed),
+            "configured": bool(signal.configured),
+            "active": bool(signal.active),
+            "mode": signal.mode,
             "has_config": bool(signal.config_path),
             "config_basename": _basename(signal.config_path),
             "config_path_hash": _path_hash(signal.config_path),

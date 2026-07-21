@@ -24,11 +24,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
-
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 // JudgeBodyStore is a dedicated SQLite database for LLM-judge bodies
@@ -48,18 +48,54 @@ import (
 //
 // Schema: standalone — the `judge_responses` table is anchored at
 // migration v1 inside this file rather than reusing the audit
-// migration list. Migrations from the audit DB are not replayed;
-// historical rows in audit.db remain there and can be reclaimed
-// with `sqlite3 audit.db "DROP TABLE judge_responses"` whenever the
-// operator is ready.
+// migration list. Historical audit.db rows move through the explicit,
+// verified cutover in judge_body_cutover.go and remain there only as a
+// read-only compatibility source until retention or authorized purge.
 type JudgeBodyStore struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
+
+	// cutoverReady gates the runtime writer and compatibility reader when
+	// the store was opened by NewJudgeBodyStoreForCutover. The gateway uses
+	// that constructor so a partial/failed legacy copy can never be served
+	// or receive new v8 rows. The ordinary constructor remains immediately
+	// writable for standalone tools and tests that have no legacy source.
+	cutoverReady atomic.Bool
+	cutoverMu    sync.RWMutex
+
+	sqliteBusyMu       sync.RWMutex
+	sqliteBusyObserver SQLiteBusyObservabilityV8
 }
 
-// NewJudgeBodyStore opens (or creates) the judge bodies database at
+// BindSQLiteBusyObservabilityV8 publishes or detaches the canonical generated
+// contention metric owner for the dedicated judge-body database.
+func (s *JudgeBodyStore) BindSQLiteBusyObservabilityV8(observer SQLiteBusyObservabilityV8) {
+	if s == nil {
+		return
+	}
+	s.sqliteBusyMu.Lock()
+	s.sqliteBusyObserver = observer
+	s.sqliteBusyMu.Unlock()
+}
+
+func (s *JudgeBodyStore) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
+	if s == nil {
+		return nil
+	}
+	s.sqliteBusyMu.RLock()
+	observer := s.sqliteBusyObserver
+	s.sqliteBusyMu.RUnlock()
+	return observer
+}
+
+// NewJudgeBodyStore opens (or creates) a standalone judge bodies database at
 // dbPath, applies the same DSN-resident pragmas + single-connection
 // pool the audit store uses, and runs the standalone migration list
 // in init(). Returns a ready-to-write store.
+//
+// Gateway startup must use NewJudgeBodyStoreForCutover instead. This immediate-
+// ready constructor is for standalone operation where no legacy audit source is
+// in scope and for focused tests.
 //
 // On first creation we ensure the parent directory exists (0700) and
 // then chmod the SQLite file down to 0600 — judge bodies can include
@@ -67,11 +103,39 @@ type JudgeBodyStore struct {
 // process umask's default 0644. Mirrors the inventory store hygiene
 // in internal/inventory/store.go.
 func NewJudgeBodyStore(dbPath string) (*JudgeBodyStore, error) {
+	return newJudgeBodyStore(dbPath, false)
+}
+
+// NewJudgeBodyStoreForCutover opens the authoritative database with reads and
+// writes disabled until CutoverLegacyJudgeBodies completes successfully. The
+// gateway MUST use this constructor whenever audit.db is present.
+func NewJudgeBodyStoreForCutover(dbPath string) (*JudgeBodyStore, error) {
+	return newJudgeBodyStore(dbPath, true)
+}
+
+func newJudgeBodyStore(dbPath string, requireCutover bool) (*JudgeBodyStore, error) {
+	return newJudgeBodyStoreWithPathHooks(dbPath, requireCutover, judgeBodyPathHooks{})
+}
+
+func newJudgeBodyStoreWithPathHooks(
+	dbPath string,
+	requireCutover bool,
+	hooks judgeBodyPathHooks,
+) (*JudgeBodyStore, error) {
 	if strings.TrimSpace(dbPath) == "" {
 		return nil, errors.New("judge_body: db path is required")
 	}
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
-		return nil, fmt.Errorf("judge_body: ensure parent dir: %w", err)
+	hooks = hooks.withDefaults()
+	prepared, err := prepareJudgeBodyDatabasePath(filepath.Clean(dbPath), hooks)
+	if err != nil {
+		return nil, err
+	}
+	defer prepared.close()
+	dbPath = prepared.path
+	if hooks.beforeSQLiteOpen != nil {
+		if err := hooks.beforeSQLiteOpen(dbPath); err != nil {
+			return nil, fmt.Errorf("judge_body: pre-open path check: %w", err)
+		}
 	}
 	db, err := openSQLite(dbPath)
 	if err != nil {
@@ -81,18 +145,15 @@ func NewJudgeBodyStore(dbPath string) (*JudgeBodyStore, error) {
 		// tier disambiguation happens at the caller boundary.
 		return nil, fmt.Errorf("judge_body: open db %s: %w", dbPath, unwrapOpenSQLiteErr(err))
 	}
-	st := &JudgeBodyStore{db: db}
+	st := &JudgeBodyStore{db: db, path: dbPath}
+	st.cutoverReady.Store(!requireCutover)
 	if err := st.init(); err != nil {
 		_ = st.Close()
 		return nil, err
 	}
-	// Tighten file permissions even if SQLite created the file with
-	// the default umask. Done after init() so the file definitely
-	// exists. Non-fatal: some sandboxed environments (containers
-	// with read-only mounts, NFS without chmod support) reject this
-	// and we still want the sidecar up.
-	if err := os.Chmod(dbPath, 0o600); err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "[judge_body] could not chmod %s to 0600: %v\n", dbPath, err)
+	if err := prepared.validateAfterOpen(); err != nil {
+		_ = st.Close()
+		return nil, err
 	}
 	return st, nil
 }
@@ -198,6 +259,31 @@ var judgeBodyMigrations = []migration{
 			return nil
 		},
 	},
+	{
+		description: "v2: verified legacy cutover state",
+		apply: func(ex dbExecer) error {
+			_, err := ex.Exec(`
+			CREATE TABLE IF NOT EXISTS legacy_judge_cutover_rows (
+				source_key TEXT NOT NULL,
+				legacy_id TEXT NOT NULL,
+				verified_at DATETIME NOT NULL,
+				PRIMARY KEY (source_key, legacy_id)
+			);
+			CREATE TABLE IF NOT EXISTS legacy_judge_cutover_state (
+				source_key TEXT PRIMARY KEY,
+				completed_at DATETIME NOT NULL,
+				verified_rows INTEGER NOT NULL
+			);
+			`)
+			return err
+		},
+	},
+	{
+		description: "v3: normalize judge timestamps for indexed retention",
+		apply: func(ex dbExecer) error {
+			return migrateJudgeBodyTimestampUnixNano(ex, judgeBodyTimestampUnixNanoIndex)
+		},
+	},
 }
 
 func (s *JudgeBodyStore) init() error {
@@ -222,6 +308,9 @@ func (s *JudgeBodyStore) init() error {
 			return err
 		}
 	}
+	if err := ensureJudgeBodyTimestampUnixNano(s.db, judgeBodyTimestampUnixNanoIndex); err != nil {
+		return fmt.Errorf("judge_body: verify timestamp retention index: %w", err)
+	}
 	return nil
 }
 
@@ -234,7 +323,7 @@ func (s *JudgeBodyStore) applyMigration(ver int, m migration) error {
 	if err := m.apply(tx); err != nil {
 		return fmt.Errorf("judge_body: migration %d (%s): %w", ver, m.description, err)
 	}
-	if _, err := txExec(tx, "judge_body_migration_version_insert",
+	if _, err := txExecContextObserved(context.Background(), tx, "judge_body_migration_version_insert", s.sqliteBusyObservabilityV8(),
 		`INSERT INTO schema_version (version, applied_at) VALUES (?, ?)`,
 		ver, time.Now().UTC()); err != nil {
 		return fmt.Errorf("judge_body: record migration %d: %w", ver, err)
@@ -261,6 +350,11 @@ func (s *JudgeBodyStore) InsertJudgeResponse(e JudgeResponse) error {
 // any in-flight retryBusy loop instead of waiting out the backoff
 // schedule.
 func (s *JudgeBodyStore) InsertJudgeResponseCtx(ctx context.Context, e JudgeResponse) error {
+	release, err := s.acquireRuntime()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if e.Raw == "" {
 		return nil
 	}
@@ -273,22 +367,27 @@ func (s *JudgeBodyStore) InsertJudgeResponseCtx(ctx context.Context, e JudgeResp
 	if e.RunID == "" {
 		e.RunID = currentRunID()
 	}
+	timestampUnixNano, err := judgeBodyUnixNano(e.Timestamp)
+	if err != nil {
+		return fmt.Errorf("judge_body: normalize timestamp: %w", err)
+	}
 	raw := truncateJudgeRaw(e.Raw, MaxJudgeRawBytes)
 	failClosed := 0
 	if e.FailClosedApplied {
 		failClosed = 1
 	}
-	_, err := s.execDB(ctx, "judge_body_insert",
+	_, err = s.execDB(ctx, "judge_body_insert",
 		`INSERT INTO judge_responses
-			(id, timestamp, kind, direction, model, action, severity, latency_ms,
+			(id, timestamp, timestamp_unix_nano, kind, direction, model, action, severity, latency_ms,
 			 parse_error, raw_response, request_id, trace_id, run_id, session_id, input_hash,
 			 confidence, fail_closed_applied, inspected_model, prompt_template_id,
 			 schema_version, content_hash, generation, binary_version,
 			 agent_id, agent_instance_id, sidecar_instance_id,
 			 policy_id, destination_app, tool_name, tool_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID,
 		e.Timestamp.Format(time.RFC3339Nano),
+		timestampUnixNano,
 		e.Kind,
 		nullStr(e.Direction),
 		nullStr(e.Model),
@@ -336,11 +435,23 @@ func (s *JudgeBodyStore) ListJudgeResponses(limit int) ([]JudgeResponse, error) 
 
 // ListJudgeResponsesCtx is the context-aware variant of ListJudgeResponses.
 func (s *JudgeBodyStore) ListJudgeResponsesCtx(ctx context.Context, limit int) ([]JudgeResponse, error) {
+	release, err := s.acquireRuntime()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return s.listJudgeResponsesCtxUnlocked(ctx, limit)
+}
+
+func (s *JudgeBodyStore) listJudgeResponsesCtxUnlocked(ctx context.Context, limit int) ([]JudgeResponse, error) {
+	if err := verifyJudgeBodyTimestampUnixNanoReady(s.db); err != nil {
+		return nil, fmt.Errorf("judge_body: timestamp readiness: %w", err)
+	}
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := s.queryDB(ctx, "judge_body_list", `
-		SELECT id, timestamp, kind, COALESCE(direction,''), COALESCE(model,''),
+		SELECT id, timestamp, timestamp_unix_nano, kind, COALESCE(direction,''), COALESCE(model,''),
 			COALESCE(action,''), COALESCE(severity,''), COALESCE(latency_ms,0),
 			COALESCE(parse_error,''), raw_response,
 			COALESCE(request_id,''), COALESCE(trace_id,''), COALESCE(run_id,''),
@@ -350,7 +461,9 @@ func (s *JudgeBodyStore) ListJudgeResponsesCtx(ctx context.Context, limit int) (
 			COALESCE(schema_version,0), COALESCE(content_hash,''), COALESCE(generation,0), COALESCE(binary_version,''),
 			COALESCE(agent_id,''), COALESCE(agent_instance_id,''), COALESCE(sidecar_instance_id,''),
 			COALESCE(policy_id,''), COALESCE(destination_app,''), COALESCE(tool_name,''), COALESCE(tool_id,'')
-		FROM judge_responses ORDER BY timestamp DESC LIMIT ?`, limit)
+		FROM judge_responses
+		ORDER BY timestamp_unix_nano DESC, id DESC
+		LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("judge_body: list: %w", err)
 	}
@@ -360,9 +473,10 @@ func (s *JudgeBodyStore) ListJudgeResponsesCtx(ctx context.Context, limit int) (
 	for rows.Next() {
 		var r JudgeResponse
 		var ts string
+		var timestampUnixNano int64
 		var failClosed int
 		var gen int64
-		if err := rows.Scan(&r.ID, &ts, &r.Kind, &r.Direction, &r.Model,
+		if err := rows.Scan(&r.ID, &ts, &timestampUnixNano, &r.Kind, &r.Direction, &r.Model,
 			&r.Action, &r.Severity, &r.LatencyMs, &r.ParseError, &r.Raw,
 			&r.RequestID, &r.TraceID, &r.RunID, &r.SessionID, &r.InputHash, &r.Confidence,
 			&failClosed, &r.InspectedModel, &r.PromptTemplateID,
@@ -373,8 +487,8 @@ func (s *JudgeBodyStore) ListJudgeResponsesCtx(ctx context.Context, limit int) (
 		}
 		r.Generation = uint64(gen)
 		r.FailClosedApplied = failClosed != 0
-		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
-			r.Timestamp = t
+		if err := assignJudgeResponseTimestamp(&r, ts, timestampUnixNano, "judge_body: list"); err != nil {
+			return nil, err
 		}
 		out = append(out, r)
 	}
@@ -388,11 +502,38 @@ func (s *JudgeBodyStore) ListJudgeResponsesCtx(ctx context.Context, limit int) (
 // gateway worker. Mirrors Store.BeginJudgeBatch so the same JudgeBatch
 // handle works against either backend without an adapter.
 func (s *JudgeBodyStore) BeginJudgeBatch(ctx context.Context) (*JudgeBatch, error) {
+	release, err := s.acquireRuntime()
+	if err != nil {
+		return nil, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		release()
 		return nil, fmt.Errorf("judge_body: begin batch: %w", err)
 	}
-	return &JudgeBatch{tx: tx}, nil
+	return &JudgeBatch{
+		tx: tx, ctx: ctx, release: release,
+		sqliteBusyObserver: s.sqliteBusyObservabilityV8(),
+	}, nil
+}
+
+func (s *JudgeBodyStore) acquireRuntime() (func(), error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("judge_body: store is not initialized")
+	}
+	s.cutoverMu.RLock()
+	if !s.cutoverReady.Load() {
+		s.cutoverMu.RUnlock()
+		return nil, errors.New("judge_body: legacy cutover is incomplete")
+	}
+	return s.cutoverMu.RUnlock, nil
+}
+
+// CutoverReady reports whether runtime reads and writes are enabled. It is
+// primarily useful to startup coordination and tests; a false result is a hard
+// fail-closed state, never a signal to fall back to audit.db.
+func (s *JudgeBodyStore) CutoverReady() bool {
+	return s != nil && s.cutoverReady.Load()
 }
 
 // DB is a test-only escape hatch for asserting pool settings.
@@ -407,4 +548,3 @@ func (s *JudgeBodyStore) DB() *sql.DB {
 // silence "imported and not used" when telemetry is otherwise
 // unreferenced in test builds. The runtime store actually uses
 // it via the retryBusy helper.
-var _ = telemetry.RecordSQLiteBusy

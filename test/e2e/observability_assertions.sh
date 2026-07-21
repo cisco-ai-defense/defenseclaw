@@ -16,17 +16,15 @@
 # anywhere else — extend them here.
 #
 # The script asserts:
-#   1. gateway.jsonl exists and is non-empty.
-#   2. Every line is valid JSONL, carries a top-level ts / event_type /
-#      severity, and uses the envelope shape defined in
-#      internal/gatewaylog/events.go. Delegates to assert-gateway-jsonl.py.
+#   1. The explicitly configured v8 JSONL destination exists and is non-empty.
+#   2. Every line is a canonical v8 record with record/bucket/signal identity,
+#      correlation, provenance, and field-class metadata.
 #   3. Timestamps parse as RFC3339Nano and fall within a bounded
 #      window (default: last 30 minutes + 5 seconds of forward drift).
 #   4. request_id, when emitted, is a valid v4 UUID.
 #   5. audit.db contains at least one row with a non-empty request_id.
-#   6. When judge persistence is enabled, judge_bodies.db (Phase 4)
-#      contains at least one judge_responses row; legacy audit.db
-#      falls through as a fallback when judge_bodies.db is absent.
+#   6. When judge persistence is enabled, judge_bodies.db contains at least
+#      one judge_responses row; the source DB remains a cutover-only fallback.
 #
 # The Splunk HEC mock assertion is opt-in: the CI workflow passes
 # --splunk-mock-log only when judge traffic is expected (full-live
@@ -91,35 +89,35 @@ ok() {
 
 echo "[observability_assertions] jsonl=$JSONL_PATH db=$AUDIT_DB_PATH judge_bodies_db=$JUDGE_BODIES_DB_PATH ts_window=${TS_WINDOW_SECONDS}s"
 
-# 1. JSONL file must exist and be non-empty.
+# 1. The explicit v8 JSONL test destination must exist and be non-empty.
 if [[ ! -f "$JSONL_PATH" ]]; then
     fail "gateway.jsonl not found at $JSONL_PATH"
 fi
 if [[ ! -s "$JSONL_PATH" ]]; then
     fail "gateway.jsonl is empty at $JSONL_PATH"
 fi
-ok "gateway.jsonl present ($(wc -l <"$JSONL_PATH" | tr -d ' ') lines)"
+ok "canonical v8 JSONL present ($(wc -l <"$JSONL_PATH" | tr -d ' ') lines)"
 
 # 2–4. Delegate structural + timestamp + UUID checks to the Python
 # validator. Optional flags turn on the stricter Phase 6 assertions
 # (shared request_id, required event types).
 VALIDATOR_ARGS=(
     "$JSONL_PATH"
-    --min-events 1
+    --min-records 1
     --ts-window-seconds "$TS_WINDOW_SECONDS"
     --require-uuid-request-id
 )
 if [[ "$REQUIRE_VERDICT" == "1" ]]; then
-    VALIDATOR_ARGS+=(--require-type verdict)
+    VALIDATOR_ARGS+=(--require-event-name guardrail.evaluation.completed)
 fi
 if [[ "$REQUIRE_JUDGE" == "1" ]]; then
-    VALIDATOR_ARGS+=(--require-type judge)
+    VALIDATOR_ARGS+=(--require-event-name guardrail.judge.completed)
 fi
 if [[ "$REQUIRE_SHARED_REQUEST_ID" == "1" ]]; then
-    VALIDATOR_ARGS+=(--require-shared-request-id)
+    VALIDATOR_ARGS+=(--require-shared-guardrail-request-id)
 fi
 
-python3 "$REPO_ROOT/scripts/assert-gateway-jsonl.py" "${VALIDATOR_ARGS[@]}"
+python3 "$REPO_ROOT/scripts/assert-observability-v8-jsonl.py" "${VALIDATOR_ARGS[@]}"
 
 # 5. SQLite correlation check: at least one audit_events row must
 # have a non-empty request_id. Skipped gracefully if sqlite3 isn't on
@@ -140,11 +138,8 @@ if command -v sqlite3 >/dev/null 2>&1; then
     # 6. Optional: require at least one judge_responses row when the
     # caller has confirmed judge persistence should be on.
     #
-    # Phase 4 split: judge bodies now live in judge_bodies.db. We
-    # check that file first; if it does not exist (e.g. pre-Phase-4
-    # binary or operator pinned legacy layout) we transparently fall
-    # back to the legacy table on audit.db. This keeps the script
-    # green across both shapes during the rollout window.
+    # Judge bodies now live in judge_bodies.db. A missing target is checked
+    # against the source table only for an in-progress historical cutover.
     if [[ "$REQUIRE_JUDGE" == "1" ]]; then
         if [[ -f "$JUDGE_BODIES_DB_PATH" ]]; then
             JUDGE_COUNT=$(sqlite3 "$JUDGE_BODIES_DB_PATH" \

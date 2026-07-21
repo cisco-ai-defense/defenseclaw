@@ -78,6 +78,24 @@ class BootstrapEnvTests(unittest.TestCase):
         for d in (cfg.data_dir, cfg.quarantine_dir, cfg.plugin_dir, cfg.policy_dir):
             self.assertTrue(os.path.isdir(d), f"expected {d} to be created")
 
+    def test_first_run_uses_private_directory_creation_for_owned_state(self):
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        created: list[str] = []
+
+        def record_private_directory(path):
+            created.append(os.path.abspath(os.fspath(path)))
+            os.makedirs(path, exist_ok=True)
+
+        with patch(
+            "defenseclaw.file_permissions.make_private_directory",
+            side_effect=record_private_directory,
+        ):
+            report = bootstrap_env(cfg)
+
+        self.assertEqual(report.errors, [], msg=report.errors)
+        for expected in (cfg.data_dir, cfg.quarantine_dir, cfg.plugin_dir, cfg.policy_dir):
+            self.assertIn(os.path.abspath(expected), created)
+
     def test_creates_audit_db_file(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
         bootstrap_env(cfg)
@@ -108,6 +126,19 @@ class BootstrapEnvTests(unittest.TestCase):
         report = bootstrap_env(cfg)
         self.assertEqual(report.data_dir, cfg.data_dir)
         self.assertEqual(report.audit_db, cfg.audit_db)
+
+    def test_hermes_readiness_honors_hermes_home(self):
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        hermes_home = os.path.join(self._tmp.name, "hermes-home")
+        os.makedirs(hermes_home)
+        with open(os.path.join(hermes_home, "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write("hooks: {}\n")
+
+        with patch.dict(os.environ, {"HERMES_HOME": hermes_home}):
+            result = _connector_readiness(cfg, "hermes")
+
+        self.assertEqual(result.status, "pass")
+        self.assertIn("Hermes config found", result.detail)
 
     def test_omnigent_readiness_honors_config_home(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
@@ -668,6 +699,12 @@ class ApplyGatewayDefaultsTokenGateTests(unittest.TestCase):
         self._prev_home = os.environ.get("DEFENSECLAW_HOME")
         os.environ["DEFENSECLAW_HOME"] = self._tmp.name
         self.addCleanup(self._restore_home)
+        self._gateway_token_env = patch.dict(
+            os.environ,
+            {"DEFENSECLAW_GATEWAY_TOKEN": "", "OPENCLAW_GATEWAY_TOKEN": ""},
+        )
+        self._gateway_token_env.start()
+        self.addCleanup(self._gateway_token_env.stop)
 
     def _restore_home(self) -> None:
         if self._prev_home is None:

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "signed_wheel_coverage_starts_at": "0.6.1",
+  "signed_checksum_exceptions": {
+    "0.6.0": {
+      "defenseclaw-0.6.0-py3-none-any.whl": "9d5e24280de6e092cc50f7f3335c58609c8e3fdeb9cb759e0c1d3e58ba9b6f74"
+    },
+    "0.5.0": {
+      "defenseclaw-0.5.0-py3-none-any.whl": "f27d87c00fa2cbade5aae06a2fb4f08e760d883cccbb216f935f34f7c9c587bd"
+    },
+    "0.4.0": {
+      "defenseclaw-0.4.0-py3-none-any.whl": "0cbf156cae9c32d08672d505564d4e9119dce200edb2bbf6d50a7cfb6d8a4458"
+    }
+  }
+}

@@ -17,7 +17,6 @@
 package inventory
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -36,19 +35,16 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/lockparse"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
@@ -68,6 +64,7 @@ const (
 	SignalWorkspaceArtifact  = "workspace_artifact"
 	SignalDesktopApp         = "desktop_app"
 	SignalLocalAIEndpoint    = "local_ai_endpoint"
+	SignalLocalModel         = "local_model"
 )
 
 const (
@@ -75,6 +72,9 @@ const (
 	AIStateSeen    = "seen"
 	AIStateChanged = "changed"
 	AIStateGone    = "gone"
+
+	maxIndeterminateModelAPIMisses   = 1
+	maxPersistedLocalModelAPISignals = 2 * maxLocalModelAPIItems
 )
 
 // aiDiscoveryStateVersion is the schema version of the on-disk state file
@@ -113,6 +113,7 @@ var allowedAISignalCategories = map[string]bool{
 	SignalWorkspaceArtifact:  true,
 	SignalDesktopApp:         true,
 	SignalLocalAIEndpoint:    true,
+	SignalLocalModel:         true,
 }
 
 // AIDiscoveryOptions is the sidecar-local runtime view of config.AIDiscoveryConfig.
@@ -131,21 +132,16 @@ type AIDiscoveryOptions struct {
 	IncludeNetworkDomains     bool
 	MaxFilesPerScan           int
 	MaxFileBytes              int64
-	EmitOTel                  bool
 	StoreRawLocalPaths        bool
 	ConfidencePolicyPath      string
 	RequireTrustedBinaryPaths bool
 	TrustedBinaryPrefixes     []string
-	// DisableRedaction mirrors config.Privacy.DisableRedaction. When
-	// true, on-the-wire AIDiscovery payloads (gateway events, OTel
-	// logs) carry full Evidence rows including the raw_path field
-	// (raw_path further requires StoreRawLocalPaths). When false (the
-	// default), evidence is sanitized before leaving this process so
-	// remote sinks never see local filesystem paths or unhashed
-	// values.
-	DisableRedaction bool
-	DataDir          string
-	HomeDir          string
+	DataDir                   string
+	HomeDir                   string
+	// ManagedEnterprise mirrors deployment_mode == managed_enterprise. It
+	// controls only the managed endpoint-inventory callback; canonical v8
+	// telemetry remains owned by the bound observability runtime.
+	ManagedEnterprise bool
 }
 
 // AIEvidence is an internal normalized evidence record. RawPath is never
@@ -208,12 +204,30 @@ type AIComponent struct {
 // gated behind the existing `StoreRawLocalPaths` privacy switch via
 // per-evidence raw paths, not here.
 type ProcessRuntime struct {
-	PID       int       `json:"pid"`
-	PPID      int       `json:"ppid,omitempty"`
-	StartedAt time.Time `json:"started_at,omitempty"`
-	UptimeSec int64     `json:"uptime_sec,omitempty"`
-	User      string    `json:"user,omitempty"`
-	Comm      string    `json:"comm,omitempty"`
+	PID       int        `json:"pid"`
+	PPID      int        `json:"ppid,omitempty"`
+	StartedAt *time.Time `json:"started_at,omitempty"`
+	UptimeSec int64      `json:"uptime_sec,omitempty"`
+	User      string     `json:"user,omitempty"`
+	Comm      string     `json:"comm,omitempty"`
+}
+
+// LocalModelInfo describes one model observed through a vetted local-server
+// metadata endpoint or as an on-disk model artifact. Model IDs deliberately
+// live outside Product and AIComponent: both of those fields are used as OTel
+// metric labels, while model names are user-controlled and effectively
+// unbounded. Keeping the identity in this dedicated block makes it available
+// to local API/CLI/TUI consumers without creating a high-cardinality metric.
+type LocalModelInfo struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"` // installed | loaded
+	Format    string `json:"format,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	Recipe    string `json:"recipe,omitempty"`
+	Modality  string `json:"modality,omitempty"`
+	Device    string `json:"device,omitempty"`
+	SizeBytes int64  `json:"size_bytes,omitempty"`
+	Pinned    bool   `json:"pinned,omitempty"`
 }
 
 // AISignal is the sanitized signal shape returned by API responses and used
@@ -221,9 +235,11 @@ type ProcessRuntime struct {
 // paths, command lines, prompt text, or secret values (unless the operator
 // has explicitly opted into `StoreRawLocalPaths`).
 //
-// The `Component` and `Runtime` blocks are nil-omitted: only detectors
-// that actually have framework / liveness fidelity populate them
-// (today: `package_manifest` for components, `process` for runtimes).
+// The `Component`, `Model`, and `Runtime` blocks are nil-omitted: only
+// detectors that actually have framework, local-model, or liveness fidelity
+// populate them (today: `package_manifest` for components, local model API /
+// artifact detectors for models, and process/model-runtime detectors for
+// runtimes).
 // `LastActiveAt` is a separate timestamp from `LastSeen` so consumers
 // can distinguish "we scanned and the signature still exists on disk"
 // (`LastSeen`) from "the underlying thing was running / used since the
@@ -247,11 +263,17 @@ type AISignal struct {
 	WorkspaceHash      string          `json:"workspace_hash,omitempty"`
 	Version            string          `json:"version,omitempty"`
 	Component          *AIComponent    `json:"component,omitempty"`
+	Model              *LocalModelInfo `json:"model,omitempty"`
 	Runtime            *ProcessRuntime `json:"runtime,omitempty"`
 	FirstSeen          time.Time       `json:"first_seen"`
 	LastSeen           time.Time       `json:"last_seen"`
 	LastActiveAt       *time.Time      `json:"last_active_at,omitempty"`
 	EvidenceHash       string          `json:"-"`
+	// ModelAPISourceHash is an internal, privacy-preserving origin key used
+	// to apply lifecycle decisions only to the exact local server that was
+	// conclusively inventoried. It is persisted via aiStoredSignal but never
+	// returned by the API or emitted to remote sinks.
+	ModelAPISourceHash string `json:"-"`
 	// Identity / Presence are populated by
 	// EnrichSignalsWithComponentConfidence() at API-response time
 	// (NOT during scan/persist). They mirror the per-component
@@ -270,12 +292,10 @@ type AISignal struct {
 	PresenceBand  string  `json:"presence_band,omitempty"`
 	// Evidence is the per-row breakdown that the confidence engine
 	// and the gateway components endpoint consume. It ships on the
-	// wire so remote sinks (OTel, webhooks) can render the same
-	// "what we saw" view the operator gets locally. RawPath is
-	// scrubbed by SanitizeEvidenceForWire unless privacy.disable_redaction
-	// AND ai_discovery.store_raw_local_paths are both true; size is
-	// bounded by maxEvidencePerSignal so a hostile pack cannot
-	// blow up payload size.
+	// wire so remote destinations and webhooks can render the same "what we
+	// saw" view the operator gets locally. RawPath is always scrubbed by
+	// SanitizeEvidenceForWire; size is bounded by maxEvidencePerSignal so a
+	// hostile pack cannot blow up payload size.
 	Evidence []AIEvidence `json:"evidence,omitempty"`
 }
 
@@ -288,21 +308,22 @@ type AISignal struct {
 const maxEvidencePerSignal = 32
 
 type AIDiscoverySummary struct {
-	ScanID            string         `json:"scan_id"`
-	ScannedAt         time.Time      `json:"scanned_at"`
-	DurationMs        int64          `json:"duration_ms"`
-	PrivacyMode       string         `json:"privacy_mode"`
-	Source            string         `json:"source"`
-	Result            string         `json:"result"`
-	TotalSignals      int            `json:"total_signals"`
-	ActiveSignals     int            `json:"active_signals"`
-	NewSignals        int            `json:"new_signals"`
-	ChangedSignals    int            `json:"changed_signals"`
-	GoneSignals       int            `json:"gone_signals"`
-	FilesScanned      int            `json:"files_scanned"`
-	DedupeSuppressed  int            `json:"dedupe_suppressed"`
-	Errors            int            `json:"errors"`
-	DetectorDurations map[string]int `json:"detector_durations_ms,omitempty"`
+	ScanID            string            `json:"scan_id"`
+	ScannedAt         time.Time         `json:"scanned_at"`
+	DurationMs        int64             `json:"duration_ms"`
+	PrivacyMode       string            `json:"privacy_mode"`
+	Source            string            `json:"source"`
+	Result            string            `json:"result"`
+	TotalSignals      int               `json:"total_signals"`
+	ActiveSignals     int               `json:"active_signals"`
+	NewSignals        int               `json:"new_signals"`
+	ChangedSignals    int               `json:"changed_signals"`
+	GoneSignals       int               `json:"gone_signals"`
+	FilesScanned      int               `json:"files_scanned"`
+	DedupeSuppressed  int               `json:"dedupe_suppressed"`
+	Errors            int               `json:"errors"`
+	DetectorErrors    map[string]string `json:"detector_errors,omitempty"`
+	DetectorDurations map[string]int    `json:"detector_durations_ms,omitempty"`
 }
 
 type AIDiscoveryReport struct {
@@ -326,9 +347,15 @@ type AIDiscoveryReportObserver func(context.Context, AIDiscoveryReport)
 // per-evidence blob.
 type aiStoredSignal struct {
 	AISignal
-	RawPaths           []string     `json:"raw_paths,omitempty"`
-	StoredEvidenceHash string       `json:"evidence_hash,omitempty"`
-	StoredEvidence     []AIEvidence `json:"evidence,omitempty"`
+	RawPaths                 []string     `json:"raw_paths,omitempty"`
+	StoredEvidenceHash       string       `json:"evidence_hash,omitempty"`
+	StoredEvidence           []AIEvidence `json:"evidence,omitempty"`
+	StoredModelAPISourceHash string       `json:"model_api_source_hash,omitempty"`
+	// ModelAPIMisses provides one-scan hysteresis for model inventory read
+	// failures. A valid empty provider response is still conclusive and marks
+	// the old model gone immediately; an unreachable/malformed provider gets
+	// one grace scan so a transient restart does not flap seen -> gone -> new.
+	ModelAPIMisses int `json:"model_api_misses,omitempty"`
 }
 
 type aiStateFile struct {
@@ -337,12 +364,27 @@ type aiStateFile struct {
 	Signals   map[string]aiStoredSignal `json:"signals"`
 }
 
+type aiDiscoveryLifecycleState uint8
+
+const (
+	aiDiscoveryPrepared aiDiscoveryLifecycleState = iota
+	aiDiscoveryClaimed
+	aiDiscoveryRunning
+	aiDiscoveryClosed
+)
+
 // ContinuousDiscoveryService owns device-level AI visibility. It is deliberately
 // sidecar-scoped so CLI/TUI/API callers all see the same state and OTel fanout.
 type ContinuousDiscoveryService struct {
 	opts    AIDiscoveryOptions
 	catalog []AISignature
 	store   *AIStateStore
+	// lifecycleMu makes claiming Run and retiring a prepared-but-never-run
+	// service atomic. Sidecar config reload uses this to close an intermediate
+	// generation that was superseded before the restart worker could run it,
+	// without ever closing a service that has already been claimed.
+	lifecycleMu    sync.Mutex
+	lifecycleState aiDiscoveryLifecycleState
 	// invStore is the optional SQLite-backed history. It is created
 	// during NewContinuousDiscoveryServiceWithOptions when the data
 	// dir is writable. When nil (open failed, disk full, etc.) the
@@ -351,8 +393,6 @@ type ContinuousDiscoveryService struct {
 	// queries are disabled.
 	invStore         *InventoryStore
 	confidenceParams ConfidenceParams
-	otel             *telemetry.Provider
-	events           *gatewaylog.Writer
 
 	mu              sync.RWMutex
 	last            AIDiscoveryReport
@@ -360,6 +400,26 @@ type ContinuousDiscoveryService struct {
 	triggers        chan chan scanResponse
 	observerMu      sync.RWMutex
 	reportObservers []AIDiscoveryReportObserver
+	// managedInventoryEmit is the sidecar-owned connector/MCP snapshot hook.
+	// It is kept independent from canonical discovery telemetry so the v8
+	// runtime remains the sole owner of signal records.
+	managedInventoryEmitMu sync.RWMutex
+	managedInventoryEmit   func(context.Context)
+	// modelAPIProbeCursor rotates origins and catalogs across bounded passes so
+	// a stalled or over-cap loopback provider cannot starve later providers.
+	modelAPIProbeCursor  atomic.Uint64
+	modelAPIItemCursorMu sync.Mutex
+	modelAPIItemCursors  map[string]int
+	modelAPICycleMu      sync.Mutex
+	modelAPICycles       map[string]*localModelAPICycle
+	// modelFileRootCursor rotates the first filesystem root. A busy cache can
+	// otherwise consume the global match budget on every pass and permanently
+	// starve later Ollama, LM Studio, MLX, or configured roots.
+	modelFileRootCursor atomic.Uint64
+	modelFileCursorMu   sync.Mutex
+	modelFileCursors    map[string]string
+	modelFileCycleMu    sync.Mutex
+	modelFileCycles     map[string]*modelFileCycle
 
 	// scanMu serializes runScan invocations so the scheduled-tick
 	// path, the process-tick path, and the API-triggered ScanNow
@@ -384,6 +444,9 @@ type ContinuousDiscoveryService struct {
 	// only constructs one ContinuousDiscoveryService; if that ever
 	// changes, each instance still gets its own serialization.
 	scanMu sync.Mutex
+
+	observabilityV8Mu sync.RWMutex
+	observabilityV8   AIDiscoveryObservabilityV8
 }
 
 type scanResponse struct {
@@ -393,7 +456,7 @@ type scanResponse struct {
 
 // NewContinuousDiscoveryService builds a sidecar discovery service from the
 // full gateway config. It returns nil when ai_discovery.enabled is false.
-func NewContinuousDiscoveryService(cfg *config.Config, otel *telemetry.Provider, events *gatewaylog.Writer) (*ContinuousDiscoveryService, error) {
+func NewContinuousDiscoveryService(cfg *config.Config) (*ContinuousDiscoveryService, error) {
 	if cfg == nil || !cfg.AIDiscovery.Enabled {
 		return nil, nil
 	}
@@ -402,17 +465,19 @@ func NewContinuousDiscoveryService(cfg *config.Config, otel *telemetry.Provider,
 		return nil, err
 	}
 	opts := AIDiscoveryOptionsFromConfig(cfg)
-	return NewContinuousDiscoveryServiceWithOptions(opts, catalog, otel, events), nil
+	return NewContinuousDiscoveryServiceWithOptions(opts, catalog), nil
 }
 
-func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog []AISignature, otel *telemetry.Provider, events *gatewaylog.Writer) *ContinuousDiscoveryService {
+func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog []AISignature, legacy ...any) *ContinuousDiscoveryService {
+	// Historical constructors accepted optional telemetry collaborators. The
+	// v8 runtime binds observability explicitly after construction, but keeping
+	// the optional arguments source-compatible lets older native tests build.
+	_ = legacy
 	opts = normalizeAIDiscoveryOptions(opts)
 	svc := &ContinuousDiscoveryService{
 		opts:     opts,
 		catalog:  catalog,
 		store:    NewAIStateStore(filepath.Join(opts.DataDir, "ai_discovery_state.json")),
-		otel:     otel,
-		events:   events,
 		triggers: make(chan chan scanResponse, 1),
 	}
 	// Try to open the SQLite history store. Failure is logged but
@@ -489,17 +554,13 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		IncludeNetworkDomains:     ad.IncludeNetworkDomains,
 		MaxFilesPerScan:           ad.MaxFilesPerScan,
 		MaxFileBytes:              int64(ad.MaxFileBytes),
-		EmitOTel:                  ad.EmitOTel,
 		StoreRawLocalPaths:        ad.StoreRawLocalPaths,
 		ConfidencePolicyPath:      ad.ConfidencePolicyPath,
 		RequireTrustedBinaryPaths: ad.RequireTrustedBinaryPaths,
 		TrustedBinaryPrefixes:     append([]string{}, ad.TrustedBinaryPrefixes...),
-		// Mirror the global redaction kill-switch so detectors and
-		// emitters know whether they should scrub raw_path / full
-		// evidence before a payload leaves the local process.
-		DisableRedaction: cfg.Privacy.DisableRedaction,
-		DataDir:          cfg.DataDir,
-		HomeDir:          home,
+		DataDir:                   cfg.DataDir,
+		HomeDir:                   home,
+		ManagedEnterprise:         managed.IsManagedEnterprise(cfg.DeploymentMode),
 	})
 }
 
@@ -535,10 +596,106 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	return opts
 }
 
+// ClaimRun reserves this service for exactly one Run invocation. Sidecar calls
+// it while holding the same lock used to swap the current discovery pointer,
+// which closes the snapshot-vs-swap race for coalesced config reloads.
+//
+// The returned runner is itself once-only: duplicate calls wait for and return
+// the first call's result rather than starting a second scan loop.
+func (s *ContinuousDiscoveryService) ClaimRun() (func(context.Context) error, bool) {
+	if s == nil {
+		return nil, false
+	}
+	s.lifecycleMu.Lock()
+	if s.lifecycleState != aiDiscoveryPrepared {
+		s.lifecycleMu.Unlock()
+		return nil, false
+	}
+	s.lifecycleState = aiDiscoveryClaimed
+	s.lifecycleMu.Unlock()
+
+	var once sync.Once
+	done := make(chan struct{})
+	var runErr error
+	runner := func(ctx context.Context) error {
+		once.Do(func() {
+			defer close(done)
+			runErr = s.runClaimed(ctx)
+		})
+		<-done
+		return runErr
+	}
+	return runner, true
+}
+
+// CloseIfNeverStarted releases a prepared service that was superseded before
+// the restart worker claimed it. It deliberately refuses claimed/running
+// services; their Run defer remains the sole close boundary.
+func (s *ContinuousDiscoveryService) CloseIfNeverStarted() (bool, error) {
+	if s == nil {
+		return false, nil
+	}
+	s.lifecycleMu.Lock()
+	if s.lifecycleState != aiDiscoveryPrepared {
+		s.lifecycleMu.Unlock()
+		return false, nil
+	}
+	s.lifecycleState = aiDiscoveryClosed
+	s.lifecycleMu.Unlock()
+	return true, s.invStore.Close()
+}
+
+// Close releases a service that was prepared for an explicit scan but never
+// claimed by Run. Running services remain owned by their Run lifecycle.
+func (s *ContinuousDiscoveryService) Close() error {
+	closed, err := s.CloseIfNeverStarted()
+	if err != nil {
+		return err
+	}
+	if !closed && s != nil {
+		return errors.New("ai discovery service is running or already closed")
+	}
+	return nil
+}
+
 func (s *ContinuousDiscoveryService) Run(ctx context.Context) error {
 	if s == nil {
 		return nil
 	}
+	runner, ok := s.ClaimRun()
+	if !ok {
+		return errors.New("ai discovery service has already been started or closed")
+	}
+	return runner(ctx)
+}
+
+func (s *ContinuousDiscoveryService) runClaimed(ctx context.Context) (runErr error) {
+	s.lifecycleMu.Lock()
+	if s.lifecycleState != aiDiscoveryClaimed {
+		s.lifecycleMu.Unlock()
+		return errors.New("ai discovery service run was not claimed")
+	}
+	s.lifecycleState = aiDiscoveryRunning
+	s.lifecycleMu.Unlock()
+
+	// The service owns the optional history store for its complete running
+	// lifetime. Close only after the active scan has observed cancellation and
+	// Run is unwinding; config reloads can therefore publish the replacement
+	// service before retiring this one without invalidating in-flight queries.
+	defer func() {
+		closeErr := s.invStore.Close()
+		s.lifecycleMu.Lock()
+		s.lifecycleState = aiDiscoveryClosed
+		s.lifecycleMu.Unlock()
+		if closeErr != nil {
+			wrapped := fmt.Errorf("ai discovery inventory store close: %w", closeErr)
+			if runErr == nil || errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+				runErr = wrapped
+			} else {
+				runErr = errors.Join(runErr, wrapped)
+			}
+		}
+	}()
 	_, _ = s.runScan(ctx, true, "startup")
 
 	fullTicker := time.NewTicker(s.opts.ScanInterval)
@@ -611,16 +768,6 @@ func (s *ContinuousDiscoveryService) ConfidenceParams() ConfidenceParams {
 	return s.confidenceParams
 }
 
-// Options exposes the resolved discovery options so handlers can
-// inspect privacy flags (DisableRedaction, StoreRawLocalPaths)
-// without re-reading the global config object.
-func (s *ContinuousDiscoveryService) Options() AIDiscoveryOptions {
-	if s == nil {
-		return AIDiscoveryOptions{}
-	}
-	return s.opts
-}
-
 func (s *ContinuousDiscoveryService) LastError() error {
 	if s == nil {
 		return nil
@@ -650,7 +797,7 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 	// but two callers can leapfrog with stale data). See the
 	// comment on ContinuousDiscoveryService.scanMu for details.
 	//
-	// We honor ctx.Done() before blocking so a cancelled callerand
+	// We honor ctx.Done() before blocking so a cancelled caller
 	// (e.g. an API request whose client disconnected) returns
 	// promptly instead of queueing behind a slow scheduled scan.
 	if err := ctx.Err(); err != nil {
@@ -664,20 +811,10 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 
 	start := time.Now()
 	scanID := newScanID()
-	ctx, span := s.otel.Tracer().Start(ctx, "defenseclaw.ai.discovery",
-		trace.WithAttributes(
-			attribute.String("defenseclaw.ai.discovery.scan_id", scanID),
-			attribute.String("defenseclaw.ai.discovery.source", source),
-			attribute.String("defenseclaw.ai.discovery.privacy_mode", s.opts.Mode),
-		),
-	)
-	// Mirror tenant/workspace/device join keys from the process
-	// resource onto the discovery span so backends that drop OTel
-	// resource on span rows still surface deployment context next
-	// to the trace — same parity guardrail spans get via
-	// telemetry.StartGuardrailStageSpan.
-	s.otel.SetSpanResourceContext(span)
-	defer span.End()
+	ctx, scanObservation := s.startScanObservation(ctx, AIDiscoveryV8ScanStart{
+		ScanID: scanID, Source: source, PrivacyMode: s.opts.Mode, StartedAt: start,
+	})
+	defer scanObservation.abort()
 
 	prev, prevErr := s.store.Load()
 	if prevErr != nil {
@@ -692,19 +829,27 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 		fmt.Fprintf(os.Stderr, "[ai-discovery] previous-scan load failed (treating workspace as new): %v\n", prevErr)
 		prev = aiStateFile{}
 	}
-	signals, stats := s.scanSignals(ctx, full)
+	signals, stats := s.scanSignals(
+		ctx,
+		scanID,
+		scanObservation,
+		full,
+		priorModelAPIFingerprints(prev.Signals),
+	)
+	if err := ctx.Err(); err != nil {
+		// A canceled refresh/client request is not a complete inventory
+		// observation. The deferred v8 abort terminates the scan trace; do not
+		// classify omissions or overwrite the last durable snapshot from this
+		// partial pass.
+		s.mu.Lock()
+		s.lastErr = err
+		s.mu.Unlock()
+		return AIDiscoveryReport{}, err
+	}
 	if prevErr != nil {
 		stats.Errors++
 	}
 	report := s.classifyAndPersist(scanID, source, start, signals, stats, prev, full)
-	if stats.Errors > 0 {
-		span.SetStatus(codes.Error, "one or more detectors failed")
-	}
-	span.SetAttributes(
-		attribute.Int("defenseclaw.ai.discovery.signals", report.Summary.TotalSignals),
-		attribute.Int("defenseclaw.ai.discovery.active_signals", report.Summary.ActiveSignals),
-		attribute.Int("defenseclaw.ai.discovery.files_scanned", report.Summary.FilesScanned),
-	)
 
 	s.mu.Lock()
 	s.last = cloneAIDiscoveryReport(report)
@@ -713,6 +858,7 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 
 	s.fanoutReport(ctx, report)
 	s.notifyReportObservers(ctx, report)
+	scanObservation.end(report)
 	return report, nil
 }
 
@@ -749,33 +895,113 @@ func (s *ContinuousDiscoveryService) notifyReportObservers(ctx context.Context, 
 // installs (no OTel, redaction enabled) don't pay for a rollup
 // they'd discard.
 func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AIDiscoveryReport) {
-	otelOn := s.opts.EmitOTel && s.otel != nil && s.otel.Enabled()
-	eventsOn := s.events != nil
-	// The snapshot is only consulted when (a) OTel is on, or
-	// (b) gateway events are on AND redaction is OFF (otherwise
-	// BuildAIDiscoveryPayload strips Confidence anyway). Skip
-	// the rollup entirely when neither path needs it.
+	observer := s.observabilityV8Snapshot()
+	v8On := observer != nil
+	// The generated v8 observer is the sole telemetry owner. Skip the rollup
+	// entirely when no canonical runtime is bound.
 	var snap componentRollupSnapshot
-	if otelOn || (eventsOn && s.opts.DisableRedaction) {
+	if v8On {
 		snap = buildComponentRollupSnapshot(report.Signals, s.confidenceParams)
 	}
-	if otelOn {
-		s.emitTelemetry(ctx, report, snap)
+	if v8On {
+		components := make([]AIDiscoveryV8ComponentObservation, 0, len(snap.Groups))
+		for _, group := range snap.Groups {
+			if confidence, ok := snap.ScoreFor(group); ok {
+				if len(group.Signals) == 0 || strings.TrimSpace(group.Signals[0].Category) == "" {
+					continue
+				}
+				componentKey := strings.ToLower(group.Ecosystem) + "\x00" + strings.ToLower(group.Name)
+				components = append(components, AIDiscoveryV8ComponentObservation{
+					ComponentID: stableSignalID(componentKey), ComponentType: group.Signals[0].Category,
+					HasLifecycleChange: group.HasLifecycleChange,
+					Metrics:            buildComponentConfidenceAttrs(group, confidence, s.confidenceParams.Policy.Version),
+				})
+			}
+		}
+		_ = observer.EmitReport(ctx, reportForObservabilityV8(report), components)
 	}
-	if eventsOn {
-		s.emitGatewayEvents(ctx, report, snap)
+	// Hook installation is the live managed-mode gate. Deployment mode can
+	// change without rebuilding this service, so construction-time options
+	// must not suppress a callback installed by a later config generation.
+	s.managedInventoryEmitMu.RLock()
+	emit := s.managedInventoryEmit
+	s.managedInventoryEmitMu.RUnlock()
+	if emit != nil {
+		emit(ctx)
 	}
+}
+
+// SetManagedInventoryEmitHook installs the sidecar callback that publishes the
+// connector and MCP endpoint snapshot after each managed discovery scan. A nil
+// callback clears it. The callback does not emit discovery signals; those flow
+// exclusively through the canonical v8 observer above.
+func (s *ContinuousDiscoveryService) SetManagedInventoryEmitHook(fn func(context.Context)) {
+	if s == nil {
+		return
+	}
+	s.managedInventoryEmitMu.Lock()
+	s.managedInventoryEmit = fn
+	s.managedInventoryEmitMu.Unlock()
+}
+
+// reportForObservabilityV8 projects local-model lifecycle identities onto an
+// installation-keyed namespace before they cross the canonical telemetry
+// adapter boundary. The local API report keeps its ordinary signal ID, while
+// remote lifecycle correlation cannot be dictionary-tested against a guessed
+// model name. If no installation key is available, correlation is omitted.
+func reportForObservabilityV8(report AIDiscoveryReport) AIDiscoveryReport {
+	out := report
+	out.Signals = append([]AISignal(nil), report.Signals...)
+	for i := range out.Signals {
+		if out.Signals[i].Category == SignalLocalModel || out.Signals[i].Model != nil {
+			out.Signals[i].SignalID = modelLifecycleSignalID(out.Signals[i])
+		}
+	}
+	return out
+}
+
+func modelLifecycleSignalID(signal AISignal) string {
+	key := currentPathHashKey()
+	if len(key) == 0 {
+		return ""
+	}
+	identity := signal.Fingerprint
+	if identity == "" {
+		identity = signal.SignalID
+	}
+	if identity == "" {
+		return ""
+	}
+	return "model_" + keyedHashHex(key, "ai-discovery/model-signal/v1\x00"+identity)
 }
 
 type scanStats struct {
 	FilesScanned      int
 	Errors            int
+	DetectorErrors    map[string]string
 	DedupeSuppressed  int
 	DetectorDurations map[string]int
+	// ModelAPIConclusive keys are provider + detector pairs for which a
+	// valid metadata response was decoded during this pass. The lifecycle
+	// classifier uses this to distinguish a definitive empty list from an
+	// indeterminate network/auth/parse failure.
+	ModelAPIConclusive  map[string]bool
+	ModelAPIAttempted   map[string]bool
+	ModelAPIDeferred    map[string]bool
+	ModelAPICycleSeen   map[string]map[string]struct{}
+	ModelFileConclusive map[string]bool
+	ModelFileAttempted  map[string]bool
+	ModelFileDeferred   map[string]bool
 }
 
-func (s *ContinuousDiscoveryService) scanSignals(ctx context.Context, full bool) ([]AISignal, scanStats) {
-	stats := scanStats{DetectorDurations: map[string]int{}}
+func (s *ContinuousDiscoveryService) scanSignals(
+	ctx context.Context,
+	scanID string,
+	scanObservation *aiDiscoveryScanObservation,
+	full bool,
+	priorModelAPI map[string]map[string]struct{},
+) ([]AISignal, scanStats) {
+	stats := scanStats{DetectorErrors: map[string]string{}, DetectorDurations: map[string]int{}}
 	var signals []AISignal
 	seen := map[string]bool{}
 
@@ -794,26 +1020,30 @@ func (s *ContinuousDiscoveryService) scanSignals(ctx context.Context, full bool)
 	}
 	measure := func(name string, fn func() ([]AISignal, int, error)) {
 		start := time.Now()
-		_, child := s.otel.Tracer().Start(ctx, "defenseclaw.ai.discovery.detector",
-			trace.WithAttributes(attribute.String("defenseclaw.ai.discovery.detector", name)))
-		s.otel.SetSpanResourceContext(child)
+		child := scanObservation.startDetector(ctx, s, AIDiscoveryV8DetectorStart{
+			ScanID: scanID, Detector: name, StartedAt: start,
+		})
 		out, files, err := fn()
-		child.SetAttributes(attribute.Int("defenseclaw.ai.discovery.signals", len(out)))
-		if files > 0 {
-			child.SetAttributes(attribute.Int("defenseclaw.ai.discovery.files_scanned", files))
-		}
 		if err != nil {
 			stats.Errors++
-			child.RecordError(err)
-			child.SetStatus(codes.Error, err.Error())
+			if name == "process" {
+				stats.DetectorErrors[name] = err.Error()
+			}
 		}
-		child.End()
+		endedAt := time.Now()
+		child.end(AIDiscoveryV8DetectorResult{
+			EndedAt: endedAt, DurationMs: endedAt.Sub(start).Milliseconds(),
+			SignalsTotal: int64(len(out)), FilesScanned: int64(files), Failed: err != nil,
+		})
 		stats.FilesScanned += files
 		stats.DetectorDurations[name] = int(time.Since(start).Milliseconds())
 		add(out)
 	}
 
-	measure("process", func() ([]AISignal, int, error) { return s.detectProcesses(), 0, nil })
+	measure("process", func() ([]AISignal, int, error) {
+		out, err := s.detectProcesses()
+		return out, 0, err
+	})
 	if !full {
 		sortAISignals(signals)
 		return signals, stats
@@ -826,7 +1056,22 @@ func (s *ContinuousDiscoveryService) scanSignals(ctx context.Context, full bool)
 	measure("mcp", func() ([]AISignal, int, error) { return s.detectMCPPaths(), 0, nil })
 	if s.opts.IncludeNetworkDomains {
 		measure("local_endpoint", func() ([]AISignal, int, error) { return s.detectLocalEndpoints(), 0, nil })
+		measure("local_model_api", func() ([]AISignal, int, error) {
+			out, files, outcome, err := s.detectLocalAPIModelsWithPrior(ctx, priorModelAPI)
+			stats.ModelAPIConclusive = outcome.conclusive
+			stats.ModelAPIAttempted = outcome.attempted
+			stats.ModelAPIDeferred = outcome.deferred
+			stats.ModelAPICycleSeen = outcome.cycleSeen
+			return out, files, err
+		})
 	}
+	measure("model_file", func() ([]AISignal, int, error) {
+		out, files, outcome, err := s.detectModelFilesWithOutcome(ctx)
+		stats.ModelFileConclusive = outcome.conclusive
+		stats.ModelFileAttempted = outcome.attempted
+		stats.ModelFileDeferred = outcome.deferred
+		return out, files, err
+	})
 	if s.opts.IncludeEnvVarNames {
 		measure("env", func() ([]AISignal, int, error) { return s.detectEnvVars(), 0, nil })
 	}
@@ -883,11 +1128,22 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		// `mtime`-style hint via signal.LastActiveAt, keep that
 		// value; otherwise default LastActiveAt to `now` so consumers
 		// always have *some* "freshness" timestamp to render.
-		if sig.LastActiveAt == nil {
+		if sig.LastActiveAt == nil && !(sig.Model != nil && sig.Model.Status == "installed") {
 			t := now
 			sig.LastActiveAt = &t
 		}
 		if old, ok := prevMap[sig.Fingerprint]; ok {
+			if full && sig.Detector == "model_file" && sig.WorkspaceHash != "" &&
+				stats.ModelFileDeferred[sig.WorkspaceHash] {
+				// A cursor page can contain only part of a sharded model. Preserve
+				// the last cycle-complete aggregate until this root reaches EOF;
+				// otherwise every prefix/suffix page would alternate size/hash and
+				// emit a false `changed` transition.
+				preserved := old.AISignal
+				preserved.SignalID = stableSignalID(sig.Fingerprint)
+				preserved.LastSeen = now
+				sig = preserved
+			}
 			sig.FirstSeen = old.FirstSeen
 			storedHash := old.EvidenceHash
 			if storedHash == "" {
@@ -915,12 +1171,58 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		out = append(out, sig)
 		counts[sig.State]++
 		emittedFps[sig.Fingerprint] = true
-		current[sig.Fingerprint] = aiStoredSignal{AISignal: sig, RawPaths: rawPathsForSignal(sig, s.opts.StoreRawLocalPaths)}
+		current[sig.Fingerprint] = aiStoredSignal{
+			AISignal: sig, RawPaths: rawPathsForSignal(sig, s.opts.StoreRawLocalPaths),
+			StoredModelAPISourceHash: sig.ModelAPISourceHash,
+		}
 	}
 
 	if full {
-		for fp, old := range prevMap {
+		apiCurrent, fileCurrent := 0, 0
+		for _, stored := range current {
+			switch stored.Detector {
+			case "model_api", "model_runtime":
+				if stored.Model != nil {
+					apiCurrent++
+				}
+			case "model_file":
+				if stored.Model != nil {
+					fileCurrent++
+				}
+			}
+		}
+		apiCarryRemaining := maxPersistedLocalModelAPISignals - apiCurrent
+		if apiCarryRemaining < 0 {
+			apiCarryRemaining = 0
+		}
+		filePersistLimit := s.opts.MaxFilesPerScan * 2
+		if s.opts.MaxFilesPerScan > maxModelFileVisitedEntries/2 {
+			filePersistLimit = maxModelFileVisitedEntries
+		}
+		fileCarryRemaining := filePersistLimit - fileCurrent
+		if fileCarryRemaining < 0 {
+			fileCarryRemaining = 0
+		}
+		prevFingerprints := make([]string, 0, len(prevMap))
+		for fp := range prevMap {
+			prevFingerprints = append(prevFingerprints, fp)
+		}
+		sort.Strings(prevFingerprints)
+		carry := carryForwardAccumulator{
+			current:    current,
+			out:        &out,
+			counts:     counts,
+			emittedFps: emittedFps,
+		}
+		for _, fp := range prevFingerprints {
+			old := prevMap[fp]
 			if _, ok := current[fp]; ok {
+				continue
+			}
+			if carry.handleModelAPICarryForward(fp, old, stats, &apiCarryRemaining) {
+				continue
+			}
+			if carry.handleModelFileCarryForward(fp, old, stats, &fileCarryRemaining) {
 				continue
 			}
 			gone := old.AISignal
@@ -950,7 +1252,10 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		}
 	}
 
-	_ = s.store.Save(aiStateFile{Version: aiDiscoveryStateVersion, UpdatedAt: now, Signals: current})
+	if err := s.store.Save(aiStateFile{Version: aiDiscoveryStateVersion, UpdatedAt: now, Signals: current}); err != nil {
+		stats.Errors++
+		stats.DetectorErrors["state_store"] = err.Error()
+	}
 
 	summary := AIDiscoverySummary{
 		ScanID:            scanID,
@@ -967,6 +1272,7 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		FilesScanned:      stats.FilesScanned,
 		DedupeSuppressed:  stats.DedupeSuppressed,
 		Errors:            stats.Errors,
+		DetectorErrors:    stats.DetectorErrors,
 		DetectorDurations: stats.DetectorDurations,
 	}
 	if stats.Errors > 0 {
@@ -980,6 +1286,124 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 	// authoritative current snapshot.
 	s.recordScanIfPossible(report)
 	return report
+}
+
+func storedModelAPICoverageKey(stored aiStoredSignal) (string, bool) {
+	sig := stored.AISignal
+	if sig.Model == nil || (sig.Detector != "model_api" && sig.Detector != "model_runtime") {
+		return "", false
+	}
+	provider := strings.TrimSpace(sig.Model.Provider)
+	sourceHash := strings.TrimSpace(sig.ModelAPISourceHash)
+	if sourceHash == "" {
+		sourceHash = strings.TrimSpace(stored.StoredModelAPISourceHash)
+	}
+	if provider == "" || sourceHash == "" {
+		return "", false
+	}
+	return localModelAPIOutcomeKey(provider, sourceHash, sig.Detector), true
+}
+
+type carryForwardAccumulator struct {
+	current    map[string]aiStoredSignal
+	out        *[]AISignal
+	counts     map[string]int
+	emittedFps map[string]bool
+}
+
+func (c carryForwardAccumulator) persist(fp string, old aiStoredSignal, budget *int) {
+	carried := old.AISignal
+	carried.State = AIStateSeen
+	old.AISignal = carried
+	c.current[fp] = old
+	*budget = *budget - 1
+	*c.out = append(*c.out, carried)
+	c.counts[AIStateSeen]++
+	c.emittedFps[fp] = true
+}
+
+// handleModelAPICarryForward owns the lifecycle rules for an API model that
+// was not emitted on this scan. Its return value means the omission was
+// handled and must not become a gone transition; a bounded carry set may
+// intentionally handle an item without persisting it.
+func (c carryForwardAccumulator) handleModelAPICarryForward(
+	fp string,
+	old aiStoredSignal,
+	stats scanStats,
+	budget *int,
+) bool {
+	coverageKey, ok := storedModelAPICoverageKey(old)
+	if !ok {
+		return false
+	}
+	if stats.ModelAPIConclusive[coverageKey] {
+		if _, seenDuringCycle := stats.ModelAPICycleSeen[coverageKey][fp]; !seenDuringCycle {
+			return false
+		}
+		if *budget > 0 {
+			old.ModelAPIMisses = 0
+			c.persist(fp, old, budget)
+		}
+		return true
+	}
+
+	deferred := stats.ModelAPIDeferred[coverageKey]
+	attempted := stats.ModelAPIAttempted[coverageKey]
+	eligible := deferred || (attempted && old.ModelAPIMisses < maxIndeterminateModelAPIMisses)
+	if !eligible {
+		return false
+	}
+	if *budget > 0 {
+		// A deferred source was not fully observed because an earlier
+		// response exhausted an item/time/endpoint budget. Keep it until
+		// that exact source receives a conclusive observation. A request
+		// that was attempted but failed gets one grace pass for ordinary
+		// local-server restarts.
+		if attempted && !deferred {
+			old.ModelAPIMisses++
+		}
+		c.persist(fp, old, budget)
+	}
+	// Persistence is deliberately bounded. If the carry budget is full,
+	// evict silently rather than emit an unsupported gone transition from
+	// an incomplete observation.
+	return true
+}
+
+func (c carryForwardAccumulator) handleModelFileCarryForward(
+	fp string,
+	old aiStoredSignal,
+	stats scanStats,
+	budget *int,
+) bool {
+	if old.Detector != "model_file" || old.Model == nil || old.WorkspaceHash == "" ||
+		!stats.ModelFileDeferred[old.WorkspaceHash] {
+		return false
+	}
+	// The artifact's root was only partially walked (entry/match cap,
+	// cancellation-adjacent error, or permission failure). Preserve prior
+	// inventory until that exact hashed root is observed conclusively.
+	if *budget > 0 {
+		c.persist(fp, old, budget)
+	}
+	// If the bounded carry set is full, omit the row without a gone event.
+	// A partial walk cannot prove deletion.
+	return true
+}
+
+func priorModelAPIFingerprints(signals map[string]aiStoredSignal) map[string]map[string]struct{} {
+	out := make(map[string]map[string]struct{})
+	for fingerprint, stored := range signals {
+		coverageKey, ok := storedModelAPICoverageKey(stored)
+		if !ok {
+			continue
+		}
+		if out[coverageKey] == nil {
+			out[coverageKey] = make(map[string]struct{})
+		}
+		out[coverageKey][fingerprint] = struct{}{}
+	}
+	return out
 }
 
 // recordScanIfPossible writes a scan to the optional inventory
@@ -1040,14 +1464,30 @@ func (s *ContinuousDiscoveryService) detectBinaries() []AISignal {
 	return out
 }
 
-func (s *ContinuousDiscoveryService) detectProcesses() []AISignal {
+func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 	procs, err := processSnapshot()
-	if err != nil || len(procs) == 0 {
-		return nil
+	if err != nil {
+		return nil, fmt.Errorf("process snapshot: %w", err)
+	}
+	if len(procs) == 0 {
+		return nil, nil
+	}
+	windowsSnapshot := procs[0].Windows
+	if windowsSnapshot {
+		classifyWindowsProcesses(procs, s.catalog)
 	}
 	now := time.Now().UTC()
 	var out []AISignal
 	for _, sig := range s.catalog {
+		if windowsSnapshot {
+			for i := range procs {
+				if procs[i].Connector != sig.ID {
+					continue
+				}
+				out = append(out, s.signalFromProcess(sig, procs[i], now, MatchKindExact, 1.0))
+			}
+			continue
+		}
 		for _, want := range sig.ProcessNames {
 			want = strings.ToLower(strings.TrimSpace(want))
 			if want == "" {
@@ -1084,31 +1524,32 @@ func (s *ContinuousDiscoveryService) detectProcesses() []AISignal {
 				quality = 0.5
 				matchKind = MatchKindSubstring
 			}
-			ev := AIEvidence{
-				Type:      "process",
-				ValueHash: hashValue(best.Comm),
-				Quality:   quality,
-				MatchKind: matchKind,
-			}
-			signal := s.signalFromEvidence(sig, SignalActiveProcess, "process", []AIEvidence{ev})
-			runtime := &ProcessRuntime{
-				PID:       best.PID,
-				PPID:      best.PPID,
-				StartedAt: best.StartedAt,
-				UptimeSec: int64(now.Sub(best.StartedAt).Seconds()),
-				User:      best.User,
-				Comm:      best.Comm,
-			}
-			signal.Runtime = runtime
-			// Process detector's `LastActiveAt` is the process'
-			// start time, not the scan time. That's the answer to
-			// "when was this thing last active" the operator wants.
-			started := best.StartedAt
-			signal.LastActiveAt = &started
-			out = append(out, signal)
+			out = append(out, s.signalFromProcess(sig, *best, now, matchKind, quality))
 		}
 	}
-	return out
+	return out, nil
+}
+
+func (s *ContinuousDiscoveryService) signalFromProcess(sig AISignature, proc processInfo, now time.Time, matchKind string, quality float64) AISignal {
+	// Keep multiple Windows instances distinct without retaining command lines
+	// or executable paths. POSIX fingerprints preserve their existing contract.
+	evidenceValue := proc.Comm
+	if proc.Windows {
+		evidenceValue = fmt.Sprintf("%s:%d", proc.Comm, proc.PID)
+	}
+	ev := AIEvidence{Type: "process", ValueHash: hashValue(evidenceValue), Quality: quality, MatchKind: matchKind}
+	signal := s.signalFromEvidence(sig, SignalActiveProcess, "process", []AIEvidence{ev})
+	runtimeInfo := &ProcessRuntime{PID: proc.PID, PPID: proc.PPID, User: proc.User, Comm: proc.Comm}
+	if !proc.StartedAt.IsZero() {
+		started := proc.StartedAt
+		runtimeInfo.StartedAt = &started
+		if uptime := now.Sub(proc.StartedAt); uptime >= 0 {
+			runtimeInfo.UptimeSec = int64(uptime.Seconds())
+		}
+		signal.LastActiveAt = &started
+	}
+	signal.Runtime = runtimeInfo
+	return signal
 }
 
 func (s *ContinuousDiscoveryService) detectApplications() []AISignal {
@@ -1191,12 +1632,16 @@ func (s *ContinuousDiscoveryService) detectEditorExtensions() []AISignal {
 // metadata, and (2) matching the path against the same vendor's
 // signature.local_endpoints entry in ai_signatures.json.
 var safeLocalEndpointPaths = map[string]struct{}{
-	"/api/tags":    {}, // Ollama — list installed models
-	"/api/version": {}, // Ollama — server version
-	"/v1/models":   {}, // OpenAI-compatible (LM Studio, vLLM, LocalAI, llama.cpp server)
-	"/v1/health":   {}, // common health endpoint
-	"/health":      {}, // ditto
-	"/healthz":     {}, // Kubernetes-style health
+	"/api/tags":      {}, // Ollama-compatible — list installed models
+	"/api/ps":        {}, // Ollama-compatible — list loaded models
+	"/api/version":   {}, // Ollama — server version
+	"/v1/models":     {}, // OpenAI-compatible — list locally available models
+	"/api/v1/models": {}, // Lemonade legacy-compatible route
+	"/v1/health":     {}, // Lemonade — server status + loaded models
+	"/api/v1/health": {}, // Lemonade legacy-compatible route
+	"/live":          {}, // Lemonade unauthenticated liveness
+	"/health":        {}, // common health endpoint
+	"/healthz":       {}, // Kubernetes-style health
 }
 
 // detectLocalEndpoints probes the loopback HTTP endpoints declared in
@@ -1254,7 +1699,8 @@ func (s *ContinuousDiscoveryService) detectLocalEndpoints() []AISignal {
 	}
 	var out []AISignal
 	for _, sig := range s.catalog {
-		for _, endpoint := range sig.LocalEndpoints {
+		isLemonade := localModelProviderForSignature(sig) == localModelProviderLemonade
+		for _, endpoint := range localEndpointsForSignature(sig) {
 			endpoint = strings.TrimSpace(endpoint)
 			if endpoint == "" || !isSafeLoopbackEndpoint(endpoint) {
 				continue
@@ -1269,8 +1715,17 @@ func (s *ContinuousDiscoveryService) detectLocalEndpoints() []AISignal {
 			if _, ok := safeLocalEndpointPaths[u.Path]; !ok {
 				continue
 			}
+			// Lemonade exposes an unauthenticated, provider-specific
+			// liveness route. Restrict presence identification to that
+			// route so an unrelated service returning 404 from /v1/models
+			// on port 13305 is not misidentified as Lemonade. The dedicated
+			// model API detector handles /v1/models and /v1/health bodies.
+			if isLemonade && u.Path != "/live" {
+				continue
+			}
 			status, ok := probe(http.MethodHead, endpoint)
-			if !ok || status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented {
+			if !ok || status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented ||
+				(isLemonade && (status < 200 || status >= 300)) {
 				// HEAD wasn't accepted; try GET as a fallback.
 				// (Already gated by safeLocalEndpointPaths above.)
 				status, ok = probe(http.MethodGet, endpoint)
@@ -1278,7 +1733,11 @@ func (s *ContinuousDiscoveryService) detectLocalEndpoints() []AISignal {
 					continue
 				}
 			}
-			if status >= 200 && status < 500 {
+			reachable := status >= 200 && status < 500
+			if isLemonade {
+				reachable = status >= 200 && status < 300
+			}
+			if reachable {
 				ev := AIEvidence{Type: "local_endpoint", ValueHash: hashValue(endpoint)}
 				out = append(out, s.signalFromEvidence(sig, SignalLocalAIEndpoint, "local_endpoint", []AIEvidence{ev}))
 				break
@@ -2035,80 +2494,6 @@ func (s *ContinuousDiscoveryService) scanRootsForRelative() []string {
 	return roots
 }
 
-func (s *ContinuousDiscoveryService) emitTelemetry(ctx context.Context, report AIDiscoveryReport, snap componentRollupSnapshot) {
-	if s.otel == nil || !s.otel.Enabled() {
-		return
-	}
-	sum := report.Summary
-	s.otel.RecordAIDiscoveryRun(ctx, sum.Source, sum.PrivacyMode, sum.Result, float64(sum.DurationMs), sum.TotalSignals, sum.ActiveSignals, sum.NewSignals, sum.GoneSignals, sum.FilesScanned, sum.DedupeSuppressed)
-	s.otel.EmitAIDiscoverySummaryLog(ctx, sum.Source, sum.PrivacyMode, sum.Result, float64(sum.DurationMs), sum.TotalSignals, sum.ActiveSignals, sum.NewSignals, sum.GoneSignals, sum.FilesScanned)
-	if sum.Errors > 0 {
-		s.otel.RecordAIDiscoveryError(ctx, "scan", "partial")
-	}
-	for _, sig := range report.Signals {
-		// Telemetry emission stays delta-focused to avoid flooding
-		// log sinks on every full scan now that report.Signals
-		// includes steady-state `seen` entries (so the API can
-		// render full inventory). New / changed / gone are still
-		// emitted because those are real lifecycle events.
-		if sig.State != AIStateNew && sig.State != AIStateChanged && sig.State != AIStateGone {
-			continue
-		}
-		s.otel.RecordAIDiscoverySignal(ctx, sig.Category, sig.Vendor, sig.Product, sig.State, sig.Detector, sig.Confidence)
-		s.otel.EmitAIDiscoverySignalLog(ctx, sig.Category, sig.Vendor, sig.Product, sig.State, sig.Detector, sig.Confidence)
-	}
-	// Component-level emission off the SHARED snapshot so every
-	// downstream consumer sees byte-identical identity / presence
-	// numbers. Cardinality is bounded by the discovered component
-	// set, not by signal volume. Logs only fire when at least one
-	// signal in the group experienced a lifecycle change so we
-	// don't flood SIEMs with duplicate "AI component confidence"
-	// rows for a steady-state monorepo.
-	policyVersion := s.confidenceParams.Policy.Version
-	for _, g := range snap.Groups {
-		conf, ok := snap.ScoreFor(g)
-		if !ok {
-			continue
-		}
-		attrs := buildComponentConfidenceAttrs(g, conf, policyVersion)
-		s.otel.RecordAIComponentConfidence(ctx, attrs)
-		if g.HasLifecycleChange {
-			s.otel.EmitAIComponentConfidenceLog(ctx, attrs)
-		}
-	}
-}
-
-func (s *ContinuousDiscoveryService) emitGatewayEvents(ctx context.Context, report AIDiscoveryReport, snap componentRollupSnapshot) {
-	if s.events == nil {
-		return
-	}
-	opts := s.opts
-	// snap.Scores is non-nil only when DisableRedaction is true
-	// (see fanoutReport). When redaction is on, every per-signal
-	// payload ships without Confidence anyway, so a nil Scores
-	// map is the correct skip-the-lookup signal.
-	for _, sig := range report.Signals {
-		if sig.State != AIStateNew && sig.State != AIStateChanged && sig.State != AIStateGone {
-			continue
-		}
-		payload := BuildAIDiscoveryPayload(sig, report.Summary.ScanID, PayloadOpts{
-			DisableRedaction:   opts.DisableRedaction,
-			StoreRawLocalPaths: opts.StoreRawLocalPaths,
-			Confidence:         snap.LookupSignal(sig),
-		})
-		// EmitContext (not Emit) so the writer can stamp run_id /
-		// trace_id from the active discovery span — without this,
-		// AI-discovery rows in gateway.jsonl carry empty correlation
-		// fields and operators cannot pivot from a discovery span
-		// in Tempo to its envelope row in Loki/Splunk.
-		s.events.EmitContext(ctx, gatewaylog.Event{
-			EventType:   gatewaylog.EventAIDiscovery,
-			Severity:    gatewaylog.SeverityInfo,
-			AIDiscovery: payload,
-		})
-	}
-}
-
 // componentSignalGroup is one rollup row's worth of state used by
 // the OTel emitter. Capturing the canonical ecosystem / name
 // strings (first non-empty wins, matching gateway.rollupComponents)
@@ -2244,10 +2629,19 @@ func (s componentRollupSnapshot) ScoreFor(g componentSignalGroup) (ConfidenceRes
 // rollup when the signal has no component block so non-SDK
 // rows (Claude Code, Cursor, Codex, ...) get confidence on the
 // API / CLI / TUI surfaces too. Returns nil only for signals
-// that have neither a component nor a vendor+product pair --
-// nil is the documented signal to BuildAIDiscoveryPayload that
-// the wire payload should not carry confidence fields.
+// that have neither a component nor a vendor+product pair. Canonical v8
+// adapters treat nil as the absence of a confidence observation.
 func (s componentRollupSnapshot) LookupSignal(sig AISignal) *ConfidenceResult {
+	// Local model IDs deliberately do not participate in product/component
+	// confidence rollups: they are unbounded identities held in sig.Model,
+	// while Product is the bounded serving runtime (for example, Lemonade
+	// Server). Reusing the runtime's confidence for every model would imply
+	// that a server binary proves each individual model is installed. The
+	// model status is instead asserted directly by the model_api,
+	// model_runtime, or model_file detector.
+	if sig.Model != nil {
+		return nil
+	}
 	if k, ok := keyForComponent(sig.Component); ok && s.Scores != nil {
 		if c, found := s.Scores[k]; found && c != nil {
 			return c
@@ -2275,6 +2669,12 @@ func groupSignalsForRollup(signals []AISignal) []componentSignalGroup {
 	order := []componentKey{}
 	for _, sig := range signals {
 		if sig.State == AIStateGone {
+			continue
+		}
+		// A model ID is an unbounded, user-controlled identity. It must never
+		// become an ecosystem/name metric label, even if an external report
+		// supplies a Component block on a local-model signal.
+		if sig.Model != nil || sig.Category == SignalLocalModel {
 			continue
 		}
 		k, ok := keyForComponent(sig.Component)
@@ -2335,6 +2735,12 @@ func groupSignalsByProduct(signals []AISignal) []productSignalGroup {
 	order := []productKey{}
 	for _, sig := range signals {
 		if sig.State == AIStateGone {
+			continue
+		}
+		// Model observations have their own unbounded identity in
+		// sig.Model and must not multiply the confidence of the bounded
+		// serving-runtime Product when several models are installed.
+		if sig.Model != nil {
 			continue
 		}
 		// Skip component-bearing signals -- those are already
@@ -2476,11 +2882,21 @@ func EnrichSignalsWithComponentConfidence(signals []AISignal, params ConfidenceP
 		if conf == nil {
 			continue
 		}
-		signals[i].IdentityScore = clampPayloadScore(conf.IdentityScore)
+		signals[i].IdentityScore = clampConfidenceScore(conf.IdentityScore)
 		signals[i].IdentityBand = conf.IdentityBand
-		signals[i].PresenceScore = clampPayloadScore(conf.PresenceScore)
+		signals[i].PresenceScore = clampConfidenceScore(conf.PresenceScore)
 		signals[i].PresenceBand = conf.PresenceBand
 	}
+}
+
+func clampConfidenceScore(value float64) float64 {
+	if value != value || value < 0 {
+		return 0
+	}
+	if value > 1 {
+		return 1
+	}
+	return value
 }
 
 func buildComponentConfidenceAttrs(g componentSignalGroup, conf ConfidenceResult, policyVersion int) telemetry.AIComponentConfidenceAttrs {
@@ -2497,171 +2913,6 @@ func buildComponentConfidenceAttrs(g componentSignalGroup, conf ConfidenceResult
 		PolicyVersion:  policyVersion,
 		DetectorCount:  len(conf.Detectors),
 	}
-}
-
-// PayloadOpts is the privacy-flag bundle threaded into
-// BuildAIDiscoveryPayload. Two flags compose: extended fields ride
-// on DisableRedaction; raw paths additionally require
-// StoreRawLocalPaths so an operator who set DisableRedaction = true
-// but kept StoreRawLocalPaths = false (the default) still gets
-// scrubbed RawPath values on the wire.
-//
-// Confidence is the optional per-component confidence result
-// shared across every signal in the same (ecosystem, name) group.
-// When set and DisableRedaction is true, the helper stamps the
-// identity / presence score, band, factors, and detector list on
-// the wire payload so downstream OTel + webhook receivers can
-// dedupe and alert on the engine output without re-running it.
-type PayloadOpts struct {
-	DisableRedaction   bool
-	StoreRawLocalPaths bool
-	Confidence         *ConfidenceResult
-}
-
-// BuildAIDiscoveryPayload renders an AISignal into the wire-format
-// gatewaylog.AIDiscoveryPayload, applying the privacy-flag
-// composition described on AIDiscoveryPayload. Exposed as a
-// standalone helper (rather than a method) so external integrations
-// (test harnesses, sample event generators, eBPF probes) can build
-// payloads identical to what the sidecar emits.
-func BuildAIDiscoveryPayload(sig AISignal, scanID string, opts PayloadOpts) *gatewaylog.AIDiscoveryPayload {
-	out := &gatewaylog.AIDiscoveryPayload{
-		ScanID:        scanID,
-		SignalID:      sig.SignalID,
-		Category:      sig.Category,
-		Vendor:        sig.Vendor,
-		Product:       sig.Product,
-		Confidence:    sig.Confidence,
-		State:         sig.State,
-		EvidenceTypes: sig.EvidenceTypes,
-		PathHashes:    sig.PathHashes,
-		Basenames:     sig.Basenames,
-		WorkspaceHash: sig.WorkspaceHash,
-	}
-	if !sig.LastSeen.IsZero() {
-		out.LastSeen = sig.LastSeen.UTC().Format(time.RFC3339)
-	}
-	if !opts.DisableRedaction {
-		// Redacted mode: ship only the minimal set above. Extended
-		// fields stay zero so omitempty hides them from receivers.
-		return out
-	}
-	// Extended mode: every field below ships so downstream OTel /
-	// webhook consumers can do their own confidence rendering and
-	// dedupe on (component.ecosystem, component.name).
-	out.Detector = sig.Detector
-	if sig.Component != nil {
-		out.Component = &gatewaylog.AIDiscoveryComponent{
-			Ecosystem: sig.Component.Ecosystem,
-			Name:      sig.Component.Name,
-			Version:   sig.Component.Version,
-			Framework: sig.Component.Framework,
-		}
-	}
-	if sig.Runtime != nil {
-		started := ""
-		if !sig.Runtime.StartedAt.IsZero() {
-			started = sig.Runtime.StartedAt.UTC().Format(time.RFC3339)
-		}
-		out.Runtime = &gatewaylog.AIDiscoveryRuntime{
-			PID:       sig.Runtime.PID,
-			PPID:      sig.Runtime.PPID,
-			StartedAt: started,
-			UptimeSec: sig.Runtime.UptimeSec,
-			User:      sig.Runtime.User,
-			Comm:      sig.Runtime.Comm,
-		}
-	}
-	if sig.LastActiveAt != nil && !sig.LastActiveAt.IsZero() {
-		out.LastActiveAt = sig.LastActiveAt.UTC().Format(time.RFC3339)
-	}
-	if len(sig.Evidence) > 0 {
-		evidence := make([]gatewaylog.AIDiscoveryEvidence, 0, len(sig.Evidence))
-		var rawPaths []string
-		for _, ev := range sig.Evidence {
-			row := gatewaylog.AIDiscoveryEvidence{
-				Type:          ev.Type,
-				Basename:      ev.Basename,
-				PathHash:      ev.PathHash,
-				ValueHash:     ev.ValueHash,
-				WorkspaceHash: ev.WorkspaceHash,
-				Quality:       ev.Quality,
-				MatchKind:     ev.MatchKind,
-			}
-			if opts.StoreRawLocalPaths {
-				row.RawPath = ev.RawPath
-				if ev.RawPath != "" {
-					rawPaths = append(rawPaths, ev.RawPath)
-				}
-			}
-			evidence = append(evidence, row)
-		}
-		out.Evidence = evidence
-		if len(rawPaths) > 0 {
-			out.RawPaths = rawPaths
-		}
-	}
-	if opts.Confidence != nil {
-		conf := opts.Confidence
-		// Engine output is in [0,1] but we don't trust callers
-		// to have validated; clamp on the wire so a corrupt
-		// snapshot can't ship NaN to a downstream histogram.
-		out.IdentityScore = clampPayloadScore(conf.IdentityScore)
-		out.IdentityBand = conf.IdentityBand
-		out.PresenceScore = clampPayloadScore(conf.PresenceScore)
-		out.PresenceBand = conf.PresenceBand
-		if len(conf.IdentityFactors) > 0 {
-			out.IdentityFactors = wireFactors(conf.IdentityFactors)
-		}
-		if len(conf.PresenceFactors) > 0 {
-			out.PresenceFactors = wireFactors(conf.PresenceFactors)
-		}
-		if len(conf.Detectors) > 0 {
-			detectors := make([]string, len(conf.Detectors))
-			copy(detectors, conf.Detectors)
-			out.Detectors = detectors
-		}
-	}
-	return out
-}
-
-// clampPayloadScore mirrors the OTel-side clamp so the wire
-// payload and the metrics never disagree on the score range. Kept
-// in this package (rather than imported from telemetry) so the
-// inventory package stays free of telemetry's dependency tree --
-// matters for unit tests that build payloads without spinning up
-// an OTel provider.
-func clampPayloadScore(v float64) float64 {
-	if v != v { // NaN
-		return 0
-	}
-	if v < 0 {
-		return 0
-	}
-	if v > 1 {
-		return 1
-	}
-	return v
-}
-
-// wireFactors renders ConfidenceFactor rows into the JSON wire
-// shape downstream sinks expect. We allocate a fresh slice (rather
-// than aliasing) so a downstream sink that mutates its received
-// payload can't poison the engine's in-memory result.
-func wireFactors(in []ConfidenceFactor) []gatewaylog.AIDiscoveryFactor {
-	out := make([]gatewaylog.AIDiscoveryFactor, 0, len(in))
-	for _, f := range in {
-		out = append(out, gatewaylog.AIDiscoveryFactor{
-			Detector:    f.Detector,
-			EvidenceID:  f.EvidenceID,
-			MatchKind:   f.MatchKind,
-			Quality:     f.Quality,
-			Specificity: f.Specificity,
-			LR:          f.LR,
-			LogitDelta:  f.LogitDelta,
-		})
-	}
-	return out
 }
 
 // AISourceExternal is the value forcibly written into AIDiscoveryReport
@@ -2721,6 +2972,12 @@ func ValidateSanitizedAIDiscoveryReport(report AIDiscoveryReport) error {
 		if !allowedAISignalCategories[sig.Category] {
 			return fmt.Errorf("unsupported category %q", sig.Category)
 		}
+		if sig.Category == SignalLocalModel && sig.Model == nil {
+			return errors.New("local_model signals require model metadata")
+		}
+		if sig.Category != SignalLocalModel && sig.Model != nil {
+			return errors.New("model metadata is only allowed on local_model signals")
+		}
 		for _, value := range sig.PathHashes {
 			if value != "" && !isSHA256Hash(value) {
 				return errors.New("path hashes must be sha256:<64 hex> or hmac-sha256:<64 hex>")
@@ -2732,6 +2989,30 @@ func ValidateSanitizedAIDiscoveryReport(report AIDiscoveryReport) error {
 		for _, value := range sig.Basenames {
 			if strings.Contains(value, "/") || strings.Contains(value, "\\") {
 				return errors.New("raw paths are not allowed")
+			}
+		}
+		if sig.Model != nil {
+			model := sig.Model
+			if strings.TrimSpace(model.ID) == "" || len(model.ID) > 512 || containsUnicodeControl(model.ID) {
+				return errors.New("model id must be 1..512 printable characters")
+			}
+			if model.Status != "installed" && model.Status != "loaded" {
+				return fmt.Errorf("unsupported model status %q", model.Status)
+			}
+			for field, rule := range map[string]struct {
+				value string
+				max   int
+			}{
+				"format": {model.Format, 64}, "provider": {model.Provider, 96},
+				"recipe": {model.Recipe, 128}, "modality": {model.Modality, 64},
+				"device": {model.Device, 128},
+			} {
+				if len(rule.value) > rule.max || containsUnicodeControl(rule.value) {
+					return fmt.Errorf("model %s must be at most %d printable characters", field, rule.max)
+				}
+			}
+			if model.SizeBytes < 0 {
+				return errors.New("model size_bytes must be non-negative")
 			}
 		}
 		// Phase-2 evidence bounds: keep the per-signal Evidence
@@ -2753,31 +3034,24 @@ func ValidateSanitizedAIDiscoveryReport(report AIDiscoveryReport) error {
 	return nil
 }
 
-// SanitizeEvidenceForWire scrubs every AISignal.Evidence row to
-// match the operator's privacy stance:
-//
-//   - When `disableRedaction` is false (the default), RawPath is
-//     unconditionally cleared and Quality / MatchKind are kept (those
-//     are not sensitive).
-//   - When `disableRedaction` is true, RawPath is preserved only when
-//     `storeRawLocalPaths` is also true -- the two flags compose so a
-//     casual `disable_redaction: true` does not silently start
-//     shipping local paths on the wire if the operator has not
-//     explicitly opted into raw-path storage.
-//
-// The function operates in-place on the slice header but copies each
-// AIEvidence value before mutating, so the caller's underlying slice
-// data is not modified.
-func SanitizeEvidenceForWire(signals []AISignal, disableRedaction, storeRawLocalPaths bool) {
+func containsUnicodeControl(value string) bool {
+	return strings.IndexFunc(value, unicode.IsControl) >= 0
+}
+
+// SanitizeEvidenceForWire unconditionally clears RawPath from every
+// AISignal.Evidence row while retaining non-sensitive Quality and MatchKind.
+// Local raw-path persistence is a separate forensic-store concern and never
+// grants an API or destination export bypass. The function operates in-place
+// on the slice header but copies each AIEvidence value before mutating, so the
+// caller's underlying slice data is not modified.
+func SanitizeEvidenceForWire(signals []AISignal) {
 	for i := range signals {
 		if len(signals[i].Evidence) == 0 {
 			continue
 		}
 		out := make([]AIEvidence, len(signals[i].Evidence))
 		for j, ev := range signals[i].Evidence {
-			if !(disableRedaction && storeRawLocalPaths) {
-				ev.RawPath = ""
-			}
+			ev.RawPath = ""
 			out[j] = ev
 		}
 		signals[i].Evidence = out
@@ -2873,6 +3147,9 @@ func (s *AIStateStore) Load() (aiStateFile, error) {
 		if len(stored.AISignal.Evidence) == 0 && len(stored.StoredEvidence) > 0 {
 			stored.AISignal.Evidence = stored.StoredEvidence
 		}
+		if stored.AISignal.ModelAPISourceHash == "" && stored.StoredModelAPISourceHash != "" {
+			stored.AISignal.ModelAPISourceHash = stored.StoredModelAPISourceHash
+		}
 		out.Signals[fp] = stored
 	}
 	return out, nil
@@ -2897,48 +3174,17 @@ func (s *AIStateStore) Save(state aiStateFile) error {
 		if len(stored.StoredEvidence) == 0 && len(stored.AISignal.Evidence) > 0 {
 			stored.StoredEvidence = stored.AISignal.Evidence
 		}
+		if stored.StoredModelAPISourceHash == "" && stored.AISignal.ModelAPISourceHash != "" {
+			stored.StoredModelAPISourceHash = stored.AISignal.ModelAPISourceHash
+		}
 		state.Signals[fp] = stored
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".ai_discovery_state.*.tmp")
+	payload, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	enc := json.NewEncoder(tmp)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(state); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpName, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, s.path)
-}
-
-// processInfo is the per-process snapshot record returned by
-// processSnapshot(). It carries enough fidelity to render in CLI/TUI
-// "active processes" views (PID, start time, uptime, user) without
-// ever exporting a full argv (which can contain secrets, prompts, or
-// workspace paths). Full argv stays gated behind StoreRawLocalPaths
-// via the existing per-evidence raw path mechanism.
-type processInfo struct {
-	PID       int
-	PPID      int
-	User      string
-	Comm      string
-	StartedAt time.Time
+	payload = append(payload, '\n')
+	return safefile.WritePrivate(s.path, payload)
 }
 
 // processNames is kept for backward compatibility with existing
@@ -2954,105 +3200,6 @@ func processNames() ([]string, error) {
 		out = append(out, p.Comm)
 	}
 	return out, nil
-}
-
-// processSnapshot returns one record per running process on POSIX
-// systems via `ps`, or an empty slice on Windows (the equivalent
-// `tasklist` parse is intentionally TODO'd; falling back to empty is
-// safe — discovery just won't emit `process` signals on Windows).
-//
-// The fields requested are: pid, ppid, user, comm, etime — exactly
-// what's needed to compute uptime + a "last invoked" timestamp without
-// reading proc internals or pulling in a third-party process library.
-//
-// Privacy posture: we deliberately do NOT request `args` or `command`
-// here. The full command line can carry secrets (API keys passed as
-// CLI flags), prompts, or local paths. Operators who explicitly want
-// argv must enable `StoreRawLocalPaths`, at which point `comm` plus
-// the per-evidence `RawPath` already cover the legitimate use cases.
-func processSnapshot() ([]processInfo, error) {
-	if runtime.GOOS == "windows" {
-		return nil, nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	// `etime` is requested last because some `ps` builds emit a
-	// trailing space-padded value; we tokenise on whitespace and the
-	// last column captures the entire etime string.
-	cmd := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=,user=,comm=,etime=")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return nil, err
-	}
-	now := time.Now().UTC()
-	var infos []processInfo
-	for _, line := range strings.Split(out.String(), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 5 {
-			continue
-		}
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
-			continue
-		}
-		ppid, _ := strconv.Atoi(fields[1])
-		user := fields[2]
-		// `comm` may itself contain spaces (rare but legal); join
-		// everything between user and the trailing etime token.
-		comm := strings.ToLower(filepath.Base(strings.Join(fields[3:len(fields)-1], " ")))
-		etime := fields[len(fields)-1]
-		started := now.Add(-parsePsEtime(etime))
-		infos = append(infos, processInfo{
-			PID:       pid,
-			PPID:      ppid,
-			User:      user,
-			Comm:      comm,
-			StartedAt: started,
-		})
-	}
-	return infos, nil
-}
-
-// parsePsEtime parses the elapsed-time format ps emits with
-// `-o etime=`: `[[dd-]hh:]mm:ss`. Returns zero on parse failure so
-// downstream code degrades gracefully (we just don't have a start
-// time for that process).
-func parsePsEtime(value string) time.Duration {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return 0
-	}
-	days := 0
-	if idx := strings.IndexByte(value, '-'); idx >= 0 {
-		d, err := strconv.Atoi(value[:idx])
-		if err != nil {
-			return 0
-		}
-		days = d
-		value = value[idx+1:]
-	}
-	parts := strings.Split(value, ":")
-	if len(parts) == 0 || len(parts) > 3 {
-		return 0
-	}
-	var hours, minutes, seconds int
-	switch len(parts) {
-	case 3:
-		hours, _ = strconv.Atoi(parts[0])
-		minutes, _ = strconv.Atoi(parts[1])
-		seconds, _ = strconv.Atoi(parts[2])
-	case 2:
-		minutes, _ = strconv.Atoi(parts[0])
-		seconds, _ = strconv.Atoi(parts[1])
-	case 1:
-		seconds, _ = strconv.Atoi(parts[0])
-	}
-	return time.Duration(days)*24*time.Hour + time.Duration(hours)*time.Hour + time.Duration(minutes)*time.Minute + time.Duration(seconds)*time.Second
 }
 
 // processCommExactlyEquals reports whether `have` is byte-for-byte
@@ -3259,13 +3406,13 @@ func projectRootForManifest(path string) string {
 			// Project root is the dir CONTAINING `.cargo` --
 			// for `~/.cargo/registry/...` that's the user's
 			// home, the natural attribution for global crates.
-			return strings.Join(parts[:i-1], "/")
+			return filepath.FromSlash(strings.Join(parts[:i-1], "/"))
 		}
 		if seg == "cache" && i > 0 && strings.ToLower(parts[i-1]) == ".yarn" {
-			return strings.Join(parts[:i-1], "/")
+			return filepath.FromSlash(strings.Join(parts[:i-1], "/"))
 		}
 		if cacheSegments[seg] {
-			return strings.Join(parts[:i], "/")
+			return filepath.FromSlash(strings.Join(parts[:i], "/"))
 		}
 	}
 	return dir
