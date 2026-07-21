@@ -3002,7 +3002,7 @@ def _is_v8_package_data_member(member_name: str) -> bool:
     )
     return any(
         any(
-            root == "defenseclaw" or re.fullmatch(r"defens~[0-9]+", root) is not None
+            re.fullmatch(r"(?:[a-z]:)?(?:defenseclaw|defens~[0-9]+)", root) is not None
             for root in parts[:data_index]
         )
         and any(

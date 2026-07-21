@@ -2785,6 +2785,9 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
         ("unexpected", "resource inventory is invalid.*unexpected="),
         ("backslash-alias", "resource inventory is invalid.*unexpected="),
         ("absolute-alias", "resource inventory is invalid.*unexpected="),
+        ("drive-absolute-alias", "resource inventory is invalid.*unexpected="),
+        ("drive-relative-alias", "resource inventory is invalid.*unexpected="),
+        ("unc-alias", "resource inventory is invalid.*unexpected="),
         ("dot-segment-alias", "resource inventory is invalid.*unexpected="),
         ("case-alias", "resource inventory is invalid.*unexpected="),
         ("windows-trailing-alias", "resource inventory is invalid.*unexpected="),
@@ -2810,6 +2813,12 @@ def test_non_bridge_candidate_rejects_incomplete_or_altered_v8_resources(
         members[r"defenseclaw\_data\config\v8\unexpected.json"] = b"{}\n"
     elif mutation == "absolute-alias":
         members["/defenseclaw/_data/config/v8/unexpected.json"] = b"{}\n"
+    elif mutation == "drive-absolute-alias":
+        members["C:/defenseclaw/_data/config/v8/unexpected.json"] = b"{}\n"
+    elif mutation == "drive-relative-alias":
+        members["C:defenseclaw/_data/config/v8/unexpected.json"] = b"{}\n"
+    elif mutation == "unc-alias":
+        members["//server/share/defenseclaw/_data/config/v8/unexpected.json"] = b"{}\n"
     elif mutation == "dot-segment-alias":
         members["defenseclaw/_data/config/v8/../v8/unexpected.json"] = b"{}\n"
     elif mutation == "case-alias":
