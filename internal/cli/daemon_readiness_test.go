@@ -131,6 +131,59 @@ func TestRotationRequiredConnectorNamesUsesEnabledConfiguredRoster(t *testing.T)
 	}
 }
 
+func TestRotationConnectorStateRejectsFallbackPolicyDrift(t *testing.T) {
+	expected := rotationConnectorState{
+		Version: 1,
+		Connectors: []rotationConnectorPolicy{
+			{Name: "claudecode", Mode: "action", HookFailMode: "closed", Enabled: true},
+			{Name: "codex", Mode: "action", HookFailMode: "closed", Enabled: true},
+		},
+	}
+	fallback := config.DefaultConfig()
+	fallback.Guardrail.Mode = "observe"
+	fallback.Guardrail.HookFailMode = "open"
+	fallback.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"claudecode": {Mode: "action", HookFailMode: "closed"},
+		"codex":      {},
+	}
+	if err := verifyRotationConfigState(fallback, expected); err == nil || !strings.Contains(err.Error(), "codex mode changed from action to observe") {
+		t.Fatalf("fallback config verification error = %v, want exact Codex action -> observe drift", err)
+	}
+
+	fallback.Guardrail.Connectors["codex"] = config.PerConnectorGuardrailConfig{Mode: "action", HookFailMode: "closed"}
+	if err := verifyRotationConfigState(fallback, expected); err != nil {
+		t.Fatalf("exact dual action/closed state rejected: %v", err)
+	}
+
+	mixed := expected
+	mixed.Connectors = append([]rotationConnectorPolicy(nil), expected.Connectors...)
+	mixed.Connectors[0].Mode = "observe"
+	mixed.Connectors[0].HookFailMode = "open"
+	fallback.Guardrail.Connectors["claudecode"] = config.PerConnectorGuardrailConfig{Mode: "observe", HookFailMode: "open"}
+	if err := verifyRotationConfigState(fallback, mixed); err != nil {
+		t.Fatalf("exact mixed connector state rejected: %v", err)
+	}
+}
+
+func TestParseRotationConnectorStateIsStrict(t *testing.T) {
+	valid := `{"connectors":[{"enabled":true,"hook_fail_mode":"closed","mode":"action","name":"codex"}],"version":1}`
+	if _, err := parseRotationConnectorState(valid); err != nil {
+		t.Fatalf("valid connector state rejected: %v", err)
+	}
+	for _, raw := range []string{
+		``,
+		`{"connectors":null,"version":1}`,
+		`{"connectors":[],"version":2}`,
+		`{"connectors":[{"enabled":true,"hook_fail_mode":"closed","mode":"action","name":"Codex"}],"version":1}`,
+		`{"connectors":[{"enabled":true,"hook_fail_mode":"closed","mode":"action","name":"codex"},{"enabled":true,"hook_fail_mode":"open","mode":"observe","name":"codex"}],"version":1}`,
+		`{"connectors":[],"unexpected":true,"version":1}`,
+	} {
+		if _, err := parseRotationConnectorState(raw); err == nil {
+			t.Fatalf("invalid connector state accepted: %q", raw)
+		}
+	}
+}
+
 func TestGatewaySnapshotReadyRotationRequiresEveryConfiguredConnector(t *testing.T) {
 	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
 	snap.Connectors = []gateway.ConnectorHealth{{Name: "codex", State: gateway.StateRunning}}
@@ -149,6 +202,23 @@ func TestGatewaySnapshotReadyRotationRequiresEveryConfiguredConnector(t *testing
 	ready, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true})
 	if err != nil || !ready {
 		t.Fatalf("ordinary readiness changed by rotation-only roster gate: ready=%v error=%v", ready, err)
+	}
+}
+
+func TestGatewaySnapshotReadyRotationRejectsUnexpectedConnector(t *testing.T) {
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	snap.Connectors = []gateway.ConnectorHealth{
+		{Name: "claudecode", State: gateway.StateRunning},
+		{Name: "codex", State: gateway.StateRunning},
+		{Name: "cursor", State: gateway.StateRunning},
+	}
+	ready, err := gatewaySnapshotReady(snap, daemonReadinessRequirements{
+		guardrailEnabled:            true,
+		requiredConnectors:          []string{"claudecode", "codex"},
+		requireExactConnectorRoster: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "unexpected ready connector: cursor") || ready {
+		t.Fatalf("unexpected connector readiness = %v, error = %v", ready, err)
 	}
 }
 
@@ -631,6 +701,95 @@ func TestWaitForStartedDaemonRotationRejectsPartialConnectorRosterAndStopsB(t *t
 	}
 	if base.stopCalls != 1 || base.stoppedPID != 42 {
 		t.Fatalf("B cleanup = (%d calls, PID %d), want (1, 42)", base.stopCalls, base.stoppedPID)
+	}
+}
+
+func TestWaitForStartedDaemonRotationRequiresExactConnectorPosture(t *testing.T) {
+	dual := rotationConnectorState{
+		Version: 1,
+		Connectors: []rotationConnectorPolicy{
+			{Name: "claudecode", Mode: "action", HookFailMode: "closed", Enabled: true},
+			{Name: "codex", Mode: "action", HookFailMode: "closed", Enabled: true},
+		},
+	}
+	dualModes := []gatewayConnectorModeSnapshot{
+		{Connector: "claudecode", GuardrailMode: "action", HookFailMode: "closed", Enabled: true},
+		{Connector: "codex", GuardrailMode: "action", HookFailMode: "closed", Enabled: true},
+	}
+	mixed := dual
+	mixed.Connectors = append([]rotationConnectorPolicy(nil), dual.Connectors...)
+	mixed.Connectors[0].Mode = "observe"
+	mixed.Connectors[0].HookFailMode = "open"
+	mixedModes := append([]gatewayConnectorModeSnapshot(nil), dualModes...)
+	mixedModes[0].GuardrailMode = "observe"
+	mixedModes[0].HookFailMode = "open"
+
+	cases := []struct {
+		name     string
+		expected rotationConnectorState
+		modes    []gatewayConnectorModeSnapshot
+		wantErr  string
+	}{
+		{name: "dual action closed", expected: dual, modes: dualModes},
+		{name: "mixed exact", expected: mixed, modes: mixedModes},
+		{name: "omission", expected: dual, modes: dualModes[1:], wantErr: "claudecode is missing"},
+		{name: "addition", expected: dual, modes: append(append([]gatewayConnectorModeSnapshot(nil), dualModes...), gatewayConnectorModeSnapshot{Connector: "cursor", GuardrailMode: "observe", HookFailMode: "open", Enabled: true}), wantErr: "unexpected connector cursor was added"},
+		{name: "mode drift", expected: dual, modes: []gatewayConnectorModeSnapshot{dualModes[0], {Connector: "codex", GuardrailMode: "observe", HookFailMode: "closed", Enabled: true}}, wantErr: "codex mode changed"},
+		{name: "fail mode drift", expected: dual, modes: []gatewayConnectorModeSnapshot{dualModes[0], {Connector: "codex", GuardrailMode: "action", HookFailMode: "open", Enabled: true}}, wantErr: "codex hook fail mode changed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+			snap.Connectors = []gateway.ConnectorHealth{
+				{Name: "claudecode", State: gateway.StateRunning},
+				{Name: "codex", State: gateway.StateRunning},
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"health":          snap,
+					"connector_modes": tc.modes,
+					"runtime": map[string]interface{}{
+						"pid":      42,
+						"data_dir": dataDir,
+					},
+				})
+			}))
+			defer srv.Close()
+
+			base := &fakeReadinessProcess{running: true, pid: 42}
+			process := &fakeStrongReadinessProcess{fakeReadinessProcess: base, identityOK: true}
+			_, ready, err := waitForStartedDaemon(
+				process,
+				42,
+				srv.Client(),
+				srv.URL,
+				time.Second,
+				5*time.Millisecond,
+				daemonReadinessRequirements{
+					guardrailEnabled:            true,
+					requiredConnectors:          []string{"claudecode", "codex"},
+					expectedConnectorState:      tc.expected,
+					verifyConnectorState:        true,
+					requireExactConnectorRoster: true,
+					expectedPID:                 42,
+					expectedDataDir:             dataDir,
+					token:                       func() string { return "fixture" },
+				},
+			)
+			if tc.wantErr == "" {
+				if err != nil || !ready || base.stopCalls != 0 {
+					t.Fatalf("exact posture readiness = %v, error = %v, stop calls = %d", ready, err, base.stopCalls)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || ready {
+				t.Fatalf("drift readiness = %v, error = %v, want %q", ready, err, tc.wantErr)
+			}
+			if base.stopCalls != 1 || base.stoppedPID != 42 {
+				t.Fatalf("B cleanup = (%d calls, PID %d), want (1, 42)", base.stopCalls, base.stoppedPID)
+			}
+		})
 	}
 }
 

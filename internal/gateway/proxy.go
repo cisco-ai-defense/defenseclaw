@@ -483,12 +483,20 @@ func (p *GuardrailProxy) ApplyGuardrailConfig(cfg *config.GuardrailConfig) {
 // connectors (codex, claudecode, cursor, ...) never reach proxy.Run, so the
 // caller (runGuardrail) is responsible for invoking this before the
 // observability short-circuit.
-func (p *GuardrailProxy) StartHookConfigGuard(ctx context.Context, conn connector.Connector, opts connector.SetupOpts) *HookConfigGuard {
+func (p *GuardrailProxy) StartHookConfigGuard(
+	ctx context.Context,
+	conn connector.Connector,
+	opts connector.SetupOpts,
+	prepare func(*HookConfigGuard),
+) *HookConfigGuard {
 	if p == nil {
 		return nil
 	}
 	debounce := time.Duration(p.cfg.HookSelfHealDebounceMs) * time.Millisecond
 	guard := NewHookConfigGuard(p.logger, p.proxyOperationalV8Runtime(), debounce)
+	if prepare != nil {
+		prepare(guard)
+	}
 	guard.SetHealNotifier(p.notifyHookHealed)
 	if !guard.Start(ctx, conn, opts) {
 		return nil

@@ -84,13 +84,18 @@ type Sidecar struct {
 	// cycle. A nil runner disables the managed UDS server.
 	ipcRunner IPCRunner
 
-	webhooksMu               sync.RWMutex
-	aiDiscoveryMu            sync.RWMutex
-	apiMu                    sync.RWMutex
-	apiServer                *APIServer
-	hookGuardsMu             sync.RWMutex
-	hookGuards               map[*HookConfigGuard]struct{}
-	hookGuardsChanged        chan struct{}
+	webhooksMu        sync.RWMutex
+	aiDiscoveryMu     sync.RWMutex
+	apiMu             sync.RWMutex
+	apiServer         *APIServer
+	hookGuardsMu      sync.RWMutex
+	hookGuards        map[*HookConfigGuard]struct{}
+	hookGuardsChanged chan struct{}
+	// hookPolicyMu makes current-policy guard repair a read lease over the
+	// complete verification/Setup transaction. Config publication takes the
+	// write side, so an older fail-mode Setup cannot finish after a newer
+	// runtime policy becomes authoritative.
+	hookPolicyMu             sync.RWMutex
 	proxyMu                  sync.RWMutex
 	guardrailProxy           *GuardrailProxy
 	apiRestartCh             chan struct{}
@@ -504,7 +509,9 @@ func (s *Sidecar) publishConfig(cfg *config.Config) *config.Config {
 		return nil
 	}
 	snapshot := cloneConfig(cfg)
+	s.hookPolicyMu.Lock()
 	s.cfgCurrent.Store(snapshot)
+	s.hookPolicyMu.Unlock()
 	return snapshot
 }
 
@@ -1527,6 +1534,7 @@ func (s *Sidecar) registerHookConfigGuard(guard *HookConfigGuard) {
 	if s == nil || guard == nil {
 		return
 	}
+	s.bindHookRuntimePolicyResolver(guard)
 	s.hookGuardsMu.Lock()
 	if s.hookGuards == nil {
 		s.hookGuards = make(map[*HookConfigGuard]struct{})
@@ -1535,6 +1543,24 @@ func (s *Sidecar) registerHookConfigGuard(guard *HookConfigGuard) {
 	s.signalHookGuardsChangedLocked()
 	s.hookGuardsMu.Unlock()
 	guard.SetDeactivationNotifier(s.unregisterHookConfigGuard)
+}
+
+func (s *Sidecar) bindHookRuntimePolicyResolver(guard *HookConfigGuard) {
+	if s == nil || guard == nil {
+		return
+	}
+	guard.SetRuntimePolicyResolver(func(connectorName string) (hookRuntimePolicy, func(), bool) {
+		s.hookPolicyMu.RLock()
+		cfg := s.currentConfig()
+		if cfg == nil {
+			s.hookPolicyMu.RUnlock()
+			return hookRuntimePolicy{}, nil, false
+		}
+		return hookRuntimePolicy{
+			hookFailMode: cfg.EffectiveHookFailModeForConnector(connectorName),
+			hiltEnabled:  cfg.EffectiveHILTForConnector(connectorName).Enabled,
+		}, sync.OnceFunc(s.hookPolicyMu.RUnlock), true
+	})
 }
 
 func (s *Sidecar) unregisterHookConfigGuard(guard *HookConfigGuard) {
@@ -2677,7 +2703,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// here to cover both the observability and proxy-bound paths. The
 		// guard goroutine stops when ctx is cancelled.
 		if s.currentConfig().Guardrail.Enabled && s.currentConfig().Guardrail.HookSelfHeal && !guardianManagedLifecycle {
-			guard := proxy.StartHookConfigGuard(ctx, conn, setupOpts)
+			guard := proxy.StartHookConfigGuard(ctx, conn, setupOpts, s.bindHookRuntimePolicyResolver)
 			if guard != nil {
 				s.registerHookConfigGuard(guard)
 				defer func() {
@@ -3313,6 +3339,7 @@ func (s *Sidecar) startMultiHookConfigGuards(ctx context.Context, registry *conn
 			return nil, fmt.Errorf("hook self-heal connector %s scoped hook token: %w", conn.Name(), err)
 		}
 		guard := newSidecarHookConfigGuard(s, debounce)
+		s.bindHookRuntimePolicyResolver(guard)
 		guard.SetHealNotifier(s.notifyHookHealed)
 		if !guard.Start(ctx, conn, opts) {
 			fmt.Fprintf(os.Stderr, "[guardrail] hook registration guard for %s did not start; continuing with verified setup registration\n", conn.Name())

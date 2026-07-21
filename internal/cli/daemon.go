@@ -51,6 +51,8 @@ const (
 	restartPortReleaseInterval   = 25 * time.Millisecond
 	rotationTransactionFlag      = "rotation-transaction"
 	rotationCleanupFlag          = "rotation-cleanup"
+	rotationConnectorStateFlag   = "rotation-connector-state"
+	rotationConnectorStateMaxLen = 16 << 10
 )
 
 var startCmd = &cobra.Command{
@@ -101,11 +103,31 @@ type managedProcessIdentity interface {
 }
 
 type gatewayStatusEnvelope struct {
-	Health  gateway.HealthSnapshot `json:"health"`
-	Runtime struct {
+	Health         gateway.HealthSnapshot         `json:"health"`
+	ConnectorModes []gatewayConnectorModeSnapshot `json:"connector_modes"`
+	Runtime        struct {
 		PID     int    `json:"pid"`
 		DataDir string `json:"data_dir"`
 	} `json:"runtime"`
+}
+
+type gatewayConnectorModeSnapshot struct {
+	Connector     string `json:"connector"`
+	GuardrailMode string `json:"guardrail_mode"`
+	HookFailMode  string `json:"hook_fail_mode"`
+	Enabled       bool   `json:"enabled"`
+}
+
+type rotationConnectorPolicy struct {
+	Name         string `json:"name"`
+	Mode         string `json:"mode"`
+	HookFailMode string `json:"hook_fail_mode"`
+	Enabled      bool   `json:"enabled"`
+}
+
+type rotationConnectorState struct {
+	Version    int                       `json:"version"`
+	Connectors []rotationConnectorPolicy `json:"connectors"`
 }
 
 var errGatewayIdentityMismatch = errors.New("gateway identity mismatch")
@@ -116,9 +138,11 @@ func init() {
 	stopCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error { return nil }
 	restartCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error { return nil }
 	startCmd.Flags().Bool(rotationTransactionFlag, false, "require transaction-grade startup verification")
+	startCmd.Flags().String(rotationConnectorStateFlag, "", "require an exact configured connector posture")
 	stopCmd.Flags().Bool(rotationTransactionFlag, false, "require transaction-grade shutdown verification")
 	stopCmd.Flags().Bool(rotationCleanupFlag, false, "allow authenticated rollback cleanup before readiness")
 	_ = startCmd.Flags().MarkHidden(rotationTransactionFlag)
+	_ = startCmd.Flags().MarkHidden(rotationConnectorStateFlag)
 	_ = stopCmd.Flags().MarkHidden(rotationTransactionFlag)
 	_ = stopCmd.Flags().MarkHidden(rotationCleanupFlag)
 
@@ -145,6 +169,18 @@ func rotationCleanupRequested(cmd *cobra.Command) bool {
 
 func runStart(cmd *cobra.Command, _ []string) error {
 	rotationTransaction := rotationTransactionRequested(cmd)
+	var expectedConnectorState rotationConnectorState
+	if rotationTransaction {
+		rawState, flagErr := cmd.Flags().GetString(rotationConnectorStateFlag)
+		if flagErr != nil {
+			return fmt.Errorf("read rotation connector state: %w", flagErr)
+		}
+		var parseErr error
+		expectedConnectorState, parseErr = parseRotationConnectorState(rawState)
+		if parseErr != nil {
+			return fmt.Errorf("rotation start requires a valid connector state: %w", parseErr)
+		}
+	}
 	d := daemon.New(config.DefaultDataPath())
 	// Start can return early when the configured listener is already healthy.
 	// Validate every process-identity artifact before that fast path so malformed
@@ -155,6 +191,11 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	cfg, cfgLoadErr := loadDaemonConfig(cmd)
 	if rotationTransaction && cfgLoadErr != nil {
 		return fmt.Errorf("rotation start requires valid configuration: %w", cfgLoadErr)
+	}
+	if rotationTransaction {
+		if err := verifyRotationConfigState(cfg, expectedConnectorState); err != nil {
+			return fmt.Errorf("rotation start configuration does not match gateway A: %w", err)
+		}
 	}
 	var cfgErr error
 	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
@@ -188,11 +229,19 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	if rotationTransaction && cfgErr != nil {
 		return fmt.Errorf("rotation start could not reload committed configuration: %w", cfgErr)
 	}
+	if rotationTransaction {
+		if err := verifyRotationConfigState(cfg, expectedConnectorState); err != nil {
+			return fmt.Errorf("rotation start reloaded configuration does not match gateway A: %w", err)
+		}
+	}
 	requirements := daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt)
 	requirements.expectedPID = pid
 	requirements.token = func() string { return daemonGatewayToken(cfg) }
 	if rotationTransaction {
-		requirements.requiredConnectors = rotationRequiredConnectorNames(cfg)
+		requirements.requiredConnectors = rotationRequiredConnectorNamesFromState(expectedConnectorState, cfg.Guardrail.Enabled)
+		requirements.expectedConnectorState = expectedConnectorState
+		requirements.verifyConnectorState = true
+		requirements.requireExactConnectorRoster = cfg.Guardrail.Enabled
 		requirements.verifyConnectorOTLP = true
 	}
 	snap, _, err := waitForStartedDaemon(
@@ -591,16 +640,19 @@ type daemonReadinessRequirements struct {
 	// Ordinary starts retain multi-connector failure isolation; token rotation
 	// must prove that every enabled configured connector converged and that the
 	// gateway accepts each connector's persisted scoped OTLP credential.
-	requiredConnectors  []string
-	verifyConnectorOTLP bool
-	startedNotBefore    time.Time
-	expectedPID         int
-	expectedDataDir     string
-	token               func() string
-	listenerHost        string
-	listenerPort        int
-	listenerOwner       func(string, int) (int, error)
-	requireOwnership    bool
+	requiredConnectors          []string
+	expectedConnectorState      rotationConnectorState
+	verifyConnectorState        bool
+	requireExactConnectorRoster bool
+	verifyConnectorOTLP         bool
+	startedNotBefore            time.Time
+	expectedPID                 int
+	expectedDataDir             string
+	token                       func() string
+	listenerHost                string
+	listenerPort                int
+	listenerOwner               func(string, int) (int, error)
+	requireOwnership            bool
 }
 
 func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {
@@ -916,6 +968,169 @@ func rotationRequiredConnectorNames(cfg *config.Config) []string {
 	return names
 }
 
+func parseRotationConnectorState(raw string) (rotationConnectorState, error) {
+	var state rotationConnectorState
+	if raw == "" {
+		return state, errors.New("connector state is missing")
+	}
+	if len(raw) > rotationConnectorStateMaxLen {
+		return state, fmt.Errorf("connector state exceeds %d bytes", rotationConnectorStateMaxLen)
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&state); err != nil {
+		return rotationConnectorState{}, fmt.Errorf("parse connector state: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return rotationConnectorState{}, errors.New("connector state contains trailing data")
+	}
+	if err := validateRotationConnectorState(state); err != nil {
+		return rotationConnectorState{}, err
+	}
+	return state, nil
+}
+
+func validateRotationConnectorState(state rotationConnectorState) error {
+	if state.Version != 1 {
+		return fmt.Errorf("unsupported connector state version %d", state.Version)
+	}
+	if state.Connectors == nil {
+		return errors.New("connector state roster is missing")
+	}
+	if len(state.Connectors) > 128 {
+		return errors.New("connector state roster is too large")
+	}
+	previous := ""
+	for _, policy := range state.Connectors {
+		name := strings.ToLower(strings.TrimSpace(policy.Name))
+		if name == "" || name != policy.Name || len(name) > 128 || strings.ContainsAny(name, "\x00\r\n\t ") {
+			return errors.New("connector state contains an invalid connector identity")
+		}
+		if previous != "" && name <= previous {
+			return errors.New("connector state roster must be sorted with unique identities")
+		}
+		if policy.Mode != "observe" && policy.Mode != "action" {
+			return fmt.Errorf("connector %s has invalid mode", name)
+		}
+		if policy.HookFailMode != "open" && policy.HookFailMode != "closed" {
+			return fmt.Errorf("connector %s has invalid hook fail mode", name)
+		}
+		previous = name
+	}
+	return nil
+}
+
+func rotationConnectorStateFromConfig(cfg *config.Config) (rotationConnectorState, error) {
+	state := rotationConnectorState{Version: 1, Connectors: []rotationConnectorPolicy{}}
+	if cfg == nil {
+		return state, errors.New("configuration is unavailable")
+	}
+	seen := make(map[string]struct{})
+	for _, raw := range cfg.ActiveConnectors() {
+		name := strings.ToLower(strings.TrimSpace(raw))
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			return state, fmt.Errorf("configured connector roster repeats %s", name)
+		}
+		seen[name] = struct{}{}
+		state.Connectors = append(state.Connectors, rotationConnectorPolicy{
+			Name:         name,
+			Mode:         strings.ToLower(strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(name))),
+			HookFailMode: strings.ToLower(strings.TrimSpace(cfg.EffectiveHookFailModeForConnector(name))),
+			Enabled:      cfg.Guardrail.EffectiveEnabled(name),
+		})
+	}
+	sort.Slice(state.Connectors, func(i, j int) bool {
+		return state.Connectors[i].Name < state.Connectors[j].Name
+	})
+	if err := validateRotationConnectorState(state); err != nil {
+		return rotationConnectorState{}, err
+	}
+	return state, nil
+}
+
+func rotationConnectorStateFromStatus(modes []gatewayConnectorModeSnapshot) (rotationConnectorState, error) {
+	state := rotationConnectorState{Version: 1, Connectors: make([]rotationConnectorPolicy, 0, len(modes))}
+	for _, mode := range modes {
+		state.Connectors = append(state.Connectors, rotationConnectorPolicy{
+			Name:         strings.ToLower(strings.TrimSpace(mode.Connector)),
+			Mode:         strings.ToLower(strings.TrimSpace(mode.GuardrailMode)),
+			HookFailMode: strings.ToLower(strings.TrimSpace(mode.HookFailMode)),
+			Enabled:      mode.Enabled,
+		})
+	}
+	sort.Slice(state.Connectors, func(i, j int) bool {
+		return state.Connectors[i].Name < state.Connectors[j].Name
+	})
+	if err := validateRotationConnectorState(state); err != nil {
+		return rotationConnectorState{}, fmt.Errorf("authenticated runtime connector state is invalid: %w", err)
+	}
+	return state, nil
+}
+
+func compareRotationConnectorStates(expected, actual rotationConnectorState) error {
+	expectedByName := make(map[string]rotationConnectorPolicy, len(expected.Connectors))
+	actualByName := make(map[string]rotationConnectorPolicy, len(actual.Connectors))
+	for _, policy := range expected.Connectors {
+		expectedByName[policy.Name] = policy
+	}
+	for _, policy := range actual.Connectors {
+		actualByName[policy.Name] = policy
+	}
+	for _, policy := range expected.Connectors {
+		observed, ok := actualByName[policy.Name]
+		if !ok {
+			return fmt.Errorf("connector %s is missing", policy.Name)
+		}
+		if observed.Mode != policy.Mode {
+			return fmt.Errorf("connector %s mode changed from %s to %s", policy.Name, policy.Mode, observed.Mode)
+		}
+		if observed.HookFailMode != policy.HookFailMode {
+			return fmt.Errorf("connector %s hook fail mode changed from %s to %s", policy.Name, policy.HookFailMode, observed.HookFailMode)
+		}
+		if observed.Enabled != policy.Enabled {
+			return fmt.Errorf("connector %s enabled state changed", policy.Name)
+		}
+	}
+	for _, policy := range actual.Connectors {
+		if _, ok := expectedByName[policy.Name]; !ok {
+			return fmt.Errorf("unexpected connector %s was added", policy.Name)
+		}
+	}
+	return nil
+}
+
+func verifyRotationConfigState(cfg *config.Config, expected rotationConnectorState) error {
+	actual, err := rotationConnectorStateFromConfig(cfg)
+	if err != nil {
+		return err
+	}
+	return compareRotationConnectorStates(expected, actual)
+}
+
+func verifyRotationRuntimeState(modes []gatewayConnectorModeSnapshot, expected rotationConnectorState) error {
+	actual, err := rotationConnectorStateFromStatus(modes)
+	if err != nil {
+		return err
+	}
+	return compareRotationConnectorStates(expected, actual)
+}
+
+func rotationRequiredConnectorNamesFromState(state rotationConnectorState, guardrailEnabled bool) []string {
+	if !guardrailEnabled {
+		return nil
+	}
+	names := make([]string, 0, len(state.Connectors))
+	for _, policy := range state.Connectors {
+		if policy.Enabled {
+			names = append(names, policy.Name)
+		}
+	}
+	return names
+}
+
 var loadRotationOTLPPathToken = connector.LoadOTLPPathToken
 var loadRotationClaudeNativeOTLPProbes = connector.LoadClaudeCodeNativeOTLPProbes
 
@@ -1101,6 +1316,11 @@ func waitForGatewayReadiness(
 				err = verifyGatewayRuntimeIdentity(status, requirements.expectedPID, requirements.expectedDataDir)
 				snap = status.Health
 			}
+			if err == nil && requirements.verifyConnectorState {
+				if stateErr := verifyRotationRuntimeState(status.ConnectorModes, requirements.expectedConnectorState); stateErr != nil {
+					return snap, false, fmt.Errorf("rotation connector state mismatch: %w", stateErr)
+				}
+			}
 			if err == nil && requirements.requireOwnership {
 				ownerPID, ownerErr := requirements.listenerOwner(requirements.listenerHost, requirements.listenerPort)
 				switch {
@@ -1241,7 +1461,33 @@ func gatewaySnapshotReady(
 			return false, nil
 		}
 	}
-	if len(requirements.requiredConnectors) > 0 {
+	if requirements.requireExactConnectorRoster {
+		readyConnectors := make(map[string]struct{}, len(snap.Connectors))
+		for _, health := range snap.Connectors {
+			name := strings.ToLower(strings.TrimSpace(health.Name))
+			if name != "" {
+				if _, duplicate := readyConnectors[name]; duplicate {
+					return false, fmt.Errorf("rotation connector convergence failed; connector %s appears more than once", name)
+				}
+				readyConnectors[name] = struct{}{}
+			}
+		}
+		expectedConnectors := make(map[string]struct{}, len(requirements.requiredConnectors))
+		for _, name := range requirements.requiredConnectors {
+			expectedConnectors[name] = struct{}{}
+			if _, ok := readyConnectors[name]; !ok {
+				return false, fmt.Errorf(
+					"rotation connector convergence failed; configured connector not ready: %s",
+					name,
+				)
+			}
+		}
+		for name := range readyConnectors {
+			if _, ok := expectedConnectors[name]; !ok {
+				return false, fmt.Errorf("rotation connector convergence failed; unexpected ready connector: %s", name)
+			}
+		}
+	} else if len(requirements.requiredConnectors) > 0 {
 		readyConnectors := make(map[string]struct{}, len(snap.Connectors))
 		for _, health := range snap.Connectors {
 			name := strings.ToLower(strings.TrimSpace(health.Name))

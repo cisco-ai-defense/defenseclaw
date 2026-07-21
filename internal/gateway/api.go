@@ -589,11 +589,15 @@ func (a *APIServer) SetNotifier(n *notifier.Dispatcher) {
 }
 
 func (a *APIServer) connectorName() string {
-	if a.scannerCfg != nil {
-		if c := strings.TrimSpace(a.scannerCfg.Guardrail.Connector); c != "" {
+	return connectorNameForConfig(a.runtimeConfigSnapshot())
+}
+
+func connectorNameForConfig(cfg *config.Config) string {
+	if cfg != nil {
+		if c := strings.TrimSpace(cfg.Guardrail.Connector); c != "" {
 			return strings.ToLower(c)
 		}
-		if c := strings.TrimSpace(string(a.scannerCfg.Claw.Mode)); c != "" {
+		if c := strings.TrimSpace(string(cfg.Claw.Mode)); c != "" {
 			return strings.ToLower(c)
 		}
 	}
@@ -1262,7 +1266,8 @@ func sameRuntimeDataDir(left, right string) bool {
 // connectorModesSummary fans the same shape out across every active
 // connector for the multi-connector status surface.
 func (a *APIServer) connectorModeSummary() map[string]interface{} {
-	if a.scannerCfg != nil && !a.scannerCfg.HasConnectorConfigured() {
+	cfg := a.runtimeConfigSnapshot()
+	if cfg != nil && !cfg.HasConnectorConfigured() {
 		return map[string]interface{}{
 			"connector":           "",
 			"mode":                "unconfigured",
@@ -1272,7 +1277,7 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 			"proxy_intercept":     false,
 		}
 	}
-	return connectorModeForConfig(a.scannerCfg, a.connectorName())
+	return connectorModeForConfig(cfg, connectorNameForConfig(cfg))
 }
 
 // connectorModesSummary returns one connectorModeFor entry per active
@@ -1283,19 +1288,20 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 // identical regardless of count. Falls back to the singular active
 // connector when the config is unavailable.
 func (a *APIServer) connectorModesSummary() []map[string]interface{} {
+	cfg := a.runtimeConfigSnapshot()
 	var names []string
-	if a.scannerCfg != nil {
-		names = a.scannerCfg.ActiveConnectors()
-		if !a.scannerCfg.HasConnectorConfigured() {
+	if cfg != nil {
+		names = cfg.ActiveConnectors()
+		if !cfg.HasConnectorConfigured() {
 			return []map[string]interface{}{}
 		}
 	}
 	if len(names) == 0 {
-		names = []string{a.connectorName()}
+		names = []string{connectorNameForConfig(cfg)}
 	}
 	out := make([]map[string]interface{}, 0, len(names))
 	for _, name := range names {
-		out = append(out, connectorModeForConfig(a.scannerCfg, strings.ToLower(strings.TrimSpace(name))))
+		out = append(out, connectorModeForConfig(cfg, strings.ToLower(strings.TrimSpace(name))))
 	}
 	return out
 }
@@ -1361,13 +1367,19 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 
 func connectorModeForConfig(cfg *config.Config, name string) map[string]interface{} {
 	guardrailMode := "observe"
+	hookFailMode := "closed"
+	enabled := false
 	if cfg != nil {
 		guardrailMode = cfg.EffectiveGuardrailModeForConnector(name)
+		hookFailMode = cfg.EffectiveHookFailModeForConnector(name)
+		enabled = cfg.Guardrail.EffectiveEnabled(name)
 	}
 	out := connectorModeFor(name, guardrailMode)
 	if guardrailMode != "" {
 		out["guardrail_mode"] = guardrailMode
 	}
+	out["hook_fail_mode"] = hookFailMode
+	out["enabled"] = enabled
 	proxyIntercept, _ := out["proxy_intercept"].(bool)
 	out["hook_enforcement"] = !proxyIntercept && strings.EqualFold(guardrailMode, "action")
 	return out

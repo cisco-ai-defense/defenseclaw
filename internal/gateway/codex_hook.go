@@ -318,7 +318,8 @@ func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, 
 // explicit codex.enabled flag still wins for operators running codex
 // alongside a different selected connector.
 func (a *APIServer) codexEnabled() bool {
-	if a.scannerCfg == nil {
+	cfg := a.runtimeConfigSnapshot()
+	if cfg == nil {
 		return false
 	}
 	// Per-connector explicit disable wins over every enable signal below:
@@ -330,30 +331,30 @@ func (a *APIServer) codexEnabled() bool {
 	// still calls in. EffectiveEnabled defaults to true, so this is a
 	// no-op for single-connector installs and any connector never
 	// explicitly disabled.
-	if a.scannerCfg.ManualConnectorConfigured("codex") && !a.scannerCfg.Guardrail.EffectiveEnabled("codex") {
+	if cfg.ManualConnectorConfigured("codex") && !cfg.Guardrail.EffectiveEnabled("codex") {
 		return false
 	}
-	if a.scannerCfg.ConnectorHookConfig("codex").Enabled {
+	if cfg.ConnectorHookConfig("codex").Enabled {
 		return true
 	}
-	if a.health != nil && a.health.HasConnectorSource("codex", "automatic") && a.scannerCfg.ApplicationProtection.EffectiveEnabled("codex") {
+	if a.health != nil && a.health.HasConnectorSource("codex", "automatic") && cfg.ApplicationProtection.EffectiveEnabled("codex") {
 		return true
 	}
 	// Multi-connector: membership in guardrail.connectors opts codex in
 	// even when it is not the singular primary (no-op for single).
-	if a.scannerCfg.Guardrail.HasConnector("codex") {
+	if cfg.Guardrail.HasConnector("codex") {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(a.scannerCfg.Guardrail.Connector), "codex")
+	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "codex")
 }
 
 func (a *APIServer) codexMode() string {
 	mode := "observe"
-	if a.scannerCfg != nil {
-		mode = strings.TrimSpace(a.scannerCfg.ConnectorHookConfig("codex").Mode)
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+		mode = strings.TrimSpace(cfg.ConnectorHookConfig("codex").Mode)
 		if mode == "" || mode == "inherit" {
 			// Per-connector guardrail override wins over global mode.
-			mode = strings.TrimSpace(a.scannerCfg.EffectiveGuardrailModeForConnector("codex"))
+			mode = strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector("codex"))
 		}
 	}
 	return normalizeAgentHookMode(mode)

@@ -287,12 +287,20 @@ def test_packaged_rotation_probes_only_the_owned_configured_gateway_without_secr
     owned_process = _function("Assert-OwnedManagedProcess")
     stale_identity = _function("Assert-StaleGatewayProcessIdentityRejected")
     port = _function("Get-PackagedGatewayApiPort")
+    posture = _function("Get-PackagedRotationConnectorPosture")
+    posture_assertion = _function("Assert-PackagedRotationActionClosedPosture")
 
     assert "[switch]$SuppressOutput" in process
     assert "if ($combined -and -not $SuppressOutput)" in process
     assert "[credential-bearing process output intentionally suppressed]" in process
     assert 'if ($SuppressOutput) { throw "$FilePath $reason" }' in process
-    assert rotation.count("-SuppressOutput") == 4
+    assert rotation.count("-SuppressOutput") == 5
+    assert "'setup', 'codex', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'" in rotation
+    assert "'setup', 'claude-code', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'" in rotation
+    assert "Get-PackagedRotationConnectorPosture $statusBefore" in rotation
+    assert "Get-PackagedRotationConnectorPosture $status" in rotation
+    assert "$postureAfterJson -cne $postureBeforeJson" in rotation
+    assert "changed the exact connector roster or effective mode/fail-mode posture" in rotation
     assert "Get-WindowsNativeGatewayTokenFromDotenvState $tokenAState" in rotation
     assert "Get-WindowsNativeGatewayTokenFromDotenvState $tokenBState" in rotation
     assert "[string]::Equals($tokenA, $tokenB" in rotation
@@ -313,6 +321,16 @@ def test_packaged_rotation_probes_only_the_owned_configured_gateway_without_secr
     assert "Assert-OwnedManagedProcess $stale $GatewayPath" in stale_identity
     assert "accepted a stale or reused gateway process identity" in stale_identity
     assert "Assert-StaleGatewayProcessIdentityRejected" in rotation
+    for field in (
+        "fail_effective",
+        "fail_configured",
+        "fail_desired",
+        "fail_runtime",
+        "fail_current",
+        "fail_drift",
+    ):
+        assert field in posture
+        assert field in posture_assertion
     assert "[Net.IPAddress]::IsLoopback($address)" in listener
     assert authentication.index("Assert-ClaudeNativeOtlpProbeAuthority") < authentication.index(
         "[Net.Http.HttpClientHandler]::new()"

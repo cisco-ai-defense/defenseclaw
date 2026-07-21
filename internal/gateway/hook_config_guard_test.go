@@ -7,18 +7,59 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 const guardTestDebounce = 40 * time.Millisecond
+
+type runtimePolicyCaptureConnector struct {
+	stubConnector
+	configPath   string
+	mu           sync.Mutex
+	setupCalls   int
+	lastOpts     connector.SetupOpts
+	setupStarted chan struct{}
+	releaseSetup <-chan struct{}
+}
+
+func (c *runtimePolicyCaptureConnector) Setup(_ context.Context, opts connector.SetupOpts) error {
+	c.mu.Lock()
+	c.setupCalls++
+	c.lastOpts = opts
+	started := c.setupStarted
+	release := c.releaseSetup
+	c.mu.Unlock()
+	if started != nil {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+	}
+	if release != nil {
+		<-release
+	}
+	payload := fmt.Sprintf("{\"command\":\"managed-hook --fail-mode %s\"}\n", opts.HookFailMode)
+	return os.WriteFile(c.configPath, []byte(payload), 0o600)
+}
+
+func (c *runtimePolicyCaptureConnector) HookCapabilities(connector.SetupOpts) connector.HookCapability {
+	return connector.HookCapability{ConfigPath: c.configPath}
+}
+
+func (*runtimePolicyCaptureConnector) HookConfigReferenceNeedles(opts connector.SetupOpts) []string {
+	return []string{fmt.Sprintf("managed-hook --fail-mode %s", opts.HookFailMode)}
+}
 
 // installedCursorConnector wires the cursor connector to a temp config path,
 // runs its initial Setup, and returns the connector, opts, and resolved config
@@ -115,6 +156,128 @@ func TestHookConfigGuard_RecreatesDeletedFile(t *testing.T) {
 	waitForPresence(t, conn, opts, true, 3*time.Second)
 	if _, err := os.Stat(cfgPath); err != nil {
 		t.Fatalf("config file not recreated: %v", err)
+	}
+}
+
+func TestHookConfigGuardRepairUsesCurrentRuntimePolicy(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "hooks.json")
+	conn := &runtimePolicyCaptureConnector{
+		stubConnector: stubConnector{name: "policy-capture"},
+		configPath:    configPath,
+	}
+	cached := connector.SetupOpts{
+		DataDir:      root,
+		HookFailMode: "open",
+	}
+	if err := conn.Setup(context.Background(), cached); err != nil {
+		t.Fatalf("initial Setup: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard := NewHookConfigGuard(nil, nil, time.Hour)
+	if !guard.Start(ctx, conn, cached) {
+		t.Fatal("hook registration guard did not start")
+	}
+	defer guard.Stop()
+
+	if err := os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("remove managed registration: %v", err)
+	}
+	sidecar := &Sidecar{}
+	sidecar.bindHookRuntimePolicyResolver(guard)
+	conn.mu.Lock()
+	before := conn.setupCalls
+	conn.mu.Unlock()
+	if err := guard.EnsurePresent(ctx, conn.Name(), root, "test missing policy"); err == nil ||
+		!strings.Contains(err.Error(), "authoritative hook runtime policy is unavailable") {
+		t.Fatalf("missing runtime policy error = %v", err)
+	}
+	conn.mu.Lock()
+	if conn.setupCalls != before {
+		conn.mu.Unlock()
+		t.Fatal("guard repaired with cached policy after current policy became unavailable")
+	}
+	conn.mu.Unlock()
+
+	live := config.DefaultConfig()
+	live.DataDir = root
+	live.Guardrail.Mode = "action"
+	live.Guardrail.HookFailMode = "closed"
+	live.Guardrail.HILT.Enabled = true
+	sidecar.publishConfig(live)
+	if err := guard.EnsurePresent(ctx, conn.Name(), root, "test current policy"); err != nil {
+		t.Fatalf("repair with current runtime policy: %v", err)
+	}
+	conn.mu.Lock()
+	last := conn.lastOpts
+	conn.mu.Unlock()
+	if last.HookFailMode != "closed" || !last.HILTEnabled {
+		t.Fatalf("repair posture = fail:%q hilt:%t, want closed/true", last.HookFailMode, last.HILTEnabled)
+	}
+
+	stale := cloneConfig(live)
+	stale.Guardrail.Mode = "observe"
+	stale.Guardrail.HookFailMode = "open"
+	stale.Guardrail.HILT.Enabled = false
+	sidecar.publishConfig(stale)
+	guard.mu.Lock()
+	guard.suppressUntil = time.Time{}
+	guard.mu.Unlock()
+	if err := os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("remove managed registration before concurrent reload: %v", err)
+	}
+	setupStarted := make(chan struct{}, 1)
+	releaseSetup := make(chan struct{})
+	conn.mu.Lock()
+	conn.setupStarted = setupStarted
+	conn.releaseSetup = releaseSetup
+	conn.mu.Unlock()
+	repairDone := make(chan error, 1)
+	go func() {
+		repairDone <- guard.EnsurePresent(ctx, conn.Name(), root, "test concurrent reload")
+	}()
+	select {
+	case <-setupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("stale-policy repair did not enter Setup")
+	}
+	publishStarted := make(chan struct{})
+	publishDone := make(chan struct{})
+	go func() {
+		close(publishStarted)
+		sidecar.publishConfig(live)
+		close(publishDone)
+	}()
+	<-publishStarted
+	select {
+	case <-publishDone:
+		t.Fatal("new runtime policy published before the old-policy repair lease completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseSetup)
+	if err := <-repairDone; err != nil {
+		t.Fatalf("stale-policy repair: %v", err)
+	}
+	select {
+	case <-publishDone:
+	case <-time.After(time.Second):
+		t.Fatal("new runtime policy did not publish after the repair lease completed")
+	}
+	guard.mu.Lock()
+	guard.suppressUntil = time.Time{}
+	guard.mu.Unlock()
+	if err := guard.EnsurePresent(ctx, conn.Name(), root, "test after concurrent reload"); err != nil {
+		t.Fatalf("current-policy repair after publication: %v", err)
+	}
+	conn.mu.Lock()
+	conn.setupStarted = nil
+	conn.releaseSetup = nil
+	last = conn.lastOpts
+	conn.mu.Unlock()
+	if last.HookFailMode != "closed" || !last.HILTEnabled {
+		t.Fatalf("post-publication registration = fail:%q hilt:%t, want closed/true", last.HookFailMode, last.HILTEnabled)
 	}
 }
 

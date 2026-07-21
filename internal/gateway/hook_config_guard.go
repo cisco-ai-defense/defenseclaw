@@ -56,6 +56,13 @@ const (
 
 var newHookConfigFSWatcher = fsnotify.NewWatcher
 
+type hookRuntimePolicy struct {
+	hookFailMode string
+	hiltEnabled  bool
+}
+
+type hookRuntimePolicyResolver func(connectorName string) (hookRuntimePolicy, func(), bool)
+
 // HookConfigGuard watches the active connector's agent config file(s) and
 // auto-heals (re-installs) the DefenseClaw hook block when a user deletes or
 // strips it while the gateway is running. Without it, enforcement silently
@@ -87,18 +94,19 @@ type HookConfigGuard struct {
 	onHealed      func(connectorName string, paths []string)
 	onDeactivated func(*HookConfigGuard)
 
-	mu            sync.Mutex
-	started       bool
-	retiring      bool
-	ctx           context.Context
-	cancel        context.CancelFunc
-	fsw           *fsnotify.Watcher
-	conn          connector.Connector
-	opts          connector.SetupOpts
-	targets       map[string]struct{} // cleaned absolute config file paths
-	watchedDirs   map[string]struct{} // cleaned absolute parent dirs added to fsw
-	pending       map[string]time.Time
-	suppressUntil time.Time
+	mu             sync.Mutex
+	started        bool
+	retiring       bool
+	ctx            context.Context
+	cancel         context.CancelFunc
+	fsw            *fsnotify.Watcher
+	conn           connector.Connector
+	opts           connector.SetupOpts
+	policyResolver hookRuntimePolicyResolver
+	targets        map[string]struct{} // cleaned absolute config file paths
+	watchedDirs    map[string]struct{} // cleaned absolute parent dirs added to fsw
+	pending        map[string]time.Time
+	suppressUntil  time.Time
 	// lastPolicyFailure suppresses an identical permanent policy diagnostic on
 	// every audit tick while still reporting a changed failure immediately.
 	lastPolicyFailure string
@@ -135,6 +143,20 @@ func (g *HookConfigGuard) SetHealNotifier(fn func(connectorName string, paths []
 	}
 	g.mu.Lock()
 	g.onHealed = fn
+	g.mu.Unlock()
+}
+
+// SetRuntimePolicyResolver binds repairs to the Sidecar's current immutable
+// config snapshot. SetupOpts also carry stable identity, path, and credential
+// inputs, but fail mode and HILT posture may change while a guard remains
+// alive. Resolving those fields immediately before verification prevents a
+// stale guard from republishing an older registration policy.
+func (g *HookConfigGuard) SetRuntimePolicyResolver(fn hookRuntimePolicyResolver) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	g.policyResolver = fn
 	g.mu.Unlock()
 }
 
@@ -573,6 +595,7 @@ func (g *HookConfigGuard) repairCurrent(
 	suppressed := time.Now().Before(g.suppressUntil)
 	conn := g.conn
 	opts := g.opts
+	policyResolver := g.policyResolver
 	baseCtx := g.ctx
 	g.mu.Unlock()
 
@@ -584,6 +607,23 @@ func (g *HookConfigGuard) repairCurrent(
 	}
 	if dataDir != "" && !sameHookGuardDataDir(opts.DataDir, dataDir) {
 		return errors.New("hook registration guard owns a different data home")
+	}
+	var releasePolicy func()
+	if policyResolver != nil {
+		policy, release, ok := policyResolver(conn.Name())
+		if !ok {
+			return errors.New("authoritative hook runtime policy is unavailable")
+		}
+		releasePolicy = release
+		if release != nil {
+			defer release()
+		}
+		policy.hookFailMode = strings.ToLower(strings.TrimSpace(policy.hookFailMode))
+		if policy.hookFailMode != "open" && policy.hookFailMode != "closed" {
+			return errors.New("authoritative hook runtime fail mode is invalid")
+		}
+		opts.HookFailMode = policy.hookFailMode
+		opts.HILTEnabled = policy.hiltEnabled
 	}
 	if connector.ConnectorExplicitlyInactive(opts.DataDir, conn.Name()) {
 		return fmt.Errorf("connector %s is explicitly inactive", conn.Name())
@@ -599,6 +639,9 @@ func (g *HookConfigGuard) repairCurrent(
 
 	present, err := connector.OwnedHooksPresent(conn, opts)
 	if err != nil {
+		if releasePolicy != nil {
+			releasePolicy()
+		}
 		g.reportPolicyFailure(conn, err)
 		return err
 	}
@@ -608,6 +651,9 @@ func (g *HookConfigGuard) repairCurrent(
 		version.Current().BinaryVersion,
 	)
 	if err != nil {
+		if releasePolicy != nil {
+			releasePolicy()
+		}
 		g.reportPolicyFailure(conn, err)
 		return err
 	}
@@ -624,7 +670,7 @@ func (g *HookConfigGuard) repairCurrent(
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
-	return g.healLocked(baseCtx, conn, opts, changed)
+	return g.healLocked(baseCtx, conn, opts, changed, releasePolicy)
 }
 
 // processPending evaluates debounced events: if any guarded config file no
@@ -725,24 +771,32 @@ func (g *HookConfigGuard) clearPolicyFailure() {
 // healLocked re-runs the connector Setup to re-install the hook block, emits
 // audit + telemetry, and suppresses the resulting self-write. Caller holds
 // repairMu and has rechecked ownership, suppression, and explicit inactivity.
-func (g *HookConfigGuard) healLocked(baseCtx context.Context, conn connector.Connector, opts connector.SetupOpts, changed []string) error {
+func (g *HookConfigGuard) healLocked(
+	baseCtx context.Context,
+	conn connector.Connector,
+	opts connector.SetupOpts,
+	changed []string,
+	releasePolicy func(),
+) error {
 	connName := conn.Name()
 	detail := strings.Join(changed, ", ")
+	recordTampered := func() {
+		if g.logger != nil {
+			// Connector is the multi-connector dimension we add; severity is left
+			// at the logger's default (empty -> INFO) — the original severity of
+			// these rows is not ours to redesign.
+			_ = g.logger.LogActionSeverityConnector(string(audit.ActionConnectorHookTampered), connName,
+				fmt.Sprintf("hook config missing owned entries: %s", detail), "", connName)
+		}
+		emitLifecycle(baseCtx, "hook_guard", "tampered", map[string]string{
+			"connector": connName,
+			"paths":     detail,
+		})
+	}
 
 	g.mu.Lock()
 	g.suppressUntil = time.Now().Add(hookGuardHealSuppressWindow)
 	g.mu.Unlock()
-	if g.logger != nil {
-		// Connector is the multi-connector dimension we add; severity is left
-		// at the logger's default (empty -> INFO) — the original severity of
-		// these rows is not ours to redesign.
-		_ = g.logger.LogActionSeverityConnector(string(audit.ActionConnectorHookTampered), connName,
-			fmt.Sprintf("hook config missing owned entries: %s", detail), "", connName)
-	}
-	emitLifecycle(baseCtx, "hook_guard", "tampered", map[string]string{
-		"connector": connName,
-		"paths":     detail,
-	})
 
 	// Once Setup starts, let its multi-file lifecycle transaction reach an
 	// atomic terminal state even if the HTTP client disconnects. The hard
@@ -760,6 +814,10 @@ func (g *HookConfigGuard) healLocked(baseCtx context.Context, conn connector.Con
 	g.mu.Unlock()
 
 	if setupErr != nil {
+		if releasePolicy != nil {
+			releasePolicy()
+		}
+		recordTampered()
 		err := setupErr
 		fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks failed: %v\n", connName, err)
 		emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
@@ -774,6 +832,10 @@ func (g *HookConfigGuard) healLocked(baseCtx context.Context, conn connector.Con
 
 	present, err := connector.OwnedHooksPresent(conn, opts)
 	if err != nil || !present {
+		if releasePolicy != nil {
+			releasePolicy()
+		}
+		recordTampered()
 		if err == nil {
 			err = fmt.Errorf("effective hook contract is still inactive")
 		}
@@ -788,6 +850,10 @@ func (g *HookConfigGuard) healLocked(baseCtx context.Context, conn connector.Con
 	}
 	if connector.RequiresHookRuntimeRegistrationEvidence(conn) {
 		if err := publishFreshHookRegistrationEvidence(opts, conn); err != nil {
+			if releasePolicy != nil {
+				releasePolicy()
+			}
+			recordTampered()
 			fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks did not publish current registration evidence: %v\n", connName, err)
 			emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
 				fmt.Sprintf("re-installed %s hook config but registration evidence is unavailable", connName), err)
@@ -798,6 +864,10 @@ func (g *HookConfigGuard) healLocked(baseCtx context.Context, conn connector.Con
 			return err
 		}
 	}
+	if releasePolicy != nil {
+		releasePolicy()
+	}
+	recordTampered()
 
 	fmt.Fprintf(os.Stderr, "[hook-guard] re-installed %s hook config after manual removal (%s)\n", connName, detail)
 	recordWatcherEventV8(baseCtx, g.observabilityV8Runtime(), "hook-heal", connName, connName)

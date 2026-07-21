@@ -4481,6 +4481,43 @@ function Assert-ClaudeNativeOtlpRotationAuthentication(
     }
 }
 
+function Get-PackagedRotationConnectorPosture([object]$Status) {
+    $rows = @($Status.connectors | Sort-Object { [string]$_.name })
+    if ($rows.Count -ne 2 -or (@($rows | ForEach-Object { [string]$_.name }) -join ',') -cne 'claudecode,codex') {
+        throw 'packaged token rotation posture did not contain the exact enabled manual dual-connector roster'
+    }
+    return @($rows | ForEach-Object {
+        $failMode = $_.fail_mode
+        [ordered]@{
+            name = [string]$_.name
+            mode = [string]$_.mode
+            enabled = [bool]$_.enabled
+            source = [string]$_.source
+            fail_effective = [string]$failMode.effective
+            fail_configured = [string]$failMode.configured
+            fail_desired = [string]$failMode.desired
+            fail_runtime = [string]$failMode.runtime
+            fail_current = [bool]$failMode.current
+            fail_drift = @($failMode.drift | ForEach-Object { [string]$_ })
+        }
+    })
+}
+
+function Assert-PackagedRotationActionClosedPosture([object[]]$Posture) {
+    foreach ($row in $Posture) {
+        if ([string]$row.mode -cne 'action' -or -not [bool]$row.enabled -or
+            [string]$row.source -cne 'manual' -or
+            [string]$row.fail_effective -cne 'closed' -or
+            [string]$row.fail_configured -cne 'closed' -or
+            [string]$row.fail_desired -cne 'closed' -or
+            [string]$row.fail_runtime -cne 'closed' -or
+            -not [bool]$row.fail_current -or
+            @($row.fail_drift).Count -ne 0) {
+            throw "packaged token rotation connector '$([string]$row.name)' is not exact action/closed without drift"
+        }
+    }
+}
+
 function Assert-PackagedClaudeTokenRotation(
     [string]$Launcher,
     [string]$Python,
@@ -4495,14 +4532,15 @@ function Assert-PackagedClaudeTokenRotation(
     $credentialLogPaths = @(
         (Join-Path $Logs 'rotation-setup-codex.log'),
         (Join-Path $Logs 'rotation-setup-claudecode.log'),
+        (Join-Path $Logs 'rotation-status-before.json'),
         (Join-Path $Logs 'rotation-success.log'),
         (Join-Path $Logs 'rotation-status.json')
     )
     $setupCodexResult = Invoke-WindowsNativeProcess $Launcher @(
-        'setup', 'codex', '--yes', '--mode', 'observe', '--restart'
+        'setup', 'codex', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'
     ) -TimeoutSeconds 300 -LogPath $credentialLogPaths[0] -SuppressOutput
     $setupClaudeResult = Invoke-WindowsNativeProcess $Launcher @(
-        'setup', 'claude-code', '--yes', '--mode', 'observe', '--restart'
+        'setup', 'claude-code', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'
     ) -TimeoutSeconds 300 -LogPath $credentialLogPaths[1] -SuppressOutput
 
     foreach ($requiredConfig in @(
@@ -4519,6 +4557,14 @@ function Assert-PackagedClaudeTokenRotation(
         }
     }
 
+    $statusBeforeResult = Invoke-WindowsNativeProcess $Launcher @('status', '--json') `
+        -TimeoutSeconds 120 -LogPath $credentialLogPaths[2] -SuppressOutput
+    try { $statusBefore = $statusBeforeResult.StdOut | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw 'packaged pre-rotation status was not valid JSON' }
+    $postureBefore = @(Get-PackagedRotationConnectorPosture $statusBefore)
+    Assert-PackagedRotationActionClosedPosture $postureBefore
+    $postureBeforeJson = $postureBefore | ConvertTo-Json -Compress -Depth 8
+
     $dotenvPath = Join-Path ([IO.Path]::GetFullPath($DataRoot)) '.env'
     if (-not (Test-Path -LiteralPath $dotenvPath -PathType Leaf)) {
         throw 'packaged dual-connector setup did not persist the gateway dotenv'
@@ -4526,7 +4572,7 @@ function Assert-PackagedClaudeTokenRotation(
     $tokenAState = [IO.File]::ReadAllBytes($dotenvPath)
     $tokenA = Get-WindowsNativeGatewayTokenFromDotenvState $tokenAState
     $rotateResult = Invoke-WindowsNativeProcess $Launcher @('setup', 'rotate-token', '--yes') `
-        -TimeoutSeconds 300 -LogPath $credentialLogPaths[2] -SuppressOutput
+        -TimeoutSeconds 300 -LogPath $credentialLogPaths[3] -SuppressOutput
     $tokenBState = [IO.File]::ReadAllBytes($dotenvPath)
     if (Test-WindowsNativeByteArraysEqual $tokenAState $tokenBState) {
         throw 'packaged token rotation did not replace the durable gateway token state'
@@ -4537,14 +4583,16 @@ function Assert-PackagedClaudeTokenRotation(
     }
 
     $statusResult = Invoke-WindowsNativeProcess $Launcher @('status', '--json') `
-        -TimeoutSeconds 120 -LogPath $credentialLogPaths[3] -SuppressOutput
+        -TimeoutSeconds 120 -LogPath $credentialLogPaths[4] -SuppressOutput
     try { $status = $statusResult.StdOut | ConvertFrom-Json -ErrorAction Stop }
     catch { throw 'packaged token rotation status was not valid JSON' }
-    $connectors = @($status.connectors)
-    $activeNames = @($connectors | Where-Object { [bool]$_.enabled } |
-        ForEach-Object { [string]$_.name } | Sort-Object -Unique)
-    if (-not [bool]$status.sidecar.running -or $connectors.Count -ne 2 -or
-        ($activeNames -join ',') -cne 'claudecode,codex') {
+    $postureAfter = @(Get-PackagedRotationConnectorPosture $status)
+    Assert-PackagedRotationActionClosedPosture $postureAfter
+    $postureAfterJson = $postureAfter | ConvertTo-Json -Compress -Depth 8
+    if ($postureAfterJson -cne $postureBeforeJson) {
+        throw 'packaged token rotation changed the exact connector roster or effective mode/fail-mode posture'
+    }
+    if (-not [bool]$status.sidecar.running) {
         throw 'packaged token rotation did not preserve the ready dual-connector roster'
     }
     $gatewayPort = Get-PackagedGatewayApiPort $Python $DataRoot
@@ -4571,7 +4619,7 @@ function Assert-PackagedClaudeTokenRotation(
         throw 'packaged Claude logs and metrics did not persist the same scoped credential'
     }
     Assert-WindowsNativeCredentialValuesAbsent `
-        @($setupCodexResult, $setupClaudeResult, $rotateResult, $statusResult) `
+        @($setupCodexResult, $setupClaudeResult, $statusBeforeResult, $rotateResult, $statusResult) `
         $credentialLogPaths @($credentialValues)
     Assert-ClaudeNativeOtlpForeignPortRejected $probes $gatewayPort
     Assert-ClaudeNativeOtlpRotationAuthentication `

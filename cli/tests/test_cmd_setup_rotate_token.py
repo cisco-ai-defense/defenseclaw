@@ -12,6 +12,7 @@ Locks the contract that:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -24,6 +25,7 @@ from click.testing import CliRunner
 from defenseclaw.audit_actions import ACTION_SETUP_GATEWAY
 from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import _rotate_token_atomic_write
+from defenseclaw.config import CONFIG_PATH_ENV
 from defenseclaw.context import AppContext
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
@@ -176,6 +178,43 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             else:
                 os.environ[name] = value
 
+    def test_connector_state_serializes_exact_dual_and_mixed_postures(self) -> None:
+        cases = {
+            "dual": {
+                "claudecode": ("action", "closed", True),
+                "codex": ("action", "closed", True),
+            },
+            "mixed": {
+                "claudecode": ("observe", "open", True),
+                "codex": ("action", "closed", True),
+            },
+        }
+        for name, policies in cases.items():
+            with self.subTest(name=name):
+                guardrail = SimpleNamespace(
+                    effective_mode=lambda connector: policies[connector][0],
+                    effective_hook_fail_mode=lambda connector: policies[connector][1],
+                    effective_enabled=lambda connector: policies[connector][2],
+                )
+                cfg = SimpleNamespace(
+                    guardrail=guardrail,
+                    active_connectors=lambda: ["codex", "claude-code"],
+                )
+                payload = json.loads(cmd_setup._rotate_token_connector_state(cfg))
+                self.assertEqual(payload["version"], 1)
+                self.assertEqual(
+                    payload["connectors"],
+                    [
+                        {
+                            "name": connector,
+                            "mode": policy[0],
+                            "hook_fail_mode": policy[1],
+                            "enabled": policy[2],
+                        }
+                        for connector, policy in sorted(policies.items())
+                    ],
+                )
+
     def test_transaction_stops_a_commits_b_then_starts_b(self) -> None:
         from tempfile import TemporaryDirectory
 
@@ -186,8 +225,17 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
                 fh.write(b"KEEP=exact\r\nDEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\r\n")
             events: list[tuple[str, str, bytes]] = []
 
-            def lifecycle(_data_dir: str, action: str, *, token: str, cleanup: bool = False) -> None:
+            def lifecycle(
+                _data_dir: str,
+                action: str,
+                *,
+                token: str,
+                config_file: str,
+                connector_state: str | None = None,
+                cleanup: bool = False,
+            ) -> None:
                 self.assertFalse(cleanup)
+                self.assertEqual(config_file, os.path.abspath(os.path.join(td, "config.yaml")))
                 with open(dotenv, "rb") as fh:
                     events.append((action, token, fh.read()))
 
@@ -217,7 +265,15 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
                 fh.write(original)
             events: list[tuple[str, bool, str]] = []
 
-            def lifecycle(_data_dir: str, action: str, *, token: str, cleanup: bool = False) -> None:
+            def lifecycle(
+                _data_dir: str,
+                action: str,
+                *,
+                token: str,
+                config_file: str,
+                connector_state: str | None = None,
+                cleanup: bool = False,
+            ) -> None:
                 events.append((action, cleanup, token))
                 if len(events) == 1:
                     raise click.ClickException("fixture stop timeout")
@@ -244,7 +300,15 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             events: list[str] = []
             app.logger.log_action.side_effect = lambda *_args: events.append("audit")
 
-            def record_lifecycle(_data_dir: str, action: str, *, token: str, cleanup: bool = False) -> None:
+            def record_lifecycle(
+                _data_dir: str,
+                action: str,
+                *,
+                token: str,
+                config_file: str,
+                connector_state: str | None = None,
+                cleanup: bool = False,
+            ) -> None:
                 self.assertFalse(cleanup)
                 if action == "start":
                     self.assertEqual(token, "a" * 64)
@@ -283,7 +347,15 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
                 fh.write(original)
             events: list[tuple[str, bool, str, bytes]] = []
 
-            def lifecycle(_data_dir: str, action: str, *, token: str, cleanup: bool = False) -> None:
+            def lifecycle(
+                _data_dir: str,
+                action: str,
+                *,
+                token: str,
+                config_file: str,
+                connector_state: str | None = None,
+                cleanup: bool = False,
+            ) -> None:
                 with open(dotenv, "rb") as fh:
                     events.append((action, cleanup, token, fh.read()))
 
@@ -426,7 +498,15 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             app = _make_rotate_ctx(td, ["codex"])
             events: list[tuple[str, bool]] = []
 
-            def lifecycle(_data_dir: str, action: str, *, token: str, cleanup: bool = False) -> None:
+            def lifecycle(
+                _data_dir: str,
+                action: str,
+                *,
+                token: str,
+                config_file: str,
+                connector_state: str | None = None,
+                cleanup: bool = False,
+            ) -> None:
                 events.append((action, cleanup))
                 if events == [("stop", False), ("start", False)]:
                     raise click.ClickException("fixture start failure")
@@ -455,10 +535,25 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             mock.patch.object(cmd_setup.subprocess, "run", side_effect=timeout) as run,
         ):
             with self.assertRaises(click.ClickException) as raised:
-                cmd_setup._run_rotate_token_lifecycle("D:\\fixture-data", "start", token="explicit-a-value")
+                cmd_setup._run_rotate_token_lifecycle(
+                    "D:\\fixture-data",
+                    "start",
+                    token="explicit-a-value",
+                    config_file="D:\\fixture-data\\config.yaml",
+                    connector_state='{"connectors":[],"version":1}',
+                )
 
         argv = run.call_args.args[0]
-        self.assertEqual(argv, ["gateway-fixture", "start", "--rotation-transaction"])
+        self.assertEqual(
+            argv,
+            [
+                "gateway-fixture",
+                "start",
+                "--rotation-transaction",
+                "--rotation-connector-state",
+                '{"connectors":[],"version":1}',
+            ],
+        )
         self.assertNotIn(secret, " ".join(argv))
         self.assertNotIn(secret, str(raised.exception))
         self.assertIs(run.call_args.kwargs["shell"], False)
@@ -476,6 +571,7 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
                 "D:\\fixture-data",
                 "stop",
                 token="explicit-b-value",
+                config_file="D:\\fixture-data\\config.yaml",
                 cleanup=True,
             )
         self.assertEqual(
@@ -485,6 +581,7 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
 
     def test_lifecycle_child_environment_is_bounded_and_uses_explicit_transaction_inputs(self) -> None:
         data_dir = "D:\\fixture-data"
+        config_file = "D:\\authoritative-config\\config.yaml"
         explicit_token = "explicit-a-value"
         ambient = {
             "PATH": "D:\\fixture-bin",
@@ -506,7 +603,12 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             mock.patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value="gateway-fixture"),
             mock.patch.object(cmd_setup.subprocess, "run", return_value=completed) as run,
         ):
-            cmd_setup._run_rotate_token_lifecycle(data_dir, "stop", token=explicit_token)
+            cmd_setup._run_rotate_token_lifecycle(
+                data_dir,
+                "stop",
+                token=explicit_token,
+                config_file=config_file,
+            )
 
         argv = run.call_args.args[0]
         child_env = run.call_args.kwargs["env"]
@@ -518,6 +620,7 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
         self.assertEqual(child_env["CLAUDE_CONFIG_DIR"], ambient["CLAUDE_CONFIG_DIR"])
         self.assertEqual(child_env[cmd_setup._DEFENSECLAW_HOME_ENV], os.path.abspath(data_dir))
         self.assertEqual(child_env[cmd_setup._DEFENSECLAW_DATA_DIR_ENV], os.path.abspath(data_dir))
+        self.assertEqual(child_env[CONFIG_PATH_ENV], os.path.abspath(config_file))
         self.assertEqual(child_env[cmd_setup._GATEWAY_TOKEN_ENV], explicit_token)
         self.assertNotIn("UNRELATED_SENTINEL", child_env)
         self.assertNotIn("UNRELATED_SECRET", child_env)
@@ -531,6 +634,7 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
                 "USERPROFILE",
                 "CODEX_HOME",
                 "CLAUDE_CONFIG_DIR",
+                CONFIG_PATH_ENV,
                 cmd_setup._DEFENSECLAW_HOME_ENV,
                 cmd_setup._DEFENSECLAW_DATA_DIR_ENV,
                 cmd_setup._GATEWAY_TOKEN_ENV,
@@ -546,26 +650,48 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             original = b"KEEP=unchanged\nDEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\n"
             with open(dotenv, "wb") as fh:
                 fh.write(original)
-            connector_state = os.path.join(td, "connector-token-state")
+            connector_token_state = os.path.join(td, "connector-token-state")
 
             def connector_bytes(token: str) -> bytes:
                 return b"connector-token=" + token.encode("ascii") + b"\r\n"
 
             original_connector = connector_bytes("a" * 64)
-            with open(connector_state, "wb") as fh:
+            with open(connector_token_state, "wb") as fh:
                 fh.write(original_connector)
+            config_file = os.path.join(td, "config.yaml")
+            original_config = b"guardrail:\n  mode: action\n"
+            with open(config_file, "wb") as fh:
+                fh.write(original_config)
             events: list[tuple[str, bool, str, bytes, bytes]] = []
+            start_connector_states: list[str] = []
 
-            def lifecycle(_data_dir: str, action: str, *, token: str, cleanup: bool = False) -> None:
+            def lifecycle(
+                _data_dir: str,
+                action: str,
+                *,
+                token: str,
+                config_file: str,
+                connector_state: str | None = None,
+                cleanup: bool = False,
+            ) -> None:
+                self.assertEqual(config_file, os.path.abspath(os.path.join(td, "config.yaml")))
                 # Model the gateway's connector refresh before readiness. A
                 # rejected B start has already persisted B into connector
                 # state; restarting A must deterministically restore A.
                 if action == "start":
-                    with open(connector_state, "wb") as fh:
+                    self.assertIsNotNone(connector_state)
+                    start_connector_states.append(str(connector_state))
+                    if token == "a" * 64 and events:
+                        with open(config_file, "rb") as fh:
+                            self.assertEqual(fh.read(), original_config)
+                    with open(connector_token_state, "wb") as fh:
                         fh.write(connector_bytes(token))
+                    if token == "b" * 64:
+                        with open(config_file, "wb") as fh:
+                            fh.write(b"guardrail:\n  mode: observe\n")
                 with open(dotenv, "rb") as fh:
                     dotenv_state = fh.read()
-                with open(connector_state, "rb") as fh:
+                with open(connector_token_state, "rb") as fh:
                     persisted_connector_state = fh.read()
                 events.append(
                     (action, cleanup, token, dotenv_state, persisted_connector_state),
@@ -588,8 +714,10 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
                 )
             with open(dotenv, "rb") as fh:
                 restored = fh.read()
-            with open(connector_state, "rb") as fh:
+            with open(connector_token_state, "rb") as fh:
                 restored_connector = fh.read()
+            with open(config_file, "rb") as fh:
+                restored_config = fh.read()
 
         self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(
@@ -606,8 +734,11 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
         self.assertEqual(events[2][4], connector_bytes("b" * 64))
         self.assertEqual(events[3][3], original)
         self.assertEqual(events[3][4], original_connector)
+        self.assertEqual(len(start_connector_states), 2)
+        self.assertEqual(start_connector_states[0], start_connector_states[1])
         self.assertEqual(restored, original)
         self.assertEqual(restored_connector, original_connector)
+        self.assertEqual(restored_config, original_config)
         self.assertNotIn("b" * 64, result.output)
         self.assertNotIn("Hook scripts refreshed", result.output)
 

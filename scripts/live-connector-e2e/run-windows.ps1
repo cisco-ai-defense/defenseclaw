@@ -1709,6 +1709,13 @@ if (-not $NoRun) {
     } else {
         Join-Path $StateRoot 'defenseclaw'
     }
+    # The smoke deliberately rewrites connector posture while exercising
+    # observe/action setup. Bind every authoritative override to the selected
+    # disposable profile so an inherited caller environment cannot redirect
+    # those writes into an operator or acceptance configuration.
+    $env:DEFENSECLAW_CONFIG = Join-Path $env:DEFENSECLAW_HOME 'config.yaml'
+    $env:CODEX_HOME = Join-Path $env:USERPROFILE '.codex'
+    $env:CLAUDE_CONFIG_DIR = Join-Path $env:USERPROFILE '.claude'
     if (-not $ReleaseCertification) { Protect-TestDirectory $env:USERPROFILE }
     $script:GatewayJsonl = Join-Path $env:DEFENSECLAW_HOME 'gateway.jsonl'
     $script:AuditDb = Join-Path $env:DEFENSECLAW_HOME 'audit.db'

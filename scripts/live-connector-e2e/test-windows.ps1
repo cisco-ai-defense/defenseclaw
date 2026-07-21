@@ -1210,6 +1210,10 @@ private-secret-name = "DefenseClaw must remain redacted"
     Assert-True ($liveWorkflowText -notmatch '(?m)^  windows-(harness-static|contract):') 'deterministic Windows jobs moved out of live radar'
     Assert-True ($ciWorkflowText -notmatch '(?m)^  windows-(hook-path|installer-smoke):') 'legacy partial Windows jobs were removed'
     Assert-True ($harnessText -notmatch '(?i)\bwsl(?:\.exe)?\b|git bash|/bin/|Get-Command\s+(?:jq|tail|curl)|Invoke-Tool\s+''(?:jq|tail|curl)''') 'native harness has no WSL, Git Bash, or Unix utility dependency'
+    Assert-True ($harnessText.Contains('$env:DEFENSECLAW_CONFIG = Join-Path $env:DEFENSECLAW_HOME ''config.yaml''') -and
+        $harnessText.Contains('$env:CODEX_HOME = Join-Path $env:USERPROFILE ''.codex''') -and
+        $harnessText.Contains('$env:CLAUDE_CONFIG_DIR = Join-Path $env:USERPROFILE ''.claude''')) `
+        'native harness binds every authoritative config/home override to its disposable profile'
     Assert-True ($harnessText -match 'timeout-handling' -and $harnessText -match 'telemetry pass') 'contract records timeout and telemetry evidence'
     foreach ($rule in @(
         'CMD-WIN-REMOVE-ITEM-RF', 'CMD-WIN-RMDIR-SQ', 'CMD-WIN-IWR-IEX', 'CMD-WIN-REG-PERSIST',

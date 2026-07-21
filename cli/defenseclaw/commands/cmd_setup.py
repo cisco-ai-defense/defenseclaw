@@ -62,6 +62,7 @@ from defenseclaw.bundle_refresh import (
 )
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.config import (
+    CONFIG_PATH_ENV,
     DEFENSECLAW_LLM_KEY_ENV,
     HILTConfig,
     PerConnectorGuardrailConfig,
@@ -121,6 +122,7 @@ _DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS = 15
 _TOKEN_ROTATION_LIFECYCLE_TIMEOUT_SECONDS = 120
 _TOKEN_ROTATION_TRANSACTION_FLAG = "--rotation-transaction"
 _TOKEN_ROTATION_CLEANUP_FLAG = "--rotation-cleanup"
+_TOKEN_ROTATION_CONNECTOR_STATE_FLAG = "--rotation-connector-state"
 _GATEWAY_TOKEN_ENV = "DEFENSECLAW_GATEWAY_TOKEN"
 _LEGACY_GATEWAY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN"
 _DEFENSECLAW_HOME_ENV = "DEFENSECLAW_HOME"
@@ -2490,7 +2492,7 @@ def _rotate_token_previous_value(app: AppContext, snapshot: _RotateTokenDotenvSn
     return str(getattr(app.cfg.gateway, "token", "") or "").strip()
 
 
-def _rotate_token_child_environment(data_dir: str, token: str) -> dict[str, str]:
+def _rotate_token_child_environment(data_dir: str, config_file: str, token: str) -> dict[str, str]:
     """Build the bounded lifecycle environment from individually named inputs."""
 
     child_env: dict[str, str] = {}
@@ -2499,10 +2501,70 @@ def _rotate_token_child_environment(data_dir: str, token: str) -> dict[str, str]
         if value is not None:
             child_env[name] = value
     normalized_data_dir = os.path.abspath(data_dir)
+    normalized_config_file = os.path.abspath(config_file)
     child_env[_DEFENSECLAW_HOME_ENV] = normalized_data_dir
     child_env[_DEFENSECLAW_DATA_DIR_ENV] = normalized_data_dir
+    child_env[CONFIG_PATH_ENV] = normalized_config_file
     child_env[_GATEWAY_TOKEN_ENV] = token
     return child_env
+
+
+@dataclass(frozen=True)
+class _RotateTokenConnectorPolicy:
+    name: str
+    mode: str
+    hook_fail_mode: str
+    enabled: bool
+
+
+def _rotate_token_connector_state(cfg: Any) -> str:
+    """Serialize the complete configured connector posture for A/B verification."""
+
+    if hasattr(cfg, "active_connectors"):
+        configured = cfg.active_connectors()
+    else:
+        configured = [(getattr(getattr(cfg, "guardrail", None), "connector", "") or "").strip()]
+    guardrail = getattr(cfg, "guardrail", None)
+    policies: dict[str, _RotateTokenConnectorPolicy] = {}
+    for raw in configured:
+        name = normalize_connector(raw)
+        if not name:
+            continue
+        if name in policies:
+            continue
+
+        mode_resolver = getattr(guardrail, "effective_mode", None)
+        mode = (
+            str(mode_resolver(name) or "").strip().lower()
+            if callable(mode_resolver)
+            else str(getattr(guardrail, "mode", "") or "observe").strip().lower()
+        )
+        fail_mode_resolver = getattr(guardrail, "effective_hook_fail_mode", None)
+        if callable(fail_mode_resolver):
+            hook_fail_mode = str(fail_mode_resolver(name) or "").strip().lower()
+        else:
+            configured_fail_mode = str(getattr(guardrail, "hook_fail_mode", "") or "closed").strip().lower()
+            hook_fail_mode = configured_fail_mode if mode == "action" else "open"
+        enabled_resolver = getattr(guardrail, "effective_enabled", None)
+        enabled = bool(enabled_resolver(name)) if callable(enabled_resolver) else True
+
+        if mode not in {"observe", "action"} or hook_fail_mode not in {"open", "closed"}:
+            raise click.ClickException("Configured connector posture is invalid; refusing token rotation.")
+        policies[name] = _RotateTokenConnectorPolicy(name, mode, hook_fail_mode, enabled)
+
+    payload = {
+        "version": 1,
+        "connectors": [
+            {
+                "name": policy.name,
+                "mode": policy.mode,
+                "hook_fail_mode": policy.hook_fail_mode,
+                "enabled": policy.enabled,
+            }
+            for policy in sorted(policies.values(), key=lambda policy: policy.name)
+        ],
+    }
+    return _json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
 def _run_rotate_token_lifecycle(
@@ -2510,6 +2572,8 @@ def _run_rotate_token_lifecycle(
     action: str,
     *,
     token: str,
+    config_file: str,
+    connector_state: str | None = None,
     cleanup: bool = False,
 ) -> None:
     """Run one bounded lifecycle phase without placing a token on argv."""
@@ -2524,7 +2588,13 @@ def _run_rotate_token_lifecycle(
     command = [executable, action, _TOKEN_ROTATION_TRANSACTION_FLAG]
     if cleanup:
         command.append(_TOKEN_ROTATION_CLEANUP_FLAG)
-    child_env = _rotate_token_child_environment(data_dir, token)
+    if action == "start":
+        if not connector_state:
+            raise ValueError("token-rotation start requires the authoritative connector state")
+        command.extend([_TOKEN_ROTATION_CONNECTOR_STATE_FLAG, connector_state])
+    elif connector_state is not None:
+        raise ValueError("token-rotation connector state is only valid for start")
+    child_env = _rotate_token_child_environment(data_dir, config_file, token)
     try:
         result = subprocess.run(
             command,
@@ -2563,7 +2633,7 @@ def _rotate_token_transaction(
     """Commit token B only between verified stop(A) and start(B)."""
 
     data_dir = os.path.abspath(app.cfg.data_dir or os.path.dirname(dotenv_path))
-    config_file = str(config_path_for_data_dir(data_dir))
+    config_file = os.path.abspath(str(config_path_for_data_dir(data_dir)))
     environment_before = {_GATEWAY_TOKEN_ENV: os.environ.get(_GATEWAY_TOKEN_ENV)}
 
     # PR #444 later centralizes daemon config loading. Integration must retain
@@ -2571,6 +2641,12 @@ def _rotate_token_transaction(
     # config+dotenv B under the explicit data directory. Do not reuse a
     # post-commit loader result for the authenticated stop phase.
     with locked_config_yaml(config_file), locked_file_update(dotenv_path):
+        config_snapshot, config_mode = _snapshot_regular_file(config_file, what="gateway config")
+        authoritative_cfg = load_config(data_dir=data_dir)
+        current_config, current_mode = _snapshot_regular_file(config_file, what="gateway config")
+        if current_config != config_snapshot or current_mode != config_mode:
+            raise click.ClickException("Gateway configuration changed while token rotation was taking its snapshot.")
+        connector_state = _rotate_token_connector_state(authoritative_cfg)
         snapshot = _rotate_token_snapshot_locked(dotenv_path)
         old_token = _rotate_token_previous_value(app, snapshot)
         pid_file = os.path.join(data_dir, "gateway.pid")
@@ -2579,7 +2655,7 @@ def _rotate_token_transaction(
         mutation_attempted = False
         try:
             try:
-                _run_rotate_token_lifecycle(data_dir, "stop", token=old_token)
+                _run_rotate_token_lifecycle(data_dir, "stop", token=old_token, config_file=config_file)
             except BaseException as stop_error:
                 # The bounded child may fail after it has completed shutdown
                 # (for example while verifying listener release). If A's
@@ -2587,7 +2663,13 @@ def _rotate_token_transaction(
                 # before returning without ever committing B.
                 if was_running and not _is_pid_alive(pid_file):
                     try:
-                        _run_rotate_token_lifecycle(data_dir, "start", token=old_token)
+                        _run_rotate_token_lifecycle(
+                            data_dir,
+                            "start",
+                            token=old_token,
+                            config_file=config_file,
+                            connector_state=connector_state,
+                        )
                     except BaseException:
                         raise click.ClickException(
                             "Token rotation stopped gateway A before the transaction could commit; "
@@ -2600,7 +2682,16 @@ def _rotate_token_transaction(
             atomic_write_private_bytes(dotenv_path, _rotate_token_render(snapshot, new_token))
             os.environ[_GATEWAY_TOKEN_ENV] = new_token
 
-            _run_rotate_token_lifecycle(data_dir, "start", token=new_token)
+            _run_rotate_token_lifecycle(
+                data_dir,
+                "start",
+                token=new_token,
+                config_file=config_file,
+                connector_state=connector_state,
+            )
+            current_config, current_mode = _snapshot_regular_file(config_file, what="gateway config")
+            if current_config != config_snapshot or current_mode != config_mode:
+                raise click.ClickException("Gateway configuration changed during token rotation.")
             _log_setup_action(
                 app,
                 ACTION_SETUP_GATEWAY,
@@ -2615,7 +2706,13 @@ def _rotate_token_transaction(
                 try:
                     # Reconcile a READY replacement (including a watchdog-start
                     # failure) while B is still the durable authentication state.
-                    _run_rotate_token_lifecycle(data_dir, "stop", token=new_token, cleanup=True)
+                    _run_rotate_token_lifecycle(
+                        data_dir,
+                        "stop",
+                        token=new_token,
+                        config_file=config_file,
+                        cleanup=True,
+                    )
                 except BaseException:
                     raise click.ClickException(
                         "Token rotation failed and the replacement gateway could not be "
@@ -2630,10 +2727,31 @@ def _rotate_token_transaction(
                     "be restored; the gateway remains stopped."
                 ) from primary_error
 
+            try:
+                current_config, current_mode = _snapshot_regular_file(config_file, what="gateway config")
+                if current_config != config_snapshot or current_mode != config_mode:
+                    _restore_regular_file_snapshot(
+                        config_file,
+                        config_snapshot,
+                        config_mode,
+                        what="gateway config",
+                    )
+            except BaseException:
+                raise click.ClickException(
+                    "Token rotation failed and the exact prior gateway configuration could not be restored; "
+                    "the gateway remains stopped."
+                ) from primary_error
+
             _restore_rotate_token_environment(environment_before)
             if was_running:
                 try:
-                    _run_rotate_token_lifecycle(data_dir, "start", token=old_token)
+                    _run_rotate_token_lifecycle(
+                        data_dir,
+                        "start",
+                        token=old_token,
+                        config_file=config_file,
+                        connector_state=connector_state,
+                    )
                 except BaseException:
                     raise click.ClickException(
                         "Token rotation failed; the exact prior dotenv snapshot was restored, "
