@@ -93,6 +93,109 @@ func TestResolveLocalModelProvenanceFamiliesAndDerivatives(t *testing.T) {
 	}
 }
 
+func TestResolveLocalModelProvenancePublisherNamespaceDerivatives(t *testing.T) {
+	tests := []struct {
+		name       string
+		id         string
+		publisher  string
+		country    string
+		root       string
+		quant      string
+		confidence string
+	}{
+		{
+			name:       "publisher namespace hosting qwen quantization",
+			id:         "nvidia/Qwen3.6-35B-A3B-NVFP4",
+			publisher:  "Alibaba Cloud",
+			country:    "CN",
+			root:       "Qwen/Qwen3.6-35B-A3B",
+			quant:      "NVFP4",
+			confidence: "medium",
+		},
+		{
+			name:       "publisher namespace hosting gemma quantization",
+			id:         "nvidia/Gemma-4-31B-NVFP4",
+			publisher:  "Google",
+			country:    "US",
+			root:       "google/Gemma-4-31B",
+			quant:      "NVFP4",
+			confidence: "medium",
+		},
+		{
+			name:       "publisher namespace with own family",
+			id:         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
+			publisher:  "NVIDIA",
+			country:    "US",
+			root:       "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B",
+			quant:      "FP8",
+			confidence: "medium",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveLocalModelProvenance(LocalModelInfo{ID: tc.id}, modelProvenanceHints{})
+			if got == nil {
+				t.Fatal("resolver returned nil")
+			}
+			if got.Publisher != tc.publisher || got.CountryCode != tc.country || got.RootModel != tc.root ||
+				got.Quantization != tc.quant || got.Confidence != tc.confidence {
+				t.Fatalf("provenance = %+v", got)
+			}
+			assertOptionalBool(t, "quantized", got.Quantized, modelBool(true))
+		})
+	}
+
+	ambiguous := resolveLocalModelProvenance(
+		LocalModelInfo{ID: "nvidia/Qwen3-Gemma3-12B-FP8"}, modelProvenanceHints{},
+	)
+	if ambiguous == nil {
+		t.Fatal("quantization-only provenance was discarded")
+	}
+	if ambiguous.Publisher != "" || ambiguous.CountryCode != "" || ambiguous.RootModel != "" {
+		t.Fatalf("ambiguous mixed-family model received identity provenance: %+v", ambiguous)
+	}
+	if ambiguous.Quantization != "FP8" || ambiguous.Quantized == nil || !*ambiguous.Quantized {
+		t.Fatalf("ambiguous model lost independent quantization evidence: %+v", ambiguous)
+	}
+}
+
+func TestModernQuantizationMarkers(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		quant string
+		root  string
+	}{
+		{name: "FP8", value: "Qwen3-32B-fp8", quant: "FP8", root: "Qwen3-32B"},
+		{name: "NVFP4", value: "Qwen3-32B-NVFP4", quant: "NVFP4", root: "Qwen3-32B"},
+		{name: "MXFP4", value: "Qwen3-32B-MXFP4", quant: "MXFP4", root: "Qwen3-32B"},
+		{name: "MXFP8", value: "Qwen3-32B-MXFP8", quant: "MXFP8", root: "Qwen3-32B"},
+		{name: "W4A16", value: "Qwen3-32B-w4a16", quant: "W4A16", root: "Qwen3-32B"},
+		{name: "W8A8", value: "Qwen3-32B-W8A8-GGUF.gguf", quant: "W8A8", root: "Qwen3-32B"},
+		{name: "integer 7BPW", value: "Qwen3-32B-7bpw", quant: "7BPW", root: "Qwen3-32B"},
+		{name: "decimal 7BPW", value: "Qwen3-32B-7.0bpw", quant: "7.0BPW", root: "Qwen3-32B"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := quantizationFromReferences([]string{tc.value}); got != tc.quant {
+				t.Fatalf("quantizationFromReferences(%q) = %q, want %q", tc.value, got, tc.quant)
+			}
+			if got := cleanDerivedModelName(tc.value); got != tc.root {
+				t.Fatalf("cleanDerivedModelName(%q) = %q, want %q", tc.value, got, tc.root)
+			}
+		})
+	}
+
+	for _, value := range []string{"Qwen3-32B-FP16", "Qwen3-32B-BF16"} {
+		if got := quantizationFromReferences([]string{value}); got != "" {
+			t.Errorf("full-precision encoding %q was classified as quantization %q", value, got)
+		}
+		if got := cleanDerivedModelName(value); got != value {
+			t.Errorf("full-precision encoding %q was stripped to %q", value, got)
+		}
+	}
+}
+
 func TestResolveLocalModelProvenanceUnknownAndTokenBoundaries(t *testing.T) {
 	for _, id := range []string{"tokenizer", "deeprank", "intelliph_v3", "llamazing", "qwench"} {
 		if got := resolveLocalModelProvenance(LocalModelInfo{ID: id}, modelProvenanceHints{}); got != nil {

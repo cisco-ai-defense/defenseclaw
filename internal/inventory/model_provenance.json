@@ -12,6 +12,36 @@
       "source_url": "https://huggingface.co/Qwen"
     },
     {
+      "id": "alibaba-nlp",
+      "publisher": "Alibaba Cloud",
+      "country_code": "CN",
+      "canonical_namespace": "Alibaba-NLP",
+      "namespaces": ["Alibaba-NLP"],
+      "organization_aliases": ["alibaba", "alibaba cloud", "alibaba nlp"],
+      "family_tokens": ["gte"],
+      "source_url": "https://huggingface.co/Alibaba-NLP"
+    },
+    {
+      "id": "alibaba-wan",
+      "publisher": "Alibaba Cloud",
+      "country_code": "CN",
+      "canonical_namespace": "Wan-AI",
+      "namespaces": ["Wan-AI"],
+      "organization_aliases": ["alibaba", "alibaba cloud", "wan ai"],
+      "family_tokens": ["wan2", "wan-"],
+      "source_url": "https://huggingface.co/Wan-AI"
+    },
+    {
+      "id": "alibaba-tongyi-mai",
+      "publisher": "Alibaba Cloud",
+      "country_code": "CN",
+      "canonical_namespace": "Tongyi-MAI",
+      "namespaces": ["Tongyi-MAI"],
+      "organization_aliases": ["alibaba", "alibaba cloud", "tongyi", "tongyi mai"],
+      "family_tokens": ["z-image"],
+      "source_url": "https://huggingface.co/Tongyi-MAI"
+    },
+    {
       "id": "deepseek",
       "publisher": "DeepSeek",
       "country_code": "CN",
@@ -26,9 +56,9 @@
       "publisher": "Meta",
       "country_code": "US",
       "canonical_namespace": "meta-llama",
-      "namespaces": ["meta-llama", "facebook", "meta"],
+      "namespaces": ["meta-llama", "facebook", "FacebookAI", "meta"],
       "organization_aliases": ["meta", "meta ai", "meta-llama"],
-      "family_tokens": ["meta-llama", "llama"],
+      "family_tokens": ["meta-llama", "llama", "opt", "roberta", "xlm-roberta", "wav2vec", "hubert", "encodec", "contriever", "seamless-m4t"],
       "source_url": "https://huggingface.co/meta-llama"
     },
     {
@@ -46,9 +76,9 @@
       "publisher": "Google",
       "country_code": "US",
       "canonical_namespace": "google",
-      "namespaces": ["google"],
+      "namespaces": ["google", "google-bert", "google-t5"],
       "organization_aliases": ["google", "google deepmind"],
-      "family_tokens": ["gemma"],
+      "family_tokens": ["gemma", "bert", "electra", "t5", "flan-t5", "vit", "siglip", "paligemma", "embeddinggemma"],
       "source_url": "https://huggingface.co/google"
     },
     {
@@ -58,7 +88,7 @@
       "canonical_namespace": "microsoft",
       "namespaces": ["microsoft"],
       "organization_aliases": ["microsoft", "microsoft research"],
-      "family_tokens": ["phi", "minilm"],
+      "family_tokens": ["phi", "minilm", "mpnet", "e5", "deberta", "wavlm", "speecht5", "florence", "layoutlm", "bitnet"],
       "source_url": "https://huggingface.co/microsoft"
     },
     {
@@ -86,9 +116,9 @@
       "publisher": "Cohere",
       "country_code": "CA",
       "canonical_namespace": "CohereForAI",
-      "namespaces": ["cohere", "cohereforai"],
-      "organization_aliases": ["cohere", "cohere for ai", "cohereforai"],
-      "family_tokens": ["command-r", "aya"],
+      "namespaces": ["cohere", "cohereforai", "CohereLabs"],
+      "organization_aliases": ["cohere", "cohere for ai", "cohereforai", "cohere labs"],
+      "family_tokens": ["command-r", "aya", "north-mini"],
       "source_url": "https://huggingface.co/CohereForAI"
     },
     {
@@ -98,7 +128,7 @@
       "canonical_namespace": "nvidia",
       "namespaces": ["nvidia"],
       "organization_aliases": ["nvidia"],
-      "family_tokens": ["nemotron"],
+      "family_tokens": ["nemotron", "parakeet", "canary", "cosmos"],
       "source_url": "https://huggingface.co/nvidia"
     },
     {
@@ -130,6 +160,256 @@
       "organization_aliases": ["black forest labs", "black-forest-labs"],
       "family_tokens": ["flux"],
       "source_url": "https://huggingface.co/black-forest-labs"
+    },
+    {
+      "id": "openai",
+      "publisher": "OpenAI",
+      "country_code": "US",
+      "canonical_namespace": "openai",
+      "namespaces": ["openai"],
+      "organization_aliases": ["openai", "open ai"],
+      "family_tokens": ["gpt-oss", "gpt2", "gpt-2", "whisper", "clip-vit"],
+      "source_url": "https://huggingface.co/openai"
+    },
+    {
+      "id": "baai",
+      "publisher": "Beijing Academy of Artificial Intelligence",
+      "country_code": "CN",
+      "canonical_namespace": "BAAI",
+      "namespaces": ["BAAI"],
+      "organization_aliases": ["baai", "beijing academy of artificial intelligence"],
+      "family_tokens": ["bge", "aquila"],
+      "source_url": "https://huggingface.co/BAAI"
+    },
+    {
+      "id": "amazon",
+      "publisher": "Amazon",
+      "country_code": "US",
+      "canonical_namespace": "amazon",
+      "namespaces": ["amazon"],
+      "organization_aliases": ["amazon", "amazon web services", "aws"],
+      "family_tokens": ["chronos"],
+      "source_url": "https://huggingface.co/amazon"
+    },
+    {
+      "id": "nomic-ai",
+      "publisher": "Nomic AI",
+      "country_code": "US",
+      "canonical_namespace": "nomic-ai",
+      "namespaces": ["nomic-ai"],
+      "organization_aliases": ["nomic", "nomic ai"],
+      "family_tokens": ["nomic-embed", "nomic-bert", "nomic-vision"],
+      "source_url": "https://huggingface.co/nomic-ai"
+    },
+    {
+      "id": "jina-ai",
+      "publisher": "Jina AI",
+      "country_code": "DE",
+      "canonical_namespace": "jinaai",
+      "namespaces": ["jinaai"],
+      "organization_aliases": ["jina", "jina ai"],
+      "family_tokens": ["jina-embeddings", "jina-reranker", "jina-clip", "reader-lm"],
+      "source_url": "https://huggingface.co/jinaai"
+    },
+    {
+      "id": "mixedbread-ai",
+      "publisher": "Mixedbread AI",
+      "country_code": "DE",
+      "canonical_namespace": "mixedbread-ai",
+      "namespaces": ["mixedbread-ai"],
+      "organization_aliases": ["mixedbread", "mixedbread ai"],
+      "family_tokens": ["mxbai"],
+      "source_url": "https://huggingface.co/mixedbread-ai"
+    },
+    {
+      "id": "snowflake",
+      "publisher": "Snowflake",
+      "country_code": "US",
+      "canonical_namespace": "Snowflake",
+      "namespaces": ["Snowflake"],
+      "organization_aliases": ["snowflake", "snowflake ai research"],
+      "family_tokens": ["snowflake-arctic", "arctic-embed"],
+      "source_url": "https://huggingface.co/Snowflake"
+    },
+    {
+      "id": "zai",
+      "publisher": "Z.ai",
+      "country_code": "CN",
+      "canonical_namespace": "zai-org",
+      "namespaces": ["zai-org"],
+      "organization_aliases": ["z.ai", "zai", "zhipu ai", "zhipuai"],
+      "family_tokens": ["glm-", "glm-ocr", "chatglm", "cogvlm", "cogview"],
+      "source_url": "https://huggingface.co/zai-org"
+    },
+    {
+      "id": "01-ai",
+      "publisher": "01.AI",
+      "country_code": "CN",
+      "canonical_namespace": "01-ai",
+      "namespaces": ["01-ai"],
+      "organization_aliases": ["01.ai", "01 ai", "zero one ai"],
+      "family_tokens": ["yi-"],
+      "source_url": "https://huggingface.co/01-ai"
+    },
+    {
+      "id": "xiaomi-mimo",
+      "publisher": "Xiaomi",
+      "country_code": "CN",
+      "canonical_namespace": "XiaomiMiMo",
+      "namespaces": ["XiaomiMiMo"],
+      "organization_aliases": ["xiaomi", "xiaomi mimo"],
+      "family_tokens": ["mimo"],
+      "source_url": "https://huggingface.co/XiaomiMiMo"
+    },
+    {
+      "id": "minimax",
+      "publisher": "MiniMax",
+      "country_code": "CN",
+      "canonical_namespace": "MiniMaxAI",
+      "namespaces": ["MiniMaxAI"],
+      "organization_aliases": ["minimax", "minimax ai"],
+      "family_tokens": ["minimax"],
+      "source_url": "https://huggingface.co/MiniMaxAI"
+    },
+    {
+      "id": "stepfun",
+      "publisher": "StepFun",
+      "country_code": "CN",
+      "canonical_namespace": "stepfun-ai",
+      "namespaces": ["stepfun-ai"],
+      "organization_aliases": ["stepfun", "stepfun ai", "stepfun-ai"],
+      "family_tokens": ["step-3", "step3", "step-audio", "step1x", "nextstep"],
+      "source_url": "https://huggingface.co/stepfun-ai"
+    },
+    {
+      "id": "poolside",
+      "publisher": "Poolside",
+      "country_code": "US",
+      "canonical_namespace": "poolside",
+      "namespaces": ["poolside"],
+      "organization_aliases": ["poolside", "poolside ai"],
+      "family_tokens": ["laguna", "malibu"],
+      "source_url": "https://huggingface.co/poolside"
+    },
+    {
+      "id": "moonshot-ai",
+      "publisher": "Moonshot AI",
+      "country_code": "CN",
+      "canonical_namespace": "moonshotai",
+      "namespaces": ["moonshotai"],
+      "organization_aliases": ["moonshot", "moonshot ai"],
+      "family_tokens": ["kimi", "moonlight"],
+      "source_url": "https://huggingface.co/moonshotai"
+    },
+    {
+      "id": "inclusion-ai",
+      "publisher": "InclusionAI",
+      "country_code": "CN",
+      "canonical_namespace": "inclusionAI",
+      "namespaces": ["inclusionAI"],
+      "organization_aliases": ["inclusionai", "inclusion ai", "ant ling"],
+      "family_tokens": ["ling-lite", "ling-mini", "ling-flash", "ling-plus", "ling-1t", "ling-2", "ring-lite", "ring-mini", "ring-flash", "ring-1t", "ring-2", "ming-lite", "ming-flash", "ming-omni", "llada"],
+      "source_url": "https://huggingface.co/inclusionAI"
+    },
+    {
+      "id": "tencent",
+      "publisher": "Tencent",
+      "country_code": "CN",
+      "canonical_namespace": "tencent",
+      "namespaces": ["tencent"],
+      "organization_aliases": ["tencent", "tencent ai", "tencent hunyuan"],
+      "family_tokens": ["hunyuan", "hunyuanvideo", "hunyuan3d"],
+      "source_url": "https://huggingface.co/tencent"
+    },
+    {
+      "id": "baidu",
+      "publisher": "Baidu",
+      "country_code": "CN",
+      "canonical_namespace": "baidu",
+      "namespaces": ["baidu"],
+      "organization_aliases": ["baidu", "baidu research"],
+      "family_tokens": ["ernie", "paddleocr", "unlimited-ocr"],
+      "source_url": "https://huggingface.co/baidu"
+    },
+    {
+      "id": "pyannote",
+      "publisher": "pyannoteAI",
+      "country_code": "FR",
+      "canonical_namespace": "pyannote",
+      "namespaces": ["pyannote"],
+      "organization_aliases": ["pyannote", "pyannote ai", "pyannoteai"],
+      "family_tokens": ["pyannote", "speaker-diarization"],
+      "source_url": "https://huggingface.co/pyannote"
+    },
+    {
+      "id": "kyutai",
+      "publisher": "Kyutai",
+      "country_code": "FR",
+      "canonical_namespace": "kyutai",
+      "namespaces": ["kyutai"],
+      "organization_aliases": ["kyutai"],
+      "family_tokens": ["moshi", "mimi", "unmute"],
+      "source_url": "https://huggingface.co/kyutai"
+    },
+    {
+      "id": "resemble-ai",
+      "publisher": "Resemble AI",
+      "country_code": "CA",
+      "canonical_namespace": "ResembleAI",
+      "namespaces": ["ResembleAI"],
+      "organization_aliases": ["resemble", "resemble ai"],
+      "family_tokens": ["chatterbox", "resemble-enhance"],
+      "source_url": "https://huggingface.co/ResembleAI"
+    },
+    {
+      "id": "huggingface-smol",
+      "publisher": "Hugging Face",
+      "country_code": "US",
+      "canonical_namespace": "HuggingFaceTB",
+      "namespaces": ["HuggingFaceTB"],
+      "organization_aliases": ["hugging face", "huggingface", "hugging face tb"],
+      "family_tokens": ["smollm", "smolvlm"],
+      "source_url": "https://huggingface.co/HuggingFaceTB"
+    },
+    {
+      "id": "huggingface-distil",
+      "publisher": "Hugging Face",
+      "country_code": "US",
+      "canonical_namespace": "distilbert",
+      "namespaces": ["distilbert"],
+      "organization_aliases": ["hugging face", "huggingface", "distilbert"],
+      "family_tokens": ["distilbert", "distilgpt2", "distilroberta"],
+      "source_url": "https://huggingface.co/distilbert"
+    },
+    {
+      "id": "eleutherai",
+      "publisher": "EleutherAI",
+      "country_code": "US",
+      "canonical_namespace": "EleutherAI",
+      "namespaces": ["EleutherAI"],
+      "organization_aliases": ["eleutherai", "eleuther ai"],
+      "family_tokens": ["pythia", "gpt-neox", "gpt-neo", "gpt-j"],
+      "source_url": "https://huggingface.co/EleutherAI"
+    },
+    {
+      "id": "allenai",
+      "publisher": "Allen Institute for AI",
+      "country_code": "US",
+      "canonical_namespace": "allenai",
+      "namespaces": ["allenai"],
+      "organization_aliases": ["allen institute for ai", "ai2", "allenai"],
+      "family_tokens": ["olmo", "olmoe", "olmocr", "tulu", "molmo", "longformer", "specter", "scibert"],
+      "source_url": "https://huggingface.co/allenai"
+    },
+    {
+      "id": "openbmb",
+      "publisher": "OpenBMB",
+      "country_code": "CN",
+      "canonical_namespace": "openbmb",
+      "namespaces": ["openbmb"],
+      "organization_aliases": ["openbmb", "open bmb"],
+      "family_tokens": ["minicpm", "voxcpm", "cpm-bee", "viscpm"],
+      "source_url": "https://huggingface.co/openbmb"
     }
   ],
   "lineages": [
@@ -192,6 +472,26 @@
       "base_models": ["meta-llama/Llama-3.3-70B-Instruct"],
       "distilled": true,
       "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-R1"
+    },
+    {
+      "id": "deepseek-r1-0528-qwen3-8b",
+      "match": "deepseek-r1-0528-qwen3-8b",
+      "publisher": "Alibaba Cloud",
+      "country_code": "CN",
+      "root_model": "Qwen/Qwen3-8B",
+      "base_models": ["Qwen/Qwen3-8B"],
+      "distilled": true,
+      "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
+    },
+    {
+      "id": "dolphin-2.9.1-yi-1.5-34b",
+      "match": "dolphin-2.9.1-yi-1.5-34b",
+      "publisher": "01.AI",
+      "country_code": "CN",
+      "root_model": "01-ai/Yi-1.5-34B",
+      "base_models": ["01-ai/Yi-1.5-34B"],
+      "distilled": false,
+      "source_url": "https://huggingface.co/dphn/dolphin-2.9.1-yi-1.5-34b"
     }
   ]
 }

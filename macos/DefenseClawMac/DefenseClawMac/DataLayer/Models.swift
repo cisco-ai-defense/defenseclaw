@@ -639,6 +639,8 @@ struct AIUsageSnapshot: Sendable {
     var signals: [AISignal] = []
     // Overview box inputs (TUI ai_discovery_box)
     var enabled: Bool = true
+    /// Runtime opt-in reported by the currently running gateway generation.
+    var lookupModelProvenanceOnline: Bool = false
     var newSignals: Int = 0
     var changedSignals: Int = 0
     var goneSignals: Int = 0
@@ -655,6 +657,7 @@ struct AIUsageSnapshot: Sendable {
         if changedSignals != 0 { parts.append("changed=\(changedSignals)") }
         if goneSignals != 0 { parts.append("gone=\(goneSignals)") }
         parts.append("files=\(filesScanned)")
+        parts.append("model-lookup=\(lookupModelProvenanceOnline ? "online" : "offline")")
         return parts
     }
 
@@ -955,21 +958,7 @@ enum AISignalDecoding {
     }
 
     private static func decodeModel(_ raw: [String: Any]?) -> AIUsageModel? {
-        guard let raw else { return nil }
-        return AIUsageModel(
-            id: string(raw["id"]),
-            status: string(raw["status"]),
-            format: string(raw["format"]),
-            provider: string(raw["provider"]),
-            recipe: string(raw["recipe"]),
-            modality: string(raw["modality"]),
-            device: string(raw["device"]),
-            sizeBytes: AIUsageValueDecoding.nonnegativeInt64(raw["size_bytes"]),
-            pinned: AIUsageValueDecoding.boolean(raw["pinned"]),
-            provenance: AIModelProvenance.fromMapping(
-                nonemptyDictionary(raw["provenance"])
-            )
-        )
+        AIUsageModel.fromMapping(raw)
     }
 
     private static func decodeRuntime(_ raw: [String: Any]?) -> AIUsageRuntime? {
@@ -1213,13 +1202,15 @@ enum AIDiscoveryGrouping {
     /// Port of AIDiscoveryPanelModel._rebuild(): group non-model signals by
     /// (state, product, vendor, ecosystem, component, version); aggregate
     /// unique categories/detectors in first-seen order; sort by state
-    /// weight, then count desc, then product. Identified models move to
-    /// `modelRows(from:)` and never appear in this product-row result.
+    /// weight, then count desc, then product. Identified `local_model` signals
+    /// move to `modelRows(from:)`; compatible non-local signals that happen to
+    /// carry model metadata remain product rows.
     static func rows(from signals: [AISignal]) -> [AIDiscoveryRow] {
         var groups: [GroupKey: AIDiscoveryRow] = [:]
         var order: [GroupKey] = []
         for signal in signals {
-            if let model = signal.model,
+            if signal.category == "local_model",
+               let model = signal.model,
                !model.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 continue
             }
@@ -1440,21 +1431,23 @@ enum AIOverviewGrouping {
 
 extension AIDiscoveryGrouping {
 
-    /// Collapse case variants of the same model ID across file, API, and
+    /// Collapse case variants of the same local-model ID across file, API, and
     /// runtime detectors, surfacing the most actionable lifecycle state.
     static func modelRows(from signals: [AISignal]) -> [AIModelDiscoveryRow] {
         var groups: [AIModelDiscoveryRowID: AIModelDiscoveryRow] = [:]
         var order: [AIModelDiscoveryRowID] = []
         for signal in signals {
-            guard let model = signal.model,
-                  !model.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            guard signal.category == "local_model",
+                  let model = signal.model
             else { continue }
+            let modelID = model.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !modelID.isEmpty else { continue }
             let key = AIModelDiscoveryRowID(
-                normalizedModelID: normalizedModelID(model.id)
+                normalizedModelID: normalizedModelID(modelID)
             )
             var row = groups[key] ?? AIModelDiscoveryRow(
                 state: signal.state,
-                modelID: model.id,
+                modelID: modelID,
                 statuses: [], formats: [], providers: [], products: [], vendors: [], detectors: [],
                 count: 0, provenance: nil, lastActive: nil, signals: []
             )

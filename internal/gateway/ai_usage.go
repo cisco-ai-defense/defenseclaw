@@ -43,7 +43,8 @@ func (a *APIServer) handleAIUsage(w http.ResponseWriter, r *http.Request) {
 	defer releaseDiscovery()
 	if discovery == nil {
 		a.writeJSON(w, http.StatusOK, map[string]any{
-			"enabled": false,
+			"enabled":                        false,
+			"lookup_model_provenance_online": false,
 			"summary": map[string]any{
 				"result": "disabled",
 			},
@@ -62,9 +63,10 @@ func (a *APIServer) handleAIUsage(w http.ResponseWriter, r *http.Request) {
 	inventory.EnrichSignalsWithComponentConfidence(report.Signals, discovery.ConfidenceParams())
 	report = a.sanitizeAIUsageReportForResponse(report)
 	a.writeJSON(w, http.StatusOK, map[string]any{
-		"enabled": true,
-		"summary": report.Summary,
-		"signals": report.Signals,
+		"enabled":                        true,
+		"lookup_model_provenance_online": discovery.LookupModelProvenanceOnline(),
+		"summary":                        report.Summary,
+		"signals":                        report.Signals,
 	})
 }
 
@@ -89,9 +91,10 @@ func (a *APIServer) handleAIUsageScan(w http.ResponseWriter, r *http.Request) {
 	inventory.EnrichSignalsWithComponentConfidence(report.Signals, discovery.ConfidenceParams())
 	report = a.sanitizeAIUsageReportForResponse(report)
 	a.writeJSON(w, http.StatusOK, map[string]any{
-		"enabled": true,
-		"summary": report.Summary,
-		"signals": report.Signals,
+		"enabled":                        true,
+		"lookup_model_provenance_online": discovery.LookupModelProvenanceOnline(),
+		"summary":                        report.Summary,
+		"signals":                        report.Signals,
 	})
 }
 

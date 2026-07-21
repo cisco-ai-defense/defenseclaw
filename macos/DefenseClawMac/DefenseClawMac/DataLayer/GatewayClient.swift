@@ -526,6 +526,8 @@ actor GatewayClient {
         snap.filesScanned = (summary["files_scanned"] as? Int) ?? 0
         // TUI: bool(raw.get("enabled")) — a missing key means disabled.
         snap.enabled = (dict["enabled"] as? Bool) ?? (summary["enabled"] as? Bool) ?? false
+        snap.lookupModelProvenanceOnline =
+            (dict["lookup_model_provenance_online"] as? Bool) ?? false
         snap.newSignals = (summary["new_signals"] as? Int) ?? 0
         snap.changedSignals = (summary["changed_signals"] as? Int) ?? 0
         snap.goneSignals = (summary["gone_signals"] as? Int) ?? 0

@@ -148,7 +148,7 @@ struct AIDiscoveryModelTests {
                 detector: "model_api",
                 state: "new",
                 model: AIUsageModel(
-                    id: "Qwen3-0.6B-GGUF", status: "installed", format: "gguf",
+                    id: "  Qwen3-0.6B-GGUF\n", status: "installed", format: "gguf",
                     provider: "ollama", provenance: partialProvenance
                 )
             ),
@@ -163,6 +163,13 @@ struct AIDiscoveryModelTests {
                 )
             ),
             makeSignal(product: "Codex", vendor: "OpenAI", category: "ai_cli", detector: "binary"),
+            makeSignal(
+                product: "Acme Model Studio", vendor: "Acme",
+                category: "desktop_app", detector: "application",
+                model: AIUsageModel(
+                    id: "acme/embedded-model", status: "available", format: "safetensors"
+                )
+            ),
             // Preserve malformed/legacy local-model rows rather than dropping
             // them when an older gateway omitted the model block.
             makeSignal(
@@ -179,6 +186,7 @@ struct AIDiscoveryModelTests {
         expect(modelRows.count == 1, "case variants of one model aggregate")
         guard let row = modelRows.first else { return }
         expect(row.count == 2, "model signal count aggregates")
+        expect(row.modelID == "Qwen3-0.6B-GGUF", "model ID is trimmed for grouping and display")
         expect(row.state == "new", "most actionable state wins across model sources")
         expect(Set(row.statuses) == Set(["installed", "loaded"]), "statuses aggregate")
         expect(Set(row.providers) == Set(["ollama", "lemonade"]), "providers aggregate")
@@ -187,8 +195,12 @@ struct AIDiscoveryModelTests {
         expect(row.provenance == provenance, "stronger provenance wins during aggregation")
 
         let productRows = AIDiscoveryGrouping.rows(from: signals)
-        expect(productRows.count == 3, "only identified model signals leave the product table")
+        expect(productRows.count == 4, "only identified local-model signals leave the product table")
         expect(productRows.contains { $0.product == "Codex" }, "ordinary product remains")
+        expect(
+            productRows.contains { $0.product == "Acme Model Studio" },
+            "non-local signals with model metadata remain product signals"
+        )
         expect(
             productRows.contains { $0.product == "Legacy Model Signal" },
             "legacy signal without model metadata remains visible"

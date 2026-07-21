@@ -93,7 +93,7 @@ var (
 	modelProvenanceOnce       sync.Once
 	modelProvenanceBuiltin    modelProvenanceCatalog
 	modelProvenanceBuiltinErr error
-	quantizationTokenPattern  = regexp.MustCompile(`(?i)(^|[^a-z0-9])(iq[1-4](?:_[a-z0-9]+)*|q[2-8](?:_[a-z0-9]+)*|[234568](?:\.[0-9]+)?bpw|awq|gptq|exl[23]|nf4|int[48]|[48]bit)($|[^a-z0-9])`)
+	quantizationTokenPattern  = regexp.MustCompile(`(?i)(^|[^a-z0-9])(iq[1-4](?:_[a-z0-9]+)*|q[2-8](?:_[a-z0-9]+)*|[2-8](?:\.[0-9]+)?bpw|awq|gptq|exl[23]|nf4|int[48]|[48]bit|fp8|nvfp4|mxfp[48]|w4a16|w8a8)($|[^a-z0-9])`)
 	distillationTokenPattern  = regexp.MustCompile(`(?i)(^|[^a-z0-9])distill(?:ed|ation)?($|[^a-z0-9])`)
 )
 
@@ -335,54 +335,111 @@ func bestPublisherRule(
 	rules []modelPublisherRule,
 	references, organizations, baseOrganizations, baseModels []string,
 ) (*modelPublisherRule, int) {
-	bestIndex, bestScore := -1, 0
+	scores := make([]int, len(rules))
 	for i := range rules {
 		rule := &rules[i]
-		score := 0
 		for _, org := range organizations {
 			for _, alias := range rule.OrganizationAliases {
-				if strings.EqualFold(strings.TrimSpace(org), strings.TrimSpace(alias)) && score < 500 {
-					score = 500
+				if strings.EqualFold(strings.TrimSpace(org), strings.TrimSpace(alias)) && scores[i] < 500 {
+					scores[i] = 500
 				}
 			}
 		}
 		for _, org := range baseOrganizations {
 			for _, alias := range rule.OrganizationAliases {
-				if strings.EqualFold(strings.TrimSpace(org), strings.TrimSpace(alias)) && score < 650 {
-					score = 650
+				if strings.EqualFold(strings.TrimSpace(org), strings.TrimSpace(alias)) && scores[i] < 650 {
+					scores[i] = 650
 				}
 			}
-		}
-		scoreReference := func(reference string, namespaceScore, familyScore int) {
-			owner, name := splitModelReference(reference)
-			for _, namespace := range rule.Namespaces {
-				if owner != "" && strings.EqualFold(owner, namespace) && score < namespaceScore {
-					score = namespaceScore
-				}
-			}
-			for _, token := range rule.FamilyTokens {
-				if containsModelToken(name, token) && score < familyScore+len(token) {
-					score = familyScore + len(token)
-				}
-			}
-		}
-		// Explicit parent metadata outranks the derived artifact name. This is
-		// what keeps a cross-family distillation or merge anchored to the root
-		// weights rather than the uploader/teacher named in the derivative.
-		for _, reference := range baseModels {
-			scoreReference(reference, 600, 300)
-		}
-		for _, reference := range references {
-			scoreReference(reference, 400, 200)
-		}
-		if score > bestScore {
-			bestIndex, bestScore = i, score
 		}
 	}
-	if bestIndex < 0 {
+	scoreReferences := func(values []string, namespaceScore, familyScore int) {
+		for _, reference := range values {
+			for i, score := range publisherReferenceScores(rules, reference, namespaceScore, familyScore) {
+				if score > scores[i] {
+					scores[i] = score
+				}
+			}
+		}
+	}
+	// Explicit parent metadata outranks the derived artifact name. This is
+	// what keeps a cross-family distillation or merge anchored to the root
+	// weights rather than the uploader/teacher named in the derivative.
+	scoreReferences(baseModels, 600, 300)
+	scoreReferences(references, 400, 200)
+
+	bestIndex, bestScore := -1, 0
+	bestTied := false
+	for i, score := range scores {
+		if score > bestScore {
+			bestIndex, bestScore, bestTied = i, score, false
+		} else if score > 0 && score == bestScore {
+			bestTied = true
+		}
+	}
+	if bestIndex < 0 || bestTied {
 		return nil, 0
 	}
 	return &rules[bestIndex], bestScore
+}
+
+// publisherReferenceScores resolves the identity evidence within one model
+// reference before combining it with other metadata. A publisher namespace is
+// authoritative when the basename is unknown or names that publisher's own
+// family. When a publisher also uploads or quantizes a clearly named foreign
+// family, the unique family token wins at family confidence. Competing family
+// tokens deliberately produce no identity score.
+func publisherReferenceScores(
+	rules []modelPublisherRule, reference string, namespaceScore, familyScore int,
+) []int {
+	scores := make([]int, len(rules))
+	owner, name := splitModelReference(reference)
+	namespaceMatches := make([]int, 0, 1)
+	familyMatches := make(map[int]int)
+	for i, rule := range rules {
+		for _, namespace := range rule.Namespaces {
+			if owner != "" && strings.EqualFold(owner, namespace) {
+				namespaceMatches = append(namespaceMatches, i)
+				break
+			}
+		}
+		for _, token := range rule.FamilyTokens {
+			if containsModelToken(name, token) && familyScore+len(token) > familyMatches[i] {
+				familyMatches[i] = familyScore + len(token)
+			}
+		}
+	}
+
+	// A namespace paired with its own family remains strong evidence even when
+	// the derivative name also mentions a teacher or base family.
+	ownFamilyMatch := -1
+	for _, i := range namespaceMatches {
+		if familyMatches[i] == 0 {
+			continue
+		}
+		if ownFamilyMatch >= 0 {
+			return scores
+		}
+		ownFamilyMatch = i
+	}
+	if ownFamilyMatch >= 0 {
+		scores[ownFamilyMatch] = namespaceScore
+		return scores
+	}
+
+	if len(familyMatches) == 1 {
+		for i, score := range familyMatches {
+			scores[i] = score
+		}
+		return scores
+	}
+	if len(familyMatches) > 1 {
+		return scores
+	}
+	if len(namespaceMatches) == 1 {
+		scores[namespaceMatches[0]] = namespaceScore
+	}
+	return scores
 }
 
 func lineageMatches(match string, references []string) bool {
@@ -548,7 +605,6 @@ func cleanDerivedModelName(value string) string {
 	for _, ext := range []string{".safetensors", ".gguf", ".ggml", ".onnx", ".ort", ".bin"} {
 		if strings.HasSuffix(lower, ext) {
 			value = value[:len(value)-len(ext)]
-			lower = strings.ToLower(value)
 			break
 		}
 	}
@@ -753,10 +809,3 @@ func validateLocalModelProvenance(provenance *LocalModelProvenance) error {
 }
 
 func modelBool(value bool) *bool { return &value }
-
-func cloneModelBool(value *bool) *bool {
-	if value == nil {
-		return nil
-	}
-	return modelBool(*value)
-}

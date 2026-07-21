@@ -355,6 +355,8 @@ class AIUsageSummary:
 @dataclass(frozen=True)
 class AIUsageSnapshot:
     enabled: bool = False
+    # Runtime opt-in reported by the currently running gateway generation.
+    lookup_model_provenance_online: bool = False
     summary: AIUsageSummary = field(default_factory=AIUsageSummary)
     signals: tuple[AIUsageSignal, ...] = ()
     fetched_at: datetime | None = None
@@ -370,6 +372,9 @@ class AIUsageSnapshot:
         summary_raw = raw.get("summary")
         return cls(
             enabled=bool(raw.get("enabled")),
+            lookup_model_provenance_online=_coerce_bool(
+                raw.get("lookup_model_provenance_online")
+            ),
             summary=AIUsageSummary.from_mapping(summary_raw if isinstance(summary_raw, Mapping) else None),
             signals=signals,
             fetched_at=_parse_datetime(raw.get("fetched_at")) or _parse_datetime(raw.get("fetchedAt")),
@@ -666,6 +671,10 @@ class AIDiscoveryPanelModel:
         if summary.gone_signals:
             parts.append(f"gone={summary.gone_signals}")
         parts.append(f"files={summary.files_scanned}")
+        lookup_state = (
+            "online" if self.snapshot.lookup_model_provenance_online else "offline"
+        )
+        parts.append(f"model-lookup={lookup_state}")
         return tuple(parts)
 
     def detail_header(self) -> str:

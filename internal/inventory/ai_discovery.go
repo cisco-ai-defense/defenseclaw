@@ -781,6 +781,14 @@ func (s *ContinuousDiscoveryService) Snapshot() AIDiscoveryReport {
 	return cloneAIDiscoveryReport(s.last)
 }
 
+// LookupModelProvenanceOnline reports the immutable runtime opt-in used by
+// this service generation. Gateway status responses expose this value so an
+// operator can distinguish saved config from the behavior of the running
+// sidecar after a no-restart update or failed restart.
+func (s *ContinuousDiscoveryService) LookupModelProvenanceOnline() bool {
+	return s != nil && s.opts.LookupModelProvenanceOnline
+}
+
 // InventoryStore exposes the optional SQLite history backend so
 // gateway handlers can serve `/components/{ecosystem}/{name}/locations`
 // and `…/history` endpoints. Returns nil when the store could not

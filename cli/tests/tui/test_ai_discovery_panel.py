@@ -75,6 +75,28 @@ def test_ai_discovery_no_snapshot_and_disabled_states() -> None:
     assert "agent discovery enable" in panel.empty_state()
 
 
+def test_ai_discovery_snapshot_decodes_and_surfaces_live_model_lookup_state() -> None:
+    offline = AIUsageSnapshot.from_mapping({"enabled": True})
+    assert offline.lookup_model_provenance_online is False
+
+    online = AIUsageSnapshot.from_mapping(
+        {
+            "enabled": True,
+            "lookup_model_provenance_online": True,
+            "summary": {"active_signals": 1, "files_scanned": 2},
+        }
+    )
+    assert online.lookup_model_provenance_online is True
+
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(online)
+    assert panel.header_parts() == (
+        "active=1",
+        "files=2",
+        "model-lookup=online",
+    )
+
+
 def test_ai_discovery_scan_uses_the_usage_scan_command() -> None:
     panel = AIDiscoveryPanelModel()
     intent = panel.scan_intent()
@@ -439,7 +461,11 @@ def test_ai_discovery_header_churn_rules() -> None:
             ),
         )
     )
-    assert panel.header_parts() == ("active=755", "files=2103")
+    assert panel.header_parts() == (
+        "active=755",
+        "files=2103",
+        "model-lookup=offline",
+    )
 
     panel.set_snapshot(
         AIUsageSnapshot(
@@ -447,7 +473,13 @@ def test_ai_discovery_header_churn_rules() -> None:
             summary=AIUsageSummary(active_signals=755, new_signals=5, changed_signals=2, files_scanned=2103),
         )
     )
-    assert panel.header_parts() == ("active=755", "new=5", "changed=2", "files=2103")
+    assert panel.header_parts() == (
+        "active=755",
+        "new=5",
+        "changed=2",
+        "files=2103",
+        "model-lookup=offline",
+    )
 
 
 def test_ai_discovery_normalizes_across_detectors_and_searches_aggregates() -> None:

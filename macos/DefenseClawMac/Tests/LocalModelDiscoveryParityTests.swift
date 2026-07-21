@@ -227,8 +227,16 @@ struct LocalModelDiscoveryParityTests {
         snapshot.goneSignals = 4
         expect(
             snapshot.discoveryHeaderParts
-                == ["active=0", "new=1", "changed=2", "gone=4", "files=3"],
+                == [
+                    "active=0", "new=1", "changed=2", "gone=4", "files=3",
+                    "model-lookup=offline",
+                ],
             "reported active zero never falls back to total detected"
+        )
+        snapshot.lookupModelProvenanceOnline = true
+        expect(
+            snapshot.discoveryHeaderParts.last == "model-lookup=online",
+            "live model provenance lookup state appears in the compact header"
         )
 
         var newAgent = makeSignal(id: "new", name: "New agent", category: "ai_cli", product: "New")
