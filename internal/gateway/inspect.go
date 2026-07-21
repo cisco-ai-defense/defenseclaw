@@ -299,6 +299,29 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 		for _, f := range aid.Findings {
 			local.Findings = append(local.Findings, findingTag+f)
 		}
+		// Synthesize structured DetailedFindings from each lane finding so
+		// the downstream emission pipeline (emitInspectVerdictFindings →
+		// scanner.EmitInspectFindings → EmitScanResult) writes a
+		// scan_results row and per-finding scan_findings rows. Without
+		// this, the AID / LLM-judge lanes only populated the stringy
+		// Findings slice, emitInspectVerdictFindings early-returned on
+		// empty DetailedFindings, and managed_enterprise deployments
+		// (where AID is the sole detector) never advanced total_scans on
+		// the IPC stats surface even though every hook call ran an
+		// inspection. Severity comes from the lane verdict; RuleID uses
+		// the raw finding name so SIEM pivots by rule_id work identically
+		// across the AID / judge / regex lanes. Confidence stays at 0
+		// (lane doesn't self-report one); the emitter treats zero as
+		// "not computed" and omits it on the wire.
+		for _, f := range aid.Findings {
+			rf := RuleFinding{
+				RuleID:   findingTag + f,
+				Title:    f,
+				Severity: aid.Severity,
+				Tags:     []string{strings.TrimSuffix(findingTag, ":")},
+			}
+			local.DetailedFindings = append(local.DetailedFindings, rf)
+		}
 	}
 	if aid.Reason != "" {
 		if local.Reason != "" {

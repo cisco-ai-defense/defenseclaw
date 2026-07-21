@@ -398,6 +398,82 @@ func TestStore_GetCounts_IncludesBlockedEgress(t *testing.T) {
 	}
 }
 
+// TestStore_GetCounts_AlertsIncludesConnectorHookEnvelopeSeverity is the
+// regression pin for the IPC ActiveAlerts stat surface. Connector-hook
+// rows land with severity=INFO on the column (a deliberate
+// noise-reduction choice in gateway.logConnectorHookAuditEnvelope — every
+// tool call produces one) while the real verdict severity lives on the
+// structured_json envelope. Counts.Alerts feeds the IPC GetStatsSnapshot
+// ActiveAlerts field; before this branch was added the counter stayed at
+// zero in managed_enterprise, where hook inspections are the sole
+// enforcement path.
+func TestStore_GetCounts_AlertsIncludesConnectorHookEnvelopeSeverity(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+
+	// Non-hook row with a real severity — counts via the column branch.
+	if err := store.LogEvent(Event{
+		Action:   "guardrail-inspection",
+		Target:   "gpt-5",
+		Severity: "HIGH",
+	}); err != nil {
+		t.Fatalf("LogEvent guardrail: %v", err)
+	}
+
+	// Benign connector-hook row: column=INFO, envelope severity=NONE.
+	// Must NOT count as an alert.
+	if err := store.LogEvent(Event{
+		Action:   "connector-hook",
+		Target:   "PreToolUse",
+		Severity: "INFO",
+		Structured: map[string]any{
+			"schema":   "defenseclaw.hook.v1",
+			"severity": "NONE",
+		},
+	}); err != nil {
+		t.Fatalf("LogEvent hook NONE: %v", err)
+	}
+
+	// Real block from a hook: column=INFO, envelope severity=HIGH.
+	// This is the row that used to be invisible; must now count.
+	if err := store.LogEvent(Event{
+		Action:   "connector-hook",
+		Target:   "PreToolUse",
+		Severity: "INFO",
+		Structured: map[string]any{
+			"schema":   "defenseclaw.hook.v1",
+			"severity": "HIGH",
+			"action":   "block",
+		},
+	}); err != nil {
+		t.Fatalf("LogEvent hook HIGH: %v", err)
+	}
+
+	// Critical hook row for good measure.
+	if err := store.LogEvent(Event{
+		Action:   "connector-hook",
+		Target:   "PreToolUse",
+		Severity: "INFO",
+		Structured: map[string]any{
+			"schema":   "defenseclaw.hook.v1",
+			"severity": "CRITICAL",
+			"action":   "block",
+		},
+	}); err != nil {
+		t.Fatalf("LogEvent hook CRITICAL: %v", err)
+	}
+
+	counts, err := store.GetCounts()
+	if err != nil {
+		t.Fatalf("GetCounts: %v", err)
+	}
+	// Expected: 1 (guardrail HIGH via column) + 2 (hook HIGH/CRITICAL via
+	// JSON) = 3. The benign hook row is excluded.
+	if counts.Alerts != 3 {
+		t.Errorf("Alerts = %d, want 3 (column-severity + hook envelope-severity)", counts.Alerts)
+	}
+}
+
 // --- Logger ---
 
 func TestLogger_LogNetworkEgress(t *testing.T) {
