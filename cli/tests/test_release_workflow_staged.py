@@ -274,12 +274,34 @@ def test_native_windows_setup_has_immutable_artifact_custody() -> None:
         assert "continue-on-error" not in str(job)
         assert job.get("if") != "${{ false }}"
 
+    installer_baseline_download = next(
+        step
+        for step in installer["steps"]
+        if step.get("with", {}).get("name")
+        == "${{ needs.release-preflight.outputs.baseline_artifact }}"
+    )
+    assert installer["env"]["UPGRADE_BASELINE_POLICY"] == (
+        "${{ github.workspace }}/effective-upgrade-baselines.json"
+    )
+    assert installer_baseline_download["with"]["path"] == "."
+
     installer_download = next(
-        step for step in installer["steps"] if step.get("uses", "").startswith("actions/download-artifact@")
+        step
+        for step in installer["steps"]
+        if step.get("with", {}).get("artifact-ids")
+        == "${{ needs.build-runtime-candidate.outputs.artifact_id }}"
     )
     assert installer_download["with"]["artifact-ids"] == ("${{ needs.build-runtime-candidate.outputs.artifact_id }}")
     assert installer_download["with"]["merge-multiple"] == "true"
     assert "needs.build-runtime-candidate.outputs.artifact_digest" in str(installer)
+
+    baseline_index = installer["steps"].index(installer_baseline_download)
+    extraction_index = next(
+        index
+        for index, step in enumerate(installer["steps"])
+        if step.get("name") == "Extract authenticated Windows installer inputs"
+    )
+    assert baseline_index < extraction_index
 
     certification_download = next(
         step for step in certification["steps"] if step.get("uses", "").startswith("actions/download-artifact@")
