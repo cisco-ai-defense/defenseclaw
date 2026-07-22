@@ -44,6 +44,7 @@ LEGACY_UPGRADE_PROTOCOL_VERSION = 1
 HARD_CUT_UPGRADE_PROTOCOL_VERSION = 2
 OBSERVABILITY_V8_BRIDGE_VERSION = "0.8.4"
 OBSERVABILITY_V8_HARD_CUT_VERSION = "0.8.5"
+POST_HARD_CUT_DIRECT_UPGRADE_VERSION = "0.8.7"
 WINDOWS_INSTALLER_START_VERSION = "0.8.6"
 UPGRADE_BASELINES_PATH = Path(
     os.environ.get(
@@ -359,6 +360,15 @@ def release_upgrade_policy(version: str) -> dict[str, Any]:
         platform: [baseline for baseline in baselines if _ver_tuple(baseline) < version_t]
         for platform, baselines in platform_published_upgrade_baselines(version).items()
     }
+    if version_t >= _ver_tuple(POST_HARD_CUT_DIRECT_UPGRADE_VERSION):
+        hard_cut_t = _ver_tuple(OBSERVABILITY_V8_HARD_CUT_VERSION)
+        tested_sources = [
+            source for source in tested_sources if _ver_tuple(source) >= hard_cut_t
+        ]
+        platform_tested_sources = {
+            platform: [source for source in sources if _ver_tuple(source) >= hard_cut_t]
+            for platform, sources in platform_tested_sources.items()
+        }
     if not tested_sources:
         raise RuntimeError(f"release {version} has an empty tested-source matrix")
     policy: dict[str, Any] = {
@@ -369,6 +379,20 @@ def release_upgrade_policy(version: str) -> dict[str, Any]:
     if version_t < _ver_tuple(OBSERVABILITY_V8_HARD_CUT_VERSION):
         if any(not values for values in platform_tested_sources.values()):
             raise RuntimeError(f"release {version} has an empty tested-source matrix")
+        return policy
+    if version_t >= _ver_tuple(POST_HARD_CUT_DIRECT_UPGRADE_VERSION):
+        policy["min_upgrade_protocol"] = HARD_CUT_UPGRADE_PROTOCOL_VERSION
+        policy.update(
+            {
+                # Retain the authenticated hard-cut lineage in release
+                # provenance, but do not offer an automatic pre-v8 hop. The
+                # signed tested-source matrix above is the supported direct
+                # upgrade contract for routine post-cut releases.
+                "minimum_source_version": OBSERVABILITY_V8_BRIDGE_VERSION,
+                "required_bridge_version": OBSERVABILITY_V8_BRIDGE_VERSION,
+                "auto_bridge_from": [],
+            }
+        )
         return policy
 
     auto_bridge_from = [

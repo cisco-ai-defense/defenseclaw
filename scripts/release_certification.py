@@ -46,6 +46,8 @@ PLATFORM_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)+$")
 SELECTION_SCHEMA = 1
 CERTIFICATION_SCHEMA = 1
 CERTIFICATION_RESULT = "passed"
+POST_HARD_CUT_DIRECT_UPGRADE_VERSION = (0, 8, 7)
+POST_HARD_CUT_SOURCE_FLOOR = (0, 8, 5)
 BEHAVIOR_CLASSES = {
     "latest_stable",
     "previous_stable",
@@ -387,6 +389,16 @@ def select_cases(
     if scope not in policy["profiles"]:
         raise CertificationError(f"unknown validation scope {scope!r}")
     sources = _ordered_sources(candidate_version, baseline_policy, latest_stable)
+    post_hard_cut_direct = (
+        _version_tuple(candidate_version, "candidate version")
+        >= POST_HARD_CUT_DIRECT_UPGRADE_VERSION
+    )
+    if post_hard_cut_direct:
+        sources = [
+            source
+            for source in sources
+            if _version_tuple(source, "source version") >= POST_HARD_CUT_SOURCE_FLOOR
+        ]
     if len(sources) < 2:
         raise CertificationError("selection needs at least two published source releases")
     bridge = policy["bridge_boundary_version"]
@@ -417,6 +429,8 @@ def select_cases(
         case_by_behavior: dict[tuple[str, str, str, bool], dict[str, Any]] = {}
         for name in requested:
             versions = class_versions[name]
+            if not versions and post_hard_cut_direct:
+                continue
             if not versions:
                 raise CertificationError(f"PR behavior class {name} has no eligible baseline")
             mode = "staged-upgrade"

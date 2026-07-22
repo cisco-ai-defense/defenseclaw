@@ -130,6 +130,28 @@ def test_live_latest_stable_is_used_before_lagging_reviewed_inventory() -> None:
     assert previous["classes"] == ["previous_stable", "bridge_boundary"]
 
 
+def test_post_hard_cut_release_certifies_only_direct_v8_sources(tmp_path: Path) -> None:
+    baseline_path = tmp_path / "upgrade-baselines.json"
+    policy = release_certification.load_baseline_policy()
+    policy["published_baselines"] = ["0.8.6", "0.8.5", *policy["published_baselines"]]
+    policy["published_baseline_config_versions"] = {
+        "0.8.6": 8,
+        "0.8.5": 8,
+        **policy["published_baseline_config_versions"],
+    }
+    baseline_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    selection = release_certification.select_cases(
+        "0.8.7",
+        "full",
+        latest_stable="0.8.6",
+        baseline_path=baseline_path,
+    )
+
+    assert _versions(selection) == ["0.8.6", "0.8.5"]
+    assert {case["baseline"] for case in selection["cases"]} == {"0.8.6", "0.8.5"}
+
+
 def test_selector_rejects_stale_or_nonpreceding_latest_stable_claim() -> None:
     with pytest.raises(release_certification.CertificationError, match="newest eligible"):
         release_certification.select_cases(

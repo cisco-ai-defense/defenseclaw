@@ -274,6 +274,7 @@ jobs:
           RELEASE_COMMIT: ${{ inputs.commit }}
           MIN_PROTOCOL: ${{ inputs.min_upgrade_protocol }}
           BRIDGE_BASELINE: ${{ inputs.required_bridge_version }}
+          CERTIFIED_BASELINES: ${{ inputs.baselines }}
         run: |
           set -euo pipefail
           python3 scripts/release_candidate.py verify \
@@ -288,13 +289,16 @@ jobs:
             echo "::error title=Invalid upgrade protocol::min_upgrade_protocol=$MIN_PROTOCOL"
             exit 1
           fi
-          if (( MIN_PROTOCOL > 1 )); then
+          BRIDGE_CERTIFIED="$(python3 -c 'import json, os; print(str(os.environ["BRIDGE_BASELINE"] in json.loads(os.environ["CERTIFIED_BASELINES"])).lower())')"
+          if (( MIN_PROTOCOL > 1 )) && [[ "$BRIDGE_CERTIFIED" == "true" ]]; then
             test -n "$BRIDGE_BASELINE"
             scripts/test-observability-v8-upgrade-continuity.sh \
               --from-version "$BRIDGE_BASELINE" \
               --target-version "$RELEASE_TAG" \
               --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
               --health-timeout 60
+          elif (( MIN_PROTOCOL > 1 )); then
+            echo "Candidate certifies direct post-hard-cut upgrades; legacy bridge continuity is outside its signed source matrix."
           else
             echo "Candidate protocol $MIN_PROTOCOL does not require hard-cut continuity."
           fi

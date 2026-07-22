@@ -1280,6 +1280,11 @@ jobs:
           platform_tested = manifest.get("platform_tested_source_versions")
           runtime_config = manifest.get("runtime_config_version")
           release_artifacts = manifest.get("release_artifacts")
+          release_version = manifest.get("release_version")
+          if not isinstance(release_version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", release_version):
+              raise SystemExit("invalid release_version")
+          version_key = tuple(map(int, release_version.split(".")))
+          post_hard_cut_direct = version_key >= (0, 8, 7)
           if schema != 2:
               raise SystemExit("modern release candidate must use upgrade manifest schema 2")
           if not isinstance(protocol, int) or isinstance(protocol, bool) or protocol < 1:
@@ -1290,7 +1295,13 @@ jobs:
               raise SystemExit("reviewed release baseline matrix is empty or invalid")
           if not isinstance(reviewed_windows, list) or not reviewed_windows:
               raise SystemExit("reviewed Windows release baseline matrix is empty or invalid")
-          if tested != reviewed:
+          expected_tested = reviewed
+          if post_hard_cut_direct:
+              expected_tested = [
+                  item for item in reviewed
+                  if tuple(map(int, item.split("."))) >= (0, 8, 5)
+              ]
+          if tested != expected_tested:
               raise SystemExit("tested_source_versions does not match the reviewed release matrix")
           if not isinstance(platform_tested, dict) or set(platform_tested) != {"windows"}:
               raise SystemExit("signed platform tested-source policy must contain exactly windows")
@@ -1298,6 +1309,11 @@ jobs:
               raise SystemExit("platform_tested_source_versions.windows must be a list")
           windows_bridge_available = not bridge or bridge in reviewed_windows
           expected_windows = reviewed_windows if windows_bridge_available else []
+          if post_hard_cut_direct:
+              expected_windows = [
+                  item for item in reviewed_windows
+                  if tuple(map(int, item.split("."))) >= (0, 8, 5)
+              ]
           if platform_tested["windows"] != expected_windows:
               raise SystemExit(
                   "platform_tested_source_versions.windows does not match the reviewed Windows matrix"
@@ -1333,7 +1349,6 @@ jobs:
               raise SystemExit(
                   "runtime_config_version does not attest the expected bridge/hard-cut runtime"
               )
-          release_version = manifest.get("release_version")
           expected_gateways = {}
           for os_name in ("darwin", "linux", "windows"):
               expected_gateways[os_name] = {
@@ -1349,7 +1364,9 @@ jobs:
                   "release_artifacts does not bind the exact protected candidate payload"
               )
           windows_prebridge = list(platform_tested["windows"])
-          if bridge and windows_bridge_available:
+          if post_hard_cut_direct:
+              windows_prebridge = []
+          elif bridge and windows_bridge_available:
               if bridge not in platform_tested["windows"]:
                   raise SystemExit("required bridge is absent from the signed Windows matrix")
               bridge_key = tuple(map(int, bridge.split(".")))
@@ -1367,14 +1384,18 @@ jobs:
                   )
               windows_prebridge = []
           if automatic is not None:
-              if not isinstance(automatic, list) or not automatic:
-                  raise SystemExit("hard-cut auto_bridge_from must be a non-empty list")
+              if not isinstance(automatic, list):
+                  raise SystemExit("hard-cut auto_bridge_from must be a list")
               bridge_key = tuple(map(int, bridge.split(".")))
-              expected_automatic = [
-                  item
-                  for item in reviewed
-                  if tuple(map(int, item.split("."))) < bridge_key
-              ]
+              expected_automatic = (
+                  []
+                  if post_hard_cut_direct
+                  else [
+                      item
+                      for item in reviewed
+                      if tuple(map(int, item.split("."))) < bridge_key
+                  ]
+              )
               if automatic != expected_automatic:
                   raise SystemExit(
                       "hard-cut auto_bridge_from does not match the reviewed pre-bridge matrix"
