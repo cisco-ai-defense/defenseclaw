@@ -778,6 +778,8 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
         'resolver_args+=(--version "${TARGET_VERSION}")',
         'run_candidate_updater_staged_success "${baseline}" explicit',
         'fresh controller → ${OBSERVABILITY_V8_HARD_CUT_VERSION} → ${TARGET_VERSION}',
+        "resolver_owned_post_cut_bridge",
+        'run_candidate_updater_staged_success "${baseline}"',
         "stage_authenticated_baseline",
         "SUCCESS_PATH_ONLY",
         "REFUSAL_CONTRACT_ONLY",
@@ -1000,6 +1002,48 @@ run_protocol_case "0.8.4"
     assert "refusal=0.8.4:immutable-bridge-empty-windows" in completed.stdout
     assert "direct=0.8.4" in completed.stdout
     assert "unexpected-installed-success" not in completed.stdout
+
+
+def test_post_cut_bridge_uses_staged_release_resolver() -> None:
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            r"""
+source "$1"
+TARGET_VERSION="0.8.8"
+CANDIDATE_MIN_PROTOCOL=2
+CANDIDATE_SCHEMA_VERSION=2
+MINIMUM_SOURCE_VERSION="0.8.4"
+REQUIRED_BRIDGE_VERSION="0.8.4"
+REFUSAL_CONTRACT_ONLY=0
+SUCCESS_PATH_ONLY=0
+stage_authenticated_baseline() { :; }
+baseline_protocol() { printf '%s\n' 2; }
+baseline_has_schema_gate() { printf '%s\n' 1; }
+manifest_array_contains() { return 0; }
+manifest_windows_sources_are_empty() { return 1; }
+run_installed_controller_refusal() { printf '%s\n' unexpected-installed-refusal; return 97; }
+run_one_upgrade_smoke() { printf '%s\n' unexpected-installed-success; return 96; }
+run_candidate_updater_refusal() { return 95; }
+run_candidate_updater_staged_success() { printf 'staged=%s\n' "$1"; }
+run_candidate_updater_direct_success() { printf '%s\n' unexpected-direct-resolver; return 94; }
+run_protocol_case "0.8.4"
+""",
+            "post-cut-bridge-test",
+            str(PROTOCOL_GATE),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "staged=0.8.4" in completed.stdout
+    assert "unexpected-installed" not in completed.stdout
+    assert "unexpected-direct-resolver" not in completed.stdout
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link permission contract")

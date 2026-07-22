@@ -5002,6 +5002,10 @@ resolve_staged_upgrade() {
         if [[ "${CURRENT_VERSION}" == "${MANIFEST_REQUIRED_BRIDGE}" ]] \
             && version_lt "${CURRENT_VERSION}" "${RELEASE_VERSION}"; then
             select_hard_cut_bootstrap_contract
+            if [[ -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
+                section "Staged Upgrade Plan"
+                ok "${CURRENT_VERSION} → ${RELEASE_VERSION} → ${POST_HARD_CUT_FINAL_VERSION}"
+            fi
             capture_hard_cut_target_controller_contract
             FRESH_HARD_CUT_HANDOFF=1
             STAGED_FINAL_MIN_PROTOCOL="${MANIFEST_MIN_PROTOCOL}"

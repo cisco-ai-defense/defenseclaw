@@ -62,9 +62,12 @@ def _manifest(version: str) -> dict[str, object]:
     if version == "0.8.5":
         published_sources.insert(0, "0.8.4")
         windows_sources = []
-    elif version == "0.8.7":
-        published_sources[0:0] = ["0.8.6", "0.8.5", "0.8.4"]
-        windows_sources = ["0.8.6"]
+    elif version in {"0.8.7", "0.8.8"}:
+        post_cut_sources = ["0.8.6", "0.8.5", "0.8.4"]
+        if version == "0.8.8":
+            post_cut_sources.insert(0, "0.8.7")
+        published_sources[0:0] = post_cut_sources
+        windows_sources = [item for item in post_cut_sources if item not in {"0.8.5", "0.8.4"}]
     gateways = {
         platform_name: {
             arch: f"defenseclaw_{version}_protocol2_{platform_name}_{arch}.dcgateway" for arch in ("amd64", "arm64")
@@ -86,7 +89,7 @@ def _manifest(version: str) -> dict[str, object]:
         "tested_source_versions": published_sources,
         "platform_tested_source_versions": {"windows": windows_sources},
     }
-    if version in {"0.8.5", "0.8.7"}:
+    if version in {"0.8.5", "0.8.7", "0.8.8"}:
         payload.update(
             {
                 "min_upgrade_protocol": 2,
@@ -151,7 +154,7 @@ def resolver_env(tmp_path: Path):
         home.mkdir(exist_ok=True)
 
         bridge_checksums_sha256 = ""
-        for version in ("0.8.4", "0.8.5", "0.8.7"):
+        for version in ("0.8.4", "0.8.5", "0.8.7", "0.8.8"):
             release_dir = fixtures / version
             release_dir.mkdir(exist_ok=True)
             manifest_payload = _manifest(version)
@@ -177,7 +180,7 @@ def resolver_env(tmp_path: Path):
                     gateway = release_dir / gateway_name
                     gateway.write_bytes(f"gateway fixture {gateway_name}\n".encode())
                     checksum_rows.append(f"{hashlib.sha256(gateway.read_bytes()).hexdigest()}  {gateway.name}")
-            if version in {"0.8.5", "0.8.7"}:
+            if version in {"0.8.5", "0.8.7", "0.8.8"}:
                 provenance = (
                     json.dumps(
                         _release_provenance(version, bridge_checksums_sha256),
@@ -278,6 +281,7 @@ case "${url}" in
     */releases/download/0.8.4/*) version='0.8.4' ;;
     */releases/download/0.8.5/*) version='0.8.5' ;;
     */releases/download/0.8.7/*) version='0.8.7' ;;
+    */releases/download/0.8.8/*) version='0.8.8' ;;
 esac
 [[ -n "${version}" && -n "${out}" ]] || exit 96
 name="${url##*/}"
@@ -402,22 +406,24 @@ def test_explicit_final_target_still_resolves_verified_two_hop_plan(
     assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
 
 
+@pytest.mark.parametrize("target_version", ("0.8.7", "0.8.8"))
 @pytest.mark.parametrize("current_version", ("0.8.3", "0.7.1"))
 def test_explicit_post_cut_target_stages_hard_cut_release(
     resolver_env,
     current_version: str,
+    target_version: str,
 ) -> None:
     env, mutation_log, curl_log = resolver_env(current_version)
 
-    result = _run(env, "--version", "0.8.7", "--plan")
+    result = _run(env, "--version", target_version, "--plan")
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert f"{current_version} → 0.8.4 bridge → fresh controller → 0.8.5 → 0.8.7" in output
+    assert f"{current_version} → 0.8.4 bridge → fresh controller → 0.8.5 → {target_version}" in output
     assert "No changes were made" in output
     assert not mutation_log.exists()
     downloads = curl_log.read_text(encoding="utf-8")
-    assert "/releases/download/0.8.7/upgrade-manifest.json" in downloads
+    assert f"/releases/download/{target_version}/upgrade-manifest.json" in downloads
     assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
     assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
 
@@ -606,17 +612,18 @@ def test_bridge_source_resolves_direct_hard_cut(resolver_env) -> None:
     assert "/releases/download/0.8.4/upgrade-manifest.json" not in downloads
 
 
-def test_bridge_source_stages_hard_cut_before_latest(resolver_env) -> None:
+@pytest.mark.parametrize("target_version", ("0.8.7", "0.8.8"))
+def test_bridge_source_stages_hard_cut_before_post_cut_target(resolver_env, target_version: str) -> None:
     env, mutation_log, curl_log = resolver_env("0.8.4")
 
-    result = _run(env, "--plan")
+    result = _run(env, "--version", target_version, "--plan")
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "0.8.4 → 0.8.5 → 0.8.7" in output
+    assert f"0.8.4 → 0.8.5 → {target_version}" in output
     assert not mutation_log.exists()
     downloads = curl_log.read_text(encoding="utf-8")
-    assert "/releases/download/0.8.7/upgrade-manifest.json" in downloads
+    assert f"/releases/download/{target_version}/upgrade-manifest.json" in downloads
     assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
     assert "/releases/download/0.8.4/upgrade-manifest.json" not in downloads
 
