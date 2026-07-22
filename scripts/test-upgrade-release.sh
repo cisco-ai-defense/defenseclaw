@@ -850,42 +850,68 @@ SH
     printf '%s\n' "${real_curl}"
 }
 
-prepare_required_bridge_assets() {
-    [[ -n "${REQUIRED_BRIDGE_VERSION}" ]] || return 0
-    [[ "${REQUIRED_BRIDGE_VERSION}" != "${TARGET_VERSION}" ]] || return 0
-
-    local bridge_dir="${RELEASE_ROOT}/${REQUIRED_BRIDGE_VERSION}"
+prepare_authenticated_upgrade_release_assets() {
+    local version="$1"
+    local label="$2"
+    local include_provenance="${3:-0}"
+    local release_dir="${RELEASE_ROOT}/${version}"
     local previous_from="${FROM_VERSION}"
     local asset
-    local bridge_wheel="defenseclaw-${REQUIRED_BRIDGE_VERSION}-2-py3-none-any.dcwheel"
-    local bridge_gateway="defenseclaw_${REQUIRED_BRIDGE_VERSION}_protocol2_${OS_NAME}_${ARCH_NAME}.dcgateway"
-    mkdir -p "${bridge_dir}"
-    for asset in \
-        "${bridge_wheel}" \
-        "${bridge_gateway}" \
-        checksums.txt \
-        checksums.txt.sig \
-        checksums.txt.pem \
-        upgrade-manifest.json; do
-        download_old_asset "${asset}" "${bridge_dir}/${asset}" \
-            "${REQUIRED_BRIDGE_VERSION}" \
-            || die "required bridge asset is unavailable: ${REQUIRED_BRIDGE_VERSION}/${asset}"
+    local wheel="defenseclaw-${version}-2-py3-none-any.dcwheel"
+    local gateway="defenseclaw_${version}_protocol2_${OS_NAME}_${ARCH_NAME}.dcgateway"
+    local -a assets=(
+        "${wheel}"
+        "${gateway}"
+        checksums.txt
+        checksums.txt.sig
+        checksums.txt.pem
+        upgrade-manifest.json
+    )
+    local -a authenticated_assets=("${wheel}" "${gateway}" upgrade-manifest.json)
+    if [[ "${include_provenance}" == "1" ]]; then
+        assets+=(release-provenance.json)
+        authenticated_assets+=(release-provenance.json)
+    fi
+
+    mkdir -p "${release_dir}"
+    for asset in "${assets[@]}"; do
+        download_old_asset "${asset}" "${release_dir}/${asset}" "${version}" \
+            || die "${label} asset is unavailable: ${version}/${asset}"
     done
     local cosign_command cosign_path
     cosign_command="$(command -v cosign)" \
-        || die "cosign is required to authenticate published bridge ${REQUIRED_BRIDGE_VERSION}"
+        || die "cosign is required to authenticate published ${label} ${version}"
     cosign_path="$(abs_path "${cosign_command}")" \
-        || die "cosign is required to authenticate published bridge ${REQUIRED_BRIDGE_VERSION}"
-    python3 "${ROOT}/scripts/historical_release_auth.py" \
-        --version "${REQUIRED_BRIDGE_VERSION}" \
-        --release-dir "${bridge_dir}" \
-        --cosign "${cosign_path}" \
-        --asset "${bridge_wheel}" \
-        --asset "${bridge_gateway}" \
-        --asset upgrade-manifest.json \
-        || die "required bridge authentication failed: ${REQUIRED_BRIDGE_VERSION}"
+        || die "cosign is required to authenticate published ${label} ${version}"
+    local -a authentication_args=(
+        --version "${version}"
+        --release-dir "${release_dir}"
+        --cosign "${cosign_path}"
+    )
+    for asset in "${authenticated_assets[@]}"; do
+        authentication_args+=(--asset "${asset}")
+    done
+    python3 "${ROOT}/scripts/historical_release_auth.py" "${authentication_args[@]}" \
+        || die "${label} authentication failed: ${version}"
     FROM_VERSION="${previous_from}"
-    ok "Authenticated published bridge assets: ${REQUIRED_BRIDGE_VERSION} (${OS_NAME}/${ARCH_NAME})"
+    ok "Authenticated published ${label} assets: ${version} (${OS_NAME}/${ARCH_NAME})"
+}
+
+prepare_required_bridge_assets() {
+    if [[ -n "${REQUIRED_BRIDGE_VERSION}" \
+        && "${REQUIRED_BRIDGE_VERSION}" != "${TARGET_VERSION}" ]]; then
+        local bridge_provenance=0
+        [[ "${REQUIRED_BRIDGE_VERSION}" == "${V8_ACTIVATION_VERSION}" ]] \
+            && bridge_provenance=1
+        prepare_authenticated_upgrade_release_assets \
+            "${REQUIRED_BRIDGE_VERSION}" "required bridge" "${bridge_provenance}"
+    fi
+
+    if ! version_lte "${TARGET_VERSION}" "${V8_ACTIVATION_VERSION}" \
+        && [[ "${REQUIRED_BRIDGE_VERSION}" != "${V8_ACTIVATION_VERSION}" ]]; then
+        prepare_authenticated_upgrade_release_assets \
+            "${V8_ACTIVATION_VERSION}" "hard-cut bootstrap" 1
+    fi
 }
 
 tail_log() {

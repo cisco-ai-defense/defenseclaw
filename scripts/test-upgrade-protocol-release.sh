@@ -12,6 +12,7 @@ umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly FIRST_SCHEMA2_RELEASE="0.8.4"
+readonly OBSERVABILITY_V8_HARD_CUT_VERSION="0.8.5"
 REFUSAL_CONTRACT_ONLY=0
 
 # shellcheck source=scripts/test-upgrade-release.sh
@@ -628,6 +629,7 @@ run_candidate_updater_refusal() {
 run_candidate_updater_staged_success() {
     local baseline="$1"
     local invocation="${2:-latest}"
+    local expected_path
     local -a resolver_args=(--yes)
     case "${invocation}" in
         latest) ;;
@@ -666,7 +668,14 @@ run_candidate_updater_staged_success() {
         die "one-command staged upgrade failed: ${baseline} -> ${TARGET_VERSION}"
     fi
 
-    grep -Fq "${baseline} → ${REQUIRED_BRIDGE_VERSION} bridge → fresh controller → ${TARGET_VERSION}" \
+    expected_path="${baseline} → ${REQUIRED_BRIDGE_VERSION} bridge → fresh controller → ${TARGET_VERSION}"
+    if [[ "${baseline}" == "${REQUIRED_BRIDGE_VERSION}" ]] \
+        && version_lt "${OBSERVABILITY_V8_HARD_CUT_VERSION}" "${TARGET_VERSION}"; then
+        expected_path="${baseline} → ${OBSERVABILITY_V8_HARD_CUT_VERSION} → ${TARGET_VERSION}"
+    elif version_lt "${OBSERVABILITY_V8_HARD_CUT_VERSION}" "${TARGET_VERSION}"; then
+        expected_path="${baseline} → ${REQUIRED_BRIDGE_VERSION} bridge → fresh controller → ${OBSERVABILITY_V8_HARD_CUT_VERSION} → ${TARGET_VERSION}"
+    fi
+    grep -Fq "${expected_path}" \
         "${log_file}" || die "staged upgrade log did not prove the resolved bridge handoff"
     verify_upgrade
     stop_smoke_gateway
@@ -764,6 +773,16 @@ run_protocol_case() {
         # and let the current release-owned resolver own the positive path.
         immutable_bridge_empty_windows_refusal=1
     fi
+    local resolver_owned_post_cut_bridge=0
+    if [[ -n "${REQUIRED_BRIDGE_VERSION}" \
+        && "${baseline}" == "${REQUIRED_BRIDGE_VERSION}" ]] \
+        && version_lt "${OBSERVABILITY_V8_HARD_CUT_VERSION}" "${TARGET_VERSION}"; then
+        # The immutable 0.8.4 controller owns only the 0.8.4 -> 0.8.5 hard
+        # cut.  Sending it directly to a later target preserves the 0.8.4
+        # dependency graph and recreates the release failure this gate exists
+        # to prevent.  The current release-owned resolver must insert 0.8.5.
+        resolver_owned_post_cut_bridge=1
+    fi
 
     if [[ -n "${REQUIRED_BRIDGE_VERSION}" && "${baseline}" == "${REQUIRED_BRIDGE_VERSION}" ]]; then
         (( supported_protocol >= CANDIDATE_MIN_PROTOCOL )) \
@@ -805,6 +824,8 @@ run_protocol_case() {
 
         if [[ "${immutable_bridge_empty_windows_refusal}" -eq 1 ]]; then
             run_installed_controller_refusal "${baseline}" "immutable-bridge-empty-windows"
+        elif [[ "${resolver_owned_post_cut_bridge}" -eq 1 ]]; then
+            log "Required bridge ${baseline} uses the release-owned ${OBSERVABILITY_V8_HARD_CUT_VERSION} bootstrap path"
         elif [[ "${legacy_schema_one_controller}" -eq 1 \
                 || "${protocol_too_old}" -eq 1 \
                 || "${source_too_old}" -eq 1 ]]; then
@@ -814,7 +835,9 @@ run_protocol_case() {
             run_one_upgrade_smoke "${baseline}"
         fi
 
-        if [[ "${source_too_old}" -eq 1 ]]; then
+        if [[ "${resolver_owned_post_cut_bridge}" -eq 1 ]]; then
+            run_candidate_updater_staged_success "${baseline}"
+        elif [[ "${source_too_old}" -eq 1 ]]; then
             [[ -n "${REQUIRED_BRIDGE_VERSION}" ]] \
                 || die "tested source ${baseline} requires a bridge, but the signed bridge contract is absent"
             manifest_array_contains auto_bridge_from "${baseline}" \

@@ -85,6 +85,7 @@ readonly BACKUP_ROOT="${DEFENSECLAW_HOME}/backups"
 readonly BRIDGE_PHASE1_STATE_NAMES_JSON='[".env",".migration_state.json","guardrail_runtime.json","device.key","active_connector.json","codex_backup.json","claudecode_backup.json","zeptoclaw_backup.json","codex_config_backup.json","codex_env.sh","codex.env","policies","connector_backups","hooks",".upgrade-shims","observability-stack"]'
 readonly REPO="cisco-ai-defense/defenseclaw"
 readonly UPGRADE_PROTOCOL_VERSION=2
+readonly OBSERVABILITY_V8_HARD_CUT_VERSION="0.8.5"
 readonly COSIGN_BOOTSTRAP_VERSION="2.6.3"
 readonly COSIGN_BOOTSTRAP_MAX_BYTES="209715200"
 readonly UPGRADE_MANIFEST_NAME="upgrade-manifest.json"
@@ -3714,6 +3715,7 @@ fi
 REQUESTED_RELEASE_VERSION="${RELEASE_VERSION}"
 STAGED_FINAL_VERSION=""
 STAGED_FINAL_MIN_PROTOCOL=""
+POST_HARD_CUT_FINAL_VERSION=""
 FRESH_HARD_CUT_HANDOFF=0
 
 # ── Detect currently installed version ───────────────────────────────────────
@@ -4972,6 +4974,24 @@ capture_hard_cut_target_controller_contract() {
     FINAL_RELEASE_WHL_SHA256="${expected}"
 }
 
+select_hard_cut_bootstrap_contract() {
+    # The 0.8.5 release owns the one supported v7 -> v8 dependency cut.  A
+    # later target must not try to perform that cut while preserving the 0.8.4
+    # environment: the two authenticated dependency graphs are intentionally
+    # incompatible.  Authenticate 0.8.5 now, finish that transaction first,
+    # then continue from the healthy 0.8.5 installation to the requested tag.
+    version_lt "${OBSERVABILITY_V8_HARD_CUT_VERSION}" "${RELEASE_VERSION}" \
+        || return 0
+
+    POST_HARD_CUT_FINAL_VERSION="${RELEASE_VERSION}"
+    RELEASE_VERSION="${OBSERVABILITY_V8_HARD_CUT_VERSION}"
+    section "Hard-Cut Bootstrap"
+    ok "Authenticated upgrade path will stage ${RELEASE_VERSION} before ${POST_HARD_CUT_FINAL_VERSION}"
+    configure_release
+    prepare_release_contract
+    FINAL_RELEASE_PROVENANCE_BRIDGE_CHECKSUMS_SHA256="${RELEASE_PROVENANCE_BRIDGE_CHECKSUMS_SHA256}"
+}
+
 resolve_staged_upgrade() {
     local supported
     [[ -n "${MANIFEST_MINIMUM_SOURCE:-}" ]] || return 0
@@ -4981,6 +5001,11 @@ resolve_staged_upgrade() {
     if version_gte "${CURRENT_VERSION}" "${MANIFEST_MINIMUM_SOURCE}"; then
         if [[ "${CURRENT_VERSION}" == "${MANIFEST_REQUIRED_BRIDGE}" ]] \
             && version_lt "${CURRENT_VERSION}" "${RELEASE_VERSION}"; then
+            select_hard_cut_bootstrap_contract
+            if [[ -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
+                section "Staged Upgrade Plan"
+                ok "${CURRENT_VERSION} → ${RELEASE_VERSION} → ${POST_HARD_CUT_FINAL_VERSION}"
+            fi
             capture_hard_cut_target_controller_contract
             FRESH_HARD_CUT_HANDOFF=1
             STAGED_FINAL_MIN_PROTOCOL="${MANIFEST_MIN_PROTOCOL}"
@@ -4993,6 +5018,7 @@ resolve_staged_upgrade() {
     # hand off to the target resolver with exactly this override, so the
     # release-owned resolver must preserve that target intent while still
     # inserting every manifest-required bridge.
+    select_hard_cut_bootstrap_contract
     if ! manifest_array_contains "auto_bridge_from" "${CURRENT_VERSION}" "${UPGRADE_MANIFEST_FILE}"; then
         supported="$(manifest_array_values "auto_bridge_from" "${UPGRADE_MANIFEST_FILE}" | paste -sd ',' - | sed 's/,/, /g')"
         die "Installed version ${CURRENT_VERSION} is outside the tested automatic bridge matrix. No changes were made.
@@ -5006,7 +5032,11 @@ resolve_staged_upgrade() {
     STAGED_FINAL_MIN_PROTOCOL="${MANIFEST_MIN_PROTOCOL}"
     RELEASE_VERSION="${MANIFEST_REQUIRED_BRIDGE}"
     section "Staged Upgrade Plan"
-    ok "${CURRENT_VERSION} → ${RELEASE_VERSION} bridge → fresh controller → ${STAGED_FINAL_VERSION}"
+    if [[ -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
+        ok "${CURRENT_VERSION} → ${RELEASE_VERSION} bridge → fresh controller → ${STAGED_FINAL_VERSION} → ${POST_HARD_CUT_FINAL_VERSION}"
+    else
+        ok "${CURRENT_VERSION} → ${RELEASE_VERSION} bridge → fresh controller → ${STAGED_FINAL_VERSION}"
+    fi
 
     configure_release
     prepare_release_contract
@@ -7012,6 +7042,47 @@ if reported_version(installed_gateway) != bridge_version:
 PY
 }
 
+continue_post_hard_cut_upgrade() {
+    local final_version="${POST_HARD_CUT_FINAL_VERSION:-}"
+    local installed_version gateway_version final_status=0
+    [[ -n "${final_version}" ]] || return 0
+    validate_version "${final_version}"
+    version_lt "${OBSERVABILITY_V8_HARD_CUT_VERSION}" "${final_version}" \
+        || die "Invalid post-hard-cut target ${final_version}; the healthy ${OBSERVABILITY_V8_HARD_CUT_VERSION} installation was preserved."
+
+    [[ -x "${DEFENSECLAW_VENV}/bin/python" \
+       && -x "${DEFENSECLAW_VENV}/bin/defenseclaw" \
+       && -x "${INSTALL_DIR}/defenseclaw-gateway" ]] \
+        || die "The ${OBSERVABILITY_V8_HARD_CUT_VERSION} bootstrap completed without a canonical controller/gateway pair; ${final_version} was not attempted."
+    installed_version="$("${DEFENSECLAW_VENV}/bin/python" -I -B -c \
+        'from defenseclaw import __version__; print(__version__)')" \
+        || die "Could not verify the installed hard-cut controller; ${final_version} was not attempted."
+    gateway_version="$("${INSTALL_DIR}/defenseclaw-gateway" --version 2>&1 \
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" \
+        || die "Could not verify the installed hard-cut gateway; ${final_version} was not attempted."
+    [[ "${installed_version}" == "${OBSERVABILITY_V8_HARD_CUT_VERSION}" \
+       && "${gateway_version}" == "${OBSERVABILITY_V8_HARD_CUT_VERSION}" ]] \
+        || die "Hard-cut bootstrap component mismatch (CLI ${installed_version:-unknown}, gateway ${gateway_version:-unknown}); ${final_version} was not attempted."
+
+    section "Hard Cut Verified"
+    ok "${OBSERVABILITY_V8_HARD_CUT_VERSION} is healthy; continuing to ${final_version}"
+
+    # The authenticated bootstrap controller is now installed outside the
+    # private target staging directory.  Drop the completed hard-cut handoff
+    # custody, but keep this resolver's cross-process lock until the ordinary
+    # post-cut child and any inherited mutators have exited.  The completed
+    # 0.8.4 hard-cut rollback is not re-armed for this later transaction.
+    unset DEFENSECLAW_STAGED_UPGRADE
+    unset DEFENSECLAW_STAGED_BRIDGE_VERSION
+    unset DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR
+    unset DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION
+    [[ -z "${STAGING_DIR:-}" ]] || rm -rf "${STAGING_DIR}"
+    STAGING_DIR=""
+    "${DEFENSECLAW_VENV}/bin/defenseclaw" upgrade --yes --version "${final_version}" \
+        || final_status=$?
+    exit "${final_status}"
+}
+
 handoff_existing_bridge_to_hard_cut() {
     local final_version="${RELEASE_VERSION}"
     local final_min_protocol="${STAGED_FINAL_MIN_PROTOCOL}"
@@ -7061,6 +7132,9 @@ handoff_existing_bridge_to_hard_cut() {
     local target_status=0
     "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}" \
         || target_status=$?
+    if [[ "${target_status}" -eq 0 ]]; then
+        continue_post_hard_cut_upgrade
+    fi
     exit "${target_status}"
 }
 
@@ -7177,7 +7251,11 @@ fi
 
 if [[ "${PLAN_ONLY}" -eq 1 ]]; then
     section "Upgrade Plan Verified"
-    if [[ -n "${STAGED_FINAL_VERSION}" ]]; then
+    if [[ -n "${STAGED_FINAL_VERSION}" && -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
+        ok "${CURRENT_VERSION} → ${RELEASE_VERSION} → fresh controller → ${STAGED_FINAL_VERSION} → ${POST_HARD_CUT_FINAL_VERSION}"
+    elif [[ -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
+        ok "${CURRENT_VERSION} → ${RELEASE_VERSION} → ${POST_HARD_CUT_FINAL_VERSION}"
+    elif [[ -n "${STAGED_FINAL_VERSION}" ]]; then
         ok "${CURRENT_VERSION} → ${RELEASE_VERSION} → fresh controller → ${STAGED_FINAL_VERSION}"
     else
         ok "${CURRENT_VERSION} → ${RELEASE_VERSION}"
@@ -7795,6 +7873,9 @@ if [[ -n "${STAGED_FINAL_VERSION}" ]]; then
     target_status=0
     "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}" \
         || target_status=$?
+    if [[ "${target_status}" -eq 0 ]]; then
+        continue_post_hard_cut_upgrade
+    fi
     exit "${target_status}"
 fi
 
