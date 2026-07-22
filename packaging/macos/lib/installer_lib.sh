@@ -83,18 +83,39 @@ home_perms_ok() {
 # so invoking $PATH-resolved `codex` / `claude` / etc. would be a
 # privilege-escalation surface — the caller must pass --agent-version
 # explicitly for connectors that don't ship a stable metadata file.
-_read_json_version() {
+# _read_json_field PATH FIELD -> echoes the top-level FIELD or "".
+#
+# Reads a JSON document from PATH and echoes the value of the given
+# top-level string field, or empty on any error (missing file,
+# unreadable file, malformed JSON, missing field, non-string value).
+# Metadata-only: no shell interpolation of the payload, no exec of
+# any binary the payload names. The python3 sub-invocation stays
+# hard-scoped to json.load + dict.get; the field name is passed as a
+# separate argv (not concatenated into the script) so a caller
+# feeding a hostile FIELD cannot inject python.
+_read_json_field() {
   local path="$1"
+  local field="$2"
   local py
   py="$(command -v python3 || echo /usr/bin/python3)"
   "${py}" -c '
 import json, sys
 try:
   with open(sys.argv[1]) as f:
-    print(json.load(f).get("version",""))
+    v = json.load(f).get(sys.argv[2], "")
+  if isinstance(v, str):
+    print(v)
 except Exception:
   pass
-' "${path}" 2>/dev/null
+' "${path}" "${field}" 2>/dev/null
+}
+
+# _read_json_version PATH -> convenience shim for the .version field.
+# Kept as a named helper so the connector-version-discovery code in
+# discover_agent_version reads clearly; delegates to _read_json_field
+# so we don't grow two copies of the same python3 one-liner.
+_read_json_version() {
+  _read_json_field "$1" "version"
 }
 
 # _native_claudecode_version_from_dir BASE -> echoes the version or "".
@@ -562,56 +583,70 @@ EOF
 
 # ---- config rendering --------------------------------------------------
 
-# aid_endpoint_for_env ENV -> stdout
-# Maps the installer's --env flag to the AI Defense cloud host that
-# defenseclaw's managed CMID inspection client will target. The daemon
-# appends the fixed /api/v1/inspect/defense_claw path itself; this
-# helper only supplies the host.
+# _valid_aid_endpoint_url URL -> exit 0 iff URL passes the strict AID
+# endpoint regex. Rejects hostless variants (`https:///`,
+# `https://?tenant=x`), whitespace, double quotes, and backslashes so
+# the value can safely land inside a double-quoted YAML scalar in
+# render_config's cisco_ai_defense block.
 #
-# Kept as a pure-bash lookup so tests can exercise it without depending
-# on the AID cloud being reachable. Adding a new environment is a
-# one-line change here + a new case in the outer arg validator.
-aid_endpoint_for_env() {
-  local env="$1"
-  case "${env}" in
-    prod)    echo "https://us.api.inspect.aidefense.security.cisco.com";;
-    preview) echo "https://preview.api.inspect.aidefense.aiteam.cisco.com";;
-    *)       return 1;;
-  esac
+# Kept as a named helper so callers exercise the same regex regardless
+# of whether the URL came from --override-endpoint or the AVC-owned
+# env_config.json.
+_valid_aid_endpoint_url() {
+  local candidate="$1"
+  local re='^https?://[^[:space:]/?#"\]+[^[:space:]"\]*$'
+  [[ "${candidate}" =~ ${re} ]]
 }
 
-# resolve_aid_endpoint ENV OVERRIDE -> stdout effective endpoint
+# resolve_aid_endpoint OVERRIDE CONFIG_FILE -> stdout effective endpoint
 #
-# When OVERRIDE is non-empty it wins over ENV: this is the --override-endpoint
-# adhoc-testing seam that lets an operator point the managed daemon at an
-# arbitrary AI Defense host (e.g. a personal preview tenant) without adding a
-# new --env case. The override is validated as a well-formed http(s) URL with
-# no whitespace or double-quote (it is later rendered into a quoted YAML
-# scalar) and any trailing slash is stripped for consistent path joining.
+# Under the managed_enterprise contract the AI Defense endpoint that
+# the daemon inspects against is authored by the AVC module and dropped
+# at CONFIG_FILE (default
+# /opt/cisco/secureclient/defenseclaw/env_config.json) as a single-
+# field JSON document:
 #
-# Return codes let the caller emit a precise error:
+#   {
+#     "cisco_ai_defense_endpoint": "https://us.api.inspect.aidefense.security.cisco.com"
+#   }
+#
+# --override-endpoint is preserved as the release-owned adhoc-testing
+# seam (personal preview tenants, sam-aid boxes, etc.) and wins over
+# the file. Any trailing slash is stripped for consistent path joining
+# — the daemon appends /api/v1/inspect/defense_claw itself.
+#
+# Return codes let the caller emit a precise per-source error:
 #   0 - success (endpoint on stdout)
-#   1 - unknown ENV (and no override) — invalid --env
-#   2 - override supplied but malformed — invalid --override-endpoint
+#   1 - config file missing / unreadable / not a regular file
+#   2 - config file present but malformed (bad JSON, missing field,
+#       URL failed the regex)
+#   3 - override supplied but malformed — invalid --override-endpoint
 #
-# Kept pure (stdout only, no warn/log) so tests can exercise precedence and
-# validation without the AID cloud being reachable.
+# rc 3 is a new code (the previous version used rc 2 for the override
+# case); callers wanting per-flag error messages should key off the
+# new numbering.
+#
+# Kept pure (stdout only, no warn/log) so tests can exercise precedence
+# and validation without the AID cloud being reachable.
 resolve_aid_endpoint() {
-  local env="$1"
-  local override="$2"
+  local override="$1"
+  local config_file="$2"
   if [[ -n "${override}" ]]; then
-    # Require a non-empty URL authority (host) right after "//": the
-    # first authority char must not be a delimiter (/ ? #), so hostless
-    # values like "https:///" or "https://?tenant=x" are rejected. The
-    # whole value must also be free of whitespace, double quotes, and
-    # backslashes — it is rendered into a double-quoted YAML scalar where
-    # a backslash would be an escape sequence and a quote would break out.
-    local re='^https?://[^[:space:]/?#"\]+[^[:space:]"\]*$'
-    [[ "${override}" =~ ${re} ]] || return 2
+    _valid_aid_endpoint_url "${override}" || return 3
     printf '%s\n' "${override%/}"
     return 0
   fi
-  aid_endpoint_for_env "${env}"
+  if [[ -z "${config_file}" || ! -f "${config_file}" ]]; then
+    return 1
+  fi
+  local endpoint
+  endpoint="$(_read_json_field "${config_file}" "cisco_ai_defense_endpoint")"
+  if [[ -z "${endpoint}" ]]; then
+    return 2
+  fi
+  _valid_aid_endpoint_url "${endpoint}" || return 2
+  printf '%s\n' "${endpoint%/}"
+  return 0
 }
 
 # render_config MODE PRIMARY API_PORT DISABLE_REDACTION SUPPORT_DIR AID_ENDPOINT CONN... -> stdout
@@ -705,9 +740,12 @@ EOF
 # inspection with a bearer token sourced from the managed cloud auth
 # provider. The daemon calls
 # ${aid_endpoint}/api/v1/inspect/defense_claw with Authorization: Bearer
-# <token>. The endpoint is installer-set; --env selects which AID cloud
-# environment to target. See internal/gateway/cisco_inspect_defense_claw.go
-# and internal/managed/cloudreg for the client-side implementation.
+# <token>. The endpoint is sourced from the AVC-authored env_config.json
+# at /opt/cisco/secureclient/defenseclaw/env_config.json (see the
+# --config-file flag on install.sh); --override-endpoint on install.sh
+# takes precedence for adhoc testing. See
+# internal/gateway/cisco_inspect_defense_claw.go and
+# internal/managed/cloudreg for the client-side implementation.
 cisco_ai_defense:
   endpoint: "${aid_endpoint}"
 

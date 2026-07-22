@@ -330,7 +330,25 @@ _setup_bundle_fixture() {
     printf '#!/bin/sh\nexit 0\n' > "${bundle}/defenseclaw"
     chmod 0755 "${bundle}/defenseclaw"
   fi
+  # Stage an env_config.json fixture next to the installer. Every test
+  # here drives install.sh past its arg-parse phase, and the AID
+  # endpoint resolver now requires either --config-file or
+  # --override-endpoint. Passing --config-file "${bundle}/env_config.json"
+  # (see FIXTURE_ENV_CONFIG_ARG below) lets the plist / connector /
+  # binary-lookup tests exercise their intended assertions without
+  # each case having to plumb its own AVC-authored file.
+  printf '{"cisco_ai_defense_endpoint": "https://us.api.inspect.aidefense.security.cisco.com"}\n' \
+    > "${bundle}/env_config.json"
+  chmod 0644 "${bundle}/env_config.json"
   printf '%s\n' "${bundle}"
+}
+
+# _bundle_env_config_arg BUNDLE -> echoes the --config-file argument
+# tests should pass to install.sh so it can resolve the AID endpoint
+# from the bundle's staged env_config.json (rather than dying on the
+# default /opt/cisco/... path that doesn't exist under a tmpdir).
+_bundle_env_config_arg() {
+  printf -- '--config-file %s/env_config.json' "$1"
 }
 
 # Regression guard for the "shippable bundle" contract: install.sh must
@@ -346,7 +364,7 @@ t_bundle_layout_resolves_locally() {
   # ownership check so the fake stub plist under a tmpdir doesn't need
   # to be root-owned.
   trace="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 bash -x "${bundle}/install.sh" \
-    --connector codex --skip-launchd --skip-connector 2>&1 | \
+    --connector codex --skip-launchd --skip-connector --config-file "${bundle}/env_config.json" 2>&1 | \
     grep -E "PLIST_SRC=|BINARY_SRC=/" || true)"
 
   assert_contains "${trace}" "PLIST_SRC=${bundle}/com.cisco.secureclient.defenseclaw.plist" "plist resolved from bundle"
@@ -361,7 +379,7 @@ t_bundle_without_binary_and_no_repo_dies() {
 
   local out rc=0
   out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 "${bundle}/install.sh" \
-    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+    --connector codex --skip-launchd --skip-connector --config-file "${bundle}/env_config.json" 2>&1)" || rc=$?
   assert_status "${rc}" 1 "missing binary + no repo should die"
   assert_contains "${out}" "no repo tree" "explains missing repo tree"
 }
@@ -393,7 +411,7 @@ t_plist_validator_accepts_bundle_default_owned_by_user() {
   # negative-only `assert_not_contains "must be owned by root"` check.
   local out rc=0
   out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 bash -x "${bundle}/install.sh" \
-    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+    --connector codex --skip-launchd --skip-connector --config-file "${bundle}/env_config.json" 2>&1)" || rc=$?
   local trace
   trace="$(printf '%s' "${out}" | grep -E 'PLIST_SRC=|PLIST_SRC_ORIGIN=' || true)"
   assert_contains "${trace}" "PLIST_SRC=${bundle}/com.cisco.secureclient.defenseclaw.plist" "plist resolved from bundle"
@@ -408,7 +426,7 @@ t_plist_validator_rejects_bundle_default_that_is_world_writable() {
   chmod 0646 "${bundle}/com.cisco.secureclient.defenseclaw.plist"
   local out rc=0
   out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 "${bundle}/install.sh" \
-    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+    --connector codex --skip-launchd --skip-connector --config-file "${bundle}/env_config.json" 2>&1)" || rc=$?
   assert_status "${rc}" 1 "world-writable plist rejected"
   assert_contains "${out}" "group/other writable" "explains why"
 }
@@ -425,7 +443,7 @@ t_plist_validator_rejects_override_owned_by_non_root() {
   out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 \
     DEFENSECLAW_PLIST_SRC="${override_plist}" \
     "${bundle}/install.sh" \
-    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+    --connector codex --skip-launchd --skip-connector --config-file "${bundle}/env_config.json" 2>&1)" || rc=$?
   assert_status "${rc}" 1 "override plist owned by non-root rejected"
   assert_contains "${out}" "must be owned by root" "explains why"
   assert_contains "${out}" "DEFENSECLAW_PLIST_SRC" "names the override source"
@@ -443,7 +461,7 @@ t_plist_validator_rejects_missing_env_override() {
   out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 \
     DEFENSECLAW_PLIST_SRC="${bundle}/does-not-exist.plist" \
     "${bundle}/install.sh" \
-    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+    --connector codex --skip-launchd --skip-connector --config-file "${bundle}/env_config.json" 2>&1)" || rc=$?
   assert_status "${rc}" 1 "missing env-override plist must fail"
   assert_contains "${out}" "DEFENSECLAW_PLIST_SRC" "error names the env var"
   assert_contains "${out}" "does not exist"        "error names the missing state"
@@ -463,7 +481,7 @@ t_plist_validator_fails_closed_when_stat_output_empty() {
   local out rc=0
   out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 PATH="${shimbin}:${PATH}" \
     "${bundle}/install.sh" \
-    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+    --connector codex --skip-launchd --skip-connector --config-file "${bundle}/env_config.json" 2>&1)" || rc=$?
   assert_status "${rc}" 1 "stat empty must fail closed"
   assert_contains "${out}" "cannot stat plist source" "explains why"
 }

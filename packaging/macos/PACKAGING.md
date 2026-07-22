@@ -32,13 +32,45 @@ Common flags:
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
-| `--mode {observe\|action}` | `observe` | Guardrail + asset_policy mode |
+| `--mode {observe\|action}` | `action` | Guardrail + asset_policy mode |
 | `--connector LIST` | `codex` | Comma-separated: `codex`, `claudecode`, `cursor` |
 | `--port PORT` | `18970` | Loopback API port |
+| `--config-file PATH` | `/opt/cisco/secureclient/defenseclaw/env_config.json` | Path to the AVC-authored JSON that supplies `cisco_ai_defense.endpoint` (see [AVC env_config.json](#avc-env_configjson)) |
+| `--override-endpoint URL` | — | Adhoc-testing seam that wins over `--config-file`; must be a full http(s) URL |
 | `--disable-redaction` | on | Turn off audit/sink redaction |
 | `--user USER` | `$SUDO_USER` | Target user for per-user hook wiring |
 | `--skip-connector` | — | Gateway only; skip user-space hook wiring |
 | `--skip-launchd` | — | Install files without bootstrapping the daemon |
+
+### AVC env_config.json
+
+On managed_enterprise hosts, the AI Defense endpoint the daemon
+inspects against comes from a static JSON file that the Cisco Secure
+Client (AVC) module drops at
+`/opt/cisco/secureclient/defenseclaw/env_config.json`. `install.sh`
+reads a single top-level field:
+
+```json
+{
+  "cisco_ai_defense_endpoint": "https://us.api.inspect.aidefense.security.cisco.com"
+}
+```
+
+Trust requirements (enforced by `install.sh` via the shared
+managed-installer helpers):
+
+- File must be root-owned with no group/other write bits.
+- No symlinks on the file or any ancestor directory.
+- No write-capable macOS ACL anywhere in the ancestor chain.
+- Every ancestor must be root-owned and non-writable by group/other.
+
+Any of the four checks failing → `install.sh` fails closed with a
+message naming the offending path. Extra fields in the JSON are
+ignored for forward compatibility — a later AVC drop can add keys
+without breaking older DefenseClaw builds.
+
+For adhoc / preview testing, `--override-endpoint URL` bypasses the
+file entirely.
 
 Full reference: `./install.sh --help`.
 

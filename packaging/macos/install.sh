@@ -51,7 +51,13 @@ DEFAULT_MODE="action"
 DEFAULT_CONNECTOR="codex"
 DEFAULT_API_PORT="18970"
 DISABLE_REDACTION="false"
-DEFAULT_ENV="prod"
+
+# AVC ships a static env_config.json under the managed install tree
+# with the AI Defense endpoint DefenseClaw should target. That file is
+# the source of truth on managed_enterprise hosts; --config-file lets
+# operators point at a different path (fleet override, test fixture).
+# --override-endpoint remains as the release-owned adhoc-testing seam.
+DEFAULT_CONFIG_FILE="/opt/cisco/secureclient/defenseclaw/env_config.json"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd 2>/dev/null || echo "${SCRIPT_DIR}")"
@@ -270,6 +276,110 @@ install_file_reconcile() {
   forget_install_temporary "${temporary}"
 }
 
+# ---- AVC env_config.json trust helpers ---------------------------------
+# The AI Defense endpoint config file is authored by AVC (a signed
+# system component) and dropped under a root-owned tree. Verify the
+# managed-enterprise trust invariants before reading its contents:
+# root-owned, no group/other write, no symlinks anywhere in the
+# ancestor chain, no write-capable macOS ACL. These mirror the checks
+# packaging/launchd/install-enterprise.sh applies to its --config source
+# (see :100-151 in that file). Kept inline here (rather than in
+# installer_lib.sh) so installer_lib.sh's pure-function contract stays
+# intact and its test harness does not accidentally invoke the
+# die-emitting trust path on a tmpdir fixture.
+_refuse_symlink_or_die() {
+  local path="$1" label="$2"
+  [[ ! -L "${path}" ]] || die "${label} must not be a symlink: ${path}"
+}
+
+_assert_no_write_acl_or_die() {
+  local path="$1" label="$2"
+  local output line normalized permissions permission
+  local -a acl_permissions
+  output="$(/bin/ls -lde -- "${path}" 2>/dev/null)" \
+    || die "${label} cannot be inspected for ACLs: ${path}"
+  while IFS= read -r line; do
+    normalized="$(printf '%s' "${line}" | /usr/bin/tr '[:upper:]' '[:lower:]')"
+    normalized="${normalized#"${normalized%%[![:space:]]*}"}"
+    [[ "${normalized}" =~ ^[0-9]+: ]] || continue
+    [[ "${normalized}" == *" allow "* ]] || continue
+    permissions="${normalized#* allow }"
+    permissions="${permissions%% *}"
+    [[ -n "${permissions}" ]] \
+      || die "${label} has an unparseable macOS allow ACL: ${path}"
+    IFS=',' read -r -a acl_permissions <<<"${permissions}"
+    for permission in "${acl_permissions[@]}"; do
+      case "${permission}" in
+        write|add_file|append|add_subdirectory|delete|delete_child|writeattr|writeextattr|writesecurity|chown)
+          die "${label} has a write-capable macOS ACL entry (${permission}): ${path}"
+          ;;
+      esac
+    done
+  done <<<"${output}"
+}
+
+_assert_trusted_dir_or_die() {
+  local path="$1" label="$2" uid mode
+  _refuse_symlink_or_die "${path}" "${label}"
+  [[ -d "${path}" ]] || die "${label} ancestor is missing: ${path}"
+  _assert_no_write_acl_or_die "${path}" "${label}"
+  uid="$(/usr/bin/stat -f '%u' "${path}" 2>/dev/null || echo '')"
+  mode="$(/usr/bin/stat -f '%Lp' "${path}" 2>/dev/null || echo '')"
+  [[ "${uid}" == "0" ]] \
+    || die "${label} ancestor is not root-owned: ${path} (uid=${uid})"
+  (( (8#${mode} & 8#022) == 0 )) \
+    || die "${label} ancestor is group/other writable: ${path} (mode=${mode})"
+}
+
+# _assert_trusted_env_config_file_or_die PATH
+#   Enforces the managed-enterprise trust contract on a file authored
+#   by AVC and dropped under a root-owned tree. Dies with a labelled
+#   message on any violation. Walks every ancestor of PATH (absolute
+#   path only; relative paths are rejected). Skipped when
+#   DC_INSTALLER_SKIP_ROOT_CHECK=1 (the same seam that bypasses the
+#   euid check for tests operating on tmpdir fixtures).
+_assert_trusted_env_config_file_or_die() {
+  local path="$1" label="AVC env_config.json"
+  if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" == "1" ]]; then
+    return 0
+  fi
+  case "${path}" in
+    /*) ;;
+    *) die "${label} must be an absolute path: ${path}" ;;
+  esac
+  _refuse_symlink_or_die "${path}" "${label}"
+  [[ -f "${path}" ]] || die "${label} is not a regular file: ${path}"
+  _assert_no_write_acl_or_die "${path}" "${label}"
+  local uid mode
+  uid="$(/usr/bin/stat -f '%u' "${path}" 2>/dev/null || echo '')"
+  mode="$(/usr/bin/stat -f '%Lp' "${path}" 2>/dev/null || echo '')"
+  [[ "${uid}" == "0" ]] \
+    || die "${label} is not root-owned: ${path} (uid=${uid})"
+  (( (8#${mode} & 8#022) == 0 )) \
+    || die "${label} is group/other writable: ${path} (mode=${mode})"
+  # Walk every ancestor and apply the same trust checks. The install-
+  # enterprise.sh trust helper does the same at :112-138.
+  local parent current="/" trimmed_parent component
+  local -a source_parts
+  parent="$(dirname "${path}")"
+  _assert_trusted_dir_or_die "${current}" "${label}"
+  trimmed_parent="${parent#/}"
+  IFS='/' read -r -a source_parts <<<"${trimmed_parent}"
+  for component in "${source_parts[@]}"; do
+    [[ -n "${component}" ]] || continue
+    case "${component}" in
+      .) continue ;;
+      ..) die "${label} path must not contain parent traversal: ${path}" ;;
+    esac
+    if [[ "${current}" == "/" ]]; then
+      current="/${component}"
+    else
+      current="${current}/${component}"
+    fi
+    _assert_trusted_dir_or_die "${current}" "${label}"
+  done
+}
+
 create_install_directory_reconcile() {
   # create_install_directory_reconcile PATH OWNER GROUP MODE
   #
@@ -349,15 +459,17 @@ Gateway options:
                             Examples: --connector cursor
                                       --connector cursor,claudecode
   --port PORT               Loopback API port (default: ${DEFAULT_API_PORT})
-  --env {prod|preview}      AI Defense cloud environment (default: ${DEFAULT_ENV}).
-                            Selects the cisco_ai_defense.endpoint that the
-                            managed daemon uses to inspect content.
-                            Use 'preview' only for internal validation against
-                            the aiteam preview deployment.
+  --config-file PATH        Path to the AVC-authored env_config.json that
+                            supplies cisco_ai_defense.endpoint. Default:
+                            ${DEFAULT_CONFIG_FILE}
+                            The file must be root-owned and non-writable by
+                            group/other, per the managed_enterprise trust
+                            contract. Expected JSON shape:
+                            {"cisco_ai_defense_endpoint": "https://..."}
   --override-endpoint URL   Point cisco_ai_defense.endpoint at an arbitrary AI
                             Defense host for adhoc testing. Takes precedence
-                            over --env. Must be a full http(s) URL, e.g.
-                            https://sam-aid-004864.api.inspect.aidefense.aiteam.cisco.com
+                            over --config-file. Must be a full http(s) URL,
+                            e.g. https://sam-aid-004864.api.inspect.aidefense.aiteam.cisco.com
   --disable-redaction       Disable redaction in audit/sinks (default: on)
   --binary PATH             Use prebuilt binary (default: alongside install.sh)
   --plist PATH              Use this LaunchDaemon plist (default: alongside install.sh)
@@ -385,7 +497,7 @@ EOF
 MODE="${DEFAULT_MODE}"
 CONNECTOR="${DEFAULT_CONNECTOR}"
 API_PORT="${DEFAULT_API_PORT}"
-AID_ENV="${DEFAULT_ENV}"
+CONFIG_FILE="${DEFAULT_CONFIG_FILE}"
 OVERRIDE_ENDPOINT=""
 ALLOW_EMPTY_USERS="false"
 
@@ -394,7 +506,7 @@ while [[ $# -gt 0 ]]; do
     --mode)             MODE="${2:?}"; shift 2;;
     --connector)        CONNECTOR="${2:?}"; shift 2;;
     --port)             API_PORT="${2:?}"; shift 2;;
-    --env)              AID_ENV="${2:?}"; shift 2;;
+    --config-file)      CONFIG_FILE="${2:?}"; shift 2;;
     --override-endpoint) OVERRIDE_ENDPOINT="${2:?}"; shift 2;;
     --disable-redaction|--no-redact) DISABLE_REDACTION="true"; shift;;
     --binary)           BINARY_SRC="${2:?}"; SKIP_BUILD="true"; shift 2;;
@@ -415,24 +527,6 @@ case "${MODE}" in
   *) die "--mode must be 'observe' or 'action' (got: ${MODE})";;
 esac
 
-# --override-endpoint (when set) wins over --env; resolve_aid_endpoint
-# validates it and strips a trailing slash. Distinct return codes let us
-# report exactly which flag was wrong.
-_ep_rc=0
-AID_ENDPOINT="$(resolve_aid_endpoint "${AID_ENV}" "${OVERRIDE_ENDPOINT}")" || _ep_rc=$?
-if (( _ep_rc == 2 )); then
-  die "--override-endpoint must be a full http(s) URL without spaces or quotes (got: ${OVERRIDE_ENDPOINT})"
-elif (( _ep_rc != 0 )); then
-  die "--env must be 'prod' or 'preview' (got: ${AID_ENV})"
-fi
-unset _ep_rc
-if [[ -n "${OVERRIDE_ENDPOINT}" ]]; then
-  case "${OVERRIDE_ENDPOINT}" in
-    http://*) warn "--override-endpoint uses plaintext http://; the CMID bearer token would traverse the wire unencrypted — use only for local/adhoc testing";;
-  esac
-  log "AI Defense endpoint overridden for adhoc testing: ${AID_ENDPOINT} (ignoring --env ${AID_ENV})"
-fi
-
 if [[ ! "${API_PORT}" =~ ^[0-9]+$ ]] || (( API_PORT < 1 || API_PORT > 65535 )); then
   die "--port must be an integer between 1 and 65535 (got: ${API_PORT})"
 fi
@@ -452,6 +546,54 @@ for c in "${CONNECTORS[@]}"; do
     warn "connector '${c}' is not in the auto-wire list (codex|claudecode|cursor); will be written to config but per-user hooks won't be auto-wired"
   fi
 done
+
+# AI Defense endpoint resolution runs AFTER purely-syntactic flag
+# validation (--mode / --port / --connector) so a stale automation
+# passing a bad port or connector list still gets its per-flag error
+# message rather than being masked by the endpoint resolver's
+# fail-closed on a missing env_config.json.
+#
+# --override-endpoint (when set) wins over --config-file. When the
+# resolver falls through to the config file we ALSO run the managed-
+# enterprise trust check (root ownership, no group/other write, no
+# symlink, no write-capable macOS ACL) on the file and every ancestor
+# before reading it — this matches
+# packaging/launchd/install-enterprise.sh's --config trust contract.
+#
+# Distinct return codes let us report exactly which input was wrong so
+# operators don't chase the wrong flag:
+#   rc 0 - success (endpoint on stdout).
+#   rc 1 - config file missing / unreadable.
+#   rc 2 - config file malformed (bad JSON, missing field, bad URL).
+#   rc 3 - --override-endpoint supplied but malformed.
+if [[ -z "${OVERRIDE_ENDPOINT}" && -e "${CONFIG_FILE}" ]]; then
+  # Trust check runs before the resolver reads the file so a
+  # tamper-suspect file is rejected loudly (rather than silently
+  # feeding its contents into config.yaml). A missing file preempts
+  # the trust check — the resolver's rc-1 branch below gives a nicer
+  # "AVC module must drop this file" message in that case.
+  _assert_trusted_env_config_file_or_die "${CONFIG_FILE}"
+fi
+_ep_rc=0
+AID_ENDPOINT="$(resolve_aid_endpoint "${OVERRIDE_ENDPOINT}" "${CONFIG_FILE}")" || _ep_rc=$?
+if (( _ep_rc == 3 )); then
+  die "--override-endpoint must be a full http(s) URL without spaces or quotes (got: ${OVERRIDE_ENDPOINT})"
+elif (( _ep_rc == 2 )); then
+  die "--config-file ${CONFIG_FILE} is malformed: expected a JSON object with a valid \"cisco_ai_defense_endpoint\" URL. If AVC's drop is missing, pass --override-endpoint URL for adhoc testing."
+elif (( _ep_rc == 1 )); then
+  die "env_config.json not found at ${CONFIG_FILE}; the AVC module must drop this file before installing, or pass --override-endpoint URL for adhoc testing."
+elif (( _ep_rc != 0 )); then
+  die "could not resolve AI Defense endpoint (rc=${_ep_rc})"
+fi
+unset _ep_rc
+if [[ -n "${OVERRIDE_ENDPOINT}" ]]; then
+  case "${OVERRIDE_ENDPOINT}" in
+    http://*) warn "--override-endpoint uses plaintext http://; the CMID bearer token would traverse the wire unencrypted — use only for local/adhoc testing";;
+  esac
+  log "AI Defense endpoint overridden for adhoc testing: ${AID_ENDPOINT} (ignoring --config-file ${CONFIG_FILE})"
+else
+  log "AI Defense endpoint resolved from ${CONFIG_FILE}: ${AID_ENDPOINT}"
+fi
 
 # ---- preflight ----------------------------------------------------------
 
@@ -832,7 +974,7 @@ if [[ -e "${CONFIG_PATH}" ]]; then
   log "reconciling managed config (existing ${CONFIG_PATH} will be replaced)"
 fi
 
-log "writing config (mode=${MODE} connectors=${CONNECTORS[*]} port=${API_PORT} env=${AID_ENV} redaction_off=${DISABLE_REDACTION})"
+log "writing config (mode=${MODE} connectors=${CONNECTORS[*]} port=${API_PORT} endpoint=${AID_ENDPOINT} redaction_off=${DISABLE_REDACTION})"
 CONFIG_TMP="$(mktemp "${CONFIG_PATH}.new.XXXXXX")" \
   || die "could not reserve a private managed-config staging file"
 INSTALL_TEMP_FILES+=("${CONFIG_TMP}")

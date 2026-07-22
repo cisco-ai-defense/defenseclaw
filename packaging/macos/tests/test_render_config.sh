@@ -132,24 +132,38 @@ t_cisco_ai_defense_block_emitted() {
   assert_contains "${out}" "endpoint: \"${TEST_AID_ENDPOINT_PREVIEW}\""    "endpoint value threaded through"
 }
 
-t_aid_endpoint_env_selection() {
-  # Helper is the single source of truth mapping installer --env to a
-  # host. Adding a new environment MUST update this helper (and this
-  # test).
-  local prod preview bogus_rc
-  prod="$(aid_endpoint_for_env prod)"
-  preview="$(aid_endpoint_for_env preview)"
-  assert_eq "${prod}"    "${TEST_AID_ENDPOINT_PROD}"    "prod maps to us prod host"
-  assert_eq "${preview}" "${TEST_AID_ENDPOINT_PREVIEW}" "preview maps to aiteam preview host"
+t_read_json_field_semantics() {
+  # _read_json_field is the pure-function reader the resolver leans on
+  # for the AVC-authored env_config.json. Assert the field-name-driven
+  # semantics: valid field → value, missing field → empty, malformed
+  # JSON → empty, missing file → empty, non-string value → empty.
+  local case_dir; case_dir="$(mktest_tmp)"
+  local cfg="${case_dir}/env_config.json"
 
-  # Unknown env must be a non-zero exit for --env validation to reject
-  # it at install time.
-  bogus_rc=0
-  aid_endpoint_for_env staging >/dev/null 2>&1 || bogus_rc=$?
-  if [[ "${bogus_rc}" == "0" ]]; then
-    _fail "aid_endpoint_for_env staging exited 0; expected non-zero for unknown env"
-    return 1
-  fi
+  # Valid string field.
+  printf '{"cisco_ai_defense_endpoint": "https://us.api.inspect.aidefense.security.cisco.com"}\n' >"${cfg}"
+  local got
+  got="$(_read_json_field "${cfg}" cisco_ai_defense_endpoint)"
+  assert_eq "${got}" "https://us.api.inspect.aidefense.security.cisco.com" \
+    "reads a top-level string field"
+
+  # Missing field → empty (rc still 0; callers gate on empty).
+  got="$(_read_json_field "${cfg}" other_key)"
+  assert_eq "${got}" "" "missing field returns empty"
+
+  # Malformed JSON → empty.
+  printf '{malformed' >"${cfg}"
+  got="$(_read_json_field "${cfg}" cisco_ai_defense_endpoint)"
+  assert_eq "${got}" "" "malformed JSON returns empty"
+
+  # Missing file → empty.
+  got="$(_read_json_field "${case_dir}/does-not-exist.json" cisco_ai_defense_endpoint)"
+  assert_eq "${got}" "" "missing file returns empty"
+
+  # Non-string value (number) → empty.
+  printf '{"cisco_ai_defense_endpoint": 42}\n' >"${cfg}"
+  got="$(_read_json_field "${cfg}" cisco_ai_defense_endpoint)"
+  assert_eq "${got}" "" "non-string field value returns empty"
 }
 
 t_otel_block_enabled_for_managed_sink() {
@@ -176,70 +190,88 @@ t_ai_discovery_enabled_for_endpoint_inventory() {
 }
 
 t_resolve_aid_endpoint_precedence() {
-  # resolve_aid_endpoint backs the --override-endpoint adhoc-testing seam.
-  # An empty override falls back to the --env-derived host; a non-empty
-  # override wins outright, has its trailing slash stripped, and is
-  # validated as an http(s) URL.
+  # resolve_aid_endpoint now takes (OVERRIDE, CONFIG_FILE) and reads
+  # the AI Defense endpoint from the AVC-authored env_config.json.
+  # --override-endpoint (arg 1) wins over the file (arg 2). Distinct
+  # return codes let callers emit per-source errors:
+  #   rc 0 success, rc 1 config file missing, rc 2 config file
+  #   malformed, rc 3 override malformed.
+  local case_dir; case_dir="$(mktest_tmp)"
+  local cfg="${case_dir}/env_config.json"
+  printf '{"cisco_ai_defense_endpoint": "%s"}\n' "${TEST_AID_ENDPOINT_PROD}" >"${cfg}"
+
   local out rc
 
-  # Fallback to --env when no override.
-  out="$(resolve_aid_endpoint prod "")"
-  assert_eq "${out}" "${TEST_AID_ENDPOINT_PROD}"    "empty override falls back to --env prod host"
-  out="$(resolve_aid_endpoint preview "")"
-  assert_eq "${out}" "${TEST_AID_ENDPOINT_PREVIEW}" "empty override falls back to --env preview host"
+  # Fallback to config file when no override.
+  out="$(resolve_aid_endpoint "" "${cfg}")"
+  assert_eq "${out}" "${TEST_AID_ENDPOINT_PROD}" "empty override reads from config file"
 
-  # Override wins over --env (even a valid --env).
-  out="$(resolve_aid_endpoint prod "https://sam-aid-004864.api.inspect.aidefense.aiteam.cisco.com")"
+  # A different endpoint value in the config file also resolves.
+  printf '{"cisco_ai_defense_endpoint": "%s"}\n' "${TEST_AID_ENDPOINT_PREVIEW}" >"${cfg}"
+  out="$(resolve_aid_endpoint "" "${cfg}")"
+  assert_eq "${out}" "${TEST_AID_ENDPOINT_PREVIEW}" \
+    "config file swap re-resolves the endpoint"
+
+  # Override wins over the config file (even a valid config file).
+  out="$(resolve_aid_endpoint "https://sam-aid-004864.api.inspect.aidefense.aiteam.cisco.com" "${cfg}")"
   assert_eq "${out}" "https://sam-aid-004864.api.inspect.aidefense.aiteam.cisco.com" \
-    "override takes precedence over --env"
+    "override takes precedence over --config-file"
 
-  # Trailing slash stripped for consistent path joining downstream.
-  out="$(resolve_aid_endpoint prod "https://host.example.com/")"
+  # Trailing slash stripped from either source for consistent path
+  # joining downstream.
+  out="$(resolve_aid_endpoint "https://host.example.com/" "${cfg}")"
   assert_eq "${out}" "https://host.example.com" "trailing slash stripped from override"
+  printf '{"cisco_ai_defense_endpoint": "https://host.example.com/"}\n' >"${cfg}"
+  out="$(resolve_aid_endpoint "" "${cfg}")"
+  assert_eq "${out}" "https://host.example.com" "trailing slash stripped from config-file value"
 
-  # http:// is allowed (adhoc/local) — the plaintext warning is emitted by
-  # install.sh, not this pure helper.
-  out="$(resolve_aid_endpoint preview "http://localhost:8080")"
+  # http:// is allowed (adhoc/local) — the plaintext warning is
+  # emitted by install.sh, not this pure helper.
+  out="$(resolve_aid_endpoint "http://localhost:8080" "${cfg}")"
   assert_eq "${out}" "http://localhost:8080" "plaintext http override accepted by resolver"
 
-  # Malformed override -> rc 2 (distinct from unknown-env rc 1) so the
-  # caller can attribute the error to the right flag.
-  rc=0; resolve_aid_endpoint prod "not-a-url"        >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "override without scheme -> rc 2"
-  rc=0; resolve_aid_endpoint prod "ftp://host"       >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "non-http(s) scheme -> rc 2"
-  rc=0; resolve_aid_endpoint prod "https://a b.com"  >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "override with whitespace -> rc 2"
-  rc=0; resolve_aid_endpoint prod 'https://a".com'   >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "override with double-quote -> rc 2"
-  rc=0; resolve_aid_endpoint prod 'https://a\.com'   >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "override with backslash -> rc 2"
+  # Malformed override -> rc 3 so the caller can attribute the error
+  # to --override-endpoint specifically.
+  rc=0; resolve_aid_endpoint "not-a-url"        "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 3 "override without scheme -> rc 3"
+  rc=0; resolve_aid_endpoint "ftp://host"       "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 3 "non-http(s) scheme -> rc 3"
+  rc=0; resolve_aid_endpoint "https://a b.com"  "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 3 "override with whitespace -> rc 3"
+  rc=0; resolve_aid_endpoint 'https://a".com'   "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 3 "override with double-quote -> rc 3"
+  rc=0; resolve_aid_endpoint 'https://a\.com'   "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 3 "override with backslash -> rc 3"
 
-  # Hostless overrides must be rejected: without an authority the rendered
-  # cisco_ai_defense.endpoint has no usable host and inspection/export
-  # silently fails at runtime.
-  rc=0; resolve_aid_endpoint prod "https:///"          >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "override with empty authority -> rc 2"
-  rc=0; resolve_aid_endpoint prod "https:///api"       >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "override with empty authority + path -> rc 2"
-  rc=0; resolve_aid_endpoint prod "https://?tenant=x"  >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "override with query but no host -> rc 2"
-  rc=0; resolve_aid_endpoint prod "https://#frag"      >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 2 "override with fragment but no host -> rc 2"
+  # Hostless overrides.
+  rc=0; resolve_aid_endpoint "https:///"          "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 3 "override with empty authority -> rc 3"
+  rc=0; resolve_aid_endpoint "https:///api"       "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 3 "override with empty authority + path -> rc 3"
+  rc=0; resolve_aid_endpoint "https://?tenant=x"  "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 3 "override with query but no host -> rc 3"
+  rc=0; resolve_aid_endpoint "https://#frag"      "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 3 "override with fragment but no host -> rc 3"
 
-  # No override + unknown env -> rc 1 (delegates to aid_endpoint_for_env).
-  rc=0; resolve_aid_endpoint staging "" >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 1 "unknown env with no override -> rc 1"
-}
+  # No override + missing config file -> rc 1.
+  rc=0; resolve_aid_endpoint "" "${case_dir}/does-not-exist.json" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 1 "missing config file with no override -> rc 1"
 
-t_preview_env_endpoint_ends_up_in_config() {
-  # End-to-end at the render layer: an installer running with --env
-  # preview must produce a config.yaml whose cisco_ai_defense.endpoint
-  # points at the preview host. This is the whole point of --env.
-  local endpoint out
-  endpoint="$(aid_endpoint_for_env preview)"
-  out="$(render_config action cursor 18970 false "/opt/cisco/secureclient/defenseclaw" "${endpoint}" cursor)"
-  assert_contains "${out}" "endpoint: \"${TEST_AID_ENDPOINT_PREVIEW}\"" "preview host lands in rendered config"
+  # No override + malformed JSON -> rc 2.
+  printf '{malformed' >"${cfg}"
+  rc=0; resolve_aid_endpoint "" "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "malformed JSON in config file -> rc 2"
+
+  # No override + missing field -> rc 2.
+  printf '{"other_key": "x"}\n' >"${cfg}"
+  rc=0; resolve_aid_endpoint "" "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "config file missing cisco_ai_defense_endpoint -> rc 2"
+
+  # No override + malformed URL in the JSON value -> rc 2 (the URL
+  # regex runs on the file's payload too).
+  printf '{"cisco_ai_defense_endpoint": "not-a-url"}\n' >"${cfg}"
+  rc=0; resolve_aid_endpoint "" "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "config file with malformed URL -> rc 2"
 }
 
 t_managed_enterprise_verdict_sources_locked() {
@@ -255,30 +287,29 @@ t_managed_enterprise_verdict_sources_locked() {
   # scanner via watcher) must be OFF at the config surface so future
   # edits to the rendered YAML can't silently reactivate a source
   # that would produce independent block verdicts.
-  local endpoint out
-  endpoint="$(aid_endpoint_for_env prod)"
-  out="$(render_config action cursor 18970 false "/opt/cisco/secureclient/defenseclaw" "${endpoint}" cursor)"
+  local out
+  out="$(render_config action cursor 18970 false "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PROD}" cursor)"
 
   # Cloud enforcement source: the cisco_ai_defense block must be
   # emitted with a non-empty endpoint (see NewCiscoDefenseClawInspectClient
   # which refuses to construct without one).
-  assert_contains     "${out}" "cisco_ai_defense:"                        "AID cloud block present"
-  assert_contains     "${out}" "endpoint: \"${endpoint}\""                "AID endpoint threaded through"
+  assert_contains     "${out}" "cisco_ai_defense:"                            "AID cloud block present"
+  assert_contains     "${out}" "endpoint: \"${TEST_AID_ENDPOINT_PROD}\""      "AID endpoint threaded through"
 
   # Local regex: guardrail block present + regex_only pin.
-  assert_contains     "${out}" "guardrail:"                               "guardrail block present"
-  assert_contains     "${out}" "detection_strategy: regex_only"           "detection_strategy: regex_only"
+  assert_contains     "${out}" "guardrail:"                                   "guardrail block present"
+  assert_contains     "${out}" "detection_strategy: regex_only"               "detection_strategy: regex_only"
 
   # Sources that must NOT be active:
-  assert_contains     "${out}" "asset_policy:"                            "asset_policy stub present"
-  assert_not_contains "${out}" "default: deny"                            "asset_policy mcp/skill/plugin default: deny MUST NOT appear"
-  assert_contains     "${out}" "watcher:"                                 "gateway.watcher stub present"
+  assert_contains     "${out}" "asset_policy:"                                "asset_policy stub present"
+  assert_not_contains "${out}" "default: deny"                                "asset_policy mcp/skill/plugin default: deny MUST NOT appear"
+  assert_contains     "${out}" "watcher:"                                     "gateway.watcher stub present"
   # judge.enabled=false is set inside the guardrail block.
   # The daemon defaults guardrail.judge.enabled=false too, so a
   # missing entry would be safe — but pinning it explicitly means
   # someone reading config.yaml can see 'the judge is off' without
   # having to know the sidecar defaults.
-  assert_contains     "${out}" "judge:"                                   "guardrail.judge stub present"
+  assert_contains     "${out}" "judge:"                                       "guardrail.judge stub present"
 }
 
 run_case "managed_enterprise verdict sources locked (AID + local regex only)" t_managed_enterprise_verdict_sources_locked
@@ -290,9 +321,8 @@ run_case "device_key_file pinned under runtime dir (SUPPORT_DIR is not writable 
 run_case "renderer pass-through: redaction on"  t_redaction_pass_through_on
 run_case "renderer pass-through: redaction off" t_redaction_pass_through_off
 run_case "cisco_ai_defense block emitted with installer endpoint" t_cisco_ai_defense_block_emitted
-run_case "aid_endpoint_for_env maps flags to hosts"               t_aid_endpoint_env_selection
+run_case "_read_json_field reads AVC env_config.json shape"       t_read_json_field_semantics
 run_case "otel block enabled for managed AID sink"               t_otel_block_enabled_for_managed_sink
 run_case "ai_discovery enabled for endpoint inventory"           t_ai_discovery_enabled_for_endpoint_inventory
-run_case "resolve_aid_endpoint override precedence + validation"  t_resolve_aid_endpoint_precedence
-run_case "--env preview lands in rendered config"                 t_preview_env_endpoint_ends_up_in_config
+run_case "resolve_aid_endpoint precedence + validation"           t_resolve_aid_endpoint_precedence
 run_case "rendered YAML parses"     t_yaml_parses
