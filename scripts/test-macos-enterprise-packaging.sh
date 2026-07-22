@@ -213,8 +213,14 @@ assert_no_defenseclaw_identity "reinstall created a defenseclaw identity"
 
 writable_config_dir="${fixture}/writable"
 mkdir -- "$writable_config_dir"
-cp -- "$config_source" "${writable_config_dir}/config.yaml"
-cp -- "$manifest_source" "${writable_config_dir}/targets.yaml"
+# $config_source and $manifest_source live under $trusted_fixture,
+# which is a root:wheel 0700 directory the CI user cannot traverse.
+# Read through sudo so the non-root CI user can still stage a writable
+# copy under $fixture; the point of the test is to prove the installer
+# refuses a world-writable source, not to test filesystem access
+# controls on the fixture.
+sudo -n cat -- "$config_source"   >"${writable_config_dir}/config.yaml"
+sudo -n cat -- "$manifest_source" >"${writable_config_dir}/targets.yaml"
 chmod 0666 "${writable_config_dir}/config.yaml" "${writable_config_dir}/targets.yaml"
 
 if sudo -n "$installer" \

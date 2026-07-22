@@ -369,14 +369,14 @@ func TestParseAIDReason(t *testing.T) {
 // in end-user notifications.
 func TestHumanizeAIDCategory(t *testing.T) {
 	cases := map[string]string{
-		"SECURITY_VIOLATION":     "security violation",
-		"PRIVACY_VIOLATION":      "privacy violation",
-		"SAFETY_VIOLATION":       "safety violation",
-		"PROMPT_INJECTION":       "prompt injection",
-		"NONE_ATTACK_TECHNIQUE":  "policy violation",
-		"LOW_SEVERITY":           "low-severity policy signal",
-		"NEW_CATEGORY_X":         "new category x", // mechanical fallback
-		"SINGLE":                 "single",         // fallback without underscores
+		"SECURITY_VIOLATION":    "security violation",
+		"PRIVACY_VIOLATION":     "privacy violation",
+		"SAFETY_VIOLATION":      "safety violation",
+		"PROMPT_INJECTION":      "prompt injection",
+		"NONE_ATTACK_TECHNIQUE": "policy violation",
+		"LOW_SEVERITY":          "low-severity policy signal",
+		"NEW_CATEGORY_X":        "new category x", // mechanical fallback
+		"SINGLE":                "single",         // fallback without underscores
 	}
 	for in, want := range cases {
 		t.Run(in, func(t *testing.T) {
