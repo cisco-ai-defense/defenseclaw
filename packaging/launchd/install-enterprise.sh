@@ -296,6 +296,17 @@ forget_temporary() {
 }
 
 install_file_atomic() {
+    # install_file_atomic SRC DST OWNER GROUP MODE
+    #
+    # Overwrites DST from SRC with the requested owner/group/mode via
+    # rename(2) — atomic on the same filesystem, so an observer sees
+    # either the old file or the new one, never a partial write. This
+    # implements the idempotent-reinstall contract; an existing regular
+    # file is expected on a second install and is replaced.
+    #
+    # Symlinks at DST are refused: a symlink under a root-owned install
+    # path can only be there via privileged tampering, and the atomic
+    # rename would otherwise clobber whatever the symlink points at.
     local source="$1"
     local destination="$2"
     local owner="$3"
@@ -303,27 +314,41 @@ install_file_atomic() {
     local mode="$5"
     local temporary
     refuse_symlink "$destination"
-    [ ! -e "$destination" ] && [ ! -L "$destination" ] \
-        || die "install destination appeared after fresh-host preflight: $destination"
     temporary="$(/usr/bin/mktemp "${destination}.new.XXXXXX")" \
         || die "could not reserve a private install file beside $destination"
     TEMP_FILES+=("$temporary")
     /usr/bin/install -o "$owner" -g "$group" -m "$mode" "$source" "$temporary"
-    /bin/ln -- "$temporary" "$destination" \
-        || die "install destination appeared concurrently and was preserved: $destination"
-    /bin/rm -f -- "$temporary"
+    /bin/mv -f -- "$temporary" "$destination" \
+        || die "could not atomically replace $destination"
     forget_temporary "$temporary"
 }
 
 create_directory_no_replace() {
+    # create_directory_no_replace PATH OWNER GROUP MODE
+    #
+    # Ensures PATH exists as a directory with the requested owner/group
+    # and mode. Existing directory contents are preserved — the
+    # idempotent-reinstall contract treats runtime dirs (audit.db,
+    # device.key, hook-guardian-state) as data-carrying and NEVER wipes
+    # them. Symlinks at PATH are refused for the same reason as
+    # install_file_atomic.
+    #
+    # Name kept as-is (rather than renamed to _reconcile) because the
+    # existing callers and tests reference this exact identifier; the
+    # "_no_replace" suffix now describes "existing directory contents
+    # are not replaced" rather than "the directory itself must not
+    # exist".
     local path="$1"
     local owner="$2"
     local group="$3"
     local mode="$4"
-    [ ! -e "$path" ] && [ ! -L "$path" ] \
-        || die "install directory appeared after fresh-host preflight: $path"
-    /bin/mkdir -- "$path" \
-        || die "install directory appeared concurrently and was preserved: $path"
+    refuse_symlink "$path"
+    if [ -e "$path" ]; then
+        [ -d "$path" ] || die "install directory path exists but is not a directory: $path"
+    else
+        /bin/mkdir -- "$path" \
+            || die "could not create install directory: $path"
+    fi
     /usr/sbin/chown "$owner:$group" "$path"
     /bin/chmod "$mode" "$path"
 }
@@ -390,59 +415,144 @@ done
 [ "$(/usr/bin/uname -s)" = Darwin ] || die "this installer supports macOS only"
 [ "$EUID" -eq 0 ] || die "run this installer as root"
 
-# This low-level package installer cannot provide the release transition
-# graph, 0.8.4 fresh-controller handoff, or exact rollback required for an
-# in-place upgrade. Detect every installed marker before validating identities,
-# unloading launchd, or changing a destination.
-for existing_path in \
+# Idempotent-reinstall contract (see PR notes for the drift analysis):
+# this installer is designed to be run repeatedly against a managed host.
+# The refuse-on-existing behavior that used to live here (a die() on any
+# marker, including a stray ~/.defenseclaw in ANY local account) left
+# drifted hosts stuck — a second run made no changes and machine-wide
+# state stayed whatever the first install produced. The rollback
+# machinery further down (snapshot_file + restore_snapshots) is designed
+# to handle overlapping runs safely, and the install_file_atomic writer
+# now overwrites existing regular files under the reinstall contract.
+#
+# Reinstall reconciles machine-wide state this installer owns (binary,
+# config, manifest, plists, launchd bootstrap). It never touches
+# per-user ~/.defenseclaw — those are owned by the hook-guardian daemon
+# on its 60s reconcile tick. It relocates legacy paths from the
+# pre-Cisco layout under LOG_DIR with a timestamped suffix (best-effort;
+# not deleted) so operators keep forensic access.
+
+_reconcile_current=false
+for _current_path in \
     "$BINARY_ROOT" \
     "$LOG_DIR" \
+    "$GATEWAY_PLIST_DEST" \
+    "$GUARDIAN_PLIST_DEST"; do
+    if [ -e "$_current_path" ] || [ -L "$_current_path" ]; then
+        _reconcile_current=true
+        break
+    fi
+done
+if [ "$_reconcile_current" = false ]; then
+    for _current_label in \
+        com.cisco.secureclient.defenseclaw \
+        com.cisco.secureclient.defenseclaw.hook-guardian; do
+        if /bin/launchctl print "system/${_current_label}" >/dev/null 2>&1; then
+            _reconcile_current=true
+            break
+        fi
+    done
+fi
+if [ "$_reconcile_current" = true ]; then
+    printf 'defenseclaw enterprise install: reconciling existing DefenseClaw installation in place (idempotent reinstall)\n'
+else
+    printf 'defenseclaw enterprise install: fresh managed_enterprise install (no existing markers detected)\n'
+fi
+unset _reconcile_current _current_path _current_label
+
+# Per-user consumer markers are informational only. The hook-guardian
+# daemon (bootstrapped below) reconciles the per-user layer on its own
+# 60s tick; deleting or refusing on them here would rip audit history
+# out from under users.
+local_users="$(/usr/bin/dscl . -list /Users 2>/dev/null || true)"
+if [ -z "$local_users" ]; then
+    warn "could not enumerate local users via dscl; per-user hook wiring will still be reconciled by the guardian on its 60s tick"
+else
+    while IFS= read -r local_user; do
+        [ -n "$local_user" ] || continue
+        local_home="$(/usr/bin/dscl . -read "/Users/${local_user}" NFSHomeDirectory 2>/dev/null \
+            | /usr/bin/sed -n 's/^NFSHomeDirectory: //p')"
+        [ -n "$local_home" ] || continue
+        case "$local_home" in
+            /*) ;;
+            *) continue ;;
+        esac
+        for _user_marker in \
+            "${local_home}/.defenseclaw" \
+            "${local_home}/.local/bin/defenseclaw" \
+            "${local_home}/.local/bin/defenseclaw-gateway"; do
+            if [ -e "$_user_marker" ] || [ -L "$_user_marker" ]; then
+                printf 'defenseclaw enterprise install: (informational) per-user artifact present, will be reconciled by hook-guardian: %s\n' "$_user_marker"
+            fi
+        done
+    done <<<"$local_users"
+fi
+unset local_users local_user local_home _user_marker
+
+# Unload legacy launchd labels (pre-Cisco path). Their plists point at
+# binaries that no longer exist on a current install, so leaving them
+# loaded produces spawn-and-crash log noise. Best-effort; the legacy
+# plist files themselves are relocated below.
+for _legacy_label in \
+    com.defenseclaw.gateway \
+    com.defenseclaw.hook-guardian; do
+    if /bin/launchctl print "system/${_legacy_label}" >/dev/null 2>&1; then
+        printf 'defenseclaw enterprise install: unloading legacy launchd job: %s\n' "$_legacy_label"
+        /bin/launchctl bootout "system/${_legacy_label}" >/dev/null 2>&1 \
+            || warn "launchctl bootout system/${_legacy_label} failed; the legacy plist will still be relocated below"
+    fi
+done
+unset _legacy_label
+
+# Ensure LOG_DIR exists early so the legacy relocation below has a
+# landing zone. Recreated with the right ownership later during the
+# mutation phase; a bare directory here is enough.
+for _log_parent in /Library/Logs "$LOG_VENDOR_DIR" "$LOG_PRODUCT_DIR"; do
+    if [ ! -d "$_log_parent" ]; then
+        /bin/mkdir -p "$_log_parent" 2>/dev/null || true
+    fi
+done
+if [ ! -d "$LOG_DIR" ]; then
+    /bin/mkdir -p "$LOG_DIR" 2>/dev/null || true
+    /usr/sbin/chown root:wheel "$LOG_DIR" 2>/dev/null || true
+    /bin/chmod 0750 "$LOG_DIR" 2>/dev/null || true
+fi
+unset _log_parent
+
+# Move legacy paths aside (best-effort, timestamped, never deleted).
+# Version tag comes from the binary source when available so the backup
+# path is distinguishable across attempts.
+_installer_version_tag="$("$BINARY_SOURCE" --version 2>/dev/null | head -1 || true)"
+[ -z "$_installer_version_tag" ] && _installer_version_tag="unknown"
+_installer_version_tag="$(printf '%s' "$_installer_version_tag" | /usr/bin/tr -c '[:alnum:]._-' '_' | /usr/bin/head -c 32)"
+[ -z "$_installer_version_tag" ] && _installer_version_tag="unknown"
+_legacy_timestamp="$(/bin/date -u +%Y%m%dT%H%M%SZ 2>/dev/null || echo unknown)"
+for _legacy_path in \
     "$LEGACY_BINARY_ROOT" \
     "$LEGACY_MANAGED_ROOT" \
     "$LEGACY_LOG_DIR" \
-    "$GATEWAY_PLIST_DEST" \
-    "$GUARDIAN_PLIST_DEST" \
     "$LEGACY_GATEWAY_PLIST_DEST" \
     "$LEGACY_GUARDIAN_PLIST_DEST"; do
-    if [ -e "$existing_path" ] || [ -L "$existing_path" ]; then
-        die "existing DefenseClaw installation detected at $existing_path; no changes were made. This installer is fresh-install-only. Use the release-owned managed-enterprise staged upgrade path; if none is published for the target release, remain on the current version and contact the deployment owner. Do not uninstall or overwrite state to force the upgrade."
-    fi
-done
-
-# A system LaunchDaemon would contend with a consumer gateway in any local
-# account, not only the account that invoked this root-owned installer. Resolve
-# configured homes through Directory Services instead of assuming /Users/name,
-# and do it before source validation or any service/filesystem mutation.
-local_users="$(/usr/bin/dscl . -list /Users 2>/dev/null)" \
-    || die "could not enumerate local users to prove this is a fresh DefenseClaw host; no changes were made"
-while IFS= read -r local_user; do
-    [ -n "$local_user" ] || continue
-    local_home="$(/usr/bin/dscl . -read "/Users/${local_user}" NFSHomeDirectory 2>/dev/null \
-        | /usr/bin/sed -n 's/^NFSHomeDirectory: //p')"
-    [ -n "$local_home" ] || continue
-    case "$local_home" in
-        /*) ;;
-        *) die "local user ${local_user} has a non-absolute home; cannot prove this is a fresh DefenseClaw host; no changes were made" ;;
-    esac
-    for existing_path in \
-        "${local_home}/.defenseclaw" \
-        "${local_home}/.local/bin/defenseclaw" \
-        "${local_home}/.local/bin/defenseclaw-gateway"; do
-        if [ -e "$existing_path" ] || [ -L "$existing_path" ]; then
-            die "existing DefenseClaw installation detected at $existing_path; no changes were made. This installer is fresh-install-only. Use the release-owned managed-enterprise staged upgrade path; if none is published for the target release, remain on the current version and contact the deployment owner. Do not uninstall or overwrite state to force the upgrade."
+    if [ -e "$_legacy_path" ] || [ -L "$_legacy_path" ]; then
+        _legacy_base="$(/usr/bin/basename -- "$_legacy_path")"
+        _legacy_target="${LOG_DIR}/${_legacy_base}.pre-${_installer_version_tag}-${_legacy_timestamp}"
+        _legacy_suffix=""
+        _legacy_i=0
+        while [ -e "${_legacy_target}${_legacy_suffix}" ] || [ -L "${_legacy_target}${_legacy_suffix}" ]; do
+            _legacy_suffix=".${_legacy_i}"
+            _legacy_i=$((_legacy_i + 1))
+            [ "$_legacy_i" -lt 100 ] || break
+        done
+        _legacy_target="${_legacy_target}${_legacy_suffix}"
+        if /bin/mv -- "$_legacy_path" "$_legacy_target" 2>/dev/null; then
+            printf 'defenseclaw enterprise install: moved legacy path aside: %s -> %s\n' "$_legacy_path" "$_legacy_target"
+        else
+            warn "could not relocate legacy path $_legacy_path; leaving it in place"
         fi
-    done
-done <<<"$local_users"
-for existing_label in \
-    com.cisco.secureclient.defenseclaw \
-    com.cisco.secureclient.defenseclaw.hook-guardian \
-    com.defenseclaw.gateway \
-    com.defenseclaw.hook-guardian; do
-    if /bin/launchctl print "system/${existing_label}" >/dev/null 2>&1; then
-        die "existing DefenseClaw launchd job detected (${existing_label}); no changes were made. This installer is fresh-install-only. Use the release-owned managed-enterprise staged upgrade path; if none is published for the target release, remain on the current version and contact the deployment owner."
     fi
 done
-unset existing_path existing_label local_users local_user local_home
+unset _installer_version_tag _legacy_timestamp _legacy_path _legacy_base \
+    _legacy_target _legacy_suffix _legacy_i
 
 assert_trusted_file_source "$CONFIG_SOURCE" "managed config"
 assert_trusted_file_source "$MANIFEST_SOURCE" "guardian manifest"

@@ -10,6 +10,10 @@ t_install_help() {
   local out
   out="$("${INSTALL_SH}" --help 2>&1)" || _fail "--help should exit 0"
   assert_contains "${out}" "--mode {observe|action}" "mode flag in help"
+  # The help string interpolates DEFAULT_MODE; assert the interpolated
+  # value so a silent DEFAULT_MODE flip in install.sh doesn't diverge
+  # from what operators see in --help.
+  assert_contains "${out}" "default: action"         "mode default in help is action"
   assert_contains "${out}" "--connector LIST"        "connector flag in help"
   assert_contains "${out}" "--disable-redaction"     "disable redaction flag in help"
   assert_contains "${out}" "comma-separated"         "comma-separated note in help"
@@ -165,6 +169,25 @@ t_install_default_env_is_prod() {
   assert_eq "${default}" "prod" "install.sh DEFAULT_ENV must be prod"
 }
 
+t_install_default_mode_is_action() {
+  # Managed-enterprise installs default to enforcing (action) mode.
+  # This installer only ever writes deployment_mode: managed_enterprise
+  # (see installer_lib.sh:render_config), so the default here drives
+  # every managed rollout unless the operator explicitly passes
+  # --mode observe. A silent flip back to observe would put the whole
+  # managed fleet into logging-only mode on the next install run.
+  # Unmanaged installers keep observe — see scripts/install.sh and
+  # cli/defenseclaw/commands/cmd_quickstart.py; nothing in this test
+  # asserts against those.
+  local default
+  default="$(grep -E '^DEFAULT_MODE=' "${INSTALL_SH}" | head -1 | cut -d'"' -f2)"
+  if [[ -z "${default}" ]]; then
+    _fail "could not find DEFAULT_MODE in install.sh"
+    return 1
+  fi
+  assert_eq "${default}" "action" "install.sh DEFAULT_MODE must be action for managed_enterprise"
+}
+
 t_uninstall_unknown_flag() {
   local out rc=0
   out="$("${UNINSTALL_SH}" --bogus 2>&1)" || rc=$?
@@ -197,6 +220,7 @@ run_case "install --env garbage rejected" t_install_bad_env_exits_nonzero
 run_case "install --override-endpoint documented" t_install_help_documents_override_endpoint
 run_case "install --override-endpoint garbage rejected" t_install_bad_override_endpoint_exits_nonzero
 run_case "install DEFAULT_ENV=prod"       t_install_default_env_is_prod
+run_case "install DEFAULT_MODE=action (managed_enterprise)" t_install_default_mode_is_action
 run_case "uninstall --help"               t_uninstall_help
 run_case "uninstall --bogus"              t_uninstall_unknown_flag
 run_case "uninstall non-root rejected"    t_uninstall_requires_root

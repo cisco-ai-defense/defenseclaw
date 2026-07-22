@@ -230,7 +230,7 @@ application_protection:
   enabled: false
 ```
 
-For an initial rollout, use `guardrail.mode: observe`, validate telemetry and guardian coverage, then change to `action` through the administrator-owned file and restart the service. Do not use a user-writable overlay config to stage enterprise policy.
+The packaged macOS installer (`packaging/macos/install.sh`) defaults `guardrail.mode` to `action` for managed_enterprise deployments so hooks enforce their verdict from the first tick. Pass `--mode observe` on the initial rollout if you want a logging-only pilot; validate telemetry and guardian coverage, then change back to `action` through the administrator-owned file and restart the service. Do not use a user-writable overlay config to stage enterprise policy.
 
 Set ownership and start the service:
 
@@ -442,7 +442,7 @@ sudo ./packaging/launchd/install-enterprise.sh \
   --manifest /path/to/approved-targets.yaml
 ```
 
-The installer refuses symlinked sources or managed destinations, verifies the root-owned macOS system path chain, unloads any existing DefenseClaw jobs, and installs through same-directory temporary files. Before launchd is allowed to start either job, it verifies these postconditions:
+The installer is idempotent: running it twice on the same host reconciles the machine-wide layout in place rather than refusing on existing state. It refuses symlinked sources or destinations, verifies the root-owned macOS system path chain, unloads any existing DefenseClaw jobs (including pre-Cisco-path legacy labels), relocates legacy directories under `/Library/Logs/Cisco/SecureClient/DefenseClaw/` with a timestamped `.pre-<version>-<timestamp>` suffix (rather than deleting them), and installs through same-directory temporary files. Runtime state (`audit.db`, `judge_bodies.db`, `device.key`, and the hook-guardian authorization directory) is preserved across reinstalls; user-scope `~/.defenseclaw/` is left untouched and reconciled by the hook-guardian daemon on its 60 s tick. Before launchd is allowed to start either job, it verifies these postconditions:
 
 | Path | Owner | Mode |
 | --- | --- | --- |
@@ -457,7 +457,7 @@ The installer refuses symlinked sources or managed destinations, verifies the ro
 | `/Library/Logs/Cisco/SecureClient/DefenseClaw` | `root:wheel` | `0750` |
 | `/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw*.plist` | `root:wheel` | `0644` |
 
-Before replacing files, the installer snapshots the existing deployment and records which LaunchDaemons are loaded. A failure after jobs are stopped restores the previous binary, config, manifest, and plists, then re-bootstraps only the jobs that were loaded before the attempt. A failed fresh install removes files created by that attempt instead of leaving persistent LaunchDaemon plists.
+Before replacing files, the installer snapshots the existing deployment and records which LaunchDaemons are loaded. A failure after jobs are stopped restores the previous binary, config, manifest, and plists, then re-bootstraps only the jobs that were loaded before the attempt.
 
 Use `--no-start` when MDM or a package transaction must install and verify the files before a separate orchestration step loads the jobs. Even in that mode, an already loaded DefenseClaw job is unloaded before replacement and remains stopped until the administrator starts it.
 

@@ -647,3 +647,88 @@ application_protection:
   enabled: false
 EOF
 }
+
+# ---- legacy path relocation --------------------------------------------
+
+# move_legacy_aside PATH BACKUP_ROOT VERSION [--dry-run] -> exit 0 on success
+#
+# Moves a legacy DefenseClaw path (e.g. /Library/DefenseClaw from a
+# pre-Cisco-path install) aside under BACKUP_ROOT so an idempotent
+# managed reinstall can proceed without silent data loss. Emits one
+# `[install] ...` log line describing the action taken.
+#
+# Behavior:
+#   - PATH missing / not a symlink target -> no-op, exit 0.
+#   - PATH is a real file/dir/symlink -> renamed to
+#     BACKUP_ROOT/<basename>.pre-<VERSION>-<TIMESTAMP>.
+#   - --dry-run (may appear anywhere in the argv tail) -> logs the
+#     intended action without touching disk. Used by tests and by
+#     verbose install-log preview modes.
+#
+# Idempotent by design: two consecutive calls against the same
+# already-relocated path both succeed (the second is a no-op).
+#
+# Kept in the pure-function library so tests can drive it under a
+# tmpdir and so both installers (packaging/macos/install.sh and
+# packaging/launchd/install-enterprise.sh) share one implementation.
+# Callers are responsible for feeding a real absolute PATH; the helper
+# does not sanitize input.
+move_legacy_aside() {
+  local path="$1" backup_root="$2" version="$3"
+  shift 3
+  local dry_run="false"
+  local arg
+  for arg in "$@"; do
+    case "${arg}" in
+      --dry-run) dry_run="true";;
+      *) return 2;;
+    esac
+  done
+
+  if [[ -z "${path}" || -z "${backup_root}" || -z "${version}" ]]; then
+    return 2
+  fi
+
+  if [[ ! -e "${path}" && ! -L "${path}" ]]; then
+    return 0
+  fi
+
+  local base timestamp target
+  base="$(basename -- "${path}")"
+  # No Date.now() here: date is fine (this runs on the operator's
+  # machine, not under a fixed-clock replay), and the timestamp is
+  # only a disambiguator against a re-run within the same version.
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || echo "unknown")"
+  target="${backup_root}/${base}.pre-${version}-${timestamp}"
+
+  if [[ "${dry_run}" == "true" ]]; then
+    printf '[install] would move legacy path aside: %s -> %s\n' "${path}" "${target}"
+    return 0
+  fi
+
+  # BACKUP_ROOT must exist and be writable; on a real install it is
+  # created by the caller (LOGS_DIR is a fine landing zone). Missing
+  # backup_root is a caller bug, not a runtime condition to swallow.
+  if [[ ! -d "${backup_root}" ]]; then
+    return 3
+  fi
+
+  # If the target collides (two-runs-in-one-second edge case), append
+  # a short suffix rather than clobbering. Loop bounded to keep the
+  # helper trivially terminating.
+  local suffix=""
+  local i
+  for (( i = 0; i < 100; i++ )); do
+    if [[ ! -e "${target}${suffix}" && ! -L "${target}${suffix}" ]]; then
+      break
+    fi
+    suffix=".${i}"
+  done
+  target="${target}${suffix}"
+
+  if ! /bin/mv -- "${path}" "${target}" 2>/dev/null; then
+    return 4
+  fi
+  printf '[install] moved legacy path aside: %s -> %s\n' "${path}" "${target}"
+  return 0
+}

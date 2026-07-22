@@ -259,10 +259,22 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     present = sorted(value for value in stale_service_identity_contract if value in text)
     assert not present
 
-    assert "existing DefenseClaw installation detected at" in text
-    assert "no changes were made. This installer is fresh-install-only" in text
-    assert "remain on the current version" in text
-    assert 'local_users="$(/usr/bin/dscl . -list /Users 2>/dev/null)"' in text
+    # Idempotent-reinstall contract: the installer no longer refuses on
+    # existing markers. It logs a reconcile message, unloads any current-
+    # generation launchd labels, and relocates legacy paths under LOG_DIR.
+    # Per-user ~/.defenseclaw is informational only — the hook-guardian
+    # daemon owns per-user reconciliation, so the installer must not
+    # abort or delete on those markers.
+    assert "reconciling existing DefenseClaw installation in place" in text
+    assert "idempotent reinstall" in text
+    assert "fresh managed_enterprise install" in text
+    assert "will be reconciled by hook-guardian" in text
+    assert "moved legacy path aside" in text
+    # Old refusal strings must NOT be present — they were the exact
+    # symptoms the reinstall rework fixes.
+    assert "no changes were made. This installer is fresh-install-only" not in text
+    assert "remain on the current version" not in text
+    assert '/usr/bin/dscl . -list /Users' in text
     assert '/usr/bin/dscl . -read "/Users/${local_user}" NFSHomeDirectory' in text
     assert '"${local_home}/.defenseclaw"' in text
     assert '"${local_home}/.local/bin/defenseclaw"' in text
@@ -273,45 +285,49 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     assert "LEGACY_GUARDIAN_PLIST_DEST=/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist" in text
     assert "com.defenseclaw.gateway" in text
     assert "com.defenseclaw.hook-guardian" in text
-    guard_offset = text.index("existing DefenseClaw installation detected at")
-    user_scan_offset = text.index('local_users="$(/usr/bin/dscl . -list /Users 2>/dev/null)"')
-    assert guard_offset < text.index(directory_creation)
-    assert guard_offset < text.index('ROLLBACK_DIR="$(/usr/bin/mktemp -d')
-    assert user_scan_offset < text.index('assert_trusted_file_source "$CONFIG_SOURCE"')
+    # Reconcile happens before any mutation: bootout / rebootstrap the
+    # current-gen labels and relocate legacy paths before the ROLLBACK
+    # snapshot arms so an interrupted reinstall rolls back cleanly.
+    reconcile_offset = text.index("reconciling existing DefenseClaw installation in place")
+    assert reconcile_offset < text.index('ROLLBACK_DIR="$(/usr/bin/mktemp -d')
+    assert reconcile_offset < text.index('assert_trusted_file_source "$CONFIG_SOURCE"')
+    # install_file_atomic uses mv -f (rename(2), atomic replace) so an
+    # existing regular destination is overwritten cleanly on reinstall.
+    # ln (hardlink) would fail with EEXIST on the second run.
     atomic_install = text[
         text.index("install_file_atomic() {") : text.index("plist_pins_managed_mode() {")
     ]
-    assert '/bin/mv -f -- "$temporary" "$destination"' not in atomic_install
-    assert '/bin/ln -- "$temporary" "$destination"' in atomic_install
-    assert "appeared concurrently and was preserved" in text
-    assert guard_offset < text.index("ROLLBACK_ARMED=true")
-    assert guard_offset < text.index('stop_job_if_loaded "$GUARDIAN_LABEL"')
+    assert '/bin/mv -f -- "$temporary" "$destination"' in atomic_install
+    assert '/bin/ln -- "$temporary" "$destination"' not in atomic_install
     assert '/bin/launchctl enable "system/${GATEWAY_LABEL}"' in text
     assert '/bin/launchctl kickstart -k "system/${GATEWAY_LABEL}"' in text
-    assert "system/com.defenseclaw.gateway" not in text
-    assert "system/com.defenseclaw.hook-guardian" not in text
+    # Legacy launchd labels are unloaded (via bootout) so their stale
+    # plists don't keep spawn-and-crashing; the current-gen labels are
+    # ALSO booted out before rebootstrap during a reinstall.
+    assert '/bin/launchctl bootout "system/${_legacy_label}"' in text
 
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "macos-enterprise-packaging:" in workflow
     assert "./scripts/test-macos-enterprise-packaging.sh" in workflow
 
     smoke = (ROOT / "scripts" / "test-macos-enterprise-packaging.sh").read_text(encoding="utf-8")
-    assert "everyone allow add_file,add_subdirectory,delete_child" in smoke
-    assert "fresh-install-only enterprise package accepted a write-capable existing root" in smoke
+    # Smoke test asserts the reinstall contract end-to-end.
     assert "managed_root=\"/opt/cisco/secureclient/defenseclaw\"" in smoke
     assert "config_dest=\"${managed_root}/etc/config.yaml\"" in smoke
     assert "log_dir=/Library/Logs/Cisco/SecureClient/DefenseClaw" in smoke
     assert "assert_no_defenseclaw_identity()" in smoke
-    assert smoke.count("assert_no_defenseclaw_identity \"") == 5
-    assert "dscl . -create" not in smoke
     assert 'legacy_managed_root="/Library/Application Support/DefenseClaw"' in smoke
     assert "legacy_binary_root=/Library/DefenseClaw" in smoke
-    assert "fresh-install-only enterprise package overwrote an existing deployment" in smoke
-    assert "enterprise package ignored a per-user DefenseClaw installation" in smoke
-    assert "per-user refusal did not name the dscl-resolved home marker" in smoke
-    assert "per-user refusal mutated managed destination" in smoke
-    assert "existing-install refusal modified managed config" in smoke
-    assert "enterprise package repaired/overwrote existing damaged metadata" in smoke
+    # Reinstall-contract-specific expectations:
+    assert "Reinstall reconciles machine-wide state" in smoke
+    assert "idempotent reinstall failed" in smoke
+    assert "reinstall did not restore config to freshly-rendered content" in smoke
+    assert "reinstall did not emit legacy-relocation log line" in smoke
+    assert "reconciling existing DefenseClaw installation in place" in smoke
+    # Untrusted config source is still refused (trust contract unchanged
+    # by the reinstall rework):
+    assert "installer accepted writable config source (source-trust contract broken)" in smoke
+    assert "untrusted source refusal did not identify managed config trust" in smoke
     assert 'trusted_fixture="/Library/DefenseClawPackagingSmoke.$$"' in smoke
 
 

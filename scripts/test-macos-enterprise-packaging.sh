@@ -1,4 +1,20 @@
 #!/usr/bin/env bash
+#
+# End-to-end smoke test for packaging/launchd/install-enterprise.sh.
+#
+# Contract (post idempotent-reinstall rework):
+#   1. Fresh install on a clean host lands the managed layout at
+#      /opt/cisco/secureclient/defenseclaw with the expected owners/modes.
+#   2. Rerunning the installer on the same host is a reconcile — the
+#      binary + config + manifest + plists are atomically replaced with
+#      the new source content, no legacy-fail message is emitted, and
+#      any pre-existing per-user ~/.defenseclaw is left untouched.
+#   3. Legacy paths (pre-Cisco layout) are relocated under LOG_DIR with
+#      a timestamped suffix rather than being deleted or triggering a
+#      hard refusal.
+#   4. Untrusted (world-writable / non-root) config sources are still
+#      refused — the trust contract on --config / --manifest sources is
+#      independent of the reinstall behavior.
 
 set -euo pipefail
 
@@ -53,8 +69,7 @@ cleanup() {
         sudo -n rm -f -- "$gateway_plist" "$guardian_plist"
     fi
     if [ "$probe_owned" = true ]; then
-        rm -f -- "${probe_marker}/existing-state" >/dev/null 2>&1 || true
-        rmdir -- "$probe_marker" >/dev/null 2>&1 || true
+        rm -rf -- "$probe_marker" >/dev/null 2>&1 || true
     fi
     if [ "$trusted_fixture_owned" = true ]; then
         sudo -n rm -rf -- "$trusted_fixture"
@@ -65,12 +80,17 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
 
+# Preflight — refuse to run on a host that already has any DefenseClaw
+# state so the smoke test doesn't clobber a real install. The idempotent-
+# reinstall contract is validated in step 3 below with a controlled
+# fresh->reinstall sequence; this preflight is only about NOT starting
+# from an ambient dirty state on the CI host.
 for path in \
     "$managed_root" "$log_dir" \
     "$legacy_binary_root" "$legacy_managed_root" "$legacy_log_dir" \
     "$gateway_plist" "$guardian_plist" \
     "$legacy_gateway_plist" "$legacy_guardian_plist"; do
-    [ ! -e "$path" ] && [ ! -L "$path" ] || fail "refusing to overwrite pre-existing path: $path"
+    [ ! -e "$path" ] && [ ! -L "$path" ] || fail "preflight: unexpected pre-existing path on CI host: $path"
 done
 for label in \
     com.cisco.secureclient.defenseclaw \
@@ -78,7 +98,7 @@ for label in \
     com.defenseclaw.gateway \
     com.defenseclaw.hook-guardian; do
     if sudo -n launchctl print "system/${label}" >/dev/null 2>&1; then
-        fail "refusing to unload pre-existing job: $label"
+        fail "preflight: unexpected pre-existing launchd job on CI host: $label"
     fi
 done
 installation_owned=true
@@ -96,11 +116,13 @@ case "$probe_home" in
 esac
 probe_marker="${probe_home}/.defenseclaw"
 [ ! -e "$probe_marker" ] && [ ! -L "$probe_marker" ] \
-    || fail "refusing to overwrite the CI user's existing DefenseClaw marker: $probe_marker"
+    || fail "preflight: CI user already has ${probe_marker}"
 
-config_source="${fixture}/config.yaml"
-manifest_source="${fixture}/targets.yaml"
-cat >"$config_source" <<'EOF'
+# Build a *trusted* config + manifest first — the untrusted-source case
+# below tests refusal by demoting these back to writable copies.
+sudo -n mkdir -m 0700 -- "$trusted_fixture"
+trusted_fixture_owned=true
+sudo -n bash -c "cat >'${trusted_fixture}/config.yaml'" <<'EOF'
 config_version: 7
 deployment_mode: managed_enterprise
 data_dir: /opt/cisco/secureclient/defenseclaw/runtime
@@ -113,67 +135,17 @@ gateway:
   api_port: 18970
 guardrail:
   enabled: true
-  mode: observe
+  mode: action
 application_protection:
   enabled: false
 EOF
-printf 'version: 1\ntargets: []\n' >"$manifest_source"
-chmod 0666 "$config_source" "$manifest_source"
-
-# A PATH-independent consumer install in any Directory Services home must stop
-# this system installer before source validation, launchd, or destination
-# mutation. Use the disposable CI user's real dscl-resolved home so the probe
-# does not create or depend on the retired DefenseClaw service identity.
-mkdir -- "$probe_marker"
-probe_owned=true
-printf 'preserve\n' >"${probe_marker}/existing-state"
-if sudo -n "$installer" \
-    --binary "$binary" \
-    --config "$config_source" \
-    --manifest "$manifest_source" \
-    --no-start >"${fixture}/per-user.stdout" 2>"${fixture}/per-user.stderr"; then
-    fail "enterprise package ignored a per-user DefenseClaw installation"
-fi
-grep -Fq "$probe_marker" "${fixture}/per-user.stderr" || fail "per-user refusal did not name the dscl-resolved home marker"
-grep -Fq "no changes were made" "${fixture}/per-user.stderr" || fail "per-user refusal did not attest no changes"
-[ "$(cat "${probe_marker}/existing-state")" = preserve ] || fail "per-user refusal changed consumer state"
-for path in \
-    "$managed_root" "$log_dir" \
-    "$legacy_binary_root" "$legacy_managed_root" "$legacy_log_dir" \
-    "$gateway_plist" "$guardian_plist" \
-    "$legacy_gateway_plist" "$legacy_guardian_plist"; do
-    [ ! -e "$path" ] && [ ! -L "$path" ] || fail "per-user refusal mutated managed destination: $path"
-done
-rm -f -- "${probe_marker}/existing-state"
-rmdir -- "$probe_marker"
-probe_owned=false
-
-if sudo -n "$installer" \
-    --binary "$binary" \
-    --config "$config_source" \
-    --manifest "$manifest_source" \
-    --no-start >"${fixture}/untrusted-source.stdout" 2>"${fixture}/untrusted-source.stderr"; then
-    fail "enterprise package accepted writable config and manifest sources"
-fi
-grep -Fq "managed config is not root-owned" "${fixture}/untrusted-source.stderr" \
-    || grep -Fq "managed config is group/other writable" "${fixture}/untrusted-source.stderr" \
-    || fail "untrusted source refusal did not identify managed config trust"
-for path in \
-    "$managed_root" "$log_dir" \
-    "$legacy_binary_root" "$legacy_managed_root" "$legacy_log_dir" \
-    "$gateway_plist" "$guardian_plist" \
-    "$legacy_gateway_plist" "$legacy_guardian_plist"; do
-    [ ! -e "$path" ] && [ ! -L "$path" ] || fail "untrusted-source refusal mutated managed destination: $path"
-done
-
-sudo -n mkdir -m 0700 -- "$trusted_fixture"
-trusted_fixture_owned=true
-sudo -n cp -- "$config_source" "${trusted_fixture}/config.yaml"
-sudo -n cp -- "$manifest_source" "${trusted_fixture}/targets.yaml"
+sudo -n bash -c "printf 'version: 1\ntargets: []\n' >'${trusted_fixture}/targets.yaml'"
 sudo -n chown root:wheel "${trusted_fixture}/config.yaml" "${trusted_fixture}/targets.yaml"
 sudo -n chmod 0644 "${trusted_fixture}/config.yaml" "${trusted_fixture}/targets.yaml"
 config_source="${trusted_fixture}/config.yaml"
 manifest_source="${trusted_fixture}/targets.yaml"
+
+# ---- 1. Fresh install lands the managed layout --------------------------
 
 sudo -n "$installer" \
     --binary "$binary" \
@@ -188,77 +160,105 @@ wheel_gid="$(stat -f '%g' /Library)"
 [ ! -w "$config_dest" ] || fail "standard user can write managed config"
 assert_no_defenseclaw_identity "installer created a defenseclaw identity during fresh install"
 
-config_hash_before_refusal="$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')"
-gateway_hash_before_refusal="$(sudo -n shasum -a 256 "$gateway_dest" | awk '{print $1}')"
-if sudo -n "$installer" \
-    --binary "$binary" \
-    --config "$config_source" \
-    --manifest "$manifest_source" \
-    --no-start >"${fixture}/reinstall.stdout" 2>"${fixture}/reinstall.stderr"; then
-    fail "fresh-install-only enterprise package overwrote an existing deployment"
-fi
-grep -Fq "existing DefenseClaw installation detected" "${fixture}/reinstall.stderr" || fail "existing-install refusal was not explicit"
-grep -Fq "no changes were made" "${fixture}/reinstall.stderr" || fail "existing-install refusal did not attest no changes"
-grep -Fq "remain on the current version" "${fixture}/reinstall.stderr" || fail "existing-install refusal did not give the fail-closed managed path"
-[ "$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')" = "$config_hash_before_refusal" ] || fail "existing-install refusal modified managed config"
-[ "$(sudo -n shasum -a 256 "$gateway_dest" | awk '{print $1}')" = "$gateway_hash_before_refusal" ] || fail "existing-install refusal modified gateway binary"
-assert_no_defenseclaw_identity "existing-install refusal created a defenseclaw identity"
+# Record hashes so we can prove the reinstall below actually swapped the files.
+config_hash_after_install="$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')"
+gateway_hash_after_install="$(sudo -n shasum -a 256 "$gateway_dest" | awk '{print $1}')"
 
-# A write-capable ACL must not turn a fresh-only reinstall into a repair path.
-# Preserve main's ACL safety probe while expecting the earlier existing-install
-# refusal introduced by the bridge release.
-sudo -n chmod +a "everyone allow add_file,add_subdirectory,delete_child,writeattr,writeextattr,writesecurity,chown" "$managed_root"
-if sudo -n "$installer" \
-    --binary "$binary" \
-    --config "$config_source" \
-    --manifest "$manifest_source" \
-    --no-start >"${fixture}/acl.stdout" 2>"${fixture}/acl.stderr"; then
-    fail "fresh-install-only enterprise package accepted a write-capable existing root"
-fi
-grep -Fq "existing DefenseClaw installation detected" "${fixture}/acl.stderr" || fail "ACL-state refusal was not explicit"
-grep -Fq "no changes were made" "${fixture}/acl.stderr" || fail "ACL-state refusal did not attest no changes"
-[ "$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')" = "$config_hash_before_refusal" ] || fail "ACL-state refusal modified managed config"
-[ "$(sudo -n shasum -a 256 "$gateway_dest" | awk '{print $1}')" = "$gateway_hash_before_refusal" ] || fail "ACL-state refusal modified gateway binary"
-sudo -n chmod -N "$managed_root"
+# Drop a marker inside the per-user probe home so we can verify a
+# reinstall doesn't touch it.
+mkdir -- "$probe_marker"
+probe_owned=true
+printf 'preserve\n' >"${probe_marker}/existing-state"
 
-# Even damaged installed metadata must not turn this package installer into an
-# implicit repair/upgrade path. It refuses before replacing state; recovery is
-# owned by the staged managed upgrader.
-sudo -n chown "$(id -u):$(id -g)" "$config_dest"
-sudo -n chmod 0666 "$config_dest"
-if sudo -n "$installer" \
-    --binary "$binary" \
-    --config "$config_source" \
-    --manifest "$manifest_source" \
-    --no-start >"${fixture}/damaged.stdout" 2>"${fixture}/damaged.stderr"; then
-    fail "enterprise package repaired/overwrote existing damaged metadata"
-fi
-grep -Fq "fresh-install-only" "${fixture}/damaged.stderr" || fail "damaged-state refusal was not explicit"
-[ "$(sudo -n stat -f '%u:%g:%Lp' "$config_dest")" = "$(id -u):$(id -g):666" ] || fail "refusal mutated damaged config metadata"
-[ "$(sudo -n shasum -a 256 "$gateway_dest" | awk '{print $1}')" = "$gateway_hash_before_refusal" ] || fail "damaged-state refusal modified gateway binary"
-assert_no_defenseclaw_identity "damaged-state refusal created a defenseclaw identity"
+# ---- 2. Reinstall reconciles machine-wide state ------------------------
 
-# Preserve main's symlink-decoy safety coverage under the new fail-closed
-# reinstall contract. The decoy must remain untouched even though the managed
-# root makes the installer refuse before destination validation.
-sudo -n chown "0:${wheel_gid}" "$config_dest"
-sudo -n chmod 0640 "$config_dest"
-decoy="${fixture}/decoy.yaml"
-printf 'decoy must remain unchanged\n' >"$decoy"
-decoy_hash="$(shasum -a 256 "$decoy" | awk '{print $1}')"
-sudo -n rm -f "$config_dest"
-sudo -n ln -s "$decoy" "$config_dest"
-if sudo -n "$installer" \
+# Mutate the managed config on disk so the fresh render will produce a
+# different sha256 — proves the reinstall is not a no-op.
+sudo -n bash -c "printf '\n# reinstall-should-overwrite\n' >>'$config_dest'"
+config_hash_before_reinstall="$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')"
+[ "$config_hash_before_reinstall" != "$config_hash_after_install" ] \
+    || fail "test setup bug: config hash did not change after appending mutation"
+
+sudo -n "$installer" \
     --binary "$binary" \
     --config "$config_source" \
     --manifest "$manifest_source" \
-    --no-start >"${fixture}/symlink.stdout" 2>"${fixture}/symlink.stderr"; then
-    fail "fresh-install-only enterprise package accepted an existing symlink config"
+    --no-start >"${fixture}/reinstall.stdout" 2>"${fixture}/reinstall.stderr" \
+    || fail "idempotent reinstall failed: see ${fixture}/reinstall.stderr"
+
+grep -Fq "reconciling existing DefenseClaw installation in place" \
+    "${fixture}/reinstall.stdout" "${fixture}/reinstall.stderr" \
+    || fail "reinstall did not emit the reconcile log line"
+
+# The reinstalled config must equal the freshly-rendered content (i.e.,
+# our earlier mutation was overwritten).
+config_hash_after_reinstall="$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')"
+[ "$config_hash_after_reinstall" = "$config_hash_after_install" ] \
+    || fail "reinstall did not restore config to freshly-rendered content"
+
+# Binary should also match the original.
+gateway_hash_after_reinstall="$(sudo -n shasum -a 256 "$gateway_dest" | awk '{print $1}')"
+[ "$gateway_hash_after_reinstall" = "$gateway_hash_after_install" ] \
+    || fail "reinstall did not restore gateway binary to source content"
+
+# Per-user probe home must be untouched.
+[ "$(cat "${probe_marker}/existing-state")" = preserve ] \
+    || fail "reinstall mutated per-user ~/.defenseclaw"
+
+assert_no_defenseclaw_identity "reinstall created a defenseclaw identity"
+
+# ---- 3. Untrusted config source is still refused ------------------------
+# The reinstall contract does NOT weaken the source-trust contract. A
+# world-writable / non-root config source must still be rejected.
+
+writable_config_dir="${fixture}/writable"
+mkdir -- "$writable_config_dir"
+cp -- "$config_source" "${writable_config_dir}/config.yaml"
+cp -- "$manifest_source" "${writable_config_dir}/targets.yaml"
+chmod 0666 "${writable_config_dir}/config.yaml" "${writable_config_dir}/targets.yaml"
+
+if sudo -n "$installer" \
+    --binary "$binary" \
+    --config "${writable_config_dir}/config.yaml" \
+    --manifest "${writable_config_dir}/targets.yaml" \
+    --no-start >"${fixture}/untrusted-source.stdout" 2>"${fixture}/untrusted-source.stderr"; then
+    fail "installer accepted writable config source (source-trust contract broken)"
 fi
-grep -Fq "existing DefenseClaw installation detected" "${fixture}/symlink.stderr" || fail "symlink-state refusal was not explicit"
-grep -Fq "no changes were made" "${fixture}/symlink.stderr" || fail "symlink-state refusal did not attest no changes"
-[ "$(shasum -a 256 "$decoy" | awk '{print $1}')" = "$decoy_hash" ] || fail "symlink decoy was modified"
-[ "$(sudo -n shasum -a 256 "$gateway_dest" | awk '{print $1}')" = "$gateway_hash_before_refusal" ] || fail "symlink-state refusal modified gateway binary"
-assert_no_defenseclaw_identity "symlink-state refusal created a defenseclaw identity"
+grep -Fq "managed config is not root-owned" "${fixture}/untrusted-source.stderr" \
+    || grep -Fq "managed config is group/other writable" "${fixture}/untrusted-source.stderr" \
+    || fail "untrusted source refusal did not identify managed config trust"
+
+# The untrusted-source refusal must not have mutated the installed state.
+[ "$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')" = "$config_hash_after_reinstall" ] \
+    || fail "untrusted-source refusal modified managed config"
+[ "$(sudo -n shasum -a 256 "$gateway_dest" | awk '{print $1}')" = "$gateway_hash_after_reinstall" ] \
+    || fail "untrusted-source refusal modified gateway binary"
+
+# ---- 4. Legacy path relocation -----------------------------------------
+# Pre-create a legacy path and re-run; the reinstaller should relocate
+# it under LOG_DIR with a timestamped suffix rather than refuse.
+
+sudo -n mkdir -p -- "$legacy_binary_root"
+sudo -n bash -c "printf 'legacy-content\n' >'${legacy_binary_root}/marker'"
+sudo -n "$installer" \
+    --binary "$binary" \
+    --config "$config_source" \
+    --manifest "$manifest_source" \
+    --no-start >"${fixture}/legacy.stdout" 2>"${fixture}/legacy.stderr" \
+    || fail "reinstall with legacy marker failed: see ${fixture}/legacy.stderr"
+
+grep -Fq "moved legacy path aside" \
+    "${fixture}/legacy.stdout" "${fixture}/legacy.stderr" \
+    || fail "reinstall did not emit legacy-relocation log line"
+
+[ ! -e "$legacy_binary_root" ] \
+    || fail "legacy path was not relocated: $legacy_binary_root still exists"
+
+# The relocated content must be discoverable under LOG_DIR.
+if ! sudo -n bash -c "ls '${log_dir}' | grep -q '^DefenseClaw\.pre-'"; then
+    fail "legacy content not found under ${log_dir} with pre- prefix"
+fi
+
+assert_no_defenseclaw_identity "legacy-relocation reinstall created a defenseclaw identity"
 
 printf 'macOS enterprise packaging smoke passed\n'

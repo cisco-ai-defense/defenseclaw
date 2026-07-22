@@ -42,13 +42,22 @@ Common flags:
 
 Full reference: `./install.sh --help`.
 
-`install.sh` is fresh-install-only. It refuses current managed paths, legacy
-managed paths, per-user DefenseClaw state, or loaded DefenseClaw launchd jobs
-before building, stopping, or writing anything. Existing deployments must use
-the release-owned staged upgrade path. If a managed-enterprise staged upgrader
-is not published for the target release, remain on the current version and
-contact the deployment owner; uninstalling or overwriting state is not a safe
-upgrade procedure.
+`install.sh` is idempotent. A second run on the same host reconciles
+machine-wide state in place: the gateway binary, `config.yaml`, both plists,
+and the guardian manifest are atomically replaced with the current source
+content; the current-generation launchd jobs are booted out and rebootstrapped;
+legacy paths from the pre-Cisco layout (e.g. `/Library/DefenseClaw`,
+`com.defenseclaw.gateway.plist`) are relocated under
+`/Library/Logs/Cisco/SecureClient/DefenseClaw/` with a
+`.pre-<version>-<timestamp>` suffix (best-effort, never deleted); and legacy
+launchd labels are unloaded. Runtime state (`audit.db`, `judge_bodies.db`,
+`device.key`, `hook-guardian-state/`) is preserved across reinstalls, and any
+`~/.defenseclaw/` under a local user account is left untouched — the
+hook-guardian daemon reconciles the per-user layer on its 60 s tick.
+
+Symlinks under a DefenseClaw-owned install destination are still refused: a
+symlink there can only get placed via privileged tampering, and an atomic
+rename over the symlink target would corrupt whatever the link pointed at.
 
 **Pre-flight requirement:** the target user's home must not be group/other-writable. If it is, `install.sh` refuses with the exact `chmod` fix in its error output.
 
