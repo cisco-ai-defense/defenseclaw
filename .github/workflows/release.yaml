@@ -754,6 +754,8 @@ jobs:
     name: Build and test signed native Windows Setup
     needs: [release-preflight, build-runtime-candidate]
     runs-on: windows-latest
+    env:
+      UPGRADE_BASELINE_POLICY: ${{ github.workspace }}/effective-upgrade-baselines.json
     environment: release
     permissions:
       contents: read
@@ -769,6 +771,11 @@ jobs:
           ref: ${{ needs.release-preflight.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.release-preflight.outputs.baseline_artifact }}
+          path: .
 
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
