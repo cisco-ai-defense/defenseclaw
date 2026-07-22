@@ -1,7 +1,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fail-closed contracts for the signed Windows real-client release gate."""
+"""Fail-closed contracts for signed and explicitly unverified Windows releases."""
 
 import json
 import re
@@ -11,9 +11,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 HARNESS = (ROOT / "scripts" / "windows-native-ci.ps1").read_text(encoding="utf-8")
-PACKAGED_V8_VALIDATOR = (
-    ROOT / "scripts" / "validate_packaged_v8_resources.py"
-).read_text(encoding="utf-8")
+PACKAGED_V8_VALIDATOR = (ROOT / "scripts" / "validate_packaged_v8_resources.py").read_text(encoding="utf-8")
 LIVE = (ROOT / "scripts" / "live-connector-e2e" / "run-windows.ps1").read_text(encoding="utf-8")
 RELEASE = (ROOT / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8")
 
@@ -95,6 +93,7 @@ def test_certification_evidence_derives_versions_from_installed_specs() -> None:
     evidence = gate.split("$evidence = [ordered]@{", 1)[1]
     assert "[string]$clients['codex'].Specification.Version" in evidence
     assert "[string]$clients['claudecode'].Specification.Version" in evidence
+    assert "verification_status = 'signed'" in evidence
     assert "codex = '0.144.3'" not in evidence
     assert "claudecode = '2.1.208'" not in evidence
 
@@ -179,6 +178,20 @@ def test_publish_has_non_advisory_real_client_certification_custody() -> None:
     )
     assert certification_index < upload_index
     assert int(certification["timeout-minutes"]) >= 90
+
+    provider_gate = next(
+        step for step in certification["steps"] if step.get("name") == "Require both real-client provider credentials"
+    )
+    certify_step = certification["steps"][certification_index]
+    unverified_step = next(
+        step
+        for step in certification["steps"]
+        if step.get("name") == "Record explicit unverified Windows Setup custody"
+    )
+    assert provider_gate["if"] == "${{ needs.windows-installer.outputs.verification_status == 'signed' }}"
+    assert certify_step["if"] == "${{ needs.windows-installer.outputs.verification_status == 'signed' }}"
+    assert unverified_step["if"] == ("${{ needs.windows-installer.outputs.verification_status == 'unverified' }}")
+    assert "record-windows-unverified" in unverified_step["run"]
 
     assert "windows-real-client-certification" in assemble["needs"]
     assert "windows-real-client-certification" in full["needs"]

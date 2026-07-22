@@ -439,10 +439,7 @@ def test_builder_pins_a_project_supported_embedded_python_and_checks_metadata() 
     build = BUILD_PS1.read_text(encoding="utf-8")
     assert '$PythonVersion = "3.13.14"' in build
     assert '$PythonTargetVersion = "3.13"' in build
-    assert (
-        '$PythonEmbedSha256 = "90B4E5B9898B72D744650524BFF92377C367F44BD5FBD09E3148656C080AD907"'
-        in build
-    )
+    assert '$PythonEmbedSha256 = "90B4E5B9898B72D744650524BFF92377C367F44BD5FBD09E3148656C080AD907"' in build
     assert "dist.metadata.get('Requires-Python')" in build
     assert "SpecifierSet(requires_python).contains(platform.python_version(), prereleases=True)" in build
     assert "if not magika_result.ok or not magika_result.output.is_text:" in build
@@ -664,11 +661,25 @@ def test_builder_checks_distroot_gateway_and_hook_identity_before_signing() -> N
     assert build.index(hook_check) < build.index(signing_call)
 
 
+def test_authenticode_credentials_use_strict_three_state_policy() -> None:
+    build = BUILD_PS1.read_text(encoding="utf-8")
+    signing = re.search(
+        r"(?ms)^function Set-FileSignaturesIfConfigured\b.*?(?=^function |^if \(-not \$IsWindows\))",
+        build,
+    )
+    assert signing
+    body = signing.group(0)
+    assert "$hasCertificate -xor $hasPassword" in body
+    assert "provide both WINDOWS_SIGNING_CERT_BASE64 and WINDOWS_SIGNING_CERT_PASSWORD, or neither" in body
+    assert "artifact is explicitly unverified" in body
+    assert body.index("$hasCertificate -xor $hasPassword") < body.rindex("return $false")
+    assert "signtool.exe" in body
+    assert "Cisco Systems, Inc." in body
+
+
 def test_reproducible_launcher_builds_include_final_pe_resources() -> None:
     build = BUILD_PS1.read_text(encoding="utf-8")
-    function = re.search(
-        r"(?ms)^function Build-VerifiedGoBinary\b.*?(?=^function |\Z)", build
-    )
+    function = re.search(r"(?ms)^function Build-VerifiedGoBinary\b.*?(?=^function |\Z)", build)
     assert function
     body = function.group(0)
     assert "foreach ($target in @($verification, $Output))" in body
@@ -721,11 +732,11 @@ def test_stale_or_off_commit_distroot_binary_identity_is_rejected(tmp_path: Path
     source = tmp_path / "main.go"
     source.write_text(
         "package main\n"
-        "import (\"encoding/json\"; \"os\")\n"
+        'import ("encoding/json"; "os")\n'
         "func main() { _ = json.NewEncoder(os.Stdout).Encode(map[string]any{"
-        "\"schema_version\": 1, \"name\": os.Getenv(\"DC_IDENTITY_NAME\"), "
-        "\"version\": os.Getenv(\"DC_IDENTITY_VERSION\"), "
-        "\"commit\": os.Getenv(\"DC_IDENTITY_COMMIT\")}) }\n",
+        '"schema_version": 1, "name": os.Getenv("DC_IDENTITY_NAME"), '
+        '"version": os.Getenv("DC_IDENTITY_VERSION"), '
+        '"commit": os.Getenv("DC_IDENTITY_COMMIT")}) }\n',
         encoding="utf-8",
     )
     executable = tmp_path / "distroot-binary.exe"

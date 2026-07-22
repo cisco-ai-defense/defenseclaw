@@ -4172,6 +4172,7 @@ function Invoke-WindowsReleaseCertification {
         $evidence = [ordered]@{
             schema_version = 1
             status = 'passed'
+            verification_status = 'signed'
             platform = 'windows-x64'
             setup = [ordered]@{
                 name = 'DefenseClawSetup-x64.exe'
