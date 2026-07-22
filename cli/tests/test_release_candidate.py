@@ -10,6 +10,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -35,6 +36,17 @@ TEST_CERTIFICATE_PEM = (
 TEST_CERTIFICATE_WRAPPER = base64.b64encode(TEST_CERTIFICATE_PEM)
 HARD_CUT_VERSION = "0.8.5"
 WINDOWS_SETUP_VERSION = "0.8.6"
+EXPECTED_V8_WHEEL_RESOURCES = {
+    "defenseclaw/_data/config/v8/defenseclaw-config.schema.json",
+    "defenseclaw/_data/config/v8/observability.yaml",
+    "defenseclaw/_data/config/v8/observability.md",
+    "defenseclaw/_data/telemetry/v8/telemetry.schema.json",
+    "defenseclaw/_data/telemetry/v8/catalog.json",
+    "defenseclaw/_data/telemetry/v8/v7-exporter-selection.json",
+    "defenseclaw/_data/telemetry/v8/galileo-rich-v2.json",
+    "defenseclaw/_data/telemetry/v8/local-observability-v1.json",
+    "defenseclaw/_data/telemetry/v8/openinference-v1.json",
+}
 HARD_CUT_IDENTITY = {
     "schema_version": 1,
     "source_release": HARD_CUT_VERSION,
@@ -2677,8 +2689,8 @@ def test_bridge_candidate_rejects_post_bridge_migration(tmp_path: Path) -> None:
         release_candidate.verify_runtime(runtime, VERSION)
 
 
-def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> None:
-    version = "0.8.5"
+def _non_bridge_candidate_wheel(tmp_path: Path) -> Path:
+    version = HARD_CUT_VERSION
     wheel = tmp_path / f"defenseclaw-{version}-py3-none-any.whl"
     with zipfile.ZipFile(wheel, mode="w") as archive:
         archive.writestr(
@@ -2723,6 +2735,10 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
             f"defenseclaw-{version}.dist-info/METADATA",
             f"Metadata-Version: 2.4\nName: defenseclaw\nVersion: {version}\n",
         )
+        canonical_resources = release_candidate._canonical_v8_wheel_resources()
+        assert set(canonical_resources) == EXPECTED_V8_WHEEL_RESOURCES
+        for member_name, payload in canonical_resources.items():
+            archive.writestr(member_name, payload)
     (tmp_path / "upgrade-manifest.json").write_text(
         json.dumps(
             {
@@ -2742,7 +2758,13 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
         encoding="utf-8",
     )
 
-    release_candidate._validate_wheel(wheel, version)
+    return wheel
+
+
+def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> None:
+    wheel = _non_bridge_candidate_wheel(tmp_path)
+
+    release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
 
     members = _read_wheel_members(wheel)
     members["defenseclaw/commands/cmd_upgrade.py"] = members[
@@ -2753,7 +2775,142 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
     )
     _write_wheel_members(wheel, members)
     with pytest.raises(release_candidate.CandidateError, match="target-controller handoff contract"):
-        release_candidate._validate_wheel(wheel, version)
+        release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing", "resource inventory is invalid.*missing="),
+        ("unexpected", "resource inventory is invalid.*unexpected="),
+        ("backslash-alias", "resource inventory is invalid.*unexpected="),
+        ("absolute-alias", "resource inventory is invalid.*unexpected="),
+        ("drive-absolute-alias", "resource inventory is invalid.*unexpected="),
+        ("drive-relative-alias", "resource inventory is invalid.*unexpected="),
+        ("unc-alias", "resource inventory is invalid.*unexpected="),
+        ("dot-segment-alias", "resource inventory is invalid.*unexpected="),
+        ("case-alias", "resource inventory is invalid.*unexpected="),
+        ("windows-trailing-alias", "resource inventory is invalid.*unexpected="),
+        ("ntfs-short-name-alias-1", "resource inventory is invalid.*unexpected="),
+        ("ntfs-short-name-alias-2", "resource inventory is invalid.*unexpected="),
+        ("directory-entry", "non-file v8 runtime resources"),
+        ("altered", "runtime resource is altered"),
+    ],
+)
+def test_non_bridge_candidate_rejects_incomplete_or_altered_v8_resources(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    wheel = _non_bridge_candidate_wheel(tmp_path)
+    members = _read_wheel_members(wheel)
+    config_schema = "defenseclaw/_data/config/v8/defenseclaw-config.schema.json"
+    if mutation == "missing":
+        members.pop(config_schema)
+    elif mutation == "unexpected":
+        members["defenseclaw/_data/config/v8/unexpected.json"] = b"{}\n"
+    elif mutation == "backslash-alias":
+        members[r"defenseclaw\_data\config\v8\unexpected.json"] = b"{}\n"
+    elif mutation == "absolute-alias":
+        members["/defenseclaw/_data/config/v8/unexpected.json"] = b"{}\n"
+    elif mutation == "drive-absolute-alias":
+        members["C:/defenseclaw/_data/config/v8/unexpected.json"] = b"{}\n"
+    elif mutation == "drive-relative-alias":
+        members["C:defenseclaw/_data/config/v8/unexpected.json"] = b"{}\n"
+    elif mutation == "unc-alias":
+        members["//server/share/defenseclaw/_data/config/v8/unexpected.json"] = b"{}\n"
+    elif mutation == "dot-segment-alias":
+        members["defenseclaw/_data/config/v8/../v8/unexpected.json"] = b"{}\n"
+    elif mutation == "case-alias":
+        members["DefenseClaw/_DATA/config/V8/unexpected.json"] = b"{}\n"
+    elif mutation == "windows-trailing-alias":
+        members["defenseclaw./_data./config/v8 /unexpected.json"] = b"{}\n"
+    elif mutation == "ntfs-short-name-alias-1":
+        members["DEFENS~1/_data/telemetry/v8/catalog.json"] = members[
+            "defenseclaw/_data/telemetry/v8/catalog.json"
+        ]
+    elif mutation == "ntfs-short-name-alias-2":
+        members["DEFENS~2/_data/config/v8/defenseclaw-config.schema.json"] = members[
+            config_schema
+        ]
+    elif mutation == "directory-entry":
+        members["defenseclaw/_data/config/v8/unexpected/"] = b""
+    else:
+        original = members[config_schema]
+        members[config_schema] = b"[" + original[1:]
+    _write_wheel_members(wheel, members)
+
+    with pytest.raises(release_candidate.CandidateError, match=message):
+        release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
+
+
+def test_non_bridge_candidate_rejects_symlink_v8_resource(tmp_path: Path) -> None:
+    wheel = _non_bridge_candidate_wheel(tmp_path)
+    members = _read_wheel_members(wheel)
+    member_name = "defenseclaw/_data/config/v8/observability.yaml"
+    payload = members.pop(member_name)
+    symlink = zipfile.ZipInfo(member_name)
+    symlink.create_system = 3
+    symlink.external_attr = (stat.S_IFLNK | 0o777) << 16
+    with zipfile.ZipFile(wheel, mode="w") as archive:
+        for name, member_payload in members.items():
+            archive.writestr(name, member_payload)
+        archive.writestr(symlink, payload)
+
+    with pytest.raises(release_candidate.CandidateError, match="non-file v8 runtime resources"):
+        release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
+
+
+@pytest.mark.parametrize(
+    "package_root",
+    [
+        "DEFENS~1",
+        "defens~9",
+        "DEFEN~12",
+        "DE2C6E~1",
+    ],
+)
+def test_non_bridge_candidate_rejects_numeric_short_name_v8_package_root(
+    tmp_path: Path,
+    package_root: str,
+) -> None:
+    wheel = _non_bridge_candidate_wheel(tmp_path)
+    members = _read_wheel_members(wheel)
+    members[f"{package_root}/_data/telemetry/v8/catalog.json"] = b"{}\n"
+    _write_wheel_members(wheel, members)
+
+    with pytest.raises(
+        release_candidate.CandidateError,
+        match="resource inventory is invalid.*unexpected=",
+    ):
+        release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
+
+
+def test_non_bridge_candidate_rejects_duplicate_v8_resource(tmp_path: Path) -> None:
+    wheel = _non_bridge_candidate_wheel(tmp_path)
+    member_name = "defenseclaw/_data/telemetry/v8/catalog.json"
+    payload = _read_wheel_members(wheel)[member_name]
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with zipfile.ZipFile(wheel, mode="a") as archive:
+            archive.writestr(member_name, payload)
+
+    with pytest.raises(release_candidate.CandidateError, match="duplicate member names"):
+        release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
+
+
+def test_non_bridge_candidate_rejects_malformed_canonical_telemetry_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def malformed_asset(_root: Path, _logical_name: str) -> bytes:
+        raise release_candidate.RuntimeAssetError("malformed fixture")
+
+    monkeypatch.setattr(release_candidate, "read_logical_asset", malformed_asset)
+
+    with pytest.raises(
+        release_candidate.CandidateError,
+        match="canonical v8 wheel resources are unavailable or malformed",
+    ):
+        release_candidate._canonical_v8_wheel_resources()
 
 
 @pytest.mark.parametrize(

@@ -54,6 +54,11 @@ try:
 except ModuleNotFoundError:  # Direct ``python scripts/release_candidate.py`` execution.
     from source_release_identity import SourceIdentityError, release_identity_for_version
 
+try:
+    from scripts.telemetry_runtime_assets import RuntimeAssetError, read_logical_asset
+except ModuleNotFoundError:  # Direct ``python scripts/release_candidate.py`` execution.
+    from telemetry_runtime_assets import RuntimeAssetError, read_logical_asset
+
 SCHEMA_VERSION = 2
 RUNTIME_ATTESTATION_FILENAME = "runtime-candidate-checksums.txt"
 RELEASE_SOURCE_MAP_FILENAME = "release-source-map.json"
@@ -63,6 +68,7 @@ RELEASE_PROVENANCE_SCHEMA_VERSION = 1
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+WINDOWS_NUMERIC_SHORT_NAME_RE = re.compile(r"^[a-z0-9]{1,6}~[0-9]+$")
 MAX_GATEWAY_BINARY_BYTES = 512 * 1024 * 1024
 PROTECTED_ARTIFACT_MAGIC = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
 PROTECTED_ARTIFACT_XOR_BYTE = 0xA5
@@ -71,6 +77,46 @@ PROTECTED_ARTIFACT_TRANSLATION = bytes(
 )
 MAX_PROTECTED_ARTIFACT_BYTES = MAX_GATEWAY_BINARY_BYTES + len(PROTECTED_ARTIFACT_MAGIC)
 ROOT = Path(__file__).resolve().parents[1]
+V8_CONFIG_WHEEL_RESOURCES = (
+    (
+        "defenseclaw/_data/config/v8/defenseclaw-config.schema.json",
+        "schemas/config/v8/defenseclaw-config.schema.json",
+    ),
+    (
+        "defenseclaw/_data/config/v8/observability.yaml",
+        "schemas/config/v8/reference/observability.yaml",
+    ),
+    (
+        "defenseclaw/_data/config/v8/observability.md",
+        "schemas/config/v8/reference/observability.md",
+    ),
+)
+V8_TELEMETRY_WHEEL_RESOURCES = (
+    (
+        "defenseclaw/_data/telemetry/v8/telemetry.schema.json",
+        "schemas/telemetry/generated/telemetry.schema.json",
+    ),
+    (
+        "defenseclaw/_data/telemetry/v8/catalog.json",
+        "schemas/telemetry/generated/catalog.json",
+    ),
+    (
+        "defenseclaw/_data/telemetry/v8/v7-exporter-selection.json",
+        "schemas/telemetry/generated/compatibility/v7-exporter-selection.json",
+    ),
+    (
+        "defenseclaw/_data/telemetry/v8/galileo-rich-v2.json",
+        "schemas/telemetry/generated/compatibility/galileo-rich-v2.json",
+    ),
+    (
+        "defenseclaw/_data/telemetry/v8/local-observability-v1.json",
+        "schemas/telemetry/generated/compatibility/local-observability-v1.json",
+    ),
+    (
+        "defenseclaw/_data/telemetry/v8/openinference-v1.json",
+        "schemas/telemetry/generated/compatibility/openinference-v1.json",
+    ),
+)
 UPGRADE_BASELINES_PATH = Path(
     os.environ.get(
         "UPGRADE_BASELINE_POLICY",
@@ -2917,6 +2963,122 @@ def _validate_hard_cut_bundle_transaction(source: str) -> None:
         _validate_fixture_hard_cut_bundle_transaction(source)
 
 
+def _canonical_v8_wheel_resources() -> dict[str, bytes]:
+    """Load the exact reviewed v8 payloads required in 0.8.5+ wheels."""
+
+    resources: dict[str, bytes] = {}
+    try:
+        for member_name, source_name in V8_CONFIG_WHEEL_RESOURCES:
+            resources[member_name] = (ROOT / source_name).read_bytes()
+        for member_name, logical_name in V8_TELEMETRY_WHEEL_RESOURCES:
+            resources[member_name] = read_logical_asset(ROOT, logical_name)
+    except (OSError, RuntimeAssetError) as exc:
+        raise CandidateError("canonical v8 wheel resources are unavailable or malformed") from exc
+
+    for member_name, payload in resources.items():
+        if not payload:
+            raise CandidateError(f"canonical v8 wheel resource is empty: {member_name}")
+        if member_name.endswith(".json"):
+            try:
+                document = json.loads(payload)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise CandidateError(
+                    f"canonical v8 wheel resource is malformed JSON: {member_name}"
+                ) from exc
+            if not isinstance(document, dict):
+                raise CandidateError(
+                    f"canonical v8 wheel resource must be a JSON object: {member_name}"
+                )
+    return resources
+
+
+def _is_v8_package_data_member(member_name: str) -> bool:
+    # ZIP member names are specified with forward slashes, but readers on
+    # Windows can still assign path meaning to backslashes. Classify aliases
+    # from the entire normalized member so absolute, drive-prefixed, and
+    # dot-segment forms cannot hide an extra package-local v8 resource.
+    parts = tuple(
+        part.rstrip(" .").casefold()
+        for part in PurePosixPath(member_name.replace("\\", "/")).parts
+    )
+    # An NTFS 8.3 alias may use either a stem-derived form (DEFENS~1) or a
+    # volume-assigned/hash-derived form. Without the destination volume there
+    # is no safe way to prove which package directory a numeric short name
+    # resolves to, so treat every valid numeric 8.3 directory component before
+    # ``_data`` as a potential alias for the DefenseClaw package root.
+    def is_package_root(part: str) -> bool:
+        candidate = re.sub(r"^[a-z]:", "", part, count=1)
+        return candidate == "defenseclaw" or (
+            len(candidate) <= 8
+            and WINDOWS_NUMERIC_SHORT_NAME_RE.fullmatch(candidate) is not None
+        )
+
+    return any(
+        any(is_package_root(part) for part in parts[:data_index])
+        and any(
+            part == "v8" or part.startswith(("v8_", "v8."))
+            for part in parts[data_index + 1 :]
+        )
+        for data_index, part in enumerate(parts)
+        if part == "_data"
+    )
+
+
+def _validate_v8_wheel_resources(
+    archive: zipfile.ZipFile,
+    member_names: list[str],
+) -> None:
+    expected = _canonical_v8_wheel_resources()
+    non_files = sorted(
+        info.filename
+        for info in archive.infolist()
+        if _is_v8_package_data_member(info.filename)
+        and (
+            info.is_dir()
+            or bool(info.external_attr & 0x10)
+            or (
+                info.create_system == 3
+                and stat.S_IFMT(info.external_attr >> 16) not in {0, stat.S_IFREG}
+            )
+        )
+    )
+    if non_files:
+        raise CandidateError(
+            "0.8.5+ candidate wheel contains non-file v8 runtime resources: "
+            f"{non_files!r}"
+        )
+    observed = {name for name in member_names if _is_v8_package_data_member(name)}
+    missing = sorted(set(expected) - observed)
+    unexpected = sorted(observed - set(expected))
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append(f"missing={missing!r}")
+        if unexpected:
+            details.append(f"unexpected={unexpected!r}")
+        raise CandidateError(
+            "0.8.5+ candidate wheel v8 runtime resource inventory is invalid: "
+            + "; ".join(details)
+        )
+
+    for member_name, canonical_payload in expected.items():
+        info = archive.getinfo(member_name)
+        if info.file_size != len(canonical_payload):
+            raise CandidateError(
+                f"0.8.5+ candidate wheel v8 runtime resource is altered: {member_name}"
+            )
+        try:
+            candidate_payload = archive.read(member_name)
+        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+            raise CandidateError(
+                f"0.8.5+ candidate wheel v8 runtime resource is unreadable: {member_name}"
+            ) from exc
+        if candidate_payload != canonical_payload:
+            raise CandidateError(
+                f"0.8.5+ candidate wheel v8 runtime resource is altered: {member_name}"
+            )
+
+
 def _validate_wheel(path: Path, version: str) -> None:
     metadata_name = f"defenseclaw-{version}.dist-info/METADATA"
     try:
@@ -2954,6 +3116,7 @@ def _validate_wheel(path: Path, version: str) -> None:
                     "defenseclaw/install_publish.py"
                 )
             if tuple(map(int, version.split("."))) >= (0, 8, 5):
+                _validate_v8_wheel_resources(archive, member_names)
                 bundle_transaction_source = archive.read(
                     "defenseclaw/bundle_refresh.py"
                 ).decode("utf-8", errors="strict")

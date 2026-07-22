@@ -1,7 +1,8 @@
 graft cli
 graft bundles/local_observability_stack
 graft bundles/splunk_local_bridge
-recursive-exclude cli __pycache__ *
+prune cli/defenseclaw/_data/config/v8
+prune cli/defenseclaw/_data/telemetry/v8
 recursive-exclude cli *.py[cod]
 prune .venv
 prune extensions
@@ -12,3 +13,15 @@ prune test
 prune .git
 prune .github
 prune .pytest_cache
+include setup.py
+include internal/envvars/registry.json
+include scripts/telemetry_runtime_assets.py
+include schemas/config/v8/defenseclaw-config.schema.json
+include schemas/config/v8/reference/observability.yaml
+include schemas/config/v8/reference/observability.md
+include schemas/telemetry/runtime/telemetry.schema.json.gz
+include schemas/telemetry/runtime/catalog.json.gz
+include schemas/telemetry/runtime/compatibility/v7-exporter-selection.json.gz
+include schemas/telemetry/runtime/compatibility/galileo-rich-v2.json.gz
+include schemas/telemetry/runtime/compatibility/local-observability-v1.json.gz
+include schemas/telemetry/runtime/compatibility/openinference-v1.json.gz

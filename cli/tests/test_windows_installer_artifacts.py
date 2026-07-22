@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gzip
 import hashlib
 import importlib.util
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import time
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -20,6 +23,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 HELPER_PATH = ROOT / "scripts" / "windows_installer_artifacts.py"
 BUILD_PS1 = ROOT / "scripts" / "build-windows-installer.ps1"
+PACKAGED_V8_VALIDATOR = ROOT / "scripts" / "validate_packaged_v8_resources.py"
 AUTHENTICODE_PS1 = ROOT / "scripts" / "windows-authenticode.ps1"
 BINARY_IDENTITY_PS1 = ROOT / "scripts" / "windows-binary-identity.ps1"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yaml"
@@ -41,6 +45,138 @@ def _zip_bytes(files: dict[str, bytes]) -> bytes:
 
 def _write_zip(path: Path, files: dict[str, bytes]) -> None:
     path.write_bytes(_zip_bytes(files))
+
+
+def _write_zip_entries(
+    path: Path,
+    files: list[tuple[str | zipfile.ZipInfo, bytes]],
+) -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for name, data in files:
+                archive.writestr(name, data)
+
+
+def _rewrite_zip_member_name_bytes(path: Path, old: str, new: str) -> None:
+    old_bytes = old.encode("utf-8")
+    new_bytes = new.encode("utf-8")
+    assert len(old_bytes) == len(new_bytes)
+    payload = path.read_bytes()
+    assert payload.count(old_bytes) == 2
+    path.write_bytes(payload.replace(old_bytes, new_bytes))
+
+
+WIN32_FORBIDDEN_WHEEL_MEMBERS = {
+    "forbidden-less-than": "defenseclaw/_data/config/v8/bad<name.json",
+    "forbidden-greater-than": "defenseclaw/_data/config/v8/bad>name.json",
+    "forbidden-quote": 'defenseclaw/_data/config/v8/bad"name.json',
+    "forbidden-pipe": "defenseclaw/_data/config/v8/bad|name.json",
+    "forbidden-question": "defenseclaw/_data/config/v8/bad?name.json",
+    "forbidden-star": "defenseclaw/_data/config/v8/bad*name.json",
+}
+
+RESERVED_DOS_WHEEL_MEMBERS = {
+    "device-con": "defenseclaw/_data/config/v8/con.json",
+    "device-con-space-extension": "defenseclaw/_data/config/v8/Con .json",
+    "device-prn": "defenseclaw/_data/config/v8/PrN.txt",
+    "device-aux": "defenseclaw/_data/config/v8/AUX",
+    "device-nul": "defenseclaw/_data/config/v8/nul.data",
+    "device-clock": "defenseclaw/_data/config/v8/clock$.txt",
+    "device-com1": "defenseclaw/_data/config/v8/com1.json",
+    "device-com9": "defenseclaw/_data/config/v8/COM9.data",
+    "device-lpt1": "defenseclaw/_data/config/v8/lpt1.json",
+    "device-lpt9": "defenseclaw/_data/config/v8/LPT9.data",
+}
+
+
+def _canonical_v8_wheel_entries() -> dict[str, bytes]:
+    resources = {
+        "defenseclaw/_data/config/v8/defenseclaw-config.schema.json": (
+            ROOT / "schemas/config/v8/defenseclaw-config.schema.json"
+        ).read_bytes(),
+        "defenseclaw/_data/config/v8/observability.yaml": (
+            ROOT / "schemas/config/v8/reference/observability.yaml"
+        ).read_bytes(),
+        "defenseclaw/_data/config/v8/observability.md": (
+            ROOT / "schemas/config/v8/reference/observability.md"
+        ).read_bytes(),
+        "defenseclaw/_data/telemetry/v8/telemetry.schema.json": gzip.decompress(
+            (ROOT / "schemas/telemetry/runtime/telemetry.schema.json.gz").read_bytes()
+        ),
+        "defenseclaw/_data/telemetry/v8/catalog.json": gzip.decompress(
+            (ROOT / "schemas/telemetry/runtime/catalog.json.gz").read_bytes()
+        ),
+        "defenseclaw/_data/telemetry/v8/v7-exporter-selection.json": gzip.decompress(
+            (ROOT / "schemas/telemetry/runtime/compatibility/v7-exporter-selection.json.gz").read_bytes()
+        ),
+        "defenseclaw/_data/telemetry/v8/galileo-rich-v2.json": gzip.decompress(
+            (ROOT / "schemas/telemetry/runtime/compatibility/galileo-rich-v2.json.gz").read_bytes()
+        ),
+        "defenseclaw/_data/telemetry/v8/local-observability-v1.json": gzip.decompress(
+            (ROOT / "schemas/telemetry/runtime/compatibility/local-observability-v1.json.gz").read_bytes()
+        ),
+        "defenseclaw/_data/telemetry/v8/openinference-v1.json": gzip.decompress(
+            (ROOT / "schemas/telemetry/runtime/compatibility/openinference-v1.json.gz").read_bytes()
+        ),
+    }
+    for name, payload in resources.items():
+        if name.startswith("defenseclaw/_data/config/v8/"):
+            assert b"\r\n" not in payload
+    return resources
+
+
+def _builder_function(name: str) -> str:
+    source = BUILD_PS1.read_text(encoding="utf-8")
+    match = re.search(rf"(?ms)^function {re.escape(name)}\b.*?(?=^function |\Z)", source)
+    assert match, f"missing PowerShell function {name}"
+    return match.group(0)
+
+
+def _run_v8_wheel_gate(tmp_path: Path, wheel: Path) -> subprocess.CompletedProcess[str]:
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell 7 is required for the Windows wheel validation fixture")
+    functions = "\n\n".join(
+        _builder_function(name)
+        for name in (
+            "Resolve-FullPath",
+            "Test-PathWithin",
+            "Read-BoundedStreamBytes",
+            "Read-CanonicalGzipBytes",
+            "Get-ValidatedWheelMemberPath",
+            "Test-DefenseClawV8WheelMember",
+            "Assert-DefenseClawWheelV8Resources",
+        )
+    )
+    harness = tmp_path / "validate-v8-wheel.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "Add-Type -AssemblyName System.IO.Compression.FileSystem\n"
+        f"{functions}\n"
+        "try {\n"
+        "    Assert-DefenseClawWheelV8Resources "
+        "-WheelPath ([Environment]::GetEnvironmentVariable('DC_TEST_V8_WHEEL')) "
+        "-RepositoryRoot ([Environment]::GetEnvironmentVariable('DC_TEST_V8_REPOSITORY'))\n"
+        "} catch {\n"
+        "    [Console]::Error.WriteLine($_.Exception.Message)\n"
+        "    exit 1\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["DC_TEST_V8_WHEEL"] = str(wheel)
+    env["DC_TEST_V8_REPOSITORY"] = str(ROOT)
+    try:
+        return subprocess.run(
+            [pwsh, "-NoProfile", "-NonInteractive", "-File", str(harness)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+        )
+    except OSError as exc:
+        pytest.skip(f"resolved PowerShell executable is not launchable: {exc}")
 
 
 def _metadata(name: str, version: str, requires: str | None = None) -> bytes:
@@ -310,6 +446,204 @@ def test_builder_pins_a_project_supported_embedded_python_and_checks_metadata() 
     assert "dist.metadata.get('Requires-Python')" in build
     assert "SpecifierSet(requires_python).contains(platform.python_version(), prereleases=True)" in build
     assert "if not magika_result.ok or not magika_result.output.is_text:" in build
+
+
+def test_v8_config_sources_are_pinned_to_cross_platform_lf_bytes() -> None:
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
+    assert {
+        "schemas/config/v8/defenseclaw-config.schema.json text eol=lf",
+        "schemas/config/v8/reference/observability.yaml text eol=lf",
+        "schemas/config/v8/reference/observability.md text eol=lf",
+    }.issubset(attributes)
+    _canonical_v8_wheel_entries()
+
+
+def test_builder_gates_exact_v8_wheel_resources_before_dependency_or_network_work() -> None:
+    build = BUILD_PS1.read_text(encoding="utf-8")
+    validator = _builder_function("Assert-DefenseClawWheelV8Resources")
+    raw_path_validator = _builder_function("Get-ValidatedWheelMemberPath")
+    packaged_validator = PACKAGED_V8_VALIDATOR.read_text(encoding="utf-8")
+    required = tuple(_canonical_v8_wheel_entries())
+
+    for member in required:
+        assert member in validator
+    for contract in (
+        "duplicate v8 resource",
+        "OrdinalIgnoreCase path collision",
+        "non-file v8 resource",
+        "unexpected v8 resources",
+        "missing required v8 resources",
+        "does not match its canonical source",
+        "Read-CanonicalGzipBytes",
+        "CryptographicOperations]::FixedTimeEquals",
+    ):
+        assert contract in validator
+    for rejected_alias in (
+        "backslash",
+        "absolute or UNC",
+        "drive-qualified",
+        "dot or empty",
+        "trailing-dot-or-space",
+        "DOS short-name",
+        "Win32-forbidden",
+        "reserved DOS device",
+    ):
+        assert rejected_alias in raw_path_validator
+    assert ".Replace('\\', '/')" not in validator
+
+    gate = "Assert-DefenseClawWheelV8Resources $wheel $repoRoot"
+    assert build.index(gate) < build.index("$yaraCompatSource")
+    assert build.index(gate) < build.index("Invoke-WebRequest")
+    staged_probe = build.index("'-I', $PackagedV8ResourceValidator")
+    dependency_probe = build.index("$dependencyCheck = @'")
+    site_archive = build.index("$siteZip = Join-Path $payload")
+    assert staged_probe < dependency_probe < site_archive
+    assert "'--site-packages', $validationSite" in build[staged_probe:dependency_probe]
+    assert "'--runtime-root', $validationRuntime" in build[staged_probe:dependency_probe]
+    assert "'--label', 'staged'" in build[staged_probe:dependency_probe]
+    for loader in (
+        "telemetry_v8_schema_bytes()",
+        "telemetry_v8_catalog_bytes()",
+        "v7_exporter_selection_bytes()",
+        '"galileo-rich-v2"',
+        '"local-observability-v1"',
+        '"openinference-v1"',
+    ):
+        assert loader in packaged_validator
+    assert "runtime unexpectedly contains a Lib/schemas fallback tree" in packaged_validator
+    assert "entry.is_symlink() or not entry.is_file()" in packaged_validator
+
+
+@pytest.mark.parametrize(
+    ("mutation", "diagnostic"),
+    [
+        ("valid", None),
+        ("missing", "missing required v8 resources"),
+        ("duplicate", "duplicate v8 resource"),
+        ("unexpected", "unexpected v8 resources"),
+        ("backslash", "non-canonical wheel member path with a backslash"),
+        ("absolute", "non-canonical absolute or UNC wheel member path"),
+        ("drive", "non-canonical drive-qualified wheel member path"),
+        ("drive-relative", "non-canonical drive-qualified wheel member path"),
+        ("unc", "non-canonical absolute or UNC wheel member path"),
+        ("parent", "non-canonical dot or empty path component"),
+        ("dot", "non-canonical dot or empty path component"),
+        ("case-alias", "unexpected v8 resources"),
+        ("trailing-dot", "non-canonical trailing-dot-or-space alias"),
+        ("trailing-space", "non-canonical trailing-dot-or-space alias"),
+        ("case-collision", "OrdinalIgnoreCase path collision"),
+        ("short-name", "non-canonical DOS short-name alias"),
+        *((mutation, "non-canonical Win32-forbidden character") for mutation in WIN32_FORBIDDEN_WHEEL_MEMBERS),
+        *((mutation, "non-canonical reserved DOS device name") for mutation in RESERVED_DOS_WHEEL_MEMBERS),
+        ("device-boundaries-allowed", None),
+        ("directory-entry", "non-file v8 resource"),
+        ("directory-attribute-entry", "non-file v8 resource"),
+        ("symlink-entry", "non-file v8 resource"),
+        ("altered", "does not match its canonical source"),
+        ("newline", "does not match its canonical source"),
+        ("malformed", "not a readable ZIP archive"),
+    ],
+)
+def test_installer_v8_wheel_gate_fails_closed(
+    tmp_path: Path,
+    mutation: str,
+    diagnostic: str | None,
+) -> None:
+    wheel = tmp_path / f"{mutation}.whl"
+    canonical = list(_canonical_v8_wheel_entries().items())
+    files = [("defenseclaw/__init__.py", b"# fixture\n"), *canonical]
+    if mutation == "missing":
+        files = [entry for entry in files if entry[0] != canonical[0][0]]
+    elif mutation == "duplicate":
+        files.append(canonical[0])
+    elif mutation == "unexpected":
+        files.append(("defenseclaw/_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation == "backslash":
+        # Write a canonical same-length name first, then patch the raw local
+        # and central-directory bytes below. ``zipfile`` normalizes a
+        # backslash name on Windows but preserves it on POSIX, so passing the
+        # malformed name directly would make the fixture host-dependent.
+        files.append(("defenseclaw/_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation == "absolute":
+        files.append(("/defenseclaw/_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation == "drive":
+        files.append(("C:/defenseclaw/_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation == "drive-relative":
+        files.append(("C:defenseclaw/_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation == "unc":
+        files.append(("//server/share/defenseclaw/_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation == "parent":
+        files.append(("defenseclaw/_data/config/v8/../v8/unexpected.json", b"{}\n"))
+    elif mutation == "dot":
+        files.append(("defenseclaw/./_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation == "case-alias":
+        files.append(("DefenseClaw/_DATA/config/V8/unexpected.json", b"{}\n"))
+    elif mutation == "trailing-dot":
+        files.append(("defenseclaw./_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation == "trailing-space":
+        files.append(("defenseclaw/_data/config/v8 /unexpected.json", b"{}\n"))
+    elif mutation == "case-collision":
+        files.append((canonical[0][0].upper(), canonical[0][1]))
+    elif mutation == "short-name":
+        files.append(("DEFENS~1/_data/config/v8/unexpected.json", b"{}\n"))
+    elif mutation in WIN32_FORBIDDEN_WHEEL_MEMBERS:
+        files.append((WIN32_FORBIDDEN_WHEEL_MEMBERS[mutation], b"{}\n"))
+    elif mutation in RESERVED_DOS_WHEEL_MEMBERS:
+        files.append((RESERVED_DOS_WHEEL_MEMBERS[mutation], b"{}\n"))
+    elif mutation == "device-boundaries-allowed":
+        files.extend(
+            (name, b"allowed boundary\n")
+            for name in (
+                "metadata/COM0.txt",
+                "metadata/COM10.txt",
+                "metadata/LPT0.txt",
+                "metadata/LPT10.txt",
+                "metadata/CLOCK.txt",
+            )
+        )
+    elif mutation == "directory-entry":
+        files.append(("defenseclaw/_data/config/v8/unexpected/", b""))
+    elif mutation == "directory-attribute-entry":
+        target, _ = canonical[1]
+        directory = zipfile.ZipInfo(target)
+        directory.create_system = 3
+        directory.external_attr = ((stat.S_IFDIR | 0o755) << 16) | 0x10
+        files = [(directory if name == target else name, data) for name, data in files]
+    elif mutation == "symlink-entry":
+        target, payload = canonical[1]
+        symlink = zipfile.ZipInfo(target)
+        symlink.create_system = 3
+        symlink.external_attr = (stat.S_IFLNK | 0o777) << 16
+        files = [(symlink if name == target else name, data) for name, data in files]
+        assert payload == canonical[1][1]
+    elif mutation == "altered":
+        target, payload = canonical[2]
+        files = [(name, b"altered\n" if name == target else data) for name, data in files]
+        assert payload != b"altered\n"
+    elif mutation == "newline":
+        target, payload = canonical[1]
+        assert b"\r\n" not in payload and b"\n" in payload
+        crlf_payload = payload.replace(b"\n", b"\r\n")
+        files = [(name, crlf_payload if name == target else data) for name, data in files]
+    elif mutation == "malformed":
+        wheel.write_bytes(b"not a wheel")
+    if mutation != "malformed":
+        _write_zip_entries(wheel, files)
+    if mutation == "backslash":
+        _rewrite_zip_member_name_bytes(
+            wheel,
+            "defenseclaw/_data/config/v8/unexpected.json",
+            r"defenseclaw\_data\config\v8\unexpected.json",
+        )
+
+    result = _run_v8_wheel_gate(tmp_path, wheel)
+
+    combined = result.stdout + result.stderr
+    if diagnostic is None:
+        assert result.returncode == 0, combined
+    else:
+        assert result.returncode != 0
+        assert diagnostic in combined
 
 
 def test_builder_checks_distroot_gateway_and_hook_identity_before_signing() -> None:
