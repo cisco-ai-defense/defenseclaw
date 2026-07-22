@@ -12,6 +12,7 @@ umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly FIRST_SCHEMA2_RELEASE="0.8.4"
+readonly OBSERVABILITY_V8_HARD_CUT_VERSION="0.8.5"
 REFUSAL_CONTRACT_ONLY=0
 
 # shellcheck source=scripts/test-upgrade-release.sh
@@ -628,6 +629,7 @@ run_candidate_updater_refusal() {
 run_candidate_updater_staged_success() {
     local baseline="$1"
     local invocation="${2:-latest}"
+    local expected_path
     local -a resolver_args=(--yes)
     case "${invocation}" in
         latest) ;;
@@ -666,7 +668,11 @@ run_candidate_updater_staged_success() {
         die "one-command staged upgrade failed: ${baseline} -> ${TARGET_VERSION}"
     fi
 
-    grep -Fq "${baseline} → ${REQUIRED_BRIDGE_VERSION} bridge → fresh controller → ${TARGET_VERSION}" \
+    expected_path="${baseline} → ${REQUIRED_BRIDGE_VERSION} bridge → fresh controller → ${TARGET_VERSION}"
+    if version_lt "${OBSERVABILITY_V8_HARD_CUT_VERSION}" "${TARGET_VERSION}"; then
+        expected_path="${baseline} → ${REQUIRED_BRIDGE_VERSION} bridge → fresh controller → ${OBSERVABILITY_V8_HARD_CUT_VERSION} → ${TARGET_VERSION}"
+    fi
+    grep -Fq "${expected_path}" \
         "${log_file}" || die "staged upgrade log did not prove the resolved bridge handoff"
     verify_upgrade
     stop_smoke_gateway

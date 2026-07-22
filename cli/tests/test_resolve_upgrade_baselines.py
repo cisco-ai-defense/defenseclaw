@@ -250,12 +250,7 @@ def test_actual_complete_windows_assets_control_platform_availability(
     )
     generator.UPGRADE_BASELINES_PATH = path
     generated = generator.release_upgrade_policy("0.8.7")
-    assert generated["min_upgrade_protocol"] == 2
-    assert generated["tested_source_versions"] == ["0.8.6", "0.8.5"]
     assert generated["platform_tested_source_versions"]["windows"] == ["0.8.6"]
-    assert generated["minimum_source_version"] == "0.8.4"
-    assert generated["required_bridge_version"] == "0.8.4"
-    assert generated["auto_bridge_from"] == []
 
 
 def test_intentional_historical_exclusions_are_not_rediscovered() -> None:

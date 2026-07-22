@@ -231,7 +231,8 @@ def test_historical_baselines_are_authenticated_and_real_dependency_mode_is_expl
     assert "start_source_gateway_canary" in smoke
     assert "is version-bound healthy before resolver handoff" in smoke
     assert 'stage_authenticated_baseline "${baseline}"' in protocol
-    assert "required bridge authentication failed" in smoke
+    assert 'die "${label} authentication failed: ${version}"' in smoke
+    assert '"${V8_ACTIVATION_VERSION}" "hard-cut bootstrap" 1' in smoke
     assert 'if [[ "${SUCCESS_PATH_ONLY}" == "1" ]]' in protocol
 
 
@@ -304,6 +305,55 @@ def test_live_continuity_local_candidate_models_strict_sigstore_boundary_only() 
     assert "prepare_required_bridge_assets" in main
     assert main.index("prepare_required_bridge_assets") < main.index("prepare_local_candidate_provenance_fixture")
     assert "assert_local_candidate_provenance_verified" in main
+
+
+@pytest.mark.skipif(os.name == "nt", reason="executes the POSIX release fixture")
+@pytest.mark.parametrize(
+    ("target_version", "expected_releases"),
+    [
+        ("0.8.5", ["0.8.4|required bridge|0"]),
+        (
+            "0.8.7",
+            [
+                "0.8.4|required bridge|0",
+                "0.8.5|hard-cut bootstrap|1",
+            ],
+        ),
+    ],
+)
+def test_posix_release_fixture_stages_hard_cut_bootstrap_only_for_later_targets(
+    target_version: str,
+    expected_releases: list[str],
+) -> None:
+    fixture = ROOT / "scripts" / "test-upgrade-release.sh"
+    text = fixture.read_text(encoding="utf-8")
+    helper_start = text.index("prepare_authenticated_upgrade_release_assets() {")
+    helper_end = text.index("\n}\n\nprepare_required_bridge_assets() {", helper_start)
+    helper = text[helper_start:helper_end]
+    assert "release-provenance.json" in helper
+    assert "authenticated_assets+=(release-provenance.json)" in helper
+
+    program = r"""
+source "$1"
+trap - EXIT
+prepare_authenticated_upgrade_release_assets() {
+    printf '%s|%s|%s\n' "$1" "$2" "$3"
+}
+REQUIRED_BRIDGE_VERSION="0.8.4"
+TARGET_VERSION="$2"
+prepare_required_bridge_assets
+"""
+    completed = subprocess.run(
+        ["bash", "-c", program, "fixture-test", str(fixture), target_version],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.splitlines() == expected_releases
 
 
 def test_live_continuity_fixture_binds_provenance_into_checksums(tmp_path: Path) -> None:
@@ -1021,6 +1071,23 @@ def test_posix_resolver_hands_both_hard_cut_paths_to_authenticated_target_contro
     assert 'exec "${INSTALL_DIR}/defenseclaw" upgrade --yes --version "${final_version}"' not in resolver
     assert "verify_hard_cut_target_controller_handoff" in resolver
     assert 'TARGET_CONTROLLER_VENV="${STAGING_DIR}/target-controller-venv"' in resolver
+
+    continuation_start = resolver.index("continue_post_hard_cut_upgrade() {")
+    continuation_end = resolver.index("\n}\n\nhandoff_existing_bridge_to_hard_cut() {", continuation_start)
+    continuation = resolver[continuation_start:continuation_end]
+    remove_staging = continuation.index('rm -rf "${STAGING_DIR}"')
+    final_upgrade = continuation.index(
+        '"${DEFENSECLAW_VENV}/bin/defenseclaw" upgrade --yes --version "${final_version}"',
+        remove_staging,
+    )
+    final_exit = continuation.index('exit "${final_status}"', final_upgrade)
+    assert remove_staging < final_upgrade < final_exit
+    assert continuation.index("unset DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION") < remove_staging
+    assert "release_upgrade_lock" not in continuation
+    assert "trap - EXIT" not in continuation
+    assert 'readonly OBSERVABILITY_V8_HARD_CUT_VERSION="0.8.5"' in resolver
+    assert 'POST_HARD_CUT_FINAL_VERSION="${RELEASE_VERSION}"' in resolver
+    assert resolver.count("continue_post_hard_cut_upgrade") == 3
 
 
 def _posix_resolver_lock_functions() -> str:

@@ -961,10 +961,6 @@ def _validate_upgrade_manifest(
         expected_windows = [
             item for item in platform_configured["windows"] if tuple(map(int, item.split("."))) < version_key
         ]
-        post_hard_cut_direct = version_key >= (0, 8, 7)
-        if post_hard_cut_direct:
-            expected_tested = [item for item in expected_tested if tuple(map(int, item.split("."))) >= (0, 8, 5)]
-            expected_windows = [item for item in expected_windows if tuple(map(int, item.split("."))) >= (0, 8, 5)]
         manifest_bridge = document.get("required_bridge_version")
         if manifest_bridge and manifest_bridge not in expected_windows:
             # An unpublished platform bridge makes the entire hard-cut path
@@ -1048,22 +1044,17 @@ def _validate_upgrade_manifest(
         raise CandidateError("upgrade manifest bridge contract requires the schema-2 tested-source policy")
     if bridge not in configured:
         raise CandidateError(f"required bridge {bridge} is absent from the tested baseline matrix")
-    post_hard_cut_direct = version_key >= (0, 8, 7)
-    if bridge not in tested and not (post_hard_cut_direct and automatic == []):
+    if bridge not in tested:
         raise CandidateError(f"required bridge {bridge} is absent from the signed global tested-source matrix")
     if bridge in platform_configured["windows"]:
-        if bridge not in platform_tested["windows"] and not post_hard_cut_direct:
+        if bridge not in platform_tested["windows"]:
             raise CandidateError(f"required bridge {bridge} is absent from the tested Windows baseline matrix")
-    elif platform_tested["windows"] and not post_hard_cut_direct:
+    elif platform_tested["windows"]:
         raise CandidateError(
             f"Windows bridge {bridge} is unpublished; the tested Windows baseline matrix must be empty"
         )
     bridge_key = tuple(map(int, bridge.split(".")))
-    expected_automatic = (
-        []
-        if post_hard_cut_direct
-        else [item for item in configured if tuple(map(int, item.split("."))) < bridge_key]
-    )
+    expected_automatic = [item for item in configured if tuple(map(int, item.split("."))) < bridge_key]
     if automatic != expected_automatic:
         raise CandidateError(
             f"auto_bridge_from must exactly match every published baseline older than required_bridge_version {bridge}"
