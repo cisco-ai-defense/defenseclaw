@@ -404,9 +404,20 @@ echo "Creating unified drag-to-Applications DMG"
 }
 ln -s /Applications "${UNIFIED_STAGE}/Applications"
 TEMP_DMG="${WORK}/DefenseClawMac-${VERSION}-macos-arm64.dmg"
+# hdiutil's automatic -srcfolder sizing can leave too little filesystem
+# headroom for the final copy. Size the image from the staged bytes with 20%
+# growth room plus 64 MiB for filesystem metadata and copy variance.
+DMG_SOURCE_KIB="$(du -sk "${UNIFIED_STAGE}" | awk '{print $1}')"
+[[ "${DMG_SOURCE_KIB}" =~ ^[0-9]+$ ]] || {
+    echo "could not determine unified DMG staging size" >&2
+    exit 1
+}
+DMG_SIZE_KIB=$((DMG_SOURCE_KIB + DMG_SOURCE_KIB / 5 + 65536))
+echo "Unified DMG source: ${DMG_SOURCE_KIB} KiB; capacity: ${DMG_SIZE_KIB} KiB"
 hdiutil create \
     -volname DefenseClawMac \
     -srcfolder "${UNIFIED_STAGE}" \
+    -size "${DMG_SIZE_KIB}k" \
     -ov -format UDZO \
     "${TEMP_DMG}"
 
