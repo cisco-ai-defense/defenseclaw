@@ -168,11 +168,53 @@ t_install_help_documents_override_endpoint() {
 t_install_bad_override_endpoint_exits_nonzero() {
   # A malformed --override-endpoint must be rejected at arg-validation
   # time (before the root check) and name the offending flag so operators
-  # don't silently install a daemon pointed at a bogus host.
+  # don't silently install a daemon pointed at a bogus host. The
+  # tightened contract (post PR-579 review): HTTPS bare origin only —
+  # no plaintext http://, no userinfo, no path/query/fragment.
   local out rc=0
   out="$("${INSTALL_SH}" --override-endpoint "not-a-url" 2>&1)" || rc=$?
   assert_status "${rc}" 1 "malformed --override-endpoint should exit non-zero"
-  assert_contains "${out}" "--override-endpoint must be a full http(s) URL" "explains override URL requirement"
+  assert_contains "${out}" "--override-endpoint must be an HTTPS bare origin" "explains override URL requirement"
+}
+
+t_install_override_endpoint_rejects_plaintext_http() {
+  # http:// would let a CMID bearer token traverse the wire in
+  # cleartext — reject at arg-validation time.
+  local out rc=0
+  out="$("${INSTALL_SH}" --override-endpoint "http://example.com" 2>&1)" || rc=$?
+  assert_status "${rc}" 1 "plaintext http:// must be rejected"
+  assert_contains "${out}" "HTTPS bare origin" "names the contract"
+}
+
+t_install_override_endpoint_rejects_userinfo() {
+  # URL userinfo (user@host / user:pass@host) is the wrong place to
+  # encode auth for the AID endpoint AND is silently dropped by
+  # net/http on some redirect paths — reject.
+  local out rc=0
+  out="$("${INSTALL_SH}" --override-endpoint "https://user@example.com" 2>&1)" || rc=$?
+  assert_status "${rc}" 1 "userinfo must be rejected"
+  assert_contains "${out}" "HTTPS bare origin" "names the contract"
+  rc=0
+  out="$("${INSTALL_SH}" --override-endpoint "https://user:pass@example.com" 2>&1)" || rc=$?
+  assert_status "${rc}" 1 "user:pass userinfo must be rejected"
+  assert_contains "${out}" "HTTPS bare origin" "names the contract"
+}
+
+t_install_override_endpoint_rejects_path_query_fragment() {
+  # The daemon appends its own path (/api/v1/inspect/defense_claw
+  # etc.); an operator-supplied path would double-append. Query and
+  # fragment on a bare-origin endpoint are equally nonsensical.
+  local out rc=0
+  for bad in \
+    "https://example.com/api" \
+    "https://example.com/api/v1/inspect" \
+    "https://example.com?tenant=x" \
+    "https://example.com#frag"; do
+    rc=0
+    out="$("${INSTALL_SH}" --override-endpoint "${bad}" 2>&1)" || rc=$?
+    assert_status "${rc}" 1 "rejects ${bad}"
+    assert_contains "${out}" "HTTPS bare origin" "names the contract for ${bad}"
+  done
 }
 
 t_install_missing_config_file_exits_nonzero() {
@@ -301,6 +343,9 @@ run_case "install --config-file flag documented"        t_install_help_documents
 run_case "install --env flag removed (replaced by --config-file)" t_install_help_omits_env_flag
 run_case "install --override-endpoint documented"        t_install_help_documents_override_endpoint
 run_case "install --override-endpoint garbage rejected"  t_install_bad_override_endpoint_exits_nonzero
+run_case "install --override-endpoint plaintext http:// rejected" t_install_override_endpoint_rejects_plaintext_http
+run_case "install --override-endpoint userinfo rejected"          t_install_override_endpoint_rejects_userinfo
+run_case "install --override-endpoint path/query/fragment rejected" t_install_override_endpoint_rejects_path_query_fragment
 run_case "install missing --config-file rejected"        t_install_missing_config_file_exits_nonzero
 run_case "install malformed --config-file rejected"      t_install_malformed_config_file_exits_nonzero
 run_case "install world-writable --config-file rejected" t_install_config_file_trust_check_fires_on_world_writable

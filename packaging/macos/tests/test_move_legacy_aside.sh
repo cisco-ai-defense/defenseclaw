@@ -115,6 +115,34 @@ t_missing_backup_root_returns_error() {
   [[ -d "${legacy}" ]] || _fail "source directory clobbered on error path"
 }
 
+t_symlinked_backup_root_rejected() {
+  # Second-line-of-defense against the PR-579 review finding: even
+  # if the caller's ancestor trust check somehow missed a symlinked
+  # LOGS_DIR, move_legacy_aside itself refuses to follow it — the
+  # legacy source is left in place rather than relocated into
+  # attacker-controlled space.
+  local case_dir legacy real_target symlinked_root
+  case_dir="$(mktest_tmp)"
+  legacy="${case_dir}/DefenseClaw"
+  mkdir "${legacy}"
+  printf 'legacy-marker\n' >"${legacy}/state"
+  real_target="${case_dir}/attacker-controlled"
+  mkdir "${real_target}"
+  symlinked_root="${case_dir}/backup"
+  ln -s "${real_target}" "${symlinked_root}"
+
+  local rc=0
+  move_legacy_aside "${legacy}" "${symlinked_root}" "0.8.4" \
+    >/dev/null 2>&1 || rc=$?
+  # exit 4 == backup_root is a symlink (see installer_lib.sh:move_legacy_aside).
+  assert_status "${rc}" 4 "symlinked backup_root rejected with rc 4"
+  # Legacy source is untouched.
+  [[ -d "${legacy}" ]] || _fail "legacy path was mutated despite symlink refusal"
+  assert_eq "$(cat "${legacy}/state")" "legacy-marker" "legacy content preserved"
+  # Nothing was relocated into the symlink target.
+  assert_eq "$(ls "${real_target}")" "" "symlink target was not populated"
+}
+
 t_symlink_target_relocated() {
   # A symlink at the legacy path is itself relocated (the symlink,
   # not the pointee). The reinstall contract's goal is to clear the
@@ -146,4 +174,5 @@ run_case "moves regular file aside"                    t_moves_regular_file_asid
 run_case "dry-run leaves disk untouched"               t_dry_run_does_not_touch_disk
 run_case "second call is idempotent"                   t_second_call_is_idempotent
 run_case "missing backup_root returns error"           t_missing_backup_root_returns_error
+run_case "symlinked backup_root rejected (PR-579 review)" t_symlinked_backup_root_rejected
 run_case "symlink target relocated, pointee preserved" t_symlink_target_relocated

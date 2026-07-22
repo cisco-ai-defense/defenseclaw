@@ -82,6 +82,15 @@ func (a *APIServer) emitHookRuleFindings(
 // the evaluation_id + top rule_ids for the caller to surface in
 // audit details + response payloads.
 //
+// A verdict WITHOUT DetailedFindings is still a real scan — the
+// AID cloud lane in managed_enterprise routinely returns an allow
+// verdict with zero findings, and the operator's `TotalScans`
+// counter should reflect that inspection happened. scanner.EmitInspectFindings
+// handles a zero-finding InspectFindingSource (it emits an EventScan
+// summary + a scan_results row without any scan_findings rows), so
+// we pass through here on nil-verdict-only rather than
+// zero-finding early-return.
+//
 // Best-effort: emission errors are recorded via the otel error
 // counter (errorReason as the bucket label) and the function
 // returns an empty hookEvaluationContext so the upstream code
@@ -93,7 +102,7 @@ func (a *APIServer) emitInspectVerdictFindings(
 	latency time.Duration,
 	errorReason string,
 ) hookEvaluationContext {
-	if verdict == nil || len(verdict.DetailedFindings) == 0 {
+	if verdict == nil {
 		return hookEvaluationContext{}
 	}
 

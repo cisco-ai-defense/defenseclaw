@@ -140,23 +140,34 @@ func (b *broadcast) subscribe() (<-chan *pb.NotificationRecord, func(uint64), fu
 	// so we do not hold b.mu during the initial fill (avoids blocking
 	// concurrent publishers when the buffer is well-sized).
 	//
-	// A late subscriber joining an already-retained record only enters
-	// the pending set when the record has NOT yet been acked by anyone
-	// (ackedByAny == false). That preserves cold-start semantics
-	// (nobody was live at publish → first subscriber to arrive owns
-	// delivery and eviction) while avoiding a pathology where a late
-	// subscriber picking up a replay would forever hold the record
-	// pending — the record was already delivered by an earlier
-	// subscriber; the replay is just a courtesy for consumers that
-	// reconnected between publish and the earlier ack landing.
+	// A late subscriber joining an already-retained record ALWAYS
+	// enters that record's pending set — regardless of whether
+	// another subscriber has already acked it. Without this, the
+	// following sequence loses R (reported as security finding):
+	//
+	//   1. Publish R while sub A + sub C are live: pending = {A, C}.
+	//   2. A acks → pending = {C}, ackedByAny = true.
+	//   3. B subscribes → gets R on replay. If we skipped adding B
+	//      to pending on the grounds that ackedByAny is already
+	//      true, B carries no ack obligation.
+	//   4. C acks → pending = {} AND ackedByAny → R is evicted.
+	//   5. B disconnects before stream.Send(R) landed on the wire.
+	//   6. B's cancel had no pending marker to release; R is gone;
+	//      the next subscriber does not see R.
+	//
+	// Adding B to pending in step 3 means step 5's cancel keeps R
+	// retained until B (or a later subscriber) actually acks it.
+	// This never wedges the ring in the churn case because
+	// releasePendingLocked treats cancel-without-ack as "release the
+	// marker but do not flip ackedByAny", so the invariant "drop
+	// only when pending == {} AND ackedByAny" still evicts once any
+	// live subscriber successfully acks.
 	replay := make([]*pb.NotificationRecord, 0, len(b.retained))
 	for i := range b.retained {
-		if !b.retained[i].ackedByAny {
-			if b.retained[i].pending == nil {
-				b.retained[i].pending = make(map[uint64]struct{})
-			}
-			b.retained[i].pending[subID] = struct{}{}
+		if b.retained[i].pending == nil {
+			b.retained[i].pending = make(map[uint64]struct{})
 		}
+		b.retained[i].pending[subID] = struct{}{}
 		replay = append(replay, b.retained[i].record)
 	}
 	b.subscribers = append(b.subscribers, sub)

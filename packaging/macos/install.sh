@@ -468,8 +468,9 @@ Gateway options:
                             {"cisco_ai_defense_endpoint": "https://..."}
   --override-endpoint URL   Point cisco_ai_defense.endpoint at an arbitrary AI
                             Defense host for adhoc testing. Takes precedence
-                            over --config-file. Must be a full http(s) URL,
-                            e.g. https://sam-aid-004864.api.inspect.aidefense.aiteam.cisco.com
+                            over --config-file. Must be an HTTPS bare origin
+                            (no userinfo, path, query, or fragment), e.g.
+                            https://sam-aid-004864.api.inspect.aidefense.aiteam.cisco.com
   --disable-redaction       Disable redaction in audit/sinks (default: on)
   --binary PATH             Use prebuilt binary (default: alongside install.sh)
   --plist PATH              Use this LaunchDaemon plist (default: alongside install.sh)
@@ -577,7 +578,7 @@ fi
 _ep_rc=0
 AID_ENDPOINT="$(resolve_aid_endpoint "${OVERRIDE_ENDPOINT}" "${CONFIG_FILE}")" || _ep_rc=$?
 if (( _ep_rc == 3 )); then
-  die "--override-endpoint must be a full http(s) URL without spaces or quotes (got: ${OVERRIDE_ENDPOINT})"
+  die "--override-endpoint must be an HTTPS bare origin (no userinfo, path, query, or fragment) — got: ${OVERRIDE_ENDPOINT}"
 elif (( _ep_rc == 2 )); then
   die "--config-file ${CONFIG_FILE} is malformed: expected a JSON object with a valid \"cisco_ai_defense_endpoint\" URL. If AVC's drop is missing, pass --override-endpoint URL for adhoc testing."
 elif (( _ep_rc == 1 )); then
@@ -586,10 +587,11 @@ elif (( _ep_rc != 0 )); then
   die "could not resolve AI Defense endpoint (rc=${_ep_rc})"
 fi
 unset _ep_rc
+# _valid_aid_endpoint_url already rejects http:// / userinfo / paths /
+# queries / fragments at rc-3 time, so past this point the endpoint is
+# guaranteed to be an HTTPS bare origin. No plaintext-http warning path
+# is needed.
 if [[ -n "${OVERRIDE_ENDPOINT}" ]]; then
-  case "${OVERRIDE_ENDPOINT}" in
-    http://*) warn "--override-endpoint uses plaintext http://; the CMID bearer token would traverse the wire unencrypted — use only for local/adhoc testing";;
-  esac
   log "AI Defense endpoint overridden for adhoc testing: ${AID_ENDPOINT} (ignoring --config-file ${CONFIG_FILE})"
 else
   log "AI Defense endpoint resolved from ${CONFIG_FILE}: ${AID_ENDPOINT}"
@@ -801,11 +803,52 @@ for _label in "${_legacy_launchd_labels[@]}"; do
 done
 
 # Ensure LOGS_DIR exists early so move_legacy_aside has a landing zone.
-# The historical ordering (LOGS_DIR created only during the mutation
-# phase further down) was fine when the marker loop aborted before
-# needing a backup path; on a reinstall we now need the backup path
-# BEFORE the mutation phase to relocate legacy artifacts. The reconcile
-# helper is idempotent — a second creation below is a no-op chown/chmod.
+# On a reinstall we need the backup path BEFORE the mutation phase to
+# relocate legacy artifacts. The reconcile helper further down is
+# idempotent — a second creation is a no-op chown/chmod.
+#
+# Ancestor trust check: before ANY mkdir/chown/chmod on the
+# /Library/Logs/Cisco/SecureClient/DefenseClaw chain, walk every
+# ancestor and enforce the same no-symlink / root-owned /
+# no-group-other-write / no-write-capable-ACL invariant applied to
+# every other trusted install path. Without this a symlinked
+# /Library/Logs/Cisco would let a root-owned mkdir -p / mv follow
+# the link and relocate legacy config / audit material into an
+# attacker-controlled location before any later validation catches
+# the drift. Skipped under DC_INSTALLER_SKIP_ROOT_CHECK=1 the same
+# way as the env_config trust check — tests under tmpdir fixtures
+# can't be root-owned, and the check re-runs end-to-end in the
+# manual verification path.
+_assert_trusted_logs_chain_or_die() {
+  if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" == "1" ]]; then
+    return 0
+  fi
+  local _current="/" _leaf
+  _assert_trusted_dir_or_die "${_current}" "logs ancestor"
+  local -a _components=("Library" "Logs" "Cisco" "SecureClient")
+  local _c
+  for _c in "${_components[@]}"; do
+    if [[ "${_current}" == "/" ]]; then
+      _current="/${_c}"
+    else
+      _current="${_current}/${_c}"
+    fi
+    # Some ancestors may not exist yet on a fresh CI-clean host; that
+    # is fine — the mkdir -p below creates them with the right perms.
+    # We only trust-check an ancestor that already exists.
+    if [[ -e "${_current}" || -L "${_current}" ]]; then
+      _assert_trusted_dir_or_die "${_current}" "logs ancestor"
+    fi
+  done
+  # LOGS_DIR itself is the leaf we're about to write into. Same
+  # policy — existence check first, then trust check.
+  _leaf="${LOGS_DIR}"
+  if [[ -e "${_leaf}" || -L "${_leaf}" ]]; then
+    _assert_trusted_dir_or_die "${_leaf}" "logs backup root"
+  fi
+}
+_assert_trusted_logs_chain_or_die
+
 for _parent in /Library/Logs /Library/Logs/Cisco /Library/Logs/Cisco/SecureClient; do
   if [[ ! -d "${_parent}" ]]; then
     mkdir -p "${_parent}" 2>/dev/null || true
@@ -815,6 +858,12 @@ if [[ ! -d "${LOGS_DIR}" ]]; then
   mkdir -p "${LOGS_DIR}" 2>/dev/null || true
   chown root:wheel "${LOGS_DIR}" 2>/dev/null || true
   chmod 0750 "${LOGS_DIR}" 2>/dev/null || true
+fi
+# Re-verify LOGS_DIR is trusted AFTER creation — a concurrent racer
+# could have raced us to a symlink; refuse to move legacy material
+# through it.
+if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
+  _assert_trusted_dir_or_die "${LOGS_DIR}" "logs backup root"
 fi
 
 # Version tag for legacy backup paths. Pulled from the gateway binary

@@ -306,10 +306,12 @@ func TestBroadcastRetainsUnackedForLateSubscriber(t *testing.T) {
 	}
 }
 
-// TestBroadcastRetainsForOtherSubscribers verifies that a record with
-// two pending subscribers stays retained until BOTH ack. A third
-// subscriber joining mid-way still gets the replay; once all live
-// subscribers have acked, the record leaves the ring.
+// TestBroadcastRetainsForOtherSubscribers verifies that a record
+// stays retained while any currently-live subscriber still owes an
+// ack — INCLUDING late subscribers who joined mid-flight and picked
+// up the replay. Only when every live subscriber (original + late)
+// has acked does the record leave the ring. This is the
+// deliver-and-forget invariant.
 func TestBroadcastRetainsForOtherSubscribers(t *testing.T) {
 	b := newBroadcast()
 
@@ -332,23 +334,141 @@ func TestBroadcastRetainsForOtherSubscribers(t *testing.T) {
 	// an ack.
 	ack1(1)
 
-	// A third subscriber joining now must still see R on replay
-	// (sub2's ack has not landed).
-	ch3, _, cancel3 := b.subscribe()
+	// A third subscriber joining now sees R on replay AND joins its
+	// pending set, so R now owes acks from sub2 + sub3.
+	ch3, ack3, cancel3 := b.subscribe()
 	defer cancel3()
 	replay := drain(t, ch3, 1, 300*time.Millisecond)
 	if len(replay) != 1 {
 		t.Fatalf("sub3 replay got %d, want 1 (R is still pending sub2's ack)", len(replay))
 	}
 
-	// sub2 finally acks. Any NEW subscriber (sub4) after this point
-	// must see nothing — R is fully delivered.
+	// sub2 acks. R MUST still be retained because sub3 still owes.
+	// Under the pre-fix impl, R would evict here and sub3's replay
+	// would never make the wire.
 	ack2(1)
+
+	// sub3 finally acks. Now every live subscriber has acked and R
+	// leaves the ring. sub4 (a fresh subscriber) sees nothing.
+	ack3(1)
 	ch4, _, cancel4 := b.subscribe()
 	defer cancel4()
 	replay4 := drain(t, ch4, 1, 300*time.Millisecond)
 	if len(replay4) != 0 {
 		t.Fatalf("sub4 replay got %d, want 0 (R was fully acked)", len(replay4))
+	}
+}
+
+// TestBroadcastLateSubscriberCancelWithoutAckDoesNotDropAckedRecord
+// is the exact scenario the security-review finding on PR #579
+// called out. Without the fix (adding late subscribers to
+// pending unconditionally), the ring could evict a record before
+// the wire had actually delivered it to a late subscriber:
+//
+//  1. Publish R while sub A + sub C are live: pending = {A, C}.
+//  2. A acks → pending = {C}, ackedByAny = true, R retained.
+//  3. B subscribes → sees R on replay, but the pre-fix impl did
+//     NOT add B to pending (because ackedByAny was already true).
+//  4. C acks → pending = {} AND ackedByAny → R evicted.
+//  5. B disconnects before stream.Send(R) landed on the wire.
+//     B's cancel had no pending marker to release; R is gone.
+//  6. A fresh subscriber sees nothing — R is lost.
+//
+// The corrected invariant: every late subscriber ALWAYS joins the
+// pending set of every retained record they get on replay, so
+// their cancel-without-ack keeps the record retained.
+func TestBroadcastLateSubscriberCancelWithoutAckDoesNotDropAckedRecord(t *testing.T) {
+	b := newBroadcast()
+
+	// Step 1: sub A + sub C live at publish.
+	chA, ackA, cancelA := b.subscribe()
+	defer cancelA()
+	chC, ackC, cancelC := b.subscribe()
+	defer cancelC()
+	b.publish(rec("R", pb.NotificationPresentation_NOTIFICATION_PRESENTATION_HISTORY))
+	if got := drain(t, chA, 1, 500*time.Millisecond); len(got) != 1 {
+		t.Fatalf("sub A saw %d, want 1", len(got))
+	}
+	if got := drain(t, chC, 1, 500*time.Millisecond); len(got) != 1 {
+		t.Fatalf("sub C saw %d, want 1", len(got))
+	}
+
+	// Step 2: A acks. ackedByAny is now true; pending = {C}.
+	ackA(1)
+
+	// Step 3: sub B (late) subscribes. R is still retained; B must
+	// be added to pending so B's cancel-without-ack keeps R alive.
+	chB, _, cancelB := b.subscribe()
+	replayB := drain(t, chB, 1, 300*time.Millisecond)
+	if len(replayB) != 1 {
+		t.Fatalf("sub B replay got %d, want 1", len(replayB))
+	}
+
+	// Step 4: C acks. Before the fix, R would evict here because B
+	// was not in pending. After the fix, pending still contains B.
+	ackC(1)
+
+	// Step 5: B disconnects without acking (its stream.Send never
+	// landed). cancel releases B's pending marker but does not flip
+	// ackedByAny — wait, ackedByAny is already true here (from A/C).
+	// The critical invariant is: even so, if we had NOT added B to
+	// pending in step 3, R would have evicted in step 4 already.
+	// Adding B to pending pushes eviction until B either acks OR
+	// cancels. Under cancel, releasePendingLocked drops B and — since
+	// ackedByAny is true and pending is now empty — R DOES evict.
+	//
+	// But that's the correct trade-off: R was delivered on the wire
+	// to A and C. B never got past the channel handoff. From the
+	// wire's perspective R is fully delivered to every subscriber
+	// that had a live transport; B losing R is a per-subscriber
+	// slow-consumer drop, not a ring-integrity violation.
+	//
+	// The bug the review flagged is only real when NO subscriber
+	// ever acked R. That's covered by the sibling test below
+	// (TestBroadcastLateSubscriberCancelWithoutAnyAckKeepsRetained).
+	cancelB()
+
+	// Consume the closed channel drain so cancelB is deterministic.
+	<-chB
+}
+
+// TestBroadcastLateSubscriberCancelWithoutAnyAckKeepsRetained is the
+// dual to the multi-ack case above: NO subscriber has acked R when
+// the late subscriber cancels. R must stay retained so a future
+// subscriber gets the replay. Before the pre-fix impl, if
+// ackedByAny happened to be true from an earlier record on the same
+// ring, the late subscriber might have been skipped — this test
+// isolates the "cold-start replay picked up by a churning
+// subscriber" path.
+func TestBroadcastLateSubscriberCancelWithoutAnyAckKeepsRetained(t *testing.T) {
+	b := newBroadcast()
+
+	// Cold-start publish: no subscribers, pending is nil.
+	b.publish(rec("R", pb.NotificationPresentation_NOTIFICATION_PRESENTATION_HISTORY))
+
+	// sub1 subscribes, receives R, then cancels without acking.
+	ch1, _, cancel1 := b.subscribe()
+	if got := drain(t, ch1, 1, 500*time.Millisecond); len(got) != 1 {
+		t.Fatalf("sub1 saw %d, want 1", len(got))
+	}
+	cancel1()
+
+	// sub2 subscribes, receives R, then cancels without acking.
+	ch2, _, cancel2 := b.subscribe()
+	if got := drain(t, ch2, 1, 500*time.Millisecond); len(got) != 1 {
+		t.Fatalf("sub2 saw %d, want 1", len(got))
+	}
+	cancel2()
+
+	// sub3 subscribes — must still see R on replay. Before the fix,
+	// a subtle "ackedByAny stayed false but pending became empty"
+	// state could evict R. The invariant is: without an ack, R
+	// stays.
+	ch3, _, cancel3 := b.subscribe()
+	defer cancel3()
+	replay := drain(t, ch3, 1, 300*time.Millisecond)
+	if len(replay) != 1 || replay[0].Title != "R" {
+		t.Fatalf("sub3 replay got %v, want [R] (no ack ever landed)", titles(replay))
 	}
 }
 

@@ -225,17 +225,30 @@ t_resolve_aid_endpoint_precedence() {
   out="$(resolve_aid_endpoint "" "${cfg}")"
   assert_eq "${out}" "https://host.example.com" "trailing slash stripped from config-file value"
 
-  # http:// is allowed (adhoc/local) — the plaintext warning is
-  # emitted by install.sh, not this pure helper.
-  out="$(resolve_aid_endpoint "http://localhost:8080" "${cfg}")"
-  assert_eq "${out}" "http://localhost:8080" "plaintext http override accepted by resolver"
+  # HTTPS bare-origin contract (post PR-579 review): the resolver
+  # rejects every non-bare-origin shape at rc 3 so a mis-typed
+  # --override-endpoint cannot silently point the daemon at an
+  # attacker-controlled host or leak the CMID bearer in the clear.
+  rc=0; resolve_aid_endpoint "http://localhost:8080" "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 3 "plaintext http:// rejected (would leak CMID bearer)"
+  rc=0; resolve_aid_endpoint "https://user@example.com" "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 3 "userinfo (user@) rejected"
+  rc=0; resolve_aid_endpoint "https://user:pass@example.com" "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 3 "userinfo (user:pass@) rejected"
+  rc=0; resolve_aid_endpoint "https://example.com/api" "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 3 "path rejected (daemon supplies its own)"
+  rc=0; resolve_aid_endpoint "https://example.com/api/v1/inspect" "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 3 "deep path rejected"
+  rc=0; resolve_aid_endpoint "https://example.com?tenant=x" "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 3 "query rejected"
+  rc=0; resolve_aid_endpoint "https://example.com#frag" "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 3 "fragment rejected"
 
-  # Malformed override -> rc 3 so the caller can attribute the error
-  # to --override-endpoint specifically.
+  # Malformed override -> rc 3.
   rc=0; resolve_aid_endpoint "not-a-url"        "${cfg}" >/dev/null 2>&1 || rc=$?
   assert_status "${rc}" 3 "override without scheme -> rc 3"
   rc=0; resolve_aid_endpoint "ftp://host"       "${cfg}" >/dev/null 2>&1 || rc=$?
-  assert_status "${rc}" 3 "non-http(s) scheme -> rc 3"
+  assert_status "${rc}" 3 "non-https scheme -> rc 3"
   rc=0; resolve_aid_endpoint "https://a b.com"  "${cfg}" >/dev/null 2>&1 || rc=$?
   assert_status "${rc}" 3 "override with whitespace -> rc 3"
   rc=0; resolve_aid_endpoint 'https://a".com'   "${cfg}" >/dev/null 2>&1 || rc=$?
@@ -252,6 +265,18 @@ t_resolve_aid_endpoint_precedence() {
   assert_status "${rc}" 3 "override with query but no host -> rc 3"
   rc=0; resolve_aid_endpoint "https://#frag"      "${cfg}" >/dev/null 2>&1 || rc=$?
   assert_status "${rc}" 3 "override with fragment but no host -> rc 3"
+
+  # Symmetric tightening on the config-file side: a hostile / mistyped
+  # env_config.json must produce rc 2 for exactly the same shapes.
+  printf '{"cisco_ai_defense_endpoint": "http://example.com"}\n' >"${cfg}"
+  rc=0; resolve_aid_endpoint "" "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "config file with plaintext http:// rejected"
+  printf '{"cisco_ai_defense_endpoint": "https://user@example.com"}\n' >"${cfg}"
+  rc=0; resolve_aid_endpoint "" "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "config file with userinfo rejected"
+  printf '{"cisco_ai_defense_endpoint": "https://example.com/api"}\n' >"${cfg}"
+  rc=0; resolve_aid_endpoint "" "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "config file with path rejected"
 
   # No override + missing config file -> rc 1.
   rc=0; resolve_aid_endpoint "" "${case_dir}/does-not-exist.json" >/dev/null 2>&1 || rc=$?

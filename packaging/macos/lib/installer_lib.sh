@@ -583,18 +583,42 @@ EOF
 
 # ---- config rendering --------------------------------------------------
 
-# _valid_aid_endpoint_url URL -> exit 0 iff URL passes the strict AID
-# endpoint regex. Rejects hostless variants (`https:///`,
-# `https://?tenant=x`), whitespace, double quotes, and backslashes so
-# the value can safely land inside a double-quoted YAML scalar in
-# render_config's cisco_ai_defense block.
+# _valid_aid_endpoint_url URL -> exit 0 iff URL is a well-formed
+# HTTPS bare-origin AID endpoint. Enforces every property the
+# downstream managed CMID inspection client and OTel AID ingest need:
+#
+#   - HTTPS only. CMID bearer tokens ride in the Authorization header;
+#     accepting plaintext http:// would let a misconfigured
+#     --override-endpoint (or a hostile env_config.json) exfiltrate
+#     enterprise credentials on the wire.
+#   - No userinfo (`user@host`, `user:pass@host`). URL userinfo is
+#     silently dropped by Go's net/http on some redirect paths and is
+#     never the right place to encode auth for the AID endpoint —
+#     letting it through opens a credential-in-config leak.
+#   - No path, query, fragment. The daemon appends
+#     `/api/v1/inspect/defense_claw` and other suffixes itself; an
+#     operator-supplied path would double-append (or silently override)
+#     the routing. Query/fragment on the endpoint are equally
+#     nonsensical.
+#   - No whitespace, double quotes, or backslashes. Belt-and-braces so
+#     the value can safely land inside a double-quoted YAML scalar in
+#     render_config's cisco_ai_defense block.
+#   - Optional `:port` on the host (integer only).
 #
 # Kept as a named helper so callers exercise the same regex regardless
 # of whether the URL came from --override-endpoint or the AVC-owned
 # env_config.json.
 _valid_aid_endpoint_url() {
   local candidate="$1"
-  local re='^https?://[^[:space:]/?#"\]+[^[:space:]"\]*$'
+  # Reject early on whitespace, quotes, backslashes anywhere.
+  case "${candidate}" in
+    *[[:space:]]*|*'"'*|*'\'*) return 1 ;;
+  esac
+  # Bare-origin shape:
+  #   https://<host>[:port]
+  # <host> = one or more hostname labels (letters, digits, hyphen)
+  # separated by dots. No userinfo, no path, no query, no fragment.
+  local re='^https://[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*(:[0-9]+)?$'
   [[ "${candidate}" =~ ${re} ]]
 }
 
@@ -632,8 +656,12 @@ resolve_aid_endpoint() {
   local override="$1"
   local config_file="$2"
   if [[ -n "${override}" ]]; then
-    _valid_aid_endpoint_url "${override}" || return 3
-    printf '%s\n' "${override%/}"
+    # Strip a lone trailing slash BEFORE validation so
+    # "https://host.example.com/" is accepted (common paste). Any
+    # other path component fails the bare-origin regex.
+    local stripped="${override%/}"
+    _valid_aid_endpoint_url "${stripped}" || return 3
+    printf '%s\n' "${stripped}"
     return 0
   fi
   if [[ -z "${config_file}" || ! -f "${config_file}" ]]; then
@@ -644,8 +672,9 @@ resolve_aid_endpoint() {
   if [[ -z "${endpoint}" ]]; then
     return 2
   fi
-  _valid_aid_endpoint_url "${endpoint}" || return 2
-  printf '%s\n' "${endpoint%/}"
+  local stripped_cfg="${endpoint%/}"
+  _valid_aid_endpoint_url "${stripped_cfg}" || return 2
+  printf '%s\n' "${stripped_cfg}"
   return 0
 }
 
@@ -835,6 +864,16 @@ move_legacy_aside() {
     return 0
   fi
 
+  # Reject a symlinked BACKUP_ROOT outright — mv into a symlink
+  # target would follow the link and relocate legacy state into
+  # whatever the symlink points at. The trust-check on the ancestor
+  # chain in install.sh runs before we get here on real installs;
+  # this second-line-of-defense guards direct call sites (tests,
+  # future callers) that skip the outer check.
+  if [[ -L "${backup_root}" ]]; then
+    return 4
+  fi
+
   local base timestamp target
   base="$(basename -- "${path}")"
   # No Date.now() here: date is fine (this runs on the operator's
@@ -848,9 +887,10 @@ move_legacy_aside() {
     return 0
   fi
 
-  # BACKUP_ROOT must exist and be writable; on a real install it is
-  # created by the caller (LOGS_DIR is a fine landing zone). Missing
-  # backup_root is a caller bug, not a runtime condition to swallow.
+  # BACKUP_ROOT must exist and be a real directory; on a real install
+  # it is created by the caller (LOGS_DIR is a fine landing zone).
+  # Missing / non-directory backup_root is a caller bug, not a
+  # runtime condition to swallow.
   if [[ ! -d "${backup_root}" ]]; then
     return 3
   fi
