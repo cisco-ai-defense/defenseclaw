@@ -97,6 +97,71 @@ except Exception:
 ' "${path}" 2>/dev/null
 }
 
+# _native_claudecode_version_from_dir BASE -> echoes the version or "".
+#
+# Reads Claude Code's native-installer layout under BASE, which looks
+# like:
+#
+#   BASE/
+#     current            symlink to versions/<X.Y.Z>
+#     versions/
+#       <X.Y.Z>/         actual install root
+#       <X.Y.Z-1>/       (older, kept for rollback)
+#
+# Metadata-only (matches the module's security posture — see the doc
+# block on discover_agent_version). No binary is exec'd; we readlink
+# the `current` pointer and basename it, or fall back to picking the
+# highest version-shaped subdir under versions/. BASE typically resolves
+# to `${home}/.local/share/claude`, `/opt/claude`, or
+# `/usr/local/share/claude`.
+_native_claudecode_version_from_dir() {
+  local base="$1"
+  [[ -n "${base}" && -d "${base}" ]] || return 0
+  local current target dname ver
+  local -r semver_re='^[0-9]+\.[0-9]+\.[0-9]+([._+-].*)?$'
+
+  # 1. `current` symlink — user's active version.
+  #    A user with multiple installed versions may have `claude version
+  #    rollback`-ed to an older one; the `current` pointer reflects the
+  #    active choice, so it wins over the highest-versions/* fallback.
+  #    Only accept a `current` whose target actually resolves — a
+  #    dangling symlink (aborted upgrade, manual rm -rf) is treated as
+  #    absent and falls through to the versions/*/ scan below.
+  current="${base}/current"
+  if [[ -L "${current}" && -e "${current}" ]]; then
+    target="$(readlink -n "${current}" 2>/dev/null || true)"
+    if [[ -n "${target}" ]]; then
+      dname="$(basename -- "${target}")"
+      if [[ "${dname}" =~ ${semver_re} ]]; then
+        echo "${dname}"
+        return
+      fi
+    fi
+  fi
+
+  # 2. Highest versions/* dir. Same sort -V idiom used by the codex
+  #    Homebrew Caskroom probe. Handles partial installs where the
+  #    `current` symlink hasn't been flipped yet, and hosts that
+  #    never publish a `current` pointer.
+  local versions_dir="${base}/versions" dir
+  if [[ -d "${versions_dir}" ]]; then
+    ver=""
+    for dir in "${versions_dir}"/*/; do
+      [[ -d "${dir}" ]] || continue
+      dname="$(basename "${dir}")"
+      [[ "${dname}" =~ ${semver_re} ]] || continue
+      if [[ -z "${ver}" ]] || \
+         [[ "$(printf '%s\n%s\n' "${ver}" "${dname}" | sort -V | tail -1)" == "${dname}" ]]; then
+        ver="${dname}"
+      fi
+    done
+    if [[ -n "${ver}" ]]; then
+      echo "${ver}"
+      return
+    fi
+  fi
+}
+
 discover_agent_version() {
   local connector="$1"
   local home="$2"
@@ -185,8 +250,47 @@ discover_agent_version() {
       fi
       ;;
     claudecode)
-      # Claude Code ships both as a standalone npm CLI (has a
-      # package.json we can read) and as a Cursor / VS Code extension.
+      # Claude Code ships through four channels:
+      #
+      #   1. Native installer (curl -fsSL https://claude.ai/install.sh
+      #      | bash) — per-user under ~/.local/share/claude/versions/
+      #      with a `current` symlink pointer. This is the officially
+      #      recommended installer and what most users have today; the
+      #      `~/.local/bin/claude` shim on PATH resolves through the
+      #      `current` symlink to `.../versions/<X.Y.Z>/claude`.
+      #   2. System-wide native install — /opt/claude or
+      #      /usr/local/share/claude, same {current,versions/*} shape.
+      #      Present when an admin installs Claude for all users.
+      #   3. npm-global CLI — @anthropic-ai/claude-code — legacy
+      #      channel, still supported. package.json carries version.
+      #   4. Cursor / VS Code editor extensions — the extension dir
+      #      name embeds the version (matches the codex probe pattern).
+      #
+      # Probe order picks native FIRST because it is what customers
+      # actually run today; leaving it for a stale npm-global fallback
+      # to win would surface a stale version to the hook-contract
+      # validator and (in managed_enterprise mode=action) fail the
+      # reconcile for that user's claudecode row.
+
+      # 1. + 2. Native installer layouts. Per-user first, then Linux
+      # system-wide paths. `installer_lib.sh` is macOS-only in
+      # today's shipping bundle, but the render-targets script is
+      # copied into the managed tree and runs against every local
+      # user's home; the extra probes cost one stat each on macOS
+      # (which does not have /opt/claude) and future-proof against
+      # a Linux managed rollout that consumes this helper.
+      local base v
+      for base in \
+        "${home}/.local/share/claude" \
+        /opt/claude \
+        /usr/local/share/claude; do
+        v="$(_native_claudecode_version_from_dir "${base}")"
+        if [[ -n "${v}" ]]; then echo "${v}"; return; fi
+      done
+
+      # 3. + 4. npm module package.json + editor-extension probes.
+      #    Kept intact so operators with a legacy npm install or an
+      #    editor-extension install continue to work.
       local pkg
       for pkg in \
         "${home}"/.npm-global/lib/node_modules/@anthropic-ai/claude-code/package.json \
@@ -195,7 +299,7 @@ discover_agent_version() {
         "${home}"/.cursor/extensions/anthropic.claude-code-*/package.json \
         "${home}"/.vscode/extensions/anthropic.claude-code-*/package.json; do
         [[ -f "${pkg}" ]] || continue
-        local v; v="$(_read_json_version "${pkg}")"
+        v="$(_read_json_version "${pkg}")"
         if [[ -n "${v}" ]]; then echo "${v}"; return; fi
       done
       ;;
