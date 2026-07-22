@@ -74,8 +74,8 @@ func TestGoReleaserHooksUseCanonicalWindowsTarget(t *testing.T) {
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if len(commands) != 2 {
-		t.Fatalf("GoReleaser Windows resource hook count = %d, want 2", len(commands))
+	if len(commands) != 4 {
+		t.Fatalf("GoReleaser Windows resource hook count = %d, want 4", len(commands))
 	}
 
 	for _, architecture := range []string{"amd64", "arm64"} {
@@ -121,9 +121,15 @@ func TestGoReleaserHooksUseCanonicalWindowsTarget(t *testing.T) {
 					t.Fatalf("hook %d selected %d supported components, want 1: %s", index, matches, actual)
 				}
 			}
+			expectedComponents := map[string]int{"gateway": 3, "hook": 1}
 			for component, count := range components {
-				if count != 1 {
-					t.Errorf("GoReleaser resource hooks for component %q = %d, want 1", component, count)
+				if count != expectedComponents[component] {
+					t.Errorf(
+						"GoReleaser resource hooks for component %q = %d, want %d",
+						component,
+						count,
+						expectedComponents[component],
+					)
 				}
 			}
 		})
