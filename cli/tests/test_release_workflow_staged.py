@@ -256,7 +256,6 @@ def test_native_windows_setup_has_immutable_artifact_custody() -> None:
     assert installer["outputs"] == {
         "artifact_id": "${{ steps.windows-installer-artifact.outputs.artifact-id }}",
         "artifact_digest": "${{ steps.windows-installer-artifact.outputs.artifact-digest }}",
-        "verification_status": "${{ steps.windows-trust.outputs.verification_status }}",
     }
     assert certification["outputs"] == {
         "artifact_id": "${{ steps.windows-certified-artifact.outputs.artifact-id }}",
@@ -348,24 +347,26 @@ def test_native_windows_setup_has_immutable_artifact_custody() -> None:
     assert "-TimeoutSeconds 4500" in setup_acceptance
 
 
-def test_windows_authenticode_is_optional_but_partial_or_invalid_configuration_fails() -> None:
+def test_windows_authenticode_is_mandatory_for_release_setup() -> None:
     jobs = _workflow()["jobs"]
     installer = jobs["windows-installer"]
     certification = jobs["windows-real-client-certification"]
-    trust = next(step for step in installer["steps"] if step.get("id") == "windows-trust")
+    trust = next(step for step in installer["steps"] if step.get("name") == "Require real Authenticode release credentials")
     rendered = trust["run"]
 
     assert "-xor" in rendered
-    assert "provide both certificate and password, or neither" in rendered
-    assert "verification_status=signed" in rendered
-    assert "verification_status=unverified" in rendered
+    assert "provide both certificate and password" in rendered
+    assert "Authenticode credentials are required for DefenseClawSetup-x64.exe" in rendered
+    assert "verification_status=unverified" not in rendered
     assert "continue-on-error" not in str(installer)
 
     build = next(
-        step for step in installer["steps"] if step.get("name") == "Build native Setup with optional Authenticode"
+        step for step in installer["steps"] if step.get("name") == "Build and Authenticode-sign native Setup"
     )
     assert "secrets.WINDOWS_SIGNING_CERT_BASE64" in str(build)
     assert "secrets.WINDOWS_SIGNING_CERT_PASSWORD" in str(build)
+    signed_status = next(step for step in installer["steps"] if step.get("name") == "Require signed Windows trust status")
+    assert "must be fully Authenticode signed for release" in signed_status["run"]
 
     provider_gate = next(
         step for step in certification["steps"] if step.get("name") == "Require both real-client provider credentials"
@@ -375,17 +376,9 @@ def test_windows_authenticode_is_optional_but_partial_or_invalid_configuration_f
         for step in certification["steps"]
         if step.get("name") == "Certify the exact signed Setup with pinned Codex and Claude Code"
     )
-    unverified = next(
-        step
-        for step in certification["steps"]
-        if step.get("name") == "Record explicit unverified Windows Setup custody"
-    )
-    signed_condition = "${{ needs.windows-installer.outputs.verification_status == 'signed' }}"
-    unverified_condition = "${{ needs.windows-installer.outputs.verification_status == 'unverified' }}"
-    assert provider_gate["if"] == signed_condition
-    assert signed_certification["if"] == signed_condition
-    assert unverified["if"] == unverified_condition
-    assert "record-windows-unverified" in unverified["run"]
+    assert "if" not in provider_gate
+    assert "if" not in signed_certification
+    assert "record-windows-unverified" not in str(certification)
 
 
 def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:

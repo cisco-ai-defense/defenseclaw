@@ -156,7 +156,6 @@ WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS = (
     "upgrade",
     "uninstall",
 )
-WINDOWS_SETUP_UNVERIFIED_REQUIREMENTS = ("setup-acceptance",)
 CHECKSUMS_BUNDLE_FILENAME = "checksums.txt.bundle"
 MAX_WINDOWS_SETUP_BYTES = 2 * 1024 * 1024 * 1024
 MAX_WINDOWS_SETUP_METADATA_BYTES = 128 * 1024 * 1024
@@ -3560,7 +3559,7 @@ def _validate_release_identity(
     return provenance
 
 
-def _validate_windows_setup_pe(path: Path) -> tuple[str, bool]:
+def _validate_windows_setup_pe(path: Path) -> str:
     try:
         size = path.stat().st_size
         if not 0 < size <= MAX_WINDOWS_SETUP_BYTES:
@@ -3589,12 +3588,10 @@ def _validate_windows_setup_pe(path: Path) -> tuple[str, bool]:
         raise CandidateError("Windows Setup lacks a PE security-directory entry")
     certificate_offset, certificate_size = struct.unpack_from("<II", payload, optional_offset + 112 + 4 * 8)
     if certificate_offset == 0 and certificate_size == 0:
-        embedded_signature_present = False
+        raise CandidateError("Windows Setup lacks an embedded Authenticode signature")
     elif certificate_offset <= 0 or certificate_size < 8 or certificate_offset > len(payload) - certificate_size:
         raise CandidateError("Windows Setup lacks a complete embedded Authenticode signature")
-    else:
-        embedded_signature_present = True
-    return hashlib.sha256(payload).hexdigest(), embedded_signature_present
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _require_object_fields(
@@ -3642,7 +3639,6 @@ def _validate_windows_setup_provenance(
     version: str,
     commit: str,
     setup_sha256: str,
-    embedded_signature_present: bool,
 ) -> dict[str, Any]:
     document = _read_windows_setup_json(path, "Windows Setup provenance")
     _require_object_fields(
@@ -3671,10 +3667,9 @@ def _validate_windows_setup_provenance(
         or document.get("distribution_flavor") != "oss"
     ):
         raise CandidateError("Windows Setup provenance release identity mismatch")
-    unsigned = document.get("unsigned")
-    if not isinstance(unsigned, bool) or embedded_signature_present != (not unsigned):
-        raise CandidateError("Windows Setup provenance signing state does not match the PE signature")
-    signed = not unsigned
+    if document.get("unsigned") is not False:
+        raise CandidateError("Windows Setup provenance must declare a signed release artifact")
+    signed = True
     built_at = document.get("built_at_utc")
     if not isinstance(built_at, str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z", built_at) is None:
         raise CandidateError("Windows Setup provenance build timestamp is invalid")
@@ -4194,7 +4189,6 @@ def _validate_windows_setup_certification(
     version: str,
     commit: str,
     setup_sha256: str,
-    signed: bool,
 ) -> None:
     document = _read_windows_setup_json(path, "Windows Setup certification")
     _require_object_fields(
@@ -4222,34 +4216,19 @@ def _validate_windows_setup_certification(
         or document.get("source_commit") != commit
         or document.get("release_version") != version
     )
-    if signed:
-        mode_mismatch = (
-            document.get("status") != "passed"
-            or document.get("verification_status") != "signed"
-            or setup
-            != {
-                "name": WINDOWS_SETUP_ASSET,
-                "sha256": setup_sha256,
-                "publisher": WINDOWS_SETUP_PUBLISHER,
-            }
-            or document.get("clients") != WINDOWS_SETUP_CLIENTS
-            or document.get("connectors") != ["codex", "claudecode"]
-            or document.get("requirements") != list(WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS)
-        )
-    else:
-        mode_mismatch = (
-            document.get("status") != "unverified"
-            or document.get("verification_status") != "unverified"
-            or setup
-            != {
-                "name": WINDOWS_SETUP_ASSET,
-                "sha256": setup_sha256,
-                "publisher": "",
-            }
-            or document.get("clients") != {}
-            or document.get("connectors") != []
-            or document.get("requirements") != list(WINDOWS_SETUP_UNVERIFIED_REQUIREMENTS)
-        )
+    mode_mismatch = (
+        document.get("status") != "passed"
+        or document.get("verification_status") != "signed"
+        or setup
+        != {
+            "name": WINDOWS_SETUP_ASSET,
+            "sha256": setup_sha256,
+            "publisher": WINDOWS_SETUP_PUBLISHER,
+        }
+        or document.get("clients") != WINDOWS_SETUP_CLIENTS
+        or document.get("connectors") != ["codex", "claudecode"]
+        or document.get("requirements") != list(WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS)
+    )
     if common_mismatch or mode_mismatch:
         raise CandidateError("Windows Setup certification identity or required evidence mismatch")
     staging_digest = document.get("staging_artifact_digest")
@@ -4282,7 +4261,7 @@ def _validate_windows_installer_assets(
     if exact_file_set and _strict_file_names(directory, "Windows installer artifact") != names:
         raise CandidateError("Windows installer artifact directory must contain exactly five files")
     setup_path = directory / WINDOWS_SETUP_ASSET
-    setup_sha256, embedded_signature_present = _validate_windows_setup_pe(setup_path)
+    setup_sha256 = _validate_windows_setup_pe(setup_path)
     sidecar = directory / f"{WINDOWS_SETUP_ASSET}.sha256"
     try:
         sidecar_payload = sidecar.read_bytes()
@@ -4299,7 +4278,6 @@ def _validate_windows_installer_assets(
         version=version,
         commit=commit,
         setup_sha256=setup_sha256,
-        embedded_signature_present=embedded_signature_present,
     )
     if runtime_directory is not None:
         _validate_windows_setup_runtime_inputs(provenance, runtime_directory, version)
@@ -4315,102 +4293,6 @@ def _validate_windows_installer_assets(
         version=version,
         commit=commit,
         setup_sha256=setup_sha256,
-        signed=not provenance["unsigned"],
-    )
-
-
-def record_windows_unverified(
-    directory: Path,
-    version: str,
-    commit: str,
-    artifact_digest: str,
-    run_url: str,
-) -> None:
-    """Record an explicit non-certification for an unsigned Setup artifact."""
-
-    _validate_version(version)
-    _validate_commit(commit)
-    payload_names = (
-        WINDOWS_SETUP_ASSET,
-        f"{WINDOWS_SETUP_ASSET}.provenance.json",
-        f"{WINDOWS_SETUP_ASSET}.sbom.json",
-        f"{WINDOWS_SETUP_ASSET}.sha256",
-    )
-    _require_regular_files(directory, payload_names, "unverified Windows installer artifact")
-    if _strict_file_names(directory, "unverified Windows installer artifact") != tuple(sorted(payload_names)):
-        raise CandidateError("unverified Windows installer artifact directory must contain exactly four files")
-
-    setup_path = directory / WINDOWS_SETUP_ASSET
-    setup_sha256, embedded_signature_present = _validate_windows_setup_pe(setup_path)
-    if embedded_signature_present:
-        raise CandidateError("refusing to mark an Authenticode-signed Windows Setup as unverified")
-    sidecar = directory / f"{WINDOWS_SETUP_ASSET}.sha256"
-    try:
-        sidecar_payload = sidecar.read_bytes()
-    except OSError as exc:
-        raise CandidateError(f"could not read Windows Setup SHA-256 sidecar: {exc}") from exc
-    match = re.fullmatch(
-        rb"([0-9a-f]{64})  DefenseClawSetup-x64\.exe(?:\r\n|\n)",
-        sidecar_payload,
-    )
-    if match is None or match.group(1).decode("ascii") != setup_sha256:
-        raise CandidateError("Windows Setup SHA-256 sidecar does not bind the exact executable")
-    provenance = _validate_windows_setup_provenance(
-        directory / f"{WINDOWS_SETUP_ASSET}.provenance.json",
-        version=version,
-        commit=commit,
-        setup_sha256=setup_sha256,
-        embedded_signature_present=False,
-    )
-    if provenance["unsigned"] is not True:
-        raise CandidateError("Windows Setup provenance does not declare the unverified signing state")
-    _validate_windows_setup_sbom(
-        directory / f"{WINDOWS_SETUP_ASSET}.sbom.json",
-        version=version,
-        commit=commit,
-        setup_sha256=setup_sha256,
-        provenance=provenance,
-    )
-    if re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", artifact_digest) is None:
-        raise CandidateError("unverified Windows Setup staging digest is invalid")
-    if (
-        re.fullmatch(
-            r"https://github\.com/cisco-ai-defense/defenseclaw/actions/runs/[1-9][0-9]*",
-            run_url,
-        )
-        is None
-    ):
-        raise CandidateError("unverified Windows Setup run URL is invalid")
-
-    certification = {
-        "schema_version": 1,
-        "status": "unverified",
-        "verification_status": "unverified",
-        "platform": "windows-x64",
-        "setup": {
-            "name": WINDOWS_SETUP_ASSET,
-            "sha256": setup_sha256,
-            "publisher": "",
-        },
-        "clients": {},
-        "connectors": [],
-        "requirements": list(WINDOWS_SETUP_UNVERIFIED_REQUIREMENTS),
-        "source_commit": commit,
-        "release_version": version,
-        "staging_artifact_digest": artifact_digest,
-        "run_url": run_url,
-    }
-    certification_path = directory / f"{WINDOWS_SETUP_ASSET}.certification.json"
-    certification_path.write_text(
-        json.dumps(certification, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    _validate_windows_setup_certification(
-        certification_path,
-        version=version,
-        commit=commit,
-        setup_sha256=setup_sha256,
-        signed=False,
     )
 
 
@@ -4852,13 +4734,6 @@ def _parser() -> argparse.ArgumentParser:
     extract_windows_parser.add_argument("--output-dir", type=Path, required=True)
     extract_windows_parser.add_argument("--version", required=True)
 
-    record_windows_parser = subparsers.add_parser("record-windows-unverified")
-    record_windows_parser.add_argument("--windows-dir", type=Path, required=True)
-    record_windows_parser.add_argument("--version", required=True)
-    record_windows_parser.add_argument("--commit", required=True)
-    record_windows_parser.add_argument("--artifact-digest", required=True)
-    record_windows_parser.add_argument("--run-url", required=True)
-
     assemble_parser = subparsers.add_parser("assemble")
     assemble_parser.add_argument("--runtime-dir", type=Path, required=True)
     assemble_parser.add_argument("--macos-dir", type=Path, required=True)
@@ -4930,15 +4805,6 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "extract-windows-installer-inputs":
             extract_windows_installer_inputs(args.release_dir, args.output_dir, args.version)
             print(f"Windows installer inputs extracted: {args.output_dir}")
-        elif args.command == "record-windows-unverified":
-            record_windows_unverified(
-                args.windows_dir,
-                args.version,
-                args.commit,
-                args.artifact_digest,
-                args.run_url,
-            )
-            print(f"unverified Windows installer custody recorded: {args.windows_dir}")
         elif args.command == "assemble":
             assemble(
                 args.runtime_dir,

@@ -46,24 +46,21 @@ cell. When Authenticode credentials are complete, it installs the exact signed
 Setup artifact and exact official Codex and Claude Code versions, fails closed
 when either provider credential is unavailable, and requires both connectors'
 live allow/block, audit, and OTLP evidence, plus Codex automatic-trust evidence.
-When both signing credentials are absent, those signed-only client checks are
-skipped and the prior standard-user lifecycle result is recorded explicitly as
-`unverified`, without publisher, client, or connector claims. Partial or invalid
-signing credentials always fail. The `publish-release` job depends directly on
-that cell, and the resulting `DefenseClawSetup-x64.exe.certification.json` is
-included in the signed release checksum set. Its bounded three-hour job budget
-leaves time for cleanup and failure-diagnostics upload after every bounded child
-operation. The certification cell never builds or installs DefenseClaw from the
-source checkout.
+Missing, partial, or invalid signing credentials fail before publication. The
+`publish-release` job depends directly on that cell, and the resulting
+`DefenseClawSetup-x64.exe.certification.json` is included in the signed release
+checksum set. Its bounded three-hour job budget leaves time for cleanup and
+failure-diagnostics upload after every bounded child operation. The
+certification cell never builds or installs DefenseClaw from the source checkout.
 
 Starting with the 0.8.6 release, the Windows release path is a non-advisory
 chain: `windows-installer` consumes the protected runtime artifact by immutable
 artifact ID and digest; `windows-real-client-certification` consumes the Setup
-bundle the same way and either certifies the signed branch or records explicit
-unverified custody; and `assemble-release-candidate` accepts the five assets
-only through `--windows-dir` after validating the custody artifact's emitted
-SHA-256 digest. Those assets are the Setup EXE, its SHA-256 sidecar, provenance,
-SPDX SBOM, and certification/status record.
+bundle the same way and certifies only the signed branch; and
+`assemble-release-candidate` accepts the five assets only through
+`--windows-dir` after validating the custody artifact's emitted SHA-256 digest.
+Those assets are the Setup EXE, its SHA-256 sidecar, provenance, SPDX SBOM, and
+certification/status record.
 Every sealed-candidate consumer authenticates `checksums.txt` with
 `checksums.txt.bundle` in offline mode and the exact protected-main Sigstore
 identity before using any asset. Only `publish-release` has `contents: write`.

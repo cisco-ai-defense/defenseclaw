@@ -806,7 +806,7 @@ def _windows_setup_dir(
         "requirements": list(
             release_candidate.WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS
             if signed
-            else release_candidate.WINDOWS_SETUP_UNVERIFIED_REQUIREMENTS
+            else ("setup-acceptance",)
         ),
         "source_commit": commit,
         "release_version": version,
@@ -1210,9 +1210,8 @@ def test_windows_setup_custody_starts_at_086_and_survives_legacy_omission() -> N
     assert not setup_assets & set(release_candidate.windows_release_binary_names(WINDOWS_SETUP_VERSION))
 
 
-@pytest.mark.parametrize("signed", [True, False])
-def test_windows_setup_exact_artifact_set_validates(tmp_path: Path, signed: bool) -> None:
-    windows = _windows_setup_dir(tmp_path, signed=signed)
+def test_windows_setup_exact_artifact_set_validates(tmp_path: Path) -> None:
+    windows = _windows_setup_dir(tmp_path)
 
     release_candidate._validate_windows_installer_assets(
         windows,
@@ -1222,10 +1221,22 @@ def test_windows_setup_exact_artifact_set_validates(tmp_path: Path, signed: bool
     )
 
 
+def test_windows_setup_rejects_unsigned_pe(tmp_path: Path) -> None:
+    windows = _windows_setup_dir(tmp_path, signed=False)
+
+    with pytest.raises(release_candidate.CandidateError, match="embedded Authenticode signature"):
+        release_candidate._validate_windows_installer_assets(
+            windows,
+            WINDOWS_SETUP_VERSION,
+            COMMIT,
+            exact_file_set=True,
+        )
+
+
 @pytest.mark.parametrize(
     ("metadata_suffix", "field", "value", "match"),
     [
-        ("provenance.json", "unsigned", True, "signing state"),
+        ("provenance.json", "unsigned", True, "signed release artifact"),
         ("sbom.json", "documentNamespace", "https://example.invalid", "SBOM document"),
         (
             "certification.json",
@@ -1266,61 +1277,19 @@ def test_windows_setup_metadata_tampering_fails_closed(
 def test_windows_setup_rejects_pe_and_provenance_signing_state_mismatch(
     tmp_path: Path,
 ) -> None:
-    windows = _windows_setup_dir(tmp_path, signed=False)
+    windows = _windows_setup_dir(tmp_path)
     path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.provenance.json"
     document = json.loads(path.read_text(encoding="utf-8"))
-    document["unsigned"] = False
-    document["inputs"]["product_executables_authenticode_signed"] = True
+    document["unsigned"] = True
+    document["inputs"]["product_executables_authenticode_signed"] = False
     path.write_text(json.dumps(document), encoding="utf-8")
 
-    with pytest.raises(release_candidate.CandidateError, match="signing state"):
+    with pytest.raises(release_candidate.CandidateError, match="signed release artifact"):
         release_candidate._validate_windows_installer_assets(
             windows,
             WINDOWS_SETUP_VERSION,
             COMMIT,
             exact_file_set=True,
-        )
-
-
-def test_record_windows_unverified_creates_explicit_non_certification(
-    tmp_path: Path,
-) -> None:
-    windows = _windows_setup_dir(tmp_path, signed=False)
-    certification = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.certification.json"
-    certification.unlink()
-
-    release_candidate.record_windows_unverified(
-        windows,
-        WINDOWS_SETUP_VERSION,
-        COMMIT,
-        "sha256:" + "4" * 64,
-        "https://github.com/cisco-ai-defense/defenseclaw/actions/runs/123456",
-    )
-
-    document = json.loads(certification.read_text(encoding="utf-8"))
-    assert document["status"] == "unverified"
-    assert document["verification_status"] == "unverified"
-    assert document["setup"]["publisher"] == ""
-    assert document["clients"] == {}
-    release_candidate._validate_windows_installer_assets(
-        windows,
-        WINDOWS_SETUP_VERSION,
-        COMMIT,
-        exact_file_set=True,
-    )
-
-
-def test_record_windows_unverified_rejects_signed_setup(tmp_path: Path) -> None:
-    windows = _windows_setup_dir(tmp_path)
-    (windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.certification.json").unlink()
-
-    with pytest.raises(release_candidate.CandidateError, match="signed Windows Setup"):
-        release_candidate.record_windows_unverified(
-            windows,
-            WINDOWS_SETUP_VERSION,
-            COMMIT,
-            "4" * 64,
-            "https://github.com/cisco-ai-defense/defenseclaw/actions/runs/123456",
         )
 
 

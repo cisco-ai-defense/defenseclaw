@@ -85,8 +85,8 @@ signature and certificate. The compatibility bootstrap passes that bundled
 transparency-log proof to pinned Cosign with `--offline`. The authenticated
 checksum root must contain exactly one entry each for Setup, its provenance,
 and the upgrade manifest. The provenance must describe an internally consistent
-signed or explicitly unverified schema-1 OSS artifact and repeat Setup's exact
-authenticated SHA-256. Local mode requires
+signed schema-1 OSS artifact and repeat Setup's exact authenticated SHA-256.
+Local mode requires
 the complete release bundle plus the pinned Cosign executable and performs no
 network access.
 
@@ -138,9 +138,9 @@ requested instead of silently degrading to an unusable provider.
 
 Local and pull-request builds are unsigned and are labeled as such in Installed
 Apps. Release signing follows the same all-or-none policy as macOS credentials:
-when both Authenticode secrets are absent the workflow publishes an explicitly
-unverified Setup, when exactly one is present the release fails, and when both
-are present signing is mandatory and any certificate, password, SignTool,
+when any Authenticode secret is absent the workflow fails, when exactly one is
+present the release fails, and when both are present signing is mandatory and any
+certificate, password, SignTool,
 timestamp, or publisher failure aborts instead of falling back to unsigned.
 For the signed path, before the payload manifest is hashed, the builder signs
 the native CLI launcher, console-free startup helper, gateway, and hook entry
@@ -274,11 +274,11 @@ Before the private staging tree can be published, Setup requires an exact
 one-to-one match between its Authenticode inventory and every extracted PE,
 checks each file digest, and enforces the recorded Windows trust policy. Signed
 DefenseClaw executables must retain the Cisco publisher, signer identity, and
-RFC 3161 timestamp; unsigned builds are accepted only when the
-manifest explicitly declares the unsigned policy. Setup repeats inventory
-verification after publication and verifies the maintenance and stable-hook
-copies so extraction or copy-time tampering cannot silently cross the install
-boundary.
+RFC 3161 timestamp; release validation rejects unsigned Setup artifacts before
+publication. Local and pull-request unsigned builds remain labeled as unsigned
+and are not sealed for release. Setup repeats inventory verification after
+publication and verifies the maintenance and stable-hook copies so extraction or
+copy-time tampering cannot silently cross the install boundary.
 
 On upgrade, the CLI uses the installer-owned cosign binary (never an
 environment-selected verifier) to verify the signed checksums and the upgrade
@@ -312,20 +312,17 @@ same-version upgrade with the same Setup bytes and requires uninstall itself to
 remove both connectors, user data, Installed Apps, and the user PATH entry while
 preserving a seeded unrelated `~/.codex/hooks.json` handler byte-for-byte.
 
-When both Authenticode credentials are absent, the signed real-client cell is
-skipped and the already-passed standard-user lifecycle result is recorded as
-explicitly `unverified`; the certification sidecar has no publisher, clients, or
-connector claims. Partial signing credentials, invalid signing material, a bad
-publisher or timestamp, and any signed-branch certification failure still abort
-before publication. The workflow emits SHA-256, merged SPDX SBOM, provenance,
-and `DefenseClawSetup-x64.exe.certification.json`, then adds every artifact to
-the final checksum manifest before the immutable release is created. macOS and
-Linux artifacts continue through their existing build path.
+Missing signing credentials, partial signing credentials, invalid signing
+material, a bad publisher or timestamp, and any signed-branch certification
+failure abort before publication. The workflow emits SHA-256, merged SPDX SBOM,
+provenance, and `DefenseClawSetup-x64.exe.certification.json`, then adds every
+artifact to the final checksum manifest before the immutable release is created.
+macOS and Linux artifacts continue through their existing build path.
 
 The Windows chain transfers each intermediate by immutable GitHub Actions
 artifact ID and digest; assembly rejects a missing or malformed custody artifact
-digest before processing its exact-ID download. The signed and unverified paths
-both emit exactly five release assets:
+digest before processing its exact-ID download. The signed path emits exactly
+five release assets:
 `DefenseClawSetup-x64.exe`, its `.sha256`, `.provenance.json`, `.sbom.json`, and
 `.certification.json` sidecars. Assembly consumes that directory explicitly via
 `--windows-dir`, seals all five bytes into the candidate, and signs
@@ -339,11 +336,10 @@ because 0.8.5 did not publish a native Setup baseline; the fresh gate still
 exercises install, repair, same-version servicing, and uninstall. Both publish
 selection and post-publish custody verification retain
 `--omit-windows-binaries` to exclude legacy raw Windows archives only. They do
-not exclude Setup or its four custody sidecars. The unverified EXE can be
-downloaded and run directly for a fresh install. The authenticated PowerShell
-bootstrap and automatic upgrade path deliberately continue to reject unsigned
-Setup targets rather than silently weakening an existing installation's trust
-policy.
+not exclude Setup or its four custody sidecars. Unsigned Setup builds are limited
+to local and pull-request validation. The authenticated PowerShell bootstrap and
+automatic upgrade path deliberately continue to reject unsigned Setup targets
+rather than silently weakening an existing installation's trust policy.
 
 Pull-request CI builds an unsigned setup and runs setup acceptance only on the
 disposable GitHub Actions user. Local setup acceptance refuses to mutate the

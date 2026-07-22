@@ -1,7 +1,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fail-closed contracts for signed and explicitly unverified Windows releases."""
+"""Fail-closed contracts for signed Windows releases."""
 
 import json
 import re
@@ -183,15 +183,9 @@ def test_publish_has_non_advisory_real_client_certification_custody() -> None:
         step for step in certification["steps"] if step.get("name") == "Require both real-client provider credentials"
     )
     certify_step = certification["steps"][certification_index]
-    unverified_step = next(
-        step
-        for step in certification["steps"]
-        if step.get("name") == "Record explicit unverified Windows Setup custody"
-    )
-    assert provider_gate["if"] == "${{ needs.windows-installer.outputs.verification_status == 'signed' }}"
-    assert certify_step["if"] == "${{ needs.windows-installer.outputs.verification_status == 'signed' }}"
-    assert unverified_step["if"] == ("${{ needs.windows-installer.outputs.verification_status == 'unverified' }}")
-    assert "record-windows-unverified" in unverified_step["run"]
+    assert "if" not in provider_gate
+    assert "if" not in certify_step
+    assert "record-windows-unverified" not in rendered
 
     assert "windows-real-client-certification" in assemble["needs"]
     assert "windows-real-client-certification" in full["needs"]

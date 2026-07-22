@@ -134,10 +134,10 @@ The final release reuses those exact certified bytes, or invokes that complete
 certification workflow on a cache miss. Legacy raw Windows runtime archives
 remain omitted, while exactly one `DefenseClawSetup-x64.exe` and its custody
 sidecars are promoted from the same sealed candidate. Complete Authenticode
-credentials require signing plus real Codex and Claude certification; absent
-credentials produce an explicitly unverified lifecycle-tested Setup, while a
-partial or invalid credential set aborts. A broken refusal, bridge handoff, migration,
-rollback, installer lifecycle, health, or history path aborts before publication.
+credentials require signing plus real Codex and Claude certification; absent,
+partial, or invalid credential sets abort instead of producing a release Setup.
+A broken refusal, bridge handoff, migration, rollback, installer lifecycle,
+health, or history path aborts before publication.
 
 ### 0.8.4 bridge rollout order
 
