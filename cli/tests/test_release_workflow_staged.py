@@ -25,12 +25,8 @@ WINDOWS_PROTOCOL_GATE = ROOT / "scripts/test-upgrade-release-windows.ps1"
 MACOS_BUILD = ROOT / "scripts/build-macos-app-release.sh"
 POSIX_INSTALLER = ROOT / "scripts/install.sh"
 POSIX_FRESH_RELEASE = ROOT / "scripts/test-fresh-install-release.sh"
-DIGEST_CAPABLE_UPLOAD_ACTION = (
-    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
-)
-COSIGN_INSTALLER_ACTION = (
-    "sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da"
-)
+DIGEST_CAPABLE_UPLOAD_ACTION = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+COSIGN_INSTALLER_ACTION = "sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da"
 
 
 def _bash_executable() -> str:
@@ -238,7 +234,7 @@ def test_native_windows_setup_is_required_while_raw_archives_remain_omitted() ->
     assert workflow_text.count("--omit-windows-binaries") == 4
     assert "publish_windows_binaries" not in workflow_text
     assert "Legacy raw Windows archives remain omitted" in workflow_text
-    assert "signed, certified DefenseClawSetup-x64.exe is published" in workflow_text
+    assert "verification status is recorded in its provenance and certification metadata" in workflow_text
 
 
 def test_native_windows_setup_has_immutable_artifact_custody() -> None:
@@ -250,9 +246,7 @@ def test_native_windows_setup_has_immutable_artifact_custody() -> None:
 
     for job in (runtime, installer, certification, assemble):
         upload_actions = [
-            step["uses"]
-            for step in job.get("steps", [])
-            if step.get("uses", "").startswith("actions/upload-artifact@")
+            step["uses"] for step in job.get("steps", []) if step.get("uses", "").startswith("actions/upload-artifact@")
         ]
         assert upload_actions
         assert set(upload_actions) == {DIGEST_CAPABLE_UPLOAD_ACTION}
@@ -262,6 +256,7 @@ def test_native_windows_setup_has_immutable_artifact_custody() -> None:
     assert installer["outputs"] == {
         "artifact_id": "${{ steps.windows-installer-artifact.outputs.artifact-id }}",
         "artifact_digest": "${{ steps.windows-installer-artifact.outputs.artifact-digest }}",
+        "verification_status": "${{ steps.windows-trust.outputs.verification_status }}",
     }
     assert certification["outputs"] == {
         "artifact_id": "${{ steps.windows-certified-artifact.outputs.artifact-id }}",
@@ -278,20 +273,16 @@ def test_native_windows_setup_has_immutable_artifact_custody() -> None:
         step
         for step in installer["steps"]
         if step.get("uses", "").startswith("actions/download-artifact@")
-        and step.get("with", {}).get("name")
-        == "${{ needs.release-preflight.outputs.baseline_artifact }}"
+        and step.get("with", {}).get("name") == "${{ needs.release-preflight.outputs.baseline_artifact }}"
     )
-    assert installer["env"]["UPGRADE_BASELINE_POLICY"] == (
-        "${{ github.workspace }}/effective-upgrade-baselines.json"
-    )
+    assert installer["env"]["UPGRADE_BASELINE_POLICY"] == ("${{ github.workspace }}/effective-upgrade-baselines.json")
     assert installer_baseline_download["with"]["path"] == "."
 
     installer_download = next(
         step
         for step in installer["steps"]
         if step.get("uses", "").startswith("actions/download-artifact@")
-        and step.get("with", {}).get("artifact-ids")
-        == "${{ needs.build-runtime-candidate.outputs.artifact_id }}"
+        and step.get("with", {}).get("artifact-ids") == "${{ needs.build-runtime-candidate.outputs.artifact_id }}"
     )
     assert installer_download["with"]["artifact-ids"] == ("${{ needs.build-runtime-candidate.outputs.artifact_id }}")
     assert installer_download["with"]["merge-multiple"] == "true"
@@ -349,13 +340,52 @@ def test_native_windows_setup_has_immutable_artifact_custody() -> None:
     setup_acceptance = next(
         step
         for step in installer["steps"]
-        if step.get("name")
-        == "Validate the exact signed Setup lifecycle as a standard user"
+        if step.get("name") == "Validate the exact Setup lifecycle as a standard user"
     )["run"]
     assert "scripts/invoke-windows-setup-standard-user-ci.ps1" in setup_acceptance
     assert "-Mode setup-acceptance" in setup_acceptance
     assert "-ArtifactRoot windows-installer-output" in setup_acceptance
     assert "-TimeoutSeconds 4500" in setup_acceptance
+
+
+def test_windows_authenticode_is_optional_but_partial_or_invalid_configuration_fails() -> None:
+    jobs = _workflow()["jobs"]
+    installer = jobs["windows-installer"]
+    certification = jobs["windows-real-client-certification"]
+    trust = next(step for step in installer["steps"] if step.get("id") == "windows-trust")
+    rendered = trust["run"]
+
+    assert "-xor" in rendered
+    assert "provide both certificate and password, or neither" in rendered
+    assert "verification_status=signed" in rendered
+    assert "verification_status=unverified" in rendered
+    assert "continue-on-error" not in str(installer)
+
+    build = next(
+        step for step in installer["steps"] if step.get("name") == "Build native Setup with optional Authenticode"
+    )
+    assert "secrets.WINDOWS_SIGNING_CERT_BASE64" in str(build)
+    assert "secrets.WINDOWS_SIGNING_CERT_PASSWORD" in str(build)
+
+    provider_gate = next(
+        step for step in certification["steps"] if step.get("name") == "Require both real-client provider credentials"
+    )
+    signed_certification = next(
+        step
+        for step in certification["steps"]
+        if step.get("name") == "Certify the exact signed Setup with pinned Codex and Claude Code"
+    )
+    unverified = next(
+        step
+        for step in certification["steps"]
+        if step.get("name") == "Record explicit unverified Windows Setup custody"
+    )
+    signed_condition = "${{ needs.windows-installer.outputs.verification_status == 'signed' }}"
+    unverified_condition = "${{ needs.windows-installer.outputs.verification_status == 'unverified' }}"
+    assert provider_gate["if"] == signed_condition
+    assert signed_certification["if"] == signed_condition
+    assert unverified["if"] == unverified_condition
+    assert "record-windows-unverified" in unverified["run"]
 
 
 def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
@@ -382,22 +412,14 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
     assert "cosign sign-blob" in assemble_rendered
     assert text.count("cosign sign-blob") == 1
     candidate_upload_index = next(
-        index
-        for index, step in enumerate(assemble_job["steps"])
-        if step.get("id") == "upload"
+        index for index, step in enumerate(assemble_job["steps"]) if step.get("id") == "upload"
     )
     candidate_upload = assemble_job["steps"][candidate_upload_index]
-    assert candidate_upload["uses"] == (
-        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
-    )
-    assert assemble_job["outputs"]["artifact_digest"] == (
-        "${{ steps.upload.outputs.artifact-digest }}"
-    )
+    assert candidate_upload["uses"] == ("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02")
+    assert assemble_job["outputs"]["artifact_digest"] == ("${{ steps.upload.outputs.artifact-digest }}")
     digest_guard = assemble_job["steps"][candidate_upload_index + 1]
     assert digest_guard["name"] == "Require candidate artifact digest output"
-    assert digest_guard["env"]["CANDIDATE_ARTIFACT_DIGEST"] == (
-        "${{ steps.upload.outputs.artifact-digest }}"
-    )
+    assert digest_guard["env"]["CANDIDATE_ARTIFACT_DIGEST"] == ("${{ steps.upload.outputs.artifact-digest }}")
     assert "Missing candidate artifact digest" in digest_guard["run"]
 
     macos_job = str(jobs["macos-app"])

@@ -648,8 +648,13 @@ function Set-FileSignaturesIfConfigured([string[]]$Paths, [string]$BuildRoot) {
     }
     $cert64 = [Environment]::GetEnvironmentVariable("WINDOWS_SIGNING_CERT_BASE64")
     $certPassword = [Environment]::GetEnvironmentVariable("WINDOWS_SIGNING_CERT_PASSWORD")
-    if ([string]::IsNullOrWhiteSpace($cert64) -or [string]::IsNullOrWhiteSpace($certPassword)) {
-        Write-Warning "No real Authenticode credentials provided; artifact is an unsigned local/PR build."
+    $hasCertificate = -not [string]::IsNullOrWhiteSpace($cert64)
+    $hasPassword = -not [string]::IsNullOrWhiteSpace($certPassword)
+    if ($hasCertificate -xor $hasPassword) {
+        throw 'Authenticode signing is partially configured; provide both WINDOWS_SIGNING_CERT_BASE64 and WINDOWS_SIGNING_CERT_PASSWORD, or neither.'
+    }
+    if (-not $hasCertificate) {
+        Write-Warning "No real Authenticode credentials provided; artifact is explicitly unverified."
         return $false
     }
     $signtool = (Get-Command 'signtool.exe' -ErrorAction Stop).Source

@@ -751,7 +751,7 @@ jobs:
           compression-level: 0
 
   windows-installer:
-    name: Build and test signed native Windows Setup
+    name: Build and test native Windows Setup
     needs: [release-preflight, build-runtime-candidate]
     runs-on: windows-latest
     env:
@@ -762,6 +762,7 @@ jobs:
     outputs:
       artifact_id: ${{ steps.windows-installer-artifact.outputs.artifact-id }}
       artifact_digest: ${{ steps.windows-installer-artifact.outputs.artifact-digest }}
+      verification_status: ${{ steps.windows-trust.outputs.verification_status }}
     defaults:
       run:
         shell: pwsh
@@ -806,17 +807,26 @@ jobs:
             --version "$env:RELEASE_TAG"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Require real Authenticode release credentials
+      - name: Resolve Windows Authenticode trust mode
+        id: windows-trust
         env:
           WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
           WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_BASE64) -or
-              [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)) {
-            throw 'Authenticode credentials are required for DefenseClawSetup-x64.exe.'
+          $hasCertificate = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_BASE64)
+          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)
+          if ($hasCertificate -xor $hasPassword) {
+            throw 'Windows Authenticode signing is partially configured; provide both certificate and password, or neither.'
+          }
+          if ($hasCertificate) {
+            'verification_status=signed' >> $env:GITHUB_OUTPUT
+            Write-Host 'Complete Authenticode credentials detected; signing is mandatory.'
+          } else {
+            'verification_status=unverified' >> $env:GITHUB_OUTPUT
+            Write-Warning 'Authenticode credentials are unavailable; publishing an explicitly unverified Setup.'
           }
 
-      - name: Build and Authenticode-sign native Setup
+      - name: Build native Setup with optional Authenticode
         env:
           RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
           WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
@@ -830,7 +840,27 @@ jobs:
           -Version $env:RELEASE_TAG
           -DistributionFlavor oss
 
-      - name: Validate the exact signed Setup lifecycle as a standard user
+      - name: Require explicit Windows trust status
+        env:
+          EXPECTED_VERIFICATION_STATUS: ${{ steps.windows-trust.outputs.verification_status }}
+        run: |
+          $provenance = Get-Content `
+            -LiteralPath windows-installer-output/DefenseClawSetup-x64.exe.provenance.json `
+            -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($provenance.unsigned -eq $false -and
+              $provenance.inputs.product_executables_authenticode_signed -eq $true) {
+            $actual = 'signed'
+          } elseif ($provenance.unsigned -eq $true -and
+                    $provenance.inputs.product_executables_authenticode_signed -eq $false) {
+            $actual = 'unverified'
+          } else {
+            throw 'Windows Setup provenance contains a mixed signing state.'
+          }
+          if ($actual -cne $env:EXPECTED_VERIFICATION_STATUS) {
+            throw "Windows trust status mismatch: expected=$env:EXPECTED_VERIFICATION_STATUS actual=$actual"
+          }
+
+      - name: Validate the exact Setup lifecycle as a standard user
         run: >-
           ./scripts/invoke-windows-setup-standard-user-ci.ps1
           -Mode setup-acceptance
@@ -839,7 +869,7 @@ jobs:
           -DiagnosticsRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-signed-setup-diagnostics')
           -TimeoutSeconds 4500
 
-      - name: Upload exact signed Windows Setup metadata
+      - name: Upload exact Windows Setup metadata
         id: windows-installer-artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -854,7 +884,7 @@ jobs:
           compression-level: 0
 
   windows-real-client-certification:
-    name: Certify signed Setup with real Windows clients
+    name: Certify signed Setup or record unverified custody
     needs: [release-preflight, windows-installer]
     runs-on: windows-latest
     timeout-minutes: 180
@@ -889,6 +919,7 @@ jobs:
           merge-multiple: true
 
       - name: Require both real-client provider credentials
+        if: ${{ needs.windows-installer.outputs.verification_status == 'signed' }}
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -899,6 +930,7 @@ jobs:
           }
 
       - name: Certify the exact signed Setup with pinned Codex and Claude Code
+        if: ${{ needs.windows-installer.outputs.verification_status == 'signed' }}
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -909,6 +941,20 @@ jobs:
           -Operation release-certification
           -ArtifactRoot windows-certified
           -StateRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-real-client-certification')
+
+      - name: Record explicit unverified Windows Setup custody
+        if: ${{ needs.windows-installer.outputs.verification_status == 'unverified' }}
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+          WINDOWS_RELEASE_ARTIFACT_DIGEST: ${{ needs.windows-installer.outputs.artifact_digest }}
+        run: >-
+          python scripts/release_candidate.py record-windows-unverified
+          --windows-dir windows-certified
+          --version "$env:RELEASE_TAG"
+          --commit "$env:RELEASE_COMMIT"
+          --artifact-digest "$env:WINDOWS_RELEASE_ARTIFACT_DIGEST"
+          --run-url "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
 
       - name: Upload real-client diagnostics on failure
         if: ${{ failure() || cancelled() }}
@@ -923,7 +969,7 @@ jobs:
           retention-days: 7
           include-hidden-files: true
 
-      - name: Upload certified native Windows Setup assets
+      - name: Upload certified or explicitly unverified Windows Setup assets
         id: windows-certified-artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -1370,7 +1416,7 @@ jobs:
           fi
 
   full-certification:
-    name: Run full signed pre-release certification
+    name: Run full pre-release certification
     needs:
       - release-preflight
       - lookup-certification
@@ -1635,7 +1681,7 @@ jobs:
           RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
         run: |
           set -euo pipefail
-          echo "::notice title=Native Windows Setup included::Legacy raw Windows archives remain omitted; the signed, certified DefenseClawSetup-x64.exe is published."
+          echo "::notice title=Native Windows Setup included::Legacy raw Windows archives remain omitted; exactly one DefenseClawSetup-x64.exe is published, and its verification status is recorded in its provenance and certification metadata."
           mapfile -t names < <(
             python3 scripts/release_candidate.py list-assets \
               --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT" \
