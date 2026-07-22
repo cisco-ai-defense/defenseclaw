@@ -90,6 +90,8 @@ readonly COSIGN_BOOTSTRAP_VERSION="2.6.3"
 readonly COSIGN_BOOTSTRAP_MAX_BYTES="209715200"
 readonly UPGRADE_MANIFEST_NAME="upgrade-manifest.json"
 readonly RELEASE_PROVENANCE_NAME="release-provenance.json"
+readonly HISTORICAL_MCP_SCANNER_REQUIREMENT='cisco-ai-mcp-scanner @ https://files.pythonhosted.org/packages/5d/74/6e72cbd496c0d33dfab1b4aee62792620236e63cccf278a8c896c6feb740/cisco_ai_mcp_scanner-4.7.2-py3-none-any.whl#sha256=6ed0b8ced168886f572aec30a971c7b0e2e1de7eea489d3821627184fd271ac8'
+readonly HISTORICAL_LITELLM_REQUIREMENT='litellm @ https://files.pythonhosted.org/packages/ec/24/81f03088876a13b628fdbaf746ee746e1dff127d63f339ef72f1a3801c91/litellm-1.89.1-py3-none-any.whl#sha256=a52a67625d89cb1787ef48c4b3c1ab9c2574ea304f56900bc631844297a13bd4'
 readonly UPGRADE_RECOVERY_ROOT="${DEFENSECLAW_HOME}/.upgrade-recovery"
 readonly UPGRADE_LOCK_FILE="${UPGRADE_RECOVERY_ROOT}/upgrade.lock"
 readonly UPGRADE_ADVISORY_LOCK_FILE="${UPGRADE_RECOVERY_ROOT}/upgrade.advisory.lock"
@@ -376,6 +378,7 @@ gateway_pid_status() {
 preflight_python_wheel() {
     local wheel="$1"
     local uv_bin
+    local -a dependency_args=(--only-binary litellm)
     uv_bin="$(command -v uv 2>/dev/null || true)"
     [[ -z "${uv_bin}" ]] \
         && die "uv not found on PATH — cannot update Python CLI. Install uv, then re-run the upgrade."
@@ -388,8 +391,16 @@ preflight_python_wheel() {
         preflight_python="${preflight_venv}/bin/python"
     fi
 
+    case "${RELEASE_VERSION}" in
+        0.8.4|0.8.5)
+            prepare_historical_bootstrap_overrides
+            dependency_args+=(--overrides "${HISTORICAL_BOOTSTRAP_OVERRIDES_FILE}")
+            ;;
+    esac
     step "Resolving Python CLI dependencies ..."
-    "${uv_bin}" --no-config pip install --python "${preflight_python}" --dry-run --quiet "${wheel}" \
+    UV_OVERRIDE= "${uv_bin}" --no-config pip install \
+        --python "${preflight_python}" --dry-run --quiet \
+        "${dependency_args[@]}" "${wheel}" \
         || die "Python CLI wheel dependencies are unsatisfiable; no services changed."
     ok "Python CLI dependency preflight passed"
 }
@@ -4270,6 +4281,7 @@ FINAL_RELEASE_WHL_SHA256=""
 TARGET_CONTROLLER_PROTECTED_WHEEL=""
 TARGET_CONTROLLER_VENV=""
 TARGET_CONTROLLER_CLI=""
+HISTORICAL_BOOTSTRAP_OVERRIDES_FILE=""
 CONTRACT_DIR=""
 MIGRATION_FAILURE_POLICY="warn"
 REQUIRED_MIGRATIONS_MISSING=""
@@ -6276,6 +6288,23 @@ for root in roots:
 PY
 }
 
+prepare_historical_bootstrap_overrides() {
+    [[ -z "${HISTORICAL_BOOTSTRAP_OVERRIDES_FILE:-}" ]] || return 0
+    [[ -n "${STAGING_DIR:-}" && -d "${STAGING_DIR}" && ! -L "${STAGING_DIR}" ]] \
+        || die "Private staging is unavailable for the historical dependency lock. No services changed."
+
+    local overrides="${STAGING_DIR}/historical-bootstrap-overrides.txt"
+    [[ ! -e "${overrides}" && ! -L "${overrides}" ]] \
+        || die "Historical dependency-lock custody is occupied. No services changed."
+    printf '%s\n%s\n' \
+        "${HISTORICAL_MCP_SCANNER_REQUIREMENT}" \
+        "${HISTORICAL_LITELLM_REQUIREMENT}" >"${overrides}" \
+        || die "Could not materialize the signed historical dependency lock. No services changed."
+    chmod 600 "${overrides}" \
+        || die "Could not protect the signed historical dependency lock. No services changed."
+    HISTORICAL_BOOTSTRAP_OVERRIDES_FILE="${overrides}"
+}
+
 prepare_bridge_phase1_cli_preflight() {
     local uv_bin preflight_venv preflight_version
     [[ -n "${whl_name:-}" && -f "${STAGING_DIR}/${whl_name}" ]] \
@@ -6321,9 +6350,13 @@ raise SystemExit(1 if inside_source else 0)
 PY
 
     preflight_venv="${STAGING_DIR}/bridge-cli-preflight"
+    prepare_historical_bootstrap_overrides
     "${uv_bin}" --no-config venv "${preflight_venv}" --python "${BRIDGE_PYTHON_INTERPRETER}" --quiet \
         || die "Could not create the bridge CLI preflight environment; no services changed."
-    "${uv_bin}" --no-config pip install --python "${preflight_venv}/bin/python" --quiet "${STAGING_DIR}/${whl_name}" \
+    UV_OVERRIDE= "${uv_bin}" --no-config pip install \
+        --python "${preflight_venv}/bin/python" --quiet \
+        --overrides "${HISTORICAL_BOOTSTRAP_OVERRIDES_FILE}" \
+        --only-binary litellm "${STAGING_DIR}/${whl_name}" \
         || die "Could not install the bridge CLI in its preflight environment; no services changed."
     preflight_version="$("${preflight_venv}/bin/python" -I -B -c 'from defenseclaw import __version__; print(__version__)')" \
         || die "Could not import the preflighted bridge CLI; no services changed."
@@ -6545,7 +6578,11 @@ PY
 
     "${uv_bin}" --no-config venv "${DEFENSECLAW_VENV}" --allow-existing --python "${BRIDGE_PYTHON_INTERPRETER}" --quiet \
         || die "Could not create the bridge CLI environment"
-    "${uv_bin}" --no-config pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet --offline "${BRIDGE_WHEEL_CUSTODY_PATH}" \
+    prepare_historical_bootstrap_overrides
+    UV_OVERRIDE= "${uv_bin}" --no-config pip install \
+        --python "${DEFENSECLAW_VENV}/bin/python" --quiet --offline \
+        --overrides "${HISTORICAL_BOOTSTRAP_OVERRIDES_FILE}" \
+        --only-binary litellm "${BRIDGE_WHEEL_CUSTODY_PATH}" \
         || die "Failed to install the bridge CLI wheel"
     bridge_version="$("${DEFENSECLAW_VENV}/bin/python" -I -B -c 'from defenseclaw import __version__; print(__version__)')" \
         || die "Could not import the installed bridge CLI"
@@ -6900,11 +6937,14 @@ raise SystemExit(1 if inside else 0)
 PY
 
     TARGET_CONTROLLER_VENV="${STAGING_DIR}/target-controller-venv"
+    prepare_historical_bootstrap_overrides
     "${uv_bin}" --no-config venv "${TARGET_CONTROLLER_VENV}" --python "${base_python}" --quiet \
         || die "Could not create the private target-controller venv. No services changed."
     chmod 700 "${TARGET_CONTROLLER_VENV}"
-    "${uv_bin}" --no-config pip install \
-        --python "${TARGET_CONTROLLER_VENV}/bin/python" --quiet "${materialized_wheel}" \
+    UV_OVERRIDE= "${uv_bin}" --no-config pip install \
+        --python "${TARGET_CONTROLLER_VENV}/bin/python" --quiet \
+        --overrides "${HISTORICAL_BOOTSTRAP_OVERRIDES_FILE}" \
+        --only-binary litellm "${materialized_wheel}" \
         || die "Could not install the authenticated target controller in private custody. No services changed."
     observed="$(PYTHONDONTWRITEBYTECODE=1 "${TARGET_CONTROLLER_VENV}/bin/python" -I -B -c \
         'from defenseclaw import __version__; print(__version__)')" \
@@ -7130,7 +7170,8 @@ handoff_existing_bridge_to_hard_cut() {
     export DEFENSECLAW_CONFIG="${CONFIG_PATH}"
     export OPENCLAW_HOME="${OPENCLAW_HOME}"
     local target_status=0
-    "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}" \
+    UV_OVERRIDE="${HISTORICAL_BOOTSTRAP_OVERRIDES_FILE}" \
+        "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}" \
         || target_status=$?
     if [[ "${target_status}" -eq 0 ]]; then
         continue_post_hard_cut_upgrade
@@ -7546,7 +7587,9 @@ else
         "${UV_BIN}" --no-config venv "${DEFENSECLAW_VENV}" --python 3.12
     fi
     VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"
-    "${UV_BIN}" --no-config pip install --python "${VENV_PYTHON}" --quiet "${STAGING_DIR}/${whl_name}" \
+    UV_OVERRIDE= "${UV_BIN}" --no-config pip install \
+        --python "${VENV_PYTHON}" --quiet --only-binary litellm \
+        "${STAGING_DIR}/${whl_name}" \
         || die "Failed to install CLI wheel"
     "${DEFENSECLAW_VENV}/bin/defenseclaw" --help >/dev/null 2>&1 \
         || die "CLI validation failed before launcher publication"
@@ -7871,7 +7914,8 @@ if [[ -n "${STAGED_FINAL_VERSION}" ]]; then
     export DEFENSECLAW_CONFIG="${CONFIG_PATH}"
     export OPENCLAW_HOME="${OPENCLAW_HOME}"
     target_status=0
-    "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}" \
+    UV_OVERRIDE="${HISTORICAL_BOOTSTRAP_OVERRIDES_FILE}" \
+        "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}" \
         || target_status=$?
     if [[ "${target_status}" -eq 0 ]]; then
         continue_post_hard_cut_upgrade
