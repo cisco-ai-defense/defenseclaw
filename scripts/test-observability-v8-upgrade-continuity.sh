@@ -29,6 +29,10 @@ FROM_VERSION=""
 FROM_VERSIONS=""
 FROM_VERSION_EXPLICIT="0"
 BASELINE_MODE="seed"
+# This gate claims to exercise the authenticated published bridge. Install its
+# real dependency graph and validate it instead of overlaying the old wheel on
+# the candidate's intentionally different dependencies.
+BASELINE_DEPENDENCIES="published"
 HEALTH_TIMEOUT="60"
 KEEP_WORKDIR="0"
 RELEASE_ROOT=""
