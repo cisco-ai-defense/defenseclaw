@@ -155,9 +155,14 @@ func NewServer(opts ServerOptions) (*Server, error) {
 
 	// Register the observer on the dispatcher so every user-visible
 	// notification (block, would-block, approval, service-state)
-	// arrives here as well as at the OS toast surface.
+	// arrives here as well as at the OS toast surface. The
+	// managed-enterprise flag switches the observer to AVC-specific
+	// title/body copy — see composeManaged in notifier_bridge.go for
+	// the two-surface contract (title in the pop-up, title+body
+	// concatenated in message history).
 	if opts.Dispatcher != nil {
-		opts.Dispatcher.AddObserver(newObserver(bcast))
+		opts.Dispatcher.AddObserver(newObserver(bcast,
+			managed.IsManagedEnterprise(opts.Config.DeploymentMode)))
 	}
 
 	return &Server{
