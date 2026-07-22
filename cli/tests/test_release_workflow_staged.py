@@ -277,7 +277,8 @@ def test_native_windows_setup_has_immutable_artifact_custody() -> None:
     installer_baseline_download = next(
         step
         for step in installer["steps"]
-        if step.get("with", {}).get("name")
+        if step.get("uses", "").startswith("actions/download-artifact@")
+        and step.get("with", {}).get("name")
         == "${{ needs.release-preflight.outputs.baseline_artifact }}"
     )
     assert installer["env"]["UPGRADE_BASELINE_POLICY"] == (
@@ -288,7 +289,8 @@ def test_native_windows_setup_has_immutable_artifact_custody() -> None:
     installer_download = next(
         step
         for step in installer["steps"]
-        if step.get("with", {}).get("artifact-ids")
+        if step.get("uses", "").startswith("actions/download-artifact@")
+        and step.get("with", {}).get("artifact-ids")
         == "${{ needs.build-runtime-candidate.outputs.artifact_id }}"
     )
     assert installer_download["with"]["artifact-ids"] == ("${{ needs.build-runtime-candidate.outputs.artifact_id }}")
