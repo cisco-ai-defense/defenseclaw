@@ -1563,11 +1563,16 @@ def _start_and_verify_services(
         if rollback_plan is not None
         else _gateway_process_environment(data_dir, config_path=config_path)
     )
+    # Starting the gateway can include bounded stale-process reconciliation on
+    # persistent runners.  Give that command the same budget used by rollback
+    # starts, while retaining the independent version-bound health deadline.
+    gateway_start_timeout = max(health_timeout + 30, 90)
     if not _run_silent(
         [gateway_command, "start"],
         "Gateway started",
         "Could not start gateway",
         env=gateway_environment,
+        timeout_seconds=gateway_start_timeout,
     ):
         ux.err("Gateway failed to start; the upgrade cannot be marked successful.")
         raise SystemExit(1)
