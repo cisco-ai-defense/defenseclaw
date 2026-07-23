@@ -58,6 +58,103 @@ t_claudecode_no_install_returns_empty() {
   assert_eq "${got}" "" "claudecode with no CLI/extensions returns empty"
 }
 
+t_claudecode_via_native_current_symlink() {
+  # Native installer layout: ~/.local/share/claude/current is a
+  # symlink to versions/<X.Y.Z>. This is the officially-recommended
+  # install path (curl -fsSL https://claude.ai/install.sh | bash) and
+  # what most users have today. Discovery must resolve the symlink
+  # target's basename to the semver.
+  local home; home="$(mktest_tmp)"
+  local vers="${home}/.local/share/claude/versions"
+  mkdir -p "${vers}/2.1.173"
+  ln -s "versions/2.1.173" "${home}/.local/share/claude/current"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.173" "claudecode version from native ~/.local/share/claude/current symlink"
+}
+
+t_claudecode_via_native_versions_dir_no_symlink() {
+  # Partial-install fallback: no `current` symlink yet, but versions/*
+  # is populated. Discovery must pick the highest semver-shaped basename.
+  local home; home="$(mktest_tmp)"
+  local vers="${home}/.local/share/claude/versions"
+  mkdir -p "${vers}/2.1.171" "${vers}/2.1.173" "${vers}/2.1.170"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.173" "claudecode picks highest versions/*/ when no current symlink"
+}
+
+t_claudecode_native_broken_current_symlink_falls_back() {
+  # `current` symlink points at a nonexistent target (e.g. a manual
+  # `rm -rf versions/*` after an aborted upgrade). Discovery must
+  # fall back to the highest existing versions/* dir rather than
+  # returning empty.
+  local home; home="$(mktest_tmp)"
+  local vers="${home}/.local/share/claude/versions"
+  mkdir -p "${vers}/2.1.171"
+  ln -s "versions/2.1.999-does-not-exist" "${home}/.local/share/claude/current"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.171" "claudecode falls back to versions/*/ when current symlink dangles"
+}
+
+t_claudecode_native_wins_over_stale_npm() {
+  # Regression guard for the reported bug: a user with the native
+  # installer AND a stale ~/.npm-global copy of @anthropic-ai/claude-code
+  # must NOT resolve to the stale npm version. If the probe order
+  # regresses to npm-first, the hook-contract validator surfaces the
+  # stale version and (in managed_enterprise mode=action) fails the
+  # reconcile — the exact silent-fail surface this fix eliminates.
+  local home; home="$(mktest_tmp)"
+  local vers="${home}/.local/share/claude/versions"
+  mkdir -p "${vers}/2.1.173"
+  ln -s "versions/2.1.173" "${home}/.local/share/claude/current"
+
+  local pkg_dir="${home}/.npm-global/lib/node_modules/@anthropic-ai/claude-code"
+  mkdir -p "${pkg_dir}"
+  cat > "${pkg_dir}/package.json" <<'JSON'
+{ "name": "@anthropic-ai/claude-code", "version": "1.0.99" }
+JSON
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.173" "native install must win over a stale npm-global claude-code"
+}
+
+t_claudecode_via_native_helper_direct() {
+  # Direct exercise of the pure helper against an operator-supplied
+  # base dir (matches how the system-wide Linux probes call it with
+  # /opt/claude and /usr/local/share/claude). Keeps the helper's
+  # contract testable without depending on how discover_agent_version
+  # threads $home.
+  local base; base="$(mktest_tmp)/opt-claude"
+  mkdir -p "${base}/versions/2.1.180"
+  ln -s "versions/2.1.180" "${base}/current"
+
+  local got
+  got="$(_native_claudecode_version_from_dir "${base}")"
+  assert_eq "${got}" "2.1.180" "native helper resolves version from an arbitrary base dir"
+
+  # Empty on a missing / non-conforming base.
+  got="$(_native_claudecode_version_from_dir "${base}.does-not-exist" 2>/dev/null || true)"
+  assert_eq "${got}" "" "native helper returns empty when base dir is missing"
+
+  # Empty on a base with no current + no versions.
+  local empty_base; empty_base="$(mktest_tmp)/empty-claude"
+  mkdir -p "${empty_base}"
+  got="$(_native_claudecode_version_from_dir "${empty_base}" 2>/dev/null || true)"
+  assert_eq "${got}" "" "native helper returns empty when base dir has neither current nor versions"
+
+  # Non-semver dir names are ignored.
+  local weird_base; weird_base="$(mktest_tmp)/weird-claude"
+  mkdir -p "${weird_base}/versions/latest" "${weird_base}/versions/nightly"
+  got="$(_native_claudecode_version_from_dir "${weird_base}" 2>/dev/null || true)"
+  assert_eq "${got}" "" "native helper rejects non-semver dir names"
+}
+
 t_codex_no_home_metadata_uses_system_or_empty() {
   # With no metadata under the tmp HOME, the probe falls through to
   # /Applications/ChatGPT.app -> Homebrew Caskroom -> system npm dirs
@@ -157,6 +254,11 @@ t_unknown_connector() {
 run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
 run_case "claudecode via VS Code extension"  t_claudecode_via_vscode_extension
 run_case "claudecode without install"        t_claudecode_no_install_returns_empty
+run_case "claudecode via native current symlink"                  t_claudecode_via_native_current_symlink
+run_case "claudecode via native versions/*  (no symlink)"         t_claudecode_via_native_versions_dir_no_symlink
+run_case "claudecode native broken current symlink falls back"    t_claudecode_native_broken_current_symlink_falls_back
+run_case "claudecode native install wins over stale npm"          t_claudecode_native_wins_over_stale_npm
+run_case "claudecode native helper direct-call semantics"         t_claudecode_via_native_helper_direct
 run_case "codex without home metadata"       t_codex_no_home_metadata_uses_system_or_empty
 run_case "codex from user npm metadata"      t_codex_from_user_npm_metadata
 run_case "codex ChatGPT.app-bundled wins over stale npm" t_codex_chatgpt_app_bundled_wins_over_npm

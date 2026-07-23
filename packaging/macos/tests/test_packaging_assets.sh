@@ -87,9 +87,9 @@ t_install_bootstraps_guardian_and_enumerator() {
   # user's hooks ever get wired on a fresh customer install.
   local body
   body="$(cat "${PKG_DIR}/install.sh")"
-  assert_contains "${body}" 'install_file_no_replace "${GUARDIAN_PLIST_SRC}" "${GUARDIAN_PLIST_DST}"' \
+  assert_contains "${body}" 'install_file_reconcile "${GUARDIAN_PLIST_SRC}" "${GUARDIAN_PLIST_DST}"' \
     "install.sh copies the guardian plist"
-  assert_contains "${body}" 'install_file_no_replace "${ENUMERATOR_PLIST_SRC}" "${ENUMERATOR_PLIST_DST}"' \
+  assert_contains "${body}" 'install_file_reconcile "${ENUMERATOR_PLIST_SRC}" "${ENUMERATOR_PLIST_DST}"' \
     "install.sh copies the enumerator plist"
   assert_contains "${body}" 'launchctl bootstrap system "${GUARDIAN_PLIST_DST}"' \
     "install.sh bootstraps the guardian daemon"
@@ -330,7 +330,25 @@ _setup_bundle_fixture() {
     printf '#!/bin/sh\nexit 0\n' > "${bundle}/defenseclaw"
     chmod 0755 "${bundle}/defenseclaw"
   fi
+  # Stage an env_config.json fixture next to the installer. Every test
+  # here drives install.sh past its arg-parse phase, and the AID
+  # endpoint resolver now requires either --config-file or
+  # --override-endpoint. Passing --config-file "${bundle}/env_config.json"
+  # (see FIXTURE_ENV_CONFIG_ARG below) lets the plist / connector /
+  # binary-lookup tests exercise their intended assertions without
+  # each case having to plumb its own AVC-authored file.
+  printf '{"cisco_ai_defense_endpoint": "https://us.api.inspect.aidefense.security.cisco.com"}\n' \
+    > "${bundle}/env_config.json"
+  chmod 0644 "${bundle}/env_config.json"
   printf '%s\n' "${bundle}"
+}
+
+# _bundle_env_config_arg BUNDLE -> echoes the --config-file argument
+# tests should pass to install.sh so it can resolve the AID endpoint
+# from the bundle's staged env_config.json (rather than dying on the
+# default /opt/cisco/... path that doesn't exist under a tmpdir).
+_bundle_env_config_arg() {
+  printf -- '--config-file %s/env_config.json' "$1"
 }
 
 # Regression guard for the "shippable bundle" contract: install.sh must
@@ -346,7 +364,7 @@ t_bundle_layout_resolves_locally() {
   # ownership check so the fake stub plist under a tmpdir doesn't need
   # to be root-owned.
   trace="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 bash -x "${bundle}/install.sh" \
-    --connector codex --skip-launchd --skip-connector 2>&1 | \
+    --connector codex --skip-launchd --skip-connector --config-file "${bundle}/env_config.json" 2>&1 | \
     grep -E "PLIST_SRC=|BINARY_SRC=/" || true)"
 
   assert_contains "${trace}" "PLIST_SRC=${bundle}/com.cisco.secureclient.defenseclaw.plist" "plist resolved from bundle"
@@ -361,7 +379,7 @@ t_bundle_without_binary_and_no_repo_dies() {
 
   local out rc=0
   out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 "${bundle}/install.sh" \
-    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+    --connector codex --skip-launchd --skip-connector --config-file "${bundle}/env_config.json" 2>&1)" || rc=$?
   assert_status "${rc}" 1 "missing binary + no repo should die"
   assert_contains "${out}" "no repo tree" "explains missing repo tree"
 }
@@ -393,7 +411,7 @@ t_plist_validator_accepts_bundle_default_owned_by_user() {
   # negative-only `assert_not_contains "must be owned by root"` check.
   local out rc=0
   out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 bash -x "${bundle}/install.sh" \
-    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+    --connector codex --skip-launchd --skip-connector --config-file "${bundle}/env_config.json" 2>&1)" || rc=$?
   local trace
   trace="$(printf '%s' "${out}" | grep -E 'PLIST_SRC=|PLIST_SRC_ORIGIN=' || true)"
   assert_contains "${trace}" "PLIST_SRC=${bundle}/com.cisco.secureclient.defenseclaw.plist" "plist resolved from bundle"
@@ -408,7 +426,7 @@ t_plist_validator_rejects_bundle_default_that_is_world_writable() {
   chmod 0646 "${bundle}/com.cisco.secureclient.defenseclaw.plist"
   local out rc=0
   out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 "${bundle}/install.sh" \
-    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+    --connector codex --skip-launchd --skip-connector --config-file "${bundle}/env_config.json" 2>&1)" || rc=$?
   assert_status "${rc}" 1 "world-writable plist rejected"
   assert_contains "${out}" "group/other writable" "explains why"
 }
@@ -425,7 +443,7 @@ t_plist_validator_rejects_override_owned_by_non_root() {
   out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 \
     DEFENSECLAW_PLIST_SRC="${override_plist}" \
     "${bundle}/install.sh" \
-    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+    --connector codex --skip-launchd --skip-connector --config-file "${bundle}/env_config.json" 2>&1)" || rc=$?
   assert_status "${rc}" 1 "override plist owned by non-root rejected"
   assert_contains "${out}" "must be owned by root" "explains why"
   assert_contains "${out}" "DEFENSECLAW_PLIST_SRC" "names the override source"
@@ -443,7 +461,7 @@ t_plist_validator_rejects_missing_env_override() {
   out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 \
     DEFENSECLAW_PLIST_SRC="${bundle}/does-not-exist.plist" \
     "${bundle}/install.sh" \
-    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+    --connector codex --skip-launchd --skip-connector --config-file "${bundle}/env_config.json" 2>&1)" || rc=$?
   assert_status "${rc}" 1 "missing env-override plist must fail"
   assert_contains "${out}" "DEFENSECLAW_PLIST_SRC" "error names the env var"
   assert_contains "${out}" "does not exist"        "error names the missing state"
@@ -463,35 +481,43 @@ t_plist_validator_fails_closed_when_stat_output_empty() {
   local out rc=0
   out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 PATH="${shimbin}:${PATH}" \
     "${bundle}/install.sh" \
-    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+    --connector codex --skip-launchd --skip-connector --config-file "${bundle}/env_config.json" 2>&1)" || rc=$?
   assert_status "${rc}" 1 "stat empty must fail closed"
   assert_contains "${out}" "cannot stat plist source" "explains why"
 }
 
 t_install_log_sink_is_after_preflight() {
-  # Regression guard: install.sh's persistent log-sink tee must NOT
-  # fire before the fresh-host preflight. Setting it up earlier
-  # implicitly creates ${LOGS_DIR}/install.log which then trips both:
-  #   1. The fresh-host marker loop (LOGS_DIR appears "existing")
-  #   2. The `create_install_directory_no_replace ${LOGS_DIR}` at
-  #      line ~678 (the dir was already created by mkdir -p)
-  # Either failure locks the operator out of reinstall after
-  # uninstall --purge. Uninstall wipes LOGS_DIR wholesale so no
-  # persistence across install/uninstall cycles is desired anyway.
-  #
-  # This test enforces the ordering by grepping for both landmarks
-  # (the tee call + the LOGS_DIR creation) and asserting the tee
-  # appears AFTER the create_install_directory_no_replace line.
+  # Regression guard: install.sh's persistent log-sink tee (which
+  # opens ${LOGS_DIR}/install.log for append) must NOT fire before
+  # LOGS_DIR exists. Under the idempotent-reinstall contract there
+  # are TWO landmarks that create/ensure LOGS_DIR:
+  #   1. The early `mkdir -p "${LOGS_DIR}"` inside the reconcile
+  #      block (so move_legacy_aside has a landing zone).
+  #   2. The later `create_install_directory_reconcile ${LOGS_DIR}`
+  #      in the mutation phase (canonical owner/mode reapply).
+  # Either one is a sufficient predecessor for the tee. Assert the
+  # tee follows *at least one* of them.
   local install="${REPO_ROOT}/packaging/macos/install.sh"
-  local tee_line create_line
+  local tee_line early_mkdir_line reconcile_line
   tee_line="$(grep -n 'tee -a "\${_install_log_path}"' "${install}" | head -1 | cut -d: -f1)"
-  create_line="$(grep -n 'create_install_directory_no_replace "\${LOGS_DIR}"' "${install}" | head -1 | cut -d: -f1)"
-  if [[ -z "${tee_line}" || -z "${create_line}" ]]; then
-    _fail "could not locate install.log tee (line=${tee_line:-?}) or LOGS_DIR creation (line=${create_line:-?}) in install.sh"
+  early_mkdir_line="$(grep -n '^  mkdir -p "\${LOGS_DIR}"' "${install}" | head -1 | cut -d: -f1)"
+  reconcile_line="$(grep -n 'create_install_directory_reconcile "\${LOGS_DIR}"' "${install}" | head -1 | cut -d: -f1)"
+  if [[ -z "${tee_line}" ]]; then
+    _fail "could not locate install.log tee in install.sh"
     return 1
   fi
-  if (( tee_line < create_line )); then
-    _fail "install.log tee at line ${tee_line} precedes LOGS_DIR creation at line ${create_line} — self-lockout on reinstall"
+  if [[ -z "${early_mkdir_line}" && -z "${reconcile_line}" ]]; then
+    _fail "no LOGS_DIR creation site found (neither early mkdir nor create_install_directory_reconcile)"
+    return 1
+  fi
+  # Take the earliest of the two creation lines (empty coerces to
+  # infinity via a large sentinel).
+  local first_create="${early_mkdir_line:-999999}"
+  if [[ -n "${reconcile_line}" && "${reconcile_line}" -lt "${first_create}" ]]; then
+    first_create="${reconcile_line}"
+  fi
+  if (( tee_line < first_create )); then
+    _fail "install.log tee at line ${tee_line} precedes LOGS_DIR creation at line ${first_create} — self-lockout on reinstall"
     return 1
   fi
 }
@@ -538,20 +564,32 @@ t_uninstall_still_sweeps_legacy_cmid_log_file() {
     "uninstall MUST NOT recurse into the shared log tree (no-quote form)"
 }
 
-t_install_refuses_existing_state_before_build_or_launchd_mutation() {
+t_install_reconciles_existing_state() {
+  # Idempotent-reinstall contract (managed_enterprise): the bundle
+  # installer no longer refuses on existing markers. It logs a reconcile
+  # line, unloads current-generation launchd labels before rebootstrap,
+  # relocates legacy paths under LOG_DIR (best-effort), and preserves
+  # user ~/.defenseclaw (owned by the hook-guardian). See PR notes for
+  # the drift analysis this contract fixes.
   local body; body="$(cat "${REPO_ROOT}/packaging/macos/install.sh")"
-  assert_contains "${body}" "existing DefenseClaw installation detected at" \
-    "managed bundle refuses an in-place hard-cut bypass"
-  assert_contains "${body}" "no changes were made. This installer is fresh-install-only" \
-    "managed bundle gives an explicit no-change refusal"
-  assert_contains "${body}" "remain on the current version" \
-    "managed bundle gives a fail-closed path when no staged enterprise upgrader exists"
+
+  assert_contains "${body}" "reconciling existing DefenseClaw installation in place" \
+    "managed bundle logs reconcile intent when existing markers detected"
+  assert_contains "${body}" "fresh managed_enterprise install" \
+    "managed bundle logs fresh-install branch when no markers detected"
+  assert_contains "${body}" "will be reconciled by hook-guardian" \
+    "managed bundle treats per-user markers as informational"
+
+  # Old refusal strings must NOT reappear.
+  assert_not_contains "${body}" "no changes were made. This installer is fresh-install-only" \
+    "managed bundle must not carry the pre-reinstall refusal text"
+  assert_not_contains "${body}" "remain on the current version" \
+    "managed bundle must not carry the pre-reinstall fail-closed guidance"
+
+  # Marker classification still enumerates the same paths so operators
+  # get accurate reconcile logs.
   assert_contains "${body}" "dscl . -list /Users" \
-    "managed bundle checks every local home even when a target user is selected"
-  assert_not_contains "${body}" 'elif [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]' \
-    "all-user dscl enumeration must not be conditional on TARGET_HOME being empty"
-  assert_contains "${body}" "command -v \"\${_installed_command}\"" \
-    "managed bundle checks package-manager/custom PATH installations"
+    "managed bundle still enumerates local users for reconcile-log forensics"
   assert_contains "${body}" '"${GUARDIAN_PLIST_DST}"' \
     "managed bundle detects the current guardian plist"
   assert_contains "${body}" '"${LEGACY_GUARDIAN_PLIST_DST}"' \
@@ -561,40 +599,54 @@ t_install_refuses_existing_state_before_build_or_launchd_mutation() {
   assert_contains "${body}" '"${LEGACY_GUARDIAN_LAUNCHD_LABEL}"' \
     "managed bundle detects the legacy guardian job"
 
-  local guard_line build_line mutation_line
-  guard_line="$(grep -n "existing DefenseClaw installation detected at" \
+  # Legacy-path relocation is wired to the pure-function helper.
+  assert_contains "${body}" "move_legacy_aside" \
+    "managed bundle calls the move_legacy_aside helper"
+
+  # Current-generation launchd labels are booted out before rebootstrap
+  # so the atomic file-replace hits a quiescent target.
+  assert_contains "${body}" 'launchctl bootout "system/${_label}"' \
+    "managed bundle boots out current-gen labels before rebootstrap"
+
+  # install_file_reconcile / create_install_directory_reconcile: the
+  # renamed pure-function helpers used by the mutation phase.
+  assert_contains "${body}" "install_file_reconcile()" \
+    "managed bundle defines install_file_reconcile"
+  assert_contains "${body}" "create_install_directory_reconcile()" \
+    "managed bundle defines create_install_directory_reconcile"
+  # No lingering references to the old no_replace names.
+  assert_not_contains "${body}" "install_file_no_replace" \
+    "old install_file_no_replace helper must be fully renamed"
+  assert_not_contains "${body}" "create_install_directory_no_replace" \
+    "old create_install_directory_no_replace helper must be fully renamed"
+
+  # install_file_reconcile uses mv -f for atomic replacement of existing
+  # regular files. ln would fail with EEXIST on a reinstall.
+  assert_contains "${body}" '/bin/mv -f -- "${temporary}" "${destination}"' \
+    "managed bundle atomic-replaces via rename(2) on reinstall"
+  assert_not_contains "${body}" 'ln "${temporary}" "${destination}"' \
+    "managed bundle no longer uses hardlink-and-die publication"
+
+  # Symlink at a destination is still refused — that's an invariant the
+  # reinstall contract preserves (only tampering places one there).
+  assert_contains "${body}" "install destination is a symlink; refusing to overwrite" \
+    "managed bundle still refuses symlinks under an install destination"
+
+  # The reconcile logic runs before the go build step (so we don't burn
+  # cycles building for a host we later realize we can't install on) and
+  # before the mutation phase.
+  local reconcile_line build_line mutation_line
+  reconcile_line="$(grep -n "reconciling existing DefenseClaw installation in place" \
     "${REPO_ROOT}/packaging/macos/install.sh" | head -1 | cut -d: -f1)"
   build_line="$(grep -n 'go build -o defenseclaw-gateway' \
     "${REPO_ROOT}/packaging/macos/install.sh" | head -1 | cut -d: -f1)"
-  mutation_line="$(grep -n 'create_install_directory_no_replace "${INSTALL_PREFIX}"' \
+  mutation_line="$(grep -n 'create_install_directory_reconcile "${INSTALL_PREFIX}"' \
     "${REPO_ROOT}/packaging/macos/install.sh" | head -1 | cut -d: -f1)"
-  if [[ -z "${guard_line}" || -z "${build_line}" || -z "${mutation_line}" \
-     || "${guard_line}" -ge "${build_line}" \
-     || "${guard_line}" -ge "${mutation_line}" ]]; then
-    _fail "existing-install guard must precede build and installed-file writes"
+  if [[ -z "${reconcile_line}" || -z "${build_line}" || -z "${mutation_line}" \
+     || "${reconcile_line}" -ge "${build_line}" \
+     || "${reconcile_line}" -ge "${mutation_line}" ]]; then
+    _fail "reconcile block must precede build and installed-file writes (reconcile=${reconcile_line:-?} build=${build_line:-?} mutation=${mutation_line:-?})"
   fi
-  assert_not_contains "${body}" 'mv -f -- "${temporary}" "${destination}"' \
-    "managed bundle publication must not force-replace a concurrent destination"
-  assert_contains "${body}" 'ln "${temporary}" "${destination}"' \
-    "managed bundle uses no-replace publication"
-  assert_contains "${body}" "appeared concurrently and was preserved" \
-    "managed bundle reports concurrent-state preservation"
-
-  # The final boundary after a potentially slow local build must repeat every
-  # current and legacy gateway/guardian job+plist pair from the initial
-  # preflight. Merely mentioning these variables in the initial marker list is
-  # insufficient: a guardian can appear while the binary is being built.
-  local final_boundary
-  final_boundary="$(sed -n '/# Repeat the launchd\/path boundary immediately before mutation/,/unset _lbl_plist/p' \
-    "${REPO_ROOT}/packaging/macos/install.sh")"
-  for expected in \
-    '"${LAUNCHD_LABEL}:${PLIST_DST}"' \
-    '"${GUARDIAN_LAUNCHD_LABEL}:${GUARDIAN_PLIST_DST}"' \
-    '"${LEGACY_LAUNCHD_LABEL}:${LEGACY_PLIST_DST}"' \
-    '"${LEGACY_GUARDIAN_LAUNCHD_LABEL}:${LEGACY_GUARDIAN_PLIST_DST}"'; do
-    assert_contains "${final_boundary}" "${expected}" \
-      "final mutation boundary repeats ${expected}"
-  done
 }
 
 run_case "plist exists and lints"     t_plist_exists_and_parses
@@ -607,7 +659,7 @@ run_case "install.log sink is set up AFTER fresh-host preflight + LOGS_DIR creat
 run_case "install does not pre-create CMID log file (root daemon owns lifecycle)"    t_install_does_not_precreate_cmid_log_file
 run_case "install does not relax CMID store perms (root daemon owns lifecycle)"      t_install_does_not_relax_cmid_store_perms
 run_case "uninstall still sweeps legacy CMID log file from pre-root installs"        t_uninstall_still_sweeps_legacy_cmid_log_file
-run_case "install refuses existing state before build or launchd mutation"           t_install_refuses_existing_state_before_build_or_launchd_mutation
+run_case "install reconciles existing state instead of refusing"                     t_install_reconciles_existing_state
 run_case "plist runs as root by default (managed CMID needs it)" t_plist_runs_as_root_by_default
 run_case "installer_lib.sh syntax"    t_install_lib_syntax
 run_case "install.sh syntax"          t_install_sh_syntax
