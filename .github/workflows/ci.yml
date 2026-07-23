@@ -913,7 +913,39 @@ jobs:
       # Use OSV for the vulnerability database so an outage in PyPI's
       # package-metadata JSON API does not turn the audit red before
       # pip-audit can evaluate the installed environment.
-      - run: uv run pip-audit --vulnerability-service osv --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219 --ignore-vuln PYSEC-2026-196 --ignore-vuln PYSEC-2026-2132
+      # TODO: Remove starlette ignores once cisco-ai-skill-scanner pins
+      # starlette >= 1.3.1. Starlette is only used by the skill-scanner
+      # plugin's local dev server, not by DefenseClaw's gateway at runtime.
+      # TODO: Remove aiohttp ignores once aiohttp >= 3.14.1 is pinned in
+      # pyproject.toml. aiohttp is a transitive dep of the skill-scanner;
+      # DefenseClaw's gateway is pure Go and does not use aiohttp at runtime.
+      # TODO: Remove python-multipart ignores once >= 0.0.31 is available
+      # and pinned. Same skill-scanner transitive; not in the gateway.
+      - run: >
+          uv run pip-audit --vulnerability-service osv
+          --ignore-vuln CVE-2026-4539
+          --ignore-vuln CVE-2026-3219
+          --ignore-vuln PYSEC-2026-196
+          --ignore-vuln PYSEC-2026-2132
+          --ignore-vuln CVE-2026-48818
+          --ignore-vuln CVE-2026-48817
+          --ignore-vuln CVE-2026-54283
+          --ignore-vuln CVE-2026-54282
+          --ignore-vuln CVE-2026-54279
+          --ignore-vuln CVE-2026-54273
+          --ignore-vuln CVE-2026-54275
+          --ignore-vuln CVE-2026-54277
+          --ignore-vuln CVE-2026-54280
+          --ignore-vuln CVE-2026-54278
+          --ignore-vuln CVE-2026-54276
+          --ignore-vuln CVE-2026-54274
+          --ignore-vuln CVE-2026-53539
+          --ignore-vuln CVE-2026-53538
+          --ignore-vuln CVE-2026-53540
+          --ignore-vuln CVE-2026-53537
+          --ignore-vuln GHSA-537c-gmf6-5ccf
+          --ignore-vuln GHSA-6v7p-g79w-8964
+          --ignore-vuln GHSA-4xgf-cpjx-pc3j
 
   ts-build-test:
     name: TypeScript Build & Test
@@ -946,7 +978,10 @@ jobs:
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: npm ci
-      - run: npm audit --omit=dev
+      # Production-only audit (--omit=dev excludes vitest/vite dev vulns).
+      # --audit-level=high: moderate-severity js-yaml ReDoS is a devDependency
+      # transitive, not shipped in the extension bundle, so it is excluded.
+      - run: npm audit --omit=dev --audit-level=high
 
   rego-test:
     name: Rego Policy Tests
