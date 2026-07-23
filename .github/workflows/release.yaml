@@ -333,9 +333,9 @@ jobs:
                     -H "Accept: application/vnd.github+json" \
                     "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_file/runs?branch=main&event=push&head_sha=$SELECTED_COMMIT&per_page=100" \
                     > "$response_temp" 2> "$response_error"; then
-                mv -f "$response_temp" "$response_path"
-                IFS=$'\t' read -r state detail < <(
-                  python3 - "$response_path" "$SELECTED_COMMIT" <<'PY'
+                  mv -f "$response_temp" "$response_path"
+                  if parsed_result="$(
+                    python3 - "$response_path" "$SELECTED_COMMIT" 2> "$response_error" <<'PY'
           import json
           import sys
 
@@ -370,7 +370,13 @@ jobs:
           else:
               print(f"failure\t{detail}")
           PY
-                )
+                  )" &&
+                     IFS=$'\t' read -r state detail <<< "$parsed_result"; then
+                    :
+                  else
+                    state="pending"
+                    detail="workflow API returned an invalid response"
+                  fi
                 else
                   rm -f "$response_temp"
                   api_error="$(

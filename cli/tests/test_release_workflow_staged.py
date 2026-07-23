@@ -438,6 +438,112 @@ def test_exact_sha_ci_gate_retries_a_transient_api_failure(tmp_path: Path) -> No
     assert "OK: exact-SHA CI passed" in completed.stdout
 
 
+def test_exact_sha_ci_gate_retries_an_invalid_successful_api_response(
+    tmp_path: Path,
+) -> None:
+    commit = "6" * 40
+    step = next(
+        step
+        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        if step.get("name") == "Require successful CI for the exact release commit"
+    )
+    payload = {
+        "workflow_runs": [
+            {
+                "head_sha": commit,
+                "head_branch": "main",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "success",
+                "run_number": 44,
+                "run_attempt": 1,
+                "id": 44,
+                "html_url": "https://github.example/actions/runs/44",
+            }
+        ]
+    }
+    env = os.environ.copy()
+    env.update(
+        {
+            "FAKE_GH_RESPONSE": json.dumps(payload),
+            "GITHUB_REPOSITORY": "example/defenseclaw",
+            "SELECTED_COMMIT": commit,
+            "CI_WAIT_ATTEMPTS": "2",
+            "CI_WAIT_MAX_SECONDS": "30",
+            "CI_WAIT_INTERVAL_SECONDS": "0",
+            "CI_API_TIMEOUT_SECONDS": "5",
+            "REQUIRED_CI_WORKFLOWS": "ci.yml|CI",
+        }
+    )
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            (
+                "GH_CALLS=0\n"
+                "gh() {\n"
+                "  GH_CALLS=$((GH_CALLS + 1))\n"
+                "  if [[ $GH_CALLS -eq 1 ]]; then printf '%s' 'not-json'; return 0; fi\n"
+                "  printf '%s' \"$FAKE_GH_RESPONSE\"\n"
+                "}\n"
+                + step["run"]
+            ),
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert (
+        "Waiting for exact-SHA CI (CI: workflow API returned an invalid response;"
+        in completed.stdout
+    )
+    assert "OK: exact-SHA CI passed" in completed.stdout
+
+
+def test_exact_sha_ci_gate_fails_closed_after_invalid_responses_are_exhausted(
+    tmp_path: Path,
+) -> None:
+    step = next(
+        step
+        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        if step.get("name") == "Require successful CI for the exact release commit"
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "GITHUB_REPOSITORY": "example/defenseclaw",
+            "SELECTED_COMMIT": "5" * 40,
+            "CI_WAIT_ATTEMPTS": "2",
+            "CI_WAIT_MAX_SECONDS": "30",
+            "CI_WAIT_INTERVAL_SECONDS": "0",
+            "CI_API_TIMEOUT_SECONDS": "5",
+            "REQUIRED_CI_WORKFLOWS": "ci.yml|CI",
+        }
+    )
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            "gh() { printf '%s' 'not-json'; }\n" + step["run"],
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert "Exact-SHA CI has not passed" in completed.stdout
+    assert "CI: workflow API returned an invalid response" in completed.stdout
+
+
 @pytest.mark.parametrize(
     ("status", "conclusion", "expected_returncode", "expected_fragment"),
     [
