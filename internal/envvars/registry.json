@@ -135,13 +135,15 @@
     {
       "name": "DEFENSECLAW_UPGRADE_FRESH_PROCESS",
       "category": "upgrade_internal",
-      "purpose": "Marks the isolated installed-CLI child used for an upgrade handoff so the child cannot recursively hand off again.",
+      "purpose": "Marks the isolated installed-CLI child used for an upgrade handoff so the child cannot recursively hand off again and a newly installed gateway can delegate its readiness wait to that supervising controller.",
       "default": "unset",
       "accepted_values": ["1", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Rejects recursive fresh-process upgrade handoffs and marks the isolated child process"}
+        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Rejects recursive fresh-process upgrade handoffs and marks the isolated child process"},
+        {"location": "internal/cli/daemon.go", "description": "Delegates gateway readiness to the supervising upgrade controller while retaining safe launch and immediate-exit checks"},
+        {"location": "scripts/upgrade.sh", "description": "Scopes the marker to the immutable post-hard-cut controller continuation"}
       ],
       "since": "0.8.4"
     },

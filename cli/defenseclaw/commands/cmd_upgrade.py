@@ -115,6 +115,12 @@ _MAX_BUNDLE_ROLLBACK_METADATA_BYTES = 4 * 1024 * 1024
 _BUNDLE_RESTART_INTENT_FILENAME = "restart-intent.json"
 _PHASE_TWO_MUTATOR_LEASE_TIMEOUT_SECONDS = 600
 _MAX_PHASE_TWO_MUTATOR_OUTPUT_BYTES = 1024 * 1024
+# ``defenseclaw-gateway start`` owns a 60-second readiness loop.  The upgrade
+# controller must outlive that loop and still leave time for the child to
+# report its result and clean up a failed start.  A larger operator-selected
+# health budget extends this command budget as well.
+_GATEWAY_START_READINESS_TIMEOUT_SECONDS = 60
+_GATEWAY_START_COMMAND_GRACE_SECONDS = 30
 # The gateway's human-facing status command performs two independently
 # bounded five-second HTTP probes.  Its process-level caller therefore needs
 # a budget comfortably above ten seconds, especially on launchd hosts where
@@ -1522,6 +1528,13 @@ def _print_hard_cut_rollback_outcome(*, succeeded: bool, backup_dir: str) -> Non
     ux.subhead(f"Recovery backup: {backup_dir}", indent="    ")
 
 
+def _gateway_start_command_timeout_seconds(health_timeout: int) -> int:
+    """Return a controller budget that fully contains gateway readiness."""
+
+    readiness_budget = max(health_timeout, _GATEWAY_START_READINESS_TIMEOUT_SECONDS)
+    return readiness_budget + _GATEWAY_START_COMMAND_GRACE_SECONDS
+
+
 def _start_and_verify_services(
     app: AppContext,
     health_timeout: int,
@@ -1563,16 +1576,12 @@ def _start_and_verify_services(
         if rollback_plan is not None
         else _gateway_process_environment(data_dir, config_path=config_path)
     )
-    # Starting the gateway can include bounded stale-process reconciliation on
-    # persistent runners.  Give that command the same budget used by rollback
-    # starts, while retaining the independent version-bound health deadline.
-    gateway_start_timeout = max(health_timeout + 30, 90)
     if not _run_silent(
         [gateway_command, "start"],
         "Gateway started",
         "Could not start gateway",
         env=gateway_environment,
-        timeout_seconds=gateway_start_timeout,
+        timeout_seconds=_gateway_start_command_timeout_seconds(health_timeout),
     ):
         ux.err("Gateway failed to start; the upgrade cannot be marked successful.")
         raise SystemExit(1)
@@ -5964,6 +5973,80 @@ def _preflight_wheel_install(
     ux.ok("Python CLI dependency preflight passed")
 
 
+def _poll_handoff_gateway_readiness(
+    cfg,
+    timeout_seconds: int,
+    expected_version: str | None,
+) -> None:
+    """Delegate one bounded upgrade readiness gate to the current gateway.
+
+    Historical controllers import this function from the newly installed
+    wheel in a fresh health-check process.  The current gateway binary can
+    therefore enforce its complete PID, process-generation, listener,
+    subsystem, and authenticated-version contract without making the frozen
+    controller's 30-second ``start`` subprocess own a 60-second wait.
+    """
+    from defenseclaw import config as config_module
+    from defenseclaw.gateway import canonical_install_path, packaged_windows_gateway_path
+
+    if expected_version is None:
+        ux.err("Fresh-process gateway readiness lacks an expected release version.", indent="  ")
+        raise SystemExit(1)
+    if timeout_seconds <= 0:
+        ux.err("Fresh-process gateway readiness timeout must be greater than zero.", indent="  ")
+        raise SystemExit(1)
+    if platform.system().lower() == "windows":
+        gateway_binary = packaged_windows_gateway_path() or os.path.expanduser(
+            os.path.join("~/.local/bin", _installed_gateway_filename("windows"))
+        )
+    else:
+        gateway_binary = canonical_install_path()
+    gateway_binary = os.path.abspath(gateway_binary)
+    try:
+        gateway_info = os.lstat(gateway_binary)
+    except OSError:
+        gateway_info = None
+    if (
+        gateway_info is None
+        or stat.S_ISLNK(gateway_info.st_mode)
+        or not stat.S_ISREG(gateway_info.st_mode)
+        or not os.access(gateway_binary, os.X_OK)
+    ):
+        ux.err("Fresh-process gateway readiness cannot verify the canonical installed gateway binary.", indent="  ")
+        raise SystemExit(1)
+    data_dir = getattr(cfg, "data_dir", "") if cfg is not None else ""
+    if not isinstance(data_dir, str) or not data_dir.strip():
+        ux.err("Fresh-process gateway readiness lacks the active data directory.", indent="  ")
+        raise SystemExit(1)
+    readiness_timeout = timeout_seconds
+    active_config_path = str(config_module.config_path())
+    click.echo(
+        f"  {ux.dim('→')} Waiting for strict gateway readiness "
+        f"as version {expected_version} (timeout {readiness_timeout}s) ..."
+    )
+    try:
+        completed = subprocess.run(
+            [
+                gateway_binary,
+                "upgrade-wait-ready",
+                "--timeout",
+                f"{readiness_timeout}s",
+                "--expected-version",
+                expected_version,
+            ],
+            check=False,
+            env=_gateway_process_environment(data_dir, config_path=active_config_path),
+            timeout=readiness_timeout + 5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        ux.err(f"Strict gateway readiness failed: {type(exc).__name__}", indent="  ")
+        raise SystemExit(1) from None
+    if completed.returncode != 0:
+        ux.err("Gateway did not satisfy the current release readiness contract.", indent="  ")
+        raise SystemExit(completed.returncode or 1)
+    ux.ok(f"Gateway is strictly ready as version {expected_version}")
+
+
 def _poll_health(
     cfg,
     timeout_seconds: int = 60,
@@ -5980,6 +6063,10 @@ def _poll_health(
     quartet, so callers that know the expected release require an exact match
     before accepting either state.
     """
+    if os.environ.get(_UPGRADE_HANDOFF_ENV) == "1":
+        _poll_handoff_gateway_readiness(cfg, timeout_seconds, expected_version)
+        return
+
     from defenseclaw.gateway import OrchestratorClient
 
     bind = _api_bind_host(cfg)
@@ -9141,7 +9228,7 @@ def _execute_hard_cut_rollback(
         _restore_hard_cut_backup_root_contract(plan)
 
         if plan.source_gateway_was_running:
-            rollback_start_timeout = max(health_timeout + 30, 90)
+            rollback_start_timeout = _gateway_start_command_timeout_seconds(health_timeout)
             start_reported_success = _run_silent(
                 [plan.active_gateway_path, "start"],
                 "Restored bridge gateway started",

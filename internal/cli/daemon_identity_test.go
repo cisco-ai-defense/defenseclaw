@@ -49,6 +49,16 @@ type fakeStrongDaemonState struct {
 
 func (f fakeStrongDaemonState) HasManagedProcessIdentity(int) bool { return f.identityOK }
 
+type fakeUpgradeDaemonState struct {
+	fakeStrongDaemonState
+	startedAt    time.Time
+	generationOK bool
+}
+
+func (f fakeUpgradeDaemonState) ManagedProcessStartedAt(int) (time.Time, bool) {
+	return f.startedAt, f.generationOK
+}
+
 func startupTestConfig(t *testing.T) *config.Config {
 	t.Helper()
 	cfg := config.DefaultConfig()
@@ -80,6 +90,144 @@ func authenticatedStatusServer(t *testing.T, token string, status gatewayStatusE
 		}
 		_ = json.NewEncoder(w).Encode(status)
 	}))
+}
+
+func TestUpgradeReadinessBindsStrictStateGenerationAndCandidateVersion(t *testing.T) {
+	token := strings.Repeat("u", 32)
+	cfg := startupTestConfig(t)
+	t.Setenv("DEFENSECLAW_HOME", cfg.DataDir)
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", token)
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, ".env"), []byte("DEFENSECLAW_GATEWAY_TOKEN="+token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Guardrail.Enabled = true
+	cfg.Gateway.Watcher.Enabled = false
+
+	generation := time.Now().Add(-time.Second)
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	snap.StartedAt = generation.Add(100 * time.Millisecond)
+	if cfg.ConfigVersion == config.ObservabilityV8ConfigVersion {
+		snap.Telemetry.State = gateway.StateRunning
+	}
+	status := gatewayStatusEnvelope{Health: snap}
+	status.Provenance.BinaryVersion = "0.9.0"
+	status.Runtime.PID = 42
+	status.Runtime.DataDir = cfg.DataDir
+	server := authenticatedStatusServer(t, token, status)
+	defer server.Close()
+	host, port := splitHostPortForTest(t, strings.TrimPrefix(server.URL, "http://"))
+	cfg.Gateway.APIBind, cfg.Gateway.APIPort = host, port
+	withStartupListenerInspector(t, func(string, int) (int, error) { return 42, nil })
+
+	state := fakeUpgradeDaemonState{
+		fakeStrongDaemonState: fakeStrongDaemonState{
+			fakeDaemonState: fakeDaemonState{running: true, pid: 42},
+			identityOK:      true,
+		},
+		startedAt:    generation,
+		generationOK: true,
+	}
+	if err := waitForUpgradeGatewayReadiness(
+		state,
+		cfg,
+		server.Client(),
+		"0.9.0",
+		time.Second,
+		5*time.Millisecond,
+	); err != nil {
+		t.Fatalf("strict upgrade readiness: %v", err)
+	}
+}
+
+func TestUpgradeReadinessRejectsVersionAndGenerationDrift(t *testing.T) {
+	token := strings.Repeat("u", 32)
+	cfg := startupTestConfig(t)
+	t.Setenv("DEFENSECLAW_HOME", cfg.DataDir)
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", token)
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, ".env"), []byte("DEFENSECLAW_GATEWAY_TOKEN="+token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Guardrail.Enabled = true
+
+	generation := time.Now()
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	snap.StartedAt = generation.Add(-10 * time.Second)
+	if cfg.ConfigVersion == config.ObservabilityV8ConfigVersion {
+		snap.Telemetry.State = gateway.StateRunning
+	}
+	status := gatewayStatusEnvelope{Health: snap}
+	status.Provenance.BinaryVersion = "0.8.5"
+	status.Runtime.PID = 42
+	status.Runtime.DataDir = cfg.DataDir
+	server := authenticatedStatusServer(t, token, status)
+	defer server.Close()
+	host, port := splitHostPortForTest(t, strings.TrimPrefix(server.URL, "http://"))
+	cfg.Gateway.APIBind, cfg.Gateway.APIPort = host, port
+	withStartupListenerInspector(t, func(string, int) (int, error) { return 42, nil })
+
+	state := fakeUpgradeDaemonState{
+		fakeStrongDaemonState: fakeStrongDaemonState{
+			fakeDaemonState: fakeDaemonState{running: true, pid: 42},
+			identityOK:      true,
+		},
+		startedAt:    generation,
+		generationOK: true,
+	}
+	err := waitForUpgradeGatewayReadiness(state, cfg, server.Client(), "0.9.0", time.Second, time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "authenticated gateway version") {
+		t.Fatalf("version drift error = %v, want authenticated version mismatch", err)
+	}
+
+	status.Provenance.BinaryVersion = "0.9.0"
+	generationServer := authenticatedStatusServer(t, token, status)
+	defer generationServer.Close()
+	host, port = splitHostPortForTest(t, strings.TrimPrefix(generationServer.URL, "http://"))
+	cfg.Gateway.APIBind, cfg.Gateway.APIPort = host, port
+	err = waitForUpgradeGatewayReadiness(
+		state,
+		cfg,
+		generationServer.Client(),
+		"0.9.0",
+		25*time.Millisecond,
+		5*time.Millisecond,
+	)
+	if err == nil || !strings.Contains(err.Error(), "STARTING") {
+		t.Fatalf("generation drift error = %v, want readiness timeout", err)
+	}
+
+	for _, subsystem := range []string{"guardrail", "telemetry"} {
+		t.Run(subsystem+" still starting", func(t *testing.T) {
+			subsystemStatus := status
+			subsystemStatus.Health.StartedAt = generation.Add(time.Millisecond)
+			switch subsystem {
+			case "guardrail":
+				subsystemStatus.Health.Guardrail.State = gateway.StateStarting
+			case "telemetry":
+				subsystemStatus.Health.Telemetry.State = gateway.StateStarting
+			}
+			subsystemServer := authenticatedStatusServer(t, token, subsystemStatus)
+			defer subsystemServer.Close()
+			host, port := splitHostPortForTest(t, strings.TrimPrefix(subsystemServer.URL, "http://"))
+			cfg.Gateway.APIBind, cfg.Gateway.APIPort = host, port
+			err := waitForUpgradeGatewayReadiness(
+				state,
+				cfg,
+				subsystemServer.Client(),
+				"0.9.0",
+				25*time.Millisecond,
+				5*time.Millisecond,
+			)
+			if err == nil || !strings.Contains(err.Error(), "STARTING") {
+				t.Fatalf("subsystem readiness error = %v, want strict subsystem timeout", err)
+			}
+		})
+	}
+
+	state.generationOK = false
+	err = waitForUpgradeGatewayReadiness(state, cfg, http.DefaultClient, "0.9.0", time.Second, time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "launch generation") {
+		t.Fatalf("missing generation error = %v, want fail-closed generation check", err)
+	}
 }
 
 func TestRotationStopReadinessAuthenticatesPIDDataDirAndListener(t *testing.T) {

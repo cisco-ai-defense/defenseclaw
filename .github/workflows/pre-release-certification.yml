@@ -188,6 +188,7 @@ jobs:
           BASELINE: ${{ matrix.baseline }}
           RELEASE_TAG: ${{ inputs.version }}
           RELEASE_COMMIT: ${{ inputs.commit }}
+          REQUIRED_BRIDGE_VERSION: ${{ inputs.required_bridge_version }}
           UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS: "1"
         run: |
           set -euo pipefail
@@ -199,12 +200,17 @@ jobs:
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             release-candidate/dist/checksums.txt
+          baseline_dependency_args=()
+          if [[ -n "$REQUIRED_BRIDGE_VERSION" && "$BASELINE" == "$REQUIRED_BRIDGE_VERSION" ]]; then
+            baseline_dependency_args+=(--baseline-dependencies published)
+          fi
           scripts/test-upgrade-protocol-release.sh \
             --from-version "$BASELINE" \
             --target-version "$RELEASE_TAG" \
             --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
             --baseline-mode seed \
-            --health-timeout 60
+            --health-timeout 60 \
+            "${baseline_dependency_args[@]}"
 
   windows-unpublished-refusal:
     name: Windows unpublished-runtime refusal

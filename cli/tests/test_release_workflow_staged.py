@@ -20,6 +20,7 @@ WORKFLOW = ROOT / ".github/workflows/release.yaml"
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 CERTIFICATION_WORKFLOW = ROOT / ".github/workflows/pre-release-certification.yml"
 PROTOCOL_GATE = ROOT / "scripts/test-upgrade-protocol-release.sh"
+HISTORICAL_BOOTSTRAP_GATE = ROOT / "scripts/test-historical-bootstrap-dependencies.sh"
 RECEIPT_CHECK = ROOT / "scripts/check_upgrade_receipt.py"
 WINDOWS_PROTOCOL_GATE = ROOT / "scripts/test-upgrade-release-windows.ps1"
 MACOS_BUILD = ROOT / "scripts/build-macos-app-release.sh"
@@ -111,6 +112,55 @@ def test_ci_wheel_metadata_prevents_floating_nonportable_scanner_resolution() ->
     assert "#sha256=[0-9a-f]{64}" in ci
 
 
+def test_ci_executes_phase_separated_resolver_dependencies_before_positive_lanes() -> None:
+    jobs = _ci_workflow()["jobs"]
+    gate = jobs["historical-resolver-dependencies"]
+    rendered = str(gate)
+    workflow_text = CI_WORKFLOW.read_text(encoding="utf-8")
+    executable_gate = HISTORICAL_BOOTSTRAP_GATE.read_text(encoding="utf-8")
+
+    assert gate["needs"] == "release-validation-plan"
+    assert "needs.release-validation-plan.outputs.sensitive == 'true'" in gate["if"]
+    assert "github.ref == 'refs/heads/main'" in gate["if"]
+    assert gate["runs-on"] == "${{ matrix.runner }}"
+    assert gate["strategy"] == {
+        "fail-fast": "false",
+        "matrix": {
+            "include": [
+                {
+                    "runner": "ubuntu-latest",
+                    "platform": "linux-amd64",
+                    "runner_arch": "X64",
+                },
+                {
+                    "runner": "macos-15",
+                    "platform": "darwin-arm64",
+                    "runner_arch": "ARM64",
+                },
+            ]
+        },
+    }
+    assert "scripts/test-historical-bootstrap-dependencies.sh" in rendered
+    assert 'test "$RUNNER_ARCH" = "${{ matrix.runner_arch }}"' in rendered
+    assert "`uv pip check`" in workflow_text
+    assert "release.yaml@refs/heads/main" in workflow_text
+    assert "id-token" not in rendered
+    assert "cosign" not in rendered
+    assert "set -euo pipefail" in executable_gate
+    assert "verify_constraint_scope" in executable_gate
+    assert "verify_uv_environment_isolation" in executable_gate
+    assert "not-an-rfc3339-timestamp" in executable_gate
+    assert "env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER" in executable_gate
+    assert "--constraints \"${CONSTRAINTS_FILE}\"" in executable_gate
+    assert '"${UV_BIN}" --no-config pip check' in executable_gate
+    assert '"cisco-ai-mcp-scanner": "4.7.2"' in executable_gate
+    assert '"litellm": "1.83.7"' in executable_gate
+    assert executable_gate.count("install_and_check \\\n") == 2
+
+    for name in ("selective-upgrade-smoke", "main-release-smoke"):
+        assert "historical-resolver-dependencies" in jobs[name]["needs"]
+
+
 def test_release_supports_nightly_certification_and_manual_promotion() -> None:
     workflow = _workflow()
     triggers = workflow["on"]
@@ -198,6 +248,287 @@ def test_release_requires_current_main_without_prescribing_repository_governance
         "windows-real-client-certification",
         "publish-release",
     }
+
+
+def test_release_requires_successful_main_ci_for_the_exact_candidate_sha() -> None:
+    workflow = _workflow()
+    preflight = workflow["jobs"]["release-preflight"]
+    steps = preflight["steps"]
+    step = next(
+        step
+        for step in steps
+        if step.get("name") == "Require successful CI for the exact release commit"
+    )
+    revalidation = next(
+        step
+        for step in steps
+        if step.get("name") == "Revalidate current main after exact-SHA CI"
+    )
+
+    assert step["if"] == "${{ needs.release-mode.outputs.operation == 'release' }}"
+    assert step["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
+        "SELECTED_COMMIT": "${{ needs.release-mode.outputs.commit }}",
+        "CI_WAIT_ATTEMPTS": "180",
+        "CI_WAIT_INTERVAL_SECONDS": "30",
+    }
+    command = step["run"]
+    assert "actions/workflows/ci.yml/runs" in command
+    assert "branch=main&event=push&head_sha=$SELECTED_COMMIT" in command
+    assert 'run.get("head_sha") == expected_sha' in command
+    assert 'status != "completed"' in command
+    assert 'conclusion == "success"' in command
+    assert 'int(run.get("run_attempt") or 0)' in command
+    assert "Exact-SHA CI has not passed" in command
+    assert "20 + 25 + 30 minutes" in WORKFLOW.read_text(encoding="utf-8")
+    assert revalidation["if"] == "${{ needs.release-mode.outputs.operation == 'release' }}"
+    assert revalidation["env"] == {
+        "SELECTED_COMMIT": "${{ needs.release-mode.outputs.commit }}",
+    }
+    revalidation_command = revalidation["run"]
+    assert "git fetch --no-tags origin main" in revalidation_command
+    assert 'CURRENT_MAIN="$(git rev-parse origin/main)"' in revalidation_command
+    assert '"$CURRENT_MAIN" != "$SELECTED_COMMIT"' in revalidation_command
+    assert "Release commit superseded" in revalidation_command
+    ci_index = steps.index(step)
+    revalidation_index = steps.index(revalidation)
+    cosign_index = next(
+        index
+        for index, candidate in enumerate(steps)
+        if candidate.get("uses", "").startswith("sigstore/cosign-installer@")
+    )
+    assert ci_index < revalidation_index < cosign_index
+
+
+@pytest.mark.parametrize(
+    ("current_main", "expected_returncode", "expected_fragment"),
+    [
+        ("e" * 40, 0, "is still the current origin/main tip"),
+        ("f" * 40, 1, "Release commit superseded"),
+    ],
+)
+def test_post_ci_main_revalidation_rejects_a_superseded_commit(
+    tmp_path: Path,
+    current_main: str,
+    expected_returncode: int,
+    expected_fragment: str,
+) -> None:
+    selected_commit = "e" * 40
+    step = next(
+        step
+        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        if step.get("name") == "Revalidate current main after exact-SHA CI"
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "CURRENT_MAIN_FOR_TEST": current_main,
+            "SELECTED_COMMIT": selected_commit,
+        }
+    )
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            (
+                "git() {\n"
+                "  if [[ $1 == fetch ]]; then return 0; fi\n"
+                "  if [[ $1 == rev-parse && $2 == origin/main ]]; then\n"
+                "    printf '%s\\n' \"$CURRENT_MAIN_FOR_TEST\"\n"
+                "    return 0\n"
+                "  fi\n"
+                "  return 1\n"
+                "}\n"
+                + step["run"]
+            ),
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == expected_returncode, completed.stdout + completed.stderr
+    assert expected_fragment in completed.stdout
+
+
+def test_exact_sha_ci_gate_retries_a_transient_api_failure(tmp_path: Path) -> None:
+    commit = "d" * 40
+    step = next(
+        step
+        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        if step.get("name") == "Require successful CI for the exact release commit"
+    )
+    payload = {
+        "workflow_runs": [
+            {
+                "head_sha": commit,
+                "head_branch": "main",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "success",
+                "run_number": 43,
+                "run_attempt": 1,
+                "id": 43,
+                "html_url": "https://github.example/actions/runs/43",
+            }
+        ]
+    }
+    env = os.environ.copy()
+    env.update(
+        {
+            "FAKE_GH_RESPONSE": json.dumps(payload),
+            "GITHUB_REPOSITORY": "example/defenseclaw",
+            "SELECTED_COMMIT": commit,
+            "CI_WAIT_ATTEMPTS": "2",
+            "CI_WAIT_INTERVAL_SECONDS": "0",
+        }
+    )
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            (
+                "GH_CALLS=0\n"
+                "gh() {\n"
+                "  GH_CALLS=$((GH_CALLS + 1))\n"
+                "  if [[ $GH_CALLS -eq 1 ]]; then return 1; fi\n"
+                "  printf '%s' \"$FAKE_GH_RESPONSE\"\n"
+                "}\n"
+                + step["run"]
+            ),
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "Waiting for exact-SHA CI (CI API unavailable; check 1/2)" in completed.stdout
+    assert "OK: exact-SHA CI passed" in completed.stdout
+
+
+@pytest.mark.parametrize(
+    ("status", "conclusion", "expected_returncode", "expected_fragment"),
+    [
+        ("queued", None, 1, "queued/pending"),
+        ("in_progress", None, 1, "in_progress/pending"),
+        ("completed", "failure", 1, "completed/failure"),
+        ("completed", "success", 0, "OK: exact-SHA CI passed"),
+    ],
+)
+def test_exact_sha_ci_gate_rejects_every_state_except_success(
+    tmp_path: Path,
+    status: str,
+    conclusion: str | None,
+    expected_returncode: int,
+    expected_fragment: str,
+) -> None:
+    commit = "a" * 40
+    step = next(
+        step
+        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        if step.get("name") == "Require successful CI for the exact release commit"
+    )
+    payload = {
+        "workflow_runs": [
+            {
+                "head_sha": commit,
+                "head_branch": "main",
+                "event": "push",
+                "status": status,
+                "conclusion": conclusion,
+                "run_number": 42,
+                "html_url": "https://github.example/actions/runs/42",
+            }
+        ]
+    }
+    env = os.environ.copy()
+    env.update(
+        {
+            "FAKE_GH_RESPONSE": json.dumps(payload),
+            "GITHUB_REPOSITORY": "example/defenseclaw",
+            "SELECTED_COMMIT": commit,
+            "CI_WAIT_ATTEMPTS": "1",
+            "CI_WAIT_INTERVAL_SECONDS": "0",
+        }
+    )
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            'gh() { printf \'%s\' "$FAKE_GH_RESPONSE"; }\n' + step["run"],
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == expected_returncode, completed.stdout + completed.stderr
+    assert expected_fragment in completed.stdout
+
+
+def test_exact_sha_ci_gate_rejects_missing_or_unrelated_runs(tmp_path: Path) -> None:
+    commit = "b" * 40
+    step = next(
+        step
+        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        if step.get("name") == "Require successful CI for the exact release commit"
+    )
+    payload = {
+        "workflow_runs": [
+            {
+                "head_sha": "c" * 40,
+                "head_branch": "main",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "success",
+                "run_number": 41,
+            },
+            {
+                "head_sha": commit,
+                "head_branch": "feature",
+                "event": "pull_request",
+                "status": "completed",
+                "conclusion": "success",
+                "run_number": 42,
+            },
+        ]
+    }
+    env = os.environ.copy()
+    env.update(
+        {
+            "FAKE_GH_RESPONSE": json.dumps(payload),
+            "GITHUB_REPOSITORY": "example/defenseclaw",
+            "SELECTED_COMMIT": commit,
+            "CI_WAIT_ATTEMPTS": "1",
+            "CI_WAIT_INTERVAL_SECONDS": "0",
+        }
+    )
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            'gh() { printf \'%s\' "$FAKE_GH_RESPONSE"; }\n' + step["run"],
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 1
+    assert "CI for " + commit + " is missing" in completed.stdout
 
 
 def test_release_target_must_advance_reviewed_and_published_stable_state() -> None:
@@ -563,9 +894,9 @@ def test_full_historical_matrix_limits_mutable_dependencies_to_required_bridge()
     rendered = str(workflow)
 
     # Linux and macOS still exercise every behavior-class baseline through the
-    # signed resolver. Only the required bridge gets its published dependency
-    # environment, which proves target-only promotion without re-resolving every
-    # older wheel against today's mutable package index.
+    # signed resolver. On both hosts, only the required bridge gets its
+    # published dependency environment. Keeping that policy identical prevents
+    # a target dependency overlay from hiding a platform-specific handoff bug.
     assert "historical-dependency-canary" not in workflow["jobs"]
     assert "historical_matrix" not in workflow["on"]["workflow_call"]["inputs"]
     linux = workflow["jobs"]["linux-upgrade"]
@@ -576,11 +907,14 @@ def test_full_historical_matrix_limits_mutable_dependencies_to_required_bridge()
     assert "scripts/test-upgrade-protocol-release.sh" in linux_rendered
     assert "--baseline-dependencies published" in linux_rendered
     assert '"$BASELINE" == "$REQUIRED_BRIDGE_VERSION"' in linux_rendered
-    assert rendered.count("--baseline-dependencies published") == 1
 
     macos = workflow["jobs"]["macos-upgrade"]
+    macos_rendered = str(macos)
     assert macos["strategy"]["matrix"]["baseline"] == "${{ fromJSON(inputs.baselines) }}"
-    assert "scripts/test-upgrade-protocol-release.sh" in str(macos)
+    assert "scripts/test-upgrade-protocol-release.sh" in macos_rendered
+    assert "--baseline-dependencies published" in macos_rendered
+    assert '"$BASELINE" == "$REQUIRED_BRIDGE_VERSION"' in macos_rendered
+    assert rendered.count("--baseline-dependencies published") == 2
 
     release = _workflow()
     assert release["jobs"]["release-preflight"]["outputs"]["certification_cases"] == (
