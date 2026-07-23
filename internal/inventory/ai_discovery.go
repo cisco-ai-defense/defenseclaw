@@ -977,6 +977,9 @@ func (s *ContinuousDiscoveryService) scanSignals(
 	measure("application", func() ([]AISignal, int, error) { return s.detectApplications(), 0, nil })
 	measure("editor_extension", func() ([]AISignal, int, error) { return s.detectEditorExtensions(), 0, nil })
 	measure("mcp", func() ([]AISignal, int, error) { return s.detectMCPPaths(), 0, nil })
+	measure("skill", func() ([]AISignal, int, error) { return s.detectSkills(), 0, nil })
+	measure("rule", func() ([]AISignal, int, error) { return s.detectRules(), 0, nil })
+	measure("plugin", func() ([]AISignal, int, error) { return s.detectPlugins(), 0, nil })
 	if s.opts.IncludeNetworkDomains {
 		measure("local_endpoint", func() ([]AISignal, int, error) { return s.detectLocalEndpoints(), 0, nil })
 		measure("local_model_api", func() ([]AISignal, int, error) {
@@ -1364,6 +1367,90 @@ func (s *ContinuousDiscoveryService) detectMCPPaths() []AISignal {
 			for _, path := range s.expandCandidatePath(candidate) {
 				if pathExists(path) {
 					out = append(out, s.signalFromPath(sig, SignalMCPServer, "mcp", path))
+				}
+			}
+		}
+	}
+	return out
+}
+
+// dirHasEntry reports whether path exists AND, if it's a directory,
+// contains at least one entry. Non-directory targets (a file at the
+// path) count as "populated" so operator-authored single-file surfaces
+// (e.g. `~/.claude/CLAUDE.md` used as a rule scalar) still trigger.
+// Empty directories return false — the "reserved for future use" case
+// we don't want polluting the dashboard.
+//
+// Uses ReadDir with a bounded read so a pathological directory (millions
+// of entries, e.g. `~/.cache`) doesn't stall a scan: os.ReadDir slurps
+// the whole thing, but here we only need to know "is len > 0" so we
+// call the lower-level (*File).ReadDir(1) shortcut which stops after
+// the first entry.
+func dirHasEntry(path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if !fi.IsDir() {
+		return true
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	// ReadDir(1) returns io.EOF when the directory is empty; any
+	// successful read of >=1 entry proves populated.
+	entries, err := f.ReadDir(1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false
+	}
+	return len(entries) > 0
+}
+
+// detectSkills / detectRules / detectPlugins mirror detectMCPPaths but
+// require the target path to contain at least one entry (see
+// dirHasEntry). This distinguishes "surface configured with skills /
+// rules / plugins" from "the agent left an empty scaffold directory".
+// The three functions are kept separate rather than parameterized so
+// each maps cleanly to a signature-catalog field name and a category
+// constant — trivial to grep, trivial to disable via
+// disabled_signature_ids per surface.
+func (s *ContinuousDiscoveryService) detectSkills() []AISignal {
+	var out []AISignal
+	for _, sig := range s.catalog {
+		for _, candidate := range sig.SkillPaths {
+			for _, path := range s.expandCandidatePath(candidate) {
+				if dirHasEntry(path) {
+					out = append(out, s.signalFromPath(sig, SignalSkill, "skill", path))
+				}
+			}
+		}
+	}
+	return out
+}
+
+func (s *ContinuousDiscoveryService) detectRules() []AISignal {
+	var out []AISignal
+	for _, sig := range s.catalog {
+		for _, candidate := range sig.RulePaths {
+			for _, path := range s.expandCandidatePath(candidate) {
+				if dirHasEntry(path) {
+					out = append(out, s.signalFromPath(sig, SignalRule, "rule", path))
+				}
+			}
+		}
+	}
+	return out
+}
+
+func (s *ContinuousDiscoveryService) detectPlugins() []AISignal {
+	var out []AISignal
+	for _, sig := range s.catalog {
+		for _, candidate := range sig.PluginPaths {
+			for _, path := range s.expandCandidatePath(candidate) {
+				if dirHasEntry(path) {
+					out = append(out, s.signalFromPath(sig, SignalPlugin, "plugin", path))
 				}
 			}
 		}
