@@ -337,14 +337,15 @@ installation before dependency or artifact changes.
 ### Cut a GitHub Release
 
 The manually dispatched `Release` GitHub Actions workflow is the only supported
-way to cut a release. Its explicit `certify` operation validates the requested
+way to cut a release. Its default `certify` operation validates the requested
 version, builds and signs all artifacts, runs the native upgrade gates, and
 records the exact golden candidate without publishing. After that run succeeds,
-the `release` operation verifies exact-SHA platform CI and the matching
-certification receipt, then creates the remote tag and GitHub release from
-those same bytes. A missing or rejected receipt stops before candidate
-construction or platform packaging. This ordering keeps Release from becoming
-a test bed and keeps Immutable Releases from stranding half-built assets.
+the `release` operation verifies the matching certification receipt before it
+begins the potentially long exact-SHA platform CI wait, then creates the remote
+tag and GitHub release from those same bytes. A missing or rejected receipt
+stops before candidate construction or platform packaging, and before the
+potentially long platform wait. This ordering keeps Release from becoming a
+test bed and keeps Immutable Releases from stranding half-built assets.
 
 The workflow input is the published-version authority. It stamps the requested
 version into its isolated build checkout before producing the CLI, gateway,

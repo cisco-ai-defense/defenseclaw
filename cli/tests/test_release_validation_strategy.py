@@ -191,9 +191,11 @@ def test_release_requires_prior_certification_and_never_tests_during_promotion()
     assert "schedule" in triggers
     assert "workflow_dispatch" in triggers
     operation = triggers["workflow_dispatch"]["inputs"]["operation"]
-    assert set(operation["options"]) == {"certify", "release"}
+    assert operation["default"] == "certify"
+    assert operation["options"] == ["certify", "release"]
     assert operation["description"] == (
-        "Certify main, or publish it only after reusing exact certification."
+        "Certify reviewed main first (default), or release only after exact "
+        "certification exists."
     )
     assert workflow["concurrency"] == {
         "group": "release-promotion-${{ github.repository }}",
@@ -222,9 +224,11 @@ def test_release_requires_prior_certification_and_never_tests_during_promotion()
         "release-mode",
         "release-preflight",
         "lookup-certification",
+        "platform-readiness",
     }
     assert "needs.release-mode.outputs.operation == 'certify'" in build["if"]
     assert "needs.lookup-certification.result == 'success'" in build["if"]
+    assert "needs.platform-readiness.result == 'success'" in build["if"]
     assert "needs.lookup-certification.result != 'success'" not in build["if"]
     full = jobs["full-certification"]
     assert full["uses"] == "./.github/workflows/pre-release-certification.yml"
@@ -237,8 +241,10 @@ def test_release_requires_prior_certification_and_never_tests_during_promotion()
     selection = jobs["select-candidate"]
     condition = selection["if"]
     assert "release-mode" in selection["needs"]
+    assert "platform-readiness" in selection["needs"]
     assert "needs.release-mode.outputs.operation == 'release'" in condition
     assert "needs.release-mode.outputs.operation == 'certify'" in condition
+    assert "needs.platform-readiness.result == 'success'" in condition
     assert "lookup-certification.outputs.reuse == 'true'" in condition
     assert "lookup-certification.outputs.reuse != 'true'" in condition
     assert "lookup-certification.result == 'success'" in condition
@@ -259,8 +265,10 @@ def test_release_requires_prior_certification_and_never_tests_during_promotion()
     assert set(publish["needs"]) == {
         "release-mode",
         "release-preflight",
+        "platform-readiness",
         "select-candidate",
     }
+    assert "needs.platform-readiness.result == 'success'" in publish["if"]
     assert "needs.select-candidate.result == 'success'" in publish["if"]
     assert publish["permissions"] == {"contents": "write"}
     rendered_publish = _render(publish)
