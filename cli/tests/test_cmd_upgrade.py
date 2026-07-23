@@ -5232,26 +5232,33 @@ class TestUpgradeServiceVerification(unittest.TestCase):
             )
 
     def test_gateway_environment_preserves_fresh_process_readiness_handoff(self):
+        data_dir = "/private/upgrade-data"
+        config_path = "/private/controller/config.yaml"
         with patch.dict(
             os.environ,
-            {"DEFENSECLAW_UPGRADE_FRESH_PROCESS": "1"},
+            {
+                "DEFENSECLAW_UPGRADE_FRESH_PROCESS": "1",
+                "DEFENSECLAW_HOME": "/attacker/home",
+                "DEFENSECLAW_CONFIG": "/attacker/config.yaml",
+            },
             clear=True,
         ):
             environment = cmd_upgrade_module._gateway_process_environment(
-                "/private/upgrade-data",
-                config_path="/private/controller/config.yaml",
+                data_dir,
+                config_path=config_path,
             )
 
         self.assertEqual(environment["DEFENSECLAW_UPGRADE_FRESH_PROCESS"], "1")
-        self.assertEqual(environment["DEFENSECLAW_HOME"], "/private/upgrade-data")
+        self.assertEqual(environment["DEFENSECLAW_HOME"], os.path.abspath(data_dir))
         self.assertEqual(
             environment["DEFENSECLAW_CONFIG"],
-            "/private/controller/config.yaml",
+            os.path.abspath(config_path),
         )
 
     def test_fresh_process_health_uses_current_strict_gateway_contract_once(self):
         cfg = Config()
         cfg.data_dir = "/private/upgrade-data"
+        config_path = "/private/controller/config.yaml"
 
         with TemporaryDirectory() as install_dir:
             gateway_binary = Path(install_dir, "defenseclaw-gateway")
@@ -5264,6 +5271,8 @@ class TestUpgradeServiceVerification(unittest.TestCase):
                     {
                         "DEFENSECLAW_UPGRADE_FRESH_PROCESS": "1",
                         "DEFENSECLAW_GATEWAY_BIN": "/attacker/override",
+                        "DEFENSECLAW_HOME": "/attacker/home",
+                        "DEFENSECLAW_CONFIG": "/attacker/config.yaml",
                         "PATH": "/attacker/path",
                     },
                     clear=True,
@@ -5272,7 +5281,7 @@ class TestUpgradeServiceVerification(unittest.TestCase):
                 patch("defenseclaw.gateway.canonical_install_path", return_value=str(gateway_binary)),
                 patch(
                     "defenseclaw.config.config_path",
-                    return_value=Path("/private/controller/config.yaml"),
+                    return_value=Path(config_path),
                 ),
                 patch(
                     "defenseclaw.commands.cmd_upgrade.subprocess.run",
@@ -5296,10 +5305,13 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         )
         self.assertEqual(run.call_args.kwargs["timeout"], 65)
         self.assertFalse(run.call_args.kwargs["check"])
-        self.assertEqual(run.call_args.kwargs["env"]["DEFENSECLAW_HOME"], "/private/upgrade-data")
+        self.assertEqual(
+            run.call_args.kwargs["env"]["DEFENSECLAW_HOME"],
+            os.path.abspath(cfg.data_dir),
+        )
         self.assertEqual(
             run.call_args.kwargs["env"]["DEFENSECLAW_CONFIG"],
-            "/private/controller/config.yaml",
+            os.path.abspath(config_path),
         )
         self.assertEqual(run.call_args.kwargs["env"]["DEFENSECLAW_UPGRADE_FRESH_PROCESS"], "1")
         legacy_client.assert_not_called()

@@ -18,16 +18,16 @@ name: Release
 
 # This workflow is the only release-signing authority because published
 # installers pin its Fulcio identity. A nightly/manual certification run seals
-# and fully exercises candidate bytes. A release dispatch promotes matching,
-# recent certified bytes, or runs the same full certification when no usable
-# certification exists.
+# and fully exercises candidate bytes. A release dispatch only promotes
+# matching, recent certified bytes; when no usable receipt exists, operators
+# must run the explicit certification operation first.
 on:
   schedule:
     - cron: "17 5 * * *"
   workflow_dispatch:
     inputs:
       operation:
-        description: "Certify main, or publish it after reusing/running full certification."
+        description: "Certify main, or publish it only after reusing exact certification."
         required: true
         type: choice
         default: release
@@ -268,21 +268,74 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SELECTED_COMMIT: ${{ needs.release-mode.outputs.commit }}
           # Main's release lane can legitimately consume 20 + 25 + 30 minutes
-          # across its sequential plan/build/smoke stages. Allow 90 minutes so
-          # setup and ordinary runner queueing do not turn a healthy merge red.
-          CI_WAIT_ATTEMPTS: "180"
+          # across its sequential plan/build/smoke stages, while native Windows
+          # certification runs in parallel. Native Windows' package-to-
+          # acceptance critical path is bounded above two hours, so allow one
+          # shared three-hour window for every required workflow plus queueing.
+          CI_WAIT_ATTEMPTS: "360"
+          CI_WAIT_MAX_SECONDS: "10800"
           CI_WAIT_INTERVAL_SECONDS: "30"
+          CI_API_TIMEOUT_SECONDS: "30"
+          REQUIRED_CI_WORKFLOWS: |-
+            ci.yml|CI
+            windows-native.yml|Windows Native CI
+            macos-app.yml|macOS App
         run: |
           set -euo pipefail
+          if [[ ! "$CI_WAIT_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || \
+             [[ ! "$CI_WAIT_MAX_SECONDS" =~ ^[0-9]+$ ]] || \
+             [[ ! "$CI_WAIT_INTERVAL_SECONDS" =~ ^[0-9]+$ ]] || \
+             [[ ! "$CI_API_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error title=Invalid exact-SHA CI configuration::Wait attempts, deadline, interval, and API timeout must be bounded integers."
+            exit 1
+          fi
+          wait_started_at="$(date +%s)"
+          wait_deadline=$((wait_started_at + CI_WAIT_MAX_SECONDS))
           for ((attempt = 1; attempt <= CI_WAIT_ATTEMPTS; attempt++)); do
-            response_temp="exact-commit-ci-runs.json.tmp"
-            if gh api \
-                -H "Accept: application/vnd.github+json" \
-                "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&head_sha=$SELECTED_COMMIT&per_page=100" \
-                > "$response_temp"; then
-              mv -f "$response_temp" exact-commit-ci-runs.json
-              IFS=$'\t' read -r state detail < <(
-                python3 - exact-commit-ci-runs.json "$SELECTED_COMMIT" <<'PY'
+            required_count=0
+            passed_count=0
+            passed_details=""
+            pending_details=""
+            while IFS='|' read -r workflow_file workflow_name; do
+              [[ -n "$workflow_file" ]] || continue
+              required_count=$((required_count + 1))
+              if [[ ! "$workflow_file" =~ ^[A-Za-z0-9._-]+$ || -z "$workflow_name" ]]; then
+                echo "::error title=Invalid exact-SHA CI configuration::Invalid required workflow entry: $workflow_file|$workflow_name"
+                exit 1
+              fi
+
+              workflow_key="${workflow_file//./-}"
+              response_path="exact-commit-${workflow_key}-runs.json"
+              response_temp="${response_path}.tmp"
+              response_error="${response_path}.error"
+              now="$(date +%s)"
+              remaining_seconds=$((wait_deadline - now))
+              if [[ "$remaining_seconds" -le 0 ]]; then
+                state="pending"
+                detail="shared deadline reached before workflow query"
+              else
+                request_timeout="$CI_API_TIMEOUT_SECONDS"
+                if [[ "$remaining_seconds" -lt "$request_timeout" ]]; then
+                  request_timeout="$remaining_seconds"
+                fi
+                api_command=(gh)
+                gh_type="$(type -t gh || true)"
+                if [[ "$gh_type" != "function" ]] && command -v timeout >/dev/null 2>&1; then
+                  api_command=(
+                    timeout
+                    --signal=TERM
+                    --kill-after=5s
+                    "${request_timeout}s"
+                    gh
+                  )
+                fi
+                if "${api_command[@]}" api \
+                    -H "Accept: application/vnd.github+json" \
+                    "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_file/runs?branch=main&event=push&head_sha=$SELECTED_COMMIT&per_page=100" \
+                    > "$response_temp" 2> "$response_error"; then
+                mv -f "$response_temp" "$response_path"
+                IFS=$'\t' read -r state detail < <(
+                  python3 - "$response_path" "$SELECTED_COMMIT" <<'PY'
           import json
           import sys
 
@@ -317,34 +370,67 @@ jobs:
           else:
               print(f"failure\t{detail}")
           PY
-              )
-            else
-              rm -f "$response_temp"
-              state="pending"
-              detail="CI API unavailable"
-            fi
-            case "$state" in
-              success)
-                echo "OK: exact-SHA CI passed for $SELECTED_COMMIT ($detail)"
-                break
-                ;;
-              failure)
-                echo "::error title=Exact-SHA CI failed::CI for $SELECTED_COMMIT finished as $detail."
-                exit 1
-                ;;
-              pending)
-                if [[ "$attempt" -eq "$CI_WAIT_ATTEMPTS" ]]; then
-                  echo "::error title=Exact-SHA CI has not passed::CI for $SELECTED_COMMIT is $detail after $attempt checks."
-                  exit 1
+                )
+                else
+                  rm -f "$response_temp"
+                  api_error="$(
+                    tr '\r\n' '  ' < "$response_error" \
+                      | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' \
+                      | cut -c1-240
+                  )"
+                  if [[ "$api_error" =~ HTTP\ (401|404|422) ]]; then
+                    state="failure"
+                    detail="workflow API permanently rejected the request: $api_error"
+                  elif [[ -n "$api_error" ]]; then
+                    state="pending"
+                    detail="workflow API unavailable: $api_error"
+                  else
+                    state="pending"
+                    detail="workflow API unavailable or timed out after ${request_timeout}s"
+                  fi
                 fi
-                echo "Waiting for exact-SHA CI ($detail; check $attempt/$CI_WAIT_ATTEMPTS) ..."
-                sleep "$CI_WAIT_INTERVAL_SECONDS"
-                ;;
-              *)
-                echo "::error title=Invalid exact-SHA CI state::Unexpected state: $state"
-                exit 1
-                ;;
-            esac
+              fi
+
+              case "$state" in
+                success)
+                  passed_count=$((passed_count + 1))
+                  passed_details="${passed_details}${passed_details:+; }$workflow_name: $detail"
+                  ;;
+                failure)
+                  echo "::error title=Exact-SHA CI failed::$workflow_name for $SELECTED_COMMIT failed ($detail)."
+                  exit 1
+                  ;;
+                pending)
+                  pending_details="${pending_details}${pending_details:+; }$workflow_name: $detail"
+                  ;;
+                *)
+                  echo "::error title=Invalid exact-SHA CI state::$workflow_name returned unexpected state: $state ($detail)"
+                  exit 1
+                  ;;
+              esac
+            done <<< "$REQUIRED_CI_WORKFLOWS"
+
+            if [[ "$required_count" -eq 0 ]]; then
+              echo "::error title=Invalid exact-SHA CI configuration::No required workflows were configured."
+              exit 1
+            fi
+            if [[ "$passed_count" -eq "$required_count" ]]; then
+              echo "OK: exact-SHA CI passed for $SELECTED_COMMIT ($passed_details)"
+              break
+            fi
+            now="$(date +%s)"
+            elapsed_seconds=$((now - wait_started_at))
+            remaining_seconds=$((wait_deadline - now))
+            if [[ "$attempt" -eq "$CI_WAIT_ATTEMPTS" || "$remaining_seconds" -le 0 ]]; then
+              echo "::error title=Exact-SHA CI has not passed::Required workflows for $SELECTED_COMMIT are not green after $elapsed_seconds elapsed seconds (shared deadline ${CI_WAIT_MAX_SECONDS} seconds) and $attempt checks ($pending_details)."
+              exit 1
+            fi
+            sleep_seconds="$CI_WAIT_INTERVAL_SECONDS"
+            if [[ "$remaining_seconds" -lt "$sleep_seconds" ]]; then
+              sleep_seconds="$remaining_seconds"
+            fi
+            echo "Waiting for exact-SHA CI ($pending_details; elapsed ${elapsed_seconds}s/${CI_WAIT_MAX_SECONDS}s; check $attempt/$CI_WAIT_ATTEMPTS) ..."
+            sleep "$sleep_seconds"
           done
 
       - name: Revalidate current main after exact-SHA CI
@@ -474,6 +560,11 @@ jobs:
           if [[ "$RELEASE_OPERATION" != "release" ]]; then
             exit 0
           fi
+          certification_required() {
+            reason="$1"
+            echo "::error title=Exact pre-release certification required::$reason Run this workflow with operation=certify for $RELEASE_COMMIT / $RELEASE_TAG, wait for it to succeed, then retry operation=release."
+            exit 1
+          }
           workflow_version="$(
             python3 scripts/release_certification.py policy-info \
               --baselines effective-upgrade-baselines.json \
@@ -483,8 +574,7 @@ jobs:
           certification_name="dc-cert-${RELEASE_COMMIT}-${RELEASE_TAG}-${workflow_key}"
           if ! gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$certification_name&per_page=100" \
             > certification-artifacts.json; then
-            echo "::warning title=Certification lookup unavailable::Running the full certification fallback."
-            exit 0
+            certification_required "Certification lookup is unavailable."
           fi
           if ! candidate="$(python3 - certification-artifacts.json "$certification_name" <<'PY'
           import json
@@ -502,19 +592,16 @@ jobs:
               print(selected["archive_download_url"] + "\t" + str(selected["workflow_run"]["id"]))
           PY
           )"; then
-            echo "::warning title=Certification index rejected::Running the full certification fallback."
-            exit 0
+            certification_required "The certification artifact index is invalid."
           fi
           archive_url="${candidate%%$'\t'*}"
           certification_run="${candidate##*$'\t'}"
           if [[ -z "$archive_url" ]]; then
-            echo "No reusable certification exists for $RELEASE_COMMIT / $RELEASE_TAG."
-            exit 0
+            certification_required "No reusable exact certification exists."
           fi
           if ! gh api "repos/$GITHUB_REPOSITORY/actions/runs/$certification_run" \
             > certification-run.json; then
-            echo "::warning title=Certification run unavailable::Running the full certification fallback."
-            exit 0
+            certification_required "The certification workflow run is unavailable."
           fi
           if ! python3 - certification-run.json "$RELEASE_COMMIT" <<'PY'
           import json
@@ -532,12 +619,10 @@ jobs:
               raise SystemExit("certification workflow event is not trusted")
           PY
           then
-            echo "::warning title=Certification run rejected::Previous evidence failed or came from an unexpected workflow. Running the full certification fallback."
-            exit 0
+            certification_required "Previous certification evidence failed or came from an unexpected workflow."
           fi
           reject_cache() {
-            echo "::warning title=Certification cache rejected::The cached bundle was missing, stale, invalid, or unavailable. Running the full certification fallback."
-            exit 0
+            certification_required "The cached certification bundle is missing, stale, invalid, or unavailable."
           }
           gh api "$archive_url" > certification.zip || reject_cache
           unzip -q certification.zip -d certification-bundle || reject_cache
@@ -609,15 +694,14 @@ jobs:
 
   build-runtime-candidate:
     name: Build runtime candidate once
-    needs: [release-preflight, lookup-certification]
+    needs: [release-mode, release-preflight, lookup-certification]
     if: >-
       ${{
         always() &&
+        needs.release-mode.outputs.operation == 'certify' &&
         needs.release-preflight.result == 'success' &&
-        (
-          needs.lookup-certification.result != 'success' ||
-          needs.lookup-certification.outputs.reuse != 'true'
-        )
+        needs.lookup-certification.result == 'success' &&
+        needs.lookup-certification.outputs.reuse != 'true'
       }}
     runs-on: ubuntu-latest
     permissions:
@@ -1517,6 +1601,7 @@ jobs:
   full-certification:
     name: Run full pre-release certification
     needs:
+      - release-mode
       - release-preflight
       - lookup-certification
       - windows-real-client-certification
@@ -1524,13 +1609,12 @@ jobs:
     if: >-
       ${{
         always() &&
+        needs.release-mode.outputs.operation == 'certify' &&
         needs.release-preflight.result == 'success' &&
+        needs.lookup-certification.result == 'success' &&
+        needs.lookup-certification.outputs.reuse != 'true' &&
         needs.windows-real-client-certification.result == 'success' &&
-        needs.assemble-release-candidate.result == 'success' &&
-        (
-          needs.lookup-certification.result != 'success' ||
-          needs.lookup-certification.outputs.reuse != 'true'
-        )
+        needs.assemble-release-candidate.result == 'success'
       }}
     uses: ./.github/workflows/pre-release-certification.yml
     permissions:
@@ -1549,6 +1633,7 @@ jobs:
   record-certification:
     name: Record exact golden candidate
     needs:
+      - release-mode
       - release-preflight
       - lookup-certification
       - assemble-release-candidate
@@ -1556,10 +1641,9 @@ jobs:
     if: >-
       ${{
         always() &&
-        (
-          needs.lookup-certification.result != 'success' ||
-          needs.lookup-certification.outputs.reuse != 'true'
-        ) &&
+        needs.release-mode.outputs.operation == 'certify' &&
+        needs.lookup-certification.result == 'success' &&
+        needs.lookup-certification.outputs.reuse != 'true' &&
         needs.assemble-release-candidate.result == 'success' &&
         needs.full-certification.result == 'success'
       }}
@@ -1652,6 +1736,7 @@ jobs:
   select-candidate:
     name: Select certified candidate for promotion
     needs:
+      - release-mode
       - release-preflight
       - lookup-certification
       - assemble-release-candidate
@@ -1663,10 +1748,14 @@ jobs:
         needs.release-preflight.result == 'success' &&
         (
           (
+            needs.release-mode.outputs.operation == 'release' &&
             needs.lookup-certification.result == 'success' &&
             needs.lookup-certification.outputs.reuse == 'true'
           ) ||
           (
+            needs.release-mode.outputs.operation == 'certify' &&
+            needs.lookup-certification.result == 'success' &&
+            needs.lookup-certification.outputs.reuse != 'true' &&
             needs.assemble-release-candidate.result == 'success' &&
             needs.full-certification.result == 'success' &&
             needs.record-certification.result == 'success'
@@ -1691,7 +1780,7 @@ jobs:
           else
             test -n "$FRESH_ARTIFACT"
             echo "artifact_name=$FRESH_ARTIFACT" >> "$GITHUB_OUTPUT"
-            echo "source=full-certification-fallback" >> "$GITHUB_OUTPUT"
+            echo "source=fresh-certification" >> "$GITHUB_OUTPUT"
           fi
 
   publish-release:

@@ -50,7 +50,11 @@ parse_protocol_args() {
                 ;;
         esac
     done
-    parse_args "${shared_args[@]}"
+    if [[ "${#shared_args[@]}" -gt 0 ]]; then
+        parse_args "${shared_args[@]}"
+    else
+        parse_args
+    fi
 }
 
 protocol_cleanup() {

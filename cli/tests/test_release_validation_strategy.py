@@ -182,7 +182,7 @@ def test_main_smoke_is_bound_to_exact_sha_and_runs_representative_canary() -> No
     assert "--refusal-contract-only" not in rendered
 
 
-def test_release_is_certified_promotion_with_full_fallback_and_no_inline_matrix() -> None:
+def test_release_requires_prior_certification_and_never_tests_during_promotion() -> None:
     workflow = _workflow(RELEASE_PATH)
     jobs = workflow["jobs"]
     triggers = workflow["on"]
@@ -192,6 +192,9 @@ def test_release_is_certified_promotion_with_full_fallback_and_no_inline_matrix(
     assert "workflow_dispatch" in triggers
     operation = triggers["workflow_dispatch"]["inputs"]["operation"]
     assert set(operation["options"]) == {"certify", "release"}
+    assert operation["description"] == (
+        "Certify main, or publish it only after reusing exact certification."
+    )
     assert workflow["concurrency"] == {
         "group": "release-promotion-${{ github.repository }}",
         "cancel-in-progress": "false",
@@ -201,6 +204,9 @@ def test_release_is_certified_promotion_with_full_fallback_and_no_inline_matrix(
     assert "reuse=false" in lookup
     assert "verify-metadata" in lookup
     assert "stale, invalid, or unavailable" in lookup
+    assert "Exact pre-release certification required" in lookup
+    assert "operation=certify" in lookup
+    assert "Running the full certification fallback" not in lookup
     assert "if ! (" not in lookup
     assert "|| reject_cache" in lookup
     assert "certification_run_attempt" in lookup
@@ -211,23 +217,44 @@ def test_release_is_certified_promotion_with_full_fallback_and_no_inline_matrix(
     assert "git fetch" not in lookup
     assert 'if [[ "$RELEASE_OPERATION" != "release" ]]; then' in lookup
     assert jobs["lookup-certification"]["steps"][0]["with"]["fetch-depth"] == "0"
+    build = jobs["build-runtime-candidate"]
+    assert set(build["needs"]) == {
+        "release-mode",
+        "release-preflight",
+        "lookup-certification",
+    }
+    assert "needs.release-mode.outputs.operation == 'certify'" in build["if"]
+    assert "needs.lookup-certification.result == 'success'" in build["if"]
+    assert "needs.lookup-certification.result != 'success'" not in build["if"]
     full = jobs["full-certification"]
     assert full["uses"] == "./.github/workflows/pre-release-certification.yml"
+    assert "release-mode" in full["needs"]
+    assert "needs.release-mode.outputs.operation == 'certify'" in full["if"]
     assert "lookup-certification.outputs.reuse != 'true'" in full["if"]
-    assert "lookup-certification.result != 'success'" in full["if"]
+    assert "lookup-certification.result == 'success'" in full["if"]
+    assert "lookup-certification.result != 'success'" not in full["if"]
 
     selection = jobs["select-candidate"]
     condition = selection["if"]
+    assert "release-mode" in selection["needs"]
+    assert "needs.release-mode.outputs.operation == 'release'" in condition
+    assert "needs.release-mode.outputs.operation == 'certify'" in condition
     assert "lookup-certification.outputs.reuse == 'true'" in condition
+    assert "lookup-certification.outputs.reuse != 'true'" in condition
     assert "lookup-certification.result == 'success'" in condition
     assert "full-certification.result == 'success'" in condition
     assert "record-certification.result == 'success'" in condition
     record = _render(jobs["record-certification"])
+    assert "needs.release-mode.outputs.operation == 'certify'" in jobs["record-certification"]["if"]
+    assert "needs.lookup-certification.result == 'success'" in jobs["record-certification"]["if"]
     assert "github.workflow_sha" in record
     assert "--workflow-file executed-pre-release-certification.yml" in record
     assert "git cat-file -e" in record
     assert "git fetch" not in record
     assert jobs["record-certification"]["steps"][0]["with"]["fetch-depth"] == "0"
+    assert "full-certification-fallback" not in text
+    assert "runs the same full certification when no usable" not in text
+    assert "source=fresh-certification" in text
     publish = jobs["publish-release"]
     assert set(publish["needs"]) == {
         "release-mode",

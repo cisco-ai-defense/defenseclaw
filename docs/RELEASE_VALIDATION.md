@@ -11,24 +11,30 @@ observability, Docker, or provenance defects for the first time.
 | Pull request | Every PR, with a path-filtered selective upgrade job for release-sensitive changes | Fast deterministic release regressions; risky PRs add current stable, previous stable, the `0.8.4` bridge boundary, an explicit direct-skip refusal, and the oldest-supported smoke/refusal | Unsigned PR candidate; direct target activation plus production pre-mutation refusal, never release certification |
 | Main smoke | Every merge to `main` | Medium candidate smoke for the exact merged SHA and at least one representative published target-activation canary | Exact merged SHA; no publication or provenance claim |
 | Pre-release certification | Nightly schedule or manual dispatch for a selected ref and candidate version | Signed candidate; behavior-class historical matrix; live migration and rollback/recovery; Docker/local observability continuity; native platform checks; bounded-retry provenance verification | One signed candidate artifact plus one certification receipt |
-| Release | Manual version input on protected `main` | Require successful main CI for the exact SHA; verify a recent receipt for that SHA, workflow version, candidate version, platform set, behavior-class baselines, artifact ID/digest, and run identity; then publish those same bytes | Reuse certified bytes without rebuilding |
+| Release | Manual version input on protected `main` | Require successful main CI, native Windows CI, and macOS app CI for the exact SHA; verify a recent receipt for that SHA, workflow version, candidate version, platform set, behavior-class baselines, artifact ID/digest, and run identity; then publish those same bytes | Reuse certified bytes without rebuilding |
 
-A release dispatched immediately after a merge may wait up to 90 minutes for
-that exact SHA's main CI. This covers the bounded sequential release lane plus
-normal runner setup and queueing. After CI succeeds, Release refetches `main`
-and aborts if another commit has superseded the selected SHA; the operator must
-then promote the new reviewed tip instead.
+A release dispatched immediately after a merge may wait up to three hours for
+that exact SHA's main CI, native Windows CI, and macOS app CI. All three
+workflows execute independently and are checked under one absolute deadline
+with bounded API requests. The window covers the native Windows package and
+acceptance critical path plus normal runner setup and queueing. After all three
+workflows succeed, Release refetches `main` and aborts if another commit has
+superseded the selected SHA; the operator must then promote the new reviewed
+tip instead.
 
 The standalone macOS app workflow builds the complete ad-hoc DMG on affected
-pull requests and on manual request. It does not repeat that disk-intensive
-package build after the same reviewed tree is merged to `main`; the main smoke
-already validates the exact merged runtime candidate. The protected Release
-workflow remains the only path that builds the publishable, conditionally
-notarized macOS assets.
+pull requests, every exact `main` SHA, and manual requests. Its stable
+`macOS App Required` aggregate must pass before Release starts publishable
+packaging. The protected Release workflow remains the only path that builds
+the conditionally notarized macOS assets. Release-wrapper changes also trigger
+this workflow, which executes their nounset contracts with macOS system Bash
+before certification can consume them.
 
 If a matching certification receipt is missing, failed, stale, or does not
-cover the exact release inputs, Release must invoke the full certification path
-and wait for it. It must never publish after only a reduced smoke and must never
+cover the exact release inputs, `operation=release` fails before candidate
+construction or platform packaging. Run the explicit `operation=certify` path
+for that exact commit and version, wait for it to succeed, and then retry
+promotion. Release must never publish after only a reduced smoke and must never
 silently accept a receipt for another commit, version, workflow revision,
 platform set, baseline selection, or candidate digest.
 
@@ -109,11 +115,12 @@ exact reviewed commit reachable from `main`, and an omitted version is resolved
 from the live stable state. Choose `release` to publish, provide the version,
 and confirm immutable releases; publishing is restricted to the current
 `main` tip. The exact commit's `CI` push workflow must complete successfully;
-a release dispatched while that run is queued, starting, or running waits for
-it in bounded preflight. A failed run stops publication, and a run that does not
-appear or finish within the bound can be retried after CI passes. A missing or
-rejected certification automatically selects the full certification path before
-publication.
+the same is true for `Windows Native CI` and `macOS App`. A release dispatched
+while any of those runs is queued, starting, or running waits for it in bounded
+preflight. A failed run stops publication, and a run that does not appear or
+finish within the bound can be retried after CI passes. A missing or rejected
+certification stops promotion before candidate construction; run `certify`
+successfully for the exact commit and version before retrying `release`.
 
 All scheduled and manual certification/publication runs share one repository-wide
 promotion lock. A later dispatch waits instead of racing another candidate, so

@@ -143,22 +143,21 @@ jobs:
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             release-candidate/dist/checksums.txt
-          source_gateway_args=()
-          if [[ "$CANARY_START_SOURCE" == "true" ]]; then
-            source_gateway_args+=(--start-source-gateway)
-          fi
-          baseline_dependency_args=()
+          upgrade_command=(
+            scripts/test-upgrade-protocol-release.sh
+            --from-version "$BASELINE"
+            --target-version "$RELEASE_TAG"
+            --release-dir "$GITHUB_WORKSPACE/release-candidate/dist"
+            --baseline-mode seed
+            --health-timeout 60
+          )
           if [[ -n "$REQUIRED_BRIDGE_VERSION" && "$BASELINE" == "$REQUIRED_BRIDGE_VERSION" ]]; then
-            baseline_dependency_args+=(--baseline-dependencies published)
+            upgrade_command+=(--baseline-dependencies published)
           fi
-          scripts/test-upgrade-protocol-release.sh \
-            --from-version "$BASELINE" \
-            --target-version "$RELEASE_TAG" \
-            --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
-            --baseline-mode seed \
-            --health-timeout 60 \
-            "${baseline_dependency_args[@]}" \
-            "${source_gateway_args[@]}"
+          if [[ "$CANARY_START_SOURCE" == "true" ]]; then
+            upgrade_command+=(--start-source-gateway)
+          fi
+          "${upgrade_command[@]}"
 
   macos-upgrade:
     name: macOS signed upgrade ${{ matrix.baseline }} → ${{ inputs.version }}
@@ -200,17 +199,18 @@ jobs:
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             release-candidate/dist/checksums.txt
-          baseline_dependency_args=()
+          upgrade_command=(
+            scripts/test-upgrade-protocol-release.sh
+            --from-version "$BASELINE"
+            --target-version "$RELEASE_TAG"
+            --release-dir "$GITHUB_WORKSPACE/release-candidate/dist"
+            --baseline-mode seed
+            --health-timeout 60
+          )
           if [[ -n "$REQUIRED_BRIDGE_VERSION" && "$BASELINE" == "$REQUIRED_BRIDGE_VERSION" ]]; then
-            baseline_dependency_args+=(--baseline-dependencies published)
+            upgrade_command+=(--baseline-dependencies published)
           fi
-          scripts/test-upgrade-protocol-release.sh \
-            --from-version "$BASELINE" \
-            --target-version "$RELEASE_TAG" \
-            --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
-            --baseline-mode seed \
-            --health-timeout 60 \
-            "${baseline_dependency_args[@]}"
+          "${upgrade_command[@]}"
 
   windows-unpublished-refusal:
     name: Windows unpublished-runtime refusal

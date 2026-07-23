@@ -337,10 +337,14 @@ installation before dependency or artifact changes.
 ### Cut a GitHub Release
 
 The manually dispatched `Release` GitHub Actions workflow is the only supported
-way to cut a release. It validates the requested version, builds and signs all
-artifacts, runs the native upgrade gates, and creates the remote tag and GitHub
-release together only after protected release approval. This ordering keeps
-Immutable Releases from stranding half-built assets.
+way to cut a release. Its explicit `certify` operation validates the requested
+version, builds and signs all artifacts, runs the native upgrade gates, and
+records the exact golden candidate without publishing. After that run succeeds,
+the `release` operation verifies exact-SHA platform CI and the matching
+certification receipt, then creates the remote tag and GitHub release from
+those same bytes. A missing or rejected receipt stops before candidate
+construction or platform packaging. This ordering keeps Release from becoming
+a test bed and keeps Immutable Releases from stranding half-built assets.
 
 The workflow input is the published-version authority. It stamps the requested
 version into its isolated build checkout before producing the CLI, gateway,
@@ -356,13 +360,22 @@ checksummed release assets still carry the requested version everywhere.
 Preferred — from the Actions UI:
 
 ```
-Actions -> Release -> Run workflow -> version: 0.4.0
+Actions -> Release -> Run workflow -> operation: certify -> version: 0.8.7
+# Wait for the certification run to succeed.
+Actions -> Release -> Run workflow -> operation: release -> version: 0.8.7
+  -> immutable_releases_confirmed: true
 ```
 
-Or dispatch the same workflow with GitHub CLI:
+Or dispatch both operations with GitHub CLI:
 
 ```bash
-gh workflow run release.yaml --ref main -f version=0.4.0
+gh workflow run release.yaml --ref main \
+  -f operation=certify -f version=0.8.7
+
+# Wait for certification to succeed, then promote the exact receipt.
+gh workflow run release.yaml --ref main \
+  -f operation=release -f version=0.8.7 \
+  -f immutable_releases_confirmed=true
 ```
 
 Do not create or push the tag yourself. The workflow must retain exclusive

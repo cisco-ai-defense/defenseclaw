@@ -18,6 +18,8 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/release.yaml"
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
+WINDOWS_CI_WORKFLOW = ROOT / ".github/workflows/windows-native.yml"
+MACOS_CI_WORKFLOW = ROOT / ".github/workflows/macos-app.yml"
 CERTIFICATION_WORKFLOW = ROOT / ".github/workflows/pre-release-certification.yml"
 PROTOCOL_GATE = ROOT / "scripts/test-upgrade-protocol-release.sh"
 HISTORICAL_BOOTSTRAP_GATE = ROOT / "scripts/test-historical-bootstrap-dependencies.sh"
@@ -32,6 +34,11 @@ COSIGN_INSTALLER_ACTION = "sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd
 
 def _bash_executable() -> str:
     """Select Git Bash on Windows instead of the WSL launcher."""
+
+    if forced_bash := os.environ.get("DEFENSECLAW_TEST_BASH"):
+        if Path(forced_bash).is_file():
+            return forced_bash
+        pytest.fail(f"DEFENSECLAW_TEST_BASH does not name a file: {forced_bash}")
 
     if os.name != "nt":
         return shutil.which("bash") or "bash"
@@ -269,18 +276,33 @@ def test_release_requires_successful_main_ci_for_the_exact_candidate_sha() -> No
     assert step["env"] == {
         "GH_TOKEN": "${{ github.token }}",
         "SELECTED_COMMIT": "${{ needs.release-mode.outputs.commit }}",
-        "CI_WAIT_ATTEMPTS": "180",
+        "CI_WAIT_ATTEMPTS": "360",
+        "CI_WAIT_MAX_SECONDS": "10800",
         "CI_WAIT_INTERVAL_SECONDS": "30",
+        "CI_API_TIMEOUT_SECONDS": "30",
+        "REQUIRED_CI_WORKFLOWS": (
+            "ci.yml|CI\n"
+            "windows-native.yml|Windows Native CI\n"
+            "macos-app.yml|macOS App"
+        ),
     }
     command = step["run"]
-    assert "actions/workflows/ci.yml/runs" in command
+    assert WINDOWS_CI_WORKFLOW.is_file()
+    assert MACOS_CI_WORKFLOW.is_file()
+    assert "actions/workflows/$workflow_file/runs" in command
     assert "branch=main&event=push&head_sha=$SELECTED_COMMIT" in command
     assert 'run.get("head_sha") == expected_sha' in command
     assert 'status != "completed"' in command
     assert 'conclusion == "success"' in command
     assert 'int(run.get("run_attempt") or 0)' in command
+    assert "wait_deadline=$((wait_started_at + CI_WAIT_MAX_SECONDS))" in command
+    assert "command -v timeout" in command
+    assert "--kill-after=5s" in command
+    assert 'HTTP\\ (401|404|422)' in command
     assert "Exact-SHA CI has not passed" in command
-    assert "20 + 25 + 30 minutes" in WORKFLOW.read_text(encoding="utf-8")
+    workflow_text = WORKFLOW.read_text(encoding="utf-8")
+    assert "20 + 25 + 30 minutes" in workflow_text
+    assert "shared three-hour window" in workflow_text
     assert revalidation["if"] == "${{ needs.release-mode.outputs.operation == 'release' }}"
     assert revalidation["env"] == {
         "SELECTED_COMMIT": "${{ needs.release-mode.outputs.commit }}",
@@ -383,7 +405,10 @@ def test_exact_sha_ci_gate_retries_a_transient_api_failure(tmp_path: Path) -> No
             "GITHUB_REPOSITORY": "example/defenseclaw",
             "SELECTED_COMMIT": commit,
             "CI_WAIT_ATTEMPTS": "2",
+            "CI_WAIT_MAX_SECONDS": "30",
             "CI_WAIT_INTERVAL_SECONDS": "0",
+            "CI_API_TIMEOUT_SECONDS": "5",
+            "REQUIRED_CI_WORKFLOWS": step["env"]["REQUIRED_CI_WORKFLOWS"],
         }
     )
     completed = subprocess.run(
@@ -409,7 +434,7 @@ def test_exact_sha_ci_gate_retries_a_transient_api_failure(tmp_path: Path) -> No
     )
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "Waiting for exact-SHA CI (CI API unavailable; check 1/2)" in completed.stdout
+    assert "Waiting for exact-SHA CI (CI: workflow API unavailable" in completed.stdout
     assert "OK: exact-SHA CI passed" in completed.stdout
 
 
@@ -455,7 +480,10 @@ def test_exact_sha_ci_gate_rejects_every_state_except_success(
             "GITHUB_REPOSITORY": "example/defenseclaw",
             "SELECTED_COMMIT": commit,
             "CI_WAIT_ATTEMPTS": "1",
+            "CI_WAIT_MAX_SECONDS": "30",
             "CI_WAIT_INTERVAL_SECONDS": "0",
+            "CI_API_TIMEOUT_SECONDS": "5",
+            "REQUIRED_CI_WORKFLOWS": step["env"]["REQUIRED_CI_WORKFLOWS"],
         }
     )
     completed = subprocess.run(
@@ -510,7 +538,10 @@ def test_exact_sha_ci_gate_rejects_missing_or_unrelated_runs(tmp_path: Path) -> 
             "GITHUB_REPOSITORY": "example/defenseclaw",
             "SELECTED_COMMIT": commit,
             "CI_WAIT_ATTEMPTS": "1",
+            "CI_WAIT_MAX_SECONDS": "30",
             "CI_WAIT_INTERVAL_SECONDS": "0",
+            "CI_API_TIMEOUT_SECONDS": "5",
+            "REQUIRED_CI_WORKFLOWS": step["env"]["REQUIRED_CI_WORKFLOWS"],
         }
     )
     completed = subprocess.run(
@@ -528,7 +559,430 @@ def test_exact_sha_ci_gate_rejects_missing_or_unrelated_runs(tmp_path: Path) -> 
     )
 
     assert completed.returncode == 1
-    assert "CI for " + commit + " is missing" in completed.stdout
+    assert "Required workflows for " + commit + " are not green" in completed.stdout
+    assert "CI: missing" in completed.stdout
+    assert "Windows Native CI: missing" in completed.stdout
+
+
+def test_exact_sha_ci_gate_rejects_a_terminal_windows_failure_after_ci_passes(
+    tmp_path: Path,
+) -> None:
+    commit = "9" * 40
+    step = next(
+        step
+        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        if step.get("name") == "Require successful CI for the exact release commit"
+    )
+    successful_ci = {
+        "workflow_runs": [
+            {
+                "head_sha": commit,
+                "head_branch": "main",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "success",
+                "run_number": 50,
+                "run_attempt": 1,
+                "id": 50,
+                "html_url": "https://github.example/actions/runs/50",
+            }
+        ]
+    }
+    failed_windows = {
+        "workflow_runs": [
+            {
+                "head_sha": commit,
+                "head_branch": "main",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "failure",
+                "run_number": 51,
+                "run_attempt": 1,
+                "id": 51,
+                "html_url": "https://github.example/actions/runs/51",
+            }
+        ]
+    }
+    env = os.environ.copy()
+    env.update(
+        {
+            "FAKE_CI_RESPONSE": json.dumps(successful_ci),
+            "FAKE_WINDOWS_RESPONSE": json.dumps(failed_windows),
+            "GITHUB_REPOSITORY": "example/defenseclaw",
+            "SELECTED_COMMIT": commit,
+            "CI_WAIT_ATTEMPTS": "1",
+            "CI_WAIT_MAX_SECONDS": "30",
+            "CI_WAIT_INTERVAL_SECONDS": "0",
+            "CI_API_TIMEOUT_SECONDS": "5",
+            "REQUIRED_CI_WORKFLOWS": step["env"]["REQUIRED_CI_WORKFLOWS"],
+        }
+    )
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            (
+                "gh() {\n"
+                "  case \"$*\" in\n"
+                "    *actions/workflows/ci.yml/runs*)\n"
+                "      printf '%s' \"$FAKE_CI_RESPONSE\"\n"
+                "      ;;\n"
+                "    *actions/workflows/windows-native.yml/runs*)\n"
+                "      printf '%s' \"$FAKE_WINDOWS_RESPONSE\"\n"
+                "      ;;\n"
+                "    *) return 1 ;;\n"
+                "  esac\n"
+                "}\n"
+                + step["run"]
+            ),
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert "Exact-SHA CI failed" in completed.stdout
+    assert "Windows Native CI" in completed.stdout
+    assert "completed/failure" in completed.stdout
+
+
+def test_exact_sha_ci_gate_selects_the_latest_successful_rerun(
+    tmp_path: Path,
+) -> None:
+    commit = "8" * 40
+    step = next(
+        step
+        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        if step.get("name") == "Require successful CI for the exact release commit"
+    )
+    payload = {
+        "workflow_runs": [
+            {
+                "head_sha": commit,
+                "head_branch": "main",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "failure",
+                "run_number": 60,
+                "run_attempt": 1,
+                "id": 60,
+                "html_url": "https://github.example/actions/runs/60",
+            },
+            {
+                "head_sha": commit,
+                "head_branch": "main",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "success",
+                "run_number": 60,
+                "run_attempt": 2,
+                "id": 61,
+                "html_url": "https://github.example/actions/runs/61",
+            },
+        ]
+    }
+    env = os.environ.copy()
+    env.update(
+        {
+            "FAKE_GH_RESPONSE": json.dumps(payload),
+            "GITHUB_REPOSITORY": "example/defenseclaw",
+            "SELECTED_COMMIT": commit,
+            "CI_WAIT_ATTEMPTS": "1",
+            "CI_WAIT_MAX_SECONDS": "30",
+            "CI_WAIT_INTERVAL_SECONDS": "0",
+            "CI_API_TIMEOUT_SECONDS": "5",
+            "REQUIRED_CI_WORKFLOWS": step["env"]["REQUIRED_CI_WORKFLOWS"],
+        }
+    )
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            'gh() { printf \'%s\' "$FAKE_GH_RESPONSE"; }\n' + step["run"],
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "OK: exact-SHA CI passed" in completed.stdout
+    assert completed.stdout.count("https://github.example/actions/runs/61") == 3
+    assert "actions/runs/60" not in completed.stdout
+
+
+@pytest.mark.parametrize(
+    ("latest_status", "latest_conclusion", "expected_fragment"),
+    [
+        ("completed", "failure", "completed/failure"),
+        ("in_progress", None, "in_progress/pending"),
+    ],
+)
+def test_exact_sha_ci_gate_never_reuses_an_older_success_over_a_newer_attempt(
+    tmp_path: Path,
+    latest_status: str,
+    latest_conclusion: str | None,
+    expected_fragment: str,
+) -> None:
+    commit = "4" * 40
+    step = next(
+        step
+        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        if step.get("name") == "Require successful CI for the exact release commit"
+    )
+    payload = {
+        "workflow_runs": [
+            {
+                "head_sha": commit,
+                "head_branch": "main",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "success",
+                "run_number": 70,
+                "run_attempt": 1,
+                "id": 70,
+                "html_url": "https://github.example/actions/runs/70",
+            },
+            {
+                "head_sha": commit,
+                "head_branch": "main",
+                "event": "push",
+                "status": latest_status,
+                "conclusion": latest_conclusion,
+                "run_number": 70,
+                "run_attempt": 2,
+                "id": 70,
+                "html_url": "https://github.example/actions/runs/70/attempts/2",
+            },
+        ]
+    }
+    env = os.environ.copy()
+    env.update(
+        {
+            "FAKE_GH_RESPONSE": json.dumps(payload),
+            "GITHUB_REPOSITORY": "example/defenseclaw",
+            "SELECTED_COMMIT": commit,
+            "CI_WAIT_ATTEMPTS": "1",
+            "CI_WAIT_MAX_SECONDS": "30",
+            "CI_WAIT_INTERVAL_SECONDS": "0",
+            "CI_API_TIMEOUT_SECONDS": "5",
+            "REQUIRED_CI_WORKFLOWS": step["env"]["REQUIRED_CI_WORKFLOWS"],
+        }
+    )
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            'gh() { printf \'%s\' "$FAKE_GH_RESPONSE"; }\n' + step["run"],
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert expected_fragment in completed.stdout
+    assert "OK: exact-SHA CI passed" not in completed.stdout
+
+
+def test_exact_sha_ci_gate_fails_closed_when_the_api_outage_exhausts_deadline(
+    tmp_path: Path,
+) -> None:
+    commit = "7" * 40
+    step = next(
+        step
+        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        if step.get("name") == "Require successful CI for the exact release commit"
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "GITHUB_REPOSITORY": "example/defenseclaw",
+            "SELECTED_COMMIT": commit,
+            "CI_WAIT_ATTEMPTS": "1",
+            "CI_WAIT_MAX_SECONDS": "30",
+            "CI_WAIT_INTERVAL_SECONDS": "0",
+            "CI_API_TIMEOUT_SECONDS": "5",
+            "REQUIRED_CI_WORKFLOWS": step["env"]["REQUIRED_CI_WORKFLOWS"],
+        }
+    )
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            "gh() { return 1; }\n" + step["run"],
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 1
+    assert "Exact-SHA CI has not passed" in completed.stdout
+    assert "CI: workflow API unavailable" in completed.stdout
+    assert "Windows Native CI: workflow API unavailable" in completed.stdout
+    assert "macOS App: workflow API unavailable" in completed.stdout
+
+
+def test_exact_sha_ci_gate_treats_permanent_workflow_api_errors_as_terminal(
+    tmp_path: Path,
+) -> None:
+    step = next(
+        step
+        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        if step.get("name") == "Require successful CI for the exact release commit"
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "GITHUB_REPOSITORY": "example/defenseclaw",
+            "SELECTED_COMMIT": "3" * 40,
+            "CI_WAIT_ATTEMPTS": "100",
+            "CI_WAIT_MAX_SECONDS": "30",
+            "CI_WAIT_INTERVAL_SECONDS": "0",
+            "CI_API_TIMEOUT_SECONDS": "5",
+            "REQUIRED_CI_WORKFLOWS": step["env"]["REQUIRED_CI_WORKFLOWS"],
+        }
+    )
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            (
+                "gh() {\n"
+                "  printf '%s\\n' 'gh: workflow not found (HTTP 404)' >&2\n"
+                "  return 1\n"
+                "}\n"
+                + step["run"]
+            ),
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 1
+    assert "Exact-SHA CI failed" in completed.stdout
+    assert "permanently rejected" in completed.stdout
+    assert "HTTP 404" in completed.stdout
+    assert "Waiting for exact-SHA CI" not in completed.stdout
+
+
+def test_exact_sha_ci_gate_enforces_the_absolute_deadline_before_api_calls(
+    tmp_path: Path,
+) -> None:
+    step = next(
+        step
+        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        if step.get("name") == "Require successful CI for the exact release commit"
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "GITHUB_REPOSITORY": "example/defenseclaw",
+            "SELECTED_COMMIT": "2" * 40,
+            "CI_WAIT_ATTEMPTS": "100",
+            "CI_WAIT_MAX_SECONDS": "0",
+            "CI_WAIT_INTERVAL_SECONDS": "0",
+            "CI_API_TIMEOUT_SECONDS": "5",
+            "REQUIRED_CI_WORKFLOWS": step["env"]["REQUIRED_CI_WORKFLOWS"],
+        }
+    )
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            (
+                "gh() { printf '%s\\n' 'GH_MUST_NOT_RUN'; return 1; }\n"
+                + step["run"]
+            ),
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 1
+    assert "shared deadline reached before workflow query" in completed.stdout
+    assert "0 seconds" in completed.stdout
+    assert "GH_MUST_NOT_RUN" not in completed.stdout
+
+
+def test_release_promotion_fails_before_build_when_exact_certification_is_missing(
+    tmp_path: Path,
+) -> None:
+    step = next(
+        step
+        for step in _workflow()["jobs"]["lookup-certification"]["steps"]
+        if step.get("name") == "Locate and verify certification bundle"
+    )
+    github_output = tmp_path / "github-output.txt"
+    env = os.environ.copy()
+    env.update(
+        {
+            "FAKE_POLICY_INFO": json.dumps(
+                {"workflow_version": "sha256:" + ("6" * 64)}
+            ),
+            "GITHUB_OUTPUT": str(github_output),
+            "GITHUB_REPOSITORY": "example/defenseclaw",
+            "LATEST_STABLE": "0.8.6",
+            "REAL_PYTHON": sys.executable,
+            "RELEASE_COMMIT": "5" * 40,
+            "RELEASE_OPERATION": "release",
+            "RELEASE_TAG": "0.8.7",
+        }
+    )
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            (
+                "gh() { printf '%s' '{\"artifacts\":[]}'; }\n"
+                "python3() {\n"
+                "  if [[ $1 == scripts/release_certification.py && $2 == policy-info ]]; then\n"
+                "    printf '%s' \"$FAKE_POLICY_INFO\"\n"
+                "  else\n"
+                "    command \"$REAL_PYTHON\" \"$@\"\n"
+                "  fi\n"
+                "}\n"
+                + step["run"]
+            ),
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert "Exact pre-release certification required" in completed.stdout
+    assert "No reusable exact certification exists" in completed.stdout
+    assert "operation=certify" in completed.stdout
+    assert "Running the full certification fallback" not in completed.stdout
+    assert github_output.read_text(encoding="utf-8") == "reuse=false\n"
+    assert not (tmp_path / "certification.zip").exists()
+    assert not (tmp_path / "certification-bundle").exists()
 
 
 def test_release_target_must_advance_reviewed_and_published_stable_state() -> None:
@@ -892,6 +1346,7 @@ def test_posix_fresh_install_gates_temporary_and_external_cosign_paths() -> None
 def test_full_historical_matrix_limits_mutable_dependencies_to_required_bridge() -> None:
     workflow = _certification_workflow()
     rendered = str(workflow)
+    workflow_text = CERTIFICATION_WORKFLOW.read_text(encoding="utf-8")
 
     # Linux and macOS still exercise every behavior-class baseline through the
     # signed resolver. On both hosts, only the required bridge gets its
@@ -915,6 +1370,10 @@ def test_full_historical_matrix_limits_mutable_dependencies_to_required_bridge()
     assert "--baseline-dependencies published" in macos_rendered
     assert '"$BASELINE" == "$REQUIRED_BRIDGE_VERSION"' in macos_rendered
     assert rendered.count("--baseline-dependencies published") == 2
+    assert workflow_text.count("upgrade_command=(") == 2
+    assert workflow_text.count('"${upgrade_command[@]}"') == 2
+    assert "baseline_dependency_args" not in workflow_text
+    assert "source_gateway_args" not in workflow_text
 
     release = _workflow()
     assert release["jobs"]["release-preflight"]["outputs"]["certification_cases"] == (
@@ -923,6 +1382,95 @@ def test_full_historical_matrix_limits_mutable_dependencies_to_required_bridge()
     assert release["jobs"]["full-certification"]["with"]["upgrade_cases"] == (
         "${{ needs.release-preflight.outputs.certification_cases }}"
     )
+
+
+@pytest.mark.parametrize(
+    ("job_name", "baseline", "start_source_gateway", "expected_optional_args"),
+    [
+        ("macos-upgrade", "0.8.5", "false", []),
+        (
+            "macos-upgrade",
+            "0.8.4",
+            "false",
+            ["--baseline-dependencies", "published"],
+        ),
+        ("linux-upgrade", "0.8.5", "false", []),
+        (
+            "linux-upgrade",
+            "0.8.4",
+            "true",
+            [
+                "--baseline-dependencies",
+                "published",
+                "--start-source-gateway",
+            ],
+        ),
+    ],
+)
+def test_certification_upgrade_wrapper_is_nounset_safe_with_optional_arguments(
+    tmp_path: Path,
+    job_name: str,
+    baseline: str,
+    start_source_gateway: str,
+    expected_optional_args: list[str],
+) -> None:
+    step = next(
+        step
+        for step in _certification_workflow()["jobs"][job_name]["steps"]
+        if step.get("name") == "Exercise staged handoff, rollback, and recovery"
+    )
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    protocol_gate = scripts / "test-upgrade-protocol-release.sh"
+    protocol_gate.write_text(
+        '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$CAPTURED_ARGS"\n',
+        encoding="utf-8",
+    )
+    protocol_gate.chmod(0o755)
+    captured_args = tmp_path / f"{job_name}-args.txt"
+    env = os.environ.copy()
+    env.update(
+        {
+            "BASELINE": baseline,
+            "CANARY_START_SOURCE": start_source_gateway,
+            "CAPTURED_ARGS": str(captured_args),
+            "GITHUB_REPOSITORY": "example/defenseclaw",
+            "GITHUB_WORKSPACE": str(tmp_path),
+            "RELEASE_COMMIT": "a" * 40,
+            "RELEASE_TAG": "0.8.7",
+            "REQUIRED_BRIDGE_VERSION": "0.8.4",
+        }
+    )
+
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            "python3() { return 0; }\n" + step["run"],
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    arguments = captured_args.read_text(encoding="utf-8").splitlines()
+    assert arguments[:10] == [
+        "--from-version",
+        baseline,
+        "--target-version",
+        "0.8.7",
+        "--release-dir",
+        str(tmp_path / "release-candidate/dist"),
+        "--baseline-mode",
+        "seed",
+        "--health-timeout",
+        "60",
+    ]
+    assert arguments[10:] == expected_optional_args
 
 
 def test_macos_app_consumes_and_validates_sealed_runtime_gateway() -> None:
@@ -1523,6 +2071,30 @@ def test_reviewed_resolver_asset_validation_fails_explicitly_without_errexit(
         completed.stdout + completed.stderr
     )
     assert "UNREACHABLE" not in completed.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="release refusal contract requires POSIX bash")
+def test_protocol_argument_parser_accepts_no_shared_arguments_under_nounset() -> None:
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            (
+                'source "$1"; parse_protocol_args; '
+                'printf "%s\\n" "$REFUSAL_CONTRACT_ONLY"'
+            ),
+            "protocol-empty-arguments-test",
+            str(PROTOCOL_GATE),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "0"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="release refusal contract requires POSIX bash")

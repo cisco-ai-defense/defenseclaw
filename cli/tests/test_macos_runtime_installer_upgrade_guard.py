@@ -236,14 +236,64 @@ def test_macos_release_signer_requirement_pins_production_team_only() -> None:
     assert 'codesign --verify --strict -R "${APP_REQUIREMENT}"' in verify
 
 
-def test_macos_package_ci_is_not_repeated_after_merge() -> None:
+def test_macos_package_ci_runs_for_every_exact_main_sha_with_stable_aggregate() -> None:
     workflow = yaml.load(
         MACOS_CI_WORKFLOW.read_text(encoding="utf-8"),
         Loader=yaml.BaseLoader,
     )
     triggers = workflow["on"]
 
-    assert set(triggers) == {"pull_request", "workflow_dispatch"}
+    assert set(triggers) == {"push", "pull_request", "workflow_dispatch"}
+    assert triggers["push"] == {"branches": ["main"]}
+    assert workflow["concurrency"] == {
+        "group": (
+            "macos-app-${{ github.event_name }}-"
+            "${{ github.event.pull_request.number || github.sha }}"
+        ),
+        "cancel-in-progress": "true",
+    }
+    aggregate = workflow["jobs"]["macos-app-required"]
+    assert aggregate["name"] == "macOS App Required"
+    assert aggregate["needs"] == ["license-headers", "build-and-test"]
+    assert aggregate["if"] == "${{ always() }}"
+    assert aggregate["steps"][0]["env"] == {
+        "LICENSE_HEADERS_RESULT": "${{ needs.license-headers.result }}",
+        "BUILD_AND_TEST_RESULT": "${{ needs.build-and-test.result }}",
+    }
+    command = aggregate["steps"][0]["run"]
+    assert 'test "$LICENSE_HEADERS_RESULT" = success' in command
+    assert 'test "$BUILD_AND_TEST_RESULT" = success' in command
+
+
+def test_macos_ci_gates_release_wrappers_with_system_bash() -> None:
+    workflow = yaml.load(
+        MACOS_CI_WORKFLOW.read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+    triggers = workflow["on"]
+    watched_paths = triggers["pull_request"]["paths"]
+    assert "scripts/test-upgrade-protocol-release.sh" in watched_paths
+    assert ".github/workflows/pre-release-certification.yml" in watched_paths
+
+    steps = workflow["jobs"]["build-and-test"]["steps"]
+    gate = next(
+        step
+        for step in steps
+        if step.get("name") == "Exercise release wrappers with system Bash"
+    )
+    assert gate["env"] == {"DEFENSECLAW_TEST_BASH": "/bin/bash"}
+    command = gate["run"]
+    assert "/bin/bash --version" in command
+    assert "uv run --frozen python -m pytest -q" in command
+    assert "cli/tests/test_release_workflow_staged.py" in command
+    assert (
+        "certification_upgrade_wrapper_is_nounset_safe_with_optional_arguments"
+        in command
+    )
+    assert (
+        "protocol_argument_parser_accepts_no_shared_arguments_under_nounset"
+        in command
+    )
 
 
 def test_macos_ci_builds_and_verifies_reviewed_runtime_fixture_first() -> None:
@@ -314,7 +364,9 @@ def test_macos_ci_builds_and_verifies_reviewed_runtime_fixture_first() -> None:
         '"scripts/generate-upgrade-manifest.py"',
         '"scripts/release_candidate.py"',
         '"scripts/source_release_identity.py"',
+        '"scripts/test-upgrade-protocol-release.sh"',
         '"scripts/test-upgrade-release.sh"',
+        '".github/workflows/pre-release-certification.yml"',
     ):
         assert workflow.count(watched) == 1
     assert 'make -C "${build_root}" dist-cli DIST_DIR="${out}"' in smoke

@@ -61,10 +61,11 @@ smoke therefore installs authenticated historical releases in a temporary
 
 The protected signing workflow creates the sealed candidate. Nightly/manual
 certification then runs the manifest-derived behavior-class matrix. A final
-release reuses that exact golden candidate, or runs the same full certification
-when no recent matching receipt exists. The signed gates verify successful
-bridge activation, fresh-controller handoff, required migrations, exact
-CLI/gateway versions, health, receipts, and rollback behavior before publish.
+release only reuses that exact golden candidate. When no recent matching
+receipt exists, run the explicit `certify` operation successfully before
+retrying `release`. The signed gates verify successful bridge activation,
+fresh-controller handoff, required migrations, exact CLI/gateway versions,
+health, receipts, and rollback behavior before publish.
 
 ```bash
 # Current platform, proving one old controller refuses the unsigned candidate.
@@ -130,14 +131,15 @@ fail closed until their fixture and verifier are reviewed.
 Nightly/manual certification seals one candidate, then runs
 `scripts/test-upgrade-protocol-release.sh` for the selected behavior-class
 Linux/macOS baselines plus native fresh-install and live-continuity gates.
-The final release reuses those exact certified bytes, or invokes that complete
-certification workflow on a cache miss. Legacy raw Windows runtime archives
-remain omitted, while exactly one `DefenseClawSetup-x64.exe` and its custody
-sidecars are promoted from the same sealed candidate. Complete Authenticode
-credentials require signing plus real Codex and Claude certification; absent
-credentials produce an explicitly unverified lifecycle-tested Setup, while a
-partial or invalid credential set aborts. A broken refusal, bridge handoff, migration,
-rollback, installer lifecycle, health, or history path aborts before publication.
+The final release reuses those exact certified bytes and fails before building
+or packaging when the receipt is absent or rejected. Legacy raw Windows runtime
+archives remain omitted, while exactly one `DefenseClawSetup-x64.exe` and its
+custody sidecars are promoted from the same sealed candidate. Complete
+Authenticode credentials require signing plus real Codex and Claude
+certification; absent credentials produce an explicitly unverified
+lifecycle-tested Setup, while a partial or invalid credential set aborts. A
+broken refusal, bridge handoff, migration, rollback, installer lifecycle,
+health, or history path aborts before publication.
 
 ### 0.8.4 bridge rollout order
 
@@ -154,8 +156,8 @@ an uncut branch artifact as the bridge.
 
 The release gates are layered so ordinary PRs stay fast and publication reuses
 recently certified bytes. See [Release Validation Strategy](RELEASE_VALIDATION.md)
-for the behavior-class selector, certification receipt, cache-miss fallback,
-and exact operator commands.
+for the behavior-class selector, certification receipt, explicit
+certification-before-promotion flow, and exact operator commands.
 
 | Workflow | Purpose |
 |----------|---------|

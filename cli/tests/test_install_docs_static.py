@@ -1830,11 +1830,19 @@ def test_release_docs_dispatch_protected_workflow_and_never_precreate_tag() -> N
     install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
 
     for text in (makefile, install):
-        assert "gh workflow run release.yaml --ref main -f version=" in text
+        assert "gh workflow run release.yaml --ref main" in text
+        assert "-f operation=certify" in text
+        assert "-f operation=release" in text
+        assert "-f immutable_releases_confirmed=true" in text
         assert "git tag 0.4.0" not in text
         assert "git push origin" not in text
     assert "Do not create or push the tag yourself" in install
-    assert "creates the remote tag and GitHub release together" in " ".join(install.split())
+    assert "creates the remote tag and GitHub release from those same bytes" in " ".join(
+        install.split()
+    )
+    assert "A missing or rejected receipt stops before candidate construction" in " ".join(
+        install.split()
+    )
 
 
 def test_upgrade_docs_fail_closed_for_unsupported_sources_without_inferred_hops() -> None:
