@@ -63,6 +63,46 @@ var AllComponents = []Component{
 	ComponentSetup,
 }
 
+// Target identifies a supported Windows build target. Resource manifests and
+// PE headers must agree with this value before an executable can be published.
+type Target string
+
+const (
+	TargetWindowsAMD64 Target = "windows_amd64"
+	TargetWindowsARM64 Target = "windows_arm64"
+)
+
+type targetSpecification struct {
+	manifestArchitecture string
+	peMachine            uint16
+}
+
+// ParseTarget validates a command-line Windows build target.
+func ParseTarget(value string) (Target, error) {
+	target := Target(strings.ToLower(strings.TrimSpace(value)))
+	if _, err := target.specification(); err != nil {
+		return "", fmt.Errorf("unsupported Windows resource target %q", value)
+	}
+	return target, nil
+}
+
+func (target Target) specification() (targetSpecification, error) {
+	switch target {
+	case TargetWindowsAMD64:
+		return targetSpecification{
+			manifestArchitecture: "amd64",
+			peMachine:            pe.IMAGE_FILE_MACHINE_AMD64,
+		}, nil
+	case TargetWindowsARM64:
+		return targetSpecification{
+			manifestArchitecture: "arm64",
+			peMachine:            pe.IMAGE_FILE_MACHINE_ARM64,
+		}, nil
+	default:
+		return targetSpecification{}, fmt.Errorf("unsupported Windows resource target %q", target)
+	}
+}
+
 type componentMetadata struct {
 	AssemblyName     string
 	Description      string
@@ -143,14 +183,29 @@ func parseVersion(value string) (parsedVersion, error) {
 	return parsedVersion{Display: display, Fixed: fixed, Pre: match[4] != ""}, nil
 }
 
-// Manifest returns the canonical UTF-8 RT_MANIFEST/1 bytes for a component.
-// The manifest opts every binary into long paths, current Windows compatibility,
-// per-monitor-v2 DPI behavior, and a non-elevating execution context. Setup is
-// the sole executable that creates common controls, so it alone activates v6.
+// Manifest returns the canonical AMD64 UTF-8 RT_MANIFEST/1 bytes for a
+// component. Setup is AMD64-only, and existing installer callers deliberately
+// retain this compatibility entry point.
 func Manifest(component Component, versionValue string) ([]byte, error) {
+	return ManifestForTarget(TargetWindowsAMD64, component, versionValue)
+}
+
+// ManifestForTarget returns the canonical UTF-8 RT_MANIFEST/1 bytes for a
+// component and target. The manifest opts every binary into long paths, current
+// Windows compatibility, per-monitor-v2 DPI behavior, and a non-elevating
+// execution context. Setup is the sole executable that creates common controls,
+// so it alone activates v6 and remains restricted to AMD64 certification.
+func ManifestForTarget(target Target, component Component, versionValue string) ([]byte, error) {
+	specification, err := target.specification()
+	if err != nil {
+		return nil, err
+	}
 	metadata, ok := componentMetadataByName[component]
 	if !ok {
 		return nil, fmt.Errorf("unsupported Windows resource component %q", component)
+	}
+	if component == ComponentSetup && target != TargetWindowsAMD64 {
+		return nil, fmt.Errorf("Windows setup resources support only %s, got %q", TargetWindowsAMD64, target)
 	}
 	parsed, err := parseVersion(versionValue)
 	if err != nil {
@@ -167,7 +222,7 @@ func Manifest(component Component, versionValue string) ([]byte, error) {
 	}
 	manifest := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity name="%s" processorArchitecture="amd64" type="win32" version="%d.%d.%d.%d" />
+  <assemblyIdentity name="%s" processorArchitecture="%s" type="win32" version="%d.%d.%d.%d" />
   <description>%s</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
@@ -189,7 +244,7 @@ func Manifest(component Component, versionValue string) ([]byte, error) {
     </windowsSettings>
   </application>%s
 </assembly>
-`, metadata.AssemblyName, parsed.Fixed[0], parsed.Fixed[1], parsed.Fixed[2], parsed.Fixed[3], metadata.Description, commonControls)
+`, metadata.AssemblyName, specification.manifestArchitecture, parsed.Fixed[0], parsed.Fixed[1], parsed.Fixed[2], parsed.Fixed[3], metadata.Description, commonControls)
 	return []byte(manifest), nil
 }
 
@@ -256,8 +311,8 @@ func readIcon(path string) (image.Image, error) {
 	return decoded, nil
 }
 
-func expectedResourceSet(component Component, versionValue, iconPath string) (*winres.ResourceSet, error) {
-	manifest, err := Manifest(component, versionValue)
+func expectedResourceSet(target Target, component Component, versionValue, iconPath string) (*winres.ResourceSet, error) {
+	manifest, err := ManifestForTarget(target, component, versionValue)
 	if err != nil {
 		return nil, err
 	}
@@ -284,11 +339,19 @@ func expectedResourceSet(component Component, versionValue, iconPath string) (*w
 	return resources, nil
 }
 
-// Apply replaces the PE resource directory with the exact DefenseClaw resource
-// set. Signed binaries are rejected so resources can never be changed after
-// Authenticode signing. The caller must sign only after Apply returns.
+// Apply replaces the PE resource directory with the exact AMD64 DefenseClaw
+// resource set. It is retained for the AMD64-only native Setup pipeline.
 func Apply(executable string, component Component, versionValue, iconPath string) error {
-	expected, err := expectedResourceSet(component, versionValue, iconPath)
+	return ApplyForTarget(executable, TargetWindowsAMD64, component, versionValue, iconPath)
+}
+
+// ApplyForTarget replaces the PE resource directory with the exact DefenseClaw
+// resource set for target. Signed binaries are rejected so resources can never
+// be changed after Authenticode signing. The requested target must match the PE
+// machine before any output file is created. The caller must sign only after
+// ApplyForTarget returns.
+func ApplyForTarget(executable string, target Target, component Component, versionValue, iconPath string) error {
+	expected, err := expectedResourceSet(target, component, versionValue, iconPath)
 	if err != nil {
 		return err
 	}
@@ -317,6 +380,10 @@ func Apply(executable string, component Component, versionValue, iconPath string
 	if signed {
 		source.Close()
 		return errors.New("refusing to modify resources after Authenticode signing")
+	}
+	if err := verifyPEMachine(source, target); err != nil {
+		source.Close()
+		return err
 	}
 	if _, err := source.Seek(0, io.SeekStart); err != nil {
 		source.Close()
@@ -354,14 +421,14 @@ func Apply(executable string, component Component, versionValue, iconPath string
 	if closeTemporaryErr != nil {
 		return fmt.Errorf("close resource output: %w", closeTemporaryErr)
 	}
-	if err := Verify(temporaryPath, component, versionValue, iconPath); err != nil {
+	if err := VerifyForTarget(temporaryPath, target, component, versionValue, iconPath); err != nil {
 		return fmt.Errorf("verify resource output before publish: %w", err)
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("publish resource-complete executable: %w", err)
 	}
 	committed = true
-	return Verify(path, component, versionValue, iconPath)
+	return VerifyForTarget(path, target, component, versionValue, iconPath)
 }
 
 type resourceKey struct {
@@ -384,10 +451,45 @@ func resourceMap(resources *winres.ResourceSet) map[resourceKey][]byte {
 	return result
 }
 
-// Verify independently parses the PE and requires its complete resource set to
-// byte-match the canonical manifest, five-size icon, and VERSIONINFO contract.
+// Verify independently parses an AMD64 PE and requires its complete resource
+// set to byte-match the canonical manifest, five-size icon, and VERSIONINFO
+// contract. It is retained for the AMD64-only native Setup pipeline.
 func Verify(executable string, component Component, versionValue, iconPath string) error {
-	expected, err := expectedResourceSet(component, versionValue, iconPath)
+	return VerifyForTarget(executable, TargetWindowsAMD64, component, versionValue, iconPath)
+}
+
+func verifyPEMachine(source io.ReaderAt, target Target) error {
+	specification, err := target.specification()
+	if err != nil {
+		return err
+	}
+	// Hide a caller-owned file's Close method from debug/pe. Closing the parsed
+	// view must not close the same descriptor used for signature/resource checks.
+	peFile, err := pe.NewFile(struct{ io.ReaderAt }{source})
+	if err != nil {
+		return fmt.Errorf("parse PE headers: %w", err)
+	}
+	machine := peFile.Machine
+	if err := peFile.Close(); err != nil {
+		return fmt.Errorf("close PE headers: %w", err)
+	}
+	if machine != specification.peMachine {
+		return fmt.Errorf(
+			"PE machine is %#x, but requested target %s requires %s (%#x)",
+			machine,
+			target,
+			specification.manifestArchitecture,
+			specification.peMachine,
+		)
+	}
+	return nil
+}
+
+// VerifyForTarget independently parses one PE file and requires its machine and
+// complete resource set to byte-match the requested target's canonical
+// manifest, five-size icon, and VERSIONINFO contract.
+func VerifyForTarget(executable string, target Target, component Component, versionValue, iconPath string) error {
+	expected, err := expectedResourceSet(target, component, versionValue, iconPath)
 	if err != nil {
 		return err
 	}
@@ -395,21 +497,22 @@ func Verify(executable string, component Component, versionValue, iconPath strin
 	if err != nil {
 		return fmt.Errorf("resolve Windows executable: %w", err)
 	}
-	peFile, err := pe.Open(path)
-	if err != nil {
-		return fmt.Errorf("parse PE headers: %w", err)
-	}
-	if peFile.Machine != pe.IMAGE_FILE_MACHINE_AMD64 {
-		machine := peFile.Machine
-		peFile.Close()
-		return fmt.Errorf("PE machine is %#x, want amd64 (%#x)", machine, pe.IMAGE_FILE_MACHINE_AMD64)
-	}
-	if err := peFile.Close(); err != nil {
-		return fmt.Errorf("close PE headers: %w", err)
-	}
 	file, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open resource-complete executable: %w", err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return fmt.Errorf("inspect resource-complete executable: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		file.Close()
+		return errors.New("resource-complete executable is not a regular file")
+	}
+	if err := verifyPEMachine(file, target); err != nil {
+		file.Close()
+		return err
 	}
 	actual, loadErr := winres.LoadFromEXE(file)
 	closeErr := file.Close()

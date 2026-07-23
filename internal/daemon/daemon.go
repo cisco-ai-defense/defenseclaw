@@ -128,10 +128,11 @@ func (d *Daemon) openLogFileForChild() (*os.File, error) {
 type pidInfo struct {
 	PID        int    `json:"pid"`
 	Executable string `json:"executable"`
-	// StartTime is the wall-clock time the parent recorded when the
-	// child was spawned. Kept for human/log diagnostics only — DO NOT
-	// use this for PID-reuse detection, since it has no relationship
-	// to the kernel's view of the process. Use StartIdentity instead.
+	// StartTime is a whole-second wall-clock lower bound captured before the
+	// child was spawned (or, on Windows, before the child initializes). Kept
+	// for startup-generation/readiness diagnostics only — DO NOT use this for
+	// PID-reuse detection, since it has no relationship to the kernel's view
+	// of the process. Use StartIdentity instead.
 	StartTime int64 `json:"start_time"`
 	// StartIdentity is an opaque per-process token captured immediately
 	// after spawn (Linux: /proc/<pid>/stat field 22 starttime; Darwin:
@@ -175,6 +176,21 @@ func (d *Daemon) HasManagedProcessIdentity(pid int) bool {
 		return false
 	}
 	return d.verifyProcess(info)
+}
+
+// ManagedProcessStartedAt returns the wall-clock launch generation recorded
+// for an exact, strongly identified managed process. StartTime is not itself a
+// PID-reuse credential; callers receive it only after the executable and
+// kernel start identity have both been revalidated against the live process.
+func (d *Daemon) ManagedProcessStartedAt(pid int) (time.Time, bool) {
+	info, err := d.readPIDInfo()
+	if err != nil || info.PID != pid || info.Executable == "" || info.StartIdentity == "" || info.StartTime <= 0 {
+		return time.Time{}, false
+	}
+	if !d.verifyProcess(info) {
+		return time.Time{}, false
+	}
+	return time.Unix(info.StartTime, 0), true
 }
 
 // verifyProcess returns true when the live process at info.PID is the SAME
@@ -380,6 +396,7 @@ func (d *Daemon) Start(args []string) (int, error) {
 	// Detach from parent process group (platform-specific)
 	setSysProcAttr(cmd)
 
+	launchStartedAt := time.Now()
 	if err := cmd.Start(); err != nil {
 		devNull.Close()
 		_ = logFile.Close()
@@ -427,7 +444,7 @@ func (d *Daemon) Start(args []string) (int, error) {
 		}
 		d.started = registered
 	} else {
-		if err := d.writePIDInfo(pid, executable, startIdentity); err != nil {
+		if err := d.writePIDInfoAt(pid, executable, startIdentity, launchStartedAt); err != nil {
 			_ = cmd.Process.Kill()
 			<-exitCh // reap the child so it doesn't become a zombie
 			devNull.Close()
@@ -842,10 +859,14 @@ func (d *Daemon) readWatchdogPID() (int, error) {
 }
 
 func (d *Daemon) writePIDInfo(pid int, executable string, startIdentity string) error {
+	return d.writePIDInfoAt(pid, executable, startIdentity, time.Now())
+}
+
+func (d *Daemon) writePIDInfoAt(pid int, executable string, startIdentity string, startedAt time.Time) error {
 	info := pidInfo{
 		PID:           pid,
 		Executable:    executable,
-		StartTime:     time.Now().Unix(),
+		StartTime:     startedAt.Unix(),
 		StartIdentity: startIdentity,
 	}
 	data, err := json.Marshal(info)
@@ -868,6 +889,10 @@ func RegisterCurrentProcess() error {
 	if !IsDaemonChild() || !daemonChildRegistersPID() {
 		return nil
 	}
+	// Registration is the first root pre-run operation on Windows. Capture the
+	// lower bound before executable/identity inspection so it always precedes
+	// the gateway health generation initialized after this function returns.
+	launchStartedAt := time.Now()
 	dataDir := strings.TrimSpace(os.Getenv(EnvDataDir))
 	if dataDir == "" {
 		return fmt.Errorf("daemon: %s is empty for daemon child", EnvDataDir)
@@ -884,7 +909,7 @@ func RegisterCurrentProcess() error {
 	if startIdentity == "" {
 		return errors.New("daemon: child process identity is empty")
 	}
-	if err := New(dataDir).writePIDInfo(pid, executable, startIdentity); err != nil {
+	if err := New(dataDir).writePIDInfoAt(pid, executable, startIdentity, launchStartedAt); err != nil {
 		return fmt.Errorf("daemon: register child process: %w", err)
 	}
 	return nil

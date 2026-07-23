@@ -55,7 +55,42 @@ function Protect-WindowsNativeText([AllowNull()][string]$Text) {
     if ($null -eq $Text) { return '' }
     $safe = $Text
     foreach ($value in Get-RedactionValues) { $safe = $safe.Replace($value, '***REDACTED***') }
-    return $safe -replace '(?im)(api[_-]?key|access[_-]?token|secret[_-]?key|authorization)\s*[:=]\s*\S+', '$1=***REDACTED***'
+
+    # Keep JSON structure intact while replacing the complete quoted value.
+    # This must run separately from the line-oriented HTTP-header rule below;
+    # otherwise one sensitive field could consume unrelated sibling keys.
+    $safe = [regex]::Replace(
+        $safe,
+        '(?i)(?<prefix>"(?:api[_-]?key|access[_-]?token|secret[_-]?key|authorization)"\s*:\s*")(?<value>(?:\\.|[^"\\])*)(?<suffix>")',
+        '${prefix}***REDACTED***${suffix}'
+    )
+
+    # Authorization credentials commonly contain a scheme and a credential
+    # separated by whitespace. Redact the entire header value, not just the
+    # first token. Limit this rule to an HTTP-style header line so prose and
+    # JSON content later on the same line are not swallowed.
+    $safe = [regex]::Replace(
+        $safe,
+        '(?im)(?<prefix>^[ \t]*[<>]?[ \t]*authorization[ \t]*:[ \t]*)[^\r\n]*',
+        '${prefix}***REDACTED***'
+    )
+
+    # Compact logs can render the same header inline with either separator.
+    # Consume a complete scheme-plus-credential pair, but stop at whitespace
+    # after the credential so unrelated diagnostic fields remain visible.
+    $safe = [regex]::Replace(
+        $safe,
+        '(?im)(?<prefix>\bauthorization\b[ \t]*[:=][ \t]*)(?:"(?:\\.|[^"\\])*"|''(?:\\.|[^''\\])*''|[A-Za-z][A-Za-z0-9._~+/-]*[ \t]+[^\s,;]+|[^\s,;]+)',
+        '${prefix}***REDACTED***'
+    )
+
+    # Preserve the existing key/value protection for compact diagnostics such
+    # as ``api_key=...``.
+    return [regex]::Replace(
+        $safe,
+        '(?im)(?<prefix>\b(?:api[_-]?key|access[_-]?token|secret[_-]?key)\b\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|''(?:\\.|[^''\\])*''|\S+)',
+        '${prefix}***REDACTED***'
+    )
 }
 
 function Assert-NativeWindowsX64 {
@@ -361,10 +396,38 @@ function Initialize-WindowsNativeTestEnvironment([string]$Root) {
 }
 
 function Limit-WindowsNativeText([AllowNull()][string]$Text, [int]$MaxBytes = 1048576) {
+    if ($MaxBytes -lt 0) { throw 'MaxBytes must be non-negative' }
     $safe = Protect-WindowsNativeText $Text
     $bytes = [Text.Encoding]::UTF8.GetBytes($safe)
     if ($bytes.Length -le $MaxBytes) { return $safe }
-    return [Text.Encoding]::UTF8.GetString($bytes, 0, $MaxBytes) + "`n[truncated]`n"
+
+    $markerBytes = [Text.Encoding]::UTF8.GetBytes("`n[truncated]`n")
+    if ($markerBytes.Length -ge $MaxBytes) {
+        return [Text.Encoding]::UTF8.GetString($markerBytes, 0, $MaxBytes)
+    }
+
+    # Preserve the start for command context and give two thirds of the
+    # remaining budget to the tail, where test runners emit their failure.
+    $contentBudget = $MaxBytes - $markerBytes.Length
+    $headBudget = [int][Math]::Floor($contentBudget / 3)
+    $tailBudget = $contentBudget - $headBudget
+
+    # A byte budget can land inside a multi-byte UTF-8 scalar. Move each cut
+    # to a code-point boundary so decoding never inserts a replacement rune.
+    $headLength = $headBudget
+    while ($headLength -gt 0 -and $headLength -lt $bytes.Length -and
+        (($bytes[$headLength] -band 0xC0) -eq 0x80)) {
+        $headLength--
+    }
+    $tailStart = $bytes.Length - $tailBudget
+    while ($tailStart -lt $bytes.Length -and
+        (($bytes[$tailStart] -band 0xC0) -eq 0x80)) {
+        $tailStart++
+    }
+
+    $head = [Text.Encoding]::UTF8.GetString($bytes, 0, $headLength)
+    $tail = [Text.Encoding]::UTF8.GetString($bytes, $tailStart, $bytes.Length - $tailStart)
+    return $head + [Text.Encoding]::UTF8.GetString($markerBytes) + $tail
 }
 
 function Write-BoundedText([string]$Path, [AllowNull()][string]$Text, [int]$MaxBytes = 1048576) {
@@ -1471,6 +1534,20 @@ if len(projects.get('defenseclaw', ())) != 1:
 print(f'validated {len(projects)} unique managed distributions')
 '@
     Invoke-Installed $Python @('-I', '-c', $code, $VenvRoot) -Timeout 120 | Out-Null
+}
+
+function Assert-PackagedV8ResourceContract([string]$Python, [string]$RuntimeRoot) {
+    $validator = Join-Path $WorkspaceRoot 'scripts\validate_packaged_v8_resources.py'
+    if (-not (Test-Path -LiteralPath $validator -PathType Leaf)) {
+        throw "Packaged v8 resource validator is missing: $validator"
+    }
+    $sitePackages = Join-Path $RuntimeRoot 'Lib\site-packages'
+    Invoke-Installed $Python @(
+        '-I', $validator,
+        '--site-packages', $sitePackages,
+        '--runtime-root', $RuntimeRoot,
+        '--label', 'packaged'
+    ) -Timeout 120 | Out-Null
 }
 
 function Add-DamagedManagedEnvironmentFixture([object]$Profile) {
@@ -3104,6 +3181,7 @@ function Invoke-SetupAcceptance {
         Invoke-Installed (Join-Path $installRoot 'bin\skill-scanner.exe') @('--help') -Timeout 120 | Out-Null
         Invoke-Installed (Join-Path $installRoot 'bin\mcp-scanner.exe') @('--help') -Timeout 120 | Out-Null
         Assert-ManagedDistributionIntegrity $python (Join-Path $installRoot 'runtime\python')
+        Assert-PackagedV8ResourceContract $python (Join-Path $installRoot 'runtime\python')
         Invoke-HeadlessTui $python
 
         Invoke-Installed $launcher @(
@@ -4014,6 +4092,7 @@ function Invoke-WindowsReleaseCertification {
         $launcher = Join-Path $bin 'defenseclaw.exe'
         $gateway = Join-Path $bin 'defenseclaw-gateway.exe'
         $hook = Join-Path $bin 'defenseclaw-hook.exe'
+        $python = Join-Path $installRoot 'runtime\python\python.exe'
         foreach ($product in @($launcher, $gateway, $hook)) {
             if (-not (Test-Path -LiteralPath $product -PathType Leaf)) {
                 throw "exact signed Setup did not install required product executable: $product"
@@ -4035,6 +4114,7 @@ function Invoke-WindowsReleaseCertification {
             }
         }
         Assert-WindowsReleasePersistentPath $launcher $logs
+        Assert-PackagedV8ResourceContract $python (Join-Path $installRoot 'runtime\python')
         $env:PATH = "$bin;$(@($toolBins) -join ';');$($originalEnvironment['PATH'])"
 
         foreach ($connectorName in @('codex', 'claudecode')) {
@@ -4057,6 +4137,7 @@ function Invoke-WindowsReleaseCertification {
         Invoke-WindowsNativeProcess $setup @(
             '/upgrade', '/quiet', '/norestart', 'INSTALLSCOPE=user'
         ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'release-setup-upgrade.log') | Out-Null
+        Assert-PackagedV8ResourceContract $python (Join-Path $installRoot 'runtime\python')
         Assert-WindowsReleaseDoctorRows $launcher $logs
 
         # Uninstall must tear down both active connectors itself. A pre-teardown
@@ -4091,6 +4172,7 @@ function Invoke-WindowsReleaseCertification {
         $evidence = [ordered]@{
             schema_version = 1
             status = 'passed'
+            verification_status = 'signed'
             platform = 'windows-x64'
             setup = [ordered]@{
                 name = 'DefenseClawSetup-x64.exe'
@@ -4870,6 +4952,25 @@ function Stop-StateProcesses([string]$Root) {
     if ($remaining.Count) { throw "isolated process cleanup timed out: $($remaining -join ', ')" }
 }
 
+function Get-WindowsNativeCaptureFiles([string]$Root) {
+    if (-not (Test-Path -LiteralPath $Root)) { return @() }
+    return @(
+        Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Name -match '^(gateway|watchdog|results|doctor|.*\.log)' -and
+                    $_.Length -le 1048576
+            } |
+            Sort-Object @{
+                Expression = {
+                    if ($_.Name -eq 'wizard-driver.log') { 0 }
+                    elseif ($_.Name -eq 'go-test.log') { 1 }
+                    else { 2 }
+                }
+            }, FullName |
+            Select-Object -First 30
+    )
+}
+
 function Invoke-Capture {
     $root = Assert-SafeStateRoot $StateRoot
     $destination = if ($DiagnosticsRoot) {
@@ -4891,12 +4992,7 @@ function Invoke-Capture {
     }
     Write-BoundedText (Join-Path $destination 'listeners.txt') ($listeners -join [Environment]::NewLine)
     if (Test-Path -LiteralPath $root) {
-        $interesting = Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
-            $_.Name -match '^(gateway|watchdog|results|doctor|.*\.log)' -and $_.Length -le 1048576
-        } | Sort-Object @{
-            Expression = { if ($_.Name -eq 'wizard-driver.log') { 0 } else { 1 } }
-        }, FullName | Select-Object -First 30
-        foreach ($file in $interesting) {
+        foreach ($file in @(Get-WindowsNativeCaptureFiles $root)) {
             $relative = [IO.Path]::GetRelativePath($root, $file.FullName) -replace '[\\/:*?"<>|]', '_'
             Write-BoundedText (Join-Path $destination $relative) ([IO.File]::ReadAllText($file.FullName))
         }
@@ -4946,6 +5042,95 @@ function Invoke-SelfTest {
         }
     }
     if (-not (Test-Path -LiteralPath (Join-Path $root 'tools\uv.exe') -PathType Leaf)) { throw 'uv was not isolated' }
+
+    $boundedLimit = 256
+    $boundedSecret = 'bounded-secret-value'
+    $captureFixture = Join-Path $root 'bounded-capture-selection'
+    $originalBoundedSecret = [Environment]::GetEnvironmentVariable('DC_E2E_TEST_SECRET')
+    try {
+        $env:DC_E2E_TEST_SECRET = $boundedSecret
+        $headerSecret = 'header-bearer-secret'
+        $inlineEqualsSecret = 'inline-equals-bearer-secret'
+        $inlineColonSecret = 'inline-colon-bearer-secret'
+        $jsonSecret = 'json-bearer-secret'
+        $jsonApiKeySecret = 'json-api-key-secret'
+        $redactionProbe = @(
+            "Authorization: Bearer $headerSecret",
+            "trace authorization=Bearer $inlineEqualsSecret status=preserve",
+            "trace Authorization: Bearer $inlineColonSecret status=preserve",
+            ('{"authorization": "Bearer ' + $jsonSecret + '", "status": "preserve"}'),
+            ('{"api_key": "' + $jsonApiKeySecret + '", "status": "preserve"}'),
+            "environment-secret=$boundedSecret"
+        ) -join [Environment]::NewLine
+        $redactedProbe = Protect-WindowsNativeText $redactionProbe
+        if ($redactedProbe.Contains($headerSecret) -or
+            $redactedProbe.Contains($inlineEqualsSecret) -or
+            $redactedProbe.Contains($inlineColonSecret) -or
+            $redactedProbe.Contains($jsonSecret) -or
+            $redactedProbe.Contains($jsonApiKeySecret) -or
+            $redactedProbe.Contains($boundedSecret)) {
+            throw 'native diagnostic redaction leaked a header, JSON, or environment secret'
+        }
+        if (-not $redactedProbe.Contains('Authorization: ***REDACTED***') -or
+            -not $redactedProbe.Contains('trace authorization=***REDACTED*** status=preserve') -or
+            -not $redactedProbe.Contains('trace Authorization: ***REDACTED*** status=preserve') -or
+            -not $redactedProbe.Contains('{"authorization": "***REDACTED***", "status": "preserve"}') -or
+            -not $redactedProbe.Contains('{"api_key": "***REDACTED***", "status": "preserve"}') -or
+            -not $redactedProbe.Contains('environment-secret=***REDACTED***')) {
+            throw 'native diagnostic redaction damaged structure or omitted a supported credential form'
+        }
+
+        $boundedInput = 'HEAD authorization=' + $boundedSecret + ' ' +
+            ('unicode-漢🚀-' * 80) + 'TAIL decisive failure'
+        $bounded = Limit-WindowsNativeText $boundedInput $boundedLimit
+        $boundedBytes = [Text.Encoding]::UTF8.GetByteCount($bounded)
+        if ($boundedBytes -gt $boundedLimit) {
+            throw "bounded native text exceeded ${boundedLimit} UTF-8 bytes: $boundedBytes"
+        }
+        if (-not $bounded.StartsWith('HEAD authorization=***REDACTED***') -or
+            -not $bounded.EndsWith('TAIL decisive failure')) {
+            throw 'bounded native text did not retain both diagnostic head and failure tail'
+        }
+        if ($bounded -notmatch '(?m)^\[truncated\]$' -or
+            $bounded.Contains($boundedSecret) -or $bounded.Contains([char]0xFFFD)) {
+            throw 'bounded native text lost truncation, redaction, or UTF-8 integrity guarantees'
+        }
+
+        [IO.Directory]::CreateDirectory($captureFixture) | Out-Null
+        $boundedPath = Join-Path $captureFixture 'go-test.log'
+        Write-BoundedText $boundedPath $boundedInput $boundedLimit
+        if ([IO.FileInfo]::new($boundedPath).Length -gt $boundedLimit) {
+            throw 'bounded diagnostic file is too large for native capture'
+        }
+        foreach ($index in 0..30) {
+            Write-BoundedText (Join-Path $captureFixture ("00-before-go-test-{0:D2}.log" -f $index)) 'decoy'
+        }
+        $oversizedPath = Join-Path $captureFixture '00-oversized.log'
+        $oversized = [IO.File]::Open(
+            $oversizedPath,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None
+        )
+        try { $oversized.SetLength(1048577) } finally { $oversized.Dispose() }
+
+        $captureFiles = @(Get-WindowsNativeCaptureFiles $root)
+        if (-not ($captureFiles | Where-Object {
+            $_.FullName.Equals($boundedPath, [StringComparison]::OrdinalIgnoreCase)
+        })) {
+            throw 'bounded go-test.log was not prioritized into native capture'
+        }
+        if ($captureFiles | Where-Object {
+            $_.FullName.Equals($oversizedPath, [StringComparison]::OrdinalIgnoreCase)
+        }) {
+            throw 'oversized diagnostic bypassed the native capture size guard'
+        }
+    } finally {
+        [Environment]::SetEnvironmentVariable('DC_E2E_TEST_SECRET', $originalBoundedSecret)
+        if (Test-Path -LiteralPath $captureFixture) {
+            Remove-SafeDisposableTree -Path $captureFixture -Root $root
+        }
+    }
 
     $healthyOutput = [Threading.Tasks.TaskCompletionSource[string]]::new()
     $healthyOutput.SetResult('complete')

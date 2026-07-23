@@ -1,7 +1,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fail-closed contracts for the signed Windows real-client release gate."""
+"""Fail-closed contracts for signed and explicitly unverified Windows releases."""
 
 import json
 import re
@@ -11,6 +11,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 HARNESS = (ROOT / "scripts" / "windows-native-ci.ps1").read_text(encoding="utf-8")
+PACKAGED_V8_VALIDATOR = (ROOT / "scripts" / "validate_packaged_v8_resources.py").read_text(encoding="utf-8")
 LIVE = (ROOT / "scripts" / "live-connector-e2e" / "run-windows.ps1").read_text(encoding="utf-8")
 RELEASE = (ROOT / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8")
 
@@ -92,6 +93,7 @@ def test_certification_evidence_derives_versions_from_installed_specs() -> None:
     evidence = gate.split("$evidence = [ordered]@{", 1)[1]
     assert "[string]$clients['codex'].Specification.Version" in evidence
     assert "[string]$clients['claudecode'].Specification.Version" in evidence
+    assert "verification_status = 'signed'" in evidence
     assert "codex = '0.144.3'" not in evidence
     assert "claudecode = '2.1.208'" not in evidence
 
@@ -177,6 +179,20 @@ def test_publish_has_non_advisory_real_client_certification_custody() -> None:
     assert certification_index < upload_index
     assert int(certification["timeout-minutes"]) >= 90
 
+    provider_gate = next(
+        step for step in certification["steps"] if step.get("name") == "Require both real-client provider credentials"
+    )
+    certify_step = certification["steps"][certification_index]
+    unverified_step = next(
+        step
+        for step in certification["steps"]
+        if step.get("name") == "Record explicit unverified Windows Setup custody"
+    )
+    assert provider_gate["if"] == "${{ needs.windows-installer.outputs.verification_status == 'signed' }}"
+    assert certify_step["if"] == "${{ needs.windows-installer.outputs.verification_status == 'signed' }}"
+    assert unverified_step["if"] == ("${{ needs.windows-installer.outputs.verification_status == 'unverified' }}")
+    assert "record-windows-unverified" in unverified_step["run"]
+
     assert "windows-real-client-certification" in assemble["needs"]
     assert "windows-real-client-certification" in full["needs"]
     assert "needs.windows-real-client-certification.result == 'success'" in full["if"]
@@ -239,6 +255,49 @@ def test_native_wheel_stages_and_verifies_v8_runtime_assets() -> None:
         "defenseclaw/_data/telemetry/v8/openinference-v1.json",
     ):
         assert packaged in build
+
+
+def test_packaged_v8_resources_are_loaded_before_hooks_and_after_installer_maintenance() -> None:
+    resource_contract = _function("Assert-PackagedV8ResourceContract")
+    acceptance = _function("Invoke-SetupAcceptance")
+    release_gate = _function("Invoke-WindowsReleaseCertification")
+
+    for resource in (
+        "defenseclaw-config.schema.json",
+        "observability.yaml",
+        "observability.md",
+        "telemetry.schema.json",
+        "catalog.json",
+        "v7-exporter-selection.json",
+        "galileo-rich-v2.json",
+        "local-observability-v1.json",
+        "openinference-v1.json",
+    ):
+        assert resource in PACKAGED_V8_VALIDATOR
+    for loader in (
+        "_schema_validator()",
+        "telemetry_v8_schema_bytes()",
+        "telemetry_v8_catalog_bytes()",
+        "v7_exporter_selection_bytes()",
+        '"galileo-rich-v2"',
+        '"local-observability-v1"',
+        '"openinference-v1"',
+    ):
+        assert loader in PACKAGED_V8_VALIDATOR
+    assert "runtime unexpectedly contains a Lib/schemas fallback tree" in PACKAGED_V8_VALIDATOR
+    assert "scripts\\validate_packaged_v8_resources.py" in resource_contract
+    assert "Test-Path -LiteralPath $validator -PathType Leaf" in resource_contract
+    assert "'-I', $validator" in resource_contract
+    assert "'--site-packages', $sitePackages" in resource_contract
+    assert "'--runtime-root', $RuntimeRoot" in resource_contract
+    assert "'--label', 'packaged'" in resource_contract
+
+    probe = "Assert-PackagedV8ResourceContract $python (Join-Path $installRoot 'runtime\\python')"
+    assert acceptance.index(probe) < acceptance.index("'init', '--skip-install'")
+    assert release_gate.count(probe) == 2
+    assert release_gate.index(probe) < release_gate.index("foreach ($connectorName in @('codex', 'claudecode'))")
+    assert release_gate.rindex(probe) > release_gate.index("'/upgrade', '/quiet'")
+    assert release_gate.rindex(probe) < release_gate.index("Assert-WindowsReleaseDoctorRows")
 
 
 def test_setup_acceptance_exercises_atomic_observability_v8_upgrade() -> None:

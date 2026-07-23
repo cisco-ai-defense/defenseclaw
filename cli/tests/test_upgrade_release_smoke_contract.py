@@ -1207,10 +1207,37 @@ def test_v8_verifier_proves_historical_and_bridge_backup_layers() -> None:
         "config.historical.source",
         "phase1-source-gateway",
         "phase two retained no distinct byte-exact config-v7 bridge backup",
-        'receipt_from="${REQUIRED_BRIDGE_VERSION}"',
+        "expected_upgrade_receipt_source",
     ):
         assert contract in text
     assert 'facts.get("from_version") != source' in RECEIPT_CHECK.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("source", "target", "required_bridge", "expected"),
+    [
+        ("0.8.4", "0.8.7", "0.8.4", "0.8.5"),
+        ("0.8.3", "0.8.7", "0.8.4", "0.8.5"),
+        ("0.8.3", "0.8.5", "0.8.4", "0.8.4"),
+        ("0.8.5", "0.8.7", "0.8.4", "0.8.5"),
+        ("0.8.6", "0.8.7", "0.8.4", "0.8.6"),
+    ],
+)
+def test_expected_upgrade_receipt_source_matches_final_transaction(
+    source: str,
+    target: str,
+    required_bridge: str,
+    expected: str,
+) -> None:
+    completed = _source_script(
+        'expected_upgrade_receipt_source "$2" "$3" "$4"',
+        source,
+        target,
+        required_bridge,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.strip() == expected
 
 
 def test_hard_cut_source_tree_ships_the_v8_runtime_and_forward_keyed_migration() -> None:

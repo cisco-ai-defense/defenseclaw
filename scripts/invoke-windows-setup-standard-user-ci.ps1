@@ -873,6 +873,7 @@ try {
     # authority.
     $harnessFiles = @(
         'invoke-windows-setup-standard-user-ci.ps1',
+        'validate_packaged_v8_resources.py',
         'windows-native-ci.ps1',
         'windows-native-paths.ps1',
         'windows-disposable-file-guard.cs',

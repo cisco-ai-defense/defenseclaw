@@ -84,8 +84,9 @@ The release also publishes `checksums.txt.bundle` beside the detached
 signature and certificate. The compatibility bootstrap passes that bundled
 transparency-log proof to pinned Cosign with `--offline`. The authenticated
 checksum root must contain exactly one entry each for Setup, its provenance,
-and the upgrade manifest. The provenance must describe a signed schema-1 OSS
-artifact and repeat Setup's exact authenticated SHA-256. Local mode requires
+and the upgrade manifest. The provenance must describe an internally consistent
+signed or explicitly unverified schema-1 OSS artifact and repeat Setup's exact
+authenticated SHA-256. Local mode requires
 the complete release bundle plus the pinned Cosign executable and performs no
 network access.
 
@@ -110,14 +111,14 @@ metadata, then repairs the affected wheel `RECORD` files. Release CI pins Go
 through `go.mod`, pins `uv`, and executes ZIP generation with the pinned
 embedded CPython runtime.
 
-The Setup SBOM is one merged SPDX 2.3 JSON document generated after the outer
-EXE is signed. It describes the exact outer checksum and exact embedded payload
+The Setup SBOM is one merged SPDX 2.3 JSON document generated after the
+Authenticode decision. It describes the exact outer checksum and exact embedded payload
 archive, records every payload digest, and expands the CPython standard
 library, complete `site-packages.zip`, project and YARA compatibility wheels,
-and signed gateway archive. Python distribution metadata, dependencies,
+and gateway archive. Python distribution metadata, dependencies,
 licenses, and every embedded file are included alongside the gateway, hook,
 launchers, and pinned Cosign verifier. Go build information is read from the
-exact signed Setup, gateway, hook, launchers, and Cosign bytes; their runtime
+exact Setup, gateway, hook, launchers, and Cosign bytes; their runtime
 and transitive modules are emitted with purls and Go module sums. Generation
 fails closed if the staged payload differs from its manifest, an expected
 component is absent, a Python distribution lacks metadata, a Go binary digest
@@ -136,15 +137,19 @@ treated as a managed release. An OSS Windows install configured as
 requested instead of silently degrading to an unusable provider.
 
 Local and pull-request builds are unsigned and are labeled as such in Installed
-Apps. Release builds require real Authenticode credentials. Before the payload
-manifest is hashed, the builder signs the native CLI launcher, console-free
-startup helper, gateway, and hook entry point; the installed scanner launchers
-are byte-identical copies of that signed CLI launcher. It then signs the outer
-setup executable. The build imports
-the PFX temporarily into the current-user certificate store, invokes SignTool
-by certificate thumbprint, uses an allowlisted HTTPS timestamp endpoint,
-verifies the exact publisher `Cisco Systems, Inc.` on every signed executable,
-and removes the certificate and private build directory in a `finally` path. No
+Apps. Release signing follows the same all-or-none policy as macOS credentials:
+when both Authenticode secrets are absent the workflow publishes an explicitly
+unverified Setup, when exactly one is present the release fails, and when both
+are present signing is mandatory and any certificate, password, SignTool,
+timestamp, or publisher failure aborts instead of falling back to unsigned.
+For the signed path, before the payload manifest is hashed, the builder signs
+the native CLI launcher, console-free startup helper, gateway, and hook entry
+point; the installed scanner launchers are byte-identical copies of that signed
+CLI launcher. It then signs the outer setup executable. The build imports the
+PFX temporarily into the current-user certificate store, invokes SignTool by
+certificate thumbprint, uses an allowlisted HTTPS timestamp endpoint, verifies
+the exact publisher `Cisco Systems, Inc.` on every signed executable, and
+removes the certificate and private build directory in a `finally` path. No
 development certificate or fabricated Cisco signature is generated.
 
 ### Native executable resources
@@ -269,7 +274,7 @@ Before the private staging tree can be published, Setup requires an exact
 one-to-one match between its Authenticode inventory and every extracted PE,
 checks each file digest, and enforces the recorded Windows trust policy. Signed
 DefenseClaw executables must retain the Cisco publisher, signer identity, and
-RFC 3161 timestamp; unsigned PR/local builds are accepted only when the
+RFC 3161 timestamp; unsigned builds are accepted only when the
 manifest explicitly declares the unsigned policy. Setup repeats inventory
 verification after publication and verifies the maintenance and stable-hook
 copies so extraction or copy-time tampering cannot silently cross the install
@@ -290,33 +295,37 @@ Those installations must be serviced by the enterprise deployment channel.
 
 ## Release and certification gate
 
-Starting with 0.8.6, the release workflow builds setup on `windows-latest`,
-requires real signing credentials, and runs the full native
-install/repair/connector/uninstall acceptance
-suite against that exact signed EXE (including installed-publisher validation),
-uploads the staging bundle, and passes its immutable artifact ID and SHA-256
-digest to a separate non-advisory real-client job. That job downloads the exact
-bundle by ID, verifies the Cisco signature plus installer sidecar/provenance
-digests, requires provenance and installed payload state to match the exact
-workflow `GITHUB_SHA`, and installs that same EXE. The gate installs
-exact official Codex CLI `0.144.3` and Claude Code `2.1.208` packages, requires
-both provider credentials, verifies automatic Codex hook trust without a manual
-`/hooks` approval, and requires lifecycle, tool allow/block, gateway JSONL,
-SQLite audit correlation, and connector-tagged OTLP evidence from both clients.
-It then runs repair and same-version upgrade with the same signed Setup bytes and
-requires uninstall itself to remove both connectors, user data, Installed Apps,
-and the user PATH entry while preserving a seeded unrelated `~/.codex/hooks.json`
-handler byte-for-byte. Missing secrets, either skipped connector, an unsigned
-or non-Cisco executable, a client-version mismatch, or missing evidence fails the
-release before publication. The workflow emits SHA-256, merged SPDX SBOM,
-provenance, and `DefenseClawSetup-x64.exe.certification.json`, then adds every
-artifact to the final checksum manifest before the immutable release is created.
-macOS and Linux artifacts continue through their existing build path.
+Starting with 0.8.6, the release workflow builds Setup on `windows-latest` and
+runs the full native install/repair/connector/uninstall acceptance suite against
+the exact EXE. The Authenticode branch is selected before the build and bound to
+the resulting provenance. With complete credentials, the workflow passes the
+immutable staging artifact to a separate non-advisory real-client job. That job
+verifies the Cisco signature plus installer sidecar/provenance digests, requires
+provenance and installed payload state to match the exact workflow `GITHUB_SHA`,
+and installs that same EXE. The signed gate installs exact official
+Codex CLI `0.144.3` and Claude Code `2.1.208` packages, requires both provider credentials,
+verifies automatic Codex hook trust without a manual
+`/hooks` approval, and
+requires lifecycle, tool allow/block, gateway JSONL, SQLite audit correlation,
+and connector-tagged OTLP evidence from both clients. It then runs repair and
+same-version upgrade with the same Setup bytes and requires uninstall itself to
+remove both connectors, user data, Installed Apps, and the user PATH entry while
+preserving a seeded unrelated `~/.codex/hooks.json` handler byte-for-byte.
+
+When both Authenticode credentials are absent, the signed real-client cell is
+skipped and the already-passed standard-user lifecycle result is recorded as
+explicitly `unverified`; the certification sidecar has no publisher, clients, or
+connector claims. Partial signing credentials, invalid signing material, a bad
+publisher or timestamp, and any signed-branch certification failure still abort
+before publication. The workflow emits SHA-256, merged SPDX SBOM, provenance,
+and `DefenseClawSetup-x64.exe.certification.json`, then adds every artifact to
+the final checksum manifest before the immutable release is created. macOS and
+Linux artifacts continue through their existing build path.
 
 The Windows chain transfers each intermediate by immutable GitHub Actions
-artifact ID and digest; assembly rejects a missing or malformed certification
-artifact digest before processing its exact-ID download. Certification emits
-exactly five release assets:
+artifact ID and digest; assembly rejects a missing or malformed custody artifact
+digest before processing its exact-ID download. The signed and unverified paths
+both emit exactly five release assets:
 `DefenseClawSetup-x64.exe`, its `.sha256`, `.provenance.json`, `.sbom.json`, and
 `.certification.json` sidecars. Assembly consumes that directory explicitly via
 `--windows-dir`, seals all five bytes into the candidate, and signs
@@ -330,7 +339,11 @@ because 0.8.5 did not publish a native Setup baseline; the fresh gate still
 exercises install, repair, same-version servicing, and uninstall. Both publish
 selection and post-publish custody verification retain
 `--omit-windows-binaries` to exclude legacy raw Windows archives only. They do
-not exclude the signed Setup or its four certified sidecars.
+not exclude Setup or its four custody sidecars. The unverified EXE can be
+downloaded and run directly for a fresh install. The authenticated PowerShell
+bootstrap and automatic upgrade path deliberately continue to reject unsigned
+Setup targets rather than silently weakening an existing installation's trust
+policy.
 
 Pull-request CI builds an unsigned setup and runs setup acceptance only on the
 disposable GitHub Actions user. Local setup acceptance refuses to mutate the

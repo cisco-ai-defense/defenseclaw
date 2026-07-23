@@ -5,6 +5,8 @@
 
 from pathlib import Path
 
+import yaml
+
 from defenseclaw.platform_support import (
     WINDOWS_CERTIFIED_ARCHITECTURES,
     WINDOWS_NOT_CERTIFIED_ARCHITECTURES,
@@ -73,11 +75,46 @@ def test_windows_guide_has_unambiguous_claims_and_powershell_examples() -> None:
         assert label in text
 
 
-def test_release_runtime_custody_includes_arm64_without_certifying_arm64_setup() -> None:
-    release = (ROOT / ".goreleaser.yaml").read_text(encoding="utf-8")
-    assert "goos:\n      - linux\n      - darwin\n      - windows" in release
-    assert "goarch:\n      - amd64\n      - arm64" in release
-    assert "ignore:\n      - goos: windows\n        goarch: arm64" not in release
+def test_release_runtime_custody_splits_certified_x64_from_compatibility_arm64() -> None:
+    release = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
+    builds = {build["id"]: build for build in release["builds"]}
+
+    assert set(builds) == {
+        "defenseclaw",
+        "defenseclaw-windows-amd64",
+        "defenseclaw-windows-arm64",
+        "defenseclaw-hook",
+    }
+    assert builds["defenseclaw"]["goos"] == ["linux", "darwin"]
+    assert builds["defenseclaw"]["goarch"] == ["amd64", "arm64"]
+    assert builds["defenseclaw-windows-amd64"]["goos"] == ["windows"]
+    assert builds["defenseclaw-windows-amd64"]["goarch"] == ["amd64"]
+    assert builds["defenseclaw-windows-arm64"]["goos"] == ["windows"]
+    assert builds["defenseclaw-windows-arm64"]["goarch"] == ["arm64"]
+    assert builds["defenseclaw-hook"]["goos"] == ["windows"]
+    assert builds["defenseclaw-hook"]["goarch"] == ["amd64"]
+
+    archives = {archive["id"]: archive for archive in release["archives"]}
+    canonical_name = "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    assert set(archives) == {"default", "windows-amd64", "windows-arm64"}
+    assert archives["default"]["ids"] == ["defenseclaw"]
+    assert archives["default"]["formats"] == ["tar.gz"]
+    assert archives["default"]["name_template"] == canonical_name
+    assert archives["windows-amd64"]["ids"] == [
+        "defenseclaw-windows-amd64",
+        "defenseclaw-hook",
+    ]
+    assert archives["windows-amd64"]["formats"] == ["zip"]
+    assert archives["windows-amd64"]["name_template"] == canonical_name
+    assert archives["windows-arm64"]["ids"] == ["defenseclaw-windows-arm64"]
+    assert archives["windows-arm64"]["formats"] == ["zip"]
+    assert archives["windows-arm64"]["name_template"] == canonical_name
+    assert all(
+        "defenseclaw-hook" not in archive["ids"]
+        for archive_id, archive in archives.items()
+        if archive_id != "windows-amd64"
+    )
+
     installer = (ROOT / "scripts/install.ps1").read_text(encoding="utf-8")
     assert '"ARM64" { Die "Windows ARM64 is not certified' in installer
     assert '"codex",\n    "claudecode",\n    "none"' in installer
@@ -134,3 +171,18 @@ def test_disposable_connector_workspace_includes_the_v8_jsonl_validator() -> Non
     ]
 
     assert "'assert-observability-v8-jsonl.py'" in contract_files
+
+
+def test_disposable_setup_workspace_includes_the_packaged_v8_validator() -> None:
+    launcher = (ROOT / "scripts/invoke-windows-setup-standard-user-ci.ps1").read_text(
+        encoding="utf-8"
+    )
+    harness_files_start = launcher.index("$harnessFiles = @(")
+    harness_files = launcher[
+        harness_files_start : launcher.index(
+            "if ($Mode -eq 'contract')", harness_files_start
+        )
+    ]
+
+    assert "'windows-native-ci.ps1'" in harness_files
+    assert "'validate_packaged_v8_resources.py'" in harness_files

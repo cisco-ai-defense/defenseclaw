@@ -5183,6 +5183,185 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         self.assertEqual(client.health.call_count, 3)
         ok.assert_called_once_with("Gateway API is healthy; fleet uplink is disabled by configuration")
 
+    def test_gateway_start_timeout_contains_readiness_budget_and_preserves_other_defaults(self):
+        app = AppContext()
+        app.cfg = Config()
+        gateway_environment = {"DEFENSECLAW_HOME": "/private/upgrade-data"}
+
+        for health_timeout, expected_start_timeout in (
+            (59, 90),
+            (60, 90),
+            (61, 91),
+            (120, 150),
+        ):
+            with (
+                self.subTest(health_timeout=health_timeout),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._reload_post_upgrade_config",
+                    return_value=app.cfg,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._gateway_process_environment",
+                    return_value=gateway_environment,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._run_silent",
+                    return_value=True,
+                ) as run_silent,
+                patch("defenseclaw.commands.cmd_upgrade._poll_health") as poll_health,
+            ):
+                _start_and_verify_services(
+                    app,
+                    health_timeout,
+                    data_dir="/private/upgrade-data",
+                )
+
+            gateway_start, openclaw_restart = run_silent.call_args_list
+            self.assertEqual(gateway_start.args[0], ["defenseclaw-gateway", "start"])
+            self.assertEqual(gateway_start.kwargs["env"], gateway_environment)
+            self.assertEqual(
+                gateway_start.kwargs["timeout_seconds"],
+                expected_start_timeout,
+            )
+            self.assertEqual(openclaw_restart.args[0], ["openclaw", "gateway", "restart"])
+            self.assertNotIn("timeout_seconds", openclaw_restart.kwargs)
+            poll_health.assert_called_once_with(
+                app.cfg,
+                health_timeout,
+                expected_version=None,
+            )
+
+    def test_gateway_environment_preserves_fresh_process_readiness_handoff(self):
+        with patch.dict(
+            os.environ,
+            {"DEFENSECLAW_UPGRADE_FRESH_PROCESS": "1"},
+            clear=True,
+        ):
+            environment = cmd_upgrade_module._gateway_process_environment(
+                "/private/upgrade-data",
+                config_path="/private/controller/config.yaml",
+            )
+
+        self.assertEqual(environment["DEFENSECLAW_UPGRADE_FRESH_PROCESS"], "1")
+        self.assertEqual(environment["DEFENSECLAW_HOME"], "/private/upgrade-data")
+        self.assertEqual(
+            environment["DEFENSECLAW_CONFIG"],
+            "/private/controller/config.yaml",
+        )
+
+    def test_fresh_process_health_uses_current_strict_gateway_contract_once(self):
+        cfg = Config()
+        cfg.data_dir = "/private/upgrade-data"
+
+        with TemporaryDirectory() as install_dir:
+            gateway_binary = Path(install_dir, "defenseclaw-gateway")
+            gateway_binary.write_bytes(b"current-gateway")
+            gateway_binary.chmod(0o700)
+            completed = Mock(returncode=0)
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "DEFENSECLAW_UPGRADE_FRESH_PROCESS": "1",
+                        "DEFENSECLAW_GATEWAY_BIN": "/attacker/override",
+                        "PATH": "/attacker/path",
+                    },
+                    clear=True,
+                ),
+                patch("defenseclaw.commands.cmd_upgrade.platform.system", return_value="Linux"),
+                patch("defenseclaw.gateway.canonical_install_path", return_value=str(gateway_binary)),
+                patch(
+                    "defenseclaw.config.config_path",
+                    return_value=Path("/private/controller/config.yaml"),
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade.subprocess.run",
+                    return_value=completed,
+                ) as run,
+                patch("defenseclaw.gateway.OrchestratorClient") as legacy_client,
+            ):
+                _poll_health(cfg, timeout_seconds=60, expected_version="0.9.0")
+
+        run.assert_called_once()
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                str(gateway_binary),
+                "upgrade-wait-ready",
+                "--timeout",
+                "60s",
+                "--expected-version",
+                "0.9.0",
+            ],
+        )
+        self.assertEqual(run.call_args.kwargs["timeout"], 65)
+        self.assertFalse(run.call_args.kwargs["check"])
+        self.assertEqual(run.call_args.kwargs["env"]["DEFENSECLAW_HOME"], "/private/upgrade-data")
+        self.assertEqual(
+            run.call_args.kwargs["env"]["DEFENSECLAW_CONFIG"],
+            "/private/controller/config.yaml",
+        )
+        self.assertEqual(run.call_args.kwargs["env"]["DEFENSECLAW_UPGRADE_FRESH_PROCESS"], "1")
+        legacy_client.assert_not_called()
+
+    def test_fresh_process_health_requires_version_and_positive_shared_budget(self):
+        cfg = Config()
+        cfg.data_dir = "/private/upgrade-data"
+        with (
+            patch.dict(os.environ, {"DEFENSECLAW_UPGRADE_FRESH_PROCESS": "1"}, clear=True),
+            patch("defenseclaw.commands.cmd_upgrade.subprocess.run") as run,
+        ):
+            for timeout, version in ((60, None), (0, "0.9.0")):
+                with self.subTest(timeout=timeout, version=version), self.assertRaises(SystemExit):
+                    _poll_health(cfg, timeout_seconds=timeout, expected_version=version)
+        run.assert_not_called()
+
+    def test_fresh_process_health_rejects_unmanaged_canonical_binary(self):
+        cfg = Config()
+        cfg.data_dir = "/private/upgrade-data"
+        with TemporaryDirectory() as install_dir:
+            target = Path(install_dir, "target")
+            target.write_bytes(b"gateway")
+            target.chmod(0o700)
+            symlink = Path(install_dir, "defenseclaw-gateway")
+            symlink.symlink_to(target)
+            with (
+                patch.dict(os.environ, {"DEFENSECLAW_UPGRADE_FRESH_PROCESS": "1"}, clear=True),
+                patch("defenseclaw.commands.cmd_upgrade.platform.system", return_value="Linux"),
+                patch("defenseclaw.gateway.canonical_install_path", return_value=str(symlink)),
+                patch("defenseclaw.commands.cmd_upgrade.subprocess.run") as run,
+                self.assertRaises(SystemExit),
+            ):
+                _poll_health(cfg, timeout_seconds=60, expected_version="0.9.0")
+        run.assert_not_called()
+
+    def test_fresh_process_health_propagates_strict_command_failure(self):
+        cfg = Config()
+        cfg.data_dir = "/private/upgrade-data"
+        with TemporaryDirectory() as install_dir:
+            gateway_binary = Path(install_dir, "defenseclaw-gateway")
+            gateway_binary.write_bytes(b"current-gateway")
+            gateway_binary.chmod(0o700)
+            for outcome, expected_code in (
+                (Mock(returncode=23), 23),
+                (subprocess.TimeoutExpired([str(gateway_binary)], 65), 1),
+            ):
+                with (
+                    self.subTest(outcome=type(outcome).__name__),
+                    patch.dict(os.environ, {"DEFENSECLAW_UPGRADE_FRESH_PROCESS": "1"}, clear=True),
+                    patch("defenseclaw.commands.cmd_upgrade.platform.system", return_value="Linux"),
+                    patch("defenseclaw.gateway.canonical_install_path", return_value=str(gateway_binary)),
+                    patch("defenseclaw.config.config_path", return_value=Path("/private/controller/config.yaml")),
+                    patch("defenseclaw.commands.cmd_upgrade.subprocess.run") as run,
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    if isinstance(outcome, BaseException):
+                        run.side_effect = outcome
+                    else:
+                        run.return_value = outcome
+                    _poll_health(cfg, timeout_seconds=60, expected_version="0.9.0")
+                self.assertEqual(raised.exception.code, expected_code)
+
     def test_restart_and_health_use_fresh_post_migration_config_and_dotenv(self):
         app = AppContext()
         app.cfg = Config(gateway=GatewayConfig(api_port=19001, token="stale-value"))
@@ -5260,7 +5439,7 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         with (
             patch("defenseclaw.commands.cmd_upgrade._refresh_target_dotenv_environment") as refresh,
             patch("defenseclaw.commands.cmd_upgrade._reload_post_upgrade_config") as reload_config,
-            patch("defenseclaw.commands.cmd_upgrade._run_silent", return_value=True),
+            patch("defenseclaw.commands.cmd_upgrade._run_silent", return_value=True) as run_silent,
             patch("defenseclaw.commands.cmd_upgrade._poll_health") as in_process_health,
             patch("defenseclaw.commands.cmd_upgrade._poll_installed_health") as installed_health,
         ):
@@ -5275,6 +5454,14 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         refresh.assert_called_once_with(plan)
         reload_config.assert_not_called()
         in_process_health.assert_not_called()
+        self.assertEqual(
+            run_silent.call_args_list[0].args[0],
+            [plan.active_gateway_path, "start"],
+        )
+        self.assertEqual(
+            run_silent.call_args_list[0].kwargs["timeout_seconds"],
+            90,
+        )
         installed_health.assert_called_once_with(
             "/private/bridge-data",
             13,
@@ -7545,6 +7732,18 @@ class TestRunSilentSurfaceErrors(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("Started", output)
         self.assertNotIn("Did not start", output)
+
+    def test_default_timeout_remains_unchanged_for_unrelated_callers(self):
+        runner = CliRunner()
+        with patch(
+            "defenseclaw.commands.cmd_upgrade._run_phase_two_mutator",
+            return_value=Mock(returncode=0, stderr="", stdout=""),
+        ) as run:
+            with runner.isolation():
+                ok = _run_silent(["other-command"], "Started", "Did not start")
+
+        self.assertTrue(ok)
+        self.assertEqual(run.call_args.kwargs["timeout"], 30)
 
     def test_non_zero_exit_surfaces_stderr(self):
         runner = CliRunner()

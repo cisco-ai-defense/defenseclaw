@@ -332,10 +332,24 @@ def test_macos_release_reclaims_build_intermediates_and_avoids_dmg_app_copy() ->
     plain_sign = build.index('codesign "${sign_args[@]}" "${PLAIN_APP}"', derived_cleanup)
     dmg = build.index('echo "Creating unified drag-to-Applications DMG"')
     staging_link = build.index('ln -s /Applications "${UNIFIED_STAGE}/Applications"', dmg)
+    source_size = build.index('DMG_SOURCE_KIB="$(du -sk "${UNIFIED_STAGE}"', staging_link)
+    padded_size = build.index("DMG_SIZE_KIB=$((DMG_SOURCE_KIB + DMG_SOURCE_KIB / 5 + 65536))", source_size)
     image_create = build.index('hdiutil create', staging_link)
     unified_source = build.index('-srcfolder "${UNIFIED_STAGE}"', image_create)
+    explicit_size = build.index('-size "${DMG_SIZE_KIB}k"', unified_source)
 
-    assert app_copy < derived_cleanup < plain_sign < dmg < staging_link < image_create < unified_source
+    assert (
+        app_copy
+        < derived_cleanup
+        < plain_sign
+        < dmg
+        < staging_link
+        < source_size
+        < padded_size
+        < image_create
+        < unified_source
+        < explicit_size
+    )
     assert 'DMG_STAGE=' not in build
     assert 'ditto "${APP}" "${DMG_STAGE}/DefenseClawMac.app"' not in build
 

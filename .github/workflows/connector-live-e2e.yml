@@ -177,6 +177,7 @@ jobs:
             -e '^cli/defenseclaw/commands/windows_uninstall_helper\.py$' \
             -e '^cli/defenseclaw/windows_acl\.py$' \
             -e '^scripts/(build-windows-installer|initialize-windows-native-ci-paths|install|invoke-windows-setup-standard-user-ci|test-fresh-install-release-windows|test-upgrade-release-windows|test-windows-disposable-user-safety|test-windows-setup-wizard|upgrade|windows-authenticode|windows-binary-identity|windows-disposable-user-safety|windows-native-ci|windows-native-paths)\.ps1$' \
+            -e '^scripts/validate_packaged_v8_resources\.py$' \
             -e '^scripts/windows_installer_artifacts\.py$' \
             -e '^scripts/windows-(disposable-file-guard|disposable-standard-user-launcher|setup-standard-user-launcher)\.cs$' \
             -e '^\.github/workflows/connector-live-e2e\.yml$'; then

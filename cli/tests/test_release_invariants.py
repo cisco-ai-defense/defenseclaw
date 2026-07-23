@@ -60,11 +60,11 @@ class TestReleaseInvariants(unittest.TestCase):
 
         During an in-place upgrade, stale bytecode can be valid for the first
         fresh migration interpreter long enough to hide newly installed
-        functions. The release smoke checks the built ZIP; this source-level
-        invariant fails earlier when the manifest exclusions are removed.
+        functions. The recursive bytecode pattern covers those files without
+        the legacy trailing wildcard that also removed required package data.
         """
         manifest = (_REPO_ROOT / "MANIFEST.in").read_text()
-        self.assertIn("recursive-exclude cli __pycache__ *", manifest)
+        self.assertNotIn("recursive-exclude cli __pycache__ *", manifest)
         self.assertIn("recursive-exclude cli *.py[cod]", manifest)
 
     def test_pyproject_version_matches_dunder(self):

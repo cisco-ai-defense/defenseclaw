@@ -132,9 +132,11 @@ Nightly/manual certification seals one candidate, then runs
 Linux/macOS baselines plus native fresh-install and live-continuity gates.
 The final release reuses those exact certified bytes, or invokes that complete
 certification workflow on a cache miss. Legacy raw Windows runtime archives
-remain omitted, while the signed `DefenseClawSetup-x64.exe` and its custody
-sidecars are built, certified with real Codex and Claude clients, and promoted
-from the same sealed candidate. A broken refusal, bridge handoff, migration,
+remain omitted, while exactly one `DefenseClawSetup-x64.exe` and its custody
+sidecars are promoted from the same sealed candidate. Complete Authenticode
+credentials require signing plus real Codex and Claude certification; absent
+credentials produce an explicitly unverified lifecycle-tested Setup, while a
+partial or invalid credential set aborts. A broken refusal, bridge handoff, migration,
 rollback, installer lifecycle, health, or history path aborts before publication.
 
 ### 0.8.4 bridge rollout order
