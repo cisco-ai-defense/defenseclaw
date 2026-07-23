@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 import subprocess
+import urllib.error
 from pathlib import Path
 from types import ModuleType
 
@@ -360,3 +361,95 @@ def test_sigstore_verification_uses_bounded_wrapper_and_exact_release_identity(
         "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main"
     )
     assert observed[observed.index("--certificate-oidc-issuer") + 1] == ("https://token.actions.githubusercontent.com")
+
+
+class _DownloadResponse:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+        self.headers: dict[str, str] = {"Content-Length": str(len(payload))}
+
+    def __enter__(self) -> _DownloadResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self, maximum: int) -> bytes:
+        return self.payload[:maximum]
+
+
+def _http_error(url: str, status: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(url, status, f"HTTP {status}", None, None)
+
+
+def test_download_retries_transient_http_and_network_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "https://api.github.com/repos/example/project/releases/assets/1"
+    responses: list[object] = [
+        _http_error(url, 500),
+        urllib.error.URLError("connection reset"),
+        _DownloadResponse(b"authenticated release asset"),
+    ]
+    sleeps: list[float] = []
+
+    def urlopen(_request: object, *, timeout: int) -> _DownloadResponse:
+        assert timeout == 60
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        assert isinstance(response, _DownloadResponse)
+        return response
+
+    monkeypatch.setattr(RESOLVER.urllib.request, "urlopen", urlopen)
+
+    assert RESOLVER._download(url, 64, sleeper=sleeps.append) == b"authenticated release asset"
+    assert responses == []
+    assert sleeps == [1.0, 2.0]
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+def test_download_fails_fast_for_permanent_http_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    url = "https://api.github.com/repos/example/project/releases/assets/1"
+    calls = 0
+    sleeps: list[float] = []
+
+    def urlopen(_request: object, *, timeout: int) -> _DownloadResponse:
+        nonlocal calls
+        calls += 1
+        assert timeout == 60
+        raise _http_error(url, status)
+
+    monkeypatch.setattr(RESOLVER.urllib.request, "urlopen", urlopen)
+
+    with pytest.raises(RESOLVER.BaselineResolutionError, match=f"HTTP Error {status}"):
+        RESOLVER._download(url, 64, sleeper=sleeps.append)
+    assert calls == 1
+    assert sleeps == []
+
+
+def test_download_transient_failure_exhaustion_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "https://api.github.com/repos/example/project/releases/assets/1"
+    calls = 0
+    sleeps: list[float] = []
+
+    def urlopen(_request: object, *, timeout: int) -> _DownloadResponse:
+        nonlocal calls
+        calls += 1
+        assert timeout == 60
+        raise _http_error(url, 503)
+
+    monkeypatch.setattr(RESOLVER.urllib.request, "urlopen", urlopen)
+
+    with pytest.raises(
+        RESOLVER.BaselineResolutionError,
+        match=r"after 4 attempts: HTTP Error 503",
+    ):
+        RESOLVER._download(url, 64, sleeper=sleeps.append)
+    assert calls == RESOLVER.MAX_DOWNLOAD_ATTEMPTS
+    assert sleeps == [1.0, 2.0, 4.0]
