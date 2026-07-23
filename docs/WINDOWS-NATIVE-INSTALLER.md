@@ -293,61 +293,30 @@ Machine-scope state and the HKLM policy
 `SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate=1` disable self-update.
 Those installations must be serviced by the enterprise deployment channel.
 
-## Release and certification gate
+## Release gate
 
-Starting with 0.8.6, the release workflow builds Setup on `windows-latest` and
-runs the full native install/repair/connector/uninstall acceptance suite against
-the exact EXE. The Authenticode branch is selected before the build and bound to
-the resulting provenance. With complete credentials, the workflow passes the
-immutable staging artifact to a separate non-advisory real-client job. That job
-verifies the Cisco signature plus installer sidecar/provenance digests, requires
-provenance and installed payload state to match the exact workflow `GITHUB_SHA`,
-and installs that same EXE. The signed gate installs exact official
-Codex CLI `0.144.3` and Claude Code `2.1.208` packages, requires both provider credentials,
-verifies automatic Codex hook trust without a manual
-`/hooks` approval, and
-requires lifecycle, tool allow/block, gateway JSONL, SQLite audit correlation,
-and connector-tagged OTLP evidence from both clients. It then runs repair and
-same-version upgrade with the same Setup bytes and requires uninstall itself to
-remove both connectors, user data, Installed Apps, and the user PATH entry while
-preserving a seeded unrelated `~/.codex/hooks.json` handler byte-for-byte.
+The one-dispatch Release workflow builds the Windows amd64 and arm64 gateway
+binaries plus the x64 `DefenseClawSetup-x64.exe` from the reviewed `main`
+commit selected by the dispatch. Setup must be
+Authenticode signed with the expected publisher and timestamp; missing,
+partial, or invalid signing credentials stop the run before publication.
 
-When both Authenticode credentials are absent, the signed real-client cell is
-skipped and the already-passed standard-user lifecycle result is recorded as
-explicitly `unverified`; the certification sidecar has no publisher, clients, or
-connector claims. Partial signing credentials, invalid signing material, a bad
-publisher or timestamp, and any signed-branch certification failure still abort
-before publication. The workflow emits SHA-256, merged SPDX SBOM, provenance,
-and `DefenseClawSetup-x64.exe.certification.json`, then adds every artifact to
-the final checksum manifest before the immutable release is created. macOS and
-Linux artifacts continue through their existing build path.
+The exact candidate is exercised on `windows-latest` through both the
+PowerShell installer entry point and native Setup. The fresh-install gate
+requires successful installation plus exact CLI and gateway version
+verification. It also proves that a second fresh-installer invocation refuses
+before changing installed state.
 
-The Windows chain transfers each intermediate by immutable GitHub Actions
-artifact ID and digest; assembly rejects a missing or malformed custody artifact
-digest before processing its exact-ID download. The signed and unverified paths
-both emit exactly five release assets:
-`DefenseClawSetup-x64.exe`, its `.sha256`, `.provenance.json`, `.sbom.json`, and
-`.certification.json` sidecars. Assembly consumes that directory explicitly via
-`--windows-dir`, seals all five bytes into the candidate, and signs
-`checksums.txt` with an offline-verifiable `checksums.txt.bundle` under the
-exact `release.yaml@refs/heads/main` Sigstore identity. The protected
-`publish-release` job is the only job granted `contents: write`.
+This is the first native Windows release, so release acceptance is
+fresh-install-only.
 
-The sealed Setup must pass the standard-user `windows-fresh-install` gate.
-The separate historical Windows upgrade matrix remains skipped for 0.8.6
-because 0.8.5 did not publish a native Setup baseline; the fresh gate still
-exercises install, repair, same-version servicing, and uninstall. Both publish
-selection and post-publish custody verification retain
-`--omit-windows-binaries` to exclude legacy raw Windows archives only. They do
-not exclude Setup or its four custody sidecars. The unverified EXE can be
-downloaded and run directly for a fresh install. The authenticated PowerShell
-bootstrap and automatic upgrade path deliberately continue to reject unsigned
-Setup targets rather than silently weakening an existing installation's trust
-policy.
+The workflow places Setup, its SHA-256, provenance, and SPDX SBOM metadata in
+the same sealed candidate as the Linux and macOS assets. Candidate assembly
+rejects missing or mismatched bytes, signs the public checksum manifest with the
+protected `release.yaml@refs/heads/main` Sigstore identity, and publishes only
+after the Windows fresh-install and Linux/macOS release gates pass. The
+protected publish job is the only job granted `contents: write`.
 
-Pull-request CI builds an unsigned setup and runs setup acceptance only on the
-disposable GitHub Actions user. Local setup acceptance refuses to mutate the
-current user unless an explicit override is supplied. A release artifact is
-not certified until it is rebuilt from the final integrated source head and
-passes clean-user native Windows acceptance; an artifact built from an earlier
-integration base is evidence only.
+Pull-request CI may build an unsigned Setup for disposable-runner regression
+testing. A publishable Setup is always rebuilt from the reviewed commit selected
+by the Release dispatch, signed, and tested as part of that same run.

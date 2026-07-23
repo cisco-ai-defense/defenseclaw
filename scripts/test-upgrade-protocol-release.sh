@@ -60,6 +60,13 @@ parse_protocol_args() {
 protocol_cleanup() {
     local status=$?
     local pid
+    # The protocol harness replaces the base smoke harness's EXIT trap below.
+    # Preserve its most important guarantee: a source/target gateway that was
+    # started inside the throwaway HOME must be stopped even when a later
+    # assertion aborts before the success path's explicit stop. Otherwise the
+    # sandbox gateway can keep the real API port (18970) after WORKDIR is
+    # deleted and make the developer's ordinary hooks fail authentication.
+    stop_smoke_gateway
     if [[ "${REFUSAL_SENTINEL_PIDS[0]+set}" == "set" ]]; then
         for pid in "${REFUSAL_SENTINEL_PIDS[@]}"; do
             kill "${pid}" >/dev/null 2>&1 || true

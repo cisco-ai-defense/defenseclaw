@@ -1,9 +1,10 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fail-closed contracts for signed and explicitly unverified Windows releases."""
+"""Contracts for the first signed native Windows release."""
 
-import json
+from __future__ import annotations
+
 import re
 from pathlib import Path
 
@@ -12,224 +13,154 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 HARNESS = (ROOT / "scripts" / "windows-native-ci.ps1").read_text(encoding="utf-8")
 PACKAGED_V8_VALIDATOR = (ROOT / "scripts" / "validate_packaged_v8_resources.py").read_text(encoding="utf-8")
-LIVE = (ROOT / "scripts" / "live-connector-e2e" / "run-windows.ps1").read_text(encoding="utf-8")
-RELEASE = (ROOT / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8")
+RELEASE_PATH = ROOT / ".github" / "workflows" / "release.yaml"
+SMOKE_PATH = ROOT / ".github" / "workflows" / "pre-release-certification.yml"
+FRESH_INSTALL = (ROOT / "scripts" / "test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")
 
 
-def _workflow() -> dict[str, object]:
-    return yaml.load(RELEASE, Loader=yaml.BaseLoader)
+def _workflow(path: Path) -> dict[str, object]:
+    return yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
 def _function(name: str) -> str:
-    match = re.search(rf"(?ms)^function {re.escape(name)}\b.*?(?=^function |\Z)", HARNESS)
+    match = re.search(
+        rf"(?ms)^function {re.escape(name)}\b.*?(?=^function |\Z)",
+        HARNESS,
+    )
     assert match, f"missing PowerShell function {name}"
     return match.group(0)
 
 
-def test_release_clients_are_both_official_and_exactly_pinned() -> None:
-    specs = _function("Get-WindowsReleaseClientSpecifications")
-    assert "@openai/codex" in specs and "Version = '0.144.3'" in specs
-    assert "@anthropic-ai/claude-code" in specs and "Version = '2.1.208'" in specs
-    assert "latest" not in specs.lower()
-    installer = _function("Install-PinnedWindowsReleaseClient")
-    assert "Assert-ExactWindowsReleaseClientVersion" in installer
-    assert "package.json" not in installer  # the immutable manifest path comes from the spec
-    assert "manifest.version -cne" in installer
-    assert "GetEnvironmentVariables('Process')" in installer
-    assert "_API_KEY$" in installer
-    assert "SetEnvironmentVariable($name, $null, 'Process')" in installer
-    assert "'install', '--package-lock-only', '--ignore-scripts', '--save-exact'" in installer
-    assert "'ci', '--no-audit', '--no-fund'" in installer
-    assert installer.count("Get-FileHash -LiteralPath $lockPath") == 2
-    assert "npm ci mutated the exact official-client dependency lock" in installer
+def _step(job: dict[str, object], name: str) -> dict[str, object]:
+    matches = [step for step in job["steps"] if step.get("name") == name]
+    assert len(matches) == 1, f"missing unique step: {name}"
+    return matches[0]
 
 
-def test_release_gate_uses_only_the_exact_signed_setup_bytes() -> None:
-    gate = _function("Invoke-WindowsReleaseCertification")
-    assert "DefenseClawSetup-x64.exe" in gate
-    assert gate.count("Assert-CiscoAuthenticodeSignature $setup") >= 2
-    assert gate.count("Get-FileHash -LiteralPath $setup") >= 2
-    assert "release setup SHA-256 sidecar mismatch" in gate
-    assert "provenance.artifact_sha256" in gate
-    assert "provenance.source_commit -cne [string]$env:GITHUB_SHA" in gate
-    assert "Assert-WindowsReleaseSbom" in gate
-    assert "installedStatePath" in gate and "installedPayloadPath" in gate
-    assert "installedIdentity.source_commit -cne [string]$env:GITHUB_SHA" in gate
-    assert "the signed DefenseClawSetup-x64.exe bytes changed" in gate
-    assert "release metadata changed during real-client certification" in gate
-    assert gate.count("Get-FileHash -LiteralPath $metadataPath") == 2
-    assert "Invoke-WindowsNativeProcess $setup" in gate
-    for forbidden in ("go build", "uv sync", "Install-PackagedArtifacts", "Invoke-BuildArtifacts"):
-        assert forbidden.lower() not in gate.lower()
+def test_release_requires_authenticode_signed_setup_and_exact_four_sidecars() -> None:
+    workflow = _workflow(RELEASE_PATH)
+    jobs = workflow["jobs"]
+    windows = jobs["windows-installer"]
+    rendered = str(windows)
 
+    assert windows["needs"] == [
+        "release-preflight",
+        "build-runtime-candidate",
+    ]
+    assert windows["runs-on"] == "windows-latest"
+    assert windows["environment"] == "release"
+    assert "WINDOWS_SIGNING_CERT_BASE64" in rendered
+    assert "WINDOWS_SIGNING_CERT_PASSWORD" in rendered
+    assert "Both Windows Authenticode certificate and password are required" in rendered
+    assert "Build native Setup with required Authenticode" in rendered
+    assert "Release Windows Setup is not fully Authenticode signed" in rendered
 
-def test_release_sbom_binds_setup_bytes_version_and_source_commit() -> None:
-    sbom = _function("Assert-WindowsReleaseSbom")
-    assert "SPDX-2.3" in sbom and "CC0-1.0" in sbom
-    assert "spdx/windows/$escapedVersion/$SetupHash" in sbom
-    assert 'sbom.comment -cne "DefenseClaw source commit: $SourceCommit"' in sbom
-    assert "DefenseClaw Windows Setup" in sbom
-    assert "./DefenseClawSetup-x64.exe" in sbom
-    assert "pkg:github/cisco-ai-defense/defenseclaw@$escapedVersion" in sbom
-    assert "documentDescribes" in sbom
-    assert "DESCRIBES" in sbom and "CONTAINS" in sbom
+    assert "invoke-windows-setup-standard-user-ci.ps1" not in rendered
+    assert "-Mode setup-acceptance" not in rendered
 
-
-def test_release_version_is_independently_bound_end_to_end() -> None:
-    gate = _function("Invoke-WindowsReleaseCertification")
-    certification = _workflow()["jobs"]["windows-real-client-certification"]
-    assert certification["needs"] == ["release-preflight", "windows-installer"]
-    certify_step = next(
-        step for step in certification["steps"] if "-Operation release-certification" in step.get("run", "")
+    upload = next(step for step in windows["steps"] if step.get("id") == "windows-installer-artifact")
+    assert upload["with"]["path"] == (
+        "windows-installer-output/DefenseClawSetup-x64.exe\n"
+        "windows-installer-output/DefenseClawSetup-x64.exe.sha256\n"
+        "windows-installer-output/DefenseClawSetup-x64.exe.provenance.json\n"
+        "windows-installer-output/DefenseClawSetup-x64.exe.sbom.json\n"
     )
-    assert certify_step["env"]["WINDOWS_RELEASE_VERSION"] == ("${{ needs.release-preflight.outputs.tag }}")
-    assert "provenance.version -cne $releaseVersion" in gate
-    assert "installedIdentity.version -cne $releaseVersion" in gate
-    assert "$sbomPath $setupHash $releaseVersion" in gate
+    assert ".certification.json" not in rendered
 
 
-def test_certification_evidence_derives_versions_from_installed_specs() -> None:
-    gate = _function("Invoke-WindowsReleaseCertification")
-    evidence = gate.split("$evidence = [ordered]@{", 1)[1]
-    assert "[string]$clients['codex'].Specification.Version" in evidence
-    assert "[string]$clients['claudecode'].Specification.Version" in evidence
-    assert "verification_status = 'signed'" in evidence
-    assert "codex = '0.144.3'" not in evidence
-    assert "claudecode = '2.1.208'" not in evidence
-
-
-def test_release_gate_cannot_skip_a_connector_or_manual_trust() -> None:
-    gate = _function("Invoke-WindowsReleaseCertification")
-    results = _function("Assert-WindowsReleaseRealClientResults")
-    assert "@('codex', 'claudecode')" in gate
-    assert "@('codex', 'claudecode')" in results
-    for event in (
-        "lifecycle:fires",
-        "tool-allow:fires",
-        "tool-block:enforced",
-        "audit-correlation",
-        "telemetry",
-        "teardown",
-        "codex:auto-trust",
-    ):
-        assert event in results
-    assert "Assert-DoctorWindowsHookRegistration" in LIVE
-    assert "Assert-CodexHooksListTrusted" in LIVE
-    assert "hooks/list verified every setup-created handler enabled and trusted" in LIVE
-    assert "without manual approval" in LIVE
-
-
-def test_release_uninstall_preserves_unrelated_codex_hooks_and_checks_all_sources() -> None:
-    gate = _function("Invoke-WindowsReleaseCertification")
-    clean = _function("Assert-WindowsReleaseCleanUninstall")
-    assert "'.codex\\hooks.json'" in gate
-    assert "cmd.exe /d /c exit 0" in gate
-    for path in (
-        "$codexConfigPath",
-        "$codexManagedConfigPath",
-        "$codexHooksPath",
-        "$claudeConfigPath",
-    ):
-        assert path in gate
-    assert "Assert-NoDefenseClawRegistration $ConnectorConfigs" in clean
-    assert "release uninstall did not preserve the unrelated Codex hook byte-for-byte" in clean
-    assert "release uninstall did not preserve the unrelated Codex managed config byte-for-byte" in clean
-
-
-def test_release_gate_fails_closed_without_secrets_or_exact_clients() -> None:
-    environment = _function("Assert-WindowsReleaseCertificationEnvironment")
-    assert "OPENAI_API_KEY" in environment and "ANTHROPIC_API_KEY" in environment
-    assert "required for non-advisory" in environment
-    assert "WINDOWS_RELEASE_ARTIFACT_DIGEST" in environment
-    assert "immutable uploaded Windows artifact digest" in environment
-    install_agent = re.search(r"(?ms)^function Install-Agent\b.*?(?=^function |\Z)", LIVE)
-    assert install_agent
-    body = install_agent.group(0)
-    assert "release certification requires an explicit preinstalled agent path and exact version" in body
-    assert "release client must be installed below" in body
-    release_branch = body.split("if ($ReleaseCertification)", 1)[1].split("return", 1)[0]
-    assert "latest" not in release_branch.lower()
-
-
-def test_publish_has_non_advisory_real_client_certification_custody() -> None:
-    jobs = _workflow()["jobs"]
-    certification = jobs["windows-real-client-certification"]
+def test_windows_setup_bytes_are_bound_into_the_single_sealed_candidate() -> None:
+    jobs = _workflow(RELEASE_PATH)["jobs"]
+    windows = jobs["windows-installer"]
     assemble = jobs["assemble-release-candidate"]
-    full = jobs["full-certification"]
-    select = jobs["select-candidate"]
+
+    assert "artifact-id" in windows["outputs"]["artifact_id"]
+    assert "artifact-digest" in windows["outputs"]["artifact_digest"]
+    assert "windows-installer" in assemble["needs"]
+    download = next(step for step in assemble["steps"] if step.get("with", {}).get("path") == "candidate-input/windows")
+    assert download["with"]["artifact-ids"] == ("${{ needs.windows-installer.outputs.artifact_id }}")
+    assert download["with"]["merge-multiple"] == "true"
+    custody = _step(assemble, "Require immutable Windows Setup artifact identity")
+    assert custody["env"]["WINDOWS_INSTALLER_ARTIFACT_DIGEST"] == (
+        "${{ needs.windows-installer.outputs.artifact_digest }}"
+    )
+    assert "Missing Windows custody digest" in custody["run"]
+    assert "--windows-dir candidate-input/windows" in str(assemble)
+
+
+def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> None:
+    smoke_workflow = _workflow(SMOKE_PATH)
+    assert set(smoke_workflow["jobs"]) == {
+        "posix-fresh-install",
+        "posix-upgrade",
+        "windows-fresh-install",
+    }
+    job = smoke_workflow["jobs"]["windows-fresh-install"]
+    rendered = str(job)
+
+    assert job["runs-on"] == "windows-latest"
+    assert "inputs.candidate_artifact" in rendered
+    assert "scripts/release_candidate.py verify" in rendered
+    assert "scripts/verify-sigstore-blob.py" in rendered
+    assert "scripts/test-fresh-install-release-windows.ps1" in rendered
+    assert "-SuccessPathOnly" in rendered
+
+    smoke_text = SMOKE_PATH.read_text(encoding="utf-8")
+    for retired in (
+        "windows-upgrade:",
+        "test-upgrade-release-windows.ps1",
+        "windows-real-client-certification",
+        "live-connector-e2e",
+        "-Operation release-certification",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+    ):
+        assert retired not in smoke_text
+
+    assert '$Installer = Join-Path $Root "scripts\\install.ps1"' in FRESH_INSTALL
+    assert '"-Local", $ReleaseDir' in FRESH_INSTALL
+    assert '"-Version", $RequestedVersion' in FRESH_INSTALL
+    assert "[switch]$SuccessPathOnly" in FRESH_INSTALL
+    assert "$first = if ($SuccessPathOnly)" in FRESH_INSTALL
+    assert "Invoke-FreshInstaller\n    } else {" in FRESH_INSTALL
+    assert "DefenseClaw installed successfully" in FRESH_INSTALL
+    assert "Assert-ExactVersion -Command $cli" in FRESH_INSTALL
+    assert "Assert-ExactVersion -Command $gateway" in FRESH_INSTALL
+    assert "$second = Invoke-FreshInstaller" in FRESH_INSTALL
+    assert "Second fresh-installer invocation unexpectedly succeeded" in FRESH_INSTALL
+
+
+def test_publish_includes_windows_binaries_without_an_omission_mode() -> None:
+    workflow = _workflow(RELEASE_PATH)
+    jobs = workflow["jobs"]
     publish = jobs["publish-release"]
-    rendered = str(certification)
+    release_text = RELEASE_PATH.read_text(encoding="utf-8")
 
-    assert certification["needs"] == ["release-preflight", "windows-installer"]
-    assert "continue-on-error" not in rendered
-    assert "-Operation release-certification" in rendered
-    assert "secrets.OPENAI_API_KEY" in rendered
-    assert "secrets.ANTHROPIC_API_KEY" in rendered
-    assert "${{ needs.windows-installer.outputs.artifact_id }}" in rendered
-    assert "${{ needs.windows-installer.outputs.artifact_digest }}" in rendered
-    assert "DefenseClawSetup-x64.exe.certification.json" in rendered
-    certification_index = next(
-        index
-        for index, step in enumerate(certification["steps"])
-        if "-Operation release-certification" in step.get("run", "")
-    )
-    upload_index = next(
-        index for index, step in enumerate(certification["steps"]) if step.get("id") == "windows-certified-artifact"
-    )
-    assert certification_index < upload_index
-    assert int(certification["timeout-minutes"]) >= 90
-
-    provider_gate = next(
-        step for step in certification["steps"] if step.get("name") == "Require both real-client provider credentials"
-    )
-    certify_step = certification["steps"][certification_index]
-    unverified_step = next(
-        step
-        for step in certification["steps"]
-        if step.get("name") == "Record explicit unverified Windows Setup custody"
-    )
-    assert provider_gate["if"] == "${{ needs.windows-installer.outputs.verification_status == 'signed' }}"
-    assert certify_step["if"] == "${{ needs.windows-installer.outputs.verification_status == 'signed' }}"
-    assert unverified_step["if"] == ("${{ needs.windows-installer.outputs.verification_status == 'unverified' }}")
-    assert "record-windows-unverified" in unverified_step["run"]
-
-    assert "windows-real-client-certification" in assemble["needs"]
-    assert "windows-real-client-certification" in full["needs"]
-    assert "needs.windows-real-client-certification.result == 'success'" in full["if"]
-    assert {
-        "lookup-certification",
+    assert publish["needs"] == [
+        "release-preflight",
         "assemble-release-candidate",
-        "full-certification",
-        "record-certification",
-    }.issubset(select["needs"])
-    assert "needs.lookup-certification.outputs.reuse == 'true'" in select["if"]
-    assert "needs.full-certification.result == 'success'" in select["if"]
-    assert "select-candidate" in publish["needs"]
-    assert "needs.select-candidate.result == 'success'" in publish["if"]
+        "release-smoke",
+    ]
+    assert "scripts/release_candidate.py list-assets" in str(publish)
+    assert "--omit-windows-binaries" not in release_text
+    assert "DefenseClawSetup-x64.exe.certification.json" not in release_text
+    assert "every sealed Linux, macOS, and Windows runtime asset" in release_text
 
 
-def test_certification_evidence_is_not_faked_in_validated_versions() -> None:
-    registry = json.loads(
-        (ROOT / "cli" / "defenseclaw" / "inventory" / "validated_versions.json").read_text(encoding="utf-8")
-    )
-    for connector in ("codex", "claudecode"):
-        windows = registry["connectors"][connector]["os"]["windows"]
-        assert windows["run_url"] == ""
-
-
-def test_release_documentation_matches_the_enforced_gate() -> None:
+def test_release_documentation_matches_the_fresh_only_gate() -> None:
     installer = (ROOT / "docs" / "WINDOWS-NATIVE-INSTALLER.md").read_text(encoding="utf-8")
     ci = (ROOT / "docs" / "WINDOWS-NATIVE-CI.md").read_text(encoding="utf-8")
-    ci_flat = " ".join(ci.split())
-    for claim in (
-        "Codex CLI `0.144.3`",
-        "Claude Code `2.1.208`",
-        "without a manual\n`/hooks` approval",
-        "DefenseClawSetup-x64.exe.certification.json",
-    ):
-        assert claim in installer
-    assert "`publish-release` job depends directly on that cell" in ci_flat
-    assert "never builds or installs DefenseClaw from the source checkout" in ci_flat
+    release = (ROOT / "docs" / "RELEASE_VALIDATION.md").read_text(encoding="utf-8")
+
+    assert "one-dispatch Release workflow" in installer
+    assert "Authenticode signed" in installer
+    assert "first native Windows release" in installer
+    assert "fresh-install-only" in installer
+    assert ".certification.json" not in installer
+    assert "A merge to `main` is the review-and-CI boundary" in ci
+    assert "does not poll or replay `Windows Native CI`" in ci
+    assert "first native Windows release" in release
+    assert "has no older native Windows baseline" in release
+    assert "fresh-install only" in release
 
 
 def test_native_wheel_stages_and_verifies_v8_runtime_assets() -> None:
@@ -257,10 +188,9 @@ def test_native_wheel_stages_and_verifies_v8_runtime_assets() -> None:
         assert packaged in build
 
 
-def test_packaged_v8_resources_are_loaded_before_hooks_and_after_installer_maintenance() -> None:
+def test_setup_acceptance_validates_packaged_resources_before_first_run() -> None:
     resource_contract = _function("Assert-PackagedV8ResourceContract")
     acceptance = _function("Invoke-SetupAcceptance")
-    release_gate = _function("Invoke-WindowsReleaseCertification")
 
     for resource in (
         "defenseclaw-config.schema.json",
@@ -274,132 +204,16 @@ def test_packaged_v8_resources_are_loaded_before_hooks_and_after_installer_maint
         "openinference-v1.json",
     ):
         assert resource in PACKAGED_V8_VALIDATOR
-    for loader in (
-        "_schema_validator()",
-        "telemetry_v8_schema_bytes()",
-        "telemetry_v8_catalog_bytes()",
-        "v7_exporter_selection_bytes()",
-        '"galileo-rich-v2"',
-        '"local-observability-v1"',
-        '"openinference-v1"',
-    ):
-        assert loader in PACKAGED_V8_VALIDATOR
-    assert "runtime unexpectedly contains a Lib/schemas fallback tree" in PACKAGED_V8_VALIDATOR
+    assert "runtime unexpectedly contains a Lib/schemas fallback tree" in (PACKAGED_V8_VALIDATOR)
     assert "scripts\\validate_packaged_v8_resources.py" in resource_contract
-    assert "Test-Path -LiteralPath $validator -PathType Leaf" in resource_contract
-    assert "'-I', $validator" in resource_contract
     assert "'--site-packages', $sitePackages" in resource_contract
     assert "'--runtime-root', $RuntimeRoot" in resource_contract
-    assert "'--label', 'packaged'" in resource_contract
 
     probe = "Assert-PackagedV8ResourceContract $python (Join-Path $installRoot 'runtime\\python')"
     assert acceptance.index(probe) < acceptance.index("'init', '--skip-install'")
-    assert release_gate.count(probe) == 2
-    assert release_gate.index(probe) < release_gate.index("foreach ($connectorName in @('codex', 'claudecode'))")
-    assert release_gate.rindex(probe) > release_gate.index("'/upgrade', '/quiet'")
-    assert release_gate.rindex(probe) < release_gate.index("Assert-WindowsReleaseDoctorRows")
 
 
-def test_setup_acceptance_exercises_atomic_observability_v8_upgrade() -> None:
-    acceptance = _function("Invoke-SetupAcceptance")
-
-    for contract in (
-        "installedState.version = '0.8.0'",
-        "FROMVERSION=0.8.0",
-        "config_version: 7",
-        "temporality: delta",
-        '(otlp.get("tls") or {}).get("insecure") is True',
-        '(otlp.get("network_safety") or {}).get("allow_private_networks") is True',
-        "config-v8', 'validate'",
-        "setup-seeded-v8-contract.log",
-        "'0.8.5' -notin @($migrationCursor.applied)",
-        "Get-GatewayIdentity $dataRoot",
-        "Get-WatchdogIdentity $dataRoot",
-        "seeded upgrade-restored gateway",
-        "seeded upgrade-restored watchdog",
-    ):
-        assert contract in acceptance
-
-
-def test_minimal_gateway_fixture_disables_external_v8_destinations() -> None:
-    minimal = _function("Set-MinimalGatewayAcceptanceConfig")
-
-    for contract in (
-        "config_path_for_data_dir",
-        "load_validate_v8",
-        "mutate_v8_config",
-        "V8YAMLMutation.set",
-        '("observability", "destinations", index, "enabled")',
-        'frozenset({"http_jsonl", "otlp", "splunk_hec"})',
-        'destination.get("enabled", True)',
-    ):
-        assert contract in minimal
-    assert minimal.index("cfg.save()") < minimal.index("mutate_v8_config(")
-
-
-def test_packaged_rotation_probes_only_the_owned_configured_gateway_without_secret_output() -> None:
-    process = _function("Invoke-WindowsNativeProcess")
-    rotation = _function("Assert-PackagedClaudeTokenRotation")
-    authentication = _function("Assert-ClaudeNativeOtlpRotationAuthentication")
-    authority = _function("Assert-ClaudeNativeOtlpProbeAuthority")
-    listener = _function("Assert-OwnedGatewayApiListener")
-    owned_process = _function("Assert-OwnedManagedProcess")
-    stale_identity = _function("Assert-StaleGatewayProcessIdentityRejected")
-    port = _function("Get-PackagedGatewayApiPort")
-    posture = _function("Get-PackagedRotationConnectorPosture")
-    posture_assertion = _function("Assert-PackagedRotationActionClosedPosture")
-
-    assert "[switch]$SuppressOutput" in process
-    assert "if ($combined -and -not $SuppressOutput)" in process
-    assert "[credential-bearing process output intentionally suppressed]" in process
-    assert 'if ($SuppressOutput) { throw "$FilePath $reason" }' in process
-    assert rotation.count("-SuppressOutput") == 5
-    assert "'setup', 'codex', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'" in rotation
-    assert "'setup', 'claude-code', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'" in rotation
-    assert "Get-PackagedRotationConnectorPosture $statusBefore" in rotation
-    assert "Get-PackagedRotationConnectorPosture $status" in rotation
-    assert "$postureAfterJson -cne $postureBeforeJson" in rotation
-    assert "changed the exact connector roster or effective mode/fail-mode posture" in rotation
-    assert "Get-WindowsNativeGatewayTokenFromDotenvState $tokenAState" in rotation
-    assert "Get-WindowsNativeGatewayTokenFromDotenvState $tokenBState" in rotation
-    assert "[string]::Equals($tokenA, $tokenB" in rotation
-    assert "Assert-WindowsNativeCredentialValuesAbsent" in rotation
-    assert "Get-ClaudeNativeOtlpRotationProbes $ClaudeHome" in rotation
-    assert "Assert-ClaudeNativeOtlpForeignPortRejected" in rotation
-    assert "substituted a gateway master token for scoped credentials" in rotation
-    assert "$scopedTokens[0], $scopedTokens[1]" in rotation
-
-    assert "os.environ.pop('DEFENSECLAW_CONFIG', None)" in port
-    assert "cfg = load(data_dir=root)" in port
-    assert "Path(cfg.data_dir).resolve() != root" in port
-    assert "$endpoint.Port -ne $GatewayPort" in authority
-    assert "Get-NetTCPConnection -State Listen -LocalPort $GatewayPort" in listener
-    assert "OwningProcess -ne [int]$GatewayIdentity.ProcessId" in listener
-    assert "Assert-OwnedManagedProcess $GatewayIdentity $GatewayPath" in listener
-    assert "$liveStartIdentity -cne [string]$Identity.StartIdentity" in owned_process
-    assert "Assert-OwnedManagedProcess $stale $GatewayPath" in stale_identity
-    assert "accepted a stale or reused gateway process identity" in stale_identity
-    assert "Assert-StaleGatewayProcessIdentityRejected" in rotation
-    for field in (
-        "fail_effective",
-        "fail_configured",
-        "fail_desired",
-        "fail_runtime",
-        "fail_current",
-        "fail_drift",
-    ):
-        assert field in posture
-        assert field in posture_assertion
-    assert "[Net.IPAddress]::IsLoopback($address)" in listener
-    assert authentication.index("Assert-ClaudeNativeOtlpProbeAuthority") < authentication.index(
-        "[Net.Http.HttpClientHandler]::new()"
-    )
-    assert authentication.index("Assert-OwnedGatewayApiListener") < authentication.index(
-        "[Net.Http.HttpClientHandler]::new()"
-    )
-
-
-def test_setup_uninstall_acceptance_uses_validated_roster_and_backup_markers() -> None:
+def test_setup_uninstall_acceptance_retains_connector_cleanup_authority() -> None:
     acceptance = _function("Invoke-SetupAcceptance")
     authority = _function("Assert-NativeConnectorCleanupAuthorityPresent")
     consumed = _function("Assert-NativeConnectorBackupMarkersConsumed")

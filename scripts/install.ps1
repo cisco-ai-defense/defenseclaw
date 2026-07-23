@@ -30,12 +30,12 @@
     release bundle plus a pinned Cosign executable.
 
 .EXAMPLE
-    $Version = "0.8.6"
+    $Version = "X.Y.Z" # Replace with the release shown on GitHub.
     $InstallUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"
     & ([scriptblock]::Create((irm $InstallUrl))) -Version $Version
 
 .EXAMPLE
-    .\install.ps1 -Version 0.8.6 -Connector codex -Yes -Quickstart
+    .\install.ps1 -Version X.Y.Z -Connector codex -Yes -Quickstart
 
 .EXAMPLE
     .\install.ps1 -Local .\release -CosignPath .\tools\cosign-windows-amd64.exe -Yes
@@ -80,6 +80,7 @@ $SigstoreOIDCIssuer = "https://token.actions.githubusercontent.com"
 $CosignVersion = "2.6.2"
 $CosignAsset = "cosign-windows-amd64.exe"
 $CosignSha256 = "DD6C61E510DA627BCAED4CD9DB844EC11CACD09826D814D89F7F68D40FEB07BE"
+$CosignMaximumBytes = 268435456
 $CosignUrl = "https://github.com/sigstore/cosign/releases/download/v$CosignVersion/$CosignAsset"
 $ConnectorChoices = @(
     "codex",
@@ -100,10 +101,10 @@ function Show-Help {
 DefenseClaw native Windows bootstrap
 
 Usage:
-  `$Version = "0.8.6"
+  `$Version = "X.Y.Z" # Replace with the release shown on GitHub.
   `$InstallUrl = "https://raw.githubusercontent.com/$Repo/`$Version/scripts/install.ps1"
   & ([scriptblock]::Create((irm `$InstallUrl))) -Version `$Version
-  .\install.ps1 -Version 0.8.6 -Connector codex -Yes -Quickstart
+  .\install.ps1 -Version X.Y.Z -Connector codex -Yes -Quickstart
   .\install.ps1 -Local .\release -CosignPath .\cosign-windows-amd64.exe
 
 Options:
@@ -446,13 +447,83 @@ function Assert-UpgradeManifest {
     } catch {
         Die "Could not parse authenticated ${UpgradeManifestAsset}: $($_.Exception.Message)"
     }
-    if ([int]$manifest.schema_version -ne 1 -or
+    if (-not (Test-ReleaseVersion -Value $ReleaseVersion)) {
+        Die "Authenticated upgrade manifest was checked against an invalid release version"
+    }
+    $expectedSchema = if ([version]$ReleaseVersion -ge [version]"0.8.4") { 2 } else { 1 }
+    if ([int]$manifest.schema_version -ne $expectedSchema -or
         -not ([string]$manifest.release_version).Equals($ReleaseVersion, [StringComparison]::Ordinal)) {
         Die "Authenticated upgrade manifest does not describe DefenseClaw $ReleaseVersion"
     }
-    $installer = $manifest.windows_installer
-    if ($null -eq $installer -or
-        -not ([string]$installer.asset).Equals($SetupAsset, [StringComparison]::Ordinal)) {
+    $releaseArtifactsProperty = $manifest.PSObject.Properties["release_artifacts"]
+    if ($expectedSchema -eq 1) {
+        if ($null -ne $releaseArtifactsProperty) {
+            Die "Authenticated legacy upgrade manifest declares unsupported protected release artifacts"
+        }
+    } else {
+        if ($null -eq $releaseArtifactsProperty -or $null -eq $releaseArtifactsProperty.Value) {
+            Die "Authenticated schema-2 upgrade manifest does not declare protected release artifacts"
+        }
+        $releaseArtifacts = $releaseArtifactsProperty.Value
+        $releaseArtifactNames = @($releaseArtifacts.PSObject.Properties.Name)
+        if ($releaseArtifactNames.Count -ne 2 -or
+            $releaseArtifactNames -notcontains "wheel" -or
+            $releaseArtifactNames -notcontains "gateways") {
+            Die "Authenticated schema-2 upgrade manifest has an invalid protected release-artifact surface"
+        }
+        $expectedWheel = "defenseclaw-$ReleaseVersion-2-py3-none-any.dcwheel"
+        if (-not ([string]$releaseArtifacts.wheel).Equals(
+            $expectedWheel, [StringComparison]::Ordinal)) {
+            Die "Authenticated schema-2 upgrade manifest does not select the exact protected wheel"
+        }
+        $gateways = $releaseArtifacts.gateways
+        if ($null -eq $gateways) {
+            Die "Authenticated schema-2 upgrade manifest has an invalid protected gateway surface"
+        }
+        $gatewayPlatformNames = @($gateways.PSObject.Properties.Name)
+        if ($gatewayPlatformNames.Count -ne 3 -or
+            $gatewayPlatformNames -notcontains "darwin" -or
+            $gatewayPlatformNames -notcontains "linux" -or
+            $gatewayPlatformNames -notcontains "windows") {
+            Die "Authenticated schema-2 upgrade manifest has an invalid protected gateway surface"
+        }
+        foreach ($platform in @("darwin", "linux", "windows")) {
+            $platformGateways = $gateways.PSObject.Properties[$platform].Value
+            if ($null -eq $platformGateways) {
+                Die "Authenticated schema-2 upgrade manifest has an invalid $platform gateway surface"
+            }
+            $gatewayArchitectureNames = @($platformGateways.PSObject.Properties.Name)
+            if ($gatewayArchitectureNames.Count -ne 2 -or
+                $gatewayArchitectureNames -notcontains "amd64" -or
+                $gatewayArchitectureNames -notcontains "arm64") {
+                Die "Authenticated schema-2 upgrade manifest has an invalid $platform gateway surface"
+            }
+            foreach ($architecture in @("amd64", "arm64")) {
+                $expectedGateway =
+                    "defenseclaw_${ReleaseVersion}_protocol2_${platform}_${architecture}.dcgateway"
+                if (-not ([string]$platformGateways.PSObject.Properties[$architecture].Value).Equals(
+                    $expectedGateway, [StringComparison]::Ordinal)) {
+                    Die "Authenticated schema-2 upgrade manifest does not select the exact protected $platform/$architecture gateway"
+                }
+            }
+        }
+    }
+
+    $installerProperty = $manifest.PSObject.Properties["windows_installer"]
+    $installer = if ($null -eq $installerProperty) { $null } else { $installerProperty.Value }
+    if ($null -eq $installer) {
+        Die "Authenticated upgrade manifest does not select $SetupAsset"
+    }
+    $installerNames = @($installer.PSObject.Properties.Name)
+    if ($installerNames.Count -ne 5 -or
+        $installerNames -notcontains "asset" -or
+        $installerNames -notcontains "architectures" -or
+        $installerNames -notcontains "handoff_args" -or
+        $installerNames -notcontains "authenticode" -or
+        $installerNames -notcontains "managed_policy") {
+        Die "Authenticated upgrade manifest has an invalid native Windows installer surface"
+    }
+    if (-not ([string]$installer.asset).Equals($SetupAsset, [StringComparison]::Ordinal)) {
         Die "Authenticated upgrade manifest does not select $SetupAsset"
     }
     $architectures = @($installer.architectures)
@@ -460,9 +531,27 @@ function Assert-UpgradeManifest {
         -not ([string]$architectures[0]).Equals("amd64", [StringComparison]::Ordinal)) {
         Die "Authenticated upgrade manifest does not describe the exact native Windows amd64 surface"
     }
-    if ($null -eq $installer.authenticode -or
-        $installer.authenticode.required -ne $true -or
-        -not ([string]$installer.authenticode.publisher).Equals(
+    $handoffArgs = @($installer.handoff_args)
+    $expectedHandoffArgs = @("/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user")
+    if ($handoffArgs.Count -ne $expectedHandoffArgs.Count) {
+        Die "Authenticated upgrade manifest has an unsupported native Setup handoff"
+    }
+    for ($index = 0; $index -lt $expectedHandoffArgs.Count; $index++) {
+        if (-not ([string]$handoffArgs[$index]).Equals(
+            $expectedHandoffArgs[$index], [StringComparison]::Ordinal)) {
+            Die "Authenticated upgrade manifest has an unsupported native Setup handoff"
+        }
+    }
+    $authenticode = $installer.authenticode
+    if ($null -eq $authenticode) {
+        Die "Authenticated upgrade manifest does not require the pinned DefenseClaw publisher"
+    }
+    $authenticodeNames = @($authenticode.PSObject.Properties.Name)
+    if ($authenticodeNames.Count -ne 2 -or
+        $authenticodeNames -notcontains "required" -or
+        $authenticodeNames -notcontains "publisher" -or
+        $authenticode.required -ne $true -or
+        -not ([string]$authenticode.publisher).Equals(
             $ExpectedPublisher, [StringComparison]::Ordinal)) {
         Die "Authenticated upgrade manifest does not require the pinned DefenseClaw publisher"
     }
@@ -661,7 +750,7 @@ function Stage-RemoteBundle {
     try {
         $releaseBase = "https://github.com/$Repo/releases/download/$ReleaseVersion"
         $cosign = Join-Path $stage $CosignAsset
-        Invoke-DownloadFile -Uri $CosignUrl -Destination $cosign -Label "pinned Cosign verifier" -MaximumBytes 104857600
+        Invoke-DownloadFile -Uri $CosignUrl -Destination $cosign -Label "pinned Cosign verifier" -MaximumBytes $CosignMaximumBytes
         Assert-Sha256 -Path $cosign -Expected $CosignSha256 -Label "pinned Cosign verifier"
         # Authenticate the release root before downloading the large executable
         # or any metadata that will influence the handoff.
@@ -734,7 +823,7 @@ function Stage-LocalBundle {
         $cosignSource = Resolve-LocalCosignSource -LocalRoot $localRoot
         $cosign = Join-Path $stage $CosignAsset
         Copy-RegularFile -Source $cosignSource -Destination $cosign `
-            -Label "pinned Cosign verifier" -MaximumBytes 104857600
+            -Label "pinned Cosign verifier" -MaximumBytes $CosignMaximumBytes
         Assert-Sha256 -Path $cosign -Expected $CosignSha256 -Label "pinned Cosign verifier"
         $authenticatedChecksums = Invoke-StagedChecksumVerification -StageRoot $stage `
             -ReleaseVersion $releaseVersion -Verifier $cosign

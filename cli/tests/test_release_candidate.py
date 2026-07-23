@@ -791,32 +791,6 @@ def _windows_setup_dir(
         json.dumps(sbom),
         encoding="utf-8",
     )
-    certification = {
-        "schema_version": 1,
-        "status": "passed" if signed else "unverified",
-        "verification_status": "signed" if signed else "unverified",
-        "platform": "windows-x64",
-        "setup": {
-            "name": setup.name,
-            "sha256": setup_hash,
-            "publisher": release_candidate.WINDOWS_SETUP_PUBLISHER if signed else "",
-        },
-        "clients": release_candidate.WINDOWS_SETUP_CLIENTS if signed else {},
-        "connectors": ["codex", "claudecode"] if signed else [],
-        "requirements": list(
-            release_candidate.WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS
-            if signed
-            else release_candidate.WINDOWS_SETUP_UNVERIFIED_REQUIREMENTS
-        ),
-        "source_commit": commit,
-        "release_version": version,
-        "staging_artifact_digest": "4" * 64,
-        "run_url": ("https://github.com/cisco-ai-defense/defenseclaw/actions/runs/123456"),
-    }
-    (windows / f"{setup.name}.certification.json").write_text(
-        json.dumps(certification),
-        encoding="utf-8",
-    )
     return windows
 
 
@@ -1196,7 +1170,6 @@ def test_windows_setup_custody_starts_at_086_and_survives_legacy_omission() -> N
         "DefenseClawSetup-x64.exe.sha256",
         "DefenseClawSetup-x64.exe.provenance.json",
         "DefenseClawSetup-x64.exe.sbom.json",
-        "DefenseClawSetup-x64.exe.certification.json",
     }
     assert "checksums.txt.bundle" in release_candidate.published_asset_names(WINDOWS_SETUP_VERSION, "notarized")
     omitted = set(
@@ -1227,18 +1200,6 @@ def test_windows_setup_exact_artifact_set_validates(tmp_path: Path, signed: bool
     [
         ("provenance.json", "unsigned", True, "signing state"),
         ("sbom.json", "documentNamespace", "https://example.invalid", "SBOM document"),
-        (
-            "certification.json",
-            "clients",
-            {"codex": "latest"},
-            "certification identity",
-        ),
-        (
-            "certification.json",
-            "requirements",
-            ["manual-trust"],
-            "certification identity",
-        ),
     ],
 )
 def test_windows_setup_metadata_tampering_fails_closed(
@@ -1287,7 +1248,6 @@ def test_record_windows_unverified_creates_explicit_non_certification(
 ) -> None:
     windows = _windows_setup_dir(tmp_path, signed=False)
     certification = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.certification.json"
-    certification.unlink()
 
     release_candidate.record_windows_unverified(
         windows,
@@ -1302,17 +1262,10 @@ def test_record_windows_unverified_creates_explicit_non_certification(
     assert document["verification_status"] == "unverified"
     assert document["setup"]["publisher"] == ""
     assert document["clients"] == {}
-    release_candidate._validate_windows_installer_assets(
-        windows,
-        WINDOWS_SETUP_VERSION,
-        COMMIT,
-        exact_file_set=True,
-    )
 
 
 def test_record_windows_unverified_rejects_signed_setup(tmp_path: Path) -> None:
     windows = _windows_setup_dir(tmp_path)
-    (windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.certification.json").unlink()
 
     with pytest.raises(release_candidate.CandidateError, match="signed Windows Setup"):
         release_candidate.record_windows_unverified(
@@ -1440,7 +1393,7 @@ def test_windows_setup_directory_rejects_extra_file(tmp_path: Path) -> None:
     windows = _windows_setup_dir(tmp_path)
     (windows / "unexpected.txt").write_text("not release-owned", encoding="utf-8")
 
-    with pytest.raises(release_candidate.CandidateError, match="exactly five"):
+    with pytest.raises(release_candidate.CandidateError, match="exactly four"):
         release_candidate._validate_windows_installer_assets(
             windows,
             WINDOWS_SETUP_VERSION,
@@ -3429,6 +3382,33 @@ def test_bridge_candidate_accepts_schema_two_policy_before_bridge_is_published(
         ["0.8.3", "0.8.2"],
         {"windows": ["0.8.3", "0.8.2"]},
     )
+
+
+def test_first_windows_release_accepts_empty_platform_baselines_without_emptying_global_policy(
+    tmp_path: Path,
+) -> None:
+    policy = json.loads((ROOT / "release" / "upgrade-baselines.json").read_text(encoding="utf-8"))
+    policy["platform_published_baselines"]["windows"] = []
+    policy_path = tmp_path / "effective-upgrade-baselines.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    configured, platforms = release_candidate._load_upgrade_baseline_policy(
+        WINDOWS_SETUP_VERSION,
+        policy_path,
+    )
+
+    assert configured == policy["published_baselines"]
+    assert configured
+    assert platforms == {"windows": []}
+
+    policy["published_baselines"] = []
+    policy["published_baseline_config_versions"] = {}
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+    with pytest.raises(release_candidate.CandidateError, match="policy is invalid"):
+        release_candidate._load_upgrade_baseline_policy(
+            WINDOWS_SETUP_VERSION,
+            policy_path,
+        )
 
 
 def test_followup_candidate_accepts_published_v8_baseline(

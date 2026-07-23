@@ -20,17 +20,14 @@ CERTIFICATION_WORKFLOW = ROOT / ".github/workflows/pre-release-certification.yml
 def test_release_workflow_routes_every_sigstore_verification_through_retry() -> None:
     required_steps = {
         WORKFLOW: {
-            ("lookup-certification", "Locate and verify certification bundle"),
             ("assemble-release-candidate", "Resolve immutable published bridge provenance"),
             ("assemble-release-candidate", "Sign and authenticate public checksum manifest"),
             ("publish-release", "Verify the exact tested candidate"),
         },
         CERTIFICATION_WORKFLOW: {
             ("posix-fresh-install", "Verify and install exact signed bytes"),
-            ("linux-upgrade", "Exercise staged handoff, rollback, and recovery"),
-            ("macos-upgrade", "Exercise staged handoff, rollback, and recovery"),
-            ("windows-unpublished-refusal", "Prove native resolver refuses before mutation"),
-            ("live-continuity", "Exercise bridge-to-target history and dashboard continuity"),
+            ("posix-upgrade", "Exercise authenticated upgrade baseline"),
+            ("windows-fresh-install", "Verify and exercise install.ps1"),
         },
     }
 

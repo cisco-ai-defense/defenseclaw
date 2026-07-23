@@ -182,165 +182,163 @@ def test_main_smoke_is_bound_to_exact_sha_and_runs_representative_canary() -> No
     assert "--refusal-contract-only" not in rendered
 
 
-def test_release_requires_prior_certification_and_never_tests_during_promotion() -> None:
+def test_release_builds_tests_and_publishes_in_one_dispatch() -> None:
     workflow = _workflow(RELEASE_PATH)
     jobs = workflow["jobs"]
     triggers = workflow["on"]
     text = RELEASE_PATH.read_text(encoding="utf-8")
 
-    assert "schedule" in triggers
-    assert "workflow_dispatch" in triggers
-    operation = triggers["workflow_dispatch"]["inputs"]["operation"]
-    assert operation["default"] == "certify"
-    assert operation["options"] == ["certify", "release"]
-    assert operation["description"] == (
-        "Certify reviewed main first (default), or release only after exact "
-        "certification exists."
-    )
+    assert set(triggers) == {"workflow_dispatch"}
+    assert set(triggers["workflow_dispatch"]["inputs"]) == {
+        "version",
+        "immutable_releases_confirmed",
+    }
     assert workflow["concurrency"] == {
-        "group": "release-promotion-${{ github.repository }}",
+        "group": "release-${{ github.repository }}",
         "cancel-in-progress": "false",
     }
+    assert set(jobs) == {
+        "release-preflight",
+        "build-runtime-candidate",
+        "macos-app",
+        "windows-installer",
+        "assemble-release-candidate",
+        "release-smoke",
+        "publish-release",
+    }
 
-    lookup = _render(jobs["lookup-certification"])
-    assert "reuse=false" in lookup
-    assert "verify-metadata" in lookup
-    assert "stale, invalid, or unavailable" in lookup
-    assert "Exact pre-release certification required" in lookup
-    assert "operation=certify" in lookup
-    assert "Running the full certification fallback" not in lookup
-    assert "if ! (" not in lookup
-    assert "|| reject_cache" in lookup
-    assert "certification_run_attempt" in lookup
-    assert 'run.get("run_attempt")' in lookup
-    assert "github.workflow_sha" in lookup
-    assert "--workflow-file executed-pre-release-certification.yml" in lookup
-    assert "git cat-file -e" in lookup
-    assert "git fetch" not in lookup
-    assert 'if [[ "$RELEASE_OPERATION" != "release" ]]; then' in lookup
-    assert jobs["lookup-certification"]["steps"][0]["with"]["fetch-depth"] == "0"
     build = jobs["build-runtime-candidate"]
-    assert set(build["needs"]) == {
-        "release-mode",
-        "release-preflight",
-        "lookup-certification",
-        "platform-readiness",
-    }
-    assert "needs.release-mode.outputs.operation == 'certify'" in build["if"]
-    assert "needs.lookup-certification.result == 'success'" in build["if"]
-    assert "needs.platform-readiness.result == 'success'" in build["if"]
-    assert "needs.lookup-certification.result != 'success'" not in build["if"]
-    full = jobs["full-certification"]
-    assert full["uses"] == "./.github/workflows/pre-release-certification.yml"
-    assert "release-mode" in full["needs"]
-    assert "needs.release-mode.outputs.operation == 'certify'" in full["if"]
-    assert "lookup-certification.outputs.reuse != 'true'" in full["if"]
-    assert "lookup-certification.result == 'success'" in full["if"]
-    assert "lookup-certification.result != 'success'" not in full["if"]
+    assert build["needs"] == "release-preflight"
+    assert "if" not in build
+    assert "scripts/release_candidate.py prepare-runtime" in _render(build)
 
-    selection = jobs["select-candidate"]
-    condition = selection["if"]
-    assert "release-mode" in selection["needs"]
-    assert "platform-readiness" in selection["needs"]
-    assert "needs.release-mode.outputs.operation == 'release'" in condition
-    assert "needs.release-mode.outputs.operation == 'certify'" in condition
-    assert "needs.platform-readiness.result == 'success'" in condition
-    assert "lookup-certification.outputs.reuse == 'true'" in condition
-    assert "lookup-certification.outputs.reuse != 'true'" in condition
-    assert "lookup-certification.result == 'success'" in condition
-    assert "full-certification.result == 'success'" in condition
-    assert "record-certification.result == 'success'" in condition
-    record = _render(jobs["record-certification"])
-    assert "needs.release-mode.outputs.operation == 'certify'" in jobs["record-certification"]["if"]
-    assert "needs.lookup-certification.result == 'success'" in jobs["record-certification"]["if"]
-    assert "github.workflow_sha" in record
-    assert "--workflow-file executed-pre-release-certification.yml" in record
-    assert "git cat-file -e" in record
-    assert "git fetch" not in record
-    assert jobs["record-certification"]["steps"][0]["with"]["fetch-depth"] == "0"
-    assert "full-certification-fallback" not in text
-    assert "runs the same full certification when no usable" not in text
-    assert "source=fresh-certification" in text
+    assemble = jobs["assemble-release-candidate"]
+    assert assemble["needs"] == [
+        "release-preflight",
+        "build-runtime-candidate",
+        "macos-app",
+        "windows-installer",
+    ]
+    assert "scripts/release_candidate.py seal" in _render(assemble)
+    assert assemble["outputs"]["artifact_name"] == ("${{ steps.names.outputs.candidate }}")
+
+    smoke = jobs["release-smoke"]
+    assert smoke["needs"] == [
+        "release-preflight",
+        "assemble-release-candidate",
+    ]
+    assert smoke["uses"] == "./.github/workflows/pre-release-certification.yml"
+    assert smoke["with"]["candidate_artifact"] == ("${{ needs.assemble-release-candidate.outputs.artifact_name }}")
+
     publish = jobs["publish-release"]
-    assert set(publish["needs"]) == {
-        "release-mode",
+    assert publish["needs"] == [
         "release-preflight",
-        "platform-readiness",
-        "select-candidate",
-    }
-    assert "needs.platform-readiness.result == 'success'" in publish["if"]
-    assert "needs.select-candidate.result == 'success'" in publish["if"]
+        "assemble-release-candidate",
+        "release-smoke",
+    ]
     assert publish["permissions"] == {"contents": "write"}
-    rendered_publish = _render(publish)
-    assert "scripts/release_api_retry.py reconcile-create" in rendered_publish
-    preflight = next(
-        step["run"]
-        for step in publish["steps"]
-        if step.get("name") == "Recheck remote release namespace"
-    )
-    assert "scripts/release_api_retry.py reconcile-create" in preflight
-    assert '--commit "$RELEASE_COMMIT"' in preflight
-    assert "--candidate-root release-candidate" in preflight
-    assert "--check-main" in preflight
-    create = next(
-        step
-        for step in publish["steps"]
-        if step.get("name") == "Publish tag and selected sealed assets"
-    )
-    assert create["if"] == "steps.release-namespace.outputs.create_required == 'true'"
+    assert "scripts/release_candidate.py verify" in _render(publish)
+    assert "scripts/release_candidate.py list-assets" in _render(publish)
+    for name, job in jobs.items():
+        if name != "publish-release":
+            assert job.get("permissions") != {"contents": "write"}
 
-    # Release owns the unchanged Fulcio identity and candidate construction,
-    # while expensive test implementations stay in the reusable workflow.
-    assert ".github/workflows/release.yaml@refs/heads/main" in text
-    assert text.count("uses: ./.github/workflows/pre-release-certification.yml") == 1
-    assert "scripts/test-observability-v8-upgrade-continuity.sh" not in text
-    assert "scripts/test-upgrade-protocol-release.sh" not in text
-    assert "scripts/test-developer-target-activation.sh" not in text
+    for retired in (
+        "schedule:",
+        "lookup-certification:",
+        "record-certification:",
+        "platform-readiness:",
+        "full-certification:",
+        "select-candidate:",
+        "windows-real-client-certification:",
+        "operation=certify",
+        "operation=release",
+        "verify-metadata",
+        "certification_run_attempt",
+        "CI_WAIT_ATTEMPTS",
+    ):
+        assert retired not in text
 
 
-def test_nightly_manual_reusable_workflow_retains_every_expensive_gate() -> None:
+def test_release_smoke_is_exact_candidate_install_and_upgrade_only() -> None:
     workflow = _workflow(CERTIFICATION_PATH)
     jobs = workflow["jobs"]
     text = CERTIFICATION_PATH.read_text(encoding="utf-8")
 
     assert set(workflow["on"]) == {"workflow_call"}
-    assert {
+    assert set(workflow["on"]["workflow_call"]["inputs"]) == {
+        "candidate_artifact",
+        "version",
+        "commit",
+        "baselines",
+    }
+    assert set(jobs) == {
         "posix-fresh-install",
-        "linux-upgrade",
-        "macos-upgrade",
-        "windows-unpublished-refusal",
-        "live-continuity",
-        "certification-complete",
-    }.issubset(jobs)
-    assert "scripts/test-upgrade-protocol-release.sh" in text
-    assert "scripts/test-developer-target-activation.sh" not in text
-    # The authenticated 0.8.4 bridge must resolve its published dependency
-    # graph on both required POSIX certification platforms. Keeping this count
-    # at two prevents macOS from silently drifting back to candidate-compatible
-    # dependencies while Linux exercises the real release boundary.
-    assert text.count("--baseline-dependencies published") == 2
-    assert '"$BASELINE" == "$REQUIRED_BRIDGE_VERSION"' in text
-    assert "matrix.start_source_gateway" in text
-    assert "--start-source-gateway" in text
-    assert "scripts/test-observability-v8-upgrade-continuity.sh" in text
-    assert "scripts/test-upgrade-release-windows.ps1" in text
-    assert "scripts/verify-sigstore-blob.py" in text
-    complete = jobs["certification-complete"]
-    assert set(complete["needs"]) == {
-        "posix-fresh-install",
-        "linux-upgrade",
-        "macos-upgrade",
-        "windows-unpublished-refusal",
-        "live-continuity",
+        "posix-upgrade",
+        "windows-fresh-install",
     }
 
+    posix_fresh = _render(jobs["posix-fresh-install"])
+    assert "scripts/release_candidate.py verify" in posix_fresh
+    assert "scripts/verify-sigstore-blob.py" in posix_fresh
+    assert "scripts/test-fresh-install-release.sh" in posix_fresh
 
-def test_effective_baseline_snapshot_is_bound_across_selection_record_and_verify() -> None:
+    upgrade = jobs["posix-upgrade"]
+    assert upgrade["strategy"]["matrix"] == {
+        "baseline": "${{ fromJSON(inputs.baselines) }}",
+        "platform": [
+            {
+                "runner": "ubuntu-latest",
+                "name": "linux-amd64",
+                "runner_arch": "X64",
+            },
+            {
+                "runner": "macos-15",
+                "name": "darwin-arm64",
+                "runner_arch": "ARM64",
+            },
+        ],
+    }
+    rendered_upgrade = _render(upgrade)
+    assert "scripts/release_candidate.py verify" in rendered_upgrade
+    assert "scripts/test-upgrade-protocol-release.sh" in rendered_upgrade
+    assert "--success-path-only" in rendered_upgrade
+
+    windows = _render(jobs["windows-fresh-install"])
+    assert "scripts/release_candidate.py verify" in windows
+    assert "scripts/test-fresh-install-release-windows.ps1" in windows
+    for retired in (
+        "windows-upgrade",
+        "test-upgrade-release-windows.ps1",
+        "live-continuity",
+        "test-observability-v8-upgrade-continuity.sh",
+        "release-certification",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+    ):
+        assert retired not in text
+
+
+def test_effective_baselines_are_authenticated_once_and_bound_to_candidate() -> None:
+    workflow = _workflow(RELEASE_PATH)
+    preflight = workflow["jobs"]["release-preflight"]
+    resolve = next(
+        step for step in preflight["steps"] if step.get("name") == "Resolve authenticated POSIX upgrade baselines"
+    )
+    script = resolve["run"]
+
+    assert "scripts/resolve_upgrade_baselines.py" in script
+    assert "required_families = ((0, 7), (0, 6), (0, 5))" in script
+    assert "upgrade_baselines = [max(older, key=key)]" in script
+    assert "selected = max(family_versions, key=key)" in script
+    assert 'document["platform_published_baselines"]["windows"] = []' in script
+    assert "upgrade_baselines=" in script
+
     release = RELEASE_PATH.read_text(encoding="utf-8")
-
-    # The effective snapshot includes live stable state without requiring a
-    # workflow-authored commit. Every selector/receipt boundary must consume
-    # that same file so certification cannot silently prove a different matrix.
     assert "effective-upgrade-baselines.json" in release
-    assert release.count("--baselines effective-upgrade-baselines.json") >= 3
-    assert "effective-upgrade-baselines.json" in _render(_workflow(RELEASE_PATH)["jobs"]["record-certification"])
+    assert release.count("scripts/resolve_upgrade_baselines.py") == 1
+    assert (
+        workflow["jobs"]["release-smoke"]["with"]["baselines"]
+        == "${{ needs.release-preflight.outputs.upgrade_baselines }}"
+    )
+    assert "--omit-windows-binaries" not in release

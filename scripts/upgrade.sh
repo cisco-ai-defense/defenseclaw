@@ -3743,7 +3743,7 @@ REQUESTED_RELEASE_VERSION="${RELEASE_VERSION}"
 STAGED_FINAL_VERSION=""
 STAGED_FINAL_MIN_PROTOCOL=""
 POST_HARD_CUT_FINAL_VERSION=""
-FRESH_HARD_CUT_HANDOFF=0
+EXISTING_BRIDGE_REFRESH=0
 
 # ── Detect currently installed version ───────────────────────────────────────
 
@@ -5029,25 +5029,22 @@ resolve_staged_upgrade() {
     if version_gte "${CURRENT_VERSION}" "${MANIFEST_MINIMUM_SOURCE}"; then
         if [[ "${CURRENT_VERSION}" == "${MANIFEST_REQUIRED_BRIDGE}" ]] \
             && version_lt "${CURRENT_VERSION}" "${RELEASE_VERSION}"; then
-            select_hard_cut_bootstrap_contract
-            if [[ -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
-                section "Staged Upgrade Plan"
-                ok "${CURRENT_VERSION} → ${RELEASE_VERSION} → ${POST_HARD_CUT_FINAL_VERSION}"
-            fi
-            capture_hard_cut_target_controller_contract
-            FRESH_HARD_CUT_HANDOFF=1
-            STAGED_FINAL_MIN_PROTOCOL="${MANIFEST_MIN_PROTOCOL}"
+            EXISTING_BRIDGE_REFRESH=1
+        else
+            return 0
         fi
-        return 0
     fi
 
     # A version override selects the final release; it never authorizes a
     # direct hard-cut install.  Legacy controllers that cannot parse schema 2
     # hand off to the target resolver with exactly this override, so the
     # release-owned resolver must preserve that target intent while still
-    # inserting every manifest-required bridge.
+    # inserting every manifest-required bridge. An existing 0.8.4 bridge takes
+    # this same path so dependency drift is normalized by the authenticated,
+    # rollback-safe phase-one transaction before the immutable 0.8.5 cut.
     select_hard_cut_bootstrap_contract
-    if ! manifest_array_contains "auto_bridge_from" "${CURRENT_VERSION}" "${UPGRADE_MANIFEST_FILE}"; then
+    if [[ "${EXISTING_BRIDGE_REFRESH}" -ne 1 ]] \
+        && ! manifest_array_contains "auto_bridge_from" "${CURRENT_VERSION}" "${UPGRADE_MANIFEST_FILE}"; then
         supported="$(manifest_array_values "auto_bridge_from" "${UPGRADE_MANIFEST_FILE}" | paste -sd ',' - | sed 's/,/, /g')"
         die "Installed version ${CURRENT_VERSION} is outside the tested automatic bridge matrix. No changes were made.
   Supported staged sources: ${supported:-none}.
@@ -5060,7 +5057,12 @@ resolve_staged_upgrade() {
     STAGED_FINAL_MIN_PROTOCOL="${MANIFEST_MIN_PROTOCOL}"
     RELEASE_VERSION="${MANIFEST_REQUIRED_BRIDGE}"
     section "Staged Upgrade Plan"
-    if [[ -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
+    if [[ "${EXISTING_BRIDGE_REFRESH}" -eq 1 \
+          && -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
+        ok "Refresh authenticated ${RELEASE_VERSION} bridge → fresh controller → ${STAGED_FINAL_VERSION} → ${POST_HARD_CUT_FINAL_VERSION}"
+    elif [[ "${EXISTING_BRIDGE_REFRESH}" -eq 1 ]]; then
+        ok "Refresh authenticated ${RELEASE_VERSION} bridge → fresh controller → ${STAGED_FINAL_VERSION}"
+    elif [[ -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
         ok "${CURRENT_VERSION} → ${RELEASE_VERSION} bridge → fresh controller → ${STAGED_FINAL_VERSION} → ${POST_HARD_CUT_FINAL_VERSION}"
     else
         ok "${CURRENT_VERSION} → ${RELEASE_VERSION} bridge → fresh controller → ${STAGED_FINAL_VERSION}"
@@ -7171,64 +7173,6 @@ continue_post_hard_cut_upgrade() {
     exit "${final_status}"
 }
 
-handoff_existing_bridge_to_hard_cut() {
-    local final_version="${RELEASE_VERSION}"
-    local final_min_protocol="${STAGED_FINAL_MIN_PROTOCOL}"
-    local handoff_dir
-
-    prepare_hard_cut_target_controller
-    RELEASE_VERSION="${CURRENT_VERSION}"
-    configure_release
-    prepare_release_contract
-    require_bridge_checksums_provenance \
-        "${FINAL_RELEASE_PROVENANCE_BRIDGE_CHECKSUMS_SHA256}" \
-        "${CHECKSUMS_FILE}"
-    if [[ "${MANIFEST_CONTROLLER_PROTOCOL}" -lt "${final_min_protocol}" ]]; then
-        die "Installed bridge ${CURRENT_VERSION} cannot drive ${final_version}. No changes were made."
-    fi
-
-    step "Retaining verified bridge gateway for rollback ..."
-    fetch_artifact "${TARBALL_URL}" "${STAGING_DIR}/${TARBALL_NAME}"
-    verify_checksum "${STAGING_DIR}/${TARBALL_NAME}" "${TARBALL_NAME}"
-    materialize_protected_artifact \
-        "${STAGING_DIR}/${TARBALL_NAME}" "${STAGING_DIR}/${MATERIALIZED_TARBALL_NAME}" "${VERIFIED_CHECKSUM}" \
-        || die "Could not materialize the authenticated protected bridge gateway"
-    validate_tarball_members "${STAGING_DIR}/${MATERIALIZED_TARBALL_NAME}"
-    step "Retaining verified bridge CLI for rollback ..."
-    fetch_artifact "${WHL_URL}" "${STAGING_DIR}/${WHL_NAME}"
-    verify_checksum "${STAGING_DIR}/${WHL_NAME}" "${WHL_NAME}"
-    materialize_protected_artifact \
-        "${STAGING_DIR}/${WHL_NAME}" "${STAGING_DIR}/${MATERIALIZED_WHL_NAME}" "${VERIFIED_CHECKSUM}" \
-        || die "Could not materialize the authenticated protected bridge CLI"
-    preflight_python_wheel "${STAGING_DIR}/${MATERIALIZED_WHL_NAME}"
-    preflight_bridge_rollback_capability "${STAGING_DIR}/${MATERIALIZED_WHL_NAME}"
-
-    handoff_dir="${STAGING_DIR}/bridge-handoff"
-    create_bridge_handoff_directory "${handoff_dir}" >/dev/null
-    verify_hard_cut_target_controller_handoff \
-        "${CURRENT_VERSION}" "${final_version}" "${handoff_dir}" \
-        || die "Fresh target-controller handoff verification failed; the healthy bridge was preserved."
-    section "Fresh Controller Handoff"
-    ok "Verified ${CURRENT_VERSION} rollback artifacts retained; launching the authenticated ${final_version} controller"
-    export DEFENSECLAW_STAGED_UPGRADE=1
-    export DEFENSECLAW_STAGED_BRIDGE_VERSION="${CURRENT_VERSION}"
-    export DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR="${handoff_dir}"
-    export DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION="${final_version}"
-    export DEFENSECLAW_HOME="${CONTROLLER_HOME}"
-    export DEFENSECLAW_CONFIG="${CONFIG_PATH}"
-    export OPENCLAW_HOME="${OPENCLAW_HOME}"
-    local target_status=0
-    env -u UV_OVERRIDE \
-        UV_CONSTRAINT="${HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE}" \
-        UV_EXCLUDE_NEWER="${HISTORICAL_BOOTSTRAP_EXCLUDE_NEWER}" \
-        "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}" \
-        || target_status=$?
-    if [[ "${target_status}" -eq 0 ]]; then
-        continue_post_hard_cut_upgrade
-    fi
-    exit "${target_status}"
-}
-
 validate_tarball_members() {
     local archive="$1" listing details entry mode
     listing="$(tar -tzf "${archive}")" \
@@ -7335,15 +7279,22 @@ PY
     exit 0
 fi
 
-if [[ "${CURRENT_VERSION}" != "unknown" ]] \
-    && [[ "${RELEASE_VERSION}" == "0.8.4" ]] \
-    && version_lt "${CURRENT_VERSION}" "${RELEASE_VERSION}"; then
-    BRIDGE_PHASE1=1
+if [[ "${CURRENT_VERSION}" != "unknown" \
+      && "${RELEASE_VERSION}" == "0.8.4" ]]; then
+    if version_lt "${CURRENT_VERSION}" "${RELEASE_VERSION}" \
+        || [[ "${EXISTING_BRIDGE_REFRESH}" -eq 1 ]]; then
+        BRIDGE_PHASE1=1
+    fi
 fi
 
 if [[ "${PLAN_ONLY}" -eq 1 ]]; then
     section "Upgrade Plan Verified"
-    if [[ -n "${STAGED_FINAL_VERSION}" && -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
+    if [[ "${EXISTING_BRIDGE_REFRESH}" -eq 1 \
+          && -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
+        ok "Refresh authenticated ${RELEASE_VERSION} bridge → fresh controller → ${STAGED_FINAL_VERSION} → ${POST_HARD_CUT_FINAL_VERSION}"
+    elif [[ "${EXISTING_BRIDGE_REFRESH}" -eq 1 ]]; then
+        ok "Refresh authenticated ${RELEASE_VERSION} bridge → fresh controller → ${STAGED_FINAL_VERSION}"
+    elif [[ -n "${STAGED_FINAL_VERSION}" && -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
         ok "${CURRENT_VERSION} → ${RELEASE_VERSION} → fresh controller → ${STAGED_FINAL_VERSION} → ${POST_HARD_CUT_FINAL_VERSION}"
     elif [[ -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
         ok "${CURRENT_VERSION} → ${RELEASE_VERSION} → ${POST_HARD_CUT_FINAL_VERSION}"
@@ -7354,11 +7305,6 @@ if [[ "${PLAN_ONLY}" -eq 1 ]]; then
     fi
     ok "No changes were made"
     exit 0
-fi
-
-if [[ "${FRESH_HARD_CUT_HANDOFF}" -eq 1 ]]; then
-    ensure_upgrade_lock_before_mutation
-    handoff_existing_bridge_to_hard_cut
 fi
 
 step "Downloading gateway binary ..."

@@ -63,12 +63,20 @@ def _dot_source(arguments: str = "") -> str:
 
 
 def _manifest(version: str = "1.2.3") -> dict[str, object]:
+    gateways = {
+        os_name: {arch: f"defenseclaw_{version}_protocol2_{os_name}_{arch}.dcgateway" for arch in ("amd64", "arm64")}
+        for os_name in ("darwin", "linux", "windows")
+    }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "release_version": version,
         "min_upgrade_protocol": 1,
         "migration_failure_policy": "fail",
         "required_cli_migrations": [],
+        "release_artifacts": {
+            "wheel": f"defenseclaw-{version}-2-py3-none-any.dcwheel",
+            "gateways": gateways,
+        },
         "windows_installer": {
             "asset": "DefenseClawSetup-x64.exe",
             "architectures": ["amd64"],
@@ -124,6 +132,8 @@ def test_bootstrap_contains_no_legacy_dependency_install_path() -> None:
     assert "artifact_sha256" in text
     assert "Invoke-NativeSetup" in text
     assert "Get-AuthenticodeSignature" in text
+    assert "0.8.6" not in text
+    assert '$Version = "X.Y.Z"' in text
 
 
 def test_remote_verification_is_fail_closed_and_release_identity_is_exact() -> None:
@@ -132,6 +142,12 @@ def test_remote_verification_is_fail_closed_and_release_identity_is_exact() -> N
     assert "checksums.txt.pem" in text
     assert "checksums.txt.bundle" in text
     assert "DD6C61E510DA627BCAED4CD9DB844EC11CACD09826D814D89F7F68D40FEB07BE" in text
+    # Cosign 2.6.2's immutable Windows amd64 asset is 188,345,985 bytes.
+    # Keep one shared bound above that exact published size for both remote
+    # downloads and local release-candidate custody.
+    assert "$CosignMaximumBytes = 268435456" in text
+    assert text.count("-MaximumBytes $CosignMaximumBytes") == 2
+    assert "104857600" not in text
     assert "--certificate-identity-regexp" in text
     assert '"--offline"' in text
     assert (
@@ -142,6 +158,19 @@ def test_remote_verification_is_fail_closed_and_release_identity_is_exact() -> N
     assert 'Status -ne "Valid"' in text
     assert '$ExpectedPublisher = "Cisco Systems, Inc."' in text
     assert "warning-and-continue" not in text.lower()
+
+
+def test_authenticated_schema_two_manifest_contract_is_exact_in_source() -> None:
+    text = INSTALL_PS1.read_text(encoding="utf-8")
+
+    assert '$expectedSchema = if ([version]$ReleaseVersion -ge [version]"0.8.4") { 2 } else { 1 }' in text
+    assert '"defenseclaw-$ReleaseVersion-2-py3-none-any.dcwheel"' in text
+    assert '"defenseclaw_${ReleaseVersion}_protocol2_${platform}_${architecture}.dcgateway"' in text
+    assert "$releaseArtifactNames.Count -ne 2" in text
+    assert "$gatewayPlatformNames.Count -ne 3" in text
+    assert "$gatewayArchitectureNames.Count -ne 2" in text
+    assert "$installerNames.Count -ne 5" in text
+    assert '$expectedHandoffArgs = @("/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user")' in text
 
 
 def test_release_publishes_offline_material_after_bounded_sigstore_authentication() -> None:
@@ -312,25 +341,55 @@ Get-AuthenticatedChecksum -ChecksumsContent $frozen -FileName 'DefenseClawSetup-
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
 def test_authenticated_manifest_requires_exact_windows_policy(tmp_path: Path) -> None:
     manifest = tmp_path / "upgrade-manifest.json"
-    manifest.write_text(json.dumps(_manifest()), encoding="utf-8")
+    manifest.write_text(json.dumps(_manifest("0.8.7")), encoding="utf-8")
     valid = _run_powershell(
         rf"""
 {_dot_source()}
-Assert-UpgradeManifest -Path '{_ps_quote(manifest)}' -ReleaseVersion '1.2.3'
+Assert-UpgradeManifest -Path '{_ps_quote(manifest)}' -ReleaseVersion '0.8.7'
 Write-Output 'VALID'
 """
     )
     assert valid.returncode == 0, valid.stderr
     assert "VALID" in valid.stdout
 
-    altered = _manifest()
+    wrong_schema = _manifest("0.8.7")
+    wrong_schema["schema_version"] = 1
+    manifest.write_text(json.dumps(wrong_schema), encoding="utf-8")
+    invalid = _run_powershell(
+        rf"""
+{_dot_source()}
+try {{
+  Assert-UpgradeManifest -Path '{_ps_quote(manifest)}' -ReleaseVersion '0.8.7'
+  throw 'expected schema rejection'
+}} catch {{ "ERROR=$($_.Exception.Message)" }}
+"""
+    )
+    assert invalid.returncode == 0, invalid.stderr
+    assert "does not describe DefenseClaw 0.8.7" in invalid.stdout
+
+    altered = _manifest("0.8.7")
+    altered["release_artifacts"]["wheel"] = "lookalike.dcwheel"  # type: ignore[index]
+    manifest.write_text(json.dumps(altered), encoding="utf-8")
+    invalid = _run_powershell(
+        rf"""
+{_dot_source()}
+try {{
+  Assert-UpgradeManifest -Path '{_ps_quote(manifest)}' -ReleaseVersion '0.8.7'
+  throw 'expected artifact rejection'
+}} catch {{ "ERROR=$($_.Exception.Message)" }}
+"""
+    )
+    assert invalid.returncode == 0, invalid.stderr
+    assert "does not select the exact protected wheel" in invalid.stdout
+
+    altered = _manifest("0.8.7")
     altered["windows_installer"]["authenticode"]["publisher"] = "Lookalike Publisher"  # type: ignore[index]
     manifest.write_text(json.dumps(altered), encoding="utf-8")
     invalid = _run_powershell(
         rf"""
 {_dot_source()}
 try {{
-  Assert-UpgradeManifest -Path '{_ps_quote(manifest)}' -ReleaseVersion '1.2.3'
+  Assert-UpgradeManifest -Path '{_ps_quote(manifest)}' -ReleaseVersion '0.8.7'
   throw 'expected policy rejection'
 }} catch {{ "ERROR=$($_.Exception.Message)" }}
 """
@@ -528,8 +587,7 @@ def test_bounded_native_process_waits_for_windows_gui_exit_code(tmp_path: Path) 
         pytest.skip("Go toolchain is unavailable")
     source = tmp_path / "gui_exit.go"
     source.write_text(
-        'package main\nimport ("os"; "time")\n'
-        'func main() { time.Sleep(200 * time.Millisecond); os.Exit(23) }\n',
+        'package main\nimport ("os"; "time")\nfunc main() { time.Sleep(200 * time.Millisecond); os.Exit(23) }\n',
         encoding="utf-8",
     )
     executable = tmp_path / "gui-exit.exe"

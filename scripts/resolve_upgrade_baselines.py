@@ -87,10 +87,7 @@ def _checked_policy(path: Path) -> dict[str, Any]:
         raise BaselineResolutionError("checked baseline floor must be unique descending semver")
     if not isinstance(configs, dict) or set(configs) != set(versions):
         raise BaselineResolutionError("checked baseline config map does not match its versions")
-    if any(
-        not isinstance(value, int) or isinstance(value, bool) or value < 1
-        for value in configs.values()
-    ):
+    if any(not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in configs.values()):
         raise BaselineResolutionError("checked baseline config versions must be positive")
     if not isinstance(platforms, dict) or set(platforms) != {"windows"}:
         raise BaselineResolutionError("checked baseline platforms must contain exactly windows")
@@ -157,11 +154,15 @@ def _asset_map(release: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _required_windows_assets(version: str) -> set[str]:
-    names: set[str] = set()
+    names = {
+        "DefenseClawSetup-x64.exe",
+        "DefenseClawSetup-x64.exe.sha256",
+        "DefenseClawSetup-x64.exe.provenance.json",
+        "DefenseClawSetup-x64.exe.sbom.json",
+    }
     for arch in ("amd64", "arm64"):
         protected = f"defenseclaw_{version}_protocol2_windows_{arch}.dcgateway"
-        archive = f"defenseclaw_{version}_windows_{arch}.zip"
-        names.update((protected, f"{protected}.sbom.json", archive, f"{archive}.sbom.json"))
+        names.update((protected, f"{protected}.sbom.json"))
     return names
 
 
@@ -369,9 +370,7 @@ def resolve_effective_policy(
         raise BaselineResolutionError("candidate runtime config version must be positive")
     checked = _checked_policy(checked_policy_path)
     checked_versions = list(checked["published_baselines"])
-    eligible_checked_versions = [
-        version for version in checked_versions if _version_key(version) < target_key
-    ]
+    eligible_checked_versions = [version for version in checked_versions if _version_key(version) < target_key]
     dynamic_floor_key = max(
         (_version_key(version) for version in eligible_checked_versions),
         default=None,
@@ -380,9 +379,7 @@ def resolve_effective_policy(
         checked["published_baseline_config_versions"][version] > candidate_runtime_config_version
         for version in eligible_checked_versions
     ):
-        raise BaselineResolutionError(
-            "eligible checked baseline config version is newer than the candidate runtime"
-        )
+        raise BaselineResolutionError("eligible checked baseline config version is newer than the candidate runtime")
     candidates: dict[str, dict[str, Any]] = {}
     for release in releases:
         if not isinstance(release, dict):
@@ -402,10 +399,7 @@ def resolve_effective_policy(
         candidates[tag] = release
 
     dynamic_versions = sorted(candidates, key=_version_key, reverse=True)
-    configs = {
-        version: checked["published_baseline_config_versions"][version]
-        for version in eligible_checked_versions
-    }
+    configs = {version: checked["published_baseline_config_versions"][version] for version in eligible_checked_versions}
     windows = [
         version
         for version in checked["platform_published_baselines"]["windows"]
@@ -426,9 +420,7 @@ def resolve_effective_policy(
 
     versions = [*dynamic_versions, *eligible_checked_versions]
     if not versions:
-        raise BaselineResolutionError(
-            f"no supported published baseline predates candidate {target_version}"
-        )
+        raise BaselineResolutionError(f"no supported published baseline predates candidate {target_version}")
     ordered_configs = {version: configs[version] for version in versions}
     return {
         "schema_version": 2,
