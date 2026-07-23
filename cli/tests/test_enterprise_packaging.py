@@ -291,6 +291,26 @@ def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     reconcile_offset = text.index("reconciling existing DefenseClaw installation in place")
     assert reconcile_offset < text.index('ROLLBACK_DIR="$(/usr/bin/mktemp -d')
     assert reconcile_offset < text.index('assert_trusted_file_source "$CONFIG_SOURCE"')
+    # Pre-mutation logs-chain trust check MUST run before the early
+    # mkdir/mv relocation block. Without this a symlinked /Library/Logs
+    # ancestor or an ACL-writable LOG_DIR ancestor could let the
+    # `mkdir -p` + `mv` steps below relocate legacy config / audit
+    # material into an attacker-controlled target before the later
+    # validation (line ~582) has a chance to fire. Mirrors the
+    # `_assert_trusted_logs_chain_or_die` gate in packaging/macos/install.sh.
+    logs_chain_gate = text.index("Ancestor trust check: before ANY mkdir/chown/chmod on the")
+    early_mkdir_landing = text.index("Ensure LOG_DIR exists early so the legacy relocation below")
+    legacy_relocation = text.index("moved legacy path aside")
+    assert logs_chain_gate < early_mkdir_landing
+    assert logs_chain_gate < legacy_relocation
+    # The gate must call the primitive assertions against every
+    # /Library/Logs/... ancestor, not just LOG_DIR itself.
+    gate_block = text[logs_chain_gate:early_mkdir_landing]
+    assert 'assert_trusted_system_dir /Library' in gate_block
+    assert 'assert_existing_secure_dir_or_absent /Library/Logs' in gate_block
+    assert 'assert_existing_secure_dir_or_absent "$LOG_VENDOR_DIR"' in gate_block
+    assert 'assert_existing_secure_dir_or_absent "$LOG_PRODUCT_DIR"' in gate_block
+    assert 'assert_existing_secure_dir_or_absent "$LOG_DIR"' in gate_block
     # install_file_atomic uses mv -f (rename(2), atomic replace) so an
     # existing regular destination is overwritten cleanly on reinstall.
     # ln (hardlink) would fail with EEXIST on the second run.

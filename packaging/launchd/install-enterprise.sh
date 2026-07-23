@@ -504,6 +504,23 @@ for _legacy_label in \
 done
 unset _legacy_label
 
+# Ancestor trust check: before ANY mkdir/chown/chmod on the
+# /Library/Logs/Cisco/SecureClient/DefenseClaw chain, walk every
+# ancestor and enforce the same no-symlink / root-owned /
+# no-group-other-write / no-write-capable-ACL invariant applied to
+# every other trusted install path. Without this a symlinked
+# /Library/Logs/Cisco (or an ACL-writable ancestor) would let the
+# `mkdir -p` and `mv` block below follow the link and relocate legacy
+# config / audit material into an attacker-controlled location before
+# any later validation catches the drift. Mirrors the pre-mutation
+# check `packaging/macos/install.sh:_assert_trusted_logs_chain_or_die`
+# applies for the bundle installer path.
+assert_trusted_system_dir /Library
+assert_existing_secure_dir_or_absent /Library/Logs
+assert_existing_secure_dir_or_absent "$LOG_VENDOR_DIR"
+assert_existing_secure_dir_or_absent "$LOG_PRODUCT_DIR"
+assert_existing_secure_dir_or_absent "$LOG_DIR"
+
 # Ensure LOG_DIR exists early so the legacy relocation below has a
 # landing zone. Recreated with the right ownership later during the
 # mutation phase; a bare directory here is enough.
@@ -518,6 +535,12 @@ if [ ! -d "$LOG_DIR" ]; then
     /bin/chmod 0750 "$LOG_DIR" 2>/dev/null || true
 fi
 unset _log_parent
+
+# Re-verify LOG_DIR is trusted AFTER creation — a concurrent racer
+# could have replaced our fresh mkdir with a symlink between the check
+# and the relocation below. Refuse to move legacy material through it
+# if that happened.
+assert_existing_secure_dir_or_absent "$LOG_DIR"
 
 # Move legacy paths aside (best-effort, timestamped, never deleted).
 # Version tag comes from the binary source when available so the backup
