@@ -1570,7 +1570,9 @@ def test_certification_upgrade_wrapper_is_nounset_safe_with_optional_arguments(
         "--target-version",
         "0.8.7",
         "--release-dir",
-        str(tmp_path / "release-candidate/dist"),
+        # The workflow appends this literal POSIX suffix in Bash, including
+        # under Git Bash when GITHUB_WORKSPACE itself uses Windows separators.
+        f"{tmp_path}/release-candidate/dist",
         "--baseline-mode",
         "seed",
         "--health-timeout",
