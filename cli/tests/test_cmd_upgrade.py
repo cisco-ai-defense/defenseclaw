@@ -5260,7 +5260,7 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         with (
             patch("defenseclaw.commands.cmd_upgrade._refresh_target_dotenv_environment") as refresh,
             patch("defenseclaw.commands.cmd_upgrade._reload_post_upgrade_config") as reload_config,
-            patch("defenseclaw.commands.cmd_upgrade._run_silent", return_value=True),
+            patch("defenseclaw.commands.cmd_upgrade._run_silent", return_value=True) as run_silent,
             patch("defenseclaw.commands.cmd_upgrade._poll_health") as in_process_health,
             patch("defenseclaw.commands.cmd_upgrade._poll_installed_health") as installed_health,
         ):
@@ -5275,6 +5275,14 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         refresh.assert_called_once_with(plan)
         reload_config.assert_not_called()
         in_process_health.assert_not_called()
+        self.assertEqual(
+            run_silent.call_args_list[0].args[0],
+            [plan.active_gateway_path, "start"],
+        )
+        self.assertEqual(
+            run_silent.call_args_list[0].kwargs["timeout_seconds"],
+            90,
+        )
         installed_health.assert_called_once_with(
             "/private/bridge-data",
             13,
