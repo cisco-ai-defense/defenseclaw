@@ -1037,6 +1037,36 @@ chmod 0640 "${CONFIG_TMP}"
   || die "could not atomically replace managed config: ${CONFIG_PATH}"
 forget_install_temporary "${CONFIG_TMP}"
 
+# Enumerate eligible local users NOW (before the hook-guardian
+# manifest render below reuses the same set) so we can also seed
+# ai_discovery.home_dirs in the rendered config. Without this,
+# the discovery service under launchd/root walks /var/root only
+# and misses every user's per-user dotfiles (editor extensions,
+# MCP configs, shell history) — see internal/inventory/ai_discovery.go
+# for the detectors that key off HomeDir.
+log "enumerating eligible local users (for hook-guardian + ai_discovery.home_dirs)"
+USER_LINES="$(DC_INSTALLER_ENUMERATE_VERBOSE=1 enumerate_local_users || true)"
+USER_COUNT="$(printf '%s\n' "${USER_LINES}" | grep -c . || true)"
+if [[ -z "${USER_LINES}" ]]; then
+  if [[ "${ALLOW_EMPTY_USERS}" == "true" ]]; then
+    warn "no eligible local users detected on this host (--allow-empty-users given)"
+    warn "  hooks + ai_discovery will wire for users that log in later once the enumerator's next tick runs"
+  else
+    die "no eligible local users detected on this host — refusing to install with a zero-target hook-guardian manifest and empty ai_discovery.home_dirs. If this box legitimately has no local users (lab / demo), rerun with --allow-empty-users to proceed; otherwise investigate why enumerate_local_users returned empty (check dscl, home dir perms, /Users layout)."
+  fi
+else
+  log "  found ${USER_COUNT} eligible user(s):"
+  while IFS=: read -r _u _uid _gid _home; do
+    [[ -z "${_u}" ]] && continue
+    log "    ${_u} (uid=${_uid}, home=${_home})"
+  done <<< "${USER_LINES}"
+  unset _u _uid _gid _home
+fi
+
+log "seeding ai_discovery.home_dirs from ${USER_COUNT:-0} eligible user(s)"
+apply_ai_discovery_home_dirs "${CONFIG_PATH}" "${USER_LINES}" \
+  || die "failed to seed ai_discovery.home_dirs in ${CONFIG_PATH}"
+
 log "chowning runtime dirs to root:wheel (daemon runs as root)"
 # Every DefenseClaw-owned directory is root:wheel. The daemon runs as
 # root (see plist), so no service-user provisioning is needed. Runtime
@@ -1129,30 +1159,10 @@ fi
 #      reconcile — hooks land within seconds on the eligible users).
 
 if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
-  log "enumerating eligible local users"
-  # DC_INSTALLER_ENUMERATE_VERBOSE=1 makes enumerate_local_users emit a
-  # WARN for every user it drops with the specific filter reason (system
-  # account, home not under /Users, mode bits, etc.). Piped into
-  # install.log via the tee at the top of this script, so admins can
-  # diagnose "why isn't user X in targets.yaml?" after the fact.
-  USER_LINES="$(DC_INSTALLER_ENUMERATE_VERBOSE=1 enumerate_local_users || true)"
-  USER_COUNT="$(printf '%s\n' "${USER_LINES}" | grep -c . || true)"
-  if [[ -z "${USER_LINES}" ]]; then
-    if [[ "${ALLOW_EMPTY_USERS}" == "true" ]]; then
-      warn "no eligible local users detected on this host (--allow-empty-users given)"
-      warn "  hooks will be wired for users that log in later once the enumerator's next 5-min tick runs"
-    else
-      die "no eligible local users detected on this host — refusing to install with a zero-target hook-guardian manifest. If this box legitimately has no local users (lab / demo), rerun with --allow-empty-users to proceed; otherwise investigate why enumerate_local_users returned empty (check dscl, home dir perms, /Users layout)."
-    fi
-  else
-    log "  found ${USER_COUNT} eligible user(s):"
-    while IFS=: read -r _u _uid _gid _home; do
-      [[ -z "${_u}" ]] && continue
-      log "    ${_u} (uid=${_uid}, home=${_home})"
-    done <<< "${USER_LINES}"
-    unset _u _uid _gid _home
-  fi
-
+  # USER_LINES / USER_COUNT were captured above (see the
+  # "enumerating eligible local users" block right after render_config)
+  # so both the hook-guardian manifest here and ai_discovery.home_dirs
+  # up there see the same eligible-user snapshot.
   log "rendering initial hook-guardian manifest -> ${GUARDIAN_MANIFEST_PATH}"
   MANIFEST_TMP="$(mktemp "${GUARDIAN_MANIFEST_PATH}.new.XXXXXX")" \
     || die "could not reserve a private manifest staging file"

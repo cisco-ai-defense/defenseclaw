@@ -149,3 +149,15 @@ mv -f "${tmp}" "${MANIFEST_PATH}"
 trap - EXIT
 
 log "rendered targets.yaml (users=$(printf '%s\n' "${user_lines}" | grep -c . || true), connectors=${connectors_csv})"
+
+# Keep ai_discovery.home_dirs in lockstep with the manifest we just wrote.
+# The discovery service under launchd/root would otherwise walk /var/root
+# only and miss every user's editor extensions, MCP configs, and shell
+# history. apply_ai_discovery_home_dirs is idempotent + atomic (no-op
+# when the resolved home list is unchanged), so this is safe to call on
+# every tick.
+if apply_ai_discovery_home_dirs "${CONFIG_PATH}" "${user_lines}"; then
+  log "refreshed ai_discovery.home_dirs (users=$(printf '%s\n' "${user_lines}" | grep -c . || true))"
+else
+  warn "failed to refresh ai_discovery.home_dirs in ${CONFIG_PATH}; discovery may miss per-user data until the next tick"
+fi

@@ -799,8 +799,16 @@ otel:
 # what carries the inventory to that sink; other ai_discovery.* keys keep their
 # built-in defaults (mode enhanced, scan intervals). The scanner is a no-op
 # unless enabled, so this block is required for endpoint inventory to flow.
+# Continuous AI discovery. home_dirs below is refreshed by
+# com.cisco.secureclient.defenseclaw.hook-enumerator on every tick from
+# the same eligible-user pass that renders hook-guardian/targets.yaml —
+# do not hand-edit; changes will be overwritten. Without this list a
+# launchd/root-launched daemon walks /var/root only and misses every
+# user's per-user data (editor extensions, MCP configs, shell history).
 ai_discovery:
   enabled: true
+  home_dirs:
+    - "__DEFENSECLAW_HOME_DIRS_PLACEHOLDER__"
 
 # asset_policy is intentionally disabled in this managed_enterprise
 # rollout. The AID cloud is the single authoritative source of block
@@ -817,6 +825,154 @@ asset_policy:
 application_protection:
   enabled: false
 EOF
+}
+
+# apply_ai_discovery_home_dirs CONFIG_PATH USER_LINES -> exit 0 on success
+#
+# Replaces the ai_discovery.home_dirs block in a rendered config.yaml
+# with one entry per user home in USER_LINES (newline-delimited
+# user:uid:gid:home rows, the same format enumerate_local_users emits).
+#
+# The initial render_config output contains a single placeholder entry
+# under ai_discovery.home_dirs (see `__DEFENSECLAW_HOME_DIRS_PLACEHOLDER__`
+# above); on first install the installer calls this helper right after
+# render_config so the config that lands on disk already has the right
+# list. On every subsequent enumerator tick, render-targets.sh calls
+# this helper again with the current user set — same in-place block
+# replace, atomic mv-if-changed so callers can no-op when the list
+# hasn't moved.
+#
+# When USER_LINES is empty the block collapses to `home_dirs: []` so
+# the Go side falls back to $HOME. That is still wrong on a
+# root-launched daemon (leaves discovery blind), so callers should
+# treat empty enumeration as a warning; the file remains valid YAML.
+#
+# Idempotent: two calls with the same input produce the same on-disk
+# bytes.
+apply_ai_discovery_home_dirs() {
+  local config_path="$1"
+  local user_lines="$2"
+
+  if [[ ! -f "${config_path}" ]]; then
+    printf 'apply_ai_discovery_home_dirs: config not found: %s\n' "${config_path}" >&2
+    return 1
+  fi
+
+  # Collect homes from user_lines. Skip empty rows so the newline at
+  # end of a heredoc-produced list doesn't produce a phantom entry.
+  local -a homes=()
+  local line home
+  while IFS= read -r line; do
+    [[ -z "${line}" ]] && continue
+    home="${line##*:}"
+    [[ -z "${home}" ]] && continue
+    homes+=("${home}")
+  done <<< "${user_lines}"
+
+  # Build the replacement block. Two-space indent under ai_discovery,
+  # four-space indent for list entries — matches render_config's shape.
+  local block=""
+  if (( ${#homes[@]} == 0 )); then
+    block=$'  home_dirs: []\n'
+  else
+    block=$'  home_dirs:\n'
+    for home in "${homes[@]}"; do
+      # Quote to survive any home path containing spaces (rare on macOS
+      # but real on network-mounted homes). No home path on macOS should
+      # contain a literal double-quote, but escape defensively.
+      home="${home//\"/\\\"}"
+      block+="    - \"${home}\""$'\n'
+    done
+  fi
+
+  local tmp
+  tmp="$(mktemp "${config_path}.hd.XXXXXX")" || return 1
+  # Rewrite the ai_discovery block:
+  #   - find `ai_discovery:` line
+  #   - keep `enabled: true` and any other scalar children
+  #   - drop the old home_dirs block (list or scalar or placeholder)
+  #   - inject the new block right after the ai_discovery: header
+  /usr/bin/python3 - "${config_path}" "${tmp}" "${block}" <<'PY'
+import sys, re
+
+src, dst, block = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(src, "r", encoding="utf-8") as fh:
+    lines = fh.readlines()
+
+out = []
+i = 0
+n = len(lines)
+while i < n:
+    line = lines[i]
+    if re.match(r'^ai_discovery:\s*$', line):
+        out.append(line)
+        i += 1
+        # Consume the ai_discovery block until we hit a non-indented
+        # non-empty line (next top-level key) or EOF. Drop any existing
+        # home_dirs entry (list or scalar); keep every other child so
+        # operator-added tuning (scan_interval_min, disabled_signature_ids,
+        # ...) survives across enumerator passes.
+        keep = []
+        while i < n:
+            child = lines[i]
+            if child.strip() == "":
+                keep.append(child); i += 1; continue
+            # Non-indented (or ends the block) -> stop consuming.
+            if not (child.startswith(" ") or child.startswith("\t")):
+                break
+            # home_dirs: <scalar>  OR  home_dirs:\n followed by "    - …"
+            m = re.match(r'^(\s+)home_dirs:\s*(.*)$', child)
+            if m:
+                indent = m.group(1)
+                i += 1
+                # If the value was empty, swallow every subsequent line
+                # that is more-indented than the home_dirs key itself
+                # (list entries / block comments). Deeper-indent check
+                # is len(indent)+1 so a sibling key at the same indent
+                # correctly terminates the sweep.
+                if m.group(2).strip() == "":
+                    while i < n:
+                        nxt = lines[i]
+                        if nxt.strip() == "":
+                            i += 1; continue
+                        # count leading whitespace
+                        stripped = nxt.lstrip()
+                        nxt_indent = len(nxt) - len(stripped)
+                        if nxt_indent > len(indent):
+                            i += 1; continue
+                        break
+                continue
+            keep.append(child); i += 1
+        # Inject the fresh home_dirs block first, then re-emit the
+        # preserved children so the file reads top-to-bottom naturally.
+        out.append(block)
+        out.extend(keep)
+        continue
+    out.append(line)
+    i += 1
+
+with open(dst, "w", encoding="utf-8") as fh:
+    fh.writelines(out)
+PY
+  local rc=$?
+  if (( rc != 0 )); then
+    rm -f -- "${tmp}"
+    return "${rc}"
+  fi
+
+  # Preserve mode + ownership from the existing config, then atomic-swap
+  # only when the content actually changed so downstream reload
+  # heuristics that watch mtime aren't triggered on a no-op tick.
+  chown --reference="${config_path}" "${tmp}" 2>/dev/null || \
+    chown "$(stat -f '%Su:%Sg' "${config_path}")" "${tmp}"
+  chmod --reference="${config_path}" "${tmp}" 2>/dev/null || \
+    chmod "$(stat -f '%A' "${config_path}")" "${tmp}"
+
+  if cmp -s "${tmp}" "${config_path}"; then
+    rm -f -- "${tmp}"
+    return 0
+  fi
+  /bin/mv -f -- "${tmp}" "${config_path}"
 }
 
 # ---- legacy path relocation --------------------------------------------

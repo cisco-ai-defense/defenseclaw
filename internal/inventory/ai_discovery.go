@@ -153,6 +153,15 @@ type AIDiscoveryOptions struct {
 	DisableRedaction bool
 	DataDir          string
 	HomeDir          string
+	// HomeDirs is the full set of user homes to walk for per-user
+	// detectors (editor_extension, mcp_server, config paths, shell
+	// history, applications). When empty, detectors fall back to
+	// HomeDir. In managed_enterprise the packaging layer populates
+	// this from the enumerator's eligible-users pass so a root-launched
+	// daemon does not silently miss every human user's dotfiles.
+	// HomeDir is kept for backward compatibility and continues to
+	// anchor "~" expansion in candidate paths.
+	HomeDirs []string
 	// ManagedEnterprise mirrors deployment_mode == managed_enterprise.
 	// In managed mode the gateway ships the FULL endpoint inventory to
 	// AI Defense as discovery events (every active signal, including
@@ -577,6 +586,7 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		DisableRedaction:  cfg.Privacy.DisableRedaction,
 		DataDir:           cfg.DataDir,
 		HomeDir:           home,
+		HomeDirs:          append([]string{}, ad.HomeDirs...),
 		ManagedEnterprise: managed.IsManagedEnterprise(cfg.DeploymentMode),
 	})
 }
@@ -607,10 +617,50 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	if opts.HomeDir == "" {
 		opts.HomeDir, _ = os.UserHomeDir()
 	}
+	// Dedupe HomeDirs and ensure HomeDir participates so single-user
+	// installs (unmanaged / dev) keep working without a config change.
+	// Order-preserving so detectors return signals in a stable order
+	// across scans — the ai_discovery state store keys on fingerprint,
+	// but callers that watch the raw output benefit from stability.
+	seenHome := make(map[string]struct{}, len(opts.HomeDirs)+1)
+	deduped := make([]string, 0, len(opts.HomeDirs)+1)
+	if opts.HomeDir != "" {
+		seenHome[opts.HomeDir] = struct{}{}
+		deduped = append(deduped, opts.HomeDir)
+	}
+	for _, h := range opts.HomeDirs {
+		h = strings.TrimRight(strings.TrimSpace(h), string(filepath.Separator))
+		if h == "" {
+			continue
+		}
+		if _, ok := seenHome[h]; ok {
+			continue
+		}
+		seenHome[h] = struct{}{}
+		deduped = append(deduped, h)
+	}
+	opts.HomeDirs = deduped
 	if len(opts.ScanRoots) == 0 && opts.HomeDir != "" {
 		opts.ScanRoots = []string{"~"}
 	}
 	return opts
+}
+
+// homesToScan returns every user home the per-user detectors should
+// walk. Never empty when HomeDir was resolvable (normalizeAIDiscoveryOptions
+// always includes HomeDir in HomeDirs); callers can iterate without a
+// separate fallback.
+func (s *ContinuousDiscoveryService) homesToScan() []string {
+	if s == nil {
+		return nil
+	}
+	if len(s.opts.HomeDirs) > 0 {
+		return s.opts.HomeDirs
+	}
+	if s.opts.HomeDir != "" {
+		return []string{s.opts.HomeDir}
+	}
+	return nil
 }
 
 func (s *ContinuousDiscoveryService) Run(ctx context.Context) error {
@@ -1405,7 +1455,17 @@ func (s *ContinuousDiscoveryService) detectProcesses() []AISignal {
 }
 
 func (s *ContinuousDiscoveryService) detectApplications() []AISignal {
-	names := installedApplicationNames(s.opts.HomeDir)
+	seen := make(map[string]struct{})
+	var names []string
+	for _, home := range s.homesToScan() {
+		for _, n := range installedApplicationNames(home) {
+			if _, ok := seen[n]; ok {
+				continue
+			}
+			seen[n] = struct{}{}
+			names = append(names, n)
+		}
+	}
 	if len(names) == 0 {
 		return nil
 	}
@@ -1428,24 +1488,30 @@ func (s *ContinuousDiscoveryService) detectApplications() []AISignal {
 }
 
 func (s *ContinuousDiscoveryService) detectEditorExtensions() []AISignal {
-	roots := []string{
-		filepath.Join(s.opts.HomeDir, ".vscode", "extensions"),
-		filepath.Join(s.opts.HomeDir, ".vscode-insiders", "extensions"),
-		filepath.Join(s.opts.HomeDir, ".vscodium", "extensions"),
-		filepath.Join(s.opts.HomeDir, ".cursor", "extensions"),
-		filepath.Join(s.opts.HomeDir, ".windsurf", "extensions"),
-		filepath.Join(s.opts.HomeDir, "Library", "Application Support", "Code", "User", "globalStorage"),
-		filepath.Join(s.opts.HomeDir, "Library", "Application Support", "Code - Insiders", "User", "globalStorage"),
-		filepath.Join(s.opts.HomeDir, "Library", "Application Support", "VSCodium", "User", "globalStorage"),
-		filepath.Join(s.opts.HomeDir, "Library", "Application Support", "Cursor", "User", "globalStorage"),
-		filepath.Join(s.opts.HomeDir, "Library", "Application Support", "Windsurf", "User", "globalStorage"),
-	}
-	for _, pattern := range []string{
-		filepath.Join(s.opts.HomeDir, "Library", "Application Support", "JetBrains", "*", "plugins"),
-		filepath.Join(s.opts.HomeDir, ".local", "share", "JetBrains", "*", "plugins"),
-	} {
-		if matches, err := filepath.Glob(pattern); err == nil {
-			roots = append(roots, matches...)
+	// Every path below is per-user; iterate every eligible home so a
+	// root-launched daemon picks up all local users' installed
+	// extensions, not just root's (which is empty on a real endpoint).
+	var roots []string
+	for _, home := range s.homesToScan() {
+		roots = append(roots,
+			filepath.Join(home, ".vscode", "extensions"),
+			filepath.Join(home, ".vscode-insiders", "extensions"),
+			filepath.Join(home, ".vscodium", "extensions"),
+			filepath.Join(home, ".cursor", "extensions"),
+			filepath.Join(home, ".windsurf", "extensions"),
+			filepath.Join(home, "Library", "Application Support", "Code", "User", "globalStorage"),
+			filepath.Join(home, "Library", "Application Support", "Code - Insiders", "User", "globalStorage"),
+			filepath.Join(home, "Library", "Application Support", "VSCodium", "User", "globalStorage"),
+			filepath.Join(home, "Library", "Application Support", "Cursor", "User", "globalStorage"),
+			filepath.Join(home, "Library", "Application Support", "Windsurf", "User", "globalStorage"),
+		)
+		for _, pattern := range []string{
+			filepath.Join(home, "Library", "Application Support", "JetBrains", "*", "plugins"),
+			filepath.Join(home, ".local", "share", "JetBrains", "*", "plugins"),
+		} {
+			if matches, err := filepath.Glob(pattern); err == nil {
+				roots = append(roots, matches...)
+			}
 		}
 	}
 	var entries []string
@@ -2104,10 +2170,13 @@ func (s *ContinuousDiscoveryService) matchManifestEntry(entry pkgManifestEntry, 
 }
 
 func (s *ContinuousDiscoveryService) detectShellHistory() ([]AISignal, int, error) {
-	paths := []string{
-		filepath.Join(s.opts.HomeDir, ".zsh_history"),
-		filepath.Join(s.opts.HomeDir, ".bash_history"),
-		filepath.Join(s.opts.HomeDir, ".config", "fish", "fish_history"),
+	var paths []string
+	for _, home := range s.homesToScan() {
+		paths = append(paths,
+			filepath.Join(home, ".zsh_history"),
+			filepath.Join(home, ".bash_history"),
+			filepath.Join(home, ".config", "fish", "fish_history"),
+		)
 	}
 	var out []AISignal
 	files := 0
@@ -2279,15 +2348,26 @@ func (s *ContinuousDiscoveryService) signalFromEvidenceWithComponent(sig AISigna
 
 func (s *ContinuousDiscoveryService) scanRoots() []string {
 	var roots []string
+	seen := make(map[string]struct{})
 	for _, root := range s.opts.ScanRoots {
 		for _, expanded := range s.expandCandidatePath(root) {
+			if _, ok := seen[expanded]; ok {
+				continue
+			}
 			if st, err := os.Stat(expanded); err == nil && st.IsDir() {
+				seen[expanded] = struct{}{}
 				roots = append(roots, expanded)
 			}
 		}
 	}
-	if len(roots) == 0 && s.opts.HomeDir != "" {
-		roots = append(roots, s.opts.HomeDir)
+	if len(roots) == 0 {
+		for _, home := range s.homesToScan() {
+			if _, ok := seen[home]; ok {
+				continue
+			}
+			seen[home] = struct{}{}
+			roots = append(roots, home)
+		}
 	}
 	return roots
 }
@@ -2309,7 +2389,22 @@ func (s *ContinuousDiscoveryService) expandCandidatePath(candidate string) []str
 		return nil
 	}
 	if strings.HasPrefix(candidate, "~") {
-		return []string{filepath.Clean(filepath.Join(s.opts.HomeDir, strings.TrimPrefix(candidate, "~")))}
+		tail := strings.TrimPrefix(candidate, "~")
+		homes := s.homesToScan()
+		if len(homes) == 0 {
+			return nil
+		}
+		out := make([]string, 0, len(homes))
+		seen := make(map[string]struct{}, len(homes))
+		for _, home := range homes {
+			p := filepath.Clean(filepath.Join(home, tail))
+			if _, ok := seen[p]; ok {
+				continue
+			}
+			seen[p] = struct{}{}
+			out = append(out, p)
+		}
+		return out
 	}
 	if filepath.IsAbs(candidate) {
 		return []string{filepath.Clean(candidate)}
@@ -2331,7 +2426,10 @@ func (s *ContinuousDiscoveryService) scanRootsForRelative() []string {
 			continue
 		}
 		if strings.HasPrefix(root, "~") {
-			roots = append(roots, filepath.Clean(filepath.Join(s.opts.HomeDir, strings.TrimPrefix(root, "~"))))
+			tail := strings.TrimPrefix(root, "~")
+			for _, home := range s.homesToScan() {
+				roots = append(roots, filepath.Clean(filepath.Join(home, tail)))
+			}
 			continue
 		}
 		if filepath.IsAbs(root) {
