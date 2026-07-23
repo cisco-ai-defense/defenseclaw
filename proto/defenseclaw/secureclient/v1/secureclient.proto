@@ -63,23 +63,29 @@ message StatsSnapshot {
   // Indicates whether the statistics are current, stale, or unavailable.
   StatsAvailability availability = 2;
 
+  // Counter fields below are proto3 `optional`. A present counter is
+  // supported by this DefenseClaw build and available to the consumer,
+  // including when its value is zero. An absent counter is unsupported
+  // or unavailable — consumers should render it as such (e.g. em-dash
+  // or hidden), not as "0".
+
   // Total scan count for the agreed statistics scope.
-  uint64 total_scans = 3;
+  optional uint64 total_scans = 3;
 
   // Current active alert count for the agreed statistics scope.
-  uint64 active_alerts = 4;
+  optional uint64 active_alerts = 4;
 
   // Count of blocked skills for the agreed statistics scope.
-  uint64 blocked_skills = 5;
+  optional uint64 blocked_skills = 5;
 
   // Count of allowed skills for the agreed statistics scope.
-  uint64 allowed_skills = 6;
+  optional uint64 allowed_skills = 6;
 
   // Count of blocked MCP servers for the agreed statistics scope.
-  uint64 blocked_mcp_servers = 7;
+  optional uint64 blocked_mcp_servers = 7;
 
   // Count of allowed MCP servers for the agreed statistics scope.
-  uint64 allowed_mcp_servers = 8;
+  optional uint64 allowed_mcp_servers = 8;
 }
 
 enum StatsAvailability {

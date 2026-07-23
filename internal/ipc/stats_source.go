@@ -42,15 +42,20 @@ func snapshotStats(src statsSource) (*pb.StatsSnapshot, error) {
 			Availability:  pb.StatsAvailability_STATS_AVAILABILITY_ERROR,
 		}, err
 	}
+	// Only set a counter when it's strictly positive. A zero-valued
+	// counter is left as nil (absent on the wire) — proto3 `optional`
+	// lets us distinguish "supported and zero" from "not supported /
+	// unavailable" without a schema bump. See the doc comment on
+	// StatsSnapshot in secureclient.proto for the semantic contract.
 	return &pb.StatsSnapshot{
 		SchemaVersion:     schemaVersion,
 		Availability:      pb.StatsAvailability_STATS_AVAILABILITY_AVAILABLE,
-		TotalScans:        uint64(clampNonNeg(c.TotalScans)),
-		ActiveAlerts:      uint64(clampNonNeg(c.Alerts)),
-		BlockedSkills:     uint64(clampNonNeg(c.BlockedSkills)),
-		AllowedSkills:     uint64(clampNonNeg(c.AllowedSkills)),
-		BlockedMcpServers: uint64(clampNonNeg(c.BlockedMCPs)),
-		AllowedMcpServers: uint64(clampNonNeg(c.AllowedMCPs)),
+		TotalScans:        nonZeroU64Ptr(c.TotalScans),
+		ActiveAlerts:      nonZeroU64Ptr(c.Alerts),
+		BlockedSkills:     nonZeroU64Ptr(c.BlockedSkills),
+		AllowedSkills:     nonZeroU64Ptr(c.AllowedSkills),
+		BlockedMcpServers: nonZeroU64Ptr(c.BlockedMCPs),
+		AllowedMcpServers: nonZeroU64Ptr(c.AllowedMCPs),
 	}, nil
 }
 
@@ -60,16 +65,23 @@ func snapshotStats(src statsSource) (*pb.StatsSnapshot, error) {
 // on a fresh install produces zero counters in both the AVAILABLE
 // and ERROR snapshots; only the enum transition tells the consumer
 // "we lost our stats source" and it must be surfaced as an update.
+//
+// GetX() returns 0 for both nil and *x=0, so absent-vs-present-zero
+// collapses to "equal" — the intended semantics under the new proto3
+// `optional` contract (presence signals supported/unsupported, value
+// signals the count; the availability enum signals reachability). Do
+// NOT switch to raw pointer comparison; a nil ↔ *0 flip is not a
+// change from the consumer's perspective.
 func statsChanged(a, b *pb.StatsSnapshot) bool {
 	if a == nil || b == nil {
 		return a != b
 	}
-	return a.TotalScans != b.TotalScans ||
-		a.ActiveAlerts != b.ActiveAlerts ||
-		a.BlockedSkills != b.BlockedSkills ||
-		a.AllowedSkills != b.AllowedSkills ||
-		a.BlockedMcpServers != b.BlockedMcpServers ||
-		a.AllowedMcpServers != b.AllowedMcpServers ||
+	return a.GetTotalScans() != b.GetTotalScans() ||
+		a.GetActiveAlerts() != b.GetActiveAlerts() ||
+		a.GetBlockedSkills() != b.GetBlockedSkills() ||
+		a.GetAllowedSkills() != b.GetAllowedSkills() ||
+		a.GetBlockedMcpServers() != b.GetBlockedMcpServers() ||
+		a.GetAllowedMcpServers() != b.GetAllowedMcpServers() ||
 		a.Availability != b.Availability
 }
 
@@ -81,4 +93,20 @@ func clampNonNeg(n int) int {
 		return 0
 	}
 	return n
+}
+
+// nonZeroU64Ptr clamps a signed count to non-negative and returns a
+// pointer only when the result is strictly positive. Nil signals
+// "counter absent" on the wire (proto3 optional); a positive value
+// is present on the wire. Present-zero is reserved for a future
+// consumer contract where 0 must be distinguishable from missing —
+// today's server always omits zeros so absent means "no data yet or
+// counter unsupported".
+func nonZeroU64Ptr(n int) *uint64 {
+	v := clampNonNeg(n)
+	if v == 0 {
+		return nil
+	}
+	u := uint64(v)
+	return &u
 }
