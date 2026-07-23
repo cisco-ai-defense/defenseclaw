@@ -56,6 +56,11 @@ func TestSnapshotStats(t *testing.T) {
 			wantBlockedSkills: u64p(2),
 		},
 		{
+			// The error branch returns before assigning any counter
+			// fields, so both KPI counters and secondary counters stay
+			// nil under STATS_AVAILABILITY_ERROR. The availability enum
+			// carries the "unreachable" signal; consumers should never
+			// try to render counter values on an ERROR snapshot.
 			name:              "DB error → ERROR with counters absent",
 			src:               fakeStats{err: errors.New("db closed")},
 			wantAvail:         pb.StatsAvailability_STATS_AVAILABILITY_ERROR,
@@ -64,7 +69,10 @@ func TestSnapshotStats(t *testing.T) {
 			wantErr:           true,
 		},
 		{
-			name: "negative counter clamped to zero → absent",
+			// TotalScans stays present (alwaysU64Ptr) with the clamped
+			// value 7. BlockedSkills clamps to 0 and, because it uses
+			// nonZeroU64Ptr, drops to nil.
+			name: "negative counter clamped to zero → KPI still present, secondary absent",
 			src: fakeStats{counts: audit.Counts{
 				BlockedSkills: -3, TotalScans: 7,
 			}},
@@ -73,16 +81,20 @@ func TestSnapshotStats(t *testing.T) {
 			wantBlockedSkills: nil,
 		},
 		{
-			// Regression guard for the omit-when-zero contract. A
-			// fresh install with zero scans must produce AVAILABLE
-			// with every counter field nil — this is the wire signal
-			// AVC uses to render "not yet observed" (em-dash) instead
-			// of "0". A future refactor that reverts to unconditional
-			// assignment breaks this case.
-			name:              "all zero counters → AVAILABLE with all-nil counters",
+			// Regression guard for the mixed presence contract on a
+			// fresh install with zero scans:
+			//   TotalScans, ActiveAlerts   — ALWAYS present, value 0
+			//                                (KPI tiles must render "0",
+			//                                 not em-dash).
+			//   BlockedSkills, AllowedSkills, BlockedMcpServers,
+			//   AllowedMcpServers          — nil (secondary drill-downs
+			//                                stay hidden until real data).
+			// A future refactor that unifies these back into a single
+			// policy breaks this case.
+			name:              "all zero counters → AVAILABLE with KPI counters *0 + secondaries nil",
 			src:               fakeStats{counts: audit.Counts{}},
 			wantAvail:         pb.StatsAvailability_STATS_AVAILABILITY_AVAILABLE,
-			wantScans:         nil,
+			wantScans:         u64p(0),
 			wantBlockedSkills: nil,
 		},
 	}
@@ -108,15 +120,17 @@ func TestSnapshotStats(t *testing.T) {
 			if got.SchemaVersion != schemaVersion {
 				t.Errorf("schema version: got %d want %d", got.SchemaVersion, schemaVersion)
 			}
-			// All-zero contract: on the AVAILABLE-with-all-nil case,
-			// also assert every counter (not just the two the table
-			// samples) is absent — otherwise a partial regression on
-			// one of the four un-sampled counters (ActiveAlerts,
-			// AllowedSkills, BlockedMcpServers, AllowedMcpServers)
-			// would slip through.
-			if tc.name == "all zero counters → AVAILABLE with all-nil counters" {
-				if got.ActiveAlerts != nil {
-					t.Errorf("active_alerts: expected nil, got %v", got.ActiveAlerts)
+			// Mixed presence contract: on the AVAILABLE-with-zero-inputs
+			// case, ActiveAlerts must be present at *0 (KPI tile
+			// renders "0"), while the four secondary counters must be
+			// nil. If any of those four regress to present-*0, the AVC
+			// UI would render "0" tiles instead of the intended
+			// "not yet observed" hidden/em-dash state.
+			if tc.name == "all zero counters → AVAILABLE with KPI counters *0 + secondaries nil" {
+				if got.ActiveAlerts == nil {
+					t.Errorf("active_alerts: expected present *0, got nil")
+				} else if *got.ActiveAlerts != 0 {
+					t.Errorf("active_alerts: expected *0, got *%d", *got.ActiveAlerts)
 				}
 				if got.AllowedSkills != nil {
 					t.Errorf("allowed_skills: expected nil, got %v", got.AllowedSkills)

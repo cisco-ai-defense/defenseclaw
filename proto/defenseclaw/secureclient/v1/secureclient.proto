@@ -68,11 +68,27 @@ message StatsSnapshot {
   // including when its value is zero. An absent counter is unsupported
   // or unavailable — consumers should render it as such (e.g. em-dash
   // or hidden), not as "0".
+  //
+  // Server-side presence policy (see internal/ipc/stats_source.go):
+  //
+  //   total_scans, active_alerts — ALWAYS present on an AVAILABLE
+  //     snapshot, even when the value is zero. These back AVC's
+  //     primary KPI tiles and need a "0" render on a fresh install.
+  //
+  //   blocked_skills, allowed_skills, blocked_mcp_servers,
+  //   allowed_mcp_servers — omitted when the value is zero. These
+  //     feed secondary drill-down views where "not yet observed" is
+  //     a meaningful distinction from "observed zero times".
+  //
+  // On an ERROR / STARTING / UNAVAILABLE snapshot every counter is
+  // absent; the availability enum carries the reachability signal.
 
-  // Total scan count for the agreed statistics scope.
+  // Total scan count for the agreed statistics scope. Always present
+  // on an AVAILABLE snapshot (even at zero).
   optional uint64 total_scans = 3;
 
   // Current active alert count for the agreed statistics scope.
+  // Always present on an AVAILABLE snapshot (even at zero).
   optional uint64 active_alerts = 4;
 
   // Count of blocked skills for the agreed statistics scope.

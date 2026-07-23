@@ -42,16 +42,27 @@ func snapshotStats(src statsSource) (*pb.StatsSnapshot, error) {
 			Availability:  pb.StatsAvailability_STATS_AVAILABILITY_ERROR,
 		}, err
 	}
-	// Only set a counter when it's strictly positive. A zero-valued
-	// counter is left as nil (absent on the wire) — proto3 `optional`
-	// lets us distinguish "supported and zero" from "not supported /
-	// unavailable" without a schema bump. See the doc comment on
-	// StatsSnapshot in secureclient.proto for the semantic contract.
+	// Counter-presence policy under proto3 `optional`:
+	//
+	//   TotalScans, ActiveAlerts — ALWAYS present, even at zero.
+	//   AVC's UI treats these as the two primary KPI tiles and needs to
+	//   render "0" on a fresh install; leaving them absent would force
+	//   an em-dash / hidden state that miscommunicates "unsupported"
+	//   for a counter that is actually zero. Use alwaysU64Ptr.
+	//
+	//   BlockedSkills, AllowedSkills, BlockedMcpServers, AllowedMcpServers
+	//   — omitted when zero (nonZeroU64Ptr). These feed secondary
+	//   drill-down views where "absent" is a useful signal ("this
+	//   endpoint hasn't observed any skill / MCP activity yet"). Absent
+	//   also lets AVC hide the corresponding tile until real data lands.
+	//
+	// See the doc comment on StatsSnapshot in secureclient.proto for
+	// the wire contract this policy composes with.
 	return &pb.StatsSnapshot{
 		SchemaVersion:     schemaVersion,
 		Availability:      pb.StatsAvailability_STATS_AVAILABILITY_AVAILABLE,
-		TotalScans:        nonZeroU64Ptr(c.TotalScans),
-		ActiveAlerts:      nonZeroU64Ptr(c.Alerts),
+		TotalScans:        alwaysU64Ptr(c.TotalScans),
+		ActiveAlerts:      alwaysU64Ptr(c.Alerts),
 		BlockedSkills:     nonZeroU64Ptr(c.BlockedSkills),
 		AllowedSkills:     nonZeroU64Ptr(c.AllowedSkills),
 		BlockedMcpServers: nonZeroU64Ptr(c.BlockedMCPs),
@@ -98,15 +109,25 @@ func clampNonNeg(n int) int {
 // nonZeroU64Ptr clamps a signed count to non-negative and returns a
 // pointer only when the result is strictly positive. Nil signals
 // "counter absent" on the wire (proto3 optional); a positive value
-// is present on the wire. Present-zero is reserved for a future
-// consumer contract where 0 must be distinguishable from missing —
-// today's server always omits zeros so absent means "no data yet or
-// counter unsupported".
+// is present on the wire. Used for the secondary counters
+// (blocked/allowed skills + MCP servers) where consumers benefit
+// from an explicit "not yet observed" absent state.
 func nonZeroU64Ptr(n int) *uint64 {
 	v := clampNonNeg(n)
 	if v == 0 {
 		return nil
 	}
 	u := uint64(v)
+	return &u
+}
+
+// alwaysU64Ptr clamps a signed count to non-negative and returns a
+// pointer that is ALWAYS present, even at zero. Used for TotalScans
+// and ActiveAlerts, which back AVC's primary KPI tiles — those tiles
+// must render "0" on a fresh install rather than the em-dash /
+// hidden state that absent implies. Every other counter should use
+// nonZeroU64Ptr instead.
+func alwaysU64Ptr(n int) *uint64 {
+	u := uint64(clampNonNeg(n))
 	return &u
 }
