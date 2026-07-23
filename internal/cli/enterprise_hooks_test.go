@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
@@ -243,6 +244,150 @@ func TestEnterpriseHookWatchEventRelevantIgnoresLockHousekeeping(t *testing.T) {
 				t.Fatalf("enterpriseHookWatchEventRelevant(%+v) = %v, want %v", tc.event, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestEnterpriseHookWatchEventInSettleWindow(t *testing.T) {
+	base := time.Date(2026, 7, 17, 15, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name        string
+		now         time.Time
+		settleUntil time.Time
+		op          fsnotify.Op
+		want        bool
+	}{
+		{
+			// Zero settleUntil means "never reconciled yet" — the
+			// watcher must not suppress the very first fsnotify event
+			// after boot; otherwise startup-time tamper is missed.
+			name:        "never reconciled: not suppressed",
+			now:         base,
+			settleUntil: time.Time{},
+			op:          fsnotify.Write,
+			want:        false,
+		},
+		{
+			// Chmod event well inside the post-reconcile settle
+			// window: this is the guardian's own chmod tail from
+			// hardenInstallFootprint. Suppress to break the
+			// self-trigger loop.
+			name:        "chmod inside window: suppressed",
+			now:         base.Add(500 * time.Millisecond),
+			settleUntil: base.Add(2 * time.Second),
+			op:          fsnotify.Chmod,
+			want:        true,
+		},
+		{
+			// Write event inside window — same rationale as Chmod;
+			// reconcile writes hook scripts and .token files, so
+			// their post-reconcile tail must be suppressed too.
+			name:        "write inside window: suppressed",
+			now:         base.Add(500 * time.Millisecond),
+			settleUntil: base.Add(2 * time.Second),
+			op:          fsnotify.Write,
+			want:        true,
+		},
+		{
+			// Right at the boundary — Before() is strictly less-than,
+			// so an event at exactly settleUntil is NOT suppressed.
+			name:        "chmod at boundary: not suppressed",
+			now:         base.Add(2 * time.Second),
+			settleUntil: base.Add(2 * time.Second),
+			op:          fsnotify.Chmod,
+			want:        false,
+		},
+		{
+			// Event after the window closed.
+			name:        "chmod outside window: not suppressed",
+			now:         base.Add(3 * time.Second),
+			settleUntil: base.Add(2 * time.Second),
+			op:          fsnotify.Chmod,
+			want:        false,
+		},
+		{
+			// Remove inside window: this IS suppressed. The guardian's
+			// atomicWriteFile uses os.Rename over the destination,
+			// which on macOS fires an fsnotify REMOVE on the target.
+			// So a REMOVE inside the settle window is our own
+			// atomic-write finishing, not a user tamper. Real user
+			// Remove events happen outside the settle window and
+			// still trigger reconcile within (settle window + debounce).
+			name:        "remove inside window: suppressed (atomic-write tail)",
+			now:         base.Add(500 * time.Millisecond),
+			settleUntil: base.Add(2 * time.Second),
+			op:          fsnotify.Remove,
+			want:        true,
+		},
+		{
+			// Remove OUTSIDE the settle window: real user tamper. The
+			// guardian's atomic-write tail lives inside the window
+			// (typically ~ms); anything after the window is a user
+			// action and must trigger reconcile.
+			name:        "remove outside window: not suppressed",
+			now:         base.Add(3 * time.Second),
+			settleUntil: base.Add(2 * time.Second),
+			op:          fsnotify.Remove,
+			want:        false,
+		},
+		{
+			// Rename inside window: same rationale as Remove — macOS
+			// rename(2) generates NOTE_RENAME on the source path
+			// alongside NOTE_DELETE on the destination.
+			name:        "rename inside window: suppressed",
+			now:         base.Add(500 * time.Millisecond),
+			settleUntil: base.Add(2 * time.Second),
+			op:          fsnotify.Rename,
+			want:        true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := enterpriseHookWatchEventInSettleWindow(tc.now, tc.settleUntil, tc.op)
+			if got != tc.want {
+				t.Fatalf("enterpriseHookWatchEventInSettleWindow(now=%v settleUntil=%v op=%v) = %v, want %v", tc.now, tc.settleUntil, tc.op, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEnterpriseHookReconcileRowsHash(t *testing.T) {
+	rowsA := []enterpriseHookReconcileRow{
+		{User: "alice", UserHome: "/Users/alice", Connector: "codex", OK: true},
+		{User: "bob", UserHome: "/Users/bob", Connector: "cursor", OK: true},
+	}
+	rowsB := []enterpriseHookReconcileRow{
+		{User: "bob", UserHome: "/Users/bob", Connector: "cursor", OK: true},
+		{User: "alice", UserHome: "/Users/alice", Connector: "codex", OK: true},
+	}
+	rowsC := []enterpriseHookReconcileRow{
+		{User: "alice", UserHome: "/Users/alice", Connector: "codex", OK: false, Error: "boom"},
+		{User: "bob", UserHome: "/Users/bob", Connector: "cursor", OK: true},
+	}
+	rowsD := []enterpriseHookReconcileRow{
+		{User: "alice", UserHome: "/Users/alice", Connector: "codex", OK: true},
+		{User: "bob", UserHome: "/Users/bob", Connector: "cursor", OK: true},
+		{User: "charlie", UserHome: "/Users/charlie", Connector: "claudecode", OK: true},
+	}
+
+	// Row order must not matter — the watcher iterates in whatever
+	// order the manifest resolves, but a "nothing changed" hash must
+	// still match after a benign reorder.
+	if h1, h2 := enterpriseHookReconcileRowsHash(rowsA), enterpriseHookReconcileRowsHash(rowsB); h1 != h2 {
+		t.Fatalf("row-order should not affect hash: A=%s B=%s", h1, h2)
+	}
+	// Same identities but one now failed → hash must differ so the
+	// watch loop treats it as a change (operator needs to see it).
+	if h1, h2 := enterpriseHookReconcileRowsHash(rowsA), enterpriseHookReconcileRowsHash(rowsC); h1 == h2 {
+		t.Fatalf("outcome change (OK true→false) must flip the hash, both = %s", h1)
+	}
+	// Adding a new target must flip the hash.
+	if h1, h2 := enterpriseHookReconcileRowsHash(rowsA), enterpriseHookReconcileRowsHash(rowsD); h1 == h2 {
+		t.Fatalf("adding a target must flip the hash, both = %s", h1)
+	}
+	// Empty input has a stable, non-empty representative — callers
+	// use hash equality to detect "no change", and the boot-time
+	// zero-value ("") must not collide with an actual empty run.
+	if got := enterpriseHookReconcileRowsHash(nil); got == "" {
+		t.Fatalf("empty rows must have a non-empty hash, got %q", got)
 	}
 }
 

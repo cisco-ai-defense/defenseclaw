@@ -162,13 +162,28 @@ def test_launchd_hook_guardian_is_separate_privileged_job():
 
     assert payload["Label"] == "com.cisco.secureclient.defenseclaw.hook-guardian"
     assert "UserName" not in payload
-    assert payload["ProgramArguments"][1:4] == ["enterprise", "hooks", "reconcile"]
+    # Guardian runs the long-running `enterprise hooks watch` command, not
+    # the one-shot `reconcile` — fsnotify-driven auto-heal (~1 s) with a
+    # 60 s periodic backstop, restart-managed via KeepAlive rather than
+    # StartInterval. See internal/cli/enterprise_hooks.go runEnterpriseHooksWatch
+    # for the loop's design (settle window + Stat-based rename-tail detection).
+    assert payload["ProgramArguments"][1:4] == ["enterprise", "hooks", "watch"]
+    # --interval 60s is the periodic backstop for tamper vectors the fsnotify
+    # path intentionally cannot catch (SharedWriter Write/Chmod on native
+    # agent configs, shared-across-connector generic scripts). Any drift in
+    # this value should be a deliberate policy change, not an accidental edit.
+    assert "--interval" in payload["ProgramArguments"]
+    assert "60s" in payload["ProgramArguments"]
     assert payload["EnvironmentVariables"]["DEFENSECLAW_DEPLOYMENT_MODE"] == "managed_enterprise"
     assert (
         payload["EnvironmentVariables"]["DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"]
         == "/opt/cisco/secureclient/defenseclaw/hook-guardian-state"
     )
-    assert payload["StartInterval"] == 300
+    # Long-running watch mode is kept alive by KeepAlive, NOT StartInterval.
+    # StartInterval would pointlessly relaunch the process every N seconds
+    # (and possibly spawn duplicates); KeepAlive relaunches only on exit.
+    assert "StartInterval" not in payload
+    assert payload.get("KeepAlive") is True
 
 
 def test_release_archives_ship_enterprise_packaging_assets():
@@ -319,7 +334,13 @@ def test_launchd_enterprise_installer_matches_cisco_plist_layout():
     home = gateway["EnvironmentVariables"]["DEFENSECLAW_HOME"]
     config = gateway["EnvironmentVariables"]["DEFENSECLAW_CONFIG"]
     auth_dir = gateway["EnvironmentVariables"]["DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"]
-    manifest = guardian["ProgramArguments"][-1]
+    # The manifest path follows the --manifest flag; explicit lookup instead
+    # of positional indexing (ProgramArguments[-1] used to be the manifest
+    # under `hooks reconcile --manifest <path>`, but the current watch-mode
+    # args add `--interval 60s` after the manifest, making index -1 wrong).
+    guardian_args = guardian["ProgramArguments"]
+    manifest_flag = guardian_args.index("--manifest")
+    manifest = guardian_args[manifest_flag + 1]
 
     assert f"BINARY_ROOT={home}" in text
     assert f'CONFIG_DEST="{config}"' in text

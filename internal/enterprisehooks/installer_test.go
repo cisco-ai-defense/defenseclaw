@@ -416,24 +416,181 @@ func TestWatchDirsIncludesHookConfigAndRuntimeDirs(t *testing.T) {
 	}
 }
 
-func TestInstallRefusesMissingHookConfig(t *testing.T) {
+// TestWatchOwnedFilesReturnsSpecificFilesNotDirs asserts the
+// watcher's per-event ownership filter has the right shape: it must
+// enumerate concrete file paths (the codex config, the connector's
+// hook script, its .token sidecar, hook helpers), NOT parent dirs.
+// Filtering by dir would defeat the whole point — the loop already
+// receives dir-scoped events from fsnotify. If a future edit ever
+// makes this return dirs instead, unrelated agent-runtime writes
+// (session sqlite churn, cache writes) would once again be treated
+// as tamper signals.
+func TestWatchOwnedFilesReturnsSpecificFilesNotDirs(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
-	_, err := Install(context.Background(), InstallOptions{
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+	hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatalf("mkdir hook dir: %v", err)
+	}
+
+	own, err := WatchOwnedFiles(InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		ProxyAddr:     "127.0.0.1:4000",
+		APIToken:      "test-token",
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		AgentVersion:  "codex-cli 0.142.0",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("WatchOwnedFiles: %v", err)
+	}
+
+	// The native agent config file is SHARED-writer: Codex itself
+	// rewrites config.toml during normal use, so the guardian must
+	// only react to Remove/Rename on it (Write/Chmod are the agent
+	// updating its own state).
+	wantShared := filepath.Join(home, ".codex", "config.toml")
+	if !sliceContains(own.SharedWriter, wantShared) {
+		t.Fatalf("WatchOwnedFiles.SharedWriter = %v, missing %s", own.SharedWriter, wantShared)
+	}
+	// It MUST NOT appear in ExclusiveWriter — that would re-introduce
+	// the log spam where every Codex config write fires a reconcile.
+	if sliceContains(own.ExclusiveWriter, wantShared) {
+		t.Fatalf("~/.codex/config.toml must not be ExclusiveWriter (Codex writes to it during normal use); got %v", own.ExclusiveWriter)
+	}
+
+	// EXCLUSIVE-writer files: DC-only artifacts that render to
+	// the same bytes on every reconcile for a given connector.
+	// Two categories qualify: the connector-specific hook script
+	// (codex-hook.sh — written by only this connector's Install)
+	// and the scoped token sidecar (.hook-codex.token — one per
+	// connector). Any event on these is meaningful because
+	// atomicWriteFile short-circuits when content matches, so
+	// only real churn triggers events.
+	wantExclusive := []string{
+		filepath.Join(hookDir, "codex-hook.sh"),
+		filepath.Join(hookDir, ".hook-codex.token"),
+	}
+	for _, w := range wantExclusive {
+		if !sliceContains(own.ExclusiveWriter, w) {
+			t.Fatalf("WatchOwnedFiles.ExclusiveWriter = %v, missing %s", own.ExclusiveWriter, w)
+		}
+		// And they must NOT slip into SharedWriter (would suppress
+		// Write/Chmod events on a file only DC writes to).
+		if sliceContains(own.SharedWriter, w) {
+			t.Fatalf("%s must be ExclusiveWriter (DC-only), not SharedWriter", w)
+		}
+	}
+
+	// Regression guard: shared-across-connectors artifacts must
+	// NOT be in either set. Including them creates a fsnotify
+	// rename storm because every reconcile rewrites the file once
+	// per active connector with slightly different bytes, and
+	// each rewrite fires a REMOVE event that our loop treats as a
+	// tamper. Excluding them means the 5-min backstop reconcile
+	// is the only thing that re-lays them, which is fine — users
+	// don't tamper with these helpers directly (they invoke the
+	// connector-specific hook, and THAT is in the allowlist).
+	wantExcluded := []string{
+		filepath.Join(hookDir, "inspect-tool.sh"),
+		filepath.Join(hookDir, "inspect-request.sh"),
+		filepath.Join(hookDir, "inspect-response.sh"),
+		filepath.Join(hookDir, "inspect-tool-response.sh"),
+		filepath.Join(hookDir, "_hardening.sh"),
+		filepath.Join(hookDir, ".hookcfg"),
+	}
+	for _, w := range wantExcluded {
+		if sliceContains(own.ExclusiveWriter, w) {
+			t.Fatalf("%s must NOT be in ExclusiveWriter — it is shared across connectors and re-rendered by every Install() with different bytes, which fires an fsnotify REMOVE storm every reconcile", w)
+		}
+		if sliceContains(own.SharedWriter, w) {
+			t.Fatalf("%s must NOT be in SharedWriter either", w)
+		}
+	}
+
+	// Regression guard: NO returned entry may be a bare dir.
+	allFiles := append(append([]string{}, own.ExclusiveWriter...), own.SharedWriter...)
+	forbiddenDirs := []string{
+		filepath.Join(home, ".codex"),
+		filepath.Join(home, ".defenseclaw"),
+		hookDir,
+	}
+	for _, f := range allFiles {
+		for _, d := range forbiddenDirs {
+			if f == d {
+				t.Fatalf("WatchOwnedFiles returned a directory %s; must return only files", f)
+			}
+		}
+	}
+
+	// Unrelated agent-runtime paths MUST NOT appear in either set.
+	forbiddenPaths := []string{
+		filepath.Join(home, ".codex", "sessions"),
+		filepath.Join(home, ".codex", "history.jsonl"),
+		filepath.Join(home, ".codex", "logs_2.sqlite-wal"),
+		filepath.Join(home, ".codex", "auth.json"),
+	}
+	for _, f := range allFiles {
+		for _, forbidden := range forbiddenPaths {
+			if f == forbidden {
+				t.Fatalf("WatchOwnedFiles leaked unrelated agent-runtime path %s", f)
+			}
+		}
+	}
+}
+
+// TestInstallBootstrapsMissingHookConfigFirstTime locks the endpoint-
+// product contract: on a fresh target where the user has never
+// launched the agent (so ~/.codex/config.toml doesn't exist yet),
+// Install auto-creates the connector's minimal-valid stub as the
+// target user AND completes successfully. Before this change the
+// installer refused with "hook config file missing", leaving
+// customers with no enforcement until they opened each agent once —
+// see bootstrap.go for the rationale.
+func TestInstallBootstrapsMissingHookConfigFirstTime(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	home := newTestHome(t)
+	cfgPath := filepath.Join(home, ".codex", "config.toml")
+	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+		t.Fatalf("precondition: %s must not exist before Install (err=%v)", cfgPath, err)
+	}
+	result, err := Install(context.Background(), InstallOptions{
 		ConnectorName: "codex",
 		UserHome:      home,
 		OwnerUID:      os.Getuid(),
 		OwnerGID:      os.Getgid(),
 		APIAddr:       "127.0.0.1:18970",
 		APIToken:      "test-token",
+		AgentVersion:  "codex-cli 0.142.0",
 		Registry:      connector.NewDefaultRegistry(),
 	})
-	if err == nil || !strings.Contains(err.Error(), "hook config") || !strings.Contains(err.Error(), "missing") {
-		t.Fatalf("Install error = %v, want hook config missing", err)
+	if err != nil {
+		t.Fatalf("Install with missing hook config: %v", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(home, ".defenseclaw")); !os.IsNotExist(statErr) {
-		t.Fatalf("data dir exists after refused install: %v", statErr)
+	if result.Connector != "codex" {
+		t.Fatalf("result.Connector = %q, want codex", result.Connector)
+	}
+	// The stub must exist AND be owned by the target user after Install.
+	info, statErr := os.Stat(cfgPath)
+	if statErr != nil {
+		t.Fatalf("stat %s after Install: %v", cfgPath, statErr)
+	}
+	if info.Size() == 0 {
+		t.Fatalf("stub at %s is empty; Connector.Setup should have written entries", cfgPath)
 	}
 }
 

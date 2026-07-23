@@ -164,6 +164,32 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	var result InstallResult
 	err = connector.WithUserHomeDir(home, func() error {
 		paths := connector.HookConfigPathsForConnector(conn, setupOpts)
+		// Endpoint-product bootstrap: on a fresh target where the
+		// user hasn't launched the agent yet, the native hook config
+		// file doesn't exist and validateActivationSurfaces below
+		// would refuse with "hook config file missing". Pre-create
+		// the connector's minimal-valid stub as the target user so
+		// the strict validate check has something to inspect.
+		//
+		// Design intent: DefenseClaw ships on customer Macs where we
+		// want enforcement live at pkg-install time — not deferred
+		// until the user happens to open each agent once. The stub
+		// is intentionally minimal (the agent's own default config
+		// content) so it won't override anything the user hasn't
+		// explicitly set; connector.Setup() below then patches in
+		// the DefenseClaw-owned entries.
+		if stub := defaultHookConfigStubForConnector(conn, setupOpts, home); stub.ContentPath != "" {
+			var bootstrapped bool
+			bootstrapErr := withOwnerCredentials(uid, gid, func() error {
+				written, werr := bootstrapMissingHookConfig(home, stub)
+				bootstrapped = written
+				return werr
+			})
+			if bootstrapErr != nil {
+				return fmt.Errorf("enterprise hooks: bootstrap missing hook config for %s: %w", conn.Name(), bootstrapErr)
+			}
+			_ = bootstrapped // reserved for future audit emission
+		}
 		if err := validateActivationSurfaces(home, paths, uid, opts.AllowMissingHookConfigRepair); err != nil {
 			return err
 		}
