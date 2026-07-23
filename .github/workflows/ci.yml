@@ -458,6 +458,9 @@ jobs:
               "pyjwt": ">=2.13.0",
               "starlette": ">=1.3.1,<1.4",
               "fastapi": ">=0.137.1,<0.138",
+              # Keep the portable LiteLLM line in wheel metadata. A tool.uv
+              # override is not shipped and cannot protect installers.
+              "litellm": ">=1.84.0,<1.92.0",
           }
           with zipfile.ZipFile(wheel) as archive:
               metadata_name = next(
@@ -504,6 +507,18 @@ jobs:
                       f"wheel security floor drift for {name}: "
                       f"expected {expected}, found {specifier.strip()}"
                   )
+          scanner = requirements.get("cisco-ai-mcp-scanner")
+          if scanner is None:
+              raise SystemExit("wheel metadata omits cisco-ai-mcp-scanner")
+          scanner_requirement = scanner.partition(";")[0].strip()
+          if re.fullmatch(
+              r"@\s+https://files[.]pythonhosted[.]org/[A-Za-z0-9_./-]+[.]whl"
+              r"#sha256=[0-9a-f]{64}",
+              scanner_requirement,
+          ) is None:
+              raise SystemExit(
+                  "wheel metadata leaves cisco-ai-mcp-scanner floating instead of binding a hashed wheel"
+              )
           digest_path.write_text(json.dumps(digests), encoding="utf-8")
           PY
           uv --no-config venv "$tmp/venv" --python "${{ matrix.python-version }}"

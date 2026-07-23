@@ -236,6 +236,15 @@ def test_historical_baselines_are_authenticated_and_real_dependency_mode_is_expl
     assert 'if [[ "${SUCCESS_PATH_ONLY}" == "1" ]]' in protocol
 
 
+def test_live_continuity_uses_the_published_bridge_dependency_graph() -> None:
+    continuity = (ROOT / "scripts/test-observability-v8-upgrade-continuity.sh").read_text(encoding="utf-8")
+
+    dependency_mode = continuity.index('BASELINE_DEPENDENCIES="published"')
+    main = continuity.index("main_continuity() {")
+    install = continuity.index("install_baseline", main)
+    assert dependency_mode < main < install
+
+
 @pytest.mark.skipif(os.name == "nt", reason="executes the POSIX release shell and symlink contract")
 def test_bridge_auth_resolves_a_symlinked_cosign_binary(tmp_path: Path) -> None:
     real_bin = tmp_path / "real-bin"
@@ -1064,6 +1073,11 @@ def test_posix_resolver_hands_both_hard_cut_paths_to_authenticated_target_contro
     assert capture < bridge_switch
     target_command = '"${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}"'
     assert resolver.count(target_command) == 2
+    scoped_target_command = (
+        'UV_OVERRIDE="${HISTORICAL_BOOTSTRAP_OVERRIDES_FILE}" \\\n'
+        f"        {target_command}"
+    )
+    assert resolver.count(scoped_target_command) == 2
     assert f"exec {target_command}" not in resolver
     assert resolver.count("|| target_status=$?") == 2
     assert resolver.count('exit "${target_status}"') == 2
@@ -1085,9 +1099,46 @@ def test_posix_resolver_hands_both_hard_cut_paths_to_authenticated_target_contro
     assert continuation.index("unset DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION") < remove_staging
     assert "release_upgrade_lock" not in continuation
     assert "trap - EXIT" not in continuation
+    assert "HISTORICAL_BOOTSTRAP_OVERRIDES_FILE" not in continuation
     assert 'readonly OBSERVABILITY_V8_HARD_CUT_VERSION="0.8.5"' in resolver
     assert 'POST_HARD_CUT_FINAL_VERSION="${RELEASE_VERSION}"' in resolver
     assert resolver.count("continue_post_hard_cut_upgrade") == 3
+
+
+def test_posix_resolver_pins_historical_bootstrap_dependencies_to_signed_lock_wheels() -> None:
+    resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
+    for artifact in (
+        "cisco_ai_mcp_scanner-4.7.2-py3-none-any.whl",
+        "sha256=6ed0b8ced168886f572aec30a971c7b0e2e1de7eea489d3821627184fd271ac8",
+        "litellm-1.89.1-py3-none-any.whl",
+        "sha256=a52a67625d89cb1787ef48c4b3c1ab9c2574ea304f56900bc631844297a13bd4",
+    ):
+        assert artifact in resolver
+
+    helper_start = resolver.index("prepare_historical_bootstrap_overrides() {")
+    helper_end = resolver.index("\n}\n\nprepare_bridge_phase1_cli_preflight() {", helper_start)
+    helper = resolver[helper_start:helper_end]
+    assert 'historical-bootstrap-overrides.txt' in helper
+    assert 'chmod 600 "${overrides}"' in helper
+
+    function_boundaries = (
+        ("preflight_python_wheel", "begin_release_upgrade_receipt"),
+        ("prepare_bridge_phase1_cli_preflight", "bridge_source_health_observation"),
+        ("activate_bridge_phase1_cli", "bridge_source_health_check"),
+        ("prepare_hard_cut_target_controller", "verify_hard_cut_target_controller_handoff"),
+    )
+    for name, next_name in function_boundaries:
+        start = resolver.index(f"{name}() {{")
+        end = resolver.index(f"\n}}\n\n{next_name}() {{", start)
+        function = resolver[start:end]
+        assert "--only-binary litellm" in function
+        assert "HISTORICAL_BOOTSTRAP_OVERRIDES_FILE" in function
+
+    ordinary_install = resolver.rindex('UV_OVERRIDE= "${UV_BIN}" --no-config pip install')
+    ordinary_install_end = resolver.index('|| die "Failed to install CLI wheel"', ordinary_install)
+    ordinary = resolver[ordinary_install:ordinary_install_end]
+    assert "--only-binary litellm" in ordinary
+    assert "HISTORICAL_BOOTSTRAP_OVERRIDES_FILE" not in ordinary
 
 
 def _posix_resolver_lock_functions() -> str:

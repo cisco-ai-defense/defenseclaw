@@ -103,6 +103,14 @@ def test_installed_release_artifacts_mount_the_full_tui() -> None:
     assert "post_status_mandatory_sqlite_write=ok" in smoke
 
 
+def test_ci_wheel_metadata_prevents_floating_nonportable_scanner_resolution() -> None:
+    ci = CI_WORKFLOW.read_text(encoding="utf-8")
+
+    assert '"litellm": ">=1.84.0,<1.92.0"' in ci
+    assert "wheel metadata leaves cisco-ai-mcp-scanner floating" in ci
+    assert "#sha256=[0-9a-f]{64}" in ci
+
+
 def test_release_supports_nightly_certification_and_manual_promotion() -> None:
     workflow = _workflow()
     triggers = workflow["on"]
