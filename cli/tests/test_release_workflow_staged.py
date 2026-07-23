@@ -59,6 +59,10 @@ def _workflow() -> dict[str, object]:
     return yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
+def _platform_readiness_steps() -> list[dict[str, object]]:
+    return _workflow()["jobs"]["platform-readiness"]["steps"]
+
+
 def _ci_workflow() -> dict[str, object]:
     return yaml.load(CI_WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
@@ -173,7 +177,12 @@ def test_release_supports_nightly_certification_and_manual_promotion() -> None:
     triggers = workflow["on"]
     assert triggers["schedule"] == [{"cron": "17 5 * * *"}]
     inputs = triggers["workflow_dispatch"]["inputs"]
-    assert inputs["operation"]["options"] == ["release", "certify"]
+    assert inputs["operation"]["description"] == (
+        "Certify reviewed main first (default), or release only after exact "
+        "certification exists."
+    )
+    assert inputs["operation"]["default"] == "certify"
+    assert inputs["operation"]["options"] == ["certify", "release"]
     assert inputs["version"]["required"] == "false"
     assert inputs["candidate_ref"]["required"] == "false"
     assert inputs["immutable_releases_confirmed"]["default"] == "false"
@@ -259,8 +268,9 @@ def test_release_requires_current_main_without_prescribing_repository_governance
 
 def test_release_requires_successful_main_ci_for_the_exact_candidate_sha() -> None:
     workflow = _workflow()
-    preflight = workflow["jobs"]["release-preflight"]
-    steps = preflight["steps"]
+    preflight_steps = workflow["jobs"]["release-preflight"]["steps"]
+    readiness = workflow["jobs"]["platform-readiness"]
+    steps = readiness["steps"]
     step = next(
         step
         for step in steps
@@ -312,14 +322,107 @@ def test_release_requires_successful_main_ci_for_the_exact_candidate_sha() -> No
     assert 'CURRENT_MAIN="$(git rev-parse origin/main)"' in revalidation_command
     assert '"$CURRENT_MAIN" != "$SELECTED_COMMIT"' in revalidation_command
     assert "Release commit superseded" in revalidation_command
+    assert not any(
+        candidate.get("name")
+        in {
+            "Require successful CI for the exact release commit",
+            "Revalidate current main after exact-SHA CI",
+        }
+        for candidate in preflight_steps
+    )
     ci_index = steps.index(step)
     revalidation_index = steps.index(revalidation)
-    cosign_index = next(
+    checkout_index = next(
         index
         for index, candidate in enumerate(steps)
-        if candidate.get("uses", "").startswith("sigstore/cosign-installer@")
+        if candidate.get("uses", "").startswith("actions/checkout@")
     )
-    assert ci_index < revalidation_index < cosign_index
+    assert checkout_index < ci_index < revalidation_index
+
+
+def test_release_verifies_receipt_before_long_platform_wait_and_guards_downstream_dag() -> None:
+    jobs = _workflow()["jobs"]
+    lookup = jobs["lookup-certification"]
+    readiness = jobs["platform-readiness"]
+
+    assert set(lookup["needs"]) == {"release-mode", "release-preflight"}
+    assert set(readiness["needs"]) == {
+        "release-mode",
+        "release-preflight",
+        "lookup-certification",
+    }
+    assert "always()" in readiness["if"]
+    for predecessor in ("release-mode", "release-preflight", "lookup-certification"):
+        assert f"needs.{predecessor}.result == 'success'" in readiness["if"]
+
+    guard = readiness["steps"][0]
+    assert guard["name"] == "Require verified certification before platform wait"
+    assert guard["env"] == {
+        "RELEASE_OPERATION": "${{ needs.release-mode.outputs.operation }}",
+        "REUSE_CERTIFICATION": "${{ needs.lookup-certification.outputs.reuse }}",
+    }
+    assert 'if [[ "$RELEASE_OPERATION" == "certify" ]]' in guard["run"]
+    assert "does not wait for exact-SHA platform workflows" in guard["run"]
+    assert 'if [[ "$REUSE_CERTIFICATION" != "true" ]]' in guard["run"]
+    assert "Verified certification required before platform wait" in guard["run"]
+
+    checkout = readiness["steps"][1]
+    assert checkout["uses"].startswith("actions/checkout@")
+    assert checkout["if"] == "${{ needs.release-mode.outputs.operation == 'release' }}"
+    for gated_job in ("build-runtime-candidate", "select-candidate", "publish-release"):
+        job = jobs[gated_job]
+        assert "platform-readiness" in job["needs"]
+        assert "needs.platform-readiness.result == 'success'" in job["if"]
+
+
+@pytest.mark.parametrize(
+    ("operation", "reuse", "expected_returncode", "expected_fragment"),
+    [
+        (
+            "certify",
+            "false",
+            0,
+            "Certification mode does not wait for exact-SHA platform workflows.",
+        ),
+        (
+            "release",
+            "true",
+            0,
+            "OK: exact reusable certification verified before platform readiness wait",
+        ),
+        (
+            "release",
+            "false",
+            1,
+            "Verified certification required before platform wait",
+        ),
+    ],
+)
+def test_platform_readiness_requires_a_verified_receipt_before_waiting(
+    operation: str,
+    reuse: str,
+    expected_returncode: int,
+    expected_fragment: str,
+) -> None:
+    guard = _platform_readiness_steps()[0]
+    env = os.environ.copy()
+    env.update(
+        {
+            "RELEASE_OPERATION": operation,
+            "REUSE_CERTIFICATION": reuse,
+        }
+    )
+    completed = subprocess.run(
+        [_bash_executable(), "-c", guard["run"]],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == expected_returncode, completed.stdout + completed.stderr
+    assert expected_fragment in completed.stdout
 
 
 @pytest.mark.parametrize(
@@ -338,7 +441,7 @@ def test_post_ci_main_revalidation_rejects_a_superseded_commit(
     selected_commit = "e" * 40
     step = next(
         step
-        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        for step in _platform_readiness_steps()
         if step.get("name") == "Revalidate current main after exact-SHA CI"
     )
     env = os.environ.copy()
@@ -380,7 +483,7 @@ def test_exact_sha_ci_gate_retries_a_transient_api_failure(tmp_path: Path) -> No
     commit = "d" * 40
     step = next(
         step
-        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        for step in _platform_readiness_steps()
         if step.get("name") == "Require successful CI for the exact release commit"
     )
     payload = {
@@ -444,7 +547,7 @@ def test_exact_sha_ci_gate_retries_an_invalid_successful_api_response(
     commit = "6" * 40
     step = next(
         step
-        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        for step in _platform_readiness_steps()
         if step.get("name") == "Require successful CI for the exact release commit"
     )
     payload = {
@@ -510,7 +613,7 @@ def test_exact_sha_ci_gate_fails_closed_after_invalid_responses_are_exhausted(
 ) -> None:
     step = next(
         step
-        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        for step in _platform_readiness_steps()
         if step.get("name") == "Require successful CI for the exact release commit"
     )
     env = os.environ.copy()
@@ -563,7 +666,7 @@ def test_exact_sha_ci_gate_rejects_every_state_except_success(
     commit = "a" * 40
     step = next(
         step
-        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        for step in _platform_readiness_steps()
         if step.get("name") == "Require successful CI for the exact release commit"
     )
     payload = {
@@ -614,7 +717,7 @@ def test_exact_sha_ci_gate_rejects_missing_or_unrelated_runs(tmp_path: Path) -> 
     commit = "b" * 40
     step = next(
         step
-        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        for step in _platform_readiness_steps()
         if step.get("name") == "Require successful CI for the exact release commit"
     )
     payload = {
@@ -676,7 +779,7 @@ def test_exact_sha_ci_gate_rejects_a_terminal_windows_failure_after_ci_passes(
     commit = "9" * 40
     step = next(
         step
-        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        for step in _platform_readiness_steps()
         if step.get("name") == "Require successful CI for the exact release commit"
     )
     successful_ci = {
@@ -762,7 +865,7 @@ def test_exact_sha_ci_gate_selects_the_latest_successful_rerun(
     commit = "8" * 40
     step = next(
         step
-        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        for step in _platform_readiness_steps()
         if step.get("name") == "Require successful CI for the exact release commit"
     )
     payload = {
@@ -840,7 +943,7 @@ def test_exact_sha_ci_gate_never_reuses_an_older_success_over_a_newer_attempt(
     commit = "4" * 40
     step = next(
         step
-        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        for step in _platform_readiness_steps()
         if step.get("name") == "Require successful CI for the exact release commit"
     )
     payload = {
@@ -907,7 +1010,7 @@ def test_exact_sha_ci_gate_fails_closed_when_the_api_outage_exhausts_deadline(
     commit = "7" * 40
     step = next(
         step
-        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        for step in _platform_readiness_steps()
         if step.get("name") == "Require successful CI for the exact release commit"
     )
     env = os.environ.copy()
@@ -948,7 +1051,7 @@ def test_exact_sha_ci_gate_treats_permanent_workflow_api_errors_as_terminal(
 ) -> None:
     step = next(
         step
-        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        for step in _platform_readiness_steps()
         if step.get("name") == "Require successful CI for the exact release commit"
     )
     env = os.environ.copy()
@@ -995,7 +1098,7 @@ def test_exact_sha_ci_gate_enforces_the_absolute_deadline_before_api_calls(
 ) -> None:
     step = next(
         step
-        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        for step in _platform_readiness_steps()
         if step.get("name") == "Require successful CI for the exact release commit"
     )
     env = os.environ.copy()
@@ -1105,9 +1208,11 @@ def test_publish_job_promotes_only_a_selected_certified_candidate() -> None:
     assert set(publish["needs"]) == {
         "release-mode",
         "release-preflight",
+        "platform-readiness",
         "select-candidate",
     }
     assert "needs.release-mode.outputs.operation == 'release'" in publish["if"]
+    assert "needs.platform-readiness.result == 'success'" in publish["if"]
     assert "needs.select-candidate.result == 'success'" in publish["if"]
     assert publish["environment"] == "release"
     assert publish["permissions"] == {"contents": "write"}

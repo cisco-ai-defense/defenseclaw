@@ -27,13 +27,13 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "Certify main, or publish it only after reusing exact certification."
+        description: "Certify reviewed main first (default), or release only after exact certification exists."
         required: true
         type: choice
-        default: release
+        default: certify
         options:
-          - release
           - certify
+          - release
       version:
         description: "Candidate version (X.Y.Z). Optional for nightly certification."
         required: false
@@ -261,197 +261,6 @@ jobs:
           fi
           echo "OK: $COMMIT is reviewed on origin/main ($RELEASE_OPERATION)"
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
-
-      - name: Require successful CI for the exact release commit
-        if: ${{ needs.release-mode.outputs.operation == 'release' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SELECTED_COMMIT: ${{ needs.release-mode.outputs.commit }}
-          # Main's release lane can legitimately consume 20 + 25 + 30 minutes
-          # across its sequential plan/build/smoke stages, while native Windows
-          # certification runs in parallel. Native Windows' package-to-
-          # acceptance critical path is bounded above two hours, so allow one
-          # shared three-hour window for every required workflow plus queueing.
-          CI_WAIT_ATTEMPTS: "360"
-          CI_WAIT_MAX_SECONDS: "10800"
-          CI_WAIT_INTERVAL_SECONDS: "30"
-          CI_API_TIMEOUT_SECONDS: "30"
-          REQUIRED_CI_WORKFLOWS: |-
-            ci.yml|CI
-            windows-native.yml|Windows Native CI
-            macos-app.yml|macOS App
-        run: |
-          set -euo pipefail
-          if [[ ! "$CI_WAIT_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || \
-             [[ ! "$CI_WAIT_MAX_SECONDS" =~ ^[0-9]+$ ]] || \
-             [[ ! "$CI_WAIT_INTERVAL_SECONDS" =~ ^[0-9]+$ ]] || \
-             [[ ! "$CI_API_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
-            echo "::error title=Invalid exact-SHA CI configuration::Wait attempts, deadline, interval, and API timeout must be bounded integers."
-            exit 1
-          fi
-          wait_started_at="$(date +%s)"
-          wait_deadline=$((wait_started_at + CI_WAIT_MAX_SECONDS))
-          for ((attempt = 1; attempt <= CI_WAIT_ATTEMPTS; attempt++)); do
-            required_count=0
-            passed_count=0
-            passed_details=""
-            pending_details=""
-            while IFS='|' read -r workflow_file workflow_name; do
-              [[ -n "$workflow_file" ]] || continue
-              required_count=$((required_count + 1))
-              if [[ ! "$workflow_file" =~ ^[A-Za-z0-9._-]+$ || -z "$workflow_name" ]]; then
-                echo "::error title=Invalid exact-SHA CI configuration::Invalid required workflow entry: $workflow_file|$workflow_name"
-                exit 1
-              fi
-
-              workflow_key="${workflow_file//./-}"
-              response_path="exact-commit-${workflow_key}-runs.json"
-              response_temp="${response_path}.tmp"
-              response_error="${response_path}.error"
-              now="$(date +%s)"
-              remaining_seconds=$((wait_deadline - now))
-              if [[ "$remaining_seconds" -le 0 ]]; then
-                state="pending"
-                detail="shared deadline reached before workflow query"
-              else
-                request_timeout="$CI_API_TIMEOUT_SECONDS"
-                if [[ "$remaining_seconds" -lt "$request_timeout" ]]; then
-                  request_timeout="$remaining_seconds"
-                fi
-                api_command=(gh)
-                gh_type="$(type -t gh || true)"
-                if [[ "$gh_type" != "function" ]] && command -v timeout >/dev/null 2>&1; then
-                  api_command=(
-                    timeout
-                    --signal=TERM
-                    --kill-after=5s
-                    "${request_timeout}s"
-                    gh
-                  )
-                fi
-                if "${api_command[@]}" api \
-                    -H "Accept: application/vnd.github+json" \
-                    "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_file/runs?branch=main&event=push&head_sha=$SELECTED_COMMIT&per_page=100" \
-                    > "$response_temp" 2> "$response_error"; then
-                  mv -f "$response_temp" "$response_path"
-                  if parsed_result="$(
-                    python3 - "$response_path" "$SELECTED_COMMIT" 2> "$response_error" <<'PY'
-          import json
-          import sys
-
-          path, expected_sha = sys.argv[1:]
-          with open(path, encoding="utf-8") as stream:
-              payload = json.load(stream)
-          runs = [
-              run
-              for run in payload.get("workflow_runs", [])
-              if run.get("head_sha") == expected_sha
-              and run.get("head_branch") == "main"
-              and run.get("event") == "push"
-          ]
-          if not runs:
-              print("pending\tmissing")
-              raise SystemExit
-          selected = max(
-              runs,
-              key=lambda run: (
-                  int(run.get("run_number") or 0),
-                  int(run.get("run_attempt") or 0),
-                  int(run.get("id") or 0),
-              ),
-          )
-          status = selected.get("status", "unknown")
-          conclusion = selected.get("conclusion") or "pending"
-          detail = f"{status}/{conclusion}"
-          if status != "completed":
-              print(f"pending\t{detail}")
-          elif conclusion == "success":
-              print(f"success\t{selected.get('html_url', 'run URL unavailable')}")
-          else:
-              print(f"failure\t{detail}")
-          PY
-                  )" &&
-                     IFS=$'\t' read -r state detail <<< "$parsed_result"; then
-                    :
-                  else
-                    state="pending"
-                    detail="workflow API returned an invalid response"
-                  fi
-                else
-                  rm -f "$response_temp"
-                  api_error="$(
-                    tr '\r\n' '  ' < "$response_error" \
-                      | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' \
-                      | cut -c1-240
-                  )"
-                  if [[ "$api_error" =~ HTTP\ (401|404|422) ]]; then
-                    state="failure"
-                    detail="workflow API permanently rejected the request: $api_error"
-                  elif [[ -n "$api_error" ]]; then
-                    state="pending"
-                    detail="workflow API unavailable: $api_error"
-                  else
-                    state="pending"
-                    detail="workflow API unavailable or timed out after ${request_timeout}s"
-                  fi
-                fi
-              fi
-
-              case "$state" in
-                success)
-                  passed_count=$((passed_count + 1))
-                  passed_details="${passed_details}${passed_details:+; }$workflow_name: $detail"
-                  ;;
-                failure)
-                  echo "::error title=Exact-SHA CI failed::$workflow_name for $SELECTED_COMMIT failed ($detail)."
-                  exit 1
-                  ;;
-                pending)
-                  pending_details="${pending_details}${pending_details:+; }$workflow_name: $detail"
-                  ;;
-                *)
-                  echo "::error title=Invalid exact-SHA CI state::$workflow_name returned unexpected state: $state ($detail)"
-                  exit 1
-                  ;;
-              esac
-            done <<< "$REQUIRED_CI_WORKFLOWS"
-
-            if [[ "$required_count" -eq 0 ]]; then
-              echo "::error title=Invalid exact-SHA CI configuration::No required workflows were configured."
-              exit 1
-            fi
-            if [[ "$passed_count" -eq "$required_count" ]]; then
-              echo "OK: exact-SHA CI passed for $SELECTED_COMMIT ($passed_details)"
-              break
-            fi
-            now="$(date +%s)"
-            elapsed_seconds=$((now - wait_started_at))
-            remaining_seconds=$((wait_deadline - now))
-            if [[ "$attempt" -eq "$CI_WAIT_ATTEMPTS" || "$remaining_seconds" -le 0 ]]; then
-              echo "::error title=Exact-SHA CI has not passed::Required workflows for $SELECTED_COMMIT are not green after $elapsed_seconds elapsed seconds (shared deadline ${CI_WAIT_MAX_SECONDS} seconds) and $attempt checks ($pending_details)."
-              exit 1
-            fi
-            sleep_seconds="$CI_WAIT_INTERVAL_SECONDS"
-            if [[ "$remaining_seconds" -lt "$sleep_seconds" ]]; then
-              sleep_seconds="$remaining_seconds"
-            fi
-            echo "Waiting for exact-SHA CI ($pending_details; elapsed ${elapsed_seconds}s/${CI_WAIT_MAX_SECONDS}s; check $attempt/$CI_WAIT_ATTEMPTS) ..."
-            sleep "$sleep_seconds"
-          done
-
-      - name: Revalidate current main after exact-SHA CI
-        if: ${{ needs.release-mode.outputs.operation == 'release' }}
-        env:
-          SELECTED_COMMIT: ${{ needs.release-mode.outputs.commit }}
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin main
-          CURRENT_MAIN="$(git rev-parse origin/main)"
-          if [[ "$CURRENT_MAIN" != "$SELECTED_COMMIT" ]]; then
-            echo "::error title=Release commit superseded::$SELECTED_COMMIT passed CI, but current origin/main is $CURRENT_MAIN. Restart promotion from the current reviewed tip."
-            exit 1
-          fi
-          echo "OK: $SELECTED_COMMIT is still the current origin/main tip after exact-SHA CI"
 
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
         with:
@@ -698,16 +507,243 @@ jobs:
           if-no-files-found: error
           retention-days: 2
 
+  platform-readiness:
+    name: Require certified platform readiness
+    needs: [release-mode, release-preflight, lookup-certification]
+    if: >-
+      ${{
+        always() &&
+        needs.release-mode.result == 'success' &&
+        needs.release-preflight.result == 'success' &&
+        needs.lookup-certification.result == 'success'
+      }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require verified certification before platform wait
+        env:
+          RELEASE_OPERATION: ${{ needs.release-mode.outputs.operation }}
+          REUSE_CERTIFICATION: ${{ needs.lookup-certification.outputs.reuse }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_OPERATION" == "certify" ]]; then
+            echo "Certification mode does not wait for exact-SHA platform workflows."
+            exit 0
+          fi
+          if [[ "$REUSE_CERTIFICATION" != "true" ]]; then
+            echo "::error title=Verified certification required before platform wait::Release promotion cannot wait for platform workflows until lookup-certification verifies an exact reusable receipt."
+            exit 1
+          fi
+          echo "OK: exact reusable certification verified before platform readiness wait"
+
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        if: ${{ needs.release-mode.outputs.operation == 'release' }}
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require successful CI for the exact release commit
+        if: ${{ needs.release-mode.outputs.operation == 'release' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELECTED_COMMIT: ${{ needs.release-mode.outputs.commit }}
+          # Main's release lane can legitimately consume 20 + 25 + 30 minutes
+          # across its sequential plan/build/smoke stages, while native Windows
+          # certification runs in parallel. Native Windows' package-to-
+          # acceptance critical path is bounded above two hours, so allow one
+          # shared three-hour window for every required workflow plus queueing.
+          CI_WAIT_ATTEMPTS: "360"
+          CI_WAIT_MAX_SECONDS: "10800"
+          CI_WAIT_INTERVAL_SECONDS: "30"
+          CI_API_TIMEOUT_SECONDS: "30"
+          REQUIRED_CI_WORKFLOWS: |-
+            ci.yml|CI
+            windows-native.yml|Windows Native CI
+            macos-app.yml|macOS App
+        run: |
+          set -euo pipefail
+          if [[ ! "$CI_WAIT_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || \
+             [[ ! "$CI_WAIT_MAX_SECONDS" =~ ^[0-9]+$ ]] || \
+             [[ ! "$CI_WAIT_INTERVAL_SECONDS" =~ ^[0-9]+$ ]] || \
+             [[ ! "$CI_API_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error title=Invalid exact-SHA CI configuration::Wait attempts, deadline, interval, and API timeout must be bounded integers."
+            exit 1
+          fi
+          wait_started_at="$(date +%s)"
+          wait_deadline=$((wait_started_at + CI_WAIT_MAX_SECONDS))
+          for ((attempt = 1; attempt <= CI_WAIT_ATTEMPTS; attempt++)); do
+            required_count=0
+            passed_count=0
+            passed_details=""
+            pending_details=""
+            while IFS='|' read -r workflow_file workflow_name; do
+              [[ -n "$workflow_file" ]] || continue
+              required_count=$((required_count + 1))
+              if [[ ! "$workflow_file" =~ ^[A-Za-z0-9._-]+$ || -z "$workflow_name" ]]; then
+                echo "::error title=Invalid exact-SHA CI configuration::Invalid required workflow entry: $workflow_file|$workflow_name"
+                exit 1
+              fi
+
+              workflow_key="${workflow_file//./-}"
+              response_path="exact-commit-${workflow_key}-runs.json"
+              response_temp="${response_path}.tmp"
+              response_error="${response_path}.error"
+              now="$(date +%s)"
+              remaining_seconds=$((wait_deadline - now))
+              if [[ "$remaining_seconds" -le 0 ]]; then
+                state="pending"
+                detail="shared deadline reached before workflow query"
+              else
+                request_timeout="$CI_API_TIMEOUT_SECONDS"
+                if [[ "$remaining_seconds" -lt "$request_timeout" ]]; then
+                  request_timeout="$remaining_seconds"
+                fi
+                api_command=(gh)
+                gh_type="$(type -t gh || true)"
+                if [[ "$gh_type" != "function" ]] && command -v timeout >/dev/null 2>&1; then
+                  api_command=(
+                    timeout
+                    --signal=TERM
+                    --kill-after=5s
+                    "${request_timeout}s"
+                    gh
+                  )
+                fi
+                if "${api_command[@]}" api \
+                    -H "Accept: application/vnd.github+json" \
+                    "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_file/runs?branch=main&event=push&head_sha=$SELECTED_COMMIT&per_page=100" \
+                    > "$response_temp" 2> "$response_error"; then
+                  mv -f "$response_temp" "$response_path"
+                  if parsed_result="$(
+                    python3 - "$response_path" "$SELECTED_COMMIT" 2> "$response_error" <<'PY'
+          import json
+          import sys
+
+          path, expected_sha = sys.argv[1:]
+          with open(path, encoding="utf-8") as stream:
+              payload = json.load(stream)
+          runs = [
+              run
+              for run in payload.get("workflow_runs", [])
+              if run.get("head_sha") == expected_sha
+              and run.get("head_branch") == "main"
+              and run.get("event") == "push"
+          ]
+          if not runs:
+              print("pending\tmissing")
+              raise SystemExit
+          selected = max(
+              runs,
+              key=lambda run: (
+                  int(run.get("run_number") or 0),
+                  int(run.get("run_attempt") or 0),
+                  int(run.get("id") or 0),
+              ),
+          )
+          status = selected.get("status", "unknown")
+          conclusion = selected.get("conclusion") or "pending"
+          detail = f"{status}/{conclusion}"
+          if status != "completed":
+              print(f"pending\t{detail}")
+          elif conclusion == "success":
+              print(f"success\t{selected.get('html_url', 'run URL unavailable')}")
+          else:
+              print(f"failure\t{detail}")
+          PY
+                  )" &&
+                     IFS=$'\t' read -r state detail <<< "$parsed_result"; then
+                    :
+                  else
+                    state="pending"
+                    detail="workflow API returned an invalid response"
+                  fi
+                else
+                  rm -f "$response_temp"
+                  api_error="$(
+                    tr '\r\n' '  ' < "$response_error" \
+                      | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' \
+                      | cut -c1-240
+                  )"
+                  if [[ "$api_error" =~ HTTP\ (401|404|422) ]]; then
+                    state="failure"
+                    detail="workflow API permanently rejected the request: $api_error"
+                  elif [[ -n "$api_error" ]]; then
+                    state="pending"
+                    detail="workflow API unavailable: $api_error"
+                  else
+                    state="pending"
+                    detail="workflow API unavailable or timed out after ${request_timeout}s"
+                  fi
+                fi
+              fi
+
+              case "$state" in
+                success)
+                  passed_count=$((passed_count + 1))
+                  passed_details="${passed_details}${passed_details:+; }$workflow_name: $detail"
+                  ;;
+                failure)
+                  echo "::error title=Exact-SHA CI failed::$workflow_name for $SELECTED_COMMIT failed ($detail)."
+                  exit 1
+                  ;;
+                pending)
+                  pending_details="${pending_details}${pending_details:+; }$workflow_name: $detail"
+                  ;;
+                *)
+                  echo "::error title=Invalid exact-SHA CI state::$workflow_name returned unexpected state: $state ($detail)"
+                  exit 1
+                  ;;
+              esac
+            done <<< "$REQUIRED_CI_WORKFLOWS"
+
+            if [[ "$required_count" -eq 0 ]]; then
+              echo "::error title=Invalid exact-SHA CI configuration::No required workflows were configured."
+              exit 1
+            fi
+            if [[ "$passed_count" -eq "$required_count" ]]; then
+              echo "OK: exact-SHA CI passed for $SELECTED_COMMIT ($passed_details)"
+              break
+            fi
+            now="$(date +%s)"
+            elapsed_seconds=$((now - wait_started_at))
+            remaining_seconds=$((wait_deadline - now))
+            if [[ "$attempt" -eq "$CI_WAIT_ATTEMPTS" || "$remaining_seconds" -le 0 ]]; then
+              echo "::error title=Exact-SHA CI has not passed::Required workflows for $SELECTED_COMMIT are not green after $elapsed_seconds elapsed seconds (shared deadline ${CI_WAIT_MAX_SECONDS} seconds) and $attempt checks ($pending_details)."
+              exit 1
+            fi
+            sleep_seconds="$CI_WAIT_INTERVAL_SECONDS"
+            if [[ "$remaining_seconds" -lt "$sleep_seconds" ]]; then
+              sleep_seconds="$remaining_seconds"
+            fi
+            echo "Waiting for exact-SHA CI ($pending_details; elapsed ${elapsed_seconds}s/${CI_WAIT_MAX_SECONDS}s; check $attempt/$CI_WAIT_ATTEMPTS) ..."
+            sleep "$sleep_seconds"
+          done
+
+      - name: Revalidate current main after exact-SHA CI
+        if: ${{ needs.release-mode.outputs.operation == 'release' }}
+        env:
+          SELECTED_COMMIT: ${{ needs.release-mode.outputs.commit }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          CURRENT_MAIN="$(git rev-parse origin/main)"
+          if [[ "$CURRENT_MAIN" != "$SELECTED_COMMIT" ]]; then
+            echo "::error title=Release commit superseded::$SELECTED_COMMIT passed CI, but current origin/main is $CURRENT_MAIN. Restart promotion from the current reviewed tip."
+            exit 1
+          fi
+          echo "OK: $SELECTED_COMMIT is still the current origin/main tip after exact-SHA CI"
+
   build-runtime-candidate:
     name: Build runtime candidate once
-    needs: [release-mode, release-preflight, lookup-certification]
+    needs: [release-mode, release-preflight, lookup-certification, platform-readiness]
     if: >-
       ${{
         always() &&
         needs.release-mode.outputs.operation == 'certify' &&
         needs.release-preflight.result == 'success' &&
         needs.lookup-certification.result == 'success' &&
-        needs.lookup-certification.outputs.reuse != 'true'
+        needs.lookup-certification.outputs.reuse != 'true' &&
+        needs.platform-readiness.result == 'success'
       }}
     runs-on: ubuntu-latest
     permissions:
@@ -1745,6 +1781,7 @@ jobs:
       - release-mode
       - release-preflight
       - lookup-certification
+      - platform-readiness
       - assemble-release-candidate
       - full-certification
       - record-certification
@@ -1752,6 +1789,7 @@ jobs:
       ${{
         always() &&
         needs.release-preflight.result == 'success' &&
+        needs.platform-readiness.result == 'success' &&
         (
           (
             needs.release-mode.outputs.operation == 'release' &&
@@ -1794,12 +1832,14 @@ jobs:
     needs:
       - release-mode
       - release-preflight
+      - platform-readiness
       - select-candidate
     if: >-
       ${{
         always() &&
         needs.release-mode.outputs.operation == 'release' &&
         needs.release-preflight.result == 'success' &&
+        needs.platform-readiness.result == 'success' &&
         needs.select-candidate.result == 'success'
       }}
     runs-on: ubuntu-latest

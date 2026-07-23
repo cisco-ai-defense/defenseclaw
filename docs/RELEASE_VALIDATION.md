@@ -11,16 +11,17 @@ observability, Docker, or provenance defects for the first time.
 | Pull request | Every PR, with a path-filtered selective upgrade job for release-sensitive changes | Fast deterministic release regressions; risky PRs add current stable, previous stable, the `0.8.4` bridge boundary, an explicit direct-skip refusal, and the oldest-supported smoke/refusal | Unsigned PR candidate; direct target activation plus production pre-mutation refusal, never release certification |
 | Main smoke | Every merge to `main` | Medium candidate smoke for the exact merged SHA and at least one representative published target-activation canary | Exact merged SHA; no publication or provenance claim |
 | Pre-release certification | Nightly schedule or manual dispatch for a selected ref and candidate version | Signed candidate; behavior-class historical matrix; live migration and rollback/recovery; Docker/local observability continuity; native platform checks; bounded-retry provenance verification | One signed candidate artifact plus one certification receipt |
-| Release | Manual version input on protected `main` | Require successful main CI, native Windows CI, and macOS app CI for the exact SHA; verify a recent receipt for that SHA, workflow version, candidate version, platform set, behavior-class baselines, artifact ID/digest, and run identity; then publish those same bytes | Reuse certified bytes without rebuilding |
+| Release | Manual version input on protected `main` | First verify a recent receipt for the exact SHA, workflow version, candidate version, platform set, behavior-class baselines, artifact ID/digest, and run identity; only then wait for successful main CI, native Windows CI, and macOS app CI for that SHA and publish those same bytes | Reuse certified bytes without rebuilding |
 
-A release dispatched immediately after a merge may wait up to three hours for
-that exact SHA's main CI, native Windows CI, and macOS app CI. All three
-workflows execute independently and are checked under one absolute deadline
-with bounded API requests. The window covers the native Windows package and
-acceptance critical path plus normal runner setup and queueing. After all three
-workflows succeed, Release refetches `main` and aborts if another commit has
-superseded the selected SHA; the operator must then promote the new reviewed
-tip instead.
+The manual workflow defaults to `operation=certify`. For
+`operation=release`, exact receipt lookup and verification finish before the
+workflow begins its potentially three-hour wait for that SHA's main CI, native
+Windows CI, and macOS app CI. All three workflows execute independently and
+are checked under one absolute deadline with bounded API requests. The window
+covers the native Windows package and acceptance critical path plus normal
+runner setup and queueing. After all three workflows succeed, Release refetches
+`main` and aborts if another commit has superseded the selected SHA; the
+operator must then promote the new reviewed tip instead.
 
 The standalone macOS app workflow builds the complete ad-hoc DMG on affected
 pull requests, every exact `main` SHA, and manual requests. Its stable
