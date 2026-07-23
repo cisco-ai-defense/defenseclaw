@@ -44,6 +44,89 @@ func TestDefaultStartReadinessTimeoutCoversColdWindowsStartup(t *testing.T) {
 	}
 }
 
+func TestUpgradeControllerReadinessDelegationIsExactAndNeverWeakensRotation(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		value               string
+		rotationTransaction bool
+		want                bool
+	}{
+		{name: "ordinary direct start"},
+		{name: "false-like value", value: "0"},
+		{name: "word-like value", value: "true"},
+		{name: "fresh upgrade controller", value: "1", want: true},
+		{name: "rotation remains synchronous", value: "1", rotationTransaction: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(upgradeFreshProcessEnv, tc.value)
+			if got := upgradeControllerOwnsGatewayStartReadiness(tc.rotationTransaction); got != tc.want {
+				t.Fatalf(
+					"upgradeControllerOwnsGatewayStartReadiness(rotation=%v, value=%q) = %v, want %v",
+					tc.rotationTransaction,
+					tc.value,
+					got,
+					tc.want,
+				)
+			}
+		})
+	}
+}
+
+func TestFreshProcessMarkerIsHiddenFromGatewayAndWatchdogChildren(t *testing.T) {
+	for _, value := range []string{"1", "unexpected"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv(upgradeFreshProcessEnv, value)
+			restore, err := isolateUpgradeFreshProcessMarkerFromChildren()
+			if err != nil {
+				t.Fatalf("isolate marker: %v", err)
+			}
+			if observed, present := os.LookupEnv(upgradeFreshProcessEnv); present {
+				t.Fatalf("gateway/watchdog child environment retained marker %q", observed)
+			}
+			restore()
+			if observed := os.Getenv(upgradeFreshProcessEnv); observed != value {
+				t.Fatalf("restored management marker = %q, want %q", observed, value)
+			}
+		})
+	}
+}
+
+func TestUpgradeWaitReadyCommandIsHiddenAndFailsClosedBeforeConfigLoading(t *testing.T) {
+	if !upgradeWaitReadyCmd.Hidden {
+		t.Fatal("upgrade readiness bridge must remain hidden")
+	}
+	if upgradeWaitReadyCmd.PersistentPreRunE == nil {
+		t.Fatal("upgrade readiness bridge would inherit the sidecar root pre-run")
+	}
+	if err := upgradeWaitReadyCmd.PersistentPreRunE(upgradeWaitReadyCmd, nil); err != nil {
+		t.Fatalf("upgrade readiness no-op pre-run: %v", err)
+	}
+
+	oldVersion := appVersion
+	oldTimeout, _ := upgradeWaitReadyCmd.Flags().GetDuration(upgradeWaitReadyTimeoutFlag)
+	oldExpected, _ := upgradeWaitReadyCmd.Flags().GetString(upgradeWaitReadyVersionFlag)
+	t.Cleanup(func() {
+		appVersion = oldVersion
+		_ = upgradeWaitReadyCmd.Flags().Set(upgradeWaitReadyTimeoutFlag, oldTimeout.String())
+		_ = upgradeWaitReadyCmd.Flags().Set(upgradeWaitReadyVersionFlag, oldExpected)
+	})
+	_ = upgradeWaitReadyCmd.Flags().Set(upgradeWaitReadyTimeoutFlag, "60s")
+	_ = upgradeWaitReadyCmd.Flags().Set(upgradeWaitReadyVersionFlag, "0.9.0")
+
+	for _, marker := range []string{"", "0"} {
+		t.Setenv(upgradeFreshProcessEnv, marker)
+		if err := runUpgradeWaitReady(upgradeWaitReadyCmd, nil); err == nil || !strings.Contains(err.Error(), "fresh-process controller marker") {
+			t.Fatalf("marker %q error = %v, want exact handoff refusal", marker, err)
+		}
+	}
+
+	t.Setenv(upgradeFreshProcessEnv, "1")
+	appVersion = "0.8.5"
+	if err := runUpgradeWaitReady(upgradeWaitReadyCmd, nil); err == nil || !strings.Contains(err.Error(), "control binary version") {
+		t.Fatalf("control binary mismatch error = %v, want candidate-version refusal", err)
+	}
+}
+
 func TestLoadDaemonConfigMatchesGatewayDynamicConfigResolution(t *testing.T) {
 	defaultDataDir := t.TempDir()
 	resolvedDataDir := t.TempDir()
@@ -104,6 +187,35 @@ func TestDaemonReadinessRequirementsExpectCanonicalV8Telemetry(t *testing.T) {
 	requirements := daemonReadinessRequirementsFromConfig(cfg, time.Time{})
 	if !requirements.telemetryEnabled {
 		t.Fatal("schema-v8 observability runtime was treated as disabled telemetry")
+	}
+}
+
+func TestDaemonReadinessRequirementsUseEffectiveGuardrailPosture(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.Connector = ""
+	cfg.Guardrail.Connectors = nil
+	cfg.Claw.Mode = ""
+
+	requirements := daemonReadinessRequirementsFromConfig(cfg, time.Time{})
+	if requirements.guardrailEnabled {
+		t.Fatal("enabled guardrail without a configured connector was treated as running")
+	}
+
+	cfg.Guardrail.Connector = "codex"
+	requirements = daemonReadinessRequirementsFromConfig(cfg, time.Time{})
+	if !requirements.guardrailEnabled {
+		t.Fatal("enabled configured connector was not treated as a running guardrail")
+	}
+
+	disabled := false
+	cfg.Guardrail.Connector = ""
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex": {Enabled: &disabled},
+	}
+	requirements = daemonReadinessRequirementsFromConfig(cfg, time.Time{})
+	if requirements.guardrailEnabled {
+		t.Fatal("individually disabled connector was treated as a running guardrail")
 	}
 }
 
@@ -591,6 +703,49 @@ func (p *fakeReadinessProcess) StopStarted(pid int, _ time.Duration) error {
 	p.stopCalls++
 	p.stoppedPID = pid
 	return p.stopErr
+}
+
+func TestVerifyDelegatedGatewayStartReturnsBeforeFrozenControllerTimeout(t *testing.T) {
+	base := &fakeReadinessProcess{running: true, pid: 42}
+	process := &fakeStrongReadinessProcess{fakeReadinessProcess: base, identityOK: true}
+
+	started := time.Now()
+	err := verifyDelegatedGatewayStart(process, 42)
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("delegated launch verification took %s, want well below frozen controller's 30s timeout", elapsed)
+	}
+	if err != nil {
+		t.Fatalf("strong live delegated launch rejected: %v", err)
+	}
+	if base.stopCalls != 0 {
+		t.Fatalf("slow-but-live delegated gateway was stopped %d times", base.stopCalls)
+	}
+}
+
+func TestVerifyDelegatedGatewayStartFailsClosedBeforeReadinessDelegation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		running    bool
+		pid        int
+		identityOK bool
+	}{
+		{name: "process exited", pid: 42, identityOK: true},
+		{name: "PID changed", running: true, pid: 43, identityOK: true},
+		{name: "strong identity missing", running: true, pid: 42},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := &fakeReadinessProcess{running: tc.running, pid: tc.pid}
+			process := &fakeStrongReadinessProcess{fakeReadinessProcess: base, identityOK: tc.identityOK}
+
+			err := verifyDelegatedGatewayStart(process, 42)
+			if err == nil || !strings.Contains(err.Error(), "process start identity") {
+				t.Fatalf("delegated launch error = %v, want strong live identity failure", err)
+			}
+			if base.stopCalls != 1 || base.stoppedPID != 42 {
+				t.Fatalf("scoped cleanup = (%d calls, PID %d), want (1, 42)", base.stopCalls, base.stoppedPID)
+			}
+		})
+	}
 }
 
 func TestWaitForStartedDaemonStopsSlowLiveProcessAfterDeadline(t *testing.T) {

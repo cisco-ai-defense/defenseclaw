@@ -20,17 +20,14 @@ WORKFLOW = ROOT / ".github/workflows/release.yaml"
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 CERTIFICATION_WORKFLOW = ROOT / ".github/workflows/pre-release-certification.yml"
 PROTOCOL_GATE = ROOT / "scripts/test-upgrade-protocol-release.sh"
+HISTORICAL_BOOTSTRAP_GATE = ROOT / "scripts/test-historical-bootstrap-dependencies.sh"
 RECEIPT_CHECK = ROOT / "scripts/check_upgrade_receipt.py"
 WINDOWS_PROTOCOL_GATE = ROOT / "scripts/test-upgrade-release-windows.ps1"
 MACOS_BUILD = ROOT / "scripts/build-macos-app-release.sh"
 POSIX_INSTALLER = ROOT / "scripts/install.sh"
 POSIX_FRESH_RELEASE = ROOT / "scripts/test-fresh-install-release.sh"
-DIGEST_CAPABLE_UPLOAD_ACTION = (
-    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
-)
-COSIGN_INSTALLER_ACTION = (
-    "sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da"
-)
+DIGEST_CAPABLE_UPLOAD_ACTION = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+COSIGN_INSTALLER_ACTION = "sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da"
 
 
 def _bash_executable() -> str:
@@ -105,6 +102,63 @@ def test_installed_release_artifacts_mount_the_full_tui() -> None:
     assert "load_packaged_v7_compatibility_selection" in smoke
     assert "compatibility_selection=compatibility_selection" in smoke
     assert "post_status_mandatory_sqlite_write=ok" in smoke
+
+
+def test_ci_wheel_metadata_prevents_floating_nonportable_scanner_resolution() -> None:
+    ci = CI_WORKFLOW.read_text(encoding="utf-8")
+
+    assert '"litellm": ">=1.84.0,<1.92.0"' in ci
+    assert "wheel metadata leaves cisco-ai-mcp-scanner floating" in ci
+    assert "#sha256=[0-9a-f]{64}" in ci
+
+
+def test_ci_executes_phase_separated_resolver_dependencies_before_positive_lanes() -> None:
+    jobs = _ci_workflow()["jobs"]
+    gate = jobs["historical-resolver-dependencies"]
+    rendered = str(gate)
+    workflow_text = CI_WORKFLOW.read_text(encoding="utf-8")
+    executable_gate = HISTORICAL_BOOTSTRAP_GATE.read_text(encoding="utf-8")
+
+    assert gate["needs"] == "release-validation-plan"
+    assert "needs.release-validation-plan.outputs.sensitive == 'true'" in gate["if"]
+    assert "github.ref == 'refs/heads/main'" in gate["if"]
+    assert gate["runs-on"] == "${{ matrix.runner }}"
+    assert gate["strategy"] == {
+        "fail-fast": "false",
+        "matrix": {
+            "include": [
+                {
+                    "runner": "ubuntu-latest",
+                    "platform": "linux-amd64",
+                    "runner_arch": "X64",
+                },
+                {
+                    "runner": "macos-15",
+                    "platform": "darwin-arm64",
+                    "runner_arch": "ARM64",
+                },
+            ]
+        },
+    }
+    assert "scripts/test-historical-bootstrap-dependencies.sh" in rendered
+    assert 'test "$RUNNER_ARCH" = "${{ matrix.runner_arch }}"' in rendered
+    assert "`uv pip check`" in workflow_text
+    assert "release.yaml@refs/heads/main" in workflow_text
+    assert "id-token" not in rendered
+    assert "cosign" not in rendered
+    assert "set -euo pipefail" in executable_gate
+    assert "verify_constraint_scope" in executable_gate
+    assert "verify_uv_environment_isolation" in executable_gate
+    assert "not-an-rfc3339-timestamp" in executable_gate
+    assert "env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER" in executable_gate
+    assert "--constraints \"${CONSTRAINTS_FILE}\"" in executable_gate
+    assert '"${UV_BIN}" --no-config pip check' in executable_gate
+    assert '"cisco-ai-mcp-scanner": "4.7.2"' in executable_gate
+    assert '"litellm": "1.83.7"' in executable_gate
+    assert executable_gate.count("install_and_check \\\n") == 2
+
+    for name in ("selective-upgrade-smoke", "main-release-smoke"):
+        assert "historical-resolver-dependencies" in jobs[name]["needs"]
 
 
 def test_release_supports_nightly_certification_and_manual_promotion() -> None:
@@ -196,6 +250,287 @@ def test_release_requires_current_main_without_prescribing_repository_governance
     }
 
 
+def test_release_requires_successful_main_ci_for_the_exact_candidate_sha() -> None:
+    workflow = _workflow()
+    preflight = workflow["jobs"]["release-preflight"]
+    steps = preflight["steps"]
+    step = next(
+        step
+        for step in steps
+        if step.get("name") == "Require successful CI for the exact release commit"
+    )
+    revalidation = next(
+        step
+        for step in steps
+        if step.get("name") == "Revalidate current main after exact-SHA CI"
+    )
+
+    assert step["if"] == "${{ needs.release-mode.outputs.operation == 'release' }}"
+    assert step["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
+        "SELECTED_COMMIT": "${{ needs.release-mode.outputs.commit }}",
+        "CI_WAIT_ATTEMPTS": "180",
+        "CI_WAIT_INTERVAL_SECONDS": "30",
+    }
+    command = step["run"]
+    assert "actions/workflows/ci.yml/runs" in command
+    assert "branch=main&event=push&head_sha=$SELECTED_COMMIT" in command
+    assert 'run.get("head_sha") == expected_sha' in command
+    assert 'status != "completed"' in command
+    assert 'conclusion == "success"' in command
+    assert 'int(run.get("run_attempt") or 0)' in command
+    assert "Exact-SHA CI has not passed" in command
+    assert "20 + 25 + 30 minutes" in WORKFLOW.read_text(encoding="utf-8")
+    assert revalidation["if"] == "${{ needs.release-mode.outputs.operation == 'release' }}"
+    assert revalidation["env"] == {
+        "SELECTED_COMMIT": "${{ needs.release-mode.outputs.commit }}",
+    }
+    revalidation_command = revalidation["run"]
+    assert "git fetch --no-tags origin main" in revalidation_command
+    assert 'CURRENT_MAIN="$(git rev-parse origin/main)"' in revalidation_command
+    assert '"$CURRENT_MAIN" != "$SELECTED_COMMIT"' in revalidation_command
+    assert "Release commit superseded" in revalidation_command
+    ci_index = steps.index(step)
+    revalidation_index = steps.index(revalidation)
+    cosign_index = next(
+        index
+        for index, candidate in enumerate(steps)
+        if candidate.get("uses", "").startswith("sigstore/cosign-installer@")
+    )
+    assert ci_index < revalidation_index < cosign_index
+
+
+@pytest.mark.parametrize(
+    ("current_main", "expected_returncode", "expected_fragment"),
+    [
+        ("e" * 40, 0, "is still the current origin/main tip"),
+        ("f" * 40, 1, "Release commit superseded"),
+    ],
+)
+def test_post_ci_main_revalidation_rejects_a_superseded_commit(
+    tmp_path: Path,
+    current_main: str,
+    expected_returncode: int,
+    expected_fragment: str,
+) -> None:
+    selected_commit = "e" * 40
+    step = next(
+        step
+        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        if step.get("name") == "Revalidate current main after exact-SHA CI"
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "CURRENT_MAIN_FOR_TEST": current_main,
+            "SELECTED_COMMIT": selected_commit,
+        }
+    )
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            (
+                "git() {\n"
+                "  if [[ $1 == fetch ]]; then return 0; fi\n"
+                "  if [[ $1 == rev-parse && $2 == origin/main ]]; then\n"
+                "    printf '%s\\n' \"$CURRENT_MAIN_FOR_TEST\"\n"
+                "    return 0\n"
+                "  fi\n"
+                "  return 1\n"
+                "}\n"
+                + step["run"]
+            ),
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == expected_returncode, completed.stdout + completed.stderr
+    assert expected_fragment in completed.stdout
+
+
+def test_exact_sha_ci_gate_retries_a_transient_api_failure(tmp_path: Path) -> None:
+    commit = "d" * 40
+    step = next(
+        step
+        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        if step.get("name") == "Require successful CI for the exact release commit"
+    )
+    payload = {
+        "workflow_runs": [
+            {
+                "head_sha": commit,
+                "head_branch": "main",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "success",
+                "run_number": 43,
+                "run_attempt": 1,
+                "id": 43,
+                "html_url": "https://github.example/actions/runs/43",
+            }
+        ]
+    }
+    env = os.environ.copy()
+    env.update(
+        {
+            "FAKE_GH_RESPONSE": json.dumps(payload),
+            "GITHUB_REPOSITORY": "example/defenseclaw",
+            "SELECTED_COMMIT": commit,
+            "CI_WAIT_ATTEMPTS": "2",
+            "CI_WAIT_INTERVAL_SECONDS": "0",
+        }
+    )
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            (
+                "GH_CALLS=0\n"
+                "gh() {\n"
+                "  GH_CALLS=$((GH_CALLS + 1))\n"
+                "  if [[ $GH_CALLS -eq 1 ]]; then return 1; fi\n"
+                "  printf '%s' \"$FAKE_GH_RESPONSE\"\n"
+                "}\n"
+                + step["run"]
+            ),
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "Waiting for exact-SHA CI (CI API unavailable; check 1/2)" in completed.stdout
+    assert "OK: exact-SHA CI passed" in completed.stdout
+
+
+@pytest.mark.parametrize(
+    ("status", "conclusion", "expected_returncode", "expected_fragment"),
+    [
+        ("queued", None, 1, "queued/pending"),
+        ("in_progress", None, 1, "in_progress/pending"),
+        ("completed", "failure", 1, "completed/failure"),
+        ("completed", "success", 0, "OK: exact-SHA CI passed"),
+    ],
+)
+def test_exact_sha_ci_gate_rejects_every_state_except_success(
+    tmp_path: Path,
+    status: str,
+    conclusion: str | None,
+    expected_returncode: int,
+    expected_fragment: str,
+) -> None:
+    commit = "a" * 40
+    step = next(
+        step
+        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        if step.get("name") == "Require successful CI for the exact release commit"
+    )
+    payload = {
+        "workflow_runs": [
+            {
+                "head_sha": commit,
+                "head_branch": "main",
+                "event": "push",
+                "status": status,
+                "conclusion": conclusion,
+                "run_number": 42,
+                "html_url": "https://github.example/actions/runs/42",
+            }
+        ]
+    }
+    env = os.environ.copy()
+    env.update(
+        {
+            "FAKE_GH_RESPONSE": json.dumps(payload),
+            "GITHUB_REPOSITORY": "example/defenseclaw",
+            "SELECTED_COMMIT": commit,
+            "CI_WAIT_ATTEMPTS": "1",
+            "CI_WAIT_INTERVAL_SECONDS": "0",
+        }
+    )
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            'gh() { printf \'%s\' "$FAKE_GH_RESPONSE"; }\n' + step["run"],
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == expected_returncode, completed.stdout + completed.stderr
+    assert expected_fragment in completed.stdout
+
+
+def test_exact_sha_ci_gate_rejects_missing_or_unrelated_runs(tmp_path: Path) -> None:
+    commit = "b" * 40
+    step = next(
+        step
+        for step in _workflow()["jobs"]["release-preflight"]["steps"]
+        if step.get("name") == "Require successful CI for the exact release commit"
+    )
+    payload = {
+        "workflow_runs": [
+            {
+                "head_sha": "c" * 40,
+                "head_branch": "main",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "success",
+                "run_number": 41,
+            },
+            {
+                "head_sha": commit,
+                "head_branch": "feature",
+                "event": "pull_request",
+                "status": "completed",
+                "conclusion": "success",
+                "run_number": 42,
+            },
+        ]
+    }
+    env = os.environ.copy()
+    env.update(
+        {
+            "FAKE_GH_RESPONSE": json.dumps(payload),
+            "GITHUB_REPOSITORY": "example/defenseclaw",
+            "SELECTED_COMMIT": commit,
+            "CI_WAIT_ATTEMPTS": "1",
+            "CI_WAIT_INTERVAL_SECONDS": "0",
+        }
+    )
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            'gh() { printf \'%s\' "$FAKE_GH_RESPONSE"; }\n' + step["run"],
+        ],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 1
+    assert "CI for " + commit + " is missing" in completed.stdout
+
+
 def test_release_target_must_advance_reviewed_and_published_stable_state() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     assert "gh api --paginate --slurp" in text
@@ -238,7 +573,7 @@ def test_native_windows_setup_is_required_while_raw_archives_remain_omitted() ->
     assert workflow_text.count("--omit-windows-binaries") == 4
     assert "publish_windows_binaries" not in workflow_text
     assert "Legacy raw Windows archives remain omitted" in workflow_text
-    assert "signed, certified DefenseClawSetup-x64.exe is published" in workflow_text
+    assert "verification status is recorded in its provenance and certification metadata" in workflow_text
 
 
 def test_native_windows_setup_has_immutable_artifact_custody() -> None:
@@ -250,9 +585,7 @@ def test_native_windows_setup_has_immutable_artifact_custody() -> None:
 
     for job in (runtime, installer, certification, assemble):
         upload_actions = [
-            step["uses"]
-            for step in job.get("steps", [])
-            if step.get("uses", "").startswith("actions/upload-artifact@")
+            step["uses"] for step in job.get("steps", []) if step.get("uses", "").startswith("actions/upload-artifact@")
         ]
         assert upload_actions
         assert set(upload_actions) == {DIGEST_CAPABLE_UPLOAD_ACTION}
@@ -262,6 +595,7 @@ def test_native_windows_setup_has_immutable_artifact_custody() -> None:
     assert installer["outputs"] == {
         "artifact_id": "${{ steps.windows-installer-artifact.outputs.artifact-id }}",
         "artifact_digest": "${{ steps.windows-installer-artifact.outputs.artifact-digest }}",
+        "verification_status": "${{ steps.windows-trust.outputs.verification_status }}",
     }
     assert certification["outputs"] == {
         "artifact_id": "${{ steps.windows-certified-artifact.outputs.artifact-id }}",
@@ -274,12 +608,32 @@ def test_native_windows_setup_has_immutable_artifact_custody() -> None:
         assert "continue-on-error" not in str(job)
         assert job.get("if") != "${{ false }}"
 
+    installer_baseline_download = next(
+        step
+        for step in installer["steps"]
+        if step.get("uses", "").startswith("actions/download-artifact@")
+        and step.get("with", {}).get("name") == "${{ needs.release-preflight.outputs.baseline_artifact }}"
+    )
+    assert installer["env"]["UPGRADE_BASELINE_POLICY"] == ("${{ github.workspace }}/effective-upgrade-baselines.json")
+    assert installer_baseline_download["with"]["path"] == "."
+
     installer_download = next(
-        step for step in installer["steps"] if step.get("uses", "").startswith("actions/download-artifact@")
+        step
+        for step in installer["steps"]
+        if step.get("uses", "").startswith("actions/download-artifact@")
+        and step.get("with", {}).get("artifact-ids") == "${{ needs.build-runtime-candidate.outputs.artifact_id }}"
     )
     assert installer_download["with"]["artifact-ids"] == ("${{ needs.build-runtime-candidate.outputs.artifact_id }}")
     assert installer_download["with"]["merge-multiple"] == "true"
     assert "needs.build-runtime-candidate.outputs.artifact_digest" in str(installer)
+
+    baseline_index = installer["steps"].index(installer_baseline_download)
+    extraction_index = next(
+        index
+        for index, step in enumerate(installer["steps"])
+        if step.get("name") == "Extract authenticated Windows installer inputs"
+    )
+    assert baseline_index < extraction_index
 
     certification_download = next(
         step for step in certification["steps"] if step.get("uses", "").startswith("actions/download-artifact@")
@@ -325,13 +679,52 @@ def test_native_windows_setup_has_immutable_artifact_custody() -> None:
     setup_acceptance = next(
         step
         for step in installer["steps"]
-        if step.get("name")
-        == "Validate the exact signed Setup lifecycle as a standard user"
+        if step.get("name") == "Validate the exact Setup lifecycle as a standard user"
     )["run"]
     assert "scripts/invoke-windows-setup-standard-user-ci.ps1" in setup_acceptance
     assert "-Mode setup-acceptance" in setup_acceptance
     assert "-ArtifactRoot windows-installer-output" in setup_acceptance
     assert "-TimeoutSeconds 4500" in setup_acceptance
+
+
+def test_windows_authenticode_is_optional_but_partial_or_invalid_configuration_fails() -> None:
+    jobs = _workflow()["jobs"]
+    installer = jobs["windows-installer"]
+    certification = jobs["windows-real-client-certification"]
+    trust = next(step for step in installer["steps"] if step.get("id") == "windows-trust")
+    rendered = trust["run"]
+
+    assert "-xor" in rendered
+    assert "provide both certificate and password, or neither" in rendered
+    assert "verification_status=signed" in rendered
+    assert "verification_status=unverified" in rendered
+    assert "continue-on-error" not in str(installer)
+
+    build = next(
+        step for step in installer["steps"] if step.get("name") == "Build native Setup with optional Authenticode"
+    )
+    assert "secrets.WINDOWS_SIGNING_CERT_BASE64" in str(build)
+    assert "secrets.WINDOWS_SIGNING_CERT_PASSWORD" in str(build)
+
+    provider_gate = next(
+        step for step in certification["steps"] if step.get("name") == "Require both real-client provider credentials"
+    )
+    signed_certification = next(
+        step
+        for step in certification["steps"]
+        if step.get("name") == "Certify the exact signed Setup with pinned Codex and Claude Code"
+    )
+    unverified = next(
+        step
+        for step in certification["steps"]
+        if step.get("name") == "Record explicit unverified Windows Setup custody"
+    )
+    signed_condition = "${{ needs.windows-installer.outputs.verification_status == 'signed' }}"
+    unverified_condition = "${{ needs.windows-installer.outputs.verification_status == 'unverified' }}"
+    assert provider_gate["if"] == signed_condition
+    assert signed_certification["if"] == signed_condition
+    assert unverified["if"] == unverified_condition
+    assert "record-windows-unverified" in unverified["run"]
 
 
 def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
@@ -358,22 +751,14 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
     assert "cosign sign-blob" in assemble_rendered
     assert text.count("cosign sign-blob") == 1
     candidate_upload_index = next(
-        index
-        for index, step in enumerate(assemble_job["steps"])
-        if step.get("id") == "upload"
+        index for index, step in enumerate(assemble_job["steps"]) if step.get("id") == "upload"
     )
     candidate_upload = assemble_job["steps"][candidate_upload_index]
-    assert candidate_upload["uses"] == (
-        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
-    )
-    assert assemble_job["outputs"]["artifact_digest"] == (
-        "${{ steps.upload.outputs.artifact-digest }}"
-    )
+    assert candidate_upload["uses"] == ("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02")
+    assert assemble_job["outputs"]["artifact_digest"] == ("${{ steps.upload.outputs.artifact-digest }}")
     digest_guard = assemble_job["steps"][candidate_upload_index + 1]
     assert digest_guard["name"] == "Require candidate artifact digest output"
-    assert digest_guard["env"]["CANDIDATE_ARTIFACT_DIGEST"] == (
-        "${{ steps.upload.outputs.artifact-digest }}"
-    )
+    assert digest_guard["env"]["CANDIDATE_ARTIFACT_DIGEST"] == ("${{ steps.upload.outputs.artifact-digest }}")
     assert "Missing candidate artifact digest" in digest_guard["run"]
 
     macos_job = str(jobs["macos-app"])
@@ -509,9 +894,9 @@ def test_full_historical_matrix_limits_mutable_dependencies_to_required_bridge()
     rendered = str(workflow)
 
     # Linux and macOS still exercise every behavior-class baseline through the
-    # signed resolver. Only the required bridge gets its published dependency
-    # environment, which proves target-only promotion without re-resolving every
-    # older wheel against today's mutable package index.
+    # signed resolver. On both hosts, only the required bridge gets its
+    # published dependency environment. Keeping that policy identical prevents
+    # a target dependency overlay from hiding a platform-specific handoff bug.
     assert "historical-dependency-canary" not in workflow["jobs"]
     assert "historical_matrix" not in workflow["on"]["workflow_call"]["inputs"]
     linux = workflow["jobs"]["linux-upgrade"]
@@ -522,11 +907,14 @@ def test_full_historical_matrix_limits_mutable_dependencies_to_required_bridge()
     assert "scripts/test-upgrade-protocol-release.sh" in linux_rendered
     assert "--baseline-dependencies published" in linux_rendered
     assert '"$BASELINE" == "$REQUIRED_BRIDGE_VERSION"' in linux_rendered
-    assert rendered.count("--baseline-dependencies published") == 1
 
     macos = workflow["jobs"]["macos-upgrade"]
+    macos_rendered = str(macos)
     assert macos["strategy"]["matrix"]["baseline"] == "${{ fromJSON(inputs.baselines) }}"
-    assert "scripts/test-upgrade-protocol-release.sh" in str(macos)
+    assert "scripts/test-upgrade-protocol-release.sh" in macos_rendered
+    assert "--baseline-dependencies published" in macos_rendered
+    assert '"$BASELINE" == "$REQUIRED_BRIDGE_VERSION"' in macos_rendered
+    assert rendered.count("--baseline-dependencies published") == 2
 
     release = _workflow()
     assert release["jobs"]["release-preflight"]["outputs"]["certification_cases"] == (
@@ -706,6 +1094,7 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
         "CANDIDATE_RUNTIME_CONFIG_VERSION",
         "MINIMUM_SOURCE_VERSION",
         "REQUIRED_BRIDGE_VERSION",
+        "OBSERVABILITY_V8_HARD_CUT_VERSION",
         "baseline_protocol",
         "baseline_has_schema_gate",
         "run_installed_controller_refusal",
@@ -730,6 +1119,9 @@ def test_protocol_gate_proves_both_refusal_paths_and_full_success() -> None:
         "artifact-envelope",
         'resolver_args+=(--version "${TARGET_VERSION}")',
         'run_candidate_updater_staged_success "${baseline}" explicit',
+        'fresh controller → ${OBSERVABILITY_V8_HARD_CUT_VERSION} → ${TARGET_VERSION}',
+        "resolver_owned_post_cut_bridge",
+        'run_candidate_updater_staged_success "${baseline}"',
         "stage_authenticated_baseline",
         "SUCCESS_PATH_ONLY",
         "REFUSAL_CONTRACT_ONLY",
@@ -952,6 +1344,48 @@ run_protocol_case "0.8.4"
     assert "refusal=0.8.4:immutable-bridge-empty-windows" in completed.stdout
     assert "direct=0.8.4" in completed.stdout
     assert "unexpected-installed-success" not in completed.stdout
+
+
+def test_post_cut_bridge_uses_staged_release_resolver() -> None:
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-c",
+            r"""
+source "$1"
+TARGET_VERSION="0.8.8"
+CANDIDATE_MIN_PROTOCOL=2
+CANDIDATE_SCHEMA_VERSION=2
+MINIMUM_SOURCE_VERSION="0.8.4"
+REQUIRED_BRIDGE_VERSION="0.8.4"
+REFUSAL_CONTRACT_ONLY=0
+SUCCESS_PATH_ONLY=0
+stage_authenticated_baseline() { :; }
+baseline_protocol() { printf '%s\n' 2; }
+baseline_has_schema_gate() { printf '%s\n' 1; }
+manifest_array_contains() { return 0; }
+manifest_windows_sources_are_empty() { return 1; }
+run_installed_controller_refusal() { printf '%s\n' unexpected-installed-refusal; return 97; }
+run_one_upgrade_smoke() { printf '%s\n' unexpected-installed-success; return 96; }
+run_candidate_updater_refusal() { return 95; }
+run_candidate_updater_staged_success() { printf 'staged=%s\n' "$1"; }
+run_candidate_updater_direct_success() { printf '%s\n' unexpected-direct-resolver; return 94; }
+run_protocol_case "0.8.4"
+""",
+            "post-cut-bridge-test",
+            str(PROTOCOL_GATE),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "staged=0.8.4" in completed.stdout
+    assert "unexpected-installed" not in completed.stdout
+    assert "unexpected-direct-resolver" not in completed.stdout
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link permission contract")

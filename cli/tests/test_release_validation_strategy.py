@@ -72,10 +72,13 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
 
     sensitive = set(json.loads(POLICY_PATH.read_text())["release_sensitive_paths"])
     assert {
+        ".gitattributes",
         ".goreleaser.yaml",
+        "MANIFEST.in",
         "go.mod",
         "go.sum",
         "pyproject.toml",
+        "setup.py",
         "uv.lock",
         "cli/defenseclaw/__init__.py",
         "cli/defenseclaw/migration_state.py",
@@ -84,6 +87,7 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
         "cli/defenseclaw/observability/v8_config.py",
         "internal/config/**",
         "internal/cli/**",
+        "internal/daemon/**",
         "bundles/local_observability_stack/**",
         "schemas/config/v8/**",
         "extensions/defenseclaw/package.json",
@@ -92,14 +96,31 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
         "scripts/resolve_upgrade_baselines.py",
         "scripts/release_api_retry.py",
         "scripts/generate-upgrade-manifest.py",
+        "scripts/test-historical-bootstrap-dependencies.sh",
         "scripts/verify-sigstore-blob.py",
         "scripts/check_observability_v8_upgrade_continuity.py",
         "scripts/test-developer-target-activation.sh",
         "scripts/test-fresh-install-release.sh",
+        "scripts/build-windows-installer.ps1",
+        "scripts/windows-native-ci.ps1",
         "scripts/build-macos-app-release.sh",
         ".github/workflows/macos-app.yml",
         "scripts/export-uv-overrides.py",
+        "scripts/telemetry_runtime_assets.py",
+        "scripts/validate_packaged_v8_resources.py",
     }.issubset(sensitive)
+    assert release_certification._is_sensitive(
+        ["scripts/validate_packaged_v8_resources.py"],
+        list(sensitive),
+    )
+    assert release_certification._is_sensitive(
+        ["scripts/test-historical-bootstrap-dependencies.sh"],
+        list(sensitive),
+    )
+    assert release_certification._is_sensitive(
+        ["internal/daemon/daemon.go"],
+        list(sensitive),
+    )
 
 
 def test_no_pull_request_workflow_can_run_full_or_signed_certification() -> None:
@@ -258,7 +279,11 @@ def test_nightly_manual_reusable_workflow_retains_every_expensive_gate() -> None
     }.issubset(jobs)
     assert "scripts/test-upgrade-protocol-release.sh" in text
     assert "scripts/test-developer-target-activation.sh" not in text
-    assert text.count("--baseline-dependencies published") == 1
+    # The authenticated 0.8.4 bridge must resolve its published dependency
+    # graph on both required POSIX certification platforms. Keeping this count
+    # at two prevents macOS from silently drifting back to candidate-compatible
+    # dependencies while Linux exercises the real release boundary.
+    assert text.count("--baseline-dependencies published") == 2
     assert '"$BASELINE" == "$REQUIRED_BRIDGE_VERSION"' in text
     assert "matrix.start_source_gateway" in text
     assert "--start-source-gateway" in text

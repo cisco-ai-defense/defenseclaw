@@ -76,13 +76,91 @@ func TestManifestContractForEveryComponent(t *testing.T) {
 	}
 }
 
-func TestResourceSetIsDeterministicAndComplete(t *testing.T) {
-	icon := repositoryIcon(t)
-	first, err := expectedResourceSet(ComponentSetup, "1.2.3", icon)
+func TestParseTargetAllowsOnlyCanonicalWindowsArchitectures(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  Target
+	}{
+		{value: "windows_amd64", want: TargetWindowsAMD64},
+		{value: " WINDOWS_ARM64 ", want: TargetWindowsARM64},
+	} {
+		target, err := ParseTarget(test.value)
+		if err != nil {
+			t.Errorf("ParseTarget(%q): %v", test.value, err)
+			continue
+		}
+		if target != test.want {
+			t.Errorf("ParseTarget(%q) = %q, want %q", test.value, target, test.want)
+		}
+	}
+
+	for _, value := range []string{
+		"",
+		"linux_amd64",
+		"windows",
+		"windows_386",
+		"windows_arm",
+		"windows_x64",
+		"windows_amd64_v1",
+		"windows_arm64_v8.0",
+	} {
+		if _, err := ParseTarget(value); err == nil {
+			t.Errorf("ParseTarget(%q) unexpectedly succeeded", value)
+		}
+	}
+}
+
+func TestManifestArchitectureMatchesTarget(t *testing.T) {
+	for _, test := range []struct {
+		target    Target
+		want      string
+		forbidden string
+	}{
+		{target: TargetWindowsAMD64, want: "amd64", forbidden: "arm64"},
+		{target: TargetWindowsARM64, want: "arm64", forbidden: "amd64"},
+	} {
+		t.Run(string(test.target), func(t *testing.T) {
+			manifest, err := ManifestForTarget(test.target, ComponentGateway, "1.2.3")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := xml.Unmarshal(manifest, new(any)); err != nil {
+				t.Fatalf("manifest is not XML: %v", err)
+			}
+			text := string(manifest)
+			if !strings.Contains(text, `processorArchitecture="`+test.want+`"`) {
+				t.Errorf("manifest does not select %s:\n%s", test.want, text)
+			}
+			if strings.Contains(text, `processorArchitecture="`+test.forbidden+`"`) {
+				t.Errorf("manifest incorrectly selects %s:\n%s", test.forbidden, text)
+			}
+		})
+	}
+}
+
+func TestSetupResourcesRemainAMD64Only(t *testing.T) {
+	manifest, err := Manifest(ComponentSetup, "1.2.3")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := expectedResourceSet(ComponentSetup, "1.2.3", icon)
+	if !strings.Contains(string(manifest), `processorArchitecture="amd64"`) {
+		t.Fatalf("default Setup manifest is not AMD64:\n%s", manifest)
+	}
+	if _, err := ManifestForTarget(TargetWindowsARM64, ComponentSetup, "1.2.3"); err == nil {
+		t.Fatal("ARM64 Setup resources unexpectedly succeeded")
+	}
+	if _, err := ManifestForTarget(Target("windows_amd64_v1"), ComponentGateway, "1.2.3"); err == nil {
+		t.Fatal("uncanonical target bypassed ParseTarget validation")
+	}
+}
+
+func TestResourceSetIsDeterministicAndComplete(t *testing.T) {
+	icon := repositoryIcon(t)
+	first, err := expectedResourceSet(TargetWindowsAMD64, ComponentSetup, "1.2.3", icon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := expectedResourceSet(TargetWindowsAMD64, ComponentSetup, "1.2.3", icon)
 	if err != nil {
 		t.Fatal(err)
 	}

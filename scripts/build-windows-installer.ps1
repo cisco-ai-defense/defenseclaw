@@ -49,6 +49,7 @@ $CosignSha256 = 'DD6C61E510DA627BCAED4CD9DB844EC11CACD09826D814D89F7F68D40FEB07B
 $WindowsArtifactHelper = Join-Path $PSScriptRoot 'windows_installer_artifacts.py'
 $WindowsAuthenticodeHelper = Join-Path $PSScriptRoot 'windows-authenticode.ps1'
 $WindowsBinaryIdentityHelper = Join-Path $PSScriptRoot 'windows-binary-identity.ps1'
+$PackagedV8ResourceValidator = Join-Path $PSScriptRoot 'validate_packaged_v8_resources.py'
 
 function Resolve-FullPath([string]$Path) {
     return [IO.Path]::GetFullPath($Path)
@@ -56,9 +57,10 @@ function Resolve-FullPath([string]$Path) {
 
 function Test-PathWithin([string]$Path, [string]$Root) {
     $candidate = Resolve-FullPath $Path
-    $parent = (Resolve-FullPath $Root).TrimEnd('\')
+    $separator = [IO.Path]::DirectorySeparatorChar
+    $parent = (Resolve-FullPath $Root).TrimEnd($separator)
     return $candidate.Equals($parent, [StringComparison]::OrdinalIgnoreCase) -or
-        $candidate.StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase)
+        $candidate.StartsWith($parent + $separator, [StringComparison]::OrdinalIgnoreCase)
 }
 
 function Remove-SafeTree([string]$Path, [string]$Root) {
@@ -255,6 +257,303 @@ function Get-FileHashHex([string]$Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Read-BoundedStreamBytes(
+    [IO.Stream]$Stream,
+    [long]$MaximumBytes,
+    [string]$Description
+) {
+    if ($MaximumBytes -lt 0) {
+        throw "Invalid byte limit for ${Description}: $MaximumBytes"
+    }
+    $buffer = [byte[]]::new(65536)
+    $output = [IO.MemoryStream]::new()
+    try {
+        while (($count = $Stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            if ($output.Length + $count -gt $MaximumBytes) {
+                throw "$Description exceeds its decoded size limit of $MaximumBytes bytes."
+            }
+            $output.Write($buffer, 0, $count)
+        }
+        return ,$output.ToArray()
+    } finally {
+        $output.Dispose()
+    }
+}
+
+function Read-CanonicalGzipBytes([string]$Path, [long]$MaximumBytes) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Missing canonical gzip resource: $Path"
+    }
+    $sourceLength = (Get-Item -LiteralPath $Path).Length
+    if ($sourceLength -lt 18 -or $sourceLength -gt $MaximumBytes) {
+        throw "Canonical gzip resource has an invalid encoded size: $Path"
+    }
+    [byte[]]$encoded = [IO.File]::ReadAllBytes($Path)
+    [byte[]]$header = @(0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff)
+    for ($index = 0; $index -lt $header.Length; $index++) {
+        if ($encoded[$index] -ne $header[$index]) {
+            throw "Canonical gzip resource has an invalid header: $Path"
+        }
+    }
+
+    $encodedStream = [IO.MemoryStream]::new($encoded, $false)
+    $gzip = [IO.Compression.GZipStream]::new(
+        $encodedStream,
+        [IO.Compression.CompressionMode]::Decompress,
+        $false
+    )
+    try {
+        try {
+            [byte[]]$decoded = Read-BoundedStreamBytes $gzip $MaximumBytes "Canonical gzip resource $Path"
+        } catch {
+            throw "Canonical gzip resource is malformed: ${Path}: $($_.Exception.Message)"
+        }
+    } finally {
+        $gzip.Dispose()
+        $encodedStream.Dispose()
+    }
+    $trailerSize = [BitConverter]::ToUInt32($encoded, $encoded.Length - 4)
+    if ($decoded.Length -ne $trailerSize) {
+        throw "Canonical gzip resource has an invalid size trailer: $Path"
+    }
+    return ,$decoded
+}
+
+function Get-ValidatedWheelMemberPath([string]$RawName) {
+    if ([string]::IsNullOrEmpty($RawName)) {
+        throw 'DefenseClaw wheel contains an empty member path.'
+    }
+    if ($RawName.Contains('\')) {
+        throw "DefenseClaw wheel contains a non-canonical wheel member path with a backslash: $RawName"
+    }
+    if ($RawName.StartsWith('/', [StringComparison]::Ordinal)) {
+        throw "DefenseClaw wheel contains a non-canonical absolute or UNC wheel member path: $RawName"
+    }
+    if ($RawName.IndexOf(':') -ge 0) {
+        throw "DefenseClaw wheel contains a non-canonical drive-qualified wheel member path: $RawName"
+    }
+    foreach ($character in $RawName.ToCharArray()) {
+        if ([char]::IsControl($character)) {
+            throw "DefenseClaw wheel contains a non-canonical control character in a member path: $RawName"
+        }
+    }
+
+    $isDirectory = $RawName.EndsWith('/', [StringComparison]::Ordinal)
+    $identity = if ($isDirectory) {
+        $RawName.Substring(0, $RawName.Length - 1)
+    } else {
+        $RawName
+    }
+    if ([string]::IsNullOrEmpty($identity) -or
+        $identity.Contains('//')) {
+        throw "DefenseClaw wheel contains a non-canonical empty path component: $RawName"
+    }
+    foreach ($component in $identity.Split([char]'/', [StringSplitOptions]::None)) {
+        if ([string]::IsNullOrEmpty($component) -or $component -eq '.' -or $component -eq '..') {
+            throw "DefenseClaw wheel contains a non-canonical dot or empty path component: $RawName"
+        }
+        if ($component.IndexOfAny([char[]]'<>"|?*') -ge 0) {
+            throw "DefenseClaw wheel contains a non-canonical Win32-forbidden character: $RawName"
+        }
+        if ($component.EndsWith('.', [StringComparison]::Ordinal) -or
+            $component.EndsWith(' ', [StringComparison]::Ordinal)) {
+            throw "DefenseClaw wheel contains a non-canonical trailing-dot-or-space alias: $RawName"
+        }
+        $stem = $component
+        $extensionIndex = $component.IndexOf('.')
+        if ($extensionIndex -ge 0) {
+            $stem = $component.Substring(0, $extensionIndex)
+        }
+        $stem = $stem.TrimEnd([char[]]' .')
+        if ($stem -match '(?i)^(?:CON|PRN|AUX|NUL|CLOCK\$|COM[1-9]|LPT[1-9])$') {
+            throw "DefenseClaw wheel contains a non-canonical reserved DOS device name: $RawName"
+        }
+        if ($component -match '(?i)^[A-Z0-9_]{1,6}~[1-9][0-9]*(?:\.[A-Z0-9_]{0,3})?$') {
+            throw "DefenseClaw wheel contains a non-canonical DOS short-name alias: $RawName"
+        }
+    }
+    return [pscustomobject]@{
+        Name = $RawName
+        Identity = $identity
+        IsDirectory = $isDirectory
+    }
+}
+
+function Test-DefenseClawV8WheelMember([string]$Name) {
+    $parts = @($Name.Split([char]'/', [StringSplitOptions]::None))
+    for ($dataIndex = 0; $dataIndex -lt $parts.Count; $dataIndex++) {
+        if (-not $parts[$dataIndex].Equals('_data', [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        $hasPackageRoot = $false
+        for ($packageIndex = 0; $packageIndex -lt $dataIndex; $packageIndex++) {
+            if ($parts[$packageIndex].Equals('defenseclaw', [StringComparison]::OrdinalIgnoreCase)) {
+                $hasPackageRoot = $true
+                break
+            }
+        }
+        if (-not $hasPackageRoot) { continue }
+        for ($resourceIndex = $dataIndex + 1; $resourceIndex -lt $parts.Count; $resourceIndex++) {
+            $component = $parts[$resourceIndex]
+            if ($component.Equals('v8', [StringComparison]::OrdinalIgnoreCase) -or
+                $component.StartsWith('v8_', [StringComparison]::OrdinalIgnoreCase) -or
+                $component.StartsWith('v8.', [StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+function Assert-DefenseClawWheelV8Resources(
+    [string]$WheelPath,
+    [string]$RepositoryRoot
+) {
+    $contracts = @(
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/config/v8/defenseclaw-config.schema.json'
+            Source = 'schemas\config\v8\defenseclaw-config.schema.json'
+            Gzip = $false
+        },
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/config/v8/observability.yaml'
+            Source = 'schemas\config\v8\reference\observability.yaml'
+            Gzip = $false
+        },
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/config/v8/observability.md'
+            Source = 'schemas\config\v8\reference\observability.md'
+            Gzip = $false
+        },
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/telemetry/v8/telemetry.schema.json'
+            Source = 'schemas\telemetry\runtime\telemetry.schema.json.gz'
+            Gzip = $true
+        },
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/telemetry/v8/catalog.json'
+            Source = 'schemas\telemetry\runtime\catalog.json.gz'
+            Gzip = $true
+        },
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/telemetry/v8/v7-exporter-selection.json'
+            Source = 'schemas\telemetry\runtime\compatibility\v7-exporter-selection.json.gz'
+            Gzip = $true
+        },
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/telemetry/v8/galileo-rich-v2.json'
+            Source = 'schemas\telemetry\runtime\compatibility\galileo-rich-v2.json.gz'
+            Gzip = $true
+        },
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/telemetry/v8/local-observability-v1.json'
+            Source = 'schemas\telemetry\runtime\compatibility\local-observability-v1.json.gz'
+            Gzip = $true
+        },
+        [pscustomobject]@{
+            Member = 'defenseclaw/_data/telemetry/v8/openinference-v1.json'
+            Source = 'schemas\telemetry\runtime\compatibility\openinference-v1.json.gz'
+            Gzip = $true
+        }
+    )
+    $maximumResourceBytes = 16 * 1024 * 1024
+    $expectedNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($contract in $contracts) {
+        if (-not $expectedNames.Add([string]$contract.Member)) {
+            throw "Duplicate internal v8 resource contract: $($contract.Member)"
+        }
+    }
+
+    $archive = $null
+    try {
+        $archive = [IO.Compression.ZipFile]::OpenRead($WheelPath)
+    } catch {
+        throw "DefenseClaw wheel is not a readable ZIP archive: $($_.Exception.Message)"
+    }
+    try {
+        $entries = [Collections.Generic.Dictionary[string, IO.Compression.ZipArchiveEntry]]::new(
+            [StringComparer]::Ordinal
+        )
+        $pathIdentities = [Collections.Generic.Dictionary[string, string]]::new(
+            [StringComparer]::OrdinalIgnoreCase
+        )
+        $unexpected = [Collections.Generic.List[string]]::new()
+        foreach ($entry in $archive.Entries) {
+            $member = Get-ValidatedWheelMemberPath ([string]$entry.FullName)
+            $name = [string]$member.Name
+            $identity = [string]$member.Identity
+            if ($pathIdentities.ContainsKey($identity)) {
+                $existingName = $pathIdentities[$identity]
+                if (Test-DefenseClawV8WheelMember $name) {
+                    throw "DefenseClaw wheel contains a duplicate v8 resource or OrdinalIgnoreCase path collision: '$name' conflicts with '$existingName'"
+                }
+                throw "DefenseClaw wheel contains an OrdinalIgnoreCase path collision: '$name' conflicts with '$existingName'"
+            }
+            $pathIdentities.Add($identity, $name)
+
+            $isV8Resource = Test-DefenseClawV8WheelMember $name
+            $unixFileType = (($entry.ExternalAttributes -shr 16) -band 0xF000)
+            if ($isV8Resource -and (
+                [bool]$member.IsDirectory -or
+                (($entry.ExternalAttributes -band 0x10) -ne 0) -or
+                ($unixFileType -ne 0 -and $unixFileType -ne 0x8000)
+            )) {
+                throw "DefenseClaw wheel contains a non-file v8 resource: $name"
+            }
+            if ([bool]$member.IsDirectory) { continue }
+            if (-not $isV8Resource) { continue }
+            if (-not $expectedNames.Contains($name)) {
+                [void]$unexpected.Add($name)
+                continue
+            }
+            $entries.Add($name, $entry)
+        }
+        if ($unexpected.Count -gt 0) {
+            $names = @($unexpected | Sort-Object -Unique) -join ', '
+            throw "DefenseClaw wheel contains unexpected v8 resources: $names"
+        }
+        $missing = @($contracts | Where-Object { -not $entries.ContainsKey([string]$_.Member) } |
+            ForEach-Object { [string]$_.Member })
+        if ($missing.Count -gt 0) {
+            throw "DefenseClaw wheel is missing required v8 resources: $($missing -join ', ')"
+        }
+
+        foreach ($contract in $contracts) {
+            $source = Resolve-FullPath (Join-Path $RepositoryRoot ([string]$contract.Source))
+            if (-not (Test-PathWithin $source $RepositoryRoot)) {
+                throw "Canonical v8 resource escapes the repository root: $source"
+            }
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+                throw "Canonical v8 resource is missing: $source"
+            }
+            if ($contract.Gzip) {
+                [byte[]]$expected = Read-CanonicalGzipBytes $source $maximumResourceBytes
+            } else {
+                $sourceLength = (Get-Item -LiteralPath $source).Length
+                if ($sourceLength -gt $maximumResourceBytes) {
+                    throw "Canonical v8 resource exceeds its size limit: $source"
+                }
+                [byte[]]$expected = [IO.File]::ReadAllBytes($source)
+            }
+            $entry = $entries[[string]$contract.Member]
+            if ($entry.Length -ne $expected.Length) {
+                throw "DefenseClaw wheel v8 resource does not match its canonical source: $($contract.Member)"
+            }
+            $entryStream = $entry.Open()
+            try {
+                [byte[]]$actual = Read-BoundedStreamBytes $entryStream $expected.Length "Wheel resource $($contract.Member)"
+            } finally {
+                $entryStream.Dispose()
+            }
+            if (-not [Security.Cryptography.CryptographicOperations]::FixedTimeEquals($actual, $expected)) {
+                throw "DefenseClaw wheel v8 resource does not match its canonical source: $($contract.Member)"
+            }
+        }
+    } finally {
+        $archive.Dispose()
+    }
+}
+
 function Set-WindowsExecutableResource(
     [string]$Executable,
     [ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup')][string]$Component,
@@ -349,8 +648,13 @@ function Set-FileSignaturesIfConfigured([string[]]$Paths, [string]$BuildRoot) {
     }
     $cert64 = [Environment]::GetEnvironmentVariable("WINDOWS_SIGNING_CERT_BASE64")
     $certPassword = [Environment]::GetEnvironmentVariable("WINDOWS_SIGNING_CERT_PASSWORD")
-    if ([string]::IsNullOrWhiteSpace($cert64) -or [string]::IsNullOrWhiteSpace($certPassword)) {
-        Write-Warning "No real Authenticode credentials provided; artifact is an unsigned local/PR build."
+    $hasCertificate = -not [string]::IsNullOrWhiteSpace($cert64)
+    $hasPassword = -not [string]::IsNullOrWhiteSpace($certPassword)
+    if ($hasCertificate -xor $hasPassword) {
+        throw 'Authenticode signing is partially configured; provide both WINDOWS_SIGNING_CERT_BASE64 and WINDOWS_SIGNING_CERT_PASSWORD, or neither.'
+    }
+    if (-not $hasCertificate) {
+        Write-Warning "No real Authenticode credentials provided; artifact is explicitly unverified."
         return $false
     }
     $signtool = (Get-Command 'signtool.exe' -ErrorAction Stop).Source
@@ -417,7 +721,7 @@ Set-Location $repoRoot
 $resourceIcon = Join-Path $repoRoot 'macos\DefenseClawMac\DefenseClawMac\Assets.xcassets\AppIcon.appiconset\icon_256.png'
 foreach ($requiredSetupInput in @(
     $resourceIcon, $WindowsArtifactHelper, $WindowsAuthenticodeHelper,
-    $WindowsBinaryIdentityHelper
+    $WindowsBinaryIdentityHelper, $PackagedV8ResourceValidator
 )) {
     if (-not (Test-Path -LiteralPath $requiredSetupInput -PathType Leaf)) {
         throw "Required Windows installer input is missing: $requiredSetupInput"
@@ -452,6 +756,7 @@ Copy-RequiredFile $wheel $wheel
 Copy-RequiredFile $upgradeManifest $upgradeManifest
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+Assert-DefenseClawWheelV8Resources $wheel $repoRoot
 $wheelArchive = [IO.Compression.ZipFile]::OpenRead($wheel)
 try {
     $metadataEntries = @($wheelArchive.Entries | Where-Object { $_.FullName -match '\.dist-info/METADATA$' })
@@ -621,6 +926,12 @@ $validationSite = Join-Path $validationRuntime 'Lib\site-packages'
 foreach ($item in Get-ChildItem -LiteralPath $sitePackages -Force) {
     Copy-Item -LiteralPath $item.FullName -Destination $validationSite -Recurse -Force
 }
+Invoke-CheckedProcess $validationPython @(
+    '-I', $PackagedV8ResourceValidator,
+    '--site-packages', $validationSite,
+    '--runtime-root', $validationRuntime,
+    '--label', 'staged'
+)
 $dependencyCheck = @'
 import importlib.metadata as metadata
 import platform

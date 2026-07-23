@@ -79,6 +79,7 @@ def _selects_full_connector_matrix(path: str) -> bool:
         "scripts/test-windows-disposable-user-safety.ps1",
         "scripts/test-windows-setup-wizard.ps1",
         "scripts/upgrade.ps1",
+        "scripts/validate_packaged_v8_resources.py",
         "scripts/windows-authenticode.ps1",
         "scripts/windows-binary-identity.ps1",
         "scripts/windows-disposable-user-safety.ps1",

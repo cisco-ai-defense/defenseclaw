@@ -304,11 +304,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 		api.tokenAuth(api.handleAgentHook("codex")).ServeHTTP(recorder, req)
 		close(requestDone)
 	}()
-	select {
-	case <-requestDone:
-		t.Fatalf("authenticated SessionStart completed before its startup registration owner was ready: status=%d body=%s", recorder.Code, recorder.Body.String())
-	case <-time.After(50 * time.Millisecond):
-	}
+	waitForHookRegistrationOwnerWaiter(t, sidecar, requestDone, recorder)
 
 	// The API listener becomes healthy before the multi-connector guardrail
 	// lane finishes Setup and registers its exact hook guard. An authenticated
@@ -318,6 +314,16 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	replacementGuard := NewHookConfigGuard(nil, nil, time.Hour)
+	repairHealed := make(chan []string, 1)
+	replacementGuard.SetHealNotifier(func(connectorName string, changed []string) {
+		if connectorName != "codex" {
+			return
+		}
+		select {
+		case repairHealed <- append([]string(nil), changed...):
+		default:
+		}
+	})
 	if !replacementGuard.Start(ctx, conn, restartOpts) {
 		t.Fatal("start replacement gateway hook guard")
 	}
@@ -326,10 +332,53 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 		sidecar.unregisterHookConfigGuard(replacementGuard)
 		replacementGuard.Stop()
 	}()
+	repairDeadline := time.NewTimer(hookRegistrationOwnerWaitTimeout + hookGuardSetupTimeout)
+	defer repairDeadline.Stop()
+	requestFinished := false
+	var repairReasons []string
 	select {
+	case repairReasons = <-repairHealed:
 	case <-requestDone:
-	case <-time.After(3 * time.Second):
-		t.Fatal("authenticated SessionStart did not hand off to the startup registration owner")
+		requestFinished = true
+		select {
+		case repairReasons = <-repairHealed:
+		default:
+			t.Fatalf("authenticated SessionStart completed without a successful registration repair: status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	case <-repairDeadline.C:
+		present, presentErr := connector.OwnedHooksPresent(conn, restartOpts)
+		lock := connector.LoadHookContractLockEntry(dataDir, "codex")
+		runtimeBody, runtimeErr := os.ReadFile(filepath.Join(dataDir, "hooks", ".hookcfg.codex"))
+		t.Fatalf(
+			"authenticated SessionStart did not complete registration repair: guard_active=%v present=%v present_err=%v lock=%+v runtime_err=%v runtime=%q",
+			replacementGuard.MatchesActiveConnector("codex", dataDir),
+			present,
+			presentErr,
+			lock,
+			runtimeErr,
+			runtimeBody,
+		)
+	}
+	foundAuthenticatedReason := false
+	for _, reason := range repairReasons {
+		if reason == "authenticated SessionStart" {
+			foundAuthenticatedReason = true
+			break
+		}
+	}
+	if !foundAuthenticatedReason {
+		t.Fatalf("registration repair notification omitted authenticated SessionStart reason: %v", repairReasons)
+	}
+	if !requestFinished {
+		select {
+		case <-requestDone:
+		case <-repairDeadline.C:
+			t.Fatalf(
+				"authenticated SessionStart repair completed but HTTP handoff did not return: guard_active=%v reasons=%v",
+				replacementGuard.MatchesActiveConnector("codex", dataDir),
+				repairReasons,
+			)
+		}
 	}
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("authenticated Codex SessionStart status=%d body=%s", recorder.Code, recorder.Body.String())
@@ -384,7 +433,44 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	}
 
 	assertOperatorCodexStatePreserved(t, configPath, managedPath, foreignPath, operatorManaged, foreignManaged)
-	assertPythonGuardrailStatusHasNoCodexRegistrationDrift(t, codexHome, dataDir)
+	assertPythonCodexFailModeReportIsCurrent(t, codexHome, dataDir)
+}
+
+func waitForHookRegistrationOwnerWaiter(
+	t *testing.T,
+	sidecar *Sidecar,
+	requestDone <-chan struct{},
+	recorder *httptest.ResponseRecorder,
+) {
+	t.Helper()
+	deadline := time.NewTimer(hookRegistrationOwnerWaitTimeout)
+	defer deadline.Stop()
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
+	for {
+		sidecar.hookGuardsMu.Lock()
+		waitChannelReady := sidecar.hookGuardsChanged != nil
+		guardCount := len(sidecar.hookGuards)
+		sidecar.hookGuardsMu.Unlock()
+		if waitChannelReady {
+			if guardCount != 0 {
+				t.Fatalf("startup registration waiter observed %d guards before owner publication", guardCount)
+			}
+			select {
+			case <-requestDone:
+				t.Fatalf("authenticated SessionStart completed before its startup registration owner was ready: status=%d body=%s", recorder.Code, recorder.Body.String())
+			default:
+				return
+			}
+		}
+		select {
+		case <-requestDone:
+			t.Fatalf("authenticated SessionStart completed before entering the startup owner wait: status=%d body=%s", recorder.Code, recorder.Body.String())
+		case <-deadline.C:
+			t.Fatal("authenticated SessionStart did not enter the startup registration-owner wait")
+		case <-poll.C:
+		}
+	}
 }
 
 func managedConfigMatchesOperatorSeed(raw []byte) bool {
@@ -563,7 +649,7 @@ func TestAuthenticatedSessionStartRejectsUnsafeRuntimeEvidenceWithoutMutation(t 
 	}
 }
 
-func assertPythonGuardrailStatusHasNoCodexRegistrationDrift(t *testing.T, codexHome, dataDir string) {
+func assertPythonCodexFailModeReportIsCurrent(t *testing.T, codexHome, dataDir string) {
 	t.Helper()
 	python, err := exec.LookPath("python.exe")
 	if err != nil {
@@ -592,10 +678,8 @@ yaml_fixture = types.ModuleType("yaml")
 yaml_fixture.safe_load = json.load
 sys.modules["yaml"] = yaml_fixture
 
-from click.testing import CliRunner
 from defenseclaw import config as dcconfig
-from defenseclaw.commands import cmd_guardrail
-from defenseclaw.context import AppContext
+from defenseclaw.fail_mode import connector_fail_mode_report
 guardrail = dcconfig.GuardrailConfig()
 guardrail.enabled = True
 guardrail.mode = "observe"
@@ -610,21 +694,16 @@ cfg.active_connector = lambda: "codex"
 cfg.active_connectors = lambda: ["codex"]
 cfg.has_connector_configured = lambda: True
 cfg.connector_workspace_dir = lambda: ""
-app = AppContext()
-app.cfg = cfg
-app.logger = None
-result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
-print(result.output)
-if result.exit_code != 0:
-    raise SystemExit(result.exit_code)
-if not all(expected in result.output for expected in ("Codex", "codex", "open")):
-    raise SystemExit("Codex open runtime row is missing from guardrail status")
-if "registration-missing" in result.output or "runtime fail-mode drift" in result.output:
-    raise SystemExit("Codex guardrail status still reports registration drift")
+report = connector_fail_mode_report(cfg, "codex")
+print(json.dumps(report, sort_keys=True))
+if report["effective"] != "open" or report["runtime"] != "open":
+    raise SystemExit("Codex runtime fail-mode report is not open")
+if report["current"] is not True or report["drift"]:
+    raise SystemExit("Codex runtime fail-mode report is not current: " + ", ".join(report["drift"]))
 `
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, python, "-c", script)
+	cmd := exec.CommandContext(ctx, python, "-S", "-c", script)
 	overrides := map[string]string{
 		"PYTHONPATH":             pythonPath,
 		"PYTHONUTF8":             "1",
@@ -645,15 +724,15 @@ if "registration-missing" in result.output or "runtime fail-mode drift" in resul
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("Python guardrail status acceptance failed: %v\n%s", err, output)
+		t.Fatalf("Python Codex fail-mode report acceptance failed: %v\n%s", err, output)
 	}
-	if !bytes.Contains(output, []byte("Codex")) ||
-		!bytes.Contains(output, []byte("codex")) ||
-		!bytes.Contains(output, []byte("open")) {
-		t.Fatalf("Python guardrail status omitted the Codex open runtime row:\n%s", output)
+	if !bytes.Contains(output, []byte(`"effective": "open"`)) ||
+		!bytes.Contains(output, []byte(`"runtime": "open"`)) ||
+		!bytes.Contains(output, []byte(`"current": true`)) {
+		t.Fatalf("Python Codex fail-mode report omitted current open runtime state:\n%s", output)
 	}
-	if bytes.Contains(output, []byte("registration-missing")) || bytes.Contains(output, []byte("runtime fail-mode drift")) {
-		t.Fatalf("Python guardrail status retained Codex registration drift:\n%s", output)
+	if !bytes.Contains(output, []byte(`"drift": []`)) || bytes.Contains(output, []byte("registration-missing")) {
+		t.Fatalf("Python Codex fail-mode report retained registration drift:\n%s", output)
 	}
 }
 

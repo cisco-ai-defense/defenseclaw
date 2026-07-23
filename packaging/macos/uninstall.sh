@@ -37,6 +37,10 @@ SUPPORT_DIR="${INSTALL_PREFIX}"
 LOGS_DIR="/Library/Logs/Cisco/SecureClient/DefenseClaw"
 PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist"
 LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw"
+GUARDIAN_PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
+GUARDIAN_LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw.hook-guardian"
+ENUMERATOR_PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
+ENUMERATOR_LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw.hook-enumerator"
 
 # Legacy paths + labels from pre-managed-layout DefenseClaw installs.
 # Kept so that running the new uninstall.sh on an old-layout host
@@ -46,6 +50,8 @@ LEGACY_SUPPORT_DIR="/Library/Application Support/DefenseClaw"
 LEGACY_LOGS_DIR="/Library/Logs/DefenseClaw"
 LEGACY_PLIST_DST="/Library/LaunchDaemons/com.defenseclaw.gateway.plist"
 LEGACY_LAUNCHD_LABEL="com.defenseclaw.gateway"
+LEGACY_GUARDIAN_PLIST_DST="/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist"
+LEGACY_GUARDIAN_LAUNCHD_LABEL="com.defenseclaw.hook-guardian"
 
 # Legacy service-user names swept on --purge. Pre-root DefenseClaw
 # installs created these accounts via ensure_service_user in install.sh.
@@ -57,6 +63,25 @@ ASSUME_YES="false"
 TARGET_USER=""
 KEEP_AGENT_CONFIGS="false"
 SCRUB_FAILED="false"
+
+# Source enumerate_local_users + home_perms_ok if the library is present.
+# uninstall.sh runs in three contexts: from a shipped bundle (SCRIPT_DIR
+# has lib/ beside it), from the managed install tree (SUPPORT_DIR/lib/),
+# and from the repo tree during tests. Try each; a missing lib just
+# means multi-user iteration falls back to the single-user SUDO_USER
+# path below.
+_UNINSTALL_LIB=""
+for _c in \
+  "${SCRIPT_DIR}/lib/installer_lib.sh" \
+  "${SUPPORT_DIR}/lib/installer_lib.sh" \
+  "${SCRIPT_DIR}/../lib/installer_lib.sh"; do
+  if [[ -f "${_c}" ]]; then _UNINSTALL_LIB="${_c}"; break; fi
+done
+unset _c
+if [[ -n "${_UNINSTALL_LIB}" ]]; then
+  # shellcheck source=lib/installer_lib.sh
+  . "${_UNINSTALL_LIB}"
+fi
 
 # ---- helpers ------------------------------------------------------------
 
@@ -130,16 +155,39 @@ done
 [[ "$(uname -s)" == "Darwin" ]] || die "macOS only"
 [[ $EUID -eq 0 ]] || die "must run as root (try: sudo $0 $*)"
 
+# Purge targets: newline-separated user:uid:gid:home lines. When --user
+# is passed explicitly, resolve that one user; otherwise iterate every
+# eligible local user via enumerate_local_users (falls back to SUDO_USER
+# if the library isn't sourced in this environment).
+PURGE_TARGETS=""
 if [[ "${PURGE}" == "true" ]]; then
-  if [[ -z "${TARGET_USER}" ]]; then
-    TARGET_USER="${SUDO_USER:-}"
-  fi
   if [[ -n "${TARGET_USER}" ]]; then
     TARGET_HOME="$(dscl . -read "/Users/${TARGET_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
     if [[ -z "${TARGET_HOME}" || ! -d "${TARGET_HOME}" ]]; then
       die "could not resolve home for --user ${TARGET_USER} (dscl returned '${TARGET_HOME}'); refusing to purge without a valid target"
     fi
+    _tuid="$(id -u "${TARGET_USER}" 2>/dev/null || echo "")"
+    _tgid="$(id -g "${TARGET_USER}" 2>/dev/null || echo "")"
+    PURGE_TARGETS="${TARGET_USER}:${_tuid}:${_tgid}:${TARGET_HOME}"
+    unset _tuid _tgid
+  elif command -v enumerate_local_users >/dev/null 2>&1; then
+    PURGE_TARGETS="$(enumerate_local_users || true)"
+  else
+    # Library not sourced — fall back to the legacy SUDO_USER single-user path.
+    _fallback_user="${SUDO_USER:-}"
+    if [[ -n "${_fallback_user}" ]]; then
+      TARGET_USER="${_fallback_user}"
+      TARGET_HOME="$(dscl . -read "/Users/${_fallback_user}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+      if [[ -n "${TARGET_HOME}" && -d "${TARGET_HOME}" ]]; then
+        _tuid="$(id -u "${_fallback_user}" 2>/dev/null || echo "")"
+        _tgid="$(id -g "${_fallback_user}" 2>/dev/null || echo "")"
+        PURGE_TARGETS="${_fallback_user}:${_tuid}:${_tgid}:${TARGET_HOME}"
+        unset _tuid _tgid
+      fi
+    fi
+    unset _fallback_user
   fi
+
   if [[ "${ASSUME_YES}" != "true" ]]; then
     printf '[uninstall] --purge will DELETE:\n'
     printf '  %s\n' "${SUPPORT_DIR}" "${LOGS_DIR}"
@@ -148,15 +196,17 @@ if [[ "${PURGE}" == "true" ]]; then
       [[ -d "${LEGACY_SUPPORT_DIR}" ]] && printf '  %s\n' "${LEGACY_SUPPORT_DIR}"
       [[ -d "${LEGACY_LOGS_DIR}" ]]    && printf '  %s\n' "${LEGACY_LOGS_DIR}"
     fi
-    if [[ -n "${TARGET_USER:-}" && -n "${TARGET_HOME:-}" ]]; then
-      printf '  %s/.defenseclaw/\n' "${TARGET_HOME}"
+    if [[ -n "${PURGE_TARGETS}" ]]; then
+      printf '[uninstall] per-user cleanup targets (%d user(s)):\n' \
+        "$(printf '%s\n' "${PURGE_TARGETS}" | grep -c . || true)"
+      while IFS=: read -r _u _uid _gid _h; do
+        [[ -z "${_u}" ]] && continue
+        printf '  %s/.defenseclaw/\n' "${_h}"
+      done <<< "${PURGE_TARGETS}"
+      unset _u _uid _gid _h
       if [[ "${KEEP_AGENT_CONFIGS}" != "true" ]]; then
-        printf '[uninstall] and will SCRUB DefenseClaw entries from:\n'
-        for f in "${TARGET_HOME}/.codex/config.toml" \
-                 "${TARGET_HOME}/.claude/settings.json" \
-                 "${TARGET_HOME}/.cursor/hooks.json"; do
-          [[ -f "${f}" ]] && printf '  %s\n' "${f}"
-        done
+        printf '[uninstall] and will SCRUB DefenseClaw entries from each user'\''s:\n'
+        printf '  ~/.codex/config.toml\n  ~/.claude/settings.json\n  ~/.cursor/hooks.json\n'
         printf '  (non-DefenseClaw entries preserved)\n'
       fi
     fi
@@ -194,8 +244,11 @@ stop_daemon() {
   fi
 }
 
-stop_daemon "${LAUNCHD_LABEL}"        "${PLIST_DST}"
-stop_daemon "${LEGACY_LAUNCHD_LABEL}" "${LEGACY_PLIST_DST}"
+stop_daemon "${LAUNCHD_LABEL}"            "${PLIST_DST}"
+stop_daemon "${GUARDIAN_LAUNCHD_LABEL}"   "${GUARDIAN_PLIST_DST}"
+stop_daemon "${ENUMERATOR_LAUNCHD_LABEL}" "${ENUMERATOR_PLIST_DST}"
+stop_daemon "${LEGACY_LAUNCHD_LABEL}"     "${LEGACY_PLIST_DST}"
+stop_daemon "${LEGACY_GUARDIAN_LAUNCHD_LABEL}" "${LEGACY_GUARDIAN_PLIST_DST}"
 
 # ---- agent-config scrub (BEFORE we delete ~/.defenseclaw) --------------
 #
@@ -209,6 +262,7 @@ PY="$(command -v python3 || printf '/usr/bin/python3')"
 scrub_agent_config() {
   local connector="$1"
   local cfg="$2"
+  local run_as_user="$3"   # empty ⇒ run as caller (root)
   if [[ ! -f "${cfg}" ]]; then
     return 0
   fi
@@ -219,8 +273,8 @@ scrub_agent_config() {
   fi
   log "  scrubbing ${connector} entries from ${cfg}"
   local rc=0
-  if [[ -n "${TARGET_USER:-}" && $(id -u "${TARGET_USER}" 2>/dev/null) != "0" ]]; then
-    sudo -u "${TARGET_USER}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+  if [[ -n "${run_as_user}" && $(id -u "${run_as_user}" 2>/dev/null) != "0" ]]; then
+    sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
   else
     "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
   fi
@@ -236,17 +290,27 @@ scrub_agent_config() {
 
 if [[ "${PURGE}" == "true" \
    && "${KEEP_AGENT_CONFIGS}" != "true" \
-   && -n "${TARGET_HOME:-}" ]]; then
-  scrub_agent_config codex      "${TARGET_HOME}/.codex/config.toml"
-  scrub_agent_config claudecode "${TARGET_HOME}/.claude/settings.json"
-  scrub_agent_config cursor     "${TARGET_HOME}/.cursor/hooks.json"
+   && -n "${PURGE_TARGETS}" ]]; then
+  while IFS=: read -r _pu _puid _pgid _phome; do
+    [[ -z "${_pu}" || -z "${_phome}" ]] && continue
+    log "scrubbing per-user hook configs for ${_pu} (${_phome})"
+    scrub_agent_config codex      "${_phome}/.codex/config.toml"    "${_pu}"
+    scrub_agent_config claudecode "${_phome}/.claude/settings.json" "${_pu}"
+    scrub_agent_config cursor     "${_phome}/.cursor/hooks.json"    "${_pu}"
+  done <<< "${PURGE_TARGETS}"
+  unset _pu _puid _pgid _phome
 fi
 
 # ---- remove files we own unconditionally --------------------------------
 #
 # Sweep both the current and legacy plist / binary tree.
 
-for plist in "${PLIST_DST}" "${LEGACY_PLIST_DST}"; do
+for plist in \
+  "${PLIST_DST}" \
+  "${GUARDIAN_PLIST_DST}" \
+  "${ENUMERATOR_PLIST_DST}" \
+  "${LEGACY_PLIST_DST}" \
+  "${LEGACY_GUARDIAN_PLIST_DST}"; do
   if [[ -f "${plist}" ]]; then
     log "removing ${plist}"
     rm -f "${plist}"
@@ -326,25 +390,31 @@ if [[ "${PURGE}" == "true" ]]; then
     fi
   done
 
-  if [[ -n "${TARGET_USER:-}" && -n "${TARGET_HOME:-}" && -d "${TARGET_HOME}/.defenseclaw" ]]; then
+  if [[ -n "${PURGE_TARGETS}" ]]; then
     if [[ "${SCRUB_FAILED}" == "true" && "${KEEP_AGENT_CONFIGS}" != "true" ]]; then
       # We're about to delete the hook scripts, but at least one agent
       # config still references them. Deleting now would leave every
       # future agent tool call fail-closed (exit 127 → block). Refuse
       # rather than paint the operator into that corner.
-      die "one or more agent-config scrubs failed; refusing to delete ${TARGET_HOME}/.defenseclaw (rerun with --keep-agent-configs to force the delete, then repair or reinstall)"
+      die "one or more agent-config scrubs failed; refusing to delete per-user .defenseclaw dirs (rerun with --keep-agent-configs to force the delete, then repair or reinstall)"
     fi
-    log "purging ${TARGET_HOME}/.defenseclaw"
-    rm -rf "${TARGET_HOME}/.defenseclaw"
-    if [[ "${KEEP_AGENT_CONFIGS}" == "true" ]]; then
-      warn "--keep-agent-configs: agent configs still reference deleted hook scripts."
-      warn "  agents will fail-close every tool call until reinstall or manual edit."
-      for cfg in "${TARGET_HOME}/.codex/config.toml" \
-                 "${TARGET_HOME}/.claude/settings.json" \
-                 "${TARGET_HOME}/.cursor/hooks.json"; do
-        [[ -f "${cfg}" ]] && warn "    ${cfg}"
-      done
-    fi
+    while IFS=: read -r _pu _puid _pgid _phome; do
+      [[ -z "${_pu}" || -z "${_phome}" ]] && continue
+      if [[ -d "${_phome}/.defenseclaw" ]]; then
+        log "purging ${_phome}/.defenseclaw"
+        rm -rf "${_phome}/.defenseclaw"
+      fi
+      if [[ "${KEEP_AGENT_CONFIGS}" == "true" ]]; then
+        for cfg in "${_phome}/.codex/config.toml" \
+                   "${_phome}/.claude/settings.json" \
+                   "${_phome}/.cursor/hooks.json"; do
+          if [[ -f "${cfg}" ]]; then
+            warn "--keep-agent-configs: ${cfg} still references deleted hook scripts (will fail-close every tool call)"
+          fi
+        done
+      fi
+    done <<< "${PURGE_TARGETS}"
+    unset _pu _puid _pgid _phome
   fi
 else
   log "preserving ${SUPPORT_DIR} (config + audit DB)"
@@ -355,15 +425,24 @@ fi
 # ---- sanity check -------------------------------------------------------
 
 REMAINING=()
-[[ -e "${PLIST_DST}" ]]              && REMAINING+=("${PLIST_DST}")
-[[ -e "${LEGACY_PLIST_DST}" ]]       && REMAINING+=("${LEGACY_PLIST_DST}")
-[[ -e "${INSTALL_PREFIX}" ]]         && REMAINING+=("${INSTALL_PREFIX}")
-[[ -e "${LEGACY_INSTALL_PREFIX}" ]]  && REMAINING+=("${LEGACY_INSTALL_PREFIX}")
+[[ -e "${PLIST_DST}" ]]                 && REMAINING+=("${PLIST_DST}")
+[[ -e "${GUARDIAN_PLIST_DST}" ]]        && REMAINING+=("${GUARDIAN_PLIST_DST}")
+[[ -e "${ENUMERATOR_PLIST_DST}" ]]      && REMAINING+=("${ENUMERATOR_PLIST_DST}")
+[[ -e "${LEGACY_PLIST_DST}" ]]          && REMAINING+=("${LEGACY_PLIST_DST}")
+[[ -e "${LEGACY_GUARDIAN_PLIST_DST}" ]] && REMAINING+=("${LEGACY_GUARDIAN_PLIST_DST}")
+[[ -e "${INSTALL_PREFIX}" ]]            && REMAINING+=("${INSTALL_PREFIX}")
+[[ -e "${LEGACY_INSTALL_PREFIX}" ]]     && REMAINING+=("${LEGACY_INSTALL_PREFIX}")
 if [[ "${PURGE}" == "true" ]]; then
   [[ -e "${LOGS_DIR}" ]]         && REMAINING+=("${LOGS_DIR}")
   [[ -e "${LEGACY_SUPPORT_DIR}" ]] && REMAINING+=("${LEGACY_SUPPORT_DIR}")
   [[ -e "${LEGACY_LOGS_DIR}" ]]    && REMAINING+=("${LEGACY_LOGS_DIR}")
-  [[ -n "${TARGET_HOME:-}" && -e "${TARGET_HOME}/.defenseclaw" ]] && REMAINING+=("${TARGET_HOME}/.defenseclaw")
+  if [[ -n "${PURGE_TARGETS}" ]]; then
+    while IFS=: read -r _pu _puid _pgid _phome; do
+      [[ -z "${_phome}" ]] && continue
+      [[ -e "${_phome}/.defenseclaw" ]] && REMAINING+=("${_phome}/.defenseclaw")
+    done <<< "${PURGE_TARGETS}"
+    unset _pu _puid _pgid _phome
+  fi
 fi
 if (( ${#REMAINING[@]} > 0 )); then
   warn "the following paths still exist (manual cleanup needed):"
