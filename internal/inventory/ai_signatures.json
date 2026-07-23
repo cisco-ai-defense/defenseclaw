@@ -43,7 +43,18 @@
         "openai"
       ],
       "application_names": [],
-      "local_endpoints": []
+      "local_endpoints": [],
+      "skill_paths": [
+        "~/.codex/skills",
+        ".codex/skills"
+      ],
+      "rule_paths": [
+        "~/.codex/rules",
+        ".codex/rules"
+      ],
+      "plugin_paths": [
+        "~/.codex/plugins"
+      ]
     },
     {
       "id": "claudecode",
@@ -94,7 +105,13 @@
       "application_names": [
         "Claude.app"
       ],
-      "local_endpoints": []
+      "local_endpoints": [],
+      "skill_paths": [
+        "~/.claude/skills"
+      ],
+      "rule_paths": [
+        "~/.claude/rules"
+      ]
     },
     {
       "id": "openclaw",
@@ -125,7 +142,10 @@
         "openclaw"
       ],
       "application_names": [],
-      "local_endpoints": []
+      "local_endpoints": [],
+      "plugin_paths": [
+        "~/.openclaw/plugins"
+      ]
     },
     {
       "id": "zeptoclaw",
@@ -189,7 +209,13 @@
         "hermes agent"
       ],
       "application_names": [],
-      "local_endpoints": []
+      "local_endpoints": [],
+      "skill_paths": [
+        "~/.hermes/skills"
+      ],
+      "plugin_paths": [
+        "~/.hermes/plugins"
+      ]
     },
     {
       "id": "cursor",
@@ -237,7 +263,11 @@
         "Cursor.app",
         "Cursor"
       ],
-      "local_endpoints": []
+      "local_endpoints": [],
+      "rule_paths": [
+        "~/.cursor/rules",
+        ".cursor/rules"
+      ]
     },
     {
       "id": "windsurf",
@@ -285,7 +315,10 @@
         "Windsurf.app",
         "Windsurf"
       ],
-      "local_endpoints": []
+      "local_endpoints": [],
+      "rule_paths": [
+        ".windsurf/rules"
+      ]
     },
     {
       "id": "geminicli",

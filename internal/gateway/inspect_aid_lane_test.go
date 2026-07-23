@@ -239,6 +239,88 @@ func TestMergeWithAIDVerdict_StrictestWins(t *testing.T) {
 	})
 }
 
+// TestMergeWithLaneVerdict_SynthesizesDetailedFindings pins the fix for
+// the IPC total_scans stat: the AID / LLM-judge lanes only populate the
+// stringy verdict.Findings slice, so before this synthesis step
+// emitInspectVerdictFindings early-returned on empty DetailedFindings and
+// no scan_results row was ever written for a managed_enterprise hook
+// inspection — total_scans stayed at 0 even though every hook call ran
+// an inspection. The merge helper must synthesize one DetailedFinding
+// per lane finding so the downstream pipeline persists a scan row.
+func TestMergeWithLaneVerdict_SynthesizesDetailedFindings(t *testing.T) {
+	t.Run("aid_findings_become_detailed_findings", func(t *testing.T) {
+		aid := &ScanVerdict{
+			Action:   "block",
+			Severity: "HIGH",
+			Findings: []string{"pii.email", "policy.jira"},
+		}
+		merged := mergeWithAIDVerdict(nil, aid)
+		if len(merged.DetailedFindings) != 2 {
+			t.Fatalf("DetailedFindings = %d, want 2 (one per AID finding)", len(merged.DetailedFindings))
+		}
+		got := merged.DetailedFindings[0]
+		if got.RuleID != "ai-defense:pii.email" {
+			t.Errorf("RuleID = %q, want ai-defense:pii.email", got.RuleID)
+		}
+		if got.Title != "pii.email" {
+			t.Errorf("Title = %q, want pii.email", got.Title)
+		}
+		if got.Severity != "HIGH" {
+			t.Errorf("Severity = %q, want HIGH (from verdict)", got.Severity)
+		}
+		if len(got.Tags) != 1 || got.Tags[0] != "ai-defense" {
+			t.Errorf("Tags = %v, want [ai-defense]", got.Tags)
+		}
+	})
+
+	t.Run("judge_findings_become_detailed_findings_with_judge_tag", func(t *testing.T) {
+		judge := &ScanVerdict{
+			Action:   "alert",
+			Severity: "MEDIUM",
+			Findings: []string{"prompt_injection"},
+		}
+		merged := mergeWithJudgeVerdict(nil, judge)
+		if len(merged.DetailedFindings) != 1 {
+			t.Fatalf("DetailedFindings = %d, want 1", len(merged.DetailedFindings))
+		}
+		if got := merged.DetailedFindings[0].RuleID; got != "llm-judge:prompt_injection" {
+			t.Errorf("RuleID = %q, want llm-judge:prompt_injection", got)
+		}
+		if got := merged.DetailedFindings[0].Tags; len(got) != 1 || got[0] != "llm-judge" {
+			t.Errorf("Tags = %v, want [llm-judge]", got)
+		}
+	})
+
+	t.Run("no_findings_no_synthesis", func(t *testing.T) {
+		aid := &ScanVerdict{Action: "block", Severity: "HIGH"}
+		merged := mergeWithAIDVerdict(nil, aid)
+		if len(merged.DetailedFindings) != 0 {
+			t.Errorf("DetailedFindings = %d, want 0 when lane returned no findings", len(merged.DetailedFindings))
+		}
+	})
+
+	t.Run("preserves_existing_detailed_findings", func(t *testing.T) {
+		local := &ToolInspectVerdict{
+			Action:   "alert",
+			Severity: "MEDIUM",
+			DetailedFindings: []RuleFinding{
+				{RuleID: "LOCAL-1", Severity: "MEDIUM"},
+			},
+		}
+		aid := &ScanVerdict{Action: "block", Severity: "HIGH", Findings: []string{"pii.email"}}
+		merged := mergeWithAIDVerdict(local, aid)
+		if len(merged.DetailedFindings) != 2 {
+			t.Fatalf("DetailedFindings = %d, want 2 (local + synthesized)", len(merged.DetailedFindings))
+		}
+		if merged.DetailedFindings[0].RuleID != "LOCAL-1" {
+			t.Errorf("local finding not preserved at head: %+v", merged.DetailedFindings)
+		}
+		if merged.DetailedFindings[1].RuleID != "ai-defense:pii.email" {
+			t.Errorf("synthesized finding not appended: %+v", merged.DetailedFindings)
+		}
+	})
+}
+
 // TestInspectToolPolicy_AIDLaneFiresWhenLocalAllow drives the full
 // inspectToolPolicy path end-to-end with no local-rule match,
 // asserting that an AID Block escalates the verdict from allow to

@@ -33,11 +33,31 @@ set -euo pipefail
 
 # ---- defaults -----------------------------------------------------------
 
-DEFAULT_MODE="observe"
+# Managed-enterprise installs default to enforcing (action) mode. This
+# installer only ever writes deployment_mode: managed_enterprise (see
+# installer_lib.sh:render_config), and the managed rollout contract is
+# "hooks enforce the verdict by default" — every deployment currently
+# requires an operator to flip mode by hand or by post-install YAML edit
+# to reach that state, which is easy to forget. Flipping the default to
+# `action` puts every managed_enterprise install on the enforcing side
+# of the observe/action decision immediately. Operators who want the
+# observe pilot behavior still get it by passing --mode observe.
+#
+# NB: this default is installer-scoped only. The unmanaged / BYOD
+# installers (scripts/install.sh, scripts/install.ps1, defenseclaw
+# quickstart) and the Go/Python config defaults keep `observe` — the
+# consumer install experience is unchanged.
+DEFAULT_MODE="action"
 DEFAULT_CONNECTOR="codex"
 DEFAULT_API_PORT="18970"
 DISABLE_REDACTION="false"
-DEFAULT_ENV="prod"
+
+# AVC ships a static env_config.json under the managed install tree
+# with the AI Defense endpoint DefenseClaw should target. That file is
+# the source of truth on managed_enterprise hosts; --config-file lets
+# operators point at a different path (fleet override, test fixture).
+# --override-endpoint remains as the release-owned adhoc-testing seam.
+DEFAULT_CONFIG_FILE="/opt/cisco/secureclient/defenseclaw/env_config.json"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd 2>/dev/null || echo "${SCRIPT_DIR}")"
@@ -192,7 +212,13 @@ die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 
 # The persistent install.log sink is set up LATER (after the fresh-host
 # preflight passes and after LOGS_DIR has been created by
-# create_install_directory_no_replace). Creating LOGS_DIR before the
+# create_install_directory_reconcile). Creating LOGS_DIR here (before
+# the marker classification runs) would still be valid on a reinstall
+# because the reconcile helper is idempotent, but the current ordering
+# preserves the pre-reconcile invariant that all filesystem writes
+# happen AFTER the marker loop has classified current-vs-legacy. Do
+# not move this up without also revalidating the marker loop's
+# read-only assumptions. Historical note: earlier fresh-install-only
 # preflight would trip the "install directory appeared after fresh-host
 # preflight" check on the very next line, and creating install.log
 # before the preflight also required a special-case exemption that made
@@ -220,27 +246,163 @@ forget_install_temporary() {
   done
 }
 
-install_file_no_replace() {
+install_file_reconcile() {
+  # install_file_reconcile SRC DST OWNER GROUP MODE
+  #
+  # Atomically writes DST from SRC with the requested owner/group/mode.
+  # Overwrites an existing regular file at DST (this is the idempotent
+  # reinstall contract for managed_enterprise — see the marker-loop
+  # comment above).
+  #
+  # Symlinks at DST are STILL refused: a symlink under a root-owned
+  # install path can only get there via privileged tampering, and
+  # renaming a temp file over a symlink target would attack whatever
+  # the symlink points at. Fail loud instead.
   local source="$1" destination="$2" owner="$3" group="$4" mode="$5"
   local temporary
-  [[ ! -e "${destination}" && ! -L "${destination}" ]] \
-    || die "install destination appeared after fresh-host preflight: ${destination}"
+  if [[ -L "${destination}" ]]; then
+    die "install destination is a symlink; refusing to overwrite: ${destination}"
+  fi
   temporary="$(mktemp "${destination}.new.XXXXXX")" \
     || die "could not reserve a private install file beside ${destination}"
   INSTALL_TEMP_FILES+=("${temporary}")
   install -o "${owner}" -g "${group}" -m "${mode}" "${source}" "${temporary}"
-  ln "${temporary}" "${destination}" \
-    || die "install destination appeared concurrently and was preserved: ${destination}"
-  rm -f -- "${temporary}"
+  # rename(2) is atomic across paths on the same filesystem; the two
+  # files are guaranteed to live in the same directory (see mktemp
+  # template above), so mv here is a metadata swap the observer will
+  # see as either "old file" or "new file", never partial.
+  /bin/mv -f -- "${temporary}" "${destination}" \
+    || die "could not atomically replace ${destination}"
   forget_install_temporary "${temporary}"
 }
 
-create_install_directory_no_replace() {
+# ---- AVC env_config.json trust helpers ---------------------------------
+# The AI Defense endpoint config file is authored by AVC (a signed
+# system component) and dropped under a root-owned tree. Verify the
+# managed-enterprise trust invariants before reading its contents:
+# root-owned, no group/other write, no symlinks anywhere in the
+# ancestor chain, no write-capable macOS ACL. These mirror the checks
+# packaging/launchd/install-enterprise.sh applies to its --config source
+# (see :100-151 in that file). Kept inline here (rather than in
+# installer_lib.sh) so installer_lib.sh's pure-function contract stays
+# intact and its test harness does not accidentally invoke the
+# die-emitting trust path on a tmpdir fixture.
+_refuse_symlink_or_die() {
+  local path="$1" label="$2"
+  [[ ! -L "${path}" ]] || die "${label} must not be a symlink: ${path}"
+}
+
+_assert_no_write_acl_or_die() {
+  local path="$1" label="$2"
+  local output line normalized permissions permission
+  local -a acl_permissions
+  output="$(/bin/ls -lde -- "${path}" 2>/dev/null)" \
+    || die "${label} cannot be inspected for ACLs: ${path}"
+  while IFS= read -r line; do
+    normalized="$(printf '%s' "${line}" | /usr/bin/tr '[:upper:]' '[:lower:]')"
+    normalized="${normalized#"${normalized%%[![:space:]]*}"}"
+    [[ "${normalized}" =~ ^[0-9]+: ]] || continue
+    [[ "${normalized}" == *" allow "* ]] || continue
+    permissions="${normalized#* allow }"
+    permissions="${permissions%% *}"
+    [[ -n "${permissions}" ]] \
+      || die "${label} has an unparseable macOS allow ACL: ${path}"
+    IFS=',' read -r -a acl_permissions <<<"${permissions}"
+    for permission in "${acl_permissions[@]}"; do
+      case "${permission}" in
+        write|add_file|append|add_subdirectory|delete|delete_child|writeattr|writeextattr|writesecurity|chown)
+          die "${label} has a write-capable macOS ACL entry (${permission}): ${path}"
+          ;;
+      esac
+    done
+  done <<<"${output}"
+}
+
+_assert_trusted_dir_or_die() {
+  local path="$1" label="$2" uid mode
+  _refuse_symlink_or_die "${path}" "${label}"
+  [[ -d "${path}" ]] || die "${label} ancestor is missing: ${path}"
+  _assert_no_write_acl_or_die "${path}" "${label}"
+  uid="$(/usr/bin/stat -f '%u' "${path}" 2>/dev/null || echo '')"
+  mode="$(/usr/bin/stat -f '%Lp' "${path}" 2>/dev/null || echo '')"
+  [[ "${uid}" == "0" ]] \
+    || die "${label} ancestor is not root-owned: ${path} (uid=${uid})"
+  (( (8#${mode} & 8#022) == 0 )) \
+    || die "${label} ancestor is group/other writable: ${path} (mode=${mode})"
+}
+
+# _assert_trusted_env_config_file_or_die PATH
+#   Enforces the managed-enterprise trust contract on a file authored
+#   by AVC and dropped under a root-owned tree. Dies with a labelled
+#   message on any violation. Walks every ancestor of PATH (absolute
+#   path only; relative paths are rejected). Skipped when
+#   DC_INSTALLER_SKIP_ROOT_CHECK=1 (the same seam that bypasses the
+#   euid check for tests operating on tmpdir fixtures).
+_assert_trusted_env_config_file_or_die() {
+  local path="$1" label="AVC env_config.json"
+  if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" == "1" ]]; then
+    return 0
+  fi
+  case "${path}" in
+    /*) ;;
+    *) die "${label} must be an absolute path: ${path}" ;;
+  esac
+  _refuse_symlink_or_die "${path}" "${label}"
+  [[ -f "${path}" ]] || die "${label} is not a regular file: ${path}"
+  _assert_no_write_acl_or_die "${path}" "${label}"
+  local uid mode
+  uid="$(/usr/bin/stat -f '%u' "${path}" 2>/dev/null || echo '')"
+  mode="$(/usr/bin/stat -f '%Lp' "${path}" 2>/dev/null || echo '')"
+  [[ "${uid}" == "0" ]] \
+    || die "${label} is not root-owned: ${path} (uid=${uid})"
+  (( (8#${mode} & 8#022) == 0 )) \
+    || die "${label} is group/other writable: ${path} (mode=${mode})"
+  # Walk every ancestor and apply the same trust checks. The install-
+  # enterprise.sh trust helper does the same at :112-138.
+  local parent current="/" trimmed_parent component
+  local -a source_parts
+  parent="$(dirname "${path}")"
+  _assert_trusted_dir_or_die "${current}" "${label}"
+  trimmed_parent="${parent#/}"
+  IFS='/' read -r -a source_parts <<<"${trimmed_parent}"
+  for component in "${source_parts[@]}"; do
+    [[ -n "${component}" ]] || continue
+    case "${component}" in
+      .) continue ;;
+      ..) die "${label} path must not contain parent traversal: ${path}" ;;
+    esac
+    if [[ "${current}" == "/" ]]; then
+      current="/${component}"
+    else
+      current="${current}/${component}"
+    fi
+    _assert_trusted_dir_or_die "${current}" "${label}"
+  done
+}
+
+create_install_directory_reconcile() {
+  # create_install_directory_reconcile PATH OWNER GROUP MODE
+  #
+  # Ensures PATH exists as a directory with the requested owner/group
+  # and mode. Existing directory contents are left in place — the
+  # idempotent-reinstall contract for managed_enterprise treats a
+  # runtime dir with an existing audit.db / device.key / hook-guardian
+  # state as data-carrying and NEVER wipes it.
+  #
+  # Symlinks at PATH are refused for the same reason as
+  # install_file_reconcile: a symlink under a root-owned install path
+  # can only be there via tampering.
   local path="$1" owner="$2" group="$3" mode="$4"
-  [[ ! -e "${path}" && ! -L "${path}" ]] \
-    || die "install directory appeared after fresh-host preflight: ${path}"
-  mkdir "${path}" \
-    || die "install directory appeared concurrently and was preserved: ${path}"
+  if [[ -L "${path}" ]]; then
+    die "install directory is a symlink; refusing to reconcile: ${path}"
+  fi
+  if [[ -e "${path}" ]]; then
+    [[ -d "${path}" ]] \
+      || die "install directory path exists but is not a directory: ${path}"
+  else
+    mkdir "${path}" \
+      || die "could not create install directory: ${path}"
+  fi
   chown "${owner}:${group}" "${path}"
   chmod "${mode}" "${path}"
 }
@@ -251,7 +413,7 @@ ensure_shared_install_parent() {
     [[ -d "${path}" && ! -L "${path}" ]] \
       || die "shared install parent is not a real directory: ${path}"
   else
-    create_install_directory_no_replace "${path}" root wheel 0755
+    create_install_directory_reconcile "${path}" root wheel 0755
   fi
   local owner mode acl_output acl_line normalized permissions permission
   local -a acl_permissions
@@ -297,14 +459,17 @@ Gateway options:
                             Examples: --connector cursor
                                       --connector cursor,claudecode
   --port PORT               Loopback API port (default: ${DEFAULT_API_PORT})
-  --env {prod|preview}      AI Defense cloud environment (default: ${DEFAULT_ENV}).
-                            Selects the cisco_ai_defense.endpoint that the
-                            managed daemon uses to inspect content.
-                            Use 'preview' only for internal validation against
-                            the aiteam preview deployment.
+  --config-file PATH        Path to the AVC-authored env_config.json that
+                            supplies cisco_ai_defense.endpoint. Default:
+                            ${DEFAULT_CONFIG_FILE}
+                            The file must be root-owned and non-writable by
+                            group/other, per the managed_enterprise trust
+                            contract. Expected JSON shape:
+                            {"cisco_ai_defense_endpoint": "https://..."}
   --override-endpoint URL   Point cisco_ai_defense.endpoint at an arbitrary AI
                             Defense host for adhoc testing. Takes precedence
-                            over --env. Must be a full http(s) URL, e.g.
+                            over --config-file. Must be an HTTPS bare origin
+                            (no userinfo, path, query, or fragment), e.g.
                             https://sam-aid-004864.api.inspect.aidefense.aiteam.cisco.com
   --disable-redaction       Disable redaction in audit/sinks (default: on)
   --binary PATH             Use prebuilt binary (default: alongside install.sh)
@@ -333,7 +498,7 @@ EOF
 MODE="${DEFAULT_MODE}"
 CONNECTOR="${DEFAULT_CONNECTOR}"
 API_PORT="${DEFAULT_API_PORT}"
-AID_ENV="${DEFAULT_ENV}"
+CONFIG_FILE="${DEFAULT_CONFIG_FILE}"
 OVERRIDE_ENDPOINT=""
 ALLOW_EMPTY_USERS="false"
 
@@ -342,7 +507,7 @@ while [[ $# -gt 0 ]]; do
     --mode)             MODE="${2:?}"; shift 2;;
     --connector)        CONNECTOR="${2:?}"; shift 2;;
     --port)             API_PORT="${2:?}"; shift 2;;
-    --env)              AID_ENV="${2:?}"; shift 2;;
+    --config-file)      CONFIG_FILE="${2:?}"; shift 2;;
     --override-endpoint) OVERRIDE_ENDPOINT="${2:?}"; shift 2;;
     --disable-redaction|--no-redact) DISABLE_REDACTION="true"; shift;;
     --binary)           BINARY_SRC="${2:?}"; SKIP_BUILD="true"; shift 2;;
@@ -363,24 +528,6 @@ case "${MODE}" in
   *) die "--mode must be 'observe' or 'action' (got: ${MODE})";;
 esac
 
-# --override-endpoint (when set) wins over --env; resolve_aid_endpoint
-# validates it and strips a trailing slash. Distinct return codes let us
-# report exactly which flag was wrong.
-_ep_rc=0
-AID_ENDPOINT="$(resolve_aid_endpoint "${AID_ENV}" "${OVERRIDE_ENDPOINT}")" || _ep_rc=$?
-if (( _ep_rc == 2 )); then
-  die "--override-endpoint must be a full http(s) URL without spaces or quotes (got: ${OVERRIDE_ENDPOINT})"
-elif (( _ep_rc != 0 )); then
-  die "--env must be 'prod' or 'preview' (got: ${AID_ENV})"
-fi
-unset _ep_rc
-if [[ -n "${OVERRIDE_ENDPOINT}" ]]; then
-  case "${OVERRIDE_ENDPOINT}" in
-    http://*) warn "--override-endpoint uses plaintext http://; the CMID bearer token would traverse the wire unencrypted — use only for local/adhoc testing";;
-  esac
-  log "AI Defense endpoint overridden for adhoc testing: ${AID_ENDPOINT} (ignoring --env ${AID_ENV})"
-fi
-
 if [[ ! "${API_PORT}" =~ ^[0-9]+$ ]] || (( API_PORT < 1 || API_PORT > 65535 )); then
   die "--port must be an integer between 1 and 65535 (got: ${API_PORT})"
 fi
@@ -400,6 +547,55 @@ for c in "${CONNECTORS[@]}"; do
     warn "connector '${c}' is not in the auto-wire list (codex|claudecode|cursor); will be written to config but per-user hooks won't be auto-wired"
   fi
 done
+
+# AI Defense endpoint resolution runs AFTER purely-syntactic flag
+# validation (--mode / --port / --connector) so a stale automation
+# passing a bad port or connector list still gets its per-flag error
+# message rather than being masked by the endpoint resolver's
+# fail-closed on a missing env_config.json.
+#
+# --override-endpoint (when set) wins over --config-file. When the
+# resolver falls through to the config file we ALSO run the managed-
+# enterprise trust check (root ownership, no group/other write, no
+# symlink, no write-capable macOS ACL) on the file and every ancestor
+# before reading it — this matches
+# packaging/launchd/install-enterprise.sh's --config trust contract.
+#
+# Distinct return codes let us report exactly which input was wrong so
+# operators don't chase the wrong flag:
+#   rc 0 - success (endpoint on stdout).
+#   rc 1 - config file missing / unreadable.
+#   rc 2 - config file malformed (bad JSON, missing field, bad URL).
+#   rc 3 - --override-endpoint supplied but malformed.
+if [[ -z "${OVERRIDE_ENDPOINT}" && -e "${CONFIG_FILE}" ]]; then
+  # Trust check runs before the resolver reads the file so a
+  # tamper-suspect file is rejected loudly (rather than silently
+  # feeding its contents into config.yaml). A missing file preempts
+  # the trust check — the resolver's rc-1 branch below gives a nicer
+  # "AVC module must drop this file" message in that case.
+  _assert_trusted_env_config_file_or_die "${CONFIG_FILE}"
+fi
+_ep_rc=0
+AID_ENDPOINT="$(resolve_aid_endpoint "${OVERRIDE_ENDPOINT}" "${CONFIG_FILE}")" || _ep_rc=$?
+if (( _ep_rc == 3 )); then
+  die "--override-endpoint must be an HTTPS bare origin (no userinfo, path, query, or fragment) — got: ${OVERRIDE_ENDPOINT}"
+elif (( _ep_rc == 2 )); then
+  die "--config-file ${CONFIG_FILE} is malformed: expected a JSON object with a valid \"cisco_ai_defense_endpoint\" URL. If AVC's drop is missing, pass --override-endpoint URL for adhoc testing."
+elif (( _ep_rc == 1 )); then
+  die "env_config.json not found at ${CONFIG_FILE}; the AVC module must drop this file before installing, or pass --override-endpoint URL for adhoc testing."
+elif (( _ep_rc != 0 )); then
+  die "could not resolve AI Defense endpoint (rc=${_ep_rc})"
+fi
+unset _ep_rc
+# _valid_aid_endpoint_url already rejects http:// / userinfo / paths /
+# queries / fragments at rc-3 time, so past this point the endpoint is
+# guaranteed to be an HTTPS bare origin. No plaintext-http warning path
+# is needed.
+if [[ -n "${OVERRIDE_ENDPOINT}" ]]; then
+  log "AI Defense endpoint overridden for adhoc testing: ${AID_ENDPOINT} (ignoring --config-file ${CONFIG_FILE})"
+else
+  log "AI Defense endpoint resolved from ${CONFIG_FILE}: ${AID_ENDPOINT}"
+fi
 
 # ---- preflight ----------------------------------------------------------
 
@@ -474,72 +670,221 @@ if [[ -n "${AGENT_VERSION}" ]]; then
   AGENT_VERSION=""
 fi
 
-# This bundle is a fresh-install surface, not an updater.  Refuse an
-# existing consumer, legacy-managed, or current-managed installation before
-# building a replacement binary, unloading launchd, or writing any installed
-# path.  In-place changes must be driven by a release-owned staged upgrader so
-# the 0.8.4 controller bridge and rollback contract cannot be bypassed.
-_existing_install_markers=(
+# Idempotent-reinstall contract (see PR notes for the drift analysis):
+# this installer is designed to be run repeatedly against a managed host
+# without needing an out-of-band uninstall/upgrade path. The refuse-on-
+# existing behavior that used to live here (a die() on any marker,
+# including a stray ~/.defenseclaw in ANY local account) left drifted
+# hosts stuck — the operator's second `sudo ./install.sh` did nothing
+# and machine-wide state stayed whatever the first install produced.
+#
+# Reinstall is scoped to machine-wide state that this installer owns:
+#   - gateway binary, config.yaml, plists, launchd bootstrap.
+#   - hook-guardian manifest + state dir.
+#   - LOGS_DIR (leaf) and its install.log.
+#
+# What is NEVER touched:
+#   - Any user's ~/.defenseclaw (reconciled by the hook-guardian
+#     daemon on its 60s tick; wiping it would drop audit history).
+#   - RUNTIME_DIR contents (audit.db, judge_bodies.db, device.key,
+#     hook-guardian-state) — data-carrying.
+#
+# What IS relocated (best-effort, not deleted):
+#   - Legacy paths from the pre-Cisco layout (/Library/DefenseClaw/
+#     etc.). Moved aside under LOGS_DIR with a timestamped suffix so
+#     the operator can inspect / recover forensics if needed.
+#   - Legacy launchd labels (com.defenseclaw.*) are unloaded via
+#     launchctl bootout before the plist file itself is relocated.
+
+# Detect ambient state so we can log a single line describing what we
+# are reconciling vs freshly installing. The per-user marker enumeration
+# is kept (and logged) so operators still see "user X had ~/.defenseclaw"
+# in install.log, but it no longer aborts the install — the hook-guardian
+# owns per-user reconciliation.
+_current_managed_markers=(
   "${INSTALL_PREFIX}"
   "${LOGS_DIR}"
   "${PLIST_DST}"
   "${GUARDIAN_PLIST_DST}"
   "${ENUMERATOR_PLIST_DST}"
+)
+_legacy_managed_paths=(
   "${LEGACY_INSTALL_PREFIX}"
   "${LEGACY_SUPPORT_DIR}"
   "${LEGACY_LOGS_DIR}"
   "${LEGACY_PLIST_DST}"
   "${LEGACY_GUARDIAN_PLIST_DST}"
 )
-if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
-  for _installed_command in defenseclaw defenseclaw-gateway; do
-    _installed_command_path="$(command -v "${_installed_command}" 2>/dev/null || true)"
-    [[ -n "${_installed_command_path}" ]] \
-      && _existing_install_markers+=("${_installed_command_path}")
+_current_launchd_labels=(
+  "${LAUNCHD_LABEL}"
+  "${GUARDIAN_LAUNCHD_LABEL}"
+  "${ENUMERATOR_LAUNCHD_LABEL}"
+)
+_legacy_launchd_labels=(
+  "${LEGACY_LAUNCHD_LABEL}"
+  "${LEGACY_GUARDIAN_LAUNCHD_LABEL}"
+)
+
+_reconcile_current="false"
+for _marker in "${_current_managed_markers[@]}"; do
+  if [[ -e "${_marker}" || -L "${_marker}" ]]; then
+    _reconcile_current="true"
+    break
+  fi
+done
+if [[ "${_reconcile_current}" == "false" ]]; then
+  for _label in "${_current_launchd_labels[@]}"; do
+    if launchctl print "system/${_label}" >/dev/null 2>&1; then
+      _reconcile_current="true"
+      break
+    fi
   done
 fi
-if [[ -n "${TARGET_HOME}" ]]; then
-  _existing_install_markers+=(
-    "${TARGET_HOME}/.defenseclaw"
-    "${TARGET_HOME}/.local/bin/defenseclaw"
-    "${TARGET_HOME}/.local/bin/defenseclaw-gateway"
-  )
+
+if [[ "${_reconcile_current}" == "true" ]]; then
+  log "reconciling existing DefenseClaw installation in place (idempotent reinstall)"
+else
+  log "fresh managed_enterprise install (no existing markers detected)"
 fi
+
+# Enumerate per-user consumer markers strictly for install.log
+# forensics. The hook-guardian daemon owns the per-user reconcile
+# loop, so we do NOT delete these — the guardian will pick them up
+# after the machine-wide reinstall lands.
 if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
-  # A system-wide managed daemon would contend with a consumer gateway in any
-  # account, including an account other than --user/SUDO_USER. Always enumerate
-  # every local account's configured home instead of assuming /Users/<name>.
-  _local_users="$(dscl . -list /Users 2>/dev/null)" \
-    || die "could not enumerate local users to prove this is a fresh DefenseClaw host; no changes were made"
-  while IFS= read -r _local_user; do
-    [[ -n "${_local_user}" ]] || continue
-    _candidate_home="$(dscl . -read "/Users/${_local_user}" NFSHomeDirectory 2>/dev/null \
-      | sed -n 's/^NFSHomeDirectory: //p')"
-    [[ -n "${_candidate_home}" ]] || continue
-    _existing_install_markers+=(
-      "${_candidate_home}/.defenseclaw"
-      "${_candidate_home}/.local/bin/defenseclaw"
-      "${_candidate_home}/.local/bin/defenseclaw-gateway"
-    )
-  done <<< "${_local_users}"
+  _local_users="$(dscl . -list /Users 2>/dev/null || true)"
+  if [[ -z "${_local_users}" ]]; then
+    warn "could not enumerate local users via dscl; per-user hook wiring will still be reconciled by the guardian on its 60s tick"
+  else
+    while IFS= read -r _local_user; do
+      [[ -n "${_local_user}" ]] || continue
+      _candidate_home="$(dscl . -read "/Users/${_local_user}" NFSHomeDirectory 2>/dev/null \
+        | sed -n 's/^NFSHomeDirectory: //p')"
+      [[ -n "${_candidate_home}" ]] || continue
+      for _u_marker in \
+        "${_candidate_home}/.defenseclaw" \
+        "${_candidate_home}/.local/bin/defenseclaw" \
+        "${_candidate_home}/.local/bin/defenseclaw-gateway"; do
+        if [[ -e "${_u_marker}" || -L "${_u_marker}" ]]; then
+          log "  (informational) per-user artifact present, will be reconciled by hook-guardian: ${_u_marker}"
+        fi
+      done
+    done <<< "${_local_users}"
+  fi
 fi
-for _marker in "${_existing_install_markers[@]}"; do
-  if [[ -e "${_marker}" || -L "${_marker}" ]]; then
-    die "existing DefenseClaw installation detected at ${_marker}; no changes were made. This installer is fresh-install-only. Use the release-owned staged upgrade path for that deployment; if no managed-enterprise staged upgrader is published, remain on the current version and contact the deployment owner. Do not uninstall or overwrite state to force the upgrade."
-  fi
-done
-for _label in \
-  "${LAUNCHD_LABEL}" \
-  "${GUARDIAN_LAUNCHD_LABEL}" \
-  "${ENUMERATOR_LAUNCHD_LABEL}" \
-  "${LEGACY_LAUNCHD_LABEL}" \
-  "${LEGACY_GUARDIAN_LAUNCHD_LABEL}"; do
+
+# Unload current-generation launchd jobs BEFORE we start writing plists
+# and binaries. Without this the later `launchctl bootstrap system` would
+# race an already-loaded job, and even in the racing-doesn't-lose case
+# the running daemon holds an open file descriptor on the old binary —
+# unloading now guarantees the atomic-replace hits a quiescent target.
+# Best-effort; failure is logged, not fatal (the bootstrap retry below
+# would surface a real failure loudly).
+for _label in "${_current_launchd_labels[@]}"; do
   if launchctl print "system/${_label}" >/dev/null 2>&1; then
-    die "existing DefenseClaw launchd job detected (${_label}); no changes were made. This installer is fresh-install-only. Use the release-owned staged upgrade path for that deployment; if no managed-enterprise staged upgrader is published, remain on the current version and contact the deployment owner."
+    log "unloading current launchd job for reinstall: ${_label}"
+    launchctl bootout "system/${_label}" >/dev/null 2>&1 \
+      || warn "launchctl bootout system/${_label} failed; bootstrap below may still succeed"
   fi
 done
-unset _existing_install_markers _marker _label _local_users _local_user _candidate_home \
-  _installed_command _installed_command_path
+
+# Legacy launchd cleanup: unload the pre-Cisco-path labels if any are
+# still loaded. These plists point at binaries that no longer exist on
+# a current install, so leaving them loaded produces log noise (repeated
+# spawn-and-crash) but is otherwise inert. bootout + move the plist
+# file aside (below) so uninstall.sh --purge and future upgrades see a
+# clean state.
+for _label in "${_legacy_launchd_labels[@]}"; do
+  if launchctl print "system/${_label}" >/dev/null 2>&1; then
+    log "unloading legacy launchd job: ${_label}"
+    launchctl bootout "system/${_label}" >/dev/null 2>&1 \
+      || warn "launchctl bootout system/${_label} failed; the legacy plist will still be relocated below"
+  fi
+done
+
+# Ensure LOGS_DIR exists early so move_legacy_aside has a landing zone.
+# On a reinstall we need the backup path BEFORE the mutation phase to
+# relocate legacy artifacts. The reconcile helper further down is
+# idempotent — a second creation is a no-op chown/chmod.
+#
+# Ancestor trust check: before ANY mkdir/chown/chmod on the
+# /Library/Logs/Cisco/SecureClient/DefenseClaw chain, walk every
+# ancestor and enforce the same no-symlink / root-owned /
+# no-group-other-write / no-write-capable-ACL invariant applied to
+# every other trusted install path. Without this a symlinked
+# /Library/Logs/Cisco would let a root-owned mkdir -p / mv follow
+# the link and relocate legacy config / audit material into an
+# attacker-controlled location before any later validation catches
+# the drift. Skipped under DC_INSTALLER_SKIP_ROOT_CHECK=1 the same
+# way as the env_config trust check — tests under tmpdir fixtures
+# can't be root-owned, and the check re-runs end-to-end in the
+# manual verification path.
+_assert_trusted_logs_chain_or_die() {
+  if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" == "1" ]]; then
+    return 0
+  fi
+  local _current="/" _leaf
+  _assert_trusted_dir_or_die "${_current}" "logs ancestor"
+  local -a _components=("Library" "Logs" "Cisco" "SecureClient")
+  local _c
+  for _c in "${_components[@]}"; do
+    if [[ "${_current}" == "/" ]]; then
+      _current="/${_c}"
+    else
+      _current="${_current}/${_c}"
+    fi
+    # Some ancestors may not exist yet on a fresh CI-clean host; that
+    # is fine — the mkdir -p below creates them with the right perms.
+    # We only trust-check an ancestor that already exists.
+    if [[ -e "${_current}" || -L "${_current}" ]]; then
+      _assert_trusted_dir_or_die "${_current}" "logs ancestor"
+    fi
+  done
+  # LOGS_DIR itself is the leaf we're about to write into. Same
+  # policy — existence check first, then trust check.
+  _leaf="${LOGS_DIR}"
+  if [[ -e "${_leaf}" || -L "${_leaf}" ]]; then
+    _assert_trusted_dir_or_die "${_leaf}" "logs backup root"
+  fi
+}
+_assert_trusted_logs_chain_or_die
+
+for _parent in /Library/Logs /Library/Logs/Cisco /Library/Logs/Cisco/SecureClient; do
+  if [[ ! -d "${_parent}" ]]; then
+    mkdir -p "${_parent}" 2>/dev/null || true
+  fi
+done
+if [[ ! -d "${LOGS_DIR}" ]]; then
+  mkdir -p "${LOGS_DIR}" 2>/dev/null || true
+  chown root:wheel "${LOGS_DIR}" 2>/dev/null || true
+  chmod 0750 "${LOGS_DIR}" 2>/dev/null || true
+fi
+# Re-verify LOGS_DIR is trusted AFTER creation — a concurrent racer
+# could have raced us to a symlink; refuse to move legacy material
+# through it.
+if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
+  _assert_trusted_dir_or_die "${LOGS_DIR}" "logs backup root"
+fi
+
+# Version tag for legacy backup paths. Pulled from the gateway binary
+# when available so a re-run against a mixed-legacy host produces a
+# distinct backup dir per attempt.
+_installer_version_tag="$("${SCRIPT_DIR}/defenseclaw" --version 2>/dev/null | head -1 || true)"
+[[ -z "${_installer_version_tag}" ]] && _installer_version_tag="unknown"
+_installer_version_tag="$(printf '%s' "${_installer_version_tag}" | tr -c '[:alnum:]._-' '_' | head -c 32)"
+[[ -z "${_installer_version_tag}" ]] && _installer_version_tag="unknown"
+
+for _legacy in "${_legacy_managed_paths[@]}"; do
+  if [[ -e "${_legacy}" || -L "${_legacy}" ]]; then
+    if ! move_legacy_aside "${_legacy}" "${LOGS_DIR}" "${_installer_version_tag}"; then
+      warn "could not relocate legacy path ${_legacy}; leaving it in place"
+    fi
+  fi
+done
+
+unset _current_managed_markers _legacy_managed_paths _current_launchd_labels \
+  _legacy_launchd_labels _marker _label _local_users _local_user _candidate_home \
+  _u_marker _installer_version_tag _legacy _parent _reconcile_current
 
 # Resolve the binary. Lookup order matches PLIST_SRC:
 #   1. --binary                              (explicit override)
@@ -572,24 +917,16 @@ if [[ "${SKIP_BUILD}" != "true" && ! -x "${BINARY_SRC}" ]]; then
 fi
 [[ -x "${BINARY_SRC}" ]] || die "binary not found or not executable: ${BINARY_SRC}"
 
-# Repeat the launchd/path boundary immediately before mutation. A deployment
-# that appears after the first preflight belongs to the concurrent installer;
-# never boot it out or remove its plist.
-for _lbl_plist in \
-  "${LAUNCHD_LABEL}:${PLIST_DST}" \
-  "${GUARDIAN_LAUNCHD_LABEL}:${GUARDIAN_PLIST_DST}" \
-  "${ENUMERATOR_LAUNCHD_LABEL}:${ENUMERATOR_PLIST_DST}" \
-  "${LEGACY_LAUNCHD_LABEL}:${LEGACY_PLIST_DST}" \
-  "${LEGACY_GUARDIAN_LAUNCHD_LABEL}:${LEGACY_GUARDIAN_PLIST_DST}"; do
-  _lbl="${_lbl_plist%%:*}"
-  _plist="${_lbl_plist#*:}"
-  if launchctl print "system/${_lbl}" >/dev/null 2>&1; then
-    die "DefenseClaw launchd job appeared after fresh-host preflight and was preserved: ${_lbl}"
-  fi
-  [[ ! -e "${_plist}" && ! -L "${_plist}" ]] \
-    || die "DefenseClaw plist appeared after fresh-host preflight and was preserved: ${_plist}"
-done
-unset _lbl_plist _lbl _plist
+# The pre-reinstall block above (marker classification + bootout of
+# current-generation labels + relocation of legacy paths) is the single
+# point where existing state is reconciled. A repeat-check at this
+# choke point used to guard the fresh-install-only invariant; under the
+# idempotent-reinstall contract the invariant is "we own reconciliation
+# of current-gen paths / labels", not "no current-gen state ever
+# exists". A concurrent second installer racing us is diagnosed by the
+# ln/rename atomicity in install_file_reconcile below (both invocations
+# will atomically swap the same destination; the last one wins with a
+# consistent triple of binary+config+plist).
 
 # ---- gateway file install ----------------------------------------------
 
@@ -603,9 +940,9 @@ log "installing binary -> ${GATEWAY_BIN}"
 for parent in /opt /opt/cisco /opt/cisco/secureclient; do
   ensure_shared_install_parent "${parent}"
 done
-create_install_directory_no_replace "${INSTALL_PREFIX}" root wheel 0755
-create_install_directory_no_replace "${INSTALL_PREFIX}/bin" root wheel 0755
-install_file_no_replace "${BINARY_SRC}" "${GATEWAY_BIN}" root wheel 0755
+create_install_directory_reconcile "${INSTALL_PREFIX}" root wheel 0755
+create_install_directory_reconcile "${INSTALL_PREFIX}/bin" root wheel 0755
+install_file_reconcile "${BINARY_SRC}" "${GATEWAY_BIN}" root wheel 0755
 
 log "creating support dirs under ${SUPPORT_DIR}"
 # SUPPORT_DIR (= INSTALL_PREFIX) is root:wheel 0755. The
@@ -620,15 +957,15 @@ RUNTIME_DIR="${SUPPORT_DIR}/runtime"
 # test_launchd_gateway_plist_uses_managed_paths CI assertion).
 # Root-owned per docs — "root-owned authorization-record directory".
 GUARDIAN_AUTH_DIR="${SUPPORT_DIR}/hook-guardian-state"
-create_install_directory_no_replace "${CONFIG_DIR}" root wheel 0755
-create_install_directory_no_replace "${RUNTIME_DIR}" root wheel 0750
-create_install_directory_no_replace "${GUARDIAN_AUTH_DIR}" root wheel 0750
+create_install_directory_reconcile "${CONFIG_DIR}" root wheel 0755
+create_install_directory_reconcile "${RUNTIME_DIR}" root wheel 0750
+create_install_directory_reconcile "${GUARDIAN_AUTH_DIR}" root wheel 0750
 # Multi-user hook wiring: the hook-guardian LaunchDaemon reads its
 # per-tick manifest from ${GUARDIAN_MANIFEST_DIR}/targets.yaml. Creating
 # the directory unconditionally keeps the guardian's LoadManifest happy
 # even if the enumerator hasn't run yet.
-create_install_directory_no_replace "${GUARDIAN_MANIFEST_DIR}" root wheel 0755
-create_install_directory_no_replace "${INSTALL_PREFIX}/lib" root wheel 0755
+create_install_directory_reconcile "${GUARDIAN_MANIFEST_DIR}" root wheel 0755
+create_install_directory_reconcile "${INSTALL_PREFIX}/lib" root wheel 0755
 # render-targets.sh is invoked by the hook-enumerator LaunchDaemon and
 # sources installer_lib.sh from a fixed path; both must land under the
 # managed tree so the daemon doesn't need to see the bundle layout.
@@ -636,8 +973,8 @@ create_install_directory_no_replace "${INSTALL_PREFIX}/lib" root wheel 0755
   || die "render-targets.sh source not found (expected ${SCRIPT_DIR}/lib/render-targets.sh)"
 [[ -f "${INSTALLER_LIB_SRC}" ]] \
   || die "installer_lib.sh source not found (expected ${SCRIPT_DIR}/lib/installer_lib.sh)"
-install_file_no_replace "${RENDER_TARGETS_SRC}" "${RENDER_TARGETS_BIN}" root wheel 0755
-install_file_no_replace "${INSTALLER_LIB_SRC}"  "${INSTALLER_LIB_DST}" root wheel 0644
+install_file_reconcile "${RENDER_TARGETS_SRC}" "${RENDER_TARGETS_BIN}" root wheel 0755
+install_file_reconcile "${INSTALLER_LIB_SRC}"  "${INSTALLER_LIB_DST}" root wheel 0644
 # LOGS_DIR — the /Library/Logs/Cisco/ and SecureClient/ ancestors may
 # be pre-existing and shared with other Cisco software. Same reasoning
 # as /opt/cisco above: only create them (with our default perms) when
@@ -646,7 +983,7 @@ install_file_no_replace "${INSTALLER_LIB_SRC}"  "${INSTALLER_LIB_DST}" root whee
 for parent in /Library/Logs /Library/Logs/Cisco /Library/Logs/Cisco/SecureClient; do
   ensure_shared_install_parent "${parent}"
 done
-create_install_directory_no_replace "${LOGS_DIR}" root wheel 0750
+create_install_directory_reconcile "${LOGS_DIR}" root wheel 0750
 
 # install.log sink — mirrored copy of every stdout / stderr line from
 # this point onward, beside gateway.log. Under `.pkg` postinstall /
@@ -679,20 +1016,56 @@ if [[ "${DC_INSTALLER_SKIP_INSTALL_LOG:-}" != "1" ]]; then
 fi
 
 CONFIG_PATH="${CONFIG_DIR}/config.yaml"
-[[ ! -e "${CONFIG_PATH}" && ! -L "${CONFIG_PATH}" ]] \
-  || die "managed config appeared after fresh-host preflight and was preserved: ${CONFIG_PATH}"
+if [[ -L "${CONFIG_PATH}" ]]; then
+  die "managed config is a symlink; refusing to overwrite: ${CONFIG_PATH}"
+fi
+if [[ -e "${CONFIG_PATH}" ]]; then
+  log "reconciling managed config (existing ${CONFIG_PATH} will be replaced)"
+fi
 
-log "writing config (mode=${MODE} connectors=${CONNECTORS[*]} port=${API_PORT} env=${AID_ENV} redaction_off=${DISABLE_REDACTION})"
+log "writing config (mode=${MODE} connectors=${CONNECTORS[*]} port=${API_PORT} endpoint=${AID_ENDPOINT} redaction_off=${DISABLE_REDACTION})"
 CONFIG_TMP="$(mktemp "${CONFIG_PATH}.new.XXXXXX")" \
   || die "could not reserve a private managed-config staging file"
 INSTALL_TEMP_FILES+=("${CONFIG_TMP}")
 render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${DISABLE_REDACTION}" "${SUPPORT_DIR}" "${AID_ENDPOINT}" "${CONNECTORS[@]}" > "${CONFIG_TMP}"
 chown root:wheel "${CONFIG_TMP}"
 chmod 0640 "${CONFIG_TMP}"
-ln "${CONFIG_TMP}" "${CONFIG_PATH}" \
-  || die "managed config appeared concurrently and was preserved: ${CONFIG_PATH}"
-rm -f -- "${CONFIG_TMP}"
+# rename(2) is atomic across paths on the same filesystem; the mktemp
+# template guarantees the two paths share a parent, so an observer sees
+# either the old config or the new one, never a partial write.
+/bin/mv -f -- "${CONFIG_TMP}" "${CONFIG_PATH}" \
+  || die "could not atomically replace managed config: ${CONFIG_PATH}"
 forget_install_temporary "${CONFIG_TMP}"
+
+# Enumerate eligible local users NOW (before the hook-guardian
+# manifest render below reuses the same set) so we can also seed
+# ai_discovery.home_dirs in the rendered config. Without this,
+# the discovery service under launchd/root walks /var/root only
+# and misses every user's per-user dotfiles (editor extensions,
+# MCP configs, shell history) — see internal/inventory/ai_discovery.go
+# for the detectors that key off HomeDir.
+log "enumerating eligible local users (for hook-guardian + ai_discovery.home_dirs)"
+USER_LINES="$(DC_INSTALLER_ENUMERATE_VERBOSE=1 enumerate_local_users || true)"
+USER_COUNT="$(printf '%s\n' "${USER_LINES}" | grep -c . || true)"
+if [[ -z "${USER_LINES}" ]]; then
+  if [[ "${ALLOW_EMPTY_USERS}" == "true" ]]; then
+    warn "no eligible local users detected on this host (--allow-empty-users given)"
+    warn "  hooks + ai_discovery will wire for users that log in later once the enumerator's next tick runs"
+  else
+    die "no eligible local users detected on this host — refusing to install with a zero-target hook-guardian manifest and empty ai_discovery.home_dirs. If this box legitimately has no local users (lab / demo), rerun with --allow-empty-users to proceed; otherwise investigate why enumerate_local_users returned empty (check dscl, home dir perms, /Users layout)."
+  fi
+else
+  log "  found ${USER_COUNT} eligible user(s):"
+  while IFS=: read -r _u _uid _gid _home; do
+    [[ -z "${_u}" ]] && continue
+    log "    ${_u} (uid=${_uid}, home=${_home})"
+  done <<< "${USER_LINES}"
+  unset _u _uid _gid _home
+fi
+
+log "seeding ai_discovery.home_dirs from ${USER_COUNT:-0} eligible user(s)"
+apply_ai_discovery_home_dirs "${CONFIG_PATH}" "${USER_LINES}" \
+  || die "failed to seed ai_discovery.home_dirs in ${CONFIG_PATH}"
 
 log "chowning runtime dirs to root:wheel (daemon runs as root)"
 # Every DefenseClaw-owned directory is root:wheel. The daemon runs as
@@ -705,7 +1078,7 @@ chown -R root:wheel "${RUNTIME_DIR}" "${LOGS_DIR}"
 # calls above; managed_enterprise trust check accepts them unchanged.
 
 log "installing LaunchDaemon plist -> ${PLIST_DST}"
-install_file_no_replace "${PLIST_SRC}" "${PLIST_DST}" root wheel 0644
+install_file_reconcile "${PLIST_SRC}" "${PLIST_DST}" root wheel 0644
 
 # Guardian + enumerator plists: the two subsystems together do all
 # per-user hook wiring (enumerator re-renders targets.yaml on a 5 min
@@ -716,9 +1089,9 @@ install_file_no_replace "${PLIST_SRC}" "${PLIST_DST}" root wheel 0644
 [[ -f "${ENUMERATOR_PLIST_SRC}" ]] \
   || die "hook-enumerator plist source not found (expected ${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.hook-enumerator.plist)"
 log "installing hook-guardian plist -> ${GUARDIAN_PLIST_DST}"
-install_file_no_replace "${GUARDIAN_PLIST_SRC}" "${GUARDIAN_PLIST_DST}" root wheel 0644
+install_file_reconcile "${GUARDIAN_PLIST_SRC}" "${GUARDIAN_PLIST_DST}" root wheel 0644
 log "installing hook-enumerator plist -> ${ENUMERATOR_PLIST_DST}"
-install_file_no_replace "${ENUMERATOR_PLIST_SRC}" "${ENUMERATOR_PLIST_DST}" root wheel 0644
+install_file_reconcile "${ENUMERATOR_PLIST_SRC}" "${ENUMERATOR_PLIST_DST}" root wheel 0644
 
 # The shipped plist deliberately omits UserName/GroupName so the daemon
 # runs as root (uid 0). If a stale plist from a pre-root DefenseClaw
@@ -786,30 +1159,10 @@ fi
 #      reconcile — hooks land within seconds on the eligible users).
 
 if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
-  log "enumerating eligible local users"
-  # DC_INSTALLER_ENUMERATE_VERBOSE=1 makes enumerate_local_users emit a
-  # WARN for every user it drops with the specific filter reason (system
-  # account, home not under /Users, mode bits, etc.). Piped into
-  # install.log via the tee at the top of this script, so admins can
-  # diagnose "why isn't user X in targets.yaml?" after the fact.
-  USER_LINES="$(DC_INSTALLER_ENUMERATE_VERBOSE=1 enumerate_local_users || true)"
-  USER_COUNT="$(printf '%s\n' "${USER_LINES}" | grep -c . || true)"
-  if [[ -z "${USER_LINES}" ]]; then
-    if [[ "${ALLOW_EMPTY_USERS}" == "true" ]]; then
-      warn "no eligible local users detected on this host (--allow-empty-users given)"
-      warn "  hooks will be wired for users that log in later once the enumerator's next 5-min tick runs"
-    else
-      die "no eligible local users detected on this host — refusing to install with a zero-target hook-guardian manifest. If this box legitimately has no local users (lab / demo), rerun with --allow-empty-users to proceed; otherwise investigate why enumerate_local_users returned empty (check dscl, home dir perms, /Users layout)."
-    fi
-  else
-    log "  found ${USER_COUNT} eligible user(s):"
-    while IFS=: read -r _u _uid _gid _home; do
-      [[ -z "${_u}" ]] && continue
-      log "    ${_u} (uid=${_uid}, home=${_home})"
-    done <<< "${USER_LINES}"
-    unset _u _uid _gid _home
-  fi
-
+  # USER_LINES / USER_COUNT were captured above (see the
+  # "enumerating eligible local users" block right after render_config)
+  # so both the hook-guardian manifest here and ai_discovery.home_dirs
+  # up there see the same eligible-user snapshot.
   log "rendering initial hook-guardian manifest -> ${GUARDIAN_MANIFEST_PATH}"
   MANIFEST_TMP="$(mktemp "${GUARDIAN_MANIFEST_PATH}.new.XXXXXX")" \
     || die "could not reserve a private manifest staging file"
@@ -827,9 +1180,13 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
   fi
   chown root:wheel "${MANIFEST_TMP}"
   chmod 0640 "${MANIFEST_TMP}"
-  ln "${MANIFEST_TMP}" "${GUARDIAN_MANIFEST_PATH}" \
-    || die "manifest appeared concurrently and was preserved: ${GUARDIAN_MANIFEST_PATH}"
-  rm -f -- "${MANIFEST_TMP}"
+  if [[ -L "${GUARDIAN_MANIFEST_PATH}" ]]; then
+    die "guardian manifest is a symlink; refusing to overwrite: ${GUARDIAN_MANIFEST_PATH}"
+  fi
+  # Atomic replace under the reinstall contract; see the config.yaml
+  # rename above for the rationale.
+  /bin/mv -f -- "${MANIFEST_TMP}" "${GUARDIAN_MANIFEST_PATH}" \
+    || die "could not atomically replace guardian manifest: ${GUARDIAN_MANIFEST_PATH}"
   forget_install_temporary "${MANIFEST_TMP}"
 
   log "loading hook-enumerator LaunchDaemon"

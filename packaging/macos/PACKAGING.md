@@ -32,23 +32,64 @@ Common flags:
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
-| `--mode {observe\|action}` | `observe` | Guardrail + asset_policy mode |
+| `--mode {observe\|action}` | `action` | Guardrail + asset_policy mode |
 | `--connector LIST` | `codex` | Comma-separated: `codex`, `claudecode`, `cursor` |
 | `--port PORT` | `18970` | Loopback API port |
+| `--config-file PATH` | `/opt/cisco/secureclient/defenseclaw/env_config.json` | Path to the AVC-authored JSON that supplies `cisco_ai_defense.endpoint` (see [AVC env_config.json](#avc-env_configjson)) |
+| `--override-endpoint URL` | — | Adhoc-testing seam that wins over `--config-file`; must be a full http(s) URL |
 | `--disable-redaction` | on | Turn off audit/sink redaction |
 | `--user USER` | `$SUDO_USER` | Target user for per-user hook wiring |
 | `--skip-connector` | — | Gateway only; skip user-space hook wiring |
 | `--skip-launchd` | — | Install files without bootstrapping the daemon |
 
+### AVC env_config.json
+
+On managed_enterprise hosts, the AI Defense endpoint the daemon
+inspects against comes from a static JSON file that the Cisco Secure
+Client (AVC) module drops at
+`/opt/cisco/secureclient/defenseclaw/env_config.json`. `install.sh`
+reads a single top-level field:
+
+```json
+{
+  "cisco_ai_defense_endpoint": "https://us.api.inspect.aidefense.security.cisco.com"
+}
+```
+
+Trust requirements (enforced by `install.sh` via the shared
+managed-installer helpers):
+
+- File must be root-owned with no group/other write bits.
+- No symlinks on the file or any ancestor directory.
+- No write-capable macOS ACL anywhere in the ancestor chain.
+- Every ancestor must be root-owned and non-writable by group/other.
+
+Any of the four checks failing → `install.sh` fails closed with a
+message naming the offending path. Extra fields in the JSON are
+ignored for forward compatibility — a later AVC drop can add keys
+without breaking older DefenseClaw builds.
+
+For adhoc / preview testing, `--override-endpoint URL` bypasses the
+file entirely.
+
 Full reference: `./install.sh --help`.
 
-`install.sh` is fresh-install-only. It refuses current managed paths, legacy
-managed paths, per-user DefenseClaw state, or loaded DefenseClaw launchd jobs
-before building, stopping, or writing anything. Existing deployments must use
-the release-owned staged upgrade path. If a managed-enterprise staged upgrader
-is not published for the target release, remain on the current version and
-contact the deployment owner; uninstalling or overwriting state is not a safe
-upgrade procedure.
+`install.sh` is idempotent. A second run on the same host reconciles
+machine-wide state in place: the gateway binary, `config.yaml`, both plists,
+and the guardian manifest are atomically replaced with the current source
+content; the current-generation launchd jobs are booted out and rebootstrapped;
+legacy paths from the pre-Cisco layout (e.g. `/Library/DefenseClaw`,
+`com.defenseclaw.gateway.plist`) are relocated under
+`/Library/Logs/Cisco/SecureClient/DefenseClaw/` with a
+`.pre-<version>-<timestamp>` suffix (best-effort, never deleted); and legacy
+launchd labels are unloaded. Runtime state (`audit.db`, `judge_bodies.db`,
+`device.key`, `hook-guardian-state/`) is preserved across reinstalls, and any
+`~/.defenseclaw/` under a local user account is left untouched — the
+hook-guardian daemon reconciles the per-user layer on its 60 s tick.
+
+Symlinks under a DefenseClaw-owned install destination are still refused: a
+symlink there can only get placed via privileged tampering, and an atomic
+rename over the symlink target would corrupt whatever the link pointed at.
 
 **Pre-flight requirement:** the target user's home must not be group/other-writable. If it is, `install.sh` refuses with the exact `chmod` fix in its error output.
 

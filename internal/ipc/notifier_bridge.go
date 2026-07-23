@@ -76,9 +76,39 @@ var paranoidSecretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`),
 }
 
+// aidCategoryPhrases maps AID SCREAMING_SNAKE_CASE classification
+// tokens to user-facing lower-case phrases for the managed_enterprise
+// notification body. AVC's UI shows the title alone in the pop-up and
+// title+body concatenated in message history, so the body needs to
+// read naturally to an end user.
+//
+// Any token not present here falls through to a mechanical
+// lower-case-with-spaces transform via humanizeAIDCategory. That
+// keeps a newly-added AID category rendering reasonably in the field
+// (e.g. "NEW_CATEGORY_X" → "new category x") without a DefenseClaw
+// release; adding an entry here is a copy-quality improvement, not a
+// correctness bar.
+var aidCategoryPhrases = map[string]string{
+	"SECURITY_VIOLATION":    "security violation",
+	"PRIVACY_VIOLATION":     "privacy violation",
+	"SAFETY_VIOLATION":      "safety violation",
+	"PROMPT_INJECTION":      "prompt injection",
+	"NONE_ATTACK_TECHNIQUE": "policy violation",
+	"LOW_SEVERITY":          "low-severity policy signal",
+}
+
 // newObserver returns a notifier.Observer that maps each observation
 // to a NotificationRecord and hands it to bcast.publish. Registered
 // with dispatcher.AddObserver from the sidecar wiring layer.
+//
+// managedEnterprise switches on the two-surface AVC copy contract:
+// title alone in the pop-up, title+body concatenated in message
+// history. Under that mode we use per-category composers that
+// produce end-user copy ("The request was blocked for security
+// violation and the following signals: Prompt Injection"). Outside
+// managed_enterprise the observer keeps the historical
+// composeTitle/composeBody flow that shares strings with the OS
+// toast surface (see internal/gateway/notifier for the OS side).
 //
 // Mapping rules — see plan §6:
 //
@@ -86,9 +116,9 @@ var paranoidSecretPatterns = []*regexp.Regexp{
 //	OnWouldBlock      → WARNING / TRANSIENT_AND_HISTORY  ("would ask" for WouldAsk)
 //	OnApprovalPending → WARNING / TRANSIENT              (approval prompts are ephemeral)
 //	OnServiceState    → WARNING / TRANSIENT              (gateway up/down)
-func newObserver(bcast *broadcast) notifier.Observer {
+func newObserver(bcast *broadcast, managedEnterprise bool) notifier.Observer {
 	return func(o notifier.Observation) {
-		rec := recordFromObservation(o)
+		rec := recordFromObservation(o, managedEnterprise)
 		if rec == nil {
 			return
 		}
@@ -96,7 +126,7 @@ func newObserver(bcast *broadcast) notifier.Observer {
 	}
 }
 
-func recordFromObservation(o notifier.Observation) *pb.NotificationRecord {
+func recordFromObservation(o notifier.Observation, managedEnterprise bool) *pb.NotificationRecord {
 	var (
 		severity     pb.NotificationSeverity
 		presentation pb.NotificationPresentation
@@ -118,8 +148,13 @@ func recordFromObservation(o notifier.Observation) *pb.NotificationRecord {
 		return nil
 	}
 
-	title := composeTitle(o)
-	body := composeBody(o)
+	var title, body string
+	if managedEnterprise {
+		title, body = composeManaged(o)
+	} else {
+		title = composeTitle(o)
+		body = composeBody(o)
+	}
 	return &pb.NotificationRecord{
 		SchemaVersion: schemaVersion,
 		Severity:      severity,
@@ -132,7 +167,7 @@ func recordFromObservation(o notifier.Observation) *pb.NotificationRecord {
 // composeTitle prefers the OS toast's title field (which the notifier
 // package already renders consistently for each category) so the
 // wire notification matches what an operator would see in the
-// system tray.
+// system tray. Used only outside managed_enterprise.
 func composeTitle(o notifier.Observation) string {
 	if t := strings.TrimSpace(o.Notification.Title); t != "" {
 		return t
@@ -152,7 +187,9 @@ func composeTitle(o notifier.Observation) string {
 //     replaces it with `<redacted>`.
 //
 // Empty bodies keep an empty string — the wire contract allows
-// optional bodies but title is always required.
+// optional bodies but title is always required. Used only outside
+// managed_enterprise; the managed path composes bespoke text per
+// category via composeManaged.
 func composeBody(o notifier.Observation) string {
 	body := o.Notification.Body
 	if body == "" {
@@ -163,6 +200,225 @@ func composeBody(o notifier.Observation) string {
 		body = o.Notification.Subtitle
 	}
 	body = compactAIDCategories(body)
+	body = redactSecretsInBody(body)
+	return body
+}
+
+// composeManaged produces the (title, body) pair sent to AVC on
+// managed_enterprise hosts. AVC's UI shows the title alone in the
+// pop-up surface and title+body concatenated inline in the message
+// history, so the copy is intentionally split: the title says WHAT
+// happened, the body says WHY.
+//
+// The four dispatcher categories (Block, WouldBlock, Approval,
+// ServiceState — see internal/gateway/notifier.Category) each get a
+// bespoke template. Extra structure needed by a template (BlockEvent
+// findings, ApprovalEvent subject, ServiceStateEvent state) is
+// pulled from o.Event via a type switch; when the payload is absent
+// or of an unexpected type, the composer falls back to safe generic
+// copy rather than empty strings.
+//
+// The paranoid-secret sweep still runs on every returned body so
+// this managed-mode copy path is subject to the same "no
+// credentials in a body" invariant as composeBody above.
+func composeManaged(o notifier.Observation) (string, string) {
+	var title, body string
+	switch o.Category {
+	case notifier.CategoryBlock:
+		title, body = composeBlockManaged(o)
+	case notifier.CategoryWouldBlock:
+		title, body = composeWouldBlockManaged(o)
+	case notifier.CategoryApproval:
+		title, body = composeApprovalManaged(o)
+	case notifier.CategoryServiceState:
+		title, body = composeServiceStateManaged(o)
+	default:
+		// Unknown category — recordFromObservation already returns
+		// nil above, so this is unreachable. Kept defensive so a
+		// future category addition still yields non-empty text.
+		title = "DefenseClaw notification"
+	}
+	if strings.TrimSpace(title) == "" {
+		title = "DefenseClaw notification"
+	}
+	body = redactSecretsInBody(body)
+	return title, body
+}
+
+// composeBlockManaged renders the Block category on managed_enterprise.
+//
+//	Title: "DefenseClaw blocked the request"
+//	Body:  "The request was blocked for <categories> and the following
+//	        signals: <signals>"
+//
+// <categories> is derived from the AID SCREAMING_SNAKE_CASE tokens
+// parsed out of BlockEvent.Reason. When no AID tokens are present
+// (asset-policy block, hook guardian, blocklist deny) the categories
+// fall back to "a policy violation" so the body still reads
+// naturally. When no signals are present the "signals" clause is
+// dropped entirely.
+func composeBlockManaged(o notifier.Observation) (string, string) {
+	cats, sigs := parseAIDReason(o.Notification.Body)
+	return "DefenseClaw blocked the request",
+		blockLikeBody("The request was blocked for", cats, sigs, "")
+}
+
+// composeWouldBlockManaged renders the WouldBlock category — either
+// observe-mode "would have blocked" or "would have asked about"
+// (BlockEvent.WouldAsk true when a confirm verdict couldn't reach
+// the chat surface — see notifier.BlockEvent godoc). The body
+// always ends with a parenthetical clarifying observe-mode
+// semantics so users understand there was no enforcement.
+func composeWouldBlockManaged(o notifier.Observation) (string, string) {
+	verb := "blocked"
+	titleVerb := "have blocked"
+	if ev, ok := o.Event.(notifier.BlockEvent); ok && ev.WouldAsk {
+		verb = "asked about"
+		titleVerb = "have asked about"
+	}
+	title := "DefenseClaw would " + titleVerb + " the request"
+	cats, sigs := parseAIDReason(o.Notification.Body)
+	body := blockLikeBody(
+		"The request would have been "+verb+" for",
+		cats, sigs,
+		" (observe mode: no enforcement taken)",
+	)
+	return title, body
+}
+
+// composeApprovalManaged renders the Approval (HITL / confirm)
+// category. Approval prompts always require a user action — the
+// title tells them to look, the body tells them what and why.
+func composeApprovalManaged(o notifier.Observation) (string, string) {
+	subject := "an agent action"
+	reason := "policy review"
+	if ev, ok := o.Event.(notifier.ApprovalEvent); ok {
+		if s := strings.TrimSpace(ev.Subject); s != "" {
+			subject = s
+		}
+		if r := strings.TrimSpace(ev.Reason); r != "" {
+			reason = r
+		}
+	}
+	title := "DefenseClaw needs your approval"
+	body := "Reply in your chat to approve or deny: " + subject + " flagged for " + reason
+	return title, body
+}
+
+// composeServiceStateManaged renders the ServiceState category.
+// The existing notifier.serviceStateNotification titles ("DefenseClaw
+// protection paused" / "DefenseClaw protection restored") already
+// meet the short-self-contained-title bar, so the managed path
+// keeps them verbatim and only reshapes the body.
+func composeServiceStateManaged(o notifier.Observation) (string, string) {
+	title := strings.TrimSpace(o.Notification.Title)
+	if title == "" {
+		title = "DefenseClaw protection state changed"
+	}
+	body := ""
+	if ev, ok := o.Event.(notifier.ServiceStateEvent); ok {
+		if r := strings.TrimSpace(ev.Reason); r != "" {
+			body = "Reason: " + r
+		}
+	}
+	// Fall back to the notification's own body when the typed
+	// payload didn't carry a reason (dev / test paths sometimes
+	// dispatch service-state without a full event).
+	if body == "" {
+		if b := strings.TrimSpace(o.Notification.Body); b != "" {
+			body = "Reason: " + b
+		}
+	}
+	return title, body
+}
+
+// blockLikeBody assembles the "The request was blocked for X and
+// the following signals: Y" body shape shared by Block and WouldBlock
+// composers. The trailer is appended verbatim (e.g. observe-mode
+// tail); the categories block always renders, the signals block is
+// omitted when sigs is empty.
+func blockLikeBody(prefix string, cats, sigs []string, trailer string) string {
+	catPhrase := "a policy violation"
+	if len(cats) > 0 {
+		humans := make([]string, 0, len(cats))
+		for _, c := range cats {
+			humans = append(humans, humanizeAIDCategory(c))
+		}
+		catPhrase = humanCategoryList(humans)
+	}
+	body := prefix + " " + catPhrase
+	if len(sigs) > 0 {
+		body += " and the following signals: " + strings.Join(sigs, ", ")
+	}
+	body += trailer
+	return body
+}
+
+// parseAIDReason splits a "Cisco AI Defense: <mixed>" body into its
+// category tokens (SCREAMING_SNAKE_CASE — SECURITY_VIOLATION,
+// PRIVACY_VIOLATION, ...) and its signal tokens (rule names like
+// "Prompt Injection", "PII"). The split reuses the same regexes that
+// compactAIDCategories keys on so the two paths stay in lockstep.
+// Body strings that don't match the AID prefix return
+// ([], []) — the caller falls back to generic copy.
+func parseAIDReason(body string) (categories []string, signals []string) {
+	m := ciscoAIDefenseBodyPrefix.FindStringSubmatch(body)
+	if m == nil {
+		return nil, nil
+	}
+	tail := strings.TrimSpace(m[1])
+	if tail == "" {
+		return nil, nil
+	}
+	for _, p := range strings.Split(tail, ",") {
+		token := strings.TrimSpace(p)
+		if token == "" {
+			continue
+		}
+		if categoryTokenPattern.MatchString(token) {
+			categories = append(categories, token)
+		} else {
+			signals = append(signals, token)
+		}
+	}
+	return categories, signals
+}
+
+// humanizeAIDCategory turns an AID SCREAMING_SNAKE_CASE token into a
+// user-facing lower-case phrase. Uses the aidCategoryPhrases map
+// when available; falls back to a mechanical lower-case + replace-
+// underscore-with-space transform so a newly-added AID token still
+// renders reasonably ("NEW_CATEGORY_X" → "new category x") without
+// a DefenseClaw release.
+func humanizeAIDCategory(token string) string {
+	if phrase, ok := aidCategoryPhrases[token]; ok {
+		return phrase
+	}
+	return strings.ToLower(strings.ReplaceAll(token, "_", " "))
+}
+
+// humanCategoryList joins a list of already-humanized category
+// phrases into English-style prose. Empty → "a policy violation"
+// (defensive; callers guard len(cats)==0 above). One → verbatim.
+// Two → "A and B" (no Oxford comma for two items). Three-plus →
+// "A, B, and C" (Oxford comma).
+func humanCategoryList(cats []string) string {
+	switch len(cats) {
+	case 0:
+		return "a policy violation"
+	case 1:
+		return cats[0]
+	case 2:
+		return cats[0] + " and " + cats[1]
+	default:
+		return strings.Join(cats[:len(cats)-1], ", ") + ", and " + cats[len(cats)-1]
+	}
+}
+
+// redactSecretsInBody applies the paranoid secret sweep from
+// paranoidSecretPatterns to a composed body. Extracted so the
+// managed and unmanaged composers both go through one choke point.
+func redactSecretsInBody(body string) string {
 	for _, p := range paranoidSecretPatterns {
 		body = p.ReplaceAllString(body, "<redacted>")
 	}
@@ -186,6 +442,9 @@ func composeBody(o notifier.Observation) string {
 // rule-name findings), the original body is preserved so the toast
 // still carries some usable text — an empty "Cisco AI Defense:"
 // with nothing after would be worse than the mixed version.
+//
+// Only used on the unmanaged path — managed_enterprise callers
+// compose their own body per category via composeManaged.
 func compactAIDCategories(body string) string {
 	m := ciscoAIDefenseBodyPrefix.FindStringSubmatch(body)
 	if m == nil {
