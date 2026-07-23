@@ -270,11 +270,11 @@ type PrivacyConfig struct {
 // telemetry is sanitized by the inventory service; this config only controls
 // which local metadata sources are inspected.
 type AIDiscoveryConfig struct {
-	Enabled                   bool     `mapstructure:"enabled"                   yaml:"enabled"`
-	Mode                      string   `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
-	ScanIntervalMin           int      `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
-	ProcessIntervalSec        int      `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
-	ScanRoots                 []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
+	Enabled            bool     `mapstructure:"enabled"                   yaml:"enabled"`
+	Mode               string   `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
+	ScanIntervalMin    int      `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
+	ProcessIntervalSec int      `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
+	ScanRoots          []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
 	// HomeDirs is the list of user home directories the detectors that
 	// walk per-user dotfiles (editor extensions, MCP configs, shell
 	// history, installed applications) should inspect. Empty means

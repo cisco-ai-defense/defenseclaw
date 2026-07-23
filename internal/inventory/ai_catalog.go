@@ -72,20 +72,20 @@ type AISignatureComponent struct {
 //     overly-generic signatures (e.g. matching the literal word "ai")
 //     contribute less per observation than tightly-scoped ones.
 type AISignature struct {
-	ID                 string                 `json:"id"`
-	Name               string                 `json:"name"`
-	Vendor             string                 `json:"vendor"`
-	Category           string                 `json:"category"`
-	Confidence         float64                `json:"confidence,omitempty"`         // legacy seed; normalized into CuratorConfidence on load
-	CuratorConfidence  float64                `json:"curator_confidence,omitempty"` // operator-meaningful base prior on identity, in (0, 1)
-	Specificity        float64                `json:"specificity,omitempty"`        // how unique the matched value is; (0, 1], default 0.7
-	SupportedConnector string                 `json:"supported_connector,omitempty"`
-	BinaryNames        []string               `json:"binary_names,omitempty"`
-	ProcessNames       []string               `json:"process_names,omitempty"`
-	ApplicationNames   []string               `json:"application_names,omitempty"`
-	ConfigPaths        []string               `json:"config_paths,omitempty"`
-	ExtensionIDs       []string               `json:"extension_ids,omitempty"`
-	MCPPaths           []string               `json:"mcp_paths,omitempty"`
+	ID                 string   `json:"id"`
+	Name               string   `json:"name"`
+	Vendor             string   `json:"vendor"`
+	Category           string   `json:"category"`
+	Confidence         float64  `json:"confidence,omitempty"`         // legacy seed; normalized into CuratorConfidence on load
+	CuratorConfidence  float64  `json:"curator_confidence,omitempty"` // operator-meaningful base prior on identity, in (0, 1)
+	Specificity        float64  `json:"specificity,omitempty"`        // how unique the matched value is; (0, 1], default 0.7
+	SupportedConnector string   `json:"supported_connector,omitempty"`
+	BinaryNames        []string `json:"binary_names,omitempty"`
+	ProcessNames       []string `json:"process_names,omitempty"`
+	ApplicationNames   []string `json:"application_names,omitempty"`
+	ConfigPaths        []string `json:"config_paths,omitempty"`
+	ExtensionIDs       []string `json:"extension_ids,omitempty"`
+	MCPPaths           []string `json:"mcp_paths,omitempty"`
 	// SkillPaths / RulePaths / PluginPaths are directory globs whose
 	// per-user existence + non-emptiness produce SignalSkill / SignalRule /
 	// SignalPlugin signals. Semantics mirror MCPPaths (path-based detection,
@@ -97,15 +97,15 @@ type AISignature struct {
 	// inventory hit here means "this endpoint has that surface configured
 	// with at least one entry" — dashboarding rollup, not per-file safety
 	// (which is what the watcher's EventScan captures).
-	SkillPaths         []string               `json:"skill_paths,omitempty"`
-	RulePaths          []string               `json:"rule_paths,omitempty"`
-	PluginPaths        []string               `json:"plugin_paths,omitempty"`
-	PackageNames       []string               `json:"package_names,omitempty"`
-	EnvVarNames        []string               `json:"env_var_names,omitempty"`
-	DomainPatterns     []string               `json:"domain_patterns,omitempty"`
-	HistoryPatterns    []string               `json:"history_patterns,omitempty"`
-	LocalEndpoints     []string               `json:"local_endpoints,omitempty"`
-	Components         []AISignatureComponent `json:"components,omitempty"`
+	SkillPaths      []string               `json:"skill_paths,omitempty"`
+	RulePaths       []string               `json:"rule_paths,omitempty"`
+	PluginPaths     []string               `json:"plugin_paths,omitempty"`
+	PackageNames    []string               `json:"package_names,omitempty"`
+	EnvVarNames     []string               `json:"env_var_names,omitempty"`
+	DomainPatterns  []string               `json:"domain_patterns,omitempty"`
+	HistoryPatterns []string               `json:"history_patterns,omitempty"`
+	LocalEndpoints  []string               `json:"local_endpoints,omitempty"`
+	Components      []AISignatureComponent `json:"components,omitempty"`
 }
 
 type aiSignatureCatalog struct {
