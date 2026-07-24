@@ -62,7 +62,10 @@ from defenseclaw.platform_support import (
     WINDOWS_CERTIFIED_ARCHITECTURES,
     WINDOWS_NOT_CERTIFIED_ARCHITECTURES,
 )
-from defenseclaw.resolver_hint import authenticated_resolver_instructions
+from defenseclaw.resolver_hint import (
+    RESOLVER_COMPLETENESS_MARKER,
+    authenticated_resolver_instructions,
+)
 from defenseclaw.upgrade_receipt import (
     begin_upgrade_receipt,
     clear_local_bundle_restart_intent,
@@ -145,6 +148,15 @@ _COSIGN_BOOTSTRAP_SHA256 = {
     ("linux", "amd64"): "7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4",
     ("linux", "arm64"): "b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917",
 }
+_POSIX_RESOLVER_ASSET = "defenseclaw-upgrade.sh"
+_MAX_RESOLVER_BYTES = 4 * 1024 * 1024
+_MAX_SYSTEM_BASH_BYTES = 32 * 1024 * 1024
+_RESOLVER_EVIDENCE_LIMITS = {
+    _POSIX_RESOLVER_ASSET: _MAX_RESOLVER_BYTES,
+    "checksums.txt": 8 * 1024 * 1024,
+    "checksums.txt.sig": 16 * 1024,
+    "checksums.txt.pem": 64 * 1024,
+}
 _TARGET_CONFIG_VERSION = 8
 _WINDOWS_SETUP_ASSET = "DefenseClawSetup-x64.exe"
 _WINDOWS_SETUP_PROVENANCE_ASSET = f"{_WINDOWS_SETUP_ASSET}.provenance.json"
@@ -194,6 +206,26 @@ class _TargetMigrationCapabilities:
     run_migrations_parameters: frozenset[str]
     migration_versions: frozenset[str]
     supported_config_versions: frozenset[int]
+
+
+@dataclass
+class _TrustedSystemBash:
+    path: str
+    descriptor: int
+    identity: tuple[int, int, int, int, int, int]
+
+    def assert_stable(self) -> None:
+        try:
+            named = os.lstat(self.path)
+            opened = os.fstat(self.descriptor)
+        except OSError as exc:
+            raise OSError("trusted system bash identity is unavailable") from exc
+        if (
+            not _system_bash_info_is_trusted(named)
+            or _system_bash_identity(named) != self.identity
+            or _system_bash_identity(opened) != self.identity
+        ):
+            raise OSError("trusted system bash identity changed before execution")
 
 
 @dataclass(frozen=True)
@@ -1820,6 +1852,345 @@ def _fetch_latest_version() -> str | None:
         return tag[1:] if tag.startswith("v") else tag
     except (requests.RequestException, KeyError, ValueError):
         return None
+
+
+def _maybe_delegate_public_upgrade(argv: list[str]) -> None:
+    """Authenticate and run the latest release resolver for a public upgrade.
+
+    This is called by the console entry point before Click loads configuration
+    or inspects recovery cursors. Resolver/controller handoffs carry one of the
+    existing internal environment contracts and deliberately bypass this shim.
+    """
+
+    if not argv or argv[0] != "upgrade" or any(item in {"-h", "--help"} for item in argv[1:]):
+        return
+    if os.environ.get(_UPGRADE_HANDOFF_ENV) == "1" or os.environ.get(_STAGED_UPGRADE_ENV) == "1":
+        return
+    if platform.system().lower() == "windows":
+        # The installed Python controller already has an authenticated native
+        # Setup handoff. Do not replace or narrow its supported Windows matrix
+        # until a native resolver trampoline can preserve that exact contract.
+        return
+
+    try:
+        with upgrade.make_context("upgrade", argv[1:]) as command_context:
+            intent = dict(command_context.params)
+    except click.ClickException as exc:
+        exc.show()
+        raise SystemExit(exc.exit_code) from None
+    if intent["allow_unverified"]:
+        ux.err(
+            "--allow-unverified cannot be delegated to a modern release-owned resolver.",
+            indent="  ",
+        )
+        raise SystemExit(2)
+    if intent["target_version"] is not None:
+        intent["target_version"] = _normalize_target_version(intent["target_version"])
+    if os.name != "posix":
+        ux.err("Automatic release-resolver delegation requires macOS or Linux.", indent="  ")
+        raise SystemExit(1)
+    if intent["health_timeout"] != 60:
+        ux.err(
+            "--health-timeout cannot be forwarded to the POSIX release resolver; no resolver was downloaded.",
+            indent="  ",
+        )
+        raise SystemExit(2)
+
+    resolver_version = _fetch_latest_version()
+    if resolver_version is None:
+        ux.err("Could not determine the latest release resolver; no local upgrade checks ran.", indent="  ")
+        raise SystemExit(1)
+    resolver_version = _normalize_target_version(resolver_version)
+    resolver_args: list[str] = []
+    if intent["yes"]:
+        resolver_args.append("--yes")
+    if intent["target_version"] is not None:
+        resolver_args.extend(("--version", intent["target_version"]))
+
+    click.echo(f"  {ux.dim('→')} Authenticating the DefenseClaw {resolver_version} release-owned upgrade resolver ...")
+    try:
+        with _authenticated_release_resolver(resolver_version) as (bash, resolver):
+            bash.assert_stable()
+            child_env = os.environ.copy()
+            child_env.pop("VERSION", None)
+            child_env.pop("PYTHONHOME", None)
+            child_env.pop("PYTHONPATH", None)
+            child_env[_UPGRADE_HANDOFF_ENV] = "1"
+            completed = subprocess.run(
+                [bash.path, resolver, *resolver_args],
+                check=False,
+                env=child_env,
+            )
+    except (OSError, subprocess.SubprocessError) as exc:
+        ux.err(f"Release-owned resolver authentication failed: {exc}", indent="  ")
+        ux.subhead(
+            "No configuration, service, migration cursor, or installed artifact was changed.",
+            indent="    ",
+        )
+        raise SystemExit(1) from exc
+    raise SystemExit(completed.returncode)
+
+
+@contextmanager
+def _authenticated_release_resolver(version: str):
+    """Yield a syntax-checked resolver bound to exact signed checksum bytes."""
+
+    with _trusted_system_bash() as bash:
+        with tempfile.TemporaryDirectory(prefix="defenseclaw-public-upgrade-") as directory:
+            os.chmod(directory, 0o700)
+            _assert_private_resolver_directory(directory)
+            paths: dict[str, str] = {}
+            for name, maximum in _RESOLVER_EVIDENCE_LIMITS.items():
+                path = os.path.join(directory, name)
+                _download_private_release_asset(version, name, path, maximum)
+                _assert_private_resolver_file(path, maximum)
+                paths[name] = path
+
+            with _cosign_verifier(strict=True) as cosign:
+                if not cosign:
+                    raise OSError("Cosign verifier is unavailable")
+                verified = subprocess.run(
+                    [
+                        cosign,
+                        "verify-blob",
+                        "--certificate",
+                        paths["checksums.txt.pem"],
+                        "--signature",
+                        paths["checksums.txt.sig"],
+                        "--certificate-identity",
+                        _RELEASE_WORKFLOW_IDENTITY,
+                        "--certificate-oidc-issuer",
+                        "https://token.actions.githubusercontent.com",
+                        paths["checksums.txt"],
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+            if verified.returncode != 0:
+                raise OSError("resolver checksum signature did not match the DefenseClaw release workflow")
+
+            expected = _resolver_digest_from_signed_checksums(
+                paths["checksums.txt"],
+                _POSIX_RESOLVER_ASSET,
+            )
+            resolver = paths[_POSIX_RESOLVER_ASSET]
+            if _sha256_file(resolver) != expected:
+                raise OSError("resolver digest does not match signed checksums")
+            try:
+                source = Path(resolver).read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise OSError("resolver is not valid UTF-8") from exc
+            if not source.splitlines() or source.splitlines()[-1] != RESOLVER_COMPLETENESS_MARKER:
+                raise OSError("resolver completeness marker is missing")
+            bash.assert_stable()
+            syntax = subprocess.run(
+                [bash.path, "-n", resolver],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            if syntax.returncode != 0:
+                raise OSError("resolver failed bash syntax validation")
+            yield bash, resolver
+
+
+def _system_bash_identity(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+        info.st_size,
+    )
+
+
+def _system_bash_info_is_trusted(info: os.stat_result) -> bool:
+    mode = stat.S_IMODE(info.st_mode)
+    return (
+        stat.S_ISREG(info.st_mode)
+        and info.st_uid == 0
+        and not mode & 0o022
+        and bool(mode & 0o111)
+        and 0 < info.st_size <= _MAX_SYSTEM_BASH_BYTES
+    )
+
+
+@contextmanager
+def _trusted_system_bash():
+    for candidate in ("/bin/bash", "/usr/bin/bash"):
+        try:
+            named = os.lstat(candidate)
+        except OSError:
+            continue
+        if stat.S_ISLNK(named.st_mode) or not _system_bash_info_is_trusted(named):
+            continue
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(candidate, flags)
+        except OSError:
+            continue
+        try:
+            opened = os.fstat(descriptor)
+            identity = _system_bash_identity(named)
+            if not _system_bash_info_is_trusted(opened) or _system_bash_identity(opened) != identity:
+                raise OSError("trusted system bash changed while it was opened")
+            handle = _TrustedSystemBash(candidate, descriptor, identity)
+            handle.assert_stable()
+            yield handle
+            return
+        finally:
+            os.close(descriptor)
+    raise OSError("a trusted root-owned system bash interpreter is unavailable")
+
+
+def _assert_private_resolver_directory(path: str) -> None:
+    info = os.lstat(path)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise OSError("resolver staging directory is not private and caller-owned")
+
+
+def _assert_private_resolver_file(path: str, maximum: int) -> None:
+    info = os.lstat(path)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
+        or not 0 < info.st_size <= maximum
+    ):
+        raise OSError("resolver evidence lost private bounded custody")
+
+
+def _validate_release_asset_url(url: str) -> None:
+    if os.environ.get(_UPGRADE_TEST_RELEASE_BASE_URL_ENV, "").strip():
+        base = _release_download_base()
+        if url != base and not url.startswith(base + "/"):
+            raise OSError("resolver test download left the gated loopback endpoint")
+        return
+    parsed = urlsplit(url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise OSError("release asset URL has an invalid port") from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in _COSIGN_BOOTSTRAP_ALLOWED_HOSTS
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or parsed.fragment
+    ):
+        raise OSError("release asset redirect left the pinned HTTPS host set")
+
+
+def _download_private_release_asset(
+    version: str,
+    name: str,
+    destination: str,
+    maximum: int,
+) -> None:
+    """Stream one fixed-name resolver asset into exclusive private custody."""
+
+    url = f"{_release_download_base()}/{version}/{name}"
+    response = None
+    for _redirect in range(6):
+        _validate_release_asset_url(url)
+        try:
+            response = requests.get(
+                url,
+                stream=True,
+                timeout=(15, 120),
+                allow_redirects=False,
+            )
+        except requests.RequestException as exc:
+            raise OSError(f"could not download resolver evidence {name}") from exc
+        if response.status_code in {301, 302, 303, 307, 308}:
+            location = response.headers.get("location", "")
+            response.close()
+            response = None
+            if os.environ.get(_UPGRADE_TEST_RELEASE_BASE_URL_ENV, "").strip():
+                raise OSError("resolver test endpoint attempted a redirect")
+            if not location:
+                raise OSError("release asset redirect had no location")
+            url = urljoin(url, location)
+            continue
+        break
+    else:
+        raise OSError("release asset download exceeded the redirect limit")
+    if response is None or response.status_code != 200:
+        status = "unavailable" if response is None else str(response.status_code)
+        if response is not None:
+            response.close()
+        raise OSError(f"resolver evidence {name} is unavailable (HTTP {status})")
+
+    content_length = response.headers.get("content-length", "")
+    if content_length:
+        try:
+            declared = int(content_length)
+        except ValueError as exc:
+            response.close()
+            raise OSError(f"resolver evidence {name} has invalid content length") from exc
+        if not 0 < declared <= maximum:
+            response.close()
+            raise OSError(f"resolver evidence {name} exceeds its size limit")
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    size = 0
+    try:
+        descriptor = os.open(destination, flags, 0o600)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            descriptor = -1
+            try:
+                for chunk in response.iter_content(chunk_size=128 * 1024):
+                    if not chunk:
+                        continue
+                    size += len(chunk)
+                    if size > maximum:
+                        raise OSError(f"resolver evidence {name} exceeds its size limit")
+                    stream.write(chunk)
+            except requests.RequestException as exc:
+                raise OSError(f"resolver evidence {name} download was interrupted") from exc
+            stream.flush()
+            os.fsync(stream.fileno())
+    finally:
+        response.close()
+        if descriptor >= 0:
+            os.close(descriptor)
+    if size == 0:
+        raise OSError(f"resolver evidence {name} is empty")
+
+
+def _resolver_digest_from_signed_checksums(path: str, resolver_name: str) -> str:
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise OSError("signed resolver checksums are not valid UTF-8") from exc
+    entry = re.compile(rf"^([0-9a-f]{{64}})  {re.escape(resolver_name)}$")
+    mention = re.compile(rf"(?:^|\s)(?:[.]/)?{re.escape(resolver_name)}(?:\s|$)")
+    matches: list[str] = []
+    invalid_mention = False
+    for line in text.splitlines():
+        matched = entry.fullmatch(line)
+        if matched:
+            matches.append(matched.group(1))
+        elif mention.search(line):
+            invalid_mention = True
+    if invalid_mention or len(matches) != 1:
+        raise OSError("signed checksums must contain exactly one canonical resolver entry")
+    return matches[0]
 
 
 def _github_headers() -> dict[str, str]:
