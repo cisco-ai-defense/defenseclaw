@@ -791,6 +791,8 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
 	macos/DefenseClawMac/script/test_numeric_safety.sh
 	macos/DefenseClawMac/script/test_output_safety.sh
+	macos/DefenseClawMac/script/test_cli_cancellation.sh
+	macos/DefenseClawMac/script/test_structured_detail_parser.sh
 	macos/DefenseClawMac/script/test_secret_file_safety.sh
 	macos/DefenseClawMac/script/test_runtime_install_filesystem.sh
 	macos/DefenseClawMac/script/test_app_state_signal_safety.sh

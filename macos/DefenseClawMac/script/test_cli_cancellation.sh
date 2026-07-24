@@ -1,3 +1,4 @@
+#!/bin/bash
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,8 +15,20 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-repository = "keitheobrien/defenseclaw_mac"
-tag = "v1.1.7"
-commit = "f8a79fe0ce86facd81205b7d6ff8a480c8e5a3b4"
-source_version = "1.1.7"
-imported_at = "2026-07-21"
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-cancellation-tests.XXXXXX")"
+trap 'rm -rf "$BUILD_DIR"' EXIT
+MODULE_CACHE="$BUILD_DIR/ModuleCache"
+mkdir -p "$MODULE_CACHE"
+
+CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" xcrun swiftc \
+  -module-cache-path "$MODULE_CACHE" \
+  "$ROOT/DefenseClawMac/DataLayer/InstallationContext.swift" \
+  "$ROOT/DefenseClawMac/DataLayer/ConfigStore.swift" \
+  "$ROOT/DefenseClawMac/DataLayer/CLIRunner.swift" \
+  "$ROOT/Tests/CLICancellationTests.swift" \
+  -o "$BUILD_DIR/CLICancellationTests"
+
+"$BUILD_DIR/CLICancellationTests"

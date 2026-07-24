@@ -20,10 +20,10 @@ SPDX-License-Identifier: Apache-2.0
 
 The macOS app was imported from [`keitheobrien/defenseclaw_mac`](https://github.com/keitheobrien/defenseclaw_mac) at:
 
-- Stable release: `v1.1.5`
-- Commit: `c3b7681b082eefb8d8e21dc9347270b7bf803b0e`
-- Commit title: `Release DefenseClawMac 1.1.5`
-- Imported: 2026-07-10
+- Stable release: `v1.1.7`
+- Commit: `f8a79fe0ce86facd81205b7d6ff8a480c8e5a3b4`
+- Commit title: `Release DefenseClawMac 1.1.7`
+- Imported: 2026-07-21
 
 The import includes the Xcode project, Swift sources, tests, developer build/test scripts, icon-generation tool, asset catalog, and README images. It intentionally excludes the upstream repository's Git metadata, `.codex` configuration, personal signing identities, duplicate license file, and standalone release wrapper. The upstream `scripts/build_unified_dmg.sh` behavior is adapted into the monorepo's `scripts/build-macos-app-release.sh` so the unified DMG is built from the same unpublished commit as the backend release rather than downloading an already-published runtime.
 

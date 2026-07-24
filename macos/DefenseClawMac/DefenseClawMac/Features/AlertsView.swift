@@ -31,6 +31,7 @@ struct AlertsView: View {
     @State private var confirmAck = false
     @State private var findingDetails: [ScanFindingEvent] = []
     @State private var findingHistory: [AuditEvent] = []
+    @State private var hydratedAuditEvent: AuditEvent?
 
     private var connectorScopedAlerts: [AlertRow] {
         appState.unackedAlerts.filter { appState.connectorFilterAllows($0.connectorName) }
@@ -60,6 +61,15 @@ struct AlertsView: View {
 
     private var selectedRow: AlertRow? {
         rows.first { selection.contains($0.id) }
+    }
+
+    private var selectedInspectorRow: AlertRow? {
+        guard let row = selectedRow,
+              case .audit(let summary) = row,
+              let hydratedAuditEvent,
+              hydratedAuditEvent.id == summary.id
+        else { return selectedRow }
+        return .audit(hydratedAuditEvent)
     }
 
     var body: some View {
@@ -122,7 +132,7 @@ struct AlertsView: View {
             get: { selectedRow != nil },
             set: { if !$0 { selection = [] } }
         )) {
-            if let row = selectedRow {
+            if let row = selectedInspectorRow {
                 alertInspector(row)
                     .inspectorColumnWidth(min: 340, ideal: 440)
             }
@@ -179,42 +189,57 @@ struct AlertsView: View {
     }
 
     private func alertInspector(_ row: AlertRow) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(row.action).font(.headline)
-                    HStack(spacing: 6) {
-                        SeverityBadge(severity: row.severity)
-                        Text(row.kind.capitalized).font(.caption).foregroundStyle(.secondary)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(row.action).font(.headline)
+                        HStack(spacing: 6) {
+                            SeverityBadge(severity: row.severity)
+                            Text(row.kind.capitalized).font(.caption).foregroundStyle(.secondary)
+                        }
                     }
+                    Spacer()
+                    Button { selection = [] } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Close alert details")
                 }
-                Spacer()
-                Button { selection = [] } label: { Image(systemName: "xmark.circle.fill") }
-                    .buttonStyle(.borderless)
-                    .accessibilityLabel("Close alert details")
-            }
-            KeyValueGrid(pairs: [
-                ("Target", row.target),
-                ("Time", row.timestamp.formatted()),
-                ("Connector", row.connectorName),
-                ("Run ID", row.runID),
-            ].filter { !$0.1.isEmpty })
+                KeyValueGrid(pairs: [
+                    ("Target", row.target),
+                    ("Time", row.timestamp.formatted()),
+                    ("Connector", row.connectorName),
+                    ("Run ID", row.runID),
+                ].filter { !$0.1.isEmpty })
 
-            let structured = StructuredDetailParser.pairs(row.details)
-            if structured.isEmpty {
+                let structured = StructuredDetailParser.pairs(row.details)
+                let safeMetadata = structured.isEmpty
+                    ? StructuredDetailParser.safeMetadataPairs(row.details)
+                    : []
+                if !safeMetadata.isEmpty {
+                    Divider()
+                    Text("Security Metadata").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    KeyValueGrid(pairs: safeMetadata)
+                }
+                if !structured.isEmpty {
+                    Divider()
+                    Text("Event Details").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    KeyValueGrid(pairs: structured)
+                }
                 if !row.details.isEmpty {
-                    Text(row.details).font(.callout).textSelection(.enabled)
+                    Divider()
+                    Text("Raw Details").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Text(row.details)
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(8)
+                        .background(Cisco.surfacePanel, in: RoundedRectangle(cornerRadius: 6))
+                        .textSelection(.enabled)
                 }
-            } else {
-                Divider()
-                Text("Event Details").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                KeyValueGrid(pairs: structured)
-            }
 
-            if !findingDetails.isEmpty {
-                Divider()
-                Text("Findings").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                ScrollView {
+                if !findingDetails.isEmpty {
+                    Divider()
+                    Text("Findings").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(findingDetails) { finding in
                             VStack(alignment: .leading, spacing: 4) {
@@ -237,51 +262,64 @@ struct AlertsView: View {
                             .background(Cisco.surfacePanel, in: RoundedRectangle(cornerRadius: 6))
                         }
                     }
+                } else if case .scan(let scan) = row, !scan.findingTitles.isEmpty {
+                    Divider()
+                    Text("Findings").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    ForEach(scan.findingTitles, id: \.self) { Text($0).font(.caption) }
                 }
-                .frame(maxHeight: 230)
-            } else if case .scan(let scan) = row, !scan.findingTitles.isEmpty {
-                Divider()
-                Text("Findings").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                ForEach(scan.findingTitles, id: \.self) { Text($0).font(.caption) }
-            }
 
-            if !findingHistory.isEmpty {
-                Divider()
-                Text("History for This Target").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                ForEach(findingHistory.prefix(5)) { event in
-                    HStack {
-                        Text(event.timestamp, format: .dateTime.month().day().hour().minute())
-                            .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-                        Text(event.action).font(.caption).lineLimit(1)
-                        Spacer()
-                        SeverityBadge(severity: event.severity)
+                if !findingHistory.isEmpty {
+                    Divider()
+                    Text("History for This Target").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    ForEach(findingHistory.prefix(5)) { event in
+                        HStack {
+                            Text(event.timestamp, format: .dateTime.month().day().hour().minute())
+                                .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                            Text(event.action).font(.caption).lineLimit(1)
+                            Spacer()
+                            SeverityBadge(severity: event.severity)
+                        }
                     }
                 }
             }
-            Spacer()
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(12)
     }
 
     private func loadSelectedDetail() {
         guard let row = selectedRow else {
+            hydratedAuditEvent = nil
             findingDetails = []
             findingHistory = []
             return
         }
-        let selectedID = row.id
+        hydratedAuditEvent = nil
+        let rowID = row.id
         Task {
             let installationGeneration = appState.installationGeneration
+            var detailRow = row
+            var selectedAuditID: String?
+            if case .audit(let event) = row {
+                selectedAuditID = event.id
+                if let fullEvent = await appState.audit.event(id: event.id) {
+                    detailRow = .audit(fullEvent)
+                }
+            }
+            guard installationGeneration == appState.installationGeneration else { return }
             let details = await appState.audit.scanFindings(
-                runID: row.runID.nonEmpty,
-                target: row.target.nonEmpty,
+                runID: detailRow.runID.nonEmpty,
+                target: detailRow.target.nonEmpty,
                 limit: 20
             )
             guard installationGeneration == appState.installationGeneration else { return }
-            let history = await appState.audit.relatedEvents(target: row.target, limit: 10)
-                .filter { $0.id != row.id }
+            let history = await appState.audit.relatedEvents(target: detailRow.target, limit: 10)
+                .filter { $0.id != selectedAuditID }
             guard installationGeneration == appState.installationGeneration,
-                  selectedRow?.id == selectedID else { return }
+                  selectedRow?.id == rowID else { return }
+            if case .audit(let fullEvent) = detailRow {
+                hydratedAuditEvent = fullEvent
+            }
             findingDetails = details
             findingHistory = history
         }

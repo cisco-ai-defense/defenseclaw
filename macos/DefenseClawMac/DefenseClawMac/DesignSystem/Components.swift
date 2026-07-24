@@ -246,11 +246,19 @@ struct KeyValueGrid: View {
         Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 5) {
             ForEach(Array(pairs.enumerated()), id: \.offset) { _, pair in
                 GridRow {
-                    Text(pair.0).font(.caption).foregroundStyle(.secondary)
-                    Text(pair.1).font(.caption).textSelection(.enabled)
+                    Text(pair.0)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Text(pair.1)
+                        .font(.caption)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

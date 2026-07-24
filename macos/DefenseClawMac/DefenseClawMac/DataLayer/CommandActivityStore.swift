@@ -19,9 +19,18 @@ import Observation
 
 enum CommandActivityStatus: String, Sendable {
     case running
+    case cancelling
+    case finishing
     case succeeded
     case failed
     case cancelled
+
+    var isActive: Bool {
+        switch self {
+        case .running, .cancelling, .finishing: true
+        case .succeeded, .failed, .cancelled: false
+        }
+    }
 }
 
 struct CommandActivityEntry: Identifiable, Sendable {
@@ -45,6 +54,8 @@ struct CommandActivityEntry: Identifiable, Sendable {
     var statusLabel: String {
         switch status {
         case .running: "Running"
+        case .cancelling: "Cancelling..."
+        case .finishing: "Finishing..."
         case .succeeded: "Exit 0"
         case .failed: "Exit \(exitCode ?? -1)"
         case .cancelled: "Cancelled"
@@ -81,6 +92,12 @@ final class CommandActivityStore {
         successEffects: [String] = [],
         suggestedNextAction: String = ""
     ) async -> CLIResult {
+        guard await runner.reserve(runID: id) else {
+            return CLIResult(
+                exitCode: 125,
+                output: "A command with this run identifier is already active.\n"
+            )
+        }
         entries.insert(
             CommandActivityEntry(
                 id: id,
@@ -132,11 +149,31 @@ final class CommandActivityStore {
     }
 
     func cancel(_ id: UUID) {
-        Task { await runner.cancel(runID: id) }
+        guard let index = entries.firstIndex(where: { $0.id == id }),
+              entries[index].status == .running else { return }
+        entries[index].status = .cancelling
+        Task {
+            let disposition = await runner.cancel(runID: id)
+            guard let index = entries.firstIndex(where: { $0.id == id }),
+                  entries[index].status == .cancelling else { return }
+            switch disposition {
+            case .requested, .alreadyRequested:
+                break
+            case .finishing:
+                entries[index].status = .finishing
+            case .notFound:
+                entries[index].finishedAt = Date()
+                entries[index].status = .cancelled
+                if entries[index].output.isEmpty {
+                    entries[index].output = "Cancellation requested after the command process was no longer active.\n"
+                }
+                entries[index].suggestedNextAction = "Refresh the affected view to verify its final state."
+            }
+        }
     }
 
     func clearCompleted() {
-        entries.removeAll { $0.status != .running }
+        entries.removeAll { !$0.status.isActive }
         if let selectedID, !entries.contains(where: { $0.id == selectedID }) {
             self.selectedID = entries.first?.id
         }
