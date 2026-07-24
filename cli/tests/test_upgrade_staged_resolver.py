@@ -286,7 +286,26 @@ def resolver_env(tmp_path: Path):
             fake_bin / "cosign",
             '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "${COSIGN_LOG}"\nexit 0\n',
         )
-        _write_executable(fake_bin / "uv", "#!/usr/bin/env bash\nexit 0\n")
+        _write_executable(
+            fake_bin / "uv",
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'printf \'%s\\n\' "$*" >> "${UV_LOG}"\n'
+            'if [[ "$#" -eq 10'
+            ' && "$1" == "--no-config"'
+            ' && "$2" == "pip"'
+            ' && "$3" == "install"'
+            ' && "$4" == "--python"'
+            ' && "$5" == "${DEFENSECLAW_HOME}/.venv/bin/python"'
+            ' && "$6" == "--dry-run"'
+            ' && "$7" == "--quiet"'
+            ' && "$8" == "--only-binary"'
+            ' && "$9" == "litellm"'
+            ' && "${10}" == */authenticated-source-0.8.6/defenseclaw-0.8.6-2-py3-none-any.whl ]]; then\n'
+            "    exit 0\n"
+            "fi\n"
+            "exit 99\n",
+        )
         _write_executable(
             fake_bin / "sha256sum",
             """#!/usr/bin/env bash
@@ -362,6 +381,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
         mutation_log = tmp_path / "mutations.log"
         curl_log = tmp_path / "curl.log"
         cosign_log = tmp_path / "cosign.log"
+        uv_log = tmp_path / "uv.log"
         env = os.environ.copy()
         for name in tuple(env):
             if name in {
@@ -379,6 +399,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
                 "MUTATION_LOG": str(mutation_log),
                 "CURL_LOG": str(curl_log),
                 "COSIGN_LOG": str(cosign_log),
+                "UV_LOG": str(uv_log),
                 "NO_COLOR": "1",
             }
         )
@@ -549,6 +570,7 @@ def test_explicit_final_target_still_resolves_verified_two_hop_plan(
     assert "No changes were made" in output
     assert not mutation_log.exists()
     assert not Path(env["DEFENSECLAW_HOME"]).exists()
+    assert not Path(env["UV_LOG"]).exists()
     downloads = curl_log.read_text(encoding="utf-8")
     assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
     assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
@@ -776,6 +798,11 @@ def test_clean_086_missing_cursor_authenticates_recovery_without_mutation(
     assert config_path.read_bytes() == before
     assert not (Path(env["DEFENSECLAW_HOME"]) / ".migration_state.json").exists()
     assert not mutation_log.exists()
+    uv_invocation = Path(env["UV_LOG"]).read_text(encoding="utf-8").split()
+    assert uv_invocation[:4] == ["--no-config", "pip", "install", "--python"]
+    assert uv_invocation[4] == f"{env['DEFENSECLAW_HOME']}/.venv/bin/python"
+    assert uv_invocation[5:9] == ["--dry-run", "--quiet", "--only-binary", "litellm"]
+    assert Path(uv_invocation[9]).name == "defenseclaw-0.8.6-2-py3-none-any.whl"
     downloads = curl_log.read_text(encoding="utf-8")
     assert "/releases/download/0.8.6/release-provenance.json" in downloads
     assert "defenseclaw-0.8.6-2-py3-none-any.dcwheel" in downloads
@@ -830,6 +857,7 @@ def test_same_version_086_cursor_bootstrap_preserves_unrelated_v8_config_bytes(
         "observability",
         "stack",
         "migration-backup",
+        "pending-cursor-retry",
         "receipt",
     ),
 )
@@ -854,6 +882,11 @@ def test_clean_086_missing_cursor_recovery_rejects_near_miss_state(
         (stack / "README.md").write_bytes(b"operator drift\n")
     elif near_miss == "migration-backup":
         Path(f"{config_path}.pre-observability-migration.bak").write_bytes(b"residue\n")
+    elif near_miss == "pending-cursor-retry":
+        (Path(env["DEFENSECLAW_HOME"]) / ".migration_state.fresh.pending.json").write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
     else:
         (Path(env["DEFENSECLAW_HOME"]) / ".upgrade-receipts").mkdir()
     before = config_path.read_bytes()

@@ -21,6 +21,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -318,6 +319,66 @@ class FreshMigrationCursorTests(unittest.TestCase):
 
         self.assertTrue(os.path.isfile(os.path.join(data_dir, "config.yaml")))
         self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
+
+    def test_cursor_publication_failure_is_repaired_on_rerun(self):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import _fresh_migration_pending_path
+
+        data_dir = os.path.join(self._tmp.name, "cursor-retry")
+        with patch.object(
+            migration_state,
+            "save_if_absent",
+            side_effect=OSError("injected cursor publication failure"),
+        ):
+            first_report = self._run_first_run(data_dir)
+
+        self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
+        self.assertTrue(os.path.isfile(_fresh_migration_pending_path(data_dir)))
+        self.assertTrue(
+            any(
+                step.name == "Migration State"
+                and step.status == "fail"
+                and step.next_command == "defenseclaw init"
+                for step in first_report.setup
+            )
+        )
+
+        second_report = self._run_first_run(data_dir)
+
+        self.assertIsNotNone(migration_state.load(data_dir))
+        self.assertFalse(os.path.lexists(_fresh_migration_pending_path(data_dir)))
+        self.assertTrue(
+            any(
+                step.name == "Migration State"
+                and step.status == "pass"
+                and "recovered pending fresh cursor" in step.detail
+                for step in second_report.setup
+            )
+        )
+
+    def test_cursor_retry_refuses_config_changed_after_failed_publication(self):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import _fresh_migration_pending_path
+
+        data_dir = os.path.join(self._tmp.name, "cursor-retry-tampered")
+        with patch.object(
+            migration_state,
+            "save_if_absent",
+            side_effect=OSError("injected cursor publication failure"),
+        ):
+            self._run_first_run(data_dir)
+
+        config_path = os.path.join(data_dir, "config.yaml")
+        with open(config_path, "a", encoding="utf-8") as stream:
+            stream.write("# operator change\n")
+        changed = Path(config_path).read_bytes()
+
+        report = self._run_first_run(data_dir)
+
+        self.assertEqual(report.status, "needs_attention")
+        self.assertEqual(Path(config_path).read_bytes(), changed)
+        self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
+        self.assertTrue(os.path.isfile(_fresh_migration_pending_path(data_dir)))
 
 
 # ---------------------------------------------------------------------------

@@ -1923,6 +1923,7 @@ def _maybe_delegate_public_upgrade(argv: list[str]) -> None:
                 "BASH_XTRACEFD",
                 "IFS",
                 "LD_PRELOAD",
+                "LD_AUDIT",
                 "LD_LIBRARY_PATH",
                 "DYLD_INSERT_LIBRARIES",
                 "DYLD_LIBRARY_PATH",

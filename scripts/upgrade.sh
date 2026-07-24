@@ -5310,6 +5310,7 @@ if os.path.lexists(environment_path):
 
 for residue in (
     config_path + ".pre-observability-migration.bak",
+    os.path.join(data_dir, ".migration_state.fresh.pending.json"),
     os.path.join(data_dir, ".upgrade-receipts"),
     os.path.join(data_dir, ".upgrade-recovery"),
 ):

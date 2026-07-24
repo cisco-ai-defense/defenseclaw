@@ -98,6 +98,50 @@ class TestInitCommand(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_init._install_scanners")
     @patch("defenseclaw.config.detect_environment", return_value="macos")
     @patch("defenseclaw.config.default_data_path")
+    def test_init_retries_failed_fresh_cursor_publication(
+        self,
+        mock_path,
+        _mock_env,
+        _mock_scanners,
+        _mock_guardrail,
+        _mock_which,
+    ):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import _fresh_migration_pending_path
+
+        mock_path.return_value = Path(self.tmp_dir)
+        original_save_if_absent = migration_state.save_if_absent
+        attempts = 0
+
+        def fail_once(data_dir, state):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OSError("injected cursor publication failure")
+            return original_save_if_absent(data_dir, state)
+
+        with (
+            patch.object(migration_state, "save_if_absent", new=fail_once),
+            patch("defenseclaw.logger.Logger.from_config", return_value=MagicMock()),
+        ):
+            first = self.runner.invoke(init_cmd, ["--skip-install"], obj=AppContext())
+            self.assertNotEqual(first.exit_code, 0)
+            self.assertIn("rerun 'defenseclaw init' to retry safely", first.output)
+            self.assertFalse(os.path.lexists(migration_state.state_path(self.tmp_dir)))
+            self.assertTrue(os.path.isfile(_fresh_migration_pending_path(self.tmp_dir)))
+
+            second = self.runner.invoke(init_cmd, ["--skip-install"], obj=AppContext())
+
+        self.assertEqual(second.exit_code, 0, second.output + (second.stderr or ""))
+        self.assertIn("recovered pending fresh cursor", second.output)
+        self.assertIsNotNone(migration_state.load(self.tmp_dir))
+        self.assertFalse(os.path.lexists(_fresh_migration_pending_path(self.tmp_dir)))
+
+    @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
+    @patch("defenseclaw.commands.cmd_init._install_guardrail")
+    @patch("defenseclaw.commands.cmd_init._install_scanners")
+    @patch("defenseclaw.config.detect_environment", return_value="macos")
+    @patch("defenseclaw.config.default_data_path")
     def test_initial_bootstrap_does_not_revive_direct_logger(
         self, mock_path, _mock_env, mock_scanners, _mock_guardrail, _mock_which
     ):
