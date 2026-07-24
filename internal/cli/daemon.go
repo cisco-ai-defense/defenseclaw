@@ -17,11 +17,18 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,9 +36,27 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-const defaultStopTimeout = 10 * time.Second
+const (
+	defaultStopTimeout           = 10 * time.Second
+	defaultStartReadinessTimeout = 60 * time.Second
+	defaultReadinessPollInterval = 100 * time.Millisecond
+	defaultReadinessHTTPTimeout  = time.Second
+	gracefulShutdownHTTPTimeout  = 3 * time.Second
+	gracefulShutdownResponseMax  = 4 << 10
+	restartPortReleaseTimeout    = defaultStopTimeout
+	restartPortReleaseInterval   = 25 * time.Millisecond
+	rotationTransactionFlag      = "rotation-transaction"
+	rotationCleanupFlag          = "rotation-cleanup"
+	rotationConnectorStateFlag   = "rotation-connector-state"
+	rotationConnectorStateMaxLen = 16 << 10
+	upgradeFreshProcessEnv       = "DEFENSECLAW_UPGRADE_FRESH_PROCESS"
+	upgradeWaitReadyTimeoutFlag  = "timeout"
+	upgradeWaitReadyVersionFlag  = "expected-version"
+)
 
 var startCmd = &cobra.Command{
 	Use:   "start",
@@ -67,24 +92,144 @@ Equivalent to 'stop' followed by 'start'.`,
 	PersistentPreRunE: nil,
 }
 
+var upgradeWaitReadyCmd = &cobra.Command{
+	Use:               "upgrade-wait-ready",
+	Hidden:            true,
+	Args:              cobra.NoArgs,
+	RunE:              runUpgradeWaitReady,
+	PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
+}
+
+var (
+	startupListenerOwner            = daemon.ListenerOwnerPID
+	requireStartupListenerOwnership = runtime.GOOS == "windows"
+)
+
+type daemonState interface {
+	IsRunning() (bool, int)
+}
+
+type managedProcessIdentity interface {
+	HasManagedProcessIdentity(int) bool
+}
+
+type managedProcessGeneration interface {
+	ManagedProcessStartedAt(int) (time.Time, bool)
+}
+
+type gatewayStatusEnvelope struct {
+	Health         gateway.HealthSnapshot         `json:"health"`
+	ConnectorModes []gatewayConnectorModeSnapshot `json:"connector_modes"`
+	Provenance     struct {
+		BinaryVersion string `json:"binary_version"`
+	} `json:"provenance"`
+	Runtime struct {
+		PID     int    `json:"pid"`
+		DataDir string `json:"data_dir"`
+	} `json:"runtime"`
+}
+
+type gatewayConnectorModeSnapshot struct {
+	Connector     string `json:"connector"`
+	GuardrailMode string `json:"guardrail_mode"`
+	HookFailMode  string `json:"hook_fail_mode"`
+	Enabled       bool   `json:"enabled"`
+}
+
+type rotationConnectorPolicy struct {
+	Name         string `json:"name"`
+	Mode         string `json:"mode"`
+	HookFailMode string `json:"hook_fail_mode"`
+	Enabled      bool   `json:"enabled"`
+}
+
+type rotationConnectorState struct {
+	Version    int                       `json:"version"`
+	Connectors []rotationConnectorPolicy `json:"connectors"`
+}
+
+var errGatewayIdentityMismatch = errors.New("gateway identity mismatch")
+
 func init() {
 	// Override PersistentPreRunE to skip config/audit loading for daemon management commands
 	startCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error { return nil }
 	stopCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error { return nil }
 	restartCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error { return nil }
+	startCmd.Flags().Bool(rotationTransactionFlag, false, "require transaction-grade startup verification")
+	startCmd.Flags().String(rotationConnectorStateFlag, "", "require an exact configured connector posture")
+	stopCmd.Flags().Bool(rotationTransactionFlag, false, "require transaction-grade shutdown verification")
+	stopCmd.Flags().Bool(rotationCleanupFlag, false, "allow authenticated rollback cleanup before readiness")
+	upgradeWaitReadyCmd.Flags().Duration(upgradeWaitReadyTimeoutFlag, defaultStartReadinessTimeout, "strict readiness deadline")
+	upgradeWaitReadyCmd.Flags().String(upgradeWaitReadyVersionFlag, "", "exact candidate gateway version")
+	_ = startCmd.Flags().MarkHidden(rotationTransactionFlag)
+	_ = startCmd.Flags().MarkHidden(rotationConnectorStateFlag)
+	_ = stopCmd.Flags().MarkHidden(rotationTransactionFlag)
+	_ = stopCmd.Flags().MarkHidden(rotationCleanupFlag)
 
 	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(stopCmd)
 	rootCmd.AddCommand(restartCmd)
+	rootCmd.AddCommand(upgradeWaitReadyCmd)
+}
+
+func rotationTransactionRequested(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	enabled, err := cmd.Flags().GetBool(rotationTransactionFlag)
+	return err == nil && enabled
+}
+
+func rotationCleanupRequested(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	enabled, err := cmd.Flags().GetBool(rotationCleanupFlag)
+	return err == nil && enabled
 }
 
 func runStart(cmd *cobra.Command, _ []string) error {
-	d := daemon.New(config.DefaultDataPath())
-	if err := d.ValidateStartIdentityFiles(); err != nil {
-		return fmt.Errorf("start daemon: %w", err)
+	rotationTransaction := rotationTransactionRequested(cmd)
+	controllerOwnsReadiness := upgradeControllerOwnsGatewayStartReadiness(rotationTransaction)
+	var expectedConnectorState rotationConnectorState
+	if rotationTransaction {
+		rawState, flagErr := cmd.Flags().GetString(rotationConnectorStateFlag)
+		if flagErr != nil {
+			return fmt.Errorf("read rotation connector state: %w", flagErr)
+		}
+		var parseErr error
+		expectedConnectorState, parseErr = parseRotationConnectorState(rawState)
+		if parseErr != nil {
+			return fmt.Errorf("rotation start requires a valid connector state: %w", parseErr)
+		}
 	}
+	d := daemon.New(config.DefaultDataPath())
+	// Start can return early when the configured listener is already healthy.
+	// Validate every process-identity artifact before that fast path so malformed
+	// or unreadable watchdog state can never be hidden by a valid gateway PID.
+	if err := d.ValidateStartIdentityFiles(); err != nil {
+		return err
+	}
+	cfg, cfgLoadErr := loadDaemonConfig(cmd)
+	if rotationTransaction && cfgLoadErr != nil {
+		return fmt.Errorf("rotation start requires valid configuration: %w", cfgLoadErr)
+	}
+	if rotationTransaction {
+		if err := verifyRotationConfigState(cfg, expectedConnectorState); err != nil {
+			return fmt.Errorf("rotation start configuration does not match gateway A: %w", err)
+		}
+	}
+	var cfgErr error
+	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
 
-	if running, pid := d.IsRunning(); running {
+	alreadyRunning, pid, err := inspectConfiguredListener(d, cfg, client)
+	if err != nil {
+		return err
+	}
+	if alreadyRunning {
+		if rotationTransaction {
+			return fmt.Errorf("rotation start requires a stopped gateway; managed PID %d is already running", pid)
+		}
 		Warn(fmt.Sprintf("Gateway sidecar is already running (PID %d)", pid))
 		fmt.Println("Use 'defenseclaw-gateway status' to check health")
 		return nil
@@ -94,43 +239,266 @@ func runStart(cmd *cobra.Command, _ []string) error {
 
 	// Pass through relevant flags to the daemon process
 	args := collectDaemonArgs(cmd)
+	restoreFreshProcessMarker, err := isolateUpgradeFreshProcessMarkerFromChildren()
+	if err != nil {
+		return fmt.Errorf("isolate delegated gateway readiness: %w", err)
+	}
+	defer restoreFreshProcessMarker()
 
-	pid, err := d.Start(args)
+	startAttemptedAt := time.Now()
+	pid, err = d.Start(args)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		return fmt.Errorf("start daemon: %w", err)
 	}
 
-	fmt.Printf("%s (PID %d)\n", Style("OK", "fg=green", "bold"), pid)
+	cfg, cfgErr = loadDaemonConfig(cmd)
+	if rotationTransaction && cfgErr != nil {
+		return fmt.Errorf("rotation start could not reload committed configuration: %w", cfgErr)
+	}
+	if rotationTransaction {
+		if err := verifyRotationConfigState(cfg, expectedConnectorState); err != nil {
+			return fmt.Errorf("rotation start reloaded configuration does not match gateway A: %w", err)
+		}
+	}
+	if controllerOwnsReadiness {
+		if err := verifyDelegatedGatewayStart(d, pid); err != nil {
+			fmt.Println(Style("FAILED", "fg=red", "bold"))
+			return fmt.Errorf("delegated gateway start: %w", err)
+		}
+		fmt.Printf("%s (PID %d; readiness delegated to upgrade controller)\n", Style("LAUNCHED", "fg=green", "bold"), pid)
+		fmt.Println()
+		fmt.Printf("  Log file: %s\n", d.LogFile())
+		fmt.Printf("  PID file: %s\n", d.PIDFile())
+		fmt.Println()
+		printSplunkLocalHint()
+		return startConfiguredWatchdog(cfg, cfgErr, false)
+	}
+	requirements := daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt)
+	requirements.expectedPID = pid
+	requirements.token = func() string { return daemonGatewayToken(cfg) }
+	if rotationTransaction {
+		requirements.requiredConnectors = rotationRequiredConnectorNamesFromState(expectedConnectorState, cfg.Guardrail.Enabled)
+		requirements.expectedConnectorState = expectedConnectorState
+		requirements.verifyConnectorState = true
+		requirements.requireExactConnectorRoster = cfg.Guardrail.Enabled
+		requirements.verifyConnectorOTLP = true
+	}
+	snap, _, err := waitForStartedDaemon(
+		d,
+		pid,
+		client,
+		sidecarStatusURL(cfg),
+		defaultStartReadinessTimeout,
+		defaultReadinessPollInterval,
+		requirements,
+	)
+	if err != nil {
+		fmt.Println(Style("FAILED", "fg=red", "bold"))
+		return fmt.Errorf("start daemon readiness: %w (check %s for errors)", err, d.LogFile())
+	}
+
+	printDaemonStartResult(pid, snap)
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Printf("  PID file: %s\n", d.PIDFile())
 	fmt.Println()
 	fmt.Println("Use 'defenseclaw-gateway status' to check health")
 	fmt.Println("Use 'defenseclaw-gateway stop' to stop the daemon")
+	printSplunkLocalHint()
 
-	// Auto-start watchdog if enabled in config.
-	cfg, cfgErr := config.LoadRuntimeV8File(config.ConfigPath())
-	if cfgErr == nil && cfg.Gateway.Watchdog.Enabled {
-		if err := runWatchdogStart(nil, nil); err != nil {
-			fmt.Printf("  Watchdog: auto-start failed: %v\n", err)
-		} else {
-			fmt.Println("  Watchdog: started")
-		}
-	} else {
-		fmt.Println("  Watchdog: disabled (enable with gateway.watchdog.enabled)")
+	return startConfiguredWatchdog(cfg, cfgErr, rotationTransaction)
+}
+
+func upgradeControllerOwnsGatewayStartReadiness(rotationTransaction bool) bool {
+	return !rotationTransaction && os.Getenv(upgradeFreshProcessEnv) == "1"
+}
+
+func isolateUpgradeFreshProcessMarkerFromChildren() (func(), error) {
+	value, present := os.LookupEnv(upgradeFreshProcessEnv)
+	if !present {
+		return func() {}, nil
+	}
+	if err := os.Unsetenv(upgradeFreshProcessEnv); err != nil {
+		return nil, err
+	}
+	return func() { _ = os.Setenv(upgradeFreshProcessEnv, value) }, nil
+}
+
+func runUpgradeWaitReady(cmd *cobra.Command, _ []string) error {
+	if os.Getenv(upgradeFreshProcessEnv) != "1" {
+		return errors.New("upgrade readiness handoff requires the fresh-process controller marker")
+	}
+	timeout, err := cmd.Flags().GetDuration(upgradeWaitReadyTimeoutFlag)
+	if err != nil || timeout <= 0 {
+		return errors.New("upgrade readiness timeout must be greater than zero")
+	}
+	deadline := time.Now().Add(timeout)
+	expectedVersion, err := cmd.Flags().GetString(upgradeWaitReadyVersionFlag)
+	if err != nil || strings.TrimSpace(expectedVersion) == "" || strings.TrimSpace(expectedVersion) != expectedVersion {
+		return errors.New("upgrade readiness requires an exact candidate version")
+	}
+	if appVersion != expectedVersion {
+		return fmt.Errorf("upgrade readiness control binary version %q does not match candidate %q", appVersion, expectedVersion)
 	}
 
+	d := daemon.New(config.DefaultDataPath())
+	if err := d.ValidateStartIdentityFiles(); err != nil {
+		return fmt.Errorf("upgrade readiness process identity: %w", err)
+	}
+	cfg, err := loadDaemonConfig(cmd)
+	if err != nil {
+		return fmt.Errorf("upgrade readiness configuration: %w", err)
+	}
+	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return errors.New("upgrade readiness deadline expired before gateway verification")
+	}
+	if err := waitForUpgradeGatewayReadiness(
+		d,
+		cfg,
+		client,
+		expectedVersion,
+		remaining,
+		defaultReadinessPollInterval,
+	); err != nil {
+		return fmt.Errorf("upgrade gateway readiness: %w", err)
+	}
 	return nil
 }
 
-func runStop(_ *cobra.Command, _ []string) error {
-	// Stop watchdog first since it monitors the gateway.
-	_ = runWatchdogStop(nil, nil)
-
-	d := daemon.New(config.DefaultDataPath())
-
+func waitForUpgradeGatewayReadiness(
+	d daemonState,
+	cfg *config.Config,
+	client *http.Client,
+	expectedVersion string,
+	timeout time.Duration,
+	pollInterval time.Duration,
+) error {
+	started := time.Now()
 	running, pid := d.IsRunning()
+	if !running || pid <= 0 {
+		return errors.New("managed gateway is not running")
+	}
+	identity, identityOK := d.(managedProcessIdentity)
+	if !identityOK || !identity.HasManagedProcessIdentity(pid) {
+		return fmt.Errorf("managed gateway PID %d lacks matching executable and process start identity", pid)
+	}
+	generation, generationOK := d.(managedProcessGeneration)
+	if !generationOK {
+		return fmt.Errorf("managed gateway PID %d lacks a verified launch generation", pid)
+	}
+	startedAt, startedAtOK := generation.ManagedProcessStartedAt(pid)
+	if !startedAtOK || startedAt.IsZero() {
+		return fmt.Errorf("managed gateway PID %d lacks a verified launch generation", pid)
+	}
+	remaining := timeout - time.Since(started)
+	if remaining <= 0 {
+		return errors.New("upgrade readiness deadline expired before gateway verification")
+	}
+	if err := waitForRunningDaemonReadinessWithVersion(
+		d,
+		pid,
+		client,
+		cfg,
+		remaining,
+		pollInterval,
+		expectedVersion,
+		startedAt,
+	); err != nil {
+		return err
+	}
+
+	running, currentPID, err := inspectConfiguredListener(d, cfg, client)
+	if err != nil {
+		return err
+	}
+	if !running || currentPID != pid {
+		return fmt.Errorf("configured gateway listener no longer belongs to managed PID %d", pid)
+	}
+	return nil
+}
+
+func startConfiguredWatchdog(cfg *config.Config, cfgErr error, rotationTransaction bool) error {
+	if cfgErr != nil || !cfg.Gateway.Watchdog.Enabled {
+		fmt.Println("  Watchdog: disabled (enable with gateway.watchdog.enabled)")
+		return nil
+	}
+	if err := runWatchdogStart(nil, nil); err != nil {
+		if rotationTransaction {
+			return fmt.Errorf("rotation start watchdog readiness: %w", err)
+		}
+		fmt.Printf("  Watchdog: auto-start failed: %v\n", err)
+		return nil
+	}
+	fmt.Println("  Watchdog: started")
+	return nil
+}
+
+func runStop(cmd *cobra.Command, _ []string) error {
+	rotationTransaction := rotationTransactionRequested(cmd)
+	rotationCleanup := rotationCleanupRequested(cmd)
+	if rotationCleanup && !rotationTransaction {
+		return errors.New("rotation cleanup requires transaction-grade verification")
+	}
+	d := daemon.New(config.DefaultDataPath())
+	cfg, cfgErr := loadDaemonConfig(cmd)
+	var running bool
+	var pid int
+	var err error
+	if rotationTransaction {
+		// Validate every identity artifact before the watchdog or gateway can
+		// be touched. A foreign listener or malformed watchdog record must leave
+		// both processes unchanged.
+		if err := d.ValidateStartIdentityFiles(); err != nil {
+			return err
+		}
+		if cfgErr != nil {
+			return fmt.Errorf("rotation stop requires valid configuration: %w", cfgErr)
+		}
+		client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
+		running, pid, err = inspectRotationStopTarget(
+			d,
+			cfg,
+			client,
+			rotationCleanup,
+			defaultStartReadinessTimeout,
+			defaultReadinessPollInterval,
+		)
+		if err != nil {
+			return err
+		}
+	} else {
+		running, pid = d.IsRunning()
+	}
+
+	watchdogWasRunning := false
+	if rotationTransaction {
+		watchdogWasRunning, err = rotationWatchdogRunning(config.DefaultDataPath())
+		if err != nil {
+			return err
+		}
+		if watchdogWasRunning && !running {
+			return errors.New("rotation watchdog owns the data directory without a running managed gateway")
+		}
+		if watchdogWasRunning && !cfg.Gateway.Watchdog.Enabled {
+			return errors.New("rotation watchdog is running while disabled in configuration")
+		}
+		if err := runWatchdogStop(nil, nil); err != nil {
+			if watchdogWasRunning {
+				if restoreErr := runWatchdogStart(nil, nil); restoreErr != nil {
+					return fmt.Errorf("rotation stop watchdog ownership: %w; restore failed: %v", err, restoreErr)
+				}
+			}
+			return fmt.Errorf("rotation stop watchdog ownership: %w", err)
+		}
+	} else {
+		// Stop watchdog first since it monitors the gateway. Ordinary operator
+		// stop keeps the historical best-effort behavior after identity preflight.
+		_ = runWatchdogStop(nil, nil)
+	}
+
 	if !running {
 		fmt.Println(Dim("Gateway sidecar is not running"))
 		return nil
@@ -138,9 +506,24 @@ func runStop(_ *cobra.Command, _ []string) error {
 
 	fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
 
-	if err := d.Stop(defaultStopTimeout); err != nil {
+	if err := stopGatewayGracefully(d, cfg, defaultStopTimeout); err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
+		if rotationTransaction && watchdogWasRunning {
+			if restoreErr := runWatchdogStart(nil, nil); restoreErr != nil {
+				return fmt.Errorf("stop daemon: %w; watchdog ownership restore failed: %v", err, restoreErr)
+			}
+		}
 		return fmt.Errorf("stop daemon: %w", err)
+	}
+	if rotationTransaction {
+		if err := waitForConfiguredPortFree(
+			cfg,
+			pid,
+			restartPortReleaseTimeout,
+			restartPortReleaseInterval,
+		); err != nil {
+			return fmt.Errorf("rotation stop listener release: %w", err)
+		}
 	}
 
 	fmt.Println(Style("OK", "fg=green", "bold"))
@@ -148,41 +531,170 @@ func runStop(_ *cobra.Command, _ []string) error {
 	return nil
 }
 
+func rotationWatchdogRunning(dataDir string) (bool, error) {
+	pidPath := filepath.Join(dataDir, watchdogPIDFile)
+	locked, info, err := watchdogIsLocked(pidPath)
+	if err != nil {
+		return false, fmt.Errorf("rotation watchdog ownership: %w", err)
+	}
+	if !locked {
+		if live, liveInfo := watchdogUnlockedLiveProcess(pidPath); live {
+			return false, fmt.Errorf(
+				"rotation watchdog PID %d is alive without the ownership lock",
+				liveInfo.PID,
+			)
+		}
+		return false, nil
+	}
+	if !verifyWatchdogProcess(info) {
+		return false, errors.New("rotation watchdog ownership fingerprint is not valid")
+	}
+	return true, nil
+}
+
+func inspectRotationStopTarget(
+	d daemonState,
+	cfg *config.Config,
+	client *http.Client,
+	cleanup bool,
+	timeout time.Duration,
+	pollInterval time.Duration,
+) (bool, int, error) {
+	running, pid, err := inspectConfiguredListener(d, cfg, client)
+	if err != nil {
+		return false, 0, err
+	}
+	if running && !cleanup {
+		if err := waitForRunningDaemonReadiness(d, pid, client, cfg, timeout, pollInterval); err != nil {
+			return false, 0, fmt.Errorf("rotation stop readiness: %w", err)
+		}
+	}
+	return running, pid, nil
+}
+
+func waitForRunningDaemonReadiness(
+	d daemonState,
+	pid int,
+	client *http.Client,
+	cfg *config.Config,
+	timeout time.Duration,
+	pollInterval time.Duration,
+) error {
+	return waitForRunningDaemonReadinessWithVersion(
+		d,
+		pid,
+		client,
+		cfg,
+		timeout,
+		pollInterval,
+		"",
+		time.Time{},
+	)
+}
+
+func waitForRunningDaemonReadinessWithVersion(
+	d daemonState,
+	pid int,
+	client *http.Client,
+	cfg *config.Config,
+	timeout time.Duration,
+	pollInterval time.Duration,
+	expectedVersion string,
+	startedNotBefore time.Time,
+) error {
+	requirements := daemonReadinessRequirementsFromConfig(cfg, startedNotBefore)
+	requirements.expectedPID = pid
+	requirements.expectedBinaryVersion = expectedVersion
+	requirements.token = func() string { return daemonGatewayToken(cfg) }
+	_, ready, err := waitForGatewayReadiness(
+		client,
+		sidecarStatusURL(cfg),
+		timeout,
+		pollInterval,
+		requirements,
+		func() bool {
+			running, currentPID := d.IsRunning()
+			return running && currentPID == pid
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if !ready {
+		return errors.New("managed gateway did not report READY")
+	}
+	if identity, ok := d.(managedProcessIdentity); !ok || !identity.HasManagedProcessIdentity(pid) {
+		return fmt.Errorf("managed gateway PID %d lacks matching executable and process start identity", pid)
+	}
+	return nil
+}
+
 func runRestart(cmd *cobra.Command, _ []string) error {
 	d := daemon.New(config.DefaultDataPath())
+	// Restart may stop an otherwise healthy managed gateway. Validate every
+	// process-identity artifact before that first side effect so malformed or
+	// unreadable watchdog state can never authorize a partial restart.
 	if err := d.ValidateStartIdentityFiles(); err != nil {
-		return fmt.Errorf("restart daemon: %w", err)
+		return err
 	}
+	cfg, _ := loadDaemonConfig(cmd)
+	var cfgErr error
+	client := &http.Client{Timeout: defaultReadinessHTTPTimeout}
 
-	// Stop the watchdog first so it doesn't fire false alarms during restart.
-	_ = runWatchdogStop(nil, nil)
-
-	if running, pid := d.IsRunning(); running {
+	running, pid, err := inspectConfiguredListener(d, cfg, client)
+	if err != nil {
+		return err
+	}
+	if running {
+		// Stop the watchdog only after proving the configured listener belongs to
+		// this managed instance; a foreign collision must have no side effects.
+		_ = runWatchdogStop(nil, nil)
 		fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
-		if err := d.Stop(defaultStopTimeout); err != nil {
+		if err := stopGatewayGracefully(d, cfg, defaultStopTimeout); err != nil {
 			fmt.Println(Style("FAILED", "fg=red", "bold"))
 			return fmt.Errorf("stop for restart: %w", err)
 		}
 		fmt.Println(Style("OK", "fg=green", "bold"))
 	}
+	if err := waitForConfiguredPortFree(cfg, pid, restartPortReleaseTimeout, restartPortReleaseInterval); err != nil {
+		return fmt.Errorf("restart preflight: %w", err)
+	}
 
 	fmt.Print("Starting gateway sidecar daemon... ")
 
 	args := collectDaemonArgs(cmd)
-	pid, err := d.Start(args)
+	startAttemptedAt := time.Now()
+	pid, err = d.Start(args)
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		return fmt.Errorf("start daemon: %w", err)
 	}
 
-	fmt.Printf("%s (PID %d)\n", Style("OK", "fg=green", "bold"), pid)
+	cfg, cfgErr = loadDaemonConfig(cmd)
+	requirements := daemonReadinessRequirementsFromConfig(cfg, startAttemptedAt)
+	requirements.expectedPID = pid
+	requirements.token = func() string { return daemonGatewayToken(cfg) }
+	snap, _, err := waitForStartedDaemon(
+		d,
+		pid,
+		client,
+		sidecarStatusURL(cfg),
+		defaultStartReadinessTimeout,
+		defaultReadinessPollInterval,
+		requirements,
+	)
+	if err != nil {
+		fmt.Println(Style("FAILED", "fg=red", "bold"))
+		return fmt.Errorf("restart daemon readiness: %w (check %s for errors)", err, d.LogFile())
+	}
+
+	printDaemonStartResult(pid, snap)
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Println()
-	printCompactHealthSummary(cfg)
+	printSplunkLocalHint()
 
 	// Re-start watchdog if enabled in config.
-	cfg, cfgErr := config.LoadRuntimeV8File(config.ConfigPath())
 	if cfgErr == nil && cfg.Gateway.Watchdog.Enabled {
 		if err := runWatchdogStart(nil, nil); err != nil {
 			fmt.Printf("  Warning: watchdog auto-start failed: %v\n", err)
@@ -192,64 +704,1073 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// printCompactHealthSummary polls /health and prints a one-line status.
-func printCompactHealthSummary(cfg *config.Config) {
-	if cfg == nil {
-		return
-	}
-	apiPort := cfg.Gateway.APIPort
-	if apiPort == 0 {
-		apiPort = 18790
-	}
-	url := fmt.Sprintf("http://127.0.0.1:%d/health", apiPort)
-
-	client := &http.Client{Timeout: 3 * time.Second}
-	for i := 0; i < 5; i++ {
-		time.Sleep(time.Second)
-		resp, err := client.Get(url)
-		if err != nil {
-			continue
-		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		resp.Body.Close()
-		if resp.StatusCode == 200 {
-			fmt.Printf("  Health: %s\n", summarizeHealth(body))
-			return
-		}
-	}
-	fmt.Println("  Health: not responding yet (use 'defenseclaw-gateway status')")
+type gracefulGatewayStopper interface {
+	StopGracefully(time.Duration, daemon.GracefulStopRequest) error
 }
 
-func summarizeHealth(body []byte) string {
-	var health map[string]json.RawMessage
-	if err := json.Unmarshal(body, &health); err != nil {
-		return "ok"
+func stopGatewayGracefully(d gracefulGatewayStopper, cfg *config.Config, timeout time.Duration) error {
+	client := &http.Client{Timeout: gracefulShutdownHTTPTimeout}
+	return d.StopGracefully(timeout, func(pid int) error {
+		return requestGatewayShutdown(client, cfg, daemonGatewayToken(cfg), pid)
+	})
+}
+
+func requestGatewayShutdown(client *http.Client, cfg *config.Config, token string, pid int) error {
+	if client == nil {
+		client = &http.Client{Timeout: gracefulShutdownHTTPTimeout}
 	}
-	subsystems := []string{"gateway", "watcher", "guardrail", "api", "telemetry", "sandbox"}
-	var parts []string
-	for _, sub := range subsystems {
-		raw, ok := health[sub]
+	if cfg == nil {
+		return errors.New("gateway shutdown configuration is unavailable")
+	}
+	if strings.TrimSpace(token) == "" {
+		return errors.New("gateway shutdown token is unavailable")
+	}
+	clientHost := strings.Trim(strings.TrimSpace(gatewayClientHost(cfg)), "[]")
+	clientIP := net.ParseIP(clientHost)
+	if !strings.EqualFold(clientHost, "localhost") && (clientIP == nil || !clientIP.IsLoopback()) {
+		return fmt.Errorf("refusing to send gateway token to non-loopback shutdown host %q", clientHost)
+	}
+	if requireStartupListenerOwnership {
+		ownerPID, err := startupListenerOwner(gatewayBindHost(cfg), cfg.Gateway.APIPort)
+		if err != nil {
+			return fmt.Errorf("verify gateway shutdown listener owner: %w", err)
+		}
+		if ownerPID != pid {
+			return fmt.Errorf("refusing to send gateway token to listener owned by PID %d; managed PID is %d", ownerPID, pid)
+		}
+	}
+	body, err := json.Marshal(map[string]interface{}{
+		"pid":      pid,
+		"data_dir": cfg.DataDir,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal gateway shutdown request: %w", err)
+	}
+	shutdownURL := strings.TrimSuffix(sidecarStatusURL(cfg), "/status") + "/api/v1/admin/shutdown"
+	req, err := http.NewRequest(http.MethodPost, shutdownURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create gateway shutdown request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-DefenseClaw-Token", token)
+	req.Header.Set("X-DefenseClaw-Client", "daemon-stop")
+	req.Header.Set("Content-Type", "application/json")
+	requestClient := *client
+	requestClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	resp, err := requestClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request gateway shutdown: %w", err)
+	}
+	defer resp.Body.Close()
+	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, gracefulShutdownResponseMax+1))
+	if readErr != nil {
+		return fmt.Errorf("read gateway shutdown response: %w", readErr)
+	}
+	if len(responseBody) > gracefulShutdownResponseMax {
+		return fmt.Errorf("gateway shutdown response exceeds %d bytes", gracefulShutdownResponseMax)
+	}
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("gateway shutdown returned %s: %s", resp.Status, strings.TrimSpace(string(responseBody)))
+	}
+	return nil
+}
+
+// printSplunkLocalHint prints Splunk Web credentials when the local bridge
+// is configured, so the user knows how to access the dashboards.
+func printSplunkLocalHint() {
+	dataDir := config.DefaultDataPath()
+
+	// Check bridge env first (written by Python setup splunk --logs)
+	bridgeEnvPath := filepath.Join(dataDir, "splunk-bridge", "env", ".env")
+	bridgeEnv := readDotEnv(bridgeEnvPath)
+	if pw := bridgeEnv["SPLUNK_PASSWORD"]; pw != "" {
+		Section("Splunk Local Mode")
+		fmt.Printf("  %s http://127.0.0.1:8000\n", Style("Web UI:", "fg=bright_black", "bold"))
+		fmt.Printf("  %s admin\n", Style("Username:", "fg=bright_black", "bold"))
+		fmt.Printf("  %s (stored in %s)\n", Style("Password:", "fg=bright_black", "bold"), bridgeEnvPath)
+		return
+	}
+
+	// Fallback: legacy DEFENSECLAW_LOCAL_* keys
+	dotenvPath := filepath.Join(dataDir, ".env")
+	env := readDotEnv(dotenvPath)
+	user := env["DEFENSECLAW_LOCAL_USERNAME"]
+	pass := env["DEFENSECLAW_LOCAL_PASSWORD"]
+	if user == "" || pass == "" {
+		return
+	}
+	Section("Splunk Local Mode")
+	fmt.Printf("  %s http://127.0.0.1:8000\n", Style("Web UI:", "fg=bright_black", "bold"))
+	fmt.Printf("  %s %s\n", Style("Username:", "fg=bright_black", "bold"), user)
+	fmt.Printf("  %s (stored in %s)\n", Style("Password:", "fg=bright_black", "bold"), dotenvPath)
+}
+
+type daemonReadinessRequirements struct {
+	// guardrailEnabled describes the effective runtime posture, not merely the
+	// global config switch. An enabled guardrail with no configured/enabled
+	// connector deliberately finalizes as disabled while it waits for setup.
+	guardrailEnabled bool
+	watcherEnabled   bool
+	telemetryEnabled bool
+	// requiredConnectors and verifyConnectorOTLP are transaction-only gates.
+	// Ordinary starts retain multi-connector failure isolation; token rotation
+	// must prove that every enabled configured connector converged and that the
+	// gateway accepts each connector's persisted scoped OTLP credential.
+	requiredConnectors          []string
+	expectedConnectorState      rotationConnectorState
+	verifyConnectorState        bool
+	requireExactConnectorRoster bool
+	verifyConnectorOTLP         bool
+	startedNotBefore            time.Time
+	expectedPID                 int
+	expectedDataDir             string
+	expectedBinaryVersion       string
+	token                       func() string
+	listenerHost                string
+	listenerPort                int
+	listenerOwner               func(string, int) (int, error)
+	requireOwnership            bool
+}
+
+func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {
+	// Resolve the daemon management view through the same strict source and
+	// dotenv path as the child. A migrated config can keep destination secrets
+	// only in <data_dir>/.env; compiling it without those values fails and used
+	// to make readiness silently probe the default endpoint instead of the
+	// dynamically configured one.
+	loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
+	cfg, _, err := loadGatewayConfigV8(config.ConfigPath())
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+	// The child receives these as flags, so startup verification must inspect
+	// the same effective endpoint instead of the on-disk defaults.
+	if sidecarHost != "" {
+		cfg.Gateway.APIBind = sidecarHost
+	}
+	if sidecarPort > 0 {
+		cfg.Gateway.APIPort = sidecarPort
+	}
+	return cfg, err
+}
+
+func readDotEnv(path string) map[string]string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	env := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
 		if !ok {
 			continue
 		}
-		var info struct {
-			State  string `json:"state"`
-			Status string `json:"status"`
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
+			value = value[1 : len(value)-1]
 		}
-		if json.Unmarshal(raw, &info) != nil {
+		env[key] = value
+	}
+	return env
+}
+
+func daemonGatewayToken(cfg *config.Config) string {
+	const (
+		canonicalTokenEnv = "DEFENSECLAW_GATEWAY_TOKEN"
+		legacyTokenEnv    = "OPENCLAW_GATEWAY_TOKEN"
+	)
+
+	// Daemon.childEnv preserves a genuinely custom token environment
+	// override, but replaces the canonical/legacy process variables with the
+	// data directory's dotenv values when those exist. Resolve the parent's
+	// readiness credential in that same order so it always authenticates with
+	// the token the child actually received.
+	tokenEnv := ""
+	if cfg != nil {
+		tokenEnv = strings.TrimSpace(cfg.Gateway.TokenEnv)
+		if tokenEnv != "" && !daemonEnvironmentKeyEqual(tokenEnv, canonicalTokenEnv) && !daemonEnvironmentKeyEqual(tokenEnv, legacyTokenEnv) {
+			if token := strings.TrimSpace(os.Getenv(tokenEnv)); token != "" {
+				return token
+			}
+		}
+	}
+
+	paths := []string{filepath.Join(config.DefaultDataPath(), ".env")}
+	if cfg != nil && cfg.DataDir != "" {
+		paths = append(paths, filepath.Join(cfg.DataDir, ".env"))
+	}
+	tokenKeys := []string{canonicalTokenEnv, legacyTokenEnv}
+	if daemonEnvironmentKeyEqual(tokenEnv, legacyTokenEnv) {
+		tokenKeys = []string{legacyTokenEnv, canonicalTokenEnv}
+	}
+	for _, path := range paths {
+		env := readDotEnv(path)
+		for _, key := range tokenKeys {
+			if token := strings.TrimSpace(daemonDotenvValue(env, key)); token != "" {
+				return token
+			}
+		}
+	}
+	if cfg != nil {
+		return strings.TrimSpace(cfg.Gateway.ResolvedToken())
+	}
+	return ""
+}
+
+func daemonEnvironmentKeyEqual(left, right string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+func daemonDotenvValue(env map[string]string, key string) string {
+	if value, ok := env[key]; ok || runtime.GOOS != "windows" {
+		return value
+	}
+	for candidate, value := range env {
+		if strings.EqualFold(candidate, key) {
+			return value
+		}
+	}
+	return ""
+}
+
+func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.Client) (bool, int, error) {
+	running, managedPID := d.IsRunning()
+	if !requireStartupListenerOwnership {
+		return running, managedPID, nil
+	}
+	ownerPID, err := startupListenerOwner(gatewayBindHost(cfg), cfg.Gateway.APIPort)
+	if errors.Is(err, daemon.ErrNoListener) {
+		if running {
+			return false, 0, fmt.Errorf("configured gateway port has no listener for managed PID %d", managedPID)
+		}
+		return false, 0, nil
+	}
+	if err != nil {
+		return false, 0, fmt.Errorf("inspect configured gateway listener: %w", err)
+	}
+	if !running || managedPID != ownerPID {
+		return false, 0, fmt.Errorf("configured gateway port %d is occupied by foreign process PID %d", cfg.Gateway.APIPort, ownerPID)
+	}
+	if identity, ok := d.(managedProcessIdentity); ok && !identity.HasManagedProcessIdentity(managedPID) {
+		return false, 0, fmt.Errorf("managed gateway PID %d lacks matching executable and process start identity", managedPID)
+	}
+	status, err := fetchSidecarStatus(client, sidecarStatusURL(cfg), daemonGatewayToken(cfg))
+	if err != nil {
+		return false, 0, fmt.Errorf("managed gateway listener authentication failed: %w", err)
+	}
+	if err := verifyGatewayRuntimeIdentity(status, managedPID, cfg.DataDir); err != nil {
+		return false, 0, err
+	}
+	return true, managedPID, nil
+}
+
+func waitForConfiguredPortFree(cfg *config.Config, stoppedPID int, timeout, pollInterval time.Duration) error {
+	if !requireStartupListenerOwnership {
+		return nil
+	}
+	if pollInterval <= 0 {
+		pollInterval = restartPortReleaseInterval
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		pid, err := startupListenerOwner(gatewayBindHost(cfg), cfg.Gateway.APIPort)
+		if errors.Is(err, daemon.ErrNoListener) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		collision := fmt.Errorf("configured gateway port %d is occupied by PID %d", cfg.Gateway.APIPort, pid)
+		if stoppedPID <= 0 || pid != stoppedPID || time.Now().After(deadline) {
+			return collision
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
+func fetchSidecarStatus(client *http.Client, addr, token string) (gatewayStatusEnvelope, error) {
+	var status gatewayStatusEnvelope
+	if strings.TrimSpace(token) == "" {
+		return status, fmt.Errorf("no gateway token is available yet")
+	}
+	req, err := http.NewRequest(http.MethodGet, addr, nil)
+	if err != nil {
+		return status, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-DefenseClaw-Token", token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return status, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		return status, fmt.Errorf("%w: authenticated status returned %s", errGatewayIdentityMismatch, resp.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, gatewayHealthDocumentMaxBytes+1))
+	if err != nil {
+		return status, fmt.Errorf("read authenticated status: %w", err)
+	}
+	if len(body) > gatewayHealthDocumentMaxBytes {
+		return status, fmt.Errorf("authenticated status exceeds %d bytes", gatewayHealthDocumentMaxBytes)
+	}
+	if err := json.Unmarshal(body, &status); err != nil {
+		return status, fmt.Errorf("%w: parse authenticated status: %v", errGatewayIdentityMismatch, err)
+	}
+	return status, nil
+}
+
+func verifyGatewayRuntimeIdentity(status gatewayStatusEnvelope, expectedPID int, expectedDataDir string) error {
+	if status.Runtime.PID != expectedPID {
+		return fmt.Errorf("%w: authenticated runtime PID %d does not match managed PID %d", errGatewayIdentityMismatch, status.Runtime.PID, expectedPID)
+	}
+	if !sameGatewayDataDir(status.Runtime.DataDir, expectedDataDir) {
+		return fmt.Errorf("%w: authenticated runtime data directory does not match this configuration", errGatewayIdentityMismatch)
+	}
+	return nil
+}
+
+func sameGatewayDataDir(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(filepath.Clean(left))
+	rightAbs, rightErr := filepath.Abs(filepath.Clean(right))
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(leftAbs, rightAbs)
+	}
+	return leftAbs == rightAbs
+}
+
+type daemonReadinessProcess interface {
+	IsRunning() (bool, int)
+	Stop(time.Duration) error
+}
+
+type attemptedProcessStopper interface {
+	StopStarted(int, time.Duration) error
+}
+
+func stopAttemptedGatewayStart(d daemonReadinessProcess, pid int) error {
+	if scoped, ok := d.(attemptedProcessStopper); ok {
+		return scoped.StopStarted(pid, defaultStopTimeout)
+	}
+	return d.Stop(defaultStopTimeout)
+}
+
+func verifyDelegatedGatewayStart(d daemonReadinessProcess, pid int) error {
+	running, currentPID := d.IsRunning()
+	identity, hasIdentity := d.(managedProcessIdentity)
+	if running && currentPID == pid && hasIdentity && identity.HasManagedProcessIdentity(pid) {
+		return nil
+	}
+
+	err := fmt.Errorf("launched gateway PID %d lacks a live matching executable and process start identity", pid)
+	if stopErr := stopAttemptedGatewayStart(d, pid); stopErr != nil && !errors.Is(stopErr, daemon.ErrNotRunning) {
+		return fmt.Errorf("%w; cleanup failed: %v", err, stopErr)
+	}
+	return err
+}
+
+func waitForStartedDaemon(d daemonReadinessProcess, pid int, client *http.Client, statusURL string, timeout, pollInterval time.Duration, requirements daemonReadinessRequirements) (gateway.HealthSnapshot, bool, error) {
+	snap, ready, err := waitForGatewayReadiness(client, statusURL, timeout, pollInterval, requirements, func() bool {
+		running, currentPID := d.IsRunning()
+		return running && currentPID == pid
+	})
+	if err == nil && ready {
+		identityOK := true
+		if identity, ok := d.(managedProcessIdentity); ok {
+			identityOK = identity.HasManagedProcessIdentity(pid)
+		}
+		if identityOK {
+			if requirements.verifyConnectorOTLP {
+				err = verifyRotationConnectorOTLPAuthentication(
+					client,
+					statusURL,
+					requirements.expectedDataDir,
+					requirements.requiredConnectors,
+				)
+				if err != nil {
+					err = fmt.Errorf("rotation connector convergence: %w", err)
+				} else {
+					return snap, true, nil
+				}
+			} else {
+				return snap, true, nil
+			}
+		} else {
+			err = fmt.Errorf("launched gateway PID %d lacks matching executable and process start identity", pid)
+		}
+	}
+	if err == nil {
+		err = fmt.Errorf("gateway did not reach READY before the startup deadline")
+	}
+	stopErr := stopAttemptedGatewayStart(d, pid)
+	if stopErr != nil && !errors.Is(stopErr, daemon.ErrNotRunning) {
+		return snap, false, fmt.Errorf("%w; cleanup failed: %v", err, stopErr)
+	}
+	return snap, false, err
+}
+
+func daemonReadinessRequirementsFromConfig(cfg *config.Config, startedNotBefore time.Time) daemonReadinessRequirements {
+	if cfg == nil {
+		return daemonReadinessRequirements{startedNotBefore: startedNotBefore}
+	}
+	requirements := daemonReadinessRequirements{
+		guardrailEnabled: configuredGuardrailExpectedRunning(cfg),
+		watcherEnabled:   cfg.Gateway.Watcher.Enabled,
+		// The canonical schema-v8 observability runtime always binds the
+		// sidecar telemetry health source.
+		// Match that runtime state instead of waiting forever for "disabled".
+		telemetryEnabled: cfg.ConfigVersion == config.ObservabilityV8ConfigVersion,
+		startedNotBefore: startedNotBefore,
+		expectedDataDir:  cfg.DataDir,
+		listenerHost:     gatewayBindHost(cfg),
+		listenerPort:     cfg.Gateway.APIPort,
+		listenerOwner:    startupListenerOwner,
+		requireOwnership: requireStartupListenerOwnership,
+	}
+	return requirements
+}
+
+func configuredGuardrailExpectedRunning(cfg *config.Config) bool {
+	if cfg == nil || !cfg.Guardrail.Enabled || !cfg.HasConnectorConfigured() {
+		return false
+	}
+	for _, raw := range cfg.ActiveConnectors() {
+		name := strings.ToLower(strings.TrimSpace(raw))
+		if name != "" && cfg.Guardrail.EffectiveEnabled(name) {
+			return true
+		}
+	}
+	return false
+}
+
+func rotationRequiredConnectorNames(cfg *config.Config) []string {
+	if cfg == nil || !cfg.Guardrail.Enabled {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	for _, raw := range cfg.ActiveConnectors() {
+		name := strings.ToLower(strings.TrimSpace(raw))
+		if name == "" || !cfg.Guardrail.EffectiveEnabled(name) {
 			continue
 		}
-		state := info.State
-		if state == "" {
-			state = info.Status
+		seen[name] = struct{}{}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func parseRotationConnectorState(raw string) (rotationConnectorState, error) {
+	var state rotationConnectorState
+	if raw == "" {
+		return state, errors.New("connector state is missing")
+	}
+	if len(raw) > rotationConnectorStateMaxLen {
+		return state, fmt.Errorf("connector state exceeds %d bytes", rotationConnectorStateMaxLen)
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&state); err != nil {
+		return rotationConnectorState{}, fmt.Errorf("parse connector state: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return rotationConnectorState{}, errors.New("connector state contains trailing data")
+	}
+	if err := validateRotationConnectorState(state); err != nil {
+		return rotationConnectorState{}, err
+	}
+	return state, nil
+}
+
+func validateRotationConnectorState(state rotationConnectorState) error {
+	if state.Version != 1 {
+		return fmt.Errorf("unsupported connector state version %d", state.Version)
+	}
+	if state.Connectors == nil {
+		return errors.New("connector state roster is missing")
+	}
+	if len(state.Connectors) > 128 {
+		return errors.New("connector state roster is too large")
+	}
+	previous := ""
+	for _, policy := range state.Connectors {
+		name := strings.ToLower(strings.TrimSpace(policy.Name))
+		if name == "" || name != policy.Name || len(name) > 128 || strings.ContainsAny(name, "\x00\r\n\t ") {
+			return errors.New("connector state contains an invalid connector identity")
 		}
+		if previous != "" && name <= previous {
+			return errors.New("connector state roster must be sorted with unique identities")
+		}
+		if policy.Mode != "observe" && policy.Mode != "action" {
+			return fmt.Errorf("connector %s has invalid mode", name)
+		}
+		if policy.HookFailMode != "open" && policy.HookFailMode != "closed" {
+			return fmt.Errorf("connector %s has invalid hook fail mode", name)
+		}
+		previous = name
+	}
+	return nil
+}
+
+func rotationConnectorStateFromConfig(cfg *config.Config) (rotationConnectorState, error) {
+	state := rotationConnectorState{Version: 1, Connectors: []rotationConnectorPolicy{}}
+	if cfg == nil {
+		return state, errors.New("configuration is unavailable")
+	}
+	seen := make(map[string]struct{})
+	for _, raw := range cfg.ActiveConnectors() {
+		name := strings.ToLower(strings.TrimSpace(raw))
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			return state, fmt.Errorf("configured connector roster repeats %s", name)
+		}
+		seen[name] = struct{}{}
+		state.Connectors = append(state.Connectors, rotationConnectorPolicy{
+			Name:         name,
+			Mode:         strings.ToLower(strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(name))),
+			HookFailMode: strings.ToLower(strings.TrimSpace(cfg.EffectiveHookFailModeForConnector(name))),
+			Enabled:      cfg.Guardrail.EffectiveEnabled(name),
+		})
+	}
+	sort.Slice(state.Connectors, func(i, j int) bool {
+		return state.Connectors[i].Name < state.Connectors[j].Name
+	})
+	if err := validateRotationConnectorState(state); err != nil {
+		return rotationConnectorState{}, err
+	}
+	return state, nil
+}
+
+func rotationConnectorStateFromStatus(modes []gatewayConnectorModeSnapshot) (rotationConnectorState, error) {
+	state := rotationConnectorState{Version: 1, Connectors: make([]rotationConnectorPolicy, 0, len(modes))}
+	for _, mode := range modes {
+		state.Connectors = append(state.Connectors, rotationConnectorPolicy{
+			Name:         strings.ToLower(strings.TrimSpace(mode.Connector)),
+			Mode:         strings.ToLower(strings.TrimSpace(mode.GuardrailMode)),
+			HookFailMode: strings.ToLower(strings.TrimSpace(mode.HookFailMode)),
+			Enabled:      mode.Enabled,
+		})
+	}
+	sort.Slice(state.Connectors, func(i, j int) bool {
+		return state.Connectors[i].Name < state.Connectors[j].Name
+	})
+	if err := validateRotationConnectorState(state); err != nil {
+		return rotationConnectorState{}, fmt.Errorf("authenticated runtime connector state is invalid: %w", err)
+	}
+	return state, nil
+}
+
+func compareRotationConnectorStates(expected, actual rotationConnectorState) error {
+	expectedByName := make(map[string]rotationConnectorPolicy, len(expected.Connectors))
+	actualByName := make(map[string]rotationConnectorPolicy, len(actual.Connectors))
+	for _, policy := range expected.Connectors {
+		expectedByName[policy.Name] = policy
+	}
+	for _, policy := range actual.Connectors {
+		actualByName[policy.Name] = policy
+	}
+	for _, policy := range expected.Connectors {
+		observed, ok := actualByName[policy.Name]
+		if !ok {
+			return fmt.Errorf("connector %s is missing", policy.Name)
+		}
+		if observed.Mode != policy.Mode {
+			return fmt.Errorf("connector %s mode changed from %s to %s", policy.Name, policy.Mode, observed.Mode)
+		}
+		if observed.HookFailMode != policy.HookFailMode {
+			return fmt.Errorf("connector %s hook fail mode changed from %s to %s", policy.Name, policy.HookFailMode, observed.HookFailMode)
+		}
+		if observed.Enabled != policy.Enabled {
+			return fmt.Errorf("connector %s enabled state changed", policy.Name)
+		}
+	}
+	for _, policy := range actual.Connectors {
+		if _, ok := expectedByName[policy.Name]; !ok {
+			return fmt.Errorf("unexpected connector %s was added", policy.Name)
+		}
+	}
+	return nil
+}
+
+func verifyRotationConfigState(cfg *config.Config, expected rotationConnectorState) error {
+	actual, err := rotationConnectorStateFromConfig(cfg)
+	if err != nil {
+		return err
+	}
+	return compareRotationConnectorStates(expected, actual)
+}
+
+func verifyRotationRuntimeState(modes []gatewayConnectorModeSnapshot, expected rotationConnectorState) error {
+	actual, err := rotationConnectorStateFromStatus(modes)
+	if err != nil {
+		return err
+	}
+	return compareRotationConnectorStates(expected, actual)
+}
+
+func rotationRequiredConnectorNamesFromState(state rotationConnectorState, guardrailEnabled bool) []string {
+	if !guardrailEnabled {
+		return nil
+	}
+	names := make([]string, 0, len(state.Connectors))
+	for _, policy := range state.Connectors {
+		if policy.Enabled {
+			names = append(names, policy.Name)
+		}
+	}
+	return names
+}
+
+var loadRotationOTLPPathToken = connector.LoadOTLPPathToken
+var loadRotationClaudeNativeOTLPProbes = connector.LoadClaudeCodeNativeOTLPProbes
+
+func verifyRotationConnectorOTLPAuthentication(
+	client *http.Client,
+	statusURL string,
+	dataDir string,
+	requiredConnectors []string,
+) error {
+	if len(requiredConnectors) == 0 {
+		return nil
+	}
+	if client == nil {
+		return errors.New("scoped OTLP authentication client is unavailable")
+	}
+	base, err := url.Parse(statusURL)
+	if err != nil || base.Scheme != "http" || base.Host == "" || base.Opaque != "" ||
+		base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+		return errors.New("scoped OTLP authentication endpoint is invalid")
+	}
+	host := strings.TrimSpace(base.Hostname())
+	hostIP := net.ParseIP(host)
+	if !strings.EqualFold(host, "localhost") && (hostIP == nil || !hostIP.IsLoopback()) {
+		return fmt.Errorf("refusing scoped OTLP authentication probe to non-loopback host %q", host)
+	}
+
+	requestClient := *client
+	requestClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	for _, name := range requiredConnectors {
+		scope, ok := connector.OTLPPathTokenScopeForConnector(name)
+		if !ok {
+			continue
+		}
+		if scope == connector.OTLPScopeClaude {
+			probes, loadErr := loadRotationClaudeNativeOTLPProbes()
+			if loadErr != nil {
+				return fmt.Errorf("connector %s native OTLP settings are unavailable: %w", name, loadErr)
+			}
+			if len(probes) != 2 {
+				return fmt.Errorf("connector %s native OTLP settings do not configure logs and metrics", name)
+			}
+			for _, probe := range probes {
+				if probe.Signal != connector.NativeOTLPSignalLogs && probe.Signal != connector.NativeOTLPSignalMetrics {
+					return fmt.Errorf("connector %s native OTLP settings contain an unsupported signal", name)
+				}
+				if probeErr := probeRotationConnectorOTLPAuthentication(
+					&requestClient,
+					base,
+					name,
+					probe.Endpoint,
+					"/v1/"+string(probe.Signal),
+					probe.Headers,
+				); probeErr != nil {
+					return probeErr
+				}
+			}
+			continue
+		}
+		token, loadErr := loadRotationOTLPPathToken(dataDir, scope)
+		if loadErr != nil {
+			return fmt.Errorf("connector %s scoped OTLP credential is unavailable: %w", name, loadErr)
+		}
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return fmt.Errorf("connector %s scoped OTLP credential is unavailable", name)
+		}
+
+		probeURL := *base
+		probeURL.RawPath = ""
+		probeURL.RawQuery = ""
+		probeURL.Fragment = ""
+		switch scope {
+		case connector.OTLPScopeCodex, connector.OTLPScopeClaude:
+			probeURL.Path = "/v1/logs"
+		case connector.OTLPScopeGeminiCLI:
+			probeURL.Path = "/otlp/" + string(scope) + "/" + url.PathEscape(token) + "/v1/logs"
+		default:
+			return fmt.Errorf("connector %s has no rotation OTLP authentication contract", name)
+		}
+
+		req, requestErr := http.NewRequest(http.MethodGet, probeURL.String(), nil)
+		if requestErr != nil {
+			return fmt.Errorf("connector %s scoped OTLP authentication probe could not be created", name)
+		}
+		req.Header.Set("X-DefenseClaw-Client", "daemon-rotation-convergence")
+		if scope == connector.OTLPScopeCodex || scope == connector.OTLPScopeClaude {
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("X-DefenseClaw-Source", name)
+		}
+		resp, requestErr := requestClient.Do(req)
+		if requestErr != nil {
+			// Do not wrap the transport error: for path-token connectors it may
+			// include the credential-bearing URL.
+			return fmt.Errorf("connector %s scoped OTLP authentication probe failed", name)
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, gracefulShutdownResponseMax))
+		_ = resp.Body.Close()
+		// Authentication happens before the OTLP handler's POST-only method
+		// check. A valid credential therefore reaches the handler and returns
+		// 405 without ingesting a synthetic telemetry record; 401/403 proves
+		// the persisted credential and gateway runtime did not converge.
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			return fmt.Errorf("connector %s scoped OTLP authentication probe returned %s", name, resp.Status)
+		}
+	}
+	return nil
+}
+
+func probeRotationConnectorOTLPAuthentication(
+	client *http.Client,
+	base *url.URL,
+	connectorName string,
+	endpoint string,
+	expectedPath string,
+	headers http.Header,
+) error {
+	probeURL, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || probeURL.Scheme != "http" || probeURL.User != nil || probeURL.RawQuery != "" ||
+		probeURL.Fragment != "" || probeURL.RawPath != "" || !strings.EqualFold(probeURL.Host, base.Host) ||
+		probeURL.Path != expectedPath {
+		return fmt.Errorf("connector %s native OTLP endpoint does not match the gateway", connectorName)
+	}
+	req, err := http.NewRequest(http.MethodGet, probeURL.String(), nil)
+	if err != nil {
+		return fmt.Errorf("connector %s native OTLP authentication probe could not be created", connectorName)
+	}
+	req.Header = headers.Clone()
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("connector %s native OTLP authentication probe failed", connectorName)
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, gracefulShutdownResponseMax))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		return fmt.Errorf("connector %s native OTLP authentication probe returned %s", connectorName, resp.Status)
+	}
+	return nil
+}
+
+// waitForGatewayReadiness waits for every required startup subsystem to reach
+// its final state. The health endpoint and API can become reachable before
+// connector Setup finishes, so API=running alone is not readiness. In
+// particular, an enabled guardrail's initial disabled state must transition to
+// running before start/restart prints OK.
+func waitForGatewayReadiness(
+	client *http.Client,
+	healthURL string,
+	timeout time.Duration,
+	pollInterval time.Duration,
+	requirements daemonReadinessRequirements,
+	processRunning func() bool,
+) (gateway.HealthSnapshot, bool, error) {
+	if pollInterval <= 0 {
+		pollInterval = defaultReadinessPollInterval
+	}
+	deadline := time.Now().Add(timeout)
+	var lastSnap gateway.HealthSnapshot
+	var lastProbeErr error
+
+	for {
+		if processRunning != nil && !processRunning() {
+			if lastProbeErr != nil {
+				return lastSnap, false, fmt.Errorf(
+					"gateway process exited before readiness (last health probe: %v)",
+					lastProbeErr,
+				)
+			}
+			return lastSnap, false, fmt.Errorf("gateway process exited before readiness")
+		}
+
+		var snap gateway.HealthSnapshot
+		var err error
+		if requirements.expectedPID > 0 {
+			token := ""
+			if requirements.token != nil {
+				token = requirements.token()
+			}
+			var status gatewayStatusEnvelope
+			status, err = fetchSidecarStatus(client, healthURL, token)
+			if err == nil {
+				err = verifyGatewayRuntimeIdentity(status, requirements.expectedPID, requirements.expectedDataDir)
+				snap = status.Health
+			}
+			if err == nil && requirements.expectedBinaryVersion != "" && status.Provenance.BinaryVersion != requirements.expectedBinaryVersion {
+				return snap, false, fmt.Errorf(
+					"authenticated gateway version %q does not match candidate %q",
+					status.Provenance.BinaryVersion,
+					requirements.expectedBinaryVersion,
+				)
+			}
+			if err == nil && requirements.verifyConnectorState {
+				if stateErr := verifyRotationRuntimeState(status.ConnectorModes, requirements.expectedConnectorState); stateErr != nil {
+					return snap, false, fmt.Errorf("rotation connector state mismatch: %w", stateErr)
+				}
+			}
+			if err == nil && requirements.requireOwnership {
+				ownerPID, ownerErr := requirements.listenerOwner(requirements.listenerHost, requirements.listenerPort)
+				switch {
+				case errors.Is(ownerErr, daemon.ErrNoListener):
+					err = ownerErr
+				case ownerErr != nil:
+					return lastSnap, false, fmt.Errorf("inspect gateway listener ownership: %w", ownerErr)
+				case ownerPID != requirements.expectedPID:
+					return lastSnap, false, fmt.Errorf("%w: configured listener PID %d does not match launched PID %d", errGatewayIdentityMismatch, ownerPID, requirements.expectedPID)
+				}
+			}
+		} else {
+			snap, err = fetchSidecarHealth(client, healthURL)
+		}
+		if err == nil {
+			lastSnap = snap
+			lastProbeErr = nil
+			ready, readinessErr := gatewaySnapshotReady(snap, requirements)
+			if readinessErr != nil {
+				return snap, false, readinessErr
+			}
+			if ready {
+				return snap, true, nil
+			}
+		} else if errors.Is(err, errGatewayIdentityMismatch) {
+			return lastSnap, false, err
+		} else {
+			lastProbeErr = err
+		}
+		if processRunning != nil && !processRunning() {
+			return lastSnap, false, fmt.Errorf("gateway process exited during readiness verification")
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			if lastProbeErr != nil {
+				return lastSnap, false, fmt.Errorf("gateway did not become ready before timeout (last probe: %v)", lastProbeErr)
+			}
+			return lastSnap, false, fmt.Errorf("gateway remained STARTING through the %s readiness timeout", timeout)
+		}
+		delay := pollInterval
+		if remaining < delay {
+			delay = remaining
+		}
+		timer := time.NewTimer(delay)
+		<-timer.C
+	}
+}
+
+func gatewaySnapshotReady(
+	snap gateway.HealthSnapshot,
+	requirements daemonReadinessRequirements,
+) (bool, error) {
+	// A process can briefly answer on the same port while restart is handing
+	// off between generations. Never declare the new PID ready from an older
+	// process's final health snapshot.
+	if !requirements.startedNotBefore.IsZero() && snap.StartedAt.Before(requirements.startedNotBefore) {
+		return false, nil
+	}
+
+	subsystems := []struct {
+		name   string
+		health gateway.SubsystemHealth
+	}{
+		{name: "api", health: snap.API},
+		{name: "gateway", health: snap.Gateway},
+		{name: "watcher", health: snap.Watcher},
+		{name: "guardrail", health: snap.Guardrail},
+		{name: "telemetry", health: snap.Telemetry},
+	}
+	for _, subsystem := range subsystems {
+		switch subsystem.health.State {
+		case gateway.StateStopped:
+			detail := strings.TrimSpace(subsystem.health.LastError)
+			if detail == "" {
+				detail = string(subsystem.health.State)
+			}
+			return false, fmt.Errorf(
+				"gateway %s failed during startup: %s",
+				subsystem.name,
+				detail,
+			)
+		}
+	}
+	// The gateway uplink retries after StateError, so an error there is
+	// transitional until the readiness deadline. The other required startup
+	// components do not recover in-place from Error and can fail immediately.
+	for _, subsystem := range []struct {
+		name   string
+		health gateway.SubsystemHealth
+	}{
+		{name: "api", health: snap.API},
+		{name: "watcher", health: snap.Watcher},
+		{name: "guardrail", health: snap.Guardrail},
+		{name: "telemetry", health: snap.Telemetry},
+	} {
+		if subsystem.health.State != gateway.StateError {
+			continue
+		}
+		detail := strings.TrimSpace(subsystem.health.LastError)
+		if detail == "" {
+			detail = string(subsystem.health.State)
+		}
+		return false, fmt.Errorf(
+			"gateway %s failed during startup: %s",
+			subsystem.name,
+			detail,
+		)
+	}
+
+	if snap.API.State != gateway.StateRunning {
+		return false, nil
+	}
+	// The OpenClaw fleet uplink is intentionally disabled for native hook-only
+	// standalone installs, including Windows. That is a final ready state, not
+	// a failure. A reconnecting/starting uplink is still pending.
+	if snap.Gateway.State != gateway.StateRunning && snap.Gateway.State != gateway.StateDisabled {
+		return false, nil
+	}
+	if !subsystemMatchesConfiguredState(snap.Watcher.State, requirements.watcherEnabled) {
+		return false, nil
+	}
+	if requirements.guardrailEnabled {
+		if snap.Guardrail.State != gateway.StateRunning {
+			return false, nil
+		}
+	} else {
+		// Connector-native hooks can remain active while the local proxy is
+		// disabled. Both running hooks and a finalized disabled state are ready;
+		// the initial disabled placeholder is not.
+		switch snap.Guardrail.State {
+		case gateway.StateRunning:
+		case gateway.StateDisabled:
+			if !snap.StartedAt.IsZero() && !snap.Guardrail.Since.After(snap.StartedAt) {
+				return false, nil
+			}
+		default:
+			return false, nil
+		}
+	}
+	if requirements.requireExactConnectorRoster {
+		readyConnectors := make(map[string]struct{}, len(snap.Connectors))
+		for _, health := range snap.Connectors {
+			name := strings.ToLower(strings.TrimSpace(health.Name))
+			if name != "" {
+				if _, duplicate := readyConnectors[name]; duplicate {
+					return false, fmt.Errorf("rotation connector convergence failed; connector %s appears more than once", name)
+				}
+				readyConnectors[name] = struct{}{}
+			}
+		}
+		expectedConnectors := make(map[string]struct{}, len(requirements.requiredConnectors))
+		for _, name := range requirements.requiredConnectors {
+			expectedConnectors[name] = struct{}{}
+			if _, ok := readyConnectors[name]; !ok {
+				return false, fmt.Errorf(
+					"rotation connector convergence failed; configured connector not ready: %s",
+					name,
+				)
+			}
+		}
+		for name := range readyConnectors {
+			if _, ok := expectedConnectors[name]; !ok {
+				return false, fmt.Errorf("rotation connector convergence failed; unexpected ready connector: %s", name)
+			}
+		}
+	} else if len(requirements.requiredConnectors) > 0 {
+		readyConnectors := make(map[string]struct{}, len(snap.Connectors))
+		for _, health := range snap.Connectors {
+			name := strings.ToLower(strings.TrimSpace(health.Name))
+			if name != "" {
+				readyConnectors[name] = struct{}{}
+			}
+		}
+		missing := make([]string, 0)
+		for _, name := range requirements.requiredConnectors {
+			if _, ok := readyConnectors[name]; !ok {
+				missing = append(missing, name)
+			}
+		}
+		if len(missing) > 0 {
+			return false, fmt.Errorf(
+				"rotation connector convergence failed; configured connectors not ready: %s",
+				strings.Join(missing, ", "),
+			)
+		}
+	}
+	if !subsystemMatchesConfiguredState(snap.Telemetry.State, requirements.telemetryEnabled) {
+		return false, nil
+	}
+	return true, nil
+}
+
+func subsystemMatchesConfiguredState(state gateway.SubsystemState, enabled bool) bool {
+	if enabled {
+		return state == gateway.StateRunning
+	}
+	return state == gateway.StateDisabled
+}
+
+func printDaemonStartResult(pid int, snap gateway.HealthSnapshot) {
+	fmt.Printf("%s (PID %d)\n", Style("OK", "fg=green", "bold"), pid)
+	fmt.Printf("  Health: %s\n", summarizeHealthSnapshot(snap))
+}
+
+func summarizeHealthSnapshot(snap gateway.HealthSnapshot) string {
+	subsystems := []struct {
+		name   string
+		health gateway.SubsystemHealth
+	}{
+		{name: "gateway", health: snap.Gateway},
+		{name: "watcher", health: snap.Watcher},
+		{name: "guardrail", health: snap.Guardrail},
+		{name: "api", health: snap.API},
+		{name: "telemetry", health: snap.Telemetry},
+	}
+	if snap.Sandbox != nil {
+		subsystems = append(subsystems, struct {
+			name   string
+			health gateway.SubsystemHealth
+		}{name: "sandbox", health: *snap.Sandbox})
+	}
+
+	var parts []string
+	for _, sub := range subsystems {
+		state := string(sub.health.State)
 		switch strings.ToLower(state) {
 		case "running", "healthy":
-			parts = append(parts, sub+":ok")
+			parts = append(parts, sub.name+":ok")
 		case "disabled", "stopped":
-			parts = append(parts, sub+":off")
+			parts = append(parts, sub.name+":off")
+		case "":
+			continue
 		default:
-			parts = append(parts, sub+":"+state)
+			parts = append(parts, sub.name+":"+state)
 		}
 	}
 	if len(parts) == 0 {

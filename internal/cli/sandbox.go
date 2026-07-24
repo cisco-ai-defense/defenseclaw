@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -16,6 +17,22 @@ var sandboxCmd = &cobra.Command{
 
 These are convenience wrappers around systemd. The sandbox and sidecar
 are independent systemd services grouped by defenseclaw-sandbox.target.`,
+	PersistentPreRunE: runSandboxPersistentPreRunE,
+}
+
+var (
+	sandboxHostOS      = func() string { return runtime.GOOS }
+	sandboxExecCommand = exec.Command
+)
+
+func runSandboxPersistentPreRunE(cmd *cobra.Command, args []string) error {
+	if sandboxHostOS() == "windows" {
+		return fmt.Errorf("sandbox commands are unsupported on native Windows")
+	}
+	if rootCmd.PersistentPreRunE != nil {
+		return rootCmd.PersistentPreRunE(cmd, args)
+	}
+	return nil
 }
 
 var sandboxStartCmd = &cobra.Command{
@@ -104,7 +121,7 @@ func runSandboxRestart(_ *cobra.Command, _ []string) error {
 
 func runSandboxStatus(_ *cobra.Command, _ []string) error {
 	for _, unit := range []string{"openshell-sandbox.service", "defenseclaw-gateway.service"} {
-		cmd := exec.Command("systemctl", "status", "--no-pager", unit)
+		cmd := sandboxExecCommand("systemctl", "status", "--no-pager", unit)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		_ = cmd.Run()
@@ -128,7 +145,7 @@ func runSandboxExec(_ *cobra.Command, args []string) error {
 	// by sudo itself rather than executed as the sandbox user. The
 	// `--` terminator forces sudo to treat everything that follows
 	// as the command vector, restoring the intended trust boundary.
-	cmd := exec.Command(
+	cmd := sandboxExecCommand(
 		"sudo",
 		append([]string{"-u", "sandbox", "--"}, args...)...,
 	)
@@ -139,7 +156,7 @@ func runSandboxExec(_ *cobra.Command, args []string) error {
 }
 
 func runSandboxShell(_ *cobra.Command, _ []string) error {
-	cmd := exec.Command("sudo", "-u", "sandbox", "--", "bash")
+	cmd := sandboxExecCommand("sudo", "-u", "sandbox", "--", "bash")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -157,7 +174,7 @@ func sandboxExecInNetns(args []string) error {
 	// non-netns path above.
 	nsArgs := []string{"netns", "exec", ns, "sudo", "-u", "sandbox", "--"}
 	nsArgs = append(nsArgs, args...)
-	cmd := exec.Command("ip", nsArgs...)
+	cmd := sandboxExecCommand("ip", nsArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -165,7 +182,7 @@ func sandboxExecInNetns(args []string) error {
 }
 
 func findSandboxNamespace() (string, error) {
-	out, err := exec.Command("ip", "netns", "list").Output()
+	out, err := sandboxExecCommand("ip", "netns", "list").Output()
 	if err != nil {
 		return "", fmt.Errorf("sandbox: failed to list namespaces: %w", err)
 	}
@@ -180,7 +197,7 @@ func findSandboxNamespace() (string, error) {
 }
 
 func systemctl(action, unit string) error {
-	cmd := exec.Command("systemctl", action, unit)
+	cmd := sandboxExecCommand("systemctl", action, unit)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

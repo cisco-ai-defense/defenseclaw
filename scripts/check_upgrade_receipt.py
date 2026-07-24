@@ -80,15 +80,16 @@ def _canonical_receipts(
     database: Path,
     source: str,
     target: str,
-    *,
-    busy_timeout_seconds: float,
 ) -> list[tuple[Any, ...]]:
     if not database.is_file():
         return []
+    # SQLite's native busy timeout can substantially overshoot a short caller
+    # deadline on Windows. Keep each read nonblocking and let the bounded outer
+    # polling loop remain the single authority for retry and timeout behavior.
     connection = sqlite3.connect(
         database.resolve().as_uri() + "?mode=ro",
         uri=True,
-        timeout=max(0.0, min(1.0, busy_timeout_seconds)),
+        timeout=0.0,
     )
     try:
         rows = connection.execute(
@@ -200,7 +201,6 @@ def check_upgrade_receipt(
                 database,
                 source,
                 target,
-                busy_timeout_seconds=max(0.0, deadline - time.monotonic()),
             )
         except sqlite3.Error:
             canonical = []

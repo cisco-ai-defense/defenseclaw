@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,10 +84,18 @@ type Sidecar struct {
 	// cycle. A nil runner disables the managed UDS server.
 	ipcRunner IPCRunner
 
-	webhooksMu               sync.RWMutex
-	aiDiscoveryMu            sync.RWMutex
-	apiMu                    sync.RWMutex
-	apiServer                *APIServer
+	webhooksMu        sync.RWMutex
+	aiDiscoveryMu     sync.RWMutex
+	apiMu             sync.RWMutex
+	apiServer         *APIServer
+	hookGuardsMu      sync.RWMutex
+	hookGuards        map[*HookConfigGuard]struct{}
+	hookGuardsChanged chan struct{}
+	// hookPolicyMu makes current-policy guard repair a read lease over the
+	// complete verification/Setup transaction. Config publication takes the
+	// write side, so an older fail-mode Setup cannot finish after a newer
+	// runtime policy becomes authoritative.
+	hookPolicyMu             sync.RWMutex
 	proxyMu                  sync.RWMutex
 	guardrailProxy           *GuardrailProxy
 	apiRestartCh             chan struct{}
@@ -500,7 +509,9 @@ func (s *Sidecar) publishConfig(cfg *config.Config) *config.Config {
 		return nil
 	}
 	snapshot := cloneConfig(cfg)
+	s.hookPolicyMu.Lock()
 	s.cfgCurrent.Store(snapshot)
+	s.hookPolicyMu.Unlock()
 	return snapshot
 }
 
@@ -1022,6 +1033,21 @@ func (s *Sidecar) requestProcessRestart() {
 	}
 }
 
+// requestProcessShutdown cancels the complete Sidecar run context. It is kept
+// separate from requestProcessRestart at the API boundary so a local graceful
+// stop cannot accidentally acquire restart-helper semantics later.
+func (s *Sidecar) requestProcessShutdown() {
+	if s == nil {
+		return
+	}
+	s.runCancelMu.Lock()
+	cancel := s.runCancel
+	s.runCancelMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 func configReloadMode(cfg *config.Config) string {
 	if cfg == nil {
 		return "hot"
@@ -1492,14 +1518,147 @@ func (s *Sidecar) setAPIServer(api *APIServer) {
 	s.apiMu.Lock()
 	previous := s.apiServer
 	if previous != nil && previous != api {
+		previous.SetHookRegistrationRepair(nil)
 		previous.bindObservabilityV8Runtimes(nil, nil, nil, nil)
 	}
 	if api != nil {
 		s.bindAPIServerObservabilityV8Locked(api)
+		api.SetHookRegistrationRepair(s.ensureActiveHookRegistration)
 	}
 	s.apiServer = api
 	s.apiMu.Unlock()
 	s.observabilityV8Mu.Unlock()
+}
+
+func (s *Sidecar) registerHookConfigGuard(guard *HookConfigGuard) {
+	if s == nil || guard == nil {
+		return
+	}
+	s.bindHookRuntimePolicyResolver(guard)
+	s.hookGuardsMu.Lock()
+	if s.hookGuards == nil {
+		s.hookGuards = make(map[*HookConfigGuard]struct{})
+	}
+	s.hookGuards[guard] = struct{}{}
+	s.signalHookGuardsChangedLocked()
+	s.hookGuardsMu.Unlock()
+	guard.SetDeactivationNotifier(s.unregisterHookConfigGuard)
+}
+
+func (s *Sidecar) bindHookRuntimePolicyResolver(guard *HookConfigGuard) {
+	if s == nil || guard == nil {
+		return
+	}
+	guard.SetRuntimePolicyResolver(func(connectorName string) (hookRuntimePolicy, func(), bool) {
+		s.hookPolicyMu.RLock()
+		cfg := s.currentConfig()
+		if cfg == nil {
+			s.hookPolicyMu.RUnlock()
+			return hookRuntimePolicy{}, nil, false
+		}
+		return hookRuntimePolicy{
+			hookFailMode: cfg.EffectiveHookFailModeForConnector(connectorName),
+			hiltEnabled:  cfg.EffectiveHILTForConnector(connectorName).Enabled,
+		}, sync.OnceFunc(s.hookPolicyMu.RUnlock), true
+	})
+}
+
+func (s *Sidecar) unregisterHookConfigGuard(guard *HookConfigGuard) {
+	if s == nil || guard == nil {
+		return
+	}
+	s.hookGuardsMu.Lock()
+	delete(s.hookGuards, guard)
+	s.signalHookGuardsChangedLocked()
+	s.hookGuardsMu.Unlock()
+}
+
+func (s *Sidecar) signalHookGuardsChangedLocked() {
+	if s.hookGuardsChanged != nil {
+		close(s.hookGuardsChanged)
+	}
+	s.hookGuardsChanged = make(chan struct{})
+}
+
+const hookRegistrationOwnerWaitTimeout = 10 * time.Second
+
+func (s *Sidecar) ensureActiveHookRegistration(ctx context.Context, connectorName string) error {
+	if s == nil {
+		return errors.New("hook registration repair owner is unavailable")
+	}
+	cfg := s.currentConfig()
+	if cfg == nil {
+		return errors.New("hook registration repair owner is unavailable")
+	}
+	// Respect intentional lifecycle ownership boundaries. A disabled guardrail
+	// or self-heal setting must not be turned back into a writer by cached hook
+	// traffic, and managed-enterprise hook files belong exclusively to the
+	// privileged guardian.
+	if !cfg.Guardrail.Enabled || !cfg.Guardrail.HookSelfHeal || managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return nil
+	}
+	name := strings.ToLower(strings.TrimSpace(connectorName))
+	if name != "codex" {
+		return fmt.Errorf("hook registration repair is unsupported for connector %q", name)
+	}
+	if !cfg.EffectiveGuardrailEnabledForConnector(name) {
+		return nil
+	}
+	dataDir := cfg.DataDir
+	configured := false
+	for _, active := range cfg.ActiveConnectors() {
+		if strings.EqualFold(strings.TrimSpace(active), name) {
+			configured = true
+			break
+		}
+	}
+	if !configured {
+		return fmt.Errorf("no configured hook registration owner exists for connector %s", name)
+	}
+	if connector.ConnectorExplicitlyInactive(dataDir, name) {
+		return fmt.Errorf("connector %s is explicitly inactive", name)
+	}
+
+	waitCtx := ctx
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
+	waitCtx, cancel := context.WithTimeout(waitCtx, hookRegistrationOwnerWaitTimeout)
+	defer cancel()
+	for {
+		s.hookGuardsMu.Lock()
+		if s.hookGuardsChanged == nil {
+			s.hookGuardsChanged = make(chan struct{})
+		}
+		changed := s.hookGuardsChanged
+		guards := make([]*HookConfigGuard, 0, len(s.hookGuards))
+		for guard := range s.hookGuards {
+			guards = append(guards, guard)
+		}
+		s.hookGuardsMu.Unlock()
+
+		var owner *HookConfigGuard
+		for _, guard := range guards {
+			if guard.MatchesActiveConnector(name, dataDir) {
+				if owner != nil {
+					return fmt.Errorf("multiple active hook registration guards claim connector %s in the configured data home", name)
+				}
+				owner = guard
+			}
+		}
+		if owner != nil {
+			return owner.EnsurePresent(ctx, name, dataDir, "authenticated SessionStart")
+		}
+		if connector.ConnectorExplicitlyInactive(dataDir, name) {
+			return fmt.Errorf("connector %s is explicitly inactive", name)
+		}
+		select {
+		case <-changed:
+			continue
+		case <-waitCtx.Done():
+			return fmt.Errorf("no active hook registration guard owns connector %s in the configured data home: %w", name, waitCtx.Err())
+		}
+	}
 }
 
 // pickInspector selects the AID inspector implementation based on
@@ -1879,7 +2038,11 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	}
 
 	if len(skillDirs) == 0 && len(pluginDirs) == 0 {
-		s.health.SetWatcher(StateError, "no directories configured", nil)
+		s.health.SetWatcher(StateRunning, "", map[string]interface{}{
+			"skill_dirs":  0,
+			"plugin_dirs": 0,
+			"idle":        "no directories configured",
+		})
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: no directories to watch\n")
 		<-ctx.Done()
 		return nil
@@ -2332,6 +2495,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 
 	workspaceDir := s.currentConfig().ConnectorWorkspaceDir()
 	agentVersion := connector.LoadCachedAgentVersion(s.currentConfig().DataDir, conn.Name())
+	agentExecutable := connector.LoadCachedAgentExecutable(s.currentConfig().DataDir, conn.Name())
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
 	setupOpts := connector.SetupOpts{
 		DataDir:   s.currentConfig().DataDir,
@@ -2357,19 +2521,24 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		HILTEnabled:      s.currentConfig().Guardrail.HILT.Enabled,
 		InstallCodeGuard: false,
 		AgentVersion:     agentVersion,
+		AgentExecutable:  agentExecutable,
 		HookContractID:   contractResolution.Contract.ContractID,
 	}
 	guardianManagedLifecycle := managedEnterpriseGuardianOwnsConnectorLifecycle(s.currentConfig(), conn)
 	if guardianManagedLifecycle {
 		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: connector lifecycle for %s is owned by the enterprise hook guardian; gateway will not write user hook files\n", conn.Name())
 	}
-	if !guardianManagedLifecycle && connector.HookContractNeedsActionOverride(contractResolution) && strings.EqualFold(s.currentConfig().Guardrail.Mode, "action") && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+	actionMode := strings.EqualFold(s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()), "action")
+	if !guardianManagedLifecycle && connector.HookContractNeedsActionOverride(contractResolution) && actionMode && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return fmt.Errorf("connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), agentVersion, contractResolution.Reason)
 	}
 	if !guardianManagedLifecycle {
 		if previous := connector.LoadHookContractLockEntry(s.currentConfig().DataDir, conn.Name()); previous.Connector != "" {
 			current := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
-			if connector.HookContractLockDrifted(previous, current) && strings.EqualFold(s.currentConfig().Guardrail.Mode, "action") && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+			// Generated hook drift is repairable by Setup below and must not block
+			// an explicit setup/restart from refreshing an existing connector.
+			// Only an upstream agent-version/contract change requires the action-mode override.
+			if connector.HookContractCompatibilityDrifted(previous, current) && actionMode && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 				return fmt.Errorf("connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
 			}
 		}
@@ -2411,6 +2580,15 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	} else if guardianManagedLifecycle {
 		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: skipping connector setup/teardown for %s; hooks are installed and repaired by the enterprise hook guardian\n", conn.Name())
 	} else {
+		support := connector.ConnectorSupportOnHostOS(conn.Name())
+		if support.Status == connector.PlatformUnsupported {
+			err := fmt.Errorf("connector %q is not supported on %s: %s", conn.Name(), runtime.GOOS, support.Reason)
+			s.health.SetGuardrail(StateError, err.Error(), nil)
+			return err
+		}
+		if support.Status == connector.PlatformPreview {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is preview on %s: %s\n", conn.Name(), runtime.GOOS, support.Reason)
+		}
 		if err := teardownPreviousConnector(registry, conn.Name(), setupOpts, ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: proceeding with %s setup despite stale state from previous connector\n", conn.Name())
 		}
@@ -2442,12 +2620,11 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		if err := verifyHookScriptsOrRetry(ctx, setupOpts, conn); err != nil {
 			return s.failGuardrailWithRollback(ctx, setupOpts, conn, "hook verification", err)
 		}
-		if err := connector.SaveActiveConnector(s.currentConfig().DataDir, conn.Name()); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
+		if err := verifyEffectiveHookRegistration(setupOpts, conn); err != nil {
+			return s.failGuardrailWithRollback(ctx, setupOpts, conn, "registration verification", err)
 		}
-		lockEntry := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
-		if err := connector.SaveHookContractLockEntry(s.currentConfig().DataDir, lockEntry); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] save hook contract lock: %v\n", err)
+		if err := s.saveSingleConnectorReadyState(ctx, setupOpts, conn); err != nil {
+			return err
 		}
 
 		// Plan A4 / S0.12: refuse to start when the connector advertises
@@ -2485,6 +2662,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		s.health,
 		s.store,
 		s.currentConfig().DataDir,
+		apiToken,
 		s.currentConfig().PolicyDir,
 		s.notify,
 		rp,
@@ -2525,7 +2703,14 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// here to cover both the observability and proxy-bound paths. The
 		// guard goroutine stops when ctx is cancelled.
 		if s.currentConfig().Guardrail.Enabled && s.currentConfig().Guardrail.HookSelfHeal && !guardianManagedLifecycle {
-			proxy.StartHookConfigGuard(ctx, conn, setupOpts)
+			guard := proxy.StartHookConfigGuard(ctx, conn, setupOpts, s.bindHookRuntimePolicyResolver)
+			if guard != nil {
+				s.registerHookConfigGuard(guard)
+				defer func() {
+					s.unregisterHookConfigGuard(guard)
+					guard.Stop()
+				}()
+			}
 		}
 	}
 	if err != nil {
@@ -3154,8 +3339,13 @@ func (s *Sidecar) startMultiHookConfigGuards(ctx context.Context, registry *conn
 			return nil, fmt.Errorf("hook self-heal connector %s scoped hook token: %w", conn.Name(), err)
 		}
 		guard := newSidecarHookConfigGuard(s, debounce)
+		s.bindHookRuntimePolicyResolver(guard)
 		guard.SetHealNotifier(s.notifyHookHealed)
-		guard.Start(ctx, conn, opts)
+		if !guard.Start(ctx, conn, opts) {
+			fmt.Fprintf(os.Stderr, "[guardrail] hook registration guard for %s did not start; continuing with verified setup registration\n", conn.Name())
+			continue
+		}
+		s.registerHookConfigGuard(guard)
 		guards = append(guards, guard)
 	}
 	return guards, nil
@@ -3226,6 +3416,7 @@ func (s *Sidecar) setupConnectorsIsolated(ctx context.Context, conns []connector
 
 func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, proxyAddr, apiAddr string) (connector.SetupOpts, error) {
 	agentVersion := connector.LoadCachedAgentVersion(s.currentConfig().DataDir, conn.Name())
+	agentExecutable := connector.LoadCachedAgentExecutable(s.currentConfig().DataDir, conn.Name())
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
 	setupTokens, err := connectorSetupTokensFor(s.currentConfig().DataDir, conn, apiToken, managed.IsManagedEnterprise(s.currentConfig().DeploymentMode))
 	if err != nil {
@@ -3243,6 +3434,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		HILTEnabled:        s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
 		InstallCodeGuard:   false,
 		AgentVersion:       agentVersion,
+		AgentExecutable:    agentExecutable,
 		HookContractID:     contractResolution.Contract.ContractID,
 	}, nil
 }
@@ -3287,6 +3479,13 @@ func connectorSetupTokensFor(dataDir string, conn connector.Connector, gatewayTo
 // back just this connector's Setup before returning so a half-installed
 // connector never lingers.
 func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connector, opts connector.SetupOpts, masterKey string, cache *guardrail.RulePackCache) error {
+	support := connector.ConnectorSupportOnHostOS(conn.Name())
+	if support.Status == connector.PlatformUnsupported {
+		return fmt.Errorf("connector %q is not supported on %s: %s", conn.Name(), runtime.GOOS, support.Reason)
+	}
+	if support.Status == connector.PlatformPreview {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is preview on %s: %s\n", conn.Name(), runtime.GOOS, support.Reason)
+	}
 	// Inject credentials before Setup so probes keyed off them succeed.
 	conn.SetCredentials(opts.APIToken, masterKey)
 
@@ -3313,15 +3512,20 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	// surface a warning, keeping the other connectors running (DN1), instead of
 	// shipping an unverified enforcing hook.
 	contractResolution := connector.ResolveHookContract(conn.Name(), opts.AgentVersion)
+	actionMode := strings.EqualFold(s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()), "action")
 	if connector.HookContractNeedsActionOverride(contractResolution) &&
-		strings.EqualFold(s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()), "action") &&
+		actionMode &&
 		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return fmt.Errorf("connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), opts.AgentVersion, contractResolution.Reason)
 	}
 	if previous := connector.LoadHookContractLockEntry(s.currentConfig().DataDir, conn.Name()); previous.Connector != "" {
 		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
-		if connector.HookContractLockDrifted(previous, current) &&
-			strings.EqualFold(s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()), "action") &&
+		// Setup refreshes generated hook artifacts for every configured
+		// connector on boot. A stale generated digest is therefore a repair
+		// trigger, not an upstream compatibility failure. Keep failing closed
+		// only when the agent version or selected contract changed.
+		if connector.HookContractCompatibilityDrifted(previous, current) &&
+			actionMode &&
 			os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 			return fmt.Errorf("connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
 		}
@@ -3338,9 +3542,17 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 		}
 		return fmt.Errorf("connector %s hook verification failed: %w", conn.Name(), err)
 	}
-	lockEntry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
-	if err := connector.SaveHookContractLockEntry(s.currentConfig().DataDir, lockEntry); err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] save hook contract lock for %s: %v\n", conn.Name(), err)
+	if err := verifyEffectiveHookRegistration(opts, conn); err != nil {
+		// Keep the same per-connector rollback contract as missing scripts: a
+		// connector is not ready until its agent-visible registration is
+		// effective, even when Setup itself returned nil.
+		if tdErr := conn.Teardown(ctx, opts); tdErr != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] rollback teardown of %s after registration verification failure: %v\n", conn.Name(), tdErr)
+		}
+		return fmt.Errorf("connector %s registration verification failed: %w", conn.Name(), err)
+	}
+	if err := publishFreshHookRegistrationEvidence(opts, conn); err != nil {
+		return fmt.Errorf("connector %s hook contract lock save failed: %w", conn.Name(), err)
 	}
 	return nil
 }
@@ -3492,6 +3704,13 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 	}
 }
 
+// RequiresFleetGateway reports whether the configured topology depends on the
+// OpenClaw fleet WebSocket subsystem. External readiness consumers use the
+// same predicate as the sidecar, including the explicit fleet-mode override.
+func RequiresFleetGateway(cfg *config.Config) bool {
+	return gatewayShouldConnectForConfiguredConnector(cfg)
+}
+
 // isLoopbackGatewayHost reports whether host points at the local
 // machine. Treats empty / "localhost" / any 127.0.0.0/8 IPv4 / ::1
 // IPv6 as loopback. 0.0.0.0 (bind-all) is intentionally NOT loopback
@@ -3593,6 +3812,25 @@ func verifyHookScriptsOrRetry(ctx context.Context, opts connector.SetupOpts, con
 		return fmt.Errorf("connector %s still missing hook scripts after hook-writer retry: %v", conn.Name(), missing)
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] connector %s hook-writer retry restored missing hook scripts\n", conn.Name())
+	return nil
+}
+
+// verifyEffectiveHookRegistration closes the gap between generated artifacts
+// and the agent-visible registration. Connector Setup is responsible for
+// atomic publication; this final authoritative read prevents ready/active
+// state from being published if a concurrent teardown or replacement wins
+// after Setup's internal write verification.
+func verifyEffectiveHookRegistration(opts connector.SetupOpts, conn connector.Connector) error {
+	if conn == nil {
+		return errors.New("connector is nil")
+	}
+	present, err := connector.OwnedHooksPresent(conn, opts)
+	if err != nil {
+		return fmt.Errorf("connector %s effective hook registration check: %w", conn.Name(), err)
+	}
+	if !present {
+		return fmt.Errorf("connector %s setup completed without an effective hook registration", conn.Name())
+	}
 	return nil
 }
 
@@ -3706,6 +3944,36 @@ func (s *Sidecar) failGuardrailWithRollback(ctx context.Context, opts connector.
 	return err
 }
 
+func (s *Sidecar) saveSingleConnectorReadyState(ctx context.Context, opts connector.SetupOpts, conn connector.Connector) error {
+	if err := connector.SaveActiveConnector(opts.DataDir, conn.Name()); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
+	}
+	if err := publishFreshHookRegistrationEvidence(opts, conn); err != nil {
+		lockErr := fmt.Errorf("connector %s hook contract lock save failed: %w", conn.Name(), err)
+		return s.failGuardrailWithRollback(ctx, opts, conn, "hook contract lock", lockErr)
+	}
+	return nil
+}
+
+func publishFreshHookRegistrationEvidence(opts connector.SetupOpts, conn connector.Connector) error {
+	lockEntry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
+	if err := connector.SaveFreshHookContractLockEntry(opts.DataDir, lockEntry); err != nil {
+		return err
+	}
+	current, err := connector.HookRuntimeRegistrationCurrent(
+		opts,
+		conn,
+		version.Current().BinaryVersion,
+	)
+	if err != nil {
+		return fmt.Errorf("verify fresh runtime registration evidence: %w", err)
+	}
+	if !current {
+		return errors.New("fresh runtime registration evidence does not match the active connector contract")
+	}
+	return nil
+}
+
 func recordAndRollbackFailedConnectorSetup(conn connector.Connector, opts connector.SetupOpts, ctx context.Context) {
 	if conn == nil {
 		return
@@ -3802,6 +4070,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	}
 	addr := fmt.Sprintf("%s:%d", bind, s.currentConfig().Gateway.APIPort)
 	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
+	api.SetShutdownRequester(s.requestProcessShutdown)
 	if s.configMgr != nil {
 		api.SetConfigRuntime(s.configMgr.Reload, s.currentConfig)
 	}

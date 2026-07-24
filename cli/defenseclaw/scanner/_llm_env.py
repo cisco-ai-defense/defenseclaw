@@ -189,6 +189,32 @@ def litellm_model(llm: LLMConfig) -> str:
     return model
 
 
+def llm_analyzer_ready(
+    llm: LLMConfig,
+    *,
+    model: str = "",
+    api_key: str = "",
+) -> bool:
+    """Return whether an optional scanner LLM lane is usable.
+
+    All scanner ``auto`` modes share this gate so skills, MCP servers, and
+    plugins degrade the same way. A model is always required. Local providers
+    are keyless, Bedrock can use its AWS credential chain, and other providers
+    require a resolved API key.
+
+    ``model`` and ``api_key`` allow a scanner's one-shot CLI flags or legacy
+    environment variables to override the resolved unified config.
+    """
+    effective_model = model or litellm_model(llm)
+    if not effective_model:
+        return False
+    if llm.is_local_provider():
+        return True
+    if "bedrock/" in effective_model.lower():
+        return True
+    return bool(api_key or llm.resolved_api_key())
+
+
 def litellm_completion_kwargs(llm: LLMConfig) -> dict:
     """Build kwargs for ``litellm.completion`` from a resolved LLMConfig.
 

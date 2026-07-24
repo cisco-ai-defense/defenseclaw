@@ -23,13 +23,31 @@ generator = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(generator)
 
 
-def test_observability_v8_reference_regeneration_is_byte_identical() -> None:
+def test_observability_v8_reference_regeneration_is_canonically_identical() -> None:
     outputs = generator._outputs(generator.SCHEMA_PATH.read_bytes())
     for path in (
         generator.CANONICAL_YAML,
         generator.CANONICAL_MARKDOWN,
     ):
         assert path.read_bytes().replace(b"\r\n", b"\n") == outputs[path].replace(b"\r\n", b"\n")
+
+
+def test_observability_v8_reference_check_accepts_crlf_and_rejects_content_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    outputs = generator._outputs(generator.SCHEMA_PATH.read_bytes())
+    monkeypatch.setattr(generator, "ROOT", tmp_path)
+    checked: dict[Path, bytes] = {}
+    for source, expected in outputs.items():
+        target = tmp_path / source.name
+        target.write_bytes(expected.replace(b"\n", b"\r\n"))
+        checked[target] = expected
+
+    assert generator._check(checked)
+
+    target.write_bytes(target.read_bytes() + b"content drift\r\n")
+    assert not generator._check(checked)
 
 
 def test_observability_v8_reference_validates_and_covers_source_surface() -> None:

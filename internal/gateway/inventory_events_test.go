@@ -695,7 +695,11 @@ func TestManagedEndpointInventorySurvivesSourceDisabledAIDiscoveryLogs(t *testin
 	}}
 	registry := connector.NewRegistry()
 	if err := registry.RegisterPlugin(&endpointInventoryPluginConnector{
-		name: "safe-connector", description: "Managed connector",
+		// Unknown plugins are deliberately not certified on Windows. Reuse a
+		// supported connector identity in this empty test registry so the
+		// cross-platform fixture exercises inventory routing, not presentation
+		// filtering.
+		name: "codex", description: "Managed connector",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -870,7 +874,7 @@ func TestManagedPluginDescriptionUsesSensitiveProjection(t *testing.T) {
 	pathCanary := strings.Join([]string{"", "Users", "alice", ".ssh", "id_rsa"}, "/")
 	description := "plugin private_key=" + pathCanary
 	if err := registry.RegisterPlugin(&endpointInventoryPluginConnector{
-		name: "sensitive-plugin", description: description,
+		name: "codex", description: description,
 	}); err != nil {
 		t.Fatal(err)
 	}

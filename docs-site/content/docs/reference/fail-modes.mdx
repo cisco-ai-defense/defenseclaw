@@ -1,6 +1,6 @@
 ---
 title: Fail modes
-description: Three knobs share the words "fail open" and "fail closed" in DefenseClaw. This page disambiguates them — response-layer hook fail mode, transport-layer strict availability, per-shell override — and tells you which one to flip for which problem.
+description: How connector fail mode handles transport and response failures, how strict availability overrides it, and which failures remain outside that contract.
 keywords:
   - DefenseClaw fail open
   - DefenseClaw fail closed
@@ -8,150 +8,138 @@ keywords:
   - DEFENSECLAW_STRICT_AVAILABILITY
   - DEFENSECLAW_FAIL_MODE
   - DefenseClaw availability
-  - response layer failure
-  - transport layer failure
-  - agent hook fail mode
 ---
 
-DefenseClaw uses the words "fail open" and "fail closed" in three different places. They are **not** the same knob. This page is the disambiguation reference.
+DefenseClaw has one persisted connector fail-mode policy plus two environment
+overrides. The effective connector mode applies consistently to both transport
+and invalid-response failures.
 
-## TL;DR
+## Controls
 
-| Knob | Layer | Default | Where it lives |
-| --- | --- | --- | --- |
-| `guardrail.hook_fail_mode` | **Response** (4xx, malformed JSON, missing `action`) | `closed` on new installs; upgraded legacy configs may be pinned to `open` | `~/.defenseclaw/config.yaml` |
-| `DEFENSECLAW_STRICT_AVAILABILITY=1` | **Transport** (gateway unreachable / 5xx) | unset = fail-open | env var on the agent shell |
-| `DEFENSECLAW_FAIL_MODE` | **Response** (per-shell override) | unset = use `hook_fail_mode` | env var on the agent shell |
-
-If you remember nothing else: new installs fail closed on malformed or unauthorized gateway responses, but still fail open when the gateway is unreachable. Set `DEFENSECLAW_STRICT_AVAILABILITY=1` only on a connector that supports fail-closed transport handling and only when you would rather take the agent offline than miss a policy decision. Avoid the per-shell `DEFENSECLAW_FAIL_MODE` outside one-shot debugging.
-
-## The decision tree
-
-<Flow
-  direction="TB"
-  caption="Two orthogonal knobs gate the verdict path: `DEFENSECLAW_STRICT_AVAILABILITY` decides what to do when the gateway is unreachable; `guardrail.hook_fail_mode` (with optional `DEFENSECLAW_FAIL_MODE` override) decides what to do when the gateway answers nonsense."
->
-  <Node id="hook" kind="connector">{`Hook fires\ntool / prompt about to execute`}</Node>
-  <Node id="reach" kind="decision">{`Can the hook reach\nthe gateway?`}</Node>
-  <Node id="strict" kind="decision">{`Strict availability\nenabled?`}</Node>
-  <Node id="block-strict" kind="policy">{`BLOCK tool\nexit 2 · loud stderr`}</Node>
-  <Node id="allow-transport" kind="generic">{`ALLOW tool\nwarn + log to\nhook-failures.jsonl`}</Node>
-  <Node id="wellformed" kind="decision">{`Response well-formed\nand authoritative?`}</Node>
-  <Node id="honor" kind="gateway">{`Honor gateway verdict\nallow / block / confirm`}</Node>
-  <Node id="failmode" kind="decision">{`Effective hook\nfail mode`}</Node>
-  <Node id="allow-open" kind="generic">{`ALLOW tool\nwarn + log entry`}</Node>
-  <Node id="block-closed" kind="policy">{`BLOCK tool\nexit 2`}</Node>
-  <Edge from="hook" to="reach" />
-  <Edge from="reach" to="strict" label="unreachable" />
-  <Edge from="reach" to="wellformed" label="answered" />
-  <Edge from="strict" to="block-strict" label="yes" />
-  <Edge from="strict" to="allow-transport" label="no" />
-  <Edge from="wellformed" to="honor" label="yes" />
-  <Edge from="wellformed" to="failmode" label="no" />
-  <Edge from="failmode" to="allow-open" label="open" />
-  <Edge from="failmode" to="block-closed" label="closed" />
-</Flow>
-
-The split between **transport** and **response** matters because the threat models are different:
-
-- **Transport failures** are the gateway being down. Bricking the developer's tool because of a sidecar restart is worse UX than a brief observability gap. `DEFENSECLAW_STRICT_AVAILABILITY=1` is the dedicated escape hatch for sites that prefer agent downtime to a missed inspection during a real outage.
-- **Response failures** are the gateway answering nonsense. That is likely misconfiguration the operator should hear about loudly — `closed` makes it impossible to ignore.
-
-## Knob 1: `guardrail.hook_fail_mode` (response-layer, recommended)
-
-Persisted in `~/.defenseclaw/config.yaml` under `guardrail.hook_fail_mode`. Two values:
-
-- `open` — when the gateway answers with a 4xx, malformed JSON, or a missing `action` field, the hook **allows** the tool/prompt with a stderr warning and an entry in `~/.defenseclaw/logs/hook-failures.jsonl`.
-- `closed` (new-install default) — the same response-layer failures **block** the tool/prompt (`exit 2`). Existing installs from before the default changed are migrated to an explicit `open` value to preserve their prior behaviour.
-
-Flip it via the dedicated CLI:
-
-```bash
-defenseclaw guardrail fail-mode                  # show current
-defenseclaw guardrail fail-mode open
-defenseclaw guardrail fail-mode closed --yes     # CI / TUI form
-```
-
-Flipping the knob regenerates every hook script (codex-hook, claude-code-hook, inspect-*) so the `FAIL_MODE` template variable picks up the new value, and restarts the gateway by default. `defenseclaw setup guardrail` and `defenseclaw init` / `quickstart` also accept `--fail-mode <open|closed>` for non-interactive flows.
-
-On a **multi-connector** install you can scope the fail mode to a single connector with `--connector` — it writes `guardrail.connectors.<name>.hook_fail_mode` and leaves every other connector untouched:
-
-```bash
-defenseclaw guardrail fail-mode closed --connector codex   # Codex blocks on bad hook responses
-defenseclaw guardrail fail-mode open   --connector claudecode
-defenseclaw guardrail fail-mode                            # bare read = global + per-connector effective values
-defenseclaw guardrail fail-mode closed                     # bare write = update active connector posture
-```
-
-Omit `--connector` to take the broad path. On a multi-connector install, a bare fail-mode write reconciles active connector overrides so a stale override does not keep a connector on the old value. On a single-connector install it updates the single global posture. See [Setup → Multi-connector](/docs/setup/guardrail/multi-connector).
-
-## Knob 2: `DEFENSECLAW_STRICT_AVAILABILITY` (transport-layer)
-
-Set in the **agent's** environment (the shell that launches Claude Code, Codex, OpenClaw, etc.):
-
-```bash
-export DEFENSECLAW_STRICT_AVAILABILITY=1
-```
-
-When set to a truthy value (`1` / `true` / `yes`):
-
-- Transport failures (gateway unreachable / network error / 5xx) **block** the tool with `exit 2`.
-- The stderr message reads `defenseclaw: gateway unreachable, blocking <subject> (DEFENSECLAW_STRICT_AVAILABILITY=1): <reason>` so on-call engineers can grep for the cause.
-
-When unset (the default), supported generated hooks allow transport failures with a stderr warning. The hook fail mode does NOT apply to transport failures — the two knobs are intentionally orthogonal. Some connector hosts cannot enforce a fail-closed transport response at all; check the [Capability Matrix](/docs/capability-matrix) before relying on this environment variable.
-
-## Knob 3: `DEFENSECLAW_FAIL_MODE` (per-shell override)
-
-Set in the **agent's** environment to override the response-layer template default for that single shell:
-
-```bash
-DEFENSECLAW_FAIL_MODE=closed claude
-```
-
-The hook script reads `${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}`, so an env var wins over the value baked into the template at `setup` time. Useful for:
-
-- One-off "I want this shell to be paranoid" sessions during incident response.
-- A/B testing fail-closed behaviour without restarting the gateway.
-
-Avoid making this a long-lived setting — the persisted `guardrail.hook_fail_mode` is the right place for cluster-wide policy.
-
-## The recommendation matrix
-
-| Deployment | `hook_fail_mode` | `DEFENSECLAW_STRICT_AVAILABILITY` |
+| Control | Effect | Default and scope |
 | --- | --- | --- |
-| Developer laptop | `closed` (shipping default) | unset |
-| CI / build agent | `closed` | unset |
-| Single-tenant prod (best-effort availability) | `open` (explicit override) | unset |
-| Single-tenant prod (strict) | `closed` | unset |
-| Regulated multi-tenant (no missed inspections) | `closed` | `1` |
+| `guardrail.hook_fail_mode` | `open` allows or `closed` blocks supported hook events when delivery or the gateway response fails. | `closed` on a fresh install. Migrated legacy configs can retain explicit `open`. Can be overridden per connector. |
+| `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed. It cannot force an otherwise closed connector open. | Unset. Per agent process; compatibility/managed-deployment override. |
+| `DEFENSECLAW_FAIL_MODE` | Temporary process-level replacement for the persisted mode. | Unset. Use only for bounded diagnosis; persist normal posture with the CLI. |
 
-The "regulated multi-tenant" row is the only one where you should ever set both. It produces an agent that refuses to run when anything in the DefenseClaw pipeline is wrong — including a transient sidecar restart. Make sure your monitoring is set up to page someone the moment the sidecar is down.
+<Callout type="warning" title="Older transport-only descriptions are stale">
+The effective hook fail mode now covers connection refusal, timeout, gateway
+5xx, missing authentication, unauthorized/malformed responses, and a missing
+decision field. `closed` no longer silently opens only because a failure was
+classified as transport.
+</Callout>
 
-## Foot-gun: `claude_code.fail_mode` and `codex.fail_mode` (legacy, NOT consumed by hook scripts)
+## Effective behavior
 
-The `AgentHookConfig.FailMode` field in `internal/config/config.go` (yaml: `claude_code.fail_mode`, `codex.fail_mode`, etc.) is a **per-connector POLICY-LAYER hint** that downstream connector glue can read to pick a posture. It is **NOT** consumed by the generated hook scripts. The legacy default `closed` is preserved for backward compatibility with installs that wrote it before `hook_fail_mode` existed.
+| Failure | Effective `open` | Effective `closed` |
+| --- | --- | --- |
+| Gateway connection refused, timeout, or 5xx | Allow the event, warn, and record the transport failure. | Return the connector's block response and record the transport failure. |
+| Connector authentication is missing | Allow by default and record the missing-token failure. | Block and report token/authentication failure. |
+| Gateway returns 4xx, malformed JSON, or no action | Allow, warn, and record the response failure. | Block with the connector's response shape and record the failure. |
+| Hook input exceeds its bounded payload | Refuse to process it, record the condition, and allow. | Refuse to process it, record the condition, and block where the connector supports a block response. |
+| Valid gateway verdict | Honor the connector/event mapping. | Honor the same mapping. Fail mode does not turn an observation-only event into a blocking surface. |
+| Internal policy evaluator panic | Allow with `would_block`, warning, and telemetry. | The same fail-open boundary; no authoritative verdict was produced. |
 
-The TUI and config editor still let you change these fields; setting them does **nothing** for the runtime response-layer behaviour. Operators who want to change response-layer hook behaviour must edit `guardrail.hook_fail_mode` (or run `defenseclaw guardrail fail-mode`), NOT the per-connector field.
+The final row is intentional and important. Hook fail mode governs delivery,
+authentication, parsing, and response availability. It does not fabricate a
+policy denial after an internal evaluator panic. Treat that condition as a
+degraded security incident and inspect gateway health.
 
-The disambiguation lives in the source:
+## Persisted fail mode
 
-- `internal/config/config.go::AgentHookConfig` — "NOT consumed by the generated hook scripts" comment.
-- `internal/config/config.go::GuardrailConfig.HookFailMode` — "this is NOT the same field as `AgentHookConfig.FailMode`" comment.
+Show current global and connector-effective values:
 
-The TUI editor labels these legacy fields explicitly so operators know to edit the canonical knob instead.
+```bash
+defenseclaw guardrail fail-mode
+defenseclaw guardrail status
+```
 
-## What each layer reads at runtime
+Set one connector closed:
 
-| Component | Reads |
-| --- | --- |
-| Generated hook scripts (`codex-hook.sh`, `claude-code-hook.sh`, `inspect-*.sh`) | `${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}` (template `FailMode` is the persisted `guardrail.hook_fail_mode`) plus `DEFENSECLAW_STRICT_AVAILABILITY` for the transport-layer check (via `_hardening.sh::defenseclaw_should_fail_closed_on_unreachable`). |
-| Go gateway | `guardrail.hook_fail_mode` for hook regeneration only. The `AgentHookConfig.FailMode` legacy field is read but not enforced anywhere on the response-layer path. |
-| Python CLI | Reads both fields when rendering / validating config; defers to `guardrail.hook_fail_mode` for behaviour. |
+```bash
+defenseclaw guardrail fail-mode closed --connector codex --yes
+defenseclaw guardrail fail-mode closed --connector claudecode --yes
+```
 
-## Reference
+Omitting `--connector` writes the broad posture. On a multi-connector install,
+a broad write reconciles active connector overrides so an old per-connector
+value cannot silently keep one peer on the prior mode.
 
-- [`internal/config/config.go::GuardrailConfig.HookFailMode`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) — the canonical doc on response-layer fail mode.
-- [`internal/config/config.go::AgentHookConfig`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) — the legacy per-connector field with the foot-gun callout.
-- [`internal/gateway/connector/hooks/_hardening.sh`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/hooks/_hardening.sh) — `defenseclaw_should_fail_closed_on_unreachable` and `defenseclaw_emit_unreachable_stderr` for the transport-layer behaviour.
-- [`cli/defenseclaw/commands/cmd_guardrail.py::fail_mode_cmd`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_guardrail.py) — the `defenseclaw guardrail fail-mode` CLI.
-- [Reference → Env vars](/docs/reference/env-vars) — every env var grouped by category.
+The command restarts the gateway and reconciles native hook state by default.
+`--no-restart` persists desired state but can leave the running generation on
+the prior value. `guardrail status` reports configured and runtime values so
+that drift is visible.
+
+## Connector response shapes
+
+Fail mode can block only where the agent protocol has a block shape:
+
+- Codex can deny/block its declared prompt, tool, permission, post-tool, and
+  stop events. It has no native ask response.
+- Claude Code can deny/block its declared prompt, expansion, tool, permission,
+  batch, task, stop, subagent, config, compaction, and elicitation events.
+  `PreToolUse` also has native ask.
+- An already-completed result event cannot undo its original side effect.
+- An observation-only event remains observation-only even when fail mode is
+  closed.
+
+See the [native Windows connector details](/docs/get-started/windows/connectors-enforcement)
+or the [capability matrix](/docs/capability-matrix) before relying on a specific
+event.
+
+## Strict availability
+
+`DEFENSECLAW_STRICT_AVAILABILITY=1` is an unconditional closed override for
+transport and missing-token failures. It exists for managed or compatibility
+deployments that must never open during a gateway outage. It does not add a
+missing hook, convert native OTLP into enforcement, or make an unsupported
+connector block-capable.
+
+Because a strict outage can make the agent unavailable, use persisted status,
+gateway monitoring, and a tested restart path before applying it broadly. On
+native Windows, set normal posture with `guardrail fail-mode` so setup, doctor,
+and status can reconcile and report it.
+
+Administrator-managed hooks force the relevant unavailable-home and transport
+failures closed rather than trusting a user-controlled process environment.
+
+## Temporary process override
+
+`DEFENSECLAW_FAIL_MODE` can replace the persisted mode for one agent process.
+It is useful only for bounded compatibility diagnosis. It is not the normal
+policy surface because it can disagree with configuration, status, and a
+different agent process. Remove the override and use
+`defenseclaw guardrail fail-mode` for durable posture.
+
+Environment keys are case-insensitive on Windows. Do not define multiple
+case-variants with different values.
+
+## Reporting and diagnosis
+
+```bash
+defenseclaw version
+defenseclaw-gateway status
+defenseclaw status
+defenseclaw guardrail status
+defenseclaw doctor
+```
+
+Hook delivery and response failures can also be recorded under
+`$DEFENSECLAW_HOME/logs/hook-failures.jsonl`; on a packaged native Windows
+install the pinned default is
+`%USERPROFILE%\.defenseclaw\logs\hook-failures.jsonl`. Treat it as sensitive
+operational data and do not publish the whole file.
+
+If doctor identifies token drift, preview its safe repair plan with
+`defenseclaw doctor --fix --dry-run`. An intentional master-token rotation uses
+`defenseclaw setup rotate-token --yes`, reconciles all active connectors, and
+requires each agent to be restarted afterward. Never diagnose auth by printing
+or comparing token values.
+
+## Legacy connector fields
+
+Fields such as `claude_code.fail_mode` and `codex.fail_mode` are legacy
+policy-layer hints. Generated and native hook runtime behavior comes from
+`guardrail.hook_fail_mode` and its per-connector entries. Use the guardrail
+command and status output; do not hand-edit the legacy fields expecting runtime
+behavior to change.

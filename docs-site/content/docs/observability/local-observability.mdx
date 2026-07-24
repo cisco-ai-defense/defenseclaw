@@ -11,6 +11,15 @@ keywords:
 
 `defenseclaw setup local-observability` brings up a full local OpenTelemetry stack and wires the gateway to it in one shot. It's what the project itself uses for development, demos, and rule-pack tuning.
 
+<Callout type="warning" title="Native Windows has a narrower optional-stack contract">
+Core DefenseClaw does not require Docker. The certified Windows local-stack
+path requires native x64 Windows Pro, Enterprise, or Education; Hyper-V;
+machine-installed Docker Desktop using Linux containers; Compose v2; and a
+real absolute `docker.exe`. WSL2/per-user Docker engines, Windows containers,
+and `.cmd`/`.bat`/shell shims are not certified. See
+[Windows capabilities](/docs/get-started/windows/capabilities-commands#capability-matrix).
+</Callout>
+
 <Video
   src="local-observability"
   caption="defenseclaw setup local-observability up — five containers come up, the gateway picks up the new OTLP endpoint, and Grafana dashboards populate live."
@@ -43,7 +52,7 @@ All five run under one Compose project (`defenseclaw-observability`). They share
     The `openclaw-observability-bridge` binary (shipped in `bundles/local_observability_stack/bin/`) drives Compose, waits for healthchecks, and writes one `kind: otlp` destination under `observability.destinations` in `~/.defenseclaw/config.yaml`.
   </Step>
   <Step>
-    **Open Grafana.** [http://localhost:3000](http://localhost:3000) — anonymous viewer access is enabled by default for the demo dashboards. Sign in as `admin/admin` to edit.
+    **Open Grafana.** [http://localhost:3000](http://localhost:3000) — anonymous viewer access is enabled by default for the demo dashboards. Follow your local stack's access policy before enabling edits; do not place credentials in terminal transcripts or support output.
   </Step>
   <Step>
     **Verify the destination handshake.** Probe the named destination without

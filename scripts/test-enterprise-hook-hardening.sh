@@ -184,6 +184,8 @@ hook_dir="${user_data}/hooks"
 hook_script="${hook_dir}/${hook_name}"
 user_token="${hook_dir}/.hook-${connector}.token"
 service_token="${service_data}/hooks/.hook-${connector}.token"
+service_otlp_token="${service_data}/hooks/.otlp-${connector}.token"
+user_otlp_token="${hook_dir}/.otlp-${connector}.token"
 native_config="${target_home}/${native_config_rel}"
 auth_record="${auth_dir}/protected_targets.json"
 server_ready="${target_home}/fake-gateway.ready"
@@ -352,11 +354,22 @@ run_reconcile() {
         --json
 }
 
-run_reconcile >"${target_home}/reconcile-initial.json"
+run_reconcile_checked() {
+    local output="$1"
+    if run_reconcile >"$output"; then
+        return 0
+    fi
+    cat "$output" >&2 || true
+    fail "enterprise hook reconcile failed; detailed JSON emitted above"
+}
+
+run_reconcile_checked "${target_home}/reconcile-initial.json"
 
 [ -f "$hook_script" ] || fail "managed hook was not installed"
 [ -f "$user_token" ] || fail "connector-scoped user token was not installed"
 sudo -n test -f "$service_token" || fail "connector-scoped service token was not created"
+sudo -n test -f "$service_otlp_token" || fail "connector-scoped service OTLP token was not created"
+[ ! -e "$user_otlp_token" ] || fail "managed install wrote an unrecognized per-user OTLP token"
 sudo -n test -f "$auth_record" || fail "root-owned authorization record was not created"
 [ "$(protected_file_owner_uid "$auth_record")" = 0 ] || fail "authorization record is not root-owned"
 [ "$(protected_file_owner_gid "$auth_record")" = "$(id -g defenseclaw)" ] || fail "authorization record group is not defenseclaw"
@@ -371,10 +384,30 @@ fi
 [ "$(file_owner_uid "$hook_script")" = "$uid" ] || fail "hook owner does not match the target user"
 [ "$(file_owner_uid "$user_token")" = "$uid" ] || fail "user token owner does not match the target user"
 [ "$(file_owner_uid "$native_config")" = "$uid" ] || fail "native config owner does not match the target user"
+[ "$(protected_file_owner_uid "$service_otlp_token")" = 0 ] || fail "service OTLP token is not root-owned"
+[ "$(protected_file_mode "$service_otlp_token")" = 600 ] || fail "service OTLP token mode is not 0600"
 [ ! -e "${hook_dir}/.token" ] || fail "legacy shared token was written"
 [ "$(wc -l <"$user_token" | tr -d ' ')" = '1' ] || fail "scoped token is not one raw line"
 ! grep -q '^DEFENSECLAW_GATEWAY_TOKEN=' "$user_token" || fail "scoped token used legacy assignment format"
 grep -Fq "$hook_script" "$native_config" || fail "native agent config does not reference the managed hook"
+service_otlp_value="$(sudo -n cat "$service_otlp_token")"
+if grep -Fq "/otlp/${connector}/${service_otlp_value}" "$native_config"; then
+    fail "native agent config leaked the gateway service OTLP token in an endpoint"
+fi
+case "$connector" in
+    codex)
+        if ! grep -Fq "authorization = \"Bearer ${service_otlp_value}\"" "$native_config" &&
+            ! grep -Fq "authorization = 'Bearer ${service_otlp_value}'" "$native_config"; then
+            fail "Codex config does not carry the gateway service OTLP token as an Authorization bearer"
+        fi
+        ;;
+    claudecode)
+        grep -Fq "authorization=Bearer ${service_otlp_value}" "$native_config" || fail "Claude config does not carry the gateway service OTLP token as a literal Authorization bearer"
+        if grep -Fq "authorization=Bearer%20${service_otlp_value}" "$native_config"; then
+            fail "Claude config retained the obsolete percent-encoded Authorization bearer"
+        fi
+        ;;
+esac
 sudo -n cmp -s "$service_token" "$user_token" || fail "service and user scoped tokens differ"
 
 sudo -n -u defenseclaw python3 - "$auth_record" "$connector" "$target_home" <<'PY'
@@ -415,7 +448,7 @@ printf 'attacker-controlled-token\n' >"$user_token"
 printf '%s\n' "$native_config_seed" >"$native_config"
 chmod 0777 "$native_config"
 
-run_reconcile >"${target_home}/reconcile-regular-tamper.json"
+run_reconcile_checked "${target_home}/reconcile-regular-tamper.json"
 
 [ "$(file_hash "$hook_script")" = "$canonical_hook_hash" ] || fail "regular-file hook tamper was not repaired"
 [ "$(file_mode "$hook_script")" = '700' ] || fail "hook special/writable mode was not normalized"
@@ -434,7 +467,7 @@ rm -f "$hook_script" "$native_config"
 ln -s "$hook_decoy" "$hook_script"
 ln -s "$config_decoy" "$native_config"
 
-run_reconcile >"${target_home}/reconcile-symlink-tamper.json"
+run_reconcile_checked "${target_home}/reconcile-symlink-tamper.json"
 
 [ ! -L "$hook_script" ] && [ -f "$hook_script" ] || fail "hook symlink was not replaced safely"
 [ ! -L "$native_config" ] && [ -f "$native_config" ] || fail "native config symlink was not replaced safely"
@@ -447,7 +480,7 @@ touch -t 200001010000 "$hook_script" "$user_token" "$native_config"
 hook_mtime="$(file_mtime "$hook_script")"
 token_mtime="$(file_mtime "$user_token")"
 config_mtime="$(file_mtime "$native_config")"
-run_reconcile >"${target_home}/reconcile-noop.json"
+run_reconcile_checked "${target_home}/reconcile-noop.json"
 [ "$(file_mtime "$hook_script")" = "$hook_mtime" ] || fail "no-op reconcile rewrote the hook"
 [ "$(file_mtime "$user_token")" = "$token_mtime" ] || fail "no-op reconcile rewrote the scoped token"
 [ "$(file_mtime "$native_config")" = "$config_mtime" ] || fail "no-op reconcile rewrote the native config"

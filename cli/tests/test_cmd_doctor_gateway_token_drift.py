@@ -209,9 +209,9 @@ class CheckGatewayTokenDriftTests(unittest.TestCase):
         # Must NOT leak full tokens into the message.
         self.assertNotIn("old-cached-token", fail_msg)
         self.assertNotIn("new-token-from-rewrite", fail_msg)
-        # Should show truncated prefixes so the operator can verify.
-        self.assertIn("old-cach", fail_msg)
-        self.assertIn("new-toke", fail_msg)
+        # Prefixes and hashes are credentials too; diagnostics must expose none.
+        self.assertNotIn("old-cach", fail_msg)
+        self.assertNotIn("new-toke", fail_msg)
 
     def test_skip_when_process_env_unreadable(self):
         """Sidecar's env can't be introspected (permissions /
@@ -324,7 +324,10 @@ class FixGatewayTokenDriftTests(unittest.TestCase):
         _seed_pidfile(self.tmp, os.getpid())
         mock_run = MagicMock(
             return_value=subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="restarted", stderr="",
+                args=[],
+                returncode=0,
+                stdout="restarted",
+                stderr="",
             ),
         )
         with (
@@ -350,7 +353,10 @@ class FixGatewayTokenDriftTests(unittest.TestCase):
         _seed_pidfile(self.tmp, os.getpid())
         mock_run = MagicMock(
             return_value=subprocess.CompletedProcess(
-                args=[], returncode=1, stdout="", stderr="port in use\n",
+                args=[],
+                returncode=1,
+                stdout="",
+                stderr="port in use\n",
             ),
         )
         with (

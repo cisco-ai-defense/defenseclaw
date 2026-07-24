@@ -105,7 +105,8 @@ class TestStatusCommand(unittest.TestCase):
     def test_status_accepts_openshell_sandbox_binary(self, mock_which, mock_client_cls):
         from defenseclaw.commands.cmd_status import status
 
-        def fake_which(binary):
+        def fake_which(binary, *, path=None):
+            del path
             if binary == "openshell-sandbox":
                 return "/usr/local/bin/openshell-sandbox"
             return None
@@ -134,7 +135,8 @@ class TestStatusCommand(unittest.TestCase):
 
         self.app.cfg.openshell.binary = "/opt/operator/openshell"
 
-        def fake_which(binary):
+        def fake_which(binary, *, path=None):
+            del path
             if binary == "openshell-sandbox":
                 return "/usr/local/bin/openshell-sandbox"
             return None
@@ -956,6 +958,12 @@ class TestSetupSplunkCommand(unittest.TestCase):
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
         self.runner = CliRunner()
+        self._native_local_splunk = patch(
+            "defenseclaw.commands.cmd_setup._native_windows_local_splunk",
+            return_value=False,
+        )
+        self._native_local_splunk.start()
+        self.addCleanup(self._native_local_splunk.stop)
         self._write_v8_destinations([])
         self._v8_validator = patch(
             "defenseclaw.observability.v8_writer._validate_candidate"

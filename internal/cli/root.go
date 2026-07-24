@@ -17,7 +17,9 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +28,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -34,6 +38,9 @@ var (
 	auditStore                   *audit.Store
 	auditLog                     *audit.Logger
 	appVersion                   string
+	appCommit                    string
+	appBuildDate                 string
+	versionJSON                  bool
 	activeObservabilityV8Startup *observabilityV8Startup
 )
 
@@ -53,9 +60,69 @@ func SetVersion(v string) {
 }
 
 func SetBuildInfo(commit, date string) {
+	appCommit = commit
+	appBuildDate = date
 	rootCmd.SetVersionTemplate(
 		fmt.Sprintf("{{.Name}} version {{.Version}} (commit=%s, built=%s)\n", commit, date),
 	)
+}
+
+type machineVersionReport struct {
+	SchemaVersion int    `json:"schema_version"`
+	Name          string `json:"name"`
+	Version       string `json:"version"`
+	Commit        string `json:"commit,omitempty"`
+	Built         string `json:"built,omitempty"`
+}
+
+func writeMachineVersion(w io.Writer) error {
+	return json.NewEncoder(w).Encode(machineVersionReport{
+		SchemaVersion: 1,
+		Name:          "defenseclaw-gateway",
+		Version:       appVersion,
+		Commit:        appCommit,
+		Built:         appBuildDate,
+	})
+}
+
+func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
+	if versionJSON {
+		return nil
+	}
+	// Enterprise hook commands also use this initializer so they receive the
+	// same authenticated v8 runtime context as the root sidecar command.
+	// A Windows daemon may explicitly break away from the TUI's Job Object.
+	// Claim its strong PID identity before any fallible/slow initialization so
+	// an abruptly cancelled launcher cannot leave an unmanaged live sidecar.
+	if err := daemon.RegisterCurrentProcess(); err != nil {
+		return err
+	}
+	activeObservabilityV8Startup = nil
+	loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
+	var err error
+	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(config.ConfigPath())
+	if err != nil {
+		return fmt.Errorf("failed to load v8 config — run 'defenseclaw upgrade' first: %w", err)
+	}
+	version.SetBinaryVersion(appVersion)
+	if auditDir := filepath.Dir(cfg.AuditDB); auditDir != "." {
+		if err := safefile.ProtectDirectory(auditDir); err != nil {
+			return fmt.Errorf("failed to prepare audit store directory: %w", err)
+		}
+	}
+	auditStore, err = audit.NewStore(cfg.AuditDB)
+	if err != nil {
+		return fmt.Errorf("failed to open audit store: %w", err)
+	}
+	if err := auditStore.Init(); err != nil {
+		return fmt.Errorf("failed to init audit store: %w", err)
+	}
+	auditLog = audit.NewLogger(auditStore)
+	installCorrelator(auditStore, os.Stderr)
+	if resolved := filepath.Join(cfg.DataDir, ".env"); resolved != filepath.Join(config.DefaultDataPath(), ".env") {
+		loadDotEnvIntoOS(resolved)
+	}
+	return nil
 }
 
 var rootCmd = &cobra.Command{
@@ -66,31 +133,7 @@ monitors tool_call and tool_result events, enforces policy in real time,
 and exposes a local REST API for the Python CLI.
 
 Run without arguments to start the sidecar daemon.`,
-	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-		if err := loadGatewayCommandConfigOnly(); err != nil {
-			return err
-		}
-
-		var err error
-		auditStore, err = audit.NewStore(cfg.AuditDB)
-		if err != nil {
-			return fmt.Errorf("failed to open audit store: %w", err)
-		}
-		if err := auditStore.Init(); err != nil {
-			return fmt.Errorf("failed to init audit store: %w", err)
-		}
-
-		auditLog = audit.NewLogger(auditStore)
-
-		// Register the sliding-window correlator so EmitScanResult
-		// runs it against every persisted scan's session window.
-		// A failure to load the embedded pattern set logs to stderr
-		// and leaves correlation disabled — the rest of the guardrail
-		// stack is unaffected.
-		installCorrelator(auditStore, os.Stderr)
-
-		return nil
-	},
+	PersistentPreRunE: rootPersistentPreRunE,
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {
 		if auditLog != nil {
 			auditLog.Close()
@@ -99,7 +142,12 @@ Run without arguments to start the sidecar daemon.`,
 			auditStore.Close()
 		}
 	},
-	RunE:         runSidecar,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if versionJSON {
+			return writeMachineVersion(cmd.OutOrStdout())
+		}
+		return runSidecar(cmd, args)
+	},
 	SilenceUsage: true,
 }
 
@@ -196,6 +244,10 @@ func prepareCompiledObservabilityV8Startup(c *config.Config, loaded *loadedConfi
 		sourceName: loaded.source,
 		raw:        append([]byte(nil), loaded.raw...),
 	}, nil
+}
+
+func init() {
+	rootCmd.Flags().BoolVar(&versionJSON, "version-json", false, "emit the exact build version as JSON and exit")
 }
 
 // Execute runs the root command and returns the exit code. The actual

@@ -334,13 +334,71 @@ func TestApplicationProtectionControllerSkipsProxyConnector(t *testing.T) {
 	}
 }
 
+func TestApplicationProtectionHookStubPublishesOwnedRegistration(t *testing.T) {
+	dir := t.TempDir()
+	hookConfigPath := filepath.Join(dir, "codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(hookConfigPath), 0o700); err != nil {
+		t.Fatalf("mkdir hook config dir: %v", err)
+	}
+	const originalConfig = "model_provider = \"openai\"\n"
+	if err := os.WriteFile(hookConfigPath, []byte(originalConfig), 0o600); err != nil {
+		t.Fatalf("write hook config: %v", err)
+	}
+	conn := &appProtectionHookStub{
+		bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "codex"}},
+		hookConfigPath:    hookConfigPath,
+	}
+	opts := connector.SetupOpts{DataDir: dir}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	present, err := connector.OwnedHooksPresent(conn, opts)
+	if err != nil {
+		t.Fatalf("OwnedHooksPresent: %v", err)
+	}
+	if !present {
+		t.Fatal("successful fake setup did not publish its owned registration")
+	}
+	raw, err := os.ReadFile(hookConfigPath)
+	if err != nil {
+		t.Fatalf("read hook config: %v", err)
+	}
+	if !strings.HasPrefix(string(raw), originalConfig) {
+		t.Fatalf("fake setup did not preserve existing config: %q", raw)
+	}
+}
+
 type appProtectionHookStub struct {
 	bootStubConnector
 	hookConfigPath string
 }
 
+const appProtectionHookReference = "defenseclaw-app-protection-test-hook"
+
+func (s *appProtectionHookStub) Setup(ctx context.Context, opts connector.SetupOpts) error {
+	if err := s.bootStubConnector.Setup(ctx, opts); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(s.hookConfigPath), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(s.hookConfigPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString("\ncommand = \"" + appProtectionHookReference + "\"\n"); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
 func (s *appProtectionHookStub) HookScriptNames(connector.SetupOpts) []string {
 	return []string{s.Name() + "-hook.sh"}
+}
+
+func (*appProtectionHookStub) HookConfigReferenceNeedles(connector.SetupOpts) []string {
+	return []string{appProtectionHookReference}
 }
 
 func (s *appProtectionHookStub) HookCapabilities(connector.SetupOpts) connector.HookCapability {

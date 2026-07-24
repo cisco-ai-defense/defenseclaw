@@ -462,6 +462,14 @@ class TestRegistryRequire(RegistryCommandTestBase):
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": self.tmp_dir}):
             return config_mod.load()
 
+    def _activate(self, *connectors):
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        self.app.cfg.guardrail.connectors = {
+            connector: PerConnectorGuardrailConfig()
+            for connector in connectors
+        }
+
     def test_require_per_connector_write(self):
         # --connector writes the per-connector override, NOT the global scalar.
         result = self.invoke([
@@ -559,6 +567,275 @@ class TestRegistryRequire(RegistryCommandTestBase):
         self.assertFalse(
             self.app.cfg.asset_policy.connectors["codex"].mcp.registry_required
         )
+
+    def test_require_unscoped_reconciles_skill_and_mcp_both_directions(self):
+        from defenseclaw.config import (
+            AssetPolicyConfig,
+            PerConnectorAssetPolicy,
+            PerConnectorAssetTypePolicy,
+        )
+
+        cases = (
+            ("skill", False, True, "codex"),
+            ("skill", True, False, "codex"),
+            ("mcp", False, True, "claudecode"),
+            ("mcp", True, False, "claudecode"),
+        )
+        for asset_type, initial, requested, opposite_connector in cases:
+            with self.subTest(
+                asset_type=asset_type,
+                initial=initial,
+                requested=requested,
+                opposite_connector=opposite_connector,
+            ):
+                self.app.cfg.asset_policy = AssetPolicyConfig()
+                self._activate("codex", "claudecode")
+                global_policy = getattr(self.app.cfg.asset_policy, asset_type)
+                global_policy.registry_required = initial
+                peer = "claudecode" if opposite_connector == "codex" else "codex"
+                setattr(
+                    self.app.cfg.asset_policy.connectors.setdefault(
+                        opposite_connector, PerConnectorAssetPolicy(),
+                    ),
+                    asset_type,
+                    PerConnectorAssetTypePolicy(registry_required=initial),
+                )
+                setattr(
+                    self.app.cfg.asset_policy.connectors.setdefault(
+                        peer, PerConnectorAssetPolicy(),
+                    ),
+                    asset_type,
+                    PerConnectorAssetTypePolicy(registry_required=requested),
+                )
+                self.app.cfg.save()
+
+                flag = "--enabled" if requested else "--disabled"
+                result = self.invoke(["require", "--type", asset_type, flag, "--json"])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                self.assertEqual(payload["changed_connectors"], [opposite_connector])
+                self.assertEqual(payload["already_compliant_connectors"], [peer])
+                self.assertEqual(payload["failed_connectors"], [])
+                self.assertEqual(payload["active_connectors"], ["claudecode", "codex"])
+                self.assertEqual(
+                    getattr(self.app.cfg.asset_policy, asset_type).registry_required,
+                    requested,
+                )
+                for connector in ("codex", "claudecode"):
+                    effective = self.app.cfg.asset_policy.effective_asset_type_policy(
+                        connector, asset_type,
+                    )
+                    self.assertEqual(effective.registry_required, requested)
+                    block = getattr(self.app.cfg.asset_policy.connectors[connector], asset_type)
+                    self.assertIsNone(block.registry_required)
+
+    def test_require_unscoped_preserves_unrelated_fields_rules_filters_and_inactive_override(self):
+        from defenseclaw.config import (
+            AssetPolicyRule,
+            PerConnectorAssetPolicy,
+            PerConnectorAssetTypePolicy,
+        )
+
+        self._activate("codex", "claudecode")
+        ap = self.app.cfg.asset_policy
+        ap.mode = "action"
+        ap.skill.registry_required = False
+        ap.skill.registry = [AssetPolicyRule(name="approved", connector="codex", reason="registry:corp")]
+        ap.skill.allowed = [AssetPolicyRule(name="manual", connector="claudecode")]
+        ap.skill.denied = [AssetPolicyRule(name="blocked", connector="codex")]
+        ap.connectors = {
+            "codex": PerConnectorAssetPolicy(
+                mode="observe",
+                skill=PerConnectorAssetTypePolicy(
+                    default="deny",
+                    registry_required=False,
+                    registry_empty_action="warn",
+                ),
+                mcp=PerConnectorAssetTypePolicy(
+                    default="allow",
+                    registry_required=True,
+                    registry_empty_action="allow",
+                ),
+            ),
+            "claudecode": PerConnectorAssetPolicy(
+                skill=PerConnectorAssetTypePolicy(registry_required=False),
+            ),
+            "cursor": PerConnectorAssetPolicy(
+                mode="action",
+                skill=PerConnectorAssetTypePolicy(
+                    default="deny",
+                    registry_required=False,
+                    registry_empty_action="deny",
+                ),
+            ),
+        }
+        self.app.cfg.save()
+
+        result = self.invoke(["require", "--type", "skill", "--enabled", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["preserved_inactive_connectors"], ["cursor"])
+        reloaded = self._reload_cfg().asset_policy
+        self.assertTrue(reloaded.skill.registry_required)
+        self.assertEqual(reloaded.skill.registry[0].connector, "codex")
+        self.assertEqual(reloaded.skill.registry[0].reason, "registry:corp")
+        self.assertEqual(reloaded.skill.allowed[0].connector, "claudecode")
+        self.assertEqual(reloaded.skill.denied[0].connector, "codex")
+        codex = reloaded.connectors["codex"]
+        self.assertEqual(codex.mode, "observe")
+        self.assertEqual(codex.skill.default, "deny")
+        self.assertEqual(codex.skill.registry_empty_action, "warn")
+        self.assertIsNone(codex.skill.registry_required)
+        self.assertTrue(codex.mcp.registry_required)
+        self.assertEqual(codex.mcp.registry_empty_action, "allow")
+        cursor = reloaded.connectors["cursor"]
+        self.assertEqual(cursor.mode, "action")
+        self.assertFalse(cursor.skill.registry_required)
+        self.assertEqual(cursor.skill.default, "deny")
+
+    def test_require_scoped_updates_only_selected_connector_for_codex_and_claude(self):
+        from defenseclaw.config import (
+            AssetPolicyConfig,
+            PerConnectorAssetPolicy,
+            PerConnectorAssetTypePolicy,
+        )
+
+        for selected, peer in (("codex", "claudecode"), ("claudecode", "codex")):
+            with self.subTest(selected=selected):
+                self.app.cfg.asset_policy = AssetPolicyConfig()
+                self._activate("codex", "claudecode")
+                self.app.cfg.asset_policy.skill.registry_required = False
+                self.app.cfg.asset_policy.connectors = {
+                    "codex": PerConnectorAssetPolicy(
+                        mode="action",
+                        skill=PerConnectorAssetTypePolicy(
+                            default="deny", registry_required=False, registry_empty_action="warn",
+                        ),
+                    ),
+                    "claudecode": PerConnectorAssetPolicy(
+                        mode="observe",
+                        skill=PerConnectorAssetTypePolicy(
+                            default="allow", registry_required=False, registry_empty_action="allow",
+                        ),
+                    ),
+                }
+                self.app.cfg.save()
+                peer_before = self.app.cfg.asset_policy.connectors[peer].skill
+
+                result = self.invoke([
+                    "require", "--type", "skill", "--enabled",
+                    "--connector", selected, "--json",
+                ])
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                payload = json.loads(result.output)
+                self.assertEqual(payload["connector"], selected)
+                self.assertEqual(payload["changed_connectors"], [selected])
+                self.assertFalse(self.app.cfg.asset_policy.skill.registry_required)
+                selected_block = self.app.cfg.asset_policy.connectors[selected].skill
+                self.assertTrue(selected_block.registry_required)
+                self.assertEqual(selected_block.default, "deny" if selected == "codex" else "allow")
+                peer_after = self.app.cfg.asset_policy.connectors[peer].skill
+                self.assertEqual(peer_after, peer_before)
+
+    def test_require_unscoped_is_idempotent_and_reports_already_compliant(self):
+        self._activate("codex", "claudecode")
+
+        first = self.invoke(["require", "--type", "mcp", "--enabled", "--json"])
+        second = self.invoke(["require", "--type", "mcp", "--enabled", "--json"])
+
+        self.assertEqual(first.exit_code, 0, first.output)
+        self.assertEqual(second.exit_code, 0, second.output)
+        payload = json.loads(second.output)
+        self.assertEqual(payload["changed_connectors"], [])
+        self.assertEqual(payload["already_compliant_connectors"], ["claudecode", "codex"])
+        self.assertFalse(payload["global_changed"])
+
+    def test_require_uses_normalized_active_roster_and_existing_alias_key(self):
+        from defenseclaw.config import (
+            PerConnectorAssetPolicy,
+            PerConnectorAssetTypePolicy,
+        )
+
+        self._activate("Codex", "open-hands")
+        self.app.cfg.asset_policy.connectors = {
+            "codex": PerConnectorAssetPolicy(
+                mcp=PerConnectorAssetTypePolicy(registry_required=False),
+            ),
+            "open_hands": PerConnectorAssetPolicy(
+                mcp=PerConnectorAssetTypePolicy(registry_required=False),
+            ),
+        }
+        self.app.cfg.save()
+
+        result = self.invoke(["require", "--type", "mcp", "--enabled", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["active_connectors"], ["codex", "openhands"])
+        self.assertIsNone(self.app.cfg.asset_policy.connectors["codex"].mcp.registry_required)
+        self.assertIsNone(self.app.cfg.asset_policy.connectors["open_hands"].mcp.registry_required)
+        self.assertNotIn("openhands", self.app.cfg.asset_policy.connectors)
+
+    def test_require_verification_failure_rolls_back_and_reports_failed_connectors(self):
+        import yaml
+        from defenseclaw.config import (
+            PerConnectorAssetPolicy,
+            PerConnectorAssetTypePolicy,
+        )
+
+        self._activate("codex", "claudecode")
+        self.app.cfg.asset_policy.skill.registry_required = False
+        self.app.cfg.asset_policy.connectors["codex"] = PerConnectorAssetPolicy(
+            skill=PerConnectorAssetTypePolicy(registry_required=False),
+        )
+        self.app.cfg.save()
+        config_path = os.path.join(self.tmp_dir, "config.yaml")
+        with open(config_path, encoding="utf-8") as stream:
+            before = yaml.safe_load(stream)
+
+        with patch(
+            "defenseclaw.registry_policy._verify_registry_required",
+            side_effect=RuntimeError("verification fixture"),
+        ):
+            result = self.invoke(["require", "--type", "skill", "--enabled", "--json"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["failed_connectors"], ["claudecode", "codex"])
+        self.assertEqual(payload["changed_connectors"], [])
+        with open(config_path, encoding="utf-8") as stream:
+            self.assertEqual(yaml.safe_load(stream), before)
+        self.assertFalse(self.app.cfg.asset_policy.skill.registry_required)
+        self.assertFalse(
+            self.app.cfg.asset_policy.effective_asset_type_policy("codex", "skill").registry_required
+        )
+
+    def test_require_write_failure_keeps_previous_configuration_and_exits_nonzero(self):
+        import yaml
+
+        self._activate("codex", "claudecode")
+        self.app.cfg.asset_policy.mcp.registry_required = False
+        self.app.cfg.save()
+        config_path = os.path.join(self.tmp_dir, "config.yaml")
+        with open(config_path, encoding="utf-8") as stream:
+            before = yaml.safe_load(stream)
+
+        with patch(
+            "defenseclaw.config.write_config_yaml_secure",
+            side_effect=OSError("write fixture"),
+        ):
+            result = self.invoke(["require", "--type", "mcp", "--enabled", "--json"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["failed_connectors"], ["claudecode", "codex"])
+        with open(config_path, encoding="utf-8") as stream:
+            self.assertEqual(yaml.safe_load(stream), before)
+        self.assertFalse(self.app.cfg.asset_policy.mcp.registry_required)
 
 
 class TestFileAdapterPathValidation(RegistryCommandTestBase):

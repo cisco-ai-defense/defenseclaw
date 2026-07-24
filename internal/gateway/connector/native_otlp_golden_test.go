@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -34,9 +35,31 @@ import (
 func fixedSetupOpts(t *testing.T) SetupOpts {
 	t.Helper()
 	return SetupOpts{
-		APIAddr:  "127.0.0.1:18970",
-		APIToken: "tok-test",
-		DataDir:  t.TempDir(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "tok-test",
+		OTLPPathToken: strings.Repeat("a", 64),
+		DataDir:       t.TempDir(),
+	}
+}
+
+func TestScopedOTLPEndpointRecognitionIsExact(t *testing.T) {
+	token := strings.Repeat("a", 64)
+	base := "http://127.0.0.1:18970/otlp/claudecode/" + token
+	if !isScopedOTLPBaseEndpoint(base, "127.0.0.1:18970", OTLPScopeClaude) {
+		t.Fatal("valid connector-scoped base endpoint was rejected")
+	}
+	if !isScopedOTLPEndpoint(base+"/v1/logs", "127.0.0.1:18970", OTLPScopeClaude, NativeOTLPSignalLogs) {
+		t.Fatal("valid connector-scoped signal endpoint was rejected")
+	}
+	for _, endpoint := range []string{
+		base + "/extra",
+		base + "/v1/traces",
+		"http://127.0.0.1:18970/otlp/codex/" + token,
+		"http://localhost:18970/otlp/claudecode/" + token,
+	} {
+		if isScopedOTLPBaseEndpoint(endpoint, "127.0.0.1:18970", OTLPScopeClaude) {
+			t.Errorf("foreign or malformed base endpoint accepted: %q", endpoint)
+		}
 	}
 }
 
@@ -102,30 +125,34 @@ func TestNativeOTLPShape_Codex(t *testing.T) {
 		if got, _ := otlp["protocol"].(string); got != "json" {
 			t.Errorf("%s.otlp-http.protocol = %q; want \"json\"", signal, got)
 		}
-		ep, _ := otlp["endpoint"].(string)
-		if !strings.HasPrefix(ep, "http://"+opts.APIAddr) {
-			t.Errorf("%s.otlp-http.endpoint does not use configured API address", signal)
-		}
 		wantSignal := map[string]string{
 			"exporter":         "logs",
 			"trace_exporter":   "traces",
 			"metrics_exporter": "metrics",
 		}[signal]
-		if !strings.HasSuffix(ep, "/otlp/codex/"+pathToken+"/v1/"+wantSignal) {
-			t.Errorf("%s.otlp-http.endpoint does not use scoped Codex %s route", signal, wantSignal)
+		ep, _ := otlp["endpoint"].(string)
+		wantEndpoint := "http://" + opts.APIAddr + "/v1/" + wantSignal
+		if ep != wantEndpoint {
+			t.Errorf("%s.otlp-http.endpoint = %q; want %q", signal, ep, wantEndpoint)
+		}
+		if strings.Contains(ep, pathToken) || strings.Contains(ep, "/otlp/codex/") {
+			t.Errorf("%s.otlp-http.endpoint leaked scoped Codex credential: %q", signal, ep)
+		}
+		if !strings.Contains(ep, "/v1/") {
+			t.Errorf("%s.otlp-http.endpoint = %q; want standard OTLP signal path", signal, ep)
 		}
 		hdrs := toStringMap(otlp["headers"])
-		if _, present := hdrs["x-defenseclaw-token"]; present {
-			t.Errorf("%s.otlp-http.headers leaked a DefenseClaw credential", signal)
-		}
-		if _, present := hdrs["authorization"]; present {
-			t.Errorf("%s.otlp-http.headers leaked an Authorization credential", signal)
+		if _, leaked := hdrs["x-defenseclaw-token"]; leaked {
+			t.Errorf("%s.otlp-http.headers leaked the general API token: %v", signal, hdrs)
 		}
 		if hdrs["x-defenseclaw-source"] != "codex" {
 			t.Errorf("%s.otlp-http.headers[x-defenseclaw-source] = %q; want \"codex\"", signal, hdrs["x-defenseclaw-source"])
 		}
 		if hdrs["x-defenseclaw-client"] == "" {
 			t.Errorf("%s.otlp-http.headers[x-defenseclaw-client] missing (gateway CSRF gate would reject)", signal)
+		}
+		if got := hdrs["authorization"]; got != "Bearer "+pathToken {
+			t.Errorf("%s.otlp-http.headers[authorization] = %q; want connector-scoped bearer", signal, got)
 		}
 	}
 }
@@ -197,8 +224,18 @@ func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
 		"OTEL_EXPORTER_OTLP_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_HEADERS",
 		"OTEL_EXPORTER_OTLP_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+		"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
 		"OTEL_LOGS_EXPORTER",
 		"OTEL_METRICS_EXPORTER",
+		"OTEL_TRACES_EXPORTER",
 		"OTEL_RESOURCE_ATTRIBUTES",
 		"OTEL_SERVICE_NAME",
 	} {
@@ -216,16 +253,23 @@ func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
 	if env["OTEL_EXPORTER_OTLP_PROTOCOL"] != "http/json" {
 		t.Errorf("OTEL_EXPORTER_OTLP_PROTOCOL = %q; want \"http/json\"", env["OTEL_EXPORTER_OTLP_PROTOCOL"])
 	}
+	if env["OTEL_TRACES_EXPORTER"] != "none" {
+		t.Errorf("OTEL_TRACES_EXPORTER = %q; want none", env["OTEL_TRACES_EXPORTER"])
+	}
 	if !strings.HasPrefix(env["OTEL_EXPORTER_OTLP_ENDPOINT"], "http://"+opts.APIAddr) {
 		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %q; want http://%s prefix",
 			env["OTEL_EXPORTER_OTLP_ENDPOINT"], opts.APIAddr)
 	}
+	if strings.Contains(env["OTEL_EXPORTER_OTLP_ENDPOINT"], opts.OTLPPathToken) ||
+		strings.Contains(env["OTEL_EXPORTER_OTLP_ENDPOINT"], "/otlp/claudecode/") {
+		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT leaked scoped Claude credential: %q", env["OTEL_EXPORTER_OTLP_ENDPOINT"])
+	}
 
 	headers := splitOTelHeader(env["OTEL_EXPORTER_OTLP_HEADERS"])
 	wantHeaders := map[string]bool{
-		"x-defenseclaw-source=claudecode":          true,
-		"x-defenseclaw-client=claudecode-otel/1.0": true,
-		"x-defenseclaw-token=" + opts.APIToken:     true,
+		"x-defenseclaw-source=claudecode":            true,
+		"x-defenseclaw-client=claudecode-otel/1.0":   true,
+		"authorization=Bearer " + opts.OTLPPathToken: true,
 	}
 	for _, h := range headers {
 		delete(wantHeaders, h)
@@ -233,6 +277,22 @@ func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
 	if len(wantHeaders) != 0 {
 		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing entries %v; got %v",
 			wantHeaders, env["OTEL_EXPORTER_OTLP_HEADERS"])
+	}
+	if strings.Contains(env["OTEL_EXPORTER_OTLP_HEADERS"], "x-defenseclaw-token=") {
+		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS leaked the general API token: %s", env["OTEL_EXPORTER_OTLP_HEADERS"])
+	}
+	for _, signal := range []string{"LOGS", "METRICS", "TRACES"} {
+		prefix := "OTEL_EXPORTER_OTLP_" + signal
+		wantEndpoint := env["OTEL_EXPORTER_OTLP_ENDPOINT"] + "/v1/" + strings.ToLower(signal)
+		if got := env[prefix+"_ENDPOINT"]; got != wantEndpoint {
+			t.Errorf("%s_ENDPOINT = %q; want %q", prefix, got, wantEndpoint)
+		}
+		if got := env[prefix+"_PROTOCOL"]; got != "http/json" {
+			t.Errorf("%s_PROTOCOL = %q; want http/json", prefix, got)
+		}
+		if got := env[prefix+"_HEADERS"]; got != env["OTEL_EXPORTER_OTLP_HEADERS"] {
+			t.Errorf("%s_HEADERS = %q; want managed common headers", prefix, got)
+		}
 	}
 
 	resAttrs := splitOTelHeader(env["OTEL_RESOURCE_ATTRIBUTES"])
@@ -246,6 +306,56 @@ func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
 	if len(wantAttrs) != 0 {
 		t.Errorf("OTEL_RESOURCE_ATTRIBUTES missing entries %v; got %v",
 			wantAttrs, env["OTEL_RESOURCE_ATTRIBUTES"])
+	}
+}
+
+func TestClaudeCodeManagedSettingsProjectionIsStableAcrossGatewayMasterRotation(t *testing.T) {
+	const apiAddr = "127.0.0.1:18970"
+	dataDir := filepath.Join("fixture", "defenseclaw")
+	scopedOTLPToken := strings.Repeat("c", 64)
+	scopedHookToken := strings.Repeat("d", 64)
+
+	render := func(masterToken string) []byte {
+		t.Helper()
+		opts := SetupOpts{
+			DataDir:            dataDir,
+			APIAddr:            apiAddr,
+			APIToken:           masterToken,
+			HookAPIToken:       scopedHookToken,
+			HookAPITokenScoped: true,
+			OTLPPathToken:      scopedOTLPToken,
+		}
+		hookCommand, hookArgs := claudeCodeHookInvocation(
+			opts,
+			filepath.Join(dataDir, "hooks", "claude-code-hook.sh"),
+		)
+		hooks := map[string]interface{}{}
+		appendClaudeCodeHookMatrix(hooks, hookCommand, hookArgs)
+		projection := map[string]interface{}{
+			"env":   buildClaudeCodeOtelEnv(opts),
+			"hooks": hooks,
+		}
+		raw, err := json.MarshalIndent(projection, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal Claude managed settings projection: %v", err)
+		}
+		return raw
+	}
+
+	masterA := strings.Repeat("a", 64)
+	masterB := strings.Repeat("b", 64)
+	projectionA := render(masterA)
+	projectionB := render(masterB)
+	if string(projectionA) != string(projectionB) {
+		t.Fatal("Claude managed settings changed across gateway master rotation")
+	}
+	for _, masterToken := range []string{masterA, masterB} {
+		if strings.Contains(string(projectionB), masterToken) {
+			t.Fatal("Claude managed settings exposed a gateway master credential")
+		}
+	}
+	if !strings.Contains(string(projectionB), scopedOTLPToken) {
+		t.Fatal("Claude managed settings omitted the stable scoped OTLP credential")
 	}
 }
 
@@ -404,6 +514,62 @@ func TestNativeOTLPShape_GeminiCLI(t *testing.T) {
 	}
 }
 
+func TestSerializeOTLPHeadersRoundTripsThroughJavaScriptURIParser(t *testing.T) {
+	t.Parallel()
+
+	const value = "Bearer literal+plus,comma=equals%percent 雪"
+	encoded := serializeOTLPHeaders(map[string]string{
+		"Authorization": value,
+	})
+	if strings.Contains(encoded, "authorization=Bearer+") {
+		t.Fatalf("space used form/query encoding instead of URI encoding: %q", encoded)
+	}
+	if !strings.Contains(encoded, "authorization=Bearer%20") {
+		t.Fatalf("space was not percent-encoded for decodeURIComponent: %q", encoded)
+	}
+
+	got := splitOTelHeader(encoded)
+	want := []string{"authorization=" + value}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("JavaScript-style header round-trip mismatch:\n  got=%q\n want=%q\nencoded=%q", got, want, encoded)
+	}
+}
+
+func TestLiteralOTLPHeadersPreserveBearerSpaceAndRejectAmbiguousValues(t *testing.T) {
+	t.Parallel()
+
+	spec := NativeOTLPSpec{
+		Kind:           NativeOTLPEnvBlock,
+		Endpoint:       "http://127.0.0.1:18970",
+		LiteralHeaders: true,
+		Headers: map[string]string{
+			"Authorization":        "Bearer scoped-token",
+			"X-DefenseClaw-Source": "claudecode",
+		},
+	}
+	env, err := spec.EnvBlock()
+	if err != nil {
+		t.Fatalf("literal EnvBlock: %v", err)
+	}
+	if got, want := env["OTEL_EXPORTER_OTLP_HEADERS"],
+		"authorization=Bearer scoped-token,x-defenseclaw-source=claudecode"; got != want {
+		t.Fatalf("literal OTLP headers = %q, want %q", got, want)
+	}
+
+	for _, invalid := range []string{"Bearer token,extra=value", "Bearer token\r\nX-Evil: injected"} {
+		invalidSpec := spec
+		invalidSpec.Headers = map[string]string{"Authorization": invalid}
+		if _, err := invalidSpec.EnvBlock(); err == nil {
+			t.Errorf("literal OTLP header value %q was accepted", invalid)
+		}
+	}
+	duplicateSpec := spec
+	duplicateSpec.Headers = map[string]string{"Authorization": "Bearer one", "authorization": "Bearer two"}
+	if _, err := duplicateSpec.EnvBlock(); err == nil {
+		t.Error("case-insensitive duplicate literal OTLP headers were accepted")
+	}
+}
+
 // toStringMap canonicalizes header keys to lower-case so values
 // produced by either map[string]string or map[string]interface{}
 // renderers compare equal.
@@ -438,8 +604,11 @@ func splitOTelHeader(v string) []string {
 			out = append(out, p)
 			continue
 		}
-		key, _ := url.QueryUnescape(p[:eq])
-		value, _ := url.QueryUnescape(p[eq+1:])
+		// OpenTelemetry JS parses header components with decodeURIComponent,
+		// whose relevant Go equivalent is PathUnescape: unlike query/form
+		// decoding, a literal '+' remains a plus rather than becoming a space.
+		key, _ := url.PathUnescape(p[:eq])
+		value, _ := url.PathUnescape(p[eq+1:])
 		out = append(out, strings.ToLower(key)+"="+value)
 	}
 	sort.Strings(out)

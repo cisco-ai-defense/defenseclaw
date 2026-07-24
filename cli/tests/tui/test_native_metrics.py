@@ -15,12 +15,8 @@ from types import SimpleNamespace
 from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile, OverviewMetrics
 
 
-class _Textual7MetricTile(MetricTile):
-    update_classes = None
-
-
-def test_metric_tile_class_map_falls_back_to_set_class(monkeypatch) -> None:
-    tile = _Textual7MetricTile(
+def test_metric_tile_class_map_uses_atomic_update(monkeypatch) -> None:
+    tile = MetricTile(
         MetricDatum(
             key="hook_calls",
             label="Hook Calls",
@@ -31,12 +27,12 @@ def test_metric_tile_class_map_falls_back_to_set_class(monkeypatch) -> None:
             target_panel="logs",
         )
     )
-    calls: list[tuple[bool, str]] = []
+    calls: list[dict[str, bool]] = []
 
     monkeypatch.setattr(
         tile,
-        "set_class",
-        lambda enabled, class_name: calls.append((enabled, class_name)),
+        "update_classes",
+        lambda classes: calls.append(classes),
     )
 
     tile._apply_class_map(
@@ -49,10 +45,12 @@ def test_metric_tile_class_map_falls_back_to_set_class(monkeypatch) -> None:
     )
 
     assert calls == [
-        (False, "metric-ok"),
-        (False, "metric-warn"),
-        (True, "metric-error"),
-        (True, "tile-clickable"),
+        {
+            "metric-ok": False,
+            "metric-warn": False,
+            "metric-error": True,
+            "tile-clickable": True,
+        }
     ]
 
 

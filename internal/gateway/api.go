@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,16 +58,22 @@ import (
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
-	health        *SidecarHealth
-	client        *Client
-	store         *audit.Store
-	logger        *audit.Logger
-	addr          string
-	scannerCfg    *config.Config
-	hilt          *HILTApprovalManager
-	notifier      *notifier.Dispatcher
-	aiDiscoveryMu sync.RWMutex
-	aiDiscovery   *inventory.ContinuousDiscoveryService
+	health *SidecarHealth
+	client *Client
+	store  *audit.Store
+	logger *audit.Logger
+
+	// shutdownRequester cancels the owning Sidecar run context after an
+	// authenticated, loopback-only management request has proven the expected
+	// process and data-home identity. shutdownOnce keeps retries idempotent.
+	shutdownRequester func()
+	shutdownOnce      sync.Once
+	addr              string
+	scannerCfg        *config.Config
+	hilt              *HILTApprovalManager
+	notifier          *notifier.Dispatcher
+	aiDiscoveryMu     sync.RWMutex
+	aiDiscovery       *inventory.ContinuousDiscoveryService
 
 	// inspectToolScanTimeout optionally overrides the synchronous
 	// /api/v1/inspect/tool scan budget for this server. Runtime constructors
@@ -110,11 +117,12 @@ type APIServer struct {
 	configWriteMu  sync.Mutex
 
 	// otlpPathTokenMu guards otlpPathTokens — the in-memory map of
-	// per-source OTLP path tokens loaded from
+	// per-source OTLP credentials loaded from
 	// ${data_dir}/hooks/.otlp-<source>.token. Reads happen on every
-	// loopback OTLP request that lacks an Authorization header (i.e.
-	// the path-token branch in tokenAuth), so the map is held under
-	// an RWMutex to keep the hot path lock-free for readers.
+	// loopback OTLP request authenticated by either a scoped Authorization
+	// header (Codex and Claude Code) or the legacy path-token transport
+	// (Gemini CLI), so the map is held under an RWMutex to keep the hot
+	// path lock-free for readers.
 	//
 	// The map is populated at boot by SetOTLPPathTokens AND refreshed
 	// lazily by lookupOTLPPathToken in two cases:
@@ -143,6 +151,13 @@ type APIServer struct {
 
 	hookAPITokenMu sync.RWMutex
 	hookAPITokens  map[string]string
+
+	// hookRegistrationRepair is the narrow authenticated bridge from a fresh
+	// connector SessionStart to the Sidecar-owned hook guard. The Sidecar owns
+	// connector selection and SetupOpts; the API never resolves an ambient
+	// profile or constructs a second registration writer.
+	hookRegistrationRepairMu sync.RWMutex
+	hookRegistrationRepair   func(context.Context, string) error
 
 	// policyReloader, when set, is called by the /policy/reload handler
 	// to atomically refresh the shared OPA engine used by the watcher.
@@ -307,6 +322,32 @@ func (a *APIServer) SetHookAPITokens(tokens map[string]string) {
 		}
 	}
 	a.hookAPITokens = cp
+}
+
+// SetHookRegistrationRepair wires the active Sidecar hook-guard registry into
+// authenticated hook handling. Passing nil detaches the retiring API server
+// before its guards stop, so a stale request cannot write through an old
+// connector generation.
+func (a *APIServer) SetHookRegistrationRepair(repair func(context.Context, string) error) {
+	if a == nil {
+		return
+	}
+	a.hookRegistrationRepairMu.Lock()
+	a.hookRegistrationRepair = repair
+	a.hookRegistrationRepairMu.Unlock()
+}
+
+func (a *APIServer) ensureHookRegistration(ctx context.Context, connectorName string) error {
+	if a == nil {
+		return nil
+	}
+	a.hookRegistrationRepairMu.RLock()
+	repair := a.hookRegistrationRepair
+	a.hookRegistrationRepairMu.RUnlock()
+	if repair == nil {
+		return nil
+	}
+	return repair(ctx, connectorName)
 }
 
 // otlpPathTokenStatMinInterval bounds secure file revalidation on the hot
@@ -548,11 +589,15 @@ func (a *APIServer) SetNotifier(n *notifier.Dispatcher) {
 }
 
 func (a *APIServer) connectorName() string {
-	if a.scannerCfg != nil {
-		if c := strings.TrimSpace(a.scannerCfg.Guardrail.Connector); c != "" {
+	return connectorNameForConfig(a.runtimeConfigSnapshot())
+}
+
+func connectorNameForConfig(cfg *config.Config) string {
+	if cfg != nil {
+		if c := strings.TrimSpace(cfg.Guardrail.Connector); c != "" {
 			return strings.ToLower(c)
 		}
-		if c := strings.TrimSpace(string(a.scannerCfg.Claw.Mode)); c != "" {
+		if c := strings.TrimSpace(string(cfg.Claw.Mode)); c != "" {
 			return strings.ToLower(c)
 		}
 	}
@@ -685,6 +730,16 @@ func (a *APIServer) SetConfigRuntime(reload func(context.Context, string) error,
 	a.configSnapshot = snapshot
 }
 
+// SetShutdownRequester wires the local management shutdown endpoint to the
+// owning Sidecar. The callback must be non-blocking; Sidecar supplies its
+// context cancel function so every subsystem gets its normal drain path.
+func (a *APIServer) SetShutdownRequester(request func()) {
+	if a == nil {
+		return
+	}
+	a.shutdownRequester = request
+}
+
 func (a *APIServer) runtimeConfigSnapshot() *config.Config {
 	if a == nil {
 		return nil
@@ -742,6 +797,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", a.handleHealth)
 	mux.HandleFunc("/status", a.handleStatus)
+	mux.HandleFunc("/api/v1/admin/shutdown", a.handleShutdown)
 	mux.HandleFunc("/skill/disable", a.handleSkillDisable)
 	mux.HandleFunc("/skill/enable", a.handleSkillEnable)
 	mux.HandleFunc("/plugin/disable", a.handlePluginDisable)
@@ -769,6 +825,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/event", a.handleGuardrailEvent)
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
+	// Provider configuration belongs to the management API so hook-only
+	// deployments can inspect and reload it without enabling the proxy listener.
+	a.registerProviderRoutes(mux)
 	// /api/v1/inspect/* and /api/v1/{connector}/hook are both in the
 	// agent's critical path: every connector hook (claude-code-hook,
 	// codex-hook, cursor-hook, ...) hits one of them. Wrap them in a
@@ -1013,6 +1072,8 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 		Source             string `json:"source"`
 		ToolInspectionMode string `json:"tool_inspection_mode"`
 		SubprocessPolicy   string `json:"subprocess_policy"`
+		PlatformStatus     string `json:"platform_status"`
+		PlatformReason     string `json:"platform_reason,omitempty"`
 		// LLMTrafficMode ("proxy" | "hooks-only") tells the CLI whether a
 		// custom provider bound to this connector is enforced on the
 		// agent's own model traffic or only configures DefenseClaw's
@@ -1033,6 +1094,8 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 			Source:             info.Source,
 			ToolInspectionMode: string(info.ToolInspectionMode),
 			SubprocessPolicy:   string(info.SubprocessPolicy),
+			PlatformStatus:     string(info.PlatformStatus),
+			PlatformReason:     info.PlatformReason,
 			LLMTrafficMode:     connector.LLMTrafficModeForConnector(info.Name),
 		}
 		if conn, ok := reg.Get(info.Name); ok {
@@ -1075,6 +1138,15 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]interface{}{
 		"health":     snap,
 		"provenance": version.Current(),
+		// Runtime identity is intentionally available only through this
+		// authenticated endpoint. Doctor uses it to bind the live listener to
+		// the managed process and configured data home without reading another
+		// process's memory or environment. Never add authentication material to
+		// this object.
+		"runtime": map[string]interface{}{
+			"pid":      os.Getpid(),
+			"data_dir": a.configDataDir(),
+		},
 		// connector_mode reports which guardrail surface the active
 		// connector is running. The TUI uses this to render the
 		// "Observability mode" banner with the right copy and to
@@ -1101,6 +1173,79 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, status)
 }
 
+type gatewayShutdownRequest struct {
+	PID     int    `json:"pid"`
+	DataDir string `json:"data_dir"`
+}
+
+// handleShutdown is the authenticated control plane used by the detached
+// Windows gateway (and, for parity, other daemon platforms). A signal cannot
+// reach a DETACHED_PROCESS reliably, so the CLI proves both the target PID and
+// configured data home over the already-authenticated loopback API, then this
+// handler cancels the Sidecar run context. That preserves normal subsystem,
+// audit, SQLite, webhook, and telemetry drains before process exit.
+func (a *APIServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		a.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if !connector.IsLoopback(r) {
+		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "shutdown is restricted to loopback clients"})
+		return
+	}
+	if a.shutdownRequester == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "graceful shutdown is unavailable"})
+		return
+	}
+
+	var request gatewayShutdownRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request body must contain one JSON object"})
+		return
+	}
+	if request.PID != os.Getpid() || !sameRuntimeDataDir(request.DataDir, a.configDataDir()) {
+		a.writeJSON(w, http.StatusConflict, map[string]string{"error": "gateway runtime identity mismatch"})
+		return
+	}
+
+	requested := false
+	a.shutdownOnce.Do(func() {
+		requested = true
+	})
+	status := "already_requested"
+	if requested {
+		status = "accepted"
+	}
+	a.writeJSON(w, http.StatusAccepted, map[string]string{"status": status})
+	if requested {
+		// Start cancellation only after the response has been written. The
+		// HTTP server's graceful Shutdown waits for this handler to return,
+		// ensuring the caller receives the acknowledgement before teardown.
+		go a.shutdownRequester()
+	}
+}
+
+func sameRuntimeDataDir(left, right string) bool {
+	if strings.TrimSpace(left) == "" || strings.TrimSpace(right) == "" {
+		return false
+	}
+	leftAbs, leftErr := filepath.Abs(filepath.Clean(left))
+	rightAbs, rightErr := filepath.Abs(filepath.Clean(right))
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(leftAbs, rightAbs)
+	}
+	return leftAbs == rightAbs
+}
+
 // connectorModeSummary returns the per-connector runtime summary for the
 // active connector. The shape is:
 //
@@ -1121,7 +1266,8 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 // connectorModesSummary fans the same shape out across every active
 // connector for the multi-connector status surface.
 func (a *APIServer) connectorModeSummary() map[string]interface{} {
-	if a.scannerCfg != nil && !a.scannerCfg.HasConnectorConfigured() {
+	cfg := a.runtimeConfigSnapshot()
+	if cfg != nil && !cfg.HasConnectorConfigured() {
 		return map[string]interface{}{
 			"connector":           "",
 			"mode":                "unconfigured",
@@ -1131,7 +1277,7 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 			"proxy_intercept":     false,
 		}
 	}
-	return connectorModeForConfig(a.scannerCfg, a.connectorName())
+	return connectorModeForConfig(cfg, connectorNameForConfig(cfg))
 }
 
 // connectorModesSummary returns one connectorModeFor entry per active
@@ -1142,19 +1288,20 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 // identical regardless of count. Falls back to the singular active
 // connector when the config is unavailable.
 func (a *APIServer) connectorModesSummary() []map[string]interface{} {
+	cfg := a.runtimeConfigSnapshot()
 	var names []string
-	if a.scannerCfg != nil {
-		names = a.scannerCfg.ActiveConnectors()
-		if !a.scannerCfg.HasConnectorConfigured() {
+	if cfg != nil {
+		names = cfg.ActiveConnectors()
+		if !cfg.HasConnectorConfigured() {
 			return []map[string]interface{}{}
 		}
 	}
 	if len(names) == 0 {
-		names = []string{a.connectorName()}
+		names = []string{connectorNameForConfig(cfg)}
 	}
 	out := make([]map[string]interface{}, 0, len(names))
 	for _, name := range names {
-		out = append(out, connectorModeForConfig(a.scannerCfg, strings.ToLower(strings.TrimSpace(name))))
+		out = append(out, connectorModeForConfig(cfg, strings.ToLower(strings.TrimSpace(name))))
 	}
 	return out
 }
@@ -1220,13 +1367,19 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 
 func connectorModeForConfig(cfg *config.Config, name string) map[string]interface{} {
 	guardrailMode := "observe"
+	hookFailMode := "closed"
+	enabled := false
 	if cfg != nil {
 		guardrailMode = cfg.EffectiveGuardrailModeForConnector(name)
+		hookFailMode = cfg.EffectiveHookFailModeForConnector(name)
+		enabled = cfg.Guardrail.EffectiveEnabled(name)
 	}
 	out := connectorModeFor(name, guardrailMode)
 	if guardrailMode != "" {
 		out["guardrail_mode"] = guardrailMode
 	}
+	out["hook_fail_mode"] = hookFailMode
+	out["enabled"] = enabled
 	proxyIntercept, _ := out["proxy_intercept"].(bool)
 	out["hook_enforcement"] = !proxyIntercept && strings.EqualFold(guardrailMode, "action")
 	return out
@@ -2900,7 +3053,9 @@ func (sw *statusWriter) Flush() {
 	}
 }
 
-// tokenAuth wraps a handler with Bearer token authentication.
+// tokenAuth wraps a handler with Bearer token authentication. Management
+// clients may use Authorization, X-DefenseClaw-Token, or the proxy-compatible
+// X-DC-Auth header; all are compared against the same gateway token.
 // GET /health is exempt to allow unauthenticated health checks.
 func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2923,6 +3078,11 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		if token == "" {
 			token = r.Header.Get("X-DefenseClaw-Token")
 		}
+		if token == "" {
+			if dcAuth := r.Header.Get("X-DC-Auth"); strings.HasPrefix(dcAuth, "Bearer ") {
+				token = strings.TrimPrefix(dcAuth, "Bearer ")
+			}
+		}
 
 		expected := ""
 		if a.scannerCfg != nil {
@@ -2937,6 +3097,32 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "no_token_configured")
 			http.Error(w, `{"error":"sidecar misconfigured: no gateway token"}`, http.StatusServiceUnavailable)
 			return
+		}
+		// Codex and Claude Code support arbitrary OTLP headers. Bind their
+		// connector-scoped bearer to the authenticated source while keeping the
+		// credential out of the URL. Once a scoped credential exists, refuse the
+		// master gateway bearer for that source exactly as the path-token route
+		// does; a leaked connector configuration must never grant management API
+		// authority. Gemini CLI still uses the path form below because its native
+		// exporter cannot set an authorization header.
+		if isUnscopedOTLPEndpointPath(r.URL.Path) && connector.IsLoopback(r) {
+			source := normalizeConnectorTelemetrySource(r.Header.Get(otelSourceHeader))
+			if scope, validSource := connector.OTLPPathTokenScopeForConnector(source); validSource {
+				scoped := a.lookupOTLPPathToken(string(scope))
+				if scoped != "" {
+					if token != "" && constantTimeStringMatch(token, scoped) {
+						// Preserve only the canonical source name used to select the
+						// credential so attribution cannot drift through an alias.
+						r.Header.Set(otelSourceHeader, string(scope))
+						r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
+						next.ServeHTTP(w, r)
+						return
+					}
+					a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_scoped_header_token")
+					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+					return
+				}
+			}
 		}
 		if pathToken, source, ok := parseOTLPPathToken(r.URL.Path); ok && connector.IsLoopback(r) {
 			scoped := a.lookupOTLPPathToken(source)

@@ -59,18 +59,13 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 			"[sidecar] WARNING: --token is deprecated and will be removed in a future release. "+
 				"Secrets on argv are visible to any local user via ps(1) / /proc/<pid>/cmdline. "+
 				"Set DEFENSECLAW_GATEWAY_TOKEN (or gateway.token in config) instead.")
-		cfg.Gateway.Token = sidecarToken
 	}
+	materializeSidecarGatewayToken(&cfg.Gateway, sidecarToken)
 	if sidecarHost != "" {
 		cfg.Gateway.Host = sidecarHost
 	}
 	if sidecarPort > 0 {
 		cfg.Gateway.Port = sidecarPort
-	}
-
-	// Resolve token from env var if not set directly (via flag or config).
-	if cfg.Gateway.Token == "" {
-		cfg.Gateway.Token = cfg.Gateway.ResolvedToken()
 	}
 
 	shell := sandbox.NewWithFallback(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir, cfg.PolicyDir)
@@ -219,6 +214,19 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 			os.Getpid())
 	}
 	return runErr
+}
+
+func materializeSidecarGatewayToken(gatewayConfig *config.GatewayConfig, explicit string) {
+	if explicit != "" {
+		gatewayConfig.Token = explicit
+		return
+	}
+	// Materialize the documented custom env -> canonical env -> legacy env ->
+	// inline-config ladder before the API server captures its authentication
+	// token. Daemon readiness uses the same ResolvedToken contract; resolving
+	// only when Token was empty let a stale inline token disagree with a newer
+	// environment token and made a healthy sidecar answer its parent with 401.
+	gatewayConfig.Token = gatewayConfig.ResolvedToken()
 }
 
 type observabilityRuntimeBootstrapper interface {

@@ -4,6 +4,8 @@
 package gateway
 
 import (
+	"fmt"
+	"os"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -64,8 +66,17 @@ func TestAPIScanErrorV8PreservesFamiliesDimensionsAndCorrelation(t *testing.T) {
 }
 
 func TestClassifyScanErrorRecognizesFilesystemAbsence(t *testing.T) {
-	if got := classifyScanError(&scanErrorText{"open /missing/file: no such file or directory"}); got != "not_found" {
-		t.Fatalf("filesystem absence classified as %q", got)
+	if got := classifyScanError(fmt.Errorf("wrapped scanner failure: %w", os.ErrNotExist)); got != "not_found" {
+		t.Fatalf("wrapped filesystem absence classified as %q", got)
+	}
+	for _, message := range []string{
+		"open /missing/file: no such file or directory",
+		`CreateFile C:\missing\file: The system cannot find the file specified.`,
+		`CreateFile C:\missing\dir\file: The system cannot find the path specified.`,
+	} {
+		if got := classifyScanError(&scanErrorText{message}); got != "not_found" {
+			t.Fatalf("filesystem absence %q classified as %q", message, got)
+		}
 	}
 }
 

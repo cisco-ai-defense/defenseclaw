@@ -11587,7 +11587,9 @@ def _atomic_write(root: Path, relative: str, payload: bytes) -> None:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(payload)
             stream.flush()
-            os.fchmod(stream.fileno(), REPOSITORY_OUTPUT_MODE)
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is not None:
+                fchmod(stream.fileno(), REPOSITORY_OUTPUT_MODE)
             os.fsync(stream.fileno())
         _safe_target(root, relative, create_parents=False)
         os.replace(temporary, target)

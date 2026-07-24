@@ -91,6 +91,7 @@ func (capture *openShellObservabilityCapture) snapshot() (
 }
 
 func TestOpenShellReloadPolicyExitUsesCanonicalObservability(t *testing.T) {
+	requireOpenShellRuntime(t)
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-openshell")
@@ -122,6 +123,7 @@ func TestOpenShellReloadPolicyExitUsesCanonicalObservability(t *testing.T) {
 }
 
 func TestOpenShellStartNonZeroExitUsesCanonicalObservability(t *testing.T) {
+	requireOpenShellRuntime(t)
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-openshell")
@@ -156,6 +158,7 @@ func TestOpenShellStartNonZeroExitUsesCanonicalObservability(t *testing.T) {
 }
 
 func TestOpenShellReloadPolicySuccessAuditsConfigurationChange(t *testing.T) {
+	requireOpenShellRuntime(t)
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-openshell")

@@ -18,11 +18,14 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,6 +46,7 @@ var (
 	enterpriseHookUserHome      string
 	enterpriseHookUID           int
 	enterpriseHookGID           int
+	enterpriseHookSID           string
 	enterpriseHookDataDir       string
 	enterpriseHookAPIAddr       string
 	enterpriseHookProxyAddr     string
@@ -51,6 +55,17 @@ var (
 	enterpriseHookJSON          bool
 	enterpriseHookWatchInterval time.Duration
 	enterpriseHookWatchDebounce time.Duration
+	enterpriseHookWatchSettle   time.Duration
+
+	enterpriseHooksRuntimeGOOS                 = func() string { return runtime.GOOS }
+	enterpriseHooksPlatformPreflight           = enterpriseHooksNativePlatformPreflight
+	enterpriseHooksRootPersistentPreRun        = rootPersistentPreRunE
+	enterpriseHooksInstallRunE                 = runEnterpriseHooksInstall
+	enterpriseHooksUninstallRunE               = runEnterpriseHooksUninstall
+	enterpriseHooksReconcileRunE               = runEnterpriseHooksReconcile
+	enterpriseHooksWatchRunE                   = runEnterpriseHooksWatch
+	enterpriseHookAuthorizationOwnershipSetter = setEnterpriseHookAuthorizationOwnership
+	enterpriseHooksRemoveManagedPolicy         = enterprisehooks.RemoveManagedPolicy
 )
 
 const defaultEnterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
@@ -69,6 +84,15 @@ standard users.`,
 var enterpriseHooksCmd = &cobra.Command{
 	Use:   "hooks",
 	Short: "Install and repair per-user hook connectors",
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if err := enterpriseHooksPlatformPreflight(); err != nil {
+			return err
+		}
+		// Cobra runs only the nearest persistent pre-run hook. Chain the root
+		// initializer explicitly so supported hosts retain config, audit, and
+		// authorization initialization before any enterprise hook operation.
+		return enterpriseHooksRootPersistentPreRun(cmd, args)
+	},
 }
 
 var enterpriseHooksInstallCmd = &cobra.Command{
@@ -82,7 +106,21 @@ Instead, run this command as an administrator for each protected user, or from
 a systemd timer/MDM guardian. First-time installs require the agent's native
 hook config file to already exist, so broad process discovery cannot create a
 new app profile from scratch.`,
-	RunE: runEnterpriseHooksInstall,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return enterpriseHooksInstallRunE(cmd, args)
+	},
+}
+
+var enterpriseHooksUninstallCmd = &cobra.Command{
+	Use:   "uninstall",
+	Short: "Remove an owned administrator-managed hook registration",
+	Long: `Remove one interactive user's DefenseClaw registration from the
+administrator-managed hook policy. The command validates the protected policy
+and ownership sidecar before mutation and refuses foreign or edited policy.
+Per-user runtime files are retained for repair or forensic recovery.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return enterpriseHooksUninstallRunE(cmd, args)
+	},
 }
 
 var enterpriseHooksReconcileCmd = &cobra.Command{
@@ -94,7 +132,9 @@ The manifest is the enterprise guardian's allow-list. It prevents a privileged
 repair job from scanning every home directory or writing into service accounts
 by accident. Each enabled target is installed or repaired independently; the
 command reports every result and exits non-zero when any target fails.`,
-	RunE: runEnterpriseHooksReconcile,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return enterpriseHooksReconcileRunE(cmd, args)
+	},
 }
 
 var enterpriseHooksWatchCmd = &cobra.Command{
@@ -106,7 +146,9 @@ tamper events through the hardened enterprise hook installer.
 This command is intended for a root-owned system service. It watches only
 directories derived from the administrator-owned manifest and keeps the
 periodic reconcile interval as a backstop for missed filesystem events.`,
-	RunE: runEnterpriseHooksWatch,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return enterpriseHooksWatchRunE(cmd, args)
+	},
 }
 
 func init() {
@@ -120,8 +162,10 @@ func init() {
 		"Target user uid (defaults to --user lookup or user-home owner)")
 	enterpriseHooksInstallCmd.Flags().IntVar(&enterpriseHookGID, "gid", -1,
 		"Target user gid (defaults to --user lookup or user-home owner)")
+	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookSID, "sid", "",
+		"Target Windows user SID (defaults to --user lookup or user-home owner)")
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookDataDir, "data-dir", "",
-		"Per-user DefenseClaw data dir for hook scripts and token (default: <user-home>/.defenseclaw)")
+		"Per-user DefenseClaw data dir for hook scripts and token (default: <user-home>/.defenseclaw; native Windows managed Claude requires this exact path)")
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookAPIAddr, "api-addr", "",
 		"Local gateway API host:port used by hook scripts (default: 127.0.0.1:<gateway.api_port>)")
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookProxyAddr, "proxy-addr", "",
@@ -129,6 +173,22 @@ func init() {
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookAgentVersion, "agent-version", "",
 		"Raw local agent version used for hook-contract validation")
 	enterpriseHooksInstallCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
+		"Emit machine-readable JSON")
+	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookConnector, "connector", "",
+		"Administrator-managed connector to remove (currently claudecode on native Windows)")
+	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookUser, "user", "",
+		"Target local user name (resolves home and SID)")
+	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookUserHome, "user-home", "",
+		"Target user's home directory (required when --user is omitted)")
+	enterpriseHooksUninstallCmd.Flags().IntVar(&enterpriseHookUID, "uid", -1,
+		"Target user uid (Unix compatibility; defaults to user-home owner)")
+	enterpriseHooksUninstallCmd.Flags().IntVar(&enterpriseHookGID, "gid", -1,
+		"Target user gid (Unix compatibility; defaults to user-home owner)")
+	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookSID, "sid", "",
+		"Target Windows user SID (defaults to --user lookup or user-home owner)")
+	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookDataDir, "data-dir", "",
+		"Per-user DefenseClaw data dir associated with the registration (native Windows managed Claude accepts only <user-home>/.defenseclaw)")
+	enterpriseHooksUninstallCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
 		"Emit machine-readable JSON")
 
 	enterpriseHooksReconcileCmd.Flags().StringVar(&enterpriseHookManifest, "manifest", defaultEnterpriseHookManifest,
@@ -150,12 +210,52 @@ func init() {
 		"Periodic reconcile backstop interval")
 	enterpriseHooksWatchCmd.Flags().DurationVar(&enterpriseHookWatchDebounce, "debounce", 750*time.Millisecond,
 		"Filesystem-event debounce before reconcile")
+	enterpriseHooksWatchCmd.Flags().DurationVar(&enterpriseHookWatchSettle, "settle", 2*time.Second,
+		"Post-reconcile quiet window: fsnotify events observed within this window after a reconcile completes are ignored (the guardian's own writes into watched dirs would otherwise loop-trigger reconcile forever)")
 
 	enterpriseHooksCmd.AddCommand(enterpriseHooksInstallCmd)
+	enterpriseHooksCmd.AddCommand(enterpriseHooksUninstallCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksReconcileCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksWatchCmd)
 	enterpriseCmd.AddCommand(enterpriseHooksCmd)
 	rootCmd.AddCommand(enterpriseCmd)
+}
+
+func runEnterpriseHooksUninstall(cmd *cobra.Command, _ []string) error {
+	target := enterpriseHookTarget{uid: -1, gid: -1, sid: strings.TrimSpace(enterpriseHookSID)}
+	var err error
+	if target.sid == "" || strings.TrimSpace(enterpriseHookUser) != "" || strings.TrimSpace(enterpriseHookUserHome) != "" {
+		target, err = resolveEnterpriseHookTarget()
+		if err != nil {
+			return enterpriseHooksUninstallError(cmd, err)
+		}
+	}
+	err = enterpriseHooksRemoveManagedPolicy(cmd.Context(), enterprisehooks.InstallOptions{
+		ConnectorName: enterpriseHookConnector,
+		UserHome:      target.home,
+		OwnerUID:      target.uid,
+		OwnerGID:      target.gid,
+		OwnerSID:      target.sid,
+		DataDir:       enterpriseHookDataDir,
+	})
+	if err != nil {
+		return enterpriseHooksUninstallError(cmd, err)
+	}
+	if enterpriseHookJSON {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+			"ok": true, "connector": strings.TrimSpace(enterpriseHookConnector), "user_home": target.home,
+		})
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s managed hooks removed for %s\n", Style("✓", "fg=green", "bold"), strings.TrimSpace(enterpriseHookConnector), target.home)
+	return nil
+}
+
+func enterpriseHooksUninstallError(cmd *cobra.Command, err error) error {
+	if enterpriseHookJSON {
+		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"ok": false, "error": err.Error()})
+		return fmt.Errorf("enterprise hooks uninstall failed")
+	}
+	return err
 }
 
 func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
@@ -181,16 +281,22 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseHooksInstallError(cmd, err)
 	}
+	otlpToken, err := enterpriseHookScopedOTLPToken(cfg.DataDir, enterpriseHookConnector)
+	if err != nil {
+		return enterpriseHooksInstallError(cmd, err)
+	}
 
 	opts := enterprisehooks.InstallOptions{
 		ConnectorName:                enterpriseHookConnector,
 		UserHome:                     target.home,
 		OwnerUID:                     target.uid,
 		OwnerGID:                     target.gid,
+		OwnerSID:                     target.sid,
 		DataDir:                      enterpriseHookDataDir,
 		APIAddr:                      apiAddr,
 		ProxyAddr:                    proxyAddr,
 		APIToken:                     token,
+		OTLPPathToken:                otlpToken,
 		HookFailMode:                 cfg.EffectiveHookFailModeForConnector(enterpriseHookConnector),
 		GuardrailMode:                cfg.EffectiveGuardrailModeForConnector(enterpriseHookConnector),
 		HILTEnabled:                  cfg.EffectiveHILTForConnector(enterpriseHookConnector).Enabled,
@@ -233,11 +339,13 @@ type enterpriseHookReconcileRow struct {
 }
 
 type enterpriseHookReconcileRun struct {
-	Manifest  string
-	Rows      []enterpriseHookReconcileRow
-	Failures  int
-	StateErr  error
-	WatchDirs []string
+	Manifest            string
+	Rows                []enterpriseHookReconcileRow
+	Failures            int
+	StateErr            error
+	WatchDirs           []string
+	WatchExclusiveFiles []string // DC-only writers: react to any event
+	WatchSharedFiles    []string // agent + DC writers: react only to Remove/Rename
 }
 
 func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
@@ -317,6 +425,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	failures := 0
 	watchDirs := map[string]struct{}{}
+	exclusiveFiles := map[string]struct{}{}
+	sharedFiles := map[string]struct{}{}
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
@@ -327,10 +437,18 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			Connector: strings.TrimSpace(target.Connector),
 		}
 		token := ""
-		resolved, err := resolveEnterpriseHookTargetValues(target.User, target.UserHome, intPtrValue(target.UID), intPtrValue(target.GID), target.DataDir)
+		otlpToken := ""
+		resolved, err := resolveEnterpriseHookTargetValues(target.User, target.UserHome, intPtrValue(target.UID), intPtrValue(target.GID), target.SID, target.DataDir)
 		if err == nil {
 			var tokenErr error
 			token, tokenErr = enterpriseHookScopedToken(cfg.DataDir, target.Connector)
+			if tokenErr != nil {
+				err = tokenErr
+			}
+		}
+		if err == nil {
+			var tokenErr error
+			otlpToken, tokenErr = enterpriseHookScopedOTLPToken(cfg.DataDir, target.Connector)
 			if tokenErr != nil {
 				err = tokenErr
 			}
@@ -341,10 +459,12 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				UserHome:                     resolved.home,
 				OwnerUID:                     resolved.uid,
 				OwnerGID:                     resolved.gid,
+				OwnerSID:                     resolved.sid,
 				DataDir:                      strings.TrimSpace(target.DataDir),
 				APIAddr:                      apiAddr,
 				ProxyAddr:                    proxyAddr,
 				APIToken:                     token,
+				OTLPPathToken:                otlpToken,
 				HookFailMode:                 cfg.EffectiveHookFailModeForConnector(target.Connector),
 				GuardrailMode:                cfg.EffectiveGuardrailModeForConnector(target.Connector),
 				HILTEnabled:                  cfg.EffectiveHILTForConnector(target.Connector).Enabled,
@@ -356,6 +476,14 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {
 				for _, dir := range dirs {
 					watchDirs[dir] = struct{}{}
+				}
+			}
+			if own, filesErr := enterprisehooks.WatchOwnedFiles(opts); filesErr == nil {
+				for _, f := range own.ExclusiveWriter {
+					exclusiveFiles[f] = struct{}{}
+				}
+				for _, f := range own.SharedWriter {
+					sharedFiles[f] = struct{}{}
 				}
 			}
 			var result enterprisehooks.InstallResult
@@ -380,6 +508,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	run.Failures = failures
 	run.StateErr = stateErr
 	run.WatchDirs = sortedEnterpriseHookWatchDirs(watchDirs)
+	run.WatchExclusiveFiles = sortedEnterpriseHookWatchDirs(exclusiveFiles)
+	run.WatchSharedFiles = sortedEnterpriseHookWatchDirs(sharedFiles)
 	return run, nil
 }
 
@@ -397,25 +527,127 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	defer fsw.Close()
 
 	watched := map[string]struct{}{}
-	reconcile := func(reason string) error {
+	// Owned-file allowlists, split by expected writer. fsnotify on
+	// macOS reports events at directory granularity — watching
+	// ~/.codex/ to see config.toml also sees every session log,
+	// sqlite WAL rotation, and history append the agent itself
+	// performs. We split further because the "owned" file itself may
+	// be written by the agent too (Codex rewrites its own config.toml
+	// constantly). See WatchOwnership doc for the reaction policy per
+	// class; both maps are rebuilt from the run's WatchExclusiveFiles
+	// / WatchSharedFiles after each reconcile.
+	exclusiveOwned := map[string]struct{}{} // DC-only writers — any event triggers
+	sharedOwned := map[string]struct{}{}    // agent + DC writers — only Remove/Rename triggers
+	// Post-reconcile guards against the self-trigger loop. Every
+	// reconcile writes into watched dirs (chmod on hook configs and
+	// hook scripts inside hardenInstallFootprint, plus writing
+	// hook_guardian_state.json / protected_targets.json). Those writes
+	// fire fsnotify events on the dirs we watch, which — with no guard
+	// — schedule another reconcile ~750 ms later, whose writes fire
+	// more events, forever.
+	//
+	// Two layered defences:
+	//
+	//   settleUntil    - short (default 2 s) window that suppresses
+	//                    every fsnotify event observed immediately
+	//                    after a reconcile completes; the vast
+	//                    majority of self-writes land here.
+	//
+	//   lastRowsHash   - SHA-256 of the reconcile row set. After each
+	//                    reconcile we compare against the previous
+	//                    hash; when unchanged we log a single
+	//                    reason=fsnotify_no_change line and skip
+	//                    re-arming the debounce timer even if events
+	//                    kept leaking past settleUntil (macOS
+	//                    FSEvents can batch chmod events with several
+	//                    seconds of latency, which is longer than any
+	//                    reasonable settle window). This breaks the
+	//                    tail-chasing loop even under adverse fs
+	//                    event timing.
+	settleUntil := time.Time{}
+	droppedInSettle := 0
+	var lastRowsHash string
+	// Track the fsnotify event that most recently armed the debounce.
+	// Included in the next reconcile log line so a `no_change=true`
+	// churn can be traced to the specific file+op that keeps firing.
+	// Cleared on every reconcile (fsnotify OR interval).
+	var lastTriggerPath string
+	var lastTriggerOp fsnotify.Op
+	reconcile := func(reason string) (bool, error) {
 		run, err := runEnterpriseHookReconcileOnce(cmd.Context())
 		if err != nil {
-			return err
+			return false, err
 		}
 		dirs := append([]string{filepath.Dir(filepath.Clean(enterpriseHookManifest))}, run.WatchDirs...)
 		syncEnterpriseHookWatchDirs(cmd, fsw, watched, dirs)
+		// Rebuild the owned-file allowlists from this run. The
+		// manifest itself is treated as exclusive-writer: only the
+		// installer / operator ever edits it, so any change is a real
+		// signal (new user added, connector disabled).
+		for k := range exclusiveOwned {
+			delete(exclusiveOwned, k)
+		}
+		for k := range sharedOwned {
+			delete(sharedOwned, k)
+		}
+		exclusiveOwned[filepath.Clean(enterpriseHookManifest)] = struct{}{}
+		for _, f := range run.WatchExclusiveFiles {
+			exclusiveOwned[filepath.Clean(f)] = struct{}{}
+		}
+		for _, f := range run.WatchSharedFiles {
+			sharedOwned[filepath.Clean(f)] = struct{}{}
+		}
 		status := "ok"
 		if run.Failures > 0 || run.StateErr != nil {
 			status = "attention"
 		}
-		fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile reason=%s status=%s targets=%d failures=%d watch_dirs=%d\n", reason, status, len(run.Rows), run.Failures, len(watched))
+		rowsHash := enterpriseHookReconcileRowsHash(run.Rows)
+		changed := rowsHash != lastRowsHash
+		lastRowsHash = rowsHash
+		triggerTag := ""
+		if reason == "fsnotify" && lastTriggerPath != "" {
+			// Attribute the reconcile to the specific fsnotify event
+			// that armed the debounce. When a `no_change=true` cycle
+			// keeps recurring, this reveals which path is generating
+			// the noise so it can be reclassified or filtered.
+			triggerTag = fmt.Sprintf(" trigger_path=%q trigger_op=%s", lastTriggerPath, lastTriggerOp)
+		}
+		if changed {
+			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile reason=%s status=%s targets=%d failures=%d watch_dirs=%d%s\n", reason, status, len(run.Rows), run.Failures, len(watched), triggerTag)
+		} else {
+			// Log at DEBUG-ish cadence: one line per no-change
+			// reconcile is fine and load-bearing for triage (we still
+			// want to know the guardian is alive), but keep it
+			// distinguishable from a real repair.
+			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile reason=%s status=%s targets=%d failures=%d watch_dirs=%d no_change=true%s\n", reason, status, len(run.Rows), run.Failures, len(watched), triggerTag)
+		}
+		lastTriggerPath = ""
+		lastTriggerOp = 0
 		if run.StateErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] state write failed: %s\n", run.StateErr)
 		}
-		return nil
+		// When the row set is byte-identical to the previous run,
+		// any Write/Chmod events still leaking past the normal
+		// settle window are tail-writes from our own reconcile
+		// (macOS FSEvents can batch chmod with 3-5 s latency).
+		// Widen the settle window modestly — enough to cover
+		// FSEvents batching, NOT enough to swallow a real subsequent
+		// tamper. Cap at 3x settle so the widened window stays in
+		// seconds, not minutes. Remove/Rename events are exempt from
+		// suppression by enterpriseHookWatchEventInSettleWindow, so
+		// widening the window here does not risk missing a "user
+		// deleted the hook config" event even if the previous
+		// reconcile classified as no_change.
+		settle := enterpriseHookWatchSettle
+		if !changed {
+			settle = enterpriseHookWatchSettle * 3
+		}
+		settleUntil = time.Now().Add(settle)
+		droppedInSettle = 0
+		return changed, nil
 	}
 
-	if err := reconcile("startup"); err != nil {
+	if _, err := reconcile("startup"); err != nil {
 		return err
 	}
 
@@ -438,6 +670,93 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			if !enterpriseHookWatchEventRelevant(event) {
 				continue
 			}
+			// Only react to events on paths DefenseClaw itself owns.
+			// Two policies apply depending on who writes to the file:
+			//
+			//   * ExclusiveWriter (hook scripts, .token sidecars,
+			//     _hardening.sh, backup files, the manifest): only DC
+			//     writes here, so any event is meaningful.
+			//   * SharedWriter (the native agent config —
+			//     ~/.codex/config.toml, ~/.claude/settings.json,
+			//     ~/.cursor/hooks.json): the agent itself constantly
+			//     rewrites these during normal use. Only Remove /
+			//     Rename is a real tamper signal; Write and Chmod are
+			//     the agent doing its own thing and the 5-min backstop
+			//     handles any in-place stripping.
+			//
+			// Events on unowned paths (agent session state, sqlite
+			// WAL churn, cache writes, workspace snapshots) are
+			// silently dropped — no log, no debounce — because they
+			// happen continuously and previously dominated the log.
+			//
+			// Empty maps means we haven't run a reconcile yet (only
+			// possible pre-startup); fall through so the startup
+			// reconcile flow is unaffected.
+			if len(exclusiveOwned) > 0 || len(sharedOwned) > 0 {
+				cleaned := filepath.Clean(event.Name)
+				_, isExclusive := exclusiveOwned[cleaned]
+				_, isShared := sharedOwned[cleaned]
+				if !isExclusive && !isShared {
+					continue
+				}
+				if isShared && !isExclusive {
+					// Shared-writer file: skip Write and Chmod events
+					// entirely — the agent is updating its own
+					// unrelated state. Any Remove/Rename falls
+					// through to the settle/reconcile path below.
+					if event.Op&(fsnotify.Remove|fsnotify.Rename) == 0 {
+						continue
+					}
+				}
+			}
+			// Drop events observed inside the post-reconcile settle
+			// window: they are almost certainly the tail of writes the
+			// reconcile itself just made (chmod / state file rewrite,
+			// or a rename that macOS surfaces as REMOVE on the
+			// destination — see enterpriseHookWatchEventInSettleWindow
+			// for the design rationale).
+			//
+			// Exception: a Remove/Rename observation inside the window
+			// where the file is ACTUALLY missing on disk is a real
+			// user tamper that raced with our reconcile, not our own
+			// atomic-write tail. rename(2) atomically replaces the
+			// destination so the file is present immediately after —
+			// a Stat call ~microseconds after the fsnotify event
+			// distinguishes the two cases deterministically. Without
+			// this carve-out, back-to-back user tampers get eaten by
+			// the previous tamper's widened settle window.
+			if enterpriseHookWatchEventInSettleWindow(time.Now(), settleUntil, event.Op) {
+				if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+					if _, statErr := os.Lstat(event.Name); os.IsNotExist(statErr) {
+						// File genuinely gone — real user rm, fall
+						// through and reconcile.
+					} else {
+						droppedInSettle++
+						continue
+					}
+				} else {
+					droppedInSettle++
+					continue
+				}
+			}
+			// Log once when the first non-suppressed event lands after
+			// a settle window closed — helps operators tell "user
+			// tampered" from "guardian saw its own tail" during
+			// triage.
+			if droppedInSettle > 0 {
+				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] settled: suppressed %d self-write event(s) within %s of last reconcile\n", droppedInSettle, enterpriseHookWatchSettle)
+				droppedInSettle = 0
+			}
+			// Record which specific event armed the debounce so the
+			// resulting reconcile log line names the culprit path.
+			// Preserve the FIRST event of a burst rather than
+			// overwriting; that's the one that actually caused the
+			// debounce arm, subsequent events during the 750ms window
+			// are already-scheduled noise.
+			if lastTriggerPath == "" {
+				lastTriggerPath = filepath.Clean(event.Name)
+				lastTriggerOp = event.Op
+			}
 			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounce)
 			debouncePending = true
 		case err, ok := <-fsw.Errors:
@@ -448,16 +767,81 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		case <-debounce.C:
 			if debouncePending {
 				debouncePending = false
-				if err := reconcile("fsnotify"); err != nil {
+				if _, err := reconcile("fsnotify"); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after fsnotify failed: %s\n", err)
 				}
 			}
 		case <-ticker.C:
-			if err := reconcile("interval"); err != nil {
+			if _, err := reconcile("interval"); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] interval reconcile failed: %s\n", err)
 			}
 		}
 	}
+}
+
+// enterpriseHookWatchEventInSettleWindow reports whether an fsnotify
+// event observed at now should be suppressed because it lands inside
+// the post-reconcile settle window. A zero settleUntil (never
+// reconciled yet, or explicitly disabled) always returns false: never
+// suppress.
+//
+// All event ops (Write, Chmod, Remove, Rename) are suppressed inside
+// the window. The guardian's Install pass writes files via a
+// tempfile+rename dance (atomicWriteFile → os.Rename), and on macOS
+// rename(2) over an existing destination fires an fsnotify REMOVE
+// event on the destination path. So a REMOVE observed within the
+// settle window is our own atomic-write finishing, not a user
+// tamper. Real user Removes happen outside the settle window and
+// still trigger reconcile promptly (worst case: settle window
+// duration, default 2 s).
+func enterpriseHookWatchEventInSettleWindow(now, settleUntil time.Time, op fsnotify.Op) bool {
+	if settleUntil.IsZero() {
+		return false
+	}
+	return now.Before(settleUntil)
+}
+
+// enterpriseHookReconcileRowsHash is a content fingerprint over the
+// stable subset of a reconcile row set. It is used by the watch loop
+// to distinguish a "nothing actually changed" tick (guardian saw its
+// own tail) from a real repair (user tampered with a file). Only the
+// fields that describe the target's identity and outcome are hashed;
+// volatile Result payload internals are intentionally excluded so
+// benign per-run details (timestamps, transient path lookups) do not
+// flip the hash.
+func enterpriseHookReconcileRowsHash(rows []enterpriseHookReconcileRow) string {
+	if len(rows) == 0 {
+		return "0"
+	}
+	type hashRow struct {
+		User      string `json:"u"`
+		UserHome  string `json:"h"`
+		Connector string `json:"c"`
+		OK        bool   `json:"o"`
+		Error     string `json:"e,omitempty"`
+	}
+	stable := make([]hashRow, 0, len(rows))
+	for _, r := range rows {
+		stable = append(stable, hashRow{
+			User:      r.User,
+			UserHome:  r.UserHome,
+			Connector: r.Connector,
+			OK:        r.OK,
+			Error:     r.Error,
+		})
+	}
+	sort.Slice(stable, func(i, j int) bool {
+		if stable[i].Connector != stable[j].Connector {
+			return stable[i].Connector < stable[j].Connector
+		}
+		return stable[i].User < stable[j].User
+	})
+	data, err := json.Marshal(stable)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func enterpriseHookWatchEventRelevant(event fsnotify.Event) bool {
@@ -600,7 +984,7 @@ func writeEnterpriseHookGuardianState(dataDir, manifest string, rows []enterpris
 	if err := os.Chmod(authorizationDir, 0o750); err != nil {
 		return fmt.Errorf("harden hook guardian authorization directory: %w", err)
 	}
-	if err := setEnterpriseHookAuthorizationOwnership(authorizationDir); err != nil {
+	if err := enterpriseHookAuthorizationOwnershipSetter(authorizationDir); err != nil {
 		return fmt.Errorf("set hook guardian authorization directory ownership: %w", err)
 	}
 	authorizationPath := filepath.Join(authorizationDir, hookGuardianAuthorizationFile)
@@ -610,7 +994,7 @@ func writeEnterpriseHookGuardianState(dataDir, manifest string, rows []enterpris
 	if err := os.Chmod(authorizationPath, 0o640); err != nil {
 		return fmt.Errorf("make hook guardian authorization readable: %w", err)
 	}
-	if err := setEnterpriseHookAuthorizationOwnership(authorizationPath); err != nil {
+	if err := enterpriseHookAuthorizationOwnershipSetter(authorizationPath); err != nil {
 		return fmt.Errorf("set hook guardian authorization file ownership: %w", err)
 	}
 
@@ -742,46 +1126,63 @@ type enterpriseHookTarget struct {
 	home string
 	uid  int
 	gid  int
+	sid  string
 }
 
 func resolveEnterpriseHookTarget() (enterpriseHookTarget, error) {
-	return resolveEnterpriseHookTargetValues(enterpriseHookUser, enterpriseHookUserHome, enterpriseHookUID, enterpriseHookGID, enterpriseHookDataDir)
+	return resolveEnterpriseHookTargetValues(enterpriseHookUser, enterpriseHookUserHome, enterpriseHookUID, enterpriseHookGID, enterpriseHookSID, enterpriseHookDataDir)
 }
 
-func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, dataDir string) (enterpriseHookTarget, error) {
+func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, sid, dataDir string) (enterpriseHookTarget, error) {
 	target := enterpriseHookTarget{
 		home: strings.TrimSpace(userHome),
 		uid:  uid,
 		gid:  gid,
+		sid:  strings.TrimSpace(sid),
 	}
 	if name := strings.TrimSpace(userName); name != "" {
 		u, err := user.Lookup(name)
 		if err != nil {
-			return target, fmt.Errorf("enterprise hooks install: lookup user %q: %w", name, err)
+			return target, fmt.Errorf("enterprise hooks: lookup user %q: %w", name, err)
 		}
 		if target.home == "" {
 			target.home = u.HomeDir
 		}
 		if target.uid < 0 {
-			uid, err := strconv.Atoi(u.Uid)
-			if err != nil {
-				return target, fmt.Errorf("enterprise hooks install: parse uid for %q: %w", name, err)
+			if runtime.GOOS == "windows" {
+				if target.sid == "" {
+					target.sid = strings.TrimSpace(u.Uid)
+				}
+			} else {
+				uid, err := strconv.Atoi(u.Uid)
+				if err != nil {
+					return target, fmt.Errorf("enterprise hooks: parse uid for %q: %w", name, err)
+				}
+				target.uid = uid
 			}
-			target.uid = uid
 		}
 		if target.gid < 0 {
-			gid, err := strconv.Atoi(u.Gid)
-			if err != nil {
-				return target, fmt.Errorf("enterprise hooks install: parse gid for %q: %w", name, err)
+			if runtime.GOOS != "windows" {
+				gid, err := strconv.Atoi(u.Gid)
+				if err != nil {
+					return target, fmt.Errorf("enterprise hooks: parse gid for %q: %w", name, err)
+				}
+				target.gid = gid
 			}
-			target.gid = gid
 		}
 	}
+	if target.home == "" && target.sid != "" {
+		home, err := enterpriseHookSIDProfilePath(target.sid)
+		if err != nil {
+			return target, fmt.Errorf("enterprise hooks: resolve profile for SID %s: %w", target.sid, err)
+		}
+		target.home = strings.TrimSpace(home)
+	}
 	if target.home == "" {
-		return target, fmt.Errorf("enterprise hooks install: --user or --user-home is required")
+		return target, fmt.Errorf("enterprise hooks: --user, --user-home, or --sid is required")
 	}
 	if dataDir := strings.TrimSpace(dataDir); dataDir != "" && !filepath.IsAbs(dataDir) {
-		return target, fmt.Errorf("enterprise hooks install: --data-dir must be absolute")
+		return target, fmt.Errorf("enterprise hooks: --data-dir must be absolute")
 	}
 	return target, nil
 }
@@ -803,6 +1204,28 @@ func enterpriseHookScopedToken(dataDir, connectorName string) (string, error) {
 		return "", fmt.Errorf("enterprise hooks: ensure scoped hook API token: %w", err)
 	}
 	if err := alignEnterpriseHookScopedTokenOwner(dataDir, connectorName); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+func enterpriseHookScopedOTLPToken(dataDir, connectorName string) (string, error) {
+	scope, ok := connector.OTLPPathTokenScopeForConnector(connectorName)
+	if !ok {
+		return "", nil
+	}
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return "", fmt.Errorf("enterprise hooks: config data_dir is required before minting OTLP path token")
+	}
+	if err := validateEnterpriseOTLPTokenLocation(dataDir, scope); err != nil {
+		return "", err
+	}
+	token, err := connector.EnsureOTLPPathToken(dataDir, scope)
+	if err != nil {
+		return "", fmt.Errorf("enterprise hooks: ensure scoped OTLP path token: %w", err)
+	}
+	if err := alignEnterpriseOTLPTokenOwner(dataDir, scope); err != nil {
 		return "", err
 	}
 	return token, nil

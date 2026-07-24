@@ -22,6 +22,7 @@ misconfiguration before the user discovers them at runtime.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import io
 import json
@@ -31,6 +32,8 @@ import shlex
 import shutil
 import ssl
 import subprocess
+import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -39,10 +42,28 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
-from defenseclaw.connector_paths import omnigent_config_path
+from defenseclaw.connector_paths import (
+    codex_home,
+    connector_config_files,
+    hermes_config_path,
+    hermes_legacy_config_path,
+    omnigent_config_path,
+)
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.doctor_gateway import (
+    GATEWAY_PROCESS_NAMES,
+    GatewayEvidence,
+    canonical_path,
+    gateway_executable_name,
+)
+from defenseclaw.doctor_hooks import (
+    WindowsHookCheck,
+    _packaged_windows_install_root,
+    validate_windows_hook_registration,
+)
 from defenseclaw.envvars import active_security_overrides
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener
+from defenseclaw.scanner_binary import resolve_scanner_binary
 from defenseclaw.webhooks import list_webhooks, validate_webhook_url
 
 # Doctor status markers, recomputed per emission so the per-call
@@ -68,11 +89,11 @@ def _doctor_subsection(title: str) -> None:
     The legacy uncolored layout so cron logs and log shippers see
     the same byte stream they always have.
     """
-    click.echo()
+    ux.echo()
     if ux._color_enabled():
-        click.echo("  " + ux.dim("──") + " " + ux._style(title, fg="cyan", bold=True) + " " + ux.dim("──"))
+        ux.echo("  " + ux.dim("──") + " " + ux._style(title, fg="cyan", bold=True) + " " + ux.dim("──"))
     else:
-        click.echo(f"  ── {title} ──")
+        ux.echo(f"  ── {title} ──")
 
 
 def _doctor_marker(tag: str) -> str:
@@ -178,7 +199,7 @@ def _write_doctor_cache(cfg, result: _DoctorResult) -> None:
         os.replace(tmp_path, path)
         tmp_path = ""
     except OSError as exc:
-        click.echo(
+        ux.echo(
             f"warning: could not write doctor cache at {path}: {exc}",
             err=True,
         )
@@ -200,6 +221,13 @@ _json_mode = False
 # rows ("Codex hooks [codex]", "Claude Code hooks [claudecode]", …) are
 # attributable instead of reading as one primary connector.
 _label_suffix = ""
+
+# Probe bodies are bounded before decoding so an endpoint cannot make doctor
+# buffer an unbounded response. Most probe bodies are rendered only as short
+# diagnostics, but /health is structured input and can legitimately exceed
+# the display limit on multi-connector installs.
+_HTTP_PROBE_DISPLAY_BYTES = 2_000
+_HEALTH_DOCUMENT_MAX_BYTES = 1_048_576
 
 
 @contextlib.contextmanager
@@ -247,7 +275,7 @@ def _emit(tag: str, label: str, detail: str = "", *, r: _DoctorResult | None = N
             # the bold label and the detail value without losing the
             # connection between the two halves.
             line += "  " + ux.dim("—") + f"  {detail}"
-        click.echo(line)
+        ux.echo(line)
     if r is not None:
         r.record(tag, label, detail)
 
@@ -264,7 +292,7 @@ def _emit_hint(text: str, *, indent: str = "      ") -> None:
     """
     if _json_mode:
         return
-    click.echo(f"{indent}{ux.dim('↪ ' + text)}")
+    ux.echo(f"{indent}{ux.dim('↪ ' + text)}")
 
 
 def _emit_aid_hint(text: str) -> None:
@@ -346,10 +374,12 @@ def _registered_hook_script_paths(
                 if not isinstance(cmd, str) or script_name not in cmd:
                     continue
                 try:
-                    tokens = shlex.split(cmd)
+                    tokens = shlex.split(cmd, posix=os.name != "nt")
                 except ValueError:
                     tokens = [cmd]
                 match = next((tok for tok in tokens if script_name in tok), cmd)
+                if len(match) >= 2 and match[0] == match[-1] and match[0] in {'"', "'"}:
+                    match = match[1:-1]
                 paths.append(os.path.abspath(os.path.expanduser(match)))
 
     deduped: list[str] = []
@@ -444,8 +474,7 @@ def _check_generated_hook_freshness(
     _emit(
         "warn",
         f"{label} freshness",
-        f"stale generated script ({detail}); run `{regen}` to regenerate "
-        "and re-register hooks",
+        f"stale generated script ({detail}); run `{regen}` to regenerate and re-register hooks",
         r=r,
     )
 
@@ -458,6 +487,8 @@ def _http_probe(
     body: bytes | None = None,
     timeout: float = 10.0,
     verify_tls: bool = True,
+    response_limit: int = _HTTP_PROBE_DISPLAY_BYTES,
+    allow_truncation: bool = True,
 ) -> tuple[int, str]:
     """Fire an HTTP request; return (status_code, body_text). Returns (0, error) on failure.
 
@@ -469,7 +500,22 @@ def _http_probe(
     returning a redirect. We route through ``build_no_redirect_opener`` and
     surface a refused redirect as a non-following ``(0, message)`` result —
     the same shape callers already treat as "could not complete the probe".
+
+    ``response_limit`` is a byte bound, not just a post-read display slice.
+    The default retains the compact diagnostic-body behavior. Structured
+    callers such as the sidecar health check opt into a larger bounded document
+    and disable truncation so an oversized response is rejected rather than
+    parsed as if it were complete.
     """
+    if response_limit <= 0:
+        raise ValueError("response_limit must be positive")
+
+    def _read_response(stream) -> str:
+        raw = stream.read(response_limit + 1)
+        if len(raw) > response_limit and not allow_truncation:
+            return f"response exceeds {response_limit}-byte limit"
+        return raw[:response_limit].decode("utf-8", errors="replace")
+
     req = urllib.request.Request(url, method=method, headers=headers or {}, data=body)
     context = None
     if not verify_tls and url.lower().startswith("https://"):
@@ -479,11 +525,11 @@ def _http_probe(
     opener = build_no_redirect_opener(urllib.request.HTTPSHandler(context=context))
     try:
         with opener.open(req, timeout=timeout) as resp:
-            return resp.status, resp.read().decode("utf-8", errors="replace")[:2000]
+            return resp.status, _read_response(resp)
     except urllib.error.HTTPError as exc:
         body_text = ""
         try:
-            body_text = exc.read().decode("utf-8", errors="replace")[:2000]
+            body_text = _read_response(exc)
         except Exception:
             pass
         return exc.code, body_text
@@ -599,11 +645,16 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
         ("mcp-scanner", cfg.scanners.mcp_scanner.binary),
     ]
     for name, binary in bins:
-        path = shutil.which(binary)
+        path = resolve_scanner_binary(binary)
         if path:
             _emit("pass", f"Scanner: {name}", path, r=r)
         else:
-            _emit("fail", f"Scanner: {name}", f"'{binary}' not on PATH", r=r)
+            _emit(
+                "fail",
+                f"Scanner: {name}",
+                f"'{binary}' not found in the managed environment or on PATH",
+                r=r,
+            )
 
 
 def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
@@ -641,7 +692,12 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
     if getattr(cfg, "openshell", None) and cfg.openshell.is_standalone():
         bind = getattr(cfg.guardrail, "host", None) or bind
     url = f"http://{bind}:{cfg.gateway.api_port}/health"
-    code, body = _http_probe(url, timeout=5.0)
+    code, body = _http_probe(
+        url,
+        timeout=5.0,
+        response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
+        allow_truncation=False,
+    )
     if code == 200:
         _emit("pass", "Sidecar API", f"{bind}:{cfg.gateway.api_port}", r=r)
 
@@ -709,7 +765,8 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     _emit("fail", f"  └─ {sub}", state, r=r)
             return health
         except (json.JSONDecodeError, TypeError):
-            _emit("warn", "Sidecar health JSON", "could not parse /health response", r=r)
+            detail = body if body.startswith("response exceeds") else "could not parse /health response"
+            _emit("warn", "Sidecar health JSON", detail, r=r)
     else:
         _emit("fail", "Sidecar API", f"not reachable on port {cfg.gateway.api_port}", r=r)
     return None
@@ -860,9 +917,9 @@ def _read_pid_from_file(pid_file: str) -> int:
             return 0
     if pid <= 0:
         return 0
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError, OSError):
+    from defenseclaw.process_liveness import pid_alive
+
+    if not pid_alive(pid):
         return 0
     return pid
 
@@ -933,9 +990,144 @@ def _read_process_env_var(pid: int, var_name: str) -> str | None:
     for line in proc.stdout.splitlines()[1:]:
         for token in line.split():
             if token.startswith(needle):
-                return token[len(needle):]
+                return token[len(needle) :]
     # We could parse, but the var wasn't there — definitive absence.
     return ""
+
+
+def _check_windows_gateway_diagnostics(
+    cfg,
+    r: _DoctorResult,
+    *,
+    evidence: GatewayEvidence | None = None,
+    platform_name: str | None = None,
+) -> bool:
+    """Run the complete native Windows gateway identity diagnostic set.
+
+    Returns ``True`` when the Windows checks were applicable.  ``evidence``
+    and ``platform_name`` are explicit seams so every branch is testable on
+    non-Windows CI without pretending the host platform changed globally.
+    """
+    platform_name = platform_name or sys.platform
+    if platform_name != "win32":
+        return False
+    evidence = evidence or GatewayEvidence(platform_name=platform_name)
+    pid_path = os.path.join(cfg.data_dir, "gateway.pid")
+    record = evidence.pid_record(pid_path)
+
+    identity_ok = False
+    process = None
+    if record.status == "missing":
+        _emit("fail", "Gateway PID identity", "managed gateway PID file is missing", r=r)
+    elif record.status == "malformed":
+        _emit("fail", "Gateway PID identity", record.reason or "managed gateway PID file is invalid", r=r)
+    elif record.status in {"denied", "unavailable"}:
+        _emit("skip", "Gateway PID identity", record.reason or "PID file inspection unavailable", r=r)
+    else:
+        process = evidence.process(record.pid)
+        if process.status == "missing":
+            _emit("fail", "Gateway PID identity", "stale PID file: recorded process does not exist", r=r)
+        elif process.status in {"denied", "unavailable"}:
+            _emit("skip", "Gateway PID identity", process.reason or "process inspection unavailable", r=r)
+        else:
+            live_name = gateway_executable_name(process.executable)
+            if live_name not in GATEWAY_PROCESS_NAMES:
+                _emit("fail", "Gateway PID identity", "recorded PID belongs to an unexpected executable", r=r)
+            elif record.executable and canonical_path(record.executable) != canonical_path(process.executable):
+                _emit("fail", "Gateway PID identity", "stale or reused PID: executable path changed", r=r)
+            elif record.start_identity and record.start_identity != process.start_identity:
+                _emit("fail", "Gateway PID identity", "stale or reused PID: process start identity changed", r=r)
+            elif not record.start_identity:
+                _emit(
+                    "skip",
+                    "Gateway PID identity",
+                    "legacy PID record has no process start identity",
+                    r=r,
+                )
+            else:
+                identity_ok = True
+                _emit("pass", "Gateway PID identity", "executable and process start identity match", r=r)
+
+    try:
+        api_port = int(getattr(cfg.gateway, "api_port", 0) or 0)
+    except (TypeError, ValueError):
+        api_port = 0
+    listener = evidence.listener(api_port)
+
+    # The management request is intentionally fixed to loopback. The port is
+    # the validated integer from gateway config; neither a configured remote
+    # host nor a redirect can receive the bearer token.
+    token = cfg.gateway.resolved_token()
+    status_code = 0
+    status_body = ""
+    if not 1 <= api_port <= 65_535:
+        status_error = "configured API port is invalid"
+    elif not token:
+        status_error = "no local gateway authentication state is configured"
+    else:
+        status_code, status_body = _http_probe(
+            f"http://127.0.0.1:{api_port}/status",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=3.0,
+            response_limit=64 * 1024,
+            allow_truncation=False,
+        )
+        status_error = ""
+
+    runtime: dict = {}
+    if status_code == 200:
+        try:
+            payload = json.loads(status_body)
+            candidate = payload.get("runtime", {}) if isinstance(payload, dict) else {}
+            if isinstance(candidate, dict):
+                runtime = candidate
+        except (json.JSONDecodeError, TypeError):
+            runtime = {}
+
+    runtime_pid = runtime.get("pid", 0)
+    try:
+        runtime_pid = int(runtime_pid)
+    except (TypeError, ValueError):
+        runtime_pid = 0
+
+    if listener.status == "missing":
+        _emit("fail", "Gateway listener owner", "no listener on the configured API port", r=r)
+    elif listener.status in {"denied", "unavailable"}:
+        _emit("skip", "Gateway listener owner", listener.reason or "listener inspection unavailable", r=r)
+    elif record.status != "ok" or listener.pid != record.pid:
+        _emit("fail", "Gateway listener owner", "configured API port is owned by an unexpected process", r=r)
+    elif not identity_ok:
+        _emit("fail", "Gateway listener owner", "listener PID matches an unverified or stale PID record", r=r)
+    elif runtime_pid and runtime_pid != listener.pid:
+        _emit("fail", "Gateway listener owner", "authenticated runtime identity does not match listener owner", r=r)
+    else:
+        _emit("pass", "Gateway listener owner", "configured API listener is owned by the managed gateway", r=r)
+
+    if status_error:
+        _emit("skip", "Gateway token drift", status_error, r=r)
+    elif status_code in {401, 403, 503}:
+        _emit("fail", "Gateway token drift", "gateway authentication drift detected", r=r)
+    elif status_code == 0:
+        _emit("skip", "Gateway token drift", "gateway is unreachable; authentication could not be inspected", r=r)
+    elif status_code != 200:
+        _emit("skip", "Gateway token drift", f"authentication inspection unavailable (HTTP {status_code})", r=r)
+    elif not runtime:
+        _emit("skip", "Gateway token drift", "authenticated runtime metadata is unavailable", r=r)
+    else:
+        _emit("pass", "Gateway token drift", "local authentication state matches the live gateway", r=r)
+
+    runtime_home = runtime.get("data_dir", "") if runtime else ""
+    if status_code in {401, 403, 503}:
+        _emit("skip", "Gateway home", "authentication drift prevents trusted runtime-home inspection", r=r)
+    elif status_code == 0:
+        _emit("skip", "Gateway home", "gateway is unreachable; runtime home could not be inspected", r=r)
+    elif status_code != 200 or not isinstance(runtime_home, str) or not runtime_home.strip():
+        _emit("skip", "Gateway home", "authenticated runtime-home evidence is unavailable", r=r)
+    elif canonical_path(runtime_home) != canonical_path(cfg.data_dir):
+        _emit("fail", "Gateway home", "running gateway uses a different canonical data home", r=r)
+    else:
+        _emit("pass", "Gateway home", "running gateway uses this canonical data home", r=r)
+    return True
 
 
 def _check_gateway_token_drift(cfg, r: _DoctorResult) -> None:
@@ -983,16 +1175,12 @@ def _check_gateway_token_drift(cfg, r: _DoctorResult) -> None:
                 for line in fh:
                     line = line.strip()
                     if line.startswith("DEFENSECLAW_GATEWAY_TOKEN="):
-                        value = line[len("DEFENSECLAW_GATEWAY_TOKEN="):]
+                        value = line[len("DEFENSECLAW_GATEWAY_TOKEN=") :]
                         # Strip optional surrounding quotes the same
                         # way config._load_dotenv_into_os does, so
                         # the comparison matches the value the CLI
                         # would actually send.
-                        if (
-                            len(value) >= 2
-                            and value[0] == value[-1]
-                            and value[0] in ('"', "'")
-                        ):
+                        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
                             value = value[1:-1]
                         dotenv_token = value
                         break
@@ -1026,8 +1214,7 @@ def _check_gateway_token_drift(cfg, r: _DoctorResult) -> None:
         _emit(
             "skip",
             "Gateway token drift",
-            f"sidecar (pid {pid}) has no DEFENSECLAW_GATEWAY_TOKEN in env; "
-            "comparing dotenv to process not meaningful",
+            f"sidecar (pid {pid}) has no DEFENSECLAW_GATEWAY_TOKEN in env; comparing dotenv to process not meaningful",
             r=r,
         )
         return
@@ -1041,16 +1228,13 @@ def _check_gateway_token_drift(cfg, r: _DoctorResult) -> None:
         )
         return
 
-    # Mismatch confirmed. Show only first 8 chars of each so the
-    # operator can confirm with their eyes without leaking the full
-    # secret into stdout / log / screenshot.
-    proc_prefix = process_token[:8] + "…" if len(process_token) >= 8 else "<too short>"
-    env_prefix = dotenv_token[:8] + "…" if len(dotenv_token) >= 8 else "<too short>"
+    # Mismatch confirmed. Do not render either credential, including hashes or
+    # prefixes: Doctor output is routinely cached, logged, and screenshotted.
     _emit(
         "fail",
         "Gateway token drift",
-        f"sidecar (pid {pid}) is running with token {proc_prefix} but "
-        f"~/.defenseclaw/.env has {env_prefix}. Every API call will "
+        f"sidecar (pid {pid}) authentication differs from the configured "
+        "state. Every API call will "
         "return HTTP 401. Run `defenseclaw doctor --fix` (or "
         "`defenseclaw-gateway restart`) to reconcile.",
         r=r,
@@ -1161,8 +1345,100 @@ def _check_gateway_home_mismatch(cfg, r: _DoctorResult) -> None:
     )
 
 
-def _check_claudecode_hooks(cfg, r: _DoctorResult) -> None:
-    settings_path = os.path.expanduser("~/.claude/settings.json")
+def _check_windows_native_hooks(
+    cfg,
+    connector: str,
+    label: str,
+    r: _DoctorResult,
+    *,
+    config_path: str | None = None,
+    install_root: str | None = None,
+    search_path: str | None = None,
+    pathext: str | None = None,
+) -> None:
+    """Validate the command Windows setup actually registered, without running it."""
+    check = _windows_native_hook_check(
+        cfg,
+        connector,
+        config_path=config_path,
+        install_root=install_root,
+        search_path=search_path,
+        pathext=pathext,
+    )
+    status = "pass" if check.healthy else "fail"
+    _emit(status, label, f"{check.state}: {check.detail}", r=r)
+
+
+def _windows_native_hook_check(
+    cfg,
+    connector: str,
+    *,
+    config_path: str | None = None,
+    install_root: str | None = None,
+    search_path: str | None = None,
+    pathext: str | None = None,
+) -> WindowsHookCheck:
+    """Return the authoritative passive runtime inspection for Windows.
+
+    Both the Services registration row and the Hook contract row use this
+    exact path.  The lock records portable generated assets for digest and
+    freshness checks; the live agent registration is the source of truth for
+    the runtime Windows will actually resolve.
+    """
+    paths = _hook_health_paths_from_lock(cfg, connector)
+    if config_path is None:
+        if paths:
+            config_path = paths[0]
+        elif connector == "codex":
+            config_path = os.path.join(codex_home(), "managed_config.toml")
+        else:
+            config_path = connector_config_files(connector)[0]
+    if install_root is None:
+        install_root = _packaged_windows_install_root(getattr(cfg, "data_dir", "") or "")
+    if install_root is None:
+        install_root = os.path.expanduser("~/.local/bin")
+    return validate_windows_hook_registration(
+        connector=connector,
+        config_path=config_path,
+        data_dir=getattr(cfg, "data_dir", "") or "",
+        install_root=install_root,
+        search_path=os.environ.get("PATH", "") if search_path is None else search_path,
+        pathext=os.environ.get("PATHEXT", "") if pathext is None else pathext,
+        workspace_dir=_workspace_dir(cfg) if connector == "claudecode" else "",
+        managed_enterprise=(
+            connector == "claudecode"
+            and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+        ),
+    )
+
+
+def _check_claudecode_hooks(
+    cfg,
+    r: _DoctorResult,
+    *,
+    platform_name: str | None = None,
+    config_path: str | None = None,
+    install_root: str | None = None,
+    search_path: str | None = None,
+    pathext: str | None = None,
+) -> None:
+    if (platform_name or os.name) == "nt":
+        _check_windows_native_hooks(
+            cfg,
+            "claudecode",
+            "Claude Code hooks",
+            r,
+            config_path=config_path,
+            install_root=install_root,
+            search_path=search_path,
+            pathext=pathext,
+        )
+        return
+    # Honor an explicitly modeled config path on every platform.  This keeps
+    # Doctor bound to the same Claude invocation that the caller selected and
+    # avoids accidentally inspecting an unrelated process-wide
+    # CLAUDE_CONFIG_DIR while validating a project or alternate home.
+    settings_path = config_path or connector_config_files("claudecode")[0]
     if not os.path.isfile(settings_path):
         _emit("fail", "Claude Code hooks", f"{settings_path} not found", r=r)
         return
@@ -1200,7 +1476,28 @@ def _check_claudecode_hooks(cfg, r: _DoctorResult) -> None:
         _emit("fail", "Claude Code hooks", "no DefenseClaw hooks found in settings.json", r=r)
 
 
-def _check_codex_hooks(cfg, r: _DoctorResult) -> None:
+def _check_codex_hooks(
+    cfg,
+    r: _DoctorResult,
+    *,
+    platform_name: str | None = None,
+    config_path: str | None = None,
+    install_root: str | None = None,
+    search_path: str | None = None,
+    pathext: str | None = None,
+) -> None:
+    if (platform_name or os.name) == "nt":
+        _check_windows_native_hooks(
+            cfg,
+            "codex",
+            "Codex hooks",
+            r,
+            config_path=config_path,
+            install_root=install_root,
+            search_path=search_path,
+            pathext=pathext,
+        )
+        return
     hook_dir = os.path.join(cfg.data_dir, "hooks")
     hook_script = os.path.join(hook_dir, "codex-hook.sh")
     if os.path.isfile(hook_script):
@@ -1278,6 +1575,299 @@ def _file_references_marker(path: str, markers: tuple[str, ...]) -> bool:
     return any(m and m in data for m in markers)
 
 
+def _split_configured_hook_command(command: str, *, platform_name: str | None = None) -> list[str]:
+    """Split the narrow command shape DefenseClaw writes into hooks.json."""
+    is_windows = (platform_name or os.name) == "nt"
+    try:
+        parts = shlex.split(command, posix=not is_windows)
+    except ValueError:
+        return []
+    if is_windows:
+        if parts and parts[0] == "&":
+            parts = parts[1:]
+        normalized = []
+        for part in parts:
+            if len(part) >= 2 and part[0] == part[-1] and part[0] in {"'", '"'}:
+                quote = part[0]
+                part = part[1:-1]
+                if quote == "'":
+                    part = part.replace("''", "'")
+            normalized.append(part)
+        parts = normalized
+    return parts
+
+
+def _powershell_literal(value: str) -> str:
+    """Return one inert single-quoted PowerShell string literal."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _cursor_health_row(document: str) -> dict[str, object] | None:
+    try:
+        parsed = json.loads(document)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    connectors = parsed.get("connectors") if isinstance(parsed, dict) else None
+    if not isinstance(connectors, list):
+        return None
+    for row in connectors:
+        if isinstance(row, dict) and str(row.get("name") or "").strip().lower() == "cursor":
+            return row
+    return None
+
+
+def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
+    """Exercise Cursor's real PowerShell transport and verify gateway receipt.
+
+    A valid fail-open response alone is insufficient: the launcher deliberately
+    emits one when the gateway is unavailable. Compare the live Cursor request
+    counter before/after so Doctor proves stdin -> adapter -> launcher ->
+    gateway -> stdout instead of merely proving that files exist.
+    """
+    gateway = getattr(cfg, "gateway", None)
+    try:
+        api_port = int(getattr(gateway, "api_port", 0) or 0)
+    except (TypeError, ValueError):
+        api_port = 0
+    if api_port <= 0 or api_port > 65535:
+        return False, "cannot resolve the sidecar API port for a Cursor runtime probe"
+
+    health_url = f"http://127.0.0.1:{api_port}/health"
+    before_code, before_body = _http_probe(
+        health_url,
+        timeout=3.0,
+        response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
+        allow_truncation=False,
+    )
+    before = _cursor_health_row(before_body) if before_code == 200 else None
+    if before is None:
+        return False, "sidecar /health has no live Cursor connector row"
+
+    payload = json.dumps(
+        {
+            "hook_event_name": "sessionStart",
+            "session_id": "defenseclaw-doctor-probe",
+            "source": "defenseclaw-doctor",
+            "workspace_roots": [],
+        },
+        separators=(",", ":"),
+    )
+    vendor_input = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=".json",
+            prefix="defenseclaw-cursor-doctor-",
+            delete=False,
+        ) as fh:
+            fh.write(payload)
+            vendor_input = fh.name
+
+        # This mirrors Cursor 3.9's Windows command-hook boundary. Paths are
+        # encoded as PowerShell literals, the whole script is UTF-16LE/base64,
+        # and subprocess receives an argv list (never shell=True).
+        script = (
+            "$OutputEncoding = [System.Text.Encoding]::UTF8; "
+            f"Get-Content -LiteralPath {_powershell_literal(vendor_input)} -Raw | "
+            f"& {{ $input | & {_powershell_literal(adapter_path)} }}"
+        )
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        proc = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                encoded,
+            ],
+            capture_output=True,
+            timeout=15.0,
+            check=False,
+            creationflags=creationflags,
+        )
+    except FileNotFoundError:
+        return False, "powershell.exe is unavailable for the Cursor runtime probe"
+    except subprocess.TimeoutExpired:
+        return False, "Cursor runtime probe timed out"
+    except OSError as exc:
+        return False, f"Cursor runtime probe could not start: {exc}"
+    finally:
+        if vendor_input:
+            try:
+                os.remove(vendor_input)
+            except OSError:
+                pass
+
+    stdout = proc.stdout[:_HTTP_PROBE_DISPLAY_BYTES].decode("utf-8", errors="replace").lstrip("\ufeff").strip()
+    stderr = proc.stderr[:_HTTP_PROBE_DISPLAY_BYTES].decode("utf-8", errors="replace").strip()
+    if proc.returncode != 0:
+        detail = stderr.splitlines()[0] if stderr else f"exit code {proc.returncode}"
+        return False, f"configured Cursor adapter failed: {detail}"
+    try:
+        response = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return False, "configured Cursor adapter returned no valid JSON response"
+    if not isinstance(response, dict) or response.get("continue") is not True:
+        return False, "configured Cursor adapter did not return an allow response"
+
+    after_code, after_body = _http_probe(
+        health_url,
+        timeout=3.0,
+        response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
+        allow_truncation=False,
+    )
+    after = _cursor_health_row(after_body) if after_code == 200 else None
+    if after is None:
+        return False, "sidecar /health lost the Cursor connector row after the probe"
+    try:
+        before_requests = int(before.get("requests") or 0)
+        after_requests = int(after.get("requests") or 0)
+        before_errors = int(before.get("errors") or 0)
+        after_errors = int(after.get("errors") or 0)
+    except (TypeError, ValueError):
+        return False, "sidecar returned invalid Cursor counter values"
+    if after_requests <= before_requests:
+        return False, "adapter returned allow JSON but the gateway Cursor request counter did not advance"
+    if after_errors > before_errors:
+        return False, "gateway Cursor error counter increased during the runtime probe"
+    return True, f"live round trip OK (requests {before_requests}->{after_requests})"
+
+
+def _check_cursor_configured_runtime(
+    cfg,
+    path: str,
+    label: str,
+    r: _DoctorResult,
+    *,
+    platform_name: str | None = None,
+    probe_runtime: bool = True,
+) -> None:
+    """Validate the exact command Cursor invokes, not generated shell assets.
+
+    The hook contract lock records portable script assets, while Windows
+    Cursor uses ``cursor-hook.ps1`` to preserve the vendor's PowerShell object
+    pipeline before invoking ``defenseclaw-hook.exe``. Parse the live
+    hooks.json, verify every DefenseClaw-owned entry uses one consistent,
+    reachable runtime, and ensure Cursor's host-side failClosed flag agrees
+    with the connector's effective observe/action mode.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            document = json.load(fh)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        _emit("fail", label, f"cannot parse configured hook file {path}: {exc}", r=r)
+        return
+
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    if not isinstance(hooks, dict):
+        _emit("fail", label, f"configured hook file has no hooks object: {path}", r=r)
+        return
+
+    managed: list[tuple[str, dict[str, object], str]] = []
+    for event, raw_entries in hooks.items():
+        if not isinstance(raw_entries, list):
+            continue
+        for raw_entry in raw_entries:
+            if not isinstance(raw_entry, dict):
+                continue
+            command = str(raw_entry.get("command") or "").strip()
+            if "hook --connector cursor" in command or "cursor-hook.sh" in command or "cursor-hook.ps1" in command:
+                managed.append((str(event), raw_entry, command))
+
+    if not managed:
+        _emit("fail", label, f"{path} has no DefenseClaw Cursor command entries", r=r)
+        return
+
+    commands = {command for _event, _entry, command in managed}
+    if len(commands) != 1:
+        _emit("fail", label, "DefenseClaw Cursor entries use inconsistent commands", r=r)
+        return
+    command = next(iter(commands))
+    argv = _split_configured_hook_command(command, platform_name=platform_name)
+    if not argv:
+        _emit("fail", label, f"cannot parse configured Cursor command: {command}", r=r)
+        return
+
+    target = os.path.expanduser(argv[0])
+    basename = os.path.basename(target).lower()
+    native = basename in {"defenseclaw-hook", "defenseclaw-hook.exe"}
+    shell_script = basename == "cursor-hook.sh"
+    windows_adapter = basename == "cursor-hook.ps1"
+    if native:
+        if argv[1:] != ["hook", "--connector", "cursor"]:
+            _emit("fail", label, f"configured Cursor launcher has unexpected arguments: {command}", r=r)
+            return
+        if (platform_name or os.name) == "nt":
+            _emit(
+                "fail",
+                label,
+                "Cursor on Windows is configured to invoke the native launcher directly; "
+                "run `defenseclaw setup cursor` to install the PowerShell input adapter",
+                r=r,
+            )
+            return
+    elif shell_script or windows_adapter:
+        if len(argv) != 1:
+            _emit("fail", label, f"configured Cursor script has unexpected arguments: {command}", r=r)
+            return
+    else:
+        _emit("fail", label, f"configured Cursor command is not a DefenseClaw hook runtime: {command}", r=r)
+        return
+
+    resolved = target if os.path.isabs(target) else (shutil.which(target) or "")
+    if not resolved or not os.path.isfile(resolved):
+        _emit("fail", label, f"configured Cursor hook runtime is missing: {target}", r=r)
+        return
+    adapter_markers = (
+        "defenseclaw-managed-hook v8",
+        "--input-file",
+        "defenseclaw-hook.exe",
+        "ProcessStartInfo",
+        "RedirectStandardOutput",
+        "WaitForExit",
+    )
+    if windows_adapter and not all(_file_references_marker(resolved, (marker,)) for marker in adapter_markers):
+        _emit("fail", label, f"configured Cursor Windows adapter is stale or invalid: {resolved}", r=r)
+        return
+
+    guardrail = getattr(cfg, "guardrail", None)
+    mode_resolver = getattr(guardrail, "effective_mode", None)
+    fail_resolver = getattr(guardrail, "effective_hook_fail_mode", None)
+    mode = str(mode_resolver("cursor") if callable(mode_resolver) else "observe").strip().lower()
+    fail_mode = str(fail_resolver("cursor") if callable(fail_resolver) else "open").strip().lower()
+    expected_fail_closed = mode == "action" and fail_mode == "closed"
+    mismatched = [
+        event for event, entry, _command in managed if (entry.get("failClosed") is True) != expected_fail_closed
+    ]
+    if mismatched:
+        _emit(
+            "fail",
+            label,
+            f"configured failClosed does not match mode={mode or 'observe'} "
+            f"(expected {str(expected_fail_closed).lower()}): {', '.join(sorted(mismatched))}",
+            r=r,
+        )
+        return
+
+    runtime_detail = ""
+    if windows_adapter and (platform_name or os.name) == "nt" and probe_runtime:
+        runtime_ok, runtime_detail = _probe_cursor_windows_runtime(cfg, resolved)
+        if not runtime_ok:
+            _emit("fail", label, runtime_detail, r=r)
+            return
+
+    _emit(
+        "pass",
+        label,
+        f"configured runtime={resolved}; entries={len(managed)}; "
+        f"mode={mode or 'observe'}; failClosed={str(expected_fail_closed).lower()}"
+        + (f"; {runtime_detail}" if runtime_detail else ""),
+        r=r,
+    )
+
+
 def _hook_health_paths_from_lock(cfg, connector: str) -> list[str]:
     """Return the hook config path(s) the gateway actually wrote for
     ``connector``, read from ``hook_contract_lock.json``.
@@ -1348,9 +1938,7 @@ def _omnigent_runtime_paths_from_backups(cfg) -> list[str]:
 
 def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
     """Verify the config, policy module, and Python import shim as one unit."""
-    config_paths = _hook_health_paths_from_lock(cfg, "omnigent") or [
-        omnigent_config_path()
-    ]
+    config_paths = _hook_health_paths_from_lock(cfg, "omnigent") or [omnigent_config_path()]
     config_path = next((p for p in config_paths if os.path.isfile(p)), "")
     config_ok = bool(config_path) and all(
         _file_references_marker(config_path, (marker,))
@@ -1360,10 +1948,7 @@ def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
         _emit("fail", "OmniGent policy", "config is missing the DefenseClaw policy registration", r=r)
         return
 
-    runtime_paths = (
-        _hook_runtime_paths_from_lock(cfg, "omnigent")
-        or _omnigent_runtime_paths_from_backups(cfg)
-    )
+    runtime_paths = _hook_runtime_paths_from_lock(cfg, "omnigent") or _omnigent_runtime_paths_from_backups(cfg)
     module_path = next((p for p in runtime_paths if p.endswith(".py")), "")
     pth_path = next((p for p in runtime_paths if p.endswith(".pth")), "")
     if not module_path or not pth_path:
@@ -1375,8 +1960,7 @@ def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
         )
         return
     if not os.path.isfile(module_path) or not all(
-        _file_references_marker(module_path, (marker,))
-        for marker in ("POLICY_REGISTRY", "defenseclaw_policy")
+        _file_references_marker(module_path, (marker,)) for marker in ("POLICY_REGISTRY", "defenseclaw_policy")
     ):
         _emit("fail", "OmniGent policy", f"policy module is missing or invalid: {module_path}", r=r)
         return
@@ -1410,21 +1994,54 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     label = _HOOK_HEALTH_LABELS.get(connector, f"{connector} hooks")
     home = os.path.expanduser("~")
     # Prefer the lock-file's recorded paths; fall back to the static map.
-    candidates = _hook_health_paths_from_lock(cfg, connector) or [
-        os.path.join(home, rel) for rel in rel_candidates
-    ]
+    candidates = _hook_health_paths_from_lock(cfg, connector)
+    if not candidates:
+        candidates = (
+            [hermes_config_path()] if connector == "hermes" else [os.path.join(home, rel) for rel in rel_candidates]
+        )
     present = [p for p in candidates if os.path.isfile(p)]
     if not present:
         _emit("fail", label, "hook file not found: " + ", ".join(candidates), r=r)
         return
     for path in present:
         if _file_references_marker(path, markers):
-            _emit("pass", label, f"reachable at {path}", r=r)
+            if connector == "cursor":
+                _check_cursor_configured_runtime(cfg, path, label, r)
+            else:
+                _emit("pass", label, f"reachable at {path}", r=r)
             return
     _emit(
         "fail",
         label,
         "hook file exists but does not reference DefenseClaw: " + ", ".join(present),
+        r=r,
+    )
+
+
+def _check_hermes_legacy_config(r: _DoctorResult, *, platform_name: str | None = None) -> None:
+    """Warn about the pre-native-Windows Hermes config without migrating it.
+
+    Native Hermes uses ``HERMES_HOME`` or ``%LOCALAPPDATA%\\hermes``. Older
+    DefenseClaw builds wrote ``~/.hermes/config.yaml`` on every platform. That
+    file can contain credentials, so doctor only reports it and leaves any
+    review, merge, archival, or deletion to the operator.
+    """
+    if (platform_name or os.name) != "nt":
+        return
+
+    current = os.path.abspath(hermes_config_path())
+    legacy = os.path.abspath(hermes_legacy_config_path())
+    if os.path.normcase(current) == os.path.normcase(legacy) or not os.path.isfile(legacy):
+        return
+
+    current_state = "already exists" if os.path.isfile(current) else "does not exist yet"
+    _emit(
+        "warn",
+        "Hermes config migration",
+        f"legacy Hermes config found at {legacy}. Native Hermes now uses {current}, "
+        f"which {current_state}. Review and merge any needed settings manually, then "
+        "re-run `defenseclaw setup hermes`. DefenseClaw will not copy or delete the "
+        "legacy file because it may contain credentials.",
         r=r,
     )
 
@@ -1456,6 +2073,8 @@ def _check_connector_hooks(cfg, connector: str, r: _DoctorResult) -> None:
         # hermes / cursor / windsurf / geminicli / opencode — generic
         # lock-file-driven hook-health row (D4).
         _check_hook_health(cfg, connector, r)
+        if connector == "hermes":
+            _check_hermes_legacy_config(r)
 
 
 def _workspace_dir(cfg) -> str:
@@ -1588,9 +2207,7 @@ def _check_antigravity_hooks(cfg, r: _DoctorResult) -> None:
     if workspace:
         extras.append(os.path.join(workspace, ".antigravitycli", "hooks.json"))
     duplicates = [
-        extra
-        for extra in extras
-        if os.path.isfile(extra) and _hook_json_references(extra, "antigravity-hook.sh")
+        extra for extra in extras if os.path.isfile(extra) and _hook_json_references(extra, "antigravity-hook.sh")
     ]
     if duplicates:
         _emit(
@@ -1767,10 +2384,7 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
         mode = modes.get(connectors[0], "observe")
         if connectors[0] == "omnigent":
             if mode == "action":
-                return (
-                    "policy-enforced for omnigent "
-                    "(mode=action via ALLOW/ASK/DENY) — proxy port intentionally closed"
-                )
+                return "policy-enforced for omnigent (mode=action via ALLOW/ASK/DENY) — proxy port intentionally closed"
             return "policy-driven for omnigent (mode=observe) — proxy port intentionally closed"
         if mode == "action":
             return f"hook-enforced for {label} (mode=action via PreToolUse deny) — proxy port intentionally closed"
@@ -1829,9 +2443,7 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
     # guardrail LLM key is a false failure: local regex/Cisco-AID policy lanes
     # remain fully functional without one.
     judge = getattr(gc, "judge", None)
-    if _guardrail_proxy_intentionally_closed(cfg) and not bool(
-        getattr(judge, "enabled", False)
-    ):
+    if _guardrail_proxy_intentionally_closed(cfg) and not bool(getattr(judge, "enabled", False)):
         _emit(
             "skip",
             "LLM API key",
@@ -2117,9 +2729,7 @@ def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
                 covered = any(host == d or host.endswith("." + d) for d in domain_strs)
                 if not covered:
                     rendered = ", ".join(domain_strs) if domain_strs else "(empty)"
-                    domain_warns.append(
-                        f"{name}: base_url host {host!r} not covered by domains [{rendered}]"
-                    )
+                    domain_warns.append(f"{name}: base_url host {host!r} not covered by domains [{rendered}]")
         # Family-mismatch: a bedrock/vertex/azure sub-block paired with
         # a base_provider_type from a different family is dead config.
         # The Go gateway tolerates it (the dispatcher only consults the
@@ -2174,8 +2784,7 @@ def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
         # resolved object — _apply_instance_overlay already does the
         # merge, so equality here means the role explicitly set the
         # value and the overlay declared a different one.
-        if resolved.base_url and overlay_entry.get("base_url") and \
-                resolved.base_url != overlay_entry.get("base_url"):
+        if resolved.base_url and overlay_entry.get("base_url") and resolved.base_url != overlay_entry.get("base_url"):
             dup_warns.append(
                 f"{component or 'llm'}: base_url role={resolved.base_url!r} "
                 f"overlay={overlay_entry['base_url']!r} (role wins)"
@@ -2189,9 +2798,7 @@ def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
                 rv = (getattr(role_b, fld, "") or "").strip()
                 ov = str(ov_b.get(fld) or "").strip()
                 if rv and ov and rv != ov:
-                    dup_warns.append(
-                        f"{component or 'llm'}: bedrock.{fld} role={rv!r} overlay={ov!r} (role wins)"
-                    )
+                    dup_warns.append(f"{component or 'llm'}: bedrock.{fld} role={rv!r} overlay={ov!r} (role wins)")
         role_v = getattr(resolved, "vertex", None)
         ov_v = overlay_entry.get("vertex") or {}
         if role_v is not None and isinstance(ov_v, dict):
@@ -2199,9 +2806,7 @@ def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
                 rv = (getattr(role_v, fld, "") or "").strip()
                 ov = str(ov_v.get(fld) or "").strip()
                 if rv and ov and rv != ov:
-                    dup_warns.append(
-                        f"{component or 'llm'}: vertex.{fld} role={rv!r} overlay={ov!r} (role wins)"
-                    )
+                    dup_warns.append(f"{component or 'llm'}: vertex.{fld} role={rv!r} overlay={ov!r} (role wins)")
         role_a = getattr(resolved, "azure", None)
         ov_a = overlay_entry.get("azure") or {}
         if role_a is not None and isinstance(ov_a, dict):
@@ -2209,23 +2814,19 @@ def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
                 rv = (getattr(role_a, fld, "") or "").strip()
                 ov = str(ov_a.get(fld) or "").strip()
                 if rv and ov and rv != ov:
-                    dup_warns.append(
-                        f"{component or 'llm'}: azure.{fld} role={rv!r} overlay={ov!r} (role wins)"
-                    )
+                    dup_warns.append(f"{component or 'llm'}: azure.{fld} role={rv!r} overlay={ov!r} (role wins)")
     if tls_warns:
         _emit(
             "warn",
             label,
-            "instances declare both ca_cert_pem and insecure_skip_verify: "
-            + ", ".join(tls_warns),
+            "instances declare both ca_cert_pem and insecure_skip_verify: " + ", ".join(tls_warns),
             r=r,
         )
     if family_warns:
         _emit(
             "warn",
             label,
-            "overlay sub-block family does not match base_provider_type: "
-            + "; ".join(family_warns),
+            "overlay sub-block family does not match base_provider_type: " + "; ".join(family_warns),
             r=r,
         )
     if auth_warns:
@@ -2247,8 +2848,7 @@ def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
         _emit(
             "warn",
             label,
-            "role and overlay disagree (role wins, overlay value is dead config): "
-            + "; ".join(dup_warns),
+            "role and overlay disagree (role wins, overlay value is dead config): " + "; ".join(dup_warns),
             r=r,
         )
     if tls_warns or family_warns or auth_warns or domain_warns or dup_warns:
@@ -2501,9 +3101,7 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
         # tally and suppressed in JSON mode (consumers there see the
         # endpoint via the spec, not the rendered hint).
         _emit_aid_hint(f"endpoint: {endpoint}")
-        _emit_aid_hint(
-            "if the key was issued for a different region, run: defenseclaw setup"
-        )
+        _emit_aid_hint("if the key was issued for a different region, run: defenseclaw setup")
     elif code == 0:
         _emit("warn", "Cisco AI Defense", f"endpoint unreachable: {body[:100]}", r=r)
         _emit_aid_hint(f"endpoint: {endpoint}")
@@ -2529,8 +3127,7 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
     _check_observability_v8_status(status, r, live_health=live_health)
     _check_connector_export_custody(
         inspect_connector_custody(
-            status.local_path
-            or getattr(cfg, "audit_db", os.path.join(cfg.data_dir, "audit.db")),
+            status.local_path or getattr(cfg, "audit_db", os.path.join(cfg.data_dir, "audit.db")),
             cfg.data_dir,
         ),
         r,
@@ -2578,13 +3175,9 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
             ]
             if item.credential_state == "invalid":
                 tag = "fail"
-                conditions.append(
-                    f"invalid credentials observed ({item.authentication_failures} recent failures)"
-                )
+                conditions.append(f"invalid credentials observed ({item.authentication_failures} recent failures)")
             elif item.credential_state == "recovered":
-                conditions.append(
-                    f"credentials recovered after {item.authentication_failures} recent failures"
-                )
+                conditions.append(f"credentials recovered after {item.authentication_failures} recent failures")
             if item.normalized_batches and item.drop_only_batches == item.normalized_batches:
                 tag = "fail"
                 conditions.append(
@@ -2625,23 +3218,17 @@ def _check_connector_export_custody(report, r: _DoctorResult) -> None:
 
         if item.credential_state == "invalid":
             tag = "fail"
-            conditions.append(
-                f"invalid credentials observed ({item.authentication_failures} recent failures)"
-            )
+            conditions.append(f"invalid credentials observed ({item.authentication_failures} recent failures)")
         elif item.credential_state == "recovered":
             if tag == "pass":
                 tag = "warn"
-            conditions.append(
-                f"credentials recovered after {item.authentication_failures} recent failures"
-            )
+            conditions.append(f"credentials recovered after {item.authentication_failures} recent failures")
         else:
             conditions.append("credentials=no recent failure")
 
         if item.normalized_batches and item.drop_only_batches == item.normalized_batches:
             tag = "fail"
-            conditions.append(
-                f"drop-only native stream ({item.drop_only_batches}/{item.normalized_batches} batches)"
-            )
+            conditions.append(f"drop-only native stream ({item.drop_only_batches}/{item.normalized_batches} batches)")
         elif item.drop_only_batches:
             if tag == "pass":
                 tag = "warn"
@@ -2962,10 +3549,7 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
         return
 
     if private_entries:
-        detail = (
-            f"active entries: {', '.join(private_entries)} | impact=high | "
-            f"sources={', '.join(sources)}"
-        )
+        detail = f"active entries: {', '.join(private_entries)} | impact=high | sources={', '.join(sources)}"
         _emit("warn", "Private upstream allowlist", detail, r=r)
 
     for entry in active:
@@ -2977,9 +3561,7 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
         # abbreviations ("e.g.", "i.e.", "etc.") don't truncate the headline
         # mid-thought.
         sentence_break = re.search(r"\.\s+(?=[A-Z])", entry.purpose)
-        purpose_one_liner = (
-            entry.purpose[: sentence_break.start()] if sentence_break else entry.purpose
-        ).strip()
+        purpose_one_liner = (entry.purpose[: sentence_break.start()] if sentence_break else entry.purpose).strip()
         if len(purpose_one_liner) > 100:
             purpose_one_liner = purpose_one_liner[:97] + "..."
         bits = [purpose_one_liner, f"impact={entry.security_impact}"]
@@ -3063,10 +3645,10 @@ def doctor(
     _json_mode = json_out
 
     if not json_out:
-        click.echo()
-        click.echo(ux._style("DefenseClaw Doctor", fg="cyan", bold=True))
-        click.echo(ux._style("══════════════════", fg="cyan"))
-        click.echo()
+        ux.echo()
+        ux.echo(ux._style("DefenseClaw Doctor", fg="cyan", bold=True))
+        ux.echo(ux._style("══════════════════", fg="cyan"))
+        ux.echo()
 
     _check_config(cfg, r)
     _check_audit_db(cfg, r)
@@ -3137,8 +3719,12 @@ def doctor(
         _doctor_subsection("Services")
     sidecar_health = _check_sidecar(cfg, r)
     _check_gateway_token_env_alignment(cfg, r)
-    _check_gateway_token_drift(cfg, r)
-    _check_gateway_home_mismatch(cfg, r)
+    if not _check_windows_gateway_diagnostics(cfg, r):
+        # Preserve the established Linux/macOS evidence collectors. Windows
+        # uses the native/injectable path above because os.kill(pid, 0), lsof,
+        # /proc, and ps are not reliable evidence there.
+        _check_gateway_token_drift(cfg, r)
+        _check_gateway_home_mismatch(cfg, r)
     # Run the per-connector hook/health check for EVERY active connector,
     # not just the primary. ``_doctor_active_connectors`` returns the single
     # active connector on single-connector installs (no label suffix applied,
@@ -3163,8 +3749,7 @@ def doctor(
                 _emit(
                     "skip",
                     "Connector hooks",
-                    f"{_CONNECTOR_LABELS.get(_conn, _conn)} — operator-disabled; "
-                    "hooks torn down",
+                    f"{_CONNECTOR_LABELS.get(_conn, _conn)} — operator-disabled; hooks torn down",
                     r=r,
                 )
             continue
@@ -3235,8 +3820,8 @@ def doctor(
             parts.append(ux._style(f"{r.warned} warnings", fg="yellow", bold=True))
         if r.skipped:
             parts.append(ux._style(f"{r.skipped} skipped", fg="bright_black"))
-        click.echo("  " + ", ".join(parts))
-        click.echo()
+        ux.echo("  " + ", ".join(parts))
+        ux.echo()
 
     if r.failed:
         if not json_out:
@@ -3245,7 +3830,7 @@ def doctor(
             # ``ux.warn`` rather than ``ux.err`` because the line
             # itself isn't a failure; the failures above are.
             ux.warn("Fix the failures above, then re-run: defenseclaw doctor", indent="  ")
-            click.echo()
+            ux.echo()
         raise SystemExit(1)
 
     if app.logger:
@@ -3477,8 +4062,7 @@ def _emit_rule_pack_row(path: str, kind: str, r: _DoctorResult) -> None:
         _emit(
             "warn",
             "Rule pack",
-            f"{kind} not found on disk: {path} — guardrail enforcement would "
-            "run with no rule packs",
+            f"{kind} not found on disk: {path} — guardrail enforcement would run with no rule packs",
             r=r,
         )
         return
@@ -3491,17 +4075,14 @@ def _emit_rule_pack_row(path: str, kind: str, r: _DoctorResult) -> None:
         _emit(
             "warn",
             "Rule pack",
-            f"{kind} is empty: {path} — guardrail enforcement would run with "
-            "no rule packs",
+            f"{kind} is empty: {path} — guardrail enforcement would run with no rule packs",
             r=r,
         )
         return
     _emit("pass", "Rule pack", f"{path} ({kind})", r=r)
 
 
-def _check_connector_inventory(
-    cfg, connector: str, r: _DoctorResult
-) -> None:
+def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
     """Surface one connector and everything it resolves to.
 
     Each connector has its own conventions for where skills, plugins,
@@ -3537,7 +4118,18 @@ def _check_connector_inventory(
         except Exception:  # noqa: BLE001
             mode = ""
         if mode:
-            _emit("pass", "Mode", mode, r=r)
+            try:
+                from defenseclaw.fail_mode import connector_fail_mode_report
+
+                fail_mode = connector_fail_mode_report(cfg, connector)
+            except Exception:  # noqa: BLE001 - doctor must still report partial state.
+                fail_mode = {"effective": "unknown", "provenance": "unavailable"}
+            _emit(
+                "pass",
+                "Mode",
+                f"{mode}; fail-mode={fail_mode['effective']}; provenance={fail_mode['provenance']}",
+                r=r,
+            )
 
     workspace = _workspace_dir(cfg)
     if workspace:
@@ -3612,12 +4204,8 @@ def _check_connector_inventory(
             # doctor would otherwise show green. (D9)
             data_dir = getattr(cfg, "data_dir", "") or ""
             if data_dir:
-                default_dir = os.path.join(
-                    data_dir, "policies", "guardrail", "default"
-                )
-                _emit_rule_pack_row(
-                    default_dir, "built-in default rule pack", r
-                )
+                default_dir = os.path.join(data_dir, "policies", "guardrail", "default")
+                _emit_rule_pack_row(default_dir, "built-in default rule pack", r)
             else:
                 _emit(
                     "skip",
@@ -3650,10 +4238,7 @@ def _check_connector_inventory(
             detail += "; judge active (proxy lane)"
         else:
             hook_conns = list(getattr(judge, "hook_connectors", []) or [])
-            gated_on = any(
-                entry.strip() == "*" or entry.strip().lower() == connector.lower()
-                for entry in hook_conns
-            )
+            gated_on = any(entry.strip() == "*" or entry.strip().lower() == connector.lower() for entry in hook_conns)
             if gated_on:
                 detail += "; judge active (hook lane)"
             else:
@@ -3665,7 +4250,17 @@ def _check_connector_inventory(
         _emit("pass", "Detection", detail, r=r)
 
 
-def _check_hook_contract_lock(cfg, connector: str, r: _DoctorResult) -> None:
+def _check_hook_contract_lock(
+    cfg,
+    connector: str,
+    r: _DoctorResult,
+    *,
+    platform_name: str | None = None,
+    config_path: str | None = None,
+    install_root: str | None = None,
+    search_path: str | None = None,
+    pathext: str | None = None,
+) -> None:
     if connector in {"openclaw", "zeptoclaw"}:
         _emit("skip", "Hook contract", f"{connector} uses proxy/chat surfaces", r=r)
         return
@@ -3699,27 +4294,62 @@ def _check_hook_contract_lock(cfg, connector: str, r: _DoctorResult) -> None:
     if script_version:
         detail += f" script={script_version}"
     locations = entry.get("locations") or {}
+    native_runtime = None
+    if (platform_name or os.name) == "nt" and connector in {"codex", "claudecode"}:
+        native_runtime = _windows_native_hook_check(
+            cfg,
+            connector,
+            config_path=config_path,
+            install_root=install_root,
+            search_path=search_path,
+            pathext=pathext,
+        )
     if isinstance(locations, dict):
         workspace_dir = str(locations.get("workspace_dir") or "").strip()
         hook_paths = [str(v) for v in locations.get("hook_config_paths", []) if v]
         runtime_paths = [str(v) for v in locations.get("hook_script_paths", []) if v]
+        if (platform_name or os.name) == "nt":
+            # The lock also records portable generated assets for digest and
+            # freshness checks.  They are not Windows runtimes.  Retain real
+            # native artifacts such as Cursor's .ps1 adapter and OmniGent's
+            # .py/.pth files, but never label a generated shell script as the
+            # configured Windows runtime.
+            runtime_paths = [path for path in runtime_paths if not path.lower().endswith(".sh")]
+        if native_runtime is not None:
+            runtime_paths = []
         if workspace_dir:
             detail += f" workspace={workspace_dir}"
         if hook_paths:
             detail += f" hook_path={hook_paths[0]}"
         if runtime_paths:
             detail += f" runtime_path={runtime_paths[0]}"
+    if native_runtime is not None:
+        detail += f" {native_runtime.runtime_description}"
 
-    current_version = _discovered_agent_version(data_dir, connector)
+    # Native Codex setup records the exact executable, version, and digest used
+    # to select the hook contract.  Automatic discovery can legitimately find a
+    # different installation (for example an npm .CMD wrapper ahead of the
+    # desktop app on PATH); it must not override that protected setup evidence.
+    protected_codex_agent = connector == "codex" and all(
+        (
+            str(entry.get("agent_executable") or "").strip(),
+            str(entry.get("agent_executable_sha256") or "").strip(),
+            str(entry.get("agent_executable_source") or "").strip() == "setup-selected",
+        )
+    )
+    current_version = "" if protected_codex_agent else _discovered_agent_version(data_dir, connector)
     if current_version and raw_version and current_version != raw_version:
         _emit(
             "fail",
             "Hook contract",
-            f"drift: lock has {raw_version!r}, discovery now reports {current_version!r}",
+            f"drift: lock has {raw_version!r}, discovery now reports {current_version!r}"
+            + (f"; {native_runtime.runtime_description}" if native_runtime is not None else ""),
             r=r,
         )
         return
-    if status == "unknown":
+    if native_runtime is not None and not native_runtime.healthy:
+        _emit("fail", "Hook contract", detail, r=r)
+    elif status == "unknown":
         _emit("fail", "Hook contract", detail, r=r)
     elif status in {"known", "unversioned"}:
         _emit("pass", "Hook contract", detail, r=r)
@@ -3854,8 +4484,7 @@ def _check_plugin_registry_required(cfg, r: _DoctorResult) -> None:
     _emit(
         "warn",
         "Plugin registry policy",
-        f"plugin.registry_required=true [{where}] is a dead-end — {impact}; "
-        "run 'doctor --fix' to clear it",
+        f"plugin.registry_required=true [{where}] is a dead-end — {impact}; run 'doctor --fix' to clear it",
         r=r,
     )
 
@@ -3928,7 +4557,8 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
         paths = ", ".join(by_conn[name])
         parts.append(f"{name}: {paths}")
     detail = (
-        "found residue from inactive connectors — " + "; ".join(parts)
+        "found residue from inactive connectors — "
+        + "; ".join(parts)
         + ". Run 'defenseclaw-gateway connector teardown --connector <name>' "
         "for each residual connector, or "
         "'defenseclaw uninstall --keep-openclaw' for a manual sweep."
@@ -4087,8 +4717,7 @@ def _fix_gateway_token_env(cfg, *, assume_yes: bool) -> tuple[str, str]:
         return ("skip", f"{canonical} is not set; nothing to repoint at")
 
     if not assume_yes and not click.confirm(
-        f"    Repoint cfg.gateway.token_env from {configured_env!r} "
-        f"to {canonical!r} in config.yaml?",
+        f"    Repoint cfg.gateway.token_env from {configured_env!r} to {canonical!r} in config.yaml?",
         default=True,
     ):
         return ("skip", "declined by user")
@@ -4137,12 +4766,8 @@ def _fix_gateway_token_drift(cfg, *, assume_yes: bool) -> tuple[str, str]:
             for line in fh:
                 line = line.strip()
                 if line.startswith("DEFENSECLAW_GATEWAY_TOKEN="):
-                    value = line[len("DEFENSECLAW_GATEWAY_TOKEN="):]
-                    if (
-                        len(value) >= 2
-                        and value[0] == value[-1]
-                        and value[0] in ('"', "'")
-                    ):
+                    value = line[len("DEFENSECLAW_GATEWAY_TOKEN=") :]
+                    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
                         value = value[1:-1]
                     dotenv_token = value
                     break
@@ -4164,13 +4789,11 @@ def _fix_gateway_token_drift(cfg, *, assume_yes: bool) -> tuple[str, str]:
     if not gw_binary:
         return (
             "warn",
-            "drift detected but defenseclaw-gateway not on PATH; "
-            "restart the sidecar manually to reconcile",
+            "drift detected but defenseclaw-gateway not on PATH; restart the sidecar manually to reconcile",
         )
 
     if not assume_yes and not click.confirm(
-        f"    Restart sidecar (pid {pid}) to pick up the current "
-        ".env token? In-flight requests will be interrupted.",
+        f"    Restart sidecar (pid {pid}) to pick up the current .env token? In-flight requests will be interrupted.",
         default=True,
     ):
         return ("skip", "declined by user")
@@ -4276,8 +4899,7 @@ def _fix_plugin_registry_required(cfg, *, assume_yes: bool) -> tuple[str, str]:
         return ("skip", "no plugin.registry_required flag set")
 
     if not assume_yes and not click.confirm(
-        f"    Clear the dead-end plugin.registry_required flag for "
-        f"[{', '.join(offenders)}] in config.yaml?",
+        f"    Clear the dead-end plugin.registry_required flag for [{', '.join(offenders)}] in config.yaml?",
         default=True,
     ):
         return ("skip", "declined by user")

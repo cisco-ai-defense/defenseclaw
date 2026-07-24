@@ -406,6 +406,9 @@ var retentionAuditMigrationCatalog = map[string]retentionOwnership{
 	"alert_acknowledgement_operations": retentionOwnedProtected,
 	"alert_acknowledgement_baselines":  retentionOwnedProtected,
 	"alert_acknowledgement_health":     retentionOwnedProtected,
+	"quarantine_records":               retentionOwnedProtected,
+	"quarantine_record_connectors":     retentionOwnedProtected,
+	"runtime_asset_state":              retentionOwnedProtected,
 	// Correlation state is graph-owned rather than independent row history.
 	// Its bounded graph reaper is added alongside the ledger so the generic
 	// table reaper can never delete a parent before its cursor, receipt, or
@@ -1271,6 +1274,12 @@ func installRetentionScanIntegrityTriggers(ex dbExecer) error {
 }
 
 func ensureRetentionTimestampInfrastructure(db *sql.DB) error {
+	return retryBusy(context.Background(), "ensure-retention-timestamp-infrastructure", func() error {
+		return ensureRetentionTimestampInfrastructureOnce(db)
+	})
+}
+
+func ensureRetentionTimestampInfrastructureOnce(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin retention timestamp infrastructure verification: %w", err)

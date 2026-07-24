@@ -207,6 +207,27 @@ def test_locked_database_respects_short_caller_deadline(tmp_path: Path) -> None:
     assert elapsed < 0.2
 
 
+def test_canonical_reads_leave_retry_budget_to_outer_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir, _ = _fixture(tmp_path)
+    real_connect = sqlite3.connect
+    observed_timeouts: list[object] = []
+
+    def recording_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        observed_timeouts.append(kwargs.get("timeout"))
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(receipt_check.sqlite3, "connect", recording_connect)
+
+    with pytest.raises(ReceiptCheckError, match="canonical=0 queued=0"):
+        _check(data_dir, timeout=0.01)
+
+    assert observed_timeouts
+    assert set(observed_timeouts) == {0.0}
+
+
 def test_slow_canonical_read_cannot_succeed_after_caller_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -358,7 +358,7 @@ The Go gateway's key internal packages are:
 | `gatewaylog/` | Structured JSONL event writer with fanout callbacks (rotating, 50MB) |
 | `guardrail/` | RulePack loading, JudgeYAML definitions, LRU-cached suppressions |
 | `inventory/` | Installed skills/MCP server tracking (AIBOM) |
-| `notify/` | Cross-platform desktop notifications (osascript on macOS, notify-send on Linux, stderr fallback) for watchdog alerts |
+| `notify/` | Desktop notifications on macOS (`osascript`), Linux (`notify-send`), and Windows (an in-process `Shell_NotifyIconW` broker owned by the signed gateway), with labelled stderr fallback when native delivery fails |
 | `policy/` | OPA engine — 7 Rego files (admission, guardrail, firewall, audit, skill_actions, sandbox, openshell), compiled once via `sync.Once` |
 | `redaction/` | Central field-class projection transforms: preserve, detect substrings, redact whole, keyed hash, or remove |
 | `sandbox/` | NVIDIA OpenShell sandbox policy enforcement |

@@ -186,6 +186,18 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertEqual(g.effective_block_message(""), "")
         self.assertEqual(g.effective_rule_pack_dir(""), "")
 
+    def test_explicit_connector_fail_mode_wins_in_observe(self):
+        g = GuardrailConfig(
+            mode="observe",
+            hook_fail_mode="closed",
+            connectors={
+                "codex": PerConnectorGuardrailConfig(hook_fail_mode="closed"),
+                "claudecode": PerConnectorGuardrailConfig(),
+            },
+        )
+        self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
+        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "open")
+
     def test_empty_map_equals_absent(self):
         with_empty = GuardrailConfig(mode="action", connectors={})
         absent = GuardrailConfig(mode="action")

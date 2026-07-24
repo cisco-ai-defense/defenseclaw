@@ -849,7 +849,7 @@ func TestEnrichAgentHookContext_CodexRefreshesEnvelope(t *testing.T) {
 func TestRuntimeAssetCanEnforce_HookOnlyEvents(t *testing.T) {
 	enforceable := []string{
 		// Claude/Codex baseline — kept literal in production code.
-		"PreToolUse", "PermissionRequest", "UserPromptExpansion",
+		"UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest",
 		// Hermes
 		"pre_tool_call",
 		// Cursor
@@ -866,10 +866,10 @@ func TestRuntimeAssetCanEnforce_HookOnlyEvents(t *testing.T) {
 			t.Errorf("runtimeAssetCanEnforce(%q) = false, want true (hook-only connector tool-inspection event)", ev)
 		}
 	}
-	// Negative cases — prompt and result events stay non-enforceable
+	// Negative cases — post-execution and non-selection prompt events stay non-enforceable
 	// so the merge logic correctly downgrades to would-block.
 	nonEnforceable := []string{
-		"UserPromptSubmit", "post_tool_call", "PostToolUse", "Stop", "BeforeAgent",
+		"post_tool_call", "PostToolUse", "Stop", "BeforeAgent",
 	}
 	for _, ev := range nonEnforceable {
 		if runtimeAssetCanEnforce(ev) {

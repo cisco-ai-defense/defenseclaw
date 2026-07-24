@@ -144,7 +144,7 @@ func TestWatchdogRecordsWatcherRestart(t *testing.T) {
 
 	loopDone := make(chan struct{})
 	go func() {
-		runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, debounce, nil, recorder)
+		runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, debounce, watchdogHealthRequirements{requireFleet: true}, nil, recorder)
 		close(loopDone)
 	}()
 
@@ -190,7 +190,7 @@ func TestWatchdogDoesNotRecordRestartOnSteadyHealthy(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 	defer cancel()
 
-	runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, 2, nil, recorder)
+	runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, 2, watchdogHealthRequirements{requireFleet: true}, nil, recorder)
 
 	if got := recorder.attempts.Load(); got != 0 {
 		t.Fatalf("expected 0 recovery notifications during steady healthy window, got %d", got)

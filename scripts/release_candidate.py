@@ -52,7 +52,15 @@ try:
         release_identity_for_version,
     )
 except ModuleNotFoundError:  # Direct ``python scripts/release_candidate.py`` execution.
-    from source_release_identity import SourceIdentityError, release_identity_for_version
+    from source_release_identity import (
+        SourceIdentityError,
+        release_identity_for_version,
+    )
+
+try:
+    from scripts.telemetry_runtime_assets import RuntimeAssetError, read_logical_asset
+except ModuleNotFoundError:  # Direct ``python scripts/release_candidate.py`` execution.
+    from telemetry_runtime_assets import RuntimeAssetError, read_logical_asset
 
 SCHEMA_VERSION = 2
 RUNTIME_ATTESTATION_FILENAME = "runtime-candidate-checksums.txt"
@@ -63,14 +71,53 @@ RELEASE_PROVENANCE_SCHEMA_VERSION = 1
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+WINDOWS_NUMERIC_SHORT_NAME_RE = re.compile(r"^[a-z0-9]{1,6}~[0-9]+$")
 MAX_GATEWAY_BINARY_BYTES = 512 * 1024 * 1024
 PROTECTED_ARTIFACT_MAGIC = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
 PROTECTED_ARTIFACT_XOR_BYTE = 0xA5
-PROTECTED_ARTIFACT_TRANSLATION = bytes(
-    value ^ PROTECTED_ARTIFACT_XOR_BYTE for value in range(256)
-)
+PROTECTED_ARTIFACT_TRANSLATION = bytes(value ^ PROTECTED_ARTIFACT_XOR_BYTE for value in range(256))
 MAX_PROTECTED_ARTIFACT_BYTES = MAX_GATEWAY_BINARY_BYTES + len(PROTECTED_ARTIFACT_MAGIC)
 ROOT = Path(__file__).resolve().parents[1]
+V8_CONFIG_WHEEL_RESOURCES = (
+    (
+        "defenseclaw/_data/config/v8/defenseclaw-config.schema.json",
+        "schemas/config/v8/defenseclaw-config.schema.json",
+    ),
+    (
+        "defenseclaw/_data/config/v8/observability.yaml",
+        "schemas/config/v8/reference/observability.yaml",
+    ),
+    (
+        "defenseclaw/_data/config/v8/observability.md",
+        "schemas/config/v8/reference/observability.md",
+    ),
+)
+V8_TELEMETRY_WHEEL_RESOURCES = (
+    (
+        "defenseclaw/_data/telemetry/v8/telemetry.schema.json",
+        "schemas/telemetry/generated/telemetry.schema.json",
+    ),
+    (
+        "defenseclaw/_data/telemetry/v8/catalog.json",
+        "schemas/telemetry/generated/catalog.json",
+    ),
+    (
+        "defenseclaw/_data/telemetry/v8/v7-exporter-selection.json",
+        "schemas/telemetry/generated/compatibility/v7-exporter-selection.json",
+    ),
+    (
+        "defenseclaw/_data/telemetry/v8/galileo-rich-v2.json",
+        "schemas/telemetry/generated/compatibility/galileo-rich-v2.json",
+    ),
+    (
+        "defenseclaw/_data/telemetry/v8/local-observability-v1.json",
+        "schemas/telemetry/generated/compatibility/local-observability-v1.json",
+    ),
+    (
+        "defenseclaw/_data/telemetry/v8/openinference-v1.json",
+        "schemas/telemetry/generated/compatibility/openinference-v1.json",
+    ),
+)
 UPGRADE_BASELINES_PATH = Path(
     os.environ.get(
         "UPGRADE_BASELINE_POLICY",
@@ -88,10 +135,48 @@ MAX_RESOLVER_BYTES = 4 * 1024 * 1024
 MAX_RELEASE_CERTIFICATE_BYTES = 64 * 1024
 MAX_EFFECTIVE_UPGRADE_BASELINES_BYTES = 1024 * 1024
 EFFECTIVE_UPGRADE_BASELINES_FILENAME = "effective-upgrade-baselines.json"
-STRICT_BASE64_RE = re.compile(
-    rb"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?"
-)
+STRICT_BASE64_RE = re.compile(rb"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?")
 MACOS_VERIFICATION_STATUSES = ("notarized", "unverified")
+WINDOWS_SETUP_START_VERSION = (0, 8, 6)
+WINDOWS_SETUP_ASSET = "DefenseClawSetup-x64.exe"
+WINDOWS_SETUP_PUBLISHER = "Cisco Systems, Inc."
+WINDOWS_SETUP_CLIENTS = {
+    "codex": "0.144.3",
+    "claudecode": "2.1.208",
+}
+WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS = (
+    "automatic-codex-trust",
+    "lifecycle",
+    "tool-allow",
+    "tool-block",
+    "gateway-jsonl",
+    "audit-correlation",
+    "connector-otlp",
+    "repair",
+    "upgrade",
+    "uninstall",
+)
+WINDOWS_SETUP_UNVERIFIED_REQUIREMENTS = ("setup-acceptance",)
+CHECKSUMS_BUNDLE_FILENAME = "checksums.txt.bundle"
+MAX_WINDOWS_SETUP_BYTES = 2 * 1024 * 1024 * 1024
+MAX_WINDOWS_SETUP_METADATA_BYTES = 128 * 1024 * 1024
+MAX_LEGACY_COSIGN_BUNDLE_BYTES = 16 * 1024 * 1024
+WINDOWS_PYTHON_EMBED_NAME = "python-3.13.14-embed-amd64.zip"
+WINDOWS_PYTHON_EMBED_URL = "https://www.python.org/ftp/python/3.13.14/python-3.13.14-embed-amd64.zip"
+WINDOWS_PYTHON_EMBED_SHA256 = "90b4e5b9898b72d744650524bff92377c367f44bd5fbd09e3148656c080ad907"
+WINDOWS_PYTHON_RUNTIME_REVIEW_DEADLINE = "2026-09-10T00:00:00.0000000+00:00"
+WINDOWS_YARA_COMPAT_WHEEL = "yara_python-4.5.4.post1-py3-none-any.whl"
+WINDOWS_WIN_UNICODE_SOURCE_URL = (
+    "https://files.pythonhosted.org/packages/89/8d/7aad74930380c8972ab282304a2ff45f3d4927108bb6693cabcc9fc6a099/"
+    "win_unicode_console-0.5.zip"
+)
+WINDOWS_WIN_UNICODE_SOURCE_SHA256 = "d4142d4d56d46f449d6f00536a73625a871cba040f0bc1a2e305a04578f07d1e"
+WINDOWS_COSIGN_VERSION = "2.6.2"
+WINDOWS_COSIGN_URL = "https://github.com/sigstore/cosign/releases/download/v2.6.2/cosign-windows-amd64.exe"
+WINDOWS_COSIGN_SHA256 = "dd6c61e510da627bcaed4cd9db844ec11cacd09826d814d89f7f68d40feb07be"
+WINDOWS_RESOURCE_POLICY = "internal/windowsresources"
+WINDOWS_RESOURCE_ICON = "macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"
+WINDOWS_RESOURCE_ICON_SHA256 = "4425858688397762266ceb5304dcbca7afe330ec1c262dd2addcb7539b14b2bf"
 
 
 class CandidateError(RuntimeError):
@@ -177,7 +262,9 @@ def _directory_identity(info: os.stat_result) -> tuple[int, int, int]:
     return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode))
 
 
-def _read_release_certificate(path: Path) -> tuple[bytes, os.stat_result, os.stat_result]:
+def _read_release_certificate(
+    path: Path,
+) -> tuple[bytes, os.stat_result, os.stat_result]:
     """Read one bounded regular certificate file without following a symlink."""
 
     try:
@@ -301,10 +388,9 @@ def _atomic_replace_release_certificate(
 
         current_file = path.lstat()
         current_parent = path.parent.lstat()
-        if (
-            _file_state(current_file) != _file_state(expected_file)
-            or _directory_identity(current_parent) != _directory_identity(expected_parent)
-        ):
+        if _file_state(current_file) != _file_state(expected_file) or _directory_identity(
+            current_parent
+        ) != _directory_identity(expected_parent):
             raise CandidateError("release certificate path changed before atomic publication")
         os.replace(temporary_name, path)
         temporary_name = ""
@@ -383,9 +469,7 @@ def _write_protected_artifact(source: Path, destination: Path) -> None:
             destination.unlink()
         except FileNotFoundError:
             pass
-        raise CandidateError(
-            f"could not create protected runtime artifact {destination.name}: {exc}"
-        ) from exc
+        raise CandidateError(f"could not create protected runtime artifact {destination.name}: {exc}") from exc
 
 
 def _validate_version(version: str) -> None:
@@ -420,7 +504,10 @@ def runtime_asset_names(version: str) -> tuple[str, ...]:
             for arch in ("amd64", "arm64")
         )
         wheel = protected["wheel"]
-        refusal_assets = (*canonical_archives, f"defenseclaw-{version}-py3-none-any.whl")
+        refusal_assets = (
+            *canonical_archives,
+            f"defenseclaw-{version}-py3-none-any.whl",
+        )
     return tuple(
         sorted(
             (
@@ -438,8 +525,7 @@ def runtime_asset_names(version: str) -> tuple[str, ...]:
 def _validate_macos_verification_status(status: object) -> str:
     if not isinstance(status, str) or status not in MACOS_VERIFICATION_STATUSES:
         raise CandidateError(
-            "macOS verification status must be exactly one of "
-            f"{MACOS_VERIFICATION_STATUSES!r}, got {status!r}"
+            f"macOS verification status must be exactly one of {MACOS_VERIFICATION_STATUSES!r}, got {status!r}"
         )
     return status
 
@@ -471,6 +557,30 @@ def release_identity_asset_names(version: str) -> tuple[str, ...]:
     return (RELEASE_PROVENANCE_FILENAME, RELEASE_SOURCE_MAP_FILENAME)
 
 
+def windows_installer_asset_names(version: str) -> tuple[str, ...]:
+    """Return the exact native-Setup release set for 0.8.6+."""
+
+    _validate_version(version)
+    if tuple(map(int, version.split("."))) < WINDOWS_SETUP_START_VERSION:
+        return ()
+    return (
+        WINDOWS_SETUP_ASSET,
+        f"{WINDOWS_SETUP_ASSET}.provenance.json",
+        f"{WINDOWS_SETUP_ASSET}.sbom.json",
+        f"{WINDOWS_SETUP_ASSET}.sha256",
+    )
+
+
+def release_proof_asset_names(version: str) -> tuple[str, ...]:
+    """Return checksum-signature proof files published outside checksums.txt."""
+
+    _validate_version(version)
+    names = ["checksums.txt.pem", "checksums.txt.sig"]
+    if tuple(map(int, version.split("."))) >= WINDOWS_SETUP_START_VERSION:
+        names.append(CHECKSUMS_BUNDLE_FILENAME)
+    return tuple(sorted(names))
+
+
 def payload_asset_names(
     version: str,
     macos_verification_status: str,
@@ -482,6 +592,7 @@ def payload_asset_names(
                 *macos_asset_names(version, macos_verification_status),
                 *resolver_asset_names(version),
                 *release_identity_asset_names(version),
+                *windows_installer_asset_names(version),
             )
         )
     )
@@ -498,8 +609,7 @@ def published_asset_names(
             (
                 *payload_asset_names(version, macos_verification_status),
                 "checksums.txt",
-                "checksums.txt.pem",
-                "checksums.txt.sig",
+                *release_proof_asset_names(version),
             )
         )
     )
@@ -513,9 +623,7 @@ def windows_release_binary_names(version: str) -> tuple[str, ...]:
     """Return Windows runtime binaries and SBOMs, excluding the refusal resolver."""
 
     _validate_version(version)
-    canonical = tuple(
-        f"defenseclaw_{version}_windows_{arch}.zip" for arch in ("amd64", "arm64")
-    )
+    canonical = tuple(f"defenseclaw_{version}_windows_{arch}.zip" for arch in ("amd64", "arm64"))
     if tuple(map(int, version.split("."))) < (0, 8, 4):
         archives = canonical
         sboms = tuple(f"{name}.sbom.json" for name in archives)
@@ -603,12 +711,16 @@ def _load_upgrade_baseline_policy(
     if candidate_version is None:
         try:
             source_identity = json.loads(
-                (ROOT / "release" / "source-install-identity.json").read_text(
-                    encoding="utf-8"
-                )
+                (ROOT / "release" / "source-install-identity.json").read_text(encoding="utf-8")
             )
             candidate_version = source_identity["source_release"]
-        except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+        ) as exc:
             raise CandidateError("could not resolve source release for baseline validation") from exc
         if not isinstance(candidate_version, str) or not VERSION_RE.fullmatch(candidate_version):
             raise CandidateError("source release for baseline validation is invalid")
@@ -644,10 +756,7 @@ def _load_upgrade_baseline_policy(
             or value > _runtime_config_version_from_source(candidate_version)
             for value in config_versions.values()
         )
-        or (
-            "0.8.4" in config_versions
-            and config_versions.get("0.8.4") != 7
-        )
+        or ("0.8.4" in config_versions and config_versions.get("0.8.4") != 7)
         or not isinstance(platforms, dict)
         or set(platforms) != {"windows"}
     ):
@@ -655,7 +764,6 @@ def _load_upgrade_baseline_policy(
     windows = platforms["windows"]
     if (
         not isinstance(windows, list)
-        or not windows
         or any(not isinstance(item, str) or not VERSION_RE.fullmatch(item) for item in windows)
         or len(windows) != len(set(windows))
         or windows != sorted(windows, key=lambda item: tuple(map(int, item.split("."))), reverse=True)
@@ -668,9 +776,7 @@ def _load_upgrade_baseline_policy(
 
 def _validate_historical_artifact_digest_policy(configured: list[str]) -> None:
     try:
-        document = json.loads(
-            HISTORICAL_ARTIFACT_DIGESTS_PATH.read_text(encoding="utf-8")
-        )
+        document = json.loads(HISTORICAL_ARTIFACT_DIGESTS_PATH.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CandidateError(f"could not load historical artifact digest policy: {exc}") from exc
     if not isinstance(document, dict) or set(document) != {
@@ -688,16 +794,14 @@ def _validate_historical_artifact_digest_policy(configured: list[str]) -> None:
         or not isinstance(exceptions, dict)
     ):
         raise CandidateError("historical artifact digest policy is invalid")
+
     def version_key(value: str) -> tuple[int, int, int]:
         return tuple(map(int, value.split(".")))
 
-    expected_versions = {
-        version for version in configured if version_key(version) < version_key(coverage_start)
-    }
+    expected_versions = {version for version in configured if version_key(version) < version_key(coverage_start)}
     if set(exceptions) != expected_versions:
         raise CandidateError(
-            "historical artifact digest exceptions must exactly match tested baselines "
-            "below signed-wheel coverage"
+            "historical artifact digest exceptions must exactly match tested baselines below signed-wheel coverage"
         )
     for version, artifacts in exceptions.items():
         expected_name = f"defenseclaw-{version}-py3-none-any.whl"
@@ -707,9 +811,7 @@ def _validate_historical_artifact_digest_policy(configured: list[str]) -> None:
             or not isinstance(artifacts.get(expected_name), str)
             or not SHA256_RE.fullmatch(artifacts[expected_name])
         ):
-            raise CandidateError(
-                f"historical digest exception for {version} must be one canonical wheel digest"
-            )
+            raise CandidateError(f"historical digest exception for {version} must be one canonical wheel digest")
 
 
 def validate_release_progression(target: str, releases_json: Path) -> tuple[str, str]:
@@ -741,9 +843,7 @@ def validate_release_progression(target: str, releases_json: Path) -> tuple[str,
             continue
         tag = row.get("tag_name")
         if not isinstance(tag, str) or not VERSION_RE.fullmatch(tag):
-            raise CandidateError(
-                f"published stable release has a non-canonical tag: {tag!r}"
-            )
+            raise CandidateError(f"published stable release has a non-canonical tag: {tag!r}")
         stable_versions.append(tag)
 
     def version_key(value: str) -> tuple[int, int, int]:
@@ -805,8 +905,7 @@ def _expected_release_artifacts(version: str) -> dict[str, Any]:
     gateways: dict[str, dict[str, str]] = {}
     for os_name in ("darwin", "linux", "windows"):
         gateways[os_name] = {
-            arch: f"defenseclaw_{version}_protocol2_{os_name}_{arch}.dcgateway"
-            for arch in ("amd64", "arm64")
+            arch: f"defenseclaw_{version}_protocol2_{os_name}_{arch}.dcgateway" for arch in ("amd64", "arm64")
         }
     return {
         "wheel": f"defenseclaw-{version}-2-py3-none-any.dcwheel",
@@ -825,15 +924,11 @@ def _validate_upgrade_manifest(
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CandidateError(f"invalid upgrade manifest {path}: {exc}") from exc
     if document.get("release_version") != version:
-        raise CandidateError(
-            f"upgrade manifest release_version={document.get('release_version')!r}; want {version!r}"
-        )
+        raise CandidateError(f"upgrade manifest release_version={document.get('release_version')!r}; want {version!r}")
     version_key = tuple(map(int, version.split(".")))
     expected_schema = 2 if version_key >= (0, 8, 4) else 1
     if document.get("schema_version") != expected_schema:
-        raise CandidateError(
-            f"upgrade manifest schema_version must be {expected_schema} for release {version}"
-        )
+        raise CandidateError(f"upgrade manifest schema_version must be {expected_schema} for release {version}")
     if document.get("migration_failure_policy") != "fail":
         raise CandidateError("release upgrade manifest must fail closed on required migration errors")
     min_protocol = document.get("min_upgrade_protocol", 1)
@@ -859,16 +954,10 @@ def _validate_upgrade_manifest(
         if not isinstance(tested, list) or not isinstance(platform_tested, dict):
             raise CandidateError("schema-2 manifest lacks its complete tested-source policy")
         if set(platform_tested) != {"windows"} or not isinstance(platform_tested["windows"], list):
-            raise CandidateError(
-                "platform_tested_source_versions must contain exactly the Windows source list"
-            )
-        expected_tested = [
-            item for item in configured if tuple(map(int, item.split("."))) < version_key
-        ]
+            raise CandidateError("platform_tested_source_versions must contain exactly the Windows source list")
+        expected_tested = [item for item in configured if tuple(map(int, item.split("."))) < version_key]
         expected_windows = [
-            item
-            for item in platform_configured["windows"]
-            if tuple(map(int, item.split("."))) < version_key
+            item for item in platform_configured["windows"] if tuple(map(int, item.split("."))) < version_key
         ]
         manifest_bridge = document.get("required_bridge_version")
         if manifest_bridge and manifest_bridge not in expected_windows:
@@ -876,11 +965,7 @@ def _validate_upgrade_manifest(
             # from older sources unsupported on that platform. Retain only
             # actually published post-hard-cut runtimes, which can drive a
             # direct protocol-2 transition without the bridge.
-            expected_windows = [
-                item
-                for item in expected_windows
-                if tuple(map(int, item.split("."))) >= (0, 8, 5)
-            ]
+            expected_windows = [item for item in expected_windows if tuple(map(int, item.split("."))) >= (0, 8, 5)]
         if tested != expected_tested:
             raise CandidateError(
                 "tested_source_versions must exactly match every reviewed baseline older than the candidate"
@@ -898,23 +983,12 @@ def _validate_upgrade_manifest(
             )
         source_runtime = _runtime_config_version_from_source(version)
         if source_runtime != expected_runtime:
-            literal = (
-                "ObservabilityV8ConfigVersion"
-                if version_key >= (0, 8, 5)
-                else "CurrentConfigVersion"
-            )
+            literal = "ObservabilityV8ConfigVersion" if version_key >= (0, 8, 5) else "CurrentConfigVersion"
             raise CandidateError(
-                f"release {version} requires gateway {literal}={expected_runtime}, "
-                f"got {source_runtime}"
+                f"release {version} requires gateway {literal}={expected_runtime}, got {source_runtime}"
             )
-        if (
-            not isinstance(runtime_config, int)
-            or isinstance(runtime_config, bool)
-            or runtime_config != source_runtime
-        ):
-            raise CandidateError(
-                "runtime_config_version must match the release-selected gateway config literal"
-            )
+        if not isinstance(runtime_config, int) or isinstance(runtime_config, bool) or runtime_config != source_runtime:
+            raise CandidateError("runtime_config_version must match the release-selected gateway config literal")
         if release_artifacts != _expected_release_artifacts(version):
             raise CandidateError(
                 "release_artifacts must explicitly name the exact protected wheel and platform gateways"
@@ -924,26 +998,21 @@ def _validate_upgrade_manifest(
             for os_name in ("darwin", "linux", "windows")
             for arch in ("amd64", "arm64")
         ]
-        if len(flattened) != len(set(flattened)) or any(
-            Path(name).name != name for name in flattened
-        ):
+        if len(flattened) != len(set(flattened)) or any(Path(name).name != name for name in flattened):
             raise CandidateError("release_artifacts names must be unique basenames")
     elif (
-        tested is not None
-        or platform_tested is not None
-        or runtime_config is not None
-        or release_artifacts is not None
+        tested is not None or platform_tested is not None or runtime_config is not None or release_artifacts is not None
     ):
         raise CandidateError("schema-1 candidate must not declare schema-2 policy")
 
-    bridge_keys = ("minimum_source_version", "required_bridge_version", "auto_bridge_from")
+    bridge_keys = (
+        "minimum_source_version",
+        "required_bridge_version",
+        "auto_bridge_from",
+    )
     bridge_presence = [key in document for key in bridge_keys]
-    if version_key >= (0, 8, 5) and (
-        min_protocol != 2 or not all(bridge_presence)
-    ):
-        raise CandidateError(
-            "0.8.5+ hard-cut release requires upgrade protocol 2 and a complete bridge contract"
-        )
+    if version_key >= (0, 8, 5) and (min_protocol != 2 or not all(bridge_presence)):
+        raise CandidateError("0.8.5+ hard-cut release requires upgrade protocol 2 and a complete bridge contract")
     if any(bridge_presence) and not all(bridge_presence):
         raise CandidateError("upgrade manifest bridge contract is incomplete")
     if min_protocol > 1 and not all(bridge_presence):
@@ -970,33 +1039,23 @@ def _validate_upgrade_manifest(
         raise CandidateError("upgrade manifest auto_bridge_from must contain unique X.Y.Z versions")
 
     if tested is None or platform_tested is None:
-        raise CandidateError(
-            "upgrade manifest bridge contract requires the schema-2 tested-source policy"
-        )
+        raise CandidateError("upgrade manifest bridge contract requires the schema-2 tested-source policy")
     if bridge not in configured:
         raise CandidateError(f"required bridge {bridge} is absent from the tested baseline matrix")
     if bridge not in tested:
-        raise CandidateError(
-            f"required bridge {bridge} is absent from the signed global tested-source matrix"
-        )
+        raise CandidateError(f"required bridge {bridge} is absent from the signed global tested-source matrix")
     if bridge in platform_configured["windows"]:
         if bridge not in platform_tested["windows"]:
-            raise CandidateError(
-                f"required bridge {bridge} is absent from the tested Windows baseline matrix"
-            )
+            raise CandidateError(f"required bridge {bridge} is absent from the tested Windows baseline matrix")
     elif platform_tested["windows"]:
         raise CandidateError(
-            f"Windows bridge {bridge} is unpublished; the tested Windows baseline matrix "
-            "must be empty"
+            f"Windows bridge {bridge} is unpublished; the tested Windows baseline matrix must be empty"
         )
     bridge_key = tuple(map(int, bridge.split(".")))
-    expected_automatic = [
-        item for item in configured if tuple(map(int, item.split("."))) < bridge_key
-    ]
+    expected_automatic = [item for item in configured if tuple(map(int, item.split("."))) < bridge_key]
     if automatic != expected_automatic:
         raise CandidateError(
-            "auto_bridge_from must exactly match every published baseline older than "
-            f"required_bridge_version {bridge}"
+            f"auto_bridge_from must exactly match every published baseline older than required_bridge_version {bridge}"
         )
 
 
@@ -1075,9 +1134,7 @@ def _upgrade_controller_calls(
 
         def visit_Call(self, node: ast.Call) -> None:
             if isinstance(node.func, ast.Name):
-                calls.append(
-                    (node.func.id, node.lineno, self.hard_cut_guard_depth > 0)
-                )
+                calls.append((node.func.id, node.lineno, self.hard_cut_guard_depth > 0))
             self.generic_visit(node)
 
     visitor = CallVisitor()
@@ -1151,9 +1208,7 @@ def _validate_phase_two_mutator_wrapper(source: str) -> None:
     if markers != ["--defenseclaw-phase-two-mutator"]:
         raise CandidateError("0.8.4+ mutator wrapper lacks its exact private marker")
     entrypoints = [
-        node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "main"
+        node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "main"
     ]
     if len(entrypoints) != 1:
         raise CandidateError("0.8.4+ mutator wrapper must define one main entrypoint")
@@ -1171,17 +1226,12 @@ def _validate_phase_two_mutator_wrapper(source: str) -> None:
         "subprocess.run",
     ):
         if required not in call_names:
-            raise CandidateError(
-                f"0.8.4+ mutator wrapper lacks lease/child contract call {required}"
-            )
+            raise CandidateError(f"0.8.4+ mutator wrapper lacks lease/child contract call {required}")
     if len([node for node in calls if _ast_call_name(node) == "subprocess.run"]) != 1 or any(
-        _ast_call_name(node) in {"subprocess.Popen", "os.system", "os.popen"}
-        for node in calls
+        _ast_call_name(node) in {"subprocess.Popen", "os.system", "os.popen"} for node in calls
     ):
         raise CandidateError("0.8.4+ mutator wrapper has an unbound child launch")
-    inheritable_calls = [
-        node for node in calls if _ast_call_name(node) == "os.set_inheritable"
-    ]
+    inheritable_calls = [node for node in calls if _ast_call_name(node) == "os.set_inheritable"]
     if not (
         len(inheritable_calls) == 1
         and len(inheritable_calls[0].args) == 2
@@ -1213,10 +1263,7 @@ def _validate_phase_two_mutator_wrapper(source: str) -> None:
     ):
         raise CandidateError("0.8.4+ mutator wrapper child command is not argument-bound")
     keywords = {keyword.arg: keyword.value for keyword in child_launch.keywords if keyword.arg}
-    if not (
-        isinstance(keywords.get("check"), ast.Constant)
-        and keywords["check"].value is False
-    ):
+    if not (isinstance(keywords.get("check"), ast.Constant) and keywords["check"].value is False):
         raise CandidateError("0.8.4+ mutator wrapper child launch must return its status")
     close_fds = keywords.get("close_fds")
     pass_fds = keywords.get("pass_fds")
@@ -1241,14 +1288,8 @@ def _validate_phase_two_mutator_wrapper(source: str) -> None:
         node
         for node in tree.body
         if isinstance(node, ast.If)
-        and any(
-            isinstance(candidate, ast.Name) and candidate.id == "__name__"
-            for candidate in ast.walk(node.test)
-        )
-        and any(
-            isinstance(candidate, ast.Call) and _ast_call_name(candidate) == "main"
-            for candidate in ast.walk(node)
-        )
+        and any(isinstance(candidate, ast.Name) and candidate.id == "__name__" for candidate in ast.walk(node.test))
+        and any(isinstance(candidate, ast.Call) and _ast_call_name(candidate) == "main" for candidate in ast.walk(node))
     ]
     if len(module_guards) != 1:
         raise CandidateError("0.8.4+ mutator wrapper is not executable as a private child")
@@ -1263,17 +1304,10 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         raise CandidateError("0.8.5+ candidate wheel bundle transaction is invalid") from exc
 
     def references_name(node: ast.AST, name: str) -> bool:
-        return any(
-            isinstance(candidate, ast.Name) and candidate.id == name
-            for candidate in ast.walk(node)
-        )
+        return any(isinstance(candidate, ast.Name) and candidate.id == name for candidate in ast.walk(node))
 
     def static_int(node: ast.AST | None) -> int | None:
-        if (
-            isinstance(node, ast.Constant)
-            and isinstance(node.value, int)
-            and not isinstance(node.value, bool)
-        ):
+        if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool):
             return node.value
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
             left = static_int(node.left)
@@ -1286,8 +1320,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
     for node in tree.body:
         value: ast.AST | None = None
         if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name)
-            and target.id == "_MAX_BUNDLE_ROLLBACK_METADATA_BYTES"
+            isinstance(target, ast.Name) and target.id == "_MAX_BUNDLE_ROLLBACK_METADATA_BYTES"
             for target in node.targets
         ):
             value = node.value
@@ -1301,26 +1334,19 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         if static_value is not None:
             metadata_bounds.append(static_value)
     if metadata_bounds != [4 * 1024 * 1024]:
-        raise CandidateError(
-            "0.8.5+ bundle transaction lacks the bridge metadata size bound"
-        )
+        raise CandidateError("0.8.5+ bundle transaction lacks the bridge metadata size bound")
 
     serializers = [
         node
         for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "_serialize_windows_security"
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_serialize_windows_security"
     ]
     if len(serializers) != 1:
-        raise CandidateError(
-            "0.8.5+ bundle transaction lacks one exact Windows security serializer"
-        )
+        raise CandidateError("0.8.5+ bundle transaction lacks one exact Windows security serializer")
     serializer = serializers[0]
     serializer_arguments = [argument.arg for argument in serializer.args.args]
     serializer_returns = [
-        node.value
-        for node in ast.walk(serializer)
-        if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)
+        node.value for node in ast.walk(serializer) if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)
     ]
     if (
         serializer.args.posonlyargs
@@ -1332,9 +1358,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         or serializer.args.kw_defaults
         or len(serializer_returns) != 1
     ):
-        raise CandidateError(
-            "0.8.5+ bundle Windows security serializer has an invalid signature"
-        )
+        raise CandidateError("0.8.5+ bundle Windows security serializer has an invalid signature")
     serialized_security = serializer_returns[0]
     serialized_values = {
         key.value: value
@@ -1350,9 +1374,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         or len(serialized_values) != 3
         or set(serialized_values) != {"owner", "dacl", "dacl_protected"}
     ):
-        raise CandidateError(
-            "0.8.5+ bundle Windows security serializer lacks exact owner/DACL fields"
-        )
+        raise CandidateError("0.8.5+ bundle Windows security serializer lacks exact owner/DACL fields")
 
     def is_canonical_security_bytes(value: ast.AST, field: str) -> bool:
         if not (
@@ -1379,9 +1401,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
 
     for field in ("owner", "dacl"):
         if not is_canonical_security_bytes(serialized_values[field], field):
-            raise CandidateError(
-                "0.8.5+ bundle Windows owner/DACL bytes are not canonically serialized"
-            )
+            raise CandidateError("0.8.5+ bundle Windows owner/DACL bytes are not canonically serialized")
     protected_value = serialized_values["dacl_protected"]
     if not (
         isinstance(protected_value, ast.Attribute)
@@ -1389,14 +1409,11 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         and isinstance(protected_value.value, ast.Name)
         and protected_value.value.id == "security"
     ):
-        raise CandidateError(
-            "0.8.5+ bundle Windows DACL protection state is not serialized exactly"
-        )
+        raise CandidateError("0.8.5+ bundle Windows DACL protection state is not serialized exactly")
     directory_chain_helpers = [
         node
         for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "_fsync_directory_chain"
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_fsync_directory_chain"
     ]
     if len(directory_chain_helpers) != 1:
         raise CandidateError("0.8.5+ bundle transaction lacks one directory fsync-chain helper")
@@ -1408,36 +1425,24 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
             *directory_chain_helper.args.kwonlyargs,
         )
     }
-    helper_calls = [
-        node
-        for node in ast.walk(directory_chain_helper)
-        if isinstance(node, ast.Call)
-    ]
+    helper_calls = [node for node in ast.walk(directory_chain_helper) if isinstance(node, ast.Call)]
     if (
         helper_arguments != {"path", "stop"}
         or not any(isinstance(node, ast.While) for node in ast.walk(directory_chain_helper))
         or not any(_ast_call_name(node) == "_fsync_directory" for node in helper_calls)
         or not any(
             isinstance(node, ast.Compare)
-            and any(
-                isinstance(candidate, ast.Name) and candidate.id == "stop"
-                for candidate in ast.walk(node)
-            )
+            and any(isinstance(candidate, ast.Name) and candidate.id == "stop" for candidate in ast.walk(node))
             for node in ast.walk(directory_chain_helper)
         )
         or not any(isinstance(node, ast.Break) for node in ast.walk(directory_chain_helper))
         or not any(
             isinstance(node, (ast.Assign, ast.AnnAssign))
-            and any(
-                isinstance(candidate, ast.Attribute) and candidate.attr == "parent"
-                for candidate in ast.walk(node)
-            )
+            and any(isinstance(candidate, ast.Attribute) and candidate.attr == "parent" for candidate in ast.walk(node))
             for node in ast.walk(directory_chain_helper)
         )
     ):
-        raise CandidateError(
-            "0.8.5+ bundle directory fsync-chain helper does not walk to its stop root"
-        )
+        raise CandidateError("0.8.5+ bundle directory fsync-chain helper does not walk to its stop root")
     functions = [
         node
         for node in tree.body
@@ -1448,9 +1453,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         raise CandidateError("0.8.5+ candidate wheel lacks one bundle activation transaction")
     transaction = functions[0]
     was_running_args = [
-        argument
-        for argument in (*transaction.args.args, *transaction.args.kwonlyargs)
-        if argument.arg == "was_running"
+        argument for argument in (*transaction.args.args, *transaction.args.kwonlyargs) if argument.arg == "was_running"
     ]
     if not (
         len(was_running_args) == 1
@@ -1463,11 +1466,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
     for node in ast.walk(transaction):
         if not isinstance(node, ast.Dict):
             continue
-        keys = {
-            key.value
-            for key in node.keys
-            if isinstance(key, ast.Constant) and isinstance(key.value, str)
-        }
+        keys = {key.value for key in node.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)}
         if "managed_paths" in keys or "restart_required" in keys:
             metadata_dicts.append(node)
     if len(metadata_dicts) != 1:
@@ -1496,8 +1495,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         missing = sorted(expected_metadata_fields - set(metadata_values))
         extra = sorted(set(metadata_values) - expected_metadata_fields)
         raise CandidateError(
-            "0.8.5+ bundle rollback metadata lacks the exact schema-2 inventory "
-            f"(missing={missing!r}, extra={extra!r})"
+            f"0.8.5+ bundle rollback metadata lacks the exact schema-2 inventory (missing={missing!r}, extra={extra!r})"
         )
     schema_value = metadata_values["schema_version"]
     if not (
@@ -1518,22 +1516,14 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
             and isinstance(value.args[0], ast.Name)
             and value.args[0].id == binding
         ):
-            raise CandidateError(
-                f"0.8.5+ bundle rollback metadata {field} is not bound to its exact inventory"
-            )
+            raise CandidateError(f"0.8.5+ bundle rollback metadata {field} is not bound to its exact inventory")
     for field in ("old_sha256", "old_modes", "created_sha256", "old_windows_security"):
         value = metadata_values[field]
         if not (isinstance(value, ast.Name) and value.id == field):
-            raise CandidateError(
-                f"0.8.5+ bundle rollback metadata {field} is not bound to its exact inventory"
-            )
+            raise CandidateError(f"0.8.5+ bundle rollback metadata {field} is not bound to its exact inventory")
     restart_value = metadata_values.get("restart_required")
-    if not (
-        isinstance(restart_value, ast.Name) and restart_value.id == "was_running"
-    ):
-        raise CandidateError(
-            "0.8.5+ bundle rollback metadata lacks boolean restart_required"
-        )
+    if not (isinstance(restart_value, ast.Name) and restart_value.id == "was_running"):
+        raise CandidateError("0.8.5+ bundle rollback metadata lacks boolean restart_required")
 
     calls = [node for node in ast.walk(transaction) if isinstance(node, ast.Call)]
     metadata_writes = [
@@ -1541,21 +1531,16 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         for node in calls
         if _ast_call_name(node) == "_atomic_write_bytes"
         and any(
-            isinstance(candidate, ast.Constant)
-            and candidate.value == "refresh-backup.json"
+            isinstance(candidate, ast.Constant) and candidate.value == "refresh-backup.json"
             for candidate in ast.walk(node)
         )
     ]
     if len(metadata_writes) != 1:
         raise CandidateError("0.8.5+ bundle transaction must durably publish one backup manifest")
     metadata_write = metadata_writes[0]
-    all_atomic_writes = [
-        node for node in calls if _ast_call_name(node) == "_atomic_write_bytes"
-    ]
+    all_atomic_writes = [node for node in calls if _ast_call_name(node) == "_atomic_write_bytes"]
     if len(all_atomic_writes) != 1 or all_atomic_writes[0] is not metadata_write:
-        raise CandidateError(
-            "0.8.5+ bundle transaction has an ambiguous direct file write"
-        )
+        raise CandidateError("0.8.5+ bundle transaction has an ambiguous direct file write")
     metadata_write_line = metadata_write.lineno
     if metadata.lineno >= metadata_write_line:
         raise CandidateError("0.8.5+ bundle rollback authority is not built before publication")
@@ -1565,10 +1550,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         if (
             isinstance(node, ast.Assign)
             and node.value is metadata
-            and any(
-                isinstance(target, ast.Name) and target.id == "backup_metadata"
-                for target in node.targets
-            )
+            and any(isinstance(target, ast.Name) and target.id == "backup_metadata" for target in node.targets)
         )
         or (
             isinstance(node, ast.AnnAssign)
@@ -1583,10 +1565,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         for node in ast.walk(transaction)
         if (
             isinstance(node, ast.Assign)
-            and any(
-                isinstance(target, ast.Name) and target.id == "serialized_metadata"
-                for target in node.targets
-            )
+            and any(isinstance(target, ast.Name) and target.id == "serialized_metadata" for target in node.targets)
         )
         or (
             isinstance(node, ast.AnnAssign)
@@ -1594,9 +1573,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
             and node.target.id == "serialized_metadata"
         )
     ]
-    serialized_value = (
-        serialized_assignments[0].value if len(serialized_assignments) == 1 else None
-    )
+    serialized_value = serialized_assignments[0].value if len(serialized_assignments) == 1 else None
     serialized_json_call = (
         serialized_value.func.value
         if isinstance(serialized_value, ast.Call)
@@ -1633,9 +1610,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         and isinstance(serialized_keywords["sort_keys"], ast.Constant)
         and serialized_keywords["sort_keys"].value is True
     ):
-        raise CandidateError(
-            "0.8.5+ bundle transaction does not publish its exact schema-2 metadata object"
-        )
+        raise CandidateError("0.8.5+ bundle transaction does not publish its exact schema-2 metadata object")
     metadata_bound_guards = [
         node
         for node in ast.walk(transaction)
@@ -1653,9 +1628,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         and any(isinstance(candidate, ast.Raise) for candidate in ast.walk(node))
     ]
     if len(metadata_bound_guards) != 1:
-        raise CandidateError(
-            "0.8.5+ bundle serialized metadata is not bounded before publication"
-        )
+        raise CandidateError("0.8.5+ bundle serialized metadata is not bounded before publication")
     bound_test = metadata_bound_guards[0].test
     bound_comparison = bound_test.operand if isinstance(bound_test, ast.UnaryOp) else None
     if not (
@@ -1676,9 +1649,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         and isinstance(bound_comparison.comparators[1], ast.Name)
         and bound_comparison.comparators[1].id == "_MAX_BUNDLE_ROLLBACK_METADATA_BYTES"
     ):
-        raise CandidateError(
-            "0.8.5+ bundle serialized metadata uses an invalid size bound"
-        )
+        raise CandidateError("0.8.5+ bundle serialized metadata uses an invalid size bound")
 
     parent: dict[ast.AST, ast.AST] = {}
     for ancestor in ast.walk(transaction):
@@ -1703,21 +1674,14 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         or condition_between(serialized_assignments[0], transaction)
         or condition_between(metadata_write, transaction)
     ):
-        raise CandidateError(
-            "0.8.5+ bundle rollback metadata construction or publication is conditional"
-        )
+        raise CandidateError("0.8.5+ bundle rollback metadata construction or publication is conditional")
 
     def assignment_value(node: ast.AST, name: str) -> ast.AST | None:
         if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == name
-            for target in node.targets
+            isinstance(target, ast.Name) and target.id == name for target in node.targets
         ):
             return node.value
-        if (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and node.target.id == name
-        ):
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == name:
             return node.value
         return None
 
@@ -1764,20 +1728,12 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
             and (value := assignment_value(node, binding)) is not None
         ]
         if len(assignments) != 1 or not child_path(assignments[0], "backup_root", leaf):
-            raise CandidateError(
-                f"0.8.5+ bundle transaction lacks exact {leaf} rollback custody"
-            )
+            raise CandidateError(f"0.8.5+ bundle transaction lacks exact {leaf} rollback custody")
         mkdir_calls = exact_root_call("_mkdir_private", binding)
         fsync_calls = exact_root_call("_fsync_directory_chain", binding)
         if len(mkdir_calls) != 1 or len(fsync_calls) != 1:
-            raise CandidateError(
-                f"0.8.5+ bundle {leaf} rollback custody is not durably created"
-            )
-        stop_values = [
-            keyword.value
-            for keyword in fsync_calls[0].keywords
-            if keyword.arg == "stop"
-        ]
+            raise CandidateError(f"0.8.5+ bundle {leaf} rollback custody is not durably created")
+        stop_values = [keyword.value for keyword in fsync_calls[0].keywords if keyword.arg == "stop"]
         if not (
             len(mkdir_calls[0].args) == 1
             and not mkdir_calls[0].keywords
@@ -1790,11 +1746,14 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
             and isinstance(stop_values[0], ast.Name)
             and stop_values[0].id == "backup_root"
         ):
-            raise CandidateError(
-                f"0.8.5+ bundle {leaf} rollback custody is not fsynced to its root"
-            )
+            raise CandidateError(f"0.8.5+ bundle {leaf} rollback custody is not fsynced to its root")
 
-    for binding in ("old_sha256", "old_modes", "created_sha256", "old_windows_security"):
+    for binding in (
+        "old_sha256",
+        "old_modes",
+        "created_sha256",
+        "old_windows_security",
+    ):
         initializers = [
             value
             for node in ast.walk(transaction)
@@ -1803,9 +1762,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
             and isinstance(value, ast.Dict)
         ]
         if len(initializers) != 1 or initializers[0].keys:
-            raise CandidateError(
-                f"0.8.5+ bundle transaction lacks one empty {binding} inventory"
-            )
+            raise CandidateError(f"0.8.5+ bundle transaction lacks one empty {binding} inventory")
 
     managed_inventory_values = [
         value
@@ -1825,9 +1782,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         }
         == {"existing_paths", "created_paths"}
     ):
-        raise CandidateError(
-            "0.8.5+ bundle managed inventory is not the exact existing/created union"
-        )
+        raise CandidateError("0.8.5+ bundle managed inventory is not the exact existing/created union")
 
     backup_copies = [
         node
@@ -1854,16 +1809,11 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
     if copy_loop is None:
         raise CandidateError("0.8.5+ bundle backup copy is outside its managed inventory loop")
     if condition_between(copy_call, copy_loop) or not (
-        isinstance(copy_loop.iter, ast.Name)
-        and copy_loop.iter.id == "existing_paths"
+        isinstance(copy_loop.iter, ast.Name) and copy_loop.iter.id == "existing_paths"
     ):
-        raise CandidateError(
-            "0.8.5+ bundle backup copy does not exactly cover existing paths"
-        )
+        raise CandidateError("0.8.5+ bundle backup copy does not exactly cover existing paths")
     backup_path_values = [
-        value
-        for node in ast.walk(copy_loop)
-        if (value := assignment_value(node, "backup_path")) is not None
+        value for node in ast.walk(copy_loop) if (value := assignment_value(node, "backup_path")) is not None
     ]
     backup_path_value = backup_path_values[0] if len(backup_path_values) == 1 else None
     if not (
@@ -1874,9 +1824,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         and isinstance(backup_path_value.right, ast.Name)
         and backup_path_value.right.id == "path"
     ):
-        raise CandidateError(
-            "0.8.5+ bundle existing backup is outside managed rollback custody"
-        )
+        raise CandidateError("0.8.5+ bundle existing backup is outside managed rollback custody")
 
     def inventory_writes(scope: ast.AST, binding: str) -> list[ast.Assign | ast.AnnAssign]:
         writes: list[ast.Assign | ast.AnnAssign] = []
@@ -1889,9 +1837,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
             else:
                 continue
             if any(
-                isinstance(target, ast.Subscript)
-                and isinstance(target.value, ast.Name)
-                and target.value.id == binding
+                isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id == binding
                 for target in targets
             ):
                 writes.append(node)
@@ -1943,29 +1889,19 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         or old_mode_value.args[0].value.args
         or old_mode_value.args[0].value.keywords
     ):
-        raise CandidateError(
-            "0.8.5+ bundle backup loop lacks exact digest and mode inventory"
-        )
+        raise CandidateError("0.8.5+ bundle backup loop lacks exact digest and mode inventory")
 
     windows_writes = inventory_writes(copy_loop, "old_windows_security")
     if len(windows_writes) != 1:
-        raise CandidateError(
-            "0.8.5+ bundle backup loop lacks exact per-path Windows security inventory"
-        )
+        raise CandidateError("0.8.5+ bundle backup loop lacks exact per-path Windows security inventory")
     windows_write = windows_writes[0]
     if not exact_inventory_key(windows_write, "old_windows_security"):
-        raise CandidateError(
-            "0.8.5+ bundle Windows security inventory is not keyed by its exact path"
-        )
+        raise CandidateError("0.8.5+ bundle Windows security inventory is not keyed by its exact path")
     windows_value = windows_write.value
     if windows_value is None:
-        raise CandidateError(
-            "0.8.5+ bundle Windows security inventory has no serialized value"
-        )
+        raise CandidateError("0.8.5+ bundle Windows security inventory has no serialized value")
     captured_security = (
-        windows_value.args[0]
-        if isinstance(windows_value, ast.Call) and len(windows_value.args) == 1
-        else None
+        windows_value.args[0] if isinstance(windows_value, ast.Call) and len(windows_value.args) == 1 else None
     )
     if (
         not isinstance(windows_value, ast.Call)
@@ -1978,9 +1914,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         or not isinstance(captured_security.args[0], ast.Name)
         or captured_security.args[0].id != "path"
     ):
-        raise CandidateError(
-            "0.8.5+ bundle Windows security inventory is not captured and serialized exactly"
-        )
+        raise CandidateError("0.8.5+ bundle Windows security inventory is not captured and serialized exactly")
     current = windows_write
     windows_guard: ast.If | None = None
     while current in parent and current is not copy_loop:
@@ -2013,9 +1947,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
             )
         )
     ):
-        raise CandidateError(
-            "0.8.5+ bundle Windows security inventory is not platform-exact"
-        )
+        raise CandidateError("0.8.5+ bundle Windows security inventory is not platform-exact")
     durable_backup_calls = [
         node
         for node in ast.walk(copy_loop)
@@ -2029,13 +1961,9 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         and node.args[0].id == "backup_path"
     ]
     if not durable_backup_calls:
-        raise CandidateError(
-            "0.8.5+ bundle backup files are not fsynced before metadata publication"
-        )
+        raise CandidateError("0.8.5+ bundle backup files are not fsynced before metadata publication")
     if any(condition_between(node, copy_loop) for node in durable_backup_calls):
-        raise CandidateError(
-            "0.8.5+ bundle backup file durability is conditional"
-        )
+        raise CandidateError("0.8.5+ bundle backup file durability is conditional")
     durable_directory_calls = [
         node
         for node in ast.walk(copy_loop)
@@ -2051,29 +1979,15 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         and node.args[0].value.id == "backup_path"
     ]
     if len(durable_directory_calls) != 1:
-        raise CandidateError(
-            "0.8.5+ bundle backup directory entries are not fsynced before metadata publication"
-        )
+        raise CandidateError("0.8.5+ bundle backup directory entries are not fsynced before metadata publication")
     if condition_between(durable_directory_calls[0], copy_loop):
-        raise CandidateError(
-            "0.8.5+ bundle backup directory durability is conditional"
-        )
+        raise CandidateError("0.8.5+ bundle backup directory durability is conditional")
     directory_call = durable_directory_calls[0]
-    stop_values = [
-        keyword.value for keyword in directory_call.keywords if keyword.arg == "stop"
-    ]
-    if not (
-        len(stop_values) == 1
-        and isinstance(stop_values[0], ast.Name)
-        and stop_values[0].id == "backup_root"
-    ):
-        raise CandidateError(
-            "0.8.5+ bundle directory fsync chain must include the backup root"
-        )
+    stop_values = [keyword.value for keyword in directory_call.keywords if keyword.arg == "stop"]
+    if not (len(stop_values) == 1 and isinstance(stop_values[0], ast.Name) and stop_values[0].id == "backup_root"):
+        raise CandidateError("0.8.5+ bundle directory fsync chain must include the backup root")
     if not any(node.lineno < directory_call.lineno for node in durable_backup_calls):
-        raise CandidateError(
-            "0.8.5+ bundle backup files must be fsynced before directory entries"
-        )
+        raise CandidateError("0.8.5+ bundle backup files must be fsynced before directory entries")
 
     claim_copies = [
         node
@@ -2086,9 +2000,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         and node.args[1].id == "created_claim"
     ]
     if len(claim_copies) != 1:
-        raise CandidateError(
-            "0.8.5+ bundle transaction lacks one retained target-created claim loop"
-        )
+        raise CandidateError("0.8.5+ bundle transaction lacks one retained target-created claim loop")
     claim_copy = claim_copies[0]
     claim_loop: ast.For | None = None
     current = claim_copy
@@ -2097,17 +2009,14 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         if isinstance(current, ast.For):
             claim_loop = current
             break
-    if claim_loop is None or condition_between(claim_copy, claim_loop) or not (
-        isinstance(claim_loop.iter, ast.Name)
-        and claim_loop.iter.id == "created_paths"
+    if (
+        claim_loop is None
+        or condition_between(claim_copy, claim_loop)
+        or not (isinstance(claim_loop.iter, ast.Name) and claim_loop.iter.id == "created_paths")
     ):
-        raise CandidateError(
-            "0.8.5+ bundle target-created claims do not exactly cover created paths"
-        )
+        raise CandidateError("0.8.5+ bundle target-created claims do not exactly cover created paths")
     claim_bindings = [
-        value
-        for node in ast.walk(claim_loop)
-        if (value := assignment_value(node, "created_claim")) is not None
+        value for node in ast.walk(claim_loop) if (value := assignment_value(node, "created_claim")) is not None
     ]
     claim_binding = claim_bindings[0] if len(claim_bindings) == 1 else None
     if not (
@@ -2118,9 +2027,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         and isinstance(claim_binding.right, ast.Name)
         and claim_binding.right.id == "path"
     ):
-        raise CandidateError(
-            "0.8.5+ bundle target-created claims are outside retained custody"
-        )
+        raise CandidateError("0.8.5+ bundle target-created claims are outside retained custody")
     claim_file_fsyncs = [
         node
         for node in ast.walk(claim_loop)
@@ -2144,37 +2051,22 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         and node.args[0].value.id == "created_claim"
     ]
     if len(claim_file_fsyncs) != 1 or len(claim_directory_fsyncs) != 1:
-        raise CandidateError(
-            "0.8.5+ bundle target-created claims are not durably retained"
-        )
+        raise CandidateError("0.8.5+ bundle target-created claims are not durably retained")
     if condition_between(claim_file_fsyncs[0], claim_loop) or condition_between(
         claim_directory_fsyncs[0],
         claim_loop,
     ):
-        raise CandidateError(
-            "0.8.5+ bundle target-created claim durability is conditional"
-        )
-    claim_stop_values = [
-        keyword.value
-        for keyword in claim_directory_fsyncs[0].keywords
-        if keyword.arg == "stop"
-    ]
+        raise CandidateError("0.8.5+ bundle target-created claim durability is conditional")
+    claim_stop_values = [keyword.value for keyword in claim_directory_fsyncs[0].keywords if keyword.arg == "stop"]
     if not (
-        claim_copy.lineno
-        < claim_file_fsyncs[0].lineno
-        < claim_directory_fsyncs[0].lineno
-        < metadata_write_line
+        claim_copy.lineno < claim_file_fsyncs[0].lineno < claim_directory_fsyncs[0].lineno < metadata_write_line
         and len(claim_stop_values) == 1
         and isinstance(claim_stop_values[0], ast.Name)
         and claim_stop_values[0].id == "backup_root"
     ):
-        raise CandidateError(
-            "0.8.5+ bundle target-created claims are not fsynced to the backup root"
-        )
+        raise CandidateError("0.8.5+ bundle target-created claims are not fsynced to the backup root")
     created_digest_writes = inventory_writes(claim_loop, "created_sha256")
-    created_digest_value = (
-        created_digest_writes[0].value if len(created_digest_writes) == 1 else None
-    )
+    created_digest_value = created_digest_writes[0].value if len(created_digest_writes) == 1 else None
     if not (
         len(created_digest_writes) == 1
         and created_digest_value is not None
@@ -2188,9 +2080,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         and isinstance(created_digest_value.args[0], ast.Name)
         and created_digest_value.args[0].id == "created_claim"
     ):
-        raise CandidateError(
-            "0.8.5+ bundle target-created claim digest inventory is incomplete"
-        )
+        raise CandidateError("0.8.5+ bundle target-created claim digest inventory is incomplete")
 
     claim_publications = [
         node
@@ -2205,9 +2095,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         and node.args[1].id == "destination"
     ]
     if len(claim_publications) != 1:
-        raise CandidateError(
-            "0.8.5+ bundle target-created claims lack one no-replace publication"
-        )
+        raise CandidateError("0.8.5+ bundle target-created claims lack one no-replace publication")
     claim_publication = claim_publications[0]
     publication_loop: ast.For | None = None
     current = claim_publication
@@ -2216,34 +2104,23 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         if isinstance(current, ast.For):
             publication_loop = current
             break
-    if publication_loop is None or condition_between(
-        claim_publication,
-        publication_loop,
-    ) or not (
-        isinstance(publication_loop.iter, ast.Name)
-        and publication_loop.iter.id == "created_paths"
-    ):
-        raise CandidateError(
-            "0.8.5+ bundle target-created publication does not cover its exact inventory"
+    if (
+        publication_loop is None
+        or condition_between(
+            claim_publication,
+            publication_loop,
         )
+        or not (isinstance(publication_loop.iter, ast.Name) and publication_loop.iter.id == "created_paths")
+    ):
+        raise CandidateError("0.8.5+ bundle target-created publication does not cover its exact inventory")
     publication_claim_values = [
-        value
-        for node in ast.walk(publication_loop)
-        if (value := assignment_value(node, "created_claim")) is not None
+        value for node in ast.walk(publication_loop) if (value := assignment_value(node, "created_claim")) is not None
     ]
     publication_destination_values = [
-        value
-        for node in ast.walk(publication_loop)
-        if (value := assignment_value(node, "destination")) is not None
+        value for node in ast.walk(publication_loop) if (value := assignment_value(node, "destination")) is not None
     ]
-    published_claim = (
-        publication_claim_values[0] if len(publication_claim_values) == 1 else None
-    )
-    published_destination = (
-        publication_destination_values[0]
-        if len(publication_destination_values) == 1
-        else None
-    )
+    published_claim = publication_claim_values[0] if len(publication_claim_values) == 1 else None
+    published_destination = publication_destination_values[0] if len(publication_destination_values) == 1 else None
     if not (
         isinstance(published_claim, ast.BinOp)
         and isinstance(published_claim.op, ast.Div)
@@ -2254,9 +2131,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         and isinstance(published_destination, ast.Name)
         and published_destination.id == "path"
     ):
-        raise CandidateError(
-            "0.8.5+ bundle target-created publication is not claim-bound"
-        )
+        raise CandidateError("0.8.5+ bundle target-created publication is not claim-bound")
 
     mutation_nodes = [
         node
@@ -2265,10 +2140,7 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         and (
             (
                 isinstance(node, ast.Assign)
-                and any(
-                    isinstance(target, ast.Name) and target.id == "mutation_started"
-                    for target in node.targets
-                )
+                and any(isinstance(target, ast.Name) and target.id == "mutation_started" for target in node.targets)
             )
             or (
                 isinstance(node, ast.AnnAssign)
@@ -2286,15 +2158,11 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         or mutation_lines[0] >= claim_publication.lineno
         or condition_between(mutation_nodes[0], transaction)
     ):
-        raise CandidateError(
-            "0.8.5+ bundle rollback metadata is not durable before first mutation"
-        )
+        raise CandidateError("0.8.5+ bundle rollback metadata is not durable before first mutation")
     mutation_line = mutation_lines[0]
     all_link_calls = [node for node in calls if _ast_call_name(node) == "os.link"]
     if len(all_link_calls) != 1:
-        raise CandidateError(
-            "0.8.5+ bundle transaction has ambiguous target-created publication"
-        )
+        raise CandidateError("0.8.5+ bundle transaction has ambiguous target-created publication")
     managed_publications = [
         node
         for node in calls
@@ -2306,21 +2174,14 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         and node.args[1].id == "destination"
     ]
     if len(managed_publications) != 1:
-        raise CandidateError(
-            "0.8.5+ bundle transaction lacks one authenticated managed-file publication"
-        )
-    all_atomic_copies = [
-        node for node in calls if _ast_call_name(node) == "_atomic_copy_file"
-    ]
-    all_legacy_copies = [
-        node for node in calls if _ast_call_name(node) == "shutil.copy2"
-    ]
-    if set(all_atomic_copies) != {claim_copy, managed_publications[0]} or all_legacy_copies != [
-        copy_call
-    ]:
-        raise CandidateError(
-            "0.8.5+ bundle transaction has an ambiguous copy mutation"
-        )
+        raise CandidateError("0.8.5+ bundle transaction lacks one authenticated managed-file publication")
+    all_atomic_copies = [node for node in calls if _ast_call_name(node) == "_atomic_copy_file"]
+    all_legacy_copies = [node for node in calls if _ast_call_name(node) == "shutil.copy2"]
+    if set(all_atomic_copies) != {
+        claim_copy,
+        managed_publications[0],
+    } or all_legacy_copies != [copy_call]:
+        raise CandidateError("0.8.5+ bundle transaction has an ambiguous copy mutation")
     managed_publication = managed_publications[0]
     managed_publication_loop: ast.For | None = None
     current = managed_publication
@@ -2329,16 +2190,17 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         if isinstance(current, ast.For):
             managed_publication_loop = current
             break
-    if managed_publication_loop is None or condition_between(
-        managed_publication,
-        managed_publication_loop,
-    ) or not (
-        isinstance(managed_publication_loop.iter, ast.Name)
-        and managed_publication_loop.iter.id == "existing_paths"
-    ):
-        raise CandidateError(
-            "0.8.5+ bundle managed-file publication does not cover existing paths"
+    if (
+        managed_publication_loop is None
+        or condition_between(
+            managed_publication,
+            managed_publication_loop,
         )
+        or not (
+            isinstance(managed_publication_loop.iter, ast.Name) and managed_publication_loop.iter.id == "existing_paths"
+        )
+    ):
+        raise CandidateError("0.8.5+ bundle managed-file publication does not cover existing paths")
     managed_destination_values = [
         value
         for node in ast.walk(managed_publication_loop)
@@ -2349,29 +2211,19 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         and isinstance(managed_destination_values[0], ast.Name)
         and managed_destination_values[0].id == "path"
     ):
-        raise CandidateError(
-            "0.8.5+ bundle managed-file publication is not destination-bound"
-        )
+        raise CandidateError("0.8.5+ bundle managed-file publication is not destination-bound")
     canonical_mutations = [*all_link_calls, *managed_publications]
     if any(node.lineno <= mutation_line for node in canonical_mutations):
-        raise CandidateError(
-            "0.8.5+ bundle mutation begins before durable rollback authority"
-        )
-    transaction_returns = [
-        node for node in ast.walk(transaction) if isinstance(node, ast.Return)
-    ]
+        raise CandidateError("0.8.5+ bundle mutation begins before durable rollback authority")
+    transaction_returns = [node for node in ast.walk(transaction) if isinstance(node, ast.Return)]
     if not (
         len(transaction_returns) == 1
-        and transaction_returns[0].lineno > max(
-            node.lineno for node in canonical_mutations
-        )
+        and transaction_returns[0].lineno > max(node.lineno for node in canonical_mutations)
         and isinstance(transaction_returns[0].value, ast.Name)
         and transaction_returns[0].value.id == "mutation_started"
         and not condition_between(transaction_returns[0], transaction)
     ):
-        raise CandidateError(
-            "0.8.5+ bundle transaction has an ambiguous completion path"
-        )
+        raise CandidateError("0.8.5+ bundle transaction has an ambiguous completion path")
     forbidden_direct_mutators = {
         "open",
         "os.open",
@@ -2400,15 +2252,10 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
     )
     if any(
         (name := _ast_call_name(node)) is not None
-        and (
-            name in forbidden_direct_mutators
-            or name.endswith(forbidden_mutator_suffixes)
-        )
+        and (name in forbidden_direct_mutators or name.endswith(forbidden_mutator_suffixes))
         for node in calls
     ):
-        raise CandidateError(
-            "0.8.5+ bundle transaction bypasses its reviewed publication primitives"
-        )
+        raise CandidateError("0.8.5+ bundle transaction bypasses its reviewed publication primitives")
     forbidden_before_metadata = {
         "os.link",
         "os.replace",
@@ -2417,14 +2264,8 @@ def _validate_fixture_hard_cut_bundle_transaction(source: str) -> None:
         "os.remove",
         "shutil.rmtree",
     }
-    if any(
-        (_ast_call_name(node) in forbidden_before_metadata)
-        and node.lineno < metadata_write_line
-        for node in calls
-    ):
-        raise CandidateError(
-            "0.8.5+ bundle transaction mutates canonical paths before rollback metadata"
-        )
+    if any((_ast_call_name(node) in forbidden_before_metadata) and node.lineno < metadata_write_line for node in calls):
+        raise CandidateError("0.8.5+ bundle transaction mutates canonical paths before rollback metadata")
 
 
 def _validate_runtime_hard_cut_bundle_transaction(source: str) -> None:
@@ -2453,11 +2294,7 @@ def _validate_runtime_hard_cut_bundle_transaction(source: str) -> None:
         return matches[0]
 
     def calls(scope: ast.AST, name: str) -> list[ast.Call]:
-        return [
-            node
-            for node in ast.walk(scope)
-            if isinstance(node, ast.Call) and _ast_call_name(node) == name
-        ]
+        return [node for node in ast.walk(scope) if isinstance(node, ast.Call) and _ast_call_name(node) == name]
 
     def references(node: ast.AST, name: str) -> bool:
         return any(isinstance(item, ast.Name) and item.id == name for item in ast.walk(node))
@@ -2486,11 +2323,7 @@ def _validate_runtime_hard_cut_bundle_transaction(source: str) -> None:
             and value.left.id == root
             and (
                 (child is None and isinstance(value.right, ast.Name))
-                or (
-                    child is not None
-                    and isinstance(value.right, ast.Constant)
-                    and value.right.value == child
-                )
+                or (child is not None and isinstance(value.right, ast.Constant) and value.right.value == child)
             )
         )
 
@@ -2532,9 +2365,7 @@ def _validate_runtime_hard_cut_bundle_transaction(source: str) -> None:
         "security.dacl_protected",
     ):
         if fragment not in serializer_source:
-            raise CandidateError(
-                "0.8.5+ bundle Windows owner/DACL bytes are not canonically serialized"
-            )
+            raise CandidateError("0.8.5+ bundle Windows owner/DACL bytes are not canonically serialized")
 
     fsync_chain = one_function("_fsync_directory_chain")
     if not (
@@ -2550,9 +2381,7 @@ def _validate_runtime_hard_cut_bundle_transaction(source: str) -> None:
         node
         for node in ast.walk(prepare)
         if isinstance(node, ast.Dict)
-        and {
-            key.value for key in node.keys if isinstance(key, ast.Constant)
-        }
+        and {key.value for key in node.keys if isinstance(key, ast.Constant)}
         == {"schema_version", "target_manifest_sha256", "restart_required"}
     ]
     intent_writes = calls(prepare, "_atomic_write_bytes")
@@ -2591,9 +2420,7 @@ def _validate_runtime_hard_cut_bundle_transaction(source: str) -> None:
 
     transaction = one_function("_activate_local_observability_manifest")
     was_running = [
-        argument
-        for argument in (*transaction.args.args, *transaction.args.kwonlyargs)
-        if argument.arg == "was_running"
+        argument for argument in (*transaction.args.args, *transaction.args.kwonlyargs) if argument.arg == "was_running"
     ]
     if not (
         len(was_running) == 1
@@ -2616,9 +2443,7 @@ def _validate_runtime_hard_cut_bundle_transaction(source: str) -> None:
     for node in ast.walk(transaction):
         if not isinstance(node, ast.Dict):
             continue
-        keys = {
-            key.value for key in node.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)
-        }
+        keys = {key.value for key in node.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)}
         if keys & {"managed_paths", "restart_required"}:
             metadata_dicts.append(node)
     if len(metadata_dicts) != 1:
@@ -2651,10 +2476,7 @@ def _validate_runtime_hard_cut_bundle_transaction(source: str) -> None:
     metadata_writes = [
         call
         for call in calls(transaction, "_atomic_write_bytes")
-        if any(
-            isinstance(node, ast.Constant) and node.value == "refresh-backup.json"
-            for node in ast.walk(call)
-        )
+        if any(isinstance(node, ast.Constant) and node.value == "refresh-backup.json" for node in ast.walk(call))
     ]
     if len(metadata_writes) != 1 or len(calls(transaction, "_atomic_write_bytes")) != 1:
         raise CandidateError("0.8.5+ bundle transaction has ambiguous metadata publication")
@@ -2662,8 +2484,7 @@ def _validate_runtime_hard_cut_bundle_transaction(source: str) -> None:
     metadata_line = metadata_write.lineno
     serialized = assignment(transaction, "serialized_metadata")
     if not (
-        len(serialized) == 1
-        and _ast_call_name(serialized[0].func.value) == "json.dumps"
+        len(serialized) == 1 and _ast_call_name(serialized[0].func.value) == "json.dumps"
         if isinstance(serialized[0], ast.Call)
         and isinstance(serialized[0].func, ast.Attribute)
         and isinstance(serialized[0].func.value, ast.Call)
@@ -2849,6 +2670,97 @@ def _validate_hard_cut_bundle_transaction(source: str) -> None:
         _validate_fixture_hard_cut_bundle_transaction(source)
 
 
+def _canonical_v8_wheel_resources() -> dict[str, bytes]:
+    """Load the exact reviewed v8 payloads required in 0.8.5+ wheels."""
+
+    resources: dict[str, bytes] = {}
+    try:
+        for member_name, source_name in V8_CONFIG_WHEEL_RESOURCES:
+            resources[member_name] = (ROOT / source_name).read_bytes()
+        for member_name, logical_name in V8_TELEMETRY_WHEEL_RESOURCES:
+            resources[member_name] = read_logical_asset(ROOT, logical_name)
+    except (OSError, RuntimeAssetError) as exc:
+        raise CandidateError("canonical v8 wheel resources are unavailable or malformed") from exc
+
+    for member_name, payload in resources.items():
+        if not payload:
+            raise CandidateError(f"canonical v8 wheel resource is empty: {member_name}")
+        if member_name.endswith(".json"):
+            try:
+                document = json.loads(payload)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise CandidateError(f"canonical v8 wheel resource is malformed JSON: {member_name}") from exc
+            if not isinstance(document, dict):
+                raise CandidateError(f"canonical v8 wheel resource must be a JSON object: {member_name}")
+    return resources
+
+
+def _is_v8_package_data_member(member_name: str) -> bool:
+    # ZIP member names are specified with forward slashes, but readers on
+    # Windows can still assign path meaning to backslashes. Classify aliases
+    # from the entire normalized member so absolute, drive-prefixed, and
+    # dot-segment forms cannot hide an extra package-local v8 resource.
+    parts = tuple(part.rstrip(" .").casefold() for part in PurePosixPath(member_name.replace("\\", "/")).parts)
+
+    # An NTFS 8.3 alias may use either a stem-derived form (DEFENS~1) or a
+    # volume-assigned/hash-derived form. Without the destination volume there
+    # is no safe way to prove which package directory a numeric short name
+    # resolves to, so treat every valid numeric 8.3 directory component before
+    # ``_data`` as a potential alias for the DefenseClaw package root.
+    def is_package_root(part: str) -> bool:
+        candidate = re.sub(r"^[a-z]:", "", part, count=1)
+        return candidate == "defenseclaw" or (
+            len(candidate) <= 8 and WINDOWS_NUMERIC_SHORT_NAME_RE.fullmatch(candidate) is not None
+        )
+
+    return any(
+        any(is_package_root(part) for part in parts[:data_index])
+        and any(part == "v8" or part.startswith(("v8_", "v8.")) for part in parts[data_index + 1 :])
+        for data_index, part in enumerate(parts)
+        if part == "_data"
+    )
+
+
+def _validate_v8_wheel_resources(
+    archive: zipfile.ZipFile,
+    member_names: list[str],
+) -> None:
+    expected = _canonical_v8_wheel_resources()
+    non_files = sorted(
+        info.filename
+        for info in archive.infolist()
+        if _is_v8_package_data_member(info.filename)
+        and (
+            info.is_dir()
+            or bool(info.external_attr & 0x10)
+            or (info.create_system == 3 and stat.S_IFMT(info.external_attr >> 16) not in {0, stat.S_IFREG})
+        )
+    )
+    if non_files:
+        raise CandidateError(f"0.8.5+ candidate wheel contains non-file v8 runtime resources: {non_files!r}")
+    observed = {name for name in member_names if _is_v8_package_data_member(name)}
+    missing = sorted(set(expected) - observed)
+    unexpected = sorted(observed - set(expected))
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append(f"missing={missing!r}")
+        if unexpected:
+            details.append(f"unexpected={unexpected!r}")
+        raise CandidateError("0.8.5+ candidate wheel v8 runtime resource inventory is invalid: " + "; ".join(details))
+
+    for member_name, canonical_payload in expected.items():
+        info = archive.getinfo(member_name)
+        if info.file_size != len(canonical_payload):
+            raise CandidateError(f"0.8.5+ candidate wheel v8 runtime resource is altered: {member_name}")
+        try:
+            candidate_payload = archive.read(member_name)
+        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+            raise CandidateError(f"0.8.5+ candidate wheel v8 runtime resource is unreadable: {member_name}") from exc
+        if candidate_payload != canonical_payload:
+            raise CandidateError(f"0.8.5+ candidate wheel v8 runtime resource is altered: {member_name}")
+
+
 def _validate_wheel(path: Path, version: str) -> None:
     metadata_name = f"defenseclaw-{version}.dist-info/METADATA"
     try:
@@ -2859,36 +2771,25 @@ def _validate_wheel(path: Path, version: str) -> None:
             names = set(member_names)
             if len(names) != len(member_names):
                 raise CandidateError("candidate wheel contains duplicate member names")
-            bytecode = [
-                name
-                for name in names
-                if "/__pycache__/" in name or name.endswith((".pyc", ".pyo"))
-            ]
+            bytecode = [name for name in names if "/__pycache__/" in name or name.endswith((".pyc", ".pyo"))]
             if bytecode:
                 raise CandidateError(f"candidate wheel contains Python bytecode: {bytecode[:3]!r}")
             if metadata_name not in names:
                 raise CandidateError(f"candidate wheel is missing {metadata_name}")
             metadata = archive.read(metadata_name).decode("utf-8", errors="strict")
-            controller_source = archive.read("defenseclaw/commands/cmd_upgrade.py").decode(
-                "utf-8", errors="strict"
-            )
-            migrations_source = archive.read("defenseclaw/migrations.py").decode(
-                "utf-8", errors="strict"
-            )
+            controller_source = archive.read("defenseclaw/commands/cmd_upgrade.py").decode("utf-8", errors="strict")
+            migrations_source = archive.read("defenseclaw/migrations.py").decode("utf-8", errors="strict")
             mutator_source = ""
             bundle_transaction_source = ""
             install_publish_source = b""
             if tuple(map(int, version.split("."))) >= (0, 8, 4):
-                mutator_source = archive.read("defenseclaw/phase_two_mutator.py").decode(
+                mutator_source = archive.read("defenseclaw/phase_two_mutator.py").decode("utf-8", errors="strict")
+                install_publish_source = archive.read("defenseclaw/install_publish.py")
+            if tuple(map(int, version.split("."))) >= (0, 8, 5):
+                _validate_v8_wheel_resources(archive, member_names)
+                bundle_transaction_source = archive.read("defenseclaw/bundle_refresh.py").decode(
                     "utf-8", errors="strict"
                 )
-                install_publish_source = archive.read(
-                    "defenseclaw/install_publish.py"
-                )
-            if tuple(map(int, version.split("."))) >= (0, 8, 5):
-                bundle_transaction_source = archive.read(
-                    "defenseclaw/bundle_refresh.py"
-                ).decode("utf-8", errors="strict")
     except (KeyError, OSError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
         raise CandidateError(f"invalid candidate wheel {path}: {exc}") from exc
     if f"\nVersion: {version}\n" not in f"\n{metadata}":
@@ -2901,8 +2802,7 @@ def _validate_wheel(path: Path, version: str) -> None:
     for node in tree.body:
         value: ast.AST | None = None
         if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == "_UPGRADE_PROTOCOL_VERSION"
-            for target in node.targets
+            isinstance(target, ast.Name) and target.id == "_UPGRADE_PROTOCOL_VERSION" for target in node.targets
         ):
             value = node.value
         elif (
@@ -2911,9 +2811,7 @@ def _validate_wheel(path: Path, version: str) -> None:
             and node.target.id == "_UPGRADE_PROTOCOL_VERSION"
         ):
             value = node.value
-        if isinstance(value, ast.Constant) and isinstance(value.value, int) and not isinstance(
-            value.value, bool
-        ):
+        if isinstance(value, ast.Constant) and isinstance(value.value, int) and not isinstance(value.value, bool):
             protocol_values.append(value.value)
     if len(protocol_values) != 1 or protocol_values[0] < 1:
         raise CandidateError("candidate wheel must declare one positive upgrade protocol")
@@ -2923,15 +2821,10 @@ def _validate_wheel(path: Path, version: str) -> None:
         v8_members = sorted(
             name
             for name in names
-            if any(
-                part == "v8" or part.startswith(("v8_", "v8."))
-                for part in PurePosixPath(name).parts
-            )
+            if any(part == "v8" or part.startswith(("v8_", "v8.")) for part in PurePosixPath(name).parts)
         )
         if v8_members:
-            raise CandidateError(
-                f"0.8.4 bridge wheel contains v8 runtime resources: {v8_members[:3]!r}"
-            )
+            raise CandidateError(f"0.8.4 bridge wheel contains v8 runtime resources: {v8_members[:3]!r}")
         if any(tuple(map(int, item.split("."))) > (0, 8, 4) for item in migration_versions):
             raise CandidateError("0.8.4 bridge wheel contains a post-bridge migration")
     candidate_key = tuple(map(int, version.split(".")))
@@ -2945,21 +2838,13 @@ def _validate_wheel(path: Path, version: str) -> None:
     if tuple(map(int, version.split("."))) >= (0, 8, 4) and protocol_values[0] < 2:
         raise CandidateError("0.8.4+ candidate wheel must ship the protocol-2 bridge controller")
     if tuple(map(int, version.split("."))) >= (0, 8, 4):
-        expected_install_publish_source = (
-            ROOT / "cli" / "defenseclaw" / "install_publish.py"
-        ).read_bytes()
+        expected_install_publish_source = (ROOT / "cli" / "defenseclaw" / "install_publish.py").read_bytes()
         if install_publish_source != expected_install_publish_source:
-            raise CandidateError(
-                "0.8.4+ candidate wheel does not contain the exact reviewed install publisher"
-            )
+            raise CandidateError("0.8.4+ candidate wheel does not contain the exact reviewed install publisher")
         _validate_phase_two_mutator_wrapper(mutator_source)
         if tuple(map(int, version.split("."))) >= (0, 8, 5):
             _validate_hard_cut_bundle_transaction(bundle_transaction_source)
-        functions = {
-            node.name
-            for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
+        functions = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
         for name in (
             "_require_release_owned_hard_cut_handoff",
             "_acquire_bridge_rollback_artifacts",
@@ -2975,8 +2860,7 @@ def _validate_wheel(path: Path, version: str) -> None:
         entrypoints = [
             node
             for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == "upgrade"
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "upgrade"
         ]
         if len(entrypoints) != 1:
             raise CandidateError("0.8.4+ controller must define one upgrade entrypoint")
@@ -2988,9 +2872,7 @@ def _validate_wheel(path: Path, version: str) -> None:
             if name == "_require_release_owned_hard_cut_handoff"
         ]
         acquisition_calls = [
-            (line, guarded)
-            for name, line, guarded in controller_calls
-            if name == "_acquire_bridge_rollback_artifacts"
+            (line, guarded) for name, line, guarded in controller_calls if name == "_acquire_bridge_rollback_artifacts"
         ]
         if (
             len(handoff_calls) != 1
@@ -3002,8 +2884,7 @@ def _validate_wheel(path: Path, version: str) -> None:
             not in direct_guard_first_calls
         ):
             raise CandidateError(
-                "0.8.4+ controller must invoke the release-owned handoff gate once "
-                "inside the bridge-to-hard-cut path"
+                "0.8.4+ controller must invoke the release-owned handoff gate once inside the bridge-to-hard-cut path"
             )
         if (
             len(acquisition_calls) != 1
@@ -3015,8 +2896,7 @@ def _validate_wheel(path: Path, version: str) -> None:
             not in direct_guard_first_calls
         ):
             raise CandidateError(
-                "0.8.4+ controller must acquire bridge rollback artifacts once "
-                "inside the bridge-to-hard-cut path"
+                "0.8.4+ controller must acquire bridge rollback artifacts once inside the bridge-to-hard-cut path"
             )
         protected_calls = [
             (name, line)
@@ -3033,14 +2913,11 @@ def _validate_wheel(path: Path, version: str) -> None:
             "_create_backup",
             "_prepare_hard_cut_rollback_plan",
         }:
-            raise CandidateError(
-                "0.8.4+ controller lacks required bridge acquisition or backup calls"
-            )
+            raise CandidateError("0.8.4+ controller lacks required bridge acquisition or backup calls")
         handoff_line = handoff_calls[0][0]
         if any(line <= handoff_line for _name, line in protected_calls):
             raise CandidateError(
-                "0.8.4+ controller must enforce the release-owned handoff before "
-                "bridge artifact acquisition or backup"
+                "0.8.4+ controller must enforce the release-owned handoff before bridge artifact acquisition or backup"
             )
         assignments = {
             target.id: node.value.value
@@ -3051,16 +2928,14 @@ def _validate_wheel(path: Path, version: str) -> None:
             for target in node.targets
             if isinstance(target, ast.Name)
         }
-        if assignments.get("_STAGED_BRIDGE_ARTIFACT_DIR_ENV") != (
-            "DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR"
-        ):
+        if assignments.get("_STAGED_BRIDGE_ARTIFACT_DIR_ENV") != ("DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR"):
             raise CandidateError("0.8.4+ controller lacks the authenticated bridge handoff contract")
-        if candidate_key >= (0, 8, 5) and assignments.get(
-            "_STAGED_TARGET_CONTROLLER_VERSION_ENV"
-        ) != "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION":
-            raise CandidateError(
-                "0.8.5+ controller lacks the authenticated target-controller handoff contract"
-            )
+        if (
+            candidate_key >= (0, 8, 5)
+            and assignments.get("_STAGED_TARGET_CONTROLLER_VERSION_ENV")
+            != "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION"
+        ):
+            raise CandidateError("0.8.5+ controller lacks the authenticated target-controller handoff contract")
 
 
 def _safe_archive_member_path(name: str, archive_name: str) -> PurePosixPath:
@@ -3113,17 +2988,61 @@ def _validate_gateway_binary(
 
     if observed_machine != expected_machine:
         raise CandidateError(
-            f"gateway architecture mismatch in {archive_name}: "
-            f"got 0x{observed_machine:x}, want {os_name}/{arch}"
+            f"gateway architecture mismatch in {archive_name}: got 0x{observed_machine:x}, want {os_name}/{arch}"
         )
 
-    version_pattern = (
-        rb"(?<![0-9.])" + re.escape(version.encode("ascii")) + rb"(?![0-9.])"
-    )
+    version_pattern = rb"(?<![0-9.])" + re.escape(version.encode("ascii")) + rb"(?![0-9.])"
     if re.search(version_pattern, payload) is None:
         raise CandidateError(f"gateway in {archive_name} does not embed release version {version}")
     if commit is not None and commit.encode("ascii") not in payload:
         raise CandidateError(f"gateway in {archive_name} does not embed release commit {commit}")
+
+
+def _validate_windows_gateway_zip_payload(
+    payload: bytes,
+    *,
+    version: str,
+    arch: str,
+    commit: str | None,
+    archive_name: str,
+) -> None:
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            seen: set[PurePosixPath] = set()
+            gateway_payloads: list[bytes] = []
+            for member in archive.infolist():
+                raw_name = member.filename[:-1] if member.is_dir() else member.filename
+                member_path = _safe_archive_member_path(raw_name, archive_name)
+                if member_path in seen:
+                    raise CandidateError(f"duplicate member in gateway archive {archive_name}: {member.filename}")
+                seen.add(member_path)
+                unix_mode = (member.external_attr >> 16) & 0xFFFF
+                file_kind = stat.S_IFMT(unix_mode)
+                if file_kind not in {0, stat.S_IFREG, stat.S_IFDIR}:
+                    raise CandidateError(f"non-regular member in gateway archive {archive_name}: {member.filename}")
+                if member.is_dir():
+                    continue
+                if member.flag_bits & 0x1:
+                    raise CandidateError(f"encrypted member in gateway archive {archive_name}: {member.filename}")
+                if member_path != PurePosixPath("defenseclaw.exe"):
+                    continue
+                if member.file_size <= 0 or member.file_size > MAX_GATEWAY_BINARY_BYTES:
+                    raise CandidateError(f"gateway binary size is invalid in {archive_name}")
+                gateway_payloads.append(archive.read(member))
+    except CandidateError:
+        raise
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise CandidateError(f"invalid gateway archive {archive_name}: {exc}") from exc
+    if len(gateway_payloads) != 1:
+        raise CandidateError(f"gateway archive {archive_name} must contain exactly one root defenseclaw.exe binary")
+    _validate_gateway_binary(
+        gateway_payloads[0],
+        os_name="windows",
+        arch=arch,
+        version=version,
+        commit=commit,
+        archive_name=archive_name,
+    )
 
 
 def _validate_gateway_archives(
@@ -3141,23 +3060,15 @@ def _validate_gateway_archives(
                     seen: set[PurePosixPath] = set()
                     gateway_payloads: list[bytes] = []
                     for member in archive.getmembers():
-                        raw_name = (
-                            member.name[:-1]
-                            if member.isdir() and member.name.endswith("/")
-                            else member.name
-                        )
+                        raw_name = member.name[:-1] if member.isdir() and member.name.endswith("/") else member.name
                         member_path = _safe_archive_member_path(raw_name, path.name)
                         if member_path in seen:
-                            raise CandidateError(
-                                f"duplicate member in gateway archive {path.name}: {member.name}"
-                            )
+                            raise CandidateError(f"duplicate member in gateway archive {path.name}: {member.name}")
                         seen.add(member_path)
                         if member.isdir():
                             continue
                         if not member.isfile():
-                            raise CandidateError(
-                                f"non-regular member in gateway archive {path.name}: {member.name}"
-                            )
+                            raise CandidateError(f"non-regular member in gateway archive {path.name}: {member.name}")
                         if member_path != PurePosixPath("defenseclaw"):
                             continue
                         if member.size <= 0 or member.size > MAX_GATEWAY_BINARY_BYTES:
@@ -3171,9 +3082,7 @@ def _validate_gateway_archives(
             except (OSError, tarfile.TarError) as exc:
                 raise CandidateError(f"invalid gateway archive {path}: {exc}") from exc
             if len(gateway_payloads) != 1:
-                raise CandidateError(
-                    f"gateway archive {path.name} must contain exactly one root defenseclaw binary"
-                )
+                raise CandidateError(f"gateway archive {path.name} must contain exactly one root defenseclaw binary")
             _validate_gateway_binary(
                 gateway_payloads[0],
                 os_name=os_name,
@@ -3185,48 +3094,10 @@ def _validate_gateway_archives(
 
     for arch in ("amd64", "arm64"):
         path = directory / artifacts["gateways"]["windows"][arch]
-        try:
-            with zipfile.ZipFile(io.BytesIO(_protected_payload(path))) as archive:
-                seen = set()
-                gateway_payloads = []
-                for member in archive.infolist():
-                    raw_name = member.filename[:-1] if member.is_dir() else member.filename
-                    member_path = _safe_archive_member_path(raw_name, path.name)
-                    if member_path in seen:
-                        raise CandidateError(
-                            f"duplicate member in gateway archive {path.name}: {member.filename}"
-                        )
-                    seen.add(member_path)
-                    unix_mode = (member.external_attr >> 16) & 0xFFFF
-                    file_kind = stat.S_IFMT(unix_mode)
-                    if file_kind not in {0, stat.S_IFREG, stat.S_IFDIR}:
-                        raise CandidateError(
-                            f"non-regular member in gateway archive {path.name}: {member.filename}"
-                        )
-                    if member.is_dir():
-                        continue
-                    if member.flag_bits & 0x1:
-                        raise CandidateError(
-                            f"encrypted member in gateway archive {path.name}: {member.filename}"
-                        )
-                    if member_path != PurePosixPath("defenseclaw.exe"):
-                        continue
-                    if member.file_size <= 0 or member.file_size > MAX_GATEWAY_BINARY_BYTES:
-                        raise CandidateError(f"gateway binary size is invalid in {path.name}")
-                    gateway_payloads.append(archive.read(member))
-        except CandidateError:
-            raise
-        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
-            raise CandidateError(f"invalid gateway archive {path}: {exc}") from exc
-        if len(gateway_payloads) != 1:
-            raise CandidateError(
-                f"gateway archive {path.name} must contain exactly one root defenseclaw.exe binary"
-            )
-        _validate_gateway_binary(
-            gateway_payloads[0],
-            os_name="windows",
-            arch=arch,
+        _validate_windows_gateway_zip_payload(
+            _protected_payload(path),
             version=version,
+            arch=arch,
             commit=commit,
             archive_name=path.name,
         )
@@ -3234,15 +3105,12 @@ def _validate_gateway_archives(
 
 def _refusal_envelope_payload(version: str) -> bytes:
     if version == "0.8.4":
-        boundary = (
-            "DefenseClaw 0.8.4 must be installed by the release-owned staged upgrade resolver.\n"
-        )
+        boundary = "DefenseClaw 0.8.4 must be installed by the release-owned staged upgrade resolver.\n"
     else:
         boundary = f"DefenseClaw {version} requires the 0.8.4 upgrade bridge.\n"
-    return (
-        boundary
-        + "No changes were made. Run the release-owned upgrade resolver without a version.\n"
-    ).encode("utf-8")
+    return (boundary + "No changes were made. Run the release-owned upgrade resolver without a version.\n").encode(
+        "utf-8"
+    )
 
 
 def _validate_legacy_refusal_envelopes(directory: Path, version: str) -> None:
@@ -3308,18 +3176,12 @@ def prepare_runtime(directory: Path, version: str) -> None:
     plain_payload = _refusal_envelope_payload(version)
     for os_name in ("darwin", "linux"):
         for arch in ("amd64", "arm64"):
-            (directory / f"defenseclaw_{version}_{os_name}_{arch}.tar.gz").write_bytes(
-                plain_payload
-            )
+            (directory / f"defenseclaw_{version}_{os_name}_{arch}.tar.gz").write_bytes(plain_payload)
     for arch in ("amd64", "arm64"):
-        (directory / f"defenseclaw_{version}_windows_{arch}.zip").write_bytes(
-            plain_payload
-        )
+        (directory / f"defenseclaw_{version}_windows_{arch}.zip").write_bytes(plain_payload)
     canonical_wheel.write_bytes(plain_payload)
     _validate_legacy_refusal_envelopes(directory, version)
-    checksum_lines = [
-        f"{_sha256(directory / name)}  {name}" for name in runtime_asset_names(version)
-    ]
+    checksum_lines = [f"{_sha256(directory / name)}  {name}" for name in runtime_asset_names(version)]
     (directory / RUNTIME_ATTESTATION_FILENAME).write_text(
         "\n".join(checksum_lines) + "\n",
         encoding="utf-8",
@@ -3336,9 +3198,7 @@ def verify_runtime(directory: Path, version: str) -> None:
     if tuple(map(int, version.split("."))) >= (0, 8, 4):
         _validate_legacy_refusal_envelopes(directory, version)
         runtime_checksums = _parse_checksums(directory / RUNTIME_ATTESTATION_FILENAME)
-        expected_runtime_checksums = {
-            name: _sha256(directory / name) for name in runtime_asset_names(version)
-        }
+        expected_runtime_checksums = {name: _sha256(directory / name) for name in runtime_asset_names(version)}
         if runtime_checksums != expected_runtime_checksums:
             raise CandidateError("runtime checksums do not cover the exact protected candidate")
     for name in names:
@@ -3378,9 +3238,7 @@ def extract_gateway(release_dir: Path, output: Path, version: str, os_name: str,
     verify_runtime(release_dir, version)
     archive_path = release_dir / _expected_release_artifacts(version)["gateways"][os_name][arch]
     try:
-        with tarfile.open(
-            fileobj=io.BytesIO(_protected_payload(archive_path)), mode="r:gz"
-        ) as archive:
+        with tarfile.open(fileobj=io.BytesIO(_protected_payload(archive_path)), mode="r:gz") as archive:
             matches = []
             for member in archive.getmembers():
                 member_path = PurePosixPath(member.name)
@@ -3403,6 +3261,111 @@ def extract_gateway(release_dir: Path, output: Path, version: str, os_name: str,
     except (OSError, tarfile.TarError) as exc:
         raise CandidateError(f"could not extract candidate gateway: {exc}") from exc
     output.chmod(0o755)
+
+
+def _write_exclusive_file(path: Path, payload: bytes, *, mode: int = 0o600) -> None:
+    owned = False
+    try:
+        with path.open("xb") as handle:
+            owned = True
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        path.chmod(mode)
+    except OSError as exc:
+        if owned:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise CandidateError(f"could not publish extracted installer input {path.name}: {exc}") from exc
+
+
+def extract_windows_installer_inputs(
+    release_dir: Path,
+    output_dir: Path,
+    version: str,
+) -> None:
+    """Decode only authenticated Windows x64 Setup inputs into a new private dir."""
+
+    _validate_version(version)
+    if tuple(map(int, version.split("."))) < WINDOWS_SETUP_START_VERSION:
+        raise CandidateError("native Windows Setup input extraction starts with release 0.8.6")
+    if output_dir.exists() or output_dir.is_symlink():
+        raise CandidateError(f"Windows installer input output already exists: {output_dir}")
+
+    verify_runtime(release_dir, version)
+    attestation = _parse_checksums(release_dir / RUNTIME_ATTESTATION_FILENAME)
+    artifacts = _expected_release_artifacts(version)
+    protected_gateway_name = artifacts["gateways"]["windows"]["amd64"]
+    protected_wheel_name = artifacts["wheel"]
+
+    def protected_payload(name: str) -> bytes:
+        source = release_dir / name
+        expected = attestation.get(name)
+        before = _sha256(source)
+        if expected != before:
+            raise CandidateError(f"runtime attestation changed before extracting {name}")
+        payload = _protected_payload(source)
+        if _sha256(source) != before:
+            raise CandidateError(f"protected runtime input changed while extracting {name}")
+        return payload
+
+    manifest_source = release_dir / "upgrade-manifest.json"
+    manifest_expected = attestation.get(manifest_source.name)
+    manifest_before = _sha256(manifest_source)
+    if manifest_expected != manifest_before:
+        raise CandidateError("runtime attestation changed before extracting upgrade-manifest.json")
+    try:
+        manifest_payload = manifest_source.read_bytes()
+    except OSError as exc:
+        raise CandidateError(f"could not read verified upgrade manifest: {exc}") from exc
+    if _sha256(manifest_source) != manifest_before:
+        raise CandidateError("upgrade-manifest.json changed while being extracted")
+
+    gateway_payload = protected_payload(protected_gateway_name)
+    wheel_payload = protected_payload(protected_wheel_name)
+    gateway_name = f"defenseclaw_{version}_windows_amd64.zip"
+    wheel_name = f"defenseclaw-{version}-py3-none-any.whl"
+    created: list[Path] = []
+    try:
+        try:
+            output_dir.mkdir(parents=True, mode=0o700)
+            output_dir.chmod(0o700)
+        except OSError as exc:
+            raise CandidateError(f"could not create private Windows installer input directory: {exc}") from exc
+        for name, payload in (
+            (gateway_name, gateway_payload),
+            (wheel_name, wheel_payload),
+            ("upgrade-manifest.json", manifest_payload),
+        ):
+            destination = output_dir / name
+            _write_exclusive_file(destination, payload)
+            created.append(destination)
+        if _strict_file_names(output_dir, "Windows installer input") != tuple(
+            sorted((gateway_name, wheel_name, "upgrade-manifest.json"))
+        ):
+            raise CandidateError("Windows installer input contains an unexpected file set")
+        _validate_upgrade_manifest(output_dir / "upgrade-manifest.json", version)
+        _validate_windows_gateway_zip_payload(
+            gateway_payload,
+            version=version,
+            arch="amd64",
+            commit=None,
+            archive_name=gateway_name,
+        )
+        _validate_wheel(output_dir / wheel_name, version)
+    except Exception:
+        for path in reversed(created):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        try:
+            output_dir.rmdir()
+        except OSError:
+            pass
+        raise
 
 
 def _copy_exact(source: Path, destination: Path, names: tuple[str, ...]) -> None:
@@ -3432,26 +3395,19 @@ def _release_identity_documents(
     if tuple(map(int, version.split("."))) < (0, 8, 5):
         supplied = sorted(name for name, value in fields.items() if value is not None)
         if supplied:
-            raise CandidateError(
-                f"release {version} forbids hard-cut provenance fields: {supplied!r}"
-            )
+            raise CandidateError(f"release {version} forbids hard-cut provenance fields: {supplied!r}")
         return None, None
 
     missing = sorted(name for name, value in fields.items() if value is None)
     if missing:
-        raise CandidateError(
-            f"release {version} requires hard-cut provenance fields: {missing!r}"
-        )
+        raise CandidateError(f"release {version} requires hard-cut provenance fields: {missing!r}")
     for name in ("source_tree", "bridge_commit", "bridge_tree"):
         value = fields[name]
         if not isinstance(value, str) or not COMMIT_RE.fullmatch(value):
             raise CandidateError(f"{name} must be a full lowercase SHA-1, got {value!r}")
-    if not isinstance(bridge_checksums_sha256, str) or not SHA256_RE.fullmatch(
-        bridge_checksums_sha256
-    ):
+    if not isinstance(bridge_checksums_sha256, str) or not SHA256_RE.fullmatch(bridge_checksums_sha256):
         raise CandidateError(
-            "bridge_checksums_sha256 must be a full lowercase SHA-256, "
-            f"got {bridge_checksums_sha256!r}"
+            f"bridge_checksums_sha256 must be a full lowercase SHA-256, got {bridge_checksums_sha256!r}"
         )
 
     identity = _reviewed_source_install_identity(version)
@@ -3472,9 +3428,7 @@ def _release_identity_documents(
         "source_install_identity": identity,
         "bridge": bridge,
     }
-    source_map_sha256 = hashlib.sha256(
-        _canonical_json(source_map).encode("utf-8")
-    ).hexdigest()
+    source_map_sha256 = hashlib.sha256(_canonical_json(source_map).encode("utf-8")).hexdigest()
     provenance = {
         "schema_version": RELEASE_PROVENANCE_SCHEMA_VERSION,
         "release_version": version,
@@ -3548,7 +3502,10 @@ def _validate_release_identity(
     if source_map.get("policy_mode") != "same_as_release_source":
         raise CandidateError("release source map policy_mode mismatch")
 
-    for document, label in ((source_map, "release source map"), (provenance, "release provenance")):
+    for document, label in (
+        (source_map, "release source map"),
+        (provenance, "release provenance"),
+    ):
         identity = document.get("source_install_identity")
         bridge = document.get("bridge")
         if not isinstance(identity, dict) or set(identity) != identity_keys:
@@ -3596,11 +3553,856 @@ def _validate_release_identity(
         raise CandidateError("release source map JSON is not canonical or changed")
     if provenance_text != _canonical_json(provenance):
         raise CandidateError("release provenance JSON is not canonical or changed")
-    if provenance.get("release_source_map_sha256") != hashlib.sha256(
-        source_map_bytes
-    ).hexdigest():
+    if provenance.get("release_source_map_sha256") != hashlib.sha256(source_map_bytes).hexdigest():
         raise CandidateError("release provenance does not authenticate its source map")
     return provenance
+
+
+def _validate_windows_setup_pe(path: Path) -> tuple[str, bool]:
+    try:
+        size = path.stat().st_size
+        if not 0 < size <= MAX_WINDOWS_SETUP_BYTES:
+            raise CandidateError("Windows Setup executable size is invalid")
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise CandidateError(f"could not read Windows Setup executable: {exc}") from exc
+    if len(payload) != size or len(payload) < 0x100 or payload[:2] != b"MZ":
+        raise CandidateError("Windows Setup is not a complete PE executable")
+    pe_offset = struct.unpack_from("<I", payload, 0x3C)[0]
+    if pe_offset > len(payload) - 24 or payload[pe_offset : pe_offset + 4] != b"PE\0\0":
+        raise CandidateError("Windows Setup has an invalid PE header")
+    machine = struct.unpack_from("<H", payload, pe_offset + 4)[0]
+    optional_size = struct.unpack_from("<H", payload, pe_offset + 20)[0]
+    optional_offset = pe_offset + 24
+    if machine != 0x8664:
+        raise CandidateError("Windows Setup is not an x64 PE executable")
+    if optional_size < 152 or optional_offset + optional_size > len(payload):
+        raise CandidateError("Windows Setup has a truncated PE32+ optional header")
+    if struct.unpack_from("<H", payload, optional_offset)[0] != 0x20B:
+        raise CandidateError("Windows Setup is not a PE32+ executable")
+    if struct.unpack_from("<H", payload, optional_offset + 68)[0] != 2:
+        raise CandidateError("Windows Setup is not a Windows GUI executable")
+    directory_count = struct.unpack_from("<I", payload, optional_offset + 108)[0]
+    if directory_count < 5:
+        raise CandidateError("Windows Setup lacks a PE security-directory entry")
+    certificate_offset, certificate_size = struct.unpack_from("<II", payload, optional_offset + 112 + 4 * 8)
+    if certificate_offset == 0 and certificate_size == 0:
+        embedded_signature_present = False
+    elif certificate_offset <= 0 or certificate_size < 8 or certificate_offset > len(payload) - certificate_size:
+        raise CandidateError("Windows Setup lacks a complete embedded Authenticode signature")
+    else:
+        embedded_signature_present = True
+    return hashlib.sha256(payload).hexdigest(), embedded_signature_present
+
+
+def _require_object_fields(
+    value: object,
+    expected: set[str],
+    label: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != expected:
+        raise CandidateError(f"{label} does not use its closed field set")
+    return value
+
+
+def _read_windows_setup_json(path: Path, label: str) -> dict[str, Any]:
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= MAX_WINDOWS_SETUP_METADATA_BYTES:
+            raise CandidateError(f"{label} has an invalid file type or size")
+        payload = path.read_bytes()
+        if len(payload) != info.st_size:
+            raise CandidateError(f"{label} changed while being read")
+        document = json.loads(payload.decode("utf-8", errors="strict"))
+    except CandidateError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CandidateError(f"invalid {label} {path}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise CandidateError(f"{label} must contain a JSON object")
+    return document
+
+
+def _require_sha256_fields(
+    document: dict[str, Any],
+    fields: tuple[str, ...],
+    label: str,
+) -> None:
+    for field in fields:
+        value = document.get(field)
+        if not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
+            raise CandidateError(f"{label} {field} is not a lowercase SHA-256 digest")
+
+
+def _validate_windows_setup_provenance(
+    path: Path,
+    *,
+    version: str,
+    commit: str,
+    setup_sha256: str,
+    embedded_signature_present: bool,
+) -> dict[str, Any]:
+    document = _read_windows_setup_json(path, "Windows Setup provenance")
+    _require_object_fields(
+        document,
+        {
+            "schema_version",
+            "artifact",
+            "artifact_sha256",
+            "version",
+            "source_commit",
+            "distribution_flavor",
+            "built_at_utc",
+            "unsigned",
+            "authenticode",
+            "inputs",
+            "toolchain",
+        },
+        "Windows Setup provenance",
+    )
+    if (
+        document.get("schema_version") != 1
+        or document.get("artifact") != WINDOWS_SETUP_ASSET
+        or document.get("artifact_sha256") != setup_sha256
+        or document.get("version") != version
+        or document.get("source_commit") != commit
+        or document.get("distribution_flavor") != "oss"
+    ):
+        raise CandidateError("Windows Setup provenance release identity mismatch")
+    unsigned = document.get("unsigned")
+    if not isinstance(unsigned, bool) or embedded_signature_present != (not unsigned):
+        raise CandidateError("Windows Setup provenance signing state does not match the PE signature")
+    signed = not unsigned
+    built_at = document.get("built_at_utc")
+    if not isinstance(built_at, str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z", built_at) is None:
+        raise CandidateError("Windows Setup provenance build timestamp is invalid")
+    inputs = _require_object_fields(
+        document.get("inputs"),
+        {
+            "gateway_archive",
+            "gateway_archive_sha256",
+            "embedded_gateway_archive_sha256",
+            "embedded_payload_sha256",
+            "product_executables_authenticode_signed",
+            "wheel",
+            "wheel_sha256",
+            "python_embed",
+            "python_embed_sha256",
+            "site_packages_sha256",
+            "yara_compat_wheel",
+            "yara_compat_wheel_sha256",
+            "cosign_sha256",
+            "payload_manifest_sha256",
+            "go_component_inventory_sha256",
+            "payload_files",
+            "windows_resource_policy",
+            "windows_resource_icon",
+            "windows_resource_icon_sha256",
+        },
+        "Windows Setup provenance inputs",
+    )
+    _require_sha256_fields(
+        inputs,
+        (
+            "gateway_archive_sha256",
+            "embedded_gateway_archive_sha256",
+            "embedded_payload_sha256",
+            "wheel_sha256",
+            "python_embed_sha256",
+            "site_packages_sha256",
+            "yara_compat_wheel_sha256",
+            "cosign_sha256",
+            "payload_manifest_sha256",
+            "go_component_inventory_sha256",
+            "windows_resource_icon_sha256",
+        ),
+        "Windows Setup provenance input",
+    )
+    gateway_archive = f"defenseclaw_{version}_windows_amd64.zip"
+    wheel = f"defenseclaw-{version}-py3-none-any.whl"
+    if (
+        inputs.get("gateway_archive") != gateway_archive
+        or inputs.get("wheel") != wheel
+        or inputs.get("python_embed") != WINDOWS_PYTHON_EMBED_NAME
+        or inputs.get("python_embed_sha256") != WINDOWS_PYTHON_EMBED_SHA256
+        or inputs.get("yara_compat_wheel") != WINDOWS_YARA_COMPAT_WHEEL
+        or inputs.get("cosign_sha256") != WINDOWS_COSIGN_SHA256
+        or inputs.get("product_executables_authenticode_signed") is not signed
+        or inputs.get("windows_resource_policy") != WINDOWS_RESOURCE_POLICY
+        or inputs.get("windows_resource_icon") != WINDOWS_RESOURCE_ICON
+        or inputs.get("windows_resource_icon_sha256") != WINDOWS_RESOURCE_ICON_SHA256
+    ):
+        raise CandidateError("Windows Setup provenance input identity or reviewed pin mismatch")
+    payload_files = _require_object_fields(
+        inputs.get("payload_files"),
+        {
+            gateway_archive,
+            wheel,
+            WINDOWS_PYTHON_EMBED_NAME,
+            WINDOWS_YARA_COMPAT_WHEEL,
+            "site-packages.zip",
+            "defenseclaw-launcher.exe",
+            "defenseclaw-startup.exe",
+            "cosign.exe",
+            "requirements-release.txt",
+            "upgrade-manifest.json",
+        },
+        "Windows Setup provenance payload files",
+    )
+    _require_sha256_fields(
+        payload_files,
+        tuple(sorted(payload_files)),
+        "Windows Setup provenance payload file",
+    )
+    payload_bindings = {
+        gateway_archive: "embedded_gateway_archive_sha256",
+        wheel: "wheel_sha256",
+        WINDOWS_PYTHON_EMBED_NAME: "python_embed_sha256",
+        WINDOWS_YARA_COMPAT_WHEEL: "yara_compat_wheel_sha256",
+        "site-packages.zip": "site_packages_sha256",
+        "cosign.exe": "cosign_sha256",
+    }
+    if any(payload_files[name] != inputs[field] for name, field in payload_bindings.items()):
+        raise CandidateError("Windows Setup provenance payload digests are inconsistent")
+
+    toolchain = _require_object_fields(
+        document.get("toolchain"),
+        {
+            "go",
+            "uv",
+            "python_embed_url",
+            "python_embed_sha256",
+            "python_runtime_review_deadline_utc",
+            "yara_compat_sha256",
+            "win_unicode_console_source_url",
+            "win_unicode_console_source_sha256",
+            "cosign_version",
+            "cosign_url",
+            "cosign_sha256",
+        },
+        "Windows Setup provenance toolchain",
+    )
+    if (
+        not isinstance(toolchain.get("go"), str)
+        or re.fullmatch(r"go version go[0-9]+\.[0-9]+(?:\.[0-9]+)? windows/amd64", toolchain["go"]) is None
+        or not isinstance(toolchain.get("uv"), str)
+        or re.fullmatch(r"uv [0-9]+\.[0-9]+\.[0-9]+(?: .*)?", toolchain["uv"]) is None
+        or toolchain.get("python_embed_url") != WINDOWS_PYTHON_EMBED_URL
+        or toolchain.get("python_embed_sha256") != WINDOWS_PYTHON_EMBED_SHA256
+        or toolchain.get("python_embed_sha256") != inputs.get("python_embed_sha256")
+        or toolchain.get("python_runtime_review_deadline_utc") != WINDOWS_PYTHON_RUNTIME_REVIEW_DEADLINE
+        or toolchain.get("yara_compat_sha256") != inputs.get("yara_compat_wheel_sha256")
+        or toolchain.get("win_unicode_console_source_url") != WINDOWS_WIN_UNICODE_SOURCE_URL
+        or toolchain.get("win_unicode_console_source_sha256") != WINDOWS_WIN_UNICODE_SOURCE_SHA256
+        or toolchain.get("cosign_version") != WINDOWS_COSIGN_VERSION
+        or toolchain.get("cosign_url") != WINDOWS_COSIGN_URL
+        or toolchain.get("cosign_sha256") != WINDOWS_COSIGN_SHA256
+        or toolchain.get("cosign_sha256") != inputs.get("cosign_sha256")
+    ):
+        raise CandidateError("Windows Setup provenance toolchain identity or reviewed pin mismatch")
+
+    authenticode = _require_object_fields(
+        document.get("authenticode"),
+        {"schema_version", "files"},
+        "Windows Setup Authenticode inventory",
+    )
+    files = authenticode.get("files")
+    if authenticode.get("schema_version") != 1 or not isinstance(files, dict):
+        raise CandidateError("Windows Setup Authenticode inventory is invalid")
+    evidence = _require_object_fields(
+        files.get(WINDOWS_SETUP_ASSET),
+        {
+            "schema_version",
+            "installed_path",
+            "sbom_file_name",
+            "sha256",
+            "expected",
+            "observed",
+        },
+        "Windows Setup Authenticode evidence",
+    )
+    if (
+        evidence.get("schema_version") != 1
+        or evidence.get("installed_path") != WINDOWS_SETUP_ASSET
+        or evidence.get("sbom_file_name") != f"./{WINDOWS_SETUP_ASSET}"
+        or evidence.get("sha256") != setup_sha256
+    ):
+        raise CandidateError("Windows Setup Authenticode evidence digest mismatch")
+    expected = _require_object_fields(
+        evidence.get("expected"),
+        {
+            "policy",
+            "status",
+            "publisher",
+            "signature_type",
+            "platform_identity_required",
+            "timestamp_required",
+            "signer_thumbprint_sha256",
+            "timestamp_signer_thumbprint_sha256",
+            "timestamp_token_sha256",
+        },
+        "Windows Setup expected Authenticode policy",
+    )
+    if (
+        expected.get("policy") != "defenseclaw-product-publisher"
+        or expected.get("platform_identity_required") is not True
+    ):
+        raise CandidateError("Windows Setup Authenticode policy identity is invalid")
+    identity_fields = (
+        "signer_thumbprint_sha256",
+        "timestamp_signer_thumbprint_sha256",
+        "timestamp_token_sha256",
+    )
+    if signed:
+        if (
+            expected.get("status") != "Valid"
+            or expected.get("publisher") != WINDOWS_SETUP_PUBLISHER
+            or expected.get("signature_type") != "Authenticode"
+            or expected.get("timestamp_required") is not True
+        ):
+            raise CandidateError("Signed Windows Setup does not require Cisco Authenticode and RFC3161")
+        for field in identity_fields:
+            if not isinstance(expected.get(field), str) or SHA256_RE.fullmatch(expected[field]) is None:
+                raise CandidateError(f"Windows Setup Authenticode {field} is invalid")
+    elif (
+        expected.get("status") != "NotSigned"
+        or expected.get("publisher") != ""
+        or expected.get("signature_type") != "None"
+        or expected.get("timestamp_required") is not False
+        or any(expected.get(field) != "" for field in identity_fields)
+    ):
+        raise CandidateError("Unverified Windows Setup contains a signed Authenticode policy")
+
+    observed = _require_object_fields(
+        evidence.get("observed"),
+        {
+            "status",
+            "publisher",
+            "signature_type",
+            "signer",
+            "chain",
+            "timestamp",
+            "embedded_signatures",
+        },
+        "Windows Setup observed Authenticode evidence",
+    )
+    signer = observed.get("signer")
+    timestamp = observed.get("timestamp")
+    embedded = observed.get("embedded_signatures")
+    if signed:
+        if (
+            observed.get("status") != "Valid"
+            or observed.get("publisher") != WINDOWS_SETUP_PUBLISHER
+            or observed.get("signature_type") != "Authenticode"
+        ):
+            raise CandidateError("Windows Setup observed Authenticode identity is invalid")
+        if not isinstance(signer, dict) or signer.get("thumbprint_sha256") != expected.get("signer_thumbprint_sha256"):
+            raise CandidateError("Windows Setup Authenticode signer identity is inconsistent")
+        if (
+            not isinstance(timestamp, dict)
+            or timestamp.get("present") is not True
+            or timestamp.get("format") != "rfc3161"
+            or timestamp.get("token_sha256") != expected.get("timestamp_token_sha256")
+            or not isinstance(timestamp.get("signing_time_utc"), str)
+            or not timestamp.get("signing_time_utc")
+        ):
+            raise CandidateError("Windows Setup RFC3161 timestamp evidence is invalid")
+        timestamp_certificate = timestamp.get("certificate")
+        if not isinstance(timestamp_certificate, dict) or timestamp_certificate.get(
+            "thumbprint_sha256"
+        ) != expected.get("timestamp_signer_thumbprint_sha256"):
+            raise CandidateError("Windows Setup RFC3161 signer identity is inconsistent")
+        if not isinstance(embedded, list) or len(embedded) != 1:
+            raise CandidateError("Windows Setup must contain exactly one embedded Authenticode signature")
+        embedded_signature = embedded[0]
+        if not isinstance(embedded_signature, dict) or embedded_signature.get("publisher") != WINDOWS_SETUP_PUBLISHER:
+            raise CandidateError("Windows Setup embedded Authenticode publisher is invalid")
+        embedded_signer = embedded_signature.get("signer")
+        embedded_timestamp = embedded_signature.get("timestamp")
+        if (
+            not isinstance(embedded_signer, dict)
+            or embedded_signer.get("thumbprint_sha256") != expected.get("signer_thumbprint_sha256")
+            or not isinstance(embedded_timestamp, dict)
+            or embedded_timestamp.get("present") is not True
+            or embedded_timestamp.get("format") != "rfc3161"
+            or embedded_timestamp.get("token_sha256") != expected.get("timestamp_token_sha256")
+        ):
+            raise CandidateError("Windows Setup embedded Authenticode timestamp identity is invalid")
+    elif (
+        observed.get("status") != "NotSigned"
+        or observed.get("publisher") != ""
+        or observed.get("signature_type") != "None"
+        or signer is not None
+        or observed.get("chain") not in (None, [])
+        or not isinstance(timestamp, dict)
+        or timestamp.get("present") is not False
+        or timestamp.get("format") != ""
+        or timestamp.get("token_sha256") != ""
+        or timestamp.get("signing_time_utc") != ""
+        or timestamp.get("certificate") is not None
+        or embedded != []
+    ):
+        raise CandidateError("Unverified Windows Setup exposes Authenticode signer or timestamp evidence")
+    return document
+
+
+def _validate_windows_setup_runtime_inputs(
+    provenance: dict[str, Any],
+    runtime_directory: Path,
+    version: str,
+) -> None:
+    """Bind installer provenance to the exact protected runtime candidate bytes."""
+
+    artifacts = _expected_release_artifacts(version)
+    gateway_path = runtime_directory / artifacts["gateways"]["windows"]["amd64"]
+    wheel_path = runtime_directory / artifacts["wheel"]
+    manifest_path = runtime_directory / "upgrade-manifest.json"
+    inputs = provenance["inputs"]
+    try:
+        gateway_sha256 = hashlib.sha256(_protected_payload(gateway_path)).hexdigest()
+        wheel_sha256 = hashlib.sha256(_protected_payload(wheel_path)).hexdigest()
+        manifest_sha256 = _sha256(manifest_path)
+    except (KeyError, OSError) as exc:
+        raise CandidateError(f"could not bind Windows Setup to runtime inputs: {exc}") from exc
+    if (
+        gateway_sha256 != inputs["gateway_archive_sha256"]
+        or wheel_sha256 != inputs["wheel_sha256"]
+        or manifest_sha256 != inputs["payload_files"]["upgrade-manifest.json"]
+    ):
+        raise CandidateError("Windows Setup provenance does not bind the exact runtime candidate")
+
+
+def _spdx_sha256(element: dict[str, Any], label: str) -> str:
+    checksums = element.get("checksums")
+    matches = (
+        [row.get("checksumValue") for row in checksums if isinstance(row, dict) and row.get("algorithm") == "SHA256"]
+        if isinstance(checksums, list)
+        else []
+    )
+    if len(matches) != 1 or not isinstance(matches[0], str) or SHA256_RE.fullmatch(matches[0]) is None:
+        raise CandidateError(f"{label} does not contain exactly one lowercase SHA-256 digest")
+    return matches[0]
+
+
+def _validate_windows_setup_sbom(
+    path: Path,
+    *,
+    version: str,
+    commit: str,
+    setup_sha256: str,
+    provenance: dict[str, Any],
+) -> None:
+    document = _read_windows_setup_json(path, "Windows Setup SBOM")
+    _require_object_fields(
+        document,
+        {
+            "spdxVersion",
+            "dataLicense",
+            "SPDXID",
+            "name",
+            "documentNamespace",
+            "comment",
+            "creationInfo",
+            "documentDescribes",
+            "packages",
+            "files",
+            "relationships",
+        },
+        "Windows Setup SBOM",
+    )
+    expected_namespace = f"https://github.com/cisco-ai-defense/defenseclaw/spdx/windows/{version}/{setup_sha256}"
+    if (
+        document.get("spdxVersion") != "SPDX-2.3"
+        or document.get("dataLicense") != "CC0-1.0"
+        or document.get("SPDXID") != "SPDXRef-DOCUMENT"
+        or document.get("name") != f"{WINDOWS_SETUP_ASSET}-{version}"
+        or document.get("documentNamespace") != expected_namespace
+        or document.get("comment") != f"DefenseClaw source commit: {commit}"
+    ):
+        raise CandidateError("Windows Setup SBOM document identity is invalid")
+    creation_info = _require_object_fields(
+        document.get("creationInfo"),
+        {"created", "creators", "licenseListVersion"},
+        "Windows Setup SBOM creationInfo",
+    )
+    created = creation_info.get("created")
+    if (
+        not isinstance(created, str)
+        or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z", created) is None
+        or creation_info.get("creators")
+        != [
+            "Organization: Cisco Systems, Inc.",
+            "Tool: DefenseClaw Windows installer SBOM generator",
+        ]
+        or creation_info.get("licenseListVersion") != "3.25"
+    ):
+        raise CandidateError("Windows Setup SBOM creation identity is invalid")
+    packages = document.get("packages")
+    files = document.get("files")
+    relationships = document.get("relationships")
+    if not all(isinstance(value, list) for value in (packages, files, relationships)):
+        raise CandidateError("Windows Setup SBOM inventory is invalid")
+
+    identifiers: set[str] = {"SPDXRef-DOCUMENT"}
+    for element in [*packages, *files]:
+        if not isinstance(element, dict):
+            raise CandidateError("Windows Setup SBOM contains a non-object element")
+        identifier = element.get("SPDXID")
+        if not isinstance(identifier, str) or not identifier.startswith("SPDXRef-") or identifier in identifiers:
+            raise CandidateError("Windows Setup SBOM contains a duplicate or invalid SPDXID")
+        identifiers.add(identifier)
+
+    relationship_rows: set[tuple[str, str, str]] = set()
+    for relationship in relationships:
+        if not isinstance(relationship, dict) or set(relationship) != {
+            "spdxElementId",
+            "relationshipType",
+            "relatedSpdxElement",
+        }:
+            raise CandidateError("Windows Setup SBOM contains an invalid relationship row")
+        row = (
+            relationship.get("spdxElementId"),
+            relationship.get("relationshipType"),
+            relationship.get("relatedSpdxElement"),
+        )
+        if (
+            not all(isinstance(item, str) and item for item in row)
+            or row[0] not in identifiers
+            or row[2] not in identifiers
+            or row in relationship_rows
+        ):
+            raise CandidateError("Windows Setup SBOM relationships are invalid")
+        relationship_rows.add(row)
+    setup_packages = [
+        item for item in packages if isinstance(item, dict) and item.get("name") == "DefenseClaw Windows Setup"
+    ]
+    if len(setup_packages) != 1:
+        raise CandidateError("Windows Setup SBOM must contain exactly one Setup package")
+    package = setup_packages[0]
+    package_id = package.get("SPDXID")
+    if (
+        not isinstance(package_id, str)
+        or package.get("versionInfo") != version
+        or package.get("packageFileName") != WINDOWS_SETUP_ASSET
+    ):
+        raise CandidateError("Windows Setup SBOM package identity is invalid")
+    if _spdx_sha256(package, "Windows Setup SBOM package") != setup_sha256:
+        raise CandidateError("Windows Setup SBOM package digest is invalid")
+    expected_purl = f"pkg:github/cisco-ai-defense/defenseclaw@{version}"
+    refs = package.get("externalRefs")
+    if (
+        not isinstance(refs, list)
+        or sum(
+            isinstance(item, dict)
+            and item.get("referenceCategory") == "PACKAGE-MANAGER"
+            and item.get("referenceType") == "purl"
+            and item.get("referenceLocator") == expected_purl
+            for item in refs
+        )
+        != 1
+    ):
+        raise CandidateError("Windows Setup SBOM source package identity is invalid")
+    setup_files = [
+        item for item in files if isinstance(item, dict) and item.get("fileName") == f"./{WINDOWS_SETUP_ASSET}"
+    ]
+    if len(setup_files) != 1:
+        raise CandidateError("Windows Setup SBOM must contain exactly one Setup file")
+    setup_file = setup_files[0]
+    file_id = setup_file.get("SPDXID")
+    if not isinstance(file_id, str) or _spdx_sha256(setup_file, "Windows Setup SBOM file") != setup_sha256:
+        raise CandidateError("Windows Setup SBOM file digest is invalid")
+    if document.get("documentDescribes") != [package_id]:
+        raise CandidateError("Windows Setup SBOM documentDescribes is invalid")
+    required_relationships: set[tuple[str, str, str]] = {
+        ("SPDXRef-DOCUMENT", "DESCRIBES", package_id),
+        (package_id, "CONTAINS", file_id),
+    }
+
+    embedded_packages = [
+        item
+        for item in packages
+        if isinstance(item, dict) and item.get("name") == "DefenseClaw embedded installer payload"
+    ]
+    if len(embedded_packages) != 1:
+        raise CandidateError("Windows Setup SBOM must contain exactly one embedded payload package")
+    embedded_package = embedded_packages[0]
+    embedded_package_id = embedded_package.get("SPDXID")
+    embedded_sha256 = provenance["inputs"]["embedded_payload_sha256"]
+    if (
+        not isinstance(embedded_package_id, str)
+        or embedded_package.get("versionInfo") != version
+        or embedded_package.get("packageFileName") != "installer-payload.zip"
+        or _spdx_sha256(embedded_package, "Windows Setup embedded payload package") != embedded_sha256
+    ):
+        raise CandidateError("Windows Setup SBOM embedded payload package is invalid")
+    embedded_files = [
+        item for item in files if isinstance(item, dict) and item.get("fileName") == "./embedded/installer-payload.zip"
+    ]
+    if len(embedded_files) != 1:
+        raise CandidateError("Windows Setup SBOM must contain exactly one embedded payload file")
+    embedded_file = embedded_files[0]
+    embedded_file_id = embedded_file.get("SPDXID")
+    if (
+        not isinstance(embedded_file_id, str)
+        or _spdx_sha256(embedded_file, "Windows Setup embedded payload file") != embedded_sha256
+    ):
+        raise CandidateError("Windows Setup SBOM embedded payload file is invalid")
+    required_relationships.update(
+        {
+            (embedded_package_id, "CONTAINS", embedded_file_id),
+            (package_id, "CONTAINS", embedded_package_id),
+        }
+    )
+
+    expected_payload = dict(provenance["inputs"]["payload_files"])
+    expected_payload["manifest.json"] = provenance["inputs"]["payload_manifest_sha256"]
+    for name, digest in expected_payload.items():
+        component_packages = [
+            item for item in packages if isinstance(item, dict) and item.get("packageFileName") == name
+        ]
+        component_files = [
+            item for item in files if isinstance(item, dict) and item.get("fileName") == f"./payload/{name}"
+        ]
+        if len(component_packages) != 1 or len(component_files) != 1:
+            raise CandidateError(f"Windows Setup SBOM payload inventory is incomplete for {name}")
+        component_package = component_packages[0]
+        component_file = component_files[0]
+        component_package_id = component_package.get("SPDXID")
+        component_file_id = component_file.get("SPDXID")
+        if (
+            not isinstance(component_package_id, str)
+            or not isinstance(component_file_id, str)
+            or _spdx_sha256(component_package, f"Windows Setup SBOM package {name}") != digest
+            or _spdx_sha256(component_file, f"Windows Setup SBOM file {name}") != digest
+        ):
+            raise CandidateError(f"Windows Setup SBOM payload digest is invalid for {name}")
+        required_relationships.update(
+            {
+                (component_package_id, "CONTAINS", component_file_id),
+                (embedded_package_id, "CONTAINS", component_package_id),
+            }
+        )
+    if not required_relationships.issubset(relationship_rows):
+        raise CandidateError("Windows Setup SBOM custody relationships are incomplete")
+
+
+def _validate_windows_setup_certification(
+    path: Path,
+    *,
+    version: str,
+    commit: str,
+    setup_sha256: str,
+    signed: bool,
+) -> None:
+    document = _read_windows_setup_json(path, "Windows Setup certification")
+    _require_object_fields(
+        document,
+        {
+            "schema_version",
+            "status",
+            "verification_status",
+            "platform",
+            "setup",
+            "clients",
+            "connectors",
+            "requirements",
+            "source_commit",
+            "release_version",
+            "staging_artifact_digest",
+            "run_url",
+        },
+        "Windows Setup certification",
+    )
+    setup = document.get("setup")
+    common_mismatch = (
+        document.get("schema_version") != 1
+        or document.get("platform") != "windows-x64"
+        or document.get("source_commit") != commit
+        or document.get("release_version") != version
+    )
+    if signed:
+        mode_mismatch = (
+            document.get("status") != "passed"
+            or document.get("verification_status") != "signed"
+            or setup
+            != {
+                "name": WINDOWS_SETUP_ASSET,
+                "sha256": setup_sha256,
+                "publisher": WINDOWS_SETUP_PUBLISHER,
+            }
+            or document.get("clients") != WINDOWS_SETUP_CLIENTS
+            or document.get("connectors") != ["codex", "claudecode"]
+            or document.get("requirements") != list(WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS)
+        )
+    else:
+        mode_mismatch = (
+            document.get("status") != "unverified"
+            or document.get("verification_status") != "unverified"
+            or setup
+            != {
+                "name": WINDOWS_SETUP_ASSET,
+                "sha256": setup_sha256,
+                "publisher": "",
+            }
+            or document.get("clients") != {}
+            or document.get("connectors") != []
+            or document.get("requirements") != list(WINDOWS_SETUP_UNVERIFIED_REQUIREMENTS)
+        )
+    if common_mismatch or mode_mismatch:
+        raise CandidateError("Windows Setup certification identity or required evidence mismatch")
+    staging_digest = document.get("staging_artifact_digest")
+    if not isinstance(staging_digest, str) or re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", staging_digest) is None:
+        raise CandidateError("Windows Setup certification staging digest is invalid")
+    run_url = document.get("run_url")
+    if (
+        not isinstance(run_url, str)
+        or re.fullmatch(
+            r"https://github\.com/cisco-ai-defense/defenseclaw/actions/runs/[1-9][0-9]*",
+            run_url,
+        )
+        is None
+    ):
+        raise CandidateError("Windows Setup certification run URL is invalid")
+
+
+def _validate_windows_installer_assets(
+    directory: Path,
+    version: str,
+    commit: str,
+    *,
+    exact_file_set: bool = False,
+    runtime_directory: Path | None = None,
+) -> None:
+    names = windows_installer_asset_names(version)
+    if not names:
+        return
+    _require_regular_files(directory, names, "Windows installer artifact")
+    if exact_file_set and _strict_file_names(directory, "Windows installer artifact") != names:
+        raise CandidateError("Windows installer artifact directory must contain exactly four files")
+    setup_path = directory / WINDOWS_SETUP_ASSET
+    setup_sha256, embedded_signature_present = _validate_windows_setup_pe(setup_path)
+    sidecar = directory / f"{WINDOWS_SETUP_ASSET}.sha256"
+    try:
+        sidecar_payload = sidecar.read_bytes()
+    except OSError as exc:
+        raise CandidateError(f"could not read Windows Setup SHA-256 sidecar: {exc}") from exc
+    match = re.fullmatch(
+        rb"([0-9a-f]{64})  DefenseClawSetup-x64\.exe(?:\r\n|\n)",
+        sidecar_payload,
+    )
+    if match is None or match.group(1).decode("ascii") != setup_sha256:
+        raise CandidateError("Windows Setup SHA-256 sidecar does not bind the exact executable")
+    provenance = _validate_windows_setup_provenance(
+        directory / f"{WINDOWS_SETUP_ASSET}.provenance.json",
+        version=version,
+        commit=commit,
+        setup_sha256=setup_sha256,
+        embedded_signature_present=embedded_signature_present,
+    )
+    if runtime_directory is not None:
+        _validate_windows_setup_runtime_inputs(provenance, runtime_directory, version)
+    _validate_windows_setup_sbom(
+        directory / f"{WINDOWS_SETUP_ASSET}.sbom.json",
+        version=version,
+        commit=commit,
+        setup_sha256=setup_sha256,
+        provenance=provenance,
+    )
+
+
+def record_windows_unverified(
+    directory: Path,
+    version: str,
+    commit: str,
+    artifact_digest: str,
+    run_url: str,
+) -> None:
+    """Record an explicit non-certification for an unsigned Setup artifact."""
+
+    _validate_version(version)
+    _validate_commit(commit)
+    payload_names = (
+        WINDOWS_SETUP_ASSET,
+        f"{WINDOWS_SETUP_ASSET}.provenance.json",
+        f"{WINDOWS_SETUP_ASSET}.sbom.json",
+        f"{WINDOWS_SETUP_ASSET}.sha256",
+    )
+    _require_regular_files(directory, payload_names, "unverified Windows installer artifact")
+    if _strict_file_names(directory, "unverified Windows installer artifact") != tuple(sorted(payload_names)):
+        raise CandidateError("unverified Windows installer artifact directory must contain exactly four files")
+
+    setup_path = directory / WINDOWS_SETUP_ASSET
+    setup_sha256, embedded_signature_present = _validate_windows_setup_pe(setup_path)
+    if embedded_signature_present:
+        raise CandidateError("refusing to mark an Authenticode-signed Windows Setup as unverified")
+    sidecar = directory / f"{WINDOWS_SETUP_ASSET}.sha256"
+    try:
+        sidecar_payload = sidecar.read_bytes()
+    except OSError as exc:
+        raise CandidateError(f"could not read Windows Setup SHA-256 sidecar: {exc}") from exc
+    match = re.fullmatch(
+        rb"([0-9a-f]{64})  DefenseClawSetup-x64\.exe(?:\r\n|\n)",
+        sidecar_payload,
+    )
+    if match is None or match.group(1).decode("ascii") != setup_sha256:
+        raise CandidateError("Windows Setup SHA-256 sidecar does not bind the exact executable")
+    provenance = _validate_windows_setup_provenance(
+        directory / f"{WINDOWS_SETUP_ASSET}.provenance.json",
+        version=version,
+        commit=commit,
+        setup_sha256=setup_sha256,
+        embedded_signature_present=False,
+    )
+    if provenance["unsigned"] is not True:
+        raise CandidateError("Windows Setup provenance does not declare the unverified signing state")
+    _validate_windows_setup_sbom(
+        directory / f"{WINDOWS_SETUP_ASSET}.sbom.json",
+        version=version,
+        commit=commit,
+        setup_sha256=setup_sha256,
+        provenance=provenance,
+    )
+    if re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", artifact_digest) is None:
+        raise CandidateError("unverified Windows Setup staging digest is invalid")
+    if (
+        re.fullmatch(
+            r"https://github\.com/cisco-ai-defense/defenseclaw/actions/runs/[1-9][0-9]*",
+            run_url,
+        )
+        is None
+    ):
+        raise CandidateError("unverified Windows Setup run URL is invalid")
+
+    certification = {
+        "schema_version": 1,
+        "status": "unverified",
+        "verification_status": "unverified",
+        "platform": "windows-x64",
+        "setup": {
+            "name": WINDOWS_SETUP_ASSET,
+            "sha256": setup_sha256,
+            "publisher": "",
+        },
+        "clients": {},
+        "connectors": [],
+        "requirements": list(WINDOWS_SETUP_UNVERIFIED_REQUIREMENTS),
+        "source_commit": commit,
+        "release_version": version,
+        "staging_artifact_digest": artifact_digest,
+        "run_url": run_url,
+    }
+    certification_path = directory / f"{WINDOWS_SETUP_ASSET}.certification.json"
+    certification_path.write_text(
+        json.dumps(certification, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _validate_windows_setup_certification(
+        certification_path,
+        version=version,
+        commit=commit,
+        setup_sha256=setup_sha256,
+        signed=False,
+    )
 
 
 def _validated_effective_upgrade_baselines(root: Path, version: str) -> str:
@@ -3629,6 +4431,7 @@ def assemble(
     commit: str,
     macos_verification_status: str,
     *,
+    windows_dir: Path | None = None,
     source_tree: str | None = None,
     bridge_commit: str | None = None,
     bridge_tree: str | None = None,
@@ -3637,9 +4440,7 @@ def assemble(
 ) -> None:
     _validate_version(version)
     _validate_commit(commit)
-    macos_verification_status = _validate_macos_verification_status(
-        macos_verification_status
-    )
+    macos_verification_status = _validate_macos_verification_status(macos_verification_status)
     source_map, provenance = _release_identity_documents(
         version,
         commit,
@@ -3650,6 +4451,19 @@ def assemble(
     )
     if root.exists():
         raise CandidateError(f"candidate output already exists: {root}")
+
+    windows_names = windows_installer_asset_names(version)
+    if windows_names:
+        if windows_dir is None:
+            raise CandidateError(f"release {version} requires --windows-dir")
+        _validate_windows_installer_assets(
+            windows_dir,
+            version,
+            commit,
+            exact_file_set=True,
+        )
+    elif windows_dir is not None:
+        raise CandidateError(f"release {version} forbids native Windows Setup artifacts")
 
     verify_runtime(runtime_dir, version)
     _validate_gateway_archives(runtime_dir, version, commit=commit)
@@ -3675,16 +4489,22 @@ def assemble(
     effective_policy_sha256 = _validated_effective_upgrade_baselines(root, version)
     _copy_exact(runtime_dir, dist, runtime_asset_names(version))
     _copy_exact(macos_dir, dist, macos_names)
+    if windows_dir is not None:
+        _copy_exact(windows_dir, dist, windows_names)
+        _validate_windows_installer_assets(
+            dist,
+            version,
+            commit,
+            runtime_directory=dist,
+        )
     _copy_resolver_assets(dist, version)
     _validate_resolver_assets(dist, version)
     if source_map is not None and provenance is not None:
-        (dist / RELEASE_SOURCE_MAP_FILENAME).write_text(
-            _canonical_json(source_map),
-            encoding="utf-8",
+        (dist / RELEASE_SOURCE_MAP_FILENAME).write_bytes(
+            _canonical_json(source_map).encode("utf-8"),
         )
-        (dist / RELEASE_PROVENANCE_FILENAME).write_text(
-            _canonical_json(provenance),
-            encoding="utf-8",
+        (dist / RELEASE_PROVENANCE_FILENAME).write_bytes(
+            _canonical_json(provenance).encode("utf-8"),
         )
 
     notes = runtime_dir / "CHANGELOG.md"
@@ -3692,8 +4512,7 @@ def assemble(
         shutil.copy2(notes, root / "RELEASE_NOTES.md")
 
     checksum_lines = [
-        f"{_sha256(dist / name)}  {name}"
-        for name in payload_asset_names(version, macos_verification_status)
+        f"{_sha256(dist / name)}  {name}" for name in payload_asset_names(version, macos_verification_status)
     ]
     (dist / "checksums.txt").write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
 
@@ -3738,13 +4557,74 @@ def _read_json_object(path: Path, label: str) -> dict[str, Any]:
     return document
 
 
+def _legacy_bundle_base64(value: object, label: str) -> bytes:
+    if not isinstance(value, str) or not value:
+        raise CandidateError(f"legacy Cosign bundle {label} must be non-empty base64")
+    try:
+        encoded = value.encode("ascii")
+        decoded = base64.b64decode(encoded, validate=True)
+    except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
+        raise CandidateError(f"legacy Cosign bundle {label} is invalid base64") from exc
+    if not decoded or base64.b64encode(decoded) != encoded:
+        raise CandidateError(f"legacy Cosign bundle {label} is noncanonical base64")
+    return decoded
+
+
+def _validate_legacy_cosign_bundle(path: Path) -> None:
+    """Validate Cosign 2.6.2 bundle framing; workflow Cosign verifies its cryptography."""
+
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= MAX_LEGACY_COSIGN_BUNDLE_BYTES:
+            raise CandidateError("legacy Cosign bundle has an invalid file type or size")
+        payload = path.read_bytes()
+        if len(payload) != info.st_size:
+            raise CandidateError("legacy Cosign bundle changed while being read")
+        document = json.loads(payload.decode("utf-8", errors="strict"))
+    except CandidateError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CandidateError(f"invalid legacy Cosign bundle {path}: {exc}") from exc
+    bundle = _require_object_fields(
+        document,
+        {"base64Signature", "cert", "rekorBundle"},
+        "legacy Cosign bundle",
+    )
+    _legacy_bundle_base64(bundle.get("base64Signature"), "base64Signature")
+    certificate = bundle.get("cert")
+    if not isinstance(certificate, str):
+        raise CandidateError("legacy Cosign bundle cert must be a certificate string")
+    try:
+        _release_certificate_payload(certificate.encode("ascii"), allow_base64_wrapper=True)
+    except (UnicodeEncodeError, CandidateError) as exc:
+        raise CandidateError("legacy Cosign bundle cert is not a canonical certificate") from exc
+
+    rekor = _require_object_fields(
+        bundle.get("rekorBundle"),
+        {"SignedEntryTimestamp", "Payload"},
+        "legacy Cosign Rekor bundle",
+    )
+    _legacy_bundle_base64(rekor.get("SignedEntryTimestamp"), "SignedEntryTimestamp")
+    rekor_payload = _require_object_fields(
+        rekor.get("Payload"),
+        {"body", "integratedTime", "logIndex", "logID"},
+        "legacy Cosign Rekor payload",
+    )
+    _legacy_bundle_base64(rekor_payload.get("body"), "Rekor body")
+    for field in ("integratedTime", "logIndex"):
+        value = rekor_payload.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise CandidateError(f"legacy Cosign Rekor {field} must be a nonnegative integer")
+    log_id = rekor_payload.get("logID")
+    if not isinstance(log_id, str) or SHA256_RE.fullmatch(log_id) is None:
+        raise CandidateError("legacy Cosign Rekor logID must be a lowercase SHA-256 digest")
+
+
 def seal(root: Path, version: str, commit: str) -> None:
     _validate_version(version)
     _validate_commit(commit)
     metadata = _read_json_object(root / "candidate-metadata.json", "candidate metadata")
-    macos_verification_status = _validate_macos_verification_status(
-        metadata.get("macos_verification_status")
-    )
+    macos_verification_status = _validate_macos_verification_status(metadata.get("macos_verification_status"))
     effective_policy_sha256 = _validated_effective_upgrade_baselines(root, version)
     expected_metadata = {
         "schema_version": SCHEMA_VERSION,
@@ -3759,15 +4639,20 @@ def seal(root: Path, version: str, commit: str) -> None:
 
     dist = root / "dist"
     _validate_release_identity(dist, version, commit)
+    _validate_windows_installer_assets(
+        dist,
+        version,
+        commit,
+        runtime_directory=dist,
+    )
     names = published_asset_names(version, macos_verification_status)
     _require_regular_files(dist, names, "release candidate")
     actual_names = _strict_file_names(dist, "release candidate")
     if actual_names != names:
-        raise CandidateError(
-            "release candidate contains an unexpected file set: "
-            f"got {actual_names!r}, want {names!r}"
-        )
+        raise CandidateError(f"release candidate contains an unexpected file set: got {actual_names!r}, want {names!r}")
     _require_canonical_release_certificate(dist / "checksums.txt.pem")
+    if tuple(map(int, version.split("."))) >= WINDOWS_SETUP_START_VERSION:
+        _validate_legacy_cosign_bundle(dist / CHECKSUMS_BUNDLE_FILENAME)
 
     checksums = _parse_checksums(dist / "checksums.txt")
     payload_names = payload_asset_names(version, macos_verification_status)
@@ -3804,9 +4689,7 @@ def verify(root: Path, version: str, commit: str) -> None:
         raise CandidateError("release candidate version mismatch")
     if manifest.get("commit") != commit:
         raise CandidateError("release candidate commit mismatch")
-    macos_verification_status = _validate_macos_verification_status(
-        manifest.get("macos_verification_status")
-    )
+    macos_verification_status = _validate_macos_verification_status(manifest.get("macos_verification_status"))
     if manifest.get("source_install_identity") != _reviewed_source_install_identity(version):
         raise CandidateError("release candidate source-install identity mismatch")
     effective_policy_sha256 = _validated_effective_upgrade_baselines(root, version)
@@ -3815,12 +4698,20 @@ def verify(root: Path, version: str, commit: str) -> None:
 
     dist = root / "dist"
     _validate_release_identity(dist, version, commit)
+    _validate_windows_installer_assets(
+        dist,
+        version,
+        commit,
+        runtime_directory=dist,
+    )
     expected_names = published_asset_names(version, macos_verification_status)
     _require_regular_files(dist, expected_names, "release candidate")
     actual_names = _strict_file_names(dist, "release candidate")
     if actual_names != expected_names:
         raise CandidateError("release candidate file set changed after sealing")
     _require_canonical_release_certificate(dist / "checksums.txt.pem")
+    if tuple(map(int, version.split("."))) >= WINDOWS_SETUP_START_VERSION:
+        _validate_legacy_cosign_bundle(dist / CHECKSUMS_BUNDLE_FILENAME)
 
     assets = manifest.get("assets")
     if not isinstance(assets, list):
@@ -3853,9 +4744,7 @@ def verify(root: Path, version: str, commit: str) -> None:
         raise CandidateError("sealed release notes are missing")
 
     checksums = _parse_checksums(dist / "checksums.txt")
-    if tuple(sorted(checksums)) != payload_asset_names(
-        version, macos_verification_status
-    ):
+    if tuple(sorted(checksums)) != payload_asset_names(version, macos_verification_status):
         raise CandidateError("checksums.txt coverage changed after sealing")
     for name, expected in checksums.items():
         if _sha256(dist / name) != expected:
@@ -3949,9 +4838,22 @@ def _parser() -> argparse.ArgumentParser:
     extract_parser.add_argument("--os", choices=("darwin", "linux"), required=True)
     extract_parser.add_argument("--arch", choices=("amd64", "arm64"), required=True)
 
+    extract_windows_parser = subparsers.add_parser("extract-windows-installer-inputs")
+    extract_windows_parser.add_argument("--release-dir", type=Path, required=True)
+    extract_windows_parser.add_argument("--output-dir", type=Path, required=True)
+    extract_windows_parser.add_argument("--version", required=True)
+
+    record_windows_parser = subparsers.add_parser("record-windows-unverified")
+    record_windows_parser.add_argument("--windows-dir", type=Path, required=True)
+    record_windows_parser.add_argument("--version", required=True)
+    record_windows_parser.add_argument("--commit", required=True)
+    record_windows_parser.add_argument("--artifact-digest", required=True)
+    record_windows_parser.add_argument("--run-url", required=True)
+
     assemble_parser = subparsers.add_parser("assemble")
     assemble_parser.add_argument("--runtime-dir", type=Path, required=True)
     assemble_parser.add_argument("--macos-dir", type=Path, required=True)
+    assemble_parser.add_argument("--windows-dir", type=Path)
     assemble_parser.add_argument("--root", type=Path, required=True)
     assemble_parser.add_argument("--version", required=True)
     assemble_parser.add_argument("--commit", required=True)
@@ -3999,8 +4901,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.releases_json,
             )
             print(
-                "release progression verified: "
-                f"target={args.target} reviewed_max={reviewed} published_max={published}"
+                f"release progression verified: target={args.target} reviewed_max={reviewed} published_max={published}"
             )
         elif args.command == "verify-runtime":
             verify_runtime(args.release_dir, args.version)
@@ -4017,6 +4918,18 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "extract-gateway":
             extract_gateway(args.release_dir, args.output, args.version, args.os, args.arch)
             print(f"candidate gateway extracted: {args.output}")
+        elif args.command == "extract-windows-installer-inputs":
+            extract_windows_installer_inputs(args.release_dir, args.output_dir, args.version)
+            print(f"Windows installer inputs extracted: {args.output_dir}")
+        elif args.command == "record-windows-unverified":
+            record_windows_unverified(
+                args.windows_dir,
+                args.version,
+                args.commit,
+                args.artifact_digest,
+                args.run_url,
+            )
+            print(f"unverified Windows installer custody recorded: {args.windows_dir}")
         elif args.command == "assemble":
             assemble(
                 args.runtime_dir,
@@ -4025,6 +4938,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.version,
                 args.commit,
                 args.macos_verification_status,
+                windows_dir=args.windows_dir,
                 source_tree=args.source_tree,
                 bridge_commit=args.bridge_commit,
                 bridge_tree=args.bridge_tree,

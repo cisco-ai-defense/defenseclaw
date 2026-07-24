@@ -176,7 +176,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	rawActionBeforeAssets := rawAction
 	action := rawAction
 	wouldBlock := rawAction == "block" && mode != "action"
-	if rawAction == "block" && !claudeCodeCanEnforce(req.HookEventName) {
+	if rawAction == "block" && !claudeCodeCanEnforce(req) {
 		action = "allow"
 		wouldBlock = true
 	} else if mode != "action" && rawAction == "block" {
@@ -301,7 +301,8 @@ func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest
 // flag still wins for operators who run claudecode alongside a
 // different selected connector (e.g. test harnesses).
 func (a *APIServer) claudeCodeEnabled() bool {
-	if a.scannerCfg == nil {
+	cfg := a.runtimeConfigSnapshot()
+	if cfg == nil {
 		return false
 	}
 	// Per-connector explicit disable wins over every enable signal below:
@@ -310,32 +311,32 @@ func (a *APIServer) claudeCodeEnabled() bool {
 	// for re-enable). Defense-in-depth alongside the boot-loop teardown.
 	// EffectiveEnabled defaults to true ⇒ no-op for single-connector
 	// installs and any connector never explicitly disabled.
-	if a.scannerCfg.ManualConnectorConfigured("claudecode") && !a.scannerCfg.Guardrail.EffectiveEnabled("claudecode") {
+	if cfg.ManualConnectorConfigured("claudecode") && !cfg.Guardrail.EffectiveEnabled("claudecode") {
 		return false
 	}
-	hookCfg := a.scannerCfg.ConnectorHookConfig("claudecode")
+	hookCfg := cfg.ConnectorHookConfig("claudecode")
 	if hookCfg.Enabled {
 		return true
 	}
-	if a.health != nil && a.health.HasConnectorSource("claudecode", "automatic") && a.scannerCfg.ApplicationProtection.EffectiveEnabled("claudecode") {
+	if a.health != nil && a.health.HasConnectorSource("claudecode", "automatic") && cfg.ApplicationProtection.EffectiveEnabled("claudecode") {
 		return true
 	}
 	// Multi-connector: membership in guardrail.connectors opts claudecode
 	// in even when it is not the singular primary (no-op for single).
-	if a.scannerCfg.Guardrail.HasConnector("claudecode") {
+	if cfg.Guardrail.HasConnector("claudecode") {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(a.scannerCfg.Guardrail.Connector), "claudecode")
+	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "claudecode")
 }
 
 func (a *APIServer) claudeCodeMode() string {
 	mode := "observe"
-	if a.scannerCfg != nil {
-		hookCfg := a.scannerCfg.ConnectorHookConfig("claudecode")
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+		hookCfg := cfg.ConnectorHookConfig("claudecode")
 		mode = strings.TrimSpace(hookCfg.Mode)
 		if mode == "" || mode == "inherit" {
 			// Per-connector guardrail override wins over global mode.
-			mode = strings.TrimSpace(a.scannerCfg.EffectiveGuardrailModeForConnector("claudecode"))
+			mode = strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector("claudecode"))
 		}
 	}
 	return normalizeAgentHookMode(mode)
@@ -368,9 +369,16 @@ func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severit
 	return resp
 }
 
-func claudeCodeCanEnforce(event string) bool {
-	switch event {
-	case "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest", "PostToolUse",
+func claudeCodeCanEnforce(req claudeCodeHookRequest) bool {
+	// Claude Code reports ConfigChange for managed policy updates too, but
+	// explicitly ignores blocking decisions for policy_settings. Treating that
+	// response as enforced would create false-positive block telemetry.
+	if req.HookEventName == "ConfigChange" && strings.EqualFold(strings.TrimSpace(req.Source), "policy_settings") {
+		return false
+	}
+
+	switch req.HookEventName {
+	case "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest",
 		"PostToolBatch", "TaskCreated", "TaskCompleted", "Stop", "SubagentStop", "TeammateIdle",
 		"ConfigChange", "PreCompact", "Elicitation", "ElicitationResult":
 		return true

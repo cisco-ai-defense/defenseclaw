@@ -62,6 +62,8 @@ from defenseclaw.migrations import run_migrations
 from defenseclaw.observability import resolve_preset
 from defenseclaw.observability.v8_presets import apply_secret
 
+from tests.permissions import assert_owner_only_file
+
 # ---------------------------------------------------------------------------
 # F-0022 / F-0023 / F-0024 — robust TLS boolean coercion
 # ---------------------------------------------------------------------------
@@ -269,14 +271,10 @@ def test_f0083_fresh_audit_db_is_owner_only(tmp_path):
     finally:
         os.umask(old_umask)
 
-    db_mode = stat.S_IMODE(os.stat(db_path).st_mode)
-    parent_mode = stat.S_IMODE(os.stat(root).st_mode)
-    # DB is owner read/write only — no group/world bits.
-    assert db_mode & 0o077 == 0, oct(db_mode)
-    assert not (db_mode & stat.S_IROTH)
-    # The parent dir we created the DB under loses world access so a
-    # different local user cannot traverse to the DB.
-    assert not (parent_mode & stat.S_IRWXO), oct(parent_mode)
+    assert_owner_only_file(db_path)
+    if os.name != "nt":
+        parent_mode = stat.S_IMODE(os.stat(root).st_mode)
+        assert not (parent_mode & stat.S_IRWXO), oct(parent_mode)
 
 
 def test_f0083_existing_loose_db_is_tightened_without_data_loss(tmp_path):
@@ -291,7 +289,7 @@ def test_f0083_existing_loose_db_is_tightened_without_data_loss(tmp_path):
     store2.init()
     try:
         # Re-opening tightens perms back to owner-only...
-        assert stat.S_IMODE(os.stat(db_path).st_mode) & 0o077 == 0
+        assert_owner_only_file(db_path)
         # ...and the DB is still usable (init is idempotent).
         store2.db.execute("SELECT 1").fetchone()
     finally:
@@ -487,6 +485,9 @@ def test_f0141_ca_file_clears_prior_skip_verify(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX shell gateway probe; native Windows executable probing has dedicated coverage"
+)
 def test_f0001_version_probe_uses_configured_gateway(tmp_path, monkeypatch):
     fake_version = "9.9.9" if __version__ != "9.9.9" else "0.0.1"
     fake_gateway = tmp_path / "custom-defenseclaw-gateway"
@@ -514,6 +515,22 @@ def test_f0001_version_probe_uses_configured_gateway(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _assert_observability_private_file(path: str, *, require_protected: bool = True) -> None:
+    """Assert the v8 private-file policy on the host running the test."""
+    if os.name != "nt":
+        assert_owner_only_file(path)
+        return
+
+    from defenseclaw import windows_acl
+
+    security = windows_acl.capture_path(path)
+    if require_protected:
+        assert security.dacl_protected is True
+    windows_acl.assert_trusted_owner(security)
+    windows_acl.assert_not_broadly_readable(security)
+    windows_acl.assert_not_broadly_writable(security)
+
+
 def test_f0442_existing_loose_dotenv_is_tightened(tmp_path):
     data_dir = str(tmp_path)
     with open(os.path.join(data_dir, "config.yaml"), "w") as f:
@@ -527,10 +544,11 @@ def test_f0442_existing_loose_dotenv_is_tightened(tmp_path):
     secret = "dd-secret-from-f0442"
     apply_secret(data_dir, resolve_preset("datadog"), secret, dry_run=False)
 
-    mode = stat.S_IMODE(os.stat(dotenv_path).st_mode)
     content = Path(dotenv_path).read_text(encoding="utf-8")
     # The pre-existing world/group-readable dotenv is tightened to 0600...
-    assert mode == 0o600, oct(mode)
+    # Existing Windows authorization metadata is retained after it passes the
+    # no-broad-read gate; unlike a new secret, it need not be protected.
+    _assert_observability_private_file(dotenv_path, require_protected=False)
     # ...and still carries the freshly written secret.
     assert f"DD_API_KEY={secret}" in content
 
@@ -544,6 +562,5 @@ def test_f0442_fresh_dotenv_is_owner_only(tmp_path):
     apply_secret(data_dir, resolve_preset("datadog"), secret, dry_run=False)
 
     dotenv_path = os.path.join(data_dir, ".env")
-    mode = stat.S_IMODE(os.stat(dotenv_path).st_mode)
-    assert mode == 0o600, oct(mode)
+    _assert_observability_private_file(dotenv_path)
     assert f"DD_API_KEY={secret}" in Path(dotenv_path).read_text(encoding="utf-8")

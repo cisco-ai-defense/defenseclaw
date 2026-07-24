@@ -35,7 +35,11 @@ from defenseclaw.config import (
     SkillScannerConfig,
 )
 from defenseclaw.models import Finding, ScanResult
-from defenseclaw.scanner._llm_env import inject_llm_env, litellm_model
+from defenseclaw.scanner._llm_env import (
+    inject_llm_env,
+    litellm_model,
+    llm_analyzer_ready,
+)
 
 if TYPE_CHECKING:
     pass
@@ -139,19 +143,33 @@ class SkillScannerWrapper:
             # operators can't action.
             model = litellm_model(llm)
             env_model = os.environ.get("SKILL_SCANNER_LLM_MODEL", "")
-            if model or env_model:
+            effective_model = model or env_model
+            api_key = llm.resolved_api_key() or os.environ.get(
+                "SKILL_SCANNER_LLM_API_KEY", ""
+            )
+            if effective_model and llm_analyzer_ready(
+                llm,
+                model=effective_model,
+                api_key=api_key,
+            ):
                 build_kwargs["use_llm"] = True
                 if model:
                     build_kwargs["llm_model"] = model
-                api_key = llm.resolved_api_key()
+                elif env_model:
+                    build_kwargs["llm_model"] = env_model
                 if api_key:
                     build_kwargs["llm_api_key"] = api_key
-                elif os.environ.get("SKILL_SCANNER_LLM_API_KEY"):
-                    build_kwargs["llm_api_key"] = os.environ["SKILL_SCANNER_LLM_API_KEY"]
                 if llm.base_url:
                     build_kwargs["llm_base_url"] = llm.base_url
                 if cfg.llm_consensus_runs > 0:
                     build_kwargs["llm_consensus_runs"] = cfg.llm_consensus_runs
+            elif effective_model:
+                key_name = llm.api_key_env or "DEFENSECLAW_LLM_KEY"
+                print(
+                    "warning: LLM analyzer skipped: "
+                    f"{key_name} is not configured; continuing with local analyzers",
+                    file=sys.stderr,
+                )
             else:
                 _log.info(
                     "skill-scanner: use_llm requested but no model resolved "
@@ -206,6 +224,7 @@ class SkillScannerWrapper:
 
     def _convert(self, sdk_result: object, target: str, elapsed: float) -> ScanResult:
         """Convert SDK ScanResult → DefenseClaw ScanResult."""
+        scanner_name = self.name()
         findings: list[Finding] = []
         for sf in getattr(sdk_result, "findings", []):
             location = getattr(sf, "file_path", "") or ""
@@ -218,6 +237,9 @@ class SkillScannerWrapper:
             if category:
                 cat_name = category.name if hasattr(category, "name") else str(category)
                 tags.append(cat_name)
+            analyzer = str(getattr(sf, "analyzer", "") or "")
+            if analyzer:
+                tags.append(f"analyzer:{analyzer}")
 
             severity = getattr(sf, "severity", None)
             sev_str = severity.name if hasattr(severity, "name") else str(severity)
@@ -229,12 +251,14 @@ class SkillScannerWrapper:
                 description=getattr(sf, "description", ""),
                 location=location,
                 remediation=getattr(sf, "remediation", "") or "",
-                scanner=getattr(sf, "analyzer", "") or "skill-scanner",
+                # Canonical finding identity names the producer, not the
+                # upstream SDK's internal analyzer, which remains in tags.
+                scanner=scanner_name,
                 tags=tags,
             ))
 
         return ScanResult(
-            scanner="skill-scanner",
+            scanner=scanner_name,
             target=target,
             timestamp=datetime.now(timezone.utc),
             findings=findings,

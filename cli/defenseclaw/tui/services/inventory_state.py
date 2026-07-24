@@ -265,6 +265,7 @@ class InventorySummary:
     models: Mapping[str, Any] = field(default_factory=dict)
     memory: Mapping[str, Any] = field(default_factory=dict)
     errors: Any = 0
+    limitations: Any = 0
     policy_skills: Mapping[str, Any] = field(default_factory=dict)
     scan_skills: Mapping[str, Any] = field(default_factory=dict)
     policy_plugins: Mapping[str, Any] = field(default_factory=dict)
@@ -284,10 +285,28 @@ class InventorySummary:
             models=_mapping(raw.get("model_providers")),
             memory=_mapping(raw.get("memory")),
             errors=raw.get("errors") or 0,
+            limitations=raw.get("limitations") or 0,
             policy_skills=_mapping(raw.get("policy_skills")),
             scan_skills=_mapping(raw.get("scan_skills")),
             policy_plugins=_mapping(raw.get("policy_plugins")),
             scan_plugins=_mapping(raw.get("scan_plugins")),
+        )
+
+
+@dataclass(frozen=True)
+class InventoryLimitation:
+    connector: str = ""
+    category: str = ""
+    status: str = "unsupported"
+    reason: str = ""
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> InventoryLimitation:
+        return cls(
+            connector=str(raw.get("connector") or ""),
+            category=str(raw.get("category") or ""),
+            status=str(raw.get("status") or "unsupported"),
+            reason=str(raw.get("reason") or ""),
         )
 
 
@@ -313,6 +332,7 @@ class InventorySnapshot:
     models: tuple[InventoryModelProvider, ...] = ()
     memory: tuple[InventoryMemory, ...] = ()
     errors: tuple[Any, ...] = ()
+    limitations: tuple[InventoryLimitation, ...] = ()
     summary: InventorySummary = field(default_factory=InventorySummary)
 
     @classmethod
@@ -363,6 +383,11 @@ class InventorySnapshot:
                 if isinstance(item, Mapping)
             ),
             errors=tuple(raw.get("errors") or ()),
+            limitations=tuple(
+                InventoryLimitation.from_mapping(item)
+                for item in raw.get("limitations") or ()
+                if isinstance(item, Mapping)
+            ),
             summary=InventorySummary.from_mapping(summary_raw if isinstance(summary_raw, Mapping) else None),
         )
 
@@ -389,6 +414,7 @@ class InventorySummaryState:
     version: str = ""
     generated_at: str = ""
     errors: str = "0"
+    limitations: str = "0"
     scan_skill_coverage: Mapping[str, str] = field(default_factory=dict)
     scan_plugin_coverage: Mapping[str, str] = field(default_factory=dict)
 
@@ -668,6 +694,7 @@ class InventoryPanelModel:
         models = tuple(item for snap in snaps for item in snap.models)
         memory = tuple(item for snap in snaps for item in snap.memory)
         total_errors = sum(len(snap.errors) for snap in snaps)
+        limitations = tuple(item for snap in snaps for item in snap.limitations)
         total_items = len(skills) + len(plugins) + len(mcps) + len(agents) + len(models) + len(memory)
         summary = InventorySummary(
             total_items=total_items,
@@ -678,6 +705,7 @@ class InventoryPanelModel:
             models={"count": str(len(models))},
             memory={"count": str(len(memory))},
             errors=str(total_errors),
+            limitations=str(len(limitations)),
         )
         return replace(
             primary,
@@ -688,6 +716,8 @@ class InventoryPanelModel:
             agents=agents,
             models=models,
             memory=memory,
+            errors=tuple(error for snap in snaps for error in snap.errors),
+            limitations=limitations,
             summary=summary,
         )
 
@@ -836,6 +866,7 @@ class InventoryPanelModel:
             version=inv.version,
             generated_at=inv.generated_at,
             errors=str(inv.summary.errors),
+            limitations=str(inv.summary.limitations),
             scan_skill_coverage=_string_map(inv.summary.scan_skills),
             scan_plugin_coverage=_string_map(inv.summary.scan_plugins),
         )
@@ -867,6 +898,8 @@ class InventoryPanelModel:
         ]
         if summary.errors not in {"0", "", "<nil>", "None"}:
             rows.append(("Errors", summary.errors))
+        if summary.limitations not in {"0", "", "<nil>", "None"}:
+            rows.append(("Unsupported capabilities", f"{summary.limitations} (informational)"))
         if skill_verdicts := _verdict_summary(summary.policy_skill_verdicts):
             rows.append(("Skill policy verdicts", skill_verdicts))
         if plugin_verdicts := _verdict_summary(summary.policy_plugin_verdicts):
@@ -1230,6 +1263,7 @@ __all__ = [
     "InventoryFilter",
     "InventoryMCP",
     "InventoryMemory",
+    "InventoryLimitation",
     "InventoryModelProvider",
     "InventoryPanelAction",
     "InventoryPanelModel",

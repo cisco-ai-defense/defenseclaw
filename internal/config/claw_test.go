@@ -142,6 +142,28 @@ func TestPluginDirs_DispatchesViaConnector(t *testing.T) {
 // when guardrail.connector is unset, SkillDirs() must keep returning
 // OpenClaw paths (workspace/skills + claw_home/skills) so existing
 // deployments don't drift.
+func TestConnectorHomesHonorClientOverrides(t *testing.T) {
+	root := t.TempDir()
+	codexHome := filepath.Join(root, "codex-home")
+	claudeHome := filepath.Join(root, "claude-home")
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
+
+	cfg := &Config{}
+	if got := cfg.ConnectorHomeDir("codex"); got != codexHome {
+		t.Fatalf("Codex home = %q, want %q", got, codexHome)
+	}
+	if got := cfg.ConnectorHomeDir("claudecode"); got != claudeHome {
+		t.Fatalf("Claude config dir = %q, want %q", got, claudeHome)
+	}
+	if got := cfg.SkillDirsForConnector("codex")[0]; got != filepath.Join(codexHome, "skills") {
+		t.Fatalf("Codex skill dir = %q", got)
+	}
+	if got := cfg.PluginDirsForConnector("claudecode")[0]; got != filepath.Join(claudeHome, "plugins") {
+		t.Fatalf("Claude plugin dir = %q", got)
+	}
+}
+
 func TestSkillDirs_FallsBackToOpenClaw(t *testing.T) {
 	homeDir := t.TempDir()
 	cfg := &Config{}
@@ -647,6 +669,38 @@ func TestConnectorHomeDir_OmnigentConfigHome(t *testing.T) {
 
 	if got := cfg.ConnectorHomeDir("omnigent"); got != configHome {
 		t.Fatalf("ConnectorHomeDir(omnigent) = %q, want %q", got, configHome)
+	}
+}
+
+func TestHermesSurfacesHonorHermesHome(t *testing.T) {
+	hermesHome := filepath.Join(t.TempDir(), "Hermes Home")
+	t.Setenv("HERMES_HOME", hermesHome)
+	configPath := filepath.Join(hermesHome, "config.yaml")
+	if err := os.MkdirAll(hermesHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configYAML := []byte("mcp:\n  servers:\n    native-windows:\n      command: hermes-mcp\n")
+	if err := os.WriteFile(configPath, configYAML, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{}
+	if got := cfg.ConnectorHomeDir("hermes"); got != hermesHome {
+		t.Errorf("ConnectorHomeDir(hermes) = %q, want %q", got, hermesHome)
+	}
+	if got, want := cfg.SkillDirsForConnector("hermes"), filepath.Join(hermesHome, "skills"); len(got) != 1 || got[0] != want {
+		t.Errorf("SkillDirsForConnector(hermes) = %v, want [%q]", got, want)
+	}
+	plugins := cfg.PluginDirsForConnector("hermes")
+	if want := filepath.Join(hermesHome, "plugins"); !containsPath(plugins, want) {
+		t.Errorf("PluginDirsForConnector(hermes) = %v, missing %q", plugins, want)
+	}
+	entries, err := cfg.ReadMCPServersForConnector("hermes")
+	if err != nil {
+		t.Fatalf("ReadMCPServersForConnector(hermes): %v", err)
+	}
+	if got := mcpEntriesByName(entries)["native-windows"].Command; got != "hermes-mcp" {
+		t.Fatalf("Hermes MCP command = %q, want hermes-mcp; entries=%+v", got, entries)
 	}
 }
 

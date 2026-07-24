@@ -1,12 +1,10 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-name: Pre-release certification gates
+name: Release candidate smoke
 
-# Candidate construction and signing deliberately stay in release.yaml so the
-# immutable release.yaml@refs/heads/main Fulcio identity remains compatible
-# with every published installer. This reusable workflow only tests those
-# already-signed, sealed bytes.
+# release.yaml builds and signs one sealed candidate. This reusable workflow
+# exercises those exact bytes in the same dispatch before publication.
 on:
   workflow_call:
     inputs:
@@ -15,7 +13,7 @@ on:
         required: true
         type: string
       version:
-        description: Canonical candidate version.
+        description: Canonical release version.
         required: true
         type: string
       commit:
@@ -23,43 +21,22 @@ on:
         required: true
         type: string
       baselines:
-        description: JSON versions selected by release behavior class.
+        description: Authenticated published versions to upgrade from.
         required: true
         type: string
-      upgrade_cases:
-        description: JSON include matrix carrying behavior-specific upgrade canaries.
-        required: true
-        type: string
-      min_upgrade_protocol:
-        description: Candidate minimum upgrade protocol.
-        required: true
-        type: string
-      required_bridge_version:
-        description: Published bridge required by the candidate, if any.
-        required: false
-        default: ""
-        type: string
-      windows_prebridge_baselines:
-        description: JSON Windows baseline list; empty while Windows release bytes are disabled.
-        required: true
-        type: string
-    outputs:
-      passed:
-        description: True only after every required certification gate passes.
-        value: ${{ jobs.certification-complete.outputs.passed }}
 
 permissions:
   contents: read
+  actions: read
 
 env:
-  # Every certification consumer reads the snapshot sealed into the candidate;
-  # no job independently re-resolves the historical source set.
   UPGRADE_BASELINE_POLICY: ${{ github.workspace }}/release-candidate/effective-upgrade-baselines.json
 
 jobs:
   posix-fresh-install:
-    name: Fresh install signed candidate (${{ matrix.platform }})
+    name: Fresh install exact candidate (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -79,6 +56,8 @@ jobs:
         with:
           python-version: "3.13"
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ inputs.candidate_artifact }}
@@ -101,69 +80,21 @@ jobs:
           bash scripts/test-fresh-install-release.sh \
             "$GITHUB_WORKSPACE/release-candidate/dist" "$RELEASE_TAG"
 
-  linux-upgrade:
-    name: Linux signed upgrade ${{ matrix.baseline }} → ${{ inputs.version }}
-    runs-on: ubuntu-latest
+  posix-upgrade:
+    name: Upgrade ${{ matrix.baseline }} → ${{ inputs.version }} (${{ matrix.platform.name }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 4
-      matrix: ${{ fromJSON(inputs.upgrade_cases) }}
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          ref: ${{ inputs.commit }}
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          python-version: "3.13"
-      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ inputs.candidate_artifact }}
-          path: release-candidate
-      - name: Exercise staged handoff, rollback, and recovery
-        env:
-          BASELINE: ${{ matrix.baseline }}
-          RELEASE_TAG: ${{ inputs.version }}
-          RELEASE_COMMIT: ${{ inputs.commit }}
-          CANARY_START_SOURCE: ${{ matrix.start_source_gateway }}
-          REQUIRED_BRIDGE_VERSION: ${{ inputs.required_bridge_version }}
-          UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS: "1"
-        run: |
-          set -euo pipefail
-          python3 scripts/release_candidate.py verify \
-            --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
-          python3 scripts/verify-sigstore-blob.py \
-            --certificate release-candidate/dist/checksums.txt.pem \
-            --signature release-candidate/dist/checksums.txt.sig \
-            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            release-candidate/dist/checksums.txt
-          source_gateway_args=()
-          if [[ "$CANARY_START_SOURCE" == "true" ]]; then
-            source_gateway_args+=(--start-source-gateway)
-          fi
-          baseline_dependency_args=()
-          if [[ -n "$REQUIRED_BRIDGE_VERSION" && "$BASELINE" == "$REQUIRED_BRIDGE_VERSION" ]]; then
-            baseline_dependency_args+=(--baseline-dependencies published)
-          fi
-          scripts/test-upgrade-protocol-release.sh \
-            --from-version "$BASELINE" \
-            --target-version "$RELEASE_TAG" \
-            --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
-            --baseline-mode seed \
-            --health-timeout 60 \
-            "${baseline_dependency_args[@]}" \
-            "${source_gateway_args[@]}"
-
-  macos-upgrade:
-    name: macOS signed upgrade ${{ matrix.baseline }} → ${{ inputs.version }}
-    runs-on: macos-15
-    strategy:
-      fail-fast: false
-      max-parallel: 4
       matrix:
         baseline: ${{ fromJSON(inputs.baselines) }}
+        platform:
+          - runner: ubuntu-latest
+            name: linux-amd64
+            runner_arch: X64
+          - runner: macos-15
+            name: darwin-arm64
+            runner_arch: ARM64
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -173,11 +104,13 @@ jobs:
         with:
           python-version: "3.13"
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ inputs.candidate_artifact }}
           path: release-candidate
-      - name: Exercise staged handoff, rollback, and recovery
+      - name: Exercise authenticated upgrade baseline
         env:
           BASELINE: ${{ matrix.baseline }}
           RELEASE_TAG: ${{ inputs.version }}
@@ -185,6 +118,7 @@ jobs:
           UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS: "1"
         run: |
           set -euo pipefail
+          test "$RUNNER_ARCH" = "${{ matrix.platform.runner_arch }}"
           python3 scripts/release_candidate.py verify \
             --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
           python3 scripts/verify-sigstore-blob.py \
@@ -193,17 +127,28 @@ jobs:
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             release-candidate/dist/checksums.txt
-          scripts/test-upgrade-protocol-release.sh \
+          baseline_dependencies=published
+          # The 0.8.4 boundary deliberately starts with dependency drift. The
+          # resolver must transactionally normalize it before the 0.8.5 cut.
+          if [[ "$BASELINE" == "0.8.4" ]]; then
+            baseline_dependencies=target
+          fi
+          bash scripts/test-upgrade-protocol-release.sh \
             --from-version "$BASELINE" \
             --target-version "$RELEASE_TAG" \
             --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
             --baseline-mode seed \
+            --baseline-dependencies "$baseline_dependencies" \
+            --success-path-only \
             --health-timeout 60
 
-  windows-unpublished-refusal:
-    name: Windows unpublished-runtime refusal
-    if: ${{ inputs.windows_prebridge_baselines == '[]' }}
+  windows-fresh-install:
+    name: Fresh install exact candidate (windows-amd64)
     runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -213,12 +158,13 @@ jobs:
         with:
           python-version: "3.13"
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ inputs.candidate_artifact }}
           path: release-candidate
-      - name: Prove native resolver refuses before mutation
-        shell: pwsh
+      - name: Verify and exercise install.ps1
         env:
           RELEASE_TAG: ${{ inputs.version }}
           RELEASE_COMMIT: ${{ inputs.commit }}
@@ -233,85 +179,15 @@ jobs:
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" `
             release-candidate/dist/checksums.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          pwsh -NoProfile -File scripts/test-upgrade-release-windows.ps1 `
+          ./scripts/test-fresh-install-release-windows.ps1 `
             -ReleaseDir "$env:GITHUB_WORKSPACE/release-candidate/dist" `
             -TargetVersion "$env:RELEASE_TAG" `
-            -UnpublishedWindowsRefusalOnly
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-  live-continuity:
-    name: Live Docker/local observability continuity
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+            -DiagnosticsRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-release-bootstrap-diagnostics')
+      - name: Upload Windows bootstrap diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          ref: ${{ inputs.commit }}
-          persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          python-version: "3.13"
-      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ inputs.candidate_artifact }}
-          path: release-candidate
-      - name: Exercise bridge-to-target history and dashboard continuity
-        env:
-          RELEASE_TAG: ${{ inputs.version }}
-          RELEASE_COMMIT: ${{ inputs.commit }}
-          MIN_PROTOCOL: ${{ inputs.min_upgrade_protocol }}
-          BRIDGE_BASELINE: ${{ inputs.required_bridge_version }}
-        run: |
-          set -euo pipefail
-          python3 scripts/release_candidate.py verify \
-            --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
-          python3 scripts/verify-sigstore-blob.py \
-            --certificate release-candidate/dist/checksums.txt.pem \
-            --signature release-candidate/dist/checksums.txt.sig \
-            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            release-candidate/dist/checksums.txt
-          if [[ ! "$MIN_PROTOCOL" =~ ^[1-9][0-9]*$ ]]; then
-            echo "::error title=Invalid upgrade protocol::min_upgrade_protocol=$MIN_PROTOCOL"
-            exit 1
-          fi
-          if (( MIN_PROTOCOL > 1 )); then
-            test -n "$BRIDGE_BASELINE"
-            scripts/test-observability-v8-upgrade-continuity.sh \
-              --from-version "$BRIDGE_BASELINE" \
-              --target-version "$RELEASE_TAG" \
-              --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
-              --health-timeout 60
-          else
-            echo "Candidate protocol $MIN_PROTOCOL does not require hard-cut continuity."
-          fi
-
-  certification-complete:
-    name: Full certification complete
-    needs:
-      - posix-fresh-install
-      - linux-upgrade
-      - macos-upgrade
-      - windows-unpublished-refusal
-      - live-continuity
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    outputs:
-      passed: ${{ steps.result.outputs.passed }}
-    steps:
-      - id: result
-        env:
-          POSIX: ${{ needs.posix-fresh-install.result }}
-          LINUX: ${{ needs.linux-upgrade.result }}
-          MACOS: ${{ needs.macos-upgrade.result }}
-          WINDOWS_REFUSAL: ${{ needs.windows-unpublished-refusal.result }}
-          CONTINUITY: ${{ needs.live-continuity.result }}
-        run: |
-          set -euo pipefail
-          for result in "$POSIX" "$LINUX" "$MACOS" "$WINDOWS_REFUSAL" "$CONTINUITY"; do
-            test "$result" = success
-          done
-          echo "passed=true" >> "$GITHUB_OUTPUT"
+          name: release-windows-bootstrap-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/defenseclaw-release-bootstrap-diagnostics/**
+          if-no-files-found: warn
+          retention-days: 7

@@ -10,6 +10,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -25,15 +26,23 @@ from scripts import release_candidate
 ROOT = Path(__file__).resolve().parents[2]
 VERSION = "0.8.4"
 COMMIT = "a" * 40
-TEST_CERTIFICATE_PEM = (
-    b"-----BEGIN CERTIFICATE-----\n"
-    b"MAMCAQA=\n"
-    b"-----END CERTIFICATE-----\n"
-)
+TEST_CERTIFICATE_PEM = b"-----BEGIN CERTIFICATE-----\nMAMCAQA=\n-----END CERTIFICATE-----\n"
 # The unit fixture only exercises canonical PEM/DER framing.  The release workflow
 # immediately asks Cosign to validate the real X.509 certificate and exact OIDC identity.
 TEST_CERTIFICATE_WRAPPER = base64.b64encode(TEST_CERTIFICATE_PEM)
 HARD_CUT_VERSION = "0.8.5"
+WINDOWS_SETUP_VERSION = "0.8.6"
+EXPECTED_V8_WHEEL_RESOURCES = {
+    "defenseclaw/_data/config/v8/defenseclaw-config.schema.json",
+    "defenseclaw/_data/config/v8/observability.yaml",
+    "defenseclaw/_data/config/v8/observability.md",
+    "defenseclaw/_data/telemetry/v8/telemetry.schema.json",
+    "defenseclaw/_data/telemetry/v8/catalog.json",
+    "defenseclaw/_data/telemetry/v8/v7-exporter-selection.json",
+    "defenseclaw/_data/telemetry/v8/galileo-rich-v2.json",
+    "defenseclaw/_data/telemetry/v8/local-observability-v1.json",
+    "defenseclaw/_data/telemetry/v8/openinference-v1.json",
+}
 HARD_CUT_IDENTITY = {
     "schema_version": 1,
     "source_release": HARD_CUT_VERSION,
@@ -138,6 +147,25 @@ def _activate_local_observability_manifest(*, was_running: bool):
 """
 
 
+def _legacy_cosign_bundle_bytes() -> bytes:
+    return json.dumps(
+        {
+            "base64Signature": base64.b64encode(b"sigstore signature").decode("ascii"),
+            "cert": TEST_CERTIFICATE_PEM.decode("ascii"),
+            "rekorBundle": {
+                "SignedEntryTimestamp": base64.b64encode(b"signed entry timestamp").decode("ascii"),
+                "Payload": {
+                    "body": base64.b64encode(b'{"kind":"hashedrekord"}').decode("ascii"),
+                    "integratedTime": 1,
+                    "logIndex": 2,
+                    "logID": "3" * 64,
+                },
+            },
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+
+
 @pytest.fixture(autouse=True)
 def _bridge_fixture_uses_bridge_source_identity(
     monkeypatch: pytest.MonkeyPatch,
@@ -188,7 +216,7 @@ def test_release_progression_requires_target_newer_than_reviewed_and_published(
         ],
     )
 
-    assert release_candidate.validate_release_progression("0.8.5", releases) == (
+    assert release_candidate.validate_release_progression("0.8.6", releases) == (
         "0.8.4",
         "0.8.3",
     )
@@ -460,6 +488,312 @@ def _macos_dir(tmp_path: Path, macos_verification_status: str = "notarized") -> 
     return macos
 
 
+def _windows_setup_dir(
+    tmp_path: Path,
+    *,
+    version: str = WINDOWS_SETUP_VERSION,
+    commit: str = COMMIT,
+    signed: bool = True,
+) -> Path:
+    windows = tmp_path / "windows"
+    windows.mkdir()
+    setup = windows / release_candidate.WINDOWS_SETUP_ASSET
+    payload = bytearray(512)
+    payload[:2] = b"MZ"
+    pe_offset = 0x80
+    struct.pack_into("<I", payload, 0x3C, pe_offset)
+    payload[pe_offset : pe_offset + 4] = b"PE\0\0"
+    struct.pack_into("<H", payload, pe_offset + 4, 0x8664)
+    struct.pack_into("<H", payload, pe_offset + 20, 0xF0)
+    optional_offset = pe_offset + 24
+    struct.pack_into("<H", payload, optional_offset, 0x20B)
+    struct.pack_into("<H", payload, optional_offset + 68, 2)
+    struct.pack_into("<I", payload, optional_offset + 108, 16)
+    if signed:
+        struct.pack_into("<II", payload, optional_offset + 112 + 4 * 8, 0x180, 16)
+        payload[0x180:0x190] = b"SIGNED-CMS-BYTES"
+    setup.write_bytes(payload)
+    setup_hash = release_candidate._sha256(setup)
+    (windows / f"{setup.name}.sha256").write_text(
+        f"{setup_hash}  {setup.name}\n",
+        encoding="ascii",
+    )
+    signer = "1" * 64
+    timestamp_signer = "2" * 64
+    timestamp_token = "3" * 64
+    if signed:
+        expected_authenticode = {
+            "policy": "defenseclaw-product-publisher",
+            "status": "Valid",
+            "publisher": release_candidate.WINDOWS_SETUP_PUBLISHER,
+            "signature_type": "Authenticode",
+            "platform_identity_required": True,
+            "timestamp_required": True,
+            "signer_thumbprint_sha256": signer,
+            "timestamp_signer_thumbprint_sha256": timestamp_signer,
+            "timestamp_token_sha256": timestamp_token,
+        }
+        observed_authenticode = {
+            "status": "Valid",
+            "publisher": release_candidate.WINDOWS_SETUP_PUBLISHER,
+            "signature_type": "Authenticode",
+            "signer": {"thumbprint_sha256": signer},
+            "chain": [],
+            "timestamp": {
+                "present": True,
+                "format": "rfc3161",
+                "token_sha256": timestamp_token,
+                "signing_time_utc": "2026-07-15T01:02:03.0000000Z",
+                "certificate": {"thumbprint_sha256": timestamp_signer},
+            },
+            "embedded_signatures": [
+                {
+                    "publisher": release_candidate.WINDOWS_SETUP_PUBLISHER,
+                    "signer": {"thumbprint_sha256": signer},
+                    "timestamp": {
+                        "present": True,
+                        "format": "rfc3161",
+                        "token_sha256": timestamp_token,
+                    },
+                }
+            ],
+        }
+    else:
+        expected_authenticode = {
+            "policy": "defenseclaw-product-publisher",
+            "status": "NotSigned",
+            "publisher": "",
+            "signature_type": "None",
+            "platform_identity_required": True,
+            "timestamp_required": False,
+            "signer_thumbprint_sha256": "",
+            "timestamp_signer_thumbprint_sha256": "",
+            "timestamp_token_sha256": "",
+        }
+        observed_authenticode = {
+            "status": "NotSigned",
+            "publisher": "",
+            "signature_type": "None",
+            "signer": None,
+            "chain": None,
+            "timestamp": {
+                "present": False,
+                "format": "",
+                "token_sha256": "",
+                "signing_time_utc": "",
+                "certificate": None,
+            },
+            "embedded_signatures": [],
+        }
+    authenticode_evidence = {
+        "schema_version": 1,
+        "installed_path": setup.name,
+        "sbom_file_name": f"./{setup.name}",
+        "sha256": setup_hash,
+        "expected": expected_authenticode,
+        "observed": observed_authenticode,
+    }
+    gateway_archive = f"defenseclaw_{version}_windows_amd64.zip"
+    wheel = f"defenseclaw-{version}-py3-none-any.whl"
+    payload_files = {
+        gateway_archive: "5" * 64,
+        wheel: "8" * 64,
+        release_candidate.WINDOWS_PYTHON_EMBED_NAME: release_candidate.WINDOWS_PYTHON_EMBED_SHA256,
+        release_candidate.WINDOWS_YARA_COMPAT_WHEEL: "a" * 64,
+        "site-packages.zip": "9" * 64,
+        "defenseclaw-launcher.exe": "d" * 64,
+        "defenseclaw-startup.exe": "e" * 64,
+        "cosign.exe": release_candidate.WINDOWS_COSIGN_SHA256,
+        "requirements-release.txt": "f" * 64,
+        "upgrade-manifest.json": "0" * 64,
+    }
+    provenance_inputs = {
+        "gateway_archive": gateway_archive,
+        "gateway_archive_sha256": "6" * 64,
+        "embedded_gateway_archive_sha256": payload_files[gateway_archive],
+        "embedded_payload_sha256": "7" * 64,
+        "product_executables_authenticode_signed": signed,
+        "wheel": wheel,
+        "wheel_sha256": payload_files[wheel],
+        "python_embed": release_candidate.WINDOWS_PYTHON_EMBED_NAME,
+        "python_embed_sha256": release_candidate.WINDOWS_PYTHON_EMBED_SHA256,
+        "site_packages_sha256": payload_files["site-packages.zip"],
+        "yara_compat_wheel": release_candidate.WINDOWS_YARA_COMPAT_WHEEL,
+        "yara_compat_wheel_sha256": payload_files[release_candidate.WINDOWS_YARA_COMPAT_WHEEL],
+        "cosign_sha256": release_candidate.WINDOWS_COSIGN_SHA256,
+        "payload_manifest_sha256": "b" * 64,
+        "go_component_inventory_sha256": "c" * 64,
+        "payload_files": payload_files,
+        "windows_resource_policy": release_candidate.WINDOWS_RESOURCE_POLICY,
+        "windows_resource_icon": release_candidate.WINDOWS_RESOURCE_ICON,
+        "windows_resource_icon_sha256": release_candidate.WINDOWS_RESOURCE_ICON_SHA256,
+    }
+    provenance = {
+        "schema_version": 1,
+        "artifact": setup.name,
+        "artifact_sha256": setup_hash,
+        "version": version,
+        "source_commit": commit,
+        "distribution_flavor": "oss",
+        "built_at_utc": "2026-07-15T01:02:03.0000000Z",
+        "unsigned": not signed,
+        "authenticode": {
+            "schema_version": 1,
+            "files": {setup.name: authenticode_evidence},
+        },
+        "inputs": provenance_inputs,
+        "toolchain": {
+            "go": "go version go1.25.5 windows/amd64",
+            "uv": "uv 0.9.26 (test fixture)",
+            "python_embed_url": release_candidate.WINDOWS_PYTHON_EMBED_URL,
+            "python_embed_sha256": release_candidate.WINDOWS_PYTHON_EMBED_SHA256,
+            "python_runtime_review_deadline_utc": (release_candidate.WINDOWS_PYTHON_RUNTIME_REVIEW_DEADLINE),
+            "yara_compat_sha256": payload_files[release_candidate.WINDOWS_YARA_COMPAT_WHEEL],
+            "win_unicode_console_source_url": release_candidate.WINDOWS_WIN_UNICODE_SOURCE_URL,
+            "win_unicode_console_source_sha256": (release_candidate.WINDOWS_WIN_UNICODE_SOURCE_SHA256),
+            "cosign_version": release_candidate.WINDOWS_COSIGN_VERSION,
+            "cosign_url": release_candidate.WINDOWS_COSIGN_URL,
+            "cosign_sha256": release_candidate.WINDOWS_COSIGN_SHA256,
+        },
+    }
+    (windows / f"{setup.name}.provenance.json").write_text(
+        json.dumps(provenance),
+        encoding="utf-8",
+    )
+    package_id = "SPDXRef-Package-DefenseClaw-Windows-Setup"
+    file_id = "SPDXRef-File-DefenseClawSetup-x64.exe"
+    embedded_package_id = "SPDXRef-Package-Embedded-Payload"
+    embedded_file_id = "SPDXRef-File-Embedded-Payload"
+    packages = [
+        {
+            "name": "DefenseClaw Windows Setup",
+            "SPDXID": package_id,
+            "versionInfo": version,
+            "packageFileName": setup.name,
+            "checksums": [{"algorithm": "SHA256", "checksumValue": setup_hash}],
+            "externalRefs": [
+                {
+                    "referenceCategory": "PACKAGE-MANAGER",
+                    "referenceType": "purl",
+                    "referenceLocator": f"pkg:github/cisco-ai-defense/defenseclaw@{version}",
+                }
+            ],
+        },
+        {
+            "name": "DefenseClaw embedded installer payload",
+            "SPDXID": embedded_package_id,
+            "versionInfo": version,
+            "packageFileName": "installer-payload.zip",
+            "checksums": [
+                {
+                    "algorithm": "SHA256",
+                    "checksumValue": provenance_inputs["embedded_payload_sha256"],
+                }
+            ],
+        },
+    ]
+    files = [
+        {
+            "fileName": f"./{setup.name}",
+            "SPDXID": file_id,
+            "checksums": [{"algorithm": "SHA256", "checksumValue": setup_hash}],
+        },
+        {
+            "fileName": "./embedded/installer-payload.zip",
+            "SPDXID": embedded_file_id,
+            "checksums": [
+                {
+                    "algorithm": "SHA256",
+                    "checksumValue": provenance_inputs["embedded_payload_sha256"],
+                }
+            ],
+        },
+    ]
+    relationships = [
+        {
+            "spdxElementId": "SPDXRef-DOCUMENT",
+            "relationshipType": "DESCRIBES",
+            "relatedSpdxElement": package_id,
+        },
+        {
+            "spdxElementId": package_id,
+            "relationshipType": "CONTAINS",
+            "relatedSpdxElement": file_id,
+        },
+        {
+            "spdxElementId": package_id,
+            "relationshipType": "CONTAINS",
+            "relatedSpdxElement": embedded_package_id,
+        },
+        {
+            "spdxElementId": embedded_package_id,
+            "relationshipType": "CONTAINS",
+            "relatedSpdxElement": embedded_file_id,
+        },
+    ]
+    sbom_payload_files = {
+        **payload_files,
+        "manifest.json": provenance_inputs["payload_manifest_sha256"],
+    }
+    for index, (name, digest) in enumerate(sorted(sbom_payload_files.items())):
+        component_package_id = f"SPDXRef-Package-Payload-{index}"
+        component_file_id = f"SPDXRef-File-Payload-{index}"
+        packages.append(
+            {
+                "name": f"DefenseClaw payload component {name}",
+                "SPDXID": component_package_id,
+                "packageFileName": name,
+                "checksums": [{"algorithm": "SHA256", "checksumValue": digest}],
+            }
+        )
+        files.append(
+            {
+                "fileName": f"./payload/{name}",
+                "SPDXID": component_file_id,
+                "checksums": [{"algorithm": "SHA256", "checksumValue": digest}],
+            }
+        )
+        relationships.extend(
+            [
+                {
+                    "spdxElementId": component_package_id,
+                    "relationshipType": "CONTAINS",
+                    "relatedSpdxElement": component_file_id,
+                },
+                {
+                    "spdxElementId": embedded_package_id,
+                    "relationshipType": "CONTAINS",
+                    "relatedSpdxElement": component_package_id,
+                },
+            ]
+        )
+    sbom = {
+        "spdxVersion": "SPDX-2.3",
+        "dataLicense": "CC0-1.0",
+        "SPDXID": "SPDXRef-DOCUMENT",
+        "name": f"{setup.name}-{version}",
+        "documentNamespace": (f"https://github.com/cisco-ai-defense/defenseclaw/spdx/windows/{version}/{setup_hash}"),
+        "comment": f"DefenseClaw source commit: {commit}",
+        "creationInfo": {
+            "created": "2026-07-15T01:02:03Z",
+            "creators": [
+                "Organization: Cisco Systems, Inc.",
+                "Tool: DefenseClaw Windows installer SBOM generator",
+            ],
+            "licenseListVersion": "3.25",
+        },
+        "documentDescribes": [package_id],
+        "packages": packages,
+        "files": files,
+        "relationships": relationships,
+    }
+    (windows / f"{setup.name}.sbom.json").write_text(
+        json.dumps(sbom),
+        encoding="utf-8",
+    )
+    return windows
+
+
 def _candidate_before_seal(
     tmp_path: Path,
     macos_verification_status: str = "notarized",
@@ -577,9 +911,7 @@ def test_hard_cut_release_provenance_is_deterministic_signed_payload(
         "version": VERSION,
         "commit": HARD_CUT_PROVENANCE_ARGS["bridge_commit"],
         "tree": HARD_CUT_PROVENANCE_ARGS["bridge_tree"],
-        "checksums_sha256": HARD_CUT_PROVENANCE_ARGS[
-            "bridge_checksums_sha256"
-        ],
+        "checksums_sha256": HARD_CUT_PROVENANCE_ARGS["bridge_checksums_sha256"],
     }
     expected_source_map = {
         "schema_version": 1,
@@ -604,18 +936,10 @@ def test_hard_cut_release_provenance_is_deterministic_signed_payload(
         "source_install_identity": HARD_CUT_IDENTITY,
         "bridge": expected_bridge,
     }
-    assert "release-provenance.json" not in release_candidate.published_asset_names(
-        VERSION, "notarized"
-    )
-    assert "release-provenance.json" in release_candidate.payload_asset_names(
-        HARD_CUT_VERSION, "notarized"
-    )
-    assert "release-source-map.json" in release_candidate.payload_asset_names(
-        HARD_CUT_VERSION, "notarized"
-    )
-    assert "release-provenance.json" in release_candidate.published_asset_names(
-        HARD_CUT_VERSION, "notarized"
-    )
+    assert "release-provenance.json" not in release_candidate.published_asset_names(VERSION, "notarized")
+    assert "release-provenance.json" in release_candidate.payload_asset_names(HARD_CUT_VERSION, "notarized")
+    assert "release-source-map.json" in release_candidate.payload_asset_names(HARD_CUT_VERSION, "notarized")
+    assert "release-provenance.json" in release_candidate.published_asset_names(HARD_CUT_VERSION, "notarized")
 
     (first / "dist/checksums.txt.sig").write_bytes(b"sigstore signature")
     (first / "dist/checksums.txt.pem").write_bytes(TEST_CERTIFICATE_PEM)
@@ -624,9 +948,7 @@ def test_hard_cut_release_provenance_is_deterministic_signed_payload(
 
     checksums = release_candidate._parse_checksums(first / "dist/checksums.txt")
     assert set(checksums) == {"release-provenance.json", "release-source-map.json"}
-    manifest = json.loads(
-        (first / "release-candidate.json").read_text(encoding="utf-8")
-    )
+    manifest = json.loads((first / "release-candidate.json").read_text(encoding="utf-8"))
     manifest_names = {item["name"] for item in manifest["assets"]}
     assert {"release-provenance.json", "release-source-map.json"} <= manifest_names
     published = tmp_path / "published-hard-cut.json"
@@ -746,7 +1068,11 @@ def test_hard_cut_seal_rejects_extra_provenance_field(
     [
         ("release_version", "0.8.6", "version mismatch"),
         ("source_commit", "9" * 40, "source_commit mismatch"),
-        ("source_install_identity", {**HARD_CUT_IDENTITY, "runtime_config_version": 7}, "identity mismatch"),
+        (
+            "source_install_identity",
+            {**HARD_CUT_IDENTITY, "runtime_config_version": 7},
+            "identity mismatch",
+        ),
         ("bridge.version", "0.8.3", "bridge version mismatch"),
     ],
 )
@@ -831,6 +1157,480 @@ def test_posix_only_publish_set_omits_only_windows_binaries() -> None:
     } <= posix_only
 
 
+def test_windows_setup_custody_starts_at_086_and_survives_legacy_omission() -> None:
+    assert release_candidate.windows_installer_asset_names("0.8.5") == ()
+    assert release_candidate.release_proof_asset_names("0.8.5") == (
+        "checksums.txt.pem",
+        "checksums.txt.sig",
+    )
+
+    setup_assets = set(release_candidate.windows_installer_asset_names(WINDOWS_SETUP_VERSION))
+    assert setup_assets == {
+        "DefenseClawSetup-x64.exe",
+        "DefenseClawSetup-x64.exe.sha256",
+        "DefenseClawSetup-x64.exe.provenance.json",
+        "DefenseClawSetup-x64.exe.sbom.json",
+    }
+    assert "checksums.txt.bundle" in release_candidate.published_asset_names(WINDOWS_SETUP_VERSION, "notarized")
+    omitted = set(
+        release_candidate.published_asset_names(
+            WINDOWS_SETUP_VERSION,
+            "notarized",
+            omit_windows_binaries=True,
+        )
+    )
+    assert setup_assets <= omitted
+    assert not setup_assets & set(release_candidate.windows_release_binary_names(WINDOWS_SETUP_VERSION))
+
+
+@pytest.mark.parametrize("signed", [True, False])
+def test_windows_setup_exact_artifact_set_validates(tmp_path: Path, signed: bool) -> None:
+    windows = _windows_setup_dir(tmp_path, signed=signed)
+
+    release_candidate._validate_windows_installer_assets(
+        windows,
+        WINDOWS_SETUP_VERSION,
+        COMMIT,
+        exact_file_set=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("metadata_suffix", "field", "value", "match"),
+    [
+        ("provenance.json", "unsigned", True, "signing state"),
+        ("sbom.json", "documentNamespace", "https://example.invalid", "SBOM document"),
+    ],
+)
+def test_windows_setup_metadata_tampering_fails_closed(
+    tmp_path: Path,
+    metadata_suffix: str,
+    field: str,
+    value: object,
+    match: str,
+) -> None:
+    windows = _windows_setup_dir(tmp_path)
+    path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.{metadata_suffix}"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document[field] = value
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(release_candidate.CandidateError, match=match):
+        release_candidate._validate_windows_installer_assets(
+            windows,
+            WINDOWS_SETUP_VERSION,
+            COMMIT,
+            exact_file_set=True,
+        )
+
+
+def test_windows_setup_rejects_pe_and_provenance_signing_state_mismatch(
+    tmp_path: Path,
+) -> None:
+    windows = _windows_setup_dir(tmp_path, signed=False)
+    path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.provenance.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["unsigned"] = False
+    document["inputs"]["product_executables_authenticode_signed"] = True
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(release_candidate.CandidateError, match="signing state"):
+        release_candidate._validate_windows_installer_assets(
+            windows,
+            WINDOWS_SETUP_VERSION,
+            COMMIT,
+            exact_file_set=True,
+        )
+
+
+def test_record_windows_unverified_creates_explicit_non_certification(
+    tmp_path: Path,
+) -> None:
+    windows = _windows_setup_dir(tmp_path, signed=False)
+    certification = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.certification.json"
+
+    release_candidate.record_windows_unverified(
+        windows,
+        WINDOWS_SETUP_VERSION,
+        COMMIT,
+        "sha256:" + "4" * 64,
+        "https://github.com/cisco-ai-defense/defenseclaw/actions/runs/123456",
+    )
+
+    document = json.loads(certification.read_text(encoding="utf-8"))
+    assert document["status"] == "unverified"
+    assert document["verification_status"] == "unverified"
+    assert document["setup"]["publisher"] == ""
+    assert document["clients"] == {}
+
+
+def test_record_windows_unverified_rejects_signed_setup(tmp_path: Path) -> None:
+    windows = _windows_setup_dir(tmp_path)
+
+    with pytest.raises(release_candidate.CandidateError, match="signed Windows Setup"):
+        release_candidate.record_windows_unverified(
+            windows,
+            WINDOWS_SETUP_VERSION,
+            COMMIT,
+            "4" * 64,
+            "https://github.com/cisco-ai-defense/defenseclaw/actions/runs/123456",
+        )
+
+
+def test_windows_setup_provenance_rejects_open_or_unpinned_build_inputs(
+    tmp_path: Path,
+) -> None:
+    windows = _windows_setup_dir(tmp_path)
+    path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.provenance.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["inputs"].pop("cosign_sha256")
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(release_candidate.CandidateError, match="closed field set"):
+        release_candidate._validate_windows_installer_assets(windows, WINDOWS_SETUP_VERSION, COMMIT)
+
+    unpinned = tmp_path / "unpinned"
+    unpinned.mkdir()
+    windows = _windows_setup_dir(unpinned)
+    path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.provenance.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["toolchain"]["cosign_version"] = "2.6.1"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(release_candidate.CandidateError, match="reviewed pin"):
+        release_candidate._validate_windows_installer_assets(windows, WINDOWS_SETUP_VERSION, COMMIT)
+
+
+def test_windows_setup_provenance_rejects_inconsistent_payload_digest(
+    tmp_path: Path,
+) -> None:
+    windows = _windows_setup_dir(tmp_path)
+    path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.provenance.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["inputs"]["payload_files"][document["inputs"]["wheel"]] = "1" * 64
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(release_candidate.CandidateError, match="payload digests"):
+        release_candidate._validate_windows_installer_assets(windows, WINDOWS_SETUP_VERSION, COMMIT)
+
+
+def test_windows_setup_sbom_requires_every_payload_custody_relationship(
+    tmp_path: Path,
+) -> None:
+    windows = _windows_setup_dir(tmp_path)
+    path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.sbom.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    manifest_package = next(
+        item["SPDXID"] for item in document["packages"] if item.get("packageFileName") == "manifest.json"
+    )
+    document["relationships"] = [
+        row
+        for row in document["relationships"]
+        if not (row["relationshipType"] == "CONTAINS" and row["relatedSpdxElement"] == manifest_package)
+    ]
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(release_candidate.CandidateError, match="custody relationships"):
+        release_candidate._validate_windows_installer_assets(windows, WINDOWS_SETUP_VERSION, COMMIT)
+
+
+def test_windows_setup_sbom_rejects_payload_digest_substitution(tmp_path: Path) -> None:
+    windows = _windows_setup_dir(tmp_path)
+    path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.sbom.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    manifest_package = next(item for item in document["packages"] if item.get("packageFileName") == "manifest.json")
+    manifest_package["checksums"] = [{"algorithm": "SHA256", "checksumValue": "1" * 64}]
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(release_candidate.CandidateError, match="payload digest"):
+        release_candidate._validate_windows_installer_assets(windows, WINDOWS_SETUP_VERSION, COMMIT)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"not json",
+        json.dumps({"base64Signature": "c2ln", "cert": "missing Rekor"}).encode(),
+        _legacy_cosign_bundle_bytes().replace(b"c2lnc3RvcmUgc2lnbmF0dXJl", b"not-base64!"),
+    ],
+)
+def test_legacy_cosign_bundle_rejects_malformed_structure(tmp_path: Path, payload: bytes) -> None:
+    path = tmp_path / release_candidate.CHECKSUMS_BUNDLE_FILENAME
+    path.write_bytes(payload)
+    with pytest.raises(release_candidate.CandidateError):
+        release_candidate._validate_legacy_cosign_bundle(path)
+
+
+def test_legacy_cosign_bundle_accepts_cosign_262_structure(tmp_path: Path) -> None:
+    path = tmp_path / release_candidate.CHECKSUMS_BUNDLE_FILENAME
+    path.write_bytes(_legacy_cosign_bundle_bytes())
+    release_candidate._validate_legacy_cosign_bundle(path)
+
+
+@pytest.mark.parametrize(
+    ("offset", "value", "match"),
+    [
+        (0x80 + 4, 0xAA64, "not an x64"),
+        (0x80 + 24 + 68, 3, "not a Windows GUI"),
+    ],
+)
+def test_windows_setup_pe_contract_rejects_wrong_target(
+    tmp_path: Path,
+    offset: int,
+    value: int,
+    match: str,
+) -> None:
+    windows = _windows_setup_dir(tmp_path)
+    setup = windows / release_candidate.WINDOWS_SETUP_ASSET
+    payload = bytearray(setup.read_bytes())
+    struct.pack_into("<H", payload, offset, value)
+    setup.write_bytes(payload)
+
+    with pytest.raises(release_candidate.CandidateError, match=match):
+        release_candidate._validate_windows_installer_assets(
+            windows,
+            WINDOWS_SETUP_VERSION,
+            COMMIT,
+        )
+
+
+def test_windows_setup_directory_rejects_extra_file(tmp_path: Path) -> None:
+    windows = _windows_setup_dir(tmp_path)
+    (windows / "unexpected.txt").write_text("not release-owned", encoding="utf-8")
+
+    with pytest.raises(release_candidate.CandidateError, match="exactly four"):
+        release_candidate._validate_windows_installer_assets(
+            windows,
+            WINDOWS_SETUP_VERSION,
+            COMMIT,
+            exact_file_set=True,
+        )
+
+
+def test_086_assemble_requires_windows_dir_before_runtime_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        release_candidate,
+        "_release_identity_documents",
+        lambda *_args, **_kwargs: (None, None),
+    )
+
+    with pytest.raises(release_candidate.CandidateError, match="requires --windows-dir"):
+        release_candidate.assemble(
+            tmp_path / "unused-runtime",
+            tmp_path / "unused-macos",
+            tmp_path / "candidate",
+            WINDOWS_SETUP_VERSION,
+            COMMIT,
+            "notarized",
+        )
+
+
+def test_086_assemble_seals_the_exact_windows_setup_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    macos = tmp_path / "macos"
+    runtime.mkdir()
+    macos.mkdir()
+    windows = _windows_setup_dir(tmp_path)
+    root = tmp_path / "candidate"
+    source_hashes = {
+        name: release_candidate._sha256(windows / name)
+        for name in release_candidate.windows_installer_asset_names(WINDOWS_SETUP_VERSION)
+    }
+    monkeypatch.setattr(
+        release_candidate,
+        "_release_identity_documents",
+        lambda *_args, **_kwargs: (None, None),
+    )
+    monkeypatch.setattr(
+        release_candidate,
+        "_reviewed_source_install_identity",
+        lambda _version: {},
+    )
+    monkeypatch.setattr(release_candidate, "runtime_asset_names", lambda _version: ())
+    monkeypatch.setattr(
+        release_candidate,
+        "macos_asset_names",
+        lambda _version, _status: (),
+    )
+    monkeypatch.setattr(release_candidate, "resolver_asset_names", lambda _version: ())
+    monkeypatch.setattr(
+        release_candidate,
+        "release_identity_asset_names",
+        lambda _version: (),
+    )
+    monkeypatch.setattr(release_candidate, "verify_runtime", lambda *_args: None)
+    monkeypatch.setattr(
+        release_candidate,
+        "_validate_gateway_archives",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        release_candidate,
+        "_validate_resolver_assets",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        release_candidate,
+        "_validate_release_identity",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        release_candidate,
+        "_validate_upgrade_manifest",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(release_candidate, "_validate_wheel", lambda *_args: None)
+    monkeypatch.setattr(
+        release_candidate,
+        "_validate_legacy_refusal_envelopes",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        release_candidate,
+        "_expected_release_artifacts",
+        lambda _version: {"wheel": "unused.dcwheel"},
+    )
+    monkeypatch.setattr(
+        release_candidate,
+        "_validate_windows_setup_runtime_inputs",
+        lambda *_args: None,
+    )
+
+    release_candidate.assemble(
+        runtime,
+        macos,
+        root,
+        WINDOWS_SETUP_VERSION,
+        COMMIT,
+        "notarized",
+        windows_dir=windows,
+    )
+
+    dist = root / "dist"
+    assert {name: release_candidate._sha256(dist / name) for name in source_hashes} == source_hashes
+    assert release_candidate._parse_checksums(dist / "checksums.txt") == source_hashes
+    (dist / "checksums.txt.sig").write_bytes(b"sigstore signature")
+    (dist / "checksums.txt.pem").write_bytes(TEST_CERTIFICATE_PEM)
+    (dist / "checksums.txt.bundle").write_bytes(_legacy_cosign_bundle_bytes())
+
+    release_candidate.seal(root, WINDOWS_SETUP_VERSION, COMMIT)
+    release_candidate.verify(root, WINDOWS_SETUP_VERSION, COMMIT)
+    manifest = json.loads((root / "release-candidate.json").read_text(encoding="utf-8"))
+    recorded = {item["name"]: item["sha256"] for item in manifest["assets"]}
+    for name, digest in source_hashes.items():
+        assert recorded[name] == digest
+    assert recorded["checksums.txt.bundle"] == release_candidate._sha256(dist / "checksums.txt.bundle")
+
+    setup = dist / release_candidate.WINDOWS_SETUP_ASSET
+    setup.write_bytes(setup.read_bytes() + b"tampered")
+    with pytest.raises(release_candidate.CandidateError):
+        release_candidate.verify(root, WINDOWS_SETUP_VERSION, COMMIT)
+
+
+def test_windows_setup_provenance_binds_exact_runtime_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    windows = _windows_setup_dir(tmp_path)
+    provenance_path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    artifacts = release_candidate._expected_release_artifacts(WINDOWS_SETUP_VERSION)
+    gateway_path = runtime / artifacts["gateways"]["windows"]["amd64"]
+    wheel_path = runtime / artifacts["wheel"]
+    manifest_path = runtime / "upgrade-manifest.json"
+    gateway_payload = b"exact canonical gateway archive"
+    wheel_payload = b"exact canonical wheel"
+    manifest_payload = b'{"release_version":"0.8.6"}\n'
+    manifest_path.write_bytes(manifest_payload)
+    protected_payloads = {gateway_path: gateway_payload, wheel_path: wheel_payload}
+    monkeypatch.setattr(
+        release_candidate,
+        "_protected_payload",
+        lambda path: protected_payloads[path],
+    )
+    inputs = provenance["inputs"]
+    inputs["gateway_archive_sha256"] = hashlib.sha256(gateway_payload).hexdigest()
+    inputs["wheel_sha256"] = hashlib.sha256(wheel_payload).hexdigest()
+    inputs["payload_files"][inputs["wheel"]] = inputs["wheel_sha256"]
+    inputs["payload_files"]["upgrade-manifest.json"] = hashlib.sha256(manifest_payload).hexdigest()
+
+    release_candidate._validate_windows_setup_runtime_inputs(provenance, runtime, WINDOWS_SETUP_VERSION)
+    manifest_path.write_bytes(b"substituted")
+    with pytest.raises(release_candidate.CandidateError, match="exact runtime candidate"):
+        release_candidate._validate_windows_setup_runtime_inputs(provenance, runtime, WINDOWS_SETUP_VERSION)
+
+
+def test_windows_installer_input_extractor_is_exclusive_and_canonical(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = tmp_path / "runtime"
+    release.mkdir()
+    gateway_source = release / "protected-windows.dcgateway"
+    wheel_source = release / "protected-wheel.dcwheel"
+    manifest_source = release / "upgrade-manifest.json"
+    gateway_source.write_bytes(b"protected gateway")
+    wheel_source.write_bytes(b"protected wheel")
+    manifest_source.write_bytes(b'{"release_version":"0.8.6"}\n')
+    attestation = {
+        path.name: release_candidate._sha256(path) for path in (gateway_source, wheel_source, manifest_source)
+    }
+    monkeypatch.setattr(release_candidate, "verify_runtime", lambda *_args: None)
+    monkeypatch.setattr(
+        release_candidate,
+        "_expected_release_artifacts",
+        lambda _version: {
+            "wheel": wheel_source.name,
+            "gateways": {"windows": {"amd64": gateway_source.name}},
+        },
+    )
+    monkeypatch.setattr(release_candidate, "_parse_checksums", lambda _path: attestation)
+    monkeypatch.setattr(
+        release_candidate,
+        "_protected_payload",
+        lambda path: {
+            gateway_source: b"canonical gateway zip",
+            wheel_source: b"canonical wheel",
+        }[path],
+    )
+    monkeypatch.setattr(
+        release_candidate,
+        "_validate_windows_gateway_zip_payload",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(release_candidate, "_validate_wheel", lambda *_args: None)
+    monkeypatch.setattr(
+        release_candidate,
+        "_validate_upgrade_manifest",
+        lambda *_args, **_kwargs: None,
+    )
+    output = tmp_path / "private-inputs"
+
+    release_candidate.extract_windows_installer_inputs(
+        release,
+        output,
+        WINDOWS_SETUP_VERSION,
+    )
+
+    assert sorted(path.name for path in output.iterdir()) == [
+        "defenseclaw-0.8.6-py3-none-any.whl",
+        "defenseclaw_0.8.6_windows_amd64.zip",
+        "upgrade-manifest.json",
+    ]
+    assert (output / "defenseclaw_0.8.6_windows_amd64.zip").read_bytes() == (b"canonical gateway zip")
+    assert (output / "defenseclaw-0.8.6-py3-none-any.whl").read_bytes() == b"canonical wheel"
+    assert (output / "upgrade-manifest.json").read_bytes() == manifest_source.read_bytes()
+    with pytest.raises(release_candidate.CandidateError, match="already exists"):
+        release_candidate.extract_windows_installer_inputs(
+            release,
+            output,
+            WINDOWS_SETUP_VERSION,
+        )
+
+
 def test_candidate_seals_and_verifies_exact_publish_set(tmp_path: Path) -> None:
     root = _sealed_candidate(tmp_path)
 
@@ -839,19 +1639,13 @@ def test_candidate_seals_and_verifies_exact_publish_set(tmp_path: Path) -> None:
 
     manifest = json.loads((root / "release-candidate.json").read_text(encoding="utf-8"))
     effective_policy = root / release_candidate.EFFECTIVE_UPGRADE_BASELINES_FILENAME
-    assert effective_policy.read_bytes() == (
-        ROOT / "release/upgrade-baselines.json"
-    ).read_bytes()
-    assert manifest["effective_upgrade_baselines_sha256"] == hashlib.sha256(
-        effective_policy.read_bytes()
-    ).hexdigest()
+    assert effective_policy.read_bytes() == (ROOT / "release/upgrade-baselines.json").read_bytes()
+    assert manifest["effective_upgrade_baselines_sha256"] == hashlib.sha256(effective_policy.read_bytes()).hexdigest()
     assert [item["name"] for item in manifest["assets"]] == list(
         release_candidate.published_asset_names(VERSION, "notarized")
     )
     checksums = release_candidate._parse_checksums(root / "dist/checksums.txt")
-    assert tuple(sorted(checksums)) == release_candidate.payload_asset_names(
-        VERSION, "notarized"
-    )
+    assert tuple(sorted(checksums)) == release_candidate.payload_asset_names(VERSION, "notarized")
     for name in release_candidate.resolver_asset_names(VERSION):
         assert (root / "dist" / name).read_bytes() == (release_candidate.RESOLVER_ASSET_SOURCES[name].read_bytes())
     assert (root / "RELEASE_NOTES.md").read_text(encoding="utf-8") == "# Candidate notes\n"
@@ -960,9 +1754,7 @@ def test_certificate_command_canonicalizes_strict_cosign_wrapper_atomically(
         original_replace(source, destination)
 
     monkeypatch.setattr(release_candidate.os, "replace", record_replace)
-    status = release_candidate.main(
-        ["canonicalize-certificate", "--certificate", str(certificate)]
-    )
+    status = release_candidate.main(["canonicalize-certificate", "--certificate", str(certificate)])
 
     assert status == 0
     assert certificate.read_bytes() == TEST_CERTIFICATE_PEM
@@ -1056,12 +1848,12 @@ def test_release_certificate_same_api_timestamp_change_is_rejected(
     ],
     ids=(
         "empty",
-        "trailing-newline",
-        "base64-pem",
-        "base64-multiple-pem",
-        "multiple-pem",
-        "crlf",
-        "bom",
+        "base64-with-newline",
+        "noncanonical-pem-body",
+        "two-pems-base64",
+        "two-pems-raw",
+        "crlf-pem",
+        "utf8-bom",
         "oversized",
     ),
 )
@@ -1096,7 +1888,9 @@ def test_certificate_atomic_publication_failure_preserves_cosign_output(
     assert not list(tmp_path.glob(".checksums.txt.pem.canonical-*"))
 
 
-def test_seal_and_verify_reject_base64_wrapped_modern_certificate(tmp_path: Path) -> None:
+def test_seal_and_verify_reject_base64_wrapped_modern_certificate(
+    tmp_path: Path,
+) -> None:
     unsealed = _candidate_before_seal(tmp_path)
     certificate = unsealed / "dist/checksums.txt.pem"
     certificate.write_bytes(TEST_CERTIFICATE_WRAPPER)
@@ -1126,14 +1920,9 @@ def test_candidate_seals_and_verifies_explicit_unverified_macos_assets(
         f"DefenseClawMac-{VERSION}-macos-arm64-unverified.dmg",
         f"DefenseClawMac-{VERSION}-macos-arm64-unverified.zip",
     )
-    assert not any(
-        name in expected_names
-        for name in release_candidate.macos_asset_names(VERSION, "notarized")
-    )
+    assert not any(name in expected_names for name in release_candidate.macos_asset_names(VERSION, "notarized"))
     checksums = release_candidate._parse_checksums(root / "dist/checksums.txt")
-    assert tuple(sorted(checksums)) == release_candidate.payload_asset_names(
-        VERSION, "unverified"
-    )
+    assert tuple(sorted(checksums)) == release_candidate.payload_asset_names(VERSION, "unverified")
 
     release_json = tmp_path / "published-unverified.json"
     release_json.write_text(
@@ -1179,13 +1968,9 @@ def test_local_release_harness_stages_exact_reviewed_resolvers(tmp_path: Path) -
 
     release_candidate.stage_resolvers(release_dir, VERSION)
 
-    assert {path.name for path in release_dir.iterdir()} == set(
-        release_candidate.resolver_asset_names(VERSION)
-    )
+    assert {path.name for path in release_dir.iterdir()} == set(release_candidate.resolver_asset_names(VERSION))
     for name in release_candidate.resolver_asset_names(VERSION):
-        assert (release_dir / name).read_bytes() == release_candidate.RESOLVER_ASSET_SOURCES[
-            name
-        ].read_bytes()
+        assert (release_dir / name).read_bytes() == release_candidate.RESOLVER_ASSET_SOURCES[name].read_bytes()
 
     with pytest.raises(release_candidate.CandidateError, match="destination already exists"):
         release_candidate.stage_resolvers(release_dir, VERSION)
@@ -1209,14 +1994,17 @@ def test_exact_reviewed_release_sources_have_cross_platform_lf_attributes() -> N
         assert b"\r\n" not in (ROOT / relative).read_bytes()
 
 
-def test_exact_gateway_is_safely_extracted_from_runtime_candidate(tmp_path: Path) -> None:
+def test_exact_gateway_is_safely_extracted_from_runtime_candidate(
+    tmp_path: Path,
+) -> None:
     runtime = _runtime_dir(tmp_path)
     output = tmp_path / "extracted/defenseclaw"
 
     release_candidate.extract_gateway(runtime, output, VERSION, "darwin", "arm64")
 
     assert output.read_bytes() == _fake_gateway("darwin", "arm64")
-    assert output.stat().st_mode & 0o111
+    if os.name == "posix":
+        assert output.stat().st_mode & 0o111
 
 
 def test_gateway_archive_attestation_covers_all_six_platform_binaries(
@@ -1323,13 +2111,16 @@ def test_gateway_archive_attestation_rejects_version_or_commit_drift(
         release_candidate._validate_gateway_archives(runtime, VERSION, commit="b" * 40)
 
 
-def test_only_manifest_bound_protocol_two_artifacts_are_installable(tmp_path: Path) -> None:
+def test_only_manifest_bound_protocol_two_artifacts_are_installable(
+    tmp_path: Path,
+) -> None:
     runtime = _runtime_dir(tmp_path)
 
     protected_gateway = runtime / RELEASE_ARTIFACTS["gateways"]["linux"]["amd64"]
     assert protected_gateway.read_bytes().startswith(release_candidate.PROTECTED_ARTIFACT_MAGIC)
     with tarfile.open(
-        fileobj=io.BytesIO(release_candidate._protected_payload(protected_gateway)), mode="r:gz"
+        fileobj=io.BytesIO(release_candidate._protected_payload(protected_gateway)),
+        mode="r:gz",
     ) as archive:
         assert any(Path(member.name).name == "defenseclaw" for member in archive.getmembers())
     with pytest.raises(tarfile.TarError):
@@ -1398,7 +2189,9 @@ def test_published_protected_wheel_is_rejected_by_package_managers_before_instal
         assert not target.exists() or {entry.name for entry in target.iterdir()} <= {".lock"}
 
 
-def test_manifest_cannot_point_resolvers_at_legacy_refusal_names(tmp_path: Path) -> None:
+def test_manifest_cannot_point_resolvers_at_legacy_refusal_names(
+    tmp_path: Path,
+) -> None:
     runtime = _runtime_dir(tmp_path)
     manifest_path = runtime / "upgrade-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1501,7 +2294,9 @@ def test_candidate_verification_binds_unverified_names_to_unverified_status(
         release_candidate.verify(root, VERSION, COMMIT)
 
 
-def test_runtime_verification_rejects_mismatched_upgrade_manifest(tmp_path: Path) -> None:
+def test_runtime_verification_rejects_mismatched_upgrade_manifest(
+    tmp_path: Path,
+) -> None:
     runtime = _runtime_dir(tmp_path)
     manifest = json.loads((runtime / "upgrade-manifest.json").read_text(encoding="utf-8"))
     manifest["release_version"] = "9.9.9"
@@ -1522,7 +2317,9 @@ def test_bridge_candidate_rejects_wheel_protocol_drift(tmp_path: Path) -> None:
         release_candidate.verify_runtime(runtime, VERSION)
 
 
-def test_bridge_candidate_requires_protocol_two_even_when_manifest_matches(tmp_path: Path) -> None:
+def test_bridge_candidate_requires_protocol_two_even_when_manifest_matches(
+    tmp_path: Path,
+) -> None:
     runtime = _runtime_dir(tmp_path)
     wheel = runtime / PROTECTED_WHEEL
     _rewrite_wheel_controller(wheel, protocol=1)
@@ -1551,24 +2348,17 @@ def test_bridge_candidate_requires_release_owned_handoff_call(tmp_path: Path) ->
 
 
 def test_repository_controller_handoff_is_the_first_guarded_call() -> None:
-    source = (
-        ROOT / "cli" / "defenseclaw" / "commands" / "cmd_upgrade.py"
-    ).read_text(encoding="utf-8")
+    source = (ROOT / "cli" / "defenseclaw" / "commands" / "cmd_upgrade.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     entrypoints = [
         node
         for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "upgrade"
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "upgrade"
     ]
     assert len(entrypoints) == 1
     calls = release_candidate._upgrade_controller_calls(entrypoints[0])
     guarded_first = release_candidate._direct_hard_cut_guard_first_calls(entrypoints[0])
-    handoffs = [
-        (line, guarded)
-        for name, line, guarded in calls
-        if name == "_require_release_owned_hard_cut_handoff"
-    ]
+    handoffs = [(line, guarded) for name, line, guarded in calls if name == "_require_release_owned_hard_cut_handoff"]
     assert len(handoffs) == 1
     assert handoffs[0][1]
     assert ("_require_release_owned_hard_cut_handoff", handoffs[0][0]) in guarded_first
@@ -1598,7 +2388,9 @@ def test_bridge_candidate_rejects_inverted_or_dead_handoff_guard(
         release_candidate.verify_runtime(runtime, VERSION)
 
 
-def test_bridge_candidate_requires_handoff_before_acquisition_or_backup(tmp_path: Path) -> None:
+def test_bridge_candidate_requires_handoff_before_acquisition_or_backup(
+    tmp_path: Path,
+) -> None:
     runtime = _runtime_dir(tmp_path)
     wheel = runtime / PROTECTED_WHEEL
     original = (
@@ -1622,7 +2414,9 @@ def test_bridge_candidate_requires_handoff_before_acquisition_or_backup(tmp_path
         release_candidate.verify_runtime(runtime, VERSION)
 
 
-def test_bridge_candidate_requires_schema_two_tested_source_policy(tmp_path: Path) -> None:
+def test_bridge_candidate_requires_schema_two_tested_source_policy(
+    tmp_path: Path,
+) -> None:
     runtime = _runtime_dir(tmp_path)
     manifest_path = runtime / "upgrade-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1663,7 +2457,9 @@ def test_bridge_candidate_requires_exact_wheel_shipped_install_publisher(
         release_candidate.verify_runtime(runtime, VERSION)
 
 
-def test_bridge_candidate_rejects_duplicate_wheel_publisher_member(tmp_path: Path) -> None:
+def test_bridge_candidate_rejects_duplicate_wheel_publisher_member(
+    tmp_path: Path,
+) -> None:
     runtime = _runtime_dir(tmp_path)
     wheel = runtime / PROTECTED_WHEEL
     members = _read_wheel_members(wheel)
@@ -1716,7 +2512,9 @@ def test_bridge_candidate_rejects_dead_branch_lease_decoy(tmp_path: Path) -> Non
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor inheritance canary")
-def test_candidate_wheel_mutator_supervisor_holds_lease_for_real_child_lifetime(tmp_path: Path) -> None:
+def test_candidate_wheel_mutator_supervisor_holds_lease_for_real_child_lifetime(
+    tmp_path: Path,
+) -> None:
     import fcntl
 
     runtime = _runtime_dir(tmp_path)
@@ -1733,8 +2531,8 @@ def test_candidate_wheel_mutator_supervisor_holds_lease_for_real_child_lifetime(
         "import pathlib, sys, time; "
         "started,release,completed=map(pathlib.Path,sys.argv[1:]); "
         "started.touch(); deadline=time.monotonic()+10; "
-        "exec(\"while not release.exists():\\n"
-        " assert time.monotonic()<deadline\\n time.sleep(0.02)\"); "
+        'exec("while not release.exists():\\n'
+        ' assert time.monotonic()<deadline\\n time.sleep(0.02)"); '
         "completed.write_text('held', encoding='utf-8')"
     )
     process = subprocess.Popen(
@@ -1909,8 +2707,8 @@ def test_bridge_candidate_rejects_post_bridge_migration(tmp_path: Path) -> None:
         release_candidate.verify_runtime(runtime, VERSION)
 
 
-def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> None:
-    version = "0.8.5"
+def _non_bridge_candidate_wheel(tmp_path: Path) -> Path:
+    version = HARD_CUT_VERSION
     wheel = tmp_path / f"defenseclaw-{version}-py3-none-any.whl"
     with zipfile.ZipFile(wheel, mode="w") as archive:
         archive.writestr(
@@ -1955,6 +2753,10 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
             f"defenseclaw-{version}.dist-info/METADATA",
             f"Metadata-Version: 2.4\nName: defenseclaw\nVersion: {version}\n",
         )
+        canonical_resources = release_candidate._canonical_v8_wheel_resources()
+        assert set(canonical_resources) == EXPECTED_V8_WHEEL_RESOURCES
+        for member_name, payload in canonical_resources.items():
+            archive.writestr(member_name, payload)
     (tmp_path / "upgrade-manifest.json").write_text(
         json.dumps(
             {
@@ -1974,18 +2776,153 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
         encoding="utf-8",
     )
 
-    release_candidate._validate_wheel(wheel, version)
+    return wheel
+
+
+def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> None:
+    wheel = _non_bridge_candidate_wheel(tmp_path)
+
+    release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
 
     members = _read_wheel_members(wheel)
-    members["defenseclaw/commands/cmd_upgrade.py"] = members[
-        "defenseclaw/commands/cmd_upgrade.py"
-    ].replace(
+    members["defenseclaw/commands/cmd_upgrade.py"] = members["defenseclaw/commands/cmd_upgrade.py"].replace(
         b'_STAGED_TARGET_CONTROLLER_VERSION_ENV = "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION"\n',
         b"",
     )
     _write_wheel_members(wheel, members)
     with pytest.raises(release_candidate.CandidateError, match="target-controller handoff contract"):
-        release_candidate._validate_wheel(wheel, version)
+        release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing", "resource inventory is invalid.*missing="),
+        ("unexpected", "resource inventory is invalid.*unexpected="),
+        ("backslash-alias", "resource inventory is invalid.*unexpected="),
+        ("absolute-alias", "resource inventory is invalid.*unexpected="),
+        ("drive-absolute-alias", "resource inventory is invalid.*unexpected="),
+        ("drive-relative-alias", "resource inventory is invalid.*unexpected="),
+        ("unc-alias", "resource inventory is invalid.*unexpected="),
+        ("dot-segment-alias", "resource inventory is invalid.*unexpected="),
+        ("case-alias", "resource inventory is invalid.*unexpected="),
+        ("windows-trailing-alias", "resource inventory is invalid.*unexpected="),
+        ("ntfs-short-name-alias-1", "resource inventory is invalid.*unexpected="),
+        ("ntfs-short-name-alias-2", "resource inventory is invalid.*unexpected="),
+        ("directory-entry", "non-file v8 runtime resources"),
+        ("altered", "runtime resource is altered"),
+    ],
+)
+def test_non_bridge_candidate_rejects_incomplete_or_altered_v8_resources(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    wheel = _non_bridge_candidate_wheel(tmp_path)
+    members = _read_wheel_members(wheel)
+    config_schema = "defenseclaw/_data/config/v8/defenseclaw-config.schema.json"
+    if mutation == "missing":
+        members.pop(config_schema)
+    elif mutation == "unexpected":
+        members["defenseclaw/_data/config/v8/unexpected.json"] = b"{}\n"
+    elif mutation == "backslash-alias":
+        members[r"defenseclaw\_data\config\v8\unexpected.json"] = b"{}\n"
+    elif mutation == "absolute-alias":
+        members["/defenseclaw/_data/config/v8/unexpected.json"] = b"{}\n"
+    elif mutation == "drive-absolute-alias":
+        members["C:/defenseclaw/_data/config/v8/unexpected.json"] = b"{}\n"
+    elif mutation == "drive-relative-alias":
+        members["C:defenseclaw/_data/config/v8/unexpected.json"] = b"{}\n"
+    elif mutation == "unc-alias":
+        members["//server/share/defenseclaw/_data/config/v8/unexpected.json"] = b"{}\n"
+    elif mutation == "dot-segment-alias":
+        members["defenseclaw/_data/config/v8/../v8/unexpected.json"] = b"{}\n"
+    elif mutation == "case-alias":
+        members["DefenseClaw/_DATA/config/V8/unexpected.json"] = b"{}\n"
+    elif mutation == "windows-trailing-alias":
+        members["defenseclaw./_data./config/v8 /unexpected.json"] = b"{}\n"
+    elif mutation == "ntfs-short-name-alias-1":
+        members["DEFENS~1/_data/telemetry/v8/catalog.json"] = members["defenseclaw/_data/telemetry/v8/catalog.json"]
+    elif mutation == "ntfs-short-name-alias-2":
+        members["DEFENS~2/_data/config/v8/defenseclaw-config.schema.json"] = members[config_schema]
+    elif mutation == "directory-entry":
+        members["defenseclaw/_data/config/v8/unexpected/"] = b""
+    else:
+        original = members[config_schema]
+        members[config_schema] = b"[" + original[1:]
+    _write_wheel_members(wheel, members)
+
+    with pytest.raises(release_candidate.CandidateError, match=message):
+        release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
+
+
+def test_non_bridge_candidate_rejects_symlink_v8_resource(tmp_path: Path) -> None:
+    wheel = _non_bridge_candidate_wheel(tmp_path)
+    members = _read_wheel_members(wheel)
+    member_name = "defenseclaw/_data/config/v8/observability.yaml"
+    payload = members.pop(member_name)
+    symlink = zipfile.ZipInfo(member_name)
+    symlink.create_system = 3
+    symlink.external_attr = (stat.S_IFLNK | 0o777) << 16
+    with zipfile.ZipFile(wheel, mode="w") as archive:
+        for name, member_payload in members.items():
+            archive.writestr(name, member_payload)
+        archive.writestr(symlink, payload)
+
+    with pytest.raises(release_candidate.CandidateError, match="non-file v8 runtime resources"):
+        release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
+
+
+@pytest.mark.parametrize(
+    "package_root",
+    [
+        "DEFENS~1",
+        "defens~9",
+        "DEFEN~12",
+        "DE2C6E~1",
+    ],
+)
+def test_non_bridge_candidate_rejects_numeric_short_name_v8_package_root(
+    tmp_path: Path,
+    package_root: str,
+) -> None:
+    wheel = _non_bridge_candidate_wheel(tmp_path)
+    members = _read_wheel_members(wheel)
+    members[f"{package_root}/_data/telemetry/v8/catalog.json"] = b"{}\n"
+    _write_wheel_members(wheel, members)
+
+    with pytest.raises(
+        release_candidate.CandidateError,
+        match="resource inventory is invalid.*unexpected=",
+    ):
+        release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
+
+
+def test_non_bridge_candidate_rejects_duplicate_v8_resource(tmp_path: Path) -> None:
+    wheel = _non_bridge_candidate_wheel(tmp_path)
+    member_name = "defenseclaw/_data/telemetry/v8/catalog.json"
+    payload = _read_wheel_members(wheel)[member_name]
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with zipfile.ZipFile(wheel, mode="a") as archive:
+            archive.writestr(member_name, payload)
+
+    with pytest.raises(release_candidate.CandidateError, match="duplicate member names"):
+        release_candidate._validate_wheel(wheel, HARD_CUT_VERSION)
+
+
+def test_non_bridge_candidate_rejects_malformed_canonical_telemetry_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def malformed_asset(_root: Path, _logical_name: str) -> bytes:
+        raise release_candidate.RuntimeAssetError("malformed fixture")
+
+    monkeypatch.setattr(release_candidate, "read_logical_asset", malformed_asset)
+
+    with pytest.raises(
+        release_candidate.CandidateError,
+        match="canonical v8 wheel resources are unavailable or malformed",
+    ):
+        release_candidate._canonical_v8_wheel_resources()
 
 
 @pytest.mark.parametrize(
@@ -2072,15 +3009,15 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
         ),
         (
             HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
-                "    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode(\"utf-8\")\n",
-                "    serialized_metadata = b\"not the metadata object\"\n",
+                '    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode("utf-8")\n',
+                '    serialized_metadata = b"not the metadata object"\n',
             ),
             "publish its exact schema-2 metadata object",
         ),
         (
             HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
                 "    if not 0 < len(serialized_metadata) <= _MAX_BUNDLE_ROLLBACK_METADATA_BYTES:\n"
-                "        raise OSError(\"rollback metadata exceeds the bridge reader bound\")\n",
+                '        raise OSError("rollback metadata exceeds the bridge reader bound")\n',
                 "",
             ),
             "serialized metadata is not bounded",
@@ -2180,25 +3117,25 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
         ),
         (
             HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
-                "    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode(\"utf-8\")\n",
+                '    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode("utf-8")\n',
                 '    _atomic_copy_file("stage", path)\n'
-                "    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode(\"utf-8\")\n",
+                '    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode("utf-8")\n',
             ),
             "ambiguous copy mutation",
         ),
         (
             HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
-                "    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode(\"utf-8\")\n",
+                '    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode("utf-8")\n',
                 '    _atomic_write_bytes("canonical", b"early mutation")\n'
-                "    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode(\"utf-8\")\n",
+                '    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode("utf-8")\n',
             ),
             "ambiguous direct file write",
         ),
         (
             HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
-                "    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode(\"utf-8\")\n",
+                '    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode("utf-8")\n',
                 '    path.write_bytes(b"early mutation")\n'
-                "    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode(\"utf-8\")\n",
+                '    serialized_metadata = json.dumps(backup_metadata, sort_keys=True).encode("utf-8")\n',
             ),
             "bypasses its reviewed publication primitives",
         ),
@@ -2211,12 +3148,12 @@ def test_non_bridge_candidate_allows_forward_keyed_migration(tmp_path: Path) -> 
         ),
         (
             HARD_CUT_BUNDLE_TRANSACTION_SOURCE.replace(
-                "    _atomic_write_bytes(backup_root / \"refresh-backup.json\", serialized_metadata)\n"
+                '    _atomic_write_bytes(backup_root / "refresh-backup.json", serialized_metadata)\n'
                 "    mutation_started = False\n"
                 "    mutation_started = True\n",
                 "    mutation_started = False\n"
                 "    mutation_started = True\n"
-                "    _atomic_write_bytes(backup_root / \"refresh-backup.json\", serialized_metadata)\n",
+                '    _atomic_write_bytes(backup_root / "refresh-backup.json", serialized_metadata)\n',
             ),
             "not durable before first mutation",
         ),
@@ -2447,10 +3384,81 @@ def test_bridge_candidate_accepts_schema_two_policy_before_bridge_is_published(
     )
 
 
+def test_first_windows_release_accepts_empty_platform_baselines_without_emptying_global_policy(
+    tmp_path: Path,
+) -> None:
+    policy = json.loads((ROOT / "release" / "upgrade-baselines.json").read_text(encoding="utf-8"))
+    policy["platform_published_baselines"]["windows"] = []
+    policy_path = tmp_path / "effective-upgrade-baselines.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    configured, platforms = release_candidate._load_upgrade_baseline_policy(
+        WINDOWS_SETUP_VERSION,
+        policy_path,
+    )
+
+    assert configured == policy["published_baselines"]
+    assert configured
+    assert platforms == {"windows": []}
+
+    policy["published_baselines"] = []
+    policy["published_baseline_config_versions"] = {}
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+    with pytest.raises(release_candidate.CandidateError, match="policy is invalid"):
+        release_candidate._load_upgrade_baseline_policy(
+            WINDOWS_SETUP_VERSION,
+            policy_path,
+        )
+
+
+def test_followup_candidate_accepts_published_v8_baseline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = tmp_path / "upgrade-baselines.json"
+    policy.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "published_baselines": ["0.8.5", "0.8.4"],
+                "published_baseline_config_versions": {
+                    "0.8.5": 8,
+                    "0.8.4": 7,
+                },
+                "platform_published_baselines": {"windows": ["0.8.4"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(release_candidate, "UPGRADE_BASELINES_PATH", policy)
+    digest_policy = tmp_path / "historical-artifact-digests.json"
+    digest_policy.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "signed_wheel_coverage_starts_at": "0.8.4",
+                "signed_checksum_exceptions": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        release_candidate,
+        "HISTORICAL_ARTIFACT_DIGESTS_PATH",
+        digest_policy,
+    )
+
+    assert release_candidate._load_upgrade_baseline_policy() == (
+        ["0.8.5", "0.8.4"],
+        {"windows": ["0.8.4"]},
+    )
+
+
 def test_hard_cut_rejects_protocol_one_schema_two_manifest_without_bridge(
     tmp_path: Path,
 ) -> None:
     configured, platforms = release_candidate._load_upgrade_baseline_policy()
+    configured = [version for version in configured if version != "0.8.5"]
     manifest_path = tmp_path / "upgrade-manifest.json"
     manifest_path.write_text(
         json.dumps(
@@ -2532,7 +3540,9 @@ def test_sealer_requires_digest_exceptions_for_exact_unsigned_baseline_suffix(
         release_candidate._validate_historical_artifact_digest_policy(["0.6.1", "0.6.0", "0.5.0"])
 
 
-def test_bridge_candidate_runtime_attestation_matches_gateway_source(tmp_path: Path) -> None:
+def test_bridge_candidate_runtime_attestation_matches_gateway_source(
+    tmp_path: Path,
+) -> None:
     manifest_path = _runtime_dir(tmp_path) / "upgrade-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["runtime_config_version"] = 8

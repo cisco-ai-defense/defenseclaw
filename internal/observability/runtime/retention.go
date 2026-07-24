@@ -87,14 +87,16 @@ type RetentionController struct {
 	clock     func() time.Time
 	reporter  RetentionControllerReporter
 
-	lifecycleMu  sync.Mutex
-	started      bool
-	stopped      bool
-	runtimeOwned bool
-	cancel       context.CancelFunc
-	done         chan struct{}
-	policyWake   chan struct{}
-	promptRun    bool
+	lifecycleMu   sync.Mutex
+	started       bool
+	stopped       bool
+	runtimeOwned  bool
+	cancel        context.CancelFunc
+	done          chan struct{}
+	policyWake    chan struct{}
+	stopRequested chan struct{}
+	stopOnce      sync.Once
+	promptRun     bool
 
 	statusMu sync.Mutex
 	status   atomic.Pointer[RetentionControllerStatus]
@@ -132,6 +134,7 @@ func newRetentionController(
 		reaper: reaper, ready: options.Ready, scheduler: scheduler,
 		clock: clock, reporter: options.Reporter,
 		done: make(chan struct{}), policyWake: make(chan struct{}, 1),
+		stopRequested: make(chan struct{}),
 	}
 	controller.storeStatus(RetentionControllerStatus{
 		State: RetentionStateWaiting, RetentionDays: reaper.RetentionDays(),
@@ -227,8 +230,9 @@ func (controller *RetentionController) Status() RetentionControllerStatus {
 	return copyStatus
 }
 
-// Stop cancels the scheduler and any active reaper run, then waits for all
-// controller work to release store ownership. Call it before closing stores.
+// Stop asks the scheduler and any active reaper run to drain, then waits for
+// all controller work to release store ownership. If ctx expires, Stop cancels
+// the active run and returns the context error. Call it before closing stores.
 func (controller *RetentionController) Stop(ctx context.Context) error {
 	return controller.stop(ctx, false)
 }
@@ -252,6 +256,7 @@ func (controller *RetentionController) stop(ctx context.Context, runtimeOwner bo
 	if !controller.started {
 		publishStopped := false
 		if !controller.stopped {
+			controller.stopOnce.Do(func() { close(controller.stopRequested) })
 			controller.stopped = true
 			close(controller.done)
 			publishStopped = true
@@ -270,22 +275,44 @@ func (controller *RetentionController) stop(ctx context.Context, runtimeOwner bo
 			return ctx.Err()
 		}
 	}
-	if controller.cancel != nil {
-		controller.cancel()
+	controller.stopOnce.Do(func() { close(controller.stopRequested) })
+	select {
+	case controller.policyWake <- struct{}{}:
+	default:
 	}
+	cancel := controller.cancel
 	done := controller.done
 	controller.lifecycleMu.Unlock()
 	select {
 	case <-done:
 		return nil
 	case <-ctx.Done():
+		// Graceful stop normally lets an in-flight SQLite batch finish so the
+		// driver can finalize its statements before the store is closed. Only a
+		// caller deadline interrupts that work; the resulting error preserves
+		// the contract that stores must remain open until a later retry succeeds.
+		if cancel != nil {
+			cancel()
+		}
 		return ctx.Err()
+	}
+}
+
+func (controller *RetentionController) stopWasRequested() bool {
+	if controller == nil || controller.stopRequested == nil {
+		return false
+	}
+	select {
+	case <-controller.stopRequested:
+		return true
+	default:
+		return false
 	}
 }
 
 func (controller *RetentionController) run(ctx context.Context) {
 	defer func() {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || controller.stopWasRequested() {
 			controller.publishStatus(controller.nextStatus(
 				RetentionStateStopped, RetentionFailureNone, nil,
 			))
@@ -300,8 +327,13 @@ func (controller *RetentionController) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-controller.stopRequested:
+			return
 		case <-controller.ready:
 		}
+	}
+	if controller.stopWasRequested() {
+		return
 	}
 	// Policy activations received while readiness was pending are already
 	// reflected in the reaper's atomic age. The one startup run applies the
@@ -317,6 +349,9 @@ func (controller *RetentionController) run(ctx context.Context) {
 	}
 
 	for {
+		if controller.stopWasRequested() {
+			return
+		}
 		interval := audit.RetentionScheduleInterval
 		if controller.reaper.RetentionDays() == 0 {
 			interval = 0
@@ -341,6 +376,9 @@ func (controller *RetentionController) run(ctx context.Context) {
 				return
 			}
 		case audit.RetentionScheduleReload:
+			if controller.stopWasRequested() {
+				return
+			}
 			prompt := controller.consumePromptRun()
 			if controller.reaper.RetentionDays() == 0 {
 				controller.publishStatus(controller.nextStatus(

@@ -45,11 +45,11 @@ UPGRADE_SMOKE_BASELINES = (
 
 
 def test_makefile_upgrade_smoke_matrix_tracks_supported_baselines() -> None:
-    text = (ROOT / "Makefile").read_text()
+    text = (ROOT / "Makefile").read_text(encoding="utf-8")
     match = re.search(r"^UPGRADE_SMOKE_FROM \?=\s*$", text, re.MULTILINE)
     assert match is not None
 
-    policy = json.loads((ROOT / "release" / "upgrade-baselines.json").read_text())
+    policy = json.loads((ROOT / "release" / "upgrade-baselines.json").read_text(encoding="utf-8"))
     assert tuple(policy["published_baselines"]) == UPGRADE_SMOKE_BASELINES
     assert "scripts/resolve_upgrade_baselines.py" in text
     assert "from_versions='$(strip $(UPGRADE_SMOKE_FROM))'" in text
@@ -171,19 +171,19 @@ output.write_text(json.dumps({'published_baselines': ['0.8.5', '0.8.4']}))
 
 
 def test_upgrade_smoke_docs_cover_default_matrix() -> None:
-    text = (ROOT / "docs" / "TESTING.md").read_text()
+    text = (ROOT / "docs" / "TESTING.md").read_text(encoding="utf-8")
     default_line = next(line for line in text.splitlines() if "default matrix covers" in line)
     for version in UPGRADE_SMOKE_BASELINES:
         assert f"`{version}`" in default_line
 
 
 def test_upgrade_smoke_help_example_includes_latest_0_8_releases() -> None:
-    text = (ROOT / "scripts" / "test-upgrade-release.sh").read_text()
-    assert "0.8.3,0.8.2,0.8.1,0.8.0" in text
+    text = (ROOT / "scripts" / "test-upgrade-release.sh").read_text(encoding="utf-8")
+    assert "0.8.5,0.8.4,0.8.3,0.8.2,0.8.1,0.8.0" in text
 
 
 def test_future_release_smoke_builds_from_isolated_version_stamped_source() -> None:
-    text = (ROOT / "scripts" / "test-upgrade-release.sh").read_text()
+    text = (ROOT / "scripts" / "test-upgrade-release.sh").read_text(encoding="utf-8")
     build_start = text.index("build_candidate_release() {")
     build_end = text.index("\n}\n\nprepare_release_root()", build_start)
     build = text[build_start:build_end]
@@ -208,8 +208,8 @@ def test_future_release_smoke_builds_from_isolated_version_stamped_source() -> N
 
 
 def test_historical_baselines_are_authenticated_and_real_dependency_mode_is_explicit() -> None:
-    smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text()
-    protocol = (ROOT / "scripts" / "test-upgrade-protocol-release.sh").read_text()
+    smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text(encoding="utf-8")
+    protocol = (ROOT / "scripts" / "test-upgrade-protocol-release.sh").read_text(encoding="utf-8")
 
     assert "stage_authenticated_baseline" in smoke
     assert "prepare_required_bridge_assets()" in smoke
@@ -227,10 +227,21 @@ def test_historical_baselines_are_authenticated_and_real_dependency_mode_is_expl
     assert "start_source_gateway_canary" in smoke
     assert "is version-bound healthy before resolver handoff" in smoke
     assert 'stage_authenticated_baseline "${baseline}"' in protocol
-    assert "required bridge authentication failed" in smoke
+    assert 'die "${label} authentication failed: ${version}"' in smoke
+    assert '"${V8_ACTIVATION_VERSION}" "hard-cut bootstrap" 1' in smoke
     assert 'if [[ "${SUCCESS_PATH_ONLY}" == "1" ]]' in protocol
 
 
+def test_live_continuity_uses_the_published_bridge_dependency_graph() -> None:
+    continuity = (ROOT / "scripts/test-observability-v8-upgrade-continuity.sh").read_text(encoding="utf-8")
+
+    dependency_mode = continuity.index('BASELINE_DEPENDENCIES="published"')
+    main = continuity.index("main_continuity() {")
+    install = continuity.index("install_baseline", main)
+    assert dependency_mode < main < install
+
+
+@pytest.mark.skipif(os.name == "nt", reason="executes the POSIX release shell and symlink contract")
 def test_bridge_auth_resolves_a_symlinked_cosign_binary(tmp_path: Path) -> None:
     real_bin = tmp_path / "real-bin"
     command_dir = tmp_path / "commands"
@@ -262,7 +273,7 @@ def test_bridge_auth_resolves_a_symlinked_cosign_binary(tmp_path: Path) -> None:
 
 
 def test_unsigned_refusal_contract_distinguishes_modern_provenance_from_legacy_schema() -> None:
-    protocol = (ROOT / "scripts" / "test-upgrade-protocol-release.sh").read_text()
+    protocol = (ROOT / "scripts" / "test-upgrade-protocol-release.sh").read_text(encoding="utf-8")
 
     assert 'installed_refusal_mode="artifact-provenance"' in protocol
     assert 'elif [[ "${REFUSAL_CONTRACT_ONLY}" == "1" ]] && ! candidate_has_checksum_signature' in protocol
@@ -272,7 +283,7 @@ def test_unsigned_refusal_contract_distinguishes_modern_provenance_from_legacy_s
 
 
 def test_live_continuity_local_candidate_models_strict_sigstore_boundary_only() -> None:
-    continuity = (ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh").read_text()
+    continuity = (ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh").read_text(encoding="utf-8")
 
     fixture_start = continuity.index("prepare_local_candidate_provenance_fixture() {")
     fixture_end = continuity.index("\n}\n\nassert_local_candidate_provenance_verified()", fixture_start)
@@ -295,6 +306,55 @@ def test_live_continuity_local_candidate_models_strict_sigstore_boundary_only() 
     assert "prepare_required_bridge_assets" in main
     assert main.index("prepare_required_bridge_assets") < main.index("prepare_local_candidate_provenance_fixture")
     assert "assert_local_candidate_provenance_verified" in main
+
+
+@pytest.mark.skipif(os.name == "nt", reason="executes the POSIX release fixture")
+@pytest.mark.parametrize(
+    ("target_version", "expected_releases"),
+    [
+        ("0.8.5", ["0.8.4|required bridge|0"]),
+        (
+            "0.8.7",
+            [
+                "0.8.4|required bridge|0",
+                "0.8.5|hard-cut bootstrap|1",
+            ],
+        ),
+    ],
+)
+def test_posix_release_fixture_stages_hard_cut_bootstrap_only_for_later_targets(
+    target_version: str,
+    expected_releases: list[str],
+) -> None:
+    fixture = ROOT / "scripts" / "test-upgrade-release.sh"
+    text = fixture.read_text(encoding="utf-8")
+    helper_start = text.index("prepare_authenticated_upgrade_release_assets() {")
+    helper_end = text.index("\n}\n\nprepare_required_bridge_assets() {", helper_start)
+    helper = text[helper_start:helper_end]
+    assert "release-provenance.json" in helper
+    assert "authenticated_assets+=(release-provenance.json)" in helper
+
+    program = r"""
+source "$1"
+trap - EXIT
+prepare_authenticated_upgrade_release_assets() {
+    printf '%s|%s|%s\n' "$1" "$2" "$3"
+}
+REQUIRED_BRIDGE_VERSION="0.8.4"
+TARGET_VERSION="$2"
+prepare_required_bridge_assets
+"""
+    completed = subprocess.run(
+        ["bash", "-c", program, "fixture-test", str(fixture), target_version],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.splitlines() == expected_releases
 
 
 def test_live_continuity_fixture_binds_provenance_into_checksums(tmp_path: Path) -> None:
@@ -345,6 +405,7 @@ def test_live_continuity_fixture_binds_provenance_into_checksums(tmp_path: Path)
     assert checksum_rows[source_map_path.name] == hashlib.sha256(source_map_path.read_bytes()).hexdigest()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="executes generated POSIX cosign shims")
 def test_live_continuity_cosign_fixture_delegates_published_signatures(
     tmp_path: Path,
 ) -> None:
@@ -530,7 +591,7 @@ def test_live_continuity_fixture_has_no_implicit_openclaw_fleet_dependency() -> 
 
 
 def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
-    smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text()
+    smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text(encoding="utf-8")
     start = smoke.index("seed_pre_v8_otel_fixture() {")
     end = smoke.index("\n}\n\nfinalize_observability_upgrade_fixture()", start)
     fixture = smoke[start:end]
@@ -539,7 +600,7 @@ def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
     assert "gateway:\n  fleet_mode: disabled" in fixture
     assert "watcher:\n    enabled: false" in fixture
 
-    resolver = (ROOT / "scripts" / "upgrade.sh").read_text()
+    resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
     assert '"${GW_STATE}" == "running" || "${GW_STATE}" == "disabled"' in resolver
     assert '"${GW_VERSION}" == "${RELEASE_VERSION}"' in resolver
     assert "fleet uplink is disabled by configuration" in resolver
@@ -561,7 +622,7 @@ def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
 
 
 def test_v8_historical_fixture_disables_fleet_and_preseeds_rollback_root() -> None:
-    smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text()
+    smoke = (ROOT / "scripts" / "test-upgrade-release.sh").read_text(encoding="utf-8")
     start = smoke.index("seed_v8_observability_fixture() {")
     end = smoke.index("\n}\n\nseed_native_v8_observability_fixture()", start)
     fixture = smoke[start:end]
@@ -582,7 +643,7 @@ def test_v8_historical_fixture_disables_fleet_and_preseeds_rollback_root() -> No
 
 
 def test_live_continuity_uses_low_cardinality_metric_boundary() -> None:
-    harness = (ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh").read_text()
+    harness = (ROOT / "scripts" / "test-observability-v8-upgrade-continuity.sh").read_text(encoding="utf-8")
     wait_start = harness.index("wait_for_pre_upgrade_metrics() {")
     wait_end = harness.index("\n}\n\nrun_live_upgrade()", wait_start)
     wait = harness[wait_start:wait_end]
@@ -617,6 +678,7 @@ def _posix_target_controller_handoff_verifier_program() -> str:
     return resolver[start:end]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX protected-artifact materializer")
 def test_posix_production_materializer_binds_opened_outer_bytes_to_signed_digest(
     tmp_path: Path,
 ) -> None:
@@ -747,7 +809,7 @@ def test_real_target_controller_enters_upgrade_command_with_bridge_v7_config(
             "DEFENSECLAW_STAGED_UPGRADE": "1",
             "DEFENSECLAW_STAGED_BRIDGE_VERSION": "0.8.4",
             "DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR": str(staged),
-            "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION": "0.8.5",
+            "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION": "0.8.6",
             "PYTHONDONTWRITEBYTECODE": "1",
             "NO_COLOR": "1",
         }
@@ -760,7 +822,7 @@ def test_real_target_controller_enters_upgrade_command_with_bridge_v7_config(
             "upgrade",
             "--yes",
             "--version",
-            "0.8.5",
+            "0.8.6",
         ],
         cwd=ROOT,
         env=environment,
@@ -774,16 +836,19 @@ def test_real_target_controller_enters_upgrade_command_with_bridge_v7_config(
     assert completed.returncode != 0
     assert "DefenseClaw Upgrade" in output
     assert "Installed version" in output and "0.8.4" in output
-    assert "Target version" in output and "0.8.5" in output
+    assert "Target version" in output and "0.8.6" in output
     assert "Failed to load config" not in output
     assert "release-owned target controller did not receive one complete, exact bridge handoff" in output
 
 
 def test_posix_resolver_bootstraps_recovery_under_fixed_mutator_lease() -> None:
-    text = (ROOT / "scripts" / "upgrade.sh").read_text()
+    text = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
     header = text.index("# ── Platform Detection")
     recovery_call = text.rfind("recover_interrupted_phase_two", 0, header)
     version_detection = text.index('CURRENT_VERSION="unknown"')
+    recovery_start = text.index("recover_interrupted_phase_two() {")
+    recovery_end = text.index("\n}\n\nacquire_upgrade_lock() {", recovery_start)
+    recovery = text[recovery_start:recovery_end]
 
     assert recovery_call != -1
     assert recovery_call < version_detection
@@ -792,7 +857,10 @@ def test_posix_resolver_bootstraps_recovery_under_fixed_mutator_lease() -> None:
     assert 'document.get("schema_version") != 4' in text
     assert '"source_gateway_was_running"' in text
     assert '"local_bundle_mutation_intent"' in text
-    assert '"--offline", "--no-deps", "--reinstall", str(wheel)' in text
+    assert '"--offline", "--no-deps", "--reinstall", str(wheel)' in recovery
+    assert 'for name in ("UV_CONSTRAINT", "UV_OVERRIDE", "UV_EXCLUDE_NEWER")' in recovery
+    assert "uv_environment.pop(name, None)" in recovery
+    assert "env=uv_environment" in recovery
     assert "_recover_interrupted_hard_cut" in text
 
 
@@ -993,21 +1061,130 @@ def test_bridge_controller_hard_cut_establishes_rollback_custody_before_mutation
     assert windows_resolver.rstrip().endswith(marker)
 
 
-def test_posix_resolver_hands_both_hard_cut_paths_to_authenticated_target_controller() -> None:
+def test_posix_resolver_normalizes_every_bridge_through_one_authenticated_handoff() -> None:
     resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
+
+    resolve_start = resolver.index("resolve_staged_upgrade() {")
+    resolve_end = resolver.index("\n}\n\npreflight_bridge_rollback_capability() {", resolve_start)
+    resolve = resolver[resolve_start:resolve_end]
+    refresh = resolve.index("EXISTING_BRIDGE_REFRESH=1")
+    bootstrap = resolve.index("select_hard_cut_bootstrap_contract", refresh)
+    capture_in_resolver = resolve.index("capture_hard_cut_target_controller_contract", bootstrap)
+    bridge_switch_in_resolver = resolve.index('RELEASE_VERSION="${MANIFEST_REQUIRED_BRIDGE}"', capture_in_resolver)
+    assert refresh < bootstrap < capture_in_resolver < bridge_switch_in_resolver
+    assert 'if [[ "${EXISTING_BRIDGE_REFRESH}" -ne 1 ]]' in resolve
+    assert "Refresh authenticated ${RELEASE_VERSION} bridge" in resolve
 
     capture = resolver.index("capture_hard_cut_target_controller_contract")
     bridge_switch = resolver.index('RELEASE_VERSION="${MANIFEST_REQUIRED_BRIDGE}"', capture)
     assert capture < bridge_switch
     target_command = '"${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}"'
-    assert resolver.count(target_command) == 2
+    assert resolver.count(target_command) == 1
+    scoped_target_command = (
+        "env -u UV_OVERRIDE \\\n"
+        '        UV_CONSTRAINT="${HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE}" \\\n'
+        '        UV_EXCLUDE_NEWER="${HISTORICAL_BOOTSTRAP_EXCLUDE_NEWER}" \\\n'
+        f"        {target_command}"
+    )
+    assert resolver.count(scoped_target_command) == 1
     assert f"exec {target_command}" not in resolver
-    assert resolver.count("|| target_status=$?") == 2
-    assert resolver.count('exit "${target_status}"') == 2
-    assert resolver.count('export DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION="${final_version}"') == 2
+    assert resolver.count("|| target_status=$?") == 1
+    assert resolver.count('exit "${target_status}"') == 1
+    assert resolver.count('export DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION="${final_version}"') == 1
     assert 'exec "${INSTALL_DIR}/defenseclaw" upgrade --yes --version "${final_version}"' not in resolver
     assert "verify_hard_cut_target_controller_handoff" in resolver
     assert 'TARGET_CONTROLLER_VENV="${STAGING_DIR}/target-controller-venv"' in resolver
+
+    continuation_start = resolver.index("continue_post_hard_cut_upgrade() {")
+    continuation_end = resolver.index("\n}\n\nvalidate_tarball_members() {", continuation_start)
+    continuation = resolver[continuation_start:continuation_end]
+    remove_staging = continuation.index('rm -rf "${STAGING_DIR}"')
+    final_upgrade = continuation.index(
+        '"${DEFENSECLAW_VENV}/bin/defenseclaw" upgrade --yes --version "${final_version}"',
+        remove_staging,
+    )
+    final_exit = continuation.index('exit "${final_status}"', final_upgrade)
+    assert remove_staging < final_upgrade < final_exit
+    assert continuation.index("unset DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION") < remove_staging
+    assert "release_upgrade_lock" not in continuation
+    assert "trap - EXIT" not in continuation
+    assert "HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE" not in continuation
+    assert "env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER" in continuation
+    assert "UV_CONSTRAINT=''" not in resolver
+    assert "UV_OVERRIDE=''" not in resolver
+    assert "UV_EXCLUDE_NEWER=''" not in resolver
+    clean_uv_prefix = "env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \\"
+    lines = resolver.splitlines()
+    direct_uv_commands = [
+        index
+        for index, line in enumerate(lines)
+        if '"${uv_bin}" --no-config' in line or '"${UV_BIN}" --no-config' in line
+    ]
+    assert len(direct_uv_commands) == 11
+    assert all(lines[index - 1].strip() == clean_uv_prefix for index in direct_uv_commands)
+    assert 'readonly OBSERVABILITY_V8_HARD_CUT_VERSION="0.8.5"' in resolver
+    assert 'POST_HARD_CUT_FINAL_VERSION="${RELEASE_VERSION}"' in resolver
+    assert resolver.count("continue_post_hard_cut_upgrade") == 2
+    assert "handoff_existing_bridge_to_hard_cut" not in resolver
+    assert "FRESH_HARD_CUT_HANDOFF" not in resolver
+
+    main_route = resolver[resolver.rindex("resolve_staged_upgrade") :]
+    phase_one = main_route.index("BRIDGE_PHASE1=1")
+    download = main_route.index('step "Downloading gateway binary ..."')
+    assert '[[ "${EXISTING_BRIDGE_REFRESH}" -eq 1 ]]' in main_route[:phase_one]
+    assert phase_one < download
+
+
+def test_posix_resolver_pins_and_checks_phase_scoped_historical_bootstrap_dependencies() -> None:
+    resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
+    for artifact in (
+        "cisco_ai_mcp_scanner-4.7.2-py3-none-any.whl",
+        "sha256=6ed0b8ced168886f572aec30a971c7b0e2e1de7eea489d3821627184fd271ac8",
+        "litellm-1.83.7-py3-none-any.whl",
+        "sha256=5784a1d9a9a4a8acd6ca1e347003a5e2e1b3c749b4d41e7da4904577adade111",
+        "HISTORICAL_BOOTSTRAP_EXCLUDE_NEWER='2026-07-18T19:02:08Z'",
+    ):
+        assert artifact in resolver
+
+    helper_start = resolver.index("prepare_historical_bootstrap_constraints() {")
+    helper_end = resolver.index("\n}\n\nprepare_bridge_phase1_cli_preflight() {", helper_start)
+    helper = resolver[helper_start:helper_end]
+    assert "historical-bootstrap-constraints.txt" in helper
+    assert 'chmod 600 "${constraints}"' in helper
+
+    metadata_check_start = resolver.index("verify_python_dependency_metadata() {")
+    metadata_check_end = resolver.index("\n}\n\nprepare_bridge_phase1_cli_preflight() {", metadata_check_start)
+    metadata_check = resolver[metadata_check_start:metadata_check_end]
+    assert "env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER" in metadata_check
+    assert '"${uv_bin}" --no-config pip check' in metadata_check
+
+    function_boundaries = (
+        ("preflight_python_wheel", "begin_release_upgrade_receipt"),
+        ("prepare_bridge_phase1_cli_preflight", "bridge_source_health_observation"),
+        ("activate_bridge_phase1_cli", "bridge_source_health_check"),
+        ("prepare_hard_cut_target_controller", "verify_hard_cut_target_controller_handoff"),
+    )
+    for name, next_name in function_boundaries:
+        start = resolver.index(f"{name}() {{")
+        end = resolver.index(f"\n}}\n\n{next_name}() {{", start)
+        function = resolver[start:end]
+        assert "--only-binary litellm" in function
+        assert "HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE" in function
+        assert "--constraints" in function
+        assert "--exclude-newer" in function
+        assert "HISTORICAL_BOOTSTRAP_EXCLUDE_NEWER" in function
+
+    for name, next_name in function_boundaries[1:]:
+        start = resolver.index(f"{name}() {{")
+        end = resolver.index(f"\n}}\n\n{next_name}() {{", start)
+        assert "verify_python_dependency_metadata" in resolver[start:end]
+
+    ordinary_install = resolver.rindex("env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \\")
+    ordinary_install_end = resolver.index('|| die "Failed to install CLI wheel"', ordinary_install)
+    ordinary = resolver[ordinary_install:ordinary_install_end]
+    assert '"${UV_BIN}" --no-config pip install' in ordinary
+    assert "--only-binary litellm" in ordinary
+    assert "HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE" not in ordinary
 
 
 def _posix_resolver_lock_functions() -> str:

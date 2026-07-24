@@ -244,6 +244,9 @@ class TestMaybeWrap(unittest.TestCase):
         ids = {f.id for f in result.findings}
         self.assertIn("EXISTING", ids)  # inner finding preserved
         self.assertIn("SEC-ANTHROPIC", ids)  # overlay finding added
+        overlay = next(f for f in result.findings if f.id == "SEC-ANTHROPIC")
+        self.assertEqual(overlay.scanner, result.scanner)
+        self.assertIn("analyzer:rule-pack", overlay.tags)
 
     def test_wrap_overlays_mcp_server_text(self):
         self.app.cfg.guardrail.rule_pack_dir = self.pack_dir
