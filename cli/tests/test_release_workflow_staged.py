@@ -153,6 +153,10 @@ def test_ci_executes_phase_separated_resolver_dependencies_before_positive_lanes
     assert "cosign" not in rendered
     assert "set -euo pipefail" in executable_gate
     assert "verify_constraint_scope" in executable_gate
+    assert 'function("continue_post_hard_cut_upgrade", "validate_tarball_members")' in executable_gate
+    assert "source.count(historical_handoff) != 1" in executable_gate
+    assert "single authenticated hard-cut handoff" in executable_gate
+    assert "handoff_existing_bridge_to_hard_cut" not in executable_gate
     assert "verify_uv_environment_isolation" in executable_gate
     assert "not-an-rfc3339-timestamp" in executable_gate
     assert "env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER" in executable_gate
