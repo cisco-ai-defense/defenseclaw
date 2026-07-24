@@ -69,6 +69,10 @@ def _release(
         f"https://downloads.example/{version}/checksums.txt.sig": b"signature\n",
         f"https://downloads.example/{version}/upgrade-manifest.json": manifest,
     }
+    if tuple(map(int, version.split("."))) >= RESOLVER.SIGSTORE_BUNDLE_START_VERSION:
+        downloaded[f"https://downloads.example/{version}/checksums.txt.bundle"] = (
+            b'{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}\n'
+        )
     assets: list[dict[str, object]] = []
     for name, digest in payload_digests.items():
         if name in windows_assets and not windows:
@@ -80,7 +84,10 @@ def _release(
                 "browser_download_url": f"https://downloads.example/{version}/{name}",
             }
         )
-    for name in ("checksums.txt", "checksums.txt.pem", "checksums.txt.sig"):
+    proof_names = ["checksums.txt", "checksums.txt.pem", "checksums.txt.sig"]
+    if tuple(map(int, version.split("."))) >= RESOLVER.SIGSTORE_BUNDLE_START_VERSION:
+        proof_names.append("checksums.txt.bundle")
+    for name in proof_names:
         url = f"https://downloads.example/{version}/{name}"
         assets.append(
             {
@@ -332,6 +339,74 @@ def test_github_asset_digest_mismatch_fails_before_signature_use() -> None:
 
     with pytest.raises(RESOLVER.BaselineResolutionError, match="GitHub asset digest mismatch"):
         _resolve("0.8.6", [(release, downloads)])
+
+
+def test_checksum_proof_bundle_is_required_but_not_self_referential() -> None:
+    release, downloads = _release("0.8.7")
+
+    checksums = downloads["https://downloads.example/0.8.7/checksums.txt"]
+    assert b"checksums.txt.bundle" not in checksums
+    policy = _resolve("0.8.8", [(release, downloads)])
+
+    assert policy["published_baselines"][0] == "0.8.7"
+
+
+def test_checksum_proof_bundle_must_have_exact_immutable_custody() -> None:
+    release, downloads = _release("0.8.7")
+    release = copy.deepcopy(release)
+    for asset in release["assets"]:
+        if asset["name"] == "checksums.txt.bundle":
+            asset["digest"] = f"sha256:{'0' * 64}"
+
+    with pytest.raises(
+        RESOLVER.BaselineResolutionError,
+        match=r"GitHub asset digest mismatch for 0\.8\.7/checksums\.txt\.bundle",
+    ):
+        _resolve("0.8.8", [(release, downloads)])
+
+
+def test_checksum_proof_bundle_cannot_be_omitted_from_new_release() -> None:
+    release, downloads = _release("0.8.7")
+    release = copy.deepcopy(release)
+    release["assets"] = [asset for asset in release["assets"] if asset["name"] != "checksums.txt.bundle"]
+
+    with pytest.raises(
+        RESOLVER.BaselineResolutionError,
+        match=r"immutable release 0\.8\.7 lacks authentication assets.*checksums\.txt\.bundle",
+    ):
+        _resolve("0.8.8", [(release, downloads)])
+
+
+def test_checksum_proof_exception_does_not_admit_unknown_release_assets() -> None:
+    release, downloads = _release("0.8.7")
+    release = copy.deepcopy(release)
+    release["assets"].append(
+        {
+            "name": "unexpected.bin",
+            "digest": f"sha256:{_digest(b'unexpected')}",
+            "browser_download_url": "https://downloads.example/0.8.7/unexpected.bin",
+        }
+    )
+
+    with pytest.raises(
+        RESOLVER.BaselineResolutionError,
+        match=r"signed checksum and immutable GitHub asset disagree for 0\.8\.7/unexpected\.bin",
+    ):
+        _resolve("0.8.8", [(release, downloads)])
+
+
+def test_checksum_proof_exception_does_not_relax_payload_digest_binding() -> None:
+    release, downloads = _release("0.8.7")
+    release = copy.deepcopy(release)
+    for asset in release["assets"]:
+        if asset["name"] == "upgrade-manifest.json":
+            asset["digest"] = f"sha256:{'0' * 64}"
+
+    with pytest.raises(
+        RESOLVER.BaselineResolutionError,
+        match=r"GitHub asset digest mismatch for 0\.8\.7/upgrade-manifest\.json",
+    ):
+        _resolve("0.8.8", [(release, downloads)])
 
 
 def test_dynamic_runtime_config_cannot_exceed_the_candidate() -> None:
