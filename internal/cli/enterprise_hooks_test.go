@@ -247,6 +247,85 @@ func TestEnterpriseHookWatchEventRelevantIgnoresLockHousekeeping(t *testing.T) {
 	}
 }
 
+func TestEnterpriseHookWatchOwnedEventActionable(t *testing.T) {
+	const (
+		exclusivePath = "/home/alice/.defenseclaw/hooks/codex-hook.sh"
+		sharedPath    = "/home/alice/.codex/config.toml"
+		unownedPath   = "/home/alice/.codex/history.jsonl"
+	)
+	exclusiveOwned := map[string]struct{}{exclusivePath: {}}
+	sharedOwned := map[string]struct{}{sharedPath: {}}
+
+	for _, tc := range []struct {
+		name      string
+		event     fsnotify.Event
+		exclusive map[string]struct{}
+		shared    map[string]struct{}
+		want      bool
+	}{
+		{
+			name:      "exclusive write remains actionable",
+			event:     fsnotify.Event{Name: exclusivePath, Op: fsnotify.Write},
+			exclusive: exclusiveOwned,
+			shared:    sharedOwned,
+			want:      true,
+		},
+		{
+			name:      "shared create from rename into place is actionable",
+			event:     fsnotify.Event{Name: sharedPath, Op: fsnotify.Create},
+			exclusive: exclusiveOwned,
+			shared:    sharedOwned,
+			want:      true,
+		},
+		{
+			name:      "shared remove remains actionable",
+			event:     fsnotify.Event{Name: sharedPath, Op: fsnotify.Remove},
+			exclusive: exclusiveOwned,
+			shared:    sharedOwned,
+			want:      true,
+		},
+		{
+			name:      "shared rename remains actionable",
+			event:     fsnotify.Event{Name: sharedPath, Op: fsnotify.Rename},
+			exclusive: exclusiveOwned,
+			shared:    sharedOwned,
+			want:      true,
+		},
+		{
+			name:      "shared write self-noise remains suppressed",
+			event:     fsnotify.Event{Name: sharedPath, Op: fsnotify.Write},
+			exclusive: exclusiveOwned,
+			shared:    sharedOwned,
+			want:      false,
+		},
+		{
+			name:      "shared chmod self-noise remains suppressed",
+			event:     fsnotify.Event{Name: sharedPath, Op: fsnotify.Chmod},
+			exclusive: exclusiveOwned,
+			shared:    sharedOwned,
+			want:      false,
+		},
+		{
+			name:      "unowned path remains suppressed",
+			event:     fsnotify.Event{Name: unownedPath, Op: fsnotify.Create},
+			exclusive: exclusiveOwned,
+			shared:    sharedOwned,
+			want:      false,
+		},
+		{
+			name:  "empty ownership maps preserve pre-startup fallback",
+			event: fsnotify.Event{Name: unownedPath, Op: fsnotify.Write},
+			want:  true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := enterpriseHookWatchOwnedEventActionable(tc.event, tc.exclusive, tc.shared); got != tc.want {
+				t.Fatalf("enterpriseHookWatchOwnedEventActionable(%+v) = %v, want %v", tc.event, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEnterpriseHookWatchEventInSettleWindow(t *testing.T) {
 	base := time.Date(2026, 7, 17, 15, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
@@ -305,18 +384,15 @@ func TestEnterpriseHookWatchEventInSettleWindow(t *testing.T) {
 			want:        false,
 		},
 		{
-			// Remove inside window: this IS suppressed. The guardian's
-			// atomicWriteFile uses os.Rename over the destination,
-			// which on macOS fires an fsnotify REMOVE on the target.
-			// So a REMOVE inside the settle window is our own
-			// atomic-write finishing, not a user tamper. Real user
-			// Remove events happen outside the settle window and
-			// still trigger reconcile within (settle window + debounce).
-			name:        "remove inside window: suppressed (atomic-write tail)",
+			// Remove inside the window may be a user atomic
+			// replacement of a protected file. Reconcile instead of
+			// deciding from path existence, which is identical for a
+			// guardian rename tail and an attacker rename-over.
+			name:        "remove inside window: not suppressed",
 			now:         base.Add(500 * time.Millisecond),
 			settleUntil: base.Add(2 * time.Second),
 			op:          fsnotify.Remove,
-			want:        true,
+			want:        false,
 		},
 		{
 			// Remove OUTSIDE the settle window: real user tamper. The
@@ -330,14 +406,23 @@ func TestEnterpriseHookWatchEventInSettleWindow(t *testing.T) {
 			want:        false,
 		},
 		{
-			// Rename inside window: same rationale as Remove — macOS
-			// rename(2) generates NOTE_RENAME on the source path
-			// alongside NOTE_DELETE on the destination.
-			name:        "rename inside window: suppressed",
+			// Rename inside the window may be an atomic
+			// replacement, so it must arm reconcile.
+			name:        "rename inside window: not suppressed",
 			now:         base.Add(500 * time.Millisecond),
 			settleUntil: base.Add(2 * time.Second),
 			op:          fsnotify.Rename,
-			want:        true,
+			want:        false,
+		},
+		{
+			// Create can be the visible part of replacing a missing
+			// protected path and should not be swallowed by the
+			// settle window.
+			name:        "create inside window: not suppressed",
+			now:         base.Add(500 * time.Millisecond),
+			settleUntil: base.Add(2 * time.Second),
+			op:          fsnotify.Create,
+			want:        false,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

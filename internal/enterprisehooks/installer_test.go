@@ -460,8 +460,8 @@ func TestWatchOwnedFilesReturnsSpecificFilesNotDirs(t *testing.T) {
 
 	// The native agent config file is SHARED-writer: Codex itself
 	// rewrites config.toml during normal use, so the guardian must
-	// only react to Remove/Rename on it (Write/Chmod are the agent
-	// updating its own state).
+	// only react to Create/Remove/Rename on it (Write/Chmod are the
+	// agent updating its own state).
 	wantShared := filepath.Join(home, ".codex", "config.toml")
 	if !sliceContains(own.SharedWriter, wantShared) {
 		t.Fatalf("WatchOwnedFiles.SharedWriter = %v, missing %s", own.SharedWriter, wantShared)
