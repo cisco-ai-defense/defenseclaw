@@ -139,11 +139,16 @@ handoff. It also runs the public POSIX installer on Linux
 and macOS, the public PowerShell installer through the exact native Setup on
 Windows, and the macOS app packaging lifecycle. The Windows release
 includes both protected runtime architectures and
-`DefenseClawSetup-x64.exe` with its checksum, provenance, and SBOM. The first
+`DefenseClawSetup-x64.exe` with its checksum, provenance, SBOM, and schema-2
+real-client certification. That release-owned certification re-verifies the
+exact Setup digest, signer, RFC 3161 timestamp evidence, provenance digest,
+source artifact custody, and connector traffic. The first
 native Windows release makes no Windows upgrade claim. Partial platform-signing
 credentials, a failed install, a failed POSIX upgrade, or any candidate-byte
-mismatch aborts before publication. Complete credentials require the signed
-platform result; absent credentials require explicit unverified provenance.
+mismatch aborts before publication. Windows Authenticode credentials are
+mandatory, and an unsigned Setup cannot enter candidate assembly. Complete
+macOS credentials require the signed platform result; absent macOS credentials
+require explicit unverified provenance.
 
 ### 0.8.4 bridge rollout order
 

@@ -59,7 +59,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate optional platform signing credentials
+      - name: Validate platform signing credentials
         env:
           HAS_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 != '' }}
           HAS_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD != '' }}
@@ -91,16 +91,14 @@ jobs:
             echo "::error title=Partial Apple release credentials::Apple signing/notarization credentials are partially configured; provide all five values or none."
             exit 1
           fi
-          if (( WINDOWS_CREDENTIAL_COUNT != 0 && WINDOWS_CREDENTIAL_COUNT != 2 )); then
-            echo "::error title=Partial Windows release credentials::Windows signing credentials are partially configured; provide both values or none."
+          if (( WINDOWS_CREDENTIAL_COUNT != 2 )); then
+            echo "::error title=Windows release credentials required::Windows Authenticode signing credentials are required; provide both certificate and password values."
             exit 1
           fi
           [[ "$APPLE_CREDENTIAL_COUNT" == "5" ]] &&
             echo "macOS release mode: Developer ID signed and notarized" ||
             echo "::warning title=Unverified macOS release::no Apple credentials; macOS assets will be explicitly unverified"
-          [[ "$WINDOWS_CREDENTIAL_COUNT" == "2" ]] &&
-            echo "Windows release mode: Authenticode signed" ||
-            echo "::warning title=Unverified Windows release::no Windows credentials; Windows Setup will be explicitly unverified"
+          echo "Windows release mode: Authenticode signed"
 
       - name: Require reviewed macOS app source
         # A DefenseClaw release must build the macOS source that was reviewed
@@ -576,7 +574,22 @@ jobs:
             --version "$env:RELEASE_TAG"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build native Setup with optional Authenticode
+      - name: Require real Authenticode release credentials
+        env:
+          WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+        run: |
+          $hasCertificate = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_BASE64)
+          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)
+          if ($hasCertificate -xor $hasPassword) {
+            throw 'Windows Authenticode signing is partially configured; provide both certificate and password.'
+          }
+          if (-not $hasCertificate) {
+            throw 'Authenticode credentials are required for DefenseClawSetup-x64.exe.'
+          }
+          Write-Host 'Complete Authenticode credentials detected; signing is mandatory.'
+
+      - name: Build and Authenticode-sign native Setup
         env:
           RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
           WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
@@ -590,24 +603,17 @@ jobs:
           -Version $env:RELEASE_TAG
           -DistributionFlavor oss
 
-      - name: Require explicit Windows signing status
-        id: windows-verification
+      - name: Require signed Windows trust status
         run: |
-          $provenance = Get-Content -LiteralPath windows-installer-output/DefenseClawSetup-x64.exe.provenance.json -Raw -Encoding UTF8 | ConvertFrom-Json
-          if ($provenance.unsigned -eq $false -and
-              $provenance.inputs.product_executables_authenticode_signed -eq $true) {
-            $status = 'signed'
-            Write-Host 'Cisco Authenticode-signed Windows Setup is ready.'
-          } elseif ($provenance.unsigned -eq $true -and
-                    $provenance.inputs.product_executables_authenticode_signed -eq $false) {
-            $status = 'unverified'
-            Write-Warning 'Authenticode credentials were absent; publishing an explicitly unverified Windows Setup.'
-          } else {
-            throw 'Windows Setup provenance has an inconsistent signing state.'
+          $provenance = Get-Content `
+            -LiteralPath windows-installer-output/DefenseClawSetup-x64.exe.provenance.json `
+            -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($provenance.unsigned -ne $false -or
+              $provenance.inputs.product_executables_authenticode_signed -ne $true) {
+            throw 'Windows Setup provenance must be fully Authenticode signed for release.'
           }
-          "verification_status=$status" >> $env:GITHUB_OUTPUT
 
-      - name: Validate the exact installer lifecycle
+      - name: Validate the exact signed installer lifecycle
         run: >-
           ./scripts/invoke-windows-setup-standard-user-ci.ps1
           -Mode setup-acceptance
@@ -639,10 +645,105 @@ jobs:
           retention-days: 7
           compression-level: 0
 
+  windows-real-client-certification:
+    name: Certify signed Setup with real Windows clients
+    needs: [release-preflight, windows-installer]
+    runs-on: windows-latest
+    timeout-minutes: 180
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.windows-certified-artifact.outputs.artifact-id }}
+      artifact_digest: ${{ steps.windows-certified-artifact.outputs.artifact-digest }}
+      source_artifact_digest: ${{ steps.source-custody.outputs.artifact_digest }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.28"
+          python-version: "3.13"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.windows-installer.outputs.artifact_id }}
+          path: windows-certified
+          merge-multiple: true
+
+      - name: Require both real-client provider credentials
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:OPENAI_API_KEY) -or
+              [string]::IsNullOrWhiteSpace($env:ANTHROPIC_API_KEY)) {
+            throw 'OPENAI_API_KEY and ANTHROPIC_API_KEY are required for Windows release certification.'
+          }
+
+      - name: Certify the exact signed Setup with pinned Codex and Claude Code
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          WINDOWS_RELEASE_ARTIFACT_DIGEST: ${{ needs.windows-installer.outputs.artifact_digest }}
+          WINDOWS_RELEASE_VERSION: ${{ needs.release-preflight.outputs.tag }}
+        run: >-
+          ./scripts/windows-native-ci.ps1
+          -Operation release-certification
+          -ArtifactRoot windows-certified
+          -StateRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-real-client-certification')
+
+      - name: Preserve source artifact custody
+        id: source-custody
+        env:
+          WINDOWS_RELEASE_ARTIFACT_DIGEST: ${{ needs.windows-installer.outputs.artifact_digest }}
+        run: |
+          if ($env:WINDOWS_RELEASE_ARTIFACT_DIGEST -cnotmatch '^(?:sha256:)?[0-9a-f]{64}$') {
+            throw 'The certified Setup source artifact has no immutable SHA-256 digest.'
+          }
+          "artifact_digest=$($env:WINDOWS_RELEASE_ARTIFACT_DIGEST)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload real-client diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-windows-real-client-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/defenseclaw-real-client-certification/diagnostics/**
+            ${{ runner.temp }}/defenseclaw-real-client-certification/logs/**
+            ${{ runner.temp }}/defenseclaw-real-client-certification/real-client-results.jsonl
+          if-no-files-found: ignore
+          retention-days: 7
+          include-hidden-files: true
+
+      - name: Upload certified native Windows Setup assets
+        id: windows-certified-artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-windows-certified-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            windows-certified/DefenseClawSetup-x64.exe
+            windows-certified/DefenseClawSetup-x64.exe.sha256
+            windows-certified/DefenseClawSetup-x64.exe.provenance.json
+            windows-certified/DefenseClawSetup-x64.exe.sbom.json
+            windows-certified/DefenseClawSetup-x64.exe.certification.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
 
   assemble-release-candidate:
     name: Seal exact release candidate
-    needs: [release-preflight, build-runtime-candidate, macos-app, windows-installer]
+    needs: [release-preflight, build-runtime-candidate, macos-app, windows-real-client-certification]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -680,19 +781,37 @@ jobs:
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          artifact-ids: ${{ needs.windows-installer.outputs.artifact_id }}
+          artifact-ids: ${{ needs.windows-real-client-certification.outputs.artifact_id }}
           path: candidate-input/windows
           merge-multiple: true
 
-      - name: Require immutable Windows Setup artifact identity
+      - name: Require immutable certified Windows Setup custody
         env:
-          WINDOWS_INSTALLER_ARTIFACT_DIGEST: ${{ needs.windows-installer.outputs.artifact_digest }}
+          WINDOWS_CERTIFIED_ARTIFACT_DIGEST: ${{ needs.windows-real-client-certification.outputs.artifact_digest }}
+          WINDOWS_SOURCE_ARTIFACT_DIGEST: ${{ needs.windows-real-client-certification.outputs.source_artifact_digest }}
         run: |
           set -euo pipefail
-          [[ "$WINDOWS_INSTALLER_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ ]] || {
-            echo "::error title=Missing Windows custody digest::The tested Setup artifact has no immutable SHA-256 digest."
-            exit 1
-          }
+          for digest in "$WINDOWS_CERTIFIED_ARTIFACT_DIGEST" "$WINDOWS_SOURCE_ARTIFACT_DIGEST"; do
+            [[ "$digest" =~ ^(sha256:)?[0-9a-f]{64}$ ]] || {
+              echo "::error title=Missing Windows custody digest::The certified Setup chain has no immutable SHA-256 digest."
+              exit 1
+            }
+          done
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          certification = json.loads(
+              Path(
+                  "candidate-input/windows/DefenseClawSetup-x64.exe.certification.json"
+              ).read_text(encoding="utf-8")
+          )
+          recorded = str(certification.get("staging_artifact_digest", "")).removeprefix("sha256:")
+          expected = os.environ["WINDOWS_SOURCE_ARTIFACT_DIGEST"].removeprefix("sha256:")
+          if recorded != expected:
+              raise SystemExit("Windows certification does not bind the source artifact digest")
+          PY
 
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
         with:

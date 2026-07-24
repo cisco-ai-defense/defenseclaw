@@ -5,9 +5,14 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import struct
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -41,10 +46,95 @@ def _step(job: dict[str, object], name: str) -> dict[str, object]:
     return matches[0]
 
 
-def test_release_accepts_signed_or_explicitly_unverified_setup_and_exact_four_sidecars() -> None:
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows Authenticode")
+def test_release_verifier_accepts_a_genuine_timestamped_authenticode_pe() -> None:
+    pwsh = shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("PowerShell is required for the native Authenticode positive test")
+    helper = ROOT / "scripts" / "windows-authenticode.ps1"
+    command = r"""
+Set-StrictMode -Version Latest
+. $env:AUTHENTICODE_FIXTURE_HELPER
+$evidence = Get-DefenseClawAuthenticodeEvidence `
+    -Path $env:AUTHENTICODE_SIGNED_PE `
+    -InstalledPath 'fixtures/pwsh.exe' `
+    -SbomFileName './fixtures/pwsh.exe'
+if ([string]$evidence.observed.status -cne 'Valid' -or
+    [string]$evidence.observed.signature_type -cne 'Authenticode' -or
+    $null -eq $evidence.observed.signer -or
+    -not [bool]$evidence.observed.timestamp.present -or
+    [string]$evidence.observed.timestamp.format -cne 'rfc3161' -or
+    [string]::IsNullOrWhiteSpace([string]$evidence.observed.timestamp.token_sha256)) {
+    throw 'the genuine signed fixture lacks signer or RFC3161 evidence'
+}
+Assert-DefenseClawAuthenticodeEvidence $env:AUTHENTICODE_SIGNED_PE $evidence | Out-Null
+"""
+    env = os.environ.copy()
+    env["AUTHENTICODE_FIXTURE_HELPER"] = str(helper)
+    env["AUTHENTICODE_SIGNED_PE"] = pwsh
+    subprocess.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-Command", command],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows Authenticode")
+def test_release_verifier_rejects_malformed_win_certificate_bytes(tmp_path: Path) -> None:
+    go = shutil.which("go")
+    pwsh = shutil.which("pwsh")
+    if not go or not pwsh:
+        pytest.skip("Go and PowerShell are required for the malformed Authenticode test")
+    source = tmp_path / "main.go"
+    source.write_text("package main\nfunc main() {}\n", encoding="utf-8")
+    executable = tmp_path / "malformed.exe"
+    build_env = os.environ.copy()
+    build_env["CGO_ENABLED"] = "0"
+    subprocess.run(
+        [go, "build", "-o", executable, source],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=build_env,
+        timeout=120,
+    )
+    payload = bytearray(executable.read_bytes())
+    pe_offset = struct.unpack_from("<I", payload, 0x3C)[0]
+    optional_offset = pe_offset + 24
+    directories = optional_offset + (112 if struct.unpack_from("<H", payload, optional_offset)[0] == 0x20B else 96)
+    certificate_offset = (len(payload) + 7) & ~7
+    payload.extend(b"\0" * (certificate_offset - len(payload)))
+    payload.extend(struct.pack("<IHH", 32, 0x0200, 0x0002) + b"\x30\x06fixture")
+    struct.pack_into("<II", payload, directories + 32, certificate_offset, 16)
+    executable.write_bytes(payload)
+
+    helper = ROOT / "scripts" / "windows-authenticode.ps1"
+    command = (
+        ". $env:AUTHENTICODE_FIXTURE_HELPER; "
+        "Get-DefenseClawEmbeddedAuthenticodeCms $env:AUTHENTICODE_MALFORMED_PE"
+    )
+    env = os.environ.copy()
+    env["AUTHENTICODE_FIXTURE_HELPER"] = str(helper)
+    env["AUTHENTICODE_MALFORMED_PE"] = str(executable)
+    result = subprocess.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+    assert result.returncode != 0
+    assert "malformed WIN_CERTIFICATE" in result.stdout + result.stderr
+
+
+def test_release_requires_signed_setup_and_release_owned_authenticode_attestation() -> None:
     workflow = _workflow(RELEASE_PATH)
     jobs = workflow["jobs"]
     windows = jobs["windows-installer"]
+    certification = jobs["windows-real-client-certification"]
     rendered = str(windows)
 
     assert windows["needs"] == [
@@ -55,15 +145,16 @@ def test_release_accepts_signed_or_explicitly_unverified_setup_and_exact_four_si
     assert windows["environment"] == "release"
     assert "WINDOWS_SIGNING_CERT_BASE64" in rendered
     assert "WINDOWS_SIGNING_CERT_PASSWORD" in rendered
-    assert "Build native Setup with optional Authenticode" in rendered
-    assert "Windows Setup provenance has an inconsistent signing state" in rendered
-    assert "publishing an explicitly unverified Windows Setup" in rendered
+    assert "Require real Authenticode release credentials" in rendered
+    assert "Build and Authenticode-sign native Setup" in rendered
+    assert "Windows Setup provenance must be fully Authenticode signed for release" in rendered
+    assert "publishing an explicitly unverified Windows Setup" not in rendered
 
     assert "invoke-windows-setup-standard-user-ci.ps1" in rendered
     assert "-Mode setup-acceptance" in rendered
     assert "-AllowCurrentUserSetupAcceptance" not in rendered
 
-    acceptance = _step(windows, "Validate the exact installer lifecycle")
+    acceptance = _step(windows, "Validate the exact signed installer lifecycle")
     acceptance_run = acceptance["run"]
     assert "-ArtifactRoot windows-installer-output" in acceptance_run
     assert "-StateRoot (Join-Path $env:RUNNER_TEMP" in acceptance_run
@@ -86,23 +177,53 @@ def test_release_accepts_signed_or_explicitly_unverified_setup_and_exact_four_si
     )
     assert ".certification.json" not in rendered
 
+    assert certification["needs"] == ["release-preflight", "windows-installer"]
+    assert certification["runs-on"] == "windows-latest"
+    assert certification["environment"] == "release"
+    assert certification["timeout-minutes"] == "180"
+    certified = str(certification)
+    assert "OPENAI_API_KEY" in certified
+    assert "ANTHROPIC_API_KEY" in certified
+    assert "-Operation release-certification" in certified
+    assert "needs.windows-installer.outputs.artifact_id" in certified
+    certified_upload = next(
+        step for step in certification["steps"] if step.get("id") == "windows-certified-artifact"
+    )
+    assert certified_upload["with"]["path"].endswith(
+        "windows-certified/DefenseClawSetup-x64.exe.certification.json\n"
+    )
+    assert "Get-DefenseClawAuthenticodeEvidence" in HARNESS
+    assert "Assert-DefenseClawAuthenticodeEvidence" in HARNESS
+    assert "schema_version = 2" in HARNESS
+    assert "authenticode = $certifiedAuthenticode" in HARNESS
+    assert "provenance_sha256 = $releaseMetadataHashes[$provenancePath]" in HARNESS
 
-def test_windows_setup_bytes_are_bound_into_the_single_sealed_candidate() -> None:
+
+def test_certified_windows_setup_bytes_are_bound_into_the_single_sealed_candidate() -> None:
     jobs = _workflow(RELEASE_PATH)["jobs"]
     windows = jobs["windows-installer"]
+    certification = jobs["windows-real-client-certification"]
     assemble = jobs["assemble-release-candidate"]
 
     assert "artifact-id" in windows["outputs"]["artifact_id"]
     assert "artifact-digest" in windows["outputs"]["artifact_digest"]
-    assert "windows-installer" in assemble["needs"]
+    assert "artifact-id" in certification["outputs"]["artifact_id"]
+    assert "artifact-digest" in certification["outputs"]["artifact_digest"]
+    assert "windows-real-client-certification" in assemble["needs"]
     download = next(step for step in assemble["steps"] if step.get("with", {}).get("path") == "candidate-input/windows")
-    assert download["with"]["artifact-ids"] == ("${{ needs.windows-installer.outputs.artifact_id }}")
+    assert download["with"]["artifact-ids"] == (
+        "${{ needs.windows-real-client-certification.outputs.artifact_id }}"
+    )
     assert download["with"]["merge-multiple"] == "true"
-    custody = _step(assemble, "Require immutable Windows Setup artifact identity")
-    assert custody["env"]["WINDOWS_INSTALLER_ARTIFACT_DIGEST"] == (
-        "${{ needs.windows-installer.outputs.artifact_digest }}"
+    custody = _step(assemble, "Require immutable certified Windows Setup custody")
+    assert custody["env"]["WINDOWS_CERTIFIED_ARTIFACT_DIGEST"] == (
+        "${{ needs.windows-real-client-certification.outputs.artifact_digest }}"
+    )
+    assert custody["env"]["WINDOWS_SOURCE_ARTIFACT_DIGEST"] == (
+        "${{ needs.windows-real-client-certification.outputs.source_artifact_digest }}"
     )
     assert "Missing Windows custody digest" in custody["run"]
+    assert "staging_artifact_digest" in custody["run"]
     assert "--windows-dir candidate-input/windows" in str(assemble)
 
 
@@ -246,7 +367,7 @@ def test_publish_includes_windows_binaries_without_an_omission_mode() -> None:
     ]
     assert "scripts/release_candidate.py list-assets" in str(publish)
     assert "--omit-windows-binaries" not in release_text
-    assert "DefenseClawSetup-x64.exe.certification.json" not in release_text
+    assert "DefenseClawSetup-x64.exe.certification.json" in release_text
     assert "every sealed Linux, macOS, and Windows runtime asset" in release_text
 
 
@@ -256,13 +377,14 @@ def test_release_documentation_matches_the_fresh_only_gate() -> None:
     release = (ROOT / "docs" / "RELEASE_VALIDATION.md").read_text(encoding="utf-8")
 
     assert "one-dispatch Release workflow" in installer
-    assert "Authenticode signed" in installer
-    assert "explicitly unverified" in installer
+    assert "Authenticode-signed" in installer
+    assert "explicitly unverified" not in installer
     assert "first native Windows release" in installer
     assert "fresh-install-only" in installer
-    assert ".certification.json" not in installer
+    assert ".certification.json" in installer
     assert "A merge to `main` is the review-and-CI boundary" in ci
     assert "does not poll or replay `Windows Native CI`" in ci
+    assert "indirectly on `windows-real-client-certification`" in ci
     assert "first native Windows release" in release
     assert "has no older native Windows baseline" in release
     assert "fresh-install only" in release

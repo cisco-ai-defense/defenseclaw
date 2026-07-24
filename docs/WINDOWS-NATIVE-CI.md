@@ -40,12 +40,22 @@ One manual Release dispatch builds the publishable Windows amd64 and arm64
 gateway binaries plus the x64 `DefenseClawSetup-x64.exe` from the reviewed
 `main` commit selected by that dispatch. The same run:
 
-1. requires either the expected Authenticode signature and timestamp or an
-   explicit unverified provenance record with exact `NotSigned` state;
+1. requires the expected Cisco Authenticode signature and RFC 3161 timestamp;
 2. exercises `install.ps1` and the exact Setup candidate as a standard user;
-3. verifies installed versions and payload ownership; and
-4. seals the tested Windows assets with the Linux and macOS candidate before
+3. re-verifies the exact Setup bytes in the release-owned real-client
+   certification job, including the PE/CMS signature, Windows trust result,
+   signer identity, timestamp token, and SHA-256;
+4. verifies installed versions, connector traffic, and payload ownership; and
+5. seals the tested Windows assets with the Linux and macOS candidate before
    publication.
+
+The certification job emits a schema-2
+`DefenseClawSetup-x64.exe.certification.json` record. Candidate assembly checks
+that its Setup digest, provenance digest, signer, RFC 3161 timestamp evidence,
+and source artifact custody all match the exact tested release inputs.
+`publish-release` depends directly on `assemble-release-candidate` and
+`release-smoke`, and indirectly on `windows-real-client-certification` through
+the sealed candidate chain.
 
 This first native Windows release is validated as a fresh x64 install. The
 release gate also verifies and seals both Windows gateway architectures before

@@ -202,6 +202,7 @@ def test_release_builds_tests_and_publishes_in_one_dispatch() -> None:
         "build-runtime-candidate",
         "macos-app",
         "windows-installer",
+        "windows-real-client-certification",
         "assemble-release-candidate",
         "release-smoke",
         "publish-release",
@@ -217,7 +218,7 @@ def test_release_builds_tests_and_publishes_in_one_dispatch() -> None:
         "release-preflight",
         "build-runtime-candidate",
         "macos-app",
-        "windows-installer",
+        "windows-real-client-certification",
     ]
     assert "scripts/release_candidate.py seal" in _render(assemble)
     assert assemble["outputs"]["artifact_name"] == ("${{ steps.names.outputs.candidate }}")
@@ -250,7 +251,6 @@ def test_release_builds_tests_and_publishes_in_one_dispatch() -> None:
         "platform-readiness:",
         "full-certification:",
         "select-candidate:",
-        "windows-real-client-certification:",
         "operation=certify",
         "operation=release",
         "verify-metadata",

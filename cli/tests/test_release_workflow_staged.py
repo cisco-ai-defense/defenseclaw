@@ -202,6 +202,7 @@ def test_release_is_one_manual_dispatch_from_reviewed_main() -> None:
         "build-runtime-candidate",
         "macos-app",
         "windows-installer",
+        "windows-real-client-certification",
         "assemble-release-candidate",
         "release-smoke",
         "publish-release",
@@ -215,11 +216,15 @@ def test_release_is_one_manual_dispatch_from_reviewed_main() -> None:
         "release-preflight",
         "build-runtime-candidate",
     ]
+    assert jobs["windows-real-client-certification"]["needs"] == [
+        "release-preflight",
+        "windows-installer",
+    ]
     assert jobs["assemble-release-candidate"]["needs"] == [
         "release-preflight",
         "build-runtime-candidate",
         "macos-app",
-        "windows-installer",
+        "windows-real-client-certification",
     ]
     assert jobs["release-smoke"]["needs"] == [
         "release-preflight",
@@ -235,6 +240,7 @@ def test_release_is_one_manual_dispatch_from_reviewed_main() -> None:
         "build-runtime-candidate": "45",
         "macos-app": "60",
         "windows-installer": "60",
+        "windows-real-client-certification": "180",
         "assemble-release-candidate": "30",
         "publish-release": "45",
     }
@@ -246,7 +252,6 @@ def test_release_is_one_manual_dispatch_from_reviewed_main() -> None:
         "platform-readiness:",
         "full-certification:",
         "select-candidate:",
-        "windows-real-client-certification:",
         "operation=certify",
         "operation=release",
         "candidate_ref",
@@ -629,11 +634,11 @@ def test_macos_release_accepts_notarized_or_explicitly_unverified_candidate() ->
     assert any(row["platform"] == "darwin-arm64" for row in fresh_matrix)
 
 
-def test_release_allows_absent_signing_credentials_but_rejects_partial_groups() -> None:
+def test_release_requires_windows_signing_credentials_and_allows_optional_macos() -> None:
     jobs = _workflow()["jobs"]
     preflight = jobs["release-preflight"]
     assert preflight["environment"] == "release"
-    credentials = _step(preflight, "Validate optional platform signing credentials")
+    credentials = _step(preflight, "Validate platform signing credentials")
     rendered = str(credentials)
 
     for name in (
@@ -649,10 +654,10 @@ def test_release_allows_absent_signing_credentials_but_rejects_partial_groups() 
     assert "APPLE_CREDENTIAL_COUNT" in credentials["run"]
     assert "WINDOWS_CREDENTIAL_COUNT" in credentials["run"]
     assert "Apple signing/notarization credentials are partially configured" in credentials["run"]
-    assert "Windows signing credentials are partially configured" in credentials["run"]
+    assert "Windows Authenticode signing credentials are required" in credentials["run"]
     assert "no Apple credentials; macOS assets will be explicitly unverified" in credentials["run"]
-    assert "no Windows credentials; Windows Setup will be explicitly unverified" in credentials["run"]
-    assert "Release signing credentials unavailable" not in credentials["run"]
+    assert "Unverified Windows release" not in credentials["run"]
+    assert "explicitly unverified Windows Setup" not in credentials["run"]
     assert jobs["build-runtime-candidate"]["needs"] == "release-preflight"
 
 
@@ -666,7 +671,7 @@ def test_macos_app_consumes_and_validates_sealed_runtime_gateway() -> None:
     assert "gateway candidate version mismatch" in text
 
 
-def test_windows_release_accepts_signed_or_explicitly_unverified_setup_and_is_fresh_only() -> None:
+def test_windows_release_requires_signed_setup_and_real_client_certification() -> None:
     jobs = _workflow()["jobs"]
     windows = jobs["windows-installer"]
     rendered = str(windows)
@@ -675,19 +680,15 @@ def test_windows_release_accepts_signed_or_explicitly_unverified_setup_and_is_fr
     assert windows["environment"] == "release"
     assert "WINDOWS_SIGNING_CERT_BASE64" in rendered
     assert "WINDOWS_SIGNING_CERT_PASSWORD" in rendered
-    assert "Build native Setup with optional Authenticode" in rendered
-    assert "Windows Setup provenance has an inconsistent signing state" in rendered
-    assert "publishing an explicitly unverified Windows Setup" in rendered
+    assert "Require real Authenticode release credentials" in rendered
+    assert "Build and Authenticode-sign native Setup" in rendered
+    assert "Require signed Windows trust status" in rendered
+    assert "publishing an explicitly unverified Windows Setup" not in rendered
     assert "invoke-windows-setup-standard-user-ci.ps1" in rendered
     assert "-Mode setup-acceptance" in rendered
     assert "-AllowCurrentUserSetupAcceptance" not in rendered
     assert "Upload native Setup diagnostics on failure" in rendered
     assert "defenseclaw-release-setup-diagnostics/**" in rendered
-    windows_contract = (ROOT / "scripts/live-connector-e2e/test-windows.ps1").read_text(encoding="utf-8")
-    assert "production release does not depend on provider-backed Windows live radar" in (windows_contract)
-    assert "needs\\.windows-installer\\.outputs\\.artifact_id" in windows_contract
-    assert "tested Windows artifact bundle directly" in windows_contract
-
     upload = next(step for step in windows["steps"] if step.get("id") == "windows-installer-artifact")
     expected = (
         "windows-installer-output/DefenseClawSetup-x64.exe\n"
@@ -697,22 +698,38 @@ def test_windows_release_accepts_signed_or_explicitly_unverified_setup_and_is_fr
     )
     assert upload["with"]["path"] == expected
 
+    certification = jobs["windows-real-client-certification"]
+    certification_text = str(certification)
+    assert certification["runs-on"] == "windows-latest"
+    assert certification["environment"] == "release"
+    assert "needs.windows-installer.outputs.artifact_id" in certification_text
+    assert "needs.windows-installer.outputs.artifact_digest" in certification_text
+    assert "OPENAI_API_KEY" in certification_text
+    assert "ANTHROPIC_API_KEY" in certification_text
+    assert "-Operation release-certification" in certification_text
+    certified_upload = next(
+        step for step in certification["steps"] if step.get("id") == "windows-certified-artifact"
+    )
+    assert "DefenseClawSetup-x64.exe.certification.json" in certified_upload["with"]["path"]
+
     assemble = jobs["assemble-release-candidate"]
     windows_download = next(
         step for step in assemble["steps"] if step.get("with", {}).get("path") == "candidate-input/windows"
     )
-    assert windows_download["with"]["artifact-ids"] == ("${{ needs.windows-installer.outputs.artifact_id }}")
-    assert "needs.windows-installer.outputs.artifact_digest" in str(assemble)
+    assert windows_download["with"]["artifact-ids"] == (
+        "${{ needs.windows-real-client-certification.outputs.artifact_id }}"
+    )
+    assert "needs.windows-real-client-certification.outputs.artifact_digest" in str(assemble)
+    assert "needs.windows-real-client-certification.outputs.source_artifact_digest" in str(assemble)
 
     release_text = WORKFLOW.read_text(encoding="utf-8")
     smoke_text = CERTIFICATION_WORKFLOW.read_text(encoding="utf-8")
     assert "--omit-windows-binaries" not in release_text
-    assert "DefenseClawSetup-x64.exe.certification.json" not in release_text
+    assert "DefenseClawSetup-x64.exe.certification.json" in release_text
     for retired in (
         "windows-upgrade:",
         "test-upgrade-release-windows.ps1",
         "live-connector-e2e",
-        "-Operation release-certification",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
     ):

@@ -352,8 +352,10 @@ Before publication, the same run proves:
   signing credentials are available, or ad-hoc signed and published with
   explicit `-unverified` names when none are configured;
 - `install.ps1` delegates to the native Windows Setup and installs the exact
-  candidate successfully, whether Authenticode-signed or explicitly
-  unverified and authenticated by the release Sigstore checksums; and
+  Cisco Authenticode-signed candidate successfully;
+- the release-owned Windows real-client job independently verifies the exact
+  Setup digest, signer, RFC 3161 timestamp evidence, provenance digest, artifact
+  custody, and connector traffic; and
 - the sealed candidate contains the expected Linux, macOS, and Windows
   binaries.
 
@@ -363,10 +365,9 @@ tests installation and exact installed-version verification.
 Apple release credentials are an all-or-none group: complete credentials must
 produce notarized assets, no credentials intentionally produce the unverified
 artifacts above, and a partial credential set stops the run.
-Windows Authenticode credentials use the same all-or-none rule: both values
-produce Cisco-signed Setup bytes, neither produces an explicitly unverified
-Setup that remains authenticated by release checksums and provenance, and a
-partial pair stops the run.
+Windows Authenticode credentials are mandatory: both values must be present and
+produce Cisco-signed Setup bytes, while missing or partial credentials stop the
+run. An unsigned Windows Setup cannot enter candidate assembly.
 
 Each selected pre-`0.8.4` POSIX source must visibly traverse the authenticated
 published `0.8.4` bridge and its fresh-controller handoff into the `0.8.5+`

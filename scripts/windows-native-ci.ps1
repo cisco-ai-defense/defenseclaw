@@ -26,6 +26,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-native-paths.ps1')
+. (Join-Path $PSScriptRoot 'windows-authenticode.ps1')
 
 $windowsResourceVerifierName = 'DefenseClawWindowsResourceVerifier-x64.exe'
 $windowsResourceIconName = 'DefenseClawWindowsResourceIcon.png'
@@ -3991,6 +3992,20 @@ function Invoke-WindowsReleaseCertification {
     if ([string]$provenance.version -cne $releaseVersion) {
         throw "release setup provenance version does not match the resolved release: $($provenance.version) != $releaseVersion"
     }
+    $provenanceAuthenticode = $provenance.authenticode.files.'DefenseClawSetup-x64.exe'
+    $initialAuthenticode = Get-DefenseClawAuthenticodeEvidence `
+        -Path $setup `
+        -InstalledPath 'DefenseClawSetup-x64.exe' `
+        -SbomFileName './DefenseClawSetup-x64.exe' `
+        -Policy 'defenseclaw-product-publisher' `
+        -ExpectedStatus 'Valid' `
+        -ExpectedPublisher 'Cisco Systems, Inc.' `
+        -ExpectedSignatureType 'Authenticode' `
+        -TimestampRequired $true
+    if ([string]$initialAuthenticode.sha256 -cne $setupHash) {
+        throw 'release-owned Authenticode evidence does not bind the exact installer bytes'
+    }
+    Assert-DefenseClawAuthenticodeEvidence $setup $provenanceAuthenticode | Out-Null
     Assert-WindowsReleaseSbom `
         $sbomPath $setupHash $releaseVersion ([string]$env:GITHUB_SHA)
     $releaseMetadataHashes = @{}
@@ -4155,6 +4170,8 @@ function Invoke-WindowsReleaseCertification {
             throw 'the DefenseClawSetup-x64.exe bytes changed during release certification'
         }
         Assert-CiscoAuthenticodeSignature $setup
+        $certifiedAuthenticode = Assert-DefenseClawAuthenticodeEvidence `
+            $setup $initialAuthenticode
         foreach ($metadataPath in @($sidecarPath, $provenancePath, $sbomPath)) {
             $finalMetadataHash = `
                 (Get-FileHash -LiteralPath $metadataPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -4170,7 +4187,7 @@ function Invoke-WindowsReleaseCertification {
         $evidencePath = Join-Path ([IO.Path]::GetFullPath($ArtifactRoot)) `
             'DefenseClawSetup-x64.exe.certification.json'
         $evidence = [ordered]@{
-            schema_version = 1
+            schema_version = 2
             status = 'passed'
             verification_status = 'signed'
             platform = 'windows-x64'
@@ -4179,6 +4196,8 @@ function Invoke-WindowsReleaseCertification {
                 sha256 = $setupHash
                 publisher = 'Cisco Systems, Inc.'
             }
+            authenticode = $certifiedAuthenticode
+            provenance_sha256 = $releaseMetadataHashes[$provenancePath]
             clients = [ordered]@{
                 codex = [string]$clients['codex'].Specification.Version
                 claudecode = [string]$clients['claudecode'].Specification.Version
@@ -4196,7 +4215,7 @@ function Invoke-WindowsReleaseCertification {
         }
         [IO.File]::WriteAllText(
             $evidencePath,
-            ($evidence | ConvertTo-Json -Depth 8),
+            ($evidence | ConvertTo-Json -Depth 16),
             [Text.UTF8Encoding]::new($false)
         )
         Write-Host 'Exact signed Windows installer passed both real-client release certifications.'

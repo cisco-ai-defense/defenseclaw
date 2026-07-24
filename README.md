@@ -63,7 +63,7 @@ High-risk deployments should pair DefenseClaw with human review, least-privilege
 |-------|-------------|
 | [Quick Start](docs/QUICKSTART.md) | First successful local setup and scan flow |
 | [Install](docs/INSTALL.md) | Windows, macOS, Linux, DGX Spark, source builds, and release installation |
-| [Native Windows](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/) | x64 Setup lifecycle, optional Authenticode status, connectors, commands, security, and troubleshooting |
+| [Native Windows](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/) | x64 Setup lifecycle, mandatory release Authenticode signing, connectors, commands, security, and troubleshooting |
 | [CLI Reference](docs/CLI.md) | Python CLI commands and operator workflows |
 | [API Reference](docs/API.md) | Gateway REST API and sidecar endpoints |
 | [Architecture](docs/ARCHITECTURE.md) | Component model, data flow, and responsibilities |

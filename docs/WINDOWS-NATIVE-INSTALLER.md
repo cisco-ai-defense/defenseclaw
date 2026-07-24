@@ -85,8 +85,9 @@ The release also publishes `checksums.txt.bundle` beside the detached
 signature and certificate. The compatibility bootstrap passes that bundled
 transparency-log proof to pinned Cosign with `--offline`. The authenticated
 checksum root must contain exactly one entry each for Setup, its provenance,
-and the upgrade manifest. The provenance must describe an internally consistent
-signed or explicitly unverified schema-1 OSS artifact and repeat Setup's exact
+and the upgrade manifest. The provenance must describe a Cisco
+Authenticode-signed schema-1 OSS artifact, include independently re-verifiable
+signature and RFC 3161 timestamp evidence, and repeat Setup's exact
 authenticated SHA-256. Local mode requires
 the complete release bundle plus the pinned Cosign executable and performs no
 network access.
@@ -137,14 +138,11 @@ treated as a managed release. An OSS Windows install configured as
 `managed_enterprise` therefore fails closed when managed cloud credentials are
 requested instead of silently degrading to an unusable provider.
 
-Unsigned builds are labeled explicitly in Installed Apps. The certificate and
-password form one optional credential group: both produce Cisco
-Authenticode-signed executables, neither produces explicitly unverified
-executables, and a partial pair fails during preflight. The unverified path is
-still authenticated by the protected release workflow's Sigstore checksum
-manifest and schema-1 provenance. When credentials are present, any
-certificate, password, SignTool, timestamp, or publisher failure aborts instead
-of falling back to unsigned.
+Unsigned local and pull-request builds are labeled explicitly in Installed
+Apps, but they cannot enter a release candidate. The release certificate and
+password are both mandatory: missing or partial credentials fail during
+preflight. Any certificate, password, SignTool, timestamp, publisher, trust, or
+attestation failure aborts instead of falling back to unsigned.
 For the signed path, before the payload manifest is hashed, the builder signs
 the native CLI launcher, console-free startup helper, gateway, and hook entry
 point; the installed scanner launchers are byte-identical copies of that signed
@@ -154,6 +152,14 @@ certificate thumbprint, uses an allowlisted HTTPS timestamp endpoint, verifies
 the exact publisher `Cisco Systems, Inc.` on every signed executable, and
 removes the certificate and private build directory in a `finally` path. No
 development certificate or fabricated Cisco signature is generated.
+
+The release-owned real-client certification job independently verifies the
+outer Setup with the repository's Authenticode helper before and after the
+standard-user lifecycle. It records the exact Setup and provenance digests,
+signer certificate, RFC 3161 timestamp token and TSA identity, source artifact
+custody, and live connector results. Candidate assembly accepts all five
+Windows assets only when that schema-2 attestation matches the provenance and
+exact Setup bytes.
 
 ### Native executable resources
 
@@ -302,29 +308,33 @@ Those installations must be serviced by the enterprise deployment channel.
 The one-dispatch Release workflow builds the Windows amd64 and arm64 gateway
 binaries plus the x64 `DefenseClawSetup-x64.exe` from the reviewed `main`
 commit selected by the dispatch. Setup must be
-Authenticode signed with the expected publisher and timestamp when both
-credentials are available. With neither credential it must instead carry
-explicit unverified provenance and exact `NotSigned` state. A partial pair or
-any invalid configured signing credential stops the run before publication.
+Authenticode signed with the expected publisher and RFC 3161 timestamp.
+Missing, partial, or invalid signing credentials stop the run before
+publication.
 
-The exact candidate is exercised on `windows-latest` through both the
-PowerShell installer entry point and native Setup. The fresh-install gate
-requires successful installation plus exact CLI and gateway version
-verification. It also proves that a second fresh-installer invocation refuses
-before changing installed state.
+The exact candidate is exercised on `windows-latest` through the PowerShell
+installer entry point, native Setup, and the pinned Codex and Claude Code
+clients. The release-owned verifier checks the Setup's PE/CMS signature,
+Windows trust result, signer certificate, RFC 3161 timestamp token, and exact
+SHA-256 before and after the lifecycle. The fresh-install gate requires
+successful installation plus exact CLI and gateway version verification. It
+also proves that a second fresh-installer invocation refuses before changing
+installed state.
 
 This is the first native Windows release, so release acceptance is
 fresh-install-only.
 
-The workflow places Setup, its SHA-256, provenance, and SPDX SBOM metadata in
-the same sealed candidate as the Linux and macOS assets. Candidate assembly
-rejects missing or mismatched bytes, signs the public checksum manifest with the
-protected `release.yaml@refs/heads/main` Sigstore identity, and publishes only
-after the Windows fresh-install and Linux/macOS release gates pass. The
-protected publish job is the only job granted `contents: write`.
+The workflow places Setup, its SHA-256, provenance, SPDX SBOM, and
+`DefenseClawSetup-x64.exe.certification.json` metadata in the same sealed
+candidate as the Linux and macOS assets. The schema-2 certification binds the
+exact Setup digest, provenance digest, signer and timestamp identities, source
+artifact custody, and real-client results. Candidate assembly rejects missing
+or mismatched bytes, signs the public checksum manifest with the protected
+`release.yaml@refs/heads/main` Sigstore identity, and publishes only after the
+Windows fresh-install and Linux/macOS release gates pass. The protected publish
+job is the only job granted `contents: write`.
 
 Pull-request CI may build an unsigned Setup for disposable-runner regression
 testing. A publishable Setup is always rebuilt from the reviewed commit selected
-by the Release dispatch and tested as part of that same run. It is
-Authenticode-signed when the complete credential pair is available and
-otherwise carries explicit unverified provenance.
+by the Release dispatch and tested as part of that same run. It is always
+Authenticode-signed with the mandatory credential pair.
