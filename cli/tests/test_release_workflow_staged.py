@@ -646,12 +646,8 @@ def test_windows_release_requires_signed_setup_and_fresh_install_only() -> None:
     assert "invoke-windows-setup-standard-user-ci.ps1" in rendered
     assert "-Mode setup-acceptance" in rendered
     assert "-AllowCurrentUserSetupAcceptance" not in rendered
-    windows_contract = (ROOT / "scripts/live-connector-e2e/test-windows.ps1").read_text(
-        encoding="utf-8"
-    )
-    assert "production release does not depend on provider-backed Windows live radar" in (
-        windows_contract
-    )
+    windows_contract = (ROOT / "scripts/live-connector-e2e/test-windows.ps1").read_text(encoding="utf-8")
+    assert "production release does not depend on provider-backed Windows live radar" in (windows_contract)
     assert "needs\\.windows-installer\\.outputs\\.artifact_id" in windows_contract
     assert "tested signed Windows artifact bundle directly" in windows_contract
 
@@ -873,6 +869,25 @@ def test_external_resolver_boundaries_disable_python_bytecode() -> None:
         body = match.group("body")
         assert "PYTHONDONTWRITEBYTECODE=1" in body, function_name
         assert 'bash "${RELEASE_ROOT}/${TARGET_VERSION}/defenseclaw-upgrade.sh"' in body
+
+
+def test_exact_bridge_success_paths_require_authenticated_refresh_evidence() -> None:
+    text = PROTOCOL_GATE.read_text(encoding="utf-8")
+    staged_start = text.index("run_candidate_updater_staged_success() {")
+    staged_end = text.index("\n}\n\nrun_candidate_updater_direct_success() {", staged_start)
+    direct_start = staged_end + 3
+    direct_end = text.index("\n}\n\nrun_protocol_case() {", direct_start)
+    staged = text[staged_start:staged_end]
+    direct = text[direct_start:direct_end]
+    refresh = (
+        "Refresh authenticated ${baseline} bridge → fresh controller → "
+        "${OBSERVABILITY_V8_HARD_CUT_VERSION} → ${TARGET_VERSION}"
+    )
+
+    assert refresh in staged
+    assert refresh in direct
+    assert "staged upgrade log did not prove the resolved bridge handoff" in staged
+    assert "release-owned resolver log did not prove the authenticated bridge refresh" in direct
 
 
 def test_posix_refusal_snapshot_preserves_python_bytecode_paths(
