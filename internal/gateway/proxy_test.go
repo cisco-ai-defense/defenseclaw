@@ -2044,6 +2044,30 @@ func TestHandlePassthrough_SSRFRejection(t *testing.T) {
 	}
 }
 
+func TestResolveConfiguredProviderDoesNotLogRawBaseURL(t *testing.T) {
+	proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "action")
+	proxy.cfg.Model = "openai/gpt-4"
+	proxy.cfg.LLM.Provider = "openai"
+	proxy.cfg.LLM.BaseURL = "https://user:secret@llm.example.test/v1?token=topsecret"
+
+	stderr := captureStderr(t, func() {
+		_ = proxy.resolveConfiguredProvider(&ChatRequest{
+			Model:        "gpt-4",
+			Messages:     []ChatMessage{{Role: "user", Content: "hi"}},
+			TargetAPIKey: "sk-test",
+		})
+	})
+	if strings.Contains(stderr, proxy.cfg.LLM.BaseURL) ||
+		strings.Contains(stderr, "secret") ||
+		strings.Contains(stderr, "topsecret") ||
+		strings.Contains(stderr, "base_url=") {
+		t.Fatalf("direct-provider log leaked configured base URL: %s", stderr)
+	}
+	if !strings.Contains(stderr, "direct-provider mode") {
+		t.Fatalf("direct-provider diagnostic was not emitted: %s", stderr)
+	}
+}
+
 func TestScrubURLSecrets(t *testing.T) {
 	tests := []struct {
 		name string
