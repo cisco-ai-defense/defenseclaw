@@ -242,17 +242,27 @@ var ruleAxes = map[string][]DataAxis{
 	// These exact entries are consulted before the JUDGE-* prefix
 	// fallbacks in AxesForRuleID, so they override them.
 	"JUDGE-EXFIL-CHANNEL":     {AxisEgressExternal},
+	"JUDGE-EXFIL-REPO":        {AxisSensitiveAccess, AxisEgressExternal},
 	"JUDGE-TOOL-INJ-EXFIL":    {AxisSensitiveAccess, AxisEgressExternal},
 	"JUDGE-TOOL-INJ-DESTRUCT": {}, // destructive = separate flow, not trifecta
 
 	// Command rules that open an outbound channel (curl/wget upload,
 	// pipe-to-shell from the network). These read no secret on their
 	// own but provide the egress leg of an exfil flow.
-	"CMD-CURL-UPLOAD": {AxisEgressExternal},
-	"CMD-WGET-POST":   {AxisEgressExternal},
-	"CMD-PIPE-CURL":   {AxisEgressExternal},
-	"CMD-PIPE-WGET":   {AxisEgressExternal},
-	"CMD-ENV-DUMP":    {AxisSensitiveAccess},
+	"CMD-CURL-UPLOAD":  {AxisEgressExternal},
+	"CMD-WGET-POST":    {AxisEgressExternal},
+	"CMD-SCP-UPLOAD":   {AxisEgressExternal},
+	"CMD-RSYNC-UPLOAD": {AxisEgressExternal},
+	"CMD-PIPE-CURL":    {AxisEgressExternal},
+	"CMD-PIPE-WGET":    {AxisEgressExternal},
+
+	// Command rules that read workspace or environment secrets.
+	"CMD-WORKSPACE-ARCHIVE": {AxisSensitiveAccess},
+	"CMD-ENV-DUMP":          {AxisSensitiveAccess},
+
+	// Command rules that read secrets and open an egress channel in one step.
+	"CMD-ARCHIVE-EXFIL": {AxisSensitiveAccess, AxisEgressExternal},
+	"CMD-ENCODE-EXFIL":  {AxisSensitiveAccess, AxisEgressExternal},
 
 	// Cloud metadata C2 endpoints read instance credentials (sensitive)
 	// over an outbound call (egress) — both axes. The C2- prefix
@@ -298,9 +308,11 @@ var judgeAxes = map[string][]DataAxis{
 	"pii.username":                {AxisSensitiveAccess},
 	"pii.password":                {AxisSensitiveAccess},
 
-	// Exfil judge — one category per axis.
-	"exfil.sensitive file access": {AxisSensitiveAccess},
-	"exfil.exfiltration channel":  {AxisEgressExternal},
+	// Exfil judge — most categories map to one axis; repository archive
+	// exfiltration spans both sensitive_access and egress_external.
+	"exfil.sensitive file access":           {AxisSensitiveAccess},
+	"exfil.exfiltration channel":            {AxisEgressExternal},
+	"exfil.repository archive exfiltration": {AxisSensitiveAccess, AxisEgressExternal},
 
 	// Tool-injection judge.
 	"tool-injection.instruction manipulation": {AxisIngressUntrusted},

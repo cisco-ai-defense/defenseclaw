@@ -1313,20 +1313,41 @@ Respond ONLY with a JSON object in this exact format:
 // rule-pack overrides the finding_id at runtime via
 // JudgeYAML.Categories so operators can rename without touching code.
 var exfilCategories = map[string]string{
-	"Sensitive File Access": "JUDGE-EXFIL-FILE",
-	"Exfiltration Channel":  "JUDGE-EXFIL-CHANNEL",
+	"Sensitive File Access":           "JUDGE-EXFIL-FILE",
+	"Exfiltration Channel":            "JUDGE-EXFIL-CHANNEL",
+	"Repository Archive Exfiltration": "JUDGE-EXFIL-REPO",
 }
 
 // exfilCategoryDefaults parallels piiCategoryDefaults — base severities
-// when no rule pack override is present. Both categories are HIGH
-// because a single positive label here is structurally unambiguous;
-// the rule pack's single_category_max_severity: HIGH preserves that.
+// when no rule pack override is present. Single-category positives
+// block at HIGH unless the rule pack raises the bar.
 var exfilCategoryDefaults = map[string]struct {
 	findingID string
 	severity  string
 }{
-	"Sensitive File Access": {findingID: "JUDGE-EXFIL-FILE", severity: "HIGH"},
-	"Exfiltration Channel":  {findingID: "JUDGE-EXFIL-CHANNEL", severity: "HIGH"},
+	"Sensitive File Access":           {findingID: "JUDGE-EXFIL-FILE", severity: "HIGH"},
+	"Exfiltration Channel":            {findingID: "JUDGE-EXFIL-CHANNEL", severity: "HIGH"},
+	"Repository Archive Exfiltration": {findingID: "JUDGE-EXFIL-REPO", severity: "HIGH"},
+}
+
+// exfilCategoryOrder returns the exfil judge categories to evaluate,
+// preferring the loaded rule pack so new YAML categories (e.g.
+// Repository Archive Exfiltration) are not dropped by a stale map.
+func (j *LLMJudge) exfilCategoryOrder() []string {
+	if jc := j.rp.ExfilJudge(); jc != nil && len(jc.Categories) > 0 {
+		out := make([]string, 0, len(jc.Categories))
+		for cat := range jc.Categories {
+			out = append(out, cat)
+		}
+		sort.Strings(out)
+		return out
+	}
+	out := make([]string, 0, len(exfilCategories))
+	for cat := range exfilCategories {
+		out = append(out, cat)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // runExfilJudge runs the data-exfiltration classifier and returns a
@@ -1434,14 +1455,25 @@ func (j *LLMJudge) exfilToVerdict(data map[string]interface{}) *ScanVerdict {
 		return allowVerdict("llm-judge-exfil")
 	}
 
-	categories := exfilCategories
+	categories := j.exfilCategoryOrder()
 	defaults := exfilCategoryDefaults
 	maxSev := "NONE"
 	var findings []string
 	var reasons []string
 	var signalStrengths []string
 
-	for cat, defaultID := range categories {
+	for _, cat := range categories {
+		defaultID := exfilCategories[cat]
+		if defaultID == "" {
+			if jc := j.rp.ExfilJudge(); jc != nil {
+				if catCfg, ok := jc.Categories[cat]; ok && catCfg.FindingID != "" {
+					defaultID = catCfg.FindingID
+				}
+			}
+		}
+		if defaultID == "" {
+			continue
+		}
 		entry, ok := data[cat]
 		if !ok {
 			continue
@@ -1456,6 +1488,9 @@ func (j *LLMJudge) exfilToVerdict(data map[string]interface{}) *ScanVerdict {
 		}
 		findingID := defaultID
 		sev := defaults[cat].severity
+		if sev == "" {
+			sev = "HIGH"
+		}
 		if jc := j.rp.ExfilJudge(); jc != nil {
 			if catCfg, ok := jc.Categories[cat]; ok {
 				if catCfg.FindingID != "" {
