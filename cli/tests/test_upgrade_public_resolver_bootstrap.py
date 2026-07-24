@@ -53,6 +53,7 @@ def _evidence_downloader(
 
 def test_main_delegates_before_click_config_or_cursor_gates() -> None:
     with (
+        patch.object(main_module.ux, "_configured_unicode_output", None),
         patch.object(sys, "argv", ["defenseclaw", "upgrade", "--yes"]),
         patch.object(
             main_module,
