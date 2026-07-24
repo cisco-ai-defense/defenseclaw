@@ -633,6 +633,11 @@ def test_stale_pre_cut_cursor_without_recovery_journal_fails_closed(resolver_env
     assert "config-v8 migration state is absent or invalid and no recoverable journal is active" in output
     assert "private phase-two journal remains present" in output
     assert "A receipt or version string alone is not rollback authority" in output
+    assert "same resolver-owned pre-hard-cut backup" in output
+    assert (
+        "If no complete resolver-owned backup exists, preserve the installation and contact DefenseClaw support"
+        in output
+    )
     assert "Do not mark 0.8.5 applied or copy individual artifacts" in output
     assert "No changes were made" in output
     assert not mutation_log.exists()
