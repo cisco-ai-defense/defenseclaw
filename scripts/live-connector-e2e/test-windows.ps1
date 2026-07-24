@@ -619,11 +619,45 @@ private-secret-name = "DefenseClaw must remain redacted"
         DEFENSECLAW_HOME = $ownedRoot
     } -PassThru -WindowStyle Hidden
     try {
-        Start-Sleep -Milliseconds 250
+        $expectedProductExecutable = Get-NormalizedExecutablePath $productExecutable
+        $productStartIdentity = ''
+        $productLiveExecutable = ''
+        $productIdentityReady = $false
+        $productIdentityStopwatch = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            do {
+                $productProbe = $null
+                try {
+                    $productProbe = [Diagnostics.Process]::GetProcessById($productDescendant.Id)
+                    $productLiveExecutable = Get-NormalizedExecutablePath `
+                        ([string]$productProbe.MainModule.FileName)
+                    $productStartIdentity = Get-NativeProcessStartIdentity $productProbe
+                } catch {
+                    $productLiveExecutable = ''
+                    $productStartIdentity = ''
+                } finally {
+                    if ($null -ne $productProbe) { $productProbe.Dispose() }
+                }
+                $productIdentityReady =
+                    -not [string]::IsNullOrWhiteSpace($productStartIdentity) -and
+                    [string]::Equals(
+                        $productLiveExecutable,
+                        $expectedProductExecutable,
+                        [StringComparison]::OrdinalIgnoreCase
+                    )
+                if ($productIdentityReady) { break }
+                Start-Sleep -Milliseconds 100
+            } while ($productIdentityStopwatch.Elapsed -lt [TimeSpan]::FromSeconds(5))
+        } finally {
+            $productIdentityStopwatch.Stop()
+        }
+        if (-not $productIdentityReady) {
+            throw 'managed cleanup fixture setup failed: matching executable and nonempty start identity were not queryable within 5 seconds'
+        }
         $productPID = @{
             pid = $productDescendant.Id
             executable = $productExecutable
-            start_identity = Get-NativeProcessStartIdentity $productDescendant
+            start_identity = $productStartIdentity
         } | ConvertTo-Json -Compress
         [IO.File]::WriteAllText((Join-Path $ownedRoot 'gateway.pid'), $productPID)
         Stop-IsolatedProcessTree -ProductExecutablePaths @($productExecutable) `
