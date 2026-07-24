@@ -445,7 +445,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		}
 		fmt.Printf("%s DefenseClaw %s to %s\n", status, payload.Manifest.Version, installRoot)
 		if payload.Manifest.Unsigned {
-			fmt.Println("Local artifact is unsigned; production releases must be Authenticode signed.")
+			fmt.Println("This Setup is not Authenticode signed; authenticated release checksum provenance is its trust boundary.")
 		}
 	}
 	if oldState != nil && compareVersions(payload.Manifest.Version, oldState.Version) < 0 {

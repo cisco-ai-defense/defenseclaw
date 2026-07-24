@@ -67,10 +67,6 @@ DOC_INSTALL_COMMANDS = {
 RELEASE_INSTALL_COMMANDS = {
     **DOC_INSTALL_COMMANDS,
     "scripts/install.sh": BASH_INSTALL_LINES,
-    "scripts/install.ps1": (
-        f'$Version = "{CURRENT_RELEASE}"',
-        f".\\install.ps1 -Version {CURRENT_RELEASE} -Connector codex -Yes -Quickstart",
-    ),
 }
 
 INSTALLER_FILES = (
@@ -137,10 +133,7 @@ def test_posix_installer_rejects_python_314_before_creating_policy_venv() -> Non
 
     developer_installer = (ROOT / "scripts/install-dev.sh").read_text(encoding="utf-8")
     assert 'readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"' in developer_installer
-    assert (
-        'version_in_range "${ver}" "${MIN_PYTHON_VERSION}" "${MAX_PYTHON_VERSION_EXCLUSIVE}"'
-        in developer_installer
-    )
+    assert 'version_in_range "${ver}" "${MIN_PYTHON_VERSION}" "${MAX_PYTHON_VERSION_EXCLUSIVE}"' in developer_installer
 
 
 def _write_minimal_schema2_install_dist(root: Path, version: str = CURRENT_RELEASE) -> None:
@@ -299,9 +292,7 @@ def test_posix_installer_identity_is_per_inode_not_per_filesystem(tmp_path: Path
 
 def test_posix_installer_routes_retirement_custody_by_managed_filesystem() -> None:
     source = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
-    assert (
-        'readonly STATE_CUSTODY_ROOT="$(dirname "${DEFENSECLAW_HOME}")/.defenseclaw-install-custody"'
-    ) in source
+    assert ('readonly STATE_CUSTODY_ROOT="$(dirname "${DEFENSECLAW_HOME}")/.defenseclaw-install-custody"') in source
 
     cleanup = source[
         source.index("cleanup_install_attempt() {") : source.index(
@@ -350,9 +341,7 @@ def test_posix_install_attempt_marker_bounds_the_publication_lifecycle() -> None
     ]
     assert "os.unlink(" not in marker_lifecycle
     assert '"${PUBLISH_HELPER}" unlink-exact' in marker_lifecycle
-    early_guard = source.index(
-        "if existing_install_detected && ! interrupted_install_attempt_detected; then"
-    )
+    early_guard = source.index("if existing_install_detected && ! interrupted_install_attempt_detected; then")
     assert early_guard < source.index("detect_platform\n", early_guard)
 
     recovered_guard = source.index("if existing_install_detected; then", early_guard + 1)
@@ -383,11 +372,7 @@ def test_posix_install_attempt_marker_is_durable_private_and_recoverable(
     functions = source[start:end]
 
     install_custody = tmp_path / "home/.defenseclaw-install-custody"
-    state_custody = (
-        tmp_path / "state/.defenseclaw-install-custody"
-        if split_roots
-        else install_custody
-    )
+    state_custody = tmp_path / "state/.defenseclaw-install-custody" if split_roots else install_custody
     for custody in {install_custody, state_custody}:
         custody.parent.mkdir(parents=True, mode=0o700)
         prepared = subprocess.run(
@@ -451,9 +436,7 @@ fi
         assert stat.S_IMODE(custody.stat().st_mode) == 0o700
         assert stat.S_IMODE(marker.stat().st_mode) == 0o600
         assert marker.stat().st_nlink == 1
-        assert marker.read_text(encoding="ascii") == (
-            "DefenseClaw authenticated fresh install in progress v1\n"
-        )
+        assert marker.read_text(encoding="ascii") == ("DefenseClaw authenticated fresh install in progress v1\n")
 
     environment["ACTION"] = "complete"
     recovered = subprocess.run(
@@ -479,11 +462,7 @@ fi
     assert all(custody.is_dir() for custody in roots)
     expected = b"DefenseClaw authenticated fresh install in progress v1\n"
     for custody in roots:
-        retired = [
-            path
-            for path in custody.glob("retired-*")
-            if path.is_file() and path.read_bytes() == expected
-        ]
+        retired = [path for path in custody.glob("retired-*") if path.is_file() and path.read_bytes() == expected]
         assert len(retired) == 1
 
 
@@ -1393,11 +1372,7 @@ def test_source_install_preflight_refuses_release_and_other_checkout_but_allows_
     make = shutil.which("make")
     if make is None:
         pytest.skip("make is unavailable")
-    tool_dirs = {
-        str(Path(tool).parent)
-        for name in ("go", "python3")
-        if (tool := shutil.which(name)) is not None
-    }
+    tool_dirs = {str(Path(tool).parent) for name in ("go", "python3") if (tool := shutil.which(name)) is not None}
     test_path = os.pathsep.join(sorted(tool_dirs) + ["/usr/bin", "/bin"])
 
     def run(
@@ -1735,6 +1710,11 @@ def test_failed_gateway_install_does_not_claim_source_ownership(tmp_path: Path) 
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
     _write_executable(fake_bin / "uv", "#!/bin/sh\nexit 0\n")
+    recursive_make = fake_bin / "recursive-make"
+    _write_executable(
+        recursive_make,
+        '#!/bin/sh\ncase " $* " in\n  *" pycli "*) exit 0 ;;\n  *" gateway "*) exit 42 ;;\n  *) exit 43 ;;\nesac\n',
+    )
     _write_executable(
         fake_bin / "go",
         "#!/bin/sh\n"
@@ -1765,6 +1745,7 @@ def test_failed_gateway_install_does_not_claim_source_ownership(tmp_path: Path) 
             "CONNECTOR=none",
             "GATEWAY=missing-source-gateway",
             f"INSTALL_DIR={install_dir}",
+            f"MAKE={recursive_make}",
         ],
         cwd=ROOT,
         env=environment,
@@ -1788,7 +1769,10 @@ def test_source_install_docs_are_developer_only_and_point_existing_hosts_to_reso
         assert "not an alternate upgrade mechanism" in normalized or "not an upgrade path" in normalized
         assert "release-owned" in text
         assert "`scripts/upgrade.sh`" in text
-        assert "`scripts/upgrade.ps1`" in text
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "`scripts/upgrade.ps1`" in readme
+    install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
+    assert "does not claim an upgrade" in install
 
 
 def test_public_operator_docs_never_advertise_direct_defenseclaw_package_install() -> None:
@@ -1825,24 +1809,24 @@ def test_quickstart_docs_do_not_pipe_main_installer() -> None:
             assert expected in text, f"{rel} is missing install snippet line: {expected}"
 
 
-def test_release_docs_dispatch_protected_workflow_and_never_precreate_tag() -> None:
+def test_release_docs_use_one_dispatch_and_never_precreate_tag() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
 
     for text in (makefile, install):
         assert "gh workflow run release.yaml --ref main" in text
-        assert "-f operation=certify" in text
-        assert "-f operation=release" in text
+        assert "-f version=" in text
         assert "-f immutable_releases_confirmed=true" in text
+        assert "-f operation=certify" not in text
+        assert "-f operation=release" not in text
         assert "git tag 0.4.0" not in text
         assert "git push origin" not in text
     assert "Do not create or push the tag yourself" in install
-    assert "creates the remote tag and GitHub release from those same bytes" in " ".join(
-        install.split()
-    )
-    assert "A missing or rejected receipt stops before candidate construction" in " ".join(
-        install.split()
-    )
+    normalized = " ".join(install.split())
+    assert "One dispatch from a reviewed `main` commit" in normalized
+    assert "tests those exact candidate bytes, and publishes them" in normalized
+    assert "A merge to `main` is the review-and-CI boundary" in normalized
+    assert "certification receipt" not in normalized
 
 
 def test_upgrade_docs_fail_closed_for_unsupported_sources_without_inferred_hops() -> None:
@@ -1853,10 +1837,10 @@ def test_upgrade_docs_fail_closed_for_unsupported_sources_without_inferred_hops(
     for text in (install, cli, guardrail):
         assert "remain on the current version" in text.lower()
         assert "contact support" in text.lower()
-    assert "0.7.0" in install
-    assert "0.2.x" in install
-    assert "0.3.x" in install
-    assert "no supported Windows source version" in install
+    assert "newest authenticated `0.7.x`, `0.6.x`, and `0.5.x`" in install
+    assert "Sources outside the signed published-baseline policy" in install
+    assert "first native Windows release" in install
+    assert "does not claim an upgrade" in install
     assert "no Windows hard-cut path is published" in cli
     assert "Explicitly upgrade to `0.8.4`" not in cli
     assert "reach tested baseline `0.4.0`" not in cli
@@ -1873,8 +1857,8 @@ def test_upgrade_docs_use_resolver_only_crash_recovery_without_manual_rollback()
     assert "Re-run that same resolver in latest mode, without a version override" in section
     assert "do not manually copy a backup over live state" in section
     assert "./scripts/upgrade.sh --yes" in section
-    assert "signed PowerShell resolver was a preflight" in section
-    assert "Release `0.8.6` publishes native Setup" in section
+    assert "first native Windows release is qualified as" in section
+    assert "does not claim an upgrade" in section
     assert "upgrade.sh --version" not in section
     assert "VERSION=0.3.0" not in section
     assert "curl -sSfL" not in section
@@ -1925,9 +1909,7 @@ def test_public_docs_never_direct_pre_bridge_clients_to_their_immutable_cli() ->
 def test_hard_cut_docs_require_target_resolver_for_frozen_controllers() -> None:
     cli = (ROOT / "docs/CLI.md").read_text(encoding="utf-8")
     install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
-    site = (ROOT / "docs-site/content/docs/get-started/upgrade.mdx").read_text(
-        encoding="utf-8"
-    )
+    site = (ROOT / "docs-site/content/docs/get-started/upgrade.mdx").read_text(encoding="utf-8")
     guardrail = (ROOT / "docs/GUARDRAIL.md").read_text(encoding="utf-8")
     rendered = "\n".join((cli, install, site, guardrail))
 
@@ -1937,8 +1919,9 @@ def test_hard_cut_docs_require_target_resolver_for_frozen_controllers() -> None:
     assert "platform_tested_source_versions.windows: []" in site
     assert "bash defenseclaw-upgrade.sh --yes" in install
     assert "bash defenseclaw-upgrade.sh --yes" in site
-    assert "PowerShell resolver" in install and "refusal" in install
     assert "PowerShell resolver" in site and "refusal" in site
+    assert "first native Windows release" in install
+    assert "does not claim an upgrade" in install
     assert "without `--version`" in cli
     assert "Do not add `--version` to the resolver command" in install
     assert "without a target version" in site
@@ -1958,16 +1941,14 @@ def test_windows_bootstrap_binds_native_setup_to_authenticated_signed_outer_byte
     assert "$setupSha = Get-AuthenticatedChecksum" in installer
     assert "-ChecksumsContent $ChecksumsContent -FileName $SetupAsset" in installer
     assert "Assert-Sha256 -Path $setup -Expected $setupSha -Label $SetupAsset" in installer
-    assert "Authenticated Setup provenance does not match the exact signed checksum" in installer
+    assert "Authenticated Setup provenance does not match the exact authenticated checksum" in installer
     assert "Assert-SetupAuthenticode -Path $setup" in installer
     assert "function New-PrivateStageRoot" in installer
     assert "Set-PrivateDirectoryProtection -Path $root" in installer
     assert "[IO.FileMode]::CreateNew" in installer
     assert "function Remove-PrivateStageRoot" in installer
 
-    native_setup = installer[
-        installer.index("function Invoke-NativeSetup {") : installer.index("function Main {")
-    ]
+    native_setup = installer[installer.index("function Invoke-NativeSetup {") : installer.index("function Main {")]
     checksum = native_setup.index("Assert-Sha256")
     authenticode = native_setup.index("Assert-SetupAuthenticode")
     execute = native_setup.index("Invoke-BoundedNativeProcess")
@@ -2003,9 +1984,7 @@ def test_install_docs_track_current_release() -> None:
             assert expected in text, f"{rel} is missing current install example: {expected}"
             for stale in STALE_RELEASES:
                 stale_example = expected.replace(CURRENT_RELEASE, stale)
-                assert stale_example not in text, (
-                    f"{rel} still contains stale install example: {stale_example}"
-                )
+                assert stale_example not in text, f"{rel} still contains stale install example: {stale_example}"
 
 
 def test_current_observability_docs_do_not_advertise_retired_redaction_controls() -> None:

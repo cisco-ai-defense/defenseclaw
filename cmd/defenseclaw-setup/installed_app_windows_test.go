@@ -160,6 +160,62 @@ func TestInstalledAppLegacyStateProofAllowsOneTimeOwnerMigration(t *testing.T) {
 	}
 }
 
+func TestInstalledAppUnsignedDisplayNamesKeepLegacyOwnershipProofExact(t *testing.T) {
+	installRoot := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw`
+	maintenancePath := `C:\Users\runneradmin\AppData\Local\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe`
+	state := &installState{
+		Version:               "1.2.3",
+		InstallRoot:           installRoot,
+		MaintenancePath:       maintenancePath,
+		UnsignedLocalArtifact: true,
+	}
+
+	values := newInstalledAppValues(
+		maintenancePath,
+		installRoot,
+		state.Version,
+		"0123456789abcdef0123456789abcdef",
+		true,
+		1,
+	)
+	if got, want := values.strings["DisplayName"], productName+unsignedInstalledAppDisplaySuffix; got != want {
+		t.Fatalf("new unsigned DisplayName = %q, want %q", got, want)
+	}
+
+	registryPath := newInstalledAppTestRegistry(t)
+	writeLegacyInstalledAppTestKey(t, registryPath, state)
+	key, err := registry.OpenKey(
+		registry.CURRENT_USER,
+		registryPath+`\`+testInstalledAppKey,
+		registry.QUERY_VALUE|registry.SET_VALUE,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches, err := legacyInstalledAppRegistrationMatchesKey(key, installRoot, state)
+	if err != nil || !matches {
+		_ = key.Close()
+		t.Fatalf("historical unsigned DisplayName was not recognized: matches=%t err=%v", matches, err)
+	}
+	if err := key.SetStringValue(
+		"DisplayName",
+		productName+unsignedInstalledAppDisplaySuffix,
+	); err != nil {
+		_ = key.Close()
+		t.Fatal(err)
+	}
+	matches, err = legacyInstalledAppRegistrationMatchesKey(key, installRoot, state)
+	if closeErr := key.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matches {
+		t.Fatal("current unsigned DisplayName widened the no-owner legacy migration proof")
+	}
+}
+
 func TestInstalledAppOwnerMarkerMustMatchDurablePreviousState(t *testing.T) {
 	registryPath := newInstalledAppTestRegistry(t)
 	installRoot := `C:\Users\runneradmin\AppData\Local\Programs\DefenseClaw`
@@ -791,7 +847,7 @@ func writeLegacyInstalledAppTestKey(t *testing.T, registryPath string, state *in
 	defer key.Close()
 	displayName := productName
 	if state.UnsignedLocalArtifact {
-		displayName += " (Unsigned Local Test Build)"
+		displayName += legacyUnsignedInstalledAppDisplaySuffix
 	}
 	values := map[string]string{
 		"DisplayName":          displayName,

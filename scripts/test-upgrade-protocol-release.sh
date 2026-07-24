@@ -60,6 +60,13 @@ parse_protocol_args() {
 protocol_cleanup() {
     local status=$?
     local pid
+    # The protocol harness replaces the base smoke harness's EXIT trap below.
+    # Preserve its most important guarantee: a source/target gateway that was
+    # started inside the throwaway HOME must be stopped even when a later
+    # assertion aborts before the success path's explicit stop. Otherwise the
+    # sandbox gateway can keep the real API port (18970) after WORKDIR is
+    # deleted and make the developer's ordinary hooks fail authentication.
+    stop_smoke_gateway
     if [[ "${REFUSAL_SENTINEL_PIDS[0]+set}" == "set" ]]; then
         for pid in "${REFUSAL_SENTINEL_PIDS[@]}"; do
             kill "${pid}" >/dev/null 2>&1 || true
@@ -673,9 +680,11 @@ run_candidate_updater_staged_success() {
     fi
 
     expected_path="${baseline} → ${REQUIRED_BRIDGE_VERSION} bridge → fresh controller → ${TARGET_VERSION}"
-    if [[ "${baseline}" == "${REQUIRED_BRIDGE_VERSION}" ]] \
-        && version_lt "${OBSERVABILITY_V8_HARD_CUT_VERSION}" "${TARGET_VERSION}"; then
-        expected_path="${baseline} → ${OBSERVABILITY_V8_HARD_CUT_VERSION} → ${TARGET_VERSION}"
+    if [[ "${baseline}" == "${REQUIRED_BRIDGE_VERSION}" ]]; then
+        expected_path="Refresh authenticated ${baseline} bridge → fresh controller → ${TARGET_VERSION}"
+        if version_lt "${OBSERVABILITY_V8_HARD_CUT_VERSION}" "${TARGET_VERSION}"; then
+            expected_path="Refresh authenticated ${baseline} bridge → fresh controller → ${OBSERVABILITY_V8_HARD_CUT_VERSION} → ${TARGET_VERSION}"
+        fi
     elif version_lt "${OBSERVABILITY_V8_HARD_CUT_VERSION}" "${TARGET_VERSION}"; then
         expected_path="${baseline} → ${REQUIRED_BRIDGE_VERSION} bridge → fresh controller → ${OBSERVABILITY_V8_HARD_CUT_VERSION} → ${TARGET_VERSION}"
     fi
@@ -688,6 +697,7 @@ run_candidate_updater_staged_success() {
 
 run_candidate_updater_direct_success() {
     local baseline="$1"
+    local expected_path
     log "Proving release-owned resolver upgrade ${baseline} -> ${TARGET_VERSION}"
     FROM_VERSION="${baseline}"
     SMOKE_HOME="${WORKDIR}/release-resolver-${baseline}"
@@ -720,6 +730,14 @@ run_candidate_updater_direct_success() {
         die "release-owned resolver upgrade failed: ${baseline} -> ${TARGET_VERSION}"
     fi
 
+    if [[ -n "${REQUIRED_BRIDGE_VERSION}" && "${baseline}" == "${REQUIRED_BRIDGE_VERSION}" ]]; then
+        expected_path="Refresh authenticated ${baseline} bridge → fresh controller → ${TARGET_VERSION}"
+        if version_lt "${OBSERVABILITY_V8_HARD_CUT_VERSION}" "${TARGET_VERSION}"; then
+            expected_path="Refresh authenticated ${baseline} bridge → fresh controller → ${OBSERVABILITY_V8_HARD_CUT_VERSION} → ${TARGET_VERSION}"
+        fi
+        grep -Fq "${expected_path}" \
+            "${log_file}" || die "release-owned resolver log did not prove the authenticated bridge refresh"
+    fi
     verify_upgrade
     stop_smoke_gateway
     ok "Release-owned resolver upgrade passed: ${baseline} -> ${TARGET_VERSION}"

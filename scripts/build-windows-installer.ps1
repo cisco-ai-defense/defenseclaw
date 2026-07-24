@@ -780,9 +780,9 @@ try {
 $upgradePolicy = Get-Content -LiteralPath $upgradeManifest -Raw -Encoding UTF8 | ConvertFrom-Json
 if ([string]$upgradePolicy.release_version -ne $Version -or
     [string]$upgradePolicy.windows_installer.asset -ne 'DefenseClawSetup-x64.exe' -or
-    $upgradePolicy.windows_installer.authenticode.required -ne $true -or
+    $upgradePolicy.windows_installer.authenticode.required -ne $false -or
     [string]$upgradePolicy.windows_installer.authenticode.publisher -ne 'Cisco Systems, Inc.') {
-    throw 'Upgrade manifest does not match the setup version and pinned Authenticode policy.'
+    throw 'Upgrade manifest does not match the setup version and optional pinned-publisher Authenticode policy.'
 }
 
 $build = Join-Path $state "build"
@@ -1285,4 +1285,4 @@ try {
 $artifact = Get-Item -LiteralPath $setupPath
 Write-Host "Built $($artifact.FullName)"
 Write-Host "Size $($artifact.Length) bytes"
-Write-Host "Signature status: $(if ($signed) { 'Authenticode signed' } else { 'unsigned local/PR artifact' })"
+Write-Host "Signature status: $(if ($signed) { 'Authenticode signed' } else { 'explicitly unverified unsigned artifact' })"

@@ -406,8 +406,8 @@ platforms = policy["platform_published_baselines"]
 if type(platforms) is not dict or set(platforms) != {"windows"}:
     fail("platform_published_baselines must contain exactly the reviewed Windows subset")
 windows_versions = platforms["windows"]
-if type(windows_versions) is not list or not windows_versions:
-    fail("reviewed Windows baseline subset must be a non-empty array")
+if type(windows_versions) is not list:
+    fail("reviewed Windows baseline subset must be an array")
 if (
     any(type(item) is not str or item not in config_versions for item in windows_versions)
     or len(set(windows_versions)) != len(windows_versions)

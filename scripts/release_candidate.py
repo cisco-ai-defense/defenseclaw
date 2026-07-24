@@ -558,14 +558,13 @@ def release_identity_asset_names(version: str) -> tuple[str, ...]:
 
 
 def windows_installer_asset_names(version: str) -> tuple[str, ...]:
-    """Return the exact native-Setup custody set for 0.8.6+."""
+    """Return the exact native-Setup release set for 0.8.6+."""
 
     _validate_version(version)
     if tuple(map(int, version.split("."))) < WINDOWS_SETUP_START_VERSION:
         return ()
     return (
         WINDOWS_SETUP_ASSET,
-        f"{WINDOWS_SETUP_ASSET}.certification.json",
         f"{WINDOWS_SETUP_ASSET}.provenance.json",
         f"{WINDOWS_SETUP_ASSET}.sbom.json",
         f"{WINDOWS_SETUP_ASSET}.sha256",
@@ -765,7 +764,6 @@ def _load_upgrade_baseline_policy(
     windows = platforms["windows"]
     if (
         not isinstance(windows, list)
-        or not windows
         or any(not isinstance(item, str) or not VERSION_RE.fullmatch(item) for item in windows)
         or len(windows) != len(set(windows))
         or windows != sorted(windows, key=lambda item: tuple(map(int, item.split("."))), reverse=True)
@@ -4280,7 +4278,7 @@ def _validate_windows_installer_assets(
         return
     _require_regular_files(directory, names, "Windows installer artifact")
     if exact_file_set and _strict_file_names(directory, "Windows installer artifact") != names:
-        raise CandidateError("Windows installer artifact directory must contain exactly five files")
+        raise CandidateError("Windows installer artifact directory must contain exactly four files")
     setup_path = directory / WINDOWS_SETUP_ASSET
     setup_sha256, embedded_signature_present = _validate_windows_setup_pe(setup_path)
     sidecar = directory / f"{WINDOWS_SETUP_ASSET}.sha256"
@@ -4309,13 +4307,6 @@ def _validate_windows_installer_assets(
         commit=commit,
         setup_sha256=setup_sha256,
         provenance=provenance,
-    )
-    _validate_windows_setup_certification(
-        directory / f"{WINDOWS_SETUP_ASSET}.certification.json",
-        version=version,
-        commit=commit,
-        setup_sha256=setup_sha256,
-        signed=not provenance["unsigned"],
     )
 
 

@@ -61,11 +61,7 @@ def _metadata(tmp_path: Path) -> tuple[dict[str, Any], dict[str, Any], Path, Pat
 def test_pr_selection_covers_five_risk_classes_without_duplicate_execution() -> None:
     selection = release_certification.select_cases("0.8.5", "pr")
 
-    covered = {
-        behavior_class
-        for item in selection["cases"]
-        for behavior_class in item["classes"]
-    }
+    covered = {behavior_class for item in selection["cases"] for behavior_class in item["classes"]}
     assert covered == {
         "latest_stable",
         "previous_stable",
@@ -153,6 +149,26 @@ def test_posix_bridge_policy_never_claims_windows_runtime() -> None:
     assert all(not item.startswith("windows-") or item == "windows-resolver-refusal" for item in full)
     baselines = release_certification.load_baseline_policy()
     assert "0.8.4" not in baselines["platform_published_baselines"]["windows"]
+
+
+def test_first_windows_release_allows_no_historical_windows_baseline(
+    tmp_path: Path,
+) -> None:
+    policy = json.loads((ROOT / "release" / "upgrade-baselines.json").read_text(encoding="utf-8"))
+    policy["platform_published_baselines"]["windows"] = []
+    path = tmp_path / "effective-upgrade-baselines.json"
+    path.write_text(json.dumps(policy), encoding="utf-8")
+
+    loaded = release_certification.load_baseline_policy(path)
+
+    assert loaded["published_baselines"]
+    assert loaded["platform_published_baselines"] == {"windows": []}
+
+    policy["published_baselines"] = []
+    policy["published_baseline_config_versions"] = {}
+    path.write_text(json.dumps(policy), encoding="utf-8")
+    with pytest.raises(release_certification.CertificationError, match="must be non-empty"):
+        release_certification.load_baseline_policy(path)
 
 
 def test_resolve_version_prefers_request_or_next_live_stable_patch() -> None:
@@ -369,11 +385,7 @@ def test_cli_outputs_github_matrices_version_and_policy_identity(tmp_path: Path)
     outputs = dict(line.split("=", 1) for line in selection_output.read_text().splitlines())
     matrix = json.loads(outputs["matrix"])
     assert len(matrix["include"]) == 4
-    assert {
-        behavior_class
-        for item in matrix["include"]
-        for behavior_class in item["classes"]
-    } == {
+    assert {behavior_class for item in matrix["include"] for behavior_class in item["classes"]} == {
         "latest_stable",
         "previous_stable",
         "bridge_boundary",
@@ -482,11 +494,7 @@ def test_changed_paths_keeps_deletions_and_both_rename_sides(
         return subprocess.CompletedProcess(
             argv,
             0,
-            stdout=(
-                "D\0scripts/upgrade.sh\0"
-                "R100\0scripts/install.sh\0docs/old-installer.md\0"
-                "M\0README.md\0"
-            ),
+            stdout=("D\0scripts/upgrade.sh\0R100\0scripts/install.sh\0docs/old-installer.md\0M\0README.md\0"),
             stderr="",
         )
 

@@ -9,7 +9,8 @@ The second invocation must refuse before changing any installed file or attribut
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$ReleaseDir,
-    [Parameter(Mandatory = $true)][string]$TargetVersion
+    [Parameter(Mandatory = $true)][string]$TargetVersion,
+    [switch]$SuccessPathOnly
 )
 
 Set-StrictMode -Version Latest
@@ -225,10 +226,12 @@ try {
 
     $legacyHelp = (& $WindowsPowerShell -NoProfile -NonInteractive -File $Installer -Help 2>&1 |
         Out-String)
-    if ($LASTEXITCODE -ne 0 -or $legacyHelp -notmatch 'DefenseClaw Installer \(Windows\)') {
+    if ($LASTEXITCODE -ne 0 -or $legacyHelp -notmatch 'DefenseClaw native Windows bootstrap') {
         throw "Windows PowerShell 5.1 could not parse/compile install.ps1:`n$legacyHelp"
     }
-    $legacyNativeRoot = Join-Path $TempRoot "windows-powershell-native-private"
+    $userPathBeforeFailure = [Environment]::GetEnvironmentVariable("Path", "User")
+    if (-not $SuccessPathOnly) {
+        $legacyNativeRoot = Join-Path $TempRoot "windows-powershell-native-private"
     [void](New-Item -ItemType Directory -Path $legacyNativeRoot)
     $legacyNative = (& $WindowsPowerShell `
         -NoProfile `
@@ -281,7 +284,6 @@ try {
         throw "Manifest-version refusal left installed state behind"
     }
 
-    $userPathBeforeFailure = [Environment]::GetEnvironmentVariable("Path", "User")
     $postMove = Invoke-FreshInstaller -InjectFailureAfterFreshDirectoryMove
     if ($postMove.ExitCode -eq 0 -or
         $postMove.Output -notmatch 'Injected fresh-install directory failure after publishing' -or
@@ -394,18 +396,29 @@ try {
     [IO.Directory]::Delete((Join-Path $HomeRoot ".local\bin"))
     [IO.Directory]::Delete((Join-Path $HomeRoot ".local"))
     Assert-NoFreshPayload -Phase "concurrent shim collision" -Context $collision.Output
+    }
 
-    $first = Invoke-FreshInstaller -InjectPolicyCleanupFailure
+    $first = if ($SuccessPathOnly) {
+        Invoke-FreshInstaller
+    } else {
+        Invoke-FreshInstaller -InjectPolicyCleanupFailure
+    }
     $expectedInstallDir = Join-Path $HomeRoot ".local\bin"
     if ($first.ExitCode -ne 0 -or
         $first.Output -notmatch 'DefenseClaw installed successfully' -or
-        $first.Output -notmatch 'Private release-policy cleanup was incomplete' -or
         $first.Output -notmatch 'Persistent User PATH was not modified' -or
         $first.Output -notmatch "Edit environment variables for your account" -or
         -not $first.Output.Contains($expectedInstallDir) -or
         -not $first.Output.Contains("& `"$expectedInstallDir\defenseclaw.cmd`" init") -or
         $first.Output -match 'Added .* to your user PATH') {
-        throw "Fresh Windows install did not survive policy cleanup failure ($($first.ExitCode)):`n$($first.Output)"
+        throw "Fresh Windows install failed ($($first.ExitCode)):`n$($first.Output)"
+    }
+    if ($SuccessPathOnly) {
+        if ($first.Output -match 'Private release-policy cleanup was incomplete') {
+            throw "Fresh Windows success path retained private policy custody:`n$($first.Output)"
+        }
+    } elseif ($first.Output -notmatch 'Private release-policy cleanup was incomplete') {
+        throw "Fresh Windows install did not exercise policy cleanup failure:`n$($first.Output)"
     }
     if ([Environment]::GetEnvironmentVariable("Path", "User") -cne $userPathBeforeFailure) {
         throw "Modern fresh install mutated the persistent user PATH"
@@ -417,7 +430,9 @@ try {
         (Get-FileHash -LiteralPath $cli -Algorithm SHA256).Hash,
         (Get-FileHash -LiteralPath $gateway -Algorithm SHA256).Hash
     )
-    [void](Remove-InjectedPolicyResidue -Output $first.Output)
+    if (-not $SuccessPathOnly) {
+        [void](Remove-InjectedPolicyResidue -Output $first.Output)
+    }
     $installedAfterCleanup = @(
         (Get-FileHash -LiteralPath $cli -Algorithm SHA256).Hash,
         (Get-FileHash -LiteralPath $gateway -Algorithm SHA256).Hash

@@ -337,15 +337,46 @@ installation before dependency or artifact changes.
 ### Cut a GitHub Release
 
 The manually dispatched `Release` GitHub Actions workflow is the only supported
-way to cut a release. Its default `certify` operation validates the requested
-version, builds and signs all artifacts, runs the native upgrade gates, and
-records the exact golden candidate without publishing. After that run succeeds,
-the `release` operation verifies the matching certification receipt before it
-begins the potentially long exact-SHA platform CI wait, then creates the remote
-tag and GitHub release from those same bytes. A missing or rejected receipt
-stops before candidate construction or platform packaging, and before the
-potentially long platform wait. This ordering keeps Release from becoming a
-test bed and keeps Immutable Releases from stranding half-built assets.
+way to cut a release. One dispatch from a reviewed `main` commit validates the
+requested version, builds and signs the Linux, macOS, and Windows artifacts,
+tests those exact candidate bytes, and publishes them. A merge to `main` is the
+review-and-CI boundary.
+
+Before publication, the same run proves:
+
+- `install.sh` installs the exact candidate on Linux and macOS;
+- the latest authenticated older release, the published `0.8.5` and `0.8.4`
+  boundaries, and representative `0.7.x`, `0.6.x`, and `0.5.x` releases
+  upgrade successfully on Linux and macOS;
+- the unified macOS app is Developer ID signed and notarized when all Apple
+  signing credentials are available, or ad-hoc signed and published with
+  explicit `-unverified` names when none are configured;
+- `install.ps1` delegates to the native Windows Setup and installs the exact
+  candidate successfully, whether Authenticode-signed or explicitly
+  unverified and authenticated by the release Sigstore checksums; and
+- the sealed candidate contains the expected Linux, macOS, and Windows
+  binaries.
+
+The first native Windows release is fresh-install-only; the release workflow
+tests installation and exact installed-version verification.
+
+Apple release credentials are an all-or-none group: complete credentials must
+produce notarized assets, no credentials intentionally produce the unverified
+artifacts above, and a partial credential set stops the run.
+Windows Authenticode credentials use the same all-or-none rule: both values
+produce Cisco-signed Setup bytes, neither produces an explicitly unverified
+Setup that remains authenticated by release checksums and provenance, and a
+partial pair stops the run.
+
+Each selected pre-`0.8.4` POSIX source must visibly traverse the authenticated
+published `0.8.4` bridge and its fresh-controller handoff into the `0.8.5+`
+updater before reaching the target. The release gate verifies both historical
+and bridge rollback snapshots, final version-bound health, and the exact staged
+path; it does not allow a seeded fixture to bypass either hop.
+
+The selected commit remains valid if a later change merges to `main` while the
+release is running; that ordinary repository activity does not invalidate
+already-built and tested candidate bytes.
 
 The workflow input is the published-version authority. It stamps the requested
 version into its isolated build checkout before producing the CLI, gateway,
@@ -361,21 +392,15 @@ checksummed release assets still carry the requested version everywhere.
 Preferred — from the Actions UI:
 
 ```
-Actions -> Release -> Run workflow -> operation: certify -> version: 0.8.7
-# Wait for the certification run to succeed.
-Actions -> Release -> Run workflow -> operation: release -> version: 0.8.7
+Actions -> Release -> Run workflow -> version: 0.8.7
   -> immutable_releases_confirmed: true
 ```
 
-Or dispatch both operations with GitHub CLI:
+Or dispatch it with GitHub CLI:
 
 ```bash
 gh workflow run release.yaml --ref main \
-  -f operation=certify -f version=0.8.7
-
-# Wait for certification to succeed, then promote the exact receipt.
-gh workflow run release.yaml --ref main \
-  -f operation=release -f version=0.8.7 \
+  -f version=0.8.7 \
   -f immutable_releases_confirmed=true
 ```
 
@@ -416,12 +441,8 @@ confirmations. The macOS/Linux release scripts are fresh-install-only. If the
 CLI, gateway, or managed virtual environment already exists, they exit before
 platform/dependency setup or artifact replacement. Use the authenticated
 current release-owned `scripts/upgrade.sh` resolver for an existing POSIX
-pre-bridge host. For the historical `0.8.5` hard cut, the signed
-`scripts/upgrade.ps1` surface was refusal-only because that release published no
-Windows runtime. Release `0.8.6` publishes the signed native Setup described
-below, but `0.8.5` is not a Windows upgrade baseline. A `0.8.3`-or-older
-built-in `defenseclaw upgrade` safely refuses a hard-cut target but cannot
-perform the required two-process bridge handoff retroactively.
+installation. Windows uses the authenticated native Setup described below for
+a fresh installation; no upgrade from a pre-native Windows release is claimed.
 
 Authenticated POSIX installs keep a private, mode-0700 same-filesystem custody
 directory for inactive rollback objects. A durable mode-0600 in-progress marker
@@ -470,12 +491,12 @@ installer prompts which connector to use. The picked connector is
 recorded at `~/.defenseclaw/picked_connector` so the CLI's `defenseclaw
 setup` defaults to it on the next invocation.
 
-### Native Windows Setup (0.8.6)
+### Native Windows Setup
 
-Release `0.8.6` publishes the signed `DefenseClawSetup-x64.exe` for native x64
-Windows. Download the Setup artifact from the `0.8.6` GitHub release, then
-double-click it for the graphical wizard or run it quietly from the signed-in,
-non-elevated user's interactive desktop session:
+Native Windows releases publish a signed `DefenseClawSetup-x64.exe` for x64
+Windows. Download Setup from the GitHub release, then double-click it for the
+graphical wizard or run it quietly from the signed-in, non-elevated user's
+interactive desktop session:
 
 ```powershell
 .\DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1
@@ -494,11 +515,9 @@ stopped CLI-only install. See the complete
 [native Windows guide](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/)
 for lifecycle, support, security, and troubleshooting boundaries.
 
-Release `0.8.5` was POSIX-only and published no native Setup, gateway, or
-rollback artifact. It therefore remains outside the Windows upgrade-baseline
-matrix. The `0.8.6` Setup qualifies fresh install, repair, same-version
-servicing, and uninstall; it does not claim an in-place Windows upgrade from
-`0.8.5`.
+The first native Windows release gate qualifies fresh installation and exact
+installed-version verification. It makes no in-place upgrade claim from older
+POSIX-only releases.
 
 ---
 
@@ -793,18 +812,16 @@ running `defenseclaw doctor` for the full report.
 
 ### Unsupported historical sources
 
-Automatic upgrades are supported only from versions named in the candidate's
-published-baseline matrix. Sources outside it—including assetless `0.7.0`,
-pre-upgrader `0.2.x`, and historical `0.3.x` releases—have no tested in-place
-path. The resolver fails closed before stopping services and prints the exact
-tested source versions.
+Each release proves upgrades from the latest authenticated older release, the
+published `0.8.5` hard-cut boundary, the published `0.8.4` bridge boundary, and
+the newest authenticated `0.7.x`, `0.6.x`, and `0.5.x` releases on both Linux
+and macOS. Sources outside the signed published-baseline policy have no
+supported in-place path. The resolver fails closed before stopping services
+and prints the allowed source versions.
 
-Support is platform-specific. POSIX release gates cover the reviewed global
-matrix through `0.4.0`. Release `0.8.4` published no Windows gateway or rollback
-binary, so the `0.8.5` hard cut had no supported Windows source version; its
-PowerShell resolver failed closed before stopping services. The signed native
-Setup published in `0.8.6` does not retroactively make `0.8.5` a Windows upgrade
-baseline. Global POSIX coverage must not be treated as a Windows upgrade claim.
+Support is platform-specific. The first native Windows release is qualified as
+a fresh install and does not claim an upgrade from an earlier POSIX-only
+release.
 
 If the installed version is not in that list, remain on the current version and
 contact support for a source-specific, state-aware recovery plan. Do not infer
@@ -842,11 +859,8 @@ of whether Cosign is already installed.
 
 The supported staged path is the authenticated current-release
 `defenseclaw-upgrade.sh` asset in latest mode (or the equivalent
-`scripts/upgrade.sh` from a trusted current-release checkout). For the
-historical `0.8.5` hard cut, the signed PowerShell resolver was a preflight
-refusal surface only. Release `0.8.6` publishes native Setup for fresh install
-and same-version servicing, without treating `0.8.5` as a Windows upgrade
-source. An already-published `0.8.3`-or-older
+`scripts/upgrade.sh` from a trusted current-release checkout). An
+already-published `0.8.3`-or-older
 `defenseclaw upgrade` command cannot gain the new two-hop orchestration after
 installation, so its signed protocol check deliberately refuses the hard cut
 before stopping services. Some frozen versions then print an obsolete raw
@@ -948,10 +962,10 @@ manager, and do not copy the wheel or gateway archive over an existing
 installation. Those operations cannot provide bridge selection, durable
 rollback, or version-bound health verification. The local shell and legacy
 PowerShell script installers are fresh-install-only and refuse existing managed
-state before dependency setup or artifact replacement. Native Windows `0.8.6`
-Setup separately supports repair and same-version servicing. Every supported
-existing POSIX host, including one already on `0.8.4`, must use the
-target-release upgrade resolver.
+state before dependency setup or artifact replacement. Native Windows Setup
+separately supports fresh install, repair, same-version servicing, and
+uninstall. Every supported existing POSIX host, including one already on
+`0.8.4`, must use the target-release upgrade resolver.
 
 For protocol-2 releases, the installable bytes are published only inside
 manifest-bound `.dcwheel` and `.dcgateway` protected envelopes. Their payloads
@@ -970,13 +984,8 @@ target release. Follow the complete Sigstore and SHA-256 bootstrap in the
 authenticated checkout of that release. Do not stream an unauthenticated
 network response into a shell.
 
-Windows could not cross the `0.8.5` hard cut because the published `0.8.4`
-bridge had no Windows gateway or rollback binary. Its signed
-`scripts/upgrade.ps1` resolver was retained only to refuse before stopping
-services and explain that no tested path existed. Release `0.8.6` now publishes
-signed native Setup for fresh install, repair, same-version servicing, and
-uninstall, but that does not retroactively make `0.8.5` a Windows upgrade
-baseline.
+The native Windows Setup is a fresh-install path. It is not a bridge for an
+older POSIX-only release.
 
 An explicit `0.8.3 → 0.8.5` request is intentionally rejected before backup,
 service stop, or installed-file mutation. Fresh installers also refuse to

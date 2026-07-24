@@ -236,6 +236,30 @@ def test_macos_release_signer_requirement_pins_production_team_only() -> None:
     assert 'codesign --verify --strict -R "${APP_REQUIREMENT}"' in verify
 
 
+def test_macos_release_signing_credentials_have_exact_optional_tristate() -> None:
+    build = BUILD_MACOS_RELEASE.read_text(encoding="utf-8")
+
+    for name in (
+        "MACOS_DEVELOPER_ID_P12_BASE64",
+        "MACOS_DEVELOPER_ID_P12_PASSWORD",
+        "MACOS_NOTARY_KEY_BASE64",
+        "MACOS_NOTARY_KEY_ID",
+        "MACOS_NOTARY_ISSUER_ID",
+    ):
+        assert f'"${{{name}:-}}"' in build
+    assert "APPLE_CREDENTIAL_COUNT != 0" in build
+    assert "APPLE_CREDENTIAL_COUNT != ${#APPLE_CREDENTIAL_VALUES[@]}" in build
+    assert (
+        "Apple signing/notarization credentials are partially configured; provide all required values or none"
+    ) in build
+    assert 'SIGNING_IDENTITY="-"' in build
+    assert 'VERIFICATION_STATUS="unverified"' in build
+    assert "complete Apple credentials were configured, but signing and notarization did not complete" in build
+    assert "credential-free macOS builds must remain explicitly unverified" in build
+    assert "DefenseClawMac-${VERSION}-macos-arm64-unverified.dmg" in build
+    assert "DefenseClawMac-${VERSION}-macos-arm64-unverified.zip" in build
+
+
 def test_macos_package_ci_runs_for_every_exact_main_sha_with_stable_aggregate() -> None:
     workflow = yaml.load(
         MACOS_CI_WORKFLOW.read_text(encoding="utf-8"),
@@ -246,10 +270,7 @@ def test_macos_package_ci_runs_for_every_exact_main_sha_with_stable_aggregate() 
     assert set(triggers) == {"push", "pull_request", "workflow_dispatch"}
     assert triggers["push"] == {"branches": ["main"]}
     assert workflow["concurrency"] == {
-        "group": (
-            "macos-app-${{ github.event_name }}-"
-            "${{ github.event.pull_request.number || github.sha }}"
-        ),
+        "group": ("macos-app-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}"),
         "cancel-in-progress": "true",
     }
     aggregate = workflow["jobs"]["macos-app-required"]
@@ -276,24 +297,14 @@ def test_macos_ci_gates_release_wrappers_with_system_bash() -> None:
     assert ".github/workflows/pre-release-certification.yml" in watched_paths
 
     steps = workflow["jobs"]["build-and-test"]["steps"]
-    gate = next(
-        step
-        for step in steps
-        if step.get("name") == "Exercise release wrappers with system Bash"
-    )
+    gate = next(step for step in steps if step.get("name") == "Exercise release wrappers with system Bash")
     assert gate["env"] == {"DEFENSECLAW_TEST_BASH": "/bin/bash"}
     command = gate["run"]
     assert "/bin/bash --version" in command
     assert "uv run --frozen python -m pytest -q" in command
     assert "cli/tests/test_release_workflow_staged.py" in command
-    assert (
-        "certification_upgrade_wrapper_is_nounset_safe_with_optional_arguments"
-        in command
-    )
-    assert (
-        "protocol_argument_parser_accepts_no_shared_arguments_under_nounset"
-        in command
-    )
+    assert "certification_upgrade_wrapper_is_nounset_safe_with_optional_arguments" in command
+    assert "protocol_argument_parser_accepts_no_shared_arguments_under_nounset" in command
 
 
 def test_macos_ci_builds_and_verifies_reviewed_runtime_fixture_first() -> None:
@@ -324,14 +335,7 @@ def test_macos_ci_builds_and_verifies_reviewed_runtime_fixture_first() -> None:
     go_cache_cleanup = fixture.index("go clean -cache -modcache")
     uv_cache_cleanup = fixture.index("uv cache clean")
     export_version = fixture.index('echo "MACOS_CI_RELEASE_VERSION=$version"')
-    assert (
-        verify_runtime
-        < extract_gateway
-        < cleanup
-        < go_cache_cleanup
-        < uv_cache_cleanup
-        < export_version
-    )
+    assert verify_runtime < extract_gateway < cleanup < go_cache_cleanup < uv_cache_cleanup < export_version
     for confinement_check in (
         "candidate_root_input.is_symlink() or workdir_input.is_symlink()",
         "candidate_root_input.resolve(strict=True)",
@@ -343,9 +347,7 @@ def test_macos_ci_builds_and_verifies_reviewed_runtime_fixture_first() -> None:
     steps = yaml.safe_load(workflow)["jobs"]["build-and-test"]["steps"]
     setup_go = next(step for step in steps if str(step.get("uses", "")).startswith("actions/setup-go@"))
     setup_uv = next(step for step in steps if str(step.get("uses", "")).startswith("astral-sh/setup-uv@"))
-    fixture_step = next(
-        step for step in steps if step.get("name") == "Prepare reviewed runtime candidate fixture"
-    )
+    fixture_step = next(step for step in steps if step.get("name") == "Prepare reviewed runtime candidate fixture")
     assert setup_go["with"]["cache"] is False
     assert setup_uv["with"]["enable-cache"] is False
     assert fixture_step["env"] == {
@@ -386,7 +388,7 @@ def test_macos_release_reclaims_build_intermediates_and_avoids_dmg_app_copy() ->
     staging_link = build.index('ln -s /Applications "${UNIFIED_STAGE}/Applications"', dmg)
     source_size = build.index('DMG_SOURCE_KIB="$(du -sk "${UNIFIED_STAGE}"', staging_link)
     padded_size = build.index("DMG_SIZE_KIB=$((DMG_SOURCE_KIB + DMG_SOURCE_KIB / 5 + 65536))", source_size)
-    image_create = build.index('hdiutil create', staging_link)
+    image_create = build.index("hdiutil create", staging_link)
     unified_source = build.index('-srcfolder "${UNIFIED_STAGE}"', image_create)
     explicit_size = build.index('-size "${DMG_SIZE_KIB}k"', unified_source)
 
@@ -402,7 +404,7 @@ def test_macos_release_reclaims_build_intermediates_and_avoids_dmg_app_copy() ->
         < unified_source
         < explicit_size
     )
-    assert 'DMG_STAGE=' not in build
+    assert "DMG_STAGE=" not in build
     assert 'ditto "${APP}" "${DMG_STAGE}/DefenseClawMac.app"' not in build
 
 
@@ -480,9 +482,7 @@ def test_mac_app_resolver_command_is_raw_canonical_semver_gated_and_bash_syntax_
     assert "printf '%s\\n' \"$resolver\" | sha" in command
     assert "bash -n <(printf '%s\\n' \"$resolver\")" in command
     assert "bash <(printf '%s\\n' \"$resolver\") --yes" in command
-    assert command.index("unset VERSION") < command.index(
-        "bash <(printf '%s\\n' \"$resolver\") --yes"
-    )
+    assert command.index("unset VERSION") < command.index("bash <(printf '%s\\n' \"$resolver\") --yes")
     result = subprocess.run(
         ["/bin/bash", "-n"],
         input=command,

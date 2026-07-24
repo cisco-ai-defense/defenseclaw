@@ -239,8 +239,8 @@ def load_baseline_policy(path: Path = DEFAULT_BASELINES) -> dict[str, Any]:
     if not isinstance(platforms, dict) or set(platforms) != {"windows"}:
         raise CertificationError("platform baselines must contain exactly the Windows exception")
     windows = platforms["windows"]
-    if not isinstance(windows, list) or not windows or any(item not in versions for item in windows):
-        raise CertificationError("Windows baselines must be a non-empty published subset")
+    if not isinstance(windows, list) or any(item not in versions for item in windows):
+        raise CertificationError("Windows baselines must be a published subset")
     if "0.8.4" in windows:
         raise CertificationError("the immutable POSIX-only 0.8.4 bridge cannot claim Windows")
     return value
