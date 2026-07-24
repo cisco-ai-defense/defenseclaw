@@ -537,7 +537,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// class; both maps are rebuilt from the run's WatchExclusiveFiles
 	// / WatchSharedFiles after each reconcile.
 	exclusiveOwned := map[string]struct{}{} // DC-only writers — any event triggers
-	sharedOwned := map[string]struct{}{}    // agent + DC writers — only Remove/Rename triggers
+	sharedOwned := map[string]struct{}{}    // agent + DC writers — Create/Remove/Rename trigger
 	// Post-reconcile guards against the self-trigger loop. Every
 	// reconcile writes into watched dirs (chmod on hook configs and
 	// hook scripts inside hardenInstallFootprint, plus writing
@@ -679,10 +679,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			//   * SharedWriter (the native agent config —
 			//     ~/.codex/config.toml, ~/.claude/settings.json,
 			//     ~/.cursor/hooks.json): the agent itself constantly
-			//     rewrites these during normal use. Only Remove /
-			//     Rename is a real tamper signal; Write and Chmod are
-			//     the agent doing its own thing and the 5-min backstop
-			//     handles any in-place stripping.
+			//     rewrites these during normal use. Create, Remove,
+			//     and Rename are real tamper signals; Write and Chmod
+			//     are the agent doing its own thing
+			//     and the 5-min backstop handles any in-place stripping.
 			//
 			// Events on unowned paths (agent session state, sqlite
 			// WAL churn, cache writes, workspace snapshots) are
@@ -692,22 +692,8 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			// Empty maps means we haven't run a reconcile yet (only
 			// possible pre-startup); fall through so the startup
 			// reconcile flow is unaffected.
-			if len(exclusiveOwned) > 0 || len(sharedOwned) > 0 {
-				cleaned := filepath.Clean(event.Name)
-				_, isExclusive := exclusiveOwned[cleaned]
-				_, isShared := sharedOwned[cleaned]
-				if !isExclusive && !isShared {
-					continue
-				}
-				if isShared && !isExclusive {
-					// Shared-writer file: skip Write and Chmod events
-					// entirely — the agent is updating its own
-					// unrelated state. Any Remove/Rename falls
-					// through to the settle/reconcile path below.
-					if event.Op&(fsnotify.Remove|fsnotify.Rename) == 0 {
-						continue
-					}
-				}
+			if !enterpriseHookWatchOwnedEventActionable(event, exclusiveOwned, sharedOwned) {
+				continue
 			}
 			// Drop Write/Chmod events observed inside the
 			// post-reconcile settle window: they are almost certainly
@@ -829,6 +815,27 @@ func enterpriseHookWatchEventRelevant(event fsnotify.Event) bool {
 		return false
 	}
 	return !strings.HasSuffix(filepath.Base(event.Name), ".lock")
+}
+
+// enterpriseHookWatchOwnedEventActionable applies the expected-writer
+// policy after the broad fsnotify relevance check. Exclusive-writer
+// files react to every relevant event. Shared-writer files retain
+// suppression for ordinary agent Write/Chmod noise, while Create,
+// Remove, and Rename remain actionable so atomic replacement events
+// reach the settle classifier. Empty ownership maps preserve the
+// pre-startup fallback.
+func enterpriseHookWatchOwnedEventActionable(event fsnotify.Event, exclusiveOwned, sharedOwned map[string]struct{}) bool {
+	if len(exclusiveOwned) == 0 && len(sharedOwned) == 0 {
+		return true
+	}
+	cleaned := filepath.Clean(event.Name)
+	if _, ok := exclusiveOwned[cleaned]; ok {
+		return true
+	}
+	if _, ok := sharedOwned[cleaned]; !ok {
+		return false
+	}
+	return event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0
 }
 
 func syncEnterpriseHookWatchDirs(cmd *cobra.Command, fsw *fsnotify.Watcher, watched map[string]struct{}, dirs []string) {

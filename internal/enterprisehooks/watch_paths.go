@@ -165,9 +165,10 @@ func WatchDirs(opts InstallOptions) ([]string, error) {
 //	  session prefs), ~/.claude/settings.json (Claude Code writes
 //	  project-scoped settings), ~/.cursor/hooks.json (Cursor rewrites
 //	  for extensions). Write and Chmod on these are almost always
-//	  the agent updating its own state, NOT a tamper — so we only
-//	  react to Remove and Rename, and let the 5-min backstop
-//	  reconcile catch any pathological in-place rewrite.
+//	  the agent updating its own state, NOT a tamper — so we react
+//	  only to Create, Remove, and Rename, and let the 5-min backstop
+//	  reconcile catch any pathological in-place rewrite. Create is
+//	  included because Linux reports rename-into-place as Create.
 //
 // The rationale: without this split, every session Codex opens will
 // touch config.toml, fire an fsnotify Write, pass the ownership
@@ -176,7 +177,7 @@ func WatchDirs(opts InstallOptions) ([]string, error) {
 // each time but still produces log spam.
 type WatchOwnership struct {
 	ExclusiveWriter []string // DC-only writers; react to any event
-	SharedWriter    []string // agent + DC writers; react only to Remove/Rename
+	SharedWriter    []string // agent + DC writers; react only to Create/Remove/Rename
 }
 
 // WatchOwnedFiles returns the specific files (NOT parent directories)

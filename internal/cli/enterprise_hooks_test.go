@@ -247,6 +247,85 @@ func TestEnterpriseHookWatchEventRelevantIgnoresLockHousekeeping(t *testing.T) {
 	}
 }
 
+func TestEnterpriseHookWatchOwnedEventActionable(t *testing.T) {
+	const (
+		exclusivePath = "/home/alice/.defenseclaw/hooks/codex-hook.sh"
+		sharedPath    = "/home/alice/.codex/config.toml"
+		unownedPath   = "/home/alice/.codex/history.jsonl"
+	)
+	exclusiveOwned := map[string]struct{}{exclusivePath: {}}
+	sharedOwned := map[string]struct{}{sharedPath: {}}
+
+	for _, tc := range []struct {
+		name      string
+		event     fsnotify.Event
+		exclusive map[string]struct{}
+		shared    map[string]struct{}
+		want      bool
+	}{
+		{
+			name:      "exclusive write remains actionable",
+			event:     fsnotify.Event{Name: exclusivePath, Op: fsnotify.Write},
+			exclusive: exclusiveOwned,
+			shared:    sharedOwned,
+			want:      true,
+		},
+		{
+			name:      "shared create from rename into place is actionable",
+			event:     fsnotify.Event{Name: sharedPath, Op: fsnotify.Create},
+			exclusive: exclusiveOwned,
+			shared:    sharedOwned,
+			want:      true,
+		},
+		{
+			name:      "shared remove remains actionable",
+			event:     fsnotify.Event{Name: sharedPath, Op: fsnotify.Remove},
+			exclusive: exclusiveOwned,
+			shared:    sharedOwned,
+			want:      true,
+		},
+		{
+			name:      "shared rename remains actionable",
+			event:     fsnotify.Event{Name: sharedPath, Op: fsnotify.Rename},
+			exclusive: exclusiveOwned,
+			shared:    sharedOwned,
+			want:      true,
+		},
+		{
+			name:      "shared write self-noise remains suppressed",
+			event:     fsnotify.Event{Name: sharedPath, Op: fsnotify.Write},
+			exclusive: exclusiveOwned,
+			shared:    sharedOwned,
+			want:      false,
+		},
+		{
+			name:      "shared chmod self-noise remains suppressed",
+			event:     fsnotify.Event{Name: sharedPath, Op: fsnotify.Chmod},
+			exclusive: exclusiveOwned,
+			shared:    sharedOwned,
+			want:      false,
+		},
+		{
+			name:      "unowned path remains suppressed",
+			event:     fsnotify.Event{Name: unownedPath, Op: fsnotify.Create},
+			exclusive: exclusiveOwned,
+			shared:    sharedOwned,
+			want:      false,
+		},
+		{
+			name:  "empty ownership maps preserve pre-startup fallback",
+			event: fsnotify.Event{Name: unownedPath, Op: fsnotify.Write},
+			want:  true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := enterpriseHookWatchOwnedEventActionable(tc.event, tc.exclusive, tc.shared); got != tc.want {
+				t.Fatalf("enterpriseHookWatchOwnedEventActionable(%+v) = %v, want %v", tc.event, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEnterpriseHookWatchEventInSettleWindow(t *testing.T) {
 	base := time.Date(2026, 7, 17, 15, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
