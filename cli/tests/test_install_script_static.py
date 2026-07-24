@@ -39,10 +39,7 @@ def test_posix_requires_portable_litellm_and_windows_delegates_to_native_setup()
     assert "It does not install Python, uv, wheels" in install_ps1
     assert '$SetupAsset = "DefenseClawSetup-x64.exe"' in install_ps1
     expected = SpecifierSet(">=1.84.0,<1.92.0")
-    direct = {
-        requirement.name: requirement
-        for requirement in map(Requirement, project["project"]["dependencies"])
-    }
+    direct = {requirement.name: requirement for requirement in map(Requirement, project["project"]["dependencies"])}
     overrides = {
         requirement.name: requirement
         for requirement in map(Requirement, project["tool"]["uv"]["override-dependencies"])
@@ -56,14 +53,15 @@ MAKEFILE = ROOT / "Makefile"
 INSTALL_DOC = ROOT / "docs" / "INSTALL.md"
 
 
-def test_unsigned_local_dist_is_never_advertised_as_schema2_installer_input() -> None:
+def test_local_dist_is_never_advertised_as_authenticated_release_input() -> None:
     posix = INSTALL_SH.read_text(encoding="utf-8")
     windows = INSTALL_PS1.read_text(encoding="utf-8")
     makefile = MAKEFILE.read_text(encoding="utf-8")
     docs = INSTALL_DOC.read_text(encoding="utf-8")
 
     assert "unsigned directory produced by `make dist` is intentionally rejected" in posix
-    assert "Authenticated Setup provenance does not describe a signed release artifact" in windows
+    assert "Authenticated Setup provenance does not declare its signing state" in windows
+    assert "Setup signing state conflicts with authenticated provenance" in windows
     assert "Invoke-StagedChecksumVerification" in windows
     assert "$(DIST_DIR)/ is not authenticated installer input for 0.8.4+" in makefile
     assert "Do not pass the unsigned output of `make dist`" in docs
@@ -75,9 +73,7 @@ def test_existing_install_refusal_names_authenticated_latest_mode_resolver() -> 
     posix = INSTALL_SH.read_text(encoding="utf-8")
     windows = INSTALL_PS1.read_text(encoding="utf-8")
 
-    assert posix.count(
-        "authenticated release-owned upgrade resolver from the target release in latest mode"
-    ) == 2
+    assert posix.count("authenticated release-owned upgrade resolver from the target release in latest mode") == 2
     assert "bash defenseclaw-upgrade.sh --yes" in posix
     assert "Do not pass --version" in posix
     assert "blob/main/docs/CLI.md#upgrade" in posix
@@ -93,12 +89,8 @@ def test_existing_install_refusal_names_authenticated_latest_mode_resolver() -> 
 
 def test_windows_native_workflow_builds_exact_setup_before_lifecycle_acceptance() -> None:
     workflow = WINDOWS_NATIVE_WORKFLOW.read_text(encoding="utf-8")
-    package_match = re.search(
-        r"(?ms)^  package-artifact:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", workflow
-    )
-    acceptance_match = re.search(
-        r"(?ms)^  packaged-acceptance:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", workflow
-    )
+    package_match = re.search(r"(?ms)^  package-artifact:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", workflow)
+    acceptance_match = re.search(r"(?ms)^  packaged-acceptance:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", workflow)
     assert package_match is not None
     assert acceptance_match is not None
     package = package_match.group(0)
@@ -118,10 +110,7 @@ def test_windows_native_workflow_builds_exact_setup_before_lifecycle_acceptance(
 def test_sandbox_installer_fallback_uses_selected_release() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
     assert "raw.githubusercontent.com/${REPO}/main/scripts/install-openshell-sandbox.sh" not in text
-    assert (
-        "raw.githubusercontent.com/${REPO}/${RELEASE_VERSION}/scripts/install-openshell-sandbox.sh"
-        in text
-    )
+    assert "raw.githubusercontent.com/${REPO}/${RELEASE_VERSION}/scripts/install-openshell-sandbox.sh" in text
 
 
 def test_release_installers_track_known_connector_choices() -> None:
@@ -144,17 +133,13 @@ def test_release_installers_track_known_connector_choices() -> None:
     else:
         hook_filter_match = re.search(
             r"\$HookConnectors = \$ConnectorChoices \| Where-Object "
-            r'\{ \$_ -notin @\((.*?)\) \}',
+            r"\{ \$_ -notin @\((.*?)\) \}",
             ps_text,
             re.DOTALL,
         )
         assert hook_filter_match is not None
-        hook_exclusions = tuple(
-            re.findall(r'"([^"]+)"', hook_filter_match.group(1))
-        )
-        hook_choices = tuple(
-            choice for choice in ps_choices if choice not in hook_exclusions
-        )
+        hook_exclusions = tuple(re.findall(r'"([^"]+)"', hook_filter_match.group(1)))
+        hook_choices = tuple(choice for choice in ps_choices if choice not in hook_exclusions)
 
     assert shell_choices == (*CONNECTOR_CHOICES, "none")
 
@@ -165,9 +150,7 @@ def test_release_installers_track_known_connector_choices() -> None:
 
 def test_posix_install_and_upgrade_validate_cli_before_launcher_publication() -> None:
     install_text = INSTALL_SH.read_text(encoding="utf-8")
-    install_cli = install_text.split("install_python_cli()", 1)[1].split(
-        "# ── Install: OpenClaw Plugin", 1
-    )[0]
+    install_cli = install_text.split("install_python_cli()", 1)[1].split("# ── Install: OpenClaw Plugin", 1)[0]
     validation = '"${DEFENSECLAW_VENV}/bin/defenseclaw" --help'
     assert install_cli.index("uv pip install") < install_cli.index(validation)
     assert install_cli.index(validation) < install_cli.index("fresh-symlink")

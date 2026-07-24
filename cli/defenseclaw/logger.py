@@ -25,6 +25,7 @@ handling, local persistence, route-specific redaction, and destination fanout.
 from __future__ import annotations
 
 import os
+import secrets
 from collections.abc import Mapping
 from typing import Any, Protocol
 
@@ -54,13 +55,14 @@ class _GatewayConfigRecorder:
 
     def __init__(self, cfg: Any) -> None:
         self._cfg = cfg
+        self._runtime_token: str | None = None
 
     def emit_cli_observability(self, payload: Mapping[str, Any]) -> None:
         gateway = getattr(self._cfg, "gateway", None)
         if gateway is None:
             raise CanonicalObservabilityUnavailableError("gateway configuration is unavailable")
         token_resolver = getattr(gateway, "resolved_token", None)
-        token = token_resolver() if callable(token_resolver) else ""
+        token = self._runtime_token or (token_resolver() if callable(token_resolver) else "")
         if not token:
             # A first gateway start may create the canonical token after this
             # CLI process loaded config (for example: init --no-start-gateway,
@@ -77,6 +79,32 @@ class _GatewayConfigRecorder:
             raise CanonicalObservabilityUnavailableError(
                 "gateway authentication is unavailable; start or reconfigure the v8 gateway"
             )
+
+        try:
+            self._emit_with_token(payload, gateway, token)
+        except requests.HTTPError as exc:
+            # A gateway restart can create or replace the canonical token after
+            # this process loaded .env.  Existing environment variables are
+            # intentionally not overwritten by the general dotenv loader, so
+            # resolved_token() can still return the old value here.  A 401
+            # proves the rejected request was not admitted and is therefore
+            # the one server response that is safe to retry. Read the current
+            # installation-owned token and retry exactly once; every other
+            # rejection remains fail-closed.
+            if not _is_authentication_rejection(exc):
+                raise
+            refreshed = _refreshed_gateway_token(self._cfg, gateway, token)
+            if not refreshed:
+                raise
+            self._emit_with_token(payload, gateway, refreshed)
+            self._runtime_token = refreshed
+
+    def _emit_with_token(
+        self,
+        payload: Mapping[str, Any],
+        gateway: Any,
+        token: str,
+    ) -> None:
         client = OrchestratorClient(
             host=_gateway_api_host(self._cfg),
             port=int(getattr(gateway, "api_port", 18970)),
@@ -96,6 +124,70 @@ class _GatewayConfigRecorder:
 
     def close(self) -> None:
         return
+
+
+def _is_authentication_rejection(exc: requests.HTTPError) -> bool:
+    response = getattr(exc, "response", None)
+    return response is not None and response.status_code == 401
+
+
+def _refreshed_gateway_token(cfg: Any, gateway: Any, rejected_token: str) -> str:
+    """Return a newly persisted canonical token after a confirmed HTTP 401.
+
+    Custom ``gateway.token_env`` values remain authoritative: silently
+    switching those to the default dotenv key would violate explicit operator
+    intent. The built-in canonical and legacy names may legitimately become
+    stale during first boot or an upgrade handoff, so those can recover from
+    the current installation's private dotenv.
+    """
+
+    token_env = str(getattr(gateway, "token_env", "") or "").strip()
+    if token_env not in {
+        "",
+        "DEFENSECLAW_GATEWAY_TOKEN",
+        "OPENCLAW_GATEWAY_TOKEN",
+    }:
+        return ""
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    refreshed = _gateway_token_from_dotenv(data_dir, token_env=token_env)
+    if not refreshed or secrets.compare_digest(
+        refreshed.encode("utf-8"),
+        rejected_token.encode("utf-8"),
+    ):
+        return ""
+    return refreshed
+
+
+def _gateway_token_from_dotenv(data_dir: str, *, token_env: str) -> str:
+    """Read the selected built-in gateway token from one installation.
+
+    An empty selector follows :meth:`GatewayConfig.resolved_token` precedence:
+    canonical DefenseClaw first, then the legacy OpenClaw name. An explicit
+    built-in selector reads only that key.
+    """
+
+    if not data_dir:
+        return ""
+    candidates = (token_env,) if token_env else ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN")
+    values: dict[str, str] = {}
+    path = os.path.join(data_dir, ".env")
+    try:
+        with open(path, encoding="utf-8") as stream:
+            for raw_line in stream:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                if key not in candidates or key in values:
+                    continue
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                    value = value[1:-1]
+                values[key] = value
+    except (OSError, UnicodeError):
+        return ""
+    return next((values.get(name, "") for name in candidates if values.get(name)), "")
 
 
 class _NoRuntimeRecorder:

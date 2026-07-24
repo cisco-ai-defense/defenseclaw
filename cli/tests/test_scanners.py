@@ -393,9 +393,11 @@ class TestSkillScannerWrapper(unittest.TestCase):
 
     def test_convert_with_findings(self):
         from defenseclaw.config import SkillScannerConfig
+        from defenseclaw.logger import Logger
         from defenseclaw.scanner.skill import SkillScannerWrapper
 
         s = SkillScannerWrapper(SkillScannerConfig())
+        target = r"C:\disposable-codex-home\skills\dc-test-benign"
 
         finding = MagicMock()
         finding.id = "rule-001"
@@ -414,11 +416,28 @@ class TestSkillScannerWrapper(unittest.TestCase):
         sdk_result = MagicMock()
         sdk_result.findings = [finding]
 
-        result = s._convert(sdk_result, "/tmp/skill", 0.5)
+        result = s._convert(sdk_result, target, 0.5)
         self.assertEqual(len(result.findings), 1)
+        self.assertEqual(result.target, target)
         self.assertEqual(result.findings[0].severity, "HIGH")
         self.assertEqual(result.findings[0].location, "main.py:42")
+        self.assertEqual(result.findings[0].scanner, result.scanner)
+        self.assertEqual(result.findings[0].scanner, "skill-scanner")
         self.assertIn("injection", result.findings[0].tags)
+        self.assertIn("analyzer:static", result.findings[0].tags)
+
+        recorder = MagicMock()
+        Logger(recorder).log_scan(result)
+        payload = recorder.emit_cli_observability.call_args.args[0]
+        self.assertEqual(payload["scan"]["target"], target)
+        self.assertEqual(
+            payload["scan"]["findings"][0]["scanner"],
+            payload["scan"]["scanner"],
+        )
+        self.assertIn(
+            "analyzer:static",
+            payload["scan"]["findings"][0]["tags"],
+        )
 
     def test_scan_raises_system_exit_on_import_error(self):
         import builtins

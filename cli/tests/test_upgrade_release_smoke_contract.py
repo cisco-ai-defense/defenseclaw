@@ -214,7 +214,7 @@ def test_source_gateway_canary_waits_for_exact_version_bound_health() -> None:
 def test_audit_event_probe_is_policy_independent_and_satisfies_gateway_contract() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     start = source.index("probe_id = str(uuid.uuid4())")
-    end = source.index("\nlocal = (config.get(\"observability\")", start)
+    end = source.index('\nlocal = (config.get("observability")', start)
     request = source[start:end]
 
     assert '"action": "policy-reload"' in request
@@ -255,15 +255,13 @@ def test_posix_resolver_owns_dynamic_receipt_and_bundle_phases() -> None:
     ]
     backup = source.index('ok "Backup saved to: ${BACKUP_DIR}"')
     receipt = source.index("begin_release_upgrade_receipt\n", backup)
-    stop = source.index('# ── Stop services', receipt)
+    stop = source.index("# ── Stop services", receipt)
     gateway_activation = source.index('mv -f "${BRIDGE_GATEWAY_INSTALL_TEMP}"', stop)
-    target_activation = source.index(
-        'UPGRADE_RECEIPT_FAILURE_CODE="interrupted"', gateway_activation
-    )
+    target_activation = source.index('UPGRADE_RECEIPT_FAILURE_CODE="interrupted"', gateway_activation)
     launcher = source.index('ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw"', target_activation)
     migration = source.index('kwargs = {"upgrade_handles_local_bundle": True}', stop)
     required = source.index('if [[ "${UPGRADE_INCOMPLETE}" -eq 1 ]]', migration)
-    start = source.index('# ── Start services', required)
+    start = source.index("# ── Start services", required)
     health = source.index('if [[ "${HEALTH_OK}" -eq 0 ]]', start)
     suppress_failed_trap = source.index("UPGRADE_RECEIPT_TERMINAL=1", health)
     complete = source.index("finish_release_upgrade_receipt succeeded", suppress_failed_trap)
@@ -282,24 +280,18 @@ def test_posix_resolver_owns_dynamic_receipt_and_bundle_phases() -> None:
         < suppress_failed_trap
         < complete
     )
-    assert receipt_function.index('local receipt_path receipt_name') < receipt_function.index(
+    assert receipt_function.index("local receipt_path receipt_name") < receipt_function.index(
         'UPGRADE_RECEIPT_PATH="${receipt_path}"'
     )
     assert "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}" in receipt_function
     migration_phase = source[stop:required]
     assert "TARGET_PYTHON_STDIN_ARGS=(-)" in migration_phase
     assert "TARGET_PYTHON_STDIN_ARGS=(-I -B -)" in migration_phase
-    assert (
-        '"${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" "${UPGRADE_RECEIPT_PATH}"'
-        in migration_phase
-    )
+    assert '"${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" "${UPGRADE_RECEIPT_PATH}"' in migration_phase
     assert "delegate_prior_upgrade_receipts(Path(receipt_path))" in migration_phase
     assert 'os.environ["MIGRATION_TO_VERSION"]' in migration_phase
     assert "record_upgrade_migrations(" in migration_phase
-    assert (
-        '"${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" "${UPGRADE_MANIFEST_FILE}"'
-        in source[migration:required]
-    )
+    assert '"${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" "${UPGRADE_MANIFEST_FILE}"' in source[migration:required]
     assert '"${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" <<\'PY\'' in source[start:health]
 
     same_version = source.index('same_version_recovery="clean"')
@@ -320,9 +312,9 @@ def test_posix_resolver_owns_dynamic_receipt_and_bundle_phases() -> None:
     assert "MAX_UPGRADE_RECEIPTS" in split_phase
     assert "UPGRADE_RECEIPT_DIRECTORY" in split_phase
     assert "load_upgrade_receipt" in split_phase
-    assert 'receipt.from_version == source_version' in split_phase
-    assert 'receipt.target_version == target_version' in split_phase
-    assert 'receipt.artifacts_verified' in split_phase
+    assert "receipt.from_version == source_version" in split_phase
+    assert "receipt.target_version == target_version" in split_phase
+    assert "receipt.artifacts_verified" in split_phase
     assert 'receipt.migration_status == "pending"' in split_phase
     assert "receipt.migration_count is None" in split_phase
     assert 'receipt.status == "pending" and receipt.failure_code == ""' in split_phase
@@ -992,6 +984,17 @@ def test_baseline_config_policy_fails_closed_and_allows_pre_bridge_topology(
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "7"
 
+    first_windows_release = json.loads(json.dumps(valid))
+    first_windows_release["platform_published_baselines"]["windows"] = []
+    policy.write_text(json.dumps(first_windows_release), encoding="utf-8")
+    completed = _source_script(
+        'UPGRADE_BASELINE_POLICY="$2"; published_baseline_config_version "$3"',
+        str(policy),
+        "0.8.3",
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "7"
+
     invalid_policies = []
     schema_one = dict(valid, schema_version=1)
     invalid_policies.append(schema_one)
@@ -1119,7 +1122,7 @@ def test_native_v8_fixture_is_strict_and_later_migration_preserves_it(
     baseline_python.parent.mkdir(parents=True)
     interpreter = "python" if os.name == "nt" else shlex.quote(sys.executable)
     baseline_python.write_text(
-        f"#!/bin/sh\nexec {interpreter} \"$@\"\n",
+        f'#!/bin/sh\nexec {interpreter} "$@"\n',
         encoding="utf-8",
     )
     baseline_python.chmod(0o700)
@@ -1207,10 +1210,37 @@ def test_v8_verifier_proves_historical_and_bridge_backup_layers() -> None:
         "config.historical.source",
         "phase1-source-gateway",
         "phase two retained no distinct byte-exact config-v7 bridge backup",
-        'receipt_from="${REQUIRED_BRIDGE_VERSION}"',
+        "expected_upgrade_receipt_source",
     ):
         assert contract in text
     assert 'facts.get("from_version") != source' in RECEIPT_CHECK.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("source", "target", "required_bridge", "expected"),
+    [
+        ("0.8.4", "0.8.7", "0.8.4", "0.8.5"),
+        ("0.8.3", "0.8.7", "0.8.4", "0.8.5"),
+        ("0.8.3", "0.8.5", "0.8.4", "0.8.4"),
+        ("0.8.5", "0.8.7", "0.8.4", "0.8.5"),
+        ("0.8.6", "0.8.7", "0.8.4", "0.8.6"),
+    ],
+)
+def test_expected_upgrade_receipt_source_matches_final_transaction(
+    source: str,
+    target: str,
+    required_bridge: str,
+    expected: str,
+) -> None:
+    completed = _source_script(
+        'expected_upgrade_receipt_source "$2" "$3" "$4"',
+        source,
+        target,
+        required_bridge,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.strip() == expected
 
 
 def test_hard_cut_source_tree_ships_the_v8_runtime_and_forward_keyed_migration() -> None:
@@ -1279,12 +1309,31 @@ def test_bridge_harness_keeps_v8_source_contracts_strictly_target_gated() -> Non
     assert 'if [[ "${BASH_SOURCE[0]}" == "$0" ]]' in script
 
 
-def test_historical_release_matrices_do_not_repeat_source_contract_suite() -> None:
+def test_historical_release_matrix_does_not_repeat_source_contract_suite() -> None:
     workflow = PRE_RELEASE_CERTIFICATION.read_text(encoding="utf-8")
-    linux = workflow[workflow.index("  linux-upgrade:") : workflow.index("  macos-upgrade:")]
-    macos = workflow[workflow.index("  macos-upgrade:") : workflow.index("  windows-unpublished-refusal:")]
-    for job in (linux, macos):
-        assert job.count('UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS: "1"') == 1
+    posix = workflow[workflow.index("  posix-upgrade:") : workflow.index("  windows-fresh-install:")]
+    assert posix.count('UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS: "1"') == 1
+    job = yaml.load(workflow, Loader=yaml.BaseLoader)["jobs"]["posix-upgrade"]
+    assert job["strategy"]["matrix"] == {
+        "baseline": "${{ fromJSON(inputs.baselines) }}",
+        "platform": [
+            {
+                "runner": "ubuntu-latest",
+                "name": "linux-amd64",
+                "runner_arch": "X64",
+            },
+            {
+                "runner": "macos-15",
+                "name": "darwin-arm64",
+                "runner_arch": "ARM64",
+            },
+        ],
+    }
+    assert "--success-path-only" in posix
+    assert "baseline_dependencies=published" in posix
+    assert 'if [[ "$BASELINE" == "0.8.4" ]]' in posix
+    assert "baseline_dependencies=target" in posix
+    assert '--baseline-dependencies "$baseline_dependencies"' in posix
 
 
 def test_success_receipt_verifier_uses_canonical_audit_and_queue_acknowledgement() -> None:

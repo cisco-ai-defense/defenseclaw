@@ -198,9 +198,7 @@ def test_release_stamp_applies_dynamic_future_version_to_every_release_surface(
     )
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert set(source_release_identity.checked_in_version_sources(repo).values()) == {
-        "9.8.7"
-    }
+    assert set(source_release_identity.checked_in_version_sources(repo).values()) == {"9.8.7"}
     identity = source_release_identity.validate_source_tree(
         repo,
         expected_release="9.8.7",
@@ -223,9 +221,7 @@ def test_hard_cut_source_cannot_be_restamped_as_the_bridge(tmp_path: Path) -> No
     )
 
     assert completed.returncode != 0
-    assert "release 0.8.4 must use source-install compatibility epoch 1" in (
-        completed.stdout + completed.stderr
-    )
+    assert "release 0.8.4 must use source-install compatibility epoch 1" in (completed.stdout + completed.stderr)
 
 
 @pytest.mark.parametrize(
@@ -270,13 +266,9 @@ def test_release_workflow_stamps_dispatch_version_and_tags_reviewed_commit() -> 
     expected = workflow.index('--expected-release "$RELEASE_TAG"', build_stamp)
     extension_build = workflow.index("run: make extensions", expected)
     restore_generated = workflow.index("git restore --worktree --", extension_build)
-    cleanliness_check = workflow.index(
-        "git status --porcelain --untracked-files=all", restore_generated
-    )
+    cleanliness_check = workflow.index("git status --porcelain --untracked-files=all", restore_generated)
     gateway_build = workflow.index("goreleaser/goreleaser-action@", extension_build)
-    package_stamp = workflow.index(
-        'scripts/stamp-version.sh "$RELEASE_TAG"', build_stamp + 1
-    )
+    package_stamp = workflow.index('scripts/stamp-version.sh "$RELEASE_TAG"', build_stamp + 1)
     publish = workflow.index('gh release create "$RELEASE_TAG"')
 
     assert (
@@ -303,7 +295,7 @@ def test_release_workflow_stamps_dispatch_version_and_tags_reviewed_commit() -> 
     assert '--tag "$RELEASE_TAG"' in proof_command
     assert '--commit "$RELEASE_COMMIT"' in proof_command
     assert "--candidate-root release-candidate" in proof_command
-    assert "--omit-windows-binaries" in proof_command
+    assert "--omit-windows-binaries" not in proof_command
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
@@ -483,9 +475,7 @@ def test_direct_install_ignores_developer_reclaim_environment_switch(
     # environment-variable registry merely because the negative test exercises
     # it. Construct it at runtime so the static inventory continues to report
     # only variables that production code actually supports.
-    unsupported_reclaim_env = "_".join(
-        ("DEFENSECLAW", "SOURCE", "DEV", "RECLAIM")
-    )
+    unsupported_reclaim_env = "_".join(("DEFENSECLAW", "SOURCE", "DEV", "RECLAIM"))
     monkeypatch.setenv(unsupported_reclaim_env, "1")
 
     completed = _preflight(tmp_path, repo, install_dir, "publish-gateway")

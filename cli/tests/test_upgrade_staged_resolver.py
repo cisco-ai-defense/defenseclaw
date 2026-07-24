@@ -598,18 +598,18 @@ def test_manual_hard_cut_artifacts_over_v7_state_refuse_before_release_download(
     assert not curl_log.exists()
 
 
-def test_bridge_source_resolves_direct_hard_cut(resolver_env) -> None:
+def test_bridge_source_refreshes_before_direct_hard_cut(resolver_env) -> None:
     env, mutation_log, curl_log = resolver_env("0.8.4")
 
     result = _run(env, "--version", "0.8.5", "--plan")
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "0.8.4 → 0.8.5" in output
-    assert "bridge → fresh controller" not in output
+    assert "Refresh authenticated 0.8.4 bridge → fresh controller → 0.8.5" in output
     assert not mutation_log.exists()
     downloads = curl_log.read_text(encoding="utf-8")
-    assert "/releases/download/0.8.4/upgrade-manifest.json" not in downloads
+    assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
+    assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
 
 
 @pytest.mark.parametrize("target_version", ("0.8.7", "0.8.8"))
@@ -620,12 +620,12 @@ def test_bridge_source_stages_hard_cut_before_post_cut_target(resolver_env, targ
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert f"0.8.4 → 0.8.5 → {target_version}" in output
+    assert f"Refresh authenticated 0.8.4 bridge → fresh controller → 0.8.5 → {target_version}" in output
     assert not mutation_log.exists()
     downloads = curl_log.read_text(encoding="utf-8")
     assert f"/releases/download/{target_version}/upgrade-manifest.json" in downloads
     assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
-    assert "/releases/download/0.8.4/upgrade-manifest.json" not in downloads
+    assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX release-owned resolver")

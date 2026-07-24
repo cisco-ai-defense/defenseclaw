@@ -90,6 +90,15 @@ readonly COSIGN_BOOTSTRAP_VERSION="2.6.3"
 readonly COSIGN_BOOTSTRAP_MAX_BYTES="209715200"
 readonly UPGRADE_MANIFEST_NAME="upgrade-manifest.json"
 readonly RELEASE_PROVENANCE_NAME="release-provenance.json"
+readonly HISTORICAL_BOOTSTRAP_MCP_SCANNER_CONSTRAINT='cisco-ai-mcp-scanner @ https://files.pythonhosted.org/packages/5d/74/6e72cbd496c0d33dfab1b4aee62792620236e63cccf278a8c896c6feb740/cisco_ai_mcp_scanner-4.7.2-py3-none-any.whl#sha256=6ed0b8ced168886f572aec30a971c7b0e2e1de7eea489d3821627184fd271ac8'
+# MCP Scanner 4.7.2 declares this exact LiteLLM version. Keep the historical
+# bootstrap graph metadata-consistent: uv overrides can force a different
+# version to resolve, but the resulting environment then fails `uv pip check`.
+readonly HISTORICAL_BOOTSTRAP_LITELLM_CONSTRAINT='litellm @ https://files.pythonhosted.org/packages/75/80/caeb4cdcad96451ba83ad3ba2a9da08b1e1a915fa845c489f56ea044488b/litellm-1.83.7-py3-none-any.whl#sha256=5784a1d9a9a4a8acd6ca1e347003a5e2e1b3c749b4d41e7da4904577adade111'
+# Bound every remaining transitive choice to packages that existed when the
+# immutable 0.8.5 hard-cut release was published. This is not a full hash lock,
+# but later PyPI uploads cannot silently change the historical bootstrap graph.
+readonly HISTORICAL_BOOTSTRAP_EXCLUDE_NEWER='2026-07-18T19:02:08Z'
 readonly UPGRADE_RECOVERY_ROOT="${DEFENSECLAW_HOME}/.upgrade-recovery"
 readonly UPGRADE_LOCK_FILE="${UPGRADE_RECOVERY_ROOT}/upgrade.lock"
 readonly UPGRADE_ADVISORY_LOCK_FILE="${UPGRADE_RECOVERY_ROOT}/upgrade.advisory.lock"
@@ -376,6 +385,7 @@ gateway_pid_status() {
 preflight_python_wheel() {
     local wheel="$1"
     local uv_bin
+    local -a dependency_args=(--only-binary litellm)
     uv_bin="$(command -v uv 2>/dev/null || true)"
     [[ -z "${uv_bin}" ]] \
         && die "uv not found on PATH — cannot update Python CLI. Install uv, then re-run the upgrade."
@@ -383,13 +393,26 @@ preflight_python_wheel() {
     local preflight_python="${DEFENSECLAW_VENV}/bin/python"
     if [[ ! -x "${preflight_python}" ]]; then
         local preflight_venv="${STAGING_DIR}/wheel-preflight-venv"
-        "${uv_bin}" --no-config venv "${preflight_venv}" --python 3.12 --quiet \
+        env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \
+            "${uv_bin}" --no-config venv "${preflight_venv}" --python 3.12 --quiet \
             || die "Could not create Python CLI preflight environment; no services changed."
         preflight_python="${preflight_venv}/bin/python"
     fi
 
+    case "${RELEASE_VERSION}" in
+        0.8.4|0.8.5)
+            prepare_historical_bootstrap_constraints
+            dependency_args+=(
+                --constraints "${HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE}"
+                --exclude-newer "${HISTORICAL_BOOTSTRAP_EXCLUDE_NEWER}"
+            )
+            ;;
+    esac
     step "Resolving Python CLI dependencies ..."
-    "${uv_bin}" --no-config pip install --python "${preflight_python}" --dry-run --quiet "${wheel}" \
+    env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \
+        "${uv_bin}" --no-config pip install \
+        --python "${preflight_python}" --dry-run --quiet \
+        "${dependency_args[@]}" "${wheel}" \
         || die "Python CLI wheel dependencies are unsatisfiable; no services changed."
     ok "Python CLI dependency preflight passed"
 }
@@ -826,12 +849,16 @@ try:
         raise SystemExit("retained bridge wheel changed before recovery bootstrap")
     if not venv_python.is_file():
         raise SystemExit("managed bridge environment is missing during recovery")
+    uv_environment = os.environ.copy()
+    for name in ("UV_CONSTRAINT", "UV_OVERRIDE", "UV_EXCLUDE_NEWER"):
+        uv_environment.pop(name, None)
     subprocess.run(
         [
             str(uv), "--no-config", "pip", "install", "--python",
             str(venv_python), "--quiet", "--offline", "--no-deps", "--reinstall", str(wheel),
         ],
         check=True,
+        env=uv_environment,
         pass_fds=(descriptor,),
     )
 finally:
@@ -3716,7 +3743,7 @@ REQUESTED_RELEASE_VERSION="${RELEASE_VERSION}"
 STAGED_FINAL_VERSION=""
 STAGED_FINAL_MIN_PROTOCOL=""
 POST_HARD_CUT_FINAL_VERSION=""
-FRESH_HARD_CUT_HANDOFF=0
+EXISTING_BRIDGE_REFRESH=0
 
 # ── Detect currently installed version ───────────────────────────────────────
 
@@ -4270,6 +4297,7 @@ FINAL_RELEASE_WHL_SHA256=""
 TARGET_CONTROLLER_PROTECTED_WHEEL=""
 TARGET_CONTROLLER_VENV=""
 TARGET_CONTROLLER_CLI=""
+HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE=""
 CONTRACT_DIR=""
 MIGRATION_FAILURE_POLICY="warn"
 REQUIRED_MIGRATIONS_MISSING=""
@@ -5001,25 +5029,22 @@ resolve_staged_upgrade() {
     if version_gte "${CURRENT_VERSION}" "${MANIFEST_MINIMUM_SOURCE}"; then
         if [[ "${CURRENT_VERSION}" == "${MANIFEST_REQUIRED_BRIDGE}" ]] \
             && version_lt "${CURRENT_VERSION}" "${RELEASE_VERSION}"; then
-            select_hard_cut_bootstrap_contract
-            if [[ -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
-                section "Staged Upgrade Plan"
-                ok "${CURRENT_VERSION} → ${RELEASE_VERSION} → ${POST_HARD_CUT_FINAL_VERSION}"
-            fi
-            capture_hard_cut_target_controller_contract
-            FRESH_HARD_CUT_HANDOFF=1
-            STAGED_FINAL_MIN_PROTOCOL="${MANIFEST_MIN_PROTOCOL}"
+            EXISTING_BRIDGE_REFRESH=1
+        else
+            return 0
         fi
-        return 0
     fi
 
     # A version override selects the final release; it never authorizes a
     # direct hard-cut install.  Legacy controllers that cannot parse schema 2
     # hand off to the target resolver with exactly this override, so the
     # release-owned resolver must preserve that target intent while still
-    # inserting every manifest-required bridge.
+    # inserting every manifest-required bridge. An existing 0.8.4 bridge takes
+    # this same path so dependency drift is normalized by the authenticated,
+    # rollback-safe phase-one transaction before the immutable 0.8.5 cut.
     select_hard_cut_bootstrap_contract
-    if ! manifest_array_contains "auto_bridge_from" "${CURRENT_VERSION}" "${UPGRADE_MANIFEST_FILE}"; then
+    if [[ "${EXISTING_BRIDGE_REFRESH}" -ne 1 ]] \
+        && ! manifest_array_contains "auto_bridge_from" "${CURRENT_VERSION}" "${UPGRADE_MANIFEST_FILE}"; then
         supported="$(manifest_array_values "auto_bridge_from" "${UPGRADE_MANIFEST_FILE}" | paste -sd ',' - | sed 's/,/, /g')"
         die "Installed version ${CURRENT_VERSION} is outside the tested automatic bridge matrix. No changes were made.
   Supported staged sources: ${supported:-none}.
@@ -5032,7 +5057,12 @@ resolve_staged_upgrade() {
     STAGED_FINAL_MIN_PROTOCOL="${MANIFEST_MIN_PROTOCOL}"
     RELEASE_VERSION="${MANIFEST_REQUIRED_BRIDGE}"
     section "Staged Upgrade Plan"
-    if [[ -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
+    if [[ "${EXISTING_BRIDGE_REFRESH}" -eq 1 \
+          && -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
+        ok "Refresh authenticated ${RELEASE_VERSION} bridge → fresh controller → ${STAGED_FINAL_VERSION} → ${POST_HARD_CUT_FINAL_VERSION}"
+    elif [[ "${EXISTING_BRIDGE_REFRESH}" -eq 1 ]]; then
+        ok "Refresh authenticated ${RELEASE_VERSION} bridge → fresh controller → ${STAGED_FINAL_VERSION}"
+    elif [[ -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
         ok "${CURRENT_VERSION} → ${RELEASE_VERSION} bridge → fresh controller → ${STAGED_FINAL_VERSION} → ${POST_HARD_CUT_FINAL_VERSION}"
     else
         ok "${CURRENT_VERSION} → ${RELEASE_VERSION} bridge → fresh controller → ${STAGED_FINAL_VERSION}"
@@ -6276,6 +6306,31 @@ for root in roots:
 PY
 }
 
+prepare_historical_bootstrap_constraints() {
+    [[ -z "${HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE:-}" ]] || return 0
+    [[ -n "${STAGING_DIR:-}" && -d "${STAGING_DIR}" && ! -L "${STAGING_DIR}" ]] \
+        || die "Private staging is unavailable for the historical dependency constraints. No services changed."
+
+    local constraints="${STAGING_DIR}/historical-bootstrap-constraints.txt"
+    [[ ! -e "${constraints}" && ! -L "${constraints}" ]] \
+        || die "Historical dependency-constraint custody is occupied. No services changed."
+    printf '%s\n%s\n' \
+        "${HISTORICAL_BOOTSTRAP_MCP_SCANNER_CONSTRAINT}" \
+        "${HISTORICAL_BOOTSTRAP_LITELLM_CONSTRAINT}" >"${constraints}" \
+        || die "Could not materialize the signed historical dependency constraints. No services changed."
+    chmod 600 "${constraints}" \
+        || die "Could not protect the signed historical dependency constraints. No services changed."
+    HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE="${constraints}"
+}
+
+verify_python_dependency_metadata() {
+    local uv_bin="$1" python="$2" context="$3"
+    env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \
+        "${uv_bin}" --no-config pip check \
+        --python "${python}" --quiet \
+        || die "${context} has inconsistent installed dependency metadata; refusing the next handoff."
+}
+
 prepare_bridge_phase1_cli_preflight() {
     local uv_bin preflight_venv preflight_version
     [[ -n "${whl_name:-}" && -f "${STAGING_DIR}/${whl_name}" ]] \
@@ -6321,10 +6376,19 @@ raise SystemExit(1 if inside_source else 0)
 PY
 
     preflight_venv="${STAGING_DIR}/bridge-cli-preflight"
-    "${uv_bin}" --no-config venv "${preflight_venv}" --python "${BRIDGE_PYTHON_INTERPRETER}" --quiet \
+    prepare_historical_bootstrap_constraints
+    env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \
+        "${uv_bin}" --no-config venv "${preflight_venv}" --python "${BRIDGE_PYTHON_INTERPRETER}" --quiet \
         || die "Could not create the bridge CLI preflight environment; no services changed."
-    "${uv_bin}" --no-config pip install --python "${preflight_venv}/bin/python" --quiet "${STAGING_DIR}/${whl_name}" \
+    env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \
+        "${uv_bin}" --no-config pip install \
+        --python "${preflight_venv}/bin/python" --quiet \
+        --constraints "${HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE}" \
+        --exclude-newer "${HISTORICAL_BOOTSTRAP_EXCLUDE_NEWER}" \
+        --only-binary litellm "${STAGING_DIR}/${whl_name}" \
         || die "Could not install the bridge CLI in its preflight environment; no services changed."
+    verify_python_dependency_metadata \
+        "${uv_bin}" "${preflight_venv}/bin/python" "Bridge CLI preflight environment"
     preflight_version="$("${preflight_venv}/bin/python" -I -B -c 'from defenseclaw import __version__; print(__version__)')" \
         || die "Could not import the preflighted bridge CLI; no services changed."
     [[ "${preflight_version}" == "${RELEASE_VERSION}" ]] \
@@ -6543,10 +6607,19 @@ for path in sys.argv[1:]:
         os.close(descriptor)
 PY
 
-    "${uv_bin}" --no-config venv "${DEFENSECLAW_VENV}" --allow-existing --python "${BRIDGE_PYTHON_INTERPRETER}" --quiet \
+    env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \
+        "${uv_bin}" --no-config venv "${DEFENSECLAW_VENV}" --allow-existing --python "${BRIDGE_PYTHON_INTERPRETER}" --quiet \
         || die "Could not create the bridge CLI environment"
-    "${uv_bin}" --no-config pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet --offline "${BRIDGE_WHEEL_CUSTODY_PATH}" \
+    prepare_historical_bootstrap_constraints
+    env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \
+        "${uv_bin}" --no-config pip install \
+        --python "${DEFENSECLAW_VENV}/bin/python" --quiet --offline \
+        --constraints "${HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE}" \
+        --exclude-newer "${HISTORICAL_BOOTSTRAP_EXCLUDE_NEWER}" \
+        --only-binary litellm "${BRIDGE_WHEEL_CUSTODY_PATH}" \
         || die "Failed to install the bridge CLI wheel"
+    verify_python_dependency_metadata \
+        "${uv_bin}" "${DEFENSECLAW_VENV}/bin/python" "Installed bridge CLI environment"
     bridge_version="$("${DEFENSECLAW_VENV}/bin/python" -I -B -c 'from defenseclaw import __version__; print(__version__)')" \
         || die "Could not import the installed bridge CLI"
     [[ "${bridge_version}" == "${RELEASE_VERSION}" ]] \
@@ -6855,6 +6928,8 @@ prepare_hard_cut_target_controller() {
        && -n "${FINAL_RELEASE_MATERIALIZED_WHL_NAME}" \
        && "${FINAL_RELEASE_WHL_SHA256}" =~ ^[0-9a-f]{64}$ ]] \
         || die "The authenticated hard-cut target-controller contract is unavailable. No services changed."
+    [[ "${FINAL_RELEASE_VERSION}" == "${OBSERVABILITY_V8_HARD_CUT_VERSION}" ]] \
+        || die "Historical dependency custody is restricted to the authenticated ${OBSERVABILITY_V8_HARD_CUT_VERSION} hard-cut controller. No services changed."
 
     section "Preparing Fresh Target Controller"
     protected_wheel="${STAGING_DIR}/target-controller-${FINAL_RELEASE_WHL_NAME}"
@@ -6900,12 +6975,21 @@ raise SystemExit(1 if inside else 0)
 PY
 
     TARGET_CONTROLLER_VENV="${STAGING_DIR}/target-controller-venv"
-    "${uv_bin}" --no-config venv "${TARGET_CONTROLLER_VENV}" --python "${base_python}" --quiet \
+    prepare_historical_bootstrap_constraints
+    env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \
+        "${uv_bin}" --no-config venv "${TARGET_CONTROLLER_VENV}" --python "${base_python}" --quiet \
         || die "Could not create the private target-controller venv. No services changed."
     chmod 700 "${TARGET_CONTROLLER_VENV}"
-    "${uv_bin}" --no-config pip install \
-        --python "${TARGET_CONTROLLER_VENV}/bin/python" --quiet "${materialized_wheel}" \
+    env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \
+        "${uv_bin}" --no-config pip install \
+        --python "${TARGET_CONTROLLER_VENV}/bin/python" --quiet \
+        --constraints "${HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE}" \
+        --exclude-newer "${HISTORICAL_BOOTSTRAP_EXCLUDE_NEWER}" \
+        --only-binary litellm "${materialized_wheel}" \
         || die "Could not install the authenticated target controller in private custody. No services changed."
+    verify_python_dependency_metadata \
+        "${uv_bin}" "${TARGET_CONTROLLER_VENV}/bin/python" \
+        "Authenticated hard-cut target-controller environment"
     observed="$(PYTHONDONTWRITEBYTECODE=1 "${TARGET_CONTROLLER_VENV}/bin/python" -I -B -c \
         'from defenseclaw import __version__; print(__version__)')" \
         || die "Could not import the fresh target controller. No services changed."
@@ -7078,64 +7162,15 @@ continue_post_hard_cut_upgrade() {
     unset DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION
     [[ -z "${STAGING_DIR:-}" ]] || rm -rf "${STAGING_DIR}"
     STAGING_DIR=""
-    "${DEFENSECLAW_VENV}/bin/defenseclaw" upgrade --yes --version "${final_version}" \
+    # The immutable 0.8.5 controller gives child commands 30 seconds but owns
+    # a separate 60-second, version-aware gateway health poll. Current gateway
+    # binaries consume this process-scoped handoff marker after safe launch so
+    # that the controller, rather than both layers, owns the readiness wait.
+    env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \
+        DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 \
+        "${DEFENSECLAW_VENV}/bin/defenseclaw" upgrade --yes --version "${final_version}" \
         || final_status=$?
     exit "${final_status}"
-}
-
-handoff_existing_bridge_to_hard_cut() {
-    local final_version="${RELEASE_VERSION}"
-    local final_min_protocol="${STAGED_FINAL_MIN_PROTOCOL}"
-    local handoff_dir
-
-    prepare_hard_cut_target_controller
-    RELEASE_VERSION="${CURRENT_VERSION}"
-    configure_release
-    prepare_release_contract
-    require_bridge_checksums_provenance \
-        "${FINAL_RELEASE_PROVENANCE_BRIDGE_CHECKSUMS_SHA256}" \
-        "${CHECKSUMS_FILE}"
-    if [[ "${MANIFEST_CONTROLLER_PROTOCOL}" -lt "${final_min_protocol}" ]]; then
-        die "Installed bridge ${CURRENT_VERSION} cannot drive ${final_version}. No changes were made."
-    fi
-
-    step "Retaining verified bridge gateway for rollback ..."
-    fetch_artifact "${TARBALL_URL}" "${STAGING_DIR}/${TARBALL_NAME}"
-    verify_checksum "${STAGING_DIR}/${TARBALL_NAME}" "${TARBALL_NAME}"
-    materialize_protected_artifact \
-        "${STAGING_DIR}/${TARBALL_NAME}" "${STAGING_DIR}/${MATERIALIZED_TARBALL_NAME}" "${VERIFIED_CHECKSUM}" \
-        || die "Could not materialize the authenticated protected bridge gateway"
-    validate_tarball_members "${STAGING_DIR}/${MATERIALIZED_TARBALL_NAME}"
-    step "Retaining verified bridge CLI for rollback ..."
-    fetch_artifact "${WHL_URL}" "${STAGING_DIR}/${WHL_NAME}"
-    verify_checksum "${STAGING_DIR}/${WHL_NAME}" "${WHL_NAME}"
-    materialize_protected_artifact \
-        "${STAGING_DIR}/${WHL_NAME}" "${STAGING_DIR}/${MATERIALIZED_WHL_NAME}" "${VERIFIED_CHECKSUM}" \
-        || die "Could not materialize the authenticated protected bridge CLI"
-    preflight_python_wheel "${STAGING_DIR}/${MATERIALIZED_WHL_NAME}"
-    preflight_bridge_rollback_capability "${STAGING_DIR}/${MATERIALIZED_WHL_NAME}"
-
-    handoff_dir="${STAGING_DIR}/bridge-handoff"
-    create_bridge_handoff_directory "${handoff_dir}" >/dev/null
-    verify_hard_cut_target_controller_handoff \
-        "${CURRENT_VERSION}" "${final_version}" "${handoff_dir}" \
-        || die "Fresh target-controller handoff verification failed; the healthy bridge was preserved."
-    section "Fresh Controller Handoff"
-    ok "Verified ${CURRENT_VERSION} rollback artifacts retained; launching the authenticated ${final_version} controller"
-    export DEFENSECLAW_STAGED_UPGRADE=1
-    export DEFENSECLAW_STAGED_BRIDGE_VERSION="${CURRENT_VERSION}"
-    export DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR="${handoff_dir}"
-    export DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION="${final_version}"
-    export DEFENSECLAW_HOME="${CONTROLLER_HOME}"
-    export DEFENSECLAW_CONFIG="${CONFIG_PATH}"
-    export OPENCLAW_HOME="${OPENCLAW_HOME}"
-    local target_status=0
-    "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}" \
-        || target_status=$?
-    if [[ "${target_status}" -eq 0 ]]; then
-        continue_post_hard_cut_upgrade
-    fi
-    exit "${target_status}"
 }
 
 validate_tarball_members() {
@@ -7226,7 +7261,8 @@ PY
             exit 0
         fi
         recovery_status=0
-        DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
+        env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \
+            DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
             OPENCLAW_HOME="${OPENCLAW_HOME}" \
             "${DEFENSECLAW_VENV}/bin/defenseclaw" upgrade --yes \
                 --version "${RELEASE_VERSION}" --health-timeout 60 \
@@ -7243,15 +7279,22 @@ PY
     exit 0
 fi
 
-if [[ "${CURRENT_VERSION}" != "unknown" ]] \
-    && [[ "${RELEASE_VERSION}" == "0.8.4" ]] \
-    && version_lt "${CURRENT_VERSION}" "${RELEASE_VERSION}"; then
-    BRIDGE_PHASE1=1
+if [[ "${CURRENT_VERSION}" != "unknown" \
+      && "${RELEASE_VERSION}" == "0.8.4" ]]; then
+    if version_lt "${CURRENT_VERSION}" "${RELEASE_VERSION}" \
+        || [[ "${EXISTING_BRIDGE_REFRESH}" -eq 1 ]]; then
+        BRIDGE_PHASE1=1
+    fi
 fi
 
 if [[ "${PLAN_ONLY}" -eq 1 ]]; then
     section "Upgrade Plan Verified"
-    if [[ -n "${STAGED_FINAL_VERSION}" && -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
+    if [[ "${EXISTING_BRIDGE_REFRESH}" -eq 1 \
+          && -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
+        ok "Refresh authenticated ${RELEASE_VERSION} bridge → fresh controller → ${STAGED_FINAL_VERSION} → ${POST_HARD_CUT_FINAL_VERSION}"
+    elif [[ "${EXISTING_BRIDGE_REFRESH}" -eq 1 ]]; then
+        ok "Refresh authenticated ${RELEASE_VERSION} bridge → fresh controller → ${STAGED_FINAL_VERSION}"
+    elif [[ -n "${STAGED_FINAL_VERSION}" && -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
         ok "${CURRENT_VERSION} → ${RELEASE_VERSION} → fresh controller → ${STAGED_FINAL_VERSION} → ${POST_HARD_CUT_FINAL_VERSION}"
     elif [[ -n "${POST_HARD_CUT_FINAL_VERSION}" ]]; then
         ok "${CURRENT_VERSION} → ${RELEASE_VERSION} → ${POST_HARD_CUT_FINAL_VERSION}"
@@ -7262,11 +7305,6 @@ if [[ "${PLAN_ONLY}" -eq 1 ]]; then
     fi
     ok "No changes were made"
     exit 0
-fi
-
-if [[ "${FRESH_HARD_CUT_HANDOFF}" -eq 1 ]]; then
-    ensure_upgrade_lock_before_mutation
-    handoff_existing_bridge_to_hard_cut
 fi
 
 step "Downloading gateway binary ..."
@@ -7543,11 +7581,17 @@ if [[ "${BRIDGE_PHASE1}" -eq 1 ]]; then
 else
     if [[ ! -d "${DEFENSECLAW_VENV}" ]]; then
         step "Creating venv at ${DEFENSECLAW_VENV} ..."
-        "${UV_BIN}" --no-config venv "${DEFENSECLAW_VENV}" --python 3.12
+        env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \
+            "${UV_BIN}" --no-config venv "${DEFENSECLAW_VENV}" --python 3.12
     fi
     VENV_PYTHON="${DEFENSECLAW_VENV}/bin/python"
-    "${UV_BIN}" --no-config pip install --python "${VENV_PYTHON}" --quiet "${STAGING_DIR}/${whl_name}" \
+    env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \
+        "${UV_BIN}" --no-config pip install \
+        --python "${VENV_PYTHON}" --quiet --only-binary litellm \
+        "${STAGING_DIR}/${whl_name}" \
         || die "Failed to install CLI wheel"
+    verify_python_dependency_metadata \
+        "${UV_BIN}" "${VENV_PYTHON}" "Installed target CLI environment"
     "${DEFENSECLAW_VENV}/bin/defenseclaw" --help >/dev/null 2>&1 \
         || die "CLI validation failed before launcher publication"
     ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw"
@@ -7871,7 +7915,10 @@ if [[ -n "${STAGED_FINAL_VERSION}" ]]; then
     export DEFENSECLAW_CONFIG="${CONFIG_PATH}"
     export OPENCLAW_HOME="${OPENCLAW_HOME}"
     target_status=0
-    "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}" \
+    env -u UV_OVERRIDE \
+        UV_CONSTRAINT="${HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE}" \
+        UV_EXCLUDE_NEWER="${HISTORICAL_BOOTSTRAP_EXCLUDE_NEWER}" \
+        "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}" \
         || target_status=$?
     if [[ "${target_status}" -eq 0 ]]; then
         continue_post_hard_cut_upgrade

@@ -173,15 +173,37 @@ t_install_default_env_is_prod() {
 }
 
 t_install_userspace_ownership_stays_descriptor_anchored() {
+  # The multi-user rewrite (26.7.3 → main) replaced the inline
+  # `prepare_userspace_for` single-user call with a machine-wide
+  # `targets.yaml` manifest reconciled by the hook-guardian
+  # LaunchDaemon. The guardian's per-target Install (Go code)
+  # is what now creates hook-config stubs — via bootstrap.go's
+  # `withOwnerCredentials` closure which sets ruid/rgid on the
+  # writing thread, so file creation happens AS the target user
+  # (kernel-enforced ownership). No descriptor-anchored
+  # prepare_userspace_for call survives in install.sh, and no
+  # pathname-based chown appears either. The original security
+  # invariants (no pathname-based chown, no DC_AGENT_TARGETS
+  # list) are still asserted below.
   local body
   body="$(cat "${INSTALL_SH}")"
-  assert_contains "${body}" \
-    'prepare_userspace_for "${c}" "${TARGET_HOME}" "${TARGET_UID}" "${TARGET_GID}"' \
-    "installer passes target ownership into anchored userspace preparation"
+  assert_contains "${body}" "render_targets_manifest" \
+    "installer renders a machine-wide targets.yaml manifest (multi-user rewrite)"
+  assert_contains "${body}" "enumerate_local_users" \
+    "installer enumerates every eligible local user (multi-user rewrite)"
+  assert_contains "${body}" "com.cisco.secureclient.defenseclaw.hook-guardian" \
+    "installer bootstraps the hook-guardian LaunchDaemon"
+  assert_contains "${body}" "com.cisco.secureclient.defenseclaw.hook-enumerator" \
+    "installer bootstraps the hook-enumerator LaunchDaemon"
   assert_not_contains "${body}" 'chown -h "${TARGET_UID}:${TARGET_GID}"' \
     "installer never applies connector ownership by pathname"
   assert_not_contains "${body}" "DC_AGENT_TARGETS" \
     "installer has no post-preparation pathname ownership list"
+  # And the single-user prepare_userspace_for call that this test
+  # originally guarded is gone — the guardian's Go installer handles
+  # hook-config stub creation now (see internal/enterprisehooks/bootstrap.go).
+  assert_not_contains "${body}" 'prepare_userspace_for "${c}" "${TARGET_HOME}"' \
+    "installer no longer calls the single-user prepare_userspace_for shell helper"
 }
 
 t_uninstall_unknown_flag() {

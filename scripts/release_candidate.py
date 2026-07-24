@@ -557,7 +557,7 @@ def release_identity_asset_names(version: str) -> tuple[str, ...]:
 
 
 def windows_installer_asset_names(version: str) -> tuple[str, ...]:
-    """Return the exact native-Setup custody set for 0.8.6+."""
+    """Return the exact native-Setup release set for 0.8.6+."""
 
     _validate_version(version)
     if tuple(map(int, version.split("."))) < WINDOWS_SETUP_START_VERSION:
@@ -764,7 +764,6 @@ def _load_upgrade_baseline_policy(
     windows = platforms["windows"]
     if (
         not isinstance(windows, list)
-        or not windows
         or any(not isinstance(item, str) or not VERSION_RE.fullmatch(item) for item in windows)
         or len(windows) != len(set(windows))
         or windows != sorted(windows, key=lambda item: tuple(map(int, item.split("."))), reverse=True)
@@ -3589,8 +3588,31 @@ def _validate_windows_setup_pe(path: Path) -> str:
     certificate_offset, certificate_size = struct.unpack_from("<II", payload, optional_offset + 112 + 4 * 8)
     if certificate_offset == 0 and certificate_size == 0:
         raise CandidateError("Windows Setup lacks an embedded Authenticode signature")
-    elif certificate_offset <= 0 or certificate_size < 8 or certificate_offset > len(payload) - certificate_size:
+    if (
+        certificate_offset == 0
+        or certificate_size < 8
+        or certificate_offset % 8 != 0
+        or certificate_offset > len(payload) - certificate_size
+    ):
         raise CandidateError("Windows Setup lacks a complete embedded Authenticode signature")
+    certificate_end = certificate_offset + certificate_size
+    cursor = certificate_offset
+    pkcs7_records = 0
+    while cursor < certificate_end:
+        if certificate_end - cursor < 8:
+            raise CandidateError("Windows Setup contains malformed WIN_CERTIFICATE bytes")
+        record_size, revision, certificate_type = struct.unpack_from("<IHH", payload, cursor)
+        record_end = cursor + record_size
+        if record_size <= 8 or record_end > certificate_end:
+            raise CandidateError("Windows Setup contains malformed WIN_CERTIFICATE bytes")
+        if revision != 0x0200 or certificate_type != 0x0002:
+            raise CandidateError("Windows Setup contains an unsupported WIN_CERTIFICATE record")
+        if payload[cursor + 8] != 0x30:
+            raise CandidateError("Windows Setup WIN_CERTIFICATE does not contain DER CMS data")
+        pkcs7_records += 1
+        cursor += (record_size + 7) & ~7
+    if cursor != certificate_end or pkcs7_records != 1:
+        raise CandidateError("Windows Setup must contain exactly one complete PKCS#7 WIN_CERTIFICATE record")
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -3633,6 +3655,136 @@ def _require_sha256_fields(
             raise CandidateError(f"{label} {field} is not a lowercase SHA-256 digest")
 
 
+def _validate_windows_authenticode_attestation(
+    evidence: object,
+    *,
+    setup_sha256: str,
+    label: str,
+) -> tuple[str, ...]:
+    """Validate release-owned Windows verification evidence and return its stable identity."""
+
+    document = _require_object_fields(
+        evidence,
+        {
+            "schema_version",
+            "installed_path",
+            "sbom_file_name",
+            "sha256",
+            "expected",
+            "observed",
+        },
+        label,
+    )
+    if (
+        document.get("schema_version") != 1
+        or document.get("installed_path") != WINDOWS_SETUP_ASSET
+        or document.get("sbom_file_name") != f"./{WINDOWS_SETUP_ASSET}"
+        or document.get("sha256") != setup_sha256
+    ):
+        raise CandidateError(f"{label} does not bind the exact Windows Setup digest")
+
+    expected = _require_object_fields(
+        document.get("expected"),
+        {
+            "policy",
+            "status",
+            "publisher",
+            "signature_type",
+            "platform_identity_required",
+            "timestamp_required",
+            "signer_thumbprint_sha256",
+            "timestamp_signer_thumbprint_sha256",
+            "timestamp_token_sha256",
+        },
+        f"{label} policy",
+    )
+    if (
+        expected.get("policy") != "defenseclaw-product-publisher"
+        or expected.get("status") != "Valid"
+        or expected.get("publisher") != WINDOWS_SETUP_PUBLISHER
+        or expected.get("signature_type") != "Authenticode"
+        or expected.get("platform_identity_required") is not True
+        or expected.get("timestamp_required") is not True
+    ):
+        raise CandidateError(f"{label} does not require Cisco Authenticode and RFC 3161")
+    identity_fields = (
+        "signer_thumbprint_sha256",
+        "timestamp_signer_thumbprint_sha256",
+        "timestamp_token_sha256",
+    )
+    _require_sha256_fields(expected, identity_fields, f"{label} policy")
+
+    observed = _require_object_fields(
+        document.get("observed"),
+        {
+            "status",
+            "publisher",
+            "signature_type",
+            "signer",
+            "chain",
+            "timestamp",
+            "embedded_signatures",
+        },
+        f"{label} observation",
+    )
+    if (
+        observed.get("status") != "Valid"
+        or observed.get("publisher") != WINDOWS_SETUP_PUBLISHER
+        or observed.get("signature_type") != "Authenticode"
+    ):
+        raise CandidateError(f"{label} platform trust decision is invalid")
+    signer = observed.get("signer")
+    if not isinstance(signer, dict) or signer.get("thumbprint_sha256") != expected["signer_thumbprint_sha256"]:
+        raise CandidateError(f"{label} signer identity is inconsistent")
+
+    timestamp = observed.get("timestamp")
+    if not isinstance(timestamp, dict):
+        raise CandidateError(f"{label} RFC 3161 timestamp evidence is missing")
+    timestamp_certificate = timestamp.get("certificate")
+    signing_time = timestamp.get("signing_time_utc")
+    if (
+        timestamp.get("present") is not True
+        or timestamp.get("format") != "rfc3161"
+        or timestamp.get("token_sha256") != expected["timestamp_token_sha256"]
+        or not isinstance(signing_time, str)
+        or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z", signing_time) is None
+        or not isinstance(timestamp.get("policy_oid"), str)
+        or re.fullmatch(r"[0-9]+(?:\.[0-9]+)+", timestamp["policy_oid"]) is None
+        or not isinstance(timestamp.get("message_imprint_algorithm_oid"), str)
+        or re.fullmatch(r"[0-9]+(?:\.[0-9]+)+", timestamp["message_imprint_algorithm_oid"]) is None
+        or not isinstance(timestamp.get("message_imprint"), str)
+        or re.fullmatch(r"[0-9a-f]+", timestamp["message_imprint"]) is None
+        or not isinstance(timestamp_certificate, dict)
+        or timestamp_certificate.get("thumbprint_sha256") != expected["timestamp_signer_thumbprint_sha256"]
+    ):
+        raise CandidateError(f"{label} RFC 3161 timestamp identity is invalid")
+
+    embedded = observed.get("embedded_signatures")
+    if not isinstance(embedded, list) or len(embedded) != 1 or not isinstance(embedded[0], dict):
+        raise CandidateError(f"{label} must contain exactly one verified embedded signature")
+    embedded_signature = embedded[0]
+    embedded_signer = embedded_signature.get("signer")
+    embedded_timestamp = embedded_signature.get("timestamp")
+    if (
+        embedded_signature.get("publisher") != WINDOWS_SETUP_PUBLISHER
+        or not isinstance(embedded_signer, dict)
+        or embedded_signer.get("thumbprint_sha256") != expected["signer_thumbprint_sha256"]
+        or not isinstance(embedded_timestamp, dict)
+        or embedded_timestamp.get("present") is not True
+        or embedded_timestamp.get("format") != "rfc3161"
+        or embedded_timestamp.get("token_sha256") != expected["timestamp_token_sha256"]
+    ):
+        raise CandidateError(f"{label} embedded signer or timestamp identity is invalid")
+
+    return (
+        setup_sha256,
+        expected["signer_thumbprint_sha256"],
+        expected["timestamp_signer_thumbprint_sha256"],
+        expected["timestamp_token_sha256"],
+        signing_time,
+    )
+
+
 def _validate_windows_setup_provenance(
     path: Path,
     *,
@@ -3668,8 +3820,7 @@ def _validate_windows_setup_provenance(
     ):
         raise CandidateError("Windows Setup provenance release identity mismatch")
     if document.get("unsigned") is not False:
-        raise CandidateError("Windows Setup provenance must declare a signed release artifact")
-    signed = True
+        raise CandidateError("Windows Setup provenance does not describe a signed release artifact")
     built_at = document.get("built_at_utc")
     if not isinstance(built_at, str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z", built_at) is None:
         raise CandidateError("Windows Setup provenance build timestamp is invalid")
@@ -3724,7 +3875,7 @@ def _validate_windows_setup_provenance(
         or inputs.get("python_embed_sha256") != WINDOWS_PYTHON_EMBED_SHA256
         or inputs.get("yara_compat_wheel") != WINDOWS_YARA_COMPAT_WHEEL
         or inputs.get("cosign_sha256") != WINDOWS_COSIGN_SHA256
-        or inputs.get("product_executables_authenticode_signed") is not signed
+        or inputs.get("product_executables_authenticode_signed") is not True
         or inputs.get("windows_resource_policy") != WINDOWS_RESOURCE_POLICY
         or inputs.get("windows_resource_icon") != WINDOWS_RESOURCE_ICON
         or inputs.get("windows_resource_icon_sha256") != WINDOWS_RESOURCE_ICON_SHA256
@@ -3804,142 +3955,17 @@ def _validate_windows_setup_provenance(
         "Windows Setup Authenticode inventory",
     )
     files = authenticode.get("files")
-    if authenticode.get("schema_version") != 1 or not isinstance(files, dict):
+    if (
+        authenticode.get("schema_version") != 1
+        or not isinstance(files, dict)
+        or WINDOWS_SETUP_ASSET not in files
+    ):
         raise CandidateError("Windows Setup Authenticode inventory is invalid")
-    evidence = _require_object_fields(
-        files.get(WINDOWS_SETUP_ASSET),
-        {
-            "schema_version",
-            "installed_path",
-            "sbom_file_name",
-            "sha256",
-            "expected",
-            "observed",
-        },
-        "Windows Setup Authenticode evidence",
+    _validate_windows_authenticode_attestation(
+        files[WINDOWS_SETUP_ASSET],
+        setup_sha256=setup_sha256,
+        label="Windows Setup provenance Authenticode evidence",
     )
-    if (
-        evidence.get("schema_version") != 1
-        or evidence.get("installed_path") != WINDOWS_SETUP_ASSET
-        or evidence.get("sbom_file_name") != f"./{WINDOWS_SETUP_ASSET}"
-        or evidence.get("sha256") != setup_sha256
-    ):
-        raise CandidateError("Windows Setup Authenticode evidence digest mismatch")
-    expected = _require_object_fields(
-        evidence.get("expected"),
-        {
-            "policy",
-            "status",
-            "publisher",
-            "signature_type",
-            "platform_identity_required",
-            "timestamp_required",
-            "signer_thumbprint_sha256",
-            "timestamp_signer_thumbprint_sha256",
-            "timestamp_token_sha256",
-        },
-        "Windows Setup expected Authenticode policy",
-    )
-    if (
-        expected.get("policy") != "defenseclaw-product-publisher"
-        or expected.get("platform_identity_required") is not True
-    ):
-        raise CandidateError("Windows Setup Authenticode policy identity is invalid")
-    identity_fields = (
-        "signer_thumbprint_sha256",
-        "timestamp_signer_thumbprint_sha256",
-        "timestamp_token_sha256",
-    )
-    if signed:
-        if (
-            expected.get("status") != "Valid"
-            or expected.get("publisher") != WINDOWS_SETUP_PUBLISHER
-            or expected.get("signature_type") != "Authenticode"
-            or expected.get("timestamp_required") is not True
-        ):
-            raise CandidateError("Signed Windows Setup does not require Cisco Authenticode and RFC3161")
-        for field in identity_fields:
-            if not isinstance(expected.get(field), str) or SHA256_RE.fullmatch(expected[field]) is None:
-                raise CandidateError(f"Windows Setup Authenticode {field} is invalid")
-    elif (
-        expected.get("status") != "NotSigned"
-        or expected.get("publisher") != ""
-        or expected.get("signature_type") != "None"
-        or expected.get("timestamp_required") is not False
-        or any(expected.get(field) != "" for field in identity_fields)
-    ):
-        raise CandidateError("Unverified Windows Setup contains a signed Authenticode policy")
-
-    observed = _require_object_fields(
-        evidence.get("observed"),
-        {
-            "status",
-            "publisher",
-            "signature_type",
-            "signer",
-            "chain",
-            "timestamp",
-            "embedded_signatures",
-        },
-        "Windows Setup observed Authenticode evidence",
-    )
-    signer = observed.get("signer")
-    timestamp = observed.get("timestamp")
-    embedded = observed.get("embedded_signatures")
-    if signed:
-        if (
-            observed.get("status") != "Valid"
-            or observed.get("publisher") != WINDOWS_SETUP_PUBLISHER
-            or observed.get("signature_type") != "Authenticode"
-        ):
-            raise CandidateError("Windows Setup observed Authenticode identity is invalid")
-        if not isinstance(signer, dict) or signer.get("thumbprint_sha256") != expected.get("signer_thumbprint_sha256"):
-            raise CandidateError("Windows Setup Authenticode signer identity is inconsistent")
-        if (
-            not isinstance(timestamp, dict)
-            or timestamp.get("present") is not True
-            or timestamp.get("format") != "rfc3161"
-            or timestamp.get("token_sha256") != expected.get("timestamp_token_sha256")
-            or not isinstance(timestamp.get("signing_time_utc"), str)
-            or not timestamp.get("signing_time_utc")
-        ):
-            raise CandidateError("Windows Setup RFC3161 timestamp evidence is invalid")
-        timestamp_certificate = timestamp.get("certificate")
-        if not isinstance(timestamp_certificate, dict) or timestamp_certificate.get(
-            "thumbprint_sha256"
-        ) != expected.get("timestamp_signer_thumbprint_sha256"):
-            raise CandidateError("Windows Setup RFC3161 signer identity is inconsistent")
-        if not isinstance(embedded, list) or len(embedded) != 1:
-            raise CandidateError("Windows Setup must contain exactly one embedded Authenticode signature")
-        embedded_signature = embedded[0]
-        if not isinstance(embedded_signature, dict) or embedded_signature.get("publisher") != WINDOWS_SETUP_PUBLISHER:
-            raise CandidateError("Windows Setup embedded Authenticode publisher is invalid")
-        embedded_signer = embedded_signature.get("signer")
-        embedded_timestamp = embedded_signature.get("timestamp")
-        if (
-            not isinstance(embedded_signer, dict)
-            or embedded_signer.get("thumbprint_sha256") != expected.get("signer_thumbprint_sha256")
-            or not isinstance(embedded_timestamp, dict)
-            or embedded_timestamp.get("present") is not True
-            or embedded_timestamp.get("format") != "rfc3161"
-            or embedded_timestamp.get("token_sha256") != expected.get("timestamp_token_sha256")
-        ):
-            raise CandidateError("Windows Setup embedded Authenticode timestamp identity is invalid")
-    elif (
-        observed.get("status") != "NotSigned"
-        or observed.get("publisher") != ""
-        or observed.get("signature_type") != "None"
-        or signer is not None
-        or observed.get("chain") not in (None, [])
-        or not isinstance(timestamp, dict)
-        or timestamp.get("present") is not False
-        or timestamp.get("format") != ""
-        or timestamp.get("token_sha256") != ""
-        or timestamp.get("signing_time_utc") != ""
-        or timestamp.get("certificate") is not None
-        or embedded != []
-    ):
-        raise CandidateError("Unverified Windows Setup exposes Authenticode signer or timestamp evidence")
     return document
 
 
@@ -4189,6 +4215,8 @@ def _validate_windows_setup_certification(
     version: str,
     commit: str,
     setup_sha256: str,
+    provenance: dict[str, Any],
+    provenance_sha256: str,
 ) -> None:
     document = _read_windows_setup_json(path, "Windows Setup certification")
     _require_object_fields(
@@ -4199,6 +4227,8 @@ def _validate_windows_setup_certification(
             "verification_status",
             "platform",
             "setup",
+            "authenticode",
+            "provenance_sha256",
             "clients",
             "connectors",
             "requirements",
@@ -4209,28 +4239,45 @@ def _validate_windows_setup_certification(
         },
         "Windows Setup certification",
     )
-    setup = document.get("setup")
-    common_mismatch = (
-        document.get("schema_version") != 1
+    if (
+        document.get("schema_version") != 2
+        or document.get("status") != "passed"
+        or document.get("verification_status") != "signed"
         or document.get("platform") != "windows-x64"
         or document.get("source_commit") != commit
         or document.get("release_version") != version
-    )
-    mode_mismatch = (
-        document.get("status") != "passed"
-        or document.get("verification_status") != "signed"
-        or setup
+        or document.get("setup")
         != {
             "name": WINDOWS_SETUP_ASSET,
             "sha256": setup_sha256,
             "publisher": WINDOWS_SETUP_PUBLISHER,
         }
+        or document.get("provenance_sha256") != provenance_sha256
         or document.get("clients") != WINDOWS_SETUP_CLIENTS
         or document.get("connectors") != ["codex", "claudecode"]
         or document.get("requirements") != list(WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS)
-    )
-    if common_mismatch or mode_mismatch:
+    ):
         raise CandidateError("Windows Setup certification identity or required evidence mismatch")
+    provenance_authenticode = provenance.get("authenticode")
+    provenance_files = (
+        provenance_authenticode.get("files")
+        if isinstance(provenance_authenticode, dict)
+        else None
+    )
+    if not isinstance(provenance_files, dict):
+        raise CandidateError("Windows Setup provenance Authenticode inventory is unavailable")
+    certified_identity = _validate_windows_authenticode_attestation(
+        document.get("authenticode"),
+        setup_sha256=setup_sha256,
+        label="Windows Setup certification Authenticode attestation",
+    )
+    provenance_identity = _validate_windows_authenticode_attestation(
+        provenance_files.get(WINDOWS_SETUP_ASSET),
+        setup_sha256=setup_sha256,
+        label="Windows Setup provenance Authenticode evidence",
+    )
+    if certified_identity != provenance_identity:
+        raise CandidateError("Windows Setup certification changed the signer or RFC 3161 timestamp identity")
     staging_digest = document.get("staging_artifact_digest")
     if not isinstance(staging_digest, str) or re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", staging_digest) is None:
         raise CandidateError("Windows Setup certification staging digest is invalid")
@@ -4273,8 +4320,9 @@ def _validate_windows_installer_assets(
     )
     if match is None or match.group(1).decode("ascii") != setup_sha256:
         raise CandidateError("Windows Setup SHA-256 sidecar does not bind the exact executable")
+    provenance_path = directory / f"{WINDOWS_SETUP_ASSET}.provenance.json"
     provenance = _validate_windows_setup_provenance(
-        directory / f"{WINDOWS_SETUP_ASSET}.provenance.json",
+        provenance_path,
         version=version,
         commit=commit,
         setup_sha256=setup_sha256,
@@ -4293,6 +4341,8 @@ def _validate_windows_installer_assets(
         version=version,
         commit=commit,
         setup_sha256=setup_sha256,
+        provenance=provenance,
+        provenance_sha256=_sha256(provenance_path),
     )
 
 

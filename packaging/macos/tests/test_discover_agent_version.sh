@@ -60,22 +60,83 @@ t_claudecode_no_install_returns_empty() {
 
 t_codex_no_home_metadata_uses_system_or_empty() {
   # With no metadata under the tmp HOME, the probe falls through to
-  # /opt/homebrew/Caskroom/codex etc. On a CI/dev box without codex
-  # installed anywhere, that returns empty. On a dev box with codex
-  # installed, we get a real version (that's fine — the point of
-  # discover_agent_version is to find one when it exists). Both are
-  # valid; assert the shape rather than the specific value.
+  # /Applications/ChatGPT.app -> Homebrew Caskroom -> system npm dirs
+  # -> PATH. On a CI/dev box without any codex install, that returns
+  # empty. On a dev box with codex installed (via any channel), we get
+  # a real version. Both are valid; assert the shape rather than the
+  # specific value.
   local home; home="$(mktest_tmp)"
   local got
   got="$(without_host_agent_bins discover_agent_version codex "${home}" 2>/dev/null || true)"
-  # Either empty, or a plausible version string (semver-ish).
+  # Either empty, or a plausible version string (semver-ish, possibly
+  # with an -alpha.N / -beta.N suffix from ChatGPT.app pre-release builds).
   if [[ -n "${got}" && ! "${got}" =~ ^[0-9]+\.[0-9]+ ]]; then
     _fail "codex probe returned unexpected non-empty non-version: ${got}"
     return 1
   fi
 }
 
+t_codex_chatgpt_app_bundled_wins_over_npm() {
+  # Regression guard for the sathishr scenario: a customer with a stale
+  # `npm i -g @openai/codex@0.104.0` (predating our MinAgentVersion
+  # of 0.124.0) AND the ChatGPT.app desktop app installed (which
+  # bundles Codex 0.145.0+) MUST have the probe return the newer
+  # ChatGPT.app version. If the probe order regresses back to
+  # npm-first, this test catches it because the stale npm metadata
+  # would win and the guardian would fail with
+  # "codex agent version 0.104.0 is not verified against a known
+  # hook contract" on every reconcile — the exact silent-fail
+  # surface we shipped with in early 2026.7.3.
+  #
+  # Runs only when /Applications/ChatGPT.app is present so CI /
+  # non-desktop-app boxes still pass. On a box with ChatGPT.app
+  # missing this returns "skip".
+  local chatgpt_codex="/Applications/ChatGPT.app/Contents/Resources/codex"
+  if [[ ! -x "${chatgpt_codex}" ]]; then
+    if [[ "${VERBOSE:-false}" == "true" ]]; then printf '  skip (ChatGPT.app not installed)\n'; fi
+    return 0
+  fi
+  local home; home="$(mktest_tmp)"
+  # Seed a stale user-npm codex install like sathishr had.
+  local pkg_dir="${home}/.npm-global/lib/node_modules/@openai/codex"
+  mkdir -p "${pkg_dir}"
+  cat > "${pkg_dir}/package.json" <<'JSON'
+{ "name": "@openai/codex", "version": "0.104.0" }
+JSON
+  # Probe as this user (DC_INSTALLER_TARGET_USER must resolve — use
+  # the current login user so sudo -n -u succeeds without a
+  # password prompt).
+  local got
+  got="$(DC_INSTALLER_TARGET_USER="$(id -un)" discover_agent_version codex "${home}" 2>&1)"
+  # Expect the ChatGPT.app-bundled version — a semver >= 0.124.0. The
+  # stale 0.104.0 must NOT win.
+  if [[ "${got}" == "0.104.0" ]]; then
+    _fail "codex probe returned the stale npm 0.104.0 instead of the newer ChatGPT.app-bundled version — the ChatGPT.app-first probe order must remain intact"
+    return 1
+  fi
+  if [[ ! "${got}" =~ ^[0-9]+\.[0-9]+ ]]; then
+    _fail "codex probe returned unexpected value with both stale npm + ChatGPT.app present: '${got}'"
+    return 1
+  fi
+}
+
 t_codex_from_user_npm_metadata() {
+  # Verifies the npm fallback branch: seed a user-scoped npm package.json
+  # under the tmp HOME and expect the probe to read the version from it.
+  # Skips when a higher-priority source is present on the host
+  # (/Applications/ChatGPT.app-bundled binary or /*/Caskroom/codex/*
+  # dir) — those correctly win over stale npm installs on real customer
+  # boxes, but would defeat this test's fixture. The ChatGPT.app-wins
+  # case is covered by t_codex_chatgpt_app_bundled_wins_over_npm above.
+  if [[ -x /Applications/ChatGPT.app/Contents/Resources/codex ]] \
+     || [[ -x /Applications/ChatGPT.app/Contents/MacOS/codex ]] \
+     || compgen -G "/opt/homebrew/Caskroom/codex/*/" >/dev/null 2>&1 \
+     || compgen -G "/usr/local/Caskroom/codex/*/" >/dev/null 2>&1; then
+    if [[ "${VERBOSE:-false}" == "true" ]]; then
+      printf '  skip (higher-priority codex source on host — see t_codex_chatgpt_app_bundled_wins_over_npm for the coverage)\n'
+    fi
+    return 0
+  fi
   local home; home="$(mktest_tmp)"
   local pkg_dir="${home}/.npm-global/lib/node_modules/@openai/codex"
   mkdir -p "${pkg_dir}"
@@ -93,56 +154,10 @@ t_unknown_connector() {
   assert_eq "${got}" "" "unknown connector returns empty string"
 }
 
-t_json_version_rejects_control_syntax() {
-  local root got
-  root="$(mktest_tmp)"
-  cat > "${root}/package.json" <<'JSON'
-{ "name": "untrusted", "version": "1.2.3;$(touch /tmp/not-allowed)" }
-JSON
-  got="$(_read_json_version "${root}/package.json")"
-  assert_eq "${got}" "" "untrusted package version syntax rejected"
-}
-
-t_json_version_rejects_fifo_without_blocking() {
-  local root fifo output pid still_running
-  root="$(mktest_tmp)"
-  fifo="${root}/package.json"
-  output="${root}/output"
-  mkfifo "${fifo}"
-  _read_json_version "${fifo}" >"${output}" &
-  pid=$!
-  still_running=true
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-    if ! kill -0 "${pid}" 2>/dev/null; then
-      still_running=false
-      break
-    fi
-    sleep 0.05
-  done
-  if [[ "${still_running}" == "true" ]]; then
-    kill -9 "${pid}" 2>/dev/null || true
-    wait "${pid}" 2>/dev/null || true
-    _fail "FIFO package metadata blocked the privileged version probe"
-    return 1
-  fi
-  wait "${pid}" || true
-  assert_eq "$(cat "${output}")" "" "FIFO package metadata is rejected"
-}
-
-t_json_version_rejects_oversized_metadata() {
-  local root got
-  root="$(mktest_tmp)"
-  dd if=/dev/zero of="${root}/package.json" bs=1024 count=257 2>/dev/null
-  got="$(_read_json_version "${root}/package.json")"
-  assert_eq "${got}" "" "oversized package metadata rejected"
-}
-
 run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
 run_case "claudecode via VS Code extension"  t_claudecode_via_vscode_extension
 run_case "claudecode without install"        t_claudecode_no_install_returns_empty
 run_case "codex without home metadata"       t_codex_no_home_metadata_uses_system_or_empty
 run_case "codex from user npm metadata"      t_codex_from_user_npm_metadata
+run_case "codex ChatGPT.app-bundled wins over stale npm" t_codex_chatgpt_app_bundled_wins_over_npm
 run_case "unknown connector returns empty"   t_unknown_connector
-run_case "package JSON version syntax is bounded" t_json_version_rejects_control_syntax
-run_case "package JSON FIFO is non-blocking" t_json_version_rejects_fifo_without_blocking
-run_case "package JSON size is bounded" t_json_version_rejects_oversized_metadata

@@ -511,7 +511,8 @@ def _windows_setup_dir(
     struct.pack_into("<I", payload, optional_offset + 108, 16)
     if signed:
         struct.pack_into("<II", payload, optional_offset + 112 + 4 * 8, 0x180, 16)
-        payload[0x180:0x190] = b"SIGNED-CMS-BYTES"
+        struct.pack_into("<IHH", payload, 0x180, 16, 0x0200, 0x0002)
+        payload[0x188:0x190] = b"\x30\x06fixture"
     setup.write_bytes(payload)
     setup_hash = release_candidate._sha256(setup)
     (windows / f"{setup.name}.sha256").write_text(
@@ -544,16 +545,33 @@ def _windows_setup_dir(
                 "format": "rfc3161",
                 "token_sha256": timestamp_token,
                 "signing_time_utc": "2026-07-15T01:02:03.0000000Z",
+                "policy_oid": "1.2.3.4",
+                "message_imprint_algorithm_oid": "2.16.840.1.101.3.4.2.1",
+                "message_imprint": "4" * 64,
+                "serial_number": "01",
                 "certificate": {"thumbprint_sha256": timestamp_signer},
+                "chain": [],
             },
             "embedded_signatures": [
                 {
+                    "scope": "top-level/0",
+                    "depth": 0,
                     "publisher": release_candidate.WINDOWS_SETUP_PUBLISHER,
+                    "digest_algorithm_oid": "2.16.840.1.101.3.4.2.1",
+                    "signature_algorithm_oid": "1.2.840.113549.1.1.1",
                     "signer": {"thumbprint_sha256": signer},
+                    "chain": [],
                     "timestamp": {
                         "present": True,
                         "format": "rfc3161",
                         "token_sha256": timestamp_token,
+                        "signing_time_utc": "2026-07-15T01:02:03.0000000Z",
+                        "policy_oid": "1.2.3.4",
+                        "message_imprint_algorithm_oid": "2.16.840.1.101.3.4.2.1",
+                        "message_imprint": "4" * 64,
+                        "serial_number": "01",
+                        "certificate": {"thumbprint_sha256": timestamp_signer},
+                        "chain": [],
                     },
                 }
             ],
@@ -656,7 +674,8 @@ def _windows_setup_dir(
             "cosign_sha256": release_candidate.WINDOWS_COSIGN_SHA256,
         },
     }
-    (windows / f"{setup.name}.provenance.json").write_text(
+    provenance_path = windows / f"{setup.name}.provenance.json"
+    provenance_path.write_text(
         json.dumps(provenance),
         encoding="utf-8",
     )
@@ -792,26 +811,24 @@ def _windows_setup_dir(
         encoding="utf-8",
     )
     certification = {
-        "schema_version": 1,
-        "status": "passed" if signed else "unverified",
-        "verification_status": "signed" if signed else "unverified",
+        "schema_version": 2,
+        "status": "passed",
+        "verification_status": "signed",
         "platform": "windows-x64",
         "setup": {
             "name": setup.name,
             "sha256": setup_hash,
-            "publisher": release_candidate.WINDOWS_SETUP_PUBLISHER if signed else "",
+            "publisher": release_candidate.WINDOWS_SETUP_PUBLISHER,
         },
-        "clients": release_candidate.WINDOWS_SETUP_CLIENTS if signed else {},
-        "connectors": ["codex", "claudecode"] if signed else [],
-        "requirements": list(
-            release_candidate.WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS
-            if signed
-            else ("setup-acceptance",)
-        ),
+        "authenticode": authenticode_evidence,
+        "provenance_sha256": release_candidate._sha256(provenance_path),
+        "clients": release_candidate.WINDOWS_SETUP_CLIENTS,
+        "connectors": ["codex", "claudecode"],
+        "requirements": list(release_candidate.WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS),
         "source_commit": commit,
         "release_version": version,
         "staging_artifact_digest": "4" * 64,
-        "run_url": ("https://github.com/cisco-ai-defense/defenseclaw/actions/runs/123456"),
+        "run_url": "https://github.com/cisco-ai-defense/defenseclaw/actions/runs/123456",
     }
     (windows / f"{setup.name}.certification.json").write_text(
         json.dumps(certification),
@@ -1193,10 +1210,10 @@ def test_windows_setup_custody_starts_at_086_and_survives_legacy_omission() -> N
     setup_assets = set(release_candidate.windows_installer_asset_names(WINDOWS_SETUP_VERSION))
     assert setup_assets == {
         "DefenseClawSetup-x64.exe",
+        "DefenseClawSetup-x64.exe.certification.json",
         "DefenseClawSetup-x64.exe.sha256",
         "DefenseClawSetup-x64.exe.provenance.json",
         "DefenseClawSetup-x64.exe.sbom.json",
-        "DefenseClawSetup-x64.exe.certification.json",
     }
     assert "checksums.txt.bundle" in release_candidate.published_asset_names(WINDOWS_SETUP_VERSION, "notarized")
     omitted = set(
@@ -1210,7 +1227,7 @@ def test_windows_setup_custody_starts_at_086_and_survives_legacy_omission() -> N
     assert not setup_assets & set(release_candidate.windows_release_binary_names(WINDOWS_SETUP_VERSION))
 
 
-def test_windows_setup_exact_artifact_set_validates(tmp_path: Path) -> None:
+def test_windows_setup_release_attestation_validates(tmp_path: Path) -> None:
     windows = _windows_setup_dir(tmp_path)
 
     release_candidate._validate_windows_installer_assets(
@@ -1221,10 +1238,26 @@ def test_windows_setup_exact_artifact_set_validates(tmp_path: Path) -> None:
     )
 
 
-def test_windows_setup_rejects_unsigned_pe(tmp_path: Path) -> None:
+def test_windows_setup_rejects_unsigned_pe_even_with_claimed_attestation(tmp_path: Path) -> None:
     windows = _windows_setup_dir(tmp_path, signed=False)
 
     with pytest.raises(release_candidate.CandidateError, match="embedded Authenticode signature"):
+        release_candidate._validate_windows_installer_assets(
+            windows,
+            WINDOWS_SETUP_VERSION,
+            COMMIT,
+            exact_file_set=True,
+        )
+
+
+def test_windows_setup_rejects_malformed_win_certificate_bytes(tmp_path: Path) -> None:
+    windows = _windows_setup_dir(tmp_path)
+    setup = windows / release_candidate.WINDOWS_SETUP_ASSET
+    payload = bytearray(setup.read_bytes())
+    struct.pack_into("<I", payload, 0x180, 32)
+    setup.write_bytes(payload)
+
+    with pytest.raises(release_candidate.CandidateError, match="malformed WIN_CERTIFICATE"):
         release_candidate._validate_windows_installer_assets(
             windows,
             WINDOWS_SETUP_VERSION,
@@ -1237,19 +1270,8 @@ def test_windows_setup_rejects_unsigned_pe(tmp_path: Path) -> None:
     ("metadata_suffix", "field", "value", "match"),
     [
         ("provenance.json", "unsigned", True, "signed release artifact"),
+        ("certification.json", "provenance_sha256", "0" * 64, "identity"),
         ("sbom.json", "documentNamespace", "https://example.invalid", "SBOM document"),
-        (
-            "certification.json",
-            "clients",
-            {"codex": "latest"},
-            "certification identity",
-        ),
-        (
-            "certification.json",
-            "requirements",
-            ["manual-trust"],
-            "certification identity",
-        ),
     ],
 )
 def test_windows_setup_metadata_tampering_fails_closed(
@@ -1274,22 +1296,18 @@ def test_windows_setup_metadata_tampering_fails_closed(
         )
 
 
-def test_windows_setup_rejects_pe_and_provenance_signing_state_mismatch(
-    tmp_path: Path,
-) -> None:
+def test_windows_setup_certification_rejects_changed_signer_identity(tmp_path: Path) -> None:
     windows = _windows_setup_dir(tmp_path)
-    path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.provenance.json"
-    document = json.loads(path.read_text(encoding="utf-8"))
-    document["unsigned"] = True
-    document["inputs"]["product_executables_authenticode_signed"] = False
-    path.write_text(json.dumps(document), encoding="utf-8")
+    certification = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.certification.json"
+    document = json.loads(certification.read_text(encoding="utf-8"))
+    document["authenticode"]["expected"]["signer_thumbprint_sha256"] = "9" * 64
+    certification.write_text(json.dumps(document), encoding="utf-8")
 
-    with pytest.raises(release_candidate.CandidateError, match="signed release artifact"):
+    with pytest.raises(release_candidate.CandidateError, match="signer identity"):
         release_candidate._validate_windows_installer_assets(
             windows,
             WINDOWS_SETUP_VERSION,
             COMMIT,
-            exact_file_set=True,
         )
 
 
@@ -3398,6 +3416,33 @@ def test_bridge_candidate_accepts_schema_two_policy_before_bridge_is_published(
         ["0.8.3", "0.8.2"],
         {"windows": ["0.8.3", "0.8.2"]},
     )
+
+
+def test_first_windows_release_accepts_empty_platform_baselines_without_emptying_global_policy(
+    tmp_path: Path,
+) -> None:
+    policy = json.loads((ROOT / "release" / "upgrade-baselines.json").read_text(encoding="utf-8"))
+    policy["platform_published_baselines"]["windows"] = []
+    policy_path = tmp_path / "effective-upgrade-baselines.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    configured, platforms = release_candidate._load_upgrade_baseline_policy(
+        WINDOWS_SETUP_VERSION,
+        policy_path,
+    )
+
+    assert configured == policy["published_baselines"]
+    assert configured
+    assert platforms == {"windows": []}
+
+    policy["published_baselines"] = []
+    policy["published_baseline_config_versions"] = {}
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+    with pytest.raises(release_candidate.CandidateError, match="policy is invalid"):
+        release_candidate._load_upgrade_baseline_policy(
+            WINDOWS_SETUP_VERSION,
+            policy_path,
+        )
 
 
 def test_followup_candidate_accepts_published_v8_baseline(

@@ -406,8 +406,8 @@ platforms = policy["platform_published_baselines"]
 if type(platforms) is not dict or set(platforms) != {"windows"}:
     fail("platform_published_baselines must contain exactly the reviewed Windows subset")
 windows_versions = platforms["windows"]
-if type(windows_versions) is not list or not windows_versions:
-    fail("reviewed Windows baseline subset must be a non-empty array")
+if type(windows_versions) is not list:
+    fail("reviewed Windows baseline subset must be an array")
 if (
     any(type(item) is not str or item not in config_versions for item in windows_versions)
     or len(set(windows_versions)) != len(windows_versions)
@@ -456,6 +456,25 @@ def parse(version: str) -> tuple[int, ...]:
 
 raise SystemExit(0 if parse(sys.argv[1]) <= parse(sys.argv[2]) else 1)
 PY
+}
+
+expected_upgrade_receipt_source() {
+    local source_version="$1" target_version="$2" required_bridge_version="${3:-}"
+    local receipt_source="${source_version}"
+
+    # A request that crosses beyond the v8 activation release completes as two
+    # transactions: source -> 0.8.5, then 0.8.5 -> target. The canonical target
+    # receipt truthfully records the final transaction rather than the original
+    # request. A request ending at 0.8.5 still records the required bridge as
+    # its source, including legacy routes that first stage through that bridge.
+    if ! version_lte "${V8_ACTIVATION_VERSION}" "${source_version}" \
+        && ! version_lte "${target_version}" "${V8_ACTIVATION_VERSION}"; then
+        receipt_source="${V8_ACTIVATION_VERSION}"
+    elif [[ -n "${required_bridge_version}" ]] \
+        && ! version_lte "${required_bridge_version}" "${source_version}"; then
+        receipt_source="${required_bridge_version}"
+    fi
+    printf '%s\n' "${receipt_source}"
 }
 
 target_uses_observability_v8() {
@@ -2588,11 +2607,10 @@ print("local_bundle_manifest=target_exact_custom_preserved")
 PY
         fi
 
-        local receipt_from="${FROM_VERSION}"
-        if [[ -n "${REQUIRED_BRIDGE_VERSION}" ]] \
-            && ! version_lte "${REQUIRED_BRIDGE_VERSION}" "${FROM_VERSION}"; then
-            receipt_from="${REQUIRED_BRIDGE_VERSION}"
-        fi
+        local receipt_from
+        receipt_from="$(expected_upgrade_receipt_source \
+            "${FROM_VERSION}" "${TARGET_VERSION}" "${REQUIRED_BRIDGE_VERSION}")" \
+            || die "could not resolve the canonical target receipt source"
         "${venv_python}" "${ROOT}/scripts/check_upgrade_receipt.py" \
             --data-dir "${SMOKE_HOME}/.defenseclaw" \
             --from-version "${receipt_from}" \

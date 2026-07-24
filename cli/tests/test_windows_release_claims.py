@@ -6,7 +6,6 @@
 from pathlib import Path
 
 import yaml
-
 from defenseclaw.platform_support import (
     WINDOWS_CERTIFIED_ARCHITECTURES,
     WINDOWS_NOT_CERTIFIED_ARCHITECTURES,
@@ -158,6 +157,18 @@ def test_windows_live_harness_avoids_automatic_variable_assignments() -> None:
     assert "$profile =" not in workflow + native_workflow
     assert "windows-native-required:" in native_workflow
     assert "name: windows native required" in native_workflow
+
+
+def test_windows_native_ci_concurrency_cannot_cross_cancel_push_and_manual_runs() -> None:
+    workflow = (ROOT / ".github/workflows/windows-native.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "group: windows-native-${{ github.event_name }}-"
+        "${{ github.event.pull_request.number || github.sha }}"
+    ) in workflow
+    assert "group: windows-native-${{ github.event.pull_request.number || github.ref }}" not in workflow
 
 
 def test_disposable_connector_workspace_includes_the_v8_jsonl_validator() -> None:

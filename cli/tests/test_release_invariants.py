@@ -184,9 +184,7 @@ class TestReleaseInvariants(unittest.TestCase):
             (_REPO_ROOT / "release" / "upgrade-baselines.json").read_text(encoding="utf-8")
         )
         expected_sources = [
-            version
-            for version in baseline_policy["published_baselines"]
-            if _ver_tuple(version) < (0, 8, 4)
+            version for version in baseline_policy["published_baselines"] if _ver_tuple(version) < (0, 8, 4)
         ]
         expected_windows = [
             version
@@ -274,7 +272,7 @@ class TestReleaseInvariants(unittest.TestCase):
                 "architectures": ["amd64"],
                 "handoff_args": ["/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user"],
                 "authenticode": {
-                    "required": True,
+                    "required": False,
                     "publisher": "Cisco Systems, Inc.",
                 },
                 "managed_policy": "respect",

@@ -135,13 +135,15 @@
     {
       "name": "DEFENSECLAW_UPGRADE_FRESH_PROCESS",
       "category": "upgrade_internal",
-      "purpose": "Marks the isolated installed-CLI child used for an upgrade handoff so the child cannot recursively hand off again.",
+      "purpose": "Marks the isolated installed-CLI child used for an upgrade handoff so the child cannot recursively hand off again and a newly installed gateway can delegate its readiness wait to that supervising controller.",
       "default": "unset",
       "accepted_values": ["1", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Rejects recursive fresh-process upgrade handoffs and marks the isolated child process"}
+        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Rejects recursive fresh-process upgrade handoffs and marks the isolated child process"},
+        {"location": "internal/cli/daemon.go", "description": "Delegates gateway readiness to the supervising upgrade controller while retaining safe launch and immediate-exit checks"},
+        {"location": "scripts/upgrade.sh", "description": "Scopes the marker to the immutable post-hard-cut controller continuation"}
       ],
       "since": "0.8.4"
     },
@@ -200,6 +202,19 @@
         {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Gates the fresh-controller candidate release endpoint override"}
       ],
       "since": "0.8.4"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_BASH",
+      "category": "test_fixture",
+      "purpose": "Selects the Bash executable used by release-workflow tests so macOS CI can exercise wrappers with the system Bash runtime.",
+      "default": "unset (auto-detect Bash, including Git Bash on Windows)",
+      "accepted_values": ["absolute path to a Bash executable", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/tests/test_release_workflow_staged.py", "description": "Selects the Bash executable used to run POSIX release-workflow contract tests"}
+      ],
+      "since": "0.8.7"
     },
     {
       "name": "DEFENSECLAW_TEST_PHASE1_RECOVERY_CRASH",
