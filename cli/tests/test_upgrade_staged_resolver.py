@@ -363,6 +363,13 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
         curl_log = tmp_path / "curl.log"
         cosign_log = tmp_path / "cosign.log"
         env = os.environ.copy()
+        for name in tuple(env):
+            if name in {
+                "DEFENSECLAW_DISABLE_REDACTION",
+                "DEFENSECLAW_JSONL_DISABLE",
+                "DEFENSECLAW_PERSIST_JUDGE",
+            } or name.startswith(("OTEL_", "DEFENSECLAW_OTEL_", "OPENCLAW_OTEL_")):
+                env.pop(name)
         env.update(
             {
                 "PATH": f"{fake_bin}:{env['PATH']}",
@@ -378,6 +385,24 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
         return env, mutation_log, curl_log
 
     return build
+
+
+def test_resolver_env_excludes_ambient_observability_decisions(
+    resolver_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names = (
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "DEFENSECLAW_OTEL_TRACES_ENDPOINT",
+        "OPENCLAW_OTEL_TLS_INSECURE",
+        "DEFENSECLAW_DISABLE_REDACTION",
+    )
+    for name in names:
+        monkeypatch.setenv(name, "ambient")
+
+    env, _mutation_log, _curl_log = resolver_env("0.8.6")
+
+    assert all(name not in env for name in names)
 
 
 def _install_clean_086_state(env: dict[str, str]) -> tuple[Path, Path]:
