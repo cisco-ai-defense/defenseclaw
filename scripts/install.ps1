@@ -544,16 +544,16 @@ function Assert-UpgradeManifest {
     }
     $authenticode = $installer.authenticode
     if ($null -eq $authenticode) {
-        Die "Authenticated upgrade manifest does not require the pinned DefenseClaw publisher"
+        Die "Authenticated upgrade manifest does not declare the optional pinned DefenseClaw publisher"
     }
     $authenticodeNames = @($authenticode.PSObject.Properties.Name)
     if ($authenticodeNames.Count -ne 2 -or
         $authenticodeNames -notcontains "required" -or
         $authenticodeNames -notcontains "publisher" -or
-        $authenticode.required -ne $true -or
+        $authenticode.required -ne $false -or
         -not ([string]$authenticode.publisher).Equals(
             $ExpectedPublisher, [StringComparison]::Ordinal)) {
-        Die "Authenticated upgrade manifest does not require the pinned DefenseClaw publisher"
+        Die "Authenticated upgrade manifest does not declare the optional pinned DefenseClaw publisher"
     }
     if (-not ([string]$installer.managed_policy).Equals("respect", [StringComparison]::Ordinal)) {
         Die "Authenticated upgrade manifest has an unsupported Windows managed-policy contract"
@@ -578,8 +578,8 @@ function Assert-SetupProvenance {
         -not ([string]$provenance.distribution_flavor).Equals("oss", [StringComparison]::Ordinal)) {
         Die "Authenticated Setup provenance does not describe the exact DefenseClaw $ReleaseVersion OSS artifact"
     }
-    if ($provenance.unsigned -isnot [bool] -or $provenance.unsigned) {
-        Die "Authenticated Setup provenance does not describe a signed release artifact"
+    if ($provenance.unsigned -isnot [bool]) {
+        Die "Authenticated Setup provenance does not declare its signing state"
     }
     if ([string]$provenance.source_commit -notmatch '^[0-9a-fA-F]{40}$') {
         Die "Authenticated Setup provenance has an invalid source commit"
@@ -587,18 +587,22 @@ function Assert-SetupProvenance {
     $claimedSha256 = [string]$provenance.artifact_sha256
     if ($claimedSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
         -not $claimedSha256.Equals($SetupSha256, [StringComparison]::OrdinalIgnoreCase)) {
-        Die "Authenticated Setup provenance does not match the exact signed checksum for $SetupAsset"
+        Die "Authenticated Setup provenance does not match the exact authenticated checksum for $SetupAsset"
     }
+    return [bool]$provenance.unsigned
 }
 
 function Assert-SetupAuthenticode {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][bool]$Unsigned
+    )
 
-    if (-not [string]::IsNullOrWhiteSpace($Local)) {
+    if (-not $Unsigned -and -not [string]::IsNullOrWhiteSpace($Local)) {
         $exitCode = Invoke-BoundedNativeProcess -FilePath $Path `
             -Arguments @('/verify') -TimeoutSeconds 120 -Hidden
         if ($exitCode -ne 0) {
-            Die "Setup offline Authenticode verification failed (exit $exitCode)"
+            Die "Setup offline signing-policy verification failed (exit $exitCode)"
         }
         Write-Ok "Setup Authenticode signature verified offline ($ExpectedPublisher)"
         return
@@ -610,6 +614,14 @@ function Assert-SetupAuthenticode {
             [Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
             $false
         )
+    }
+    if ($Unsigned) {
+        if ([string]$signature.Status -ne "NotSigned" -or
+            -not [string]::IsNullOrEmpty($publisher)) {
+            Die "Setup signing state conflicts with authenticated provenance: status='$($signature.Status)', publisher='$publisher'"
+        }
+        Write-Warn2 "Setup is explicitly unverified by Authenticode; release Sigstore checksums authenticated its exact bytes"
+        return
     }
     if ([string]$signature.Status -ne "Valid" -or
         -not $publisher.Equals($ExpectedPublisher, [StringComparison]::Ordinal)) {
@@ -700,15 +712,16 @@ function Complete-StagedBundleVerification {
     $setupSha = Get-AuthenticatedChecksum -ChecksumsContent $ChecksumsContent -FileName $SetupAsset
     Assert-StagedUpgradeManifest -StageRoot $StageRoot -ReleaseVersion $ReleaseVersion `
         -ChecksumsContent $ChecksumsContent
-    Assert-StagedSetupProvenance -StageRoot $StageRoot -ReleaseVersion $ReleaseVersion `
+    $setupUnsigned = Assert-StagedSetupProvenance -StageRoot $StageRoot -ReleaseVersion $ReleaseVersion `
         -SetupSha256 $setupSha -ChecksumsContent $ChecksumsContent
     Assert-Sha256 -Path $setup -Expected $setupSha -Label $SetupAsset
-    Assert-SetupAuthenticode -Path $setup
+    Assert-SetupAuthenticode -Path $setup -Unsigned $setupUnsigned
 
     return [pscustomobject]@{
         Root = $StageRoot
         Setup = $setup
         SetupSha256 = $setupSha
+        Unsigned = $setupUnsigned
         Version = $ReleaseVersion
     }
 }
@@ -776,7 +789,7 @@ function Stage-RemoteBundle {
             -Label $ProvenanceAsset -MaximumBytes 1048576
         $setupSha = Get-AuthenticatedChecksum `
             -ChecksumsContent $authenticatedChecksums -FileName $SetupAsset
-        Assert-StagedSetupProvenance -StageRoot $stage -ReleaseVersion $ReleaseVersion `
+        $null = Assert-StagedSetupProvenance -StageRoot $stage -ReleaseVersion $ReleaseVersion `
             -SetupSha256 $setupSha -ChecksumsContent $authenticatedChecksums
         Invoke-DownloadFile -Uri "$releaseBase/$SetupAsset" `
             -Destination (Join-Path $stage $SetupAsset) `
@@ -831,7 +844,7 @@ function Stage-LocalBundle {
             -ChecksumsContent $authenticatedChecksums
         $setupSha = Get-AuthenticatedChecksum `
             -ChecksumsContent $authenticatedChecksums -FileName $SetupAsset
-        Assert-StagedSetupProvenance -StageRoot $stage -ReleaseVersion $releaseVersion `
+        $null = Assert-StagedSetupProvenance -StageRoot $stage -ReleaseVersion $releaseVersion `
             -SetupSha256 $setupSha -ChecksumsContent $authenticatedChecksums
         Copy-RegularFile -Source (Join-Path $localRoot $SetupAsset) `
             -Destination (Join-Path $stage $SetupAsset) -Label $SetupAsset `
@@ -942,6 +955,7 @@ function Invoke-NativeSetup {
     param(
         [Parameter(Mandatory = $true)][string]$SetupPath,
         [Parameter(Mandatory = $true)][string]$ExpectedSha256,
+        [Parameter(Mandatory = $true)][bool]$Unsigned,
         [Parameter(Mandatory = $true)][string[]]$Arguments
     )
 
@@ -949,7 +963,7 @@ function Invoke-NativeSetup {
     # file lives in a private directory, but this also detects same-user or
     # security-product replacement between initial verification and handoff.
     Assert-Sha256 -Path $SetupPath -Expected $ExpectedSha256 -Label $SetupAsset
-    Assert-SetupAuthenticode -Path $SetupPath
+    Assert-SetupAuthenticode -Path $SetupPath -Unsigned $Unsigned
     Write-Step "Starting authenticated native Setup"
     return Invoke-BoundedNativeProcess -FilePath $SetupPath -Arguments $Arguments `
         -TimeoutSeconds 3600
@@ -978,7 +992,8 @@ function Main {
         }
         Write-Ok "Authenticated $SetupAsset for DefenseClaw $($bundle.Version)"
         $exitCode = Invoke-NativeSetup -SetupPath $bundle.Setup `
-            -ExpectedSha256 $bundle.SetupSha256 -Arguments $arguments
+            -ExpectedSha256 $bundle.SetupSha256 -Unsigned $bundle.Unsigned `
+            -Arguments $arguments
         if ($exitCode -eq 0) {
             Write-Ok "Native DefenseClaw Setup completed successfully"
         } else {

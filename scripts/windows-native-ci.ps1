@@ -3982,7 +3982,7 @@ function Invoke-WindowsReleaseCertification {
     }
     $provenance = Get-Content -LiteralPath $provenancePath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ([string]$provenance.artifact_sha256 -cne $setupHash) {
-        throw 'release setup provenance does not identify the exact signed installer bytes'
+        throw 'release setup provenance does not identify the exact installer bytes'
     }
     if ([string]$provenance.source_commit -cne [string]$env:GITHUB_SHA) {
         throw "release setup provenance source commit does not match GITHUB_SHA: $($provenance.source_commit)"
@@ -4152,7 +4152,7 @@ function Invoke-WindowsReleaseCertification {
 
         $finalHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($finalHash -cne $setupHash) {
-            throw 'the signed DefenseClawSetup-x64.exe bytes changed during release certification'
+            throw 'the DefenseClawSetup-x64.exe bytes changed during release certification'
         }
         Assert-CiscoAuthenticodeSignature $setup
         foreach ($metadataPath in @($sidecarPath, $provenancePath, $sbomPath)) {

@@ -82,7 +82,7 @@ def _manifest(version: str = "1.2.3") -> dict[str, object]:
             "architectures": ["amd64"],
             "handoff_args": ["/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user"],
             "authenticode": {
-                "required": True,
+                "required": False,
                 "publisher": "Cisco Systems, Inc.",
             },
             "managed_policy": "respect",
@@ -395,24 +395,24 @@ try {{
 """
     )
     assert invalid.returncode == 0, invalid.stderr
-    assert "does not require the pinned DefenseClaw publisher" in invalid.stdout
+    assert "does not declare the optional pinned DefenseClaw publisher" in invalid.stdout
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
-def test_authenticated_provenance_binds_signed_setup_checksum(tmp_path: Path) -> None:
+def test_authenticated_provenance_binds_setup_checksum_and_signing_state(tmp_path: Path) -> None:
     setup_sha = "a" * 64
     provenance = tmp_path / "DefenseClawSetup-x64.exe.provenance.json"
     provenance.write_text(json.dumps(_provenance(setup_sha)), encoding="utf-8")
     valid = _run_powershell(
         rf"""
 {_dot_source()}
-Assert-SetupProvenance -Path '{_ps_quote(provenance)}' `
+$unsigned = Assert-SetupProvenance -Path '{_ps_quote(provenance)}' `
   -ReleaseVersion '1.2.3' -SetupSha256 '{setup_sha}'
-Write-Output 'VALID'
+Write-Output "VALID_UNSIGNED=$unsigned"
 """
     )
     assert valid.returncode == 0, valid.stderr
-    assert "VALID" in valid.stdout
+    assert "VALID_UNSIGNED=False" in valid.stdout
 
     provenance.write_text(json.dumps(_provenance("b" * 64)), encoding="utf-8")
     wrong_hash = _run_powershell(
@@ -426,21 +426,19 @@ try {{
 """
     )
     assert wrong_hash.returncode == 0, wrong_hash.stderr
-    assert "does not match the exact signed checksum" in wrong_hash.stdout
+    assert "does not match the exact authenticated checksum" in wrong_hash.stdout
 
     provenance.write_text(json.dumps(_provenance(setup_sha, unsigned=True)), encoding="utf-8")
     unsigned = _run_powershell(
         rf"""
 {_dot_source()}
-try {{
-  Assert-SetupProvenance -Path '{_ps_quote(provenance)}' `
-    -ReleaseVersion '1.2.3' -SetupSha256 '{setup_sha}'
-  throw 'expected unsigned provenance rejection'
-}} catch {{ "ERROR=$($_.Exception.Message)" }}
+$unsigned = Assert-SetupProvenance -Path '{_ps_quote(provenance)}' `
+  -ReleaseVersion '1.2.3' -SetupSha256 '{setup_sha}'
+Write-Output "VALID_UNSIGNED=$unsigned"
 """
     )
     assert unsigned.returncode == 0, unsigned.stderr
-    assert "does not describe a signed release artifact" in unsigned.stdout
+    assert "VALID_UNSIGNED=True" in unsigned.stdout
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
@@ -454,13 +452,34 @@ function Get-AuthenticodeSignature {{
   [pscustomobject]@{{ Status = 'NotSigned'; SignerCertificate = $null }}
 }}
 try {{
-  Assert-SetupAuthenticode -Path '{_ps_quote(setup)}'
+  Assert-SetupAuthenticode -Path '{_ps_quote(setup)}' -Unsigned $false
   throw 'expected Authenticode rejection'
 }} catch {{ "ERROR=$($_.Exception.Message)" }}
 """
     )
     assert completed.returncode == 0, completed.stderr
     assert "status='NotSigned'" in completed.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
+def test_explicitly_unverified_setup_is_accepted_after_provenance_binding(tmp_path: Path) -> None:
+    setup = tmp_path / "DefenseClawSetup-x64.exe"
+    setup.write_bytes(b"unsigned fixture")
+    completed = _run_powershell(
+        rf"""
+{_dot_source(f"-Local '{_ps_quote(tmp_path)}'")}
+function Get-AuthenticodeSignature {{
+  [pscustomobject]@{{ Status = 'NotSigned'; SignerCertificate = $null }}
+}}
+function Invoke-BoundedNativeProcess {{ throw 'UNSIGNED_SETUP_VERIFY_CALLED' }}
+Assert-SetupAuthenticode -Path '{_ps_quote(setup)}' -Unsigned $true
+Write-Output 'VERIFIED'
+"""
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "UNSIGNED_SETUP_VERIFY_CALLED" not in completed.stdout + completed.stderr
+    assert "release Sigstore checksums authenticated its exact bytes" in completed.stdout
+    assert "VERIFIED" in completed.stdout
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
@@ -478,7 +497,7 @@ function Invoke-BoundedNativeProcess {{
   }}
   return 0
 }}
-Assert-SetupAuthenticode -Path '{_ps_quote(setup)}'
+Assert-SetupAuthenticode -Path '{_ps_quote(setup)}' -Unsigned $false
 Write-Output 'VERIFIED'
 """
     )
@@ -526,9 +545,9 @@ function Invoke-CosignVerification {{
   Write-Host 'COSIGN_VERIFIED'
   return [IO.File]::ReadAllText($ChecksumsPath)
 }}
-function Assert-SetupAuthenticode {{ param($Path) Write-Host 'AUTHENTICODE_VERIFIED' }}
+function Assert-SetupAuthenticode {{ param($Path, $Unsigned) Write-Host 'AUTHENTICODE_VERIFIED' }}
 function Invoke-NativeSetup {{
-  param($SetupPath, $ExpectedSha256, [string[]]$Arguments)
+  param($SetupPath, $ExpectedSha256, $Unsigned, [string[]]$Arguments)
   if ($ExpectedSha256 -ne '{setup_sha}') {{ throw 'wrong setup checksum' }}
   if (-not (Test-Path -LiteralPath $SetupPath -PathType Leaf)) {{ throw 'missing staged setup' }}
   Write-Host ('SETUP_ARGS=' + ($Arguments -join '|'))
@@ -559,7 +578,7 @@ def test_native_setup_exit_code_is_preserved_by_main() -> None:
 function Assert-NativeWindowsX64 {{}}
 function Assert-CompatibleLayoutRequest {{}}
 function Stage-RemoteBundle {{
-  [pscustomobject]@{{ Root=''; Setup='fixture.exe'; SetupSha256=('a' * 64); Version='1.2.3' }}
+  [pscustomobject]@{{ Root=''; Setup='fixture.exe'; SetupSha256=('a' * 64); Unsigned=$false; Version='1.2.3' }}
 }}
 function Invoke-NativeSetup {{ return 1603 }}
 $result = Main

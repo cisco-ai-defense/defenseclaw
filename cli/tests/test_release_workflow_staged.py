@@ -603,15 +603,18 @@ def test_posix_fresh_install_gates_temporary_and_external_cosign_paths() -> None
     assert '$(sha256_file "${EXTERNAL_COSIGN}")' in text
 
 
-def test_macos_release_requires_notarization_and_tests_exact_candidate() -> None:
+def test_macos_release_accepts_notarized_or_explicitly_unverified_candidate() -> None:
     jobs = _workflow()["jobs"]
     macos = jobs["macos-app"]
     build = _step(macos, "Build, sign, notarize, and package app")
-    assert build["env"]["MACOS_REQUIRE_NOTARIZATION"] == "true"
+    assert build["env"]["MACOS_REQUIRE_NOTARIZATION"] == "false"
     assert build["env"]["MACOS_GATEWAY_INPUT"] == ("${{ github.workspace }}/macos-runtime/defenseclaw")
-    trust = _step(macos, "Require notarized macOS assets")
-    assert 'VERIFICATION_STATUS" != "notarized"' in trust["run"]
-    assert "unverified" not in trust["run"]
+    trust = _step(macos, "Accept notarized or explicitly unverified macOS assets")
+    assert '"notarized")' in trust["run"]
+    assert '"unverified")' in trust["run"]
+    assert "macos-arm64-unverified.dmg" in trust["run"]
+    assert "macos-arm64-unverified.zip" in trust["run"]
+    assert "Unexpected macOS verification status" in trust["run"]
     assert macos["outputs"]["verification_status"] == ("${{ steps.app.outputs.verification_status }}")
 
     assemble = jobs["assemble-release-candidate"]
@@ -622,11 +625,11 @@ def test_macos_release_requires_notarization_and_tests_exact_candidate() -> None
     assert any(row["platform"] == "darwin-arm64" for row in fresh_matrix)
 
 
-def test_release_fails_before_build_when_signing_credentials_are_missing() -> None:
+def test_release_allows_absent_signing_credentials_but_rejects_partial_groups() -> None:
     jobs = _workflow()["jobs"]
     preflight = jobs["release-preflight"]
     assert preflight["environment"] == "release"
-    credentials = _step(preflight, "Require production signing credentials")
+    credentials = _step(preflight, "Validate optional platform signing credentials")
     rendered = str(credentials)
 
     for name in (
@@ -639,8 +642,13 @@ def test_release_fails_before_build_when_signing_credentials_are_missing() -> No
         "WINDOWS_SIGNING_CERT_PASSWORD",
     ):
         assert f"${{{{ secrets.{name} != '' }}}}" in rendered
-        assert f"missing+=({name})" in credentials["run"]
-    assert "Release signing credentials unavailable" in credentials["run"]
+    assert "APPLE_CREDENTIAL_COUNT" in credentials["run"]
+    assert "WINDOWS_CREDENTIAL_COUNT" in credentials["run"]
+    assert "Apple signing/notarization credentials are partially configured" in credentials["run"]
+    assert "Windows signing credentials are partially configured" in credentials["run"]
+    assert "no Apple credentials; macOS assets will be explicitly unverified" in credentials["run"]
+    assert "no Windows credentials; Windows Setup will be explicitly unverified" in credentials["run"]
+    assert "Release signing credentials unavailable" not in credentials["run"]
     assert jobs["build-runtime-candidate"]["needs"] == "release-preflight"
 
 
@@ -654,7 +662,7 @@ def test_macos_app_consumes_and_validates_sealed_runtime_gateway() -> None:
     assert "gateway candidate version mismatch" in text
 
 
-def test_windows_release_requires_signed_setup_and_fresh_install_only() -> None:
+def test_windows_release_accepts_signed_or_explicitly_unverified_setup_and_is_fresh_only() -> None:
     jobs = _workflow()["jobs"]
     windows = jobs["windows-installer"]
     rendered = str(windows)
@@ -663,15 +671,16 @@ def test_windows_release_requires_signed_setup_and_fresh_install_only() -> None:
     assert windows["environment"] == "release"
     assert "WINDOWS_SIGNING_CERT_BASE64" in rendered
     assert "WINDOWS_SIGNING_CERT_PASSWORD" in rendered
-    assert "Both Windows Authenticode certificate and password are required" in rendered
-    assert "Release Windows Setup is not fully Authenticode signed" in rendered
+    assert "Build native Setup with optional Authenticode" in rendered
+    assert "Windows Setup provenance has an inconsistent signing state" in rendered
+    assert "publishing an explicitly unverified Windows Setup" in rendered
     assert "invoke-windows-setup-standard-user-ci.ps1" in rendered
     assert "-Mode setup-acceptance" in rendered
     assert "-AllowCurrentUserSetupAcceptance" not in rendered
     windows_contract = (ROOT / "scripts/live-connector-e2e/test-windows.ps1").read_text(encoding="utf-8")
     assert "production release does not depend on provider-backed Windows live radar" in (windows_contract)
     assert "needs\\.windows-installer\\.outputs\\.artifact_id" in windows_contract
-    assert "tested signed Windows artifact bundle directly" in windows_contract
+    assert "tested Windows artifact bundle directly" in windows_contract
 
     upload = next(step for step in windows["steps"] if step.get("id") == "windows-installer-artifact")
     expected = (

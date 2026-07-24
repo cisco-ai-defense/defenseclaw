@@ -32,7 +32,8 @@ One manual Release dispatch builds the publishable Windows amd64 and arm64
 gateway binaries plus the x64 `DefenseClawSetup-x64.exe` from the reviewed
 `main` commit selected by that dispatch. The same run:
 
-1. requires the expected Authenticode signature and timestamp;
+1. requires either the expected Authenticode signature and timestamp or an
+   explicit unverified provenance record with exact `NotSigned` state;
 2. exercises `install.ps1` and the exact Setup candidate as a standard user;
 3. verifies installed versions and payload ownership; and
 4. seals the tested Windows assets with the Linux and macOS candidate before

@@ -1941,7 +1941,7 @@ def test_windows_bootstrap_binds_native_setup_to_authenticated_signed_outer_byte
     assert "$setupSha = Get-AuthenticatedChecksum" in installer
     assert "-ChecksumsContent $ChecksumsContent -FileName $SetupAsset" in installer
     assert "Assert-Sha256 -Path $setup -Expected $setupSha -Label $SetupAsset" in installer
-    assert "Authenticated Setup provenance does not match the exact signed checksum" in installer
+    assert "Authenticated Setup provenance does not match the exact authenticated checksum" in installer
     assert "Assert-SetupAuthenticode -Path $setup" in installer
     assert "function New-PrivateStageRoot" in installer
     assert "Set-PrivateDirectoryProtection -Path $root" in installer

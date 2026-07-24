@@ -348,14 +348,25 @@ Before publication, the same run proves:
 - the latest authenticated older release, the published `0.8.5` and `0.8.4`
   boundaries, and representative `0.7.x`, `0.6.x`, and `0.5.x` releases
   upgrade successfully on Linux and macOS;
-- the unified macOS app is Developer ID signed and notarized;
-- `install.ps1` delegates to the signed native Windows Setup and installs the
-  exact candidate successfully; and
+- the unified macOS app is Developer ID signed and notarized when all Apple
+  signing credentials are available, or ad-hoc signed and published with
+  explicit `-unverified` names when none are configured;
+- `install.ps1` delegates to the native Windows Setup and installs the exact
+  candidate successfully, whether Authenticode-signed or explicitly
+  unverified and authenticated by the release Sigstore checksums; and
 - the sealed candidate contains the expected Linux, macOS, and Windows
   binaries.
 
 The first native Windows release is fresh-install-only; the release workflow
 tests installation and exact installed-version verification.
+
+Apple release credentials are an all-or-none group: complete credentials must
+produce notarized assets, no credentials intentionally produce the unverified
+artifacts above, and a partial credential set stops the run.
+Windows Authenticode credentials use the same all-or-none rule: both values
+produce Cisco-signed Setup bytes, neither produces an explicitly unverified
+Setup that remains authenticated by release checksums and provenance, and a
+partial pair stops the run.
 
 Each selected pre-`0.8.4` POSIX source must visibly traverse the authenticated
 published `0.8.4` bridge and its fresh-controller handoff into the `0.8.5+`
@@ -430,8 +441,8 @@ confirmations. The macOS/Linux release scripts are fresh-install-only. If the
 CLI, gateway, or managed virtual environment already exists, they exit before
 platform/dependency setup or artifact replacement. Use the authenticated
 current release-owned `scripts/upgrade.sh` resolver for an existing POSIX
-installation. Windows uses the signed native Setup described below for a fresh
-installation; no upgrade from a pre-native Windows release is claimed.
+installation. Windows uses the authenticated native Setup described below for
+a fresh installation; no upgrade from a pre-native Windows release is claimed.
 
 Authenticated POSIX installs keep a private, mode-0700 same-filesystem custody
 directory for inactive rollback objects. A durable mode-0600 in-progress marker

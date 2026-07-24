@@ -1,7 +1,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""Contracts for the first signed native Windows release."""
+"""Contracts for the first native Windows release."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def _step(job: dict[str, object], name: str) -> dict[str, object]:
     return matches[0]
 
 
-def test_release_requires_authenticode_signed_setup_and_exact_four_sidecars() -> None:
+def test_release_accepts_signed_or_explicitly_unverified_setup_and_exact_four_sidecars() -> None:
     workflow = _workflow(RELEASE_PATH)
     jobs = workflow["jobs"]
     windows = jobs["windows-installer"]
@@ -51,15 +51,15 @@ def test_release_requires_authenticode_signed_setup_and_exact_four_sidecars() ->
     assert windows["environment"] == "release"
     assert "WINDOWS_SIGNING_CERT_BASE64" in rendered
     assert "WINDOWS_SIGNING_CERT_PASSWORD" in rendered
-    assert "Both Windows Authenticode certificate and password are required" in rendered
-    assert "Build native Setup with required Authenticode" in rendered
-    assert "Release Windows Setup is not fully Authenticode signed" in rendered
+    assert "Build native Setup with optional Authenticode" in rendered
+    assert "Windows Setup provenance has an inconsistent signing state" in rendered
+    assert "publishing an explicitly unverified Windows Setup" in rendered
 
     assert "invoke-windows-setup-standard-user-ci.ps1" in rendered
     assert "-Mode setup-acceptance" in rendered
     assert "-AllowCurrentUserSetupAcceptance" not in rendered
 
-    acceptance = _step(windows, "Validate the exact signed installer lifecycle")
+    acceptance = _step(windows, "Validate the exact installer lifecycle")
     acceptance_run = acceptance["run"]
     assert "-ArtifactRoot windows-installer-output" in acceptance_run
     assert "-StateRoot (Join-Path $env:RUNNER_TEMP" in acceptance_run
@@ -162,6 +162,7 @@ def test_release_documentation_matches_the_fresh_only_gate() -> None:
 
     assert "one-dispatch Release workflow" in installer
     assert "Authenticode signed" in installer
+    assert "explicitly unverified" in installer
     assert "first native Windows release" in installer
     assert "fresh-install-only" in installer
     assert ".certification.json" not in installer

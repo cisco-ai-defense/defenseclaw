@@ -59,7 +59,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Require production signing credentials
+      - name: Validate optional platform signing credentials
         env:
           HAS_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 != '' }}
           HAS_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD != '' }}
@@ -70,27 +70,37 @@ jobs:
           HAS_WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD != '' }}
         run: |
           set -euo pipefail
-          missing=()
-          [[ "$HAS_MACOS_DEVELOPER_ID_P12_BASE64" == "true" ]] ||
-            missing+=(MACOS_DEVELOPER_ID_P12_BASE64)
-          [[ "$HAS_MACOS_DEVELOPER_ID_P12_PASSWORD" == "true" ]] ||
-            missing+=(MACOS_DEVELOPER_ID_P12_PASSWORD)
-          [[ "$HAS_MACOS_NOTARY_KEY_BASE64" == "true" ]] ||
-            missing+=(MACOS_NOTARY_KEY_BASE64)
-          [[ "$HAS_MACOS_NOTARY_KEY_ID" == "true" ]] ||
-            missing+=(MACOS_NOTARY_KEY_ID)
-          [[ "$HAS_MACOS_NOTARY_ISSUER_ID" == "true" ]] ||
-            missing+=(MACOS_NOTARY_ISSUER_ID)
-          [[ "$HAS_WINDOWS_SIGNING_CERT_BASE64" == "true" ]] ||
-            missing+=(WINDOWS_SIGNING_CERT_BASE64)
-          [[ "$HAS_WINDOWS_SIGNING_CERT_PASSWORD" == "true" ]] ||
-            missing+=(WINDOWS_SIGNING_CERT_PASSWORD)
-          if (( ${#missing[@]} > 0 )); then
-            names="$(IFS=,; printf '%s' "${missing[*]}")"
-            echo "::error title=Release signing credentials unavailable::Configure these secrets in the GitHub release environment before dispatching: $names"
+          APPLE_CREDENTIAL_COUNT=0
+          for configured in \
+            "$HAS_MACOS_DEVELOPER_ID_P12_BASE64" \
+            "$HAS_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$HAS_MACOS_NOTARY_KEY_BASE64" \
+            "$HAS_MACOS_NOTARY_KEY_ID" \
+            "$HAS_MACOS_NOTARY_ISSUER_ID"; do
+            [[ "$configured" != "true" ]] ||
+              APPLE_CREDENTIAL_COUNT=$((APPLE_CREDENTIAL_COUNT + 1))
+          done
+          WINDOWS_CREDENTIAL_COUNT=0
+          for configured in \
+            "$HAS_WINDOWS_SIGNING_CERT_BASE64" \
+            "$HAS_WINDOWS_SIGNING_CERT_PASSWORD"; do
+            [[ "$configured" != "true" ]] ||
+              WINDOWS_CREDENTIAL_COUNT=$((WINDOWS_CREDENTIAL_COUNT + 1))
+          done
+          if (( APPLE_CREDENTIAL_COUNT != 0 && APPLE_CREDENTIAL_COUNT != 5 )); then
+            echo "::error title=Partial Apple release credentials::Apple signing/notarization credentials are partially configured; provide all five values or none."
             exit 1
           fi
-          echo "Apple notarization and Windows Authenticode credentials are available."
+          if (( WINDOWS_CREDENTIAL_COUNT != 0 && WINDOWS_CREDENTIAL_COUNT != 2 )); then
+            echo "::error title=Partial Windows release credentials::Windows signing credentials are partially configured; provide both values or none."
+            exit 1
+          fi
+          [[ "$APPLE_CREDENTIAL_COUNT" == "5" ]] &&
+            echo "macOS release mode: Developer ID signed and notarized" ||
+            echo "::warning title=Unverified macOS release::no Apple credentials; macOS assets will be explicitly unverified"
+          [[ "$WINDOWS_CREDENTIAL_COUNT" == "2" ]] &&
+            echo "Windows release mode: Authenticode signed" ||
+            echo "::warning title=Unverified Windows release::no Windows credentials; Windows Setup will be explicitly unverified"
 
       - name: Require reviewed macOS app source
         # A DefenseClaw release must build the macOS source that was reviewed
@@ -471,22 +481,35 @@ jobs:
           MACOS_NOTARY_KEY_BASE64: ${{ secrets.MACOS_NOTARY_KEY_BASE64 }}
           MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
           MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
-          # Publishing requires the complete Apple credential set and a
-          # successfully notarized app; ad-hoc artifacts are CI-only.
-          MACOS_REQUIRE_NOTARIZATION: "true"
+          # Complete credentials produce notarized assets. With none, the
+          # builder emits only explicitly named -unverified assets. Partial
+          # credentials fail in preflight and again inside the builder.
+          MACOS_REQUIRE_NOTARIZATION: "false"
           MACOS_GATEWAY_INPUT: ${{ github.workspace }}/macos-runtime/defenseclaw
         run: scripts/build-macos-app-release.sh "$RELEASE_VERSION" macos-candidate
 
-      - name: Require notarized macOS assets
+      - name: Accept notarized or explicitly unverified macOS assets
         env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
           VERIFICATION_STATUS: ${{ steps.app.outputs.verification_status }}
         run: |
           set -euo pipefail
-          if [[ "$VERIFICATION_STATUS" != "notarized" ]]; then
-            echo "::error title=macOS notarization required::status=$VERIFICATION_STATUS"
-            exit 1
-          fi
-          echo "Developer ID signed and notarized macOS assets are ready."
+          case "$VERIFICATION_STATUS" in
+            "notarized")
+              test -f "macos-candidate/DefenseClawMac-${RELEASE_TAG}-macos-arm64.dmg"
+              test -f "macos-candidate/DefenseClawMac-${RELEASE_TAG}-macos-arm64.zip"
+              echo "Developer ID signed and notarized macOS assets are ready."
+              ;;
+            "unverified")
+              test -f "macos-candidate/DefenseClawMac-${RELEASE_TAG}-macos-arm64-unverified.dmg"
+              test -f "macos-candidate/DefenseClawMac-${RELEASE_TAG}-macos-arm64-unverified.zip"
+              echo "::warning title=Publishing unverified macOS assets::Apple credentials were absent; asset names explicitly carry the -unverified suffix."
+              ;;
+            *)
+              echo "::error title=Unexpected macOS verification status::status=$VERIFICATION_STATUS"
+              exit 1
+              ;;
+          esac
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -553,17 +576,7 @@ jobs:
             --version "$env:RELEASE_TAG"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Require Windows Authenticode credentials
-        env:
-          WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
-          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_BASE64) -or
-              [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)) {
-            throw 'Both Windows Authenticode certificate and password are required for release.'
-          }
-
-      - name: Build native Setup with required Authenticode
+      - name: Build native Setup with optional Authenticode
         env:
           RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
           WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
@@ -577,15 +590,24 @@ jobs:
           -Version $env:RELEASE_TAG
           -DistributionFlavor oss
 
-      - name: Require signed Windows Setup provenance
+      - name: Require explicit Windows signing status
+        id: windows-verification
         run: |
           $provenance = Get-Content -LiteralPath windows-installer-output/DefenseClawSetup-x64.exe.provenance.json -Raw -Encoding UTF8 | ConvertFrom-Json
-          if ($provenance.unsigned -ne $false -or
-              $provenance.inputs.product_executables_authenticode_signed -ne $true) {
-            throw 'Release Windows Setup is not fully Authenticode signed.'
+          if ($provenance.unsigned -eq $false -and
+              $provenance.inputs.product_executables_authenticode_signed -eq $true) {
+            $status = 'signed'
+            Write-Host 'Cisco Authenticode-signed Windows Setup is ready.'
+          } elseif ($provenance.unsigned -eq $true -and
+                    $provenance.inputs.product_executables_authenticode_signed -eq $false) {
+            $status = 'unverified'
+            Write-Warning 'Authenticode credentials were absent; publishing an explicitly unverified Windows Setup.'
+          } else {
+            throw 'Windows Setup provenance has an inconsistent signing state.'
           }
+          "verification_status=$status" >> $env:GITHUB_OUTPUT
 
-      - name: Validate the exact signed installer lifecycle
+      - name: Validate the exact installer lifecycle
         run: >-
           ./scripts/invoke-windows-setup-standard-user-ci.ps1
           -Mode setup-acceptance
@@ -985,7 +1007,7 @@ jobs:
           RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
         run: |
           set -euo pipefail
-          echo "::notice title=Native Windows Setup included::The signed DefenseClawSetup-x64.exe and every sealed Linux, macOS, and Windows runtime asset are published together."
+          echo "::notice title=Native Windows Setup included::The lifecycle-tested DefenseClawSetup-x64.exe and every sealed Linux, macOS, and Windows runtime asset are published together."
           mapfile -t names < <(
             python3 scripts/release_candidate.py list-assets \
               --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"

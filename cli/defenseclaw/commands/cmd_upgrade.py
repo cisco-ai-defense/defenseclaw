@@ -147,6 +147,10 @@ _COSIGN_BOOTSTRAP_SHA256 = {
 }
 _TARGET_CONFIG_VERSION = 8
 _WINDOWS_SETUP_ASSET = "DefenseClawSetup-x64.exe"
+_WINDOWS_SETUP_PROVENANCE_ASSET = f"{_WINDOWS_SETUP_ASSET}.provenance.json"
+# Match the release-candidate validator's bounded metadata envelope. Signed
+# inventories can include evidence for every embedded Windows executable.
+_MAX_WINDOWS_SETUP_PROVENANCE_BYTES = 128 * 1024 * 1024
 _WINDOWS_INSTALL_STATE = "install-state.json"
 _CSIDL_LOCAL_APPDATA = 0x001C
 _CSIDL_PROFILE = 0x0028
@@ -611,11 +615,23 @@ def upgrade(
             _UPGRADE_MANIFEST_FILENAME,
         ]
         if native_windows_state is not None:
-            # The signed native Setup is the only published Windows delivery
-            # artifact. The protected raw Windows gateway remains sealed inside
-            # Setup and must not be fetched through the legacy CLI path.
+            # Native Setup and its signing-state provenance are one
+            # authenticated delivery unit. The protected raw Windows gateway
+            # remains sealed inside Setup and must not be fetched through the
+            # legacy CLI path.
             _windows_installer_policy(upgrade_manifest)
-            artifact_names.append(_WINDOWS_SETUP_ASSET)
+            if hard_cut_provenance is None:
+                ux.err(
+                    "Native Windows Setup requires authenticated release provenance.",
+                    indent="  ",
+                )
+                raise SystemExit(1)
+            artifact_names.extend(
+                (
+                    _WINDOWS_SETUP_ASSET,
+                    _WINDOWS_SETUP_PROVENANCE_ASSET,
+                )
+            )
         if checksums is not None:
             # Resolve artifact names from authenticated release policy before
             # allowing unsigned release metadata to fill an explicitly opted-in
@@ -638,16 +654,19 @@ def upgrade(
                 if not click.confirm("  Proceed?", default=False):
                     ux.subhead("Aborted.")
                     return
-            ux.banner("Creating Backup")
-            backup_dir = _create_backup(app.cfg, data_dir=data_dir)
-            ux.ok(f"Backup saved to: {backup_dir}")
             setup_path, setup_name = _download_windows_setup(
                 target_version,
                 staging_dir,
                 checksums,
                 upgrade_manifest,
                 allow_unverified=effective_allow_unverified,
+                expected_source_commit=hard_cut_provenance.source_commit,
             )
+            # Complete every authenticated Setup/provenance/signing-state
+            # check before creating the first mutable backup.
+            ux.banner("Creating Backup")
+            backup_dir = _create_backup(app.cfg, data_dir=data_dir)
+            ux.ok(f"Backup saved to: {backup_dir}")
             _handoff_windows_setup_upgrade(
                 setup_path,
                 setup_name,
@@ -1351,6 +1370,7 @@ def upgrade(
     _check_post_upgrade_drift(target_version)
     click.echo()
 
+
 def _recover_interrupted_same_version_upgrade(
     app: AppContext,
     *,
@@ -1887,8 +1907,7 @@ def _detect_platform() -> tuple[str, str]:
 
     if system == "windows" and arch in WINDOWS_NOT_CERTIFIED_ARCHITECTURES:
         ux.err(
-            f"Windows {arch.upper()} is not certified for this release; "
-            "use certified Windows x64 (amd64).",
+            f"Windows {arch.upper()} is not certified for this release; use certified Windows x64 (amd64).",
             indent="  ",
         )
         raise SystemExit(1)
@@ -2603,8 +2622,10 @@ def _download_windows_setup(
     checksums: dict[str, str] | None,
     manifest: dict[str, object] | None,
     allow_unverified: bool = False,
+    *,
+    expected_source_commit: str,
 ) -> tuple[str, str]:
-    """Download, checksum, and Authenticode-verify the native setup EXE."""
+    """Download and authenticate native Setup plus its signing provenance."""
     installer = _windows_installer_policy(manifest)
     setup_name = str(installer.get("asset", _WINDOWS_SETUP_ASSET))
     if setup_name != _WINDOWS_SETUP_ASSET:
@@ -2619,9 +2640,100 @@ def _download_windows_setup(
     else:
         ux.err("No trusted checksum manifest is available for the setup executable.", indent="  ")
         raise SystemExit(1)
-    _verify_windows_setup_authenticode(dest, installer, allow_unverified=allow_unverified)
+
+    provenance_name = f"{setup_name}.provenance.json"
+    provenance_path = os.path.join(staging_dir, provenance_name)
+    click.echo(f"  {ux.dim('→')} Downloading native Windows setup provenance ...")
+    _download_file(f"{GITHUB_DL}/{version}/{provenance_name}", provenance_path)
+    _verify_sha256(provenance_path, provenance_name, checksums)
+    setup_sha256 = _file_sha256(dest)
+    provenance_unsigned = _validate_windows_setup_provenance(
+        provenance_path,
+        version=version,
+        setup_name=setup_name,
+        setup_sha256=setup_sha256,
+        expected_source_commit=expected_source_commit,
+    )
+    observed_unsigned = _verify_windows_setup_authenticode(
+        dest,
+        installer,
+        allow_unverified=allow_unverified,
+    )
+    if provenance_unsigned is not observed_unsigned:
+        ux.err(
+            "Windows Setup Authenticode state does not match its authenticated provenance.",
+            indent="  ",
+        )
+        raise SystemExit(1)
     ux.ok("Native Windows setup executable downloaded")
     return dest, setup_name
+
+
+def _validate_windows_setup_provenance(
+    path: str,
+    *,
+    version: str,
+    setup_name: str,
+    setup_sha256: str,
+    expected_source_commit: str,
+) -> bool:
+    """Validate the checksum-covered identity and signing state for Setup."""
+
+    expected_fields = {
+        "schema_version",
+        "artifact",
+        "artifact_sha256",
+        "version",
+        "source_commit",
+        "distribution_flavor",
+        "built_at_utc",
+        "unsigned",
+        "authenticode",
+        "inputs",
+        "toolchain",
+    }
+    try:
+        info = os.lstat(path)
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or not 0 < info.st_size <= _MAX_WINDOWS_SETUP_PROVENANCE_BYTES
+        ):
+            raise OSError("provenance is not a bounded regular file")
+        with open(path, "rb") as stream:
+            raw = stream.read(_MAX_WINDOWS_SETUP_PROVENANCE_BYTES + 1)
+        if not raw or len(raw) > _MAX_WINDOWS_SETUP_PROVENANCE_BYTES:
+            raise OSError("provenance is outside its size bound")
+        payload = json.loads(raw.decode("utf-8", errors="strict"))
+        if not isinstance(payload, dict) or set(payload) != expected_fields:
+            raise OSError("provenance does not use the closed schema-1 field set")
+        schema = payload["schema_version"]
+        unsigned = payload["unsigned"]
+        source_commit = payload["source_commit"]
+        if schema != 1 or isinstance(schema, bool):
+            raise OSError("provenance schema is unsupported")
+        if payload["artifact"] != setup_name or payload["version"] != version:
+            raise OSError("provenance does not identify the target Setup release")
+        if payload["distribution_flavor"] != "oss":
+            raise OSError("provenance does not identify the OSS distribution")
+        if (
+            not isinstance(payload["artifact_sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", payload["artifact_sha256"]) is None
+            or not secrets.compare_digest(payload["artifact_sha256"], setup_sha256)
+        ):
+            raise OSError("provenance does not bind the exact Setup SHA-256")
+        if (
+            not isinstance(expected_source_commit, str)
+            or re.fullmatch(r"[0-9a-f]{40}", expected_source_commit) is None
+            or source_commit != expected_source_commit
+        ):
+            raise OSError("provenance source commit does not match authenticated release provenance")
+        if not isinstance(unsigned, bool):
+            raise OSError("provenance signing state is not boolean")
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        ux.err(f"Invalid {_WINDOWS_SETUP_PROVENANCE_ASSET}: {exc}", indent="  ")
+        raise SystemExit(1) from exc
+    return unsigned
 
 
 def _windows_installer_policy(manifest: dict[str, object] | None) -> dict[str, object]:
@@ -2639,15 +2751,19 @@ def _verify_windows_setup_authenticode(
     setup_path: str,
     installer: dict[str, object],
     allow_unverified: bool = False,
-) -> None:
-    """Validate Authenticode status and publisher for the setup EXE."""
+) -> bool:
+    """Validate an optional Authenticode identity after checksum authentication."""
+    # Native Setup never relies on the broad --allow-unverified escape hatch:
+    # the exact executable must already match the authenticated release
+    # checksum manifest before this optional platform-identity check.
+    del allow_unverified
     auth = installer.get("authenticode", {})
     if not isinstance(auth, dict):
         auth = {}
     default = default_publisher()
     publisher = auth.get("publisher", default)
-    if auth.get("required") is not True or publisher != default:
-        ux.err("Release manifest does not require the pinned DefenseClaw publisher.", indent="  ")
+    if auth.get("required") is not False or publisher != default:
+        ux.err("Release manifest does not declare the optional pinned DefenseClaw publisher.", indent="  ")
         raise SystemExit(1)
 
     powershell = _system_powershell_path()
@@ -2696,7 +2812,12 @@ def _verify_windows_setup_authenticode(
     signer = payload.get("Publisher", "")
     if status == "Valid" and signer == publisher:
         ux.ok(f"Setup Authenticode signature verified ({publisher})")
-        return
+        return False
+    if status == "NotSigned" and signer == "":
+        ux.warn(
+            "Setup is explicitly unverified by Authenticode; release Sigstore checksums authenticated its exact bytes."
+        )
+        return True
     _fail_authenticode(
         f"Setup Authenticode signature is not trusted: status={status!r}, publisher={signer!r}",
     )
@@ -2708,7 +2829,10 @@ def default_publisher() -> str:
 
 def _fail_authenticode(message: str) -> None:
     ux.err(message, indent="  ")
-    ux.subhead("Refusing to run an unsigned or untrusted setup executable.", indent="    ")
+    ux.subhead(
+        "Refusing to run a setup executable with an unexpected signing state or untrusted signature.",
+        indent="    ",
+    )
     raise SystemExit(1)
 
 
@@ -3774,12 +3898,12 @@ def _validate_windows_installer_policy(value: object) -> dict[str, object]:
             indent="  ",
         )
         raise SystemExit(1)
-    required = auth.get("required", True)
+    required = auth.get("required")
     publisher = auth.get("publisher")
-    if required is not True or publisher != default_publisher():
+    if required is not False or publisher != default_publisher():
         ux.err(
-            f"{_UPGRADE_MANIFEST_FILENAME} windows_installer.authenticode must require "
-            f"the pinned publisher {default_publisher()!r}.",
+            f"{_UPGRADE_MANIFEST_FILENAME} windows_installer.authenticode must declare "
+            f"the optional pinned publisher {default_publisher()!r}.",
             indent="  ",
         )
         raise SystemExit(1)
@@ -4457,14 +4581,9 @@ def _install_windows_gateway_pair(
             except OSError as rollback_error:
                 preserved_hook = previous_hook
                 previous_hook = ""
-                recovery_note = (
-                    f"; previous hook preserved at {preserved_hook}"
-                    if preserved_hook
-                    else ""
-                )
+                recovery_note = f"; previous hook preserved at {preserved_hook}" if preserved_hook else ""
                 raise OSError(
-                    "gateway replacement failed and hook rollback also failed: "
-                    f"{rollback_error}{recovery_note}",
+                    f"gateway replacement failed and hook rollback also failed: {rollback_error}{recovery_note}",
                 ) from install_error
             raise
     finally:
@@ -4838,9 +4957,7 @@ def _run_managed_validation(
         stdout = getattr(exc, "stdout", None)
         stderr = getattr(exc, "stderr", None)
         output = "\n".join((output_text(stdout), output_text(stderr)))
-        detail = " | ".join(
-            line.strip() for line in output.splitlines()[:5] if line.strip()
-        )
+        detail = " | ".join(line.strip() for line in output.splitlines()[:5] if line.strip())
         suffix = f": {detail[:1000]}" if detail else ""
         ux.err(f"{failure_message}{suffix}", indent="  ")
         raise SystemExit(1) from exc

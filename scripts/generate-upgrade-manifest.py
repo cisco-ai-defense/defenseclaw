@@ -404,7 +404,11 @@ def build_manifest() -> dict[str, Any]:
                 "INSTALLSCOPE=user",
             ],
             "authenticode": {
-                "required": True,
+                # The protected release workflow's Sigstore identity and
+                # checksum manifest authenticate Setup in every release.
+                # Authenticode adds the Windows publisher identity whenever
+                # the complete credential pair is available.
+                "required": False,
                 "publisher": "Cisco Systems, Inc.",
             },
             "managed_policy": "respect",

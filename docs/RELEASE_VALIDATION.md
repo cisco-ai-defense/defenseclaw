@@ -36,8 +36,8 @@ publication:
 | Platform | Built assets | Validation |
 |---|---|---|
 | Linux | amd64 and arm64 gateway archives plus the shared CLI/plugin assets | Install the exact sealed candidate with `install.sh`; upgrade the latest authenticated older release, the `0.8.5` hard-cut boundary, the `0.8.4` bridge boundary, and representative `0.7.x`, `0.6.x`, and `0.5.x` releases; require the candidate CLI and gateway to be healthy |
-| macOS | Intel and Apple Silicon gateway archives, shared CLI/plugin assets, and the unified macOS app | Install the exact sealed candidate with `install.sh`; run the same six authenticated upgrade paths; require the app to be Developer ID signed and notarized |
-| Windows | amd64 and arm64 gateway binaries, shared CLI assets, and the x64 `DefenseClawSetup-x64.exe` | Exercise the exact x64 candidate through `install.ps1` and native Setup; verify the installed CLI/gateway versions; require Authenticode signing |
+| macOS | Intel and Apple Silicon gateway archives, shared CLI/plugin assets, and the unified macOS app | Install the exact sealed candidate with `install.sh`; run the same six authenticated upgrade paths; with a complete Apple credential set, require Developer ID signing and notarization; with no Apple credentials, require ad-hoc signing and explicit `-unverified` artifact names |
+| Windows | amd64 and arm64 gateway binaries, shared CLI assets, and the x64 `DefenseClawSetup-x64.exe` | Exercise the exact x64 candidate through `install.ps1` and native Setup; verify the installed CLI/gateway versions; with both Windows credentials, require Cisco Authenticode; with neither, require explicit unverified provenance and exact `NotSigned` state |
 
 This is the complete release acceptance scope. The first native Windows release
 has no older native Windows baseline, so Windows acceptance is intentionally
@@ -48,6 +48,18 @@ metadata: the latest supported version older than the target, the `0.8.5`
 hard-cut boundary, the `0.8.4` bridge boundary, and the newest available
 `0.7.x`, `0.6.x`, and `0.5.x` versions. Linux and macOS use the same six
 resolved baselines so the result is easy to understand and reproduce.
+
+Platform signing credentials are optional as complete groups. For macOS, all
+five Developer ID and notary values produce signed, notarized artifacts with
+the normal names. If all five are absent, the same release continues with
+ad-hoc-signed DMG and ZIP assets whose names end in `-unverified`. A partially
+configured Apple credential group fails before packaging; the workflow never
+silently downgrades a requested signed build.
+For Windows, the certificate and password are also one complete group. Both
+produce Cisco Authenticode-signed Setup and payload executables. If both are
+absent, the same release continues with an explicitly unverified Setup whose
+exact bytes remain authenticated by the release Sigstore checksum manifest and
+schema-1 provenance. A partial Windows credential group fails before packaging.
 
 For every pre-`0.8.4` source, the success gate must prove the staged route
 through the immutable published `0.8.4` bridge, followed by the fresh-controller
@@ -80,4 +92,4 @@ integration, lint, and platform regression coverage. Repository merge rules
 should require their aggregate checks. Release assumes anything merged into
 `main` has passed that review boundary and limits itself to proving that the
 actual artifacts install, the supported POSIX upgrade works, platform signing
-is present, and the tested bytes are the bytes published.
+status is represented honestly, and the tested bytes are the bytes published.

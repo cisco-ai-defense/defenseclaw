@@ -1153,8 +1153,8 @@ private-secret-name = "DefenseClaw must remain redacted"
         'disposable acceptance revalidates the exact single-link Setup handle before and after the lifecycle'
     Assert-True ($releaseWorkflowText -match 'invoke-windows-setup-standard-user-ci\.ps1' -and
         $releaseWorkflowText -match '-Mode setup-acceptance' -and
-        $releaseWorkflowText -notmatch '(?s)Validate the exact signed installer lifecycle.*?-AllowCurrentUserSetupAcceptance') `
-        'signed Setup acceptance uses the same real standard-user boundary'
+        $releaseWorkflowText -notmatch '(?s)Validate the exact installer lifecycle.*?-AllowCurrentUserSetupAcceptance') `
+        'Setup acceptance uses the same real standard-user boundary'
     Assert-True ($nativeWorkflowText -match 'Always clean isolated processes, listeners, and temp state') 'required jobs have cleanup safety nets'
     $pathSnapshotFunction = [regex]::Match(
         $nativeHarnessText,
@@ -1248,7 +1248,7 @@ private-secret-name = "DefenseClaw must remain redacted"
     Assert-True ($releaseAssemblyJob -match 'needs:\s*\[release-preflight,\s*build-runtime-candidate,\s*macos-app,\s*windows-installer\]' -and
         $releaseAssemblyJob -match 'artifact-ids:\s*\$\{\{ needs\.windows-installer\.outputs\.artifact_id \}\}' -and
         $releaseAssemblyJob -match '--windows-dir candidate-input/windows') `
-        'immutable release assembly consumes the tested signed Windows artifact bundle directly'
+        'immutable release assembly consumes the tested Windows artifact bundle directly'
     Assert-True ($liveWorkflowText -match 'shell:\s*bash') 'Unix Bash harness remains present'
     Assert-True ($liveWorkflowText -notmatch '(?m)^  windows-(harness-static|contract):') 'deterministic Windows jobs moved out of live radar'
     Assert-True ($ciWorkflowText -notmatch '(?m)^  windows-(hook-path|installer-smoke):') 'legacy partial Windows jobs were removed'

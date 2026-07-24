@@ -1219,9 +1219,11 @@ func samePathEntry(a, b string) bool {
 }
 
 const (
-	uninstallRegistryPath   = `Software\Microsoft\Windows\CurrentVersion\Uninstall`
-	installedAppRegistryKey = "DefenseClaw"
-	installedAppOwnerValue  = "DefenseClawTransactionID"
+	uninstallRegistryPath                   = `Software\Microsoft\Windows\CurrentVersion\Uninstall`
+	installedAppRegistryKey                 = "DefenseClaw"
+	installedAppOwnerValue                  = "DefenseClawTransactionID"
+	unsignedInstalledAppDisplaySuffix       = " (Unsigned / Unverified Build)"
+	legacyUnsignedInstalledAppDisplaySuffix = " (Unsigned Local Test Build)"
 )
 
 var ntDeleteRegistryKey = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtDeleteKey")
@@ -1414,7 +1416,7 @@ func newInstalledAppValues(
 ) installedAppValues {
 	displayName := productName
 	if unsigned {
-		displayName += " (Unsigned Local Test Build)"
+		displayName += unsignedInstalledAppDisplaySuffix
 	}
 	return installedAppValues{
 		strings: map[string]string{
@@ -1631,7 +1633,7 @@ func legacyInstalledAppRegistrationMatchesKey(
 
 	displayName := productName
 	if previousState.UnsignedLocalArtifact {
-		displayName += " (Unsigned Local Test Build)"
+		displayName += legacyUnsignedInstalledAppDisplaySuffix
 	}
 	expected := map[string]string{
 		"DisplayName":          displayName,

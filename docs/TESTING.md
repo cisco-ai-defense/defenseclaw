@@ -136,13 +136,14 @@ and macOS. Five seeded sources resolve their published wheel dependency graph.
 The `0.8.4` boundary instead starts with deliberate dependency drift and must
 prove the authenticated rollback-safe bridge refresh before the `0.8.5`
 handoff. It also runs the public POSIX installer on Linux
-and macOS, the public PowerShell installer through signed native Setup on
-Windows, and macOS app notarization. The Windows release
+and macOS, the public PowerShell installer through the exact native Setup on
+Windows, and the macOS app packaging lifecycle. The Windows release
 includes both protected runtime architectures and
 `DefenseClawSetup-x64.exe` with its checksum, provenance, and SBOM. The first
-native Windows release makes no Windows upgrade claim. Missing notarization or
-Authenticode credentials, a failed install, a failed POSIX upgrade, or any
-candidate-byte mismatch aborts before publication.
+native Windows release makes no Windows upgrade claim. Partial platform-signing
+credentials, a failed install, a failed POSIX upgrade, or any candidate-byte
+mismatch aborts before publication. Complete credentials require the signed
+platform result; absent credentials require explicit unverified provenance.
 
 ### 0.8.4 bridge rollout order
 
