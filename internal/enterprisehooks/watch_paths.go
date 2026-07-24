@@ -279,8 +279,8 @@ func WatchOwnedFiles(opts InstallOptions) (WatchOwnership, error) {
 		// config.toml / claudecode settings.json / cursor hooks.json).
 		// The agent itself writes to this constantly during normal use
 		// (MRU model, plugin state, session prefs), so we ONLY react
-		// to Remove/Rename here. Any in-place stripping via `sed -i`
-		// is caught by the 5-min backstop reconcile.
+		// to Create/Remove/Rename here. Any in-place stripping via
+		// `sed -i` is caught by the 5-min backstop reconcile.
 		for _, path := range connector.HookConfigPathsForConnector(conn, setupOpts) {
 			addShared(path)
 		}
