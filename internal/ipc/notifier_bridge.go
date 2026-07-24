@@ -258,7 +258,7 @@ func composeManaged(o notifier.Observation) (string, string) {
 // naturally. When no signals are present the "signals" clause is
 // dropped entirely.
 func composeBlockManaged(o notifier.Observation) (string, string) {
-	cats, sigs := parseAIDReason(o.Notification.Body)
+	cats, sigs := parseAIDReason(reasonForParse(o))
 	return "DefenseClaw blocked the request",
 		blockLikeBody("The request was blocked for", cats, sigs, "")
 }
@@ -277,7 +277,7 @@ func composeWouldBlockManaged(o notifier.Observation) (string, string) {
 		titleVerb = "have asked about"
 	}
 	title := "DefenseClaw would " + titleVerb + " the request"
-	cats, sigs := parseAIDReason(o.Notification.Body)
+	cats, sigs := parseAIDReason(reasonForParse(o))
 	body := blockLikeBody(
 		"The request would have been "+verb+" for",
 		cats, sigs,
@@ -352,6 +352,39 @@ func blockLikeBody(prefix string, cats, sigs []string, trailer string) string {
 	}
 	body += trailer
 	return body
+}
+
+// reasonForParse returns the RICHEST available body string for the
+// managed-mode composer to hand to parseAIDReason. Prefers the typed
+// event's Reason field (BlockEvent.Reason / ApprovalEvent.Reason)
+// which is UNTRUNCATED, and falls back to o.Notification.Body which
+// the notifier package pre-truncates to 140 chars via truncateReason
+// for OS-toast readability.
+//
+// The truncation cap on the toast is deliberate — a macOS Notification
+// Center toast cannot render more than a few lines cleanly. But AVC's
+// Message History surface renders the wire body inline with far more
+// room, and truncation there lost the tail of long violation lists
+// like "Violence & Public Safety Threats" (visible as "Safety Th..."
+// before this fix). Feeding the untruncated Reason into parseAIDReason
+// closes that gap without changing the OS-toast body path.
+//
+// For CategoryApproval the ApprovalEvent.Reason isn't AID-shaped, but
+// keeping the same helper shape avoids caller-side type-switch churn;
+// parseAIDReason returns ([], []) on any non-AID prefix and every
+// caller already handles that case.
+func reasonForParse(o notifier.Observation) string {
+	switch ev := o.Event.(type) {
+	case notifier.BlockEvent:
+		if r := strings.TrimSpace(ev.Reason); r != "" {
+			return r
+		}
+	case notifier.ApprovalEvent:
+		if r := strings.TrimSpace(ev.Reason); r != "" {
+			return r
+		}
+	}
+	return o.Notification.Body
 }
 
 // parseAIDReason splits a "Cisco AI Defense: <mixed>" body into its
