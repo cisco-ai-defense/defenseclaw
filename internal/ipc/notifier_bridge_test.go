@@ -363,6 +363,87 @@ func TestParseAIDReason(t *testing.T) {
 	}
 }
 
+// TestManagedCopy_UsesUntruncatedReason pins the contract that the
+// managed-mode composer parses the FULL BlockEvent.Reason rather than
+// the pre-truncated OS-toast body when constructing the AVC wire
+// notification. The notifier package caps toast bodies at 140 chars
+// with a trailing "..." (see truncateReason in
+// internal/gateway/notifier/notifier.go) so a long violation list
+// like the one below gets clipped mid-signal on the toast surface.
+// AVC's Message History pane, however, has room for the full text —
+// and clipping there loses information operators need to triage.
+// This test asserts the wire body includes the tail signal that
+// would be lost to truncation.
+func TestManagedCopy_UsesUntruncatedReason(t *testing.T) {
+	// Real production-shaped reason string from a QA-observed block:
+	// well over the notifier's 140-char toast cap, forces the
+	// truncator to clip "Public Safety Threats" mid-word into
+	// "Public Safety Th...". Kept intentionally long (>140) so the
+	// truncated-vs-untruncated distinction is materially observable.
+	fullReason := "Cisco AI Defense: SECURITY_VIOLATION, SAFETY_VIOLATION, PRIVACY_VIOLATION, POLICY_VIOLATION, Prompt Injection, PII, Malicious URL Detection, Violence & Public Safety Threats"
+	if len(fullReason) <= 140 {
+		t.Fatalf("test fixture must exceed the toast truncation cap of 140 chars; got %d", len(fullReason))
+	}
+	// Simulate the notifier layer's contribution: Notification.Body
+	// is truncated per truncateReason's 140-char cap; the BlockEvent
+	// carries the original untruncated Reason. reasonForParse must
+	// prefer BlockEvent.Reason so the AVC wire body sees every signal.
+	truncatedToastBody := fullReason[:137] + "..."
+
+	obs := notifier.Observation{
+		Category: notifier.CategoryBlock,
+		Notification: notify.Notification{
+			Title: "DefenseClaw blocked prompt",
+			Body:  truncatedToastBody,
+		},
+		Event: notifier.BlockEvent{Reason: fullReason},
+	}
+	got := recordFromObservation(obs, true)
+	if got == nil {
+		t.Fatal("expected non-nil record")
+	}
+	// Tail signal that would be dropped if the composer parsed the
+	// truncated toast body. Its presence proves reasonForParse pulled
+	// from BlockEvent.Reason.
+	if !strings.Contains(got.Body, "Violence & Public Safety Threats") {
+		t.Errorf("managed body dropped a tail signal (composer parsed truncated toast body?): %q", got.Body)
+	}
+	// Belt-and-braces: no truncation ellipsis leaked into the wire
+	// body. If this fires the composer regressed to reading
+	// Notification.Body directly.
+	if strings.Contains(got.Body, "...") {
+		t.Errorf("managed body contains a toast-truncation ellipsis; expected untruncated Reason: %q", got.Body)
+	}
+	// Every category token should appear as a humanized phrase.
+	for _, cat := range []string{"security violation", "safety violation", "privacy violation"} {
+		if !strings.Contains(got.Body, cat) {
+			t.Errorf("managed body missing category %q: %q", cat, got.Body)
+		}
+	}
+}
+
+// TestManagedCopy_FallsBackToNotificationBody proves reasonForParse
+// gracefully falls back to Notification.Body when the typed event
+// carries no Reason. Guards against a future refactor that made the
+// BlockEvent-preference branch too eager (e.g. returning "" on empty
+// Reason instead of falling through).
+func TestManagedCopy_FallsBackToNotificationBody(t *testing.T) {
+	obs := notifier.Observation{
+		Category: notifier.CategoryBlock,
+		Notification: notify.Notification{
+			Body: "Cisco AI Defense: SECURITY_VIOLATION",
+		},
+		Event: notifier.BlockEvent{Reason: ""}, // no event-level reason
+	}
+	got := recordFromObservation(obs, true)
+	if got == nil {
+		t.Fatal("expected non-nil record")
+	}
+	if !strings.Contains(got.Body, "security violation") {
+		t.Errorf("managed body should still parse the toast body when BlockEvent.Reason is empty: %q", got.Body)
+	}
+}
+
 // TestHumanizeAIDCategory covers both the curated-map path and the
 // mechanical fallback. A regression that dropped the fallback would
 // make new AID categories render as raw SCREAMING_SNAKE_CASE tokens
