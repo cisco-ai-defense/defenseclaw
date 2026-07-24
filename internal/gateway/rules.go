@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -293,6 +294,67 @@ var trustExploitRules = []PatternRule{
 }
 
 // ---------------------------------------------------------------------------
+// Agent sandbox-escape rules
+//
+// Catch the write-then-execute class: an agent writes a file or config that a
+// trusted, unsandboxed host component (IDE, language extension, git, daemon)
+// later executes. Each rule requires a sensitive target AND a dangerous
+// payload token to co-occur, so scaffolding a plain config file does not fire.
+// The whole args JSON is scanned as one blob; patterns match barewords with
+// bounded gaps because content arrives JSON-escaped.
+//
+// Related advisories: CVE-2026-48124, GHSA-pc9j-3qc2-95wv,
+// GHSA-p9g2-cr55-cw9c, GHSA-v4xv-rqh3-w9mc.
+// ---------------------------------------------------------------------------
+
+var agentEscapeRules = []PatternRule{
+	// .claude settings that wire a hook to a shell command; a model/permissions
+	// settings file has no hooks->command pair and won't match.
+	{ID: "ESC-CLAUDE-HOOK", Pattern: regexp.MustCompile(`(?i)\.claude[\\/][^"\s]*?\.json[\s\S]{0,1000}?\bhooks\b[\s\S]{0,800}?\bcommand\b\s*\\?["']?\s*[:=]`), Title: "Workspace .claude hook installs a command", Severity: "CRITICAL", Confidence: 0.88, Tags: []string{"agent-escape", "write-then-execute"}},
+	// File written directly into .claude/hooks/, where hook scripts run.
+	{ID: "ESC-CLAUDE-HOOK-DIR", Pattern: regexp.MustCompile(`(?i)\.claude[\\/]hooks[\\/][\w.-]+`), Title: "Write into .claude/hooks directory", Severity: "HIGH", Confidence: 0.80, Tags: []string{"agent-escape", "write-then-execute"}},
+	// pyvenv.cfg write under any parent dir. pyvenv.cfg is normal by
+	// definition, so this is a LOW standalone signal (a venv-escape
+	// prerequisite): the escape needs the paired bin/python wrapper too.
+	{ID: "ESC-VENV-CFG", Pattern: regexp.MustCompile(`(?i)[\w.\-]+[\\/]+pyvenv\.cfg`), Title: "Virtualenv marker write (pyvenv.cfg)", Severity: "LOW", Confidence: 0.80, Tags: []string{"agent-escape", "write-then-execute"}},
+	// bin/python written as a shell wrapper (shebang or exec "$REAL"). Shell
+	// shims can be legitimate, so this is a LOW standalone signal; the escape
+	// is the combination with a venv marker and a host payload.
+	{ID: "ESC-VENV-INTERP", Pattern: regexp.MustCompile(`(?i)[\\/](?:bin[\\/]python[0-9.]*|Scripts[\\/]python[0-9.]*\.exe)\b[\s\S]{0,400}?(?:#!\s*/(?:usr/)?bin/(?:env\s+)?(?:ba)?sh|\bexec\s+\\?["']?\$)`), Title: "Virtualenv interpreter replaced with a shell wrapper", Severity: "LOW", Confidence: 0.82, Tags: []string{"agent-escape", "write-then-execute"}},
+	// git config keys that run a program. The always-executable keys
+	// (hooksPath/sshCommand/diff.external/textconv/filter helpers/
+	// packObjectsHook) match on assignment; fsmonitor matches only with a
+	// path/command value, never the builtin boolean core.fsmonitor=true|false.
+	{ID: "ESC-GIT-CONFIG-EXEC", Pattern: regexp.MustCompile(`(?i)(?:\bgit\s+config\b[^\n]{0,40}?\b(?:core\.hooksPath|core\.sshCommand|diff\.external|[\w.-]+\.textconv|filter\.[^.\s]+\.(?:clean|smudge|process)|uploadpack\.packObjectsHook)\b|\bgit\s+config\b[^\n]{0,40}?\bcore\.fsmonitor\s+\\?["']?[./~$]|(?:^|[\s"'\[\],]|\\[nrt])(?:hooksPath|sshCommand|packObjectsHook|diff\.external|textconv)\s*\\?["']?\s*[=:]|(?:^|[\s"'\[\],]|\\[nrt])fsmonitor\s*\\?["']?\s*[=:]\s*\\?["']?[./~$])`), Title: "git config execution-indirection key set", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"agent-escape", "code-execution"}},
+	// GitPwned: a read-only git verb with --output aimed at git metadata
+	// (.git/config, .git-alt/config, hooks) — a self-contained arbitrary write
+	// into a config that later executes. Scoped to metadata targets so a plain
+	// `--output=/tmp/x` (benign) does not match; -O (orderfile) is not a write.
+	{ID: "ESC-GIT-READ-WEAPONIZED", Pattern: regexp.MustCompile(`(?i)\bgit\s+(?:show|log|diff|whatchanged)\b[^\n|;&]{0,200}?--output[= ]\\?["']?\S*(?:\.git[\w.\-]*[\\/]config|[\\/]hooks[\\/])`), Title: "git read command writing into git metadata (--output)", Severity: "HIGH", Confidence: 0.90, Tags: []string{"agent-escape", "code-execution"}},
+	// --separate-git-dir=<name> puts git metadata off the literal .git path.
+	// The flag is legitimate on its own, so LOW: the escape needs a later
+	// config/hook write into the redirected dir.
+	{ID: "ESC-GIT-SEPARATE-DIR", Pattern: regexp.MustCompile(`(?i)--separate-git-dir[= ]`), Title: "Git metadata dir redirected off the .git path", Severity: "LOW", Confidence: 0.80, Tags: []string{"agent-escape", "code-execution"}},
+	// Write to a git hook file under a .git metadata dir (.git/hooks,
+	// .git-alt/hooks). Scoped to .git-looking parents so an app's own hooks/
+	// dir (React hooks, husky) does not match.
+	{ID: "ESC-GIT-HOOK-WRITE", Pattern: regexp.MustCompile(`(?i)\.git[\w.\-]*[\\/]hooks[\\/](?:fsmonitor-watchman|pre-commit|post-commit|pre-push|post-checkout|post-merge|prepare-commit-msg|commit-msg|pre-receive|post-receive|update|post-update|pre-rebase|post-rewrite|reference-transaction)\b`), Title: "Write to a git hook file", Severity: "HIGH", Confidence: 0.82, Tags: []string{"agent-escape", "code-execution"}},
+	// Docker daemon socket USE (not mere mention): a root-equivalent,
+	// unsandboxed exec environment. Inspecting socket permissions does not
+	// match. Distinct from PATH-DOCKER (the ~/.docker/config.json creds).
+	{ID: "ESC-DOCKER-SOCK", Pattern: regexp.MustCompile(`(?i)(?:--unix-socket\s+\S*docker\.sock|\bdocker\s+-H\s+unix:|DOCKER_HOST\s*=\s*unix:|-v\s+\S*docker\.sock:|--mount[^\n|;&]*?source=\S*docker\.sock)`), Title: "Docker daemon socket access", Severity: "HIGH", Confidence: 0.85, Tags: []string{"agent-escape", "privilege-escalation"}},
+	// docker run --privileged: a privileged container is a host-root escape.
+	// The daemon-use path the socket rule misses (CLI reaches the daemon
+	// without naming the socket).
+	{ID: "ESC-DOCKER-PRIVILEGED", Pattern: regexp.MustCompile(`(?i)\bdocker\s+(?:run|create)\b[^\n|;&]{0,200}?--privileged\b`), Title: "Privileged Docker container (host-root escape)", Severity: "HIGH", Confidence: 0.82, Tags: []string{"agent-escape", "privilege-escalation"}},
+	// Self-contained VSCode auto-run: either task.allowAutomaticTasks turned
+	// "on", or a tasks/launch.json that carries both a folderOpen trigger and a
+	// command. A hand-triggered build task (no folderOpen) does not match, and
+	// allowAutomaticTasks:"off" does not match.
+	{ID: "ESC-VSCODE-AUTORUN", Pattern: regexp.MustCompile(`(?i)(?:allowAutomaticTasks\\?["']?\s*[:=]\s*\\?["']?on\b|\.vscode[\\/](?:tasks|launch)\.json[\s\S]{0,1000}?(?:folderOpen[\s\S]{0,1000}?\bcommand\b|\bcommand\b[\s\S]{0,1000}?folderOpen))`), Title: "VSCode task auto-run on folder open", Severity: "HIGH", Confidence: 0.82, Tags: []string{"agent-escape", "write-then-execute"}},
+}
+
+// ---------------------------------------------------------------------------
 // Scan engine — runs all rules against input, no tool-name gating
 // ---------------------------------------------------------------------------
 
@@ -315,6 +377,7 @@ var defaultRuleCategories = []ruleCategory{
 	{"c2", c2Rules},
 	{"cognitive-file", cognitiveFileRules},
 	{"trust-exploit", trustExploitRules},
+	{"agent-escape", agentEscapeRules},
 }
 
 // allRuleCategories groups all rule slices for iteration. Seeded from the
@@ -679,8 +742,31 @@ var shellNormalizeReplacer = strings.NewReplacer(
 var shellVarPattern = regexp.MustCompile(`\$\{?\w+\}?`)
 var shellGlobPattern = regexp.MustCompile(`\?`)
 
+// shellUnicodeEscape matches JSON \uXXXX escapes. Decoding them on the
+// normalized pass defeats evasions like hooks / command that hide a
+// keyword from the raw scan while a JSON parser (and thus the host) still reads
+// it as "hooks" / "command".
+var shellUnicodeEscape = regexp.MustCompile(`\\u([0-9a-fA-F]{4})`)
+
+func decodeUnicodeEscapes(s string) string {
+	if !strings.Contains(s, `\u`) {
+		return s
+	}
+	return shellUnicodeEscape.ReplaceAllStringFunc(s, func(m string) string {
+		// m is `\uXXXX`; parse the 4 hex digits after the `\u`.
+		code, err := strconv.ParseInt(m[2:], 16, 32)
+		if err != nil {
+			return m
+		}
+		return string(rune(code))
+	})
+}
+
 func normalizeShell(s string) string {
-	n := shellNormalizeReplacer.Replace(s)
+	// Decode JSON unicode escapes first so a keyword hidden as \uXXXX is
+	// visible to the subsequent de-obfuscation and rule matching.
+	n := decodeUnicodeEscapes(s)
+	n = shellNormalizeReplacer.Replace(n)
 	// Expand globs: replace ? with each common character so /etc/shad?w → /etc/shadow
 	n = shellGlobPattern.ReplaceAllString(n, "o")
 	// Strip variable references: ${P}/shadow → /shadow, $HOME/.ssh → /.ssh
