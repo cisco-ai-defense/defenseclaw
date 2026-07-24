@@ -622,6 +622,28 @@ def test_macos_release_requires_notarization_and_tests_exact_candidate() -> None
     assert any(row["platform"] == "darwin-arm64" for row in fresh_matrix)
 
 
+def test_release_fails_before_build_when_signing_credentials_are_missing() -> None:
+    jobs = _workflow()["jobs"]
+    preflight = jobs["release-preflight"]
+    assert preflight["environment"] == "release"
+    credentials = _step(preflight, "Require production signing credentials")
+    rendered = str(credentials)
+
+    for name in (
+        "MACOS_DEVELOPER_ID_P12_BASE64",
+        "MACOS_DEVELOPER_ID_P12_PASSWORD",
+        "MACOS_NOTARY_KEY_BASE64",
+        "MACOS_NOTARY_KEY_ID",
+        "MACOS_NOTARY_ISSUER_ID",
+        "WINDOWS_SIGNING_CERT_BASE64",
+        "WINDOWS_SIGNING_CERT_PASSWORD",
+    ):
+        assert f"${{{{ secrets.{name} != '' }}}}" in rendered
+        assert f"missing+=({name})" in credentials["run"]
+    assert "Release signing credentials unavailable" in credentials["run"]
+    assert jobs["build-runtime-candidate"]["needs"] == "release-preflight"
+
+
 def test_macos_app_consumes_and_validates_sealed_runtime_gateway() -> None:
     text = MACOS_BUILD.read_text(encoding="utf-8")
     assert 'GATEWAY_INPUT="${MACOS_GATEWAY_INPUT:-}"' in text

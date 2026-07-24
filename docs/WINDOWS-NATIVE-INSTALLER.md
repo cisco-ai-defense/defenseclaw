@@ -137,11 +137,10 @@ treated as a managed release. An OSS Windows install configured as
 requested instead of silently degrading to an unusable provider.
 
 Local and pull-request builds are unsigned and are labeled as such in Installed
-Apps. Release signing follows the same all-or-none policy as macOS credentials:
-when both Authenticode secrets are absent the workflow publishes an explicitly
-unverified Setup, when exactly one is present the release fails, and when both
-are present signing is mandatory and any certificate, password, SignTool,
-timestamp, or publisher failure aborts instead of falling back to unsigned.
+Apps. Production releases require both Authenticode secrets and fail during
+preflight when either is unavailable. Signing is mandatory after preflight, and
+any certificate, password, SignTool, timestamp, or publisher failure aborts
+instead of falling back to unsigned.
 For the signed path, before the payload manifest is hashed, the builder signs
 the native CLI launcher, console-free startup helper, gateway, and hook entry
 point; the installed scanner launchers are byte-identical copies of that signed

@@ -46,6 +46,7 @@ jobs:
     name: Validate release request
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    environment: release
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       commit: ${{ steps.provenance.outputs.commit }}
@@ -57,6 +58,39 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Require production signing credentials
+        env:
+          HAS_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 != '' }}
+          HAS_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD != '' }}
+          HAS_MACOS_NOTARY_KEY_BASE64: ${{ secrets.MACOS_NOTARY_KEY_BASE64 != '' }}
+          HAS_MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID != '' }}
+          HAS_MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID != '' }}
+          HAS_WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 != '' }}
+          HAS_WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD != '' }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ "$HAS_MACOS_DEVELOPER_ID_P12_BASE64" == "true" ]] ||
+            missing+=(MACOS_DEVELOPER_ID_P12_BASE64)
+          [[ "$HAS_MACOS_DEVELOPER_ID_P12_PASSWORD" == "true" ]] ||
+            missing+=(MACOS_DEVELOPER_ID_P12_PASSWORD)
+          [[ "$HAS_MACOS_NOTARY_KEY_BASE64" == "true" ]] ||
+            missing+=(MACOS_NOTARY_KEY_BASE64)
+          [[ "$HAS_MACOS_NOTARY_KEY_ID" == "true" ]] ||
+            missing+=(MACOS_NOTARY_KEY_ID)
+          [[ "$HAS_MACOS_NOTARY_ISSUER_ID" == "true" ]] ||
+            missing+=(MACOS_NOTARY_ISSUER_ID)
+          [[ "$HAS_WINDOWS_SIGNING_CERT_BASE64" == "true" ]] ||
+            missing+=(WINDOWS_SIGNING_CERT_BASE64)
+          [[ "$HAS_WINDOWS_SIGNING_CERT_PASSWORD" == "true" ]] ||
+            missing+=(WINDOWS_SIGNING_CERT_PASSWORD)
+          if (( ${#missing[@]} > 0 )); then
+            names="$(IFS=,; printf '%s' "${missing[*]}")"
+            echo "::error title=Release signing credentials unavailable::Configure these secrets in the GitHub release environment before dispatching: $names"
+            exit 1
+          fi
+          echo "Apple notarization and Windows Authenticode credentials are available."
 
       - name: Require reviewed macOS app source
         # A DefenseClaw release must build the macOS source that was reviewed
