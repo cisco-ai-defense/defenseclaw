@@ -179,6 +179,147 @@ class BootstrapEnvTests(unittest.TestCase):
         self.assertEqual(result.status, "warn")
 
 
+class FreshMigrationCursorTests(unittest.TestCase):
+    """Fresh v8 publication seeds one non-clobbering migration cursor."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def _run_first_run(self, data_dir: str):
+        from defenseclaw.bootstrap import (
+            FirstRunOptions,
+            StepResult,
+            run_first_run,
+        )
+
+        with (
+            patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
+            patch(
+                "defenseclaw.bootstrap._quiet_guardrail_setup",
+                return_value=StepResult("Guardrail", "pass", "test"),
+            ),
+        ):
+            return run_first_run(
+                FirstRunOptions(
+                    connector="codex",
+                    profile="observe",
+                    skip_install=True,
+                    start_gateway=False,
+                    verify=False,
+                )
+            )
+
+    def test_successful_fresh_first_run_bootstraps_registry_through_0_8_5(self):
+        from defenseclaw import __version__, migration_state
+        from defenseclaw.migrations import MIGRATIONS, _ver_tuple
+
+        data_dir = os.path.join(self._tmp.name, "fresh")
+        report = self._run_first_run(data_dir)
+
+        self.assertNotEqual(report.status, "needs_attention")
+        state = migration_state.load(data_dir)
+        self.assertIsNotNone(state)
+        assert state is not None
+        expected = [
+            version
+            for version, _description, _migration in MIGRATIONS
+            if _ver_tuple(version) <= _ver_tuple(__version__)
+        ]
+        self.assertEqual(state.applied, expected)
+        self.assertEqual(state.package_version, __version__)
+        self.assertEqual(state.applied_at["0.8.5"], migration_state.BOOTSTRAP_SENTINEL)
+        self.assertTrue(
+            all(state.applied_at[version] == migration_state.BOOTSTRAP_SENTINEL for version in expected)
+        )
+
+    def test_rerun_preserves_bootstrapped_cursor_byte_for_byte(self):
+        from defenseclaw import migration_state
+
+        data_dir = os.path.join(self._tmp.name, "rerun")
+        self._run_first_run(data_dir)
+        cursor_path = migration_state.state_path(data_dir)
+        with open(cursor_path, "rb") as stream:
+            original = stream.read()
+
+        self._run_first_run(data_dir)
+
+        with open(cursor_path, "rb") as stream:
+            self.assertEqual(stream.read(), original)
+
+    def test_existing_valid_future_unknown_and_corrupt_cursors_are_preserved(self):
+        from defenseclaw import migration_state
+
+        payloads = {
+            "valid": b'{"schema":1,"package_version":"operator","applied":["0.8.0"]}\n',
+            "future": b'{"schema":999,"opaque":{"keep":true}}\n',
+            "unknown": b'{"schema":"next","opaque":{"keep":true}}\n',
+            "corrupt": b'{"schema":',
+        }
+        for label, payload in payloads.items():
+            with self.subTest(label=label):
+                data_dir = os.path.join(self._tmp.name, label)
+                os.makedirs(data_dir)
+                cursor_path = migration_state.state_path(data_dir)
+                with open(cursor_path, "wb") as stream:
+                    stream.write(payload)
+
+                self._run_first_run(data_dir)
+
+                with open(cursor_path, "rb") as stream:
+                    self.assertEqual(stream.read(), payload)
+
+    def test_final_config_save_failure_does_not_create_cursor(self):
+        from defenseclaw import migration_state
+        from defenseclaw.config import Config
+
+        data_dir = os.path.join(self._tmp.name, "save-failure")
+        original_save = Config.save
+        save_calls = 0
+
+        def fail_final_save(cfg):
+            nonlocal save_calls
+            save_calls += 1
+            if save_calls == 1:
+                return original_save(cfg)
+            raise OSError("injected final config save failure")
+
+        with patch.object(Config, "save", new=fail_final_save):
+            report = self._run_first_run(data_dir)
+
+        self.assertTrue(os.path.isfile(os.path.join(data_dir, "config.yaml")))
+        self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
+        self.assertTrue(
+            any(step.name == "Config Save" and step.status == "fail" for step in report.setup)
+        )
+
+    def test_later_setup_exception_does_not_create_cursor(self):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import FirstRunOptions, run_first_run
+
+        data_dir = os.path.join(self._tmp.name, "setup-failure")
+        with (
+            patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
+            patch(
+                "defenseclaw.bootstrap._quiet_guardrail_setup",
+                side_effect=RuntimeError("injected setup failure"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "injected setup failure"),
+        ):
+            run_first_run(
+                FirstRunOptions(
+                    connector="codex",
+                    profile="observe",
+                    skip_install=True,
+                    start_gateway=False,
+                    verify=False,
+                )
+            )
+
+        self.assertTrue(os.path.isfile(os.path.join(data_dir, "config.yaml")))
+        self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
+
+
 # ---------------------------------------------------------------------------
 # _apply_first_run_choices: hook_fail_mode plumbing
 #

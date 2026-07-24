@@ -191,6 +191,48 @@ class FirstRunReport:
         return data
 
 
+class FreshMigrationStateError(OSError):
+    """A fresh v8 config was published but its migration cursor was not."""
+
+
+def finalize_first_run_config(cfg: Config, *, was_config_absent: bool) -> bool:
+    """Publish the finalized config and, for a fresh v8 install, its cursor.
+
+    ``was_config_absent`` must be captured before any first-run mutation.
+    Guided setup can save the config several times while configuring the
+    connector, and :func:`bootstrap_env` runs after the first publication, so
+    checking for the config file here would misclassify every successful fresh
+    install as an existing one.
+
+    Cursor publication is deliberately ordered after ``cfg.save()``.  A failed
+    config write therefore cannot create or advance migration state.  Existing
+    cursor paths are preserved without parsing so corrupt, unknown-schema, and
+    future-schema recovery evidence remains untouched.
+
+    Returns ``True`` when a fresh cursor was created and ``False`` for an
+    existing config or cursor.
+    """
+    cfg.save()
+    if not was_config_absent:
+        return False
+    if getattr(cfg, "_source_config_version", None) != 8:
+        return False
+
+    from defenseclaw import __version__, migration_state
+    from defenseclaw.migrations import MIGRATIONS
+
+    state = migration_state.bootstrap(
+        None,
+        from_version=__version__,
+        package_version=__version__,
+        registry_versions=[version for version, _description, _migration in MIGRATIONS],
+    )
+    try:
+        return migration_state.save_if_absent(cfg.data_dir, state)
+    except OSError as exc:
+        raise FreshMigrationStateError(str(exc)) from exc
+
+
 def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
     """Initialize ``~/.defenseclaw/`` and related state.
 
@@ -300,7 +342,11 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     scanner_mode = _normalize_scanner_mode(options.scanner_mode)
     connector_mode_warnings: list[dict] = []
 
-    new_config = not os.path.exists(cfg_mod.config_path())
+    # ``lexists`` keeps a broken symlink or other pre-existing directory entry
+    # on the existing-install path.  Fresh bootstrap must never reinterpret an
+    # operator-controlled config path merely because its target is unavailable.
+    was_config_absent = not os.path.lexists(cfg_mod.config_path())
+    new_config = was_config_absent
     if not new_config:
         try:
             cfg_mod.require_v8_config()
@@ -414,7 +460,9 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         setup.append(StepResult("Sidecar", "skip", "not started (--no-start-gateway)", "defenseclaw-gateway start"))
 
     try:
-        cfg.save()
+        finalize_first_run_config(cfg, was_config_absent=was_config_absent)
+    except FreshMigrationStateError as exc:
+        setup.append(StepResult("Migration State", "fail", str(exc), "defenseclaw doctor migration-state"))
     except OSError as exc:
         setup.append(StepResult("Config Save", "fail", str(exc), "defenseclaw config validate"))
 

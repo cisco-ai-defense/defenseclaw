@@ -314,7 +314,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     click.echo(f"  Platform:      {ux.bold(env)}")
 
     cfg_file = config_path()
-    is_new_config = not os.path.exists(cfg_file)
+    is_new_config = not os.path.lexists(cfg_file)
     if is_new_config:
         cfg = default_config()
         prepare_fresh_v8_config(cfg)
@@ -416,7 +416,9 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         is_new_config=is_new_config,
     )
 
-    cfg.save()
+    from defenseclaw.bootstrap import finalize_first_run_config
+
+    finalize_first_run_config(cfg, was_config_absent=is_new_config)
 
     # Sandbox setup (Linux only)
     if sandbox:

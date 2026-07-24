@@ -82,6 +82,16 @@ class TestInitCommand(unittest.TestCase):
         # Verify config file was created
         config_file = os.path.join(self.tmp_dir, "config.yaml")
         self.assertTrue(os.path.isfile(config_file))
+        from defenseclaw import migration_state
+
+        state = migration_state.load(self.tmp_dir)
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertTrue(migration_state.is_applied(state, "0.8.5"))
+        self.assertEqual(
+            state.applied_at["0.8.5"],
+            migration_state.BOOTSTRAP_SENTINEL,
+        )
 
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_init._install_guardrail")
