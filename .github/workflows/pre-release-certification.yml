@@ -145,7 +145,7 @@ jobs:
   windows-fresh-install:
     name: Fresh install exact candidate (windows-amd64)
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     defaults:
       run:
         shell: pwsh
@@ -181,5 +181,4 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/test-fresh-install-release-windows.ps1 `
             -ReleaseDir "$env:GITHUB_WORKSPACE/release-candidate/dist" `
-            -TargetVersion "$env:RELEASE_TAG" `
-            -SuccessPathOnly
+            -TargetVersion "$env:RELEASE_TAG"

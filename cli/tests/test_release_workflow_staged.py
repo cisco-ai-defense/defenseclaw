@@ -66,6 +66,10 @@ def _certification_workflow() -> dict[str, object]:
     return yaml.load(CERTIFICATION_WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
+def _windows_ci_workflow() -> dict[str, object]:
+    return yaml.load(WINDOWS_CI_WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+
+
 def test_sensitive_plan_installs_cosign_before_historical_authentication() -> None:
     workflow = _ci_workflow()
     steps = workflow["jobs"]["release-validation-plan"]["steps"]
@@ -518,7 +522,7 @@ def test_exact_posix_fresh_install_and_twelve_upgrade_cells_gate_publication() -
     }
     assert jobs["posix-fresh-install"]["timeout-minutes"] == "30"
     assert jobs["posix-upgrade"]["timeout-minutes"] == "60"
-    assert jobs["windows-fresh-install"]["timeout-minutes"] == "30"
+    assert jobs["windows-fresh-install"]["timeout-minutes"] == "45"
 
     assert jobs["posix-fresh-install"]["strategy"] == {
         "fail-fast": "false",
@@ -715,24 +719,89 @@ def test_windows_release_accepts_signed_or_explicitly_unverified_setup_and_is_fr
     windows_smoke = _certification_workflow()["jobs"]["windows-fresh-install"]
     assert windows_smoke["runs-on"] == "windows-latest"
     assert "scripts/test-fresh-install-release-windows.ps1" in str(windows_smoke)
-    assert "-SuccessPathOnly" in str(windows_smoke)
+    assert "-TargetVersion" in str(windows_smoke)
+    assert "-SuccessPathOnly" not in str(windows_smoke)
 
 
-def test_windows_install_ps1_smoke_exercises_public_fresh_path() -> None:
+def test_windows_install_ps1_smoke_uses_disposable_native_profile_and_layout() -> None:
     smoke = (ROOT / "scripts/test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")
+    disposable = (ROOT / "scripts/invoke-windows-setup-standard-user-ci.ps1").read_text(encoding="utf-8")
 
-    assert '$Installer = Join-Path $Root "scripts\\install.ps1"' in smoke
-    assert '"-Local", $ReleaseDir' in smoke
-    assert '"-Version", $RequestedVersion' in smoke
-    assert "[switch]$SuccessPathOnly" in smoke
-    assert "$first = if ($SuccessPathOnly)" in smoke
-    assert "Invoke-FreshInstaller\n    } else {" in smoke
-    assert "DefenseClaw installed successfully" in smoke
-    assert "Assert-ExactVersion -Command $cli" in smoke
-    assert "Assert-ExactVersion -Command $gateway" in smoke
-    assert "$second = Invoke-FreshInstaller" in smoke
-    assert "Second fresh-installer invocation unexpectedly succeeded" in smoke
-    assert "existing DefenseClaw installation" in smoke
+    assert "invoke-windows-setup-standard-user-ci.ps1" in smoke
+    assert "-Mode bootstrap-acceptance" in smoke
+    assert "-ArtifactRoot $ReleaseDir" in smoke
+    assert "-TargetVersion $TargetVersion" in smoke
+    assert "'bootstrap-acceptance'" in disposable
+    assert "test-fresh-install-release-windows.ps1" in disposable
+    assert "install.ps1" in disposable
+    for asset in (
+        "DefenseClawSetup-x64.exe",
+        "DefenseClawSetup-x64.exe.provenance.json",
+        "upgrade-manifest.json",
+        "checksums.txt",
+        "checksums.txt.sig",
+        "checksums.txt.pem",
+        "checksums.txt.bundle",
+        "cosign-windows-amd64.exe",
+    ):
+        assert asset in disposable
+
+    assert "GetFolderPath([Environment+SpecialFolder]::UserProfile)" in smoke
+    assert "[Environment+SpecialFolder]::LocalApplicationData" in smoke
+    assert "Programs\\DefenseClaw" in smoke
+    assert "DefenseClaw\\InstallerCache" in smoke
+    assert "Uninstall\\DefenseClaw" in smoke
+    assert re.search(r"""['"]-Local['"]""", smoke)
+    assert re.search(r"""['"]-Version['"]""", smoke)
+    assert re.search(r"""['"]-CosignPath['"]""", smoke)
+    assert "Native DefenseClaw Setup completed successfully" in smoke
+    assert "Assert-ExactVersion -Executable $launcher" in smoke
+    assert "Assert-ExactVersion -Executable $gateway" in smoke
+    assert "$first = Invoke-CapturedProcess" in smoke
+    assert "$second = Invoke-CapturedProcess" in smoke
+    assert "DELETEUSERDATA=1" in smoke
+    assert 'GetEnvironmentVariable("Path", "User")' in smoke
+    assert "uninstall did not restore the original user PATH exactly" in smoke
+
+    # Environment strings do not change Windows Known Folder resolution. The
+    # release regression must never recreate the legacy fake-home test bed that
+    # let direct Setup pass while the public bootstrap failed.
+    assert "$env:USERPROFILE = $HomeRoot" not in smoke
+    assert "$env:DEFENSECLAW_HOME = Join-Path $HomeRoot" not in smoke
+    assert '".defenseclaw/.venv/Scripts/defenseclaw.exe"' not in smoke
+    assert '".local\\bin\\defenseclaw-gateway.exe"' not in smoke
+    assert "Second fresh-installer invocation unexpectedly succeeded" not in smoke
+
+
+def test_windows_pr_ci_executes_public_bootstrap_against_authenticated_fixture() -> None:
+    jobs = _windows_ci_workflow()["jobs"]
+    bootstrap = jobs["public-bootstrap-acceptance"]
+    rendered = str(bootstrap)
+
+    assert bootstrap["runs-on"] == "windows-latest"
+    assert int(bootstrap["timeout-minutes"]) >= 50
+    assert bootstrap["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+    }
+    assert bootstrap["env"]["BOOTSTRAP_FIXTURE_VERSION"] == "0.8.7"
+    assert bootstrap["env"]["BOOTSTRAP_FIXTURE_RUN_ID"] == "30063491006"
+    assert bootstrap["env"]["BOOTSTRAP_FIXTURE_ARTIFACT"] == ("release-candidate-30063491006-1")
+    assert "sigstore/cosign-installer@" in rendered
+    assert "gh release view" in rendered
+    assert "gh release download" in rendered
+    assert "actions/download-artifact@" in rendered
+    assert "checksums.txt.bundle" in rendered
+    assert "test-fresh-install-release-windows.ps1" in rendered
+    assert "-ReleaseDir $env:DC_BOOTSTRAP_RELEASE_DIR" in rendered
+    assert "-TargetVersion $env:BOOTSTRAP_FIXTURE_VERSION" in rendered
+    assert "-StateRoot $bootstrapState" in rendered
+    assert "-DiagnosticsRoot $env:DC_DIAGNOSTICS" in rendered
+    smoke = (ROOT / "scripts/test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")
+    assert "-TimeoutSeconds 1800" in smoke
+
+    required = jobs["windows-native-required"]
+    assert "public-bootstrap-acceptance" in required["needs"]
 
 
 def test_posix_installer_cannot_bypass_upgrade_graph_on_existing_install() -> None:

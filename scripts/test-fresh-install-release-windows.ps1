@@ -2,15 +2,25 @@
 # SPDX-License-Identifier: Apache-2.0
 
 <#
-Exercise the exact sealed candidate through install.ps1 in an isolated profile.
-The second invocation must refuse before changing any installed file or attribute.
+.SYNOPSIS
+    Exercises the public Windows bootstrap against one exact sealed candidate.
+
+.DESCRIPTION
+    Native Setup derives its per-user layout from token-bound Windows Known
+    Folders. Environment-variable profile spoofing is intentionally unsupported.
+    The parent mode therefore delegates to the repository's disposable
+    standard-user launcher. Child mode runs with a real isolated profile and
+    HKCU hive, installs through scripts/install.ps1, repeats the authenticated
+    handoff, verifies the installed version, and proves complete uninstall.
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$ReleaseDir,
     [Parameter(Mandatory = $true)][string]$TargetVersion,
-    [switch]$SuccessPathOnly
+    [Parameter(DontShow = $true)][switch]$Child,
+    [Parameter(DontShow = $true)][string]$StateRoot = "",
+    [Parameter(DontShow = $true)][string]$DiagnosticsRoot = ""
 )
 
 Set-StrictMode -Version Latest
@@ -20,456 +30,325 @@ if ($TargetVersion -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
     throw "TargetVersion must be canonical X.Y.Z"
 }
 
+$ReleaseDir = (Resolve-Path -LiteralPath $ReleaseDir -ErrorAction Stop).Path
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$Installer = Join-Path $Root "scripts\install.ps1"
-$ReleaseDir = (Resolve-Path -LiteralPath $ReleaseDir).Path
-$PowerShell = (Get-Command pwsh -CommandType Application -ErrorAction Stop).Source
-$WindowsPowerShell = (Get-Command powershell.exe -CommandType Application -ErrorAction Stop).Source
-$WorkRoot = Join-Path ([IO.Path]::GetTempPath()) (
-    "defenseclaw-fresh-release-" + [guid]::NewGuid().ToString("N")
-)
-$HomeRoot = Join-Path $WorkRoot "home"
-$TempRoot = Join-Path $WorkRoot "temp"
-$savedUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-$savedEnvironment = @{}
-foreach ($name in @("USERPROFILE", "HOME", "DEFENSECLAW_HOME", "TEMP", "TMP")) {
-    $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
-}
 
-function Get-TreeSnapshot {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    $rootItem = Get-Item -LiteralPath $Path -Force
-    $items = @($rootItem) + @(
-        Get-ChildItem -LiteralPath $Path -Force -Recurse |
-            Sort-Object -Property FullName
-    )
-    $rows = foreach ($item in $items) {
-        $relative = if ($item.FullName -eq $rootItem.FullName) {
-            "."
-        } else {
-            [IO.Path]::GetRelativePath($rootItem.FullName, $item.FullName).Replace('\', '/')
-        }
-        $row = [ordered]@{
-            path = $relative
-            attributes = [string]$item.Attributes
-            last_write_utc_ticks = $item.LastWriteTimeUtc.Ticks
-            kind = if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                "reparse"
-            } elseif ($item.PSIsContainer) {
-                "directory"
-            } else {
-                "file"
-            }
-        }
-        if ($row["kind"] -eq "reparse") {
-            $row["target"] = [string]($item.Target -join "|")
-        } elseif ($row["kind"] -eq "file") {
-            $row["length"] = [long]$item.Length
-            $row["sha256"] = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
-        }
-        [pscustomobject]$row
-    }
-    return ($rows | ConvertTo-Json -Compress -Depth 4)
-}
-
-function Invoke-FreshInstaller {
+function Invoke-CapturedProcess {
     param(
-        [string]$RequestedVersion = $TargetVersion,
-        [switch]$InjectFailureBeforeShim,
-        [switch]$InjectConcurrentShimBeforePublish,
-        [switch]$InjectPolicyCleanupFailure,
-        [switch]$InjectPolicyCustodyMoveBeforeCleanup,
-        [switch]$InjectFailureAfterFreshDirectoryMove
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ArgumentList
     )
-    $arguments = @(
-        "-NoProfile", "-NonInteractive", "-File", $Installer,
-        "-Local", $ReleaseDir,
-        "-Version", $RequestedVersion,
-        "-Connector", "none",
-        "-Yes"
-    )
-    if ($InjectFailureBeforeShim -or
-        $InjectConcurrentShimBeforePublish -or
-        $InjectPolicyCleanupFailure -or
-        $InjectPolicyCustodyMoveBeforeCleanup -or
-        $InjectFailureAfterFreshDirectoryMove) {
-        $arguments += "-TestMode"
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = (& $FilePath @ArgumentList 2>&1 | Out-String -Width 32768)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
     }
-    if ($InjectFailureBeforeShim) { $arguments += "-InjectFailureBeforeShim" }
-    if ($InjectConcurrentShimBeforePublish) {
-        $arguments += "-InjectConcurrentShimBeforePublish"
+    return [pscustomobject]@{
+        ExitCode = [int]$exitCode
+        Output = [string]$output
     }
-    if ($InjectPolicyCleanupFailure) { $arguments += "-InjectPolicyCleanupFailure" }
-    if ($InjectPolicyCustodyMoveBeforeCleanup) {
-        $arguments += "-InjectPolicyCustodyMoveBeforeCleanup"
-    }
-    if ($InjectFailureAfterFreshDirectoryMove) {
-        $arguments += "-InjectFailureAfterFreshDirectoryMove"
-    }
-    $output = (& $PowerShell @arguments 2>&1 | Out-String)
-    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
 }
 
 function Assert-ExactVersion {
-    param([Parameter(Mandatory = $true)][string]$Command)
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string]$ExpectedVersion
+    )
 
-    $output = (& $Command --version 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0) { throw "Version probe failed: $Command`n$output" }
+    $probe = Invoke-CapturedProcess -FilePath $Executable -ArgumentList @("--version")
+    if ($probe.ExitCode -ne 0) {
+        throw "Version probe failed for ${Executable}:`n$($probe.Output)"
+    }
     $versions = @(
         [regex]::Matches(
-            $output,
+            $probe.Output,
             '(?<![0-9.])([0-9]+\.[0-9]+\.[0-9]+)(?![0-9.])'
         ) | ForEach-Object { $_.Groups[1].Value }
     )
-    if ($versions.Count -ne 1 -or $versions[0] -cne $TargetVersion) {
-        throw "Version output did not report exact ${TargetVersion}: $output"
+    if ($versions.Count -ne 1 -or $versions[0] -cne $ExpectedVersion) {
+        throw "${Executable} did not report exact version ${ExpectedVersion}: $($probe.Output)"
     }
 }
 
-function Assert-NoInstallerCustody {
-    $leftovers = @(
-        Get-ChildItem -LiteralPath $TempRoot -Force -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.Name -like "defenseclaw-install-policy-*" -or
-                $_.Name -like "dc-gw-*" -or
-                $_.Name -like "dc-cli-*"
-            }
-    )
-    if ($leftovers.Count -ne 0) {
-        throw "Fresh Windows installer left plaintext/private custody behind: $($leftovers.FullName -join ', ')"
-    }
-}
-
-function Assert-NoFreshPayload {
+function Assert-BootstrapSucceeded {
     param(
-        [string]$Phase = "fresh-install rollback",
-        [string]$Context = ""
+        [Parameter(Mandatory = $true)][object]$Result,
+        [Parameter(Mandatory = $true)][string]$ExpectedVersion,
+        [Parameter(Mandatory = $true)][string]$Phase
     )
-    foreach ($path in @(
-        $env:DEFENSECLAW_HOME,
-        (Join-Path $HomeRoot ".local\bin\defenseclaw-gateway.exe"),
-        (Join-Path $HomeRoot ".local\bin\defenseclaw.cmd")
+
+    foreach ($expected in @(
+        "Release checksum signature verified (Sigstore)",
+        "Authenticated DefenseClawSetup-x64.exe for DefenseClaw $ExpectedVersion",
+        "Starting authenticated native Setup",
+        "Native DefenseClaw Setup completed successfully"
     )) {
-        if (Test-Path -LiteralPath $path) {
-            $diagnostic = if ($Context) { "`nInstaller output:`n$Context" } else { "" }
-            throw "Failed fresh install left a managed payload marker during ${Phase}: $path$diagnostic"
+        if ($Result.Output -notmatch [regex]::Escape($expected)) {
+            throw "${Phase} did not report '$expected':`n$($Result.Output)"
         }
     }
+    if ($Result.Output -notmatch (
+            "Setup Authenticode signature verified" +
+            "|Setup is explicitly unverified by Authenticode"
+        )) {
+        throw "${Phase} did not report an explicit Setup signing state:`n$($Result.Output)"
+    }
+    if ($Result.ExitCode -ne 0) {
+        throw "${Phase} failed ($($Result.ExitCode)):`n$($Result.Output)"
+    }
 }
 
-function Remove-InjectedPolicyResidue {
-    param([Parameter(Mandatory = $true)][string]$Output)
-
-    $match = [regex]::Match(
-        $Output,
-        "Last expected path: '([^']+)'\. Last cleanup error:"
+function Get-UserPathEntryCount {
+    param(
+        [AllowNull()][string]$Value,
+        [Parameter(Mandatory = $true)][string]$ExpectedEntry
     )
-    if (-not $match.Success) {
-        throw "Policy cleanup failure did not report its private residual path:`n$Output"
-    }
-    $residual = [IO.Path]::GetFullPath($match.Groups[1].Value)
-    $separator = [IO.Path]::DirectorySeparatorChar
-    $tempPrefix = [IO.Path]::GetFullPath($TempRoot).TrimEnd($separator) + $separator
-    if (-not $residual.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -or
-        (Split-Path -Leaf $residual) -notlike 'defenseclaw-install-policy-*') {
-        throw "Policy cleanup warning reported an unsafe residual path: $residual"
-    }
-    if (-not (Test-Path -LiteralPath $residual -PathType Container)) {
-        throw "Policy cleanup warning residual does not exist: $residual"
-    }
-    Remove-Item -LiteralPath $residual -Recurse -Force -ErrorAction Stop
-    if (Test-Path -LiteralPath $residual) {
-        throw "Could not retire injected policy cleanup residual: $residual"
-    }
-    return $residual
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return 0 }
+    return @(
+        $Value.Split(
+            [char[]]@(";"),
+            [StringSplitOptions]::RemoveEmptyEntries
+        ) | Where-Object {
+            ([IO.Path]::GetFullPath($_.Trim())).TrimEnd('\').Equals(
+                ([IO.Path]::GetFullPath($ExpectedEntry)).TrimEnd('\'),
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        }
+    ).Count
 }
 
-function Remove-MovedPolicyCustodyResidue {
-    param([Parameter(Mandatory = $true)][string]$Output)
+function Wait-ForPathRemoval {
+    param([Parameter(Mandatory = $true)][string]$Path)
 
-    $match = [regex]::Match(
-        $Output,
-        "Last expected path: '([^']+)'\. Last cleanup error:"
-    )
-    if (-not $match.Success) {
-        throw "Moved policy custody did not report its preserved canonical path:`n$Output"
+    for ($attempt = 0; $attempt -lt 80 -and (Test-Path -LiteralPath $Path); $attempt++) {
+        Start-Sleep -Milliseconds 250
     }
-    $canonical = [IO.Path]::GetFullPath($match.Groups[1].Value)
-    $displaced = "$canonical.installer-owned-original"
-    $separator = [IO.Path]::DirectorySeparatorChar
-    $tempPrefix = [IO.Path]::GetFullPath($TempRoot).TrimEnd($separator) + $separator
-    if (-not $canonical.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -or
-        (Split-Path -Leaf $canonical) -notlike 'defenseclaw-install-policy-*') {
-        throw "Moved policy cleanup reported an unsafe canonical path: $canonical"
-    }
-    if (Test-Path -LiteralPath $canonical) {
-        throw "Moved policy cleanup recreated or deleted through the canonical namespace: $canonical"
-    }
-    if (-not (Test-Path -LiteralPath $displaced -PathType Container)) {
-        throw "Creation-bound policy custody was not preserved at its moved path: $displaced"
-    }
-    if (@(Get-ChildItem -LiteralPath $displaced -Force).Count -eq 0) {
-        throw "Preserved moved policy custody unexpectedly lost its authenticated contents"
-    }
-    Remove-Item -LiteralPath $displaced -Recurse -Force -ErrorAction Stop
 }
+
+if (-not $Child) {
+    if (-not $IsWindows) {
+        throw "Fresh Windows release smoke requires native Windows"
+    }
+    if ($env:GITHUB_ACTIONS -ne "true" -or $env:RUNNER_ENVIRONMENT -ne "github-hosted") {
+        throw "Fresh Windows release smoke is restricted to GitHub-hosted Windows CI"
+    }
+    if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+        throw "RUNNER_TEMP is required for disposable Windows release smoke"
+    }
+
+    $helper = Join-Path $Root "scripts\invoke-windows-setup-standard-user-ci.ps1"
+    $stateBase = if ([string]::IsNullOrWhiteSpace($StateRoot)) {
+        Join-Path $env:RUNNER_TEMP (
+            "defenseclaw-bootstrap-acceptance-" + [guid]::NewGuid().ToString("N")
+        )
+    } else {
+        [IO.Path]::GetFullPath($StateRoot)
+    }
+    $helperCompleted = $false
+    try {
+        & $helper `
+            -Mode bootstrap-acceptance `
+            -ArtifactRoot $ReleaseDir `
+            -StateRoot $stateBase `
+            -TargetVersion $TargetVersion `
+            -DiagnosticsRoot $DiagnosticsRoot `
+            -TimeoutSeconds 1800
+        $helperCompleted = $true
+    } finally {
+        $resolvedState = [IO.Path]::GetFullPath($stateBase).TrimEnd('\')
+        $approvedStateBases = @(
+            $env:RUNNER_TEMP,
+            $env:DC_WINDOWS_NATIVE_BASE_ROOT
+        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\') }
+        $approvedBoundary = $approvedStateBases | Where-Object {
+            $resolvedState.StartsWith(
+                $_ + [IO.Path]::DirectorySeparatorChar,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        } | Select-Object -First 1
+        if ([string]::IsNullOrWhiteSpace([string]$approvedBoundary) -or
+            -not ([IO.Path]::GetFileName($resolvedState)).StartsWith(
+                "defenseclaw-bootstrap-acceptance-",
+                [StringComparison]::Ordinal
+            )) {
+            throw "Refusing to clean unexpected bootstrap acceptance state: $resolvedState"
+        }
+        if (Test-Path -LiteralPath $resolvedState) {
+            if ($helperCompleted) {
+                Remove-Item -LiteralPath $resolvedState -Recurse -Force -ErrorAction Stop
+            } else {
+                Write-Warning (
+                    "Disposable bootstrap state was preserved after failure: $resolvedState"
+                )
+            }
+        }
+    }
+    return
+}
+
+if (-not $IsWindows) {
+    throw "Disposable bootstrap acceptance child requires native Windows"
+}
+if ([string]::IsNullOrWhiteSpace($StateRoot)) {
+    throw "Disposable bootstrap acceptance child requires StateRoot"
+}
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$accountName = ($identity.Name -split '\\')[-1]
+$principal = [Security.Principal.WindowsPrincipal]::new($identity)
+if ($accountName -notmatch '^dcacc[0-9a-f]{10}$' -or
+    $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw "Bootstrap acceptance child must be a disposable real Windows standard user"
+}
+
+$profile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+$localAppData = [Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::LocalApplicationData
+)
+if ([string]::IsNullOrWhiteSpace($profile) -or
+    [string]::IsNullOrWhiteSpace($localAppData) -or
+    [string]::IsNullOrWhiteSpace($env:USERPROFILE) -or
+    -not ([IO.Path]::GetFullPath($env:USERPROFILE)).TrimEnd('\').Equals(
+        ([IO.Path]::GetFullPath($profile)).TrimEnd('\'),
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw "Disposable bootstrap child does not have a token-bound real user profile"
+}
+
+$installer = Join-Path $PSScriptRoot "install.ps1"
+$powerShell = Join-Path $PSHOME "pwsh.exe"
+$cosign = Join-Path $ReleaseDir "cosign-windows-amd64.exe"
+$setup = Join-Path $ReleaseDir "DefenseClawSetup-x64.exe"
+$installRoot = Join-Path $localAppData "Programs\DefenseClaw"
+$dataRoot = Join-Path $profile ".defenseclaw"
+$cacheRoot = Join-Path $localAppData "DefenseClaw\InstallerCache"
+$arpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw"
+$launcher = Join-Path $installRoot "bin\defenseclaw.exe"
+$gateway = Join-Path $installRoot "bin\defenseclaw-gateway.exe"
+$installed = $false
+$userPathBefore = [Environment]::GetEnvironmentVariable("Path", "User")
+
+foreach ($path in @(
+    $installRoot,
+    $dataRoot,
+    $cacheRoot,
+    $arpKey
+)) {
+    if (Test-Path -LiteralPath $path) {
+        throw "Bootstrap acceptance refuses pre-existing product state: $path"
+    }
+}
+foreach ($path in @($installer, $powerShell, $cosign, $setup)) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Bootstrap acceptance input is missing: $path"
+    }
+}
+
+# The supported public path has no custom home override. Setup and the
+# compatibility bootstrap must agree on the account's real Known Folder.
+Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
+
+$bootstrapArguments = @(
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-File",
+    $installer,
+    "-Local",
+    $ReleaseDir,
+    "-CosignPath",
+    $cosign,
+    "-Version",
+    $TargetVersion,
+    "-Connector",
+    "none",
+    "-Yes"
+)
 
 try {
-    [void](New-Item -ItemType Directory -Path $HomeRoot -Force)
-    [void](New-Item -ItemType Directory -Path $TempRoot -Force)
-    $env:USERPROFILE = $HomeRoot
-    $env:HOME = $HomeRoot
-    $env:DEFENSECLAW_HOME = Join-Path $HomeRoot ".defenseclaw"
-    $env:TEMP = $TempRoot
-    $env:TMP = $TempRoot
+    $first = Invoke-CapturedProcess `
+        -FilePath $powerShell `
+        -ArgumentList $bootstrapArguments
+    Assert-BootstrapSucceeded `
+        -Result $first `
+        -ExpectedVersion $TargetVersion `
+        -Phase "First public bootstrap"
+    $installed = $true
 
-    $legacyHelp = (& $WindowsPowerShell -NoProfile -NonInteractive -File $Installer -Help 2>&1 |
-        Out-String)
-    if ($LASTEXITCODE -ne 0 -or $legacyHelp -notmatch 'DefenseClaw native Windows bootstrap') {
-        throw "Windows PowerShell 5.1 could not parse/compile install.ps1:`n$legacyHelp"
-    }
-    $userPathBeforeFailure = [Environment]::GetEnvironmentVariable("Path", "User")
-    if (-not $SuccessPathOnly) {
-        $legacyNativeRoot = Join-Path $TempRoot "windows-powershell-native-private"
-    [void](New-Item -ItemType Directory -Path $legacyNativeRoot)
-    $legacyNative = (& $WindowsPowerShell `
-        -NoProfile `
-        -NonInteractive `
-        -File $Installer `
-        -TestMode `
-        -NativePrivateDirectorySelfTestRoot $legacyNativeRoot 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0 -or
-        $legacyNative -notmatch 'Native private directory lifecycle passed' -or
-        $legacyNative -notmatch 'Native snapshotted-child move-out refusal passed' -or
-        $legacyNative -notmatch 'Native namespace retirement wait passed' -or
-        $legacyNative -notmatch 'Native fresh directory fault boundaries passed') {
-        throw "Windows PowerShell 5.1 native private lifecycle failed:`n$legacyNative"
-    }
-    if (@(Get-ChildItem -LiteralPath $legacyNativeRoot -Force).Count -ne 0) {
-        throw "Windows PowerShell 5.1 native private lifecycle left custody behind"
-    }
-    [IO.Directory]::Delete($legacyNativeRoot)
-
-    $modernNativeRoot = Join-Path $TempRoot "powershell-native-private"
-    [void](New-Item -ItemType Directory -Path $modernNativeRoot)
-    $modernNative = (& $PowerShell `
-        -NoProfile `
-        -NonInteractive `
-        -File $Installer `
-        -TestMode `
-        -NativePrivateDirectorySelfTestRoot $modernNativeRoot 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0 -or
-        $modernNative -notmatch 'Native private directory lifecycle passed' -or
-        $modernNative -notmatch 'Native snapshotted-child move-out refusal passed' -or
-        $modernNative -notmatch 'Native namespace retirement wait passed' -or
-        $modernNative -notmatch 'Native fresh directory fault boundaries passed') {
-        throw "PowerShell 7 native private lifecycle failed:`n$modernNative"
-    }
-    if (@(Get-ChildItem -LiteralPath $modernNativeRoot -Force).Count -ne 0) {
-        throw "PowerShell 7 native private lifecycle left custody behind"
-    }
-    [IO.Directory]::Delete($modernNativeRoot)
-
-    $mismatch = Invoke-FreshInstaller -RequestedVersion "999.999.999"
-    if ($mismatch.ExitCode -eq 0 -or $mismatch.Output -notmatch 'does not match -Version') {
-        throw "Manifest-version refusal did not fail inside authenticated policy setup:`n$($mismatch.Output)"
-    }
-    Assert-NoInstallerCustody
-    if (
-        (Test-Path -LiteralPath $env:DEFENSECLAW_HOME) -or
-        (Test-Path -LiteralPath (Join-Path $HomeRoot ".local\bin\defenseclaw-gateway.exe")) -or
-        (Test-Path -LiteralPath (Join-Path $HomeRoot ".local\bin\defenseclaw.cmd"))
-    ) {
-        throw "Manifest-version refusal left installed state behind"
-    }
-
-    $postMove = Invoke-FreshInstaller -InjectFailureAfterFreshDirectoryMove
-    if ($postMove.ExitCode -eq 0 -or
-        $postMove.Output -notmatch 'Injected fresh-install directory failure after publishing' -or
-        $postMove.Output -notmatch 'rollback safety boundary did not complete' -or
-        $postMove.Output -notmatch 'rollback preserved changed or concurrent state' -or
-        $postMove.Output -match 'Fresh-install payload rollback completed; retry is safe') {
-        throw "Post-move fresh-directory cleanup was not exact:`n$($postMove.Output)"
-    }
-    Assert-NoInstallerCustody
-    if (Test-Path -LiteralPath $env:DEFENSECLAW_HOME) {
-        Write-Host "--- post-move installer output ---" -ForegroundColor Yellow
-        Write-Host $postMove.Output
-        Write-Host "--- bounded residual path inventory (names and kinds only) ---" -ForegroundColor Yellow
-        @(
-            Get-ChildItem -LiteralPath $HomeRoot -Force -Recurse -ErrorAction SilentlyContinue |
-                Select-Object -First 100
-        ) | ForEach-Object {
-            $relative = [IO.Path]::GetRelativePath($HomeRoot, $_.FullName)
-            $kind = if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                "reparse"
-            } elseif ($_.PSIsContainer) {
-                "directory"
-            } else {
-                "file"
-            }
-            Write-Host "$kind`t$relative"
+    foreach ($path in @($launcher, $gateway)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Public bootstrap did not install native executable: $path"
         }
     }
-    Assert-NoFreshPayload -Phase "post-directory-publication injection" -Context $postMove.Output
-    if (Test-Path -LiteralPath (Join-Path $HomeRoot ".local")) {
-        throw "Post-move fresh-directory failure left .local or bin custody behind"
+    if (-not (Test-Path -LiteralPath $arpKey)) {
+        throw "Public bootstrap did not publish the per-user Installed Apps registration"
     }
-    if ([Environment]::GetEnvironmentVariable("Path", "User") -cne $userPathBeforeFailure) {
-        throw "Post-move fresh-directory failure changed the user PATH"
-    }
-
-    $injected = Invoke-FreshInstaller `
-        -InjectFailureBeforeShim `
-        -InjectPolicyCleanupFailure
-    if ($injected.ExitCode -eq 0 -or
-        $injected.Output -notmatch 'Injected fresh-install failure before CLI shim publication' -or
-        $injected.Output -notmatch 'Injected private release-policy cleanup failure' -or
-        $injected.Output -notmatch 'Gateway installed' -or
-        $injected.Output -notmatch 'Installing DefenseClaw CLI' -or
-        $injected.Output -notmatch 'rollback preserved changed or concurrent state' -or
-        $injected.Output -notmatch 'creation-bound private directory cleanup remains incomplete' -or
-        $injected.Output -match 'Fresh-install payload rollback completed; retry is safe') {
-        throw "Post-venv fresh-install rollback injection was not exercised:`n$($injected.Output)"
-    }
-    [void](Remove-InjectedPolicyResidue -Output $injected.Output)
-    Assert-NoInstallerCustody
-    Assert-NoFreshPayload `
-        -Phase "post-venv policy-cleanup injection" `
-        -Context $injected.Output
-    if (Test-Path -LiteralPath (Join-Path $HomeRoot ".local")) {
-        throw "Failed fresh install left installer-created binary directories behind"
-    }
-    if ([Environment]::GetEnvironmentVariable("Path", "User") -cne $userPathBeforeFailure) {
-        throw "Failed fresh install changed the user PATH"
+    Assert-ExactVersion -Executable $launcher -ExpectedVersion $TargetVersion
+    Assert-ExactVersion -Executable $gateway -ExpectedVersion $TargetVersion
+    if ((Get-UserPathEntryCount `
+            -Value ([Environment]::GetEnvironmentVariable("Path", "User")) `
+            -ExpectedEntry (Join-Path $installRoot "bin")) -ne 1) {
+        throw "Public bootstrap did not publish exactly one native user PATH entry"
     }
 
-    $movedCustody = Invoke-FreshInstaller `
-        -InjectFailureBeforeShim `
-        -InjectPolicyCustodyMoveBeforeCleanup
-    if ($movedCustody.ExitCode -eq 0 -or
-        $movedCustody.Output -notmatch 'Injected fresh-install failure before CLI shim publication' -or
-        $movedCustody.Output -notmatch 'canonical binding was lost' -or
-        $movedCustody.Output -notmatch 'current location of installer-owned custody may be unknown' -or
-        $movedCustody.Output -notmatch 'Retained creation identity:' -or
-        $movedCustody.Output -notmatch 'creation-bound private directory cleanup remains incomplete' -or
-        $movedCustody.Output -notmatch 'rollback preserved changed or concurrent state' -or
-        $movedCustody.Output -match 'Fresh-install payload rollback completed; retry is safe') {
-        throw "Moved private-policy custody was not retained:`n$($movedCustody.Output)"
-    }
-    Remove-MovedPolicyCustodyResidue -Output $movedCustody.Output
-    Assert-NoInstallerCustody
-    Assert-NoFreshPayload `
-        -Phase "moved policy-custody injection" `
-        -Context $movedCustody.Output
-    if (Test-Path -LiteralPath (Join-Path $HomeRoot ".local")) {
-        throw "Moved policy custody left installer-created binary directories behind"
-    }
-    if ([Environment]::GetEnvironmentVariable("Path", "User") -cne $userPathBeforeFailure) {
-        throw "Moved policy custody changed the user PATH"
+    $firstHashes = @(
+        (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash,
+        (Get-FileHash -LiteralPath $gateway -Algorithm SHA256).Hash
+    )
+    $second = Invoke-CapturedProcess `
+        -FilePath $powerShell `
+        -ArgumentList $bootstrapArguments
+    Assert-BootstrapSucceeded `
+        -Result $second `
+        -ExpectedVersion $TargetVersion `
+        -Phase "Repeated public bootstrap"
+    Assert-ExactVersion -Executable $launcher -ExpectedVersion $TargetVersion
+    Assert-ExactVersion -Executable $gateway -ExpectedVersion $TargetVersion
+    $secondHashes = @(
+        (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash,
+        (Get-FileHash -LiteralPath $gateway -Algorithm SHA256).Hash
+    )
+    if (($firstHashes -join ":") -cne ($secondHashes -join ":")) {
+        throw "Repeated public bootstrap changed the exact installed candidate bytes"
     }
 
-    $collision = Invoke-FreshInstaller -InjectConcurrentShimBeforePublish
-    $unclaimedShim = Join-Path $HomeRoot ".local\bin\defenseclaw.cmd"
-    if ($collision.ExitCode -eq 0 -or
-        $collision.Output -notmatch 'CLI appeared during installation; it was preserved' -or
-        $collision.Output -notmatch 'rollback preserved changed or concurrent state') {
-        throw "Concurrent fresh-install shim collision was not preserved:`n$($collision.Output)"
+    $uninstall = Invoke-CapturedProcess `
+        -FilePath $setup `
+        -ArgumentList @("/uninstall", "/quiet", "DELETEUSERDATA=1")
+    if ($uninstall.ExitCode -ne 0) {
+        throw "Native uninstall failed ($($uninstall.ExitCode)):`n$($uninstall.Output)"
     }
-    Assert-NoInstallerCustody
-    if (-not (Test-Path -LiteralPath $unclaimedShim -PathType Leaf)) {
-        throw "Concurrent unclaimed shim disappeared during rollback"
-    }
-    $unclaimedBytes = [IO.File]::ReadAllText($unclaimedShim, [Text.Encoding]::ASCII)
-    if ($unclaimedBytes -cne "@echo off`r`necho concurrent-unclaimed-shim`r`n") {
-        throw "Concurrent unclaimed shim bytes changed during rollback"
-    }
-    if ((Test-Path -LiteralPath $env:DEFENSECLAW_HOME) -or
-        (Test-Path -LiteralPath (Join-Path $HomeRoot ".local\bin\defenseclaw-gateway.exe"))) {
-        throw "Concurrent shim collision retained installer-owned gateway or venv state"
-    }
-    if ([Environment]::GetEnvironmentVariable("Path", "User") -cne $userPathBeforeFailure) {
-        throw "Concurrent shim collision changed the user PATH"
-    }
-    [IO.File]::Delete($unclaimedShim)
-    [IO.Directory]::Delete((Join-Path $HomeRoot ".local\bin"))
-    [IO.Directory]::Delete((Join-Path $HomeRoot ".local"))
-    Assert-NoFreshPayload -Phase "concurrent shim collision" -Context $collision.Output
-    }
-
-    $first = if ($SuccessPathOnly) {
-        Invoke-FreshInstaller
-    } else {
-        Invoke-FreshInstaller -InjectPolicyCleanupFailure
-    }
-    $expectedInstallDir = Join-Path $HomeRoot ".local\bin"
-    if ($first.ExitCode -ne 0 -or
-        $first.Output -notmatch 'DefenseClaw installed successfully' -or
-        $first.Output -notmatch 'Persistent User PATH was not modified' -or
-        $first.Output -notmatch "Edit environment variables for your account" -or
-        -not $first.Output.Contains($expectedInstallDir) -or
-        -not $first.Output.Contains("& `"$expectedInstallDir\defenseclaw.cmd`" init") -or
-        $first.Output -match 'Added .* to your user PATH') {
-        throw "Fresh Windows install failed ($($first.ExitCode)):`n$($first.Output)"
-    }
-    if ($SuccessPathOnly) {
-        if ($first.Output -match 'Private release-policy cleanup was incomplete') {
-            throw "Fresh Windows success path retained private policy custody:`n$($first.Output)"
+    $installed = $false
+    Wait-ForPathRemoval -Path $cacheRoot
+    foreach ($path in @($installRoot, $dataRoot, $cacheRoot, $arpKey)) {
+        if (Test-Path -LiteralPath $path) {
+            throw "Public bootstrap uninstall left managed state behind: $path"
         }
-    } elseif ($first.Output -notmatch 'Private release-policy cleanup was incomplete') {
-        throw "Fresh Windows install did not exercise policy cleanup failure:`n$($first.Output)"
     }
-    if ([Environment]::GetEnvironmentVariable("Path", "User") -cne $userPathBeforeFailure) {
-        throw "Modern fresh install mutated the persistent user PATH"
+    if (-not [string]::Equals(
+            $userPathBefore,
+            [Environment]::GetEnvironmentVariable("Path", "User"),
+            [StringComparison]::Ordinal
+        )) {
+        throw "Public bootstrap uninstall did not restore the original user PATH exactly"
     }
-
-    $cli = Join-Path $HomeRoot ".defenseclaw/.venv/Scripts/defenseclaw.exe"
-    $gateway = Join-Path $HomeRoot ".local\bin\defenseclaw-gateway.exe"
-    $installedBeforeCleanup = @(
-        (Get-FileHash -LiteralPath $cli -Algorithm SHA256).Hash,
-        (Get-FileHash -LiteralPath $gateway -Algorithm SHA256).Hash
-    )
-    if (-not $SuccessPathOnly) {
-        [void](Remove-InjectedPolicyResidue -Output $first.Output)
-    }
-    $installedAfterCleanup = @(
-        (Get-FileHash -LiteralPath $cli -Algorithm SHA256).Hash,
-        (Get-FileHash -LiteralPath $gateway -Algorithm SHA256).Hash
-    )
-    if (($installedBeforeCleanup -join ':') -cne ($installedAfterCleanup -join ':')) {
-        throw "Policy cleanup failure or residual retirement changed installed bytes"
-    }
-    Assert-NoInstallerCustody
-    Assert-ExactVersion -Command $cli
-    Assert-ExactVersion -Command $gateway
-    $before = Get-TreeSnapshot -Path $HomeRoot
-    $userPathBeforeSecond = [Environment]::GetEnvironmentVariable("Path", "User")
-
-    $second = Invoke-FreshInstaller
-    if ($second.ExitCode -eq 0) { throw "Second fresh-installer invocation unexpectedly succeeded" }
-    if ($second.Output -notmatch 'existing DefenseClaw installation' -or
-        $second.Output -notmatch 'No changes were made') {
-        throw "Second invocation did not report the pre-mutation refusal:`n$($second.Output)"
-    }
-    if ($second.Output -match 'Detecting platform') {
-        throw "Second invocation crossed the fresh-install preflight boundary"
-    }
-    $after = Get-TreeSnapshot -Path $HomeRoot
-    if ($after -cne $before) { throw "Second fresh-installer invocation changed installed state" }
-    $userPathAfterSecond = [Environment]::GetEnvironmentVariable("Path", "User")
-    if ($userPathAfterSecond -cne $userPathBeforeSecond) {
-        throw "Second fresh-installer invocation changed the user PATH"
-    }
-    Assert-NoInstallerCustody
-
-    Write-Host "Fresh Windows install passed: $TargetVersion" -ForegroundColor Green
+    Write-Host "Fresh Windows public bootstrap passed: $TargetVersion" -ForegroundColor Green
 } finally {
-    [Environment]::SetEnvironmentVariable("Path", $savedUserPath, "User")
-    foreach ($name in $savedEnvironment.Keys) {
-        [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], "Process")
-    }
-    if (Test-Path -LiteralPath $WorkRoot) {
-        Remove-Item -LiteralPath $WorkRoot -Recurse -Force -ErrorAction SilentlyContinue
+    if ($installed -or (Test-Path -LiteralPath $installRoot)) {
+        try {
+            $cleanup = Invoke-CapturedProcess `
+                -FilePath $setup `
+                -ArgumentList @("/uninstall", "/quiet", "DELETEUSERDATA=1")
+            if ($cleanup.ExitCode -ne 0) {
+                Write-Warning "Emergency native uninstall failed ($($cleanup.ExitCode))"
+            }
+        } catch {
+            Write-Warning "Emergency native uninstall failed: $($_.Exception.Message)"
+        }
     }
 }
