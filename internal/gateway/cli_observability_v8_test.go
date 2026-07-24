@@ -65,6 +65,73 @@ func TestCLIObservabilityV8RequestBoundary(t *testing.T) {
 	}
 }
 
+func TestCLIObservabilityV8SkillFindingScannerContract(t *testing.T) {
+	fixture, api, capture := newCLIObservabilityV8Fixture(t)
+	const target = `C:\disposable-codex-home\skills\dc-test-benign`
+	const canonical = `{"kind":"scan","run_id":"skill-python-run","scan":{"scanner":"skill-scanner","target":"C:\\disposable-codex-home\\skills\\dc-test-benign","timestamp":"2026-07-24T16:00:00Z","findings":[{"id":"MANIFEST_MISSING_LICENSE_c5ae9be793","severity":"INFO","title":"Skill does not specify a license","description":"","location":"SKILL.md","remediation":"","scanner":"skill-scanner","tags":["analyzer:static"]}],"duration_ms":125}}`
+	const leakedAnalyzer = `{"kind":"scan","run_id":"malformed-skill-run","scan":{"scanner":"skill-scanner","target":"C:\\disposable-codex-home\\skills\\dc-test-benign","timestamp":"2026-07-24T16:00:00Z","findings":[{"id":"MANIFEST_MISSING_LICENSE_c5ae9be793","severity":"INFO","title":"Skill does not specify a license","description":"","location":"SKILL.md","remediation":"","scanner":"static","tags":[]}],"duration_ms":125}}`
+
+	request := httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, strings.NewReader(canonical))
+	response := httptest.NewRecorder()
+	api.handleCLIObservabilityV8(response, request)
+	if response.Code != http.StatusNoContent || response.Body.Len() != 0 {
+		t.Fatalf("canonical skill payload status=%d response=%q", response.Code, response.Body.String())
+	}
+
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	for _, check := range []struct {
+		query string
+		args  []any
+		want  int
+	}{
+		{
+			query: `SELECT COUNT(*) FROM scan_results WHERE run_id = 'skill-python-run' AND scanner = 'skill-scanner' AND target = ?`,
+			args:  []any{target},
+			want:  1,
+		},
+		{
+			query: `SELECT COUNT(*) FROM scan_findings WHERE run_id = 'skill-python-run' AND scanner = 'skill-scanner'`,
+			want:  1,
+		},
+		{
+			query: `SELECT COUNT(*) FROM audit_events WHERE run_id = 'skill-python-run' AND action IN ('scan', 'scan-finding')`,
+			want:  2,
+		},
+	} {
+		var count int
+		if err := database.QueryRow(check.query, check.args...).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != check.want {
+			t.Fatalf("query=%q rows=%d want=%d", check.query, count, check.want)
+		}
+	}
+	if len(capture.traces) != 1 {
+		t.Fatalf("asset scan traces=%d, want one", len(capture.traces))
+	}
+
+	request = httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, strings.NewReader(leakedAnalyzer))
+	response = httptest.NewRecorder()
+	api.handleCLIObservabilityV8(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("malformed skill payload status=%d response=%q", response.Code, response.Body.String())
+	}
+	for _, table := range []string{"scan_results", "scan_findings", "audit_events"} {
+		var count int
+		query := "SELECT COUNT(*) FROM " + table + " WHERE run_id = 'malformed-skill-run'"
+		if err := database.QueryRow(query).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("%s rows=%d after rejected skill payload", table, count)
+		}
+	}
+}
+
 func TestCLIObservabilityV8RejectsMalformedScanBeforeForensicPersistence(t *testing.T) {
 	tests := []struct {
 		name   string
