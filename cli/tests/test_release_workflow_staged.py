@@ -865,12 +865,23 @@ def test_release_publish_retries_only_after_absence_and_reconciles_ambiguity() -
     assert "refusing another create" in rendered
     assert "Release API retries exhausted" in rendered
     assert "scripts/release_api_retry.py prove-published" in rendered
-    create_index = rendered.index('gh release create "$RELEASE_TAG"')
+    create_run = create["run"]
+    loop_index = create_run.index("for attempt in 1 2 3; do")
+    main_check_index = create_run.index("scripts/release_api_retry.py require-absent")
+    check_main_flag_index = create_run.index("--check-main", main_check_index)
+    create_index = create_run.index('gh release create "$RELEASE_TAG"')
+    retry_reconcile_index = create_run.index("scripts/release_api_retry.py reconcile-create")
+    loop_end_index = create_run.index("\ndone", loop_index)
+    assert loop_index < main_check_index < check_main_flag_index < create_index < retry_reconcile_index < loop_end_index
     precheck_index = rendered.index("scripts/release_api_retry.py reconcile-create")
-    main_check_index = rendered.index("scripts/release_api_retry.py require-absent", precheck_index)
+    mutation_check_index = rendered.index(
+        "scripts/release_api_retry.py require-absent",
+        precheck_index,
+    )
+    rendered_create_index = rendered.index('gh release create "$RELEASE_TAG"')
     reconcile_index = rendered.rindex("scripts/release_api_retry.py reconcile-create")
     prove_index = rendered.index("scripts/release_api_retry.py prove-published")
-    assert precheck_index < main_check_index < create_index < reconcile_index < prove_index
+    assert precheck_index < mutation_check_index < rendered_create_index < reconcile_index < prove_index
 
 
 def test_every_release_remote_action_is_commit_pinned() -> None:

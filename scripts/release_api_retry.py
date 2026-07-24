@@ -232,9 +232,7 @@ class GitHubReleaseAPI:
                     return item
             if len(releases) < 100:
                 return None
-        raise ReleaseAPIError(
-            f"GitHub release listing exceeded {MAX_RELEASE_LIST_PAGES} pages while probing {tag!r}"
-        )
+        raise ReleaseAPIError(f"GitHub release listing exceeded {MAX_RELEASE_LIST_PAGES} pages while probing {tag!r}")
 
     def resolve_tag_commit(self, payload: dict[str, object]) -> str:
         current = payload
@@ -266,8 +264,6 @@ def require_absent_namespace(
     tag: str,
     expected_main_commit: str | None = None,
 ) -> None:
-    if expected_main_commit is not None:
-        require_main_commit(api, expected_main_commit)
     tag_payload = api.tag_ref(tag)
     release_payload = api.release_by_tag(tag)
     if tag_payload is not None or release_payload is not None:
@@ -277,14 +273,16 @@ def require_absent_namespace(
         if release_payload is not None:
             occupied.append("release")
         raise ReleaseAPIError(f"remote release namespace {tag!r} is occupied by {', '.join(occupied)}")
+    # Keep this as the final successful API proof before publication. Namespace
+    # probes can be slow enough for protected main to advance while they run.
+    if expected_main_commit is not None:
+        require_main_commit(api, expected_main_commit)
 
 
 def require_main_commit(api: GitHubReleaseAPI, expected_commit: str) -> None:
     remote_main = api.main_commit()
     if remote_main != expected_commit:
-        raise ReleaseAPIError(
-            f"main advanced during certification: expected {expected_commit}, found {remote_main}"
-        )
+        raise ReleaseAPIError(f"main advanced during certification: expected {expected_commit}, found {remote_main}")
 
 
 def _candidate_release_json(payload: dict[str, object]) -> dict[str, object]:
