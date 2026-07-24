@@ -206,15 +206,15 @@ if ($accountName -notmatch '^dcacc[0-9a-f]{10}$' -or
     throw "Bootstrap acceptance child must be a disposable real Windows standard user"
 }
 
-$profile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+$userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
 $localAppData = [Environment]::GetFolderPath(
     [Environment+SpecialFolder]::LocalApplicationData
 )
-if ([string]::IsNullOrWhiteSpace($profile) -or
+if ([string]::IsNullOrWhiteSpace($userProfile) -or
     [string]::IsNullOrWhiteSpace($localAppData) -or
     [string]::IsNullOrWhiteSpace($env:USERPROFILE) -or
     -not ([IO.Path]::GetFullPath($env:USERPROFILE)).TrimEnd('\').Equals(
-        ([IO.Path]::GetFullPath($profile)).TrimEnd('\'),
+        ([IO.Path]::GetFullPath($userProfile)).TrimEnd('\'),
         [StringComparison]::OrdinalIgnoreCase
     )) {
     throw "Disposable bootstrap child does not have a token-bound real user profile"
@@ -225,7 +225,7 @@ $powerShell = Join-Path $PSHOME "pwsh.exe"
 $cosign = Join-Path $ReleaseDir "cosign-windows-amd64.exe"
 $setup = Join-Path $ReleaseDir "DefenseClawSetup-x64.exe"
 $installRoot = Join-Path $localAppData "Programs\DefenseClaw"
-$dataRoot = Join-Path $profile ".defenseclaw"
+$dataRoot = Join-Path $userProfile ".defenseclaw"
 $cacheRoot = Join-Path $localAppData "DefenseClaw\InstallerCache"
 $arpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw"
 $launcher = Join-Path $installRoot "bin\defenseclaw.exe"
@@ -309,6 +309,11 @@ try {
         -Phase "Repeated public bootstrap"
     Assert-ExactVersion -Executable $launcher -ExpectedVersion $TargetVersion
     Assert-ExactVersion -Executable $gateway -ExpectedVersion $TargetVersion
+    if ((Get-UserPathEntryCount `
+            -Value ([Environment]::GetEnvironmentVariable("Path", "User")) `
+            -ExpectedEntry (Join-Path $installRoot "bin")) -ne 1) {
+        throw "Repeated public bootstrap changed the native user PATH entry count"
+    }
     $secondHashes = @(
         (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash,
         (Get-FileHash -LiteralPath $gateway -Algorithm SHA256).Hash
