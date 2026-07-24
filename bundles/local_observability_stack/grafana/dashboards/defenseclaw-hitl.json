@@ -57,7 +57,7 @@
         "name": "connector",
         "label": "Connector",
         "type": "custom",
-        "query": "openclaw,codex,claudecode,zeptoclaw,hermes,cursor,windsurf,geminicli,copilot,openhands,antigravity",
+        "query": "openclaw,codex,claudecode,zeptoclaw,hermes,cursor,windsurf,geminicli,copilot,openhands,antigravity,opencode,omnigent",
         "multi": true,
         "includeAll": true,
         "allValue": ".+",
@@ -119,6 +119,14 @@
           {
             "text": "antigravity",
             "value": "antigravity"
+          },
+          {
+            "text": "opencode",
+            "value": "opencode"
+          },
+          {
+            "text": "omnigent",
+            "value": "omnigent"
           }
         ],
         "skipUrlSync": false,
@@ -141,7 +149,7 @@
     {
       "type": "stat",
       "title": "Confirms (1h)",
-      "description": "verdict_action=confirm: the verdict that asks DefenseClaw to step up to a human. Sum of all stages.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "verdict_action=confirm: the verdict that asks DefenseClaw to step up to a human. Sum of all stages.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations → internal/gateway/hook_decision_metrics_v8.go (recordHookDecisionMetricsV8); internal/gateway/inspect_metrics_v8.go (recordInspectMetricsV8)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -154,7 +162,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"confirm\", tool=~\"$connector:.*\"}[1h])) or vector(0)",
+          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"confirm\", connector=~\"$connector\"}[1h])) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -214,7 +222,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"allow\", tool=~\"$connector:.*\"}[1h])) or vector(0)",
+          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"allow\", connector=~\"$connector\"}[1h])) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -235,7 +243,7 @@
           }
         }
       },
-      "description": "covered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations → internal/gateway/hook_decision_metrics_v8.go (recordHookDecisionMetricsV8); internal/gateway/inspect_metrics_v8.go (recordInspectMetricsV8)"
     },
     {
       "type": "stat",
@@ -252,7 +260,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"block\", tool=~\"$connector:.*\"}[1h])) or vector(0)",
+          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"block\", connector=~\"$connector\"}[1h])) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -273,12 +281,12 @@
           }
         }
       },
-      "description": "covered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)"
+      "description": "covered_by:\n  - defenseclaw_inspect_evaluations → internal/gateway/hook_decision_metrics_v8.go (recordHookDecisionMetricsV8); internal/gateway/inspect_metrics_v8.go (recordInspectMetricsV8)"
     },
     {
       "type": "stat",
       "title": "Hook errors (1h)",
-      "description": "Gateway errors during the selected range. OpenClaw HILT timeout metrics appear when that connector runs in action mode.\n\ncovered_by:\n  - defenseclaw_gateway_errors → internal/telemetry/gateway_events.go (EventError)",
+      "description": "Generated structured gateway failures during the selected range. OpenClaw HILT timeout metrics appear when that connector runs in action mode.\n\ncovered_by:\n  - defenseclaw_gateway_errors → internal/gateway/platform_health_observability_v8.go",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -328,8 +336,8 @@
     },
     {
       "type": "stat",
-      "title": "HILT unsupported (1h)",
-      "description": "hilt_unsupported — the connector accepted the prompt but the operator surface (chat client) cannot render an approval UI. Often indicates a misconfigured connector.\n\ncovered_by:\n  - defenseclaw_guardrail_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "title": "HILT unavailable / delivery failed (1h)",
+      "description": "Chat HILT attempts that lacked a usable operator session or failed while delivering the approval prompt. Both fail closed; the status mix panel keeps the two failure classes separate.\n\ncovered_by:\n  - defenseclaw_approval_lifecycle → internal/gateway/hilt_observability_v8.go (generated canonical metric)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -342,7 +350,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_connector=~\"$connector\", guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"hilt_unsupported\"}[1h])) or vector(0)",
+          "expr": "sum(increase(defenseclaw_approval_lifecycle_total{connector=~\"$connector\", surface=\"chat\", result=~\"unavailable|delivery_failed\"}[1h])) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -376,7 +384,7 @@
     {
       "type": "bargauge",
       "title": "Hook-mode approval funnel ($__range)",
-      "description": "Approval funnel using hook telemetry. confirm/block/allow from inspect evaluations; shadow blocks from would_block outcomes. OpenClaw HILT-specific counters populate when that connector runs in action mode.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "Approval funnel using hook telemetry. confirm/block/allow from inspect evaluations; shadow blocks from would_block outcomes. OpenClaw HILT-specific counters populate when that connector runs in action mode.\n\ncovered_by:\n  - defenseclaw_inspect_evaluations → internal/gateway/hook_decision_metrics_v8.go (recordHookDecisionMetricsV8); internal/gateway/inspect_metrics_v8.go (recordInspectMetricsV8)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -389,7 +397,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"confirm\", tool=~\"$connector:.*\"}[$__range])) or vector(0)",
+          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"confirm\", connector=~\"$connector\"}[$__range])) or vector(0)",
           "legendFormat": "confirm verdicts",
           "refId": "A",
           "instant": true
@@ -401,13 +409,13 @@
           "instant": true
         },
         {
-          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"block\", tool=~\"$connector:.*\"}[$__range])) or vector(0)",
+          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"block\", connector=~\"$connector\"}[$__range])) or vector(0)",
           "legendFormat": "blocks",
           "refId": "C",
           "instant": true
         },
         {
-          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"allow\", tool=~\"$connector:.*\"}[$__range])) or vector(0)",
+          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"allow\", connector=~\"$connector\"}[$__range])) or vector(0)",
           "legendFormat": "allows",
           "refId": "D",
           "instant": true
@@ -434,7 +442,7 @@
     {
       "type": "timeseries",
       "title": "Chat HILT status mix over time",
-      "description": "Status counters from RecordGuardrailEvaluation(\"openclaw:hilt\", action). Stack shows requested vs approved/denied/timeout/unsupported simultaneously so you can see the operator-response funnel.\n\ncovered_by:\n  - defenseclaw_guardrail_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "Generated approval lifecycle events for the chat HILT surface. Stack preserves pending, policy outcomes, operator cancellation, expiry, unavailable sessions, and delivery failures without treating approval states as guardrail decisions.\n\ncovered_by:\n  - defenseclaw_approval_lifecycle → internal/gateway/hilt_observability_v8.go (generated canonical metric)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -447,8 +455,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (guardrail_action_taken) (rate(defenseclaw_guardrail_evaluations_total{guardrail_connector=~\"$connector\", guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=~\"approval_requested|approval_approved|approval_denied|approval_timeout|hilt_unsupported\"}[$__rate_interval])) or on() vector(0)",
-          "legendFormat": "{{guardrail_action_taken}}",
+          "expr": "sum by (result) (rate(defenseclaw_approval_lifecycle_total{connector=~\"$connector\", surface=\"chat\", result=~\"pending|approved|denied|expired|cancelled|unavailable|delivery_failed\"}[$__rate_interval])) or on() vector(0)",
+          "legendFormat": "{{result}}",
           "refId": "A"
         }
       ],
@@ -467,7 +475,7 @@
     {
       "type": "timeseries",
       "title": "Chat HILT approval-vs-denial rate (1h rolling)",
-      "description": "approved / (approved + denied + timeout). Slow drift toward 0 means operators are denying more often — investigate via the verdict-categories panel on Security.\n\ncovered_by:\n  - defenseclaw_guardrail_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "approved / (approved + denied + expired) for policy-complete chat HILT requests. Technical cancellation and delivery failures remain visible in the neighboring panels without distorting the operator decision ratio.\n\ncovered_by:\n  - defenseclaw_approval_lifecycle → internal/gateway/hilt_observability_v8.go (generated canonical metric)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -480,7 +488,7 @@
       },
       "targets": [
         {
-          "expr": "(sum(rate(defenseclaw_guardrail_evaluations_total{guardrail_connector=~\"$connector\", guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"approval_approved\"}[1h])) or vector(0)) / clamp_min((sum(rate(defenseclaw_guardrail_evaluations_total{guardrail_connector=~\"$connector\", guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=~\"approval_approved|approval_denied|approval_timeout\"}[1h])) or vector(0)), 0.0001)",
+          "expr": "(sum(rate(defenseclaw_approval_lifecycle_total{connector=~\"$connector\", surface=\"chat\", result=\"approved\"}[1h])) or vector(0)) / clamp_min((sum(rate(defenseclaw_approval_lifecycle_total{connector=~\"$connector\", surface=\"chat\", result=~\"approved|denied|expired\"}[1h])) or vector(0)), 0.0001)",
           "legendFormat": "approval rate",
           "refId": "A"
         }
@@ -496,7 +504,7 @@
     {
       "type": "stat",
       "title": "HITL backlog delta (5m)",
-      "description": "Five-minute request/completion delta, not a live in-flight gauge. Positive means more approval requests than terminal decisions arrived during the window; zero does not prove an older request is no longer pending.\n\ncovered_by:\n  - defenseclaw_guardrail_evaluations → internal/telemetry/metrics.go (RecordGuardrailEvaluation)",
+      "description": "Five-minute pending/completion delta, not a live in-flight gauge. Positive means more delivered approval requests than terminal decisions arrived during the window; zero does not prove an older request is no longer pending.\n\ncovered_by:\n  - defenseclaw_approval_lifecycle → internal/gateway/hilt_observability_v8.go (generated canonical metric)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -509,7 +517,7 @@
       },
       "targets": [
         {
-          "expr": "clamp_min((sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_connector=~\"$connector\",guardrail_action_taken=\"approval_requested\"}[5m])) or vector(0)) - (sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_connector=~\"$connector\",guardrail_action_taken=~\"approval_approved|approval_denied|approval_timeout\"}[5m])) or vector(0)), 0)",
+          "expr": "clamp_min((sum(increase(defenseclaw_approval_lifecycle_total{connector=~\"$connector\",surface=\"chat\",result=\"pending\"}[5m])) or vector(0)) - (sum(increase(defenseclaw_approval_lifecycle_total{connector=~\"$connector\",surface=\"chat\",result=~\"approved|denied|expired|cancelled\"}[5m])) or vector(0)), 0)",
           "refId": "A",
           "instant": true
         }
@@ -579,7 +587,7 @@
           }
         }
       },
-      "description": "Global exec approvals resolved as approved in the last hour. This metric has no connector label, so the dashboard connector filter does not apply.\n\ncovered_by:\n  - defenseclaw_approval_count → internal/telemetry/metrics.go (RecordApproval)"
+      "description": "Global exec approvals resolved as approved in the last hour. This metric has no connector label, so the dashboard connector filter does not apply.\n\ncovered_by:\n  - defenseclaw_approval_count → internal/gateway/router_approval_observability_v8.go (generated compatibility metric)"
     },
     {
       "type": "stat",
@@ -609,12 +617,12 @@
           }
         }
       },
-      "description": "Global exec approvals denied in the last hour. This metric has no connector label, so the dashboard connector filter does not apply.\n\ncovered_by:\n  - defenseclaw_approval_count → internal/telemetry/metrics.go (RecordApproval)"
+      "description": "Global exec approvals denied in the last hour. This metric has no connector label, so the dashboard connector filter does not apply.\n\ncovered_by:\n  - defenseclaw_approval_count → internal/gateway/router_approval_observability_v8.go (generated compatibility metric)"
     },
     {
       "type": "stat",
       "title": "Exec approvals pending (1h)",
-      "description": "Global exec approval requests handed to the manual approval path in the last hour. This is an event count, not a live in-flight gauge.\n\ncovered_by:\n  - defenseclaw_approval_count → internal/telemetry/metrics.go (RecordApproval)",
+      "description": "Global exec approval requests handed to the manual approval path in the last hour. This is an event count, not a live in-flight gauge.\n\ncovered_by:\n  - defenseclaw_approval_count → internal/gateway/router_approval_observability_v8.go (generated compatibility metric)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -636,7 +644,7 @@
     {
       "type": "stat",
       "title": "Auto-approval ratio (1h)",
-      "description": "auto=\"true\" share — fraction of approvals granted by policy without operator interaction. Watch for unexpected spikes.\n\ncovered_by:\n  - defenseclaw_approval_count → internal/telemetry/metrics.go:1146 (RecordApproval) — code-emitted, will populate once exec approvals run",
+      "description": "auto=\"true\" share — fraction of approvals granted by policy without operator interaction. Watch for unexpected spikes.\n\ncovered_by:\n  - defenseclaw_approval_count → internal/gateway/router_approval_observability_v8.go (generated compatibility metric)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -663,7 +671,7 @@
     {
       "type": "stat",
       "title": "Dangerous-command share (1h)",
-      "description": "dangerous=\"true\" share across global exec approval events. This metric has no connector label, so the dashboard connector filter does not apply.\n\ncovered_by:\n  - defenseclaw_approval_count → internal/telemetry/metrics.go (RecordApproval)",
+      "description": "dangerous=\"true\" share across global exec approval events. This metric has no connector label, so the dashboard connector filter does not apply.\n\ncovered_by:\n  - defenseclaw_approval_count → internal/gateway/router_approval_observability_v8.go (generated compatibility metric)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -707,7 +715,7 @@
     {
       "type": "stat",
       "title": "Denial rate (dangerous exec, 1h)",
-      "description": "Among global dangerous=\"true\" exec approval events, the fraction denied. This metric has no connector label, so the dashboard connector filter does not apply.\n\ncovered_by:\n  - defenseclaw_approval_count → internal/telemetry/metrics.go (RecordApproval)",
+      "description": "Among global dangerous=\"true\" exec approval events, the fraction denied. This metric has no connector label, so the dashboard connector filter does not apply.\n\ncovered_by:\n  - defenseclaw_approval_count → internal/gateway/router_approval_observability_v8.go (generated compatibility metric)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -734,7 +742,7 @@
     {
       "type": "timeseries",
       "title": "Exec approval result mix over time",
-      "description": "Global exec approval event rate by result ∈ {approved, denied, pending, timeout}. Pending is an emitted event, not a live in-flight gauge.\n\ncovered_by:\n  - defenseclaw_approval_count → internal/telemetry/metrics.go (RecordApproval)",
+      "description": "Global exec approval event rate by result ∈ {approved, denied, pending}. Pending is an emitted event, not a live in-flight gauge.\n\ncovered_by:\n  - defenseclaw_approval_count → internal/gateway/router_approval_observability_v8.go (generated compatibility metric)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -767,7 +775,7 @@
     {
       "type": "timeseries",
       "title": "Exec approvals by automatic vs manual",
-      "description": "Global exec approval event rate split by auto=true (policy automatic) and auto=false (manual or denied).\n\ncovered_by:\n  - defenseclaw_approval_count → internal/telemetry/metrics.go (RecordApproval)",
+      "description": "Global exec approval event rate split by auto=true (policy automatic) and auto=false (manual or denied).\n\ncovered_by:\n  - defenseclaw_approval_count → internal/gateway/router_approval_observability_v8.go (generated compatibility metric)",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -795,6 +803,46 @@
             "fillOpacity": 25
           }
         }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Canonical approval audit trail",
+      "gridPos": {
+        "x": 0,
+        "y": 39,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "logs",
+      "title": "Approval requests and resolutions — ID, result, agent, and trace",
+      "description": "Durable canonical approval.requested and approval.resolved records. The approval ID joins request to resolution; result and actor identify the terminal decision; agent and trace fields preserve the correlation actually reported by the producer.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | event_name=~\"approval[.](requested|resolved)\" | line_format \"approval={{.body_defenseclaw_approval_id}} · event={{.event_name}} · result={{if .body_defenseclaw_approval_result}}{{.body_defenseclaw_approval_result}}{{else}}{{.outcome}}{{end}} · actor={{.body_defenseclaw_approval_actor_type}} · agent={{.body_gen_ai_agent_id}} · command={{.body_defenseclaw_approval_command_name}} · trace_id={{.correlation_trace_id}}\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
       }
     }
   ],

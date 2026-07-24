@@ -388,7 +388,7 @@ Discovery touches the most sensitive parts of the host filesystem. DefenseClaw i
   </Step>
 </Steps>
 
-The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usage`—retains the dedicated `model` block so the operator can see what is installed or loaded. Local scan history retains the same block in `inventory.db`; outbound gateway events, OTel logs, and webhooks apply the existing privacy gate: with normal redaction enabled, extended model metadata plus model basenames/path hashes are omitted, and lifecycle correlation uses an installation-scoped HMAC pseudonym rather than a dictionary-testable model ID. Full metadata can be included only when `privacy.disable_redaction=true`; raw filesystem paths remain separately gated by `ai_discovery.store_raw_local_paths`.
+The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usage`—retains the dedicated `model` block so the operator can see what is installed or loaded. Local scan history retains the same block in `inventory.db`. Outbound canonical records follow each v8 destination's field-class redaction profile. Normal discovery sanitization omits extended model metadata plus model basenames/path hashes, and lifecycle correlation uses an installation-scoped HMAC pseudonym rather than a dictionary-testable model ID. Raw filesystem paths require both `ai_discovery.store_raw_local_paths: true` and a selected projection that preserves the `path` field class. The retired v7 `privacy.disable_redaction` control is not a runtime bypass.
 
 ## Use it alongside Registry
 

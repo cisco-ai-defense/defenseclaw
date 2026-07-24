@@ -18,20 +18,19 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/google/uuid"
 )
 
 const (
-	hiltStatusRequested   = "approval_requested"
 	hiltStatusApproved    = "approval_approved"
 	hiltStatusDenied      = "approval_denied"
 	hiltStatusTimeout     = "approval_timeout"
@@ -49,10 +48,11 @@ type pendingHILTApproval struct {
 // this manager; they emit the connector's native "ask" decision instead.
 type HILTApprovalManager struct {
 	client   *Client
-	logger   *audit.Logger
 	notifier *notifier.Dispatcher
-	otelMu   sync.RWMutex
-	otel     *telemetry.Provider
+
+	observabilityMu              sync.RWMutex
+	observabilityV8              hiltObservabilityV8Runtime
+	observabilityV8Authoritative bool
 
 	mu             sync.Mutex
 	pending        map[string]*pendingHILTApproval
@@ -60,11 +60,9 @@ type HILTApprovalManager struct {
 	activeSessions map[string]time.Time
 }
 
-func NewHILTApprovalManager(client *Client, logger *audit.Logger, otel *telemetry.Provider) *HILTApprovalManager {
+func NewHILTApprovalManager(client *Client) *HILTApprovalManager {
 	return &HILTApprovalManager{
 		client:         client,
-		logger:         logger,
-		otel:           otel,
 		pending:        make(map[string]*pendingHILTApproval),
 		activeSessions: make(map[string]time.Time),
 	}
@@ -80,24 +78,6 @@ func (m *HILTApprovalManager) SetNotifier(n *notifier.Dispatcher) {
 	m.notifier = n
 }
 
-func (m *HILTApprovalManager) SetOTelProvider(p *telemetry.Provider) {
-	if m == nil {
-		return
-	}
-	m.otelMu.Lock()
-	m.otel = p
-	m.otelMu.Unlock()
-}
-
-func (m *HILTApprovalManager) otelProvider() *telemetry.Provider {
-	if m == nil {
-		return nil
-	}
-	m.otelMu.RLock()
-	defer m.otelMu.RUnlock()
-	return m.otel
-}
-
 // HILTApprovalContext carries the optional correlation IDs that
 // surfaces upstream of HILT (proxy guardrail verdict, inspect
 // endpoint, hook handler) attach to a confirm decision so the
@@ -106,8 +86,38 @@ func (m *HILTApprovalManager) otelProvider() *telemetry.Provider {
 // prompt. Pass the zero value when no structured findings exist
 // for this approval (legacy callers, blocklist confirms).
 type HILTApprovalContext struct {
-	EvaluationID string
-	RuleIDs      []string
+	EvaluationID      string
+	RuleIDs           []string
+	RunID             string
+	RequestID         string
+	TurnID            string
+	OperationID       string
+	SessionID         string
+	AgentID           string
+	AgentName         string
+	AgentType         string
+	AgentInstanceID   string
+	RootAgentID       string
+	ParentAgentID     string
+	RootSessionID     string
+	ParentSessionID   string
+	LineageProvenance string
+	LifecycleID       string
+	ExecutionID       string
+	Depth             *int64
+	Phase             string
+	Sequence          *int64
+	UserID            string
+	UserName          string
+	PolicyID          string
+	PolicyVersion     string
+	ToolID            string
+	ToolName          string
+	ToolType          string
+	ToolCallID        string
+	ToolProvider      string
+	ToolSkillKey      string
+	DestinationApp    string
 }
 
 // Request blocks until the user replies, the timeout fires, or the
@@ -124,16 +134,33 @@ func (m *HILTApprovalManager) Request(ctx context.Context, sessionID, subject, s
 	if m == nil {
 		return false, hiltStatusUnsupported, fmt.Errorf("hilt approval unavailable")
 	}
-	sessionIDs := m.sessionCandidates(sessionID)
-	if m.client == nil || len(sessionIDs) == 0 {
-		m.record(ctx, hiltStatusUnsupported, subject, severity, "session/client unavailable", ec)
-		return false, hiltStatusUnsupported, fmt.Errorf("hilt approval unavailable")
-	}
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-
+	sessionIDs := m.sessionCandidates(sessionID)
+	correlationSessionID := sessionID
+	if correlationSessionID == "" && len(sessionIDs) == 1 {
+		correlationSessionID = sessionIDs[0]
+	}
 	id := "hilt-" + strings.Split(uuid.NewString(), "-")[0]
+	startedAt := time.Now().UTC()
+	operation, observabilityErr := m.startHILTApprovalV8(
+		ctx, id, correlationSessionID, subject, severity, reason, ec, startedAt,
+	)
+	if observabilityErr != nil {
+		return false, hiltStatusUnsupported, fmt.Errorf("hilt approval observability unavailable")
+	}
+	finish := func(result string, outcome observability.Outcome, technicalFailure bool, errorType string) error {
+		if operation == nil {
+			return nil
+		}
+		return operation.finish(ctx, result, outcome, technicalFailure, errorType, time.Now().UTC())
+	}
+	if m.client == nil || len(sessionIDs) == 0 {
+		finishErr := finish("cancelled", observability.OutcomeCancelled, true, "approval_unavailable")
+		return false, hiltStatusUnsupported, errors.Join(fmt.Errorf("hilt approval unavailable"), finishErr)
+	}
+
 	safeReason := string(redaction.ForSinkReason(reason))
 	msg := fmt.Sprintf("DefenseClaw needs your approval before this agent action proceeds.\n\nAction: %s\nSeverity: %s\nReason: %s\n\nReply exactly `approve %s` to allow once, or `deny %s` to block.",
 		subject, severity, reasonOrFallback(safeReason, "matched guardrail policy"), id, id)
@@ -167,10 +194,14 @@ func (m *HILTApprovalManager) Request(ctx context.Context, sessionID, subject, s
 		if lastErr != nil {
 			details = lastErr.Error()
 		}
-		m.record(ctx, hiltStatusUnsupported, subject, severity, details, ec)
-		return false, hiltStatusUnsupported, fmt.Errorf("hilt approval unavailable: %s", details)
+		finishErr := finish("cancelled", observability.OutcomeCancelled, true, "approval_delivery_failed")
+		return false, hiltStatusUnsupported, errors.Join(
+			fmt.Errorf("hilt approval unavailable: %s", details), finishErr,
+		)
 	}
-	m.record(ctx, hiltStatusRequested, subject, severity, safeReason, ec)
+	if operation != nil {
+		operation.recordMetric(ctx, operation.input, time.Now().UTC(), "pending")
+	}
 	// Fire a user-session toast as soon as the chat-side prompt has
 	// been delivered. This is the single chokepoint covering every
 	// HILT path — guardrail confirm verdicts, OpenClaw inspect
@@ -199,19 +230,25 @@ func (m *HILTApprovalManager) Request(ctx context.Context, sessionID, subject, s
 	select {
 	case approved := <-pending.result:
 		if approved {
-			m.record(ctx, hiltStatusApproved, subject, severity, safeReason, ec)
+			if err := finish("approved", observability.OutcomeApproved, false, ""); err != nil {
+				return false, hiltStatusApproved, fmt.Errorf("hilt approval audit failed")
+			}
 			return true, hiltStatusApproved, nil
 		}
-		m.record(ctx, hiltStatusDenied, subject, severity, safeReason, ec)
+		if err := finish("denied", observability.OutcomeDenied, false, ""); err != nil {
+			return false, hiltStatusDenied, fmt.Errorf("hilt denial audit failed")
+		}
 		return false, hiltStatusDenied, nil
 	case <-timer.C:
 		m.remove(id)
-		m.record(ctx, hiltStatusTimeout, subject, severity, safeReason, ec)
+		if err := finish("expired", observability.OutcomeTimedOut, false, ""); err != nil {
+			return false, hiltStatusTimeout, fmt.Errorf("hilt timeout audit failed")
+		}
 		return false, hiltStatusTimeout, nil
 	case <-ctx.Done():
 		m.remove(id)
-		m.record(ctx, hiltStatusTimeout, subject, severity, ctx.Err().Error(), ec)
-		return false, hiltStatusTimeout, ctx.Err()
+		finishErr := finish("cancelled", observability.OutcomeCancelled, true, "approval_cancelled")
+		return false, hiltStatusTimeout, errors.Join(ctx.Err(), finishErr)
 	}
 }
 
@@ -304,29 +341,6 @@ func (m *HILTApprovalManager) remove(id string) {
 	m.mu.Lock()
 	delete(m.pending, strings.ToLower(id))
 	m.mu.Unlock()
-}
-
-func (m *HILTApprovalManager) record(ctx context.Context, action, subject, severity, details string, evalCtx ...HILTApprovalContext) {
-	if m == nil {
-		return
-	}
-	var ec HILTApprovalContext
-	if len(evalCtx) > 0 {
-		ec = evalCtx[0]
-	}
-	if m.logger != nil {
-		body := fmt.Sprintf("severity=%s details=%s", severity, redaction.ForSinkReason(details))
-		if ec.EvaluationID != "" {
-			body += " evaluation_id=" + ec.EvaluationID
-		}
-		if len(ec.RuleIDs) > 0 {
-			body += " rule_ids=" + strings.Join(ec.RuleIDs, ",")
-		}
-		_ = m.logger.LogActionCtx(ctx, action, subject, body)
-	}
-	if otel := m.otelProvider(); otel != nil {
-		otel.RecordGuardrailEvaluation(ctx, "openclaw:hilt", action)
-	}
 }
 
 func reasonOrFallback(reason, fallback string) string {

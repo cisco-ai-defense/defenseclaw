@@ -1,0 +1,550 @@
+# Deterministic, fork-safe native Windows x64 certification.
+#
+# Branch protection must require the exact aggregate check name:
+#   Windows Native Required
+#
+# Real provider-secret Codex/Claude tests remain in connector-live-e2e.yml and
+# are workflow_dispatch-only. They are regression radar, not a merge gate.
+
+name: Windows Native CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-native-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  windows-go:
+    name: Windows x64 Go suite
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf go -DiagnosticsLeaf windows-native-diagnostics-go
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run native Windows Go DACL regressions explicitly
+        run: |
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
+          $go = (Get-Command go.exe -ErrorAction Stop).Source
+          $daclTests = @(
+            'TestWriteWindowsRemovesInheritedUnauthorizedWriter',
+            'TestWriteWindowsPreservesStricterExistingDACL',
+            'TestWindowsWriteLikeAccess',
+            'TestWindowsTrustedOwner',
+            'TestRejectUntrustedWindowsWriteACEs',
+            'TestHookAPITokenWindowsRejectsUntrustedDirectoryACL',
+            'TestHookAPITokenWindowsAllowsReadOnlyUnsupportedAllowACE',
+            'TestHookAPITokenWindowsAllowsInheritOnlyCreatorOwnerTemplate',
+            'TestHookAPITokenWindowsAllowsOwnerRightsACE',
+            'TestHookAPITokenWindowsRejectsDirectCreatorOwnerACE',
+            'TestHookAPITokenWindowsAllowsCreateChildOnSharedAncestor',
+            'TestHookAPITokenWindowsRejectsOrdinaryWriteOnSharedAncestor',
+            'TestHookAPITokenWindowsRejectsWritableAncestorThroughPublicOperations',
+            'TestHookAPITokenWindowsAllowsInheritOnlyTemplateOnSharedAncestor',
+            'TestHookAPITokenWindowsRejectsDeleteChildOnSharedAncestor',
+            'TestHookAPITokenWindowsRejectsReparsePointDirectory',
+            'TestHookAPITokenRejectsSymlinkedDataDirParent',
+            'TestLoadOTLPPathToken_RejectsUnsafeFiles',
+            'TestLoadOTLPPathTokenWindowsRejectsWritableAncestor',
+            'TestLoadOTLPPathTokenWindowsAllowsCreateChildOnSharedAncestor'
+          )
+          $daclTestPattern = '^(' + ($daclTests -join '|') + ')$'
+          Invoke-WindowsNativeProcess $go @('test', '-v', '-count=1', '-run', $daclTestPattern, './internal/safefile', './internal/managed', './internal/gateway/connector') -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-dacl-test.log') | Out-Null
+      - name: Stress native single-flight and executable lifecycle contracts
+        run: |
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
+          $go = (Get-Command go.exe -ErrorAction Stop).Source
+          Invoke-WindowsNativeProcess $go @(
+            'test', '-v', '-count=10', '-run', '^TestRunScan_SingleFlight$', './internal/inventory'
+          ) -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-inventory-singleflight-stress.log') | Out-Null
+          Invoke-WindowsNativeProcess $go @(
+            'test', '-v', '-count=2', '-run', '^TestNativeWindowsExecutableForeignCollisionAndRecovery$', './internal/cli'
+          ) -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-native-executable-lifecycle-stress.log') | Out-Null
+      - name: Full native Windows Go test, vet, and build
+        run: |
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
+          $go = (Get-Command go.exe -ErrorAction Stop).Source
+          # These tests contain POSIX mode-bit/script assertions that native
+          # Windows does not use. Equivalent token validation, reparse-point,
+          # private-DACL, and supported-connector coverage runs in this job.
+          $windowsInapplicable = '^(' + (@(
+            'TestAtomicWriteFile_PreservesSymlinkedDotfile',
+            'TestOpenHandsHookScript_BlockExitsTwo'
+          ) -join '|') + ')$'
+          # Keep package execution serial on the four-core hosted runner so
+          # bounded discovery tests are not starved by concurrent packages.
+          Invoke-WindowsNativeProcess $go @('test', '-count=1', '-timeout=20m', '-p=1', '-skip', $windowsInapplicable, './...') -TimeoutSeconds 2100 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-test.log') | Out-Null
+          Invoke-WindowsNativeProcess $go @('vet', './...') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-vet.log') | Out-Null
+          $bin = Join-Path $env:DC_STATE_ROOT 'bin'
+          New-Item -ItemType Directory -Force -Path $bin | Out-Null
+          $env:CGO_ENABLED = '0'
+          Invoke-WindowsNativeProcess $go @('build', '-o', (Join-Path $bin 'defenseclaw-gateway.exe'), './cmd/defenseclaw') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-gateway.log') | Out-Null
+          Invoke-WindowsNativeProcess $go @('build', '-ldflags', '-H=windowsgui', '-o', (Join-Path $bin 'defenseclaw-hook.exe'), './cmd/defenseclaw-hook') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-hook.log') | Out-Null
+          $packageVersion = Get-WorkspacePackageVersion
+          Assert-WindowsExecutableResource -Path (Join-Path $bin 'defenseclaw-gateway.exe') -Component 'gateway' -Version $packageVersion -Apply
+          Assert-WindowsExecutableResource -Path (Join-Path $bin 'defenseclaw-hook.exe') -Component 'hook' -Version $packageVersion -Apply
+      - name: Capture bounded diagnostics
+        if: ${{ failure() || cancelled() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
+      - name: Upload diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-go-diagnostics
+          path: ${{ env.DC_DIAGNOSTICS }}\**
+          if-no-files-found: ignore
+          retention-days: 5
+      - name: Always clean isolated processes, listeners, and temp state
+        if: ${{ always() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
+
+  windows-python:
+    name: Windows complete Python suite (includes TUI) / shard ${{ matrix.shard }}
+    runs-on: windows-latest
+    timeout-minutes: 75
+    env:
+      PYTHON_SHARD: ${{ matrix.shard }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('py-' + $env:PYTHON_SHARD) -DiagnosticsLeaf ('windows-native-diagnostics-python-' + $env:PYTHON_SHARD)
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.28"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Sync locked Python environment
+        run: uv sync --frozen --python 3.12
+      - name: Stage packaged runtime data with PowerShell
+        run: ./scripts/windows-native-ci.ps1 -Operation stage-package-data
+      - name: Validate registered Windows Codex and Claude hook commands
+        if: ${{ matrix.shard == 1 }}
+        run: |
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
+          $uv = (Get-Command uv.exe -ErrorAction Stop).Source
+          Invoke-WindowsNativeProcess $uv @('run', '--frozen', 'python', '-m', 'pytest', 'cli/tests/test_cmd_doctor_windows_hooks.py', '-q') -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-doctor-windows-hooks.log') | Out-Null
+      - name: Run native Windows Local Splunk certification regressions
+        if: ${{ matrix.shard == 1 }}
+        run: |
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
+          $uv = (Get-Command uv.exe -ErrorAction Stop).Source
+          Invoke-WindowsNativeProcess $uv @('run', '--frozen', 'python', '-m', 'pytest', 'cli/tests/test_local_splunk_controller.py', 'cli/tests/test_local_splunk_transaction.py', 'cli/tests/test_local_splunk_packaging.py', 'cli/tests/test_windows_local_observability_gates.py', '-q') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-local-splunk.log') | Out-Null
+      - name: Run Python test shard ${{ matrix.shard }} of 4, including headless TUI tests
+        run: |
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
+          $uv = (Get-Command uv.exe -ErrorAction Stop).Source
+          $testFiles = @(Get-ChildItem cli/tests -Recurse -File -Filter 'test_*.py' | Sort-Object FullName)
+          $shardIndex = [int]$env:PYTHON_SHARD - 1
+          $shardFiles = @(
+            for ($index = 0; $index -lt $testFiles.Count; $index++) {
+              if (($index % 4) -eq $shardIndex) {
+                $testFiles[$index].FullName
+              }
+            }
+          )
+          if (-not $shardFiles) {
+            throw "Python test shard $($shardIndex + 1) selected no files"
+          }
+          # These assertions exercise the POSIX-only OpenShell ownership path
+          # (pwd, root-owned mkdir/chown, and Linux sandbox users). Symlink
+          # capability alone is not enough to make that product path native to
+          # Windows, so keep the exact nodes in Linux CI and omit them here.
+          $windowsInapplicableTests = @(
+            '--deselect=cli/tests/test_cmd_setup_sandbox.py::TestTrustedPrivilegedCommands::test_existing_openclaw_integration_requires_pin',
+            '--deselect=cli/tests/test_remediation_setup_sandbox.py::TestSandboxInitIdempotentPin::test_f0162_refuses_swapped_symlink',
+            '--deselect=cli/tests/test_remediation_setup_sandbox.py::TestInitSandboxChownTOCTOU::test_f0421_rechecks_pinned_home_before_chown',
+            # Windows os.readlink returns the preserved absolute target with
+            # an equivalent \\?\ prefix, so this raw POSIX string assertion
+            # remains covered by the Linux suite.
+            '--deselect=cli/tests/test_migrations.py::TestMigrate050PurgeLegacyFlatPolicyBundle::test_symlinked_flat_data_json_is_left_alone'
+          )
+          $pytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $shardFiles + $windowsInapplicableTests + @('-q')
+          Invoke-WindowsNativeProcess $uv $pytestArgs -TimeoutSeconds 4200 -LogPath (Join-Path $env:DC_STATE_ROOT ('pytest-shard-{0}.log' -f $env:PYTHON_SHARD)) | Out-Null
+      - name: Capture bounded diagnostics
+        if: ${{ failure() || cancelled() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
+      - name: Upload diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-python-diagnostics-${{ matrix.shard }}
+          path: ${{ env.DC_DIAGNOSTICS }}\**
+          if-no-files-found: ignore
+          retention-days: 5
+      - name: Always clean isolated processes, listeners, and temp state
+        if: ${{ always() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
+
+  powershell-static:
+    name: Windows PowerShell harness validation
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.28"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Parse every PowerShell script
+        run: |
+          $failures = [Collections.Generic.List[string]]::new()
+          Get-ChildItem scripts -Recurse -Filter '*.ps1' | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            foreach ($error in @($errors)) { $failures.Add("$($_.FullName): $error") }
+          }
+          if ($failures.Count) { throw ($failures -join "`n") }
+      - name: Parser, mock timeout, redaction, isolation, and workflow contracts
+        run: ./scripts/live-connector-e2e/test-windows.ps1
+      - name: Native Setup bootstrap delegation and offline contract
+        run: uv run --frozen python -m pytest cli/tests/test_install_ps1.py -q
+      - name: Capture bounded diagnostics
+        if: ${{ failure() || cancelled() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
+      - name: Upload diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-powershell-diagnostics
+          path: ${{ env.DC_DIAGNOSTICS }}\**
+          if-no-files-found: ignore
+          retention-days: 5
+      - name: Always clean isolated processes, listeners, and temp state
+        if: ${{ always() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
+
+  package-artifact:
+    name: Windows packaged artifact build
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf pkg -DiagnosticsLeaf windows-native-diagnostics-package -ArtifactLeaf windows-native-dist
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.28"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Build release-shaped Windows x64 zip and Python wheel
+        run: ./scripts/windows-native-ci.ps1 -Operation build-artifacts -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
+      - name: Build unsigned native Windows setup executable
+        run: ./scripts/windows-native-ci.ps1 -Operation build-installer -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
+      - name: Verify native setup wizard responsiveness
+        run: >-
+          ./scripts/invoke-windows-setup-standard-user-ci.ps1
+          -Mode wizard-smoke
+          -ArtifactRoot $env:DC_ARTIFACT_ROOT
+          -StateRoot (Join-Path $env:DC_STATE_ROOT 'wizard-standard-user')
+          -DiagnosticsRoot $env:DC_DIAGNOSTICS
+          -TimeoutSeconds 600
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-package
+          path: ${{ env.DC_ARTIFACT_ROOT }}\*
+          if-no-files-found: error
+          retention-days: 3
+      - name: Capture bounded diagnostics
+        if: ${{ failure() || cancelled() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
+      - name: Upload diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-package-diagnostics
+          path: ${{ env.DC_DIAGNOSTICS }}\**
+          if-no-files-found: ignore
+          retention-days: 5
+      - name: Always clean isolated processes, listeners, and temp state
+        if: ${{ always() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
+
+  packaged-acceptance:
+    name: Windows native Setup install and lifecycle acceptance
+    needs: package-artifact
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf acc -DiagnosticsLeaf windows-native-diagnostics-acceptance -ArtifactLeaf windows-native-dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-native-package
+          path: ${{ env.DC_ARTIFACT_ROOT }}
+      - name: Native Setup EXE install, CLI/TUI smoke, repair, and uninstall
+        run: >-
+          ./scripts/invoke-windows-setup-standard-user-ci.ps1
+          -Mode setup-acceptance
+          -StateRoot $env:DC_STATE_ROOT
+          -ArtifactRoot $env:DC_ARTIFACT_ROOT
+          -DiagnosticsRoot $env:DC_DIAGNOSTICS
+          -TimeoutSeconds 4200
+      - name: Capture bounded redacted diagnostics
+        if: ${{ failure() || cancelled() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
+      - name: Upload diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-acceptance-diagnostics
+          path: ${{ env.DC_DIAGNOSTICS }}\**
+          if-no-files-found: ignore
+          retention-days: 5
+      - name: Always clean isolated processes, listeners, and temp state
+        if: ${{ always() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
+
+  public-bootstrap-acceptance:
+    name: Windows public install.ps1 acceptance
+    runs-on: windows-latest
+    timeout-minutes: 50
+    permissions:
+      actions: read
+      contents: read
+    env:
+      BOOTSTRAP_FIXTURE_VERSION: 0.8.7
+      # Before 0.8.7 exists, replay the sealed candidate that exposed the
+      # fake-profile harness defect. Once published, the job automatically uses
+      # permanent release assets and this fallback remains fail-closed evidence.
+      BOOTSTRAP_FIXTURE_RUN_ID: "30063491006"
+      BOOTSTRAP_FIXTURE_ARTIFACT: release-candidate-30063491006-1
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf bootstrap -DiagnosticsLeaf windows-native-diagnostics-bootstrap -ArtifactLeaf windows-bootstrap-fixture
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
+      - name: Select permanent release or sealed candidate fixture
+        id: fixture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $previousErrorActionPreference = $ErrorActionPreference
+          try {
+            $ErrorActionPreference = 'Continue'
+            $lookup = (
+              gh release view $env:BOOTSTRAP_FIXTURE_VERSION `
+                --repo $env:GITHUB_REPOSITORY `
+                --json isDraft `
+                --jq '.isDraft' 2>&1 |
+                Out-String -Width 32768
+            ).Trim()
+            $lookupExit = $LASTEXITCODE
+          } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+          }
+          if ($lookupExit -eq 0) {
+            $published = $lookup -ceq 'false'
+          } elseif ($lookup -ceq 'release not found') {
+            $published = $false
+          } else {
+            throw "Could not resolve bootstrap fixture release: $lookup"
+          }
+          if ($published) {
+            'source=release' >> $env:GITHUB_OUTPUT
+          } else {
+            'source=candidate' >> $env:GITHUB_OUTPUT
+          }
+          # GitHub's pwsh wrapper exits with the last native exit code. A
+          # missing release is the expected pre-publication branch, not an
+          # error after its candidate fallback has been selected.
+          $global:LASTEXITCODE = 0
+      - name: Download authenticated public bootstrap fixture
+        if: ${{ steps.fixture.outputs.source == 'release' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $fixture = Join-Path $env:DC_ARTIFACT_ROOT 'release'
+          [IO.Directory]::CreateDirectory($fixture) | Out-Null
+          foreach ($asset in @(
+            'DefenseClawSetup-x64.exe',
+            'DefenseClawSetup-x64.exe.provenance.json',
+            'upgrade-manifest.json',
+            'checksums.txt',
+            'checksums.txt.sig',
+            'checksums.txt.pem',
+            'checksums.txt.bundle'
+          )) {
+            gh release download $env:BOOTSTRAP_FIXTURE_VERSION `
+              --repo $env:GITHUB_REPOSITORY `
+              --pattern $asset `
+              --dir $fixture
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not download authenticated bootstrap fixture asset: $asset"
+            }
+          }
+          "DC_BOOTSTRAP_RELEASE_DIR=$fixture" >> $env:GITHUB_ENV
+      - name: Download sealed pre-publication bootstrap fixture
+        if: ${{ steps.fixture.outputs.source == 'candidate' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ env.BOOTSTRAP_FIXTURE_ARTIFACT }}
+          path: ${{ env.DC_ARTIFACT_ROOT }}\candidate
+          repository: cisco-ai-defense/defenseclaw
+          run-id: ${{ env.BOOTSTRAP_FIXTURE_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Select sealed candidate distribution
+        if: ${{ steps.fixture.outputs.source == 'candidate' }}
+        run: |
+          $fixture = Join-Path $env:DC_ARTIFACT_ROOT 'candidate\dist'
+          if (-not (Test-Path -LiteralPath $fixture -PathType Container)) {
+            throw "Sealed bootstrap candidate distribution is missing: $fixture"
+          }
+          "DC_BOOTSTRAP_RELEASE_DIR=$fixture" >> $env:GITHUB_ENV
+      - name: Exercise current public bootstrap under a real disposable user
+        run: |
+          $bootstrapState = Join-Path $env:DC_STATE_ROOT (
+            'defenseclaw-bootstrap-acceptance-' + [guid]::NewGuid().ToString('N')
+          )
+          ./scripts/test-fresh-install-release-windows.ps1 `
+            -ReleaseDir $env:DC_BOOTSTRAP_RELEASE_DIR `
+            -TargetVersion $env:BOOTSTRAP_FIXTURE_VERSION `
+            -StateRoot $bootstrapState `
+            -DiagnosticsRoot $env:DC_DIAGNOSTICS
+      - name: Capture bounded diagnostics
+        if: ${{ failure() || cancelled() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
+      - name: Upload diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-bootstrap-diagnostics
+          path: ${{ env.DC_DIAGNOSTICS }}\**
+          if-no-files-found: ignore
+          retention-days: 5
+      - name: Always clean isolated processes, listeners, and temp state
+        if: ${{ always() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
+
+  connector-contract:
+    name: Windows x64 connector contract / ${{ matrix.connector }}
+    needs: [powershell-static, package-artifact]
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      CONNECTOR: ${{ matrix.connector }}
+    strategy:
+      fail-fast: false
+      matrix:
+        connector: [codex, claudecode]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('ct-' + $env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + $env:CONNECTOR) -ArtifactLeaf windows-native-dist
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.28"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-native-package
+          path: ${{ env.DC_ARTIFACT_ROOT }}
+      - name: Required setup, allow/block, audit, telemetry, timeout, and teardown contract
+        run: >-
+          ./scripts/invoke-windows-setup-standard-user-ci.ps1
+          -Mode contract
+          -Connector $env:CONNECTOR
+          -StateRoot $env:DC_STATE_ROOT
+          -ArtifactRoot $env:DC_ARTIFACT_ROOT
+          -DiagnosticsRoot $env:DC_DIAGNOSTICS
+          -TimeoutSeconds 1800
+      - name: Upload deterministic contract results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-contract-results-${{ matrix.connector }}
+          path: ${{ env.DC_STATE_ROOT }}\results.jsonl
+          if-no-files-found: warn
+          retention-days: 5
+      - name: Capture bounded redacted diagnostics
+        if: ${{ failure() || cancelled() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
+      - name: Upload diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-contract-diagnostics-${{ matrix.connector }}
+          path: ${{ env.DC_DIAGNOSTICS }}\**
+          if-no-files-found: ignore
+          retention-days: 5
+      - name: Always clean isolated processes, listeners, and temp state
+        if: ${{ always() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
+
+  windows-native-required:
+    name: Windows Native Required
+    if: ${{ always() }}
+    needs:
+      - windows-go
+      - windows-python
+      - powershell-static
+      - package-artifact
+      - packaged-acceptance
+      - public-bootstrap-acceptance
+      - connector-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      REQUIRED_RESULTS: ${{ toJSON(needs) }}
+    steps:
+      - name: Fail unless every deterministic Windows job succeeded
+        run: |
+          $results = $env:REQUIRED_RESULTS | ConvertFrom-Json
+          $failed = @($results.PSObject.Properties | Where-Object { $_.Value.result -ne 'success' })
+          if ($failed.Count) {
+            $summary = $failed | ForEach-Object { "$($_.Name)=$($_.Value.result)" }
+            throw "Required Windows certification did not succeed: $($summary -join ', ')"
+          }
+          Write-Host 'Every deterministic native Windows x64 certification job succeeded.'

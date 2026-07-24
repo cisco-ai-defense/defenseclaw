@@ -265,6 +265,26 @@ actor CLIRunner {
 
     private var cachedPaths: [String: String] = [:]
     private var runStates: [UUID: RunState] = [:]
+    private var installationContext: InstallationContext
+
+    init(context: InstallationContext = .resolve()) {
+        self.installationContext = context
+    }
+
+    func rebind(to context: InstallationContext) {
+        guard installationContext != context else { return }
+        if installationContext.permitsMutation, !context.permitsMutation {
+            let activeRuns = runStates.compactMap { executionID, state -> (UUID, ActiveRun)? in
+                guard case .running(let active) = state, active.process.isRunning else { return nil }
+                return (executionID, active)
+            }
+            for (executionID, active) in activeRuns {
+                _ = requestCancellation(executionID: executionID, token: active.token)
+            }
+        }
+        installationContext = context
+        cachedPaths.removeAll()
+    }
 
     /// Reserve an Activity run before its visible row is published. This makes
     /// a cancellation click racing process launch durable instead of a no-op.
@@ -296,7 +316,11 @@ actor CLIRunner {
             return cached
         }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let candidates = [
+        var candidates: [String] = []
+        if name == "defenseclaw" {
+            candidates.append(installationContext.runtimeCLIURL.path)
+        }
+        candidates += [
             "\(home)/.local/bin/\(name)",
             "/opt/homebrew/bin/\(name)",
             "/usr/local/bin/\(name)",
@@ -322,7 +346,9 @@ actor CLIRunner {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/which")
         proc.arguments = [name]
-        proc.environment = Self.subprocessEnvironment()
+        proc.environment = Self.subprocessEnvironment(
+            protected: installationContext.protectedSubprocessEnvironment
+        )
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = Pipe()
@@ -339,7 +365,8 @@ actor CLIRunner {
     /// DefenseClaw CLI and its helper tools.
     static func subprocessEnvironment(
         inheriting environment: [String: String] = ProcessInfo.processInfo.environment,
-        home: String = FileManager.default.homeDirectoryForCurrentUser.path
+        home: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        protected: [String: String] = [:]
     ) -> [String: String] {
         var result = environment
         let inherited = (environment["PATH"] ?? "")
@@ -366,6 +393,9 @@ actor CLIRunner {
             !directory.isEmpty && seen.insert(directory).inserted
         }
         result["PATH"] = merged.joined(separator: ":")
+        for (key, value) in protected where !key.isEmpty {
+            result[key] = value
+        }
         return result
     }
 
@@ -373,6 +403,7 @@ actor CLIRunner {
     func run(
         arguments: [String],
         environment: [String: String] = [:],
+        mutation: Bool = true,
         runID: UUID? = nil,
         onLine: (@Sendable (String) async -> Void)? = nil
     ) async -> CLIResult {
@@ -380,6 +411,7 @@ actor CLIRunner {
             binary: "defenseclaw",
             arguments: arguments,
             environment: environment,
+            mutation: mutation,
             runID: runID,
             onLine: onLine
         )
@@ -393,6 +425,7 @@ actor CLIRunner {
         arguments: [String],
         standardInput: String? = nil,
         environment: [String: String] = [:],
+        mutation: Bool = true,
         runID: UUID? = nil,
         onLine: (@Sendable (String) async -> Void)? = nil
     ) async -> CLIResult {
@@ -418,6 +451,10 @@ actor CLIRunner {
             }
         }
 
+        if mutation, !installationContext.permitsMutation {
+            let reason = installationContext.accessMode.reason ?? "This installation is read only."
+            return CLIResult(exitCode: 77, output: "Operation refused by the Mac app: \(reason)")
+        }
         guard let binary = locateBinary(named: binaryName) else {
             let setting = binaryName == "defenseclaw" ? " Set its path in Settings ▸ Connection." : ""
             return CLIResult(exitCode: 127, output: "\(binaryName) binary not found.\(setting)")
@@ -428,6 +465,11 @@ actor CLIRunner {
         var env = Self.subprocessEnvironment()
         env["NO_COLOR"] = "1"
         for (key, value) in environment where !key.isEmpty {
+            env[key] = value
+        }
+        // Installation identity is security-sensitive. Apply it last so a
+        // wizard's secret environment cannot redirect a command elsewhere.
+        for (key, value) in installationContext.protectedSubprocessEnvironment {
             env[key] = value
         }
         proc.environment = env
@@ -647,7 +689,7 @@ actor CLIRunner {
 
     /// Lightweight doctor probe (TUI Shift+D) — parsed into check rows.
     func doctor() async -> [DoctorCheck] {
-        let result = await run(arguments: ["doctor"])
+        let result = await run(arguments: ["doctor"], mutation: true)
         guard !result.outputTruncated, result.succeeded || !result.output.isEmpty else {
             return [DoctorCheck(name: "defenseclaw doctor", result: .fail, detail: result.output)]
         }

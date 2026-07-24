@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools==82.0.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "defenseclaw-mcp-launcher-fixture"
+version = "1.0.1"
+requires-python = ">=3.11"
+
+[project.scripts]
+defenseclaw-mcp-launcher-fixture = "defenseclaw_mcp_launcher_fixture:main"
+
+[tool.setuptools]
+py-modules = ["defenseclaw_mcp_launcher_fixture"]

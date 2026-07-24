@@ -69,12 +69,13 @@ from defenseclaw.inventory.claw_inventory import (
     enrich_with_policy,
 )
 from defenseclaw.models import ScanResult
+from defenseclaw.paths import bundled_policies_dir, bundled_rego_dir
 
 from tests.helpers import cleanup_app, make_app_context, make_temp_store
 
 
 def _bundled_rego_dir() -> str:
-    return os.path.join(os.path.dirname(defenseclaw.__file__), "_data", "policies", "rego")
+    return os.fspath(bundled_rego_dir())
 
 
 # ---------------------------------------------------------------------------
@@ -556,9 +557,12 @@ class TestF0421OwnerWritableTrustedBinary(unittest.TestCase):
                 # trusted prefix is swappable by a non-root principal.
                 self.assertFalse(ad._is_trusted_binary_path(binary))
 
+    @unittest.skipIf(
+        os.name == "nt", "POSIX owner-writable executable trust; Windows DACL admission has dedicated coverage"
+    )
     def test_operator_opt_in_prefix_still_trusts_binary(self):
         bin_dir, binary = self._make_user_owned_binary()
-        with patch.object(ad, "_TRUSTED_BIN_PREFIXES_DEFAULT", ()):
+        with patch.object(ad, "_builtin_trusted_bin_prefixes", return_value=()):
             with patch.dict(
                 os.environ,
                 {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": bin_dir},
@@ -575,9 +579,7 @@ class TestF0421OwnerWritableTrustedBinary(unittest.TestCase):
 
 class TestOpenShellPolicyHardening(unittest.TestCase):
     def _openshell_dir(self):
-        return os.path.join(
-            os.path.dirname(defenseclaw.__file__), "_data", "policies", "openshell"
-        )
+        return os.fspath(bundled_policies_dir() / "openshell")
 
     def test_f0544_hostless_allowed_ips_requires_host_membership(self):
         rego = os.path.join(self._openshell_dir(), "default.rego")
@@ -634,6 +636,11 @@ class TestF0641TomllibFallback(unittest.TestCase):
         # ``import tomllib`` and silently dropped every Codex tool definition.
         # Simulate the 3.10 environment by forcing that import to fail and
         # confirm the tomli backport still yields the parsed tools.
+        try:
+            import tomllib as fallback_parser
+        except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
+            import tomli as fallback_parser
+
         real_import = builtins.__import__
 
         def _no_tomllib(name, *args, **kwargs):
@@ -641,7 +648,10 @@ class TestF0641TomllibFallback(unittest.TestCase):
                 raise ModuleNotFoundError("No module named 'tomllib'")
             return real_import(name, *args, **kwargs)
 
-        with patch("builtins.__import__", side_effect=_no_tomllib):
+        with (
+            patch.dict(sys.modules, {"tomli": fallback_parser}),
+            patch("builtins.__import__", side_effect=_no_tomllib),
+        ):
             rows = _tools_from_codex_config(self.path)
         self.assertEqual([r["id"] for r in rows], ["audit"])
         self.assertEqual(rows[0]["name"], "Audit Tool")

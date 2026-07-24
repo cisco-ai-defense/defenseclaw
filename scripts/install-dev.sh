@@ -33,6 +33,7 @@ readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 readonly MIN_GO_VERSION="1.26.4"
 readonly MIN_PYTHON_VERSION="3.10"
 readonly MAX_PYTHON_VERSION="3.13"
+readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"
 readonly PREFERRED_PYTHON_VERSIONS=("3.12" "3.11" "3.13" "3.10")
 
 readonly VENV_DIR="${REPO_ROOT}/.venv"
@@ -86,11 +87,11 @@ version_lte() {
 }
 
 version_in_range() {
-    # Returns 0 if $1 is between $2 (min) and $3 (max) inclusive
+    # Returns 0 if $1 is >= $2 (min) and < $3 (exclusive max).
     local ver="${1:-0}"
     local min="${2:-0}"
     local max="${3:-999}"
-    version_gte "${ver}" "${min}" && version_lte "${ver}" "${max}"
+    version_gte "${ver}" "${min}" && ! version_gte "${ver}" "${max}"
 }
 
 extract_version() {
@@ -200,7 +201,7 @@ check_python() {
             if [[ -n "${uv_python}" ]] && [[ -x "${uv_python}" ]]; then
                 local ver
                 ver="$(extract_version "$("${uv_python}" --version 2>&1)")"
-                if version_in_range "${ver}" "${MIN_PYTHON_VERSION}" "${MAX_PYTHON_VERSION}"; then
+                if version_in_range "${ver}" "${MIN_PYTHON_VERSION}" "${MAX_PYTHON_VERSION_EXCLUSIVE}"; then
                     python_cmd="${uv_python}"
                     python_version="${ver}"
                     log_info "Found Python ${ver} via uv"
@@ -217,7 +218,7 @@ check_python() {
             if command_exists "${cmd}"; then
                 local ver
                 ver="$(extract_version "$("${cmd}" --version 2>&1)")"
-                if version_in_range "${ver}" "${MIN_PYTHON_VERSION}" "${MAX_PYTHON_VERSION}"; then
+                if version_in_range "${ver}" "${MIN_PYTHON_VERSION}" "${MAX_PYTHON_VERSION_EXCLUSIVE}"; then
                     python_cmd="${cmd}"
                     python_version="${ver}"
                     break
@@ -232,7 +233,7 @@ check_python() {
             if command_exists "${cmd}"; then
                 local ver
                 ver="$(extract_version "$("${cmd}" --version 2>&1)")"
-                if version_in_range "${ver}" "${MIN_PYTHON_VERSION}" "${MAX_PYTHON_VERSION}"; then
+                if version_in_range "${ver}" "${MIN_PYTHON_VERSION}" "${MAX_PYTHON_VERSION_EXCLUSIVE}"; then
                     python_cmd="${cmd}"
                     python_version="${ver}"
                     break
@@ -542,7 +543,11 @@ print_next_steps() {
     echo ""
     echo -e "  • View daemon logs:"
     echo -e "    ${CYAN}tail -f ~/.defenseclaw/gateway.log${NC}     ${NC}# pretty/human-readable"
-    echo -e "    ${CYAN}tail -f ~/.defenseclaw/gateway.jsonl${NC}   ${NC}# structured JSONL (verdicts/judge/lifecycle)"
+    if [[ -f "${HOME}/.defenseclaw/gateway.jsonl" ]]; then
+        echo -e "    ${CYAN}tail -f ~/.defenseclaw/gateway.jsonl${NC}   ${NC}# configured JSONL destination output"
+    else
+        echo "    gateway.jsonl is not enabled; add an explicit kind: jsonl destination to create it."
+    fi
     echo ""
     echo -e "  ${BOLD}Development commands:${NC}"
     echo ""

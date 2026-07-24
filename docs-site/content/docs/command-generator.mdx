@@ -27,8 +27,18 @@ Generated commands are display-only. Nothing on this page runs against your mach
   <Card title="Judge provider & auth" description="When a judge runs: --judge-provider / --judge-region / --judge-instance-name, --llm-role, --inherit-from / --inherit-llm, and the full Bedrock / Vertex / Azure judge-auth families (region, auth-mode, credential env vars, profile, inference profile, repeatable deployment aliases), plus --judge-tls-ca-cert-file / --judge-insecure-skip-verify. Only the auth block for the selected provider is emitted, and credential env vars get placeholder export lines." />
   <Card title="Rule pack" description="--rule-pack (default / strict / permissive). Locked to action mode so the disabled state matches the CLI semantics." />
   <Card title="HITL" description="--human-approval + --hilt-min-severity (critical / high / medium / low). Disabled in observe mode. The connector card explains whether the event can ask natively or takes a non-pausing connector fallback." />
-  <Card title="Advanced knobs" description="--port, --block-message, --workspace, --disable-redaction, --restart / --no-restart, --verify / --no-verify, plus --disable (teardown). The disable-redaction toggle emits a prominent warning so you don't ship un-redacted prompts to external sinks by accident; --disable collapses the command to the guardrail-off verb." />
+  <Card title="Advanced knobs" description="--port, --block-message, --workspace, --restart / --no-restart, --verify / --no-verify, plus --disable (teardown). Redaction is configured separately as v8 route/profile policy; --disable collapses the command to the guardrail-off verb." />
 </Cards>
+
+<Callout title="Redaction is v8 policy, not a setup flag">
+Choose destination buckets with
+`observability.destinations[].routes[].selector.buckets` and define reusable
+policy under `observability.redaction_profiles`. After editing `config.yaml`, run
+`defenseclaw config validate`,
+`defenseclaw config show --effective --section observability`, and
+`defenseclaw observability plan`, then apply the reviewed policy with
+`defenseclaw-gateway restart`.
+</Callout>
 
 ## Conventions the generator follows
 

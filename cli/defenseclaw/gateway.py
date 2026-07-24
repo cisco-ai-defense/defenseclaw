@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import quote
 
@@ -39,16 +41,39 @@ import requests
 PLUGIN_MUTATION_TIMEOUT = 90
 
 
+def gateway_api_client_host(cfg: Any) -> str:
+    """Return a connectable host for the configured sidecar API bind."""
+    gateway = getattr(cfg, "gateway", None)
+    bind = str(getattr(gateway, "api_bind", "") or "").strip()
+    if bind in {"", "0.0.0.0", "::", "[::]", "*"}:
+        return "127.0.0.1"
+    return bind
+
+
+def _url_host(host: str) -> str:
+    """Bracket a bare IPv6 literal for use in an HTTP authority."""
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
 class OrchestratorClient:
-    def __init__(self, host: str = "127.0.0.1", port: int = 18970, timeout: int = 5,
-                 token: str = "", plugin_timeout: int | None = None) -> None:
-        self.base_url = f"http://{host}:{port}"
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 18970,
+        timeout: int = 5,
+        token: str = "",
+        plugin_timeout: int | None = None,
+    ) -> None:
+        self.base_url = f"http://{_url_host(host)}:{port}"
         self.timeout = timeout
         self.plugin_timeout = max(timeout, plugin_timeout or PLUGIN_MUTATION_TIMEOUT)
         self._session = requests.Session()
         self._session.headers["X-DefenseClaw-Client"] = "python-cli"
         if token:
             self._session.headers["Authorization"] = f"Bearer {token}"
+            self._session.headers["X-DC-Auth"] = f"Bearer {token}"
 
     def health(self) -> dict[str, Any]:
         resp = self._session.get(f"{self.base_url}/health", timeout=self.timeout)
@@ -59,6 +84,81 @@ class OrchestratorClient:
         resp = self._session.get(f"{self.base_url}/status", timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
+
+    def provider_registry(self) -> dict[str, Any]:
+        resp = self._session.get(f"{self.base_url}/v1/config/providers", timeout=self.timeout)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict) or not isinstance(data.get("providers"), list):
+            raise ValueError("sidecar returned a malformed provider registry")
+        return data
+
+    def reload_provider_registry(self) -> dict[str, Any]:
+        resp = self._session.post(
+            f"{self.base_url}/v1/config/providers/reload",
+            json={},
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict) or data.get("status") != "ok":
+            raise ValueError("sidecar returned a malformed provider reload response")
+        return data
+
+    def emit_cli_observability(self, payload: Mapping[str, Any]) -> None:
+        """Hand one raw Python-CLI fact to the canonical v8 runtime.
+
+        Destination selection, redaction, SQLite persistence, and fanout all
+        happen in the gateway. A non-204 response means admission was not
+        confirmed and is intentionally surfaced to the caller.
+        """
+        resp = self._session.post(
+            f"{self.base_url}/api/v1/observability/cli",
+            json=dict(payload),
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        if resp.status_code != 204:
+            raise requests.HTTPError("canonical observability admission was not acknowledged")
+
+    def set_alert_disposition(
+        self,
+        *,
+        operation_id: str,
+        audit_db_identity: str,
+        disposition: str,
+        selector: Mapping[str, Any],
+        preview: bool,
+        selection_digest: str | None = None,
+    ) -> dict[str, Any]:
+        """Preview or apply protected alert-review state through the CAS API."""
+
+        payload: dict[str, Any] = {
+            "operation_id": operation_id,
+            "audit_db_identity": audit_db_identity,
+            "disposition": disposition,
+            "selector": dict(selector),
+            "preview": preview,
+        }
+        if selection_digest:
+            payload["selection_digest"] = selection_digest
+        resp = self._session.post(
+            f"{self.base_url}/api/v1/alerts/disposition",
+            json=payload,
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
+        if resp.status_code not in {200, 409, 503}:
+            resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError("gateway returned a malformed alert disposition response")
+        data["_http_status"] = resp.status_code
+        return data
+
+    def close(self) -> None:
+        self._session.close()
 
     def disable_skill(self, skill_key: str) -> dict[str, Any]:
         resp = self._session.post(
@@ -163,9 +263,7 @@ class OrchestratorClient:
         a true "what SDKs and versions are on this fleet" table without
         re-implementing the join.
         """
-        resp = self._session.get(
-            f"{self.base_url}/api/v1/ai-usage/components", timeout=self.timeout
-        )
+        resp = self._session.get(f"{self.base_url}/api/v1/ai-usage/components", timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
 
@@ -174,9 +272,8 @@ class OrchestratorClient:
         from ``ai_signals`` for the latest scan).
 
         Powered by ``GET /api/v1/ai-usage/components/{ecosystem}/{name}/locations``;
-        when ``privacy.disable_redaction`` and
-        ``ai_discovery.store_raw_local_paths`` are both set on the
-        sidecar, each row may include a ``raw_path`` field, otherwise
+        when ``ai_discovery.store_raw_local_paths`` is set on the sidecar,
+        each row may include a ``raw_path`` field, otherwise
         only basenames + path hashes are returned.
 
         ``ecosystem`` and ``name`` are URL-encoded with ``safe=""``
@@ -187,10 +284,7 @@ class OrchestratorClient:
         slash inside a scoped npm name like ``@anthropic-ai/sdk``
         survives the split and the lookup hits the right row.
         """
-        url = (
-            f"{self.base_url}/api/v1/ai-usage/components/"
-            f"{quote(ecosystem, safe='')}/{quote(name, safe='')}/locations"
-        )
+        url = f"{self.base_url}/api/v1/ai-usage/components/{quote(ecosystem, safe='')}/{quote(name, safe='')}/locations"
         resp = self._session.get(url, timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
@@ -203,10 +297,7 @@ class OrchestratorClient:
         ``ecosystem`` and ``name`` are URL-encoded with ``safe=""``
         for the same reason as ``ai_usage_component_locations``.
         """
-        url = (
-            f"{self.base_url}/api/v1/ai-usage/components/"
-            f"{quote(ecosystem, safe='')}/{quote(name, safe='')}/history"
-        )
+        url = f"{self.base_url}/api/v1/ai-usage/components/{quote(ecosystem, safe='')}/{quote(name, safe='')}/history"
         resp = self._session.get(url, timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
@@ -297,21 +388,33 @@ def resolve_gateway_binary() -> str | None:
 
     Resolution order:
 
-    1. ``DEFENSECLAW_GATEWAY_BIN`` — explicit env override used by
+    1. The verified sibling from a native Windows installation.  The native
+       launcher supplies ``DEFENSECLAW_INSTALL_ROOT`` only after validating
+       install state; this helper additionally requires ``sys.executable`` to
+       be that root's embedded Python runtime.  This path deliberately wins
+       over the working directory, overrides, and ``PATH`` so an unrelated
+       ``defenseclaw-gateway.exe`` cannot shadow the installed service.
+    2. ``DEFENSECLAW_GATEWAY_BIN`` — explicit env override used by
        tests, packagers, and vendored distributions that drop the
        binary somewhere non-standard.  Returned verbatim (even when the
        file is missing) so the real ``exec`` error surfaces to the
        caller rather than a generic "not found" from here.
-    2. ``shutil.which(GATEWAY_BIN_NAME)`` — honours ``PATH``.  The
+    3. ``shutil.which(GATEWAY_BIN_NAME)`` — honours ``PATH``.  The
        happy path for installed releases and for users whose shell has
        already sourced the updated rc file.
-    3. :func:`canonical_install_path` — the ``~/.local/bin`` fallback
+    4. :func:`canonical_install_path` — the ``~/.local/bin`` fallback
        that keeps ``defenseclaw tui`` working in the same shell that
        just ran ``make all``.
 
     ``None`` only if every option above fails to resolve to a runnable
     file on disk.  Callers own the user-facing error message.
     """
+    packaged_root = packaged_windows_install_root()
+    if packaged_root:
+        # A corroborated package must fail closed when its sibling is missing;
+        # never fall through to a working-directory/PATH shadow.
+        return packaged_windows_gateway_path()
+
     override = os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip()
     if override:
         return override
@@ -325,6 +428,49 @@ def resolve_gateway_binary() -> str | None:
         return canonical
 
     return None
+
+
+def packaged_windows_gateway_path() -> str | None:
+    """Return the gateway sibling for a corroborated native Windows runtime.
+
+    ``DEFENSECLAW_INSTALL_ROOT`` is not trusted by itself: developer shells and
+    child processes may set arbitrary environment values.  A packaged CLI is
+    recognized only when the current interpreter is the embedded Python at the
+    same root and the sibling gateway is runnable.  Native setup can then use
+    this absolute path for every lifecycle operation without Windows' current-
+    directory executable search taking precedence over ``PATH``.
+    """
+
+    root = packaged_windows_install_root()
+    if not root:
+        return None
+
+    candidate = os.path.join(root, "bin", "defenseclaw-gateway.exe")
+    if _is_runnable_file(candidate):
+        return os.path.abspath(candidate)
+    return None
+
+
+def packaged_windows_install_root() -> str | None:
+    """Return a native install root corroborated by the running interpreter."""
+
+    if os.name != "nt":
+        return None
+
+    install_root = os.environ.get("DEFENSECLAW_INSTALL_ROOT", "").strip()
+    if not install_root or "\x00" in install_root or not os.path.isabs(install_root):
+        return None
+
+    root = os.path.abspath(install_root)
+    expected_python = os.path.join(root, "runtime", "python", "python.exe")
+    try:
+        actual_python = os.path.normcase(os.path.realpath(sys.executable))
+        packaged_python = os.path.normcase(os.path.realpath(expected_python))
+    except OSError:
+        return None
+    if actual_python != packaged_python:
+        return None
+    return root
 
 
 def _is_runnable_file(path: str) -> bool:

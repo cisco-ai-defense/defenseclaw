@@ -12,6 +12,26 @@ import pytest
 from defenseclaw.resolver_hint import authenticated_resolver_instructions
 
 
+def _bash_executable() -> str:
+    """Return Git Bash on Windows instead of the WindowsApps WSL alias."""
+
+    if os.name != "nt":
+        return shutil.which("bash") or "bash"
+
+    candidates: list[Path] = []
+    git = shutil.which("git")
+    if git:
+        candidates.append(Path(git).resolve().parent.parent / "bin" / "bash.exe")
+    for variable in ("ProgramFiles", "ProgramFiles(x86)", "LocalAppData"):
+        root = os.environ.get(variable)
+        if root:
+            candidates.append(Path(root) / "Git" / "bin" / "bash.exe")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    pytest.skip("Git Bash is required for the POSIX resolver syntax contract on Windows")
+
+
 def test_authenticated_resolver_hint_is_copy_pasteable_and_fail_closed() -> None:
     output = authenticated_resolver_instructions("0.8.5")
 
@@ -31,11 +51,13 @@ def test_authenticated_resolver_hint_is_copy_pasteable_and_fail_closed() -> None
     assert "sha256sum" in output and "shasum -a 256" in output
     assert "--proto-redir '=https'" in output
     assert "DefenseClaw upgrade resolver complete v1" in output
+    assert "unset VERSION" in output
     assert "raw.githubusercontent.com" not in output
     assert "upgrade.sh | bash" not in output
     assert "--version" not in output
 
     windows = output.split("Windows PowerShell:\n", 1)[1]
+    assert "Preflight refusal only" in windows
     create = windows.index("New-Item -ItemType Directory -Path $d")
     protect = windows.index("$directoryAcl.SetAccessRuleProtection($true, $false)")
     apply_acl = windows.index("Set-Acl -LiteralPath $d")
@@ -52,8 +74,9 @@ def test_authenticated_resolver_hint_is_copy_pasteable_and_fail_closed() -> None
     assert "$matches" not in windows
 
     posix = output.split("POSIX:\n", 1)[1].split("\nWindows PowerShell:", 1)[0]
+    assert posix.index("unset VERSION") < posix.index("bash \"$d/defenseclaw-upgrade.sh\" --yes")
     completed = subprocess.run(
-        ["bash", "-n"],
+        [_bash_executable(), "-n"],
         input=posix,
         capture_output=True,
         text=True,
@@ -73,6 +96,8 @@ def test_windows_resolver_secures_and_validates_temp_dir_before_fetch(
     output = authenticated_resolver_instructions("0.8.5")
     windows = output.split("Windows PowerShell:\n", 1)[1]
     probe = r"""
+$securityModule = Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
+Import-Module $securityModule -ErrorAction Stop
 function global:cosign {}
 function global:Invoke-WebRequest {
   [CmdletBinding()]
@@ -110,11 +135,12 @@ function global:Invoke-WebRequest {
     environment = os.environ.copy()
     environment["TEMP"] = str(tmp_path)
     environment["TMP"] = str(tmp_path)
+    script = tmp_path / f"resolver-{shell_name.replace('.', '-')}.ps1"
+    script.write_text(probe + windows, encoding="utf-8")
     completed = subprocess.run(
-        [shell, "-NoProfile", "-NonInteractive", "-Command", "-"],
-        input=probe + windows,
-        text=True,
+        [shell, "-NoProfile", "-NonInteractive", "-File", str(script)],
         capture_output=True,
+        text=True,
         check=False,
         env=environment,
         timeout=30,

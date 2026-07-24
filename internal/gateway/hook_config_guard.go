@@ -6,9 +6,11 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -17,7 +19,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 const (
@@ -45,7 +47,21 @@ const (
 	// Sized to comfortably cover a teardown+Setup cycle plus a debounce
 	// tick; Repoint at the end of the swap re-targets the guard.
 	hookGuardSwitchSuppressWindow = 5 * time.Second
+
+	// defaultHookGuardPolicyAuditInterval catches effective-policy changes
+	// that do not produce a filesystem event (notably Windows registry policy)
+	// and retries watches for policy directories created after startup.
+	defaultHookGuardPolicyAuditInterval = 30 * time.Second
 )
+
+var newHookConfigFSWatcher = fsnotify.NewWatcher
+
+type hookRuntimePolicy struct {
+	hookFailMode string
+	hiltEnabled  bool
+}
+
+type hookRuntimePolicyResolver func(connectorName string) (hookRuntimePolicy, func(), bool)
 
 // HookConfigGuard watches the active connector's agent config file(s) and
 // auto-heals (re-installs) the DefenseClaw hook block when a user deletes or
@@ -61,41 +77,60 @@ const (
 // The GuardrailProxy owns one guard and calls Repoint when it hot-swaps
 // connectors so the watcher follows the active connector.
 type HookConfigGuard struct {
-	logger   *audit.Logger
-	otel     *telemetry.Provider
-	debounce time.Duration
+	logger        *audit.Logger
+	observability hookLifecycleMetricV8Runtime
+	debounce      time.Duration
+	// repairMu serializes every Setup-backed repair source (fsnotify,
+	// periodic audit, and authenticated SessionStart). A waiter rechecks the
+	// effective contract after acquiring it, so concurrent SessionStarts
+	// coalesce into one registration publication.
+	repairMu sync.Mutex
+	// policyAudit is separate from debounce so tests can shorten effective-
+	// policy polling without changing filesystem event coalescing.
+	policyAudit time.Duration
 
 	// onHealed is an optional fan-out hook (webhook / desktop
 	// notification) invoked after a successful re-install. nil is safe.
-	onHealed func(connectorName string, paths []string)
+	onHealed      func(connectorName string, paths []string)
+	onDeactivated func(*HookConfigGuard)
 
-	mu            sync.Mutex
-	started       bool
-	ctx           context.Context
-	cancel        context.CancelFunc
-	fsw           *fsnotify.Watcher
-	conn          connector.Connector
-	opts          connector.SetupOpts
-	targets       map[string]struct{} // cleaned absolute config file paths
-	watchedDirs   map[string]struct{} // cleaned absolute parent dirs added to fsw
-	pending       map[string]time.Time
-	suppressUntil time.Time
-	done          chan struct{}
+	mu             sync.Mutex
+	started        bool
+	retiring       bool
+	ctx            context.Context
+	cancel         context.CancelFunc
+	fsw            *fsnotify.Watcher
+	conn           connector.Connector
+	opts           connector.SetupOpts
+	policyResolver hookRuntimePolicyResolver
+	targets        map[string]struct{} // cleaned absolute config file paths
+	watchedDirs    map[string]struct{} // cleaned absolute parent dirs added to fsw
+	pending        map[string]time.Time
+	suppressUntil  time.Time
+	// lastPolicyFailure suppresses an identical permanent policy diagnostic on
+	// every audit tick while still reporting a changed failure immediately.
+	lastPolicyFailure string
+	done              chan struct{}
 }
 
 // NewHookConfigGuard constructs a guard. debounce <= 0 falls back to the
-// default. logger and otel may be nil (observability becomes a no-op).
-func NewHookConfigGuard(logger *audit.Logger, otel *telemetry.Provider, debounce time.Duration) *HookConfigGuard {
+// default. logger and observability may be nil (those surfaces become no-ops).
+func NewHookConfigGuard(
+	logger *audit.Logger,
+	observability hookLifecycleMetricV8Runtime,
+	debounce time.Duration,
+) *HookConfigGuard {
 	if debounce <= 0 {
 		debounce = defaultHookGuardDebounce
 	}
 	return &HookConfigGuard{
-		logger:      logger,
-		otel:        otel,
-		debounce:    debounce,
-		targets:     map[string]struct{}{},
-		watchedDirs: map[string]struct{}{},
-		pending:     map[string]time.Time{},
+		logger:        logger,
+		observability: observability,
+		debounce:      debounce,
+		policyAudit:   defaultHookGuardPolicyAuditInterval,
+		targets:       map[string]struct{}{},
+		watchedDirs:   map[string]struct{}{},
+		pending:       map[string]time.Time{},
 	}
 }
 
@@ -111,35 +146,100 @@ func (g *HookConfigGuard) SetHealNotifier(fn func(connectorName string, paths []
 	g.mu.Unlock()
 }
 
-func (g *HookConfigGuard) SetOTelProvider(p *telemetry.Provider) {
+// SetRuntimePolicyResolver binds repairs to the Sidecar's current immutable
+// config snapshot. SetupOpts also carry stable identity, path, and credential
+// inputs, but fail mode and HILT posture may change while a guard remains
+// alive. Resolving those fields immediately before verification prevents a
+// stale guard from republishing an older registration policy.
+func (g *HookConfigGuard) SetRuntimePolicyResolver(fn hookRuntimePolicyResolver) {
 	if g == nil {
 		return
 	}
 	g.mu.Lock()
-	g.otel = p
+	g.policyResolver = fn
 	g.mu.Unlock()
+}
+
+// SetDeactivationNotifier lets the Sidecar remove this guard from its active
+// ownership registry before the watcher is stopped. If the guard already
+// stopped, the callback runs immediately so a restart race cannot publish a
+// stale owner after shutdown.
+func (g *HookConfigGuard) SetDeactivationNotifier(fn func(*HookConfigGuard)) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	g.onDeactivated = fn
+	active := g.started && !g.retiring
+	g.mu.Unlock()
+	if !active && fn != nil {
+		g.deactivate()
+	}
+}
+
+func (g *HookConfigGuard) deactivate() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	fn := g.onDeactivated
+	g.onDeactivated = nil
+	g.mu.Unlock()
+	if fn != nil {
+		fn(g)
+	}
+}
+
+func (g *HookConfigGuard) bindObservabilityV8(runtime hookLifecycleMetricV8Runtime) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	g.observability = runtime
+	g.mu.Unlock()
+}
+
+func (g *HookConfigGuard) observabilityV8Runtime() hookLifecycleMetricV8Runtime {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.observability
 }
 
 // Start begins watching the given connector's config files. It launches a
 // background goroutine bound to ctx and returns immediately. Starting a guard
 // for a connector with no hook config paths (proxy/plugin connectors) is
 // allowed: the goroutine runs idle until a later Repoint adds targets.
-func (g *HookConfigGuard) Start(ctx context.Context, conn connector.Connector, opts connector.SetupOpts) {
+func (g *HookConfigGuard) Start(ctx context.Context, conn connector.Connector, opts connector.SetupOpts) bool {
 	if g == nil {
-		return
+		return false
 	}
 	g.mu.Lock()
 	if g.started {
+		if g.retiring {
+			g.mu.Unlock()
+			return false
+		}
 		g.mu.Unlock()
 		g.Repoint(conn, opts)
-		return
+		return true
 	}
 
-	fsw, err := fsnotify.NewWatcher()
+	fsw, err := newHookConfigFSWatcher()
 	if err != nil {
+		gctx, cancel := context.WithCancel(ctx)
+		g.ctx = gctx
+		g.cancel = cancel
+		g.done = make(chan struct{})
+		g.started = true
+		g.retiring = false
+		g.applyTargetsLocked(conn, opts)
 		g.mu.Unlock()
-		fmt.Fprintf(os.Stderr, "[hook-guard] create fsnotify watcher: %v (self-heal disabled)\n", err)
-		return
+		fmt.Fprintf(os.Stderr, "[hook-guard] create fsnotify watcher: %v (filesystem self-heal disabled; authenticated registration repair remains available)\n", err)
+		go g.runWithoutWatcher()
+		return true
 	}
 
 	gctx, cancel := context.WithCancel(ctx)
@@ -148,10 +248,12 @@ func (g *HookConfigGuard) Start(ctx context.Context, conn connector.Connector, o
 	g.fsw = fsw
 	g.done = make(chan struct{})
 	g.started = true
+	g.retiring = false
 	g.applyTargetsLocked(conn, opts)
 	g.mu.Unlock()
 
 	go g.run()
+	return true
 }
 
 // Repoint switches the guard to a new connector (e.g. after a runtime
@@ -161,6 +263,8 @@ func (g *HookConfigGuard) Repoint(conn connector.Connector, opts connector.Setup
 	if g == nil {
 		return
 	}
+	g.repairMu.Lock()
+	defer g.repairMu.Unlock()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if !g.started || g.fsw == nil {
@@ -183,6 +287,8 @@ func (g *HookConfigGuard) SuppressHealing(d time.Duration) {
 	if g == nil || d <= 0 {
 		return
 	}
+	g.repairMu.Lock()
+	defer g.repairMu.Unlock()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if until := time.Now().Add(d); until.After(g.suppressUntil) {
@@ -203,11 +309,21 @@ func (g *HookConfigGuard) Stop() {
 	g.mu.Lock()
 	if !g.started {
 		g.mu.Unlock()
+		g.deactivate()
+		g.repairMu.Lock()
+		g.repairMu.Unlock()
 		return
 	}
+	g.retiring = true
 	cancel := g.cancel
 	done := g.done
 	g.mu.Unlock()
+	// Remove ownership before cancellation closes the watcher. An API request
+	// racing shutdown can now only observe "no active guard" and cannot write
+	// through the retiring connector generation.
+	g.deactivate()
+	g.repairMu.Lock()
+	g.repairMu.Unlock()
 
 	if cancel != nil {
 		cancel()
@@ -225,7 +341,7 @@ func (g *HookConfigGuard) applyTargetsLocked(conn connector.Connector, opts conn
 
 	newTargets := map[string]struct{}{}
 	newDirs := map[string]struct{}{}
-	for _, p := range connector.HookConfigPathsForConnector(conn, opts) {
+	for _, p := range connector.HookPolicyWatchPathsForConnector(conn, opts) {
 		clean := filepath.Clean(p)
 		newTargets[clean] = struct{}{}
 		newDirs[filepath.Dir(clean)] = struct{}{}
@@ -242,7 +358,12 @@ func (g *HookConfigGuard) applyTargetsLocked(conn connector.Connector, opts conn
 			continue
 		}
 		if err := g.fsw.Add(dir); err != nil {
-			fmt.Fprintf(os.Stderr, "[hook-guard] watch %s: %v (skipping)\n", dir, err)
+			// Optional project/managed policy directories commonly do not exist
+			// yet. Their nearest existing parent remains watched and the periodic
+			// audit retries them after creation; absence is not a degraded state.
+			if !errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "[hook-guard] watch %s: %v (skipping)\n", dir, err)
+			}
 			continue
 		}
 		g.watchedDirs[dir] = struct{}{}
@@ -257,27 +378,74 @@ func (g *HookConfigGuard) applyTargetsLocked(conn connector.Connector, opts conn
 	}
 }
 
+// resyncTargetsLocked force-refreshes directory watches after Setup. A
+// directory watch is tied to the underlying directory object, so a path that
+// Setup recreated can look unchanged in watchedDirs while fsnotify still
+// references the deleted object. Rebuilding the watcher avoids inode/file-ID
+// reuse making a remove/add cycle silently retain the stale OS handle. Caller
+// must hold g.mu.
+func (g *HookConfigGuard) resyncTargetsLocked(conn connector.Connector, opts connector.SetupOpts) {
+	if g.fsw == nil {
+		g.applyTargetsLocked(conn, opts)
+		return
+	}
+
+	fresh, err := fsnotify.NewWatcher()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[hook-guard] refresh fsnotify watcher: %v (keeping existing watcher)\n", err)
+		return
+	}
+	previous := g.fsw
+	g.fsw = fresh
+	g.watchedDirs = map[string]struct{}{}
+	g.applyTargetsLocked(conn, opts)
+	_ = previous.Close()
+}
+
 func (g *HookConfigGuard) run() {
 	defer close(g.done)
 	defer func() {
 		g.mu.Lock()
-		if g.fsw != nil {
-			_ = g.fsw.Close()
-		}
+		g.retiring = true
 		g.started = false
+		watcher := g.fsw
+		g.fsw = nil
 		g.mu.Unlock()
+		g.deactivate()
+		g.repairMu.Lock()
+		g.repairMu.Unlock()
+		if watcher != nil {
+			_ = watcher.Close()
+		}
 	}()
 
 	ticker := time.NewTicker(g.debounce)
 	defer ticker.Stop()
+	var policyTicker *time.Ticker
+	var policyAudit <-chan time.Time
+	if g.policyAudit > 0 {
+		policyTicker = time.NewTicker(g.policyAudit)
+		policyAudit = policyTicker.C
+		defer policyTicker.Stop()
+	}
 
 	for {
+		g.mu.Lock()
+		ctx := g.ctx
+		watcher := g.fsw
+		g.mu.Unlock()
+		if ctx == nil || watcher == nil {
+			return
+		}
 		select {
-		case <-g.ctx.Done():
+		case <-ctx.Done():
 			return
 
-		case event, ok := <-g.fsw.Events:
+		case event, ok := <-watcher.Events:
 			if !ok {
+				if g.watcherWasReplaced(watcher) {
+					continue
+				}
 				return
 			}
 			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
@@ -286,26 +454,223 @@ func (g *HookConfigGuard) run() {
 			name := filepath.Clean(event.Name)
 			g.mu.Lock()
 			_, isTarget := g.targets[name]
-			if isTarget {
+			_, isWatchedDir := g.watchedDirs[name]
+			// A Windows directory watch remains attached to the deleted file
+			// identity after the path is removed and recreated. Queue the watched
+			// directory itself so the normal debounced processing path rebuilds
+			// the watcher after the replacement has settled.
+			if isTarget || (isWatchedDir && event.Op&(fsnotify.Remove|fsnotify.Rename) != 0) {
 				if _, exists := g.pending[name]; !exists {
 					g.pending[name] = time.Now()
 				}
 			}
 			g.mu.Unlock()
 
-		case err, ok := <-g.fsw.Errors:
+		case err, ok := <-watcher.Errors:
 			if !ok {
+				if g.watcherWasReplaced(watcher) {
+					continue
+				}
 				return
 			}
-			if g.otel != nil {
-				g.otel.RecordWatcherError(g.ctx)
-			}
+			recordWatcherErrorV8(g.ctx, g.observabilityV8Runtime())
 			fmt.Fprintf(os.Stderr, "[hook-guard] fsnotify error: %v\n", err)
 
 		case <-ticker.C:
 			g.processPending()
+
+		case <-policyAudit:
+			g.processPolicyAudit()
 		}
 	}
+}
+
+func (g *HookConfigGuard) runWithoutWatcher() {
+	defer close(g.done)
+	defer func() {
+		g.mu.Lock()
+		g.retiring = true
+		g.started = false
+		g.mu.Unlock()
+		g.deactivate()
+		g.repairMu.Lock()
+		g.repairMu.Unlock()
+	}()
+	g.mu.Lock()
+	ctx := g.ctx
+	policyAudit := g.policyAudit
+	g.mu.Unlock()
+	if ctx == nil {
+		return
+	}
+	if policyAudit <= 0 {
+		<-ctx.Done()
+		return
+	}
+	ticker := time.NewTicker(policyAudit)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Filesystem events are unavailable, but Claude's effective-policy
+			// and Codex's registration audits remain useful degraded recovery.
+			g.processPolicyAudit()
+		}
+	}
+}
+
+// watcherWasReplaced distinguishes the expected channel closure caused by a
+// resync from a terminal closure of the active watcher.
+func (g *HookConfigGuard) watcherWasReplaced(observed *fsnotify.Watcher) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.started && g.fsw != nil && g.fsw != observed
+}
+
+func sameHookGuardDataDir(left, right string) bool {
+	left = filepath.Clean(strings.TrimSpace(left))
+	right = filepath.Clean(strings.TrimSpace(right))
+	if left == "." || right == "." {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+// MatchesActiveConnector reports whether this started guard owns the exact
+// connector and configured data home. The API/Sidecar bridge uses this before
+// an authenticated SessionStart may request a repair, preventing an ambient or
+// retiring profile from being selected by connector name alone.
+func (g *HookConfigGuard) MatchesActiveConnector(connectorName, dataDir string) bool {
+	if g == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.started && !g.retiring && g.conn != nil &&
+		strings.EqualFold(strings.TrimSpace(g.conn.Name()), strings.TrimSpace(connectorName)) &&
+		sameHookGuardDataDir(g.opts.DataDir, dataDir)
+}
+
+// EnsurePresent synchronously verifies and, when necessary, repairs the exact
+// active connector registration. It is safe for the authenticated hook path:
+// repairs are serialized, bounded, recheck suppression and inactive state
+// after acquiring the serialization lock, and reuse Connector.Setup plus the
+// authoritative OwnedHooksPresent verifier.
+func (g *HookConfigGuard) EnsurePresent(ctx context.Context, connectorName, dataDir, reason string) error {
+	if strings.TrimSpace(reason) == "" {
+		reason = "authenticated registration check"
+	}
+	return g.repairCurrent(ctx, connectorName, dataDir, []string{reason})
+}
+
+func (g *HookConfigGuard) repairCurrent(
+	ctx context.Context,
+	connectorName, dataDir string,
+	changed []string,
+) error {
+	if g == nil {
+		return errors.New("hook registration guard is unavailable")
+	}
+	// Fast retirement gate keeps a request arriving behind an in-flight atomic
+	// repair from queueing on repairMu while Stop is waiting for that repair.
+	// Ownership/suppression/inactive state are all rechecked again after the
+	// serialization lock before any filesystem mutation.
+	g.mu.Lock()
+	retiringBeforeQueue := g.retiring || !g.started
+	g.mu.Unlock()
+	if retiringBeforeQueue {
+		return errors.New("hook registration guard is retiring")
+	}
+	g.repairMu.Lock()
+	defer g.repairMu.Unlock()
+
+	g.mu.Lock()
+	started := g.started
+	retiring := g.retiring
+	suppressed := time.Now().Before(g.suppressUntil)
+	conn := g.conn
+	opts := g.opts
+	policyResolver := g.policyResolver
+	baseCtx := g.ctx
+	g.mu.Unlock()
+
+	if !started || retiring || conn == nil {
+		return errors.New("hook registration guard is not active")
+	}
+	if connectorName != "" && !strings.EqualFold(strings.TrimSpace(conn.Name()), strings.TrimSpace(connectorName)) {
+		return fmt.Errorf("hook registration guard owns connector %s, not %s", conn.Name(), connectorName)
+	}
+	if dataDir != "" && !sameHookGuardDataDir(opts.DataDir, dataDir) {
+		return errors.New("hook registration guard owns a different data home")
+	}
+	var releasePolicy func()
+	if policyResolver != nil {
+		policy, release, ok := policyResolver(conn.Name())
+		if !ok {
+			return errors.New("authoritative hook runtime policy is unavailable")
+		}
+		releasePolicy = release
+		if release != nil {
+			defer release()
+		}
+		policy.hookFailMode = strings.ToLower(strings.TrimSpace(policy.hookFailMode))
+		if policy.hookFailMode != "open" && policy.hookFailMode != "closed" {
+			return errors.New("authoritative hook runtime fail mode is invalid")
+		}
+		opts.HookFailMode = policy.hookFailMode
+		opts.HILTEnabled = policy.hiltEnabled
+	}
+	if connector.ConnectorExplicitlyInactive(opts.DataDir, conn.Name()) {
+		return fmt.Errorf("connector %s is explicitly inactive", conn.Name())
+	}
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		baseCtx = ctx
+	}
+
+	present, err := connector.OwnedHooksPresent(conn, opts)
+	if err != nil {
+		if releasePolicy != nil {
+			releasePolicy()
+		}
+		g.reportPolicyFailure(conn, err)
+		return err
+	}
+	evidenceCurrent, err := connector.HookRuntimeRegistrationCurrent(
+		opts,
+		conn,
+		version.Current().BinaryVersion,
+	)
+	if err != nil {
+		if releasePolicy != nil {
+			releasePolicy()
+		}
+		g.reportPolicyFailure(conn, err)
+		return err
+	}
+	g.clearPolicyFailure()
+	if present && evidenceCurrent {
+		return nil
+	}
+	if present && !evidenceCurrent {
+		changed = append(changed, "stale runtime registration evidence")
+	}
+	if suppressed {
+		return errors.New("hook registration repair is suppressed during connector transition")
+	}
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	return g.healLocked(baseCtx, conn, opts, changed, releasePolicy)
 }
 
 // processPending evaluates debounced events: if any guarded config file no
@@ -330,71 +695,182 @@ func (g *HookConfigGuard) processPending() {
 	if suppressed || len(ready) == 0 || conn == nil {
 		return
 	}
-
-	present, err := connector.OwnedHooksPresent(conn, opts)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[hook-guard] presence check for %s: %v\n", conn.Name(), err)
+	if connector.ConnectorExplicitlyInactive(opts.DataDir, conn.Name()) {
+		// A low-level connector teardown writes an explicit runtime-state
+		// exclusion before editing the agent config. Honor it so this
+		// still-running guard cannot race the intentional removal and
+		// reinstall hooks a moment later.
 		return
 	}
-	if present {
-		// The owned hook still exists — the operator edited unrelated
-		// keys, or a previous heal already restored it. Do not fight
-		// legitimate edits.
-		return
-	}
+	// A policy event can be the first creation of a previously absent .claude
+	// or managed-settings.d directory. Rebind before evaluating so later files
+	// inside that directory cannot escape the effective-policy guardian.
+	g.mu.Lock()
+	g.resyncTargetsLocked(conn, opts)
+	g.mu.Unlock()
 
-	g.heal(conn, opts, ready)
+	_ = g.repairCurrent(g.ctx, conn.Name(), opts.DataDir, ready)
 }
 
-// heal re-runs the connector Setup to re-install the hook block, emits audit
-// + telemetry, and suppresses the resulting self-write.
-func (g *HookConfigGuard) heal(conn connector.Connector, opts connector.SetupOpts, changed []string) {
-	connName := conn.Name()
-	detail := strings.Join(changed, ", ")
-
+// processPolicyAudit preserves Claude's full effective-settings audit and adds
+// only Codex's registration audit. The latter catches a managed_config.toml
+// registration that was already absent when a replacement watcher started or
+// whose Windows file event was missed; other connectors remain event-driven.
+func (g *HookConfigGuard) processPolicyAudit() {
 	g.mu.Lock()
-	g.suppressUntil = time.Now().Add(hookGuardHealSuppressWindow)
+	conn := g.conn
+	opts := g.opts
+	suppressed := time.Now().Before(g.suppressUntil)
+	if !suppressed && conn != nil && conn.Name() == "claudecode" {
+		// Recompute targets so newly created managed/project directories and
+		// drop-ins join the watcher without replacing its live OS handle.
+		g.applyTargetsLocked(conn, opts)
+	}
+	g.mu.Unlock()
+	if suppressed || conn == nil || (conn.Name() != "claudecode" && conn.Name() != "codex") {
+		return
+	}
+	reason := "periodic effective-policy audit"
+	if conn.Name() == "codex" {
+		reason = "periodic registration audit"
+	}
+	_ = g.repairCurrent(g.ctx, conn.Name(), opts.DataDir, []string{reason})
+}
+
+func (g *HookConfigGuard) reportPolicyFailure(conn connector.Connector, err error) {
+	message := err.Error()
+	g.mu.Lock()
+	if g.lastPolicyFailure == message {
+		g.mu.Unlock()
+		return
+	}
+	g.lastPolicyFailure = message
+	logger := g.logger
 	baseCtx := g.ctx
 	g.mu.Unlock()
+
+	connName := conn.Name()
+	fmt.Fprintf(os.Stderr, "[hook-guard] effective-policy check for %s: %v\n", connName, err)
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
-	if g.logger != nil {
-		// Connector is the multi-connector dimension we add; severity is left
-		// at the logger's default (empty -> INFO) — the original severity of
-		// these rows is not ours to redesign.
-		_ = g.logger.LogActionSeverityConnector(string(audit.ActionConnectorHookTampered), connName,
-			fmt.Sprintf("hook config missing owned entries: %s", detail), "", connName)
+	emitErrorConnector(baseCtx, "hook_guard", "effective-policy-blocked", connName,
+		fmt.Sprintf("%s effective hook policy is not enforcing", connName), err)
+	if logger != nil {
+		_ = logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), connName,
+			fmt.Sprintf("effective hook policy is not enforcing: %v", err), "", connName)
 	}
-	emitLifecycle(baseCtx, "hook_guard", "tampered", map[string]string{
-		"connector": connName,
-		"paths":     detail,
-	})
+}
 
+func (g *HookConfigGuard) clearPolicyFailure() {
+	g.mu.Lock()
+	g.lastPolicyFailure = ""
+	g.mu.Unlock()
+}
+
+// healLocked re-runs the connector Setup to re-install the hook block, emits
+// audit + telemetry, and suppresses the resulting self-write. Caller holds
+// repairMu and has rechecked ownership, suppression, and explicit inactivity.
+func (g *HookConfigGuard) healLocked(
+	baseCtx context.Context,
+	conn connector.Connector,
+	opts connector.SetupOpts,
+	changed []string,
+	releasePolicy func(),
+) error {
+	connName := conn.Name()
+	detail := strings.Join(changed, ", ")
+	recordTampered := func() {
+		if g.logger != nil {
+			// Connector is the multi-connector dimension we add; severity is left
+			// at the logger's default (empty -> INFO) — the original severity of
+			// these rows is not ours to redesign.
+			_ = g.logger.LogActionSeverityConnector(string(audit.ActionConnectorHookTampered), connName,
+				fmt.Sprintf("hook config missing owned entries: %s", detail), "", connName)
+		}
+		emitLifecycle(baseCtx, "hook_guard", "tampered", map[string]string{
+			"connector": connName,
+			"paths":     detail,
+		})
+	}
+
+	g.mu.Lock()
+	g.suppressUntil = time.Now().Add(hookGuardHealSuppressWindow)
+	g.mu.Unlock()
+
+	// Once Setup starts, let its multi-file lifecycle transaction reach an
+	// atomic terminal state even if the HTTP client disconnects. The hard
+	// timeout still bounds the synchronous SessionStart path.
 	hctx, cancel := context.WithTimeout(context.WithoutCancel(baseCtx), hookGuardSetupTimeout)
 	defer cancel()
 
-	if err := conn.Setup(hctx, opts); err != nil {
+	setupErr := conn.Setup(hctx, opts)
+
+	// Setup may have recreated a deleted parent directory even when a later
+	// verification step fails. Rebind before handling its result so the guard
+	// never remains attached to the deleted inode.
+	g.mu.Lock()
+	g.resyncTargetsLocked(conn, opts)
+	g.mu.Unlock()
+
+	if setupErr != nil {
+		if releasePolicy != nil {
+			releasePolicy()
+		}
+		recordTampered()
+		err := setupErr
 		fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks failed: %v\n", connName, err)
 		emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
 			fmt.Sprintf("failed to re-install %s hook config", connName), err)
+		recordGatewayErrorV8(baseCtx, g.observabilityV8Runtime(), "hook_guard", "self-heal-failed")
 		if g.logger != nil {
 			_ = g.logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), connName,
 				fmt.Sprintf("hook self-heal Setup failed: %v", err), "", connName)
 		}
-		return
+		return err
 	}
 
-	// A whole-directory deletion would have dropped our fsnotify watch;
-	// Setup recreates the parent dirs, so re-sync the watch set.
-	g.mu.Lock()
-	g.applyTargetsLocked(conn, opts)
-	g.mu.Unlock()
+	present, err := connector.OwnedHooksPresent(conn, opts)
+	if err != nil || !present {
+		if releasePolicy != nil {
+			releasePolicy()
+		}
+		recordTampered()
+		if err == nil {
+			err = fmt.Errorf("effective hook contract is still inactive")
+		}
+		fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks did not restore enforcement: %v\n", connName, err)
+		emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
+			fmt.Sprintf("re-installed %s hook config but enforcement is still inactive", connName), err)
+		if g.logger != nil {
+			_ = g.logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), connName,
+				fmt.Sprintf("hook self-heal verification failed: %v", err), "", connName)
+		}
+		return err
+	}
+	if connector.RequiresHookRuntimeRegistrationEvidence(conn) {
+		if err := publishFreshHookRegistrationEvidence(opts, conn); err != nil {
+			if releasePolicy != nil {
+				releasePolicy()
+			}
+			recordTampered()
+			fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks did not publish current registration evidence: %v\n", connName, err)
+			emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
+				fmt.Sprintf("re-installed %s hook config but registration evidence is unavailable", connName), err)
+			if g.logger != nil {
+				_ = g.logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), connName,
+					fmt.Sprintf("hook self-heal registration evidence failed: %v", err), "", connName)
+			}
+			return err
+		}
+	}
+	if releasePolicy != nil {
+		releasePolicy()
+	}
+	recordTampered()
 
 	fmt.Fprintf(os.Stderr, "[hook-guard] re-installed %s hook config after manual removal (%s)\n", connName, detail)
-	if g.otel != nil {
-		g.otel.RecordWatcherEvent(baseCtx, "hook-heal", connName, connName)
-	}
+	recordWatcherEventV8(baseCtx, g.observabilityV8Runtime(), "hook-heal", connName, connName)
 	if g.logger != nil {
 		_ = g.logger.LogActionSeverityConnector(string(audit.ActionConnectorHookRepaired), connName,
 			fmt.Sprintf("re-installed hook entries removed from: %s", detail), "", connName)
@@ -410,4 +886,5 @@ func (g *HookConfigGuard) heal(conn connector.Connector, opts connector.SetupOpt
 	if notify != nil {
 		notify(connName, changed)
 	}
+	return nil
 }

@@ -22,14 +22,14 @@ so that the Go orchestrator and Python CLI share the same config file.
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import platform
 import stat
 import subprocess
 import sys
-import tempfile
-import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -37,7 +37,7 @@ from typing import Any
 
 import yaml
 
-from defenseclaw import connector_paths
+from defenseclaw import connector_paths, credential_provenance
 from defenseclaw import migration_state as migration_state_helpers
 
 # Back-compat re-exports — internal-but-imported-by-tests helpers that
@@ -66,9 +66,10 @@ from defenseclaw.connector_paths import (  # noqa: F401
 from defenseclaw.connector_paths import (  # noqa: F401
     _read_openclaw_json as _read_openclaw_config,
 )
+from defenseclaw.file_lock import locked_file_update
+from defenseclaw.file_permissions import atomic_write_text_secure, make_private_directory
 
 _log = logging.getLogger(__name__)
-_privacy_disable_redaction_warned = False
 _llm_migration_warned_keys: set[tuple[str, ...]] = set()
 _untrusted_managed_config_warned_paths: set[str] = set()
 
@@ -88,15 +89,21 @@ VALID_DEPLOYMENT_MODES = {
 
 
 class ConfigVersionError(RuntimeError):
-    """The upgrade preflight could not read the schema discriminator."""
+    """A bounded schema preflight could not establish a usable config version."""
 
 
 def source_config_version(*, path: str | None = None) -> int | None:
     """Read only ``config_version`` without loading either runtime schema.
 
     The 0.8.4 bridge remains a config-v7 runtime.  It uses this bounded YAML
-    node inspection solely to prove that the separately verified 0.8.5 wheel
-    can migrate the source before any installed artifact is changed.
+    node inspection solely to prove that the separately verified first-v8-or-
+    later target wheel can migrate the source before any installed artifact is
+    changed.
+
+    This preflight deliberately does not source ``.env``, construct legacy
+    compatibility dataclasses, resolve secrets, or apply runtime defaults.
+    ``None`` means the file does not exist; malformed, non-mapping, and
+    unversioned documents report version ``0`` so callers fail closed.
     """
 
     cfg_file = path or str(config_path())
@@ -122,58 +129,28 @@ def source_config_version(*, path: str | None = None) -> int | None:
     return _exact_config_version(node.value)
 
 
-def _exact_config_version(value: Any) -> int:
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.strip().isdigit():
-        return int(value.strip())
-    return 0
+def require_v8_config(*, path: str | None = None, allow_missing: bool = False) -> None:
+    """Fail before full config loading unless the source is exactly v8."""
+
+    version = source_config_version(path=path)
+    if version is None and allow_missing:
+        return
+    if version is None:
+        raise ConfigVersionError(
+            "DefenseClaw is not initialized — run 'defenseclaw init' first."
+        )
+    if version != 8:
+        raise ConfigVersionError(
+            "Configuration schema v8 is required — run 'defenseclaw upgrade' first."
+        )
+
+
 LEGACY_DEPLOYMENT_MODE_ALIASES = {
     "managed": "managed_enterprise",
     "standalone": "unmanaged_byod",
     "ci": "ci_cd",
     "edge": "server",
 }
-
-if os.name == "nt":
-    import msvcrt
-
-    # msvcrt.locking() locks a byte range starting at the file pointer's
-    # CURRENT position. To get mutual exclusion we must lock the SAME byte
-    # (offset 0) on every acquisition, so we seek(0) immediately before each
-    # lock/unlock call and we never write to the lock file. Writing (in any
-    # mode) can advance the pointer or grow the file, which would make
-    # concurrent holders lock disjoint ranges and silently defeat the lock.
-    def _lock_file_exclusive(file_obj) -> None:
-        while True:
-            file_obj.seek(0)
-            try:
-                # LK_LOCK blocks for ~10s then raises; retry so this behaves
-                # like a blocking exclusive lock (fcntl.flock(LOCK_EX)).
-                msvcrt.locking(file_obj.fileno(), msvcrt.LK_LOCK, 1)
-                return
-            except OSError:
-                time.sleep(0.05)
-
-    def _unlock_file(file_obj) -> None:
-        file_obj.seek(0)
-        try:
-            msvcrt.locking(file_obj.fileno(), msvcrt.LK_UNLCK, 1)
-        except OSError:
-            # Lock already released (e.g. handle closed); don't crash
-            # teardown/save paths.
-            pass
-
-else:
-    import fcntl
-
-    def _lock_file_exclusive(file_obj) -> None:
-        fcntl.flock(file_obj.fileno(), fcntl.LOCK_EX)
-
-    def _unlock_file(file_obj) -> None:
-        fcntl.flock(file_obj.fileno(), fcntl.LOCK_UN)
 
 
 def _coerce_bool(value: Any, *, default: bool = False) -> bool:
@@ -955,6 +932,13 @@ class WatchConfig:
 
 @dataclass
 class SplunkConfig:
+    """Upgrade/credential-preview DTO for removed pre-v8 Splunk config.
+
+    Target commands must inspect canonical v8 destination status instead of
+    reading this projection. ``Config.save`` never writes it to an exact-v8
+    document.
+    """
+
     hec_endpoint: str = "https://localhost:8088/services/collector/event"
     hec_token: str = ""
     hec_token_env: str = ""
@@ -1061,11 +1045,10 @@ class OTelSpanFilterConfig:
 
 @dataclass
 class OTelDestinationConfig:
-    """One named OTLP fan-out destination.
+    """Upgrade/credential-preview shape for a pre-v8 OTLP destination.
 
-    Process-wide resource attributes and trace sampling remain on
-    :class:`OTelConfig`; transport, credentials, signal selection, and queue
-    settings are isolated per destination.
+    This is not the canonical v8 destination model. Target commands read the
+    validated observability graph through ``v8_status``/``v8_config``.
     """
 
     name: str = ""
@@ -1101,6 +1084,8 @@ class OTelMetricPolicyConfig:
 
 @dataclass
 class OTelConfig:
+    """Upgrade/credential-preview DTO for the removed top-level ``otel`` block."""
+
     enabled: bool = False
     traces: OTelTracePolicyConfig = field(default_factory=OTelTracePolicyConfig)
     logs: OTelLogPolicyConfig = field(default_factory=OTelLogPolicyConfig)
@@ -1657,52 +1642,32 @@ class WebhookConfig:
 
 @dataclass
 class PerConnectorObservability:
-    """Per-connector observability override (D5b) keyed by connector name.
+    """Per-connector notification override keyed by connector name.
 
-    A connector's events route to *its* configured sinks/webhooks,
-    falling back to the GLOBAL list (top-level ``audit_sinks:`` /
-    ``webhooks:``) when a dimension is unset. Each dimension is
-    independently tri-state, mirroring the Go ``*[]T`` / nil-vs-empty
-    pointer semantics used elsewhere in this file:
+    Telemetry routing belongs exclusively to canonical v8 destinations and
+    routes. This compatibility child models only connector-specific webhooks,
+    with the same tri-state semantics as the Go ``*[]T`` field:
 
     * ``None``       — key absent; INHERIT the global list. This is the
                        default and the safety fallback: a connector with
                        no per-connector config still emits to the global
-                       sinks (no silent drop).
+                       webhooks (no silent drop).
     * present list   — OVERRIDE: route this connector's events to exactly
                        these entries. An explicit empty list ``[]``
                        suppresses the global list for that connector.
-
-    ``audit_sinks`` is kept as raw mappings rather than a typed dataclass
-    so it round-trips verbatim alongside the unmodelled top-level
-    ``audit_sinks:`` list (whose schema is owned by the Go gateway and
-    ``defenseclaw.observability.writer``). ``webhooks`` reuses the modeled
-    :class:`WebhookConfig`, parity with the top-level ``webhooks:`` list.
     """
 
-    audit_sinks: list[dict[str, Any]] | None = None
     webhooks: list[WebhookConfig] | None = None
 
 
 @dataclass
 class ObservabilityConfig:
-    """Per-connector observability routing (D5b).
+    """Notification-only connector compatibility inside ``observability``.
 
     ``connectors`` maps a connector name to its
     :class:`PerConnectorObservability` override. Empty/absent preserves the
-    legacy global-only behavior. Resolution goes through
-    :meth:`effective_audit_sinks` / :meth:`effective_webhooks` (which take
-    the global list and fall back to it), never by reading the map
-    directly — mirroring :class:`AssetPolicyConfig` and
-    ``guardrail.connectors``.
-
-    NOTE (lane boundary): the runtime event-emit dispatch lives in the Go
-    gateway (``internal/gateway/webhook.go`` for webhooks,
-    ``internal/audit/sinks`` for audit sinks). This Python structure is the
-    config + resolution surface so ``Config.save()`` round-trips the block
-    and Python consumers can resolve it; HONORING the resolution at emit
-    time additionally requires the matching Go change (flagged separately —
-    those files are outside this lane).
+    global webhook behavior. Telemetry destinations are deliberately absent:
+    the strict v8 schema rejects connector-local destination ownership.
     """
 
     connectors: dict[str, PerConnectorObservability] = field(default_factory=dict)
@@ -1724,23 +1689,6 @@ class ObservabilityConfig:
             if connector_paths.normalize(name) == want:
                 return entry
         return None
-
-    def effective_audit_sinks(
-        self,
-        connector: str,
-        global_sinks: list[dict[str, Any]] | None,
-    ) -> list[dict[str, Any]]:
-        """Resolve the audit sinks a connector's events route to.
-
-        Per-connector override (when the ``audit_sinks`` dimension is set)
-        wins; otherwise inherit ``global_sinks``. ``global_sinks`` is passed
-        in because the global ``audit_sinks:`` list is unmodelled (read from
-        raw YAML), not a :class:`Config` field.
-        """
-        pc = self._connector_override(connector)
-        if pc is not None and pc.audit_sinks is not None:
-            return list(pc.audit_sinks)
-        return list(global_sinks or [])
 
     def effective_webhooks(
         self,
@@ -1829,6 +1777,7 @@ class GuardrailConfig:
     model_name: str = ""  # alias exposed to OpenClaw, e.g. "claude-opus"
     api_key_env: str = ""  # env var holding the API key, e.g. "ANTHROPIC_API_KEY"
     api_base: str = ""  # base URL override for Azure, custom endpoints
+    allow_private_upstreams: list[str] = field(default_factory=list)
     # OriginalModel is NOT a secret-bearing LLM config field — it just
     # records the upstream model name the client sees rewritten onto
     # outgoing requests (Bifrost model-routing). Orthogonal to ``llm``.
@@ -1873,11 +1822,9 @@ class GuardrailConfig:
     # by ``_migrate_0_4_0_seed_hook_fail_mode`` so the flip is a
     # NEW-INSTALL-ONLY behavior change.
     #
-    # Transport-layer failures (gateway unreachable / 5xx) are
-    # handled separately by each hook's ``fail_unreachable`` helper
-    # and ALWAYS allow unless the operator opts into strict
-    # availability via ``DEFENSECLAW_STRICT_AVAILABILITY=1`` —
-    # regardless of this field's value. Mirrors
+    # Transport-layer failures (gateway unreachable / timeout / 5xx)
+    # follow this same mode. ``DEFENSECLAW_STRICT_AVAILABILITY=1``
+    # remains an unconditional force-closed override. Mirrors
     # ``GuardrailConfig.HookFailMode`` in internal/config/config.go.
     hook_fail_mode: str = "closed"
     # ``llm_role`` is the operator's answer to "should DefenseClaw's
@@ -1962,11 +1909,19 @@ class GuardrailConfig:
         return self.hilt
 
     def effective_hook_fail_mode(self, connector: str = "") -> str:
-        """Per-connector override > global > ``"open"`` (non-"closed")."""
+        """Explicit connector posture > observe compatibility > global.
+
+        Existing observe-only installs remain fail-open when they only carry
+        the legacy global value. A connector-scoped value is an explicit
+        runtime response-integrity choice, however, and must not be collapsed
+        back to open merely because policy findings are being observed.
+        """
         pc = self._connector_override(connector)
         if pc is not None and pc.hook_fail_mode.strip():
             if pc.hook_fail_mode.strip().lower() == "closed":
                 return "closed"
+            return "open"
+        if self.effective_mode(connector).strip().lower() != "action":
             return "open"
         if self.hook_fail_mode.strip().lower() == "closed":
             return "closed"
@@ -2061,22 +2016,21 @@ class NotificationSourceFilter:
 def _default_notifications_enabled() -> bool:
     """Mirror Go's ``config.DefaultNotificationsEnabled``.
 
-    Darwin is the only platform with a consumer-grade desktop
-    notification surface that every user already has running, so it
-    opts in by default. Every other OS waits for an explicit
-    ``defenseclaw setup notifications on`` opt-in. Implemented as a
+    macOS and native Windows both have an attended consumer desktop
+    notification surface, so fresh installs opt in by default. Every other OS
+    waits for an explicit ``defenseclaw setup notifications on`` opt-in. Implemented as a
     free function (not a literal default) so the platform check is
     evaluated at config-construction time, not module-import time —
     important for unit tests that monkey-patch ``platform.system``.
     """
-    return platform.system() == "Darwin"
+    return platform.system() in {"Darwin", "Windows"}
 
 
 @dataclass
 class NotificationsConfig:
     """User-session OS notifications. Mirrors internal/config.NotificationsConfig.
 
-    Master switch ``enabled`` defaults to ``True`` on darwin and
+    Master switch ``enabled`` defaults to ``True`` on macOS and Windows and
     ``False`` elsewhere — same matrix as Go's
     ``DefaultNotificationsEnabled``. ``defenseclaw setup
     notifications`` (the single-prompt onboarding wizard) is still
@@ -2109,24 +2063,6 @@ class NotificationsConfig:
 
 
 @dataclass
-class PrivacyConfig:
-    """Privacy / redaction toggles. Mirrors internal/config.PrivacyConfig.
-
-    ``disable_redaction`` is the persistent kill-switch documented in
-    the Go redaction package: when True the sidecar bypasses every
-    ForSink* helper at startup, including persistent sinks (audit DB,
-    OTel logs, Splunk HEC, webhooks). It violates the
-    unconditional-redaction contract documented in OBSERVABILITY.md
-    by design — only enable on single-tenant installs where every
-    downstream sink lives inside the same trust boundary.
-    The CLI emits a warning on flip, and config loaders emit a
-    once-per-process warning when they observe it.
-    """
-
-    disable_redaction: bool = False
-
-
-@dataclass
 class AIDiscoveryConfig:
     enabled: bool = False
     mode: str = "enhanced"
@@ -2142,7 +2078,6 @@ class AIDiscoveryConfig:
     include_network_domains: bool = True
     max_files_per_scan: int = 1000
     max_file_bytes: int = 512 * 1024
-    emit_otel: bool = True
     store_raw_local_paths: bool = False
     confidence_policy_path: str = ""
     require_trusted_binary_paths: bool = False
@@ -2349,7 +2284,6 @@ class Config:
     # legacy global-only behavior; resolution goes through
     # :class:`ObservabilityConfig` resolvers, never by reading the map directly.
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
-    privacy: PrivacyConfig = field(default_factory=lambda: PrivacyConfig())
     _loaded_authoritative_dicts: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
     # Loaded raw values of _OWNED_NESTED_KEYS paths (absent = key not in
     # the file at load). Lets the merge distinguish "this process loaded
@@ -2358,6 +2292,11 @@ class Config:
     # preserve it). Parity with _loaded_authoritative_dicts for the
     # dict-shaped authoritative paths.
     _loaded_owned_nested_values: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+    # Exact source version observed by load(). Ordinary saves of an already-v8
+    # document must never serialize the legacy audit_db/otel/privacy model over
+    # the canonical observability graph.
+    _source_config_version: int = field(default=0, repr=False, compare=False)
+    _loaded_v8_modeled_snapshot: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     ai_discovery: AIDiscoveryConfig = field(default_factory=AIDiscoveryConfig)
     application_protection: ApplicationProtectionConfig = field(default_factory=ApplicationProtectionConfig)
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
@@ -2403,9 +2342,7 @@ class Config:
         Per-connector override (``observability.connectors[connector].webhooks``)
         wins; otherwise inherit the global ``webhooks:`` list. Convenience
         wrapper around :meth:`ObservabilityConfig.effective_webhooks` that
-        supplies ``self.webhooks`` as the global fallback. The matching audit
-        sink resolver lives on :class:`ObservabilityConfig` because the global
-        ``audit_sinks:`` list is unmodelled (raw YAML), not a Config field.
+        supplies ``self.webhooks`` as the global fallback.
         """
         return self.observability.effective_webhooks(connector, self.webhooks)
 
@@ -2651,51 +2588,78 @@ class Config:
     def save(self) -> None:
         """Persist this :class:`Config` to ``~/.defenseclaw/config.yaml``.
 
-        Round-trips through the existing file so that YAML keys the
-        Python dataclass does NOT model survive the save. The two known
-        callers that depend on this contract today are:
-
-        * ``audit_sinks:`` — written by ``defenseclaw setup splunk``
-          (see ``cli/defenseclaw/observability/writer.py``). Operators
-          configure local-Splunk HEC, remote Splunk Enterprise, OTLP
-          logs, and webhook forwarding here.
-        * ``otel.resource.attributes:`` — stamped by the same writer
-          to attribute exporters back to the preset that configured
-          them.
-
-        Before this round-trip, every connector-setup call site that
-        invoked ``cfg.save()`` (``setup codex``, ``setup claude-code``,
-        ``execute_guardrail_setup``, etc.) would silently strip those
-        blocks because ``dataclasses.asdict(self)`` only emits the
-        fields the dataclass declares — turning Splunk dashboards dark
-        without any warning. The two workaround "no cfg.save() here"
-        comments in ``cmd_setup.py`` documented this foot-gun; this
-        method removes the need for them.
-
-        Modeled keys still win — including the v4-migration strip of
-        the legacy ``splunk:`` top-level key and the byte-stability
-        strips of empty ``notifications``/``privacy``/``asset_policy``
-        blocks — so that operators who programmatically reset a value
-        through the dataclass still see the file updated.
+        A v8 document preserves the canonical ``observability`` graph and
+        applies only modeled values that changed since load. This keeps the
+        Go-owned routing/redaction graph authoritative while allowing Python
+        setup commands to update their own modeled sections safely. Legacy
+        documents use the compatibility merge only inside the upgrade input
+        boundary; target-runtime commands reject them before mutation.
 
         Write is atomic via ``tmp + os.replace`` (matches the
-        observability writer pattern) so a crash mid-write cannot
+        canonical config writer) so a crash mid-write cannot
         leave a half-written ``config.yaml`` that the Go gateway
         refuses to reload.
         """
         path = str(config_path_for_data_dir(self.data_dir))
-        dataclass_data = _config_to_dict(self)
-        owned_keys = _owned_top_level_keys(self)
         with locked_config_yaml(path):
+            self._save_locked(path)
+
+    def save_verified(self, verify: Callable[[str], None]) -> None:
+        """Persist, verify the exact written generation, and roll back on failure.
+
+        Verification runs while the canonical per-config lock is held. If it
+        fails after the atomic replacement, the prior v8 document is restored
+        atomically before the original error is re-raised.
+        """
+        path = str(config_path_for_data_dir(self.data_dir))
+        previous_source_version = self._source_config_version
+        previous_snapshot = copy.deepcopy(self._loaded_v8_modeled_snapshot)
+        with locked_config_yaml(path):
+            existed = os.path.exists(path)
             existing = _load_existing_config_yaml(path)
-            merged = _merge_preserving_unmodeled(
-                existing,
-                dataclass_data,
-                owned_keys,
-                authoritative_base=self._loaded_authoritative_dicts,
-                owned_base=self._loaded_owned_nested_values,
+            self._save_locked(path)
+            try:
+                verify(path)
+            except Exception as verify_error:
+                self._source_config_version = previous_source_version
+                self._loaded_v8_modeled_snapshot = previous_snapshot
+                try:
+                    if existed:
+                        write_config_yaml_secure(path, existing)
+                    else:
+                        os.unlink(path)
+                except Exception as rollback_error:
+                    raise RuntimeError(
+                        "config verification failed and the previous configuration "
+                        f"could not be restored: {rollback_error}"
+                    ) from verify_error
+                raise
+
+    def _save_locked(self, path: str) -> None:
+        """Persist using an already-held config lock."""
+
+        if self._source_config_version == 0 and not os.path.lexists(path):
+            # A programmatically constructed Config with no source file is a
+            # fresh target configuration, not a legacy document. Use the
+            # canonical defaults as its structural baseline so explicit
+            # caller choices are persisted while removed v7 fields remain
+            # excluded. Existing unversioned/v7 files still fail closed below.
+            self._source_config_version = 8
+            self._loaded_v8_modeled_snapshot = _config_to_dict(default_config())
+        if self._source_config_version != 8:
+            raise ConfigVersionError(
+                "Configuration schema v8 is required — run 'defenseclaw upgrade' first."
             )
-            write_config_yaml_secure(path, merged)
+        dataclass_data = _config_to_dict(self)
+        existing = _load_existing_config_yaml(path)
+        merged = _merge_v8_modeled_changes(existing, dataclass_data, self._loaded_v8_modeled_snapshot)
+        merged["config_version"] = 8
+        merged.setdefault("observability", {})
+        from defenseclaw.observability.v8_config import load_validate_v8
+
+        load_validate_v8(merged, source_name=path)
+        write_config_yaml_secure(path, merged)
+        self._loaded_v8_modeled_snapshot = copy.deepcopy(dataclass_data)
 
 
 # ---------------------------------------------------------------------------
@@ -2707,80 +2671,31 @@ class Config:
 def locked_config_yaml(path: str):
     """Hold an exclusive per-config lock for a read/merge/write cycle."""
     directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
-    lock_path = path + ".lock"
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(lock_path, flags, 0o600)
-    try:
-        # "r+" (not "a+"): the lock file is a pure sentinel we never write to,
-        # and append mode would force the file pointer to EOF, breaking the
-        # offset-0 byte-range lock used on Windows (see _lock_file_exclusive).
-        lock = os.fdopen(fd, "r+")
-    except BaseException:
-        os.close(fd)
-        raise
-    try:
-        _lock_file_exclusive(lock)
-        try:
-            yield
-        finally:
-            _unlock_file(lock)
-    finally:
-        lock.close()
+    # On elevated Windows accounts, a directory created with bare
+    # ``os.makedirs`` can inherit the token's default owner (for example the
+    # Administrators group) instead of the interactive user's SID.  The
+    # subsequent fail-closed config/audit writers then correctly refuse to
+    # mutate that foreign-owned directory.  Apply the private creation DACL at
+    # creation time so the config lock is never exposed in a permissive or
+    # ambiguously owned parent.
+    make_private_directory(directory)
+    with locked_file_update(path):
+        yield
 
 
 def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
     """Atomically write YAML without widening config.yaml permissions."""
     _assert_config_write_allowed(path, data)
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
-    existing_mode: int | None = None
-    try:
-        existing_mode = stat.S_IMODE(os.stat(path).st_mode)
-    except FileNotFoundError:
-        pass
-    except OSError:
-        existing_mode = None
+
+    def write_yaml(stream) -> None:
+        yaml.safe_dump(data, stream, default_flow_style=False, sort_keys=False)
 
     token_suffix = migration_state_helpers.upgrade_mutation_temp_suffix()
-    fd, tmp = tempfile.mkstemp(
+    atomic_write_text_secure(
+        path,
+        write_yaml,
         prefix=f".{os.path.basename(path)}.{token_suffix}",
-        suffix=".tmp",
-        dir=directory,
     )
-    descriptor_chmod = getattr(os, "fchmod", None)
-    if descriptor_chmod is not None:
-        descriptor_chmod(fd, 0o600)
-    else:
-        os.chmod(tmp, 0o600)
-    try:
-        with os.fdopen(fd, "w") as f:
-            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-            f.flush()
-            os.fsync(f.fileno())
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-    if existing_mode is not None and existing_mode != 0o600:
-        target_mode = existing_mode & 0o600
-        if target_mode == 0o600 and existing_mode & 0o077 == 0o040:
-            target_mode = 0o640
-        elif target_mode == 0:
-            target_mode = 0o600
-        try:
-            os.chmod(tmp, target_mode)
-        except OSError as exc:
-            _log.warning(
-                "config.save: cannot mirror %o mode onto %s (%s); writing as 0600",
-                existing_mode,
-                tmp,
-                exc,
-            )
-    os.replace(tmp, path)
     try:
         dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
     except OSError:
@@ -2904,6 +2819,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     d = asdict(cfg)
     d.pop("_loaded_authoritative_dicts", None)
     d.pop("_loaded_owned_nested_values", None)
+    d.pop("_source_config_version", None)
+    d.pop("_loaded_v8_modeled_snapshot", None)
     otel = d.get("otel") or {}
     destinations = otel.get("destinations") or []
     for destination in destinations:
@@ -2948,6 +2865,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     _strip_empty_llm(scanners.get("mcp_scanner"), "llm")
     _strip_empty_llm(scanners, "plugin_llm")
     guardrail = d.get("guardrail") or {}
+    if isinstance(guardrail, dict) and not guardrail.get("allow_private_upstreams"):
+        guardrail.pop("allow_private_upstreams", None)
     _strip_empty_llm(guardrail, "llm")
     _strip_empty_llm(guardrail.get("judge"), "llm")
     # Mirror Go's ``yaml:",omitempty"`` on the hook-lane judge keys so a
@@ -2968,11 +2887,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     # Exception: if the map WAS populated at load and the caller has now
     # cleared it (e.g. ``setup remove`` collapsing the final
     # multi-connector entry back to the legacy singular shape), we must
-    # emit an explicit empty ``connectors: {}`` so the authoritative
-    # atomic-replace in ``_deep_merge_nested`` clears the on-disk block.
-    # Popping the key here would instead let the parent (non-authoritative)
-    # guardrail merge rescue the stale connectors from disk, so the
-    # removal would silently fail to persist.
+    # emit an explicit empty ``connectors: {}`` so the v8 structural delta
+    # clears the on-disk block instead of treating omission as no change.
     if isinstance(guardrail, dict) and not guardrail.get("connectors"):
         had_connectors = bool((getattr(cfg, "_loaded_authoritative_dicts", None) or {}).get("guardrail.connectors"))
         if had_connectors:
@@ -2988,14 +2904,15 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         conns = guardrail.get("connectors")
         if isinstance(conns, dict):
             for entry in conns.values():
-                if isinstance(entry, dict) and entry.get("enabled") is None:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("enabled") is None:
                     entry.pop("enabled", None)
-    # v4: the legacy top-level `splunk:` block is rejected by the Go
-    # gateway at startup (see internal/config/config.go::detectLegacySplunk).
-    # The Python dataclass retains a SplunkConfig for backwards-compatible
-    # reads, but we must never *write* the key to disk — even with
-    # default values — or the sidecar will refuse to start with a v4
-    # migration error. Splunk forwarding lives under audit_sinks now.
+                if entry.get("hilt") is None:
+                    entry.pop("hilt", None)
+    # The compatibility dataclass can preview a retired ``splunk:`` source for
+    # upgrade/credential recovery, but exact-v8 serialization must never write
+    # it. Splunk forwarding is a canonical observability destination.
     d.pop("splunk", None)
     # Mirror the Go `yaml:"cooldown_seconds,omitempty"` tag: when the
     # operator hasn't set a cooldown (tri-state None), drop the key so
@@ -3004,14 +2921,6 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     # kept verbatim.
     for wh in d.get("webhooks") or []:
         _strip_webhook_omitempty(wh)
-    # Mirror Go's ``yaml:"privacy,omitempty"`` — drop the block
-    # entirely when it carries only defaults so existing configs
-    # without a ``privacy:`` block stay byte-identical after a
-    # load/save round-trip. The block reappears the moment any
-    # field flips off-default (e.g. ``disable_redaction: true``).
-    privacy = d.get("privacy")
-    if isinstance(privacy, dict) and not any(privacy.values()):
-        d.pop("privacy", None)
     if d.get("ai_discovery") == _disabled_ai_discovery_dict():
         d.pop("ai_discovery", None)
     if d.get("application_protection") == _default_application_protection_dict():
@@ -3045,27 +2954,6 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         if not sources:
             d.pop("registries", None)
     return d
-
-
-def _owned_top_level_keys(cfg: Config) -> frozenset[str]:
-    """Return the set of TOP-LEVEL YAML keys the dataclass declares.
-
-    Used by :meth:`Config.save` to distinguish "dataclass intentionally
-    omitted this key" (e.g. ``notifications:`` was at full defaults so
-    ``_config_to_dict`` stripped it) from "the dataclass doesn't model
-    this key at all" (e.g. ``audit_sinks:``, written by
-    :mod:`defenseclaw.observability.writer`). The first case should drop
-    the key from the on-disk file; the second case should preserve it.
-
-    Implementation note: we read the field names off ``Config`` itself
-    via ``dataclasses.fields`` rather than calling ``asdict(cfg)`` so
-    this stays O(fields) instead of O(full config tree) and so it is
-    safe to call from inside ``save()`` without triggering side effects
-    on lazily-populated nested dataclasses.
-    """
-    from dataclasses import fields
-
-    return frozenset(f.name for f in fields(cfg) if not f.name.startswith("_"))
 
 
 def _load_existing_config_yaml(path: str) -> dict[str, Any]:
@@ -3155,12 +3043,6 @@ def _backup_unparseable_config(path: str) -> str:
 # Format: dotted YAML path from the top-level config dict.
 _AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset(
     {
-        # OpenTelemetry resource attributes (service.name,
-        # deployment.environment, custom operator labels). Some
-        # operators use this for tenant identifiers, so leftover keys
-        # after a clear leak prior tenant identity into the new
-        # session.
-        "otel.resource.attributes",
         # Per-connector guardrail overrides map. This is fully modeled by
         # the dataclass (``guardrail.connectors``) and is the single source
         # of truth for the configured connector set. Without atomic replace,
@@ -3216,151 +3098,101 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
     }
 )
 
+_V8_UNMODELED_OR_REMOVED_TOP_LEVEL = frozenset(
+    {"audit_db", "audit_sinks", "otel", "privacy", "splunk", "observability"}
+)
+_V8_MISSING = object()
 
-def _merge_preserving_unmodeled(
+
+def _merge_v8_modeled_changes(
     existing: dict[str, Any],
-    new: dict[str, Any],
-    owned_top_level: frozenset[str],
-    authoritative_base: dict[str, dict[str, Any]] | None = None,
-    owned_base: dict[str, Any] | None = None,
+    current: dict[str, Any],
+    baseline: dict[str, Any],
 ) -> dict[str, Any]:
-    """Deep-merge ``new`` over ``existing`` while preserving unmodelled keys.
+    """Apply only Python-modeled values changed since an exact-v8 load.
 
-    Top-level rules (the layer where ``audit_sinks:`` lives):
-
-    * Key in ``new``: dataclass wins (with a recursive deep-merge when
-      both sides are dicts so nested unmodelled keys like operator
-      additions survive).
-    * Key only in ``existing``:
-        - If the key IS owned by the dataclass (``owned_top_level``) →
-          the dataclass intentionally chose to omit it (e.g.
-          ``_config_to_dict`` stripped ``notifications:`` because it
-          was at full defaults, or stripped the legacy ``splunk:``
-          v4-migration block). Drop it.
-        - Otherwise → unmodelled extension key (``audit_sinks:``,
-          operator-added comments-as-keys, future Go-side additions).
-          Preserve it unchanged.
-    * Key only in ``new`` → emit it.
-
-    Nested rules (any depth below top level):
-
-    * Both dicts → recurse via :func:`_deep_merge_nested`. The
-      recursion preserves unmodelled subkeys by default (so an
-      operator-added ``otel.custom_extension.foo`` survives a save
-      that doesn't touch it) BUT atomically replaces dicts whose
-      dotted path appears in
-      :data:`_AUTHORITATIVE_MODELED_DICT_PATHS`. The latter
-      includes ``otel.resource.attributes``. A caller that clears a
-      modeled collection gets the on-disk block cleared, which is the
-      whole point of clearing it.
-    * Lists → atomic replacement (the dataclass list is authoritative;
-      partial list merges would mis-handle operator deletions of list
-      elements modelled by the dataclass).
-    * Scalars / type mismatch → new wins.
+    The legacy dataclass materializes hundreds of defaults, including fields
+    removed from v8. Writing its full shape is therefore unsafe. A structural
+    delta preserves the latest on-disk canonical graph and concurrent edits,
+    while still allowing ordinary setup commands to update unrelated supported
+    configuration fields.
     """
-    out: dict[str, Any] = {}
-    # Pass 1: walk existing keys so file order is preserved when the
-    # dataclass output omits a key. yaml.safe_dump with sort_keys=False
-    # honours dict iteration order on CPython 3.7+, which keeps
-    # operator-edited files visually stable across saves.
-    for k, ev in existing.items():
-        if k in new:
-            nv = new[k]
-            if isinstance(ev, dict) and isinstance(nv, dict):
-                out[k] = _deep_merge_nested(
-                    ev,
-                    nv,
-                    path=k,
-                    authoritative_base=authoritative_base,
-                    owned_base=owned_base,
-                )
-            else:
-                out[k] = nv
-        elif k in owned_top_level:
-            # Dataclass owns this key and chose to omit it (default-strip
-            # or legacy-drop). Honour that decision.
+
+    merged = copy.deepcopy(existing)
+    for key in sorted(set(current) | set(baseline)):
+        if key in _V8_UNMODELED_OR_REMOVED_TOP_LEVEL or key.startswith("_"):
             continue
+        _apply_v8_modeled_delta(
+            merged,
+            key,
+            current.get(key, _V8_MISSING),
+            baseline.get(key, _V8_MISSING),
+        )
+
+    # ``observability`` is chiefly owned by the canonical v8 graph, so the
+    # legacy Python dataclass must never replace that top-level mapping.  The
+    # one target-runtime child it still owns is the notification-only
+    # per-connector webhook map. Apply that child structurally while preserving
+    # buckets, routes, destinations, redaction profiles, local storage, and any
+    # other Go-owned observability state already on disk.
+    current_observability = current.get("observability")
+    baseline_observability = baseline.get("observability")
+    current_connectors = (
+        current_observability.get("connectors", _V8_MISSING)
+        if isinstance(current_observability, dict)
+        else _V8_MISSING
+    )
+    baseline_connectors = (
+        baseline_observability.get("connectors", _V8_MISSING)
+        if isinstance(baseline_observability, dict)
+        else _V8_MISSING
+    )
+    if current_connectors != baseline_connectors:
+        observability = merged.get("observability")
+        if not isinstance(observability, dict):
+            observability = {}
         else:
-            # Unmodelled key — rescue it from the file. This is the
-            # whole point of the round-trip save.
-            out[k] = ev
-    # Pass 2: append keys present only in the dataclass output.
-    for k, nv in new.items():
-        if k not in existing:
-            out[k] = nv
-    return out
+            observability = copy.deepcopy(observability)
+        _apply_v8_modeled_delta(
+            observability,
+            "connectors",
+            current_connectors,
+            baseline_connectors,
+        )
+        merged["observability"] = observability
+    return merged
 
 
-def _deep_merge_nested(
-    existing: dict[str, Any],
-    new: dict[str, Any],
-    path: str = "",
-    authoritative_base: dict[str, dict[str, Any]] | None = None,
-    owned_base: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Recursive deep-merge for nested dicts.
-
-    Behaviour:
-
-    * If the dotted path of the recursing dict is in
-      :data:`_AUTHORITATIVE_MODELED_DICT_PATHS` (e.g.
-      ``otel.resource.attributes``), the dataclass dict is the
-      single source of truth. ``new`` wins atomically — no per-key
-      rescue from ``existing``. Setting the modeled map to ``{}``
-      therefore CLEARS the on-disk block, which is what callers
-      expect when they change tenant identifiers.
-
-    * Otherwise, keys only in ``existing`` are preserved (the
-      operator-added free-form rescue path) and keys in ``new``
-      win on overlap.
-    """
-    if path in _AUTHORITATIVE_MODELED_DICT_PATHS:
-        base = (authoritative_base or {}).get(path)
-        if base is not None and dict(new) == dict(base) and dict(existing) != dict(base):
-            return dict(existing)
-        # Atomic replace: dataclass dict wins. We deliberately keep
-        # the path in the recursion signature so future authoritative
-        # paths nested deeper still match without a separate flag.
-        return dict(new)
-    out: dict[str, Any] = {}
-    for k, ev in existing.items():
-        child = f"{path}.{k}" if path else k
-        if k in new:
-            nv = new[k]
-            if isinstance(ev, dict) and isinstance(nv, dict):
-                out[k] = _deep_merge_nested(
-                    ev,
-                    nv,
-                    path=child,
-                    authoritative_base=authoritative_base,
-                    owned_base=owned_base,
-                )
-            else:
-                out[k] = nv
-        elif "." not in k and child in _OWNED_NESTED_KEYS:
-            # Dataclass owns this nested key and chose to omit it (the
-            # omitempty strip in ``_config_to_dict`` removed its zero
-            # value). Drop it ONLY when this process actually loaded a
-            # value and cleared it — that is what makes `guardrail judge
-            # remove` persist. When the loaded snapshot has no value,
-            # this process never owned a change and the on-disk value
-            # came from a concurrent writer (e.g. `judge add` in another
-            # terminal while a TUI/wizard session was open): preserve
-            # it, mirroring the stale-writer rescue the authoritative
-            # dict paths get via ``authoritative_base``. The `"." not in
-            # k` guard keeps a literal YAML key that merely contains
-            # dots (e.g. an unmodeled `judge.hook_connectors` directly
-            # under `guardrail:`) from colliding with the dotted path of
-            # a modeled key — those stay on the preserve path below.
-            if (owned_base or {}).get(child):
-                continue
-            out[k] = ev
+def _apply_v8_modeled_delta(
+    target: dict[str, Any],
+    key: str,
+    current: Any,
+    baseline: Any,
+) -> None:
+    if current == baseline:
+        return
+    if current is _V8_MISSING:
+        target.pop(key, None)
+        return
+    if isinstance(current, dict) and isinstance(baseline, dict):
+        child = target.get(key)
+        if not isinstance(child, dict):
+            child = {}
         else:
-            out[k] = ev
-    for k, nv in new.items():
-        if k not in existing:
-            out[k] = nv
-    return out
+            child = copy.deepcopy(child)
+        for nested in sorted(set(current) | set(baseline)):
+            _apply_v8_modeled_delta(
+                child,
+                nested,
+                current.get(nested, _V8_MISSING),
+                baseline.get(nested, _V8_MISSING),
+            )
+        if child:
+            target[key] = child
+        else:
+            target.pop(key, None)
+        return
+    target[key] = copy.deepcopy(current)
 
 
 def _default_notifications_dict() -> dict[str, Any]:
@@ -3384,9 +3216,7 @@ def _serialize_asset_policy_connectors(cfg: Config, asset_policy: Any) -> None:
     * Empty map + never loaded with connectors → drop the key so a
       global-only config stays byte-identical after a load/save round-trip.
     * Empty map + WAS loaded with connectors → emit an explicit
-      ``connectors: {}`` so the authoritative atomic-replace in
-      :func:`_deep_merge_nested` clears the on-disk block (the map is in
-      :data:`_AUTHORITATIVE_MODELED_DICT_PATHS`).
+      ``connectors: {}`` so the v8 structural delta clears the on-disk block.
     * Non-empty map → drop ``None`` per-type blocks, an unset (``None``)
       ``registry_required``, and empty-string scalars so a populated map
       round-trips without ``mcp: null`` / ``registry_required: null`` noise.
@@ -3428,12 +3258,12 @@ def _serialize_asset_policy_connectors(cfg: Config, asset_policy: Any) -> None:
 
 
 def _strip_webhook_omitempty(wh: Any) -> None:
-    """Drop omitempty webhook keys in place (cooldown_seconds None, name "").
+    """Drop zero-valued optional webhook keys in place.
 
-    Mirrors Go's ``yaml:"cooldown_seconds,omitempty"`` / ``yaml:"name,omitempty"``
-    so a webhook that never set those stays byte-identical after a load/save
-    cycle. Shared by the top-level ``webhooks:`` serialization and the
-    per-connector ``observability.connectors[*].webhooks`` serialization.
+    Mirrors Go's ``omitempty`` behavior for ``cooldown_seconds``, ``name``, and
+    ``secret_env`` so a webhook that never set those fields remains valid under
+    the strict v8 environment-variable grammar. Shared by the top-level
+    ``webhooks:`` serialization and the notification-only per-connector map.
     """
     if not isinstance(wh, dict):
         return
@@ -3444,10 +3274,12 @@ def _strip_webhook_omitempty(wh: Any) -> None:
         wh.pop("cooldown_seconds", None)
     if wh.get("name", "") == "":
         wh.pop("name", None)
+    if wh.get("secret_env", "") == "":
+        wh.pop("secret_env", None)
 
 
 def _serialize_observability(cfg: Config, observability: Any, d: dict[str, Any]) -> None:
-    """In-place YAML cleanup for the ``observability:`` block (D5b).
+    """Serialize the Python-owned notification subset of ``observability``.
 
     Mirrors the ``asset_policy.connectors`` serialization handling:
 
@@ -3455,12 +3287,11 @@ def _serialize_observability(cfg: Config, observability: Any, d: dict[str, Any])
       whole ``observability:`` key so a global-only config stays
       byte-identical after a load/save round-trip.
     * Empty connectors + WAS loaded with connectors → emit an explicit
-      ``observability: {connectors: {}}`` so the authoritative atomic-replace
-      in :func:`_deep_merge_nested` clears the on-disk block (the map is in
-      :data:`_AUTHORITATIVE_MODELED_DICT_PATHS`).
-    * Non-empty connectors → drop the ``None`` (inherit-global) dimensions and
-      strip webhook omitempty keys so a populated map round-trips without
-      ``audit_sinks: null`` / ``webhooks: null`` noise.
+      ``observability: {connectors: {}}`` so the v8 structural delta clears the
+      on-disk block.
+    * Non-empty connectors → strip webhook zero values. Connector destinations
+      belong in canonical v8 destinations/routes; this surface owns
+      notifications only.
     """
     if not isinstance(observability, dict):
         d.pop("observability", None)
@@ -3476,19 +3307,23 @@ def _serialize_observability(cfg: Config, observability: Any, d: dict[str, Any])
     if not isinstance(connectors, dict):
         d.pop("observability", None)
         return
-    for entry in connectors.values():
+    empty_connectors: list[str] = []
+    for name, entry in connectors.items():
         if not isinstance(entry, dict):
+            empty_connectors.append(name)
             continue
-        # None dimension = "inherit global"; drop the key (a present list,
-        # including [], is an explicit override and is kept).
-        if entry.get("audit_sinks") is None:
-            entry.pop("audit_sinks", None)
         webhooks = entry.get("webhooks")
         if webhooks is None:
             entry.pop("webhooks", None)
         elif isinstance(webhooks, list):
             for wh in webhooks:
                 _strip_webhook_omitempty(wh)
+        if not entry:
+            empty_connectors.append(name)
+    for name in empty_connectors:
+        connectors.pop(name, None)
+    if not connectors:
+        d.pop("observability", None)
 
 
 def _disabled_ai_discovery_dict() -> dict[str, Any]:
@@ -4080,6 +3915,12 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
     hilt_raw = raw.get("hilt")
     if hilt_raw is None:
         hilt_raw = raw.get("hitl")
+    private_upstreams_raw = raw.get("allow_private_upstreams", [])
+    private_upstreams = (
+        [str(value).strip() for value in private_upstreams_raw if str(value).strip()]
+        if isinstance(private_upstreams_raw, (list, tuple))
+        else []
+    )
     return GuardrailConfig(
         enabled=raw.get("enabled", False),
         mode=raw.get("mode", "observe"),
@@ -4091,6 +3932,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         model_name=raw.get("model_name", ""),
         api_key_env=raw.get("api_key_env", ""),
         api_base=raw.get("api_base", ""),
+        allow_private_upstreams=private_upstreams,
         original_model=raw.get("original_model", ""),
         block_message=raw.get("block_message", ""),
         judge=_merge_judge(raw.get("judge")),
@@ -4409,10 +4251,8 @@ def _merge_observability_connectors(
     out: dict[str, PerConnectorObservability] = {}
     for name, entry in raw.items():
         entry = entry if isinstance(entry, dict) else {}
-        sinks = entry.get("audit_sinks")
         webhooks_raw = entry.get("webhooks")
         out[str(name)] = PerConnectorObservability(
-            audit_sinks=([dict(s) for s in sinks if isinstance(s, dict)] if isinstance(sinks, list) else None),
             webhooks=(_merge_webhooks(webhooks_raw) if isinstance(webhooks_raw, list) else None),
         )
     return out
@@ -4555,6 +4395,8 @@ def _load_dotenv_into_os(data_dir: str) -> None:
     even when not exported in the user's shell profile.
     """
     env_path = os.path.join(data_dir, ".env")
+    credential_provenance.begin_dotenv_load(data_dir, env_path)
+    seen_keys: set[str] = set()
     try:
         with open(env_path) as f:
             for line in f:
@@ -4565,8 +4407,17 @@ def _load_dotenv_into_os(data_dir: str) -> None:
                 key, value = key.strip(), value.strip()
                 if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
                     value = value[1:-1]
-                if key and key not in os.environ:
-                    os.environ[key] = value
+                if key and key not in seen_keys:
+                    seen_keys.add(key)
+                    injected = key not in os.environ
+                    if injected:
+                        os.environ[key] = value
+                    credential_provenance.note_dotenv_candidate(
+                        data_dir,
+                        key,
+                        value,
+                        injected=injected,
+                    )
     except FileNotFoundError:
         pass
     except OSError as exc:
@@ -4596,52 +4447,8 @@ def _warn_plaintext_secrets(cfg: Config) -> None:
         _warn("cisco_ai_defense", "api_key", "CISCO_AI_DEFENSE_API_KEY")
     if cfg.scanners.skill_scanner.virustotal_api_key:
         _warn("scanners.skill_scanner", "virustotal_api_key", "VIRUSTOTAL_API_KEY")
-    if cfg.splunk.hec_token:
+    if cfg._source_config_version != 8 and cfg.splunk.hec_token:
         _warn("splunk", "hec_token", "DEFENSECLAW_SPLUNK_HEC_TOKEN")
-
-
-def _warn_disable_redaction_config(cfg: Config) -> None:
-    """Emit the persistent redaction kill-switch warning once per process.
-
-    Colors the prefix and verb yellow when stderr is a TTY so the
-    operator notices it among the rest of a busy install log. Falls
-    back to plain text on non-TTY (CI logs, ``script``, ``script -a``,
-    redirected stderr) so build tooling that pattern-matches against
-    the message keeps working unchanged. We deliberately do NOT
-    obey ``NO_COLOR`` here because this warning is high-severity —
-    everyone should see it visibly highlighted when they have a TTY,
-    and ``NO_COLOR`` users have a plain-text fallback either way.
-    """
-    global _privacy_disable_redaction_warned
-    if not cfg.privacy.disable_redaction or _privacy_disable_redaction_warned:
-        return
-    _privacy_disable_redaction_warned = True
-
-    # Yellow + bold prefix, yellow body. On non-TTY we drop the
-    # ANSI codes entirely so the existing pattern-matchers in
-    # tests/CI keep working. ``click.style`` honors NO_COLOR
-    # implicitly, but for this single high-severity warning we
-    # also want it visible to TTY users who set NO_COLOR for OTHER
-    # reasons (e.g. screen readers that prefer cleaner panels) —
-    # so we manually gate on isatty only.
-    try:
-        is_tty = sys.stderr.isatty()
-    except (AttributeError, ValueError):
-        is_tty = False
-    if is_tty:
-        prefix = "\x1b[1;33m⚠ warning:\x1b[0m \x1b[33m"
-        suffix = "\x1b[0m"
-    else:
-        prefix, suffix = "warning: ", ""
-
-    print(
-        f"{prefix}privacy.disable_redaction=true — ALL sinks (audit DB, "
-        f"OTel logs, webhooks, Splunk HEC) will receive UNREDACTED prompts, "
-        f"judge bodies, and verdict reasons. Disable in shared/multi-tenant "
-        f"deployments via `defenseclaw setup redaction on`.{suffix}",
-        file=sys.stderr,
-    )
-
 
 def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     """Load config from the active config path, applying defaults.
@@ -4666,16 +4473,14 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     ss_raw = scanners_raw.get("skill_scanner", {})
     gw_raw = raw.get("gateway", {})
     splunk_raw = raw.get("splunk", {}) or {}
+    source_config_version = _exact_config_version(raw.get("config_version"))
+    audit_db = _audit_database_path(raw, data_dir, source_config_version)
 
-    # v4 compatibility: the Go gateway routes Splunk forwarding through
-    # the generic `audit_sinks:` list. The Python CLI still has its own
-    # fire-and-forget Splunk forwarder for events raised in process
-    # (aibom scan, skill quarantine, plugin disable, etc.), so mirror
-    # the first enabled `splunk_hec` sink into the legacy SplunkConfig
-    # shape *in memory only* — we never write the legacy block back to
-    # disk (see _config_to_dict). This preserves parallel Python → HEC
-    # forwarding without reintroducing the migration tripwire in
-    # internal/config/config.go::detectLegacySplunk.
+    # Upgrade/credential-preview compatibility: mirror the first enabled v7
+    # Splunk sink into the legacy DTO in memory. Target v8 commands must never
+    # use this projection; they read the canonical destination graph instead.
+    # The explicit upgrade converter owns translation, and Config.save never
+    # writes this block into an exact-v8 document.
     if not splunk_raw:
         for sink in raw.get("audit_sinks") or []:
             if not isinstance(sink, dict):
@@ -4710,7 +4515,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         llm=_merge_llm(raw.get("llm")),
         default_llm_api_key_env=raw.get("default_llm_api_key_env", ""),
         default_llm_model=raw.get("default_llm_model", ""),
-        audit_db=raw.get("audit_db", os.path.join(data_dir, AUDIT_DB_NAME)),
+        audit_db=audit_db,
         quarantine_dir=raw.get("quarantine_dir", os.path.join(data_dir, "quarantine")),
         plugin_dir=raw.get("plugin_dir", os.path.join(data_dir, "plugins")),
         policy_dir=raw.get("policy_dir", os.path.join(data_dir, "policies")),
@@ -4802,15 +4607,14 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         registries=_merge_registries(raw.get("registries")),
         webhooks=_merge_webhooks(raw.get("webhooks")),
         observability=_merge_observability(raw.get("observability")),
-        privacy=_merge_privacy(raw.get("privacy")),
         ai_discovery=_merge_ai_discovery(raw.get("ai_discovery")),
         application_protection=_merge_application_protection(raw.get("application_protection")),
         notifications=_merge_notifications(raw.get("notifications")),
     )
     cfg._loaded_authoritative_dicts = _snapshot_authoritative_dicts(raw)
     cfg._loaded_owned_nested_values = _snapshot_owned_nested_values(raw)
+    cfg._source_config_version = source_config_version
     _migrate_llm_fields(cfg)
-    _warn_disable_redaction_config(cfg)
     _warn_plaintext_secrets(cfg)
     # Fail loud on invalid guardrail value invariants, mirroring the Go
     # gateway's Load() which rejects the same shapes. Value-only check —
@@ -4825,21 +4629,38 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     # validated by their respective writers at write time.
     cfg.observability.validate()
     cfg.application_protection.validate()
+    if source_config_version == 8:
+        cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg
 
 
-def _merge_privacy(raw: dict[str, Any] | None) -> PrivacyConfig:
-    """Build a :class:`PrivacyConfig` from the YAML ``privacy:`` block.
+def _exact_config_version(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return 0
 
-    Defaults match the Go side (``disable_redaction: false``) so a
-    config without the block keeps the historical
-    redact-by-default contract.
-    """
-    if not isinstance(raw, dict):
-        return PrivacyConfig()
-    return PrivacyConfig(
-        disable_redaction=bool(raw.get("disable_redaction", False)),
-    )
+
+def _audit_database_path(raw: dict[str, Any], data_dir: str, source_version: int) -> str:
+    """Resolve Python readers/writers to the same local store as config v8."""
+
+    if source_version == 8:
+        observability = raw.get("observability")
+        local = observability.get("local") if isinstance(observability, dict) else None
+        configured = local.get("path") if isinstance(local, dict) else None
+        path = configured.strip() if isinstance(configured, str) else ""
+        if not path:
+            path = os.path.join(data_dir, AUDIT_DB_NAME)
+        elif not os.path.isabs(path):
+            path = os.path.join(data_dir, path)
+        return os.path.normpath(os.path.expanduser(path))
+    configured = raw.get("audit_db")
+    if isinstance(configured, str) and configured.strip():
+        return configured
+    return os.path.join(data_dir, AUDIT_DB_NAME)
 
 
 def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
@@ -4860,7 +4681,6 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         include_network_domains=bool(raw.get("include_network_domains", True)),
         max_files_per_scan=int(raw.get("max_files_per_scan", 1000) or 1000),
         max_file_bytes=int(raw.get("max_file_bytes", 512 * 1024) or 512 * 1024),
-        emit_otel=bool(raw.get("emit_otel", True)),
         store_raw_local_paths=bool(raw.get("store_raw_local_paths", False)),
         confidence_policy_path=str(raw.get("confidence_policy_path", "") or ""),
         require_trusted_binary_paths=bool(raw.get("require_trusted_binary_paths", False)),
@@ -4948,7 +4768,7 @@ def _merge_notifications(raw: dict[str, Any] | None) -> NotificationsConfig:
     """Build a :class:`NotificationsConfig` from the YAML ``notifications:`` block.
 
     Defaults are platform-conditional for the master switch (true on
-    darwin, false elsewhere — see :func:`_default_notifications_enabled`)
+    macOS and Windows, false elsewhere — see :func:`_default_notifications_enabled`)
     and on for every category and source so that once an operator
     opts in via ``defenseclaw setup notifications`` they immediately
     see every block surface; tuning down is then a matter of
@@ -5024,3 +4844,18 @@ def default_config() -> Config:
             device_key_file=os.path.join(data_dir, "device.key"),
         ),
     )
+
+
+def prepare_fresh_v8_config(cfg: Config) -> Config:
+    """Mark a never-persisted default config as a canonical v8 source.
+
+    Capturing dataclass defaults as the v8 baseline means the first save writes
+    only explicit first-run choices, plus ``config_version`` and the canonical
+    ``observability`` block.
+    """
+
+    if cfg is None or cfg._source_config_version != 0:
+        raise ValueError("fresh v8 configuration requires an unversioned default")
+    cfg._source_config_version = 8
+    cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
+    return cfg

@@ -4,6 +4,14 @@
 
 Draft for implementation planning.
 
+> [!NOTE]
+> This planning snapshot predates the observability-v8 hard cut. References below
+> to implicit `gateway.jsonl` reads or a global redaction toggle describe the v7
+> baseline being replaced; they are not current runtime requirements. The shipped
+> Python TUI reads canonical v8 SQLite event history and effective destination
+> policy. JSONL exists only when an explicit destination selects it. See
+> [`docs/OBSERVABILITY.md`](../OBSERVABILITY.md) for the current contract.
+
 ## Summary
 
 Replace the current Go Bubble Tea TUI with a Python Textual TUI while preserving the operational contract of the existing UI. The goal is not merely a visual refresh. The required outcome is behavior parity, materially better mouse support through widget-level click handling, and a polished futuristic operator-console interface that improves scanability, feedback, and day-to-day UX.

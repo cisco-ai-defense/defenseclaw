@@ -39,7 +39,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from defenseclaw.connector_paths import omnigent_config_path
+from defenseclaw.connector_paths import (
+    connector_config_files,
+    hermes_config_path,
+    omnigent_config_path,
+)
 from defenseclaw.inventory import agent_discovery
 
 if TYPE_CHECKING:
@@ -192,7 +196,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
 
     Safe to call repeatedly. Each step is idempotent:
 
-    * directories — ``os.makedirs(exist_ok=True)``
+    * directories — private owner/SYSTEM-only creation (idempotent)
     * policy seeding — skipped when destination already exists
     * audit DB — ``Store.init()`` runs ``CREATE TABLE IF NOT EXISTS``
     * gateway token — re-read from ``openclaw.json`` on every call
@@ -203,6 +207,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
     """
     from defenseclaw.config import config_path
     from defenseclaw.db import Store
+    from defenseclaw.file_permissions import make_private_directory
 
     report = BootstrapReport(
         data_dir=cfg.data_dir,
@@ -218,7 +223,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
         if not d:
             continue
         try:
-            os.makedirs(d, exist_ok=True)
+            make_private_directory(d)
             report.dirs_created.append(d)
         except OSError as exc:
             report.errors.append(f"mkdir {d}: {exc}")
@@ -235,7 +240,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
             continue
         if os.path.realpath(d).startswith(data_real + os.sep):
             try:
-                os.makedirs(d, exist_ok=True)
+                make_private_directory(d)
                 report.dirs_created.append(d)
             except OSError as exc:
                 report.errors.append(f"mkdir {d}: {exc}")
@@ -296,11 +301,42 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     connector_mode_warnings: list[dict] = []
 
     new_config = not os.path.exists(cfg_mod.config_path())
+    if not new_config:
+        try:
+            cfg_mod.require_v8_config()
+        except cfg_mod.ConfigVersionError:
+            cfg = cfg_mod.default_config()
+            setup.append(
+                StepResult(
+                    "Config",
+                    "fail",
+                    "configuration schema v8 is required",
+                    "defenseclaw upgrade",
+                )
+            )
+            return FirstRunReport(
+                status="needs_attention",
+                config_file=str(cfg_mod.config_path()),
+                data_dir=cfg.data_dir,
+                connector=connector,
+                profile=profile,
+                setup=setup,
+                next_commands=["defenseclaw upgrade"],
+                connector_mode_warnings=connector_mode_warnings,
+            )
     try:
         cfg = cfg_mod.load()
     except Exception:
         cfg = cfg_mod.default_config()
+        cfg_mod.prepare_fresh_v8_config(cfg)
         new_config = True
+    else:
+        # Loading an absent file returns the normal default dataclass rather
+        # than raising. Mark that never-persisted object as a fresh v8 source
+        # before the first mutation; ordinary Config.save deliberately rejects
+        # unversioned/legacy objects after the hard cutover.
+        if new_config and getattr(cfg, "_source_config_version", 0) == 0:
+            cfg_mod.prepare_fresh_v8_config(cfg)
 
     cfg.environment = cfg_mod.detect_environment()
     if profile == "action":
@@ -328,7 +364,14 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         store.init()
     except Exception as exc:  # broad: sqlite/file errors need to surface
         setup.append(StepResult("Audit DB", "fail", str(exc), "defenseclaw doctor --fix"))
-    logger = Logger(store, cfg.splunk)
+    # A genuinely new/pre-v8 bootstrap has no canonical graph yet. Re-running
+    # first-run against v8 must use the live owner and must not silently drop
+    # ordinary v8 setup mutations.
+    logger = (
+        Logger.no_runtime()
+        if new_config or getattr(cfg, "_source_config_version", None) != 8
+        else Logger.from_config(cfg)
+    )
 
     try:
         bootstrap = bootstrap_env(cfg, logger)
@@ -574,8 +617,7 @@ def _connector_mode_warning_steps(warnings: list[dict]) -> list[StepResult]:
         connector = warning.get("connector", "")
         label = _CONNECTOR_META.get(connector, {}).get("label", connector or "Connector")
         detail = (
-            f"requested action, configured observe: "
-            f"{warning.get('reason', 'connector version could not be verified')}"
+            f"requested action, configured observe: {warning.get('reason', 'connector version could not be verified')}"
         )
         steps.append(
             StepResult(
@@ -617,9 +659,7 @@ def _apply_first_run_choices(
             if _normalize_connector(str(key)) == wanted:
                 selected_override = pc
                 break
-        cfg.guardrail.connectors = {
-            connector: selected_override or PerConnectorGuardrailConfig()
-        }
+        cfg.guardrail.connectors = {connector: selected_override or PerConnectorGuardrailConfig()}
     else:
         cfg.guardrail.connectors = {}
     cfg.guardrail.scanner_mode = scanner_mode
@@ -629,15 +669,11 @@ def _apply_first_run_choices(
     if options.with_judge:
         cfg.guardrail.judge.enabled = True
         cfg.guardrail.judge.hook_connectors = (
-            list(options.judge_hook_connectors)
-            if options.judge_hook_connectors is not None
-            else ["*"]
+            list(options.judge_hook_connectors) if options.judge_hook_connectors is not None else ["*"]
         )
         if not cfg.guardrail.detection_strategy or cfg.guardrail.detection_strategy == "regex_only":
             cfg.guardrail.detection_strategy = "regex_judge"
-        completion_strategy = (
-            getattr(cfg.guardrail, "detection_strategy_completion", "") or ""
-        ).strip().lower()
+        completion_strategy = (getattr(cfg.guardrail, "detection_strategy_completion", "") or "").strip().lower()
         if completion_strategy in ("", "regex_only"):
             cfg.guardrail.detection_strategy_completion = "regex_judge"
     else:
@@ -1030,12 +1066,12 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "defenseclaw setup openclaw",
         )
     if connector == "codex":
-        path = os.path.expanduser("~/.codex/config.toml")
+        path = connector_config_files("codex")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Codex config found")
         return StepResult("Connector", "warn", "Codex config not found yet", "defenseclaw setup codex")
     if connector == "claudecode":
-        path = os.path.expanduser("~/.claude/settings.json")
+        path = connector_config_files("claudecode")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Claude Code settings found")
         return StepResult("Connector", "warn", "Claude Code settings not found yet", "defenseclaw setup claude-code")
@@ -1045,7 +1081,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             return StepResult("Connector", "pass", "ZeptoClaw config found")
         return StepResult("Connector", "warn", "ZeptoClaw config not found yet", "defenseclaw setup zeptoclaw")
     if connector == "hermes":
-        path = os.path.expanduser("~/.hermes/config.yaml")
+        path = hermes_config_path()
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Hermes config found")
         return StepResult("Connector", "warn", "Hermes config not found yet", "defenseclaw setup hermes")
@@ -1121,8 +1157,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         try:
             config_text = Path(path).read_text(encoding="utf-8")
             configured = all(
-                marker in config_text
-                for marker in ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")
+                marker in config_text for marker in ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")
             )
         except (OSError, UnicodeError):
             configured = False

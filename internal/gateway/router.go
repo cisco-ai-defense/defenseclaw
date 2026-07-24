@@ -25,57 +25,54 @@ import (
 	"sync"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
-
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
-
-// activeSpan tracks a pending tool call span with its start time.
-type activeSpan struct {
-	span      trace.Span
-	ctx       context.Context
-	startTime time.Time
-	tool      string
-	provider  string
-}
-
-// activeAgent tracks an invoke_agent span for a running agent session.
-type activeAgent struct {
-	span       trace.Span
-	ctx        context.Context
-	startTime  time.Time
-	sessionKey string
-}
 
 // EventRouter dispatches gateway events to the appropriate handlers and logs
 // everything to the audit store.
 type EventRouter struct {
-	client       *Client
-	store        *audit.Store
-	logger       *audit.Logger
-	policy       *enforce.PolicyEngine
-	otelMu       sync.RWMutex
-	otel         *telemetry.Provider
-	configMu     sync.RWMutex
-	notify       *NotificationQueue
-	judge        *LLMJudge
-	rp           *guardrail.RulePack
-	guardrailCfg *config.GuardrailConfig
-	hilt         *HILTApprovalManager
-	judgeSem     chan struct{} // bounds concurrent active tool-judge executions
+	client *Client
+	store  *audit.Store
+	logger *audit.Logger
+	policy *enforce.PolicyEngine
+	// The process-owned v8 capabilities are published atomically under one lock.
+	// EventRouter never retains a runtime generation lease or generated trace
+	// handle across WebSocket deliveries.
+	observabilityV8LifecycleMu   sync.RWMutex
+	observabilityV8Emitter       sidecarRuntimeEmitter
+	observabilityV8Lifecycle     lifecycleV8Runtime
+	observabilityV8Authoritative bool
+	configMu                     sync.RWMutex
+	notify                       *NotificationQueue
+	judge                        *LLMJudge
+	rp                           *guardrail.RulePack
+	guardrailCfg                 *config.GuardrailConfig
+	hilt                         *HILTApprovalManager
+	judgeSem                     chan struct{} // bounds concurrent active tool-judge executions
 
-	autoApprove      bool
-	activeToolSpans  map[string][]*activeSpan
-	activeAgentSpans map[string]*activeAgent // keyed by runId
-	activeLLMCtx     context.Context         // context of most recent LLM span, for tool→LLM hierarchy
-	spanMu           sync.Mutex
+	autoApprove bool
+	spanMu      sync.Mutex
+	// Ended W3C model contexts are keyed by source-backed session/run facts.
+	// Contexts contain no live span or runtime-generation lease.
+	activeLLMContexts map[eventRouterModelContextKey]eventRouterModelContextEntry
+
+	toolObservationMu    sync.Mutex
+	toolObservations     map[string]eventRouterToolObservation
+	toolObservationOrder []eventRouterToolObservationCacheEntry
+	toolObservationNow   func() time.Time
+
+	agentRunObservationMu    sync.Mutex
+	agentRunObservationCache map[agentRunObservationKey]time.Time
+	agentRunObservationOrder []agentRunObservationCacheEntry
+	agentRunTopologies       map[string]agentRunTopologyState
+	agentRunExecutions       map[agentRunExecutionKey]agentRunExecutionState
+	agentRunObservationNow   func() time.Time
 
 	activeSessionsMu sync.RWMutex
 	activeSessions   map[string]time.Time // sessionKey → last seen
@@ -92,42 +89,28 @@ type EventRouter struct {
 }
 
 // NewEventRouter creates a router that handles gateway events for the sidecar.
-func NewEventRouter(client *Client, store *audit.Store, logger *audit.Logger, autoApprove bool, otel *telemetry.Provider) *EventRouter {
+func NewEventRouter(client *Client, store *audit.Store, logger *audit.Logger, autoApprove bool) *EventRouter {
 	return &EventRouter{
-		client:           client,
-		store:            store,
-		logger:           logger,
-		policy:           enforce.NewPolicyEngine(store),
-		otel:             otel,
-		autoApprove:      autoApprove,
-		activeToolSpans:  make(map[string][]*activeSpan),
-		activeAgentSpans: make(map[string]*activeAgent),
-		activeSessions:   make(map[string]time.Time),
-		judgeSem:         make(chan struct{}, 16),
-		contextTracker:   NewContextTracker(0, 0),
+		client:                   client,
+		store:                    store,
+		logger:                   logger,
+		policy:                   enforce.NewPolicyEngine(store),
+		autoApprove:              autoApprove,
+		activeSessions:           make(map[string]time.Time),
+		judgeSem:                 make(chan struct{}, 16),
+		contextTracker:           NewContextTracker(0, 0),
+		agentRunObservationCache: make(map[agentRunObservationKey]time.Time),
+		agentRunTopologies:       make(map[string]agentRunTopologyState),
+		agentRunExecutions:       make(map[agentRunExecutionKey]agentRunExecutionState),
+		agentRunObservationNow:   time.Now,
+		toolObservations:         make(map[string]eventRouterToolObservation),
+		toolObservationNow:       time.Now,
+		activeLLMContexts:        make(map[eventRouterModelContextKey]eventRouterModelContextEntry),
 	}
 }
 
 func (r *EventRouter) SetHILTApprovalManager(m *HILTApprovalManager) {
 	r.hilt = m
-}
-
-func (r *EventRouter) SetOTelProvider(p *telemetry.Provider) {
-	if r == nil {
-		return
-	}
-	r.otelMu.Lock()
-	r.otel = p
-	r.otelMu.Unlock()
-}
-
-func (r *EventRouter) otelProvider() *telemetry.Provider {
-	if r == nil {
-		return nil
-	}
-	r.otelMu.RLock()
-	defer r.otelMu.RUnlock()
-	return r.otel
 }
 
 func (r *EventRouter) SetGuardrailConfig(cfg *config.GuardrailConfig) {
@@ -142,49 +125,12 @@ func (r *EventRouter) guardrailConfig() *config.GuardrailConfig {
 	return r.guardrailCfg
 }
 
-// getActiveAgentCtx returns the context from the currently active agent span,
-// providing parent-child hierarchy for LLM spans.
-// Falls back to context.Background() if no agent span is active.
-func (r *EventRouter) getActiveAgentCtx() context.Context {
-	r.spanMu.Lock()
-	defer r.spanMu.Unlock()
-	for _, aa := range r.activeAgentSpans {
-		return aa.ctx
-	}
-	return context.Background()
-}
-
-// getToolParentCtx returns the best parent context for tool/approval spans:
-// prefers the most recent LLM span context (for LLM→tool hierarchy),
-// falls back to agent context, then context.Background().
-func (r *EventRouter) getToolParentCtx() context.Context {
-	r.spanMu.Lock()
-	defer r.spanMu.Unlock()
-	if r.activeLLMCtx != nil {
-		return r.activeLLMCtx
-	}
-	for _, aa := range r.activeAgentSpans {
-		return aa.ctx
-	}
-	return context.Background()
-}
-
-// activeAgentCorrelation returns session_id / run_id from the currently
-// active agent span, when exactly one is active. Approval events do not
-// carry correlation identifiers on the wire, so this is best-effort: if
-// no agent span is active, both return values are empty. When multiple
-// agents run concurrently (multi-tenant sidecar), we also return empty
-// rather than guess — downstream SIEMs should prefer trace_id for
-// correlation in that case.
+// activeAgentCorrelation intentionally returns no inferred identity. Current
+// approval frames do not carry a trustworthy session/run anchor, and an
+// EventRouter lifecycle observation is not proof that a later frame belongs to
+// that run. A version-gated adapter may replace this only when the wire carries
+// the complete current/root/parent session and agent topology.
 func (r *EventRouter) activeAgentCorrelation() (sessionID, runID string) {
-	r.spanMu.Lock()
-	defer r.spanMu.Unlock()
-	if len(r.activeAgentSpans) != 1 {
-		return "", ""
-	}
-	for rid, aa := range r.activeAgentSpans {
-		return aa.sessionKey, rid
-	}
 	return "", ""
 }
 
@@ -244,7 +190,7 @@ func (r *EventRouter) SetDefaultAgentName(name string) {
 
 // SetDefaultPolicyID sets the identifier of the active guardrail /
 // admission policy. Threaded into tool and approval spans so downstream
-// SIEMs (Splunk Local Bridge, AgentWatch) can aggregate per-policy.
+// downstream SIEM projections can aggregate per policy.
 func (r *EventRouter) SetDefaultPolicyID(id string) {
 	r.configMu.Lock()
 	r.defaultPolicyID = id
@@ -584,7 +530,6 @@ func (r *EventRouter) handleSessionTool(evt EventFrame) {
 // the sidecar is subscribed to a session, using the same stream format as
 // session.tool (runId, stream:"tool", data:{phase, name, ...}).
 func (r *EventRouter) handleSessionMessage(evt EventFrame) {
-	otel := r.otelProvider()
 	// OpenClaw sends two session.message formats:
 	//   Format A (chat message): {sessionKey, message:{role,content,...}, messageSeq, session:{...}}
 	//   Format B (tool stream):  {stream:"tool", data:{phase,name,...}, runId, sessionKey}
@@ -655,11 +600,19 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 
 		msgCtx := ContextWithSessionID(context.Background(), envelope.SessionKey)
 		msgMeta := streamLLMEventMeta(r, envelope.SessionKey, envelope.RunID, msg.Provider, msg.Model, "")
-		msgMeta.TurnID = firstNonEmpty(envelope.MessageID, intString(envelope.MessageSeq))
+		// messageId is exact message/source-frame evidence, never a turn. The
+		// stream coordinator mints a UUIDv7 turn at the user-prompt boundary
+		// and restores it for the assistant frame from durable pending state.
+		msgMeta.MessageID = envelope.MessageID
+		msgMeta.SourceEventID = envelope.MessageID
+		msgMeta.SourceSequence = intString(envelope.MessageSeq)
+		modelEventCtx := msgCtx
+		modelEventMeta := msgMeta
+		emitModelOperation := true
 		switch msg.Role {
 		case "user":
 			msgMeta.PromptID = promptIDForSessionMessage(envelope.SessionKey, envelope.MessageSeq, envelope.MessageID)
-			emitLLMPromptEvent(msgCtx, msgMeta, contentStr, envelope.Message)
+			r.emitLLMPromptEventV8(msgCtx, msgMeta, contentStr, envelope.Message)
 		case "assistant":
 			msgMeta.PromptID = replyPromptIDForSessionMessage(envelope.SessionKey, envelope.MessageSeq)
 			msgMeta.ResponseID = stableLLMEventID("response", "openclaw", envelope.SessionKey, envelope.MessageID, intString(envelope.MessageSeq))
@@ -667,7 +620,9 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 			if msg.StopReason != "" {
 				finishReasons = []string{msg.StopReason}
 			}
-			emitLLMResponseEvent(msgCtx, msgMeta, contentStr, string(msg.Content), finishReasons)
+			_, modelEventCtx, modelEventMeta, emitModelOperation = r.emitLLMResponseEventV8Correlated(
+				msgCtx, msgMeta, contentStr, string(msg.Content), finishReasons,
+			)
 		}
 
 		if r.hilt != nil && r.hilt.ResolveFromMessage(envelope.SessionKey, msg.Role, contentStr) {
@@ -685,58 +640,38 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 				msg.StopReason, redaction.MessageContent(msg.ErrorMessage), msg.Provider, msg.Model)
 		}
 
-		// Emit LLM span for assistant messages with a known model.
-		// This captures LLM invocations that arrive via the WebSocket
-		// (the direct OpenClaw → LLM path, not the guardrail proxy).
-		// Uses the active agent context as parent for proper hierarchy.
-		// Stores the LLM context so subsequent tool spans become children.
-		if otel != nil && msg.Role == "assistant" && msg.Model != "" {
-			system := inferSystem(msg.Provider, msg.Model)
-			promptTokens, completionTokens := 0, 0
+		// A completed assistant message is a bounded generated model
+		// operation. The source reports no start instant, so the adapter
+		// records a truthful zero-duration span and retains only its ended
+		// W3C context for a subsequent tool or approval child.
+		if msg.Role == "assistant" && msg.Model != "" && emitModelOperation {
+			promptTokens, completionTokens := int64(0), int64(0)
 			if msg.Usage != nil {
-				promptTokens = msg.Usage.PromptTokens
-				completionTokens = msg.Usage.CompletionTokens
+				promptTokens = int64(msg.Usage.PromptTokens)
+				completionTokens = int64(msg.Usage.CompletionTokens)
 			}
 			finishReasons := []string{}
 			if msg.StopReason != "" {
 				finishReasons = []string{msg.StopReason}
 			}
-			// Count tool_use blocks in content to populate tool_calls attribute.
-			toolCallCount := countToolUseBlocks(msg.Content)
-
-			parentCtx := r.getActiveAgentCtx()
-			now := time.Now()
-			llmCtx, span := otel.StartLLMSpan(
-				parentCtx,
-				system, msg.Model, msg.Provider,
-				0, 0.0,
+			toolCallCount := int64(countToolUseBlocks(msg.Content))
+			meta := eventRouterModelMeta(
+				r, envelope.SessionKey, envelope.RunID, envelope.MessageID,
+				envelope.MessageSeq, msg.Provider, msg.Model,
 			)
-			otel.SetRawSpanString(span, "defenseclaw.llm.response.content", contentStr)
-			otel.SetRawSpanString(span, "defenseclaw.llm.response.raw_content", string(msg.Content))
-			if span != nil {
-				span.SetAttributes(attribute.Bool("defenseclaw.telemetry.input.reported", false))
-			}
-			otel.SetGenAIOutput(span, contentStr)
-			otel.EndLLMSpan(
-				parentCtx,
-				span, msg.Model,
-				promptTokens, completionTokens,
-				finishReasons, toolCallCount,
-				"none", "",
-				system, now,
-				r.agentNameForStream(""),
-				r.agentNameForStream(""),
-				SharedAgentRegistry().AgentID(),
-				SessionIDFromContext(parentCtx),
+			meta.TurnID = modelEventMeta.TurnID
+			meta.PromptID = modelEventMeta.PromptID
+			meta.ResponseID = modelEventMeta.ResponseID
+			llmCtx := r.emitEventRouterModelV8(
+				modelEventCtx, meta, msg.Provider, msg.Model, contentStr,
+				promptTokens, completionTokens, toolCallCount, finishReasons, time.Now().UTC(),
+			)
+			r.rememberEventRouterModelContext(
+				envelope.SessionKey, envelope.RunID, llmCtx, time.Now().UTC(),
 			)
 
-			// Store LLM context so tool_call spans become children of this LLM span.
-			r.spanMu.Lock()
-			r.activeLLMCtx = llmCtx
-			r.spanMu.Unlock()
-
-			readLoopLogf("[bifrost] session.message: emitted LLM span model=%s provider=%s system=%s tokens=%d/%d",
-				msg.Model, msg.Provider, system, promptTokens, completionTokens)
+			readLoopLogf("[bifrost] session.message: emitted generated model operation model=%s provider=%s tokens=%d/%d",
+				msg.Model, msg.Provider, promptTokens, completionTokens)
 		}
 
 		if r.contextTracker != nil && envelope.SessionKey != "" && contentStr != "" {
@@ -750,32 +685,31 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 		// raise audit rows but cannot block or confirm. Without
 		// this hook, prompts that bypass the guardrail HTTP proxy
 		// (e.g. OpenClaw shelling out to a separate CLI subprocess
-		// whose fetch is not monkey-patched) are logged to
-		// gateway.jsonl but never judged.
+		// whose fetch is not monkey-patched) are recorded as canonical
+		// prompt events but never judged.
 		if msg.Role == "user" && contentStr != "" {
 			r.scanInboundPrompt(envelope.SessionKey, envelope.MessageID, msg.Model, contentStr)
 		}
 
-		if msg.Role == "user" && r.contextTracker != nil && envelope.SessionKey != "" {
+		// managed_enterprise: multi-turn injection detection is a local
+		// heuristic — disabled so AID stays the sole decision-maker.
+		if !ManagedEnterpriseActive() && msg.Role == "user" && r.contextTracker != nil && envelope.SessionKey != "" {
 			if r.contextTracker.HasRepeatedInjection(envelope.SessionKey, 3) {
 				r.logStreamAction(envelope.SessionKey, string(audit.ActionGatewayMultiTurnInjection), envelope.SessionKey,
 					"repeated injection patterns detected across multiple user turns")
 				// Async read-loop context — stamp session_id so the
 				// verdict event carries the conversation identifier
 				// even though we're outside any HTTP request.
-				vctx := r.streamContext(envelope.SessionKey, audit.CorrelationEnvelope{TurnID: envelope.MessageID})
+				vctx := r.streamContext(envelope.SessionKey, audit.CorrelationEnvelope{})
 				emitVerdict(vctx, gatewaylog.StageMultiTurn, gatewaylog.DirectionPrompt, "",
 					"warn", "repeated injection patterns across user turns",
 					gatewaylog.SeverityHigh, []string{"injection:multi-turn"}, 0)
-				if otel != nil {
-					otel.EmitRuntimeAlert(
-						telemetry.AlertToolCallFlagged, "HIGH", telemetry.SourceLocalPattern,
-						fmt.Sprintf("Multi-turn injection attempt in session %s", truncate(envelope.SessionKey, 32)),
-						map[string]string{"session": envelope.SessionKey},
-						map[string]string{"action_taken": "alert"},
-						"", "",
-					)
-				}
+				meta := streamLLMEventMeta(r, envelope.SessionKey, envelope.RunID, "builtin", msg.Model, "")
+				meta.MessageID = envelope.MessageID
+				r.recordEventRouterGuardrailMetricsV8(vctx, eventRouterGuardrailMetricObservation{
+					meta: meta, severity: "HIGH", alertType: "prompt-injection",
+					alertSource: "local-pattern", observedAt: time.Now().UTC(),
+				})
 			}
 		}
 
@@ -807,7 +741,6 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 // Only prompts that light up the deterministic regex stage escalate
 // to the judge.
 func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content string) {
-	otel := r.otelProvider()
 	if content == "" {
 		return
 	}
@@ -852,7 +785,7 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 	severity := deriveSeverity(verdict.Severity)
 	categories := categoriesOf(verdict.Findings)
 
-	vctx := r.streamContext(sessionKey, audit.CorrelationEnvelope{TurnID: messageID})
+	vctx := r.streamContext(sessionKey, audit.CorrelationEnvelope{})
 	emitVerdict(
 		vctx,
 		gatewaylog.StageSessionMessage,
@@ -864,30 +797,21 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 		categories,
 		latencyMs,
 	)
+	meta := streamLLMEventMeta(r, sessionKey, "", "builtin", model, "")
+	meta.MessageID = messageID
+	r.recordEventRouterGuardrailMetricsV8(vctx, eventRouterGuardrailMetricObservation{
+		meta: meta, action: verdict.Action, severity: verdict.Severity,
+		alertType: "prompt-injection", alertSource: "local-pattern", observedAt: time.Now().UTC(),
+	})
 
-	// verdict.Findings / verdict.Reason are minted directly from user
-	// content and can carry literal PII (emails, SSNs, secrets) when
-	// the local-pattern scanner matches. Always redact before any
-	// sink, log line, or UI surface — same rules as handleSessionTool.
-	scrubbedReason := redaction.ForSinkReason(verdict.Reason)
+	// Preserve the source reason for canonical per-destination redaction. The
+	// stderr summary below omits it; only log-injection controls are removed
+	// before the structured fact reaches the v8 runtime.
+	auditReason := stripLogInjectionRunes(verdict.Reason)
 	r.logStreamAction(sessionKey, string(audit.ActionGatewaySessionPromptAlert), sessionKey,
 		fmt.Sprintf("msgId=%s model=%s action=%s severity=%s findings=%d reason=%s",
 			messageID, model, verdict.Action, verdict.Severity,
-			len(verdict.Findings), scrubbedReason))
-
-	if otel != nil {
-		otel.EmitRuntimeAlert(
-			telemetry.AlertPromptInjection, verdict.Severity, telemetry.SourceLocalPattern,
-			fmt.Sprintf("Inbound prompt flagged in session %s", truncate(sessionKey, 32)),
-			map[string]string{
-				"session":    sessionKey,
-				"message_id": messageID,
-				"model":      model,
-			},
-			map[string]string{"action_taken": verdict.Action},
-			"", "",
-		)
-	}
+			len(verdict.Findings), auditReason))
 
 	r.persistSessionPromptScan(verdict, sessionKey, messageID, elapsed)
 
@@ -941,22 +865,20 @@ func (r *EventRouter) handleChatEvent(evt EventFrame, seqStr string) {
 	readLoopLogf("[bifrost] chat: state=%s session=%s runId=%s seq=%d",
 		ce.State, ce.SessionKey, ce.RunID, ce.Seq)
 	if ce.State == "error" {
-		// Chat error messages follow the same leak profile as
-		// session.message errors: upstream text frequently
-		// includes echoed prompt snippets. Scrub operator-
-		// facing stderr and the persistent audit detail.
-		// audit.Logger also scrubs again via sanitizeEvent so
-		// this is belt-and-braces defense in depth.
+		// Operator-facing stderr remains redacted. The canonical audit fact keeps
+		// bounded source content so every destination can apply its own profile.
 		scrubbedErr := redaction.MessageContent(ce.ErrorMessage)
 		readLoopLogf("[bifrost] chat ERROR: %q session=%s runId=%s",
 			scrubbedErr, ce.SessionKey, ce.RunID)
 		r.logStreamAction(ce.SessionKey, string(audit.ActionGatewayChatError), ce.SessionKey,
 			fmt.Sprintf("runId=%s error=%s", ce.RunID,
-				truncate(redaction.ForSinkString(ce.ErrorMessage), 200)))
+				truncate(stripLogInjectionRunes(ce.ErrorMessage), 200)))
 		ectx := ContextWithSessionID(context.Background(), ce.SessionKey)
 		emitError(ectx, "chat", "chat-error",
 			fmt.Sprintf("runId=%s session=%s", ce.RunID, ce.SessionKey),
 			fmt.Errorf("%s", redaction.ForSinkString(ce.ErrorMessage)))
+		metricRuntime, _ := r.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+		recordGatewayErrorV8(ectx, metricRuntime, "chat", "chat-error")
 	}
 }
 
@@ -991,18 +913,26 @@ type agentToolResult struct {
 	ExitCode *int   `json:"exitCode,omitempty"`
 }
 
+type agentStreamEnvelope struct {
+	RunID            string          `json:"runId"`
+	Stream           string          `json:"stream"`
+	Data             json.RawMessage `json:"data,omitempty"`
+	SessionKey       string          `json:"sessionKey"`
+	SessionID        string          `json:"sessionId,omitempty"`
+	AgentID          string          `json:"agentId,omitempty"`
+	SpawnedBy        string          `json:"spawnedBy,omitempty"`
+	ParentSessionKey string          `json:"parentSessionKey,omitempty"`
+	ParentSessionID  string          `json:"parentSessionId,omitempty"`
+	SpawnDepth       *int64          `json:"spawnDepth,omitempty"`
+	Seq              int64           `json:"seq"`
+	Ts               int64           `json:"ts"`
+}
+
 func (r *EventRouter) handleAgentEvent(evt EventFrame) {
 	// OpenClaw sends two agent event formats:
 	//   Format A (stream): {runId, stream:"lifecycle"|"tool"|"text", data:{phase,...}, sessionKey, seq, ts}
 	//   Format B (legacy): {type, toolCall:{...}, toolResult:{...}, content}
-	var streamEvt struct {
-		RunID      string          `json:"runId"`
-		Stream     string          `json:"stream"`
-		Data       json.RawMessage `json:"data,omitempty"`
-		SessionKey string          `json:"sessionKey"`
-		Seq        int             `json:"seq"`
-		Ts         int64           `json:"ts"`
-	}
+	var streamEvt agentStreamEnvelope
 	if err := json.Unmarshal(evt.Payload, &streamEvt); err == nil && streamEvt.Stream != "" {
 		r.handleAgentStreamEvent(streamEvt, evt)
 		return
@@ -1082,26 +1012,24 @@ func (r *EventRouter) handleAgentEvent(evt EventFrame) {
 
 // agentStreamData captures the data envelope of OpenClaw's stream-based agent events.
 type agentStreamData struct {
-	Phase      string          `json:"phase"`
-	Name       string          `json:"name"`
-	ToolCallID string          `json:"toolCallId"`
-	Args       json.RawMessage `json:"args,omitempty"`
-	Error      string          `json:"error,omitempty"`
-	StartedAt  int64           `json:"startedAt,omitempty"`
-	EndedAt    int64           `json:"endedAt,omitempty"`
-	IsError    bool            `json:"isError,omitempty"`
-	Meta       string          `json:"meta,omitempty"`
+	Phase            string          `json:"phase"`
+	Name             string          `json:"name"`
+	ToolCallID       string          `json:"toolCallId"`
+	Args             json.RawMessage `json:"args,omitempty"`
+	Error            string          `json:"error,omitempty"`
+	StartedAt        int64           `json:"startedAt,omitempty"`
+	EndedAt          int64           `json:"endedAt,omitempty"`
+	IsError          bool            `json:"isError,omitempty"`
+	Meta             string          `json:"meta,omitempty"`
+	SessionID        string          `json:"sessionId,omitempty"`
+	AgentID          string          `json:"agentId,omitempty"`
+	SpawnedBy        string          `json:"spawnedBy,omitempty"`
+	ParentSessionKey string          `json:"parentSessionKey,omitempty"`
+	ParentSessionID  string          `json:"parentSessionId,omitempty"`
+	SpawnDepth       *int64          `json:"spawnDepth,omitempty"`
 }
 
-func (r *EventRouter) handleAgentStreamEvent(se struct {
-	RunID      string          `json:"runId"`
-	Stream     string          `json:"stream"`
-	Data       json.RawMessage `json:"data,omitempty"`
-	SessionKey string          `json:"sessionKey"`
-	Seq        int             `json:"seq"`
-	Ts         int64           `json:"ts"`
-}, evt EventFrame) {
-	otel := r.otelProvider()
+func (r *EventRouter) handleAgentStreamEvent(se agentStreamEnvelope, evt EventFrame) {
 	var data agentStreamData
 	if se.Data != nil {
 		_ = json.Unmarshal(se.Data, &data)
@@ -1115,81 +1043,23 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 		switch data.Phase {
 		case "start":
 			readLoopLogf("[bifrost] agent lifecycle START runId=%s", se.RunID)
-			r.logStreamAction(se.SessionKey, string(audit.ActionGatewayAgentStart), se.SessionKey,
-				fmt.Sprintf("runId=%s", se.RunID))
-
-			// Start invoke_agent span as root of this agent run.
-			if otel != nil && se.RunID != "" {
-				// Use sessionKey as conversation.id; fall back to runId.
-				conversationID := se.SessionKey
-				if conversationID == "" {
-					conversationID = se.RunID
-				}
-				agentCtx, agentSpan := otel.StartAgentSpan(
-					context.Background(),
-					conversationID,           // conversation.id
-					r.agentNameForStream(""), // agent name (claw mode fallback)
-					r.agentNameForStream(""), // agent type
-					SharedAgentRegistry().AgentID(),
-					"",                       // provider filled on session.message
-					r.agentNameForStream(""), // connector / claw mode
-				)
-				r.spanMu.Lock()
-				r.activeAgentSpans[se.RunID] = &activeAgent{
-					span:       agentSpan,
-					ctx:        agentCtx,
-					startTime:  time.Now(),
-					sessionKey: se.SessionKey,
-				}
-				r.spanMu.Unlock()
-			}
+			r.emitAgentRunObservationV8(se, data)
 
 		case "error":
 			// Agent lifecycle error messages are upstream LLM /
 			// framework errors. Same leak profile as chat
 			// errors — may quote user prompts or inner
 			// model-graph state. Scrub for stderr, audit, and
-			// the OTel span tag.
+			// the generated record's configured destination projection.
 			scrubbedErr := redaction.MessageContent(data.Error)
 			readLoopLogf("[bifrost] agent lifecycle ERROR runId=%s error=%q", se.RunID, scrubbedErr)
-			r.logStreamAction(se.SessionKey, string(audit.ActionGatewayAgentError), se.SessionKey,
-				fmt.Sprintf("runId=%s error=%s", se.RunID,
-					truncate(redaction.ForSinkString(data.Error), 200)))
-			ectx := ContextWithSessionID(context.Background(), se.SessionKey)
-			emitError(ectx, "agent", "agent-error",
-				fmt.Sprintf("runId=%s session=%s", se.RunID, se.SessionKey),
-				fmt.Errorf("%s", redaction.ForSinkString(data.Error)))
-
-			// End invoke_agent span with error.
-			if otel != nil && se.RunID != "" {
-				r.spanMu.Lock()
-				r.activeLLMCtx = nil
-				if aa := r.activeAgentSpans[se.RunID]; aa != nil {
-					delete(r.activeAgentSpans, se.RunID)
-					r.spanMu.Unlock()
-					otel.EndAgentSpan(aa.span, truncate(redaction.ForSinkString(data.Error), 256))
-				} else {
-					r.spanMu.Unlock()
-				}
-			}
+			r.emitAgentRunObservationV8(se, data)
+			r.clearEventRouterModelContexts(se.SessionKey, se.RunID)
 
 		case "end":
 			readLoopLogf("[bifrost] agent lifecycle END runId=%s", se.RunID)
-			r.logStreamAction(se.SessionKey, string(audit.ActionGatewayAgentEnd), se.SessionKey,
-				fmt.Sprintf("runId=%s", se.RunID))
-
-			// End invoke_agent span successfully.
-			if otel != nil && se.RunID != "" {
-				r.spanMu.Lock()
-				r.activeLLMCtx = nil
-				if aa := r.activeAgentSpans[se.RunID]; aa != nil {
-					delete(r.activeAgentSpans, se.RunID)
-					r.spanMu.Unlock()
-					otel.EndAgentSpan(aa.span, "")
-				} else {
-					r.spanMu.Unlock()
-				}
-			}
+			r.emitAgentRunObservationV8(se, data)
+			r.clearEventRouterModelContexts(se.SessionKey, se.RunID)
 
 		default:
 			readLoopLogf("[bifrost] agent lifecycle phase=%s runId=%s", data.Phase, se.RunID)
@@ -1224,24 +1094,30 @@ func (r *EventRouter) handleAgentStreamEvent(se struct {
 }
 
 func (r *EventRouter) handleToolCall(evt EventFrame) {
-	otel := r.otelProvider()
 	var payload ToolCallPayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] parse tool_call: %v\n", err)
 		return
 	}
+	toolStartedAt := time.Now().UTC()
+	_, _, observabilityV8Authoritative := r.observabilityV8CapabilitiesSnapshot()
 
-	r.logStreamToolAction(payload.SessionID, string(audit.ActionGatewayToolCall), payload.Tool, payload.ID,
-		fmt.Sprintf("status=%s args_length=%d", payload.Status, len(payload.Args)))
-	meta := streamLLMEventMeta(r, payload.SessionID, payload.RunID, "builtin", "", payload.AgentName)
-	meta.ToolID = payload.ID
-	meta.ToolName = payload.Tool
-	emitToolInvocationEvent(context.Background(), meta, "call", payload.Tool, stringFromJSONRaw(payload.Args), "", nil)
+	toolObservation := generatedToolV8Observation{}
+	if observabilityV8Authoritative {
+		toolObservation = r.observeEventRouterToolCallV8(payload, toolStartedAt, false)
+	} else {
+		r.logStreamToolAction(payload.SessionID, string(audit.ActionGatewayToolCall), payload.Tool, payload.ID,
+			fmt.Sprintf("status=%s args_length=%d", payload.Status, len(payload.Args)))
+	}
 
 	// Static block/allow list — checked before any pattern scanning.
 	// Connector-scoped (@C/T) entries resolve before the bare global entry;
 	// the connector is this sidecar's configured connector (see connectorName).
-	if r.policy != nil {
+	//
+	// managed_enterprise: explicit local policy (MCP-server block, static
+	// block/allow) is bypassed — Cisco AI Defense is the sole decision-maker
+	// and the request fails open through this router lane.
+	if !ManagedEnterpriseActive() && r.policy != nil {
 		conn := r.connectorName()
 		// MCP-server runtime block: a blocked MCP server (global or
 		// --connector scoped) denies all of its tools at runtime. Checked
@@ -1259,9 +1135,15 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 			emitVerdict(vctx, gatewaylog.StageBlockList, gatewaylog.DirectionPrompt, payload.Tool,
 				"block", reason,
 				gatewaylog.SeverityHigh, []string{"policy:block", "surface:mcp_server_block"}, 0)
-			if otel != nil {
-				otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
-			}
+			toolObservation.outcome = observability.OutcomeBlocked
+			toolObservation.toolStatus = "blocked"
+			toolObservation.dangerous = true
+			toolObservation.finishedAt = time.Now().UTC()
+			r.recordEventRouterGuardrailMetricsV8(vctx, eventRouterGuardrailMetricObservation{
+				meta: toolObservation.meta, tool: payload.Tool, action: "block",
+				severity: "HIGH", observedAt: toolObservation.finishedAt,
+			})
+			r.emitEventRouterToolTerminalV8(toolObservation)
 			return
 		}
 		blocked, err := r.policy.IsToolBlockedForConnector(payload.Tool, conn)
@@ -1277,9 +1159,16 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 			emitVerdict(vctx, gatewaylog.StageBlockList, gatewaylog.DirectionPrompt, payload.Tool,
 				"block", reason,
 				gatewaylog.SeverityHigh, []string{"policy:error", "surface:tool_call", toolPolicyLookupErrorFinding}, 0)
-			if otel != nil {
-				otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
-			}
+			toolObservation.outcome = observability.OutcomeRejected
+			toolObservation.toolStatus = "failed"
+			toolObservation.errorType = "policy_lookup_failed"
+			toolObservation.technicalFailure = true
+			toolObservation.finishedAt = time.Now().UTC()
+			r.recordEventRouterGuardrailMetricsV8(vctx, eventRouterGuardrailMetricObservation{
+				meta: toolObservation.meta, tool: payload.Tool, action: "block",
+				severity: "HIGH", observedAt: toolObservation.finishedAt,
+			})
+			r.emitEventRouterToolTerminalV8(toolObservation)
 			return
 		}
 		if blocked {
@@ -1293,9 +1182,15 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 			emitVerdict(vctx, gatewaylog.StageBlockList, gatewaylog.DirectionPrompt, payload.Tool,
 				"block", "static block list",
 				gatewaylog.SeverityHigh, []string{"policy:block", "surface:tool_call"}, 0)
-			if otel != nil {
-				otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
-			}
+			toolObservation.outcome = observability.OutcomeBlocked
+			toolObservation.toolStatus = "blocked"
+			toolObservation.dangerous = true
+			toolObservation.finishedAt = time.Now().UTC()
+			r.recordEventRouterGuardrailMetricsV8(vctx, eventRouterGuardrailMetricObservation{
+				meta: toolObservation.meta, tool: payload.Tool, action: "block",
+				severity: "HIGH", observedAt: toolObservation.finishedAt,
+			})
+			r.emitEventRouterToolTerminalV8(toolObservation)
 			return
 		}
 		// An explicit allow skips the scan gate: no rule scan, no judge. This
@@ -1314,16 +1209,29 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 			emitVerdict(vctx, gatewaylog.StageBlockList, gatewaylog.DirectionPrompt, payload.Tool,
 				"block", reason,
 				gatewaylog.SeverityHigh, []string{"policy:error", "surface:tool_call", toolPolicyLookupErrorFinding}, 0)
-			if otel != nil {
-				otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
-			}
+			toolObservation.outcome = observability.OutcomeRejected
+			toolObservation.toolStatus = "failed"
+			toolObservation.errorType = "policy_lookup_failed"
+			toolObservation.technicalFailure = true
+			toolObservation.finishedAt = time.Now().UTC()
+			r.recordEventRouterGuardrailMetricsV8(vctx, eventRouterGuardrailMetricObservation{
+				meta: toolObservation.meta, tool: payload.Tool, action: "block",
+				severity: "HIGH", observedAt: toolObservation.finishedAt,
+			})
+			r.emitEventRouterToolTerminalV8(toolObservation)
 			return
 		}
 		if allowed {
-			r.logStreamToolAction(payload.SessionID, "gateway-tool-call-allowed", payload.Tool, payload.ID, "reason=allow-list")
-			if otel != nil {
-				otel.RecordInspectEvaluation(context.Background(), payload.Tool, "allow", "NONE")
-			}
+			// The allow-list disposition is a gateway-tool-call occurrence with
+			// an explicit allow reason. "gateway-tool-call-allowed" was never a
+			// registered audit action, so the strict v8 runtime correctly rejected
+			// it instead of persisting an unclassified compatibility record.
+			r.logStreamToolAction(payload.SessionID, string(audit.ActionGatewayToolCall), payload.Tool, payload.ID, "reason=allow-list")
+			r.recordEventRouterGuardrailMetricsV8(context.Background(), eventRouterGuardrailMetricObservation{
+				meta: toolObservation.meta, tool: payload.Tool, action: "allow",
+				severity: "NONE", observedAt: time.Now().UTC(),
+			})
+			r.rememberEventRouterToolCallV8(toolObservation)
 			return
 		}
 	}
@@ -1340,79 +1248,50 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 				findings[0].RuleID, findings[0].Severity, findings[0].Confidence))
 		fmt.Fprintf(os.Stderr, "[sidecar] FLAGGED tool call: %s (%s)\n", payload.Tool, findings[0].Title)
 
-		if otel != nil {
-			otel.EmitRuntimeAlert(
-				telemetry.AlertToolCallFlagged,
-				severity,
-				telemetry.SourceToolInspect,
-				fmt.Sprintf("Dangerous tool call: %s — %s", payload.Tool, findings[0].Title),
-				map[string]string{"tool": payload.Tool},
-				map[string]string{"rule_id": flaggedPattern, "action": "flagged"},
-				"", "",
-			)
-		}
+		vctx := r.streamContext(payload.SessionID, audit.CorrelationEnvelope{
+			DestinationApp: "builtin", ToolName: payload.Tool, ToolID: payload.ID,
+		})
+		emitVerdict(vctx, gatewaylog.StageRegex, gatewaylog.DirectionToolCall, "",
+			"alert", findings[0].Title, deriveSeverity(severity), []string{flaggedPattern}, 0,
+			emitVerdictExtras{RuleIDs: []string{flaggedPattern}})
+		r.recordEventRouterGuardrailMetricsV8(vctx, eventRouterGuardrailMetricObservation{
+			meta: toolObservation.meta, tool: payload.Tool, action: "alert", severity: severity,
+			alertType: "tool-call-flagged", alertSource: "tool-inspect", observedAt: time.Now().UTC(),
+		})
 	}
 
 	// LLM judge — runs tool injection detection on arguments asynchronously.
 	// The semaphore bounds concurrent judge executions while queued goroutines
 	// wait for a slot instead of dropping inspection entirely.
-	if r.judge != nil && len(payload.Args) > 0 {
-		go func(tool, sessionID, toolID string, args json.RawMessage) {
+	//
+	// managed_enterprise: the judge is a local decision-maker — disabled so
+	// AID stays authoritative.
+	if !ManagedEnterpriseActive() && r.judge != nil && len(payload.Args) > 0 {
+		go func(tool, sessionID, toolID string, meta llmEventMeta, args json.RawMessage) {
 			r.judgeSem <- struct{}{}
 			defer func() { <-r.judgeSem }()
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 			verdict := r.judge.RunToolJudge(ctx, tool, string(args))
 			if verdict.Severity != "NONE" {
-				// Judge verdict reasons are LLM-authored prose
-				// that frequently quote the offending argument
-				// back verbatim ("Tool call uses user email
-				// alice@example.com without consent"). Scrub
-				// the stderr emission and the audit detail
-				// so the quoted literal never reaches a
-				// persistent sink.
+				// Keep stderr redacted, but retain the source reason for the v8
+				// route-specific redaction boundary.
 				fmt.Fprintf(os.Stderr, "[sidecar] LLM JUDGE flagged tool call: %s severity=%s %s\n",
 					tool, verdict.Severity, redaction.Reason(verdict.Reason))
 				r.logStreamToolAction(sessionID, string(audit.ActionGatewayToolCallJudgeFlagged), tool, toolID,
 					fmt.Sprintf("severity=%s findings=%d reason=%s",
 						verdict.Severity, len(verdict.Findings),
-						redaction.ForSinkReason(verdict.Reason)))
-				if otel != nil {
-					otel.RecordInspectEvaluation(ctx, tool, verdict.Action, verdict.Severity)
-				}
+						stripLogInjectionRunes(verdict.Reason)))
+				r.recordEventRouterGuardrailMetricsV8(ctx, eventRouterGuardrailMetricObservation{
+					meta: meta, tool: tool, action: verdict.Action,
+					severity: verdict.Severity, observedAt: time.Now().UTC(),
+				})
 			}
-		}(payload.Tool, payload.SessionID, payload.ID, payload.Args)
+		}(payload.Tool, payload.SessionID, payload.ID, toolObservation.meta, payload.Args)
 	}
 
-	if otel != nil {
-		parentCtx := r.getToolParentCtx()
-		agentName := r.agentNameForStream(payload.AgentName)
-		_, policyID := r.defaultRoutingMetadata()
-		ctx, span := otel.StartToolSpan(
-			parentCtx,
-			payload.Tool, payload.Status, payload.Args,
-			dangerous, flaggedPattern, "builtin", "",
-			telemetry.ToolSpanContext{
-				ToolID:         payload.ID,
-				SessionID:      payload.SessionID,
-				RunID:          payload.RunID,
-				DestinationApp: toolDestinationApp("builtin", ""),
-				PolicyID:       policyID,
-				AgentName:      agentName,
-				AgentType:      agentName,
-				AgentID:        SharedAgentRegistry().AgentID(),
-			},
-		)
-		r.spanMu.Lock()
-		r.activeToolSpans[payload.Tool] = append(r.activeToolSpans[payload.Tool], &activeSpan{
-			span:      span,
-			ctx:       ctx,
-			startTime: time.Now(),
-			tool:      payload.Tool,
-			provider:  "builtin",
-		})
-		r.spanMu.Unlock()
-	}
+	toolObservation.dangerous = dangerous
+	r.rememberEventRouterToolCallV8(toolObservation)
 }
 
 // toolDestinationApp formats the destination_app field for tool spans
@@ -1437,7 +1316,6 @@ func toolDestinationApp(provider, qualifier string) string {
 }
 
 func (r *EventRouter) handleToolResult(evt EventFrame) {
-	otel := r.otelProvider()
 	var payload ToolResultPayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] parse tool_result: %v\n", err)
@@ -1449,33 +1327,16 @@ func (r *EventRouter) handleToolResult(evt EventFrame) {
 		exitCode = *payload.ExitCode
 	}
 
-	r.logStreamToolAction(payload.SessionID, string(audit.ActionGatewayToolResult), payload.Tool, payload.ID,
-		fmt.Sprintf("exit_code=%d output_len=%d", exitCode, len(payload.Output)))
-	meta := streamLLMEventMeta(r, payload.SessionID, payload.RunID, "builtin", "", payload.AgentName)
-	meta.ToolID = payload.ID
-	meta.ToolName = payload.Tool
-	emitToolInvocationEvent(context.Background(), meta, "result", payload.Tool, "", payload.Output, &exitCode)
+	_, _, observabilityV8Authoritative := r.observabilityV8CapabilitiesSnapshot()
+	if observabilityV8Authoritative {
+		observation := r.completeEventRouterToolCallV8(payload, time.Now().UTC())
+		r.emitEventRouterToolTerminalV8(observation)
+	} else {
+		r.logStreamToolAction(payload.SessionID, string(audit.ActionGatewayToolResult), payload.Tool, payload.ID,
+			fmt.Sprintf("exit_code=%d output_len=%d", exitCode, len(payload.Output)))
+	}
 
 	r.inspectToolResult(payload)
-
-	if otel != nil {
-		r.spanMu.Lock()
-		var as *activeSpan
-		if q := r.activeToolSpans[payload.Tool]; len(q) > 0 {
-			as = q[0]
-			r.activeToolSpans[payload.Tool] = q[1:]
-			if len(r.activeToolSpans[payload.Tool]) == 0 {
-				delete(r.activeToolSpans, payload.Tool)
-			}
-		}
-		r.spanMu.Unlock()
-
-		if as != nil {
-			otel.SetRawSpanString(as.span, "defenseclaw.tool.output", payload.Output)
-			otel.SetGenAIToolResult(as.span, payload.Output)
-			otel.EndToolSpan(as.span, exitCode, len(payload.Output), as.startTime, as.tool, as.provider)
-		}
-	}
 }
 
 // inspectToolResult checks tool output against sensitive-tools configuration
@@ -1510,7 +1371,10 @@ func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
 	verdict := scanLocalPatterns("completion", payload.Output)
 
 	// Stage 2: LLM judge, if requested and available. Merge into verdict.
-	if stool.JudgeResult {
+	// managed_enterprise: the judge is a local decision-maker — disabled so
+	// AID stays authoritative. Combined with the inert scanLocalPatterns
+	// above, the verdict stays allow and this lane no-ops (fail open).
+	if stool.JudgeResult && !ManagedEnterpriseActive() {
 		if r.judge == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] tool %s requests judge_result but judge unavailable; using regex-only verdict\n",
 				payload.Tool)
@@ -1562,7 +1426,7 @@ func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
 	r.logStreamToolAction(payload.SessionID, string(audit.ActionToolResultPIIAlert), payload.Tool, payload.ID,
 		fmt.Sprintf("severity=%s entities=%d findings=%d reason=%s",
 			verdict.Severity, entityCount, len(verdict.Findings),
-			redaction.ForSinkReason(verdict.Reason)))
+			stripLogInjectionRunes(verdict.Reason)))
 	if r.notify != nil {
 		// SecurityNotification ultimately surfaces in the TUI
 		// and any webhook alert, both of which are operator-
@@ -1580,7 +1444,7 @@ func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
 }
 
 func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
-	otel := r.otelProvider()
+	approvalStartedAt := time.Now().UTC()
 	var payload ApprovalRequestPayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] parse exec.approval.requested: %v\n", err)
@@ -1591,6 +1455,35 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 	if rawCmd == "" && len(argv) > 0 {
 		rawCmd = strings.Join(argv, " ")
 	}
+	cmdName := baseCommand(rawCmd)
+	correlation := payload.CorrelationContext()
+	approval := eventRouterApprovalObservation{
+		id: payload.ID, sessionKey: correlation.SessionKey, sessionID: correlation.SessionID,
+		runID: correlation.RunID, requestID: correlation.RequestID, turnID: correlation.TurnID,
+		operationID: correlation.OperationID, agentID: correlation.AgentID, agentName: correlation.AgentName,
+		agentType: correlation.AgentType, agentInstanceID: correlation.AgentInstanceID,
+		rootAgentID: correlation.RootAgentID, parentAgentID: correlation.ParentAgentID,
+		rootSessionID: correlation.RootSessionID, parentSessionID: correlation.ParentSessionID,
+		lineageProvenance: correlation.LineageProvenance, lifecycleID: correlation.LifecycleID,
+		executionID: correlation.ExecutionID, phase: correlation.Phase,
+		userID: correlation.UserID, userName: correlation.UserName,
+		policyID: correlation.PolicyID, policyVersion: correlation.PolicyVersion,
+		destinationApp: correlation.DestinationApp, toolID: correlation.ToolID,
+		toolName: correlation.ToolName, toolType: correlation.ToolType,
+		toolCallID: correlation.ToolCallID, toolProvider: correlation.ToolProvider,
+		toolSkillKey: correlation.ToolSkillKey,
+		commandName:  cmdName, command: rawCmd, argv: append([]string(nil), argv...), cwd: cwd,
+		startedAt: approvalStartedAt,
+	}
+	if correlation.Depth != nil {
+		approval.depth, approval.depthSet = *correlation.Depth, true
+	}
+	if correlation.Sequence != nil {
+		approval.sequence, approval.sequenceSet = *correlation.Sequence, true
+	}
+	approval = r.enrichEventRouterApprovalTopology(approval)
+	approvalContext := r.getToolParentCtx(approval.sessionKey, approval.runID)
+	_ = r.emitApprovalRequestedV8(approvalContext, approval)
 
 	// a sparse approval frame with no SystemRunPlan,
 	// nested `request`, raw command text, OR argv carries no
@@ -1605,46 +1498,31 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 		fmt.Fprintf(os.Stderr,
 			"[sidecar] DENIED exec approval: id=%s reason=empty-command-context\n",
 			payload.ID)
-		approvalSession, _ := r.activeAgentCorrelation()
-		r.logStreamAction(approvalSession, "gateway-approval-denied", payload.ID,
-			"reason=empty-command-context")
+		approval.result = "denied"
+		approval.actorType = "policy"
+		approval.reason = "empty-command-context"
+		approval.dangerous = true
+		approval.finishedAt = time.Now().UTC()
+		_ = r.emitApprovalResolutionV8(approvalContext, approval)
 		r.resolveApprovalAsync(payload.ID, false,
 			"defenseclaw: approval request has no command context")
 		return
 	}
 
-	cmdName := baseCommand(rawCmd)
 	fmt.Fprintf(os.Stderr, "[sidecar] exec.approval.requested: id=%s command=%s argc=%d cwd=%s\n",
 		payload.ID, cmdName, len(argv), cwd)
-	approvalSession, _ := r.activeAgentCorrelation()
-	r.logStreamAction(approvalSession, string(audit.ActionGatewayApprovalRequested), payload.ID,
-		fmt.Sprintf("command_name=%s argc=%d cwd=%s", cmdName, len(argv), cwd))
 
-	var approvalSpan trace.Span
-	if otel != nil {
-		parentCtx := r.getToolParentCtx()
-		sessionID, runID := r.activeAgentCorrelation()
-		agentName := r.agentNameForStream("")
-		_, policyID := r.defaultRoutingMetadata()
-		_, approvalSpan = otel.StartApprovalSpan(parentCtx, payload.ID, rawCmd, argv, cwd,
-			telemetry.ToolSpanContext{
-				ToolID:         payload.ID,
-				SessionID:      sessionID,
-				RunID:          runID,
-				DestinationApp: toolDestinationApp("builtin", ""),
-				PolicyID:       policyID,
-				AgentName:      agentName,
-				AgentType:      agentName,
-				AgentID:        SharedAgentRegistry().AgentID(),
-			},
-		)
-	}
-
+	// managed_enterprise: local command-danger detection (rule engine +
+	// legacy heuristics) is disabled — AID is the sole decision-maker, so
+	// approval requests fail open through this router lane. ScanAllRules is
+	// already inert in managed; also short-circuit the legacy heuristics so
+	// nothing here can deny.
+	managedAIDOnly := ManagedEnterpriseActive()
 	cmdFindings := ScanAllRules(rawCmd, "shell")
 	argvFindings := ScanAllRules(strings.Join(argv, " "), "shell")
 	allFindings := append(cmdFindings, argvFindings...)
 	dangerousByRules := len(allFindings) > 0 && severityRank[HighestSeverity(allFindings)] >= severityRank["HIGH"]
-	dangerousByLegacy := r.isCommandDangerous(rawCmd) || r.isArgvDangerous(argv)
+	dangerousByLegacy := !managedAIDOnly && (r.isCommandDangerous(rawCmd) || r.isArgvDangerous(argv))
 	dangerous := dangerousByRules || dangerousByLegacy
 	topFinding := RuleFinding{RuleID: "UNKNOWN", Title: "dangerous command pattern"}
 	for _, f := range allFindings {
@@ -1658,10 +1536,7 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 	}
 
 	if dangerous {
-		sessionID, _ := r.activeAgentCorrelation()
-		r.logStreamAction(sessionID, string(audit.ActionGatewayApprovalDenied), payload.ID,
-			fmt.Sprintf("reason=%s command_name=%s", topFinding.RuleID, cmdName))
-		vctx := r.streamContext(sessionID, audit.CorrelationEnvelope{
+		vctx := r.streamContext(approval.sessionKey, audit.CorrelationEnvelope{
 			DestinationApp: "builtin",
 			ToolName:       cmdName,
 			ToolID:         payload.ID,
@@ -1671,42 +1546,33 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 			deriveSeverity(topFinding.Severity), []string{"approval:denied", "surface:exec"}, 0)
 		fmt.Fprintf(os.Stderr, "[sidecar] DENIED exec approval: %s (%s)\n", cmdName, topFinding.Title)
 
-		if otel != nil {
-			otel.EndApprovalSpan(approvalSpan, "denied", "dangerous-command", false, true)
-
-			otel.EmitRuntimeAlert(
-				telemetry.AlertDangerousCommand, "HIGH", telemetry.SourceLocalPattern,
-				fmt.Sprintf("Dangerous command blocked: %s", cmdName),
-				map[string]string{"tool": "shell", "command": rawCmd},
-				map[string]string{"action_taken": "deny"},
-				"", "",
-			)
-		}
+		approval.result = "denied"
+		approval.actorType = "policy"
+		approval.reason = topFinding.Title
+		approval.ruleIDs = []string{topFinding.RuleID}
+		approval.dangerous = true
+		approval.finishedAt = time.Now().UTC()
+		_ = r.emitApprovalResolutionV8(approvalContext, approval)
 
 		r.resolveApprovalAsync(payload.ID, false, "defenseclaw: command matched dangerous pattern")
 		return
 	}
 
 	if r.autoApprove {
-		r.logStreamAction(approvalSession, string(audit.ActionGatewayApprovalGranted), payload.ID,
-			fmt.Sprintf("reason=auto-approve command_name=%s", cmdName))
 		fmt.Fprintf(os.Stderr, "[sidecar] AUTO-APPROVED exec: %s\n", cmdName)
-
-		if otel != nil {
-			otel.EndApprovalSpan(approvalSpan, "approved", "auto-approved safe command", true, false)
-		}
+		approval.result = "approved"
+		approval.actorType = "automatic"
+		approval.reason = "auto-approved safe command"
+		approval.finishedAt = time.Now().UTC()
+		_ = r.emitApprovalResolutionV8(approvalContext, approval)
 
 		r.resolveApprovalAsync(payload.ID, true, "defenseclaw: auto-approved safe command")
 		return
 	}
 
 	fmt.Fprintf(os.Stderr, "[sidecar] PENDING exec approval: %s (awaiting manual approval)\n", cmdName)
-	r.logStreamAction(approvalSession, string(audit.ActionGatewayApprovalPending), payload.ID,
-		fmt.Sprintf("command_name=%s reason=awaiting-manual-approval", cmdName))
-
-	if otel != nil {
-		otel.EndApprovalSpan(approvalSpan, "pending", "awaiting manual approval", false, false)
-	}
+	approval.reason = "awaiting manual approval"
+	_ = r.emitApprovalPendingMetricsV8(approvalContext, approval)
 }
 
 // approvalCtx returns a context with a timeout for approval resolution RPCs.

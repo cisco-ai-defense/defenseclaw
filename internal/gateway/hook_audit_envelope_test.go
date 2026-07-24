@@ -19,7 +19,6 @@ package gateway
 import (
 	"context"
 	"encoding/json"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -69,21 +68,9 @@ func TestRenderHookAuditEnvelope_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestRenderHookAuditEnvelope_PreRedactsReason is the M2 regression
-// test: free-form text fields (today, just Reason) must be pre-
-// redacted before the envelope is folded into the audit row. Without
-// this, the downstream sanitiseEvent → redaction.ForSinkReason path
-// tokenises on ", " / "; " literals INSIDE the strconv.Quote'd JSON
-// value and corrupts the JSON envelope every audit sink writes.
-//
-// We don't try to assert "this exact PII pattern got redacted" —
-// that's the redaction package's job. We DO assert that the rendered
-// envelope JSON remains parseable AND that PII-suggestive substrings
-// survive only in already-redacted form (the ForSinkReason marker
-// `<redacted-` prefix). That's the actionable invariant: downstream
-// jq/SIEM rules need parseable JSON, regardless of what the operator
-// puts in Reason.
-func TestRenderHookAuditEnvelope_PreRedactsReason(t *testing.T) {
+// Source envelopes preserve content until routing so each destination can
+// apply its configured redaction profile. The default profile is none.
+func TestRenderHookAuditEnvelope_PreservesSourceReasonForRouting(t *testing.T) {
 	env := HookAuditEnvelope{
 		Connector: "codex",
 		Event:     "PreToolUse",
@@ -92,25 +79,20 @@ func TestRenderHookAuditEnvelope_PreRedactsReason(t *testing.T) {
 	rendered := renderHookAuditEnvelope(env)
 	var decoded map[string]interface{}
 	if err := json.Unmarshal([]byte(rendered), &decoded); err != nil {
-		t.Fatalf("envelope JSON not parseable after Reason pre-redaction: %v\nraw=%s", err, rendered)
+		t.Fatalf("envelope JSON not parseable after source sanitization: %v\nraw=%s", err, rendered)
 	}
 	reasonOut, _ := decoded["reason"].(string)
-	// The PII patterns must NOT appear verbatim — the redaction
-	// pipeline replaces them with placeholder markers like
-	// "<redacted-email-1>" or "<redacted-credential-1>". We do not
-	// pin the exact marker text (that's an internal redaction
-	// contract), only that the raw value is gone.
-	for _, leaked := range []string{
+	for _, source := range []string{
 		"admin@example.com",
 		"AKIAABCDEFGHIJKLMNOP",
 	} {
-		if strings.Contains(reasonOut, leaked) {
-			t.Errorf("reason field leaked raw PII %q\n  got=%q", leaked, reasonOut)
+		if !strings.Contains(reasonOut, source) {
+			t.Errorf("source reason lost schema-eligible content %q\n  got=%q", source, reasonOut)
 		}
 	}
 }
 
-func TestRenderHookAuditEnvelope_PreRedactsExtra(t *testing.T) {
+func TestRenderHookAuditEnvelope_PreservesSourceExtraForRouting(t *testing.T) {
 	env := HookAuditEnvelope{
 		Connector: "codex",
 		Event:     "PreToolUse",
@@ -126,9 +108,9 @@ func TestRenderHookAuditEnvelope_PreRedactsExtra(t *testing.T) {
 		t.Fatalf("envelope JSON not parseable after Extra pre-redaction: %v\nraw=%s", err, rendered)
 	}
 	got := decoded.Extra["operator_note"]
-	for _, leaked := range []string{"admin@example.com", "AKIAABCDEFGHIJKLMNOP"} {
-		if strings.Contains(got, leaked) {
-			t.Errorf("extra field leaked raw PII %q\n  got=%q", leaked, got)
+	for _, source := range []string{"admin@example.com", "AKIAABCDEFGHIJKLMNOP"} {
+		if !strings.Contains(got, source) {
+			t.Errorf("source extra lost schema-eligible content %q\n  got=%q", source, got)
 		}
 	}
 }
@@ -206,16 +188,8 @@ func TestRenderHookAuditLegacyDetails_FormatStable(t *testing.T) {
 }
 
 func TestLogConnectorHookAuditEnvelope_PersistsStructuredPayload(t *testing.T) {
-	store, err := audit.NewStore(filepath.Join(t.TempDir(), "audit.db"))
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
-	defer store.Close()
-	if err := store.Init(); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-
-	api := &APIServer{logger: audit.NewLogger(store)}
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{store: store, logger: logger}
 	api.logConnectorHookAuditEnvelope(context.Background(), HookAuditEnvelope{
 		Connector:  "codex",
 		Event:      "PreToolUse",
@@ -224,7 +198,7 @@ func TestLogConnectorHookAuditEnvelope_PersistsStructuredPayload(t *testing.T) {
 		RawAction:  "block",
 		Severity:   "HIGH",
 		Mode:       "action",
-		Reason:     "matched policy",
+		Reason:     "matched admin@example.com",
 		WouldBlock: true,
 		ElapsedMs:  42,
 	})
@@ -254,6 +228,29 @@ func TestLogConnectorHookAuditEnvelope_PersistsStructuredPayload(t *testing.T) {
 	}
 	if got.Structured["would_block"] != true {
 		t.Fatalf("structured would_block = %#v, want true", got.Structured["would_block"])
+	}
+	if got.Structured["reason"] != "matched admin@example.com" {
+		t.Fatalf("default-none route changed source reason: %#v", got.Structured["reason"])
+	}
+}
+
+func TestRenderHookAuditEnvelopeNormalizesOptionalPreviousPhase(t *testing.T) {
+	_, structured := renderHookAuditEnvelopePayload(HookAuditEnvelope{
+		Connector:          "codex",
+		Event:              "PreToolUse",
+		Result:             "ok",
+		AgentPhase:         " ToOl ",
+		AgentPreviousPhase: "future-phase",
+		AgentSequence:      1,
+		AgentLifecycleID:   "lifecycle-0123456789abcdef",
+		AgentExecutionID:   "execution-0123456789abcdef",
+		AgentOperationID:   "operation-1",
+	})
+	if structured["agent_phase"] != "tool" {
+		t.Fatalf("agent_phase=%#v want tool", structured["agent_phase"])
+	}
+	if _, exists := structured["agent_previous_phase"]; exists {
+		t.Fatalf("unsupported optional previous phase was retained: %#v", structured)
 	}
 }
 

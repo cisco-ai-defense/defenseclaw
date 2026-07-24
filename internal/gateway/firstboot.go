@@ -21,9 +21,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // firstBootMu serializes EnsureGatewayToken so two goroutines (e.g. proxy
@@ -107,13 +108,6 @@ func appendEnvLine(path, key, value string) error {
 		return fmt.Errorf("appendEnvLine: value contains newline")
 	}
 
-	dir := filepath.Dir(path)
-	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return err
-		}
-	}
-
 	var lines []string
 	if data, err := os.ReadFile(path); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
@@ -136,13 +130,5 @@ func appendEnvLine(path, key, value string) error {
 	}
 	lines = append(lines, fmt.Sprintf("%s=%s", key, value), "")
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strings.Join(lines, "\n")), 0o600); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, path)
+	return safefile.WritePrivate(path, []byte(strings.Join(lines, "\n")))
 }

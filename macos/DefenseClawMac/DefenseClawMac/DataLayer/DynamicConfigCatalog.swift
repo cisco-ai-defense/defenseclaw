@@ -19,9 +19,10 @@
 // build_setup_sections) — dumping it through the venv python means the Mac
 // editor gains new sections/fields the moment the runtime is upgraded, with
 // no Mac code changes. The static ConfigEditorCatalog stays as the offline
-// fallback, and an "Other (uncatalogued)" section surfaces config.yaml keys
-// that even the runtime catalog doesn't describe yet, so brand-new features
-// remain configurable until a wizard exists.
+// fallback, and a read-only "Other (uncatalogued)" section surfaces config
+// keys that even the runtime catalog doesn't describe yet. The runtime writer
+// cannot safely persist truly unmodelled keys, so this fallback never claims
+// a successful edit that Config.save() would silently discard.
 
 import Foundation
 
@@ -52,10 +53,6 @@ enum DynamicConfigCatalog {
     print(\(String(reflecting: sentinel)) + json.dumps(out))
     """
 
-    static var runtimePython: String {
-        FileManager.default.homeDirectoryForCurrentUser.path + "/.defenseclaw/.venv/bin/python"
-    }
-
     /// One dumped field's resolved value, keyed by config path — seeds the
     /// editor's "original" values so no separate YAML read is needed.
     struct LoadResult {
@@ -66,9 +63,10 @@ enum DynamicConfigCatalog {
     /// Dump the runtime's catalog. nil on any failure (missing venv, renamed
     /// symbol in a future runtime, parse error) — callers fall back to the
     /// static catalog.
-    static func load(using cli: CLIRunner) async -> LoadResult? {
+    static func load(using cli: CLIRunner, context: InstallationContext) async -> LoadResult? {
+        let runtimePython = context.runtimePythonURL.path
         guard FileManager.default.isExecutableFile(atPath: runtimePython) else { return nil }
-        let result = await cli.run(binary: runtimePython, arguments: ["-c", dumpScript])
+        let result = await cli.run(binary: runtimePython, arguments: ["-c", dumpScript], mutation: false)
         guard result.succeeded,
               let line = result.output.split(separator: "\n").first(where: { $0.hasPrefix(sentinel) }),
               let data = String(line.dropFirst(sentinel.count)).data(using: .utf8),
@@ -120,15 +118,15 @@ enum DynamicConfigCatalog {
         }
     }
 
-    /// Scalar config.yaml keys not covered by the catalog — brand-new runtime
-    /// features stay configurable here until the runtime catalog (or a Mac
-    /// wizard) describes them.
+    /// Config keys not covered by the runtime catalog. These are deliberately
+    /// read-only: `apply_config_field` cannot persist truly unmodelled fields,
+    /// and it cannot infer the element type of an unknown sequence.
     static func uncataloguedSection(
         raw: YAMLNode,
         knownKeys: Set<String>
     ) -> (section: ConfigEditorSection, values: [String: String])? {
         var fields: [ConfigEditorField] = []
-        var values: [String: String] = [:]
+        let values: [String: String] = [:]
 
         func walk(_ node: YAMLNode, path: String) {
             switch node {
@@ -141,30 +139,26 @@ enum DynamicConfigCatalog {
                     || lower.contains("secret")
                     || lower.contains("password")
                     || lower.contains("credential")
-                let kind: ConfigEditorField.Kind = secret
-                    ? .password
-                    : ["true", "false"].contains(scalar.lowercased()) ? .bool
-                    : Int(scalar) != nil ? .int
-                    : .string
                 fields.append(ConfigEditorField(
-                    label: path, key: path, kind: kind,
-                    hint: "Uncatalogued key present in config.yaml."
+                    label: path,
+                    key: "",
+                    kind: .header,
+                    hint: "Uncatalogued key present in config.yaml (read only).",
+                    headerValue: secret ? "configured (hidden)" : scalar
                 ))
-                if kind != .password { values[path] = scalar }
             case .mapping(let map):
                 for key in map.keys.sorted() {
                     walk(map[key]!, path: path.isEmpty ? key : "\(path).\(key)")
                 }
             case .sequence(let items):
-                // CSV-editable only when every element is a scalar.
                 guard !path.isEmpty, !knownKeys.contains(path) else { return }
-                let scalars = items.compactMap(\.string)
-                guard scalars.count == items.count else { return }
                 fields.append(ConfigEditorField(
-                    label: path, key: path, kind: .string,
-                    hint: "Uncatalogued list (comma-separated) present in config.yaml."
+                    label: path,
+                    key: "",
+                    kind: .header,
+                    hint: "Uncatalogued list present in config.yaml (read only).",
+                    headerValue: "\(items.count) value\(items.count == 1 ? "" : "s")"
                 ))
-                values[path] = scalars.joined(separator: ", ")
             }
         }
         walk(raw, path: "")
@@ -172,8 +166,8 @@ enum DynamicConfigCatalog {
         return (
             ConfigEditorSection(
                 name: "Other (uncatalogued)",
-                summary: "config.yaml keys the runtime catalog doesn't describe yet — editable here until a wizard exists.",
-                help: "Values save through the runtime's own config writer; unknown keys stay exactly where they are in config.yaml.",
+                summary: "config.yaml keys the runtime catalog doesn't describe yet (read only).",
+                help: "Upgrade the runtime to gain a typed editor for these fields, or edit config.yaml with the matching runtime documentation.",
                 fields: fields
             ),
             values

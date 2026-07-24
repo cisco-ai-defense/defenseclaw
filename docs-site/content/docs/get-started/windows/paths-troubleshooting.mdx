@@ -1,0 +1,296 @@
+---
+title: Paths and troubleshooting
+description: Native Windows filesystem locations, supported overrides, safe diagnostics, and post-install and post-upgrade verification.
+keywords:
+  - DefenseClaw Windows paths
+  - DefenseClaw Windows troubleshooting
+  - DefenseClaw Windows logs
+  - DefenseClaw Windows doctor
+  - DefenseClaw Windows verification
+---
+
+The packaged Windows lifecycle separates product files, user data, installer
+maintenance state, and each agent's own configuration. Keep those boundaries
+intact when diagnosing a problem.
+
+## Filesystem reference
+
+| Default location | Purpose | Manual editing |
+| --- | --- | --- |
+| `%LOCALAPPDATA%\Programs\DefenseClaw\` | Current-user product root resolved through the Windows User Programs Known Folder. | **Do not edit.** Use Setup repair/upgrade/uninstall. |
+| `...\bin\defenseclaw.exe` | Stable CLI/TUI launcher for the embedded managed runtime. | Do not replace or wrap. |
+| `...\bin\defenseclaw-gateway.exe` | Native gateway and lifecycle command. | Do not replace. |
+| `...\bin\defenseclaw-hook.exe` | No-console native connector hook runner. | Do not invoke with fabricated credentials or replace. |
+| `...\bin\defenseclaw-startup.exe` | HKCU logon helper that starts the adjacent gateway. | Do not relocate independently. |
+| `...\bin\skill-scanner.exe`, `mcp-scanner.exe` | Packaged local scanners. | Do not replace. |
+| `...\runtime\python\` | Embedded Python and installed DefenseClaw packages. | Do not use as a general Python environment or modify packages. |
+| `...\runtime\tools\cosign.exe` | Pinned verifier used by the packaged upgrade path. | Do not replace or add to global `PATH`. |
+| `...\installer\install-state.json` | Installer-owned product identity and lifecycle metadata. | **Never edit or copy as a repair technique.** |
+| `%LOCALAPPDATA%\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe` | Trusted maintenance copy for repair, upgrade handoff, and uninstall. | Run through documented actions only; do not replace by hand. |
+| `%LOCALAPPDATA%\DefenseClaw\InstallerState\` | Private durable transaction/recovery state and `setup.log`. | Do not delete journals. Read the log locally when troubleshooting. |
+| `%LOCALAPPDATA%\DefenseClaw\InstallerTemp\` | Bounded transient payload staging. | Do not reuse as an install source or recovery backup. |
+| `%USERPROFILE%\.defenseclaw\config.yaml` | Primary operator configuration. | Prefer setup/config commands; if edited, run `defenseclaw config validate` before restart. |
+| `%USERPROFILE%\.defenseclaw\.env` | Protected gateway/provider/destination environment values. | **Never print or edit for routine diagnosis.** Use `keys` and setup commands. |
+| `%USERPROFILE%\.defenseclaw\audit.db` | Mandatory local SQLite audit and policy state. | Do not open with a second writer or attach to a support ticket. |
+| `%USERPROFILE%\.defenseclaw\gateway.log` | Appended detached-gateway stdout/stderr. | Read locally; review for sensitive content before sharing excerpts. No size-rotation guarantee is documented. |
+| `%USERPROFILE%\.defenseclaw\logs\hook-failures.jsonl` | Hook delivery/response failure records when produced. | Treat as sensitive operational data. |
+| `%USERPROFILE%\.defenseclaw\hooks\` | Generated hook assets, runtime state, and connector-scoped credential sidecars. | **Never edit, print, or copy credentials.** Reconcile with setup/doctor. |
+| `%USERPROFILE%\.defenseclaw\backups\` | Managed connector and upgrade recovery material. | Do not restore or delete manually; it may contain credential-bearing state. |
+| `%USERPROFILE%\.defenseclaw\quarantine\` | DefenseClaw-owned quarantined skills/plugins and provenance. | Use `skill restore` or `plugin restore`; do not drag files back. |
+| `%USERPROFILE%\.defenseclaw\.upgrade-receipts\` | Private automatic-upgrade admission/recovery receipts when used. | Inspect metadata only; do not edit receipt JSON. |
+| `%USERPROFILE%\.defenseclaw\gateway.pid`, `watchdog.pid` | Protected process identity records, not bare kill instructions. | Do not delete while a process may be running. |
+| `%USERPROFILE%\.defenseclaw\gateway.jsonl` | Optional JSONL destination only when explicitly configured there. | Not a default log; manage through observability configuration. |
+| `%CODEX_HOME%\managed_config.toml` | Effective native Windows Codex hook policy. Default home is `%USERPROFILE%\.codex`. | Do not edit DefenseClaw-managed hooks; use setup/remove. |
+| `%CODEX_HOME%\config.toml` | Codex user config plus DefenseClaw-marked OTLP/notify fields. | Other Codex settings are user-owned; use DefenseClaw teardown to remove managed fields. |
+| `%CLAUDE_CONFIG_DIR%\settings.json` | Claude Code user config plus DefenseClaw-marked hooks/OTLP environment entries. Default is `%USERPROFILE%\.claude`. | Do not remove individual managed entries by hand; use setup/remove. |
+
+The installer records the exact connector homes and uses them for later repair,
+upgrade, and cleanup. Connector configuration backups are ownership records,
+not a user-facing rollback directory.
+
+## Supported path overrides
+
+`CODEX_HOME` and `CLAUDE_CONFIG_DIR` are the supported connector configuration
+overrides. Set them to absolute, normalized native Windows paths before initial
+Setup or connector setup. The installer validates and records them; reparse
+ancestors are refused.
+
+<Tabs items={['PowerShell', 'cmd']}>
+  <Tab value="PowerShell">
+
+```powershell
+$env:CODEX_HOME = "D:\Agent Profiles\Codex"
+$env:CLAUDE_CONFIG_DIR = "D:\Agent Profiles\Claude"
+```
+
+  </Tab>
+  <Tab value="cmd">
+
+```cmd
+set "CODEX_HOME=D:\Agent Profiles\Codex"
+set "CLAUDE_CONFIG_DIR=D:\Agent Profiles\Claude"
+```
+
+  </Tab>
+</Tabs>
+
+Changing an environment value after installation does not authorize lifecycle
+commands to abandon the recorded home. Re-run supported connector setup or
+repair deliberately; do not move the directory and edit installer state.
+
+The generic runtime recognizes `DEFENSECLAW_HOME`, but the native packaged
+Setup, launchers, logon helper, repair, and upgrade lifecycle deliberately pin
+the data root to the current profile's `.defenseclaw`. Relocating a packaged
+installation with `DEFENSECLAW_HOME`, `DEFENSECLAW_CONFIG`, or an executable
+override is not supported.
+
+`DEFENSECLAW_FAIL_MODE` and `DEFENSECLAW_STRICT_AVAILABILITY` are runtime
+behavior overrides, not path controls. Prefer the persisted
+`defenseclaw guardrail fail-mode` command for normal operation.
+
+## Quoting, long paths, and case
+
+Quote every path that can contain spaces. In PowerShell, use the call operator
+for an executable path:
+
+```powershell
+& "$env:LOCALAPPDATA\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe" /verify
+```
+
+In cmd, quote the executable itself:
+
+```cmd
+"%LOCALAPPDATA%\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe" /verify
+```
+
+DefenseClaw product executables are long-path-aware, and installer journal and
+process-identity tests cover paths beyond the legacy `MAX_PATH` limit. That
+does not certify arbitrary third-party agents, plugins, network filesystems,
+or shell wrappers. Protected connector and transaction paths reject reparse
+redirection; remote Windows filesystems are not a supported transaction target.
+
+Windows comparisons are case-insensitive where required for environment keys
+and owned path identity. Do not rely on two connector homes, files, or
+environment variables that differ only by letter case.
+
+## First diagnostics
+
+Run these before changing state:
+
+<Tabs items={['PowerShell', 'cmd']}>
+  <Tab value="PowerShell">
+
+```powershell
+Get-Command defenseclaw
+Get-Command defenseclaw-gateway
+defenseclaw version
+defenseclaw-gateway status
+defenseclaw status
+defenseclaw guardrail status
+defenseclaw config validate
+defenseclaw doctor
+```
+
+  </Tab>
+  <Tab value="cmd">
+
+```cmd
+where defenseclaw
+where defenseclaw-gateway
+defenseclaw version
+defenseclaw-gateway status
+defenseclaw status
+defenseclaw guardrail status
+defenseclaw config validate
+defenseclaw doctor
+```
+
+  </Tab>
+</Tabs>
+
+`version` detects a stale launcher/gateway mismatch. `status` reports the
+configured connector roster and authenticated runtime state. `doctor` checks
+the installed agent contract, native registration, credentials, endpoints,
+and connectivity without printing credential values.
+
+For repairable findings, preview before mutation:
+
+```powershell
+defenseclaw doctor --fix --dry-run
+```
+
+Only use `--fix --yes` after reviewing the exact proposed fix. The token-drift
+fix can restart the gateway. Doctor does not tear down inactive connector
+residue automatically.
+
+## Troubleshooting
+
+<Accordions>
+  <Accordion title="The command is not recognized or the wrong version runs">
+    Open a new terminal so the updated user `PATH` is loaded. Use `Get-Command
+    defenseclaw -All` in PowerShell or `where defenseclaw` in cmd, then run
+    `defenseclaw version`. Repair Setup if the product-owned launcher is missing.
+    Do not prepend an unpacked source checkout or embedded runtime directory as
+    a permanent workaround.
+  </Accordion>
+  <Accordion title="Setup refuses the launch context">
+    Close the elevated terminal and run Setup normally from the signed-in
+    user's interactive desktop. `/quiet` does not permit elevation, SYSTEM,
+    service, session-zero, or background/batch installation. `/help` and
+    `/verify` are the only read-only exceptions.
+  </Accordion>
+  <Accordion title="Setup or repair fails">
+    Close foreground DefenseClaw CLI/TUI processes, then inspect
+    `%LOCALAPPDATA%\DefenseClaw\InstallerState\setup.log` locally. Re-run the
+    authenticated maintenance EXE so it can resume a valid journal. Do not
+    delete `InstallerState`, `InstallerTemp`, the cached Setup, or a locked
+    application tree to force progress.
+  </Accordion>
+  <Accordion title="The gateway is stopped, stale, or owned by another process">
+    Run `defenseclaw-gateway status`, then `defenseclaw-gateway start` or
+    `restart`. DefenseClaw refuses a foreign listener or mismatched PID/start
+    identity; investigate that process instead of deleting the PID file. Check
+    `%USERPROFILE%\.defenseclaw\gateway.log` locally for the startup error.
+  </Accordion>
+  <Accordion title="Logon startup or watchdog is not active">
+    First run `defenseclaw-gateway status` and `defenseclaw-gateway watchdog
+    status`. A configured connector should have the installer-owned HKCU Run
+    registration; repair Setup if it is missing. The watchdog runs only when
+    `gateway.watchdog.enabled` is configured and is not a Windows service.
+  </Accordion>
+  <Accordion title="Codex or Claude Code hooks do not appear">
+    Confirm both products run natively as the same Windows user. Run
+    `defenseclaw guardrail status` and `defenseclaw doctor`, then re-run the
+    supported connector setup in observe mode. Fully restart the agent. Do not
+    copy hook entries between `config.toml`, `managed_config.toml`, and
+    `settings.json` by hand.
+  </Accordion>
+  <Accordion title="A connector is disabled or status disagrees with configuration">
+    Use `defenseclaw guardrail status` to compare desired and runtime posture.
+    A prior `--no-restart` change may require `defenseclaw-gateway restart`.
+    Use connector-scoped enable/disable so the other supported connector is not
+    changed unintentionally.
+  </Accordion>
+  <Accordion title="A disabled skill or plugin still behaves unexpectedly">
+    Use `defenseclaw skill list` or `plugin list` and check the connector scope.
+    Hard-disable requires an exact identity present in that connector's
+    DefenseClaw inventory. Skill hard-disable is limited to Codex leading
+    `$skill` selection and Claude Code expansion; plugin hard-disable is limited
+    to Claude Code expansion. An unrecognized path-qualified or nested alias is
+    not covered merely because its basename resembles a disabled item.
+    Quarantine is the filesystem enforcement control. Restore does not clear a
+    separate block or disable policy.
+  </Accordion>
+  <Accordion title="Native OTLP authentication fails">
+    Run `defenseclaw doctor` and `defenseclaw-gateway status`. Reconcile the
+    connector with its setup command and restart the agent. If doctor diagnoses
+    master-token drift, preview `doctor --fix --dry-run`; use
+    `defenseclaw setup rotate-token --yes` only for an intentional global
+    rotation. Never print, compare, copy, or manually replace token files or
+    OTLP headers.
+  </Accordion>
+  <Accordion title="Upgrade is refused or interrupted">
+    A source not listed in the target release's signed Windows baseline matrix
+    must be refused before mutation. An interrupted eligible upgrade retains
+    private receipts/journals for automatic retry. Inspect only filenames and
+    timestamps under `.upgrade-receipts`; do not edit JSON or restore backup
+    files manually. Re-run the authenticated upgrade or Setup after closing
+    locked DefenseClaw clients.
+  </Accordion>
+  <Accordion title="The TUI renders poorly or cannot redraw">
+    Prefer a current native Windows console host and resize to at least 80×24.
+    Start `defenseclaw tui` directly rather than through WSL, Git Bash, or a
+    redirected pipeline. The CLI forces UTF-8 and the TUI has native key and
+    clipboard handling; workflows that cannot support redraw should use the
+    numbered/text or `--json` command surfaces instead.
+  </Accordion>
+  <Accordion title="Uninstall leaves user data or connector residue">
+    Preserving `%USERPROFILE%\.defenseclaw` is the default. If connector cleanup
+    fails, even `DELETEUSERDATA=1` retains data and retry evidence. Run doctor,
+    repair the recorded connector registration, and retry the trusted
+    uninstaller. Do not manually delete backups or agent configuration while
+    teardown is unresolved.
+  </Accordion>
+</Accordions>
+
+## Post-install checklist
+
+Complete this without real secrets or destructive tools:
+
+- Open a new native PowerShell or cmd window and confirm `defenseclaw` and
+  `defenseclaw-gateway` resolve from the product `bin` directory.
+- Run `defenseclaw version`; require the CLI and gateway generation to agree.
+- Run `defenseclaw-gateway status`, `defenseclaw status`, and
+  `defenseclaw guardrail status`; require the intended Codex and/or Claude Code
+  rows, mode, fail mode, and enabled state.
+- Run `defenseclaw config validate` and `defenseclaw doctor`; resolve every
+  connector registration or authentication failure.
+- Restart each configured native agent. In an empty disposable directory,
+  submit a non-sensitive prompt such as “Reply with the word ready.” Do not use
+  customer data, credentials, or a destructive tool call.
+- Open `defenseclaw tui` or use `defenseclaw alerts` and confirm new activity is
+  attributed only to the agent you exercised.
+- If both connectors are installed, repeat the harmless prompt once in each;
+  one connector's success does not prove the other's hook or OTLP settings.
+
+## Post-upgrade checklist
+
+- Run `defenseclaw version`, `defenseclaw migrations status`, and
+  `defenseclaw config validate`.
+- Require `defenseclaw-gateway status` and `defenseclaw doctor` to pass with the
+  exact upgraded generation.
+- Compare `defenseclaw guardrail status` with the pre-upgrade connector roster,
+  modes, fail modes, enabled state, and optional watchdog state.
+- Confirm the command path still resolves to the installed product directory,
+  not a stale checkout or copied binary.
+- Restart Codex and Claude Code, then repeat the harmless per-connector event
+  check above.
+- Verify optional destinations with `defenseclaw observability plan` and the
+  destination-specific test command. A destination failure does not erase the
+  mandatory local audit, but it must be treated as degraded delivery.
+- Keep private receipts and backups untouched until the upgraded gateway and
+  both configured connectors are healthy.
+
+For broader context, see [CLI reference](/docs/reference/cli),
+[configuration](/docs/reference/configuration), [upgrade](/docs/get-started/upgrade),
+and [TUI](/docs/tui).

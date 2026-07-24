@@ -42,6 +42,8 @@ struct WizardField: Identifiable {
     /// Optional second condition, ANDed with visibleWhen (e.g. action==setup
     /// AND connector is a proxy connector).
     var visibleWhen2: (key: String, equals: [String])? = nil
+    /// Optional third driver for provider-family auth subgroups.
+    var visibleWhen3: (key: String, equals: [String])? = nil
     var help: String = ""
 
     var id: String { key }
@@ -94,6 +96,14 @@ struct SetupView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                if let reason = appState.installationReadOnlyReason {
+                    Label(reason, systemImage: "lock.shield")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Cisco.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                }
                 Text("Setup Areas").font(.title3.weight(.semibold))
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), spacing: 12)], spacing: 12) {
                     ForEach(TUIWizards.all) { wizard in
@@ -119,6 +129,7 @@ struct SetupView: View {
                             .background(Cisco.surfacePanel, in: RoundedRectangle(cornerRadius: 10))
                         }
                         .buttonStyle(.plain)
+                        .disabled(!appState.installationMutationsAllowed)
                     }
                 }
 
@@ -157,7 +168,9 @@ struct WizardSheet: View {
 
     private var visibleFields: [WizardField] {
         wizard.fields.filter { field in
-            matches(field.visibleWhen) && matches(field.visibleWhen2)
+            matches(field.visibleWhen)
+                && matches(field.visibleWhen2)
+                && matches(field.visibleWhen3)
         }
     }
 
@@ -575,6 +588,7 @@ struct ConfigEditorView: View {
                         .foregroundStyle(Cisco.orange)
                     Button("Restart Gateway Now") { restartGateway() }
                         .controlSize(.small)
+                        .disabled(!appState.installationMutationsAllowed)
                     Button("Dismiss") { restartQueued = false }
                         .controlSize(.small)
                         .buttonStyle(.borderless)
@@ -668,11 +682,19 @@ struct ConfigEditorView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Cisco.blue)
-                .disabled(diffEntries.isEmpty || firstValidationError != nil || saving)
+                .disabled(
+                    !appState.installationMutationsAllowed
+                        || diffEntries.isEmpty
+                        || firstValidationError != nil
+                        || saving
+                )
                 .help("Review the pending config changes before saving (writes config.yaml via the DefenseClaw runtime)")
             }
         }
         .task { loadCatalog() }
+        .onReceive(NotificationCenter.default.publisher(for: .dcRefreshPanel)) { _ in
+            loadCatalog()
+        }
         .sheet(isPresented: $showDiff) {
             ConfigDiffSheet(entries: diffEntries, saving: saving) { save in
                 if save { applyChanges() } else { showDiff = false }
@@ -726,6 +748,7 @@ struct ConfigEditorView: View {
                     .frame(width: 210, alignment: .leading)
                     .help(field.key)
                 fieldControl(field)
+                    .disabled(!appState.installationMutationsAllowed)
                 Spacer(minLength: 0)
             }
             .help(field.hint)
@@ -814,31 +837,47 @@ struct ConfigEditorView: View {
     /// catalog describes land in the "Other (uncatalogued)" section.
     private func loadCatalog() {
         Task {
+            let installationGeneration = appState.installationGeneration
+            let context = appState.installationContext
+            let cli = appState.cli
             let cfg = await appState.configStore.reload()
+            guard installationGeneration == appState.installationGeneration else { return }
             var values: [String: String] = [:]
             var active: [ConfigEditorSection]
-            if let dynamic = await DynamicConfigCatalog.load(using: appState.cli) {
-                dynamicSections = dynamic.sections
+            let freshDynamicSections: [ConfigEditorSection]?
+            let freshCatalogSource: String
+            if let dynamic = await DynamicConfigCatalog.load(
+                using: cli,
+                context: context
+            ) {
+                guard installationGeneration == appState.installationGeneration else { return }
+                freshDynamicSections = dynamic.sections
                 values = dynamic.values
                 active = dynamic.sections
                 let version = appState.installedRuntimeVersion.map { " \($0)" } ?? ""
-                catalogSource = "runtime catalog\(version) · \(dynamic.sections.count) sections"
+                freshCatalogSource = "runtime catalog\(version) · \(dynamic.sections.count) sections"
             } else {
-                dynamicSections = nil
+                guard installationGeneration == appState.installationGeneration else { return }
+                freshDynamicSections = nil
                 active = ConfigEditorCatalog.sections(activeConnectors: appState.activeConnectorNames)
-                catalogSource = "built-in catalog (runtime dump unavailable)"
+                freshCatalogSource = "built-in catalog (runtime dump unavailable)"
                 for field in active.flatMap(\.fields) where !field.key.isEmpty {
                     if field.kind == .password { continue }
                     values[field.key] = Self.displayValue(cfg.raw[field.key])
                 }
             }
             let known = Set(active.flatMap(\.fields).map(\.key).filter { !$0.isEmpty })
+            let freshUncatalogued: ConfigEditorSection?
             if let extra = DynamicConfigCatalog.uncataloguedSection(raw: cfg.raw, knownKeys: known) {
-                uncatalogued = extra.section
+                freshUncatalogued = extra.section
                 values.merge(extra.values) { current, _ in current }
             } else {
-                uncatalogued = nil
+                freshUncatalogued = nil
             }
+            guard installationGeneration == appState.installationGeneration else { return }
+            dynamicSections = freshDynamicSections
+            catalogSource = freshCatalogSource
+            uncatalogued = freshUncatalogued
             original = values
             edited = [:]
         }
@@ -873,7 +912,7 @@ struct ConfigEditorView: View {
     """
 
     private var runtimePython: String {
-        FileManager.default.homeDirectoryForCurrentUser.path + "/.defenseclaw/.venv/bin/python"
+        appState.installationContext.runtimePythonURL.path
     }
 
     private func applyChanges() {
@@ -881,7 +920,7 @@ struct ConfigEditorView: View {
         guard !entries.isEmpty else { return }
         guard FileManager.default.isExecutableFile(atPath: runtimePython) else {
             showDiff = false
-            status = "DefenseClaw runtime not found at ~/.defenseclaw/.venv — cannot write config."
+            status = "DefenseClaw runtime not found at \(appState.installationContext.venvURL.path) — cannot write config."
             statusOK = false
             return
         }

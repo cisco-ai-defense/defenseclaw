@@ -21,6 +21,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from defenseclaw.tui.app import DefenseClawTUI
+from defenseclaw.tui.services.gateway_log_views import GatewayLogViews
+from defenseclaw.tui.services.read_repository import TUIReadSnapshot
 from defenseclaw.tui.services.tui_state import TUIStateStore
 
 
@@ -106,6 +108,26 @@ def test_panel_total_count_sums_alerts_streams() -> None:
     app.alerts_model.audit_events = [object()] * 3  # type: ignore[attr-defined]
     app.alerts_model.egress_events = [object()] * 4  # type: ignore[attr-defined]
     assert app._panel_total_count("alerts") == 7
+
+
+def test_hidden_stream_counts_use_latest_snapshot_without_hydrating_models() -> None:
+    app = DefenseClawTUI(config=_config_for())
+    app.logs_model.lines["gateway"] = ["raw-1", "raw-2"]
+    app.logs_model.lines["watchdog"] = ["watchdog-1"]
+    app._read_snapshot = TUIReadSnapshot(  # type: ignore[arg-type]  # noqa: SLF001
+        revision=2,
+        data_version=9,
+        audit_events=tuple(object() for _ in range(7)),
+        log_views=GatewayLogViews(
+            verdict_lines=("verdict-1", "verdict-2"),
+            otel_lines=("otel-1", "otel-2", "otel-3"),
+        ),
+    )
+
+    assert app.audit_model.items == []
+    assert app.logs_model.lines["verdicts"] == []
+    assert app._panel_total_count("audit") == 7
+    assert app._panel_total_count("logs") == 8
 
 
 def test_unknown_panel_total_count_is_zero() -> None:

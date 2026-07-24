@@ -29,6 +29,11 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 UPGRADE_SCRIPT = ROOT / "scripts" / "upgrade.sh"
 
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="upgrade.sh staged-resolver contracts require a native POSIX shell; Windows upgrades use the native installer",
+)
+
 
 def _write_executable(path: Path, body: str) -> None:
     path.write_text(body, encoding="utf-8")
@@ -56,7 +61,13 @@ def _manifest(version: str) -> dict[str, object]:
     windows_sources = ["0.8.3", "0.8.2", "0.8.1", "0.8.0"]
     if version == "0.8.5":
         published_sources.insert(0, "0.8.4")
-        windows_sources.insert(0, "0.8.4")
+        windows_sources = []
+    elif version in {"0.8.7", "0.8.8"}:
+        post_cut_sources = ["0.8.6", "0.8.5", "0.8.4"]
+        if version == "0.8.8":
+            post_cut_sources.insert(0, "0.8.7")
+        published_sources[0:0] = post_cut_sources
+        windows_sources = [item for item in post_cut_sources if item not in {"0.8.5", "0.8.4"}]
     gateways = {
         platform_name: {
             arch: f"defenseclaw_{version}_protocol2_{platform_name}_{arch}.dcgateway" for arch in ("amd64", "arm64")
@@ -78,7 +89,7 @@ def _manifest(version: str) -> dict[str, object]:
         "tested_source_versions": published_sources,
         "platform_tested_source_versions": {"windows": windows_sources},
     }
-    if version == "0.8.5":
+    if version in {"0.8.5", "0.8.7", "0.8.8"}:
         payload.update(
             {
                 "min_upgrade_protocol": 2,
@@ -108,10 +119,10 @@ def _manifest(version: str) -> dict[str, object]:
     return payload
 
 
-def _release_provenance(bridge_checksums_sha256: str) -> dict[str, object]:
+def _release_provenance(version: str, bridge_checksums_sha256: str) -> dict[str, object]:
     return {
         "schema_version": 1,
-        "release_version": "0.8.5",
+        "release_version": version,
         "source_commit": "1" * 40,
         "source_tree": "2" * 40,
         "policy_commit": "3" * 40,
@@ -119,7 +130,7 @@ def _release_provenance(bridge_checksums_sha256: str) -> dict[str, object]:
         "release_source_map_sha256": "5" * 64,
         "source_install_identity": {
             "schema_version": 1,
-            "source_release": "0.8.5",
+            "source_release": version,
             "source_install_compatibility_epoch": 2,
             "runtime_config_version": 8,
         },
@@ -143,16 +154,36 @@ def resolver_env(tmp_path: Path):
         home.mkdir(exist_ok=True)
 
         bridge_checksums_sha256 = ""
-        for version in ("0.8.4", "0.8.5"):
+        for version in ("0.8.4", "0.8.5", "0.8.7", "0.8.8"):
             release_dir = fixtures / version
             release_dir.mkdir(exist_ok=True)
-            manifest = json.dumps(_manifest(version), sort_keys=True).encode()
+            manifest_payload = _manifest(version)
+            manifest = json.dumps(manifest_payload, sort_keys=True).encode()
             (release_dir / "upgrade-manifest.json").write_bytes(manifest)
             checksum_rows = [f"{hashlib.sha256(manifest).hexdigest()}  upgrade-manifest.json"]
-            if version == "0.8.5":
+            release_artifacts = manifest_payload["release_artifacts"]
+            assert isinstance(release_artifacts, dict)
+            wheel_name = release_artifacts["wheel"]
+            assert isinstance(wheel_name, str)
+            wheel = release_dir / wheel_name
+            wheel.write_bytes(
+                b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
+                + bytes(value ^ 0xA5 for value in b"resolver target wheel fixture")
+            )
+            checksum_rows.append(f"{hashlib.sha256(wheel.read_bytes()).hexdigest()}  {wheel.name}")
+            gateways = release_artifacts["gateways"]
+            assert isinstance(gateways, dict)
+            for platform_gateways in gateways.values():
+                assert isinstance(platform_gateways, dict)
+                for gateway_name in platform_gateways.values():
+                    assert isinstance(gateway_name, str)
+                    gateway = release_dir / gateway_name
+                    gateway.write_bytes(f"gateway fixture {gateway_name}\n".encode())
+                    checksum_rows.append(f"{hashlib.sha256(gateway.read_bytes()).hexdigest()}  {gateway.name}")
+            if version in {"0.8.5", "0.8.7", "0.8.8"}:
                 provenance = (
                     json.dumps(
-                        _release_provenance(bridge_checksums_sha256),
+                        _release_provenance(version, bridge_checksums_sha256),
                         indent=2,
                         sort_keys=True,
                     )
@@ -188,6 +219,27 @@ def resolver_env(tmp_path: Path):
             '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "${COSIGN_LOG}"\nexit 0\n',
         )
         _write_executable(
+            fake_bin / "sha256sum",
+            """#!/usr/bin/env bash
+set -euo pipefail
+case "${1##*/}" in
+    cosign-darwin-amd64) sha='5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be' ;;
+    cosign-darwin-arm64) sha='ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e' ;;
+    cosign-linux-amd64) sha='7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4' ;;
+    cosign-linux-arm64) sha='b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917' ;;
+    *)
+        sha="$(python3 - "$1" <<'PY'
+import hashlib
+import sys
+print(hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest())
+PY
+)"
+        ;;
+esac
+printf '%s  %s\n' "${sha}" "$1"
+""",
+        )
+        _write_executable(
             fake_bin / "curl",
             """#!/usr/bin/env bash
 set -euo pipefail
@@ -205,20 +257,31 @@ for arg in "$@"; do
         want_out=0
         continue
     fi
-    if [[ "${arg}" == '-o' ]]; then
+    if [[ "${arg}" == '-o' || "${arg}" == '--output' ]]; then
         want_out=1
     elif [[ "${arg}" == http* ]]; then
         url="${arg}"
     fi
 done
 if [[ "${url}" == */releases/latest ]]; then
-    printf '{"tag_name":"0.8.5"}\n'
+    printf '{"tag_name":"0.8.7"}\n'
+    exit 0
+fi
+if [[ "${url}" == https://github.com/sigstore/cosign/releases/download/* ]]; then
+    [[ -n "${out}" ]] || exit 95
+    cat > "${out}" <<'COSIGN'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${COSIGN_LOG}"
+exit 0
+COSIGN
     exit 0
 fi
 version=''
 case "${url}" in
     */releases/download/0.8.4/*) version='0.8.4' ;;
     */releases/download/0.8.5/*) version='0.8.5' ;;
+    */releases/download/0.8.7/*) version='0.8.7' ;;
+    */releases/download/0.8.8/*) version='0.8.8' ;;
 esac
 [[ -n "${version}" && -n "${out}" ]] || exit 96
 name="${url##*/}"
@@ -323,25 +386,46 @@ def _rewrite_manifest(env: dict[str, str], version: str, payload: dict[str, obje
     )
 
 
-def test_explicit_hard_cut_from_0_8_3_refuses_before_mutation(resolver_env) -> None:
-    env, mutation_log, _curl_log = resolver_env("0.8.3")
+@pytest.mark.parametrize("current_version", ("0.8.3", "0.8.0"))
+def test_explicit_final_target_still_resolves_verified_two_hop_plan(
+    resolver_env,
+    current_version: str,
+) -> None:
+    env, mutation_log, curl_log = resolver_env(current_version)
 
     result = _run(env, "--version", "0.8.5", "--plan")
 
     output = result.stdout + result.stderr
-    assert result.returncode != 0
-    assert "0.8.5 requires the 0.8.4 upgrade bridge" in output
+    assert result.returncode == 0, output
+    assert f"{current_version} → 0.8.4 bridge → fresh controller → 0.8.5" in output
     assert "No changes were made" in output
-    assert "there is intentionally no --version argument" in output
-    assert "defenseclaw-upgrade.XXXXXX" in output
-    assert "releases/download/0.8.5/" in output
-    assert "defenseclaw-upgrade.sh" in output
-    assert "cosign verify-blob" in output
-    assert "DefenseClaw upgrade resolver complete v1" in output
-    assert 'bash "$d/defenseclaw-upgrade.sh" --yes' in output
-    assert "upgrade.sh | bash" not in output
     assert not mutation_log.exists()
     assert not Path(env["DEFENSECLAW_HOME"]).exists()
+    downloads = curl_log.read_text(encoding="utf-8")
+    assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
+    assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
+
+
+@pytest.mark.parametrize("target_version", ("0.8.7", "0.8.8"))
+@pytest.mark.parametrize("current_version", ("0.8.3", "0.7.1"))
+def test_explicit_post_cut_target_stages_hard_cut_release(
+    resolver_env,
+    current_version: str,
+    target_version: str,
+) -> None:
+    env, mutation_log, curl_log = resolver_env(current_version)
+
+    result = _run(env, "--version", target_version, "--plan")
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert f"{current_version} → 0.8.4 bridge → fresh controller → 0.8.5 → {target_version}" in output
+    assert "No changes were made" in output
+    assert not mutation_log.exists()
+    downloads = curl_log.read_text(encoding="utf-8")
+    assert f"/releases/download/{target_version}/upgrade-manifest.json" in downloads
+    assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
+    assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
 
 
 def test_bridge_manifest_runtime_config_boundary_is_fail_closed(resolver_env) -> None:
@@ -383,11 +467,12 @@ def test_normal_latest_resolves_verified_two_hop_plan(resolver_env) -> None:
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "0.8.3 → 0.8.4 bridge → fresh controller → 0.8.5" in output
+    assert "0.8.3 → 0.8.4 bridge → fresh controller → 0.8.5 → 0.8.7" in output
     assert "No changes were made" in output
     assert not mutation_log.exists()
     assert not Path(env["DEFENSECLAW_HOME"]).exists()
     downloads = curl_log.read_text(encoding="utf-8")
+    assert "/releases/download/0.8.7/upgrade-manifest.json" in downloads
     assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
     assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
     assert "defenseclaw_0.8.5_protocol2_" in downloads
@@ -513,30 +598,61 @@ def test_manual_hard_cut_artifacts_over_v7_state_refuse_before_release_download(
     assert not curl_log.exists()
 
 
-def test_bridge_source_resolves_direct_hard_cut(resolver_env) -> None:
+def test_bridge_source_refreshes_before_direct_hard_cut(resolver_env) -> None:
     env, mutation_log, curl_log = resolver_env("0.8.4")
+
+    result = _run(env, "--version", "0.8.5", "--plan")
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "Refresh authenticated 0.8.4 bridge → fresh controller → 0.8.5" in output
+    assert not mutation_log.exists()
+    downloads = curl_log.read_text(encoding="utf-8")
+    assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
+    assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
+
+
+@pytest.mark.parametrize("target_version", ("0.8.7", "0.8.8"))
+def test_bridge_source_stages_hard_cut_before_post_cut_target(resolver_env, target_version: str) -> None:
+    env, mutation_log, curl_log = resolver_env("0.8.4")
+
+    result = _run(env, "--version", target_version, "--plan")
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert f"Refresh authenticated 0.8.4 bridge → fresh controller → 0.8.5 → {target_version}" in output
+    assert not mutation_log.exists()
+    downloads = curl_log.read_text(encoding="utf-8")
+    assert f"/releases/download/{target_version}/upgrade-manifest.json" in downloads
+    assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
+    assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX release-owned resolver")
+def test_modern_resolver_bootstraps_cosign_before_mutation(resolver_env) -> None:
+    env, mutation_log, _curl_log = resolver_env("0.8.3")
+    fake_bin = Path(env["PATH"].split(os.pathsep, 1)[0])
+    (fake_bin / "cosign").unlink()
+    controlled_system_bin = fake_bin.parent / "system-bin"
+    controlled_system_bin.mkdir()
+    for directory in os.defpath.split(os.pathsep):
+        source_directory = Path(directory)
+        if not source_directory.is_dir():
+            continue
+        for candidate in source_directory.iterdir():
+            destination = controlled_system_bin / candidate.name
+            if candidate.name == "cosign" or destination.exists() or not os.access(candidate, os.X_OK):
+                continue
+            destination.symlink_to(candidate)
+    env["PATH"] = f"{fake_bin}:{controlled_system_bin}"
+    assert shutil.which("cosign", path=env["PATH"]) is None
 
     result = _run(env, "--plan")
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "0.8.4 → 0.8.5" in output
-    assert "bridge → fresh controller" not in output
-    assert not mutation_log.exists()
-    downloads = curl_log.read_text(encoding="utf-8")
-    assert "/releases/download/0.8.4/upgrade-manifest.json" not in downloads
-
-
-def test_modern_resolver_requires_cosign_before_mutation(resolver_env) -> None:
-    env, mutation_log, _curl_log = resolver_env("0.8.3")
-    (Path(env["PATH"].split(os.pathsep, 1)[0]) / "cosign").unlink()
-
-    result = _run(env, "--plan")
-
-    output = result.stdout + result.stderr
-    assert result.returncode != 0
-    assert "requires Sigstore provenance verification" in output
-    assert "No changes were made" in output
+    assert "Cosign was not found; authenticating temporary Cosign 2.6.3" in output
+    assert "Temporary Cosign verifier authenticated" in output
     assert not mutation_log.exists()
 
 

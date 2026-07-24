@@ -32,6 +32,8 @@ def test_textual_launcher_activates_first_run_when_config_load_fails(monkeypatch
         raise FileNotFoundError("missing config")
 
     monkeypatch.setattr("defenseclaw.config.load", fail_load)
+    monkeypatch.setattr("defenseclaw.config.require_v8_config", lambda **_kwargs: None)
+    monkeypatch.setattr("defenseclaw.config.source_config_version", lambda: 8)
     monkeypatch.setattr("defenseclaw.tui.app.DefenseClawTUI", FakeApp)
 
     run_textual_tui()
@@ -53,6 +55,8 @@ def test_textual_launcher_skips_first_run_when_config_loads(monkeypatch) -> None
             launched["ran"] = True
 
     monkeypatch.setattr("defenseclaw.config.load", lambda: cfg)
+    monkeypatch.setattr("defenseclaw.config.require_v8_config", lambda **_kwargs: None)
+    monkeypatch.setattr("defenseclaw.config.source_config_version", lambda: 8)
     monkeypatch.setattr("defenseclaw.tui.app.DefenseClawTUI", FakeApp)
 
     run_textual_tui()
@@ -76,8 +80,6 @@ def test_textual_launcher_hands_missing_config_to_init_when_tty(monkeypatch) -> 
 
     def load_config() -> object:
         calls["load"] += 1
-        if calls["load"] == 1:
-            raise FileNotFoundError("missing config")
         return cfg
 
     def run_init(argv: tuple[str, ...], *, check: bool) -> subprocess.CompletedProcess:
@@ -87,6 +89,8 @@ def test_textual_launcher_hands_missing_config_to_init_when_tty(monkeypatch) -> 
         return subprocess.CompletedProcess(argv, 0)
 
     monkeypatch.setattr("defenseclaw.config.load", load_config)
+    monkeypatch.setattr("defenseclaw.config.require_v8_config", lambda **_kwargs: None)
+    monkeypatch.setattr("defenseclaw.config.source_config_version", lambda: None)
     monkeypatch.setattr("defenseclaw.config.config_path", lambda: "/tmp/config.yaml")
     monkeypatch.setattr("defenseclaw.tui.app.DefenseClawTUI", FakeApp)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
@@ -96,7 +100,7 @@ def test_textual_launcher_hands_missing_config_to_init_when_tty(monkeypatch) -> 
 
     run_textual_tui()
 
-    assert calls == {"load": 2, "init": 1}
+    assert calls == {"load": 1, "init": 1}
     assert launched["config"] is cfg
     assert launched["first_run"] is False
     assert launched["ran"] is True
@@ -113,6 +117,8 @@ def test_textual_launcher_decline_opens_without_embedded_first_run(monkeypatch) 
             launched["ran"] = True
 
     monkeypatch.setattr("defenseclaw.config.load", lambda: (_ for _ in ()).throw(FileNotFoundError("missing")))
+    monkeypatch.setattr("defenseclaw.config.require_v8_config", lambda **_kwargs: None)
+    monkeypatch.setattr("defenseclaw.config.source_config_version", lambda: None)
     monkeypatch.setattr("defenseclaw.config.config_path", lambda: "/tmp/config.yaml")
     monkeypatch.setattr("defenseclaw.tui.app.DefenseClawTUI", FakeApp)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)

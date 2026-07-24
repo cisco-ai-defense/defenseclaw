@@ -22,7 +22,7 @@
 # No Go, Node.js, or git required — only Python and uv.
 #
 #   # From GitHub release:
-#   VERSION=0.8.4
+#   VERSION=0.8.6
 #   INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 #   curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 #
@@ -69,7 +69,12 @@ readonly INSTALL_ATTEMPT_MARKER=".defenseclaw-install-in-progress-v1"
 readonly INSTALL_ATTEMPT_MARKER_CONTENT="DefenseClaw authenticated fresh install in progress v1"
 readonly REPO="cisco-ai-defense/defenseclaw"
 readonly OPENCLAW_VERSION="2026.3.24"
+readonly MIN_PYTHON_VERSION="3.10"
+readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"
+readonly COSIGN_BOOTSTRAP_VERSION="2.6.3"
+readonly COSIGN_BOOTSTRAP_MAX_BYTES="209715200"
 VERIFIED_CHECKSUM=""
+COSIGN_BIN=""
 
 # Supported connectors. Keep in sync with cli/defenseclaw/connector_paths.py
 # KNOWN_CONNECTORS. The "none" pseudo-value means "lay binaries only — pick
@@ -903,7 +908,8 @@ ensure_python() {
         if has "$cmd"; then
             local ver
             ver="$(extract_version "$("$cmd" --version 2>&1)")"
-            if version_gte "$ver" "3.10"; then
+            if version_gte "$ver" "${MIN_PYTHON_VERSION}" \
+                && ! version_gte "$ver" "${MAX_PYTHON_VERSION_EXCLUSIVE}"; then
                 PYTHON_VERSION="$ver"
                 POLICY_PYTHON="$(command -v "$cmd")"
                 ok "Python ${ver}"
@@ -965,12 +971,52 @@ sha256_file() {
     fi
 }
 
+resolve_cosign() {
+    if has cosign; then
+        COSIGN_BIN="$(command -v cosign)"
+        return 0
+    fi
+
+    local expected filename verifier_url verifier_path actual size
+    case "${OS}/${ARCH_NORM}" in
+        darwin/amd64) expected="5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be" ;;
+        darwin/arm64) expected="ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e" ;;
+        linux/amd64) expected="7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4" ;;
+        linux/arm64) expected="b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917" ;;
+        *) die "Automatic Cosign bootstrap is unavailable for ${OS}/${ARCH_NORM}; no payload was activated" ;;
+    esac
+    filename="cosign-${OS}-${ARCH_NORM}"
+    verifier_url="https://github.com/sigstore/cosign/releases/download/v${COSIGN_BOOTSTRAP_VERSION}/${filename}"
+    verifier_path="${POLICY_DIR}/${filename}"
+    info "Cosign was not found; authenticating temporary Cosign ${COSIGN_BOOTSTRAP_VERSION}..."
+    curl --fail --silent --show-error --location \
+        --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --max-filesize "${COSIGN_BOOTSTRAP_MAX_BYTES}" \
+        --output "${verifier_path}" "${verifier_url}" \
+        || die "Could not download the pinned Cosign verifier; no payload was activated"
+    [[ -f "${verifier_path}" && ! -L "${verifier_path}" && -O "${verifier_path}" ]] \
+        || die "Temporary Cosign verifier lost private file custody; no payload was activated"
+    size="$(custody_stat size "${verifier_path}")" \
+        || die "Could not inspect the temporary Cosign verifier"
+    [[ "${size}" -gt 0 && "${size}" -le "${COSIGN_BOOTSTRAP_MAX_BYTES}" ]] \
+        || die "Temporary Cosign verifier exceeded its authenticated size boundary"
+    actual="$(sha256_file "${verifier_path}")"
+    [[ "${actual}" == "${expected}" ]] \
+        || die "Temporary Cosign verifier SHA-256 authentication failed; no payload was activated"
+    chmod 700 "${verifier_path}" \
+        || die "Could not make the authenticated temporary Cosign verifier executable"
+    [[ "$(sha256_file "${verifier_path}")" == "${expected}" ]] \
+        || die "Temporary Cosign verifier changed before execution; no payload was activated"
+    COSIGN_BIN="${verifier_path}"
+    ok "Temporary Cosign verifier authenticated"
+}
+
 load_release_policy() {
     step "Authenticating release policy"
     [[ -n "${POLICY_PYTHON:-}" && -x "${POLICY_PYTHON}" ]] \
         || die "A supported Python interpreter is required to validate the signed release artifact policy"
     local policy_dir_raw
-    policy_dir_raw="$(mktemp -d)"
+    policy_dir_raw="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-policy.XXXXXX")"
     POLICY_DIR="$(cd "${policy_dir_raw}" && pwd -P)" \
         || die "Could not canonicalize the release-policy staging directory"
     local policy_custody_key
@@ -1011,7 +1057,6 @@ PY
     MODERN_RELEASE=false
     if version_gte "${RELEASE_VERSION}" "0.8.4"; then
         MODERN_RELEASE=true
-        has cosign || die "cosign is required to authenticate DefenseClaw ${RELEASE_VERSION} before installation"
         local signature="${POLICY_DIR}/checksums.txt.sig"
         local certificate="${POLICY_DIR}/checksums.txt.pem"
         if [[ -n "${LOCAL_DIR}" ]]; then
@@ -1023,7 +1068,8 @@ PY
             fetch_artifact "$(artifact_path "checksums.txt.sig")" "${signature}"
             fetch_artifact "$(artifact_path "checksums.txt.pem")" "${certificate}"
         fi
-        cosign verify-blob \
+        resolve_cosign
+        "${COSIGN_BIN}" verify-blob \
             --certificate "${certificate}" \
             --signature "${signature}" \
             --certificate-identity "https://github.com/${REPO}/.github/workflows/release.yaml@refs/heads/main" \
@@ -1418,6 +1464,9 @@ install_python_cli() {
         warn "Legacy wheel download residue was preserved because exact retirement is unavailable"
     fi
 
+    "${DEFENSECLAW_VENV}/bin/defenseclaw" --help &>/dev/null \
+        || die "CLI validation failed before launcher publication"
+
     if [[ "${MODERN_RELEASE:-false}" == true ]]; then
         CLI_PUBLISHED_ID="$(
             "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-symlink \
@@ -1433,12 +1482,7 @@ install_python_cli() {
     fi
     [[ "${CLI_PUBLISHED_ID}" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]] \
         || die "Installed DefenseClaw CLI returned an invalid identity"
-
-    if "${DEFENSECLAW_VENV}/bin/defenseclaw" --help &>/dev/null; then
-        ok "CLI installed"
-    else
-        warn "CLI installed but verification failed — check dependencies"
-    fi
+    ok "CLI installed"
 }
 
 # ── Install: OpenClaw Plugin (from tarball) ───────────────────────────────────
@@ -1784,7 +1828,7 @@ while [[ $# -gt 0 ]]; do
         --help|-h)
             echo ""
             echo "Usage:"
-            echo '  VERSION=0.8.4'
+            echo '  VERSION=0.8.6'
             echo '  INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"'
             echo '  curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash'
             echo "  ./scripts/install.sh --local /path/to/release-assets  # complete authenticated assets"

@@ -284,6 +284,32 @@ func TestDispatcher_DedupWithinWindow(t *testing.T) {
 	}
 }
 
+func TestDispatcher_ConcurrentDuplicatesDeliverExactlyOnce(t *testing.T) {
+	rec := &recorder{}
+	cfg := enabledConfig()
+	cfg.DedupWindow = time.Minute
+	cfg.MaxPerMinute = 100
+	d := NewWithSender(cfg, rec.Send)
+	d.SetClock(func() time.Time { return time.Unix(0, 0) })
+
+	const workers = 64
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			d.OnBlock(BlockEvent{Source: SourceHook, Target: "Bash", Reason: "阻止 <redacted>"})
+		}()
+	}
+	wg.Wait()
+
+	// Wait for the full window so a duplicate that races through dedup is
+	// counted instead of arriving after the assertion has already returned.
+	if got := rec.Drain(2, 250*time.Millisecond); len(got) != 1 {
+		t.Fatalf("concurrent duplicate delivery count = %d, want 1: %#v", len(got), got)
+	}
+}
+
 func TestDispatcher_RateLimitAndRollup(t *testing.T) {
 	rec := &recorder{}
 	cfg := enabledConfig()

@@ -35,13 +35,16 @@ behavior so a regression to the original vulnerable code re-fails the test:
 
 import os
 import re
-import stat
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
 import click
 from click.testing import CliRunner
+
+from tests.environment import requires_symlink_privilege
+from tests.permissions import assert_owner_only_directory
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +169,15 @@ class TestRestartFailsClosed(unittest.TestCase):
 
         self.assertIs(_restart_openclaw_gateway(), False)
 
+    @patch(
+        "defenseclaw.commands.cmd_setup.subprocess.run",
+        side_effect=subprocess.TimeoutExpired("openclaw", 60),
+    )
+    def test_f0143_restart_openclaw_gateway_returns_false_on_timeout(self, _mock_run):
+        from defenseclaw.commands.cmd_setup import _restart_openclaw_gateway
+
+        self.assertIs(_restart_openclaw_gateway(), False)
+
 
 class TestSandboxChownPin(unittest.TestCase):
     """F-0161: privileged chown must refuse a divergent symlink target."""
@@ -193,6 +205,7 @@ class TestSandboxChownPin(unittest.TestCase):
 class TestSandboxInitIdempotentPin(unittest.TestCase):
     """F-0162: idempotency fast-path must refuse a swapped .openclaw symlink."""
 
+    @requires_symlink_privilege
     def test_f0162_refuses_swapped_symlink(self):
         from defenseclaw.commands.cmd_init_sandbox import (
             OPENCLAW_OWNERSHIP_BACKUP,
@@ -225,6 +238,7 @@ class TestInitSandboxChownTOCTOU(unittest.TestCase):
     against the pinned home immediately before the step-7 recursive chown,
     closing the TOCTOU window between integration and the privileged chown."""
 
+    @requires_symlink_privilege
     def test_f0421_rechecks_pinned_home_before_chown(self):
         from defenseclaw.commands import cmd_init_sandbox as mod
 
@@ -277,6 +291,7 @@ class TestInitSandboxChownTOCTOU(unittest.TestCase):
             )
 
 
+@unittest.skipIf(os.name == "nt", "systemd privileged-copy validation is Linux-only")
 class TestSystemdInstallValidation(unittest.TestCase):
     """F-0163: install only known filenames, refusing tampered sources."""
 
@@ -381,6 +396,7 @@ class TestRestoreOpenclawGatewaySymlink(unittest.TestCase):
     or clobber an arbitrary operator file."""
 
     @patch("defenseclaw.commands.cmd_setup_sandbox._needs_sudo", return_value=False)
+    @requires_symlink_privilege
     def test_f0425_refuses_symlinked_config(self, _mock_sudo):
         from defenseclaw.commands.cmd_setup_sandbox import _restore_openclaw_gateway
 
@@ -450,10 +466,7 @@ class TestInitDirPermissions(unittest.TestCase):
             for sub in ("quarantine", "plugins"):
                 path = os.path.join(tmp, sub)
                 self.assertTrue(os.path.isdir(path), f"{sub} not created")
-                mode = stat.S_IMODE(os.stat(path).st_mode)
-                self.assertEqual(
-                    mode, 0o700, f"{sub} is {oct(mode)}, expected 0o700"
-                )
+                assert_owner_only_directory(path)
 
 
 if __name__ == "__main__":

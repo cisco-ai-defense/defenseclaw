@@ -28,8 +28,8 @@ import pytest
 from defenseclaw import install_publish
 
 ROOT = Path(__file__).resolve().parents[2]
-CURRENT_RELEASE = "0.8.4"
-STALE_RELEASES = ("0.8.0", "0.8.1", "0.8.2", "0.8.3")
+CURRENT_RELEASE = "0.8.6"
+STALE_RELEASES = ("0.8.0", "0.8.1", "0.8.2", "0.8.3", "0.8.4", "0.8.5")
 
 BASH_INSTALL_LINES = (
     f"VERSION={CURRENT_RELEASE}",
@@ -49,10 +49,10 @@ DOC_INSTALL_COMMANDS = {
     ),
     "docs-site/content/docs/get-started/install.mdx": BASH_INSTALL_LINES
     + (
-        f'$Version = "{CURRENT_RELEASE}"',
-        '$InstallUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"',
-        "& ([scriptblock]::Create((irm $InstallUrl))) -Version $Version",
-        "& ([scriptblock]::Create((irm $InstallUrl))) -Version $Version -Connector codex -Quickstart -Yes",
+        ".\\DefenseClawSetup-x64.exe",
+        ".\\DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1",
+        "after download it does not require Python, `uv`, Go, Node.js, Git, or a",
+        "PowerShell installation command.",
     ),
     "docs-site/content/docs/get-started/first-guardrail.mdx": (
         f"VERSION={CURRENT_RELEASE}",
@@ -64,11 +64,51 @@ DOC_INSTALL_COMMANDS = {
         "text: `curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${INSTALL_VERSION}/scripts/install.sh | VERSION=${INSTALL_VERSION} bash`,",
     ),
 }
+RELEASE_INSTALL_COMMANDS = {
+    **DOC_INSTALL_COMMANDS,
+    "scripts/install.sh": BASH_INSTALL_LINES,
+}
 
 INSTALLER_FILES = (
     "scripts/install.sh",
     "scripts/install.ps1",
 )
+
+OBSERVABILITY_V8_CURRENT_AUTHORITY_FILES = (
+    "docs-site/components/command-generator.tsx",
+    "docs-site/content/docs/command-generator.mdx",
+    "docs-site/content/docs/setup/guardrail/index.mdx",
+    "docs-site/content/docs/connectors/openclaw.mdx",
+    "docs-site/content/docs/connectors/zeptoclaw.mdx",
+    "docs-site/content/docs/connectors/claudecode.mdx",
+    "docs-site/content/docs/connectors/codex.mdx",
+    "docs-site/content/docs/connectors/geminicli.mdx",
+    "docs-site/content/docs/setup/index.mdx",
+    "bundles/local_observability_stack/prometheus/rules/alerts.yml",
+    "scripts/install-dev.sh",
+    "docs-site/content/docs/reference/configuration.mdx",
+)
+
+OBSERVABILITY_V8_WORKFLOW_GUIDES = (
+    "docs-site/components/command-generator.tsx",
+    "docs-site/content/docs/command-generator.mdx",
+    "docs-site/content/docs/setup/guardrail/index.mdx",
+    "docs-site/content/docs/setup/index.mdx",
+    "bundles/local_observability_stack/prometheus/rules/alerts.yml",
+)
+
+OBSERVABILITY_V8_CONNECTOR_GUIDES = (
+    "docs-site/content/docs/connectors/openclaw.mdx",
+    "docs-site/content/docs/connectors/zeptoclaw.mdx",
+    "docs-site/content/docs/connectors/claudecode.mdx",
+    "docs-site/content/docs/connectors/codex.mdx",
+    "docs-site/content/docs/connectors/geminicli.mdx",
+)
+
+OBSERVABILITY_V8_JSONL_GUIDES = {
+    "docs-site/content/docs/setup/index.mdx": "kind: jsonl",
+    "docs-site/content/docs/reference/configuration.mdx": "kind: jsonl",
+}
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -81,6 +121,19 @@ def _write_python_selector_shims(root: Path, body: str) -> None:
 
     for name in ("python3.12", "python3.11", "python3.13", "python3.10", "python3"):
         _write_executable(root / name, body)
+
+
+def test_posix_installer_rejects_python_314_before_creating_policy_venv() -> None:
+    source = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
+    assert 'readonly MIN_PYTHON_VERSION="3.10"' in source
+    assert 'readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"' in source
+    selector = source[source.index("ensure_python() {") : source.index("# ── Resolve dist artifacts")]
+    assert 'version_gte "$ver" "${MIN_PYTHON_VERSION}"' in selector
+    assert '! version_gte "$ver" "${MAX_PYTHON_VERSION_EXCLUSIVE}"' in selector
+
+    developer_installer = (ROOT / "scripts/install-dev.sh").read_text(encoding="utf-8")
+    assert 'readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"' in developer_installer
+    assert 'version_in_range "${ver}" "${MIN_PYTHON_VERSION}" "${MAX_PYTHON_VERSION_EXCLUSIVE}"' in developer_installer
 
 
 def _write_minimal_schema2_install_dist(root: Path, version: str = CURRENT_RELEASE) -> None:
@@ -239,9 +292,7 @@ def test_posix_installer_identity_is_per_inode_not_per_filesystem(tmp_path: Path
 
 def test_posix_installer_routes_retirement_custody_by_managed_filesystem() -> None:
     source = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
-    assert (
-        'readonly STATE_CUSTODY_ROOT="$(dirname "${DEFENSECLAW_HOME}")/.defenseclaw-install-custody"'
-    ) in source
+    assert ('readonly STATE_CUSTODY_ROOT="$(dirname "${DEFENSECLAW_HOME}")/.defenseclaw-install-custody"') in source
 
     cleanup = source[
         source.index("cleanup_install_attempt() {") : source.index(
@@ -290,9 +341,7 @@ def test_posix_install_attempt_marker_bounds_the_publication_lifecycle() -> None
     ]
     assert "os.unlink(" not in marker_lifecycle
     assert '"${PUBLISH_HELPER}" unlink-exact' in marker_lifecycle
-    early_guard = source.index(
-        "if existing_install_detected && ! interrupted_install_attempt_detected; then"
-    )
+    early_guard = source.index("if existing_install_detected && ! interrupted_install_attempt_detected; then")
     assert early_guard < source.index("detect_platform\n", early_guard)
 
     recovered_guard = source.index("if existing_install_detected; then", early_guard + 1)
@@ -323,11 +372,7 @@ def test_posix_install_attempt_marker_is_durable_private_and_recoverable(
     functions = source[start:end]
 
     install_custody = tmp_path / "home/.defenseclaw-install-custody"
-    state_custody = (
-        tmp_path / "state/.defenseclaw-install-custody"
-        if split_roots
-        else install_custody
-    )
+    state_custody = tmp_path / "state/.defenseclaw-install-custody" if split_roots else install_custody
     for custody in {install_custody, state_custody}:
         custody.parent.mkdir(parents=True, mode=0o700)
         prepared = subprocess.run(
@@ -391,9 +436,7 @@ fi
         assert stat.S_IMODE(custody.stat().st_mode) == 0o700
         assert stat.S_IMODE(marker.stat().st_mode) == 0o600
         assert marker.stat().st_nlink == 1
-        assert marker.read_text(encoding="ascii") == (
-            "DefenseClaw authenticated fresh install in progress v1\n"
-        )
+        assert marker.read_text(encoding="ascii") == ("DefenseClaw authenticated fresh install in progress v1\n")
 
     environment["ACTION"] = "complete"
     recovered = subprocess.run(
@@ -419,11 +462,7 @@ fi
     assert all(custody.is_dir() for custody in roots)
     expected = b"DefenseClaw authenticated fresh install in progress v1\n"
     for custody in roots:
-        retired = [
-            path
-            for path in custody.glob("retired-*")
-            if path.is_file() and path.read_bytes() == expected
-        ]
+        retired = [path for path in custody.glob("retired-*") if path.is_file() and path.read_bytes() == expected]
         assert len(retired) == 1
 
 
@@ -838,6 +877,7 @@ def test_legacy_macos_installer_claims_gateway_after_copy_and_codesign(
     assert verified.returncode == 0, verified.stdout + verified.stderr
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX installer requires /bin/bash")
 def test_posix_installer_refuses_partial_home_and_dangling_entrypoints(tmp_path: Path) -> None:
     installer = ROOT / "scripts/install.sh"
     for case in ("partial-home", "dangling-cli"):
@@ -884,6 +924,7 @@ def test_posix_installer_refuses_partial_home_and_dangling_entrypoints(tmp_path:
             assert not marker.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX installer requires /bin/bash")
 def test_posix_local_installer_refuses_existing_state_before_artifact_checks(tmp_path: Path) -> None:
     home = tmp_path / "home"
     data_home = home / ".defenseclaw"
@@ -927,6 +968,7 @@ def test_posix_local_installer_refuses_existing_state_before_artifact_checks(tmp
     assert marker.read_bytes() == b"preserve\n"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX installer requires /bin/bash")
 def test_posix_installer_refuses_path_only_gateway_before_platform_or_network(
     tmp_path: Path,
 ) -> None:
@@ -1330,21 +1372,27 @@ def test_source_install_preflight_refuses_release_and_other_checkout_but_allows_
     make = shutil.which("make")
     if make is None:
         pytest.skip("make is unavailable")
+    tool_dirs = {str(Path(tool).parent) for name in ("go", "python3") if (tool := shutil.which(name)) is not None}
+    test_path = os.pathsep.join(sorted(tool_dirs) + ["/usr/bin", "/bin"])
 
-    def run(home: Path, install_dir: Path) -> subprocess.CompletedProcess[str]:
+    def run(
+        home: Path,
+        install_dir: Path,
+        target: str = "_source-install-preflight",
+    ) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment.update(
             {
                 "HOME": str(home),
                 "DEFENSECLAW_HOME": str(home / ".defenseclaw"),
-                "PATH": "/usr/bin:/bin",
+                "PATH": test_path,
             }
         )
         return subprocess.run(
             [
                 make,
                 "--no-print-directory",
-                "_source-install-preflight",
+                target,
                 f"INSTALL_DIR={install_dir}",
             ],
             cwd=ROOT,
@@ -1390,16 +1438,24 @@ def test_source_install_preflight_refuses_release_and_other_checkout_but_allows_
     assert "release-owned resolver" in refused_output
     assert (other_bin / "defenseclaw").readlink() == other_cli
 
+    refused = run(other_home, other_bin, "_source-install-dev-preflight")
+    assert refused.returncode != 0
+    assert "another installation" in (refused.stdout + refused.stderr)
+
     owner_home = tmp_path / "owner/home"
     owner_bin = owner_home / ".local/bin"
     owner_bin.mkdir(parents=True)
-    expected_cli = ROOT / ".venv/bin/defenseclaw"
+    expected_cli = ROOT.resolve() / ".venv/bin/defenseclaw"
     (owner_bin / "defenseclaw").symlink_to(expected_cli)
     (owner_home / ".defenseclaw").mkdir()
 
     refused = run(owner_home, owner_bin)
     assert refused.returncode != 0
     assert "managed state exists beside a markerless source CLI" in (refused.stdout + refused.stderr)
+
+    allowed = run(owner_home, owner_bin, "_source-install-dev-preflight")
+    assert allowed.returncode == 0, allowed.stdout + allowed.stderr
+    assert not (owner_bin / ".defenseclaw-source-root").exists()
 
     owner_gateway = owner_bin / "defenseclaw-gateway"
     owner_gateway.write_bytes(b"owned gateway\n")
@@ -1410,9 +1466,9 @@ def test_source_install_preflight_refuses_release_and_other_checkout_but_allows_
             {
                 "schema_version": 2,
                 "checkout_root": str(ROOT.resolve()),
-                "source_release": "0.8.4",
-                "source_install_compatibility_epoch": 1,
-                "runtime_config_version": 7,
+                "source_release": CURRENT_RELEASE,
+                "source_install_compatibility_epoch": 2,
+                "runtime_config_version": 8,
                 "gateway_sha256": gateway_digest,
             },
             indent=2,
@@ -1457,6 +1513,7 @@ def test_source_gateway_claim_allows_rebuild_but_rejects_installed_tampering(
         "extensions/defenseclaw/package-lock.json",
         "macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj",
         "internal/config/config.go",
+        "internal/config/observability_v8_types.go",
         "release/source-install-identity.json",
     ):
         destination = repo / relative
@@ -1653,6 +1710,11 @@ def test_failed_gateway_install_does_not_claim_source_ownership(tmp_path: Path) 
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
     _write_executable(fake_bin / "uv", "#!/bin/sh\nexit 0\n")
+    recursive_make = fake_bin / "recursive-make"
+    _write_executable(
+        recursive_make,
+        '#!/bin/sh\ncase " $* " in\n  *" pycli "*) exit 0 ;;\n  *" gateway "*) exit 42 ;;\n  *) exit 43 ;;\nesac\n',
+    )
     _write_executable(
         fake_bin / "go",
         "#!/bin/sh\n"
@@ -1683,6 +1745,7 @@ def test_failed_gateway_install_does_not_claim_source_ownership(tmp_path: Path) 
             "CONNECTOR=none",
             "GATEWAY=missing-source-gateway",
             f"INSTALL_DIR={install_dir}",
+            f"MAKE={recursive_make}",
         ],
         cwd=ROOT,
         env=environment,
@@ -1706,7 +1769,10 @@ def test_source_install_docs_are_developer_only_and_point_existing_hosts_to_reso
         assert "not an alternate upgrade mechanism" in normalized or "not an upgrade path" in normalized
         assert "release-owned" in text
         assert "`scripts/upgrade.sh`" in text
-        assert "`scripts/upgrade.ps1`" in text
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "`scripts/upgrade.ps1`" in readme
+    install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
+    assert "does not claim an upgrade" in install
 
 
 def test_public_operator_docs_never_advertise_direct_defenseclaw_package_install() -> None:
@@ -1736,23 +1802,31 @@ def test_public_operator_docs_never_advertise_direct_defenseclaw_package_install
 
 def test_quickstart_docs_do_not_pipe_main_installer() -> None:
     for rel, expected_lines in DOC_INSTALL_COMMANDS.items():
-        text = (ROOT / rel).read_text()
+        text = (ROOT / rel).read_text(encoding="utf-8")
         assert "raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh" not in text
         assert "raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.ps1" not in text
         for expected in expected_lines:
             assert expected in text, f"{rel} is missing install snippet line: {expected}"
 
 
-def test_release_docs_dispatch_protected_workflow_and_never_precreate_tag() -> None:
+def test_release_docs_use_one_dispatch_and_never_precreate_tag() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
 
     for text in (makefile, install):
-        assert "gh workflow run release.yaml --ref main -f version=" in text
+        assert "gh workflow run release.yaml --ref main" in text
+        assert "-f version=" in text
+        assert "-f immutable_releases_confirmed=true" in text
+        assert "-f operation=certify" not in text
+        assert "-f operation=release" not in text
         assert "git tag 0.4.0" not in text
         assert "git push origin" not in text
     assert "Do not create or push the tag yourself" in install
-    assert "creates the remote tag and GitHub release together" in " ".join(install.split())
+    normalized = " ".join(install.split())
+    assert "One dispatch from a reviewed `main` commit" in normalized
+    assert "tests those exact candidate bytes, and publishes them" in normalized
+    assert "A merge to `main` is the review-and-CI boundary" in normalized
+    assert "certification receipt" not in normalized
 
 
 def test_upgrade_docs_fail_closed_for_unsupported_sources_without_inferred_hops() -> None:
@@ -1763,13 +1837,11 @@ def test_upgrade_docs_fail_closed_for_unsupported_sources_without_inferred_hops(
     for text in (install, cli, guardrail):
         assert "remain on the current version" in text.lower()
         assert "contact support" in text.lower()
-    assert "0.7.0" in install
-    assert "0.2.x" in install
-    assert "0.3.x" in install
-    assert "native Windows matrix currently covers only" in install
-    assert "Windows source older than `0.8.0`" in install
-    assert "Windows older than `0.8.0`" in cli
-    assert "`0.8.0`–`0.8.3` only" in cli
+    assert "newest authenticated `0.7.x`, `0.6.x`, and `0.5.x`" in install
+    assert "Sources outside the signed published-baseline policy" in install
+    assert "first native Windows release" in install
+    assert "does not claim an upgrade" in install
+    assert "no Windows hard-cut path is published" in cli
     assert "Explicitly upgrade to `0.8.4`" not in cli
     assert "reach tested baseline `0.4.0`" not in cli
     assert "Upgrading from 0.2.0 to an artifact-backed release" not in install
@@ -1785,7 +1857,8 @@ def test_upgrade_docs_use_resolver_only_crash_recovery_without_manual_rollback()
     assert "Re-run that same resolver in latest mode, without a version override" in section
     assert "do not manually copy a backup over live state" in section
     assert "./scripts/upgrade.sh --yes" in section
-    assert ".\\scripts\\upgrade.ps1 -Yes" in section
+    assert "first native Windows release is qualified as" in section
+    assert "does not claim an upgrade" in section
     assert "upgrade.sh --version" not in section
     assert "VERSION=0.3.0" not in section
     assert "curl -sSfL" not in section
@@ -1798,25 +1871,17 @@ def test_installed_user_upgrade_docs_require_authenticated_resolver_assets() -> 
     quickstart = (ROOT / "docs/GUARDRAIL_QUICKSTART.md").read_text(encoding="utf-8")
     site = (ROOT / "docs-site/content/docs/get-started/upgrade.mdx").read_text(encoding="utf-8")
 
-    for asset in ("defenseclaw-upgrade.sh", "defenseclaw-upgrade.ps1"):
-        assert asset in cli
-    assert "cosign verify-blob" in cli
-    assert "-UseBasicParsing" in cli
+    assert "defenseclaw-upgrade.sh" in cli
+    assert "verify-blob" in cli
+    assert "unset VERSION" in cli
     latest_assets = "releases/latest/download/"
-    assert cli.count(latest_assets) == 2
+    assert cli.count(latest_assets) == 1
     assert re.search(r"releases/download/\d+\.\d+\.\d+/", cli) is None
     assert f"releases/download/v{CURRENT_RELEASE}/" not in cli
     assert "That URL is only a locator" in " ".join(cli.split())
-    documented_windows = cli.split(
-        "```powershell\n# PowerShell: download the current resolver, then run latest mode\n",
-        1,
-    )[1].split("\n```", 1)[0]
-    generated_windows = (
-        authenticated_resolver_instructions(CURRENT_RELEASE)
-        .replace(f"releases/download/{CURRENT_RELEASE}/", latest_assets)
-        .split("Windows PowerShell:\n", 1)[1]
-    )
-    assert documented_windows.strip() == generated_windows.strip()
+    generated = authenticated_resolver_instructions(CURRENT_RELEASE)
+    assert "Preflight refusal only" in generated
+    assert "unset VERSION" in generated
     assert "does not require a source checkout" in quickstart
     assert "does not require a source checkout" in site
     expected_reference = "https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade"
@@ -1841,73 +1906,58 @@ def test_public_docs_never_direct_pre_bridge_clients_to_their_immutable_cli() ->
     assert "cannot perform" in rendered or "cannot learn" in rendered
 
 
-def test_hard_cut_docs_reject_frozen_raw_hint_and_allow_coherent_bridge_controller() -> None:
+def test_hard_cut_docs_require_target_resolver_for_frozen_controllers() -> None:
     cli = (ROOT / "docs/CLI.md").read_text(encoding="utf-8")
     install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
-    site = (ROOT / "docs-site/content/docs/get-started/upgrade.mdx").read_text(
-        encoding="utf-8"
-    )
+    site = (ROOT / "docs-site/content/docs/get-started/upgrade.mdx").read_text(encoding="utf-8")
     guardrail = (ROOT / "docs/GUARDRAIL.md").read_text(encoding="utf-8")
     rendered = "\n".join((cli, install, site, guardrail))
 
-    assert "Run `defenseclaw upgrade --yes`" in cli
-    assert "installed, coherent `0.8.4` bridge controller" in install
-    assert "supports `0.8.4 → 0.8.5`" in site
-    assert "authenticated bridge rollback custody" in site
+    assert "release-owned POSIX shell resolver performs the supported one-command path" in cli
+    assert "Every supported POSIX source uses the authenticated target-release resolver" in install
+    assert "immutable `0.8.4` command cannot parse the truthful" in site
+    assert "platform_tested_source_versions.windows: []" in site
     assert "bash defenseclaw-upgrade.sh --yes" in install
     assert "bash defenseclaw-upgrade.sh --yes" in site
-    assert "& .\\defenseclaw-upgrade.ps1 -Yes" in install
-    assert "& .\\defenseclaw-upgrade.ps1 -Yes" in site
+    assert "PowerShell resolver" in site and "refusal" in site
+    assert "first native Windows release" in install
+    assert "does not claim an upgrade" in install
     assert "without `--version`" in cli
-    assert "Do not add `--version` or `-Version`" in install
-    assert "Do not pass `--version` or" in site
+    assert "Do not add `--version` to the resolver command" in install
+    assert "without a target version" in site
     assert "0.8.3` or older" in install
     assert "`0.8.3` or older" in site
     assert rendered.count("obsolete raw") >= 3
+    assert "frozen built-in command remains usable" not in rendered
+    assert "supports `0.8.4 → 0.8.5`" not in rendered
     assert "curl -fsSL https://raw.githubusercontent.com" not in rendered
     assert "upgrade.sh | bash" not in rendered
 
 
-def test_windows_install_protected_materialization_binds_exact_signed_outer_bytes() -> None:
+def test_windows_bootstrap_binds_native_setup_to_authenticated_signed_outer_bytes() -> None:
     installer = (ROOT / "scripts/install.ps1").read_text(encoding="utf-8")
 
-    assert "Get-RequiredChecksumDigest" in installer
-    assert "Protected release artifact changed after checksum authentication" in installer
-    assert "-ExpectedSha256 (Get-RequiredChecksumDigest" in installer
-    assert '-cnotcontains "wheel"' in installer
-    assert "-cne $expectedWheel" in installer
-    assert "function New-PrivateDirectoryAcl" in installer
-    assert "CreatePrivateDirectory" in installer
-    assert "FILE_CREATE" in installer
-    assert "FILE_DIRECTORY_FILE" in installer
-    assert "$script:PrivateDirectoryClaims[$full] = [pscustomobject]@{" in installer
-    assert "Identity = $claim.Identity" in installer
-    assert "Native = $claim" in installer
-    assert "function New-PrivateFileStream" in installer
-    assert "GetTempFileName" not in installer
-    assert "New-Item -ItemType Directory -Force -Path $tmp" not in installer
-    assert "$tmp = New-PrivateDirectory -Path (Join-Path" in installer
-    assert "$script:WheelInnerSha256 = Copy-AuthenticatedPrivateArtifact" in installer
-    assert "$script:GatewayArchiveInnerSha256 = Copy-AuthenticatedPrivateArtifact" in installer
-    assert "Assert-ExactPrivateArtifactDigest -Path $gatewayZip" in installer
-    assert "$expandedGateway=Join-Path $extract \"defenseclaw.exe\"" in installer
-    assert "$expandedGatewaySha256=(Get-FileHash -LiteralPath $expandedGateway" in installer
-    assert "$script:GatewayBinary=Join-Path $script:PolicyDir \"defenseclaw.exe\"" in installer
-    assert "$script:GatewayBinarySha256=Copy-AuthenticatedPrivateArtifact -Source $expandedGateway" in installer
-    assert "Set-PrivateFileAcl -Path $script:GatewayBinary" not in installer
-    assert "Assert-ExactPrivateArtifactDigest -Path $script:GatewayBinary" in installer
-    assert "Assert-ExactPrivateArtifactDigest -Path $whlPath" in installer
+    assert "function Get-AuthenticatedChecksum" in installer
+    assert "$setupSha = Get-AuthenticatedChecksum" in installer
+    assert "-ChecksumsContent $ChecksumsContent -FileName $SetupAsset" in installer
+    assert "Assert-Sha256 -Path $setup -Expected $setupSha -Label $SetupAsset" in installer
+    assert "Authenticated Setup provenance does not match the exact authenticated checksum" in installer
+    assert "Assert-SetupAuthenticode -Path $setup" in installer
+    assert "function New-PrivateStageRoot" in installer
+    assert "Set-PrivateDirectoryProtection -Path $root" in installer
+    assert "[IO.FileMode]::CreateNew" in installer
+    assert "function Remove-PrivateStageRoot" in installer
+
+    native_setup = installer[installer.index("function Invoke-NativeSetup {") : installer.index("function Main {")]
+    checksum = native_setup.index("Assert-Sha256")
+    authenticode = native_setup.index("Assert-SetupAuthenticode")
+    execute = native_setup.index("Invoke-BoundedNativeProcess")
+    assert checksum < authenticode < execute
+
     main = installer[installer.index("function Main {") :]
-    policy_finally = main.index("} finally {")
-    policy_cleanup = main.index("Close-ReleasePolicyCustody")
-    transaction_commit = main.index("Complete-FreshInstallAttempt")
-    assert policy_finally < policy_cleanup < transaction_commit
-    cleanup = installer[
-        installer.index("function Close-ReleasePolicyCustody {") : installer.index("function Get-OwnerDaclSddl")
-    ]
-    assert "Remove-PrivateDirectory -Path $policyToRemove" in cleanup
-    assert "Private release-policy cleanup was incomplete" in cleanup
-    assert "Write-Warn2 $script:PolicyCleanupWarning" in cleanup
+    execute = main.index("Invoke-NativeSetup")
+    cleanup = main.index("Remove-PrivateStageRoot")
+    assert execute < main.index("} finally {") < cleanup
 
 
 def test_cli_docs_describe_authenticated_same_version_upgrade_as_noop() -> None:
@@ -1921,13 +1971,119 @@ def test_cli_docs_describe_authenticated_same_version_upgrade_as_noop() -> None:
 
 def test_installer_help_does_not_pipe_main_installer() -> None:
     for rel in INSTALLER_FILES:
-        text = (ROOT / rel).read_text()
+        text = (ROOT / rel).read_text(encoding="utf-8")
         assert "defenseclaw/main" not in text
 
 
 def test_install_docs_track_current_release() -> None:
-    for rel, expected_lines in DOC_INSTALL_COMMANDS.items():
-        snippet = "\n".join(expected_lines)
-        assert CURRENT_RELEASE in snippet, f"{rel} must pin at least one installer version"
-        for stale in STALE_RELEASES:
-            assert stale not in snippet, f"{rel} still expects stale install snippet version {stale}"
+    for rel, expected_lines in RELEASE_INSTALL_COMMANDS.items():
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        versioned_lines = tuple(line for line in expected_lines if CURRENT_RELEASE in line)
+        assert versioned_lines, f"{rel} must pin at least one installer version"
+        for expected in versioned_lines:
+            assert expected in text, f"{rel} is missing current install example: {expected}"
+            for stale in STALE_RELEASES:
+                stale_example = expected.replace(CURRENT_RELEASE, stale)
+                assert stale_example not in text, f"{rel} still contains stale install example: {stale_example}"
+
+
+def test_current_observability_docs_do_not_advertise_retired_redaction_controls() -> None:
+    retired_guidance = (
+        "--disable-redaction",
+        "--enable-redaction",
+        "setup redaction",
+        "privacy.disable_redaction",
+        "disableRedaction",
+    )
+    for rel in OBSERVABILITY_V8_CURRENT_AUTHORITY_FILES:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        for retired in retired_guidance:
+            assert retired not in text, f"{rel} still advertises retired control: {retired}"
+
+    guardrail_reference = (ROOT / "docs-site/content/docs/setup/guardrail/index.mdx").read_text()
+    assert "Legacy v7 JSONL export" in guardrail_reference
+
+
+def test_current_observability_guidance_explains_v8_redaction_workflow() -> None:
+    required_workflow = (
+        "observability.destinations[].routes[].selector.buckets",
+        "observability.redaction_profiles",
+        "defenseclaw config validate",
+        "defenseclaw config show --effective --section observability",
+        "defenseclaw observability plan",
+        "defenseclaw-gateway restart",
+    )
+    for rel in OBSERVABILITY_V8_WORKFLOW_GUIDES:
+        text = (ROOT / rel).read_text()
+        for expected in required_workflow:
+            assert expected in text, f"{rel} is missing v8 redaction guidance: {expected}"
+
+    for rel in OBSERVABILITY_V8_CONNECTOR_GUIDES:
+        text = (ROOT / rel).read_text()
+        assert "observability.destinations[].routes[].selector.buckets" in text
+        assert "observability.redaction_profiles" in text
+
+
+def test_current_observability_docs_describe_jsonl_as_explicit_optional_destination() -> None:
+    for rel, expected_wording in OBSERVABILITY_V8_JSONL_GUIDES.items():
+        lines = [line for line in (ROOT / rel).read_text().splitlines() if "gateway.jsonl" in line]
+        assert lines, f"{rel} must retain its scoped gateway.jsonl guidance"
+        for line in lines:
+            normalized = line.lower()
+            assert "optional" in normalized, f"{rel} treats gateway.jsonl as implicit: {line}"
+            assert expected_wording.lower() in normalized, f"{rel} omits the expected JSONL destination wording: {line}"
+
+
+def test_dev_installer_only_offers_jsonl_tail_when_the_destination_exists() -> None:
+    text = (ROOT / "scripts/install-dev.sh").read_text(encoding="utf-8")
+    existence_check = 'if [[ -f "${HOME}/.defenseclaw/gateway.jsonl" ]]'
+    tail_command = "tail -f ~/.defenseclaw/gateway.jsonl"
+    enablement = "add an explicit kind: jsonl destination to create it"
+    assert existence_check in text
+    assert tail_command in text
+    assert enablement in text
+    assert text.index(existence_check) < text.index(tail_command) < text.index(enablement)
+
+
+def test_setup_index_separates_commands_from_policy_reference_cards() -> None:
+    text = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text()
+    command_start = text.index("## Auxiliary configuration commands")
+    reference_start = text.index("## Deployment and policy references")
+    matrix_start = text.index("## Interactive vs non-interactive")
+    command_cards = text[command_start:reference_start]
+    reference_cards = text[reference_start:matrix_start]
+    assert 'title="Redaction profiles"' not in command_cards
+    assert 'title="Redaction profiles"' in reference_cards
+    assert "not\nadditional `defenseclaw setup` verbs" in reference_cards
+
+
+def test_zeptoclaw_calls_out_local_history_retention_and_trust_boundary() -> None:
+    text = (ROOT / "docs-site/content/docs/connectors/zeptoclaw.mdx").read_text()
+    for expected in (
+        'title="Treat local event history as sensitive data"',
+        "observability.local.retention_days",
+        "retains 90 days",
+        "observability.defaults.redaction_profile",
+        "also governs SQLite",
+        "only that export trust boundary",
+    ):
+        assert expected in text
+
+
+def test_enterprise_example_uses_secure_managed_redaction_default() -> None:
+    text = (ROOT / "docs-site/content/docs/setup/enterprise-deployment.mdx").read_text()
+    assert "  defaults:\n    redaction_profile: sensitive" in text
+
+
+def test_readme_observability_edit_workflow_is_fail_fast() -> None:
+    text = (ROOT / "README.md").read_text()
+    expected = "\n".join(
+        (
+            "defenseclaw config validate && \\",
+            "defenseclaw config show --effective --section observability && \\",
+            "defenseclaw observability plan && \\",
+            "defenseclaw-gateway restart && \\",
+            "defenseclaw doctor",
+        )
+    )
+    assert expected in text

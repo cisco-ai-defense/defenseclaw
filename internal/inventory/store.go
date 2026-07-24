@@ -25,11 +25,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
-
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 // InventoryStore is the durable companion to AIStateStore: where the
@@ -52,6 +51,41 @@ import (
 //   - ai_components_v      view: dedup'd components rolled up across scans
 type InventoryStore struct {
 	db *sql.DB
+	// closeOnce makes the documented idempotent Close contract explicit. A
+	// discovery service normally closes the store when Run exits, while a
+	// sidecar reload that rejects a prepared (never-run) service closes it from
+	// the rollback path. Both paths may race with defensive cleanup without
+	// closing the database pool more than once.
+	closeOnce sync.Once
+	closeErr  error
+
+	sqliteBusyMu       sync.RWMutex
+	sqliteBusyObserver SQLiteBusyObservabilityV8
+}
+
+// SQLiteBusyObservabilityV8 is implemented by the process-owned generated
+// runtime adapter. Inventory never receives a telemetry provider or exporter.
+type SQLiteBusyObservabilityV8 interface {
+	RecordSQLiteBusyMetric(context.Context, string) error
+}
+
+func (s *InventoryStore) bindSQLiteBusyObservabilityV8(observer SQLiteBusyObservabilityV8) {
+	if s == nil {
+		return
+	}
+	s.sqliteBusyMu.Lock()
+	s.sqliteBusyObserver = observer
+	s.sqliteBusyMu.Unlock()
+}
+
+func (s *InventoryStore) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
+	if s == nil {
+		return nil
+	}
+	s.sqliteBusyMu.RLock()
+	observer := s.sqliteBusyObserver
+	s.sqliteBusyMu.RUnlock()
+	return observer
 }
 
 // inventoryPragmas mirrors the audit store hardening: every pragma
@@ -116,7 +150,10 @@ func (s *InventoryStore) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	return s.db.Close()
+	s.closeOnce.Do(func() {
+		s.closeErr = s.db.Close()
+	})
+	return s.closeErr
 }
 
 // SQLite BUSY retry policy: see internal/audit/store.go for the
@@ -166,6 +203,15 @@ func isSQLiteBusy(err error) bool {
 // backoff on BUSY. Each retry records a telemetry event so
 // contention shows up on the same counter the audit store uses.
 func retryBusy(ctx context.Context, op string, fn func() error) error {
+	return retryBusyObserved(ctx, op, nil, fn)
+}
+
+func retryBusyObserved(
+	ctx context.Context,
+	op string,
+	observer SQLiteBusyObservabilityV8,
+	fn func() error,
+) error {
 	delay := time.Duration(sqliteRetryBaseMs) * time.Millisecond
 	var err error
 	for attempt := 0; attempt < sqliteRetryAttempts; attempt++ {
@@ -173,7 +219,9 @@ func retryBusy(ctx context.Context, op string, fn func() error) error {
 		if !isSQLiteBusy(err) {
 			return err
 		}
-		telemetry.RecordSQLiteBusy(ctx, op)
+		if observer != nil {
+			_ = observer.RecordSQLiteBusyMetric(ctx, op)
+		}
 		if attempt == sqliteRetryAttempts-1 {
 			break
 		}
@@ -192,7 +240,7 @@ func retryBusy(ctx context.Context, op string, fn func() error) error {
 // metrics line up across both DBs.
 func (s *InventoryStore) execDB(ctx context.Context, op, query string, args ...any) (sql.Result, error) {
 	var res sql.Result
-	err := retryBusy(ctx, op, func() error {
+	err := retryBusyObserved(ctx, op, s.sqliteBusyObservabilityV8(), func() error {
 		var execErr error
 		res, execErr = s.db.ExecContext(ctx, query, args...)
 		return execErr
@@ -202,7 +250,7 @@ func (s *InventoryStore) execDB(ctx context.Context, op, query string, args ...a
 
 func (s *InventoryStore) queryDB(ctx context.Context, op, query string, args ...any) (*sql.Rows, error) {
 	var rows *sql.Rows
-	err := retryBusy(ctx, op, func() error {
+	err := retryBusyObserved(ctx, op, s.sqliteBusyObservabilityV8(), func() error {
 		var qErr error
 		rows, qErr = s.db.QueryContext(ctx, query, args...)
 		return qErr
@@ -215,7 +263,7 @@ func (s *InventoryStore) queryDB(ctx context.Context, op, query string, args ...
 // returned to fn so the caller's invariants are not corrupted by a
 // silent partial replay.
 func (s *InventoryStore) runInTx(ctx context.Context, op string, fn func(*sql.Tx) error) error {
-	return retryBusy(ctx, op, func() error {
+	return retryBusyObserved(ctx, op, s.sqliteBusyObservabilityV8(), func() error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
@@ -647,9 +695,9 @@ type ComponentLocationRow struct {
 
 // ListComponentLocations returns every active location currently
 // known for the given (ecosystem, name) component, drawn from the
-// most-recent scan that contains it. RawPath is included only when
-// the caller passes `includeRawPaths=true` -- the gateway sets that
-// based on `privacy.disable_redaction && ai_discovery.store_raw_local_paths`.
+// most-recent scan that contains it. RawPath is included only for explicitly
+// local, trusted callers that pass includeRawPaths=true; gateway API callers
+// always pass false.
 func (s *InventoryStore) ListComponentLocations(ctx context.Context, ecosystem, name string, includeRawPaths bool) ([]ComponentLocationRow, error) {
 	if s == nil || s.db == nil {
 		return nil, nil

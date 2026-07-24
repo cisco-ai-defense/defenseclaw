@@ -19,6 +19,7 @@ DefenseClaw has Python, Go, TypeScript, Rego, docs, and end-to-end test surfaces
 | `make lint` | Ruff, Go formatting/linting, and Python compile check |
 | `make upgrade-smoke` | Build an unsigned schema-2 candidate and prove an old controller refuses it before mutation |
 | `make upgrade-smoke-matrix` | Run that unsigned-candidate refusal contract across all supported historical baselines |
+| `make upgrade-developer-activation` | In a throwaway `HOME`, directly activate an unsigned exact-SHA candidate and prove target migration/runtime health without claiming resolver provenance |
 | `make upgrade-signed-protocol-matrix` | Run the full resolver success/refusal policy against an already signed candidate (release gate only) |
 
 ## Focused Tests
@@ -56,64 +57,127 @@ smoke therefore installs authenticated historical releases in a temporary
 - refuse the schema-2 candidate before service stop, backup, or mutation
 - leave CLI, gateway, config, OpenClaw state, permissions, and PID state unchanged
 - emit the historical controller's expected forward-compatibility failure
-- ship exact reviewed POSIX and PowerShell resolver assets bound by the candidate checksums
+- ship the exact reviewed POSIX resolver and signed PowerShell refusal asset bound by the candidate checksums
 
-The protected release workflow separately signs the sealed candidate and then
-runs the full manifest-derived resolver matrix. That signed gate verifies
-successful bridge activation, fresh-controller handoff, required migrations,
-exact CLI/gateway versions, health, receipts, and rollback behavior before
-publish.
+The protected release workflow creates one sealed candidate from the current
+`main` commit selected by the dispatch. In that same run it uses the public installer on Linux,
+macOS, and Windows, upgrades the latest authenticated older release, the
+published `0.8.5` and `0.8.4` boundaries, and the newest authenticated
+`0.7.x`, `0.6.x`, and `0.5.x` releases on Linux and macOS, and publishes those
+exact bytes only after every smoke check passes.
+There is no separate certification operation or reusable receipt.
 
 ```bash
 # Current platform, proving one old controller refuses the unsigned candidate.
 make upgrade-smoke ARGS="--from-version 0.7.2"
 
-# Full supported historical refusal matrix used by generic PR CI.
-make upgrade-smoke-matrix
+# Optional developer diagnostic across the complete reviewed historical floor.
+# Ordinary PR CI uses a smaller path-sensitive behavior-class selection.
+make upgrade-smoke-matrix ARGS="--target-version X.Y.Z"
+
+# Fast positive target-owned migration/health check for an unsigned local
+# candidate. This never calls or weakens the production upgrade resolver.
+make upgrade-developer-activation ARGS="--release-root /path/to/candidate-root --target-version 0.8.5 --from-version 0.8.4 --baseline-mode seed"
 
 # Full positive protocol matrix. This requires the sealed, release-workflow-
 # signed candidate; it must not be pointed at unsigned local artifacts.
 make upgrade-signed-protocol-matrix \
-  ARGS="--release-dir release-candidate/dist --baseline-mode seed"
+  ARGS="--target-version X.Y.Z --release-dir release-candidate/dist --baseline-mode seed"
 
 # Legacy schema-1 positive harness, retained only for old release fixtures.
 make upgrade-legacy-smoke-matrix \
   ARGS="--target-version 0.8.3 --release-root /path/to/published-release-root --baseline-mode seed"
 ```
 
-For a Linux host without the repo's Go toolchain, prepare candidate artifacts on a machine that can cross-build, copy the printed release root to Linux, then run the same smoke there:
+For a Linux host without the repo's Go toolchain, prepare candidate artifacts
+on a machine that can cross-build and copy the printed release root plus the
+reviewed test scripts to Linux. Run target activation and production refusal as
+separate claims:
 
 ```bash
 scripts/test-upgrade-release.sh --prepare-only --platform linux/arm64 --keep-workdir
 scp -r /tmp/defenseclaw-upgrade-smoke.xxxxxx/candidate-release openclaw-vineeth:/tmp/
-ssh openclaw-vineeth 'scripts/test-upgrade-protocol-release.sh --release-root /tmp/candidate-release --from-versions "0.8.3,0.8.2,0.8.1,0.8.0,0.7.2,0.7.1,0.6.6,0.6.5,0.6.4,0.6.3,0.6.2,0.6.1,0.6.0,0.5.0,0.4.0" --baseline-mode seed --refusal-contract-only'
+ssh openclaw-vineeth 'scripts/test-developer-target-activation.sh --release-root /tmp/candidate-release --target-version 0.8.6 --from-version 0.8.5 --baseline-mode seed'
+ssh openclaw-vineeth 'scripts/test-upgrade-protocol-release.sh --release-root /tmp/candidate-release --target-version 0.8.6 --from-version 0.8.4 --baseline-mode seed --refusal-contract-only'
 ```
 
-The default matrix covers the POSIX published 0.4.0+ baselines that have all three: a Python wheel, platform gateway archives, and an upgrade command: `0.8.3`, `0.8.2`, `0.8.1`, `0.8.0`, `0.7.2`, `0.7.1`, `0.6.6`, `0.6.5`, `0.6.4`, `0.6.3`, `0.6.2`, `0.6.1`, `0.6.0`, `0.5.0`, and `0.4.0`. The native Windows matrix is deliberately narrower: `0.8.3`, `0.8.2`, `0.8.1`, and `0.8.0`. Baselines newer than the candidate target are skipped automatically so local CI does not accidentally test downgrades before a release workflow stamps the next version. Release `0.7.0` has no downloadable release assets, and `0.2.0` predates the upgrade command, so they are not live-upgradeable by this harness.
+For routine candidates newer than the reviewed support list, the default matrix covers the required schema-v7 bridge plus every supported 0.4.0+ historical source: `0.8.4`, `0.8.3`, `0.8.2`, `0.8.1`, `0.8.0`, `0.7.2`, `0.7.1`, `0.6.6`, `0.6.5`, `0.6.4`, `0.6.3`, `0.6.2`, `0.6.1`, `0.6.0`, `0.5.0`, and `0.4.0`.
+That reviewed floor lives in `release/upgrade-baselines.json`;
+the Make target and smoke-contract tests must match it exactly. At execution
+time the resolver authenticates and prepends every newer immutable stable
+release older than the exact `--target-version`, and candidate assembly seals
+that effective snapshot with its signed checksums and upgrade manifest.
+This tests newly published sources such as config-v8 `0.8.5` without baking
+unpublished assets into the reviewed floor. Legacy fixture candidates exclude
+reviewed sources that are not older than the candidate and fail clearly when no
+supported predecessor remains. Dynamic matrix targets require the candidate
+argument because the checked-in development version is not release selection;
+set `UPGRADE_SMOKE_FROM` only for an intentional developer subset. Release
+`0.7.0` has no downloadable assets, and `0.2.0` predates the upgrade command,
+so neither is eligible for automatic staging. Targets before `0.8.5` retain
+schema-v7 checks. A hard-cut manifest (`min_upgrade_protocol >= 2`) must prove
+pre-mutation refusal for incapable baselines, a verified `0.8.4` bridge handoff
+for every listed older POSIX source, and full v7-to-v8 observability,
+private-secret, rollback, local-bundle, SQLite, and fresh-process health checks
+from the bridge.
 
-The release workflow builds the runtime once, seals the exact candidate bytes,
-and runs manifest-derived Linux, macOS, and native Windows upgrade gates before
-the protected publish job can create an immutable release. The publisher then
-reads the release back and verifies the exact sealed asset set and digests.
+The effective baseline resolver adds published 0.8.5 dynamically as config
+version 8. The harness then seeds canonical v8 config, migration
+cursor, and baseline-owned bundle state; it requires later targets to preserve
+config/environment bytes, avoid replaying the one-time v8 activation, refresh
+managed bundle bytes, and retain operator files. Unknown future config families
+fail closed until their fixture and verifier are reviewed.
+
+One manual release dispatch builds and seals one candidate, then runs
+`scripts/test-upgrade-protocol-release.sh --success-path-only` from the latest
+authenticated older release, the `0.8.5` hard-cut boundary, the `0.8.4` bridge
+boundary, and representative `0.7.x`, `0.6.x`, and `0.5.x` sources on Linux
+and macOS. Five seeded sources resolve their published wheel dependency graph.
+The `0.8.4` boundary instead starts with deliberate dependency drift and must
+prove the authenticated rollback-safe bridge refresh before the `0.8.5`
+handoff. It also runs the public POSIX installer on Linux
+and macOS, the public PowerShell installer through the exact native Setup on
+Windows, and the macOS app packaging lifecycle. The Windows release
+includes both protected runtime architectures and
+`DefenseClawSetup-x64.exe` with its checksum, provenance, and SBOM. The first
+native Windows release makes no Windows upgrade claim. Partial platform-signing
+credentials, a failed install, a failed POSIX upgrade, or any candidate-byte
+mismatch aborts before publication. Complete credentials require the signed
+platform result; absent credentials require explicit unverified provenance.
 
 ### 0.8.4 bridge rollout order
 
-Publish `0.8.4` as the latest release before merging or cutting the
-observability-v8 hard-cut release. Confirm GitHub reports the release immutable,
+Publish `0.8.4` as the latest release before cutting `0.8.5`. Confirm GitHub
+reports the release immutable,
 let the bridge soak, and retain evidence that the sealed `0.8.4` candidate
 upgraded successfully from every version in
 `release/upgrade-baselines.json` on the required native platforms. Only after
-that proof is green should the hard-cut change land and its candidate be cut.
+that proof is green should the hard-cut candidate be cut.
 The later hard-cut baseline policy must include published `0.8.4`; do not treat
 an uncut branch artifact as the bridge.
 
 ## CI Workflows
 
+Ordinary PRs stay fast, while the release dispatch validates the final signed
+candidate before publishing it. See
+[Release Validation Strategy](RELEASE_VALIDATION.md) for the exact release
+contract and operator command.
+
 | Workflow | Purpose |
 |----------|---------|
-| `.github/workflows/ci.yml` | Go lint/test, Python test, TypeScript test, Rego test, unsigned schema-2 refusal contract, and parity checks |
+| `.github/workflows/ci.yml` | Fast deterministic release regressions on every PR; a five-class unsigned success/refusal matrix only for release-sensitive PRs; and an exact-SHA medium upgrade canary on every main merge, alongside the normal language/parity checks |
+| `.github/workflows/telemetry-registry.yml` | Exhaustive telemetry-registry mutation, provenance, and failure-atomicity suites for telemetry-sensitive PRs, nightly, and manual dispatch |
 | `.github/workflows/e2e.yml` | Self-hosted end-to-end suites and scheduled validation |
-| `.github/workflows/release.yaml` | Tagged release artifacts |
+| `.github/workflows/release.yaml` | One manual build, sign, smoke, and publish pipeline for a reviewed `main` commit |
+| `.github/workflows/pre-release-certification.yml` | Reusable exact-candidate install and six-baseline POSIX upgrade smoke jobs |
+
+Ordinary PR and main CI always run `make telemetry-check`, which compiles the
+real registry and rejects stale generated runtime or Go outputs. The two
+exhaustive telemetry mutation suites are excluded from the regular Python
+shards and run only when their registry, compiler, renderer, schema, generated
+output, test, or dependency inputs change. They also run nightly and through
+manual dispatch. This keeps the common CI path fast without weakening the
+exhaustive gate for changes that can affect telemetry generation.
 
 ## Before a PR
 
@@ -123,5 +187,9 @@ make test
 make ts-test
 make rego-test
 make check
-make upgrade-smoke-matrix
 ```
+
+For a release-sensitive change, run `make upgrade-smoke` locally and use
+`make upgrade-developer-activation` with an unsigned candidate root when the
+target migration/runtime changed. Neither test claims a signed bridge handoff;
+the release workflow proves the final signed install and upgrade success paths.

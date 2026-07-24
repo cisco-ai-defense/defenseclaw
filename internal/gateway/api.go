@@ -31,13 +31,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/google/uuid"
 
@@ -49,26 +48,61 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
-	health      *SidecarHealth
-	client      *Client
-	store       *audit.Store
-	logger      *audit.Logger
-	addr        string
-	scannerCfg  *config.Config
-	otel        *telemetry.Provider
-	hilt        *HILTApprovalManager
-	notifier    *notifier.Dispatcher
-	aiDiscovery *inventory.ContinuousDiscoveryService
+	health *SidecarHealth
+	client *Client
+	store  *audit.Store
+	logger *audit.Logger
+
+	// shutdownRequester cancels the owning Sidecar run context after an
+	// authenticated, loopback-only management request has proven the expected
+	// process and data-home identity. shutdownOnce keeps retries idempotent.
+	shutdownRequester func()
+	shutdownOnce      sync.Once
+	addr              string
+	scannerCfg        *config.Config
+	hilt              *HILTApprovalManager
+	notifier          *notifier.Dispatcher
+	aiDiscoveryMu     sync.RWMutex
+	aiDiscovery       *inventory.ContinuousDiscoveryService
+
+	// inspectToolScanTimeout optionally overrides the synchronous
+	// /api/v1/inspect/tool scan budget for this server. Runtime constructors
+	// leave it at zero and therefore retain inspectScanTimeout; tests that
+	// exercise policy semantics can use a larger budget so race-detector
+	// scheduler latency is not mistaken for a scanner verdict.
+	inspectToolScanTimeout time.Duration
+
+	// observabilityV8Mu protects the complete process-owned runtime capability
+	// set. Sidecar publishes or detaches all four seams atomically.
+	observabilityV8Mu sync.RWMutex
+	// observabilityV8 is process-owned by Sidecar. When present, inbound OTLP
+	// admission is emitted through the canonical collection/redaction/routing
+	// graph instead of the legacy audit/sink path.
+	observabilityV8 sidecarRuntimeEmitter
+	// observabilityV8Canary pins the generated two-span diagnostic to one
+	// runtime-graph generation through export acknowledgement. It is separate
+	// from log admission so partial test/runtime integrations stay explicit.
+	observabilityV8Canary sidecarRuntimeCanaryEmitter
+	// observabilityV8LocalOnly persists control-plane evidence through the
+	// canonical collection/redaction/SQLite graph without constructing any
+	// optional destination projection. It remains deliberately distinct from
+	// the ordinary OTLP-ingest emitter so mandatory local evidence cannot be
+	// coupled to remote delivery.
+	observabilityV8LocalOnly sidecarRuntimeLocalOnlyEmitter
+	// observabilityV8Lifecycle is the process-owned request-bounded generated
+	// trace seam used by hook and API producers. Binding it with the other seams
+	// prevents one request from selecting a different runtime generation later.
+	observabilityV8Lifecycle lifecycleV8Runtime
 
 	// cfgMu protects mutable fields in scannerCfg.Guardrail (Mode,
 	// ScannerMode) which can be changed at runtime via the PATCH
@@ -83,11 +117,12 @@ type APIServer struct {
 	configWriteMu  sync.Mutex
 
 	// otlpPathTokenMu guards otlpPathTokens — the in-memory map of
-	// per-source OTLP path tokens loaded from
+	// per-source OTLP credentials loaded from
 	// ${data_dir}/hooks/.otlp-<source>.token. Reads happen on every
-	// loopback OTLP request that lacks an Authorization header (i.e.
-	// the path-token branch in tokenAuth), so the map is held under
-	// an RWMutex to keep the hot path lock-free for readers.
+	// loopback OTLP request authenticated by either a scoped Authorization
+	// header (Codex and Claude Code) or the legacy path-token transport
+	// (Gemini CLI), so the map is held under an RWMutex to keep the hot
+	// path lock-free for readers.
 	//
 	// The map is populated at boot by SetOTLPPathTokens AND refreshed
 	// lazily by lookupOTLPPathToken in two cases:
@@ -98,27 +133,31 @@ type APIServer struct {
 	//     `defenseclaw setup geminicli` (which mints a fresh on-disk
 	//     token), and the next OTLP request would otherwise 401
 	//     because the in-memory snapshot hasn't been refreshed.
-	//  2. Mtime drift for a HIT scope (M1 fix). Closes the rotation
-	//     gap where an operator regenerates the on-disk token (e.g.
+	//  2. Bounded secure revalidation for a HIT scope. Closes the rotation
+	//     gap where an operator replaces the on-disk token (e.g.
 	//     post-rotation policy or a security-incident response)
 	//     while the gateway keeps running. Without this check the
 	//     in-memory token wins forever and every loopback OTLP
 	//     request after the rotation 401s until the gateway is
 	//     restarted.
 	//
-	// Both refreshes are rate-limited per scope by otlpPathTokenReloadAt
+	// Both refreshes are rate-limited per scope by otlpPathTokenLastStatAt
 	// so a hostile or noisy caller cannot turn the auth path into a
-	// per-request disk stampede. Values are kept as a small
-	// otlpPathTokenEntry struct that carries the token AND the mtime
-	// observed when it was loaded, so rotation detection is a single
-	// os.Stat (no full read on the steady-state path).
+	// per-request disk stampede. Revalidation opens and reads only the bounded
+	// owner-only token file; cached requests inside the interval do no I/O.
 	otlpPathTokenMu         sync.RWMutex
 	otlpPathTokens          map[connector.OTLPPathTokenScope]otlpPathTokenEntry
-	otlpPathTokenReloadAt   map[connector.OTLPPathTokenScope]time.Time
 	otlpPathTokenLastStatAt map[connector.OTLPPathTokenScope]time.Time
 
 	hookAPITokenMu sync.RWMutex
 	hookAPITokens  map[string]string
+
+	// hookRegistrationRepair is the narrow authenticated bridge from a fresh
+	// connector SessionStart to the Sidecar-owned hook guard. The Sidecar owns
+	// connector selection and SetupOpts; the API never resolves an ambient
+	// profile or constructs a second registration writer.
+	hookRegistrationRepairMu sync.RWMutex
+	hookRegistrationRepair   func(context.Context, string) error
 
 	// policyReloader, when set, is called by the /policy/reload handler
 	// to atomically refresh the shared OPA engine used by the watcher.
@@ -147,8 +186,11 @@ type APIServer struct {
 	hookReportedCostTotalOrder        []string
 	hookToolInvocations               map[string][]hookToolInvocation
 	hookToolInvocationOrder           []string
-	hookSessionTraces                 map[string]hookSessionTrace
-	hookSessionTraceOrder             []string
+	hookSpawnLineageMu                sync.Mutex
+	hookSpawnIntents                  map[string]hookSpawnIntent
+	hookSpawnIntentOrder              []string
+	hookSessionStates                 map[string]hookSessionState
+	hookSessionStateOrder             []string
 	hookPhaseStates                   map[string]hookPhaseState
 	hookPhaseStateOrder               []string
 	otlpMetricMu                      sync.Mutex
@@ -209,6 +251,12 @@ type APIServer struct {
 // only invoke this when their concrete constructor returned a non-nil
 // value.
 func (a *APIServer) SetCiscoInspector(c Inspector) {
+	if c != nil {
+		a.observabilityV8Mu.RLock()
+		metricRuntime, _ := a.observabilityV8Lifecycle.(hookLifecycleMetricV8Runtime)
+		a.observabilityV8Mu.RUnlock()
+		c.bindObservabilityV8(metricRuntime)
+	}
 	a.ciscoInspector = c
 }
 
@@ -224,21 +272,12 @@ func (a *APIServer) SetHookJudge(j *LLMJudge) {
 	}
 }
 
-// SetOTelProvider attaches the OTel provider so guardrail events
-// can be recorded as metrics.
-func (a *APIServer) SetOTelProvider(p *telemetry.Provider) {
-	a.otel = p
-	if a.ciscoInspector != nil {
-		a.ciscoInspector.SetTelemetry(p)
-	}
-}
-
-// otlpPathTokenEntry bundles the cached path-token with the mtime of
-// the on-disk file when it was last loaded. Rotation detection
-// compares the live mtime against this value via a cheap os.Stat.
+// otlpPathTokenEntry holds only the last securely loaded value. Once the
+// bounded stat interval expires, lookupOTLPPathToken reopens and validates the
+// owner-only regular file and reloads its content. File mtime is deliberately
+// not trusted as identity: atomic replacement can preserve timestamps.
 type otlpPathTokenEntry struct {
 	token string
-	mtime time.Time
 }
 
 // SetOTLPPathTokens replaces the in-memory snapshot of per-source
@@ -250,14 +289,6 @@ type otlpPathTokenEntry struct {
 // map (a subset of OTLPPathTokenScopes()) is supported: scopes
 // missing from the map fall back to the master-token comparison in
 // tokenAuth so we do not break legacy deployments.
-//
-// Mtime is sampled from the on-disk file when available so the
-// rotation-detection path in lookupOTLPPathToken can avoid an
-// immediate reload on the first request after boot. If stat fails
-// (the boot caller may pass values not yet on disk in test
-// environments) the mtime is left as the zero value, which forces
-// the first lookup to reload — strictly safer than caching a token
-// we can't compare against the file system.
 func (a *APIServer) SetOTLPPathTokens(tokens map[connector.OTLPPathTokenScope]string) {
 	a.otlpPathTokenMu.Lock()
 	defer a.otlpPathTokenMu.Unlock()
@@ -265,18 +296,9 @@ func (a *APIServer) SetOTLPPathTokens(tokens map[connector.OTLPPathTokenScope]st
 		a.otlpPathTokens = nil
 		return
 	}
-	dataDir := a.configDataDir()
 	cp := make(map[connector.OTLPPathTokenScope]otlpPathTokenEntry, len(tokens))
 	for k, v := range tokens {
-		entry := otlpPathTokenEntry{token: v}
-		if dataDir != "" {
-			if path, err := connector.OTLPPathTokenFilePath(dataDir, k); err == nil {
-				if info, err := os.Stat(path); err == nil {
-					entry.mtime = info.ModTime()
-				}
-			}
-		}
-		cp[k] = entry
+		cp[k] = otlpPathTokenEntry{token: v}
 	}
 	a.otlpPathTokens = cp
 }
@@ -302,20 +324,35 @@ func (a *APIServer) SetHookAPITokens(tokens map[string]string) {
 	a.hookAPITokens = cp
 }
 
-// otlpPathTokenReloadMinInterval bounds disk I/O on the loopback OTLP auth
-// path. After a cache miss OR a rotation-suspected hit for a known scope
-// we re-read the on-disk token file at most once per scope per this
-// interval; subsequent requests before the interval elapses use the
-// in-memory value (or "" on miss) without touching disk. 500ms is short
-// enough that the very next OTLP retry after `defenseclaw setup geminicli`
-// or a token rotation succeeds in real operator workflows, and long enough
-// that an attacker probing /otlp/geminicli/<random>/v1/* cannot weaponise
-// the reload into a disk DoS.
-const otlpPathTokenReloadMinInterval = 500 * time.Millisecond
+// SetHookRegistrationRepair wires the active Sidecar hook-guard registry into
+// authenticated hook handling. Passing nil detaches the retiring API server
+// before its guards stop, so a stale request cannot write through an old
+// connector generation.
+func (a *APIServer) SetHookRegistrationRepair(repair func(context.Context, string) error) {
+	if a == nil {
+		return
+	}
+	a.hookRegistrationRepairMu.Lock()
+	a.hookRegistrationRepair = repair
+	a.hookRegistrationRepairMu.Unlock()
+}
 
-// otlpPathTokenStatMinInterval bounds os.Stat calls on the hot
-// auth-check path. We only check the on-disk mtime once per scope per
-// this interval; in between, every request reuses the cached entry
+func (a *APIServer) ensureHookRegistration(ctx context.Context, connectorName string) error {
+	if a == nil {
+		return nil
+	}
+	a.hookRegistrationRepairMu.RLock()
+	repair := a.hookRegistrationRepair
+	a.hookRegistrationRepairMu.RUnlock()
+	if repair == nil {
+		return nil
+	}
+	return repair(ctx, connectorName)
+}
+
+// otlpPathTokenStatMinInterval bounds secure file revalidation on the hot
+// auth-check path. We reopen the token at most once per scope per this
+// interval; in between, every request reuses the cached entry
 // without any system call. 1s is short enough that a rotated token
 // is picked up within the human-perceptible window (operators don't
 // expect "rotate then immediately retry" to succeed without a brief
@@ -334,25 +371,25 @@ const otlpPathTokenStatMinInterval = 1 * time.Second
 //
 //   - F4 boot-race: empty in-memory map, on-disk file exists →
 //     lazy load on miss.
-//   - M1 rotation: on-disk mtime moved past the cached mtime →
-//     evict + reload.
+//   - Rotation/replacement: bounded secure reload observes current content,
+//     including same-mtime atomic replacement and delete+recreate.
 //   - Reload error / disappearance: file removed → drop the
 //     in-memory entry so the next request 401s instead of
 //     authenticating a stale token forever.
 //
-// All three refreshes share the same per-scope rate limiter
-// (otlpPathTokenReloadAt) so a hostile or noisy caller cannot
-// turn the auth path into a disk-stampede primitive. Stat calls
-// for rotation detection are gated by otlpPathTokenLastStatAt
-// to keep the steady-state per-request cost effectively zero.
+// All three refreshes share the same per-scope validation deadline
+// (otlpPathTokenLastStatAt) so a hostile or noisy caller cannot turn the auth
+// path into a disk-stampede primitive. A second, independent reload deadline
+// must not override a due validation and return a credential that has been
+// removed from disk.
 // Unknown scopes never trigger disk I/O.
 func (a *APIServer) lookupOTLPPathToken(source string) string {
 	scope := connector.OTLPPathTokenScope(source)
 
-	// Fast path: read under RLock and decide whether a stat is due.
-	// The stat throttle (otlpPathTokenLastStatAt) is checked for
+	// Fast path: read under RLock and decide whether validation is due.
+	// The validation throttle (otlpPathTokenLastStatAt) is checked for
 	// BOTH cache-hit and cache-miss cases — a missing token file
-	// for a known scope must not turn into one os.Stat per request,
+	// for a known scope must not turn into one file open per request,
 	// or a hostile caller probing /otlp/geminicli/<random>/v1/*
 	// before any operator-side setup mints the on-disk token can
 	// weaponise the auth check into a per-request disk syscall.
@@ -404,68 +441,37 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 
 	// Re-read cache after upgrading the lock — another goroutine
 	// may have already done the work we were about to do.
+	cached = otlpPathTokenEntry{}
+	haveCached = false
 	if a.otlpPathTokens != nil {
 		if e, ok := a.otlpPathTokens[scope]; ok {
 			cached = e
-			haveCached = ok && e.token != ""
+			haveCached = e.token != ""
 		}
 	}
-
-	// Rate-limit reloads so a flood of misses or rotation probes
-	// can't issue one disk read per request.
-	if a.otlpPathTokenReloadAt != nil {
-		if last, ok := a.otlpPathTokenReloadAt[scope]; ok &&
-			time.Since(last) < otlpPathTokenReloadMinInterval {
-			if haveCached {
-				return cached.token
-			}
-			return ""
+	// Re-check the authoritative validation deadline after upgrading the lock.
+	// Another goroutine may have securely refreshed (or revoked) this scope while
+	// we waited. In that case its cache result is current and no second disk read
+	// is needed. If validation is still due, no independent throttle may return a
+	// cached credential before the secure load below.
+	if last := a.otlpPathTokenLastStatAt[scope]; !last.IsZero() &&
+		time.Since(last) < otlpPathTokenStatMinInterval {
+		if haveCached {
+			return cached.token
 		}
-	}
-
-	// Stat the on-disk file. We do this regardless of whether we
-	// have a cached entry: a missing file means the operator has
-	// torn down the connector, in which case authenticating the
-	// stale in-memory token would be a regression. A present file
-	// with an unchanged mtime is the steady-state path and avoids
-	// the read+parse cost.
-	tokenPath, err := connector.OTLPPathTokenFilePath(dataDir, scope)
-	if err != nil {
 		return ""
 	}
+
+	// Securely reopen and reload the file whenever the bounded stat interval
+	// expires. LoadOTLPPathToken uses Lstat, rejects symlinks/non-regular files,
+	// validates ownership/permissions, verifies the opened file is the same
+	// inode, and validates the complete token content. This intentionally does
+	// not use mtime as identity: same-mtime atomic replacement and
+	// delete+recreate must rotate the cached credential.
 	if a.otlpPathTokenLastStatAt == nil {
 		a.otlpPathTokenLastStatAt = make(map[connector.OTLPPathTokenScope]time.Time)
 	}
 	a.otlpPathTokenLastStatAt[scope] = time.Now()
-
-	info, statErr := os.Stat(tokenPath)
-	if statErr != nil {
-		if !os.IsNotExist(statErr) {
-			// Permission flips and other stat failures are treated as
-			// fail-closed. Returning a cached token here would keep a
-			// revoked/hidden token valid until restart.
-			return ""
-		}
-		// File is gone — drop any stale cached entry and fail
-		// closed so the next OTLP request 401s rather than
-		// authenticating a removed token.
-		if a.otlpPathTokens != nil {
-			delete(a.otlpPathTokens, scope)
-		}
-		return ""
-	}
-
-	// Cached entry is still current — refresh the stat timestamp
-	// (already done above) and return without disk-read cost.
-	if haveCached && cached.mtime.Equal(info.ModTime()) {
-		return cached.token
-	}
-
-	// Either no cache yet or mtime moved → reload from disk.
-	if a.otlpPathTokenReloadAt == nil {
-		a.otlpPathTokenReloadAt = make(map[connector.OTLPPathTokenScope]time.Time)
-	}
-	a.otlpPathTokenReloadAt[scope] = time.Now()
 
 	tok, err := connector.LoadOTLPPathToken(dataDir, scope)
 	if err != nil || tok == "" {
@@ -481,7 +487,7 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 	if a.otlpPathTokens == nil {
 		a.otlpPathTokens = make(map[connector.OTLPPathTokenScope]otlpPathTokenEntry)
 	}
-	a.otlpPathTokens[scope] = otlpPathTokenEntry{token: tok, mtime: info.ModTime()}
+	a.otlpPathTokens[scope] = otlpPathTokenEntry{token: tok}
 	return tok
 }
 
@@ -554,7 +560,24 @@ func (a *APIServer) SetHILTApprovalManager(m *HILTApprovalManager) {
 // the API can answer /v1/ai/* endpoints from a live store. Safe to
 // call with nil — endpoint handlers short-circuit on a nil service.
 func (a *APIServer) SetAIDiscoveryService(svc *inventory.ContinuousDiscoveryService) {
+	if a == nil {
+		return
+	}
+	a.aiDiscoveryMu.Lock()
 	a.aiDiscovery = svc
+	a.aiDiscoveryMu.Unlock()
+}
+
+// leaseAIDiscovery pins the current discovery service for one complete API
+// handler. Config reload publishes the replacement with the write lock, so it
+// waits for handlers using the old service/store before canceling that service
+// and allowing its Run defer to close inventory.db.
+func (a *APIServer) leaseAIDiscovery() (*inventory.ContinuousDiscoveryService, func()) {
+	if a == nil {
+		return nil, func() {}
+	}
+	a.aiDiscoveryMu.RLock()
+	return a.aiDiscovery, a.aiDiscoveryMu.RUnlock
 }
 
 // SetNotifier wires the user-session OS notifier dispatcher used by
@@ -566,11 +589,15 @@ func (a *APIServer) SetNotifier(n *notifier.Dispatcher) {
 }
 
 func (a *APIServer) connectorName() string {
-	if a.scannerCfg != nil {
-		if c := strings.TrimSpace(a.scannerCfg.Guardrail.Connector); c != "" {
+	return connectorNameForConfig(a.runtimeConfigSnapshot())
+}
+
+func connectorNameForConfig(cfg *config.Config) string {
+	if cfg != nil {
+		if c := strings.TrimSpace(cfg.Guardrail.Connector); c != "" {
 			return strings.ToLower(c)
 		}
-		if c := strings.TrimSpace(string(a.scannerCfg.Claw.Mode)); c != "" {
+		if c := strings.TrimSpace(string(cfg.Claw.Mode)); c != "" {
 			return strings.ToLower(c)
 		}
 	}
@@ -703,6 +730,16 @@ func (a *APIServer) SetConfigRuntime(reload func(context.Context, string) error,
 	a.configSnapshot = snapshot
 }
 
+// SetShutdownRequester wires the local management shutdown endpoint to the
+// owning Sidecar. The callback must be non-blocking; Sidecar supplies its
+// context cancel function so every subsystem gets its normal drain path.
+func (a *APIServer) SetShutdownRequester(request func()) {
+	if a == nil {
+		return
+	}
+	a.shutdownRequester = request
+}
+
 func (a *APIServer) runtimeConfigSnapshot() *config.Config {
 	if a == nil {
 		return nil
@@ -760,6 +797,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", a.handleHealth)
 	mux.HandleFunc("/status", a.handleStatus)
+	mux.HandleFunc("/api/v1/admin/shutdown", a.handleShutdown)
 	mux.HandleFunc("/skill/disable", a.handleSkillDisable)
 	mux.HandleFunc("/skill/enable", a.handleSkillEnable)
 	mux.HandleFunc("/plugin/disable", a.handlePluginDisable)
@@ -787,6 +825,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/event", a.handleGuardrailEvent)
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
+	// Provider configuration belongs to the management API so hook-only
+	// deployments can inspect and reload it without enabling the proxy listener.
+	a.registerProviderRoutes(mux)
 	// /api/v1/inspect/* and /api/v1/{connector}/hook are both in the
 	// agent's critical path: every connector hook (claude-code-hook,
 	// codex-hook, cursor-hook, ...) hits one of them. Wrap them in a
@@ -804,6 +845,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
 	mux.HandleFunc("/api/v1/telemetry/canary", a.handleTelemetryCanary)
+	mux.HandleFunc("/api/v1/watchdog/recovery", a.handleWatchdogRecovery)
+	mux.HandleFunc(destinationtest.EndpointPath, a.handleObservabilityDestinationTestActivity)
+	mux.HandleFunc(cliObservabilityV8Path, a.handleCLIObservabilityV8)
+	mux.HandleFunc(alertAcknowledgementV8Path, a.handleAlertAcknowledgementV8)
 	a.registerConnectorHookRoutes(mux, hookLimiter)
 	// OTLP-HTTP receiver for the three signal types codex
 	// (via [otel.exporter.otlp-http]) and Claude Code (via
@@ -820,6 +865,14 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/ai-usage/scan", a.handleAIUsageScan)
 	mux.HandleFunc("/api/v1/ai-usage/discovery", a.handleAIUsageDiscovery)
 	mux.HandleFunc("/api/v1/ai-usage/components", a.handleAIUsageComponents)
+	// Correlation graph endpoints expose the durable, evidence-backed identity
+	// ledger. They remain behind the same bearer-token and CSRF middleware as
+	// every other API route; handlers are read-only and accept exactly one
+	// canonical anchor per request.
+	mux.HandleFunc("/api/v1/correlation/graph", a.handleCorrelationGraphV8)
+	mux.HandleFunc("/api/v1/correlation/explain", a.handleCorrelationExplainV8)
+	mux.HandleFunc("/api/v1/correlation/timeline", a.handleCorrelationTimelineV8)
+	mux.HandleFunc("/api/v1/correlation/conflicts", a.handleCorrelationConflictsV8)
 	// Locations + history endpoints share the /api/v1/ai-usage/components/
 	// prefix; the handlers parse {ecosystem}/{name}/{leaf} themselves.
 	// Net/http's mux uses longest-prefix routing, so registering
@@ -859,9 +912,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 		reg = InstallSharedAgentRegistry("", "")
 	}
 	handler = CorrelationMiddleware(reg)(handler)
-	// request-ID then OTel so the HTTP server span includes the full chain.
+	// request-ID then scoped W3C extraction so generated hook spans retain the
+	// agent parent without creating an unregistered SDK server span.
 	handler = requestIDMiddleware(handler)
-	handler = otelHTTPServerMiddleware("sidecar-api", handler)
+	handler = inboundTraceContextMiddleware(handler)
 
 	srv := &http.Server{
 		Addr:    a.addr,
@@ -917,8 +971,9 @@ func (a *APIServer) handleTelemetryCanary(w http.ResponseWriter, r *http.Request
 		a.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	if a.otel == nil || !a.otel.TracesEnabled() {
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "OTel traces are not enabled"})
+	canary := a.observabilityV8CanaryRuntime()
+	if canary == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "observability v8 traces are not available"})
 		return
 	}
 	var request struct {
@@ -933,27 +988,50 @@ func (a *APIServer) handleTelemetryCanary(w http.ResponseWriter, r *http.Request
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	traceID, err := a.otel.EmitGenAICanaryToDestination(ctx, request.Destination)
-	after := a.otel.DestinationDeliveryStats(request.Destination)
-	acknowledged := a.otel.DestinationAcknowledgedCanaryTrace(request.Destination, traceID)
-	if err != nil && !acknowledged {
-		a.writeJSON(w, http.StatusBadGateway, map[string]interface{}{
-			"error": err.Error(), "trace_id": traceID, "delivery": after,
-		})
-		return
-	}
-	status := http.StatusOK
-	if !acknowledged {
-		status = http.StatusBadGateway
+	result, err := canary.EmitTraceCanary(ctx, request.Destination)
+	destination := result.Destination
+	if destination == "" {
+		destination = request.Destination
 	}
 	payload := map[string]interface{}{
-		"trace_id": traceID, "destination": request.Destination,
-		"acknowledged": acknowledged, "delivery": after,
+		"trace_id": result.TraceID, "destination": destination,
+		"generation": result.Generation, "acknowledged": result.Acknowledged,
 	}
 	if err != nil {
-		payload["flush_warning"] = err.Error()
+		payload["error"] = err.Error()
+	}
+	status := http.StatusOK
+	if err != nil || !result.Acknowledged {
+		status = http.StatusBadGateway
 	}
 	a.writeJSON(w, status, payload)
+}
+
+// handleWatchdogRecovery is the narrow, authenticated bridge used by the
+// standalone watchdog after the sidecar becomes reachable again. The sidecar
+// owns the observability graph, so the watchdog never constructs a second OTel
+// provider or exports outside canonical v8 routing. The global auth and CSRF
+// middleware protect this POST; the additional loopback check prevents a
+// remote authenticated client from manufacturing recovery counts.
+func (a *APIServer) handleWatchdogRecovery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		a.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if !connector.IsLoopback(r) {
+		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "watchdog recovery is loopback-only"})
+		return
+	}
+	runtime, _ := a.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+	if runtime == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "observability v8 metrics are not available"})
+		return
+	}
+	if err := recordWatcherRestartV8(r.Context(), runtime); err != nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "watchdog recovery metric was not recorded"})
+		return
+	}
+	a.writeJSON(w, http.StatusOK, map[string]bool{"recorded": true})
 }
 
 func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -994,6 +1072,8 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 		Source             string `json:"source"`
 		ToolInspectionMode string `json:"tool_inspection_mode"`
 		SubprocessPolicy   string `json:"subprocess_policy"`
+		PlatformStatus     string `json:"platform_status"`
+		PlatformReason     string `json:"platform_reason,omitempty"`
 		// LLMTrafficMode ("proxy" | "hooks-only") tells the CLI whether a
 		// custom provider bound to this connector is enforced on the
 		// agent's own model traffic or only configures DefenseClaw's
@@ -1014,6 +1094,8 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 			Source:             info.Source,
 			ToolInspectionMode: string(info.ToolInspectionMode),
 			SubprocessPolicy:   string(info.SubprocessPolicy),
+			PlatformStatus:     string(info.PlatformStatus),
+			PlatformReason:     info.PlatformReason,
 			LLMTrafficMode:     connector.LLMTrafficModeForConnector(info.Name),
 		}
 		if conn, ok := reg.Get(info.Name); ok {
@@ -1056,6 +1138,15 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]interface{}{
 		"health":     snap,
 		"provenance": version.Current(),
+		// Runtime identity is intentionally available only through this
+		// authenticated endpoint. Doctor uses it to bind the live listener to
+		// the managed process and configured data home without reading another
+		// process's memory or environment. Never add authentication material to
+		// this object.
+		"runtime": map[string]interface{}{
+			"pid":      os.Getpid(),
+			"data_dir": a.configDataDir(),
+		},
 		// connector_mode reports which guardrail surface the active
 		// connector is running. The TUI uses this to render the
 		// "Observability mode" banner with the right copy and to
@@ -1082,6 +1173,79 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, status)
 }
 
+type gatewayShutdownRequest struct {
+	PID     int    `json:"pid"`
+	DataDir string `json:"data_dir"`
+}
+
+// handleShutdown is the authenticated control plane used by the detached
+// Windows gateway (and, for parity, other daemon platforms). A signal cannot
+// reach a DETACHED_PROCESS reliably, so the CLI proves both the target PID and
+// configured data home over the already-authenticated loopback API, then this
+// handler cancels the Sidecar run context. That preserves normal subsystem,
+// audit, SQLite, webhook, and telemetry drains before process exit.
+func (a *APIServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		a.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if !connector.IsLoopback(r) {
+		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "shutdown is restricted to loopback clients"})
+		return
+	}
+	if a.shutdownRequester == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "graceful shutdown is unavailable"})
+		return
+	}
+
+	var request gatewayShutdownRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request body must contain one JSON object"})
+		return
+	}
+	if request.PID != os.Getpid() || !sameRuntimeDataDir(request.DataDir, a.configDataDir()) {
+		a.writeJSON(w, http.StatusConflict, map[string]string{"error": "gateway runtime identity mismatch"})
+		return
+	}
+
+	requested := false
+	a.shutdownOnce.Do(func() {
+		requested = true
+	})
+	status := "already_requested"
+	if requested {
+		status = "accepted"
+	}
+	a.writeJSON(w, http.StatusAccepted, map[string]string{"status": status})
+	if requested {
+		// Start cancellation only after the response has been written. The
+		// HTTP server's graceful Shutdown waits for this handler to return,
+		// ensuring the caller receives the acknowledgement before teardown.
+		go a.shutdownRequester()
+	}
+}
+
+func sameRuntimeDataDir(left, right string) bool {
+	if strings.TrimSpace(left) == "" || strings.TrimSpace(right) == "" {
+		return false
+	}
+	leftAbs, leftErr := filepath.Abs(filepath.Clean(left))
+	rightAbs, rightErr := filepath.Abs(filepath.Clean(right))
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(leftAbs, rightAbs)
+	}
+	return leftAbs == rightAbs
+}
+
 // connectorModeSummary returns the per-connector runtime summary for the
 // active connector. The shape is:
 //
@@ -1102,7 +1266,8 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 // connectorModesSummary fans the same shape out across every active
 // connector for the multi-connector status surface.
 func (a *APIServer) connectorModeSummary() map[string]interface{} {
-	if a.scannerCfg != nil && !a.scannerCfg.HasConnectorConfigured() {
+	cfg := a.runtimeConfigSnapshot()
+	if cfg != nil && !cfg.HasConnectorConfigured() {
 		return map[string]interface{}{
 			"connector":           "",
 			"mode":                "unconfigured",
@@ -1112,7 +1277,7 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 			"proxy_intercept":     false,
 		}
 	}
-	return connectorModeForConfig(a.scannerCfg, a.connectorName())
+	return connectorModeForConfig(cfg, connectorNameForConfig(cfg))
 }
 
 // connectorModesSummary returns one connectorModeFor entry per active
@@ -1123,19 +1288,20 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 // identical regardless of count. Falls back to the singular active
 // connector when the config is unavailable.
 func (a *APIServer) connectorModesSummary() []map[string]interface{} {
+	cfg := a.runtimeConfigSnapshot()
 	var names []string
-	if a.scannerCfg != nil {
-		names = a.scannerCfg.ActiveConnectors()
-		if !a.scannerCfg.HasConnectorConfigured() {
+	if cfg != nil {
+		names = cfg.ActiveConnectors()
+		if !cfg.HasConnectorConfigured() {
 			return []map[string]interface{}{}
 		}
 	}
 	if len(names) == 0 {
-		names = []string{a.connectorName()}
+		names = []string{connectorNameForConfig(cfg)}
 	}
 	out := make([]map[string]interface{}, 0, len(names))
 	for _, name := range names {
-		out = append(out, connectorModeForConfig(a.scannerCfg, strings.ToLower(strings.TrimSpace(name))))
+		out = append(out, connectorModeForConfig(cfg, strings.ToLower(strings.TrimSpace(name))))
 	}
 	return out
 }
@@ -1201,13 +1367,19 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 
 func connectorModeForConfig(cfg *config.Config, name string) map[string]interface{} {
 	guardrailMode := "observe"
+	hookFailMode := "closed"
+	enabled := false
 	if cfg != nil {
 		guardrailMode = cfg.EffectiveGuardrailModeForConnector(name)
+		hookFailMode = cfg.EffectiveHookFailModeForConnector(name)
+		enabled = cfg.Guardrail.EffectiveEnabled(name)
 	}
 	out := connectorModeFor(name, guardrailMode)
 	if guardrailMode != "" {
 		out["guardrail_mode"] = guardrailMode
 	}
+	out["hook_fail_mode"] = hookFailMode
+	out["enabled"] = enabled
 	proxyIntercept, _ := out["proxy_intercept"].(bool)
 	out["hook_enforcement"] = !proxyIntercept && strings.EqualFold(guardrailMode, "action")
 	return out
@@ -1496,11 +1668,8 @@ func (a *APIServer) handleScanResult(w http.ResponseWriter, r *http.Request) {
 
 	logger := a.logger
 	if logger == nil {
-		if a.store == nil {
-			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit store not configured"})
-			return
-		}
-		logger = audit.NewLogger(a.store)
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "v8 observability runtime not configured"})
+		return
 	}
 
 	var result scanner.ScanResult
@@ -1774,7 +1943,7 @@ func (a *APIServer) handleAuditEvent(w http.ResponseWriter, r *http.Request) {
 	if event.Severity == "" {
 		event.Severity = "INFO"
 	}
-	if err := persistAuditEvent(a.logger, a.store, event); err != nil {
+	if err := persistAuditEvent(a.logger, event); err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1801,18 +1970,6 @@ func (a *APIServer) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	start := time.Now()
-	ctx := r.Context()
-	var span trace.Span
-	if a.otel != nil {
-		ctx, span = a.otel.StartPolicySpan(ctx, "admission", req.Input.TargetType, req.Input.TargetName)
-	}
-	endAdmission := func(verdict, reason string) {
-		if a.otel != nil && span != nil {
-			a.otel.EndPolicySpan(span, "admission", verdict, reason, start)
-		}
-	}
-
 	input := policy.AdmissionInput{
 		TargetType: req.Input.TargetType,
 		TargetName: req.Input.TargetName,
@@ -1828,27 +1985,27 @@ func (a *APIServer) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request)
 			ScanError:     req.Input.ScanResult.ScanError,
 		}
 	}
-
-	out, err := a.evaluateAdmissionPolicy(ctx, input)
+	ctx, observation, err := a.startAPIPolicyEvaluationV8(
+		r.Context(), "admission", req.Input.TargetType, req.Input.TargetName,
+	)
 	if err != nil {
-		endAdmission("error", err.Error())
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 		return
 	}
 
-	if a.otel != nil {
-		endAdmission(out.Verdict, out.Reason)
-		a.otel.RecordAdmissionDecision(ctx, out.Verdict, req.Input.TargetType, "api")
-		a.otel.RecordPolicyEvaluation(ctx, "admission", out.Verdict)
-		latencyMs := float64(time.Since(start).Milliseconds())
-		a.otel.RecordPolicyLatency(ctx, "admission", latencyMs)
-		// Feed the <2000ms block SLO histogram for every admission
-		// decision so the dashboard can compare blocked vs allowed
-		// latency distributions.
-		a.otel.RecordBlockSLO(ctx, req.Input.TargetType, latencyMs)
-		if out.Verdict == "blocked" || out.Verdict == "rejected" {
-			a.otel.EmitPolicyDecision("admission", out.Verdict, req.Input.TargetName, req.Input.TargetType, out.Reason, nil)
-		}
+	out, err := a.evaluateAdmissionPolicy(ctx, input)
+	if err != nil {
+		_ = observation.complete("error", "", "", err)
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		return
+	}
+	severity := ""
+	if req.Input.ScanResult != nil {
+		severity = req.Input.ScanResult.MaxSeverity
+	}
+	if err := observation.complete(out.Verdict, out.Reason, severity, nil); err != nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "observability runtime unavailable"})
+		return
 	}
 
 	a.writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "data": out})
@@ -1993,9 +2150,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 
 	result, err := ss.Scan(ctx, req.Target)
 	if err != nil {
-		if a.otel != nil {
-			a.otel.RecordScanError(r.Context(), "skill-scanner", "skill", classifyScanError(err))
-		}
+		a.recordAPIScanErrorV8(r.Context(), "skill-scanner", "skill", classifyScanError(err))
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -2040,9 +2195,7 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 
 	result, err := ps.Scan(ctx, req.Target)
 	if err != nil {
-		if a.otel != nil {
-			a.otel.RecordScanError(r.Context(), "plugin-scanner", "plugin", classifyScanError(err))
-		}
+		a.recordAPIScanErrorV8(r.Context(), "plugin-scanner", "plugin", classifyScanError(err))
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -2096,9 +2249,7 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 
 	result, err := ms.Scan(ctx, req.Target)
 	if err != nil {
-		if a.otel != nil {
-			a.otel.RecordScanError(r.Context(), "mcp-scanner", "mcp", classifyScanError(err))
-		}
+		a.recordAPIScanErrorV8(r.Context(), "mcp-scanner", "mcp", classifyScanError(err))
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -2268,6 +2419,7 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 type guardrailEventRequest struct {
+	EvaluationID   string   `json:"evaluation_id"`
 	Direction      string   `json:"direction"`
 	Model          string   `json:"model"`
 	Action         string   `json:"action"`
@@ -2291,50 +2443,19 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
-	if req.Direction == "" || req.Action == "" || req.Severity == "" {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "direction, action, and severity are required"})
+	if req.EvaluationID == "" || req.Direction == "" || req.Action == "" || req.Severity == "" {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "evaluation_id, direction, action, and severity are required"})
+		return
+	}
+	facts, err := newAPIGuardrailEventV8Facts(r.Context(), a.connectorName(), req)
+	if err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
-	// PR #141 audit M6: compute the redacted reason BEFORE the details
-	// string is composed so the audit-store row, the gateway.log line,
-	// and any sink-forwarded copy all carry the redacted form. The
-	// upstream rule-id literal is still preserved on stderr (see
-	// switch-block below) for operator-facing visibility, but every
-	// persisted surface now matches the rest of the v7 redaction
-	// contract.
+	// The local stderr diagnostic remains redacted. Canonical telemetry keeps
+	// the source reason until the central per-destination redaction stage.
 	redactedReason := redaction.Reason(req.Reason)
-	details := fmt.Sprintf("direction=%s action=%s severity=%s findings=%d elapsed_ms=%.1f",
-		req.Direction, req.Action, req.Severity, len(req.Findings), req.ElapsedMs)
-	if req.Reason != "" {
-		details += fmt.Sprintf(" reason=%s", truncate(redactedReason, 120))
-	}
-
-	if nfs := NormalizeScanVerdict(&ScanVerdict{
-		Severity: req.Severity,
-		Findings: req.Findings,
-	}); len(nfs) > 0 {
-		ids := make([]string, 0, len(nfs))
-		seen := make(map[string]bool, len(nfs))
-		for _, nf := range nfs {
-			if seen[nf.CanonicalID] {
-				continue
-			}
-			seen[nf.CanonicalID] = true
-			ids = append(ids, nf.CanonicalID)
-			if len(ids) >= 8 {
-				break
-			}
-		}
-		details += fmt.Sprintf(" canonical=%s", strings.Join(ids, ","))
-	}
-
-	// Both Reason and Findings are composed upstream by the
-	// guardrail proxy and routinely embed the matched literal
-	// in RULE-ID:description form. redactedReason is computed
-	// above (see audit M6); the same Reveal-aware redaction is
-	// applied to each finding for parity with the persisted
-	// `details` string. Rule IDs survive intact in either form.
 	redactedFindings := make([]string, len(req.Findings))
 	for i, f := range req.Findings {
 		redactedFindings[i] = redaction.Reason(f)
@@ -2350,89 +2471,16 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		fmt.Fprintf(os.Stderr, "[guardrail] OK %s: model=%s severity=%s elapsed=%.0fms\n",
 			req.Direction, req.Model, req.Severity, req.ElapsedMs)
 	}
-
-	requestID := RequestIDFromContext(r.Context())
-	if requestID != "" {
-		// Append the correlation key so the human-readable
-		// gateway.log line (which still routes through LogAction
-		// and does not carry structured fields) is also searchable
-		// by request_id. Structured sinks pick it up from the
-		// dedicated Event.RequestID column below.
-		details += fmt.Sprintf(" request_id=%s", requestID)
-	}
-	// Attribute every guardrail-evaluate audit row to the proxy connector
-	// so the REST path reaches connector parity with the inline proxy path.
-	// MergeEnvelope keeps the dimensions the middleware already stamped and
-	// only fills in the connector.
-	auditCtx := r.Context()
-	if name := a.connectorName(); name != "" {
-		auditCtx = audit.ContextWithEnvelope(auditCtx, audit.MergeEnvelope(
-			audit.CorrelationEnvelope{Connector: name},
-			audit.EnvelopeFromContext(auditCtx),
-		))
-	}
-	if a.logger != nil {
-		// v7 envelope threading: see review finding C1. The previous
-		// LogActionWithCorrelation carried only trace_id + request_id
-		// onto the guardrail-verdict audit row — every other
-		// dimension (session_id, agent_*, policy_id, destination_app,
-		// tool_*) was silently dropped before the row reached
-		// SQLite/sinks/OTel. LogActionCtx routes through the same
-		// ctx envelope the middleware already stamped for this
-		// request (now also carrying connector) so all surfaces agree.
-		_ = a.logger.LogActionCtx(auditCtx, string(audit.ActionGuardrailVerdict), req.Model, details)
-	}
-	if a.store != nil {
-		evt := audit.Event{
-			Action:    string(audit.ActionGuardrailInspection),
-			Target:    req.Model,
-			Severity:  req.Severity,
-			Details:   details,
-			Timestamp: time.Now().UTC(),
-			RequestID: requestID,
-		}
-		// Store-level twin row (TUI-only surface) — ApplyEnvelope
-		// keeps it in lockstep with the logger row above.
-		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(auditCtx))
-		_ = a.store.LogEvent(evt)
-	}
-	_ = persistAuditEvent(a.logger, a.store, audit.Event{
-		Action:    string(audit.ActionGuardrailInspection),
-		Target:    req.Model,
-		Severity:  req.Severity,
-		Details:   details,
-		Timestamp: time.Now().UTC(),
-		RequestID: requestID,
-	})
-
-	if a.otel != nil {
-		ctx := r.Context()
-		a.otel.RecordGuardrailEvaluation(ctx, "guardrail-proxy", req.Action)
-		a.otel.RecordGuardrailLatency(ctx, "guardrail-proxy", req.ElapsedMs)
-		if req.CiscoElapsedMs > 0 {
-			a.otel.RecordGuardrailLatency(ctx, "cisco-ai-defense", req.CiscoElapsedMs)
-			a.otel.RecordGuardrailEvaluation(ctx, "cisco-ai-defense", req.Action)
-		}
-		if req.TokensIn != nil || req.TokensOut != nil {
-			var tIn, tOut int64
-			if req.TokensIn != nil {
-				tIn = *req.TokensIn
-			}
-			if req.TokensOut != nil {
-				tOut = *req.TokensOut
-			}
-			agentName := a.connectorName()
-			if reg := SharedAgentRegistry(); reg != nil && reg.AgentName() != "" {
-				agentName = reg.AgentName()
-			}
-			a.otel.RecordLLMTokens(ctx, "chat", "defenseclaw", req.Model, agentName, SharedAgentRegistry().AgentID(), SessionIDFromContext(ctx), tIn, tOut)
-		}
+	if err := a.emitGuardrailEventV8(r.Context(), facts); err != nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "observability runtime unavailable"})
+		return
 	}
 
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 type guardrailEvaluateRequest struct {
+	EvaluationID  string                      `json:"evaluation_id"`
 	Direction     string                      `json:"direction"`
 	Model         string                      `json:"model"`
 	Mode          string                      `json:"mode"`
@@ -2454,10 +2502,16 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
-	if req.Direction == "" || req.Mode == "" {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "direction and mode are required"})
+	if req.EvaluationID == "" || req.Direction == "" || req.Mode == "" {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "evaluation_id, direction, and mode are required"})
 		return
 	}
+	facts, err := newAPIGuardrailEvaluateV8RequestFacts(r.Context(), a, req)
+	if err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	req = facts.request
 
 	fmt.Fprintf(os.Stderr, "[guardrail] evaluate >>> direction=%s model=%s mode=%s scanner_mode=%s content_len=%d\n",
 		req.Direction, req.Model, req.Mode, req.ScannerMode, req.ContentLength)
@@ -2495,57 +2549,33 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	startedAt := time.Now().UTC()
 	out, err := a.evaluateGuardrailPolicy(r.Context(), input)
+	completedAt := time.Now().UTC()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] evaluate error: %v\n", err)
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 		return
 	}
-
-	details := fmt.Sprintf("direction=%s action=%s severity=%s scanner_mode=%s sources=%v elapsed_ms=%.1f",
-		req.Direction, out.Action, out.Severity, req.ScannerMode, out.ScannerSources, req.ElapsedMs)
-	if out.Reason != "" {
-		details += fmt.Sprintf(" reason=%s", truncate(out.Reason, 120))
+	facts, err = facts.complete(out, startedAt, completedAt)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] evaluate invalid output: %v\n", err)
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "guardrail output is invalid"})
+		return
 	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] evaluate <<< action=%s severity=%s sources=%v reason=%q\n",
 		out.Action, out.Severity, out.ScannerSources,
 		redaction.Reason(truncate(out.Reason, 120)))
 
-	requestID := RequestIDFromContext(r.Context())
-	if requestID != "" {
-		details += fmt.Sprintf(" request_id=%s", requestID)
+	runtime, ok := a.observabilityV8RuntimeEmitter().(apiGuardrailEvaluateV8Runtime)
+	if !ok || runtime == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "observability runtime unavailable"})
+		return
 	}
-	if a.logger != nil {
-		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailOPAVerdict), req.Model, details)
-	}
-	if a.store != nil {
-		evt := audit.Event{
-			Action:    string(audit.ActionGuardrailOPAInspection),
-			Target:    req.Model,
-			Severity:  out.Severity,
-			Details:   details,
-			Timestamp: time.Now().UTC(),
-			RequestID: requestID,
-		}
-		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(r.Context()))
-		_ = a.store.LogEvent(evt)
-	}
-	_ = persistAuditEvent(a.logger, a.store, audit.Event{
-		Action:    string(audit.ActionGuardrailOPAInspection),
-		Target:    req.Model,
-		Severity:  out.Severity,
-		Details:   details,
-		Timestamp: time.Now().UTC(),
-		RequestID: requestID,
-	})
-
-	if a.otel != nil {
-		ctx := r.Context()
-		for _, src := range out.ScannerSources {
-			a.otel.RecordGuardrailEvaluation(ctx, src, out.Action)
-		}
-		a.otel.RecordGuardrailLatency(ctx, "opa-guardrail", req.ElapsedMs)
+	if err := facts.emit(r.Context(), runtime); err != nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "observability runtime unavailable"})
+		return
 	}
 
 	a.writeJSON(w, http.StatusOK, out)
@@ -2690,7 +2720,7 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		candidate, err := config.LoadFromFile(configPath)
+		candidate, err := config.LoadRuntimeV8File(configPath)
 		if err != nil {
 			_ = restoreConfigFileState(configPath, original)
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -2841,7 +2871,7 @@ func (a *APIServer) patchGuardrailConfigFile(path string, updates map[string]any
 	if err := config.PatchYAMLFile(path, updates); err != nil {
 		return err
 	}
-	if _, err := config.LoadFromFile(path); err != nil {
+	if _, err := config.LoadRuntimeV8File(path); err != nil {
 		if restoreErr := restoreConfigFileState(path, original); restoreErr != nil {
 			return fmt.Errorf("api: patched config invalid: %w; restore failed: %v", err, restoreErr)
 		}
@@ -2980,28 +3010,29 @@ func policyOutageVerdict(input policy.GuardrailInput, reason string) *policy.Gua
 	}
 }
 
-// metricsMiddleware records HTTP request count and duration via OTel.
+// metricsMiddleware records generated HTTP request count and duration.
 //
-// SECURITY (Plan B5): the path-token OTLP endpoint encodes the master gateway
-// bearer token as a URL segment, so we MUST sanitize r.URL.Path before any
-// telemetry sink sees it — otherwise the token would leak to any backend the
-// gateway exports OTel metrics to. We also prefer r.Pattern when set so
-// parametric routes don't blow up label cardinality.
+// SECURITY (Plan B5): only the matched ServeMux pattern may become a route
+// label. Raw paths can contain the scoped OTLP path token and are
+// attacker-controlled, so unmatched requests collapse to one bounded token.
 func (a *APIServer) metricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if a.otel == nil {
+		runtime := a.apiOperationalV8Runtime()
+		if runtime == nil {
 			next.ServeHTTP(w, r)
 			return
 		}
 		t0 := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
-		durationMs := float64(time.Since(t0).Milliseconds())
 		route := r.Pattern
 		if route == "" {
-			route = sanitizeRouteForTelemetry(r.URL.Path)
+			// An empty ServeMux pattern is an unmatched path. Never use the raw
+			// path here: it may contain a path token and is attacker-controlled,
+			// which would leak secrets and create unbounded metric cardinality.
+			route = "unmatched"
 		}
-		a.otel.RecordHTTPRequest(r.Context(), r.Method, route, sw.status, durationMs)
+		recordAPIRequestV8(r.Context(), runtime, r.Method, route, sw.status, time.Since(t0))
 	})
 }
 
@@ -3022,7 +3053,9 @@ func (sw *statusWriter) Flush() {
 	}
 }
 
-// tokenAuth wraps a handler with Bearer token authentication.
+// tokenAuth wraps a handler with Bearer token authentication. Management
+// clients may use Authorization, X-DefenseClaw-Token, or the proxy-compatible
+// X-DC-Auth header; all are compared against the same gateway token.
 // GET /health is exempt to allow unauthenticated health checks.
 func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3045,6 +3078,11 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		if token == "" {
 			token = r.Header.Get("X-DefenseClaw-Token")
 		}
+		if token == "" {
+			if dcAuth := r.Header.Get("X-DC-Auth"); strings.HasPrefix(dcAuth, "Bearer ") {
+				token = strings.TrimPrefix(dcAuth, "Bearer ")
+			}
+		}
 
 		expected := ""
 		if a.scannerCfg != nil {
@@ -3059,6 +3097,32 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "no_token_configured")
 			http.Error(w, `{"error":"sidecar misconfigured: no gateway token"}`, http.StatusServiceUnavailable)
 			return
+		}
+		// Codex and Claude Code support arbitrary OTLP headers. Bind their
+		// connector-scoped bearer to the authenticated source while keeping the
+		// credential out of the URL. Once a scoped credential exists, refuse the
+		// master gateway bearer for that source exactly as the path-token route
+		// does; a leaked connector configuration must never grant management API
+		// authority. Gemini CLI still uses the path form below because its native
+		// exporter cannot set an authorization header.
+		if isUnscopedOTLPEndpointPath(r.URL.Path) && connector.IsLoopback(r) {
+			source := normalizeConnectorTelemetrySource(r.Header.Get(otelSourceHeader))
+			if scope, validSource := connector.OTLPPathTokenScopeForConnector(source); validSource {
+				scoped := a.lookupOTLPPathToken(string(scope))
+				if scoped != "" {
+					if token != "" && constantTimeStringMatch(token, scoped) {
+						// Preserve only the canonical source name used to select the
+						// credential so attribution cannot drift through an alias.
+						r.Header.Set(otelSourceHeader, string(scope))
+						r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
+						next.ServeHTTP(w, r)
+						return
+					}
+					a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_scoped_header_token")
+					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+					return
+				}
+			}
 		}
 		if pathToken, source, ok := parseOTLPPathToken(r.URL.Path); ok && connector.IsLoopback(r) {
 			scoped := a.lookupOTLPPathToken(source)
@@ -3157,16 +3221,27 @@ func constantTimeStringMatch(a, b string) bool {
 	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
 }
 
-func (a *APIServer) emitHTTPAuthFailure(ctx context.Context, r *http.Request, route string, code gatewaylog.ErrorCode, metricReason string) {
-	actor := "anonymous"
-	if strings.TrimSpace(r.Header.Get("Authorization")) != "" || r.Header.Get("X-DefenseClaw-Token") != "" {
-		actor = "claimed"
+func (a *APIServer) emitHTTPAuthFailure(ctx context.Context, r *http.Request, _ string, _ gatewaylog.ErrorCode, metricReason string) {
+	// Ordinary sidecar authentication failures use the canonical compliance
+	// event plus its generated platform-health metric. OTLP receivers own the
+	// more specific telemetry.authentication.failed event, including the inbound
+	// signal and connector when those facts are known, and share the same
+	// generated metric family. Both paths use fixed route labels and never fall
+	// back to the legacy gateway event or Provider metric.
+	if r != nil && !isOTLPEndpointPath(r.URL.Path) {
+		// Target runtime startup guarantees the v8 graph. Missing capability,
+		// collection disablement, or persistence failure cannot revive a legacy
+		// gateway event or Provider metric.
+		a.emitAPIAuthenticationFailureV8(ctx, metricReason)
+		return
 	}
-	msg := fmt.Sprintf("sidecar API auth failure (actor=%s client_ip=%s ua=%q)",
-		actor, ClientIPRedacted(r), TruncateUserAgent256(r.UserAgent()))
-	emitGatewayError(ctx, gatewaylog.SubsystemAuth, code, msg, nil)
-	if a.otel != nil {
-		a.otel.RecordHTTPAuthFailure(ctx, route, metricReason)
+	if r != nil {
+		a.emitOTLPAuthenticationFailureV8(ctx, r, metricReason)
+		metricRoute := "otlp"
+		if signal, ok := otlpSignalFromRequestPath(r.URL.Path); ok {
+			metricRoute += "-" + string(signal)
+		}
+		a.recordAPIAuthenticationFailureMetricV8(ctx, metricRoute, metricReason)
 	}
 }
 
@@ -3415,9 +3490,14 @@ func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.Ad
 }
 
 func classifyScanError(err error) string {
-	msg := err.Error()
+	if errors.Is(err, os.ErrNotExist) {
+		return "not_found"
+	}
+	msg := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(msg, "not found") || strings.Contains(msg, "executable file not found"):
+	case strings.Contains(msg, "not found") || strings.Contains(msg, "no such file") ||
+		strings.Contains(msg, "cannot find the file specified") ||
+		strings.Contains(msg, "cannot find the path specified"):
 		return "not_found"
 	case strings.Contains(msg, "context deadline exceeded") || strings.Contains(msg, "timeout"):
 		return "timeout"
@@ -3448,38 +3528,30 @@ func (a *APIServer) handlePolicyEvaluateFirewall(w http.ResponseWriter, r *http.
 		return
 	}
 
-	start := time.Now()
-	ctx := r.Context()
-	var span trace.Span
-	if a.otel != nil {
-		ctx, span = a.otel.StartPolicySpan(ctx, "firewall", "network", input.Destination)
-	}
-	endFw := func(verdict, detail string) {
-		if a.otel != nil && span != nil {
-			a.otel.EndPolicySpan(span, "firewall", verdict, detail, start)
-		}
+	ctx, observation, err := a.startAPIPolicyEvaluationV8(
+		r.Context(), "firewall", "network", input.Destination,
+	)
+	if err != nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		return
 	}
 
 	engine, err := a.loadPolicyEngine()
 	if err != nil {
-		endFw("error", err.Error())
+		_ = observation.complete("error", "", "", err)
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 		return
 	}
 
 	out, err := engine.EvaluateFirewall(ctx, input)
 	if err != nil {
-		endFw("error", err.Error())
+		_ = observation.complete("error", "", "", err)
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-
-	if a.otel != nil {
-		endFw(out.Action, out.RuleName)
-		a.otel.RecordPolicyEvaluation(ctx, "firewall", out.Action)
-		if out.Action == "deny" || out.Action == "block" {
-			a.otel.EmitPolicyDecision("firewall", out.Action, input.Destination, "network", out.RuleName, nil)
-		}
+	if err := observation.complete(out.Action, out.RuleName, "", nil); err != nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "observability runtime unavailable"})
+		return
 	}
 
 	a.writeJSON(w, http.StatusOK, out)
@@ -3501,39 +3573,34 @@ func (a *APIServer) handlePolicyEvaluateAudit(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	start := time.Now()
-	ctx := r.Context()
-	var span trace.Span
-	if a.otel != nil {
-		ctx, span = a.otel.StartPolicySpan(ctx, "audit", input.EventType, input.Severity)
-	}
-	endAud := func(verdict, detail string) {
-		if a.otel != nil && span != nil {
-			a.otel.EndPolicySpan(span, "audit", verdict, detail, start)
-		}
+	ctx, observation, err := a.startAPIPolicyEvaluationV8(
+		r.Context(), "audit", firstNonEmpty(input.EventType, "audit-event"), input.EventType,
+	)
+	if err != nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		return
 	}
 
 	engine, err := a.loadPolicyEngine()
 	if err != nil {
-		endAud("error", err.Error())
+		_ = observation.complete("error", "", input.Severity, err)
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 		return
 	}
 
 	out, err := engine.EvaluateAudit(ctx, input)
 	if err != nil {
-		endAud("error", err.Error())
+		_ = observation.complete("error", "", input.Severity, err)
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-
-	if a.otel != nil {
-		verdict := "expire"
-		if out.Retain {
-			verdict = "retain"
-		}
-		endAud(verdict, out.RetainReason)
-		a.otel.RecordPolicyEvaluation(ctx, "audit", verdict)
+	verdict := "expire"
+	if out.Retain {
+		verdict = "retain"
+	}
+	if err := observation.complete(verdict, out.RetainReason, input.Severity, nil); err != nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "observability runtime unavailable"})
+		return
 	}
 
 	a.writeJSON(w, http.StatusOK, out)
@@ -3559,39 +3626,34 @@ func (a *APIServer) handlePolicyEvaluateSkillActions(w http.ResponseWriter, r *h
 		return
 	}
 
-	start := time.Now()
-	ctx := r.Context()
-	var span trace.Span
-	if a.otel != nil {
-		ctx, span = a.otel.StartPolicySpan(ctx, "skill-actions", input.TargetType, input.Severity)
-	}
-	endSkill := func(verdict, detail string) {
-		if a.otel != nil && span != nil {
-			a.otel.EndPolicySpan(span, "skill-actions", verdict, detail, start)
-		}
+	ctx, observation, err := a.startAPIPolicyEvaluationV8(
+		r.Context(), "skill-actions", firstNonEmpty(input.TargetType, "skill"), "",
+	)
+	if err != nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		return
 	}
 
 	engine, err := a.loadPolicyEngine()
 	if err != nil {
-		endSkill("error", err.Error())
+		_ = observation.complete("error", "", input.Severity, err)
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 		return
 	}
 
 	out, err := engine.EvaluateSkillActions(ctx, input)
 	if err != nil {
-		endSkill("error", err.Error())
+		_ = observation.complete("error", "", input.Severity, err)
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-
-	if a.otel != nil {
-		verdict := out.RuntimeAction
-		if out.ShouldBlock {
-			verdict = "block"
-		}
-		endSkill(verdict, "")
-		a.otel.RecordPolicyEvaluation(ctx, "skill-actions", verdict)
+	verdict := out.RuntimeAction
+	if out.ShouldBlock {
+		verdict = "block"
+	}
+	if err := observation.complete(verdict, "", input.Severity, nil); err != nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "observability runtime unavailable"})
+		return
 	}
 
 	a.writeJSON(w, http.StatusOK, out)
@@ -3611,14 +3673,20 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "policy_dir not configured"})
 		return
 	}
+	if a.observabilityV8RuntimeEmitter() == nil || a.logger == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "observability runtime unavailable"})
+		return
+	}
+	recordFailure := func(reason string) {
+		_ = a.recordAPIPolicyReloadMetricV8(r.Context(), "failed")
+		_ = a.emitAPIPolicyReloadRejectedV8(r.Context(), reason)
+	}
 
 	// If a shared OPA engine is wired, use its atomic Reload(); otherwise
 	// validate by constructing a throwaway engine (backward-compatible).
 	if a.policyReloader != nil {
 		if err := a.policyReloader(); err != nil {
-			if a.otel != nil {
-				a.otel.RecordPolicyReload(r.Context(), "failed")
-			}
+			recordFailure(err.Error())
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{
 				"error":  "reload failed: " + err.Error(),
 				"status": "failed",
@@ -3628,9 +3696,7 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	} else {
 		engine, err := policy.New(a.scannerCfg.PolicyDir)
 		if err != nil {
-			if a.otel != nil {
-				a.otel.RecordPolicyReload(r.Context(), "failed")
-			}
+			recordFailure(err.Error())
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{
 				"error":  "reload failed: " + err.Error(),
 				"status": "failed",
@@ -3638,9 +3704,7 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := engine.Compile(); err != nil {
-			if a.otel != nil {
-				a.otel.RecordPolicyReload(r.Context(), "failed")
-			}
+			recordFailure(err.Error())
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{
 				"error":  "compilation failed: " + err.Error(),
 				"status": "failed",
@@ -3654,18 +3718,14 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	// the fresh rulepack. Safe no-op when the cache is unset.
 	InvalidateJudgeVerdictCache()
 
-	if a.otel != nil {
-		a.otel.RecordPolicyReload(r.Context(), "success")
-		a.otel.EmitPolicyDecision("reload", "success", a.scannerCfg.PolicyDir, "", "OPA policy reloaded via API", nil)
+	if err := a.logger.LogActionCtx(r.Context(), string(audit.ActionPolicyReload), a.scannerCfg.PolicyDir, "OPA policy reloaded via API"); err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "policy reloaded but compliance logging failed"})
+		return
 	}
-
-	if a.logger != nil {
-		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionPolicyReload), a.scannerCfg.PolicyDir, "OPA policy reloaded via API")
+	if err := a.recordAPIPolicyReloadMetricV8(r.Context(), "success"); err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "policy reloaded but observability metric failed"})
+		return
 	}
-	emitLifecycle(r.Context(), "policy", "reload", map[string]string{
-		"policy_dir": a.scannerCfg.PolicyDir,
-		"source":     "api",
-	})
 
 	a.writeJSON(w, http.StatusOK, map[string]string{
 		"status":     "reloaded",
@@ -3712,9 +3772,7 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 
 	result, err := scanner.ScanCode(r.Context(), req.Path, rulesDir)
 	if err != nil {
-		if a.otel != nil {
-			a.otel.RecordScanError(r.Context(), "codeguard", "code", classifyScanError(err))
-		}
+		a.recordAPIScanErrorV8(r.Context(), "codeguard", "code", classifyScanError(err))
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -3723,23 +3781,11 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
-	// DeepSec H.MEDIUM ("Raw scan JSON stores unredacted secret-bearing
-	// findings"): the persistent path (LogScanWithCorrelation →
-	// audit.scan_persist.go) already runs Description / Location /
-	// Remediation through redaction.ForSinkString before INSERT, and
-	// `defenseclaw scan code --json` (internal/cli/scan_v7.go::findingToV7)
-	// applies the same redaction before serialization. The REST API used
-	// to bypass both — serializing the raw scanner.ScanResult straight to
-	// the response body and leaking matched source lines, raw absolute
-	// paths, and operator-supplied remediation text to any caller. Apply
-	// the same field-level redaction here so all three surfaces (DB row,
-	// CLI JSON, REST response) treat scanner output identically. We
-	// redact AFTER LogScanWithCorrelation has been called: scan_persist.go
-	// re-applies its own redaction before INSERT, so the in-place mutation
-	// here only affects the response body — keeping the existing audit
-	// DB contract untouched. Title is intentionally NOT redacted to stay
-	// symmetric with the persistence path (Title is the rule-name /
-	// operator-searchable summary, not the matched bytes).
+	// Keep the authenticated REST response conservative by default. Canonical
+	// persistence above already retained the source facts so each configured
+	// destination can independently apply `none`, `detect`, or `whole`
+	// redaction. This in-place copy change affects only the response body.
+	// Title remains an operator-searchable rule summary.
 	for i := range result.Findings {
 		f := &result.Findings[i]
 		f.Description = redaction.ForSinkString(f.Description)

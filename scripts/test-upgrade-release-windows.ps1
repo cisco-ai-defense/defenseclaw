@@ -40,6 +40,15 @@
     in release/upgrade-baselines.json. If omitted, the newest published
     pre-bridge baseline is used for local compatibility; release CI should pass
     every pre-bridge baseline through a job matrix.
+.PARAMETER BaselinePolicy
+    Materialized effective schema-2 baseline policy. Defaults to the
+    UPGRADE_BASELINE_POLICY environment variable and then the checked-in
+    historical floor.
+.PARAMETER UnpublishedWindowsRefusalOnly
+    Authenticate the exact sealed candidate and prove that its release-owned
+    resolver refuses a hard cut whose signed Windows source matrix is empty.
+    The isolated published source process, installed bytes, ACLs, config,
+    receipts, PID custody, and persistent user PATH must remain unchanged.
 #>
 
 [CmdletBinding()]
@@ -55,8 +64,12 @@ param(
     [ValidatePattern('^$|^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$')]
     [string]$SourceVersion = "",
 
+    [string]$BaselinePolicy = "",
+
     [ValidateRange(1, 600)]
     [int]$HealthTimeout = 60,
+
+    [switch]$UnpublishedWindowsRefusalOnly,
 
     [switch]$KeepWorkDir
 )
@@ -72,6 +85,15 @@ $script:PublishedBaselines = @()
 $script:PublishedPreBridgeBaselines = @()
 $script:PublishedWindowsBaselines = @()
 $script:BaselineConfigVersions = @{}
+$script:UpgradeBaselinePolicy = $BaselinePolicy
+if (-not $script:UpgradeBaselinePolicy -and $env:UPGRADE_BASELINE_POLICY) {
+    $script:UpgradeBaselinePolicy = $env:UPGRADE_BASELINE_POLICY
+}
+if (-not $script:UpgradeBaselinePolicy) {
+    $script:UpgradeBaselinePolicy = Join-Path (
+        Join-Path $PSScriptRoot ".."
+    ) "release\upgrade-baselines.json"
+}
 $script:SourceVersionSpecified = $PSBoundParameters.ContainsKey("SourceVersion")
 $script:WorkRoot = ""
 $script:ReleaseRoot = ""
@@ -118,8 +140,27 @@ function Get-Property {
     return $Object.PSObject.Properties[$Name]
 }
 
+function Get-CandidateRuntimeConfigVersion {
+    $relative = if ((Compare-Version $TargetVersion $script:HardCutVersion) -ge 0) {
+        "internal\config\observability_v8_types.go"
+    } else {
+        "internal\config\config.go"
+    }
+    $pattern = if ((Compare-Version $TargetVersion $script:HardCutVersion) -ge 0) {
+        '(?m)^\s*ObservabilityV8ConfigVersion\s*=\s*([1-9][0-9]*)\s*$'
+    } else {
+        '(?m)^\s*const\s+CurrentConfigVersion\s*=\s*([1-9][0-9]*)\s*$'
+    }
+    $path = Join-Path (Join-Path $PSScriptRoot "..") $relative
+    $match = [regex]::Match((Get-Content -LiteralPath $path -Raw -Encoding UTF8), $pattern)
+    if (-not $match.Success) {
+        Fail "Could not resolve candidate runtime config version from $path"
+    }
+    return [int64]$match.Groups[1].Value
+}
+
 function Read-UpgradeBaselinePolicy {
-    $path = Join-Path (Join-Path $PSScriptRoot "..") "release\upgrade-baselines.json"
+    $path = $script:UpgradeBaselinePolicy
     try {
         $policy = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
     } catch {
@@ -156,24 +197,18 @@ function Read-UpgradeBaselinePolicy {
         Fail "Published baseline config-version keys must exactly match published_baselines"
     }
     $script:BaselineConfigVersions = @{}
+    $candidateRuntimeConfigVersion = Get-CandidateRuntimeConfigVersion
     foreach ($value in $values) {
         $property = Get-Property $configVersions.Value ([string]$value)
         if (-not $property -or -not (Test-Integer $property.Value)) {
-            Fail "Published baseline $value has no reviewed config version in {5,6,7}"
+            Fail "Published baseline $value has no positive reviewed config version"
         }
         $configVersion = [int64]$property.Value
-        if ($configVersion -notin @(5, 6, 7)) {
-            Fail "Published baseline $value has no reviewed config version in {5,6,7}"
-        }
-        $expectedConfigVersion = if ((Compare-Version ([string]$value) "0.8.3") -ge 0) {
-            7
-        } elseif ((Compare-Version ([string]$value) "0.7.1") -ge 0) {
-            6
-        } else {
-            5
-        }
-        if ($configVersion -ne $expectedConfigVersion) {
-            Fail "Published baseline $value must seed historical config version $expectedConfigVersion"
+        if ($configVersion -lt 1 -or $configVersion -gt $candidateRuntimeConfigVersion) {
+            Fail (
+                "Published baseline $value config version must be positive and no newer " +
+                "than candidate runtime $candidateRuntimeConfigVersion"
+            )
         }
         $script:BaselineConfigVersions[[string]$value] = $configVersion
     }
@@ -1077,6 +1112,30 @@ function Assert-SnapshotsEqual {
     $beforeHash = (Get-FileHash -LiteralPath $Before -Algorithm SHA256).Hash
     $afterHash = (Get-FileHash -LiteralPath $After -Algorithm SHA256).Hash
     if ($beforeHash -ne $afterHash) {
+        $beforeByPath = @{}
+        foreach ($row in @(Get-Content -LiteralPath $Before -Raw -Encoding UTF8 | ConvertFrom-Json)) {
+            $beforeByPath[[string]$row.path] = $row
+        }
+        $afterByPath = @{}
+        foreach ($row in @(Get-Content -LiteralPath $After -Raw -Encoding UTF8 | ConvertFrom-Json)) {
+            $afterByPath[[string]$row.path] = $row
+        }
+        $allPaths = @($beforeByPath.Keys) + @($afterByPath.Keys)
+        foreach ($path in @($allPaths | Sort-Object -Unique)) {
+            if (-not $beforeByPath.ContainsKey($path)) {
+                Write-Host ("snapshot added: {0}" -f $path)
+                continue
+            }
+            if (-not $afterByPath.ContainsKey($path)) {
+                Write-Host ("snapshot removed: {0}" -f $path)
+                continue
+            }
+            $beforeRow = [string]($beforeByPath[$path] | ConvertTo-Json -Depth 6 -Compress)
+            $afterRow = [string]($afterByPath[$path] | ConvertTo-Json -Depth 6 -Compress)
+            if ($beforeRow -cne $afterRow) {
+                Write-Host ("snapshot changed: {0}" -f $path)
+            }
+        }
         Fail "$Label changed installed bytes, ACLs, configuration, cursor, receipts, or artifacts"
     }
 }
@@ -1192,14 +1251,27 @@ function Test-HardCutExplicitRefusal {
     $after = Join-Path $Case.Root "resolver-refusal.after.json"
     $log = Join-Path $Case.Root "resolver-refusal.log"
     $userPathBefore = [Environment]::GetEnvironmentVariable("Path", "User")
+    $bytecodeEnvironment = [Environment]::GetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "Process")
     try {
+        # Exercise the production cold-cache contract.  The resolver itself
+        # must use isolated Python with -B; a test-wide environment override
+        # must not be what keeps a refused upgrade mutation-free.
+        $packageRoot = Join-Path (Join-Path (Join-Path $Case.Venv "Lib") "site-packages") "defenseclaw"
+        foreach ($cache in @(Get-ChildItem -LiteralPath $packageRoot -Directory -Filter "__pycache__" -Recurse -Force)) {
+            Remove-Item -LiteralPath $cache.FullName -Recurse -Force -ErrorAction Stop
+        }
+        foreach ($bytecode in @(Get-ChildItem -LiteralPath $packageRoot -File -Filter "*.pyc" -Recurse -Force)) {
+            Remove-Item -LiteralPath $bytecode.FullName -Force -ErrorAction Stop
+        }
         Write-InstalledStateSnapshot -Case $Case -Output $before
+        [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $null, "Process")
         $arguments = @(
             "-NoProfile", "-NonInteractive", "-File", (Get-CandidateResolverPath),
             "-Version", $TargetVersion, "-Yes", "-HealthTimeout", [string]$HealthTimeout,
             "-ReleaseBaseUrl", $script:ServerBaseUrl, "-TestMode"
         )
         $status = Invoke-ExternalLogged -Command $script:Commandpwsh -Arguments $arguments -LogPath $log
+        [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $bytecodeEnvironment, "Process")
         if ($status -eq 0) { Show-LogTail $log; Fail "Explicit hard-cut request unexpectedly succeeded" }
         if ($sentinel.HasExited -or -not (Get-Process -Id $sentinel.Id -ErrorAction SilentlyContinue)) {
             Fail "Explicit hard-cut refusal crossed the service-stop boundary"
@@ -1220,9 +1292,65 @@ function Test-HardCutExplicitRefusal {
             Fail "Explicit refusal did not explain the signed bridge requirement"
         }
     } finally {
+        [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $bytecodeEnvironment, "Process")
         Stop-RefusalSentinel -Case $Case -Sentinel $sentinel
     }
     Write-Ok "Explicit hard-cut request left PID, service, config, cursor, ACLs, CLI, and gateway unchanged"
+}
+
+function Test-UnpublishedWindowsResolverRefusal {
+    param([Parameter(Mandatory = $true)][object]$Case)
+
+    Write-Step "Proving sealed latest resolver refuses unpublished Windows runtime before mutation"
+    Set-CaseEnvironment -Case $Case
+    $sentinel = Start-RefusalSentinel -Case $Case
+    $before = Join-Path $Case.Root "unpublished-windows-refusal.before.json"
+    $after = Join-Path $Case.Root "unpublished-windows-refusal.after.json"
+    $log = Join-Path $Case.Root "unpublished-windows-refusal.log"
+    $userPathBefore = [Environment]::GetEnvironmentVariable("Path", "User")
+    try {
+        Write-InstalledStateSnapshot -Case $Case -Output $before
+        $arguments = @(
+            "-NoProfile", "-NonInteractive", "-File", (Get-CandidateResolverPath),
+            "-Yes", "-HealthTimeout", [string]$HealthTimeout,
+            "-ReleaseBaseUrl", $script:ServerBaseUrl, "-TestMode",
+            "-LatestVersionOverride", $TargetVersion
+        )
+        $status = Invoke-ExternalLogged -Command $script:Commandpwsh -Arguments $arguments -LogPath $log
+        if ($status -eq 0) {
+            Show-LogTail $log
+            Fail "Unpublished Windows hard cut unexpectedly succeeded"
+        }
+        if ($sentinel.HasExited -or -not (Get-Process -Id $sentinel.Id -ErrorAction SilentlyContinue)) {
+            Fail "Unpublished Windows refusal crossed the service-stop boundary"
+        }
+        $pidText = (Get-Content -LiteralPath (Join-Path $Case.Data "gateway.pid") -Raw).Trim()
+        if ($pidText -ne [string]$sentinel.Id) {
+            Fail "Unpublished Windows refusal changed gateway.pid"
+        }
+        Write-InstalledStateSnapshot -Case $Case -Output $after
+        Assert-SnapshotsEqual -Before $before -After $after -Label "unpublished Windows refusal"
+        if ([Environment]::GetEnvironmentVariable("Path", "User") -ne $userPathBefore) {
+            Fail "Unpublished Windows refusal changed the persistent user PATH"
+        }
+        Assert-NoSucceededReceipt -Case $Case
+        Assert-CommandVersion -Command $Case.Cli -Expected $script:OldBaseline -Label "refused CLI"
+        Assert-CommandVersion -Command $Case.Gateway -Expected $script:OldBaseline -Label "refused gateway"
+        $text = Get-Content -LiteralPath $log -Raw -Encoding UTF8
+        foreach ($required in @(
+            "Windows upgrades to $TargetVersion are unsupported by the signed release policy",
+            "Required bridge $($script:BridgeVersion) was not published for Windows",
+            "No changes were made"
+        )) {
+            if ($text -notmatch [regex]::Escape($required)) {
+                Show-LogTail $log
+                Fail "Unpublished Windows refusal did not report: $required"
+            }
+        }
+    } finally {
+        Stop-RefusalSentinel -Case $Case -Sentinel $sentinel
+    }
+    Write-Ok "Sealed resolver refused unpublished Windows runtime without changing source state"
 }
 
 function Test-ProtectedMaterializationCollision {
@@ -2603,6 +2731,38 @@ function Assert-CandidatePolicy {
     return $false
 }
 
+function Assert-UnpublishedWindowsCandidatePolicy {
+    param([Parameter(Mandatory = $true)][object]$Manifest)
+
+    if ((Compare-Version $TargetVersion $script:HardCutVersion) -lt 0) {
+        Fail "Unpublished-Windows refusal requires a hard-cut candidate"
+    }
+    $schema = Get-Property $Manifest "schema_version"
+    $minProtocol = Get-Property $Manifest "min_upgrade_protocol"
+    $minimum = Get-Property $Manifest "minimum_source_version"
+    $bridge = Get-Property $Manifest "required_bridge_version"
+    $automatic = Get-Property $Manifest "auto_bridge_from"
+    $platformTested = Get-Property $Manifest "platform_tested_source_versions"
+    $windows = if ($platformTested) {
+        Get-Property $platformTested.Value "windows"
+    } else {
+        $null
+    }
+    $platformNames = @()
+    if ($platformTested) {
+        $platformNames = @($platformTested.Value.PSObject.Properties.Name)
+    }
+    if (-not $schema -or [int]$schema.Value -ne 2 -or
+        -not $minProtocol -or [int]$minProtocol.Value -lt 2 -or
+        -not $minimum -or [string]$minimum.Value -ne $script:BridgeVersion -or
+        -not $bridge -or [string]$bridge.Value -ne $script:BridgeVersion -or
+        -not $automatic -or -not $platformTested -or -not $windows -or
+        $platformNames.Count -ne 1 -or $platformNames -notcontains "windows" -or
+        @($windows.Value).Count -ne 0) {
+        Fail "Candidate is not a truthful hard cut with an unpublished Windows bridge"
+    }
+}
+
 function Cleanup {
     foreach ($case in $script:Cases) { Stop-CaseGateway -Case $case }
     foreach ($sentinel in $script:Sentinels) {
@@ -2656,6 +2816,18 @@ function Main {
     if ($candidateManifest -isnot [pscustomobject]) {
         Fail "Authenticated sealed candidate manifest is not one JSON object"
     }
+    if ($UnpublishedWindowsRefusalOnly) {
+        Assert-UnpublishedWindowsCandidatePolicy -Manifest $candidateManifest
+        [void](Ensure-PublishedRelease -Version $script:OldBaseline)
+        Clear-UpgradeTestEnvironment
+        Start-ReleaseServer
+        $refusal = New-UpgradeCase -Name "unpublished-windows-refusal" -BaselineVersion $script:OldBaseline
+        Test-UnpublishedWindowsResolverRefusal -Case $refusal
+        Stop-CaseGateway -Case $refusal
+        Write-Ok "Native unpublished-Windows sealed-resolver refusal passed"
+        return
+    }
+
     $hardCut = Assert-CandidatePolicy -Manifest $candidateManifest
     [void](Ensure-PublishedRelease -Version $script:OldBaseline)
     if ($hardCut) {

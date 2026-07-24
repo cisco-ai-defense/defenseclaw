@@ -48,6 +48,9 @@ class ConnectorContract:
     aid_surfaces: tuple[str, ...] = ()
     supports_traceparent: bool = False
     native_otlp: bool = False
+    native_otlp_auth: str = ""
+    native_otlp_signals: tuple[str, ...] = ()
+    native_otlp_endpoint_template: str = ""
     capabilities: dict[str, Any] = field(default_factory=dict)
     notes: tuple[str, ...] = ()
 
@@ -129,6 +132,13 @@ def _load_contracts_from_manifest(
                     aid_surfaces=tuple(str(v) for v in raw_contract.get("aid_surfaces", []) if v),
                     supports_traceparent=bool(raw_contract.get("supports_traceparent", False)),
                     native_otlp=bool(raw_contract.get("native_otlp", False)),
+                    native_otlp_auth=str(raw_contract.get("native_otlp_auth", "") or ""),
+                    native_otlp_signals=tuple(
+                        str(v) for v in raw_contract.get("native_otlp_signals", []) if v
+                    ),
+                    native_otlp_endpoint_template=str(
+                        raw_contract.get("native_otlp_endpoint_template", "") or ""
+                    ),
                     capabilities=dict(raw_contract.get("capabilities", {}) or {}),
                     notes=tuple(str(v) for v in raw_contract.get("notes", []) if v),
                 )

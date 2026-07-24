@@ -25,7 +25,7 @@ Research date: 2026-06-16. Local cross-check: `agy --version` returned `1.0.5`; 
 | Rules | `~/.gemini/GEMINI.md`; migration/changelog also mention `AGENTS.md` as context | `<workspace>/.agents/rules/` | `<plugin>/rules/*.md` | Discovery-only. Do not write rules until activation metadata/file naming is documented. |
 | Workflows | UI supports global workflows but no path is documented | UI supports workspace workflows but no path is documented | Not documented | Unsupported for write; discovery only if a documented path appears later. |
 | Agents | No standalone path documented | No standalone path documented | CLI plugins may include `<plugin>/agents/` | Unsupported standalone; plugin-contained agents are discovery-only. |
-| Plugins | `~/.gemini/config/plugins/<plugin>/`; CLI stages installed plugins under `~/.gemini/antigravity-cli/plugins/<plugin>/` | `<workspace>/.agents/plugins/<plugin>/` or `<workspace>/_agents/plugins/<plugin>/` | N/A | Discovery/scan only. Do not install or disable Antigravity plugins without a separate maintainer decision. |
+| Plugins | `~/.gemini/config/plugins/<plugin>/`; CLI stages installed plugins under `~/.gemini/antigravity-cli/plugins/<plugin>/` | `<workspace>/.agents/plugins/<plugin>/` or `<workspace>/_agents/plugins/<plugin>/` | N/A | Install/list/scan/remove at the documented global or workspace path. Discover the CLI staging path. Runtime disable remains policy/advisory state. |
 
 Notes:
 
@@ -95,4 +95,4 @@ DefenseClaw should read both `serverUrl` and `url`, preserve unknown fields, and
 - `PreToolUse` remains the only empirically verified ask/block event in agy v1.0.x. Other lifecycle events are registered according to the Antigravity 2.0 contract and handled when upstream starts emitting them.
 - MCP read/write support uses `~/.gemini/config/mcp_config.json` and `<workspace>/.agents/mcp_config.json`; plugin MCP configs are discovery-only. DefenseClaw writes `serverUrl` for remote entries, reads `url` for compatibility, preserves unknown fields, and does not log secret-bearing `env` or `headers` values.
 - AgentSkills folder form is read/write at `~/.gemini/config/skills/<skill>/SKILL.md` and `<workspace>/.agents/skills/<skill>/SKILL.md`. CLI direct markdown skills under `~/.gemini/antigravity-cli/skills/` remain discovery-only because they use a different shape.
-- Rules, workflows, plugins, and plugin-contained agents remain discovery/scan only as listed in the contract table. DefenseClaw does not install or disable Antigravity plugins in PR #365.
+- Rules, workflows, and plugin-contained agents remain discovery/scan only as listed in the contract table. DefenseClaw installs and removes Antigravity plugins at Google's documented manual plugin paths; runtime disable remains policy/advisory state rather than invoking `agy plugin disable`.

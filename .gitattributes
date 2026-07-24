@@ -3,3 +3,11 @@
 scripts/upgrade.sh text eol=lf
 scripts/upgrade.ps1 text eol=lf
 cli/defenseclaw/install_publish.py text eol=lf
+schemas/config/v8/defenseclaw-config.schema.json text eol=lf
+schemas/config/v8/reference/observability.yaml text eol=lf
+schemas/config/v8/reference/observability.md text eol=lf
+
+# These pinned upstream snapshots are authenticated by SHA256 over their exact
+# bytes. Disable checkout-time newline conversion so Windows materializes the
+# same payload that the dependency lock reviewed.
+schemas/telemetry/v8/upstream/** -text

@@ -76,25 +76,7 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 			output = map[string]interface{}{"context": in.AdditionalContext}
 		}
 	case "cursor":
-		// Cursor's hook script is fail-closed: an empty stdout is
-		// treated as a hook failure and blocks the tool call. Every
-		// code path in this case must therefore produce a non-nil
-		// Output map — including alert with no AdditionalContext,
-		// which must fall through to the plain allow envelope.
-		switch in.Action {
-		case "block":
-			output = map[string]interface{}{"continue": true, "permission": "deny", "user_message": reason, "agent_message": reason}
-		case "confirm":
-			output = map[string]interface{}{"continue": true, "permission": "ask", "user_message": reason, "agent_message": reason}
-		case "alert":
-			if in.AdditionalContext != "" {
-				output = map[string]interface{}{"continue": true, "permission": "allow", "agent_message": in.AdditionalContext}
-			} else {
-				output = map[string]interface{}{"continue": true, "permission": "allow"}
-			}
-		default:
-			output = map[string]interface{}{"continue": true, "permission": "allow"}
-		}
+		output = cursorHookOutputForProfile(in.Req.HookEventName, in.Action, reason, in.AdditionalContext)
 	case "windsurf":
 		if in.Action == "block" {
 			output = map[string]interface{}{"message": reason}
@@ -133,6 +115,32 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		output = map[string]interface{}{"systemMessage": in.AdditionalContext}
 	}
 	return HookRespondOutput{FieldName: "hook_output", Output: output}
+}
+
+func cursorHookOutputForProfile(event, action, reason, additional string) map[string]interface{} {
+	event = canonicalHookEvent(event)
+	if event == "beforesubmitprompt" {
+		if action == "block" {
+			return map[string]interface{}{"continue": false, "user_message": reason, "agent_message": reason}
+		}
+		return map[string]interface{}{"continue": true}
+	}
+	switch action {
+	case "block":
+		return map[string]interface{}{"continue": true, "permission": "deny", "user_message": reason, "agent_message": reason}
+	case "confirm":
+		return map[string]interface{}{"continue": true, "permission": "ask", "user_message": reason, "agent_message": reason}
+	case "alert":
+		if additional != "" {
+			return map[string]interface{}{"continue": true, "permission": "allow", "agent_message": additional}
+		}
+	}
+	switch event {
+	case "pretooluse", "beforeshellexecution", "beforemcpexecution", "beforereadfile", "beforetabfileread", "stop":
+		return map[string]interface{}{"continue": true, "permission": "allow"}
+	default:
+		return map[string]interface{}{"continue": true}
+	}
 }
 
 // antigravityHookOutputForProfile renders the per-event hook

@@ -284,27 +284,3 @@ func TestActivityPayloadDiff(t *testing.T) {
 		}
 	}
 }
-
-// TestWriterStampsProvenance verifies the writer choke point stamps
-// provenance. Callers should never have to remember to stamp; the
-// writer is the sole authority.
-func TestWriterStampsProvenance(t *testing.T) {
-	version.ResetForTesting()
-	version.SetBinaryVersion("7.0.0")
-
-	w, err := New(Config{})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	var seen Event
-	w.WithFanout(func(e Event) { seen = e })
-	w.Emit(Event{EventType: EventLifecycle})
-
-	if seen.SchemaVersion != version.SchemaVersion {
-		t.Fatalf("writer did not stamp schema_version: %+v", seen)
-	}
-	if seen.BinaryVersion != "7.0.0" {
-		t.Fatalf("writer did not stamp binary_version: %+v", seen)
-	}
-}

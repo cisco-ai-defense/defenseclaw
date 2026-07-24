@@ -1,0 +1,19 @@
+config_version: 8
+
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ DEFENSECLAW OBSERVABILITY                                               │
+# │                                                                          │
+# │ producers -> collection -> local history + optional exports              │
+# │                                                                          │
+# │ Effective plan: defenseclaw observability plan                           │
+# │ Every knob:    defenseclaw config reference observability                │
+# │ Validate:      defenseclaw config validate                               │
+# └──────────────────────────────────────────────────────────────────────────┘
+# The v1 full-fidelity defaults are active:
+# - every defined log, trace, and metric is collected
+# - schema-defined content supplied by producers is captured
+# - local SQLite stores every collected log and its content unredacted
+# - adding an OTLP destination with no send/routes exports all three signals,
+#   every bucket, unredacted; logs-only/metrics-only kinds export their capability
+# Add only choices that differ from those defaults. Local SQLite is automatic.
+observability: {}

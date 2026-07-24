@@ -34,9 +34,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
-
-	"go.opentelemetry.io/otel/trace"
 )
 
 // judgeCtxKey is a private context key used to mark an inspection path as
@@ -96,10 +93,18 @@ func redactEntity(s string) string {
 // migration fallback. The non-LLM knobs (Enabled, Timeout, PII toggles,
 // ToolInjection, Fallbacks, …) continue to come from JudgeConfig.
 type LLMJudge struct {
-	cfg      *config.JudgeConfig
-	model    string
-	provider LLMProvider
-	rp       *guardrail.RulePack
+	cfg          *config.JudgeConfig
+	model        string
+	providerName string
+	provider     LLMProvider
+	rp           *guardrail.RulePack
+
+	telemetryMu sync.RWMutex
+	traceV8     judgeTraceV8Runtime
+	// traceV8Authoritative remains true after a v8 runtime detaches. A nil
+	// runtime during shutdown/reload means "do not start a new span", not
+	// permission to resurrect the legacy v7 path.
+	traceV8Authoritative bool
 }
 
 // NewLLMJudge creates a judge from config. Returns nil if judge is
@@ -169,7 +174,10 @@ func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath strin
 	} else {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: judge ready (model=%s)\n", model)
 	}
-	return &LLMJudge{cfg: cfg, model: model, provider: provider, rp: rp}
+	return &LLMJudge{
+		cfg: cfg, model: model, providerName: llm.ProviderPrefix(),
+		provider: provider, rp: rp,
+	}
 }
 
 // RunJudges runs injection and PII judges according to config.
@@ -463,80 +471,42 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		prompt = jc.SystemPrompt
 	}
 
-	tel := judgeTelemetry()
-	sys := judgeGenAISystem(j.model)
-	llmCtx := ctx
-	var sp trace.Span
-	if tel != nil {
-		llmCtx, sp = tel.StartJudgeSpan(ctx, sys, j.model, maxTok, kind)
+	messages := []ChatMessage{
+		{Role: "system", Content: prompt},
+		{Role: "user", Content: wrapJudgeSample(content)},
 	}
+	llmCtx, judgeTrace := j.startJudgeTrace(
+		ctx, kind, "prompt", maxTok, messages, time.Now().UTC(),
+	)
+	defer judgeTrace.Abort()
 	start := time.Now()
 
-	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(
-		[]ChatMessage{
-			{Role: "system", Content: prompt},
-			{Role: "user", Content: wrapJudgeSample(content)},
-		},
-		maxTok,
-	))
+	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(messages, maxTok))
 	latencyMs := time.Since(start).Milliseconds()
-	promptTok, completionTok := 0, 0
-	responseModel := j.model
-	if resp != nil && resp.Usage != nil {
-		promptTok = int(resp.Usage.PromptTokens)
-		completionTok = int(resp.Usage.CompletionTokens)
-	}
+	rawResponse := ""
 
-	recordJudgeMetrics := func(verdict *ScanVerdict, parseErr bool) {
-		if tel == nil {
-			return
-		}
-		tel.RecordJudgeLatency(ctx, j.model, kind, float64(latencyMs))
-		if promptTok > 0 {
-			tel.RecordJudgeTokens(ctx, j.model, "input", int64(promptTok))
-		}
-		if completionTok > 0 {
-			tel.RecordJudgeTokens(ctx, j.model, "output", int64(completionTok))
-		}
-		va := "error"
-		if verdict != nil {
-			if verdict.JudgeFailed || parseErr {
-				va = "error"
-			} else {
-				va = verdict.Action
-			}
-		}
-		var endErr error
-		if err != nil {
-			endErr = err
-		} else if parseErr {
-			endErr = fmt.Errorf("parse-failed")
-		}
-		tel.EndJudgeSpan(sp, responseModel, promptTok, completionTok, latencyMs, va, false, endErr)
+	recordJudgeMetrics := func(verdict *ScanVerdict, failure judgeTraceFailure) {
+		_ = judgeTrace.End(resp, rawResponse, verdict, failure, err, latencyMs)
 	}
 
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] injection error: %v\n", err)
-		recordJudgeMetrics(nil, false)
+		recordJudgeMetrics(nil, judgeTraceFailureProvider)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{InputContent: content})
+			err.Error(), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, InputContent: content})
 		return errorVerdict("llm-judge-injection")
 	}
 
 	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
-		recordJudgeMetrics(nil, false)
+		recordJudgeMetrics(nil, judgeTraceFailureEmptyResponse)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"empty-response", "", JudgeEmitOpts{InputContent: content})
+			"empty-response", "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureEmptyResponse, InputContent: content})
 		return errorVerdict("llm-judge-injection")
 	}
 
-	if resp.Model != "" {
-		responseModel = resp.Model
-	}
-
-	rawResponse := resp.Choices[0].Message.Content
+	rawResponse = resp.Choices[0].Message.Content
 	if judgeLogTrace() || redaction.Reveal() {
 		// The injection-judge response regularly echoes excerpts of the
 		// triggering prompt. Even when the operator opted into trace
@@ -553,10 +523,11 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 	if parsed == nil {
 		emitError(ctx, string(gatewaylog.SubsystemGuardrail), string(gatewaylog.ErrCodeLLMBridgeError),
 			"injection judge returned unparseable JSON", fmt.Errorf("parse-failed"))
-		recordJudgeMetrics(nil, true)
+		j.recordGatewayErrorV8(ctx, gatewaylog.ErrCodeLLMBridgeError)
+		recordJudgeMetrics(nil, judgeTraceFailureParse)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{InputContent: content})
+			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureOutputParse, InputContent: content})
 		return errorVerdict("llm-judge-injection")
 	}
 
@@ -567,7 +538,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 	// hasSensitiveFileContext for the token set.
 	sensitiveCtx := hasSensitiveFileContext(content)
 	verdict := j.injectionToVerdictCtx(parsed, sensitiveCtx)
-	recordJudgeMetrics(verdict, false)
+	recordJudgeMetrics(verdict, judgeTraceFailureNone)
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] injection verdict: action=%s severity=%s findings=%v\n",
 		verdict.Action, verdict.Severity, verdict.Findings)
 	emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
@@ -615,19 +586,6 @@ func SetRetainJudgeBodies(v bool) {
 	retainJudgeBodies.Store(v)
 }
 
-// judgeTel optionally wires OTel for judge spans + histograms.
-var judgeTel atomic.Pointer[telemetry.Provider]
-
-// SetJudgeTelemetryProvider installs the shared OTel provider for judge
-// instrumentation. Pass nil to disable.
-func SetJudgeTelemetryProvider(p *telemetry.Provider) {
-	judgeTel.Store(p)
-}
-
-func judgeTelemetry() *telemetry.Provider {
-	return judgeTel.Load()
-}
-
 // verdictCache is an optional process-local TTL cache for judge results.
 var verdictCache atomic.Pointer[guardrail.VerdictCache]
 
@@ -636,18 +594,14 @@ func SetJudgeVerdictCache(c *guardrail.VerdictCache) {
 	verdictCache.Store(c)
 }
 
-// NewJudgeVerdictCache constructs a verdict cache with optional OTel hit/miss hooks.
-func NewJudgeVerdictCache(ttl time.Duration, tel *telemetry.Provider) *guardrail.VerdictCache {
+// NewJudgeVerdictCache constructs a verdict cache with canonical v8 hit/miss hooks.
+func NewJudgeVerdictCache(ttl time.Duration, runtime hookLifecycleMetricV8Runtime) *guardrail.VerdictCache {
 	return guardrail.NewVerdictCache(ttl,
 		func(ctx context.Context, scanner, verdict, ttlB string) {
-			if tel != nil {
-				tel.RecordGuardrailCacheHit(ctx, scanner, verdict, ttlB)
-			}
+			recordJudgeCacheMetricV8(ctx, runtime, true, scanner, verdict, ttlB)
 		},
 		func(ctx context.Context, scanner, verdict, ttlB string) {
-			if tel != nil {
-				tel.RecordGuardrailCacheMiss(ctx, scanner, verdict, ttlB)
-			}
+			recordJudgeCacheMetricV8(ctx, runtime, false, scanner, verdict, ttlB)
 		},
 	)
 }
@@ -952,80 +906,42 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii: calling provider (dir=%s, content_len=%d)\n", direction, len(content))
 
-	tel := judgeTelemetry()
-	sys := judgeGenAISystem(j.model)
-	llmCtx := ctx
-	var sp trace.Span
-	if tel != nil {
-		llmCtx, sp = tel.StartJudgeSpan(ctx, sys, j.model, maxTok, kind)
+	messages := []ChatMessage{
+		{Role: "system", Content: prompt},
+		{Role: "user", Content: wrapJudgeSample(content)},
 	}
+	llmCtx, judgeTrace := j.startJudgeTrace(
+		ctx, kind, direction, maxTok, messages, time.Now().UTC(),
+	)
+	defer judgeTrace.Abort()
 	start := time.Now()
-	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(
-		[]ChatMessage{
-			{Role: "system", Content: prompt},
-			{Role: "user", Content: wrapJudgeSample(content)},
-		},
-		maxTok,
-	))
+	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(messages, maxTok))
 	latencyMs := time.Since(start).Milliseconds()
-	responseModel := j.model
+	rawResponse := ""
 
-	recordJudgeMetrics := func(verdict *ScanVerdict, parseErr bool) {
-		if tel == nil {
-			return
-		}
-		tel.RecordJudgeLatency(ctx, j.model, kind, float64(latencyMs))
-		pt, ct := 0, 0
-		if resp != nil && resp.Usage != nil {
-			pt = int(resp.Usage.PromptTokens)
-			ct = int(resp.Usage.CompletionTokens)
-			if pt > 0 {
-				tel.RecordJudgeTokens(ctx, j.model, "input", int64(pt))
-			}
-			if ct > 0 {
-				tel.RecordJudgeTokens(ctx, j.model, "output", int64(ct))
-			}
-		}
-		va := "error"
-		if verdict != nil {
-			if verdict.JudgeFailed || parseErr {
-				va = "error"
-			} else {
-				va = verdict.Action
-			}
-		}
-		var endErr error
-		if err != nil {
-			endErr = err
-		} else if parseErr {
-			endErr = fmt.Errorf("parse-failed")
-		}
-		tel.EndJudgeSpan(sp, responseModel, pt, ct, latencyMs, va, false, endErr)
+	recordJudgeMetrics := func(verdict *ScanVerdict, failure judgeTraceFailure) {
+		_ = judgeTrace.End(resp, rawResponse, verdict, failure, err, latencyMs)
 	}
 
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii error (dir=%s): %v\n", direction, err)
-		recordJudgeMetrics(nil, false)
+		recordJudgeMetrics(nil, judgeTraceFailureProvider)
 		emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{ToolName: toolName, InputContent: content})
+			err.Error(), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, ToolName: toolName, InputContent: content})
 		return errorVerdict("llm-judge-pii")
 	}
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii: provider returned (dir=%s, choices=%d)\n", direction, len(resp.Choices))
 
 	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
-		recordJudgeMetrics(nil, false)
+		recordJudgeMetrics(nil, judgeTraceFailureEmptyResponse)
 		emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"empty-response", "", JudgeEmitOpts{ToolName: toolName, InputContent: content})
+			"empty-response", "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureEmptyResponse, ToolName: toolName, InputContent: content})
 		return errorVerdict("llm-judge-pii")
 	}
 
-	if resp.Model != "" {
-		responseModel = resp.Model
-	}
-
-	rawResponse := resp.Choices[0].Message.Content
+	rawResponse = resp.Choices[0].Message.Content
 	// The raw response echoes the detected PII values back (that's how the
 	// prompt is structured). Never log it at info — operators can enable
 	// DEFENSECLAW_JUDGE_TRACE=1 or DEFENSECLAW_REVEAL_PII=1 in non-
@@ -1042,10 +958,11 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 	if parsed == nil {
 		emitError(ctx, string(gatewaylog.SubsystemGuardrail), string(gatewaylog.ErrCodeLLMBridgeError),
 			"pii judge returned unparseable JSON", fmt.Errorf("parse-failed"))
-		recordJudgeMetrics(nil, true)
+		j.recordGatewayErrorV8(ctx, gatewaylog.ErrCodeLLMBridgeError)
+		recordJudgeMetrics(nil, judgeTraceFailureParse)
 		emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{ToolName: toolName, InputContent: content})
+			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureOutputParse, ToolName: toolName, InputContent: content})
 		return errorVerdict("llm-judge-pii")
 	}
 
@@ -1066,7 +983,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 	}
 
 	verdict := j.piiToVerdict(parsed, direction, toolName)
-	recordJudgeMetrics(verdict, false)
+	recordJudgeMetrics(verdict, judgeTraceFailureNone)
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii verdict (dir=%s): action=%s severity=%s findings=%v\n",
 		direction, verdict.Action, verdict.Severity, verdict.Findings)
 	emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
@@ -1437,80 +1354,42 @@ func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdi
 		prompt = jc.SystemPrompt
 	}
 
-	tel := judgeTelemetry()
-	sys := judgeGenAISystem(j.model)
-	llmCtx := ctx
-	var sp trace.Span
-	if tel != nil {
-		llmCtx, sp = tel.StartJudgeSpan(ctx, sys, j.model, maxTok, kind)
+	messages := []ChatMessage{
+		{Role: "system", Content: prompt},
+		{Role: "user", Content: wrapJudgeSample(content)},
 	}
+	llmCtx, judgeTrace := j.startJudgeTrace(
+		ctx, kind, "prompt", maxTok, messages, time.Now().UTC(),
+	)
+	defer judgeTrace.Abort()
 	start := time.Now()
 
-	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(
-		[]ChatMessage{
-			{Role: "system", Content: prompt},
-			{Role: "user", Content: wrapJudgeSample(content)},
-		},
-		maxTok,
-	))
+	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(messages, maxTok))
 	latencyMs := time.Since(start).Milliseconds()
-	promptTok, completionTok := 0, 0
-	responseModel := j.model
-	if resp != nil && resp.Usage != nil {
-		promptTok = int(resp.Usage.PromptTokens)
-		completionTok = int(resp.Usage.CompletionTokens)
-	}
+	rawResponse := ""
 
-	recordJudgeMetrics := func(verdict *ScanVerdict, parseErr bool) {
-		if tel == nil {
-			return
-		}
-		tel.RecordJudgeLatency(ctx, j.model, kind, float64(latencyMs))
-		if promptTok > 0 {
-			tel.RecordJudgeTokens(ctx, j.model, "input", int64(promptTok))
-		}
-		if completionTok > 0 {
-			tel.RecordJudgeTokens(ctx, j.model, "output", int64(completionTok))
-		}
-		va := "error"
-		if verdict != nil {
-			if verdict.JudgeFailed || parseErr {
-				va = "error"
-			} else {
-				va = verdict.Action
-			}
-		}
-		var endErr error
-		if err != nil {
-			endErr = err
-		} else if parseErr {
-			endErr = fmt.Errorf("parse-failed")
-		}
-		tel.EndJudgeSpan(sp, responseModel, promptTok, completionTok, latencyMs, va, false, endErr)
+	recordJudgeMetrics := func(verdict *ScanVerdict, failure judgeTraceFailure) {
+		_ = judgeTrace.End(resp, rawResponse, verdict, failure, err, latencyMs)
 	}
 
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] exfil error: %v\n", err)
-		recordJudgeMetrics(nil, false)
+		recordJudgeMetrics(nil, judgeTraceFailureProvider)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{InputContent: content})
+			err.Error(), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, InputContent: content})
 		return errorVerdict("llm-judge-exfil")
 	}
 
 	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
-		recordJudgeMetrics(nil, false)
+		recordJudgeMetrics(nil, judgeTraceFailureEmptyResponse)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"empty-response", "", JudgeEmitOpts{InputContent: content})
+			"empty-response", "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureEmptyResponse, InputContent: content})
 		return errorVerdict("llm-judge-exfil")
 	}
 
-	if resp.Model != "" {
-		responseModel = resp.Model
-	}
-
-	rawResponse := resp.Choices[0].Message.Content
+	rawResponse = resp.Choices[0].Message.Content
 	if judgeLogTrace() || redaction.Reveal() {
 		// Same caveat as the injection / PII paths: the model echoes
 		// excerpts of the triggering prompt back, so redact even
@@ -1523,15 +1402,16 @@ func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdi
 	if parsed == nil {
 		emitError(ctx, string(gatewaylog.SubsystemGuardrail), string(gatewaylog.ErrCodeLLMBridgeError),
 			"exfil judge returned unparseable JSON", fmt.Errorf("parse-failed"))
-		recordJudgeMetrics(nil, true)
+		j.recordGatewayErrorV8(ctx, gatewaylog.ErrCodeLLMBridgeError)
+		recordJudgeMetrics(nil, judgeTraceFailureParse)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{InputContent: content})
+			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureOutputParse, InputContent: content})
 		return errorVerdict("llm-judge-exfil")
 	}
 
 	verdict := j.exfilToVerdict(parsed)
-	recordJudgeMetrics(verdict, false)
+	recordJudgeMetrics(verdict, judgeTraceFailureNone)
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] exfil verdict: action=%s severity=%s findings=%v\n",
 		verdict.Action, verdict.Severity, verdict.Findings)
 	emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
@@ -1731,95 +1611,56 @@ func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *Sca
 		}
 	}
 
-	tel := judgeTelemetry()
-	sys := judgeGenAISystem(j.model)
-	llmCtx := ctx
-	var sp trace.Span
-	if tel != nil {
-		llmCtx, sp = tel.StartJudgeSpan(ctx, sys, j.model, maxTok, kind)
+	messages := []ChatMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: wrapJudgeSample(args)},
 	}
+	llmCtx, judgeTrace := j.startJudgeTrace(
+		ctx, kind, "tool_call", maxTok, messages, time.Now().UTC(),
+	)
+	defer judgeTrace.Abort()
 	start := time.Now()
-	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(
-		[]ChatMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: wrapJudgeSample(args)},
-		},
-		maxTok,
-	))
+	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(messages, maxTok))
 	latencyMs := time.Since(start).Milliseconds()
-	responseModel := j.model
+	rawResponse := ""
 
-	recordJudgeMetrics := func(verdict *ScanVerdict, parseErr bool) {
-		if tel == nil {
-			return
-		}
-		tel.RecordJudgeLatency(ctx, j.model, kind, float64(latencyMs))
-		if resp != nil && resp.Usage != nil {
-			if resp.Usage.PromptTokens > 0 {
-				tel.RecordJudgeTokens(ctx, j.model, "input", resp.Usage.PromptTokens)
-			}
-			if resp.Usage.CompletionTokens > 0 {
-				tel.RecordJudgeTokens(ctx, j.model, "output", resp.Usage.CompletionTokens)
-			}
-		}
-		va := "error"
-		if verdict != nil {
-			if verdict.JudgeFailed || parseErr {
-				va = "error"
-			} else {
-				va = verdict.Action
-			}
-		}
-		var endErr error
-		if err != nil {
-			endErr = err
-		} else if parseErr {
-			endErr = fmt.Errorf("parse-failed")
-		}
-		pt, ct := 0, 0
-		if resp != nil && resp.Usage != nil {
-			pt = int(resp.Usage.PromptTokens)
-			ct = int(resp.Usage.CompletionTokens)
-		}
-		tel.EndJudgeSpan(sp, responseModel, pt, ct, latencyMs, va, false, endErr)
+	recordJudgeMetrics := func(verdict *ScanVerdict, failure judgeTraceFailure) {
+		_ = judgeTrace.End(resp, rawResponse, verdict, failure, err, latencyMs)
 	}
 
 	dir := gatewaylog.DirectionPrompt
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] tool injection error: %v\n", err)
-		recordJudgeMetrics(nil, false)
+		recordJudgeMetrics(nil, judgeTraceFailureProvider)
 		emitJudge(ctx, kind, j.model, dir,
 			len(args), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{ToolName: toolName, InputContent: args})
+			err.Error(), "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureProvider, ToolName: toolName, InputContent: args})
 		return errorVerdict("llm-judge-tool")
-	}
-
-	if resp.Model != "" {
-		responseModel = resp.Model
 	}
 
 	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
-		recordJudgeMetrics(nil, false)
+		recordJudgeMetrics(nil, judgeTraceFailureEmptyResponse)
 		emitJudge(ctx, kind, j.model, dir,
 			len(args), latencyMs, "error", gatewaylog.SeverityHigh,
-			"empty-response", "", JudgeEmitOpts{ToolName: toolName, InputContent: args})
+			"empty-response", "", JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureEmptyResponse, ToolName: toolName, InputContent: args})
 		return errorVerdict("llm-judge-tool")
 	}
 
-	rawResponse := resp.Choices[0].Message.Content
+	rawResponse = resp.Choices[0].Message.Content
 	parsed := parseJudgeJSON(rawResponse)
 	if parsed == nil {
 		emitError(ctx, string(gatewaylog.SubsystemGuardrail), string(gatewaylog.ErrCodeLLMBridgeError),
 			"tool injection judge returned unparseable JSON", fmt.Errorf("parse-failed"))
-		recordJudgeMetrics(nil, true)
+		j.recordGatewayErrorV8(ctx, gatewaylog.ErrCodeLLMBridgeError)
+		recordJudgeMetrics(nil, judgeTraceFailureParse)
 		emitJudge(ctx, kind, j.model, dir,
 			len(args), latencyMs, "error", gatewaylog.SeverityHigh,
-			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{ToolName: toolName, InputContent: args})
+			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{FailureClass: gatewaylog.JudgeFailureOutputParse, ToolName: toolName, InputContent: args})
 		return errorVerdict("llm-judge-tool")
 	}
 
 	verdict := toolInjectionToVerdict(parsed)
-	recordJudgeMetrics(verdict, false)
+	recordJudgeMetrics(verdict, judgeTraceFailureNone)
 	emitJudge(ctx, kind, j.model, dir,
 		len(args), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
 		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), ToolName: toolName, InputContent: args})
@@ -2150,25 +1991,60 @@ func (j *LLMJudge) adjudicateCategory(ctx context.Context, direction, content st
 	}
 
 	systemPrompt := fmt.Sprintf(promptTemplate, direction, evidenceLines)
-
-	resp, err := j.provider.ChatCompletion(ctx, &ChatRequest{
-		Messages: []ChatMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: strippedContent},
-		},
+	messages := []ChatMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: strippedContent},
+	}
+	const maxTok = 1024
+	kind := judgeAdjudicationKind(category)
+	llmCtx, judgeTrace := j.startJudgeTrace(
+		ctx, kind, direction, maxTok, messages, time.Now().UTC(),
+	)
+	defer judgeTrace.Abort()
+	started := time.Now()
+	resp, err := j.provider.ChatCompletion(llmCtx, &ChatRequest{
+		Messages:  messages,
 		MaxTokens: intPtr(1024),
 		Fallbacks: j.cfg.Fallbacks,
 	})
+	latencyMs := time.Since(started).Milliseconds()
+	rawResponse := ""
+	recordJudgeMetrics := func(verdict *ScanVerdict, failure judgeTraceFailure) {
+		_ = judgeTrace.End(resp, rawResponse, verdict, failure, err, latencyMs)
+	}
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] adjudicate %s error: %v\n", category, err)
+		recordJudgeMetrics(nil, judgeTraceFailureProvider)
 		return errorVerdict("llm-judge-adjudicate")
 	}
 
 	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
+		recordJudgeMetrics(nil, judgeTraceFailureEmptyResponse)
 		return errorVerdict("llm-judge-adjudicate")
 	}
 
-	return parseAdjudicationResponse(resp.Choices[0].Message.Content, category)
+	rawResponse = resp.Choices[0].Message.Content
+	verdict := parseAdjudicationResponse(rawResponse, category)
+	failure := judgeTraceFailureNone
+	if verdict.JudgeFailed {
+		failure = judgeTraceFailureParse
+	}
+	recordJudgeMetrics(verdict, failure)
+	return verdict
+}
+
+func judgeAdjudicationKind(category string) string {
+	switch category {
+	case "pii":
+		return "adjudicate_pii"
+	case "exfil":
+		return "adjudicate_exfil"
+	default:
+		// The only remaining supported category is injection. Keeping the
+		// fallback closed to the known vocabulary avoids attacker-controlled
+		// span/metric cardinality if a future caller passes an arbitrary token.
+		return "adjudicate_injection"
+	}
 }
 
 func formatSignalEvidence(signals []TriageSignal) string {

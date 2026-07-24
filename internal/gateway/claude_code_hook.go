@@ -92,13 +92,19 @@ type claudeCodeHookResponse struct {
 	// verdict (capped at 8). Lets operators correlate a block
 	// without joining against scan_findings. Additive.
 	RuleIDs []string `json:"rule_ids,omitempty"`
+	// RedactionEnabled carries the cloud-controlled per-inspection
+	// redaction directive back through the unified dispatch so
+	// finalizeAgentHook can honor it on the hook_decision event +
+	// audit row. Never serialized on the hook response wire.
+	RedactionEnabled *bool  `json:"-"`
+	SourceReason     string `json:"-"`
 }
 
 // Claude Code hook traffic flows through the unified pipeline at
 // handleAgentHook("claudecode"); the profile-runtime registry invokes
 // the connector-specific evaluator kept below. The pipeline's shared
 // concerns — audit envelope refresh, dispatch metric, dedup, trace
-// propagation, OTel emissions — live in exactly one place
+// propagation, and v8 observability emissions — live in exactly one place
 // (handleAgentHook) so per-connector handlers cannot drift apart on
 // any of those signals. The evaluator stamps the unified-pipeline
 // correlation keys (resp.EvaluationID / resp.RuleIDs) on its return
@@ -132,7 +138,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			assetDecisions = append(assetDecisions, a.claudeCodePromptExpansionAssetDecisions(ctx, req)...)
 		}
 	case "PreToolUse", "PermissionRequest", "PermissionDenied":
-		verdict = a.inspectToolPolicy(&ToolInspectRequest{Tool: claudeCodeToolName(req), Args: claudeCodeToolArgs(req), Direction: "tool_call", Connector: "claudecode", MCPServerName: req.MCPServerName})
+		verdict = a.inspectToolPolicyCtx(ctx, &ToolInspectRequest{Tool: claudeCodeToolName(req), Args: claudeCodeToolArgs(req), Direction: "tool_call", Connector: "claudecode", MCPServerName: req.MCPServerName})
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
 		}
@@ -161,11 +167,16 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeEventContent(req), Direction: "prompt", Connector: "claudecode"})
 	}
 
+	// Inject the cloud-controlled per-inspection redaction directive
+	// onto the context so the downstream emit choke points and the OS
+	// toast honor it (managed_enterprise only; no-op otherwise).
+	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
+
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
 	wouldBlock := rawAction == "block" && mode != "action"
-	if rawAction == "block" && !claudeCodeCanEnforce(req.HookEventName) {
+	if rawAction == "block" && !claudeCodeCanEnforce(req) {
 		action = "allow"
 		wouldBlock = true
 	} else if mode != "action" && rawAction == "block" {
@@ -200,7 +211,8 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	evalCtx := a.emitHookRuleFindings(ctx, "claudecode", req.HookEventName, verdict,
 		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
-		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx)
+		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
+			sinkPolicyFor(ctx, verdict.RedactionEnabled))
 	}
 	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
 	// Stamp the unified-pipeline correlation keys so the agent-hook
@@ -209,6 +221,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// both see them without a second pass.
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = evalCtx.RuleIDs
+	resp.RedactionEnabled = verdict.RedactionEnabled
 	return resp
 }
 
@@ -235,7 +248,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 // through OnWouldBlock with WouldAsk=true so a single
 // notifications.block_would_block=false silences all observe-mode
 // noise without affecting real native asks.
-func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext) {
+func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
 	if a == nil || a.notifier == nil {
 		return
 	}
@@ -243,7 +256,10 @@ func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest
 	if target == "" {
 		target = req.HookEventName
 	}
-	safeReason := string(redaction.ForSinkReason(reason))
+	// Honor the cloud-controlled per-inspection redaction policy
+	// (all-sinks scope, managed_enterprise only) when a caller passes
+	// one; otherwise default to the historical ForSinkReason behavior.
+	safeReason := redaction.ReasonForSink(reason, notificationSinkPolicy(policy))
 	base := notifier.BlockEvent{
 		Source:       notifier.SourceHook,
 		Target:       target,
@@ -285,7 +301,8 @@ func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest
 // flag still wins for operators who run claudecode alongside a
 // different selected connector (e.g. test harnesses).
 func (a *APIServer) claudeCodeEnabled() bool {
-	if a.scannerCfg == nil {
+	cfg := a.runtimeConfigSnapshot()
+	if cfg == nil {
 		return false
 	}
 	// Per-connector explicit disable wins over every enable signal below:
@@ -294,32 +311,32 @@ func (a *APIServer) claudeCodeEnabled() bool {
 	// for re-enable). Defense-in-depth alongside the boot-loop teardown.
 	// EffectiveEnabled defaults to true ⇒ no-op for single-connector
 	// installs and any connector never explicitly disabled.
-	if a.scannerCfg.ManualConnectorConfigured("claudecode") && !a.scannerCfg.Guardrail.EffectiveEnabled("claudecode") {
+	if cfg.ManualConnectorConfigured("claudecode") && !cfg.Guardrail.EffectiveEnabled("claudecode") {
 		return false
 	}
-	hookCfg := a.scannerCfg.ConnectorHookConfig("claudecode")
+	hookCfg := cfg.ConnectorHookConfig("claudecode")
 	if hookCfg.Enabled {
 		return true
 	}
-	if a.health != nil && a.health.HasConnectorSource("claudecode", "automatic") && a.scannerCfg.ApplicationProtection.EffectiveEnabled("claudecode") {
+	if a.health != nil && a.health.HasConnectorSource("claudecode", "automatic") && cfg.ApplicationProtection.EffectiveEnabled("claudecode") {
 		return true
 	}
 	// Multi-connector: membership in guardrail.connectors opts claudecode
 	// in even when it is not the singular primary (no-op for single).
-	if a.scannerCfg.Guardrail.HasConnector("claudecode") {
+	if cfg.Guardrail.HasConnector("claudecode") {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(a.scannerCfg.Guardrail.Connector), "claudecode")
+	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "claudecode")
 }
 
 func (a *APIServer) claudeCodeMode() string {
 	mode := "observe"
-	if a.scannerCfg != nil {
-		hookCfg := a.scannerCfg.ConnectorHookConfig("claudecode")
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+		hookCfg := cfg.ConnectorHookConfig("claudecode")
 		mode = strings.TrimSpace(hookCfg.Mode)
 		if mode == "" || mode == "inherit" {
 			// Per-connector guardrail override wins over global mode.
-			mode = strings.TrimSpace(a.scannerCfg.EffectiveGuardrailModeForConnector("claudecode"))
+			mode = strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector("claudecode"))
 		}
 	}
 	return normalizeAgentHookMode(mode)
@@ -335,7 +352,7 @@ func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severit
 	if rawAction == "" {
 		rawAction = action
 	}
-	safeReason := string(redaction.ForSinkReason(reason))
+	safeReason := redaction.ReasonForAgent(reason)
 	additional := claudeCodeAdditionalContext(rawAction, severity, safeReason, wouldBlock)
 	resp := claudeCodeHookResponse{
 		Action:            action,
@@ -346,14 +363,22 @@ func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severit
 		Mode:              mode,
 		WouldBlock:        wouldBlock,
 		AdditionalContext: additional,
+		SourceReason:      reason,
 	}
 	resp.ClaudeCodeOutput = claudeCodeOutput(req, action, rawAction, safeReason, additional)
 	return resp
 }
 
-func claudeCodeCanEnforce(event string) bool {
-	switch event {
-	case "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest", "PostToolUse",
+func claudeCodeCanEnforce(req claudeCodeHookRequest) bool {
+	// Claude Code reports ConfigChange for managed policy updates too, but
+	// explicitly ignores blocking decisions for policy_settings. Treating that
+	// response as enforced would create false-positive block telemetry.
+	if req.HookEventName == "ConfigChange" && strings.EqualFold(strings.TrimSpace(req.Source), "policy_settings") {
+		return false
+	}
+
+	switch req.HookEventName {
+	case "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest",
 		"PostToolBatch", "TaskCreated", "TaskCompleted", "Stop", "SubagentStop", "TeammateIdle",
 		"ConfigChange", "PreCompact", "Elicitation", "ElicitationResult":
 		return true

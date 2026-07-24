@@ -81,6 +81,12 @@ type codexHookResponse struct {
 	// connector hook scripts ignore the fields.
 	EvaluationID string   `json:"evaluation_id,omitempty"`
 	RuleIDs      []string `json:"rule_ids,omitempty"`
+	// RedactionEnabled carries the cloud-controlled per-inspection
+	// redaction directive back through the unified dispatch so
+	// finalizeAgentHook can honor it on the hook_decision event +
+	// audit row. Never serialized on the hook response wire.
+	RedactionEnabled *bool  `json:"-"`
+	SourceReason     string `json:"-"`
 }
 
 // handleCodexHook + enrichCodexHookContext were deleted in the
@@ -92,7 +98,7 @@ type codexHookResponse struct {
 // callback immediately before evaluateCodexHook runs.
 //
 // The unified pipeline owns shared concerns (audit envelope refresh,
-// dispatch metric, dedup, trace propagation, OTel emissions) in
+// dispatch metric, dedup, trace propagation, v8 observability emissions) in
 // exactly one place now. See agent_hook.go and hook_profile_runtime.go
 // for the registry and shared-pipeline rationale. The evaluator
 // stamps the unified-pipeline correlation keys (resp.EvaluationID /
@@ -165,8 +171,14 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			Direction: "prompt",
 			Connector: "codex",
 		})
+		if decision, matched := a.codexPromptSkillAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{
+				targetType: "skill",
+				decision:   decision,
+			})
+		}
 	case "PreToolUse", "PermissionRequest":
-		verdict = a.inspectToolPolicy(&ToolInspectRequest{
+		verdict = a.inspectToolPolicyCtx(ctx, &ToolInspectRequest{
 			Tool:          codexToolName(req),
 			Args:          codexToolArgs(req),
 			Direction:     "tool_call",
@@ -198,6 +210,13 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 		}
 	}
 
+	// Inject the cloud-controlled per-inspection redaction directive
+	// onto the context so the downstream emit choke points (findings,
+	// verdict/hook_decision events) and the OS toast honor it. No-op
+	// outside managed_enterprise / when the AID lane returned no
+	// directive.
+	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
+
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
@@ -227,16 +246,18 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	// Emit per-rule findings FIRST so the notification + audit
 	// rows produced below can carry the resulting evaluation_id
 	// and top rule_ids — keeping the SIEM pivot key identical
-	// across audit log, gateway.jsonl, OS notification, and the
+	// across canonical logs, OS notification, and the
 	// HTTP response body.
 	evalCtx := a.emitHookRuleFindings(ctx, "codex", req.HookEventName, verdict,
 		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
-		a.dispatchCodexHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx)
+		a.dispatchCodexHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
+			sinkPolicyFor(ctx, verdict.RedactionEnabled))
 	}
 	resp := codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = evalCtx.RuleIDs
+	resp.RedactionEnabled = verdict.RedactionEnabled
 	return resp
 }
 
@@ -246,7 +267,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 // dispatchCodexHookNotification follows the same routing contract
 // documented on dispatchAgentHookNotification. See that comment for
 // the rationale behind WouldAsk routing through OnWouldBlock.
-func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext) {
+func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
 	if a == nil || a.notifier == nil {
 		return
 	}
@@ -254,7 +275,10 @@ func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, 
 	if target == "" {
 		target = req.HookEventName
 	}
-	safeReason := string(redaction.ForSinkReason(reason))
+	// Honor the cloud-controlled per-inspection redaction policy
+	// (all-sinks scope, managed_enterprise only) when a caller passes
+	// one; otherwise default to the historical ForSinkReason behavior.
+	safeReason := redaction.ReasonForSink(reason, notificationSinkPolicy(policy))
 	base := notifier.BlockEvent{
 		Source:       notifier.SourceHook,
 		Target:       target,
@@ -294,7 +318,8 @@ func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, 
 // explicit codex.enabled flag still wins for operators running codex
 // alongside a different selected connector.
 func (a *APIServer) codexEnabled() bool {
-	if a.scannerCfg == nil {
+	cfg := a.runtimeConfigSnapshot()
+	if cfg == nil {
 		return false
 	}
 	// Per-connector explicit disable wins over every enable signal below:
@@ -306,30 +331,30 @@ func (a *APIServer) codexEnabled() bool {
 	// still calls in. EffectiveEnabled defaults to true, so this is a
 	// no-op for single-connector installs and any connector never
 	// explicitly disabled.
-	if a.scannerCfg.ManualConnectorConfigured("codex") && !a.scannerCfg.Guardrail.EffectiveEnabled("codex") {
+	if cfg.ManualConnectorConfigured("codex") && !cfg.Guardrail.EffectiveEnabled("codex") {
 		return false
 	}
-	if a.scannerCfg.ConnectorHookConfig("codex").Enabled {
+	if cfg.ConnectorHookConfig("codex").Enabled {
 		return true
 	}
-	if a.health != nil && a.health.HasConnectorSource("codex", "automatic") && a.scannerCfg.ApplicationProtection.EffectiveEnabled("codex") {
+	if a.health != nil && a.health.HasConnectorSource("codex", "automatic") && cfg.ApplicationProtection.EffectiveEnabled("codex") {
 		return true
 	}
 	// Multi-connector: membership in guardrail.connectors opts codex in
 	// even when it is not the singular primary (no-op for single).
-	if a.scannerCfg.Guardrail.HasConnector("codex") {
+	if cfg.Guardrail.HasConnector("codex") {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(a.scannerCfg.Guardrail.Connector), "codex")
+	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "codex")
 }
 
 func (a *APIServer) codexMode() string {
 	mode := "observe"
-	if a.scannerCfg != nil {
-		mode = strings.TrimSpace(a.scannerCfg.ConnectorHookConfig("codex").Mode)
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+		mode = strings.TrimSpace(cfg.ConnectorHookConfig("codex").Mode)
 		if mode == "" || mode == "inherit" {
 			// Per-connector guardrail override wins over global mode.
-			mode = strings.TrimSpace(a.scannerCfg.EffectiveGuardrailModeForConnector("codex"))
+			mode = strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector("codex"))
 		}
 	}
 	return normalizeAgentHookMode(mode)
@@ -345,7 +370,7 @@ func codexResponseFor(event, action, rawAction, severity, reason string, finding
 	if rawAction == "" {
 		rawAction = action
 	}
-	safeReason := string(redaction.ForSinkReason(reason))
+	safeReason := redaction.ReasonForAgent(reason)
 	additional := codexAdditionalContext(rawAction, severity, safeReason, wouldBlock)
 	resp := codexHookResponse{
 		Action:            action,
@@ -356,6 +381,7 @@ func codexResponseFor(event, action, rawAction, severity, reason string, finding
 		Mode:              mode,
 		WouldBlock:        wouldBlock,
 		AdditionalContext: additional,
+		SourceReason:      reason,
 	}
 	resp.CodexOutput = codexOutput(event, action, rawAction, safeReason, additional)
 	return resp

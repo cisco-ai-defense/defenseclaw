@@ -234,13 +234,19 @@ def test_mcp_parse_scoped_group_and_empty_group() -> None:
     assert parse_mcp_list_json(json.dumps({"connector": "claudecode", "mcp_servers": []})) == ()
 
 
-def test_mcp_actions_name_connector_specific_unset_targets() -> None:
+def test_mcp_actions_name_connector_specific_unset_targets(monkeypatch, tmp_path) -> None:
+    hermes_config = tmp_path / "hermes-home" / "config.yaml"
+    claude_config = tmp_path / "claude-home" / "settings.json"
+    codex_config = tmp_path / "codex-home" / "config.toml"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_config.parent))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_config.parent))
+    monkeypatch.setenv("CODEX_HOME", str(codex_config.parent))
     cases = {
         "openclaw": "OpenClaw config",
-        "claudecode": "~/.claude/settings.json",
-        "codex": "./.mcp.json",
+        "claudecode": str(claude_config),
+        "codex": str(codex_config),
         "zeptoclaw": "~/.zeptoclaw/config.json",
-        "hermes": "~/.hermes/config.yaml",
+        "hermes": str(hermes_config),
         "cursor": "./.cursor/mcp.json",
         "windsurf": "~/.codeium/windsurf/mcp_config.json",
         "geminicli": "~/.gemini/settings.json",
@@ -267,7 +273,9 @@ def test_catalog_empty_connector_stays_unowned_and_antigravity_labels_contract_p
     assert ".agents/mcp_config.json" in connector_source_label("antigravity", "mcps")
     assert "hooks-only" not in connector_source_label("antigravity", "mcps")
     assert ".gemini/config/skills" in connector_source_label("antigravity", "skills")
-    assert "discovery-only" in connector_source_label("antigravity", "plugins")
+    antigravity_plugins = connector_source_label("antigravity", "plugins")
+    assert ".gemini/config/plugins" in antigravity_plugins
+    assert "read/write" in antigravity_plugins
     assert "OMNIGENT_CONFIG_HOME" in connector_source_label("omnigent", "config")
     assert "managed by OmniGent" in connector_source_label("omnigent", "mcps")
     assert "unsupported" in mcp_unset_target_for_connector("omnigent")
@@ -387,10 +395,25 @@ def test_tools_refresh_scoped_display_counts_and_intents() -> None:
     assert panel.action_intent("b").args == ("tool", "block", "write_file@filesystem")
     assert panel.action_intent("u").args == ("tool", "unblock", "write_file@filesystem")
     assert panel.handle_key("u").intent.args == ("tool", "unblock", "write_file@filesystem")
-
     panel.select_row(1)
     assert panel.selected().display_scope == "(global)"
     assert panel.action_intent("i").args == ("tool", "status", "read_file")
+
+
+def test_tools_refresh_key_defers_store_read_to_shell_worker() -> None:
+    calls: list[str] = []
+
+    class Store:
+        def list_actions_by_type(self, target_type: str) -> list[object]:
+            calls.append(target_type)
+            return []
+
+    panel = ToolsPanelModel(Store())
+    action = panel.handle_key("r")
+
+    assert action.handled is True
+    assert action.reload_requested is True
+    assert calls == []
 
 
 def test_tools_connector_filter_shows_selected_connector_plus_global_fallback() -> None:
@@ -824,6 +847,7 @@ def test_catalog_summary_text_splits_navigation_and_action_keys() -> None:
     # Action set is on its own line so it can't be missed.
     assert "[dim]Actions:[/]" in text
     assert "o open menu" in text
+    assert "u unblock" in text
     # Navigation primer is on the row above, not jammed in with actions.
     assert "[dim]Navigate:[/]" in text
     # Filter / detail metadata still on line 2.
@@ -833,6 +857,7 @@ def test_catalog_summary_text_splits_navigation_and_action_keys() -> None:
 # ---------------------------------------------------------------------------
 # WU13: multi-connector focus — list command targets the focused connector
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize(
     "model_factory, base_args",

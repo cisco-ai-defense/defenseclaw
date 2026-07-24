@@ -14,112 +14,246 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Audit logger — convenience wrapper over Store for scan/action logging.
+"""Python CLI handoff to the process-owned Observability v8 runtime.
 
-Mirrors internal/audit/logger.go.
+This module is deliberately transport-only. It does not write audit tables,
+forward directly to Splunk, choose destinations, or redact producer data. The
+running gateway owns collection, generated-family validation, mandatory-floor
+handling, local persistence, route-specific redaction, and destination fanout.
 """
 
 from __future__ import annotations
 
-import json
 import os
-import sys
-import urllib.error
-import urllib.request
-import uuid
-from datetime import datetime, timezone
-from typing import Any
+import secrets
+from collections.abc import Mapping
+from typing import Any, Protocol
 
-from defenseclaw.db import Store
-from defenseclaw.models import Event, ScanResult
+import requests
+from urllib3.exceptions import NewConnectionError
+
+from defenseclaw.gateway import OrchestratorClient
+from defenseclaw.models import ScanResult
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Refuse to follow HTTP redirects on token-bearing requests.
+class CanonicalObservabilityError(RuntimeError):
+    """The CLI could not confirm canonical v8 admission."""
 
-    The Splunk HEC forwarder sends a bearer ``Authorization: Splunk
-    <token>`` header. Python's default opener follows 3xx redirects and
-    replays the request headers onto the redirected request, so a
-    response-controlled ``Location`` could leak the HEC token to an
-    arbitrary cross-origin host (F-0808). We refuse every redirect so the
-    token is only ever sent to the configured HEC endpoint; a redirect is
-    surfaced as an ``HTTPError`` that the caller logs as a warning.
-    """
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
-        raise urllib.error.HTTPError(
-            req.full_url,
-            code,
-            f"refusing to follow Splunk HEC redirect to {newurl!r} "
-            "(would forward the HEC Authorization token off the configured host)",
-            headers,
-            fp,
+class CanonicalObservabilityUnavailableError(CanonicalObservabilityError):
+    """The canonical v8 runtime is absent or cannot be reached."""
+
+
+class _CanonicalRecorder(Protocol):
+    def emit_cli_observability(self, payload: Mapping[str, Any]) -> None: ...
+
+    def close(self) -> None: ...
+
+
+class _GatewayConfigRecorder:
+    """Resolve mutable gateway access only when a fact is emitted."""
+
+    def __init__(self, cfg: Any) -> None:
+        self._cfg = cfg
+        self._runtime_token: str | None = None
+
+    def emit_cli_observability(self, payload: Mapping[str, Any]) -> None:
+        gateway = getattr(self._cfg, "gateway", None)
+        if gateway is None:
+            raise CanonicalObservabilityUnavailableError("gateway configuration is unavailable")
+        token_resolver = getattr(gateway, "resolved_token", None)
+        token = self._runtime_token or (token_resolver() if callable(token_resolver) else "")
+        if not token:
+            # A first gateway start may create the canonical token after this
+            # CLI process loaded config (for example: init --no-start-gateway,
+            # then setup <connector> --restart). Refresh the installation
+            # dotenv once at emission time so the command can authenticate its
+            # final canonical audit fact without requiring a second invocation.
+            data_dir = str(getattr(self._cfg, "data_dir", "") or "")
+            if data_dir:
+                from defenseclaw.config import _load_dotenv_into_os
+
+                _load_dotenv_into_os(data_dir)
+                token = token_resolver() if callable(token_resolver) else ""
+        if not token:
+            raise CanonicalObservabilityUnavailableError(
+                "gateway authentication is unavailable; start or reconfigure the v8 gateway"
+            )
+
+        try:
+            self._emit_with_token(payload, gateway, token)
+        except requests.HTTPError as exc:
+            # A gateway restart can create or replace the canonical token after
+            # this process loaded .env.  Existing environment variables are
+            # intentionally not overwritten by the general dotenv loader, so
+            # resolved_token() can still return the old value here.  A 401
+            # proves the rejected request was not admitted and is therefore
+            # the one server response that is safe to retry. Read the current
+            # installation-owned token and retry exactly once; every other
+            # rejection remains fail-closed.
+            if not _is_authentication_rejection(exc):
+                raise
+            refreshed = _refreshed_gateway_token(self._cfg, gateway, token)
+            if not refreshed:
+                raise
+            self._emit_with_token(payload, gateway, refreshed)
+            self._runtime_token = refreshed
+
+    def _emit_with_token(
+        self,
+        payload: Mapping[str, Any],
+        gateway: Any,
+        token: str,
+    ) -> None:
+        client = OrchestratorClient(
+            host=_gateway_api_host(self._cfg),
+            port=int(getattr(gateway, "api_port", 18970)),
+            timeout=10,
+            token=token,
         )
+        try:
+            client.emit_cli_observability(payload)
+        except requests.RequestException as exc:
+            if _is_definite_preconnect_failure(exc):
+                raise CanonicalObservabilityUnavailableError(
+                    "canonical Observability v8 runtime is unavailable"
+                ) from exc
+            raise
+        finally:
+            client.close()
+
+    def close(self) -> None:
+        return
 
 
-def _build_hec_opener(ctx: Any | None) -> urllib.request.OpenerDirector:
-    """Build a urllib opener that never follows redirects.
+def _is_authentication_rejection(exc: requests.HTTPError) -> bool:
+    response = getattr(exc, "response", None)
+    return response is not None and response.status_code == 401
 
-    Used for the token-bearing Splunk HEC POST so the
-    ``Authorization`` header cannot be replayed across a
-    response-selected redirect to another origin (F-0808). When ``ctx``
-    is provided it is bound to the HTTPS handler so TLS posture is
-    preserved.
+
+def _refreshed_gateway_token(cfg: Any, gateway: Any, rejected_token: str) -> str:
+    """Return a newly persisted canonical token after a confirmed HTTP 401.
+
+    Custom ``gateway.token_env`` values remain authoritative: silently
+    switching those to the default dotenv key would violate explicit operator
+    intent. The built-in canonical and legacy names may legitimately become
+    stale during first boot or an upgrade handoff, so those can recover from
+    the current installation's private dotenv.
     """
-    handlers: list[urllib.request.BaseHandler] = [_NoRedirectHandler()]
-    if ctx is not None:
-        handlers.append(urllib.request.HTTPSHandler(context=ctx))
-    return urllib.request.build_opener(*handlers)
+
+    token_env = str(getattr(gateway, "token_env", "") or "").strip()
+    if token_env not in {
+        "",
+        "DEFENSECLAW_GATEWAY_TOKEN",
+        "OPENCLAW_GATEWAY_TOKEN",
+    }:
+        return ""
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    refreshed = _gateway_token_from_dotenv(data_dir, token_env=token_env)
+    if not refreshed or secrets.compare_digest(
+        refreshed.encode("utf-8"),
+        rejected_token.encode("utf-8"),
+    ):
+        return ""
+    return refreshed
+
+
+def _gateway_token_from_dotenv(data_dir: str, *, token_env: str) -> str:
+    """Read the selected built-in gateway token from one installation.
+
+    An empty selector follows :meth:`GatewayConfig.resolved_token` precedence:
+    canonical DefenseClaw first, then the legacy OpenClaw name. An explicit
+    built-in selector reads only that key.
+    """
+
+    if not data_dir:
+        return ""
+    candidates = (token_env,) if token_env else ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN")
+    values: dict[str, str] = {}
+    path = os.path.join(data_dir, ".env")
+    try:
+        with open(path, encoding="utf-8") as stream:
+            for raw_line in stream:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                if key not in candidates or key in values:
+                    continue
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                    value = value[1:-1]
+                values[key] = value
+    except (OSError, UnicodeError):
+        return ""
+    return next((values.get(name, "") for name in candidates if values.get(name)), "")
+
+
+class _NoRuntimeRecorder:
+    """Explicit bootstrap/recovery capability: no buffering and no writes."""
+
+    def emit_cli_observability(self, _payload: Mapping[str, Any]) -> None:
+        return
+
+    def close(self) -> None:
+        return
 
 
 class Logger:
-    def __init__(self, store: Store, splunk_cfg: Any | None = None) -> None:
-        self.store = store
-        self._splunk = _SplunkForwarder(splunk_cfg)
+    """Emit CLI facts through one injected canonical-v8 recorder."""
+
+    def __init__(self, recorder: _CanonicalRecorder) -> None:
+        if recorder is None or not callable(getattr(recorder, "emit_cli_observability", None)):
+            raise TypeError("Logger requires a canonical Observability v8 recorder")
+        self._recorder = recorder
+
+    @classmethod
+    def from_config(cls, cfg: Any) -> Logger:
+        """Create a lazy handoff to the gateway that owns ``cfg``.
+
+        Construction performs no network or secret lookup. The ordinary CLI's
+        config-version gate owns v7 rejection before this method is called.
+        """
+
+        if cfg is None or getattr(cfg, "gateway", None) is None:
+            raise CanonicalObservabilityError("gateway configuration is unavailable")
+        return cls(_GatewayConfigRecorder(cfg))
+
+    @classmethod
+    def no_runtime(cls) -> Logger:
+        """Return an explicit bootstrap/recovery logger that emits nothing.
+
+        This capability never buffers raw facts and never writes SQLite,
+        JSONL, Splunk, OTLP, or any other sink. It is intentionally distinct
+        from :meth:`from_config` so ordinary command paths cannot silently
+        degrade to it.
+        """
+
+        return cls(_NoRuntimeRecorder())
 
     def log_scan(self, result: ScanResult) -> None:
-        scan_id = str(uuid.uuid4())
-        raw = result.to_json()
-        duration_ms = int(result.duration.total_seconds() * 1000)
-        max_sev = result.max_severity()
-
-        self.store.insert_scan_result(
-            scan_id, result.scanner, result.target, result.timestamp,
-            duration_ms, len(result.findings), max_sev, raw,
-        )
-
-        for f in result.findings:
-            tags_json = json.dumps(f.tags) if f.tags else "[]"
-            self.store.insert_finding(
-                str(uuid.uuid4()), scan_id, f.severity, f.title,
-                f.description, f.location, f.remediation, f.scanner, tags_json,
-            )
-
-        event = Event(
-            timestamp=datetime.now(timezone.utc),
-            action="scan",
-            target=result.target,
-            details=(
-                f"scanner={result.scanner} findings={len(result.findings)} "
-                f"max_severity={max_sev} duration={result.duration}"
-            ),
-            severity=max_sev,
-            run_id=_current_run_id(),
-        )
-        self.store.log_event(event)
-        self._splunk.forward_event(event)
+        payload = {
+            "kind": "scan",
+            "run_id": _current_run_id(),
+            "scan": {
+                "scanner": result.scanner,
+                "target": result.target,
+                "timestamp": result.timestamp.isoformat(),
+                "findings": [finding.to_dict() for finding in result.findings],
+                "duration_ms": int(result.duration.total_seconds() * 1000),
+            },
+        }
+        self._emit(payload)
 
     def log_action(self, action: str, target: str, details: str) -> None:
-        event = Event(
-            timestamp=datetime.now(timezone.utc),
-            action=action,
-            target=target,
-            details=details,
-            severity="INFO",
-            run_id=_current_run_id(),
+        self._emit(
+            {
+                "kind": "action",
+                "run_id": _current_run_id(),
+                "action": {"name": action, "target": target, "details": details},
+            }
         )
-        self.store.log_event(event)
-        self._splunk.forward_event(event)
 
     def log_activity(
         self,
@@ -135,50 +269,23 @@ class Logger:
         version_to: str = "",
         severity: str = "INFO",
     ) -> None:
-        activity_id = str(uuid.uuid4())
-        before_json = json.dumps(before, default=str, sort_keys=True) if before is not None else ""
-        after_json = json.dumps(after, default=str, sort_keys=True) if after is not None else ""
-        diff_json = json.dumps(diff or [], default=str, sort_keys=True)
-        tt = target_type or "unknown"
-        tid = target_id or "unknown"
-        self.store.insert_activity_event(
-            activity_id,
-            actor=actor or "system",
-            action=action,
-            target_type=tt,
-            target_id=tid,
-            before_json=before_json,
-            after_json=after_json,
-            diff_json=diff_json,
-            version_from=version_from,
-            version_to=version_to,
-        )
-        # Redacted summary for audit_events / alerts (mirrors Go sanitize path).
-        payload = {
-            "activity_id": activity_id,
+        # Source values intentionally remain untouched. The v8 runtime creates
+        # an independent projection for SQLite and every selected destination.
+        activity: dict[str, Any] = {
             "actor": actor,
             "action": action,
-            "target_type": tt,
-            "target_id": tid,
-            "reason": "",
-            "before": before,
-            "after": after,
+            "target_type": target_type or "unknown",
+            "target_id": target_id or "unknown",
             "diff": diff or [],
             "version_from": version_from,
             "version_to": version_to,
+            "severity": severity or "INFO",
         }
-        target = f"{tt}:{tid}"
-        event = Event(
-            timestamp=datetime.now(timezone.utc),
-            action=action,
-            actor=actor,
-            target=target,
-            details=json.dumps(payload, default=str, sort_keys=True),
-            severity=severity or "INFO",
-            run_id=_current_run_id(),
-        )
-        self.store.log_event(event)
-        self._splunk.forward_event(event)
+        if before is not None:
+            activity["before"] = before
+        if after is not None:
+            activity["after"] = after
+        self._emit({"kind": "activity", "run_id": _current_run_id(), "activity": activity})
 
     def log_alert(
         self,
@@ -187,118 +294,136 @@ class Logger:
         summary: str,
         details: dict[str, Any] | None = None,
     ) -> None:
-        payload = {"source": source, "summary": summary}
-        if details:
-            payload["details"] = details
-        event = Event(
-            timestamp=datetime.now(timezone.utc),
-            action="alert",
-            target=source,
-            actor="defenseclaw",
-            details=json.dumps(payload, default=str, sort_keys=True),
-            severity=severity or "WARN",
-            run_id=_current_run_id(),
+        alert: dict[str, Any] = {
+            "source": source,
+            "severity": severity or "WARN",
+            "summary": summary,
+        }
+        if details is not None:
+            alert["details"] = details
+        self._emit({"kind": "alert", "run_id": _current_run_id(), "alert": alert})
+
+    def log_llm_bridge(
+        self,
+        *,
+        model: str,
+        provider: str,
+        status: str,
+        duration_ms: float,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        response_model: str = "",
+        response_id: str = "",
+        finish_reasons: list[str] | None = None,
+    ) -> None:
+        """Submit one observed LiteLLM call to generated v8 signals."""
+
+        self._emit(
+            {
+                "kind": "llm_bridge",
+                "run_id": _current_run_id(),
+                "llm_bridge": {
+                    "model": model,
+                    "provider": provider,
+                    "status": status,
+                    "duration_ms": duration_ms,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "response_model": response_model,
+                    "response_id": response_id,
+                    "finish_reasons": list(finish_reasons or []),
+                },
+            }
         )
-        self.store.log_event(event)
-        self._splunk.forward_event(event)
+
+    def log_webhook_delivery(
+        self,
+        *,
+        webhook_kind: str,
+        target_url: str,
+        status_code: int,
+        duration_ms: float,
+        succeeded: bool,
+    ) -> None:
+        """Submit one observed synthetic delivery to generated v8 metrics."""
+
+        self._emit(
+            {
+                "kind": "webhook_delivery",
+                "run_id": _current_run_id(),
+                "webhook_delivery": {
+                    "webhook_kind": webhook_kind,
+                    "target_url": target_url,
+                    "status_code": status_code,
+                    "duration_ms": duration_ms,
+                    "succeeded": succeeded,
+                },
+            }
+        )
 
     def close(self) -> None:
-        self._splunk.close()
+        close = getattr(self._recorder, "close", None)
+        if callable(close):
+            close()
+
+    def _emit(self, payload: Mapping[str, Any]) -> None:
+        try:
+            self._recorder.emit_cli_observability(payload)
+        except CanonicalObservabilityError:
+            raise
+        except Exception as exc:
+            raise CanonicalObservabilityError("canonical Observability v8 admission was not confirmed") from exc
+
+
+def _gateway_api_host(cfg: Any) -> str:
+    gateway = cfg.gateway
+    bind = str(getattr(gateway, "api_bind", "") or "").strip()
+    if not bind:
+        openshell = getattr(cfg, "openshell", None)
+        guardrail = getattr(cfg, "guardrail", None)
+        standalone = bool(
+            openshell is not None and callable(getattr(openshell, "is_standalone", None)) and openshell.is_standalone()
+        )
+        guardrail_host = str(getattr(guardrail, "host", "") or "").strip()
+        if standalone and guardrail_host and guardrail_host != "localhost":
+            bind = guardrail_host
+    if bind in {"", "0.0.0.0", "::", "[::]", "localhost"}:
+        return "127.0.0.1"
+    return bind
+
+
+def _is_definite_preconnect_failure(exc: requests.RequestException) -> bool:
+    """Return true only when no request bytes could have reached the gateway.
+
+    Connect timeouts are explicitly safe to retry. Requests wraps DNS and
+    connection-refused failures in a ``ConnectionError`` whose nested urllib3
+    reason is ``NewConnectionError``. Read timeouts, resets, protocol errors,
+    and generic connection failures remain ambiguous because the gateway may
+    already have committed the canonical record.
+    """
+
+    if isinstance(exc, requests.ConnectTimeout):
+        return True
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        identity = id(current)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if isinstance(current, NewConnectionError):
+            return True
+        for related in (
+            getattr(current, "reason", None),
+            current.__cause__,
+            current.__context__,
+            *current.args,
+        ):
+            if isinstance(related, BaseException):
+                pending.append(related)
+    return False
 
 
 def _current_run_id() -> str:
     return os.environ.get("DEFENSECLAW_RUN_ID", "").strip()
-
-
-class _SplunkForwarder:
-    def __init__(self, splunk_cfg: Any | None) -> None:
-        self.cfg = splunk_cfg
-
-    def close(self) -> None:
-        return
-
-    def forward_event(self, event: Event) -> None:
-        if not self.cfg or not getattr(self.cfg, "enabled", False):
-            return
-
-        endpoint = _normalize_hec_endpoint(getattr(self.cfg, "hec_endpoint", ""))
-        token = self.cfg.resolved_hec_token() if hasattr(self.cfg, "resolved_hec_token") else ""
-        if not endpoint or not token:
-            return
-
-        payload = {
-            "time": event.timestamp.timestamp(),
-            "source": getattr(self.cfg, "source", "defenseclaw"),
-            "sourcetype": getattr(self.cfg, "sourcetype", "_json"),
-            "index": getattr(self.cfg, "index", "defenseclaw"),
-            "event": {
-                "id": event.id,
-                "timestamp": event.timestamp.isoformat(),
-                "action": event.action,
-                "target": event.target,
-                "actor": event.actor,
-                "details": event.details,
-                "severity": event.severity,
-                "run_id": event.run_id,
-                "source": "defenseclaw",
-            },
-        }
-        if event.structured:
-            payload["event"]["structured"] = event.structured
-
-        try:
-            req = urllib.request.Request(
-                endpoint,
-                data=json.dumps(payload).encode("utf-8"),
-                method="POST",
-                headers={
-                    "Authorization": f"Splunk {token}",
-                    "Content-Type": "application/json",
-                },
-            )
-            # default to verifying TLS certificates so this
-            # legacy forwarder cannot leak the HEC token to a MITM peer.
-            # Operators must explicitly set ``insecure_skip_verify=True``
-            # on the SplunkConfig (or the underlying audit_sinks block)
-            # to opt into the unverified path. ``tls_verify_enabled``
-            # collapses the legacy ``verify_tls`` field and the new
-            # ``insecure_skip_verify`` field into a single secure-by-
-            # default decision.
-            ctx = None
-            verify_enabled = True
-            if hasattr(self.cfg, "tls_verify_enabled"):
-                verify_enabled = bool(self.cfg.tls_verify_enabled())
-            else:
-                # Fall back conservatively: only disable verification
-                # when the caller passes a config that explicitly
-                # sets ``insecure_skip_verify``.
-                verify_enabled = not bool(getattr(self.cfg, "insecure_skip_verify", False))
-            if not verify_enabled:
-                import ssl
-
-                ctx = ssl._create_unverified_context()
-            # Use an opener that refuses redirects so the bearer
-            # ``Authorization: Splunk <token>`` header is never replayed
-            # onto a response-controlled cross-origin redirect (F-0808).
-            opener = _build_hec_opener(ctx)
-            with opener.open(req, timeout=5) as resp:  # noqa: S310
-                if getattr(resp, "status", 200) >= 400:
-                    raise urllib.error.HTTPError(
-                        endpoint,
-                        resp.status,
-                        resp.read().decode("utf-8", errors="replace"),
-                        hdrs=resp.headers,
-                        fp=None,
-                    )
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
-            print(f"warning: splunk forward: {exc}", file=sys.stderr)
-
-
-def _normalize_hec_endpoint(endpoint: str) -> str:
-    endpoint = endpoint.strip().rstrip("/")
-    if not endpoint:
-        return ""
-    suffix = "/services/collector/event"
-    if endpoint.endswith(suffix):
-        return endpoint
-    return endpoint + suffix

@@ -24,12 +24,15 @@ from defenseclaw.tui.panels.audit import (
     split_connector_token,
     structured_detail_rows,
 )
-from defenseclaw.tui.services.gateway_events import (
+from defenseclaw.tui.services.event_models import (
     EgressEvent,
     ScanBlock,
-    load_gateway_egress,
-    load_gateway_scan_blocks,
     parse_timestamp,
+)
+from defenseclaw.tui.services.v8_event_history import (
+    V8EventHistoryRow,
+    load_v8_event_history,
+    payload_text,
 )
 
 SeverityFilter = Literal["", "CRITICAL", "HIGH", "MEDIUM", "LOW"]
@@ -152,6 +155,82 @@ class AlertTableRow:
     finding_index: int = -1
 
 
+_V8_ALERT_BUCKETS = frozenset(
+    {
+        "security.finding",
+        "guardrail.evaluation",
+        "enforcement.action",
+        "asset.scan",
+        "network.egress",
+        "platform.health",
+        "diagnostic",
+    }
+)
+
+
+def _is_v8_alert_row(row: V8EventHistoryRow) -> bool:
+    return row.bucket in _V8_ALERT_BUCKETS
+
+
+def _v8_alert_event(row: V8EventHistoryRow) -> AlertEvent:
+    payload = row.payload
+    action = payload_text(
+        payload,
+        "defenseclaw.guardrail.decision",
+        "defenseclaw.enforcement.effective_action",
+        "defenseclaw.network.decision",
+        "defenseclaw.scan.verdict",
+    ) or row.outcome or row.action or row.event_name
+    target = payload_text(
+        payload,
+        "defenseclaw.finding.target_ref",
+        "defenseclaw.enforcement.target_ref",
+        "defenseclaw.network.target_ref",
+        "defenseclaw.scan.target_ref",
+        "defenseclaw.agent.id",
+    ) or row.event_name
+    summary = payload_text(
+        payload,
+        "defenseclaw.guardrail.evidence_summary",
+        "defenseclaw.finding.evidence_summary",
+        "defenseclaw.finding.description",
+        "defenseclaw.network.reason",
+        "defenseclaw.error.summary",
+    ) or row.details
+    detail_parts = [
+        f"bucket={row.bucket}",
+        f"event_name={row.event_name}",
+        f"source={row.source}",
+    ]
+    if row.connector:
+        detail_parts.append(f"connector={row.connector}")
+    if row.redaction_profile:
+        detail_parts.append(f"redaction_profile={row.redaction_profile}")
+    if summary:
+        detail_parts.append(f"summary={summary}")
+    return AlertEvent(
+        id=row.id,
+        severity=(row.severity or "INFO").upper(),
+        action=action,
+        target=target,
+        details=" ".join(detail_parts),
+        timestamp=row.timestamp or datetime.now(timezone.utc),
+        actor=row.actor or row.source,
+        run_id=row.run_id,
+        trace_id=row.trace_id,
+        request_id=row.request_id,
+        session_id=row.session_id,
+    )
+
+
+def alerts_from_v8_history(
+    rows: tuple[V8EventHistoryRow, ...],
+) -> tuple[AlertEvent, ...]:
+    """Project canonical history rows without performing another DB read."""
+
+    return tuple(_v8_alert_event(row) for row in rows if _is_v8_alert_row(row))
+
+
 def humanize_alert_details(raw: str) -> str:
     """Port of the Go TUI/CLI alert detail humanizer."""
 
@@ -213,7 +292,12 @@ def humanize_alert_details(raw: str) -> str:
 class AlertsPanelModel:
     """Pure alerts panel state with Go-compatible filtering and selection."""
 
-    def __init__(self, data_dir: Path | None = None, *, store: object | None = None) -> None:
+    def __init__(
+        self,
+        data_dir: Path | None = None,
+        *,
+        store: object | None = None,
+    ) -> None:
         self.data_dir = data_dir
         self.store = store
         self.audit_events: list[AlertEvent] = []
@@ -242,7 +326,7 @@ class AlertsPanelModel:
         self._severity_counts_cache: dict[str, int] | None = None
 
     def set_data_dir(self, data_dir: Path | str | None) -> None:
-        """Late-bind the gateway.jsonl source after a config reload."""
+        """Late-bind the data dir used for non-telemetry process state."""
 
         self.data_dir = Path(data_dir) if data_dir else None
 
@@ -258,50 +342,44 @@ class AlertsPanelModel:
         self.store = store
 
     def set_events(self, events: list[AlertEvent]) -> None:
+        if self.audit_events == events:
+            return
         self.audit_events = list(events)
         self._invalidate_row_caches()
         self.apply_filter()
         self.selected_ids.intersection_update(event.id for event in events)
 
     def refresh_gateway_scans(self) -> None:
-        if self.data_dir is None:
-            return
-        gateway_path = self.data_dir / "gateway.jsonl"
-        try:
-            scan_blocks = load_gateway_scan_blocks(gateway_path, raise_errors=True)
-            egress_events = load_gateway_egress(gateway_path, raise_errors=True)
-        except OSError:
-            self.apply_filter()
-            return
-        if tuple(self.scan_blocks) != scan_blocks or tuple(self.egress_events) != egress_events:
-            self.scan_blocks = list(scan_blocks)
-            self.egress_events = list(egress_events)
+        """Clear retired JSONL-derived projections.
+
+        Asset scans, findings, and egress decisions are represented as
+        canonical v8 audit rows by :meth:`refresh`.
+        """
+
+        if self.scan_blocks or self.egress_events:
+            self.scan_blocks = []
+            self.egress_events = []
             self._invalidate_row_caches()
         self.apply_filter()
 
     def refresh(self) -> None:
         """Refresh external data sources owned by the model."""
 
-        if self.store is not None and hasattr(self.store, "list_alerts"):
-            reader = self._store_alert_reader()
-            try:
-                audit_events = [
-                    _coerce_alert_event(event)
-                    for event in reader(500)  # type: ignore[misc]
-                ]
-            except Exception:  # noqa: BLE001 - missing/partial audit DBs render empty alerts.
-                audit_events = []
-            if self.audit_events != audit_events:
-                self.audit_events = audit_events
-                self._invalidate_row_caches()
-        if self.data_dir is None:
-            if self.scan_blocks or self.egress_events:
-                self.scan_blocks = []
-                self.egress_events = []
-                self._invalidate_row_caches()
-            self.apply_filter()
-        else:
-            self.refresh_gateway_scans()
+        if self.store is not None:
+            rows = load_v8_event_history(self.store, limit=500)
+            self.apply_v8_history(rows)
+        self.refresh_gateway_scans()
+
+    def apply_v8_history(self, rows: tuple[V8EventHistoryRow, ...]) -> None:
+        """Apply an already-loaded shared canonical-history snapshot."""
+
+        audit_events = list(alerts_from_v8_history(rows))
+        if self.audit_events == audit_events:
+            return
+        self.audit_events = audit_events
+        self._invalidate_row_caches()
+        self.apply_filter()
+        self.selected_ids.intersection_update(event.id for event in audit_events)
 
     def flat_rows(self) -> list[AlertRow]:
         expanded = frozenset(self.expanded)
@@ -392,6 +470,12 @@ class AlertsPanelModel:
     def set_severity_filter_exact(self, severity: SeverityFilter) -> None:
         self.severity_filter = severity
         self.show_all_severities = True
+        if self.store is not None and severity in {"", "MEDIUM", "LOW"}:
+            # The default alert load is intentionally limited to actionable
+            # severities. Toolbar buttons must hydrate the complete store just
+            # like their keyboard equivalents before showing All/Medium/Low.
+            self.refresh()
+            return
         self.apply_filter()
 
     def set_severity_filter(self, severity: SeverityFilter) -> None:
@@ -455,6 +539,15 @@ class AlertsPanelModel:
 
     def filtered_ids(self) -> list[str]:
         return [row.event.id for row in self.filtered if not row.event.id.startswith("gw:")]
+
+    def all_ids(self) -> list[str]:
+        return sorted(
+            {
+                row.event.id
+                for row in self.flat_rows()
+                if not row.event.id.startswith("gw:")
+            }
+        )
 
     def severity_counts(self) -> dict[str, int]:
         if self._severity_counts_cache is not None:
@@ -543,17 +636,16 @@ class AlertsPanelModel:
             copied = self.copy_detail_text()
             if not copied:
                 return AlertPanelAction(True, hint="No alert detail to copy.")
-            return AlertPanelAction(True, hint="Alert detail copied.", copy_text=copied)
+            return AlertPanelAction(True, hint="Copied alert detail.", copy_text=copied)
         if key == "d":
             row = self.selected()
             if row is None or row.event.id.startswith("gw:"):
                 return AlertPanelAction(True, hint="No audit alert selected to dismiss.")
-            severity = row.event.severity or self.severity_filter or "all"
             return AlertPanelAction(
                 True,
                 AlertCommandIntent(
                     label="alerts dismiss selected",
-                    args=("alerts", "dismiss", "--severity", severity),
+                    args=_alert_id_command_args("dismiss", [row.event.id]),
                     hint=f"Dismissing selected alert {row.event.id}.",
                 ),
             )
@@ -564,28 +656,32 @@ class AlertsPanelModel:
                 True,
                 AlertCommandIntent(
                     label=f"alerts acknowledge {len(self.selected_ids)} selected",
-                    args=("alerts", "acknowledge", "--severity", self.severity_filter or "all"),
+                    args=_alert_id_command_args("acknowledge", self.selected_ids),
                     hint=f"Acknowledging {len(self.selected_ids)} selected alert(s).",
                 ),
             )
         if key == "c":
-            if not self.filtered_ids():
+            filtered_ids = self.filtered_ids()
+            if not filtered_ids:
                 return AlertPanelAction(True, hint="No filtered alerts to clear.")
             return AlertPanelAction(
                 True,
                 AlertCommandIntent(
                     label="alerts dismiss filtered",
-                    args=("alerts", "dismiss", "--severity", self.severity_filter or "all"),
-                    hint=f"Clearing {len(self.filtered_ids())} filtered alert(s).",
+                    args=_alert_id_command_args("dismiss", filtered_ids),
+                    hint=f"Clearing {len(filtered_ids)} filtered alert(s).",
                 ),
             )
         if key == "C":
+            all_ids = self.all_ids()
+            if not all_ids:
+                return AlertPanelAction(True, hint="No active alerts to clear.")
             return AlertPanelAction(
                 True,
                 AlertCommandIntent(
                     label="alerts dismiss all",
-                    args=("alerts", "dismiss", "--severity", "all"),
-                    hint="Clearing all active alerts.",
+                    args=_alert_id_command_args("dismiss", all_ids),
+                    hint=f"Clearing all {len(all_ids)} loaded active alert(s).",
                 ),
             )
         return AlertPanelAction(False)
@@ -1022,6 +1118,18 @@ def _alert_filter_change(old: str, new: str) -> AlertFilterChange | None:
     if old == new:
         return None
     return AlertFilterChange(panel="alerts", filter_type="severity", old=old, new=new)
+
+
+def _alert_id_command_args(command: str, alert_ids: list[str] | set[str]) -> tuple[str, ...]:
+    ids = sorted(set(alert_ids))
+    args = ["alerts", command]
+    for alert_id in ids:
+        args.extend(("--id", alert_id))
+    if len(ids) > 1:
+        # The TUI's CommandPreviewScreen is the user confirmation boundary.
+        # Avoid asking for a second prompt in its noninteractive subprocess.
+        args.append("--yes")
+    return tuple(args)
 
 
 def _alert_row_key(row: AlertRow) -> str:

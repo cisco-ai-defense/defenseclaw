@@ -153,22 +153,26 @@ build_arch() {
   GOOS=darwin GOARCH="${arch}" CGO_ENABLED=0 go "${go_args[@]}"
 }
 
+# The shipped artifact file is named "defenseclaw" (not "defenseclaw-gateway").
+# install.sh discovers it bundle-locally under this name and installs it to the
+# runtime path .../bin/defenseclaw-gateway, which stays the canonical daemon
+# name everywhere else (launchd, systemd, watchdog, process detection).
 cd "${REPO_ROOT}"
 if [[ "${BUNDLE_GOARCH}" == "universal" ]]; then
   command -v lipo >/dev/null 2>&1 \
     || { echo "build-macos-bundle: 'lipo' not found — universal builds must run on macOS with Xcode CLT" >&2; exit 1; }
-  build_arch amd64 "${BUNDLE_DIR}/defenseclaw-gateway.amd64"
-  build_arch arm64 "${BUNDLE_DIR}/defenseclaw-gateway.arm64"
+  build_arch amd64 "${BUNDLE_DIR}/defenseclaw.amd64"
+  build_arch arm64 "${BUNDLE_DIR}/defenseclaw.arm64"
   echo "==> lipo-creating universal binary"
-  lipo -create -output "${BUNDLE_DIR}/defenseclaw-gateway" \
-    "${BUNDLE_DIR}/defenseclaw-gateway.amd64" \
-    "${BUNDLE_DIR}/defenseclaw-gateway.arm64"
-  rm -f "${BUNDLE_DIR}/defenseclaw-gateway.amd64" "${BUNDLE_DIR}/defenseclaw-gateway.arm64"
-  lipo -info "${BUNDLE_DIR}/defenseclaw-gateway"
+  lipo -create -output "${BUNDLE_DIR}/defenseclaw" \
+    "${BUNDLE_DIR}/defenseclaw.amd64" \
+    "${BUNDLE_DIR}/defenseclaw.arm64"
+  rm -f "${BUNDLE_DIR}/defenseclaw.amd64" "${BUNDLE_DIR}/defenseclaw.arm64"
+  lipo -info "${BUNDLE_DIR}/defenseclaw"
 else
-  build_arch "${BUNDLE_GOARCH}" "${BUNDLE_DIR}/defenseclaw-gateway"
+  build_arch "${BUNDLE_GOARCH}" "${BUNDLE_DIR}/defenseclaw"
 fi
-chmod 0755 "${BUNDLE_DIR}/defenseclaw-gateway"
+chmod 0755 "${BUNDLE_DIR}/defenseclaw"
 
 # ---- copy installer scripts + plist -------------------------------------
 
@@ -177,11 +181,19 @@ cp packaging/macos/install.sh                       "${BUNDLE_DIR}/install.sh"
 cp packaging/macos/uninstall.sh                     "${BUNDLE_DIR}/uninstall.sh"
 cp packaging/macos/lib/installer_lib.sh             "${BUNDLE_DIR}/lib/installer_lib.sh"
 cp packaging/macos/lib/scrub_agent_configs.py       "${BUNDLE_DIR}/lib/scrub_agent_configs.py"
+cp packaging/macos/lib/render-targets.sh            "${BUNDLE_DIR}/lib/render-targets.sh"
 cp packaging/launchd/com.cisco.secureclient.defenseclaw.plist \
     "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.plist"
+cp packaging/launchd/com.cisco.secureclient.defenseclaw.hook-guardian.plist \
+    "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
+cp packaging/launchd/com.cisco.secureclient.defenseclaw.hook-enumerator.plist \
+    "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
 chmod 0755 "${BUNDLE_DIR}/install.sh" "${BUNDLE_DIR}/uninstall.sh"
 chmod 0755 "${BUNDLE_DIR}/lib/installer_lib.sh" "${BUNDLE_DIR}/lib/scrub_agent_configs.py"
+chmod 0755 "${BUNDLE_DIR}/lib/render-targets.sh"
 chmod 0644 "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.plist"
+chmod 0644 "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
+chmod 0644 "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
 
 # ---- README -------------------------------------------------------------
 

@@ -17,10 +17,12 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -28,6 +30,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 func init() {
@@ -35,17 +38,20 @@ func init() {
 }
 
 // newHookCmd builds the hidden `hook` subcommand the agent runtime invokes per
-// event. On Windows this replaces the Bash hook scripts entirely: the agent is
-// configured to run `defenseclaw-gateway hook --connector <name> --event <ev>`,
-// which reads the event JSON from stdin, forwards it to the local gateway, and
-// shapes the agent-native stdout + exit code. It is hidden because it is a
+// event. On Windows most agents invoke the native launcher directly. Cursor's
+// PowerShell transport instead uses a generated adapter and this command's
+// validated --input-file path because its object pipeline cannot preserve JSON
+// on native stdin. Both paths forward the event to the local gateway and shape
+// the agent-native stdout + exit code. It is hidden because it is a
 // machine-facing entrypoint, not something a human runs directly.
 func newHookCmd() *cobra.Command {
 	var (
-		connector string
-		event     string
-		apiAddr   string
-		failMode  string
+		connector         string
+		event             string
+		apiAddr           string
+		failMode          string
+		inputFile         string
+		enterpriseManaged bool
 	)
 
 	cmd := &cobra.Command{
@@ -54,35 +60,128 @@ func newHookCmd() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		// The hook is a short-lived per-event subprocess. Skip the daemon's
-		// PersistentPreRunE/PostRun (config load, audit store open, OTel init):
+		// PersistentPreRunE/PostRun (config load and audit store open):
 		// they are slow, can fail when the gateway is mid-setup, and would
 		// hold the audit DB on every keystroke an agent makes.
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			opts := buildHookOptions(connector, event, apiAddr, failMode)
+			if enterpriseManaged && enterpriseManagedHookRuntimeNoop() {
+				return nil
+			}
+			opts := buildHookOptionsForRuntime(connector, event, apiAddr, failMode, enterpriseManaged)
+			var input *os.File
+			if inputFile != "" {
+				if runtime.GOOS != "windows" || connector != "cursor" {
+					return fmt.Errorf("--input-file is only supported for the Cursor Windows hook adapter")
+				}
+				var err error
+				input, err = openCursorHookInputFile(opts.HookDir, inputFile)
+				if err != nil {
+					return err
+				}
+				opts.Stdin = input
+			}
 			// hookexec returns the exact agent exit code (0 allow / 2 block).
 			// os.Exit is required because cobra collapses RunE outcomes to 0/1.
-			os.Exit(hookexec.Run(cmd.Context(), opts))
+			code := hookexec.Run(cmd.Context(), opts)
+			if input != nil {
+				// Preserve hookexec's exact allow/block exit code after it has
+				// emitted the vendor response. Process exit also releases the
+				// read handle if an unusual filesystem reports a close error.
+				_ = input.Close()
+			}
+			os.Exit(code)
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&connector, "connector", "", "connector name (e.g. claudecode, codex, cursor)")
-	cmd.Flags().StringVar(&event, "event", "", "agent hook event name (informational)")
+	cmd.Flags().StringVar(&event, "event", "", "agent hook event name (selects the request deadline; inferred when omitted)")
 	cmd.Flags().StringVar(&apiAddr, "api-addr", "", "gateway host:port (defaults to the hook sidecar / local gateway)")
 	cmd.Flags().StringVar(&failMode, "fail-mode", "", "response-failure policy: open or closed (defaults to the hook sidecar / open)")
+	cmd.Flags().StringVar(&inputFile, "input-file", "", "Cursor Windows adapter payload file")
+	cmd.Flags().BoolVar(&enterpriseManaged, "enterprise-managed", false, "resolve the current SID's administrator-managed hook runtime")
+	_ = cmd.Flags().MarkHidden("input-file")
+	_ = cmd.Flags().MarkHidden("enterprise-managed")
 	_ = cmd.MarkFlagRequired("connector")
 
 	return cmd
 }
 
-// buildHookOptions resolves the hook configuration from flags plus the same
-// environment variables the .sh hooks honor, so the native path and the Bash
-// path behave identically. It is factored out of RunE (which calls os.Exit)
-// so it can be unit-tested.
+const cursorHookInputMaxBytes int64 = 1 << 20
+
+func openCursorHookInputFile(hookDir, path string) (*os.File, error) {
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("Cursor hook input path must be absolute")
+	}
+	cleanDir, err := filepath.Abs(hookDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Cursor hook directory: %w", err)
+	}
+	cleanPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Cursor hook input: %w", err)
+	}
+	if !pathidentity.Same(filepath.Dir(cleanPath), cleanDir) {
+		return nil, fmt.Errorf("Cursor hook input must be inside the DefenseClaw hooks directory")
+	}
+	base := filepath.Base(cleanPath)
+	if !strings.HasPrefix(base, ".cursor-input-") || !strings.HasSuffix(base, ".json") {
+		return nil, fmt.Errorf("Cursor hook input filename is not DefenseClaw-managed")
+	}
+	info, err := os.Lstat(cleanPath)
+	if err != nil {
+		return nil, fmt.Errorf("inspect Cursor hook input: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("Cursor hook input must be a regular file")
+	}
+	if info.Size() > cursorHookInputMaxBytes {
+		return nil, fmt.Errorf("Cursor hook input exceeds %d bytes", cursorHookInputMaxBytes)
+	}
+	input, err := os.Open(cleanPath)
+	if err != nil {
+		return nil, fmt.Errorf("open Cursor hook input: %w", err)
+	}
+	openedInfo, err := input.Stat()
+	if err != nil {
+		_ = input.Close()
+		return nil, fmt.Errorf("inspect opened Cursor hook input: %w", err)
+	}
+	if !openedInfo.Mode().IsRegular() || openedInfo.Size() > cursorHookInputMaxBytes {
+		_ = input.Close()
+		return nil, fmt.Errorf("opened Cursor hook input is not a valid payload file")
+	}
+	return input, nil
+}
+
+// buildHookOptions resolves hook configuration. Source builds and Unix hooks
+// retain their environment-compatible behavior. A packaged Windows hook binds
+// security-critical values to installer-owned state and accepts inherited
+// environment only when it tightens policy. It is factored out of RunE (which
+// calls os.Exit) so it can be unit-tested.
 func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Options {
-	home := config.DefaultDataPath()
+	return buildHookOptionsForRuntime(connector, event, apiAddr, failMode, false)
+}
+
+func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, enterpriseManaged bool) hookexec.Options {
+	home, trustedNativeState := trustedNativeHookHome()
+	if enterpriseManaged && enterpriseManagedHookRuntimeForceClosed() {
+		// The administrator-owned runtime failed trust validation. Do not read its
+		// sidecar/token or contact any endpoint derived from those files; hand an
+		// unavailable strict runtime directly to hookexec's fail-closed boundary.
+		return hookexec.Options{
+			Connector:          connector,
+			Event:              event,
+			FailMode:           "closed",
+			StrictAvailability: true,
+			ManagedEnterprise:  true,
+		}
+	}
+	if !trustedNativeState {
+		home = config.DefaultDataPath()
+	}
 	hookDir := filepath.Join(home, "hooks")
 
 	// Setup writes hooks/.hookcfg on Windows so the agent's hook command can
@@ -90,14 +189,17 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 	// stable). It supplies the gateway address + fail mode the flags omit.
 	sidecar := readHookSidecar(filepath.Join(hookDir, ".hookcfg"))
 
-	if apiAddr == "" {
+	if apiAddr == "" && trustedNativeState {
+		apiAddr = sidecar["DEFENSECLAW_GATEWAY_ADDR"]
+	}
+	if apiAddr == "" && !trustedNativeState {
 		apiAddr = os.Getenv("DEFENSECLAW_GATEWAY_ADDR")
 	}
 	if apiAddr == "" {
 		apiAddr = sidecar["DEFENSECLAW_GATEWAY_ADDR"]
 	}
 	if apiAddr == "" {
-		apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultConfig().Gateway.APIPort)
+		apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultGatewayAPIPort)
 	}
 
 	// The gateway is always a local, loopback-bound sidecar: setup bakes
@@ -111,17 +213,24 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 	if !hookIsLoopbackAddr(apiAddr) {
 		fmt.Fprintf(os.Stderr,
 			"defenseclaw: ignoring non-loopback gateway address %q; using local gateway\n", apiAddr)
-		apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultConfig().Gateway.APIPort)
+		apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultGatewayAPIPort)
 	}
 
-	// Precedence mirrors the .sh `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-baked}"`:
-	// the env var wins, then the explicit flag, then the sidecar's baked value,
-	// and finally hookexec's "open" default for an empty string.
-	if v := os.Getenv("DEFENSECLAW_FAIL_MODE"); v != "" {
-		failMode = v
-	}
 	if failMode == "" {
-		failMode = sidecar["DEFENSECLAW_FAIL_MODE"]
+		failMode = hookSidecarFailMode(sidecar, connector)
+	}
+	if v := os.Getenv("DEFENSECLAW_FAIL_MODE"); v != "" {
+		if !trustedNativeState || strings.EqualFold(strings.TrimSpace(v), "closed") {
+			// A packaged native hook accepts inherited environment only when it
+			// tightens policy. Project settings cannot turn a baked closed mode open.
+			failMode = v
+		}
+	}
+	token := os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")
+	if trustedNativeState {
+		// Connector-scoped token sidecars are ACL-protected installer state.
+		// Never let an inherited generic token shadow or replace them.
+		token = ""
 	}
 
 	opts := hookexec.Options{
@@ -131,8 +240,9 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 		FailMode:           failMode,
 		Home:               home,
 		HookDir:            hookDir,
-		Token:              os.Getenv("DEFENSECLAW_GATEWAY_TOKEN"),
+		Token:              token,
 		StrictAvailability: hookEnvTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY")),
+		ManagedEnterprise:  enterpriseManaged,
 		TraceParent: hookFirstNonEmpty(
 			os.Getenv("DEFENSECLAW_TRACEPARENT"),
 			os.Getenv("TRACEPARENT"),
@@ -144,24 +254,45 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 			os.Getenv("OTEL_TRACESTATE"),
 		),
 	}
-
+	if trustedNativeState {
+		opts.GatewayRecovery = trustedNativeGatewayRecovery()
+	}
 	if v := os.Getenv("DEFENSECLAW_HOOK_MAX_BODY"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			opts.MaxBody = n
+			if !trustedNativeState || n <= 1<<20 {
+				// Packaged hooks allow projects to lower the cap, never raise it.
+				opts.MaxBody = n
+			}
 		}
 	}
 
 	return opts
 }
 
-// readHookSidecar parses the hooks/.hookcfg file setup writes on Windows. It is
-// a small `KEY=value` file (DEFENSECLAW_GATEWAY_ADDR, DEFENSECLAW_FAIL_MODE); an
-// absent or unreadable file yields an empty map so callers fall back to flags,
-// environment, then defaults. Values may be optionally quoted.
+// readHookSidecar parses the hooks/.hookcfg file setup writes on Windows.
+// Version 2 is JSON with a connector-keyed fail_modes map. The legacy
+// KEY=value shape remains readable so the first connector refresh can migrate
+// an existing install without changing its runtime behavior beforehand.
 func readHookSidecar(path string) map[string]string {
 	out := map[string]string{}
 	data, err := os.ReadFile(path)
 	if err != nil {
+		return out
+	}
+	var current struct {
+		Version     int               `json:"version"`
+		GatewayAddr string            `json:"gateway_addr"`
+		FailModes   map[string]string `json:"fail_modes"`
+		LegacyMode  string            `json:"legacy_fail_mode"`
+	}
+	if json.Unmarshal(data, &current) == nil && current.Version >= 2 {
+		out["DEFENSECLAW_GATEWAY_ADDR"] = current.GatewayAddr
+		for connector, mode := range current.FailModes {
+			out[hookSidecarFailModeKey(connector)] = mode
+		}
+		if current.LegacyMode != "" {
+			out["DEFENSECLAW_FAIL_MODE"] = current.LegacyMode
+		}
 		return out
 	}
 	for _, line := range strings.Split(string(data), "\n") {
@@ -186,6 +317,19 @@ func readHookSidecar(path string) map[string]string {
 		}
 	}
 	return out
+}
+
+func hookSidecarFailMode(sidecar map[string]string, connector string) string {
+	if mode := sidecar[hookSidecarFailModeKey(connector)]; mode != "" {
+		return mode
+	}
+	return sidecar["DEFENSECLAW_FAIL_MODE"]
+}
+
+func hookSidecarFailModeKey(connector string) string {
+	name := strings.ToUpper(strings.TrimSpace(connector))
+	name = strings.NewReplacer("-", "", "_", "", " ", "").Replace(name)
+	return "DEFENSECLAW_FAIL_MODE_" + name
 }
 
 // hookIsLoopbackAddr reports whether addr ("host:port" or a bare host) targets

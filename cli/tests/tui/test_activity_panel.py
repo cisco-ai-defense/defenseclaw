@@ -15,8 +15,6 @@ from __future__ import annotations
 from datetime import timedelta
 
 from defenseclaw.tui.panels.activity import ActivityPanelModel
-from defenseclaw.tui.services import gateway_events
-from defenseclaw.tui.services.gateway_events import parse_gateway_event, render_verdict_line
 
 
 def test_activity_panel_empty_state_matches_go_contract() -> None:
@@ -55,95 +53,3 @@ def test_activity_panel_terminal_and_history_key_flow() -> None:
     assert panel.term_mode is False
     panel.handle_key("enter")
     assert panel.term_mode is True
-
-
-def test_activity_panel_mutation_diff_toggle(tmp_path) -> None:
-    (tmp_path / "gateway.jsonl").write_text(
-        (
-            '{"ts":"2026-04-20T12:00:02Z","event_type":"activity","severity":"INFO",'
-            '"activity":{"actor":"alice","action":"config-update","target_type":"config",'
-            '"target_id":"cfg","version_from":"v1","version_to":"v2",'
-            '"diff":[{"op":"replace","path":"/guardrail/enabled"}]}}\n'
-        ),
-        encoding="utf-8",
-    )
-    panel = ActivityPanelModel(tmp_path)
-    panel.load_mutations()
-    panel.handle_key("2")
-    panel.handle_key("enter")
-
-    rendered = panel.render_text()
-    assert "alice" in rendered
-    assert "config-update" in rendered
-    assert "replace /guardrail/enabled" in rendered
-
-
-def test_gateway_event_loaders_retry_after_transient_read_failure(tmp_path, monkeypatch) -> None:
-    path = tmp_path / "gateway.jsonl"
-    path.write_text(
-        (
-            '{"ts":"2026-04-20T12:00:00Z","event_type":"egress","egress":'
-            '{"branch":"shape","decision":"allow","looks_like_llm":true}}\n'
-            '{"ts":"2026-04-20T12:00:01Z","event_type":"activity","activity":'
-            '{"actor":"alice","action":"config-update","target_id":"cfg"}}\n'
-            '{"ts":"2026-04-20T12:00:02Z","event_type":"scan","severity":"HIGH","scan":'
-            '{"scan_id":"sid1","scanner":"skill-scanner","target":"t.py"}}\n'
-        ),
-        encoding="utf-8",
-    )
-    original = gateway_events._read_tail_event_lines
-    fail_next = False
-
-    def flaky_read(*args, **kwargs):
-        nonlocal fail_next
-        if fail_next:
-            fail_next = False
-            raise OSError("transient read failure")
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(gateway_events, "_read_tail_event_lines", flaky_read)
-    for loader in (
-        gateway_events.load_gateway_egress,
-        gateway_events.load_gateway_activity,
-        gateway_events.load_gateway_scan_blocks,
-    ):
-        fail_next = True
-        assert loader(path) == ()
-        assert loader(path)
-
-
-def test_gateway_event_tail_preserves_row_at_exact_window_boundary(tmp_path) -> None:
-    first = b'{"event_type":"activity","activity":{"action":"first"}}\n'
-    second = b'{"event_type":"activity","activity":{"action":"second"}}\n'
-    path = tmp_path / "gateway.jsonl"
-    path.write_bytes(first + second)
-
-    lines = gateway_events._read_tail_event_lines(path, max_bytes=len(second), max_lines=None)
-
-    assert lines == (second.decode().strip(),)
-
-
-def test_gateway_event_scan_rendering_matches_go_smoke() -> None:
-    event = parse_gateway_event(
-        '{"ts":"2026-04-20T12:00:00Z","event_type":"scan","severity":"HIGH",'
-        '"scan":{"scan_id":"s1","scanner":"skill-scanner","target":"/x",'
-        '"verdict":"warn","duration_ms":42,"severity_max":"HIGH"}}'
-    )
-
-    assert event.event_type == "scan"
-    rendered = render_verdict_line(event)
-    assert "skill-scanner" in rendered
-    assert "s1" in rendered
-
-
-def test_gateway_event_scan_finding_rendering_matches_go_smoke() -> None:
-    event = parse_gateway_event(
-        '{"ts":"2026-04-20T12:00:01Z","event_type":"scan_finding","severity":"CRITICAL",'
-        '"scan_finding":{"scan_id":"s1","scanner":"skill-scanner","target":"f.py",'
-        '"rule_id":"R42","line_number":7,"title":"bad"}}'
-    )
-
-    assert event.event_type == "scan_finding"
-    rendered = render_verdict_line(event)
-    assert "R42" in rendered
-    assert "7" in rendered

@@ -63,7 +63,7 @@ func TestFindingEnricher_PopulatesDataAxis(t *testing.T) {
 		},
 	}
 
-	_, err := EmitScanResult(context.Background(), nil, pers, nil, result, AgentIdentity{})
+	_, err := EmitScanResult(context.Background(), pers, result, AgentIdentity{})
 	if err != nil {
 		t.Fatalf("EmitScanResult: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestFindingEnricher_DoesNotOverwriteExistingAxes(t *testing.T) {
 		},
 	}
 
-	_, err := EmitScanResult(context.Background(), nil, pers, nil, result, AgentIdentity{})
+	_, err := EmitScanResult(context.Background(), pers, result, AgentIdentity{})
 	if err != nil {
 		t.Fatalf("EmitScanResult: %v", err)
 	}

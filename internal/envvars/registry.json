@@ -135,15 +135,44 @@
     {
       "name": "DEFENSECLAW_UPGRADE_FRESH_PROCESS",
       "category": "upgrade_internal",
-      "purpose": "Marks the isolated installed-CLI child used for an upgrade handoff so the child cannot recursively hand off again.",
+      "purpose": "Marks the isolated installed-CLI child used for an upgrade handoff so the child cannot recursively hand off again and a newly installed gateway can delegate its readiness wait to that supervising controller.",
       "default": "unset",
       "accepted_values": ["1", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Rejects recursive fresh-process upgrade handoffs and marks the isolated child process"}
+        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Rejects recursive fresh-process upgrade handoffs and marks the isolated child process"},
+        {"location": "internal/cli/daemon.go", "description": "Delegates gateway readiness to the supervising upgrade controller while retaining safe launch and immediate-exit checks"},
+        {"location": "scripts/upgrade.sh", "description": "Scopes the marker to the immutable post-hard-cut controller continuation"}
       ],
       "since": "0.8.4"
+    },
+    {
+      "name": "DEFENSECLAW_PHASE_TWO_MUTATOR_CHILD",
+      "category": "upgrade_internal",
+      "purpose": "Marks the trusted phase-two mutation child so upgrade recovery can distinguish the lease-holding subprocess from its controller.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/phase_two_mutator.py", "description": "Marks the private mutation subprocess while it inherits the authenticated upgrade lease"}
+      ],
+      "since": "0.8.5"
+    },
+    {
+      "name": "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING",
+      "category": "upgrade_internal",
+      "purpose": "Carries the controller-authenticated observability-v8 preflight snapshot into the fresh target migration child. It binds the validated config and recovery plan to the phase-two mutation process.",
+      "default": "unset",
+      "accepted_values": ["JSON object no larger than 4096 bytes", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Passes the verified binding only to the isolated phase-two migration child"},
+        {"location": "cli/defenseclaw/migrations.py", "description": "Requires and validates the binding before the v7-to-v8 hard-cut mutation"}
+      ],
+      "since": "0.8.5"
     },
     {
       "name": "DEFENSECLAW_UPGRADE_MUTATION_TOKEN",
@@ -173,6 +202,19 @@
         {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Gates the fresh-controller candidate release endpoint override"}
       ],
       "since": "0.8.4"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_BASH",
+      "category": "test_fixture",
+      "purpose": "Selects the Bash executable used by release-workflow tests so macOS CI can exercise wrappers with the system Bash runtime.",
+      "default": "unset (auto-detect Bash, including Git Bash on Windows)",
+      "accepted_values": ["absolute path to a Bash executable", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/tests/test_release_workflow_staged.py", "description": "Selects the Bash executable used to run POSIX release-workflow contract tests"}
+      ],
+      "since": "0.8.7"
     },
     {
       "name": "DEFENSECLAW_TEST_PHASE1_RECOVERY_CRASH",
@@ -303,6 +345,20 @@
       "since": "0.8.4"
     },
     {
+      "name": "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION",
+      "category": "upgrade_internal",
+      "purpose": "Binds a staged hard-cut handoff to the authenticated target-controller version that the resolver installed out of place.",
+      "default": "unset",
+      "accepted_values": ["canonical X.Y.Z version", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Requires the fresh target controller to match the resolver-authenticated target version before accepting bridge rollback custody"},
+        {"location": "scripts/upgrade.sh", "description": "Unix release resolver supplies the authenticated target version to the fresh out-of-place controller"}
+      ],
+      "since": "0.8.5"
+    },
+    {
       "name": "DEFENSECLAW_DUMP_RAW_SECRETS",
       "category": "security_opt_out",
       "purpose": "E2E test toggle ONLY. When set, scripts/test-e2e-full-stack.sh prints raw secrets to its diagnostic logs. Never set in production.",
@@ -318,17 +374,18 @@
     {
       "name": "DEFENSECLAW_DISABLE_REDACTION",
       "category": "security_opt_out",
-      "purpose": "Disable all PII / credential redaction across every sink (audit DB, JSONL, OTel, Splunk, webhooks). Strongest opt-out — raw values appear everywhere.",
-      "default": "unset (redaction enabled)",
+      "purpose": "Upgrade-only v7 migration input. When truthy during defenseclaw upgrade, the converter preserves the legacy unredacted posture with explicit v8 profile none. The v8 runtime ignores this variable.",
+      "default": "unset (ignored by the v8 runtime)",
       "accepted_values": ["1", "true", "unset"],
       "security_impact": "high",
-      "surface_in_doctor": true,
+      "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/redaction/redaction.go:111", "description": "DisableAll() reads this env var"},
-        {"location": "cli/defenseclaw/commands/redaction_status.py:42", "description": "Python status reporter"},
-        {"location": "cli/defenseclaw/commands/cmd_setup.py:3158", "description": "Setup flow surfaces this in onboarding"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:503", "description": "Reads the captured v7 upgrade environment and materializes the equivalent v8 redaction profile"}
       ],
-      "since": "0.3.0"
+      "since": "0.3.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure observability.defaults, bucket, or destination redaction_profile in config v8."
     },
     {
       "name": "DEFENSECLAW_REVEAL_PII",
@@ -359,31 +416,20 @@
       "since": "0.3.0"
     },
     {
-      "name": "DEFENSECLAW_SCHEMA_VALIDATION",
-      "category": "security_opt_out",
-      "purpose": "Disable the runtime JSON-schema gate that validates event payloads before they hit sinks. Set to 'off' to disable. Intended only for triaging schema-drift incidents.",
-      "default": "on",
-      "accepted_values": ["off", "unset"],
-      "security_impact": "medium",
-      "surface_in_doctor": true,
-      "consumers": [
-        {"location": "internal/gateway/sidecar.go:243", "description": "Gateway boot reads and toggles the schema gate"}
-      ],
-      "since": "0.4.0"
-    },
-    {
       "name": "DEFENSECLAW_JSONL_DISABLE",
       "category": "security_opt_out",
-      "purpose": "Disable the gateway.jsonl audit tier. Other sinks (audit DB, OTel, Splunk) continue. Useful when local disk is constrained; downgrades forensic coverage.",
-      "default": "unset (JSONL enabled)",
+      "purpose": "Upgrade-only v7 migration input. When truthy during defenseclaw upgrade, the converter omits the legacy implicit JSONL destination. The v8 runtime ignores this variable.",
+      "default": "unset (ignored by the v8 runtime)",
       "accepted_values": ["1", "true", "unset"],
       "security_impact": "low",
-      "surface_in_doctor": true,
+      "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/gateway/sidecar.go:226", "description": "Gateway boot reads this kill switch"},
-        {"location": "internal/gateway/jsonl_kill_switch.go", "description": "Definition site"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1197", "description": "Reads the captured v7 upgrade environment when converting implicit JSONL behavior"}
       ],
-      "since": "0.4.0"
+      "since": "0.4.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Add, disable, or remove an explicit kind: jsonl destination in config v8."
     },
     {
       "name": "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
@@ -589,140 +635,173 @@
     {
       "name": "DEFENSECLAW_OTEL_ENABLED",
       "category": "telemetry",
-      "purpose": "Master toggle for the OTel exporter. Overrides otel.enabled in config.yaml.",
-      "default": "(value from otel.enabled in config.yaml)",
+      "purpose": "Upgrade-only v7 migration input for the former otel.enabled master toggle. The v8 runtime ignores this variable.",
+      "default": "unset (ignored by the v8 runtime)",
       "accepted_values": ["true", "false", "1", "0", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/config/config.go:2297", "description": "viper.BindEnv otel.enabled"}],
-      "since": "0.4.0"
+      "consumers": [
+        {"location": "cli/defenseclaw/observability/v8_migration.py:2689", "description": "Preserves the effective v7 OTel master-toggle decision during upgrade"},
+        {"location": "internal/config/config.go:3453", "description": "Binds the variable only inside the legacy configuration loader used before v8 activation"}
+      ],
+      "since": "0.4.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Enable or disable named observability.destinations entries in config v8."
     },
     {
       "name": "DEFENSECLAW_OTEL_ENDPOINT",
       "category": "telemetry",
-      "purpose": "Legacy flat OTLP exporter endpoint consumed only for upgrade compatibility. New setups should configure otel.destinations[].endpoint.",
+      "purpose": "Upgrade-only v7 migration input for the former flat OTLP exporter endpoint. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["any-otlp-endpoint", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2684", "description": "Migrates legacy env-backed flat OTel export into a generic-otlp named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:634", "description": "Preserves legacy env-backed flat OTel export when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1483", "description": "Converts the captured v7 endpoint into a canonical v8 destination"},
+        {"location": "internal/config/config.go:2875", "description": "Reads the endpoint only inside the legacy configuration loader"}
       ],
-      "since": "0.4.0"
+      "since": "0.4.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure observability.destinations[].endpoint in config v8."
     },
     {
       "name": "DEFENSECLAW_OTEL_PROTOCOL",
       "category": "telemetry",
-      "purpose": "Legacy flat OTLP exporter protocol consumed only for upgrade compatibility. New setups should configure otel.destinations[].protocol.",
+      "purpose": "Upgrade-only v7 migration input for the former flat OTLP exporter protocol. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["grpc", "grpc/protobuf", "http", "http/protobuf", "http/json", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2695", "description": "Migrates legacy env-backed flat OTel export into a generic-otlp named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:699", "description": "Preserves legacy env-backed flat OTel export when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1538", "description": "Converts the captured v7 protocol into a canonical v8 destination"},
+        {"location": "internal/config/config.go:2891", "description": "Reads the protocol only inside the legacy configuration loader"}
       ],
-      "since": "0.4.0"
+      "since": "0.4.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure observability.destinations[].protocol in config v8."
     },
     {
       "name": "DEFENSECLAW_OTEL_TLS_INSECURE",
       "category": "security_opt_out",
-      "purpose": "Legacy flat OTLP TLS toggle consumed only for upgrade compatibility. New setups should configure otel.destinations[].tls.insecure.",
+      "purpose": "Upgrade-only v7 migration input for the former flat OTLP TLS-insecure toggle. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["true", "false", "1", "0", "unset"],
       "security_impact": "high",
       "security_note": "Enabling this variable disables OTLP server-certificate verification after legacy configuration is migrated into a named destination.",
-      "surface_in_doctor": true,
+      "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2769", "description": "Migrates legacy env-backed flat OTel TLS policy into a named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:742", "description": "Preserves legacy env-backed TLS policy when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1580", "description": "Converts the captured v7 TLS policy into a canonical v8 destination"},
+        {"location": "internal/config/config.go:2937", "description": "Reads the TLS decision only inside the legacy configuration loader"}
       ],
-      "since": "0.4.0"
+      "since": "0.4.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure observability.destinations[].tls in config v8."
     },
     {
       "name": "DEFENSECLAW_OTEL_TRACES_ENDPOINT",
       "category": "telemetry",
-      "purpose": "Legacy trace-specific flat OTLP endpoint consumed only for upgrade compatibility. New setups should configure otel.destinations[].traces.endpoint or destination endpoint.",
+      "purpose": "Upgrade-only v7 migration input for the former trace-specific OTLP endpoint. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["any-otlp-endpoint", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2683", "description": "Migrates legacy env-backed flat OTel export into a generic-otlp named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:633", "description": "Preserves legacy env-backed flat OTel export when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1495", "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"},
+        {"location": "internal/config/config.go:2875", "description": "Reads signal-specific endpoints only inside the legacy configuration loader"}
       ],
-      "since": "0.4.0"
+      "since": "0.4.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure a v8 destination endpoint or signal_overrides.traces.endpoint."
     },
     {
       "name": "DEFENSECLAW_OTEL_TRACES_PROTOCOL",
       "category": "telemetry",
-      "purpose": "Legacy trace-specific flat OTLP protocol consumed only for upgrade compatibility. New setups should configure otel.destinations[].traces.protocol or destination protocol.",
+      "purpose": "Upgrade-only v7 migration input for the former trace-specific OTLP protocol. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["grpc", "grpc/protobuf", "http", "http/protobuf", "http/json", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2694", "description": "Migrates legacy env-backed flat OTel export into a generic-otlp named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:698", "description": "Preserves legacy env-backed flat OTel export when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1547", "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"},
+        {"location": "internal/config/config.go:2891", "description": "Reads signal-specific protocols only inside the legacy configuration loader"}
       ],
-      "since": "0.4.0"
+      "since": "0.4.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure the protocol on the canonical v8 destination."
     },
     {
       "name": "DEFENSECLAW_OTEL_LOGS_ENDPOINT",
       "category": "telemetry",
-      "purpose": "Legacy log-specific flat OTLP endpoint consumed only for upgrade compatibility. New setups should configure otel.destinations[].logs.endpoint or the destination endpoint.",
+      "purpose": "Upgrade-only v7 migration input for the former log-specific OTLP endpoint. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["any-otlp-endpoint", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2724", "description": "Migrates a legacy logs-only env-backed exporter into a generic-otlp named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:655", "description": "Preserves a legacy logs-only route when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1495", "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"},
+        {"location": "internal/config/config.go:2875", "description": "Reads signal-specific endpoints only inside the legacy configuration loader"}
       ],
-      "since": "0.8.0"
+      "since": "0.8.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure a v8 destination endpoint or signal_overrides.logs.endpoint."
     },
     {
       "name": "DEFENSECLAW_OTEL_LOGS_PROTOCOL",
       "category": "telemetry",
-      "purpose": "Legacy log-specific flat OTLP protocol consumed only for upgrade compatibility. New setups should configure otel.destinations[].logs.protocol or the destination protocol.",
+      "purpose": "Upgrade-only v7 migration input for the former log-specific OTLP protocol. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["grpc", "grpc/protobuf", "http", "http/protobuf", "http/json", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2740", "description": "Migrates a legacy logs-only env-backed exporter into a generic-otlp named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:664", "description": "Preserves a legacy logs-only route when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1547", "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"},
+        {"location": "internal/config/config.go:2891", "description": "Reads signal-specific protocols only inside the legacy configuration loader"}
       ],
-      "since": "0.8.0"
+      "since": "0.8.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure the protocol on the canonical v8 destination."
     },
     {
       "name": "DEFENSECLAW_OTEL_METRICS_ENDPOINT",
       "category": "telemetry",
-      "purpose": "Legacy metric-specific flat OTLP endpoint consumed only for upgrade compatibility. New setups should configure otel.destinations[].metrics.endpoint or the destination endpoint.",
+      "purpose": "Upgrade-only v7 migration input for the former metric-specific OTLP endpoint. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["any-otlp-endpoint", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2723", "description": "Migrates a legacy metrics-only env-backed exporter into a generic-otlp named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:655", "description": "Preserves a legacy metrics-only route when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1495", "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"},
+        {"location": "internal/config/config.go:2875", "description": "Reads signal-specific endpoints only inside the legacy configuration loader"}
       ],
-      "since": "0.8.0"
+      "since": "0.8.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure a v8 destination endpoint or signal_overrides.metrics.endpoint."
     },
     {
       "name": "DEFENSECLAW_OTEL_METRICS_PROTOCOL",
       "category": "telemetry",
-      "purpose": "Legacy metric-specific flat OTLP protocol consumed only for upgrade compatibility. New setups should configure otel.destinations[].metrics.protocol or the destination protocol.",
+      "purpose": "Upgrade-only v7 migration input for the former metric-specific OTLP protocol. The v8 runtime ignores this variable.",
       "default": "unset",
       "accepted_values": ["grpc", "grpc/protobuf", "http", "http/protobuf", "http/json", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/config.go:2739", "description": "Migrates a legacy metrics-only env-backed exporter into a generic-otlp named destination"},
-        {"location": "cli/defenseclaw/observability/writer.py:664", "description": "Preserves a legacy metrics-only route when setup adds a named destination"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py:1547", "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"},
+        {"location": "internal/config/config.go:2891", "description": "Reads signal-specific protocols only inside the legacy configuration loader"}
       ],
-      "since": "0.8.0"
+      "since": "0.8.0",
+      "deprecated": true,
+      "migration_only": true,
+      "replacement_hint": "Configure the protocol on the canonical v8 destination."
     },
     {
       "name": "DEFENSECLAW_TELEMETRY_ENABLED",
@@ -837,7 +916,7 @@
     {
       "name": "DEFENSECLAW_IPC_SOCKET",
       "category": "runtime_path",
-      "purpose": "Override the local UDS gRPC socket path used by the internal/ipc server. Test rigs and out-of-tree clients use this to point at a scratch socket without editing config.yaml.",
+      "purpose": "Override the local UDS gRPC socket path used by the internal/ipc server in unmanaged and test deployments. Managed-enterprise resolution deliberately ignores this environment variable; use administrator-owned managed.socket_path instead.",
       "default": "unset (resolver picks per-mode default: <dirname(data_dir)>/ipc/defenseclaw_ipc.sock for managed_enterprise, otherwise <data_dir>/ipc/defenseclaw_ipc.sock)",
       "accepted_values": ["any-absolute-path", "unset"],
       "security_impact": "low",
@@ -846,7 +925,7 @@
         {"location": "internal/ipc/paths.go", "description": "ResolveSocketPath consults this before falling back to the deployment-mode default"}
       ],
       "since": "0.8.4",
-      "security_note": "Local-only socket path override — the resolved path is created with mode 0666 (managed_enterprise) or 0600 (unmanaged); managed_enterprise refuses to boot when the resolved mode is world-writable and managed.allowed_uids is empty."
+      "security_note": "Local-only socket path override — managed_enterprise ignores the environment override, creates the resolved socket with a 0660 ceiling (0600 otherwise), and authenticates peers against the effective code-signing team, signing, and bundle-ID allowlists."
     },
     {
       "name": "DEFENSECLAW_GUARDIAN_CONNECTOR",
@@ -900,6 +979,20 @@
         {"location": "scripts/setup-llm.sh:51", "description": "LLM setup script"}
       ],
       "since": "0.2.0"
+    },
+    {
+      "name": "DEFENSECLAW_OBSERVABILITY_BIN",
+      "category": "runtime_path",
+      "purpose": "Override the executable used by the backward-compatible POSIX local-observability bridge.",
+      "default": "defenseclaw-observability (resolved via PATH)",
+      "accepted_values": ["executable name or absolute path", "unset"],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "bundles/local_observability_stack/bin/openclaw-observability-bridge:7", "description": "POSIX compatibility bridge selects the lifecycle-controller executable"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Executable selection — a non-default value changes which local program the compatibility bridge launches."
     },
     {
       "name": "DEFENSECLAW_OVERLAY_ROOT",
@@ -982,6 +1075,21 @@
       "since": "0.2.0"
     },
     {
+      "name": "DEFENSECLAW_INSTALL_ROOT",
+      "category": "runtime_path",
+      "purpose": "Native Windows installer root injected by the stable defenseclaw.exe launcher so the managed Python CLI can locate the owning packaged install for installer-based upgrade handoff.",
+      "default": "unset (set by DefenseClawSetup-x64.exe launcher)",
+      "accepted_values": ["any-absolute-path", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-launcher/main.go:99", "description": "Launcher appends the verified install root to the managed Python process environment"},
+        {"location": "cli/tests/test_cmd_upgrade.py:1185", "description": "Windows native-upgrade tests cover rejection of an untrusted injected install root"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Installer root selection — upgrade code must treat this inherited value as untrusted and verify it is a canonical, product-owned Windows install before handing off to the setup executable."
+    },
+    {
       "name": "MIGRATION_DEFENSECLAW_HOME",
       "category": "runtime_path",
       "purpose": "Passed by scripts/upgrade.sh to the migration step. Identifies the data dir the migration should operate on.",
@@ -1003,6 +1111,20 @@
       "surface_in_doctor": false,
       "consumers": [{"location": "internal/gateway/connector/hooks/inspect-tool.sh:22", "description": "Each hook exports this"}],
       "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_CONNECTOR",
+      "category": "hook_internal",
+      "purpose": "Runtime selector for the connector that owns an invocation of the shared hook scripts. Managed installations read the installer-owned connector sidecar; non-managed shells may set this explicitly.",
+      "default": "unset",
+      "accepted_values": ["normalized connector identifier", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/gateway/connector/hooks/_hardening.sh:175", "description": "Selects one unambiguous connector runtime record for shared hooks"},
+        {"location": "internal/gateway/connector/subprocess.go:664", "description": "Writes and validates the connector-scoped runtime sidecar"}
+      ],
+      "since": "0.7.0"
     },
     {
       "name": "DEFENSECLAW_HOOK_NAME",
@@ -1234,6 +1356,20 @@
       "surface_in_doctor": false,
       "consumers": [{"location": "cli/defenseclaw/credentials.py", "description": "Credentials registry"}],
       "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN",
+      "category": "credential",
+      "purpose": "Generated HEC token for the owned bundled Local Splunk sink. Kept separate from remote Splunk Enterprise credentials.",
+      "default": "unset",
+      "accepted_values": ["cryptographically random HEC token", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/observability/local_splunk.py", "description": "Native Local Splunk credential contract"},
+        {"location": "cli/defenseclaw/commands/cmd_setup.py", "description": "Owned local-splunk audit sink wiring"}
+      ],
+      "since": "0.8.0"
     },
     {
       "name": "DEFENSECLAW_SPLUNK_HEC_TOKEN",
@@ -1553,6 +1689,21 @@
       "security_note": "CGNAT egress guard — prevents SSRF into shared carrier-grade NAT / overlay-network address space (e.g. another tenant's Tailscale node)."
     },
     {
+      "name": "DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS",
+      "category": "security_opt_out",
+      "purpose": "Comma-separated list of specific IP addresses exempt from the SSRF private-address block for LLM upstream forwarding. Merges with guardrail.allow_private_upstreams in config.yaml. Loopback, link-local, and cloud metadata IPs are never exempted.",
+      "default": "unset (all private IPs blocked)",
+      "accepted_values": ["comma-separated IPs (e.g. 10.50.2.100,172.16.0.5)", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {"location": "internal/netguard/allowlist.go:53", "description": "ParseAllowedPrivateUpstreams() reads this env var and merges with config.yaml entries"},
+        {"location": "cli/defenseclaw/registries/ssrf.py:60", "description": "_allowed_private_ips() reads this env var for Python-side SSRF guard exemption"}
+      ],
+      "since": "0.8.1",
+      "security_note": "Private-upstream SSRF guard exemption — allows operator-specified on-prem LLM gateways on RFC 1918 addresses to bypass the private-IP block. Each IP must be explicitly listed (no CIDR)."
+    },
+    {
       "name": "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT",
       "category": "security_opt_out",
       "purpose": "Bypass the action-mode fail-closed checks for unverified hook contracts and hook-contract lock drift during connector setup, allowing enforcing hooks to be installed against agent versions outside the verified contract matrix.",
@@ -1761,6 +1912,890 @@
         {"location": "cli/defenseclaw/tui/__init__.py:53", "description": "Gates the interactive first-run setup prompt"}
       ],
       "since": "0.7.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_EXE",
+      "category": "test_fixture",
+      "purpose": "Absolute path to the temporary gateway executable invoked by the native Windows daemon executable tests.",
+      "default": "unset",
+      "accepted_values": ["absolute temporary executable path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/daemon_executable_windows_test.go:315", "description": "PowerShell test harness invokes the isolated gateway executable"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_COMMAND",
+      "category": "test_fixture",
+      "purpose": "Gateway subcommand selected by the native Windows daemon executable test harness.",
+      "default": "unset",
+      "accepted_values": ["start", "status", "restart", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/daemon_executable_windows_test.go:315", "description": "PowerShell test harness passes the selected gateway lifecycle command"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_WAIT_PROCESS_EXIT",
+      "category": "test_fixture",
+      "purpose": "Activate the short-lived helper subprocess used to verify that native Windows daemon shutdown waits on the original process handle.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/daemon/proc_windows_flags_test.go:95", "description": "Native Windows daemon test binary enters its delayed-exit helper mode"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_PROCESS_HELPER",
+      "category": "test_fixture",
+      "purpose": "Activate the isolated subprocess entry point used by native Windows process-snapshot tests.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/inventory/process_snapshot_windows_test.go:148", "description": "Native Windows test binary enters its named-process helper mode"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CLAWHUB_LAUNCHER",
+      "category": "hook_internal",
+      "purpose": "Absolute path to the trusted ClawHub .cmd or .bat launcher passed to the temporary Windows command adapter. Set only in the child process environment; inherited values are overwritten.",
+      "default": "unset (set by the ClawHub launcher adapter on Windows)",
+      "accepted_values": ["absolute path to a .cmd or .bat launcher"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_skill.py:202", "description": "Windows ClawHub command adapter publishes the selected trusted launcher to its generated batch file"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CLAWHUB_CWD",
+      "category": "hook_internal",
+      "purpose": "Working directory used by the temporary Windows ClawHub command adapter. Set only in the child process environment; inherited values are overwritten.",
+      "default": "unset (set by the ClawHub launcher adapter on Windows)",
+      "accepted_values": ["absolute directory path"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_skill.py:203", "description": "Windows ClawHub command adapter publishes the selected launch directory to its generated batch file"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_MARKER",
+      "category": "test_fixture",
+      "purpose": "Test-only marker path used by the fake ClawHub launcher to record a single invocation.",
+      "default": "unset",
+      "accepted_values": ["absolute file path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/tests/test_cmd_skill.py:858", "description": "Fake Windows ClawHub launcher appends an invocation marker during command-adapter tests"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CLEANUP_PARENT_PID",
+      "category": "hook_internal",
+      "purpose": "Parent process identifier awaited by the bounded delayed InstallerCache cleanup helper.",
+      "default": "unset (set and overwritten by native Setup)",
+      "accepted_values": ["decimal process id", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/platform_windows.go", "description": "Delayed cleanup helper waits for the originating Setup process before acquiring the setup mutex"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CLEANUP_TARGET",
+      "category": "hook_internal",
+      "purpose": "Canonical InstallerCache directory considered for delayed removal.",
+      "default": "unset (set and overwritten by native Setup)",
+      "accepted_values": ["absolute installer-cache path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/platform_windows.go", "description": "Delayed cleanup helper receives the exact cache target"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CLEANUP_JOURNAL",
+      "category": "hook_internal",
+      "purpose": "Protected native Setup transaction journal used to bind delayed directory cleanup to the uninstall transaction that scheduled it.",
+      "default": "unset (set and overwritten by native Setup)",
+      "accepted_values": ["absolute setup-journal path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/platform_windows.go", "description": "Delayed cleanup helper re-reads and locks the journal before deleting its owned target"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CLEANUP_TRANSACTION_ID",
+      "category": "hook_internal",
+      "purpose": "Exact native Setup uninstall transaction identifier expected by the delayed directory cleanup helper.",
+      "default": "unset (set and overwritten by native Setup)",
+      "accepted_values": ["setup transaction identifier", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/platform_windows.go", "description": "Delayed cleanup helper refuses deletion when the protected journal belongs to another transaction"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CLEANUP_WAIT_MS",
+      "category": "hook_internal",
+      "purpose": "Bounded parent-process wait duration for the native Setup delayed directory cleanup helper.",
+      "default": "unset (set and overwritten by native Setup)",
+      "accepted_values": ["non-negative decimal milliseconds", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/platform_windows.go", "description": "Delayed cleanup helper exits without deletion if the originating Setup process does not stop within this bound"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CODEX_POLICY_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the isolated Codex effective-policy helper subprocess.",
+      "default": "unset",
+      "accepted_values": ["test-defined value", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/gateway/connector/codex_policy_test.go", "description": "Native Windows test fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CODEX_POLICY_ENTRY_PATH",
+      "category": "test_fixture",
+      "purpose": "Test-only marker path used by the Codex effective-policy subprocess fixture to record helper entry.",
+      "default": "unset",
+      "accepted_values": ["absolute test marker path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/gateway/connector/codex_policy_test.go", "description": "Codex policy timeout/process-tree test fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CODEX_POLICY_HANG_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the Codex policy subprocess fixture that deliberately blocks for timeout coverage.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/codex_policy_test.go", "description": "Test-only Codex policy timeout helper"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CODEX_POLICY_TREE_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the Codex policy subprocess-tree fixture used to verify descendant cleanup.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/codex_policy_test.go", "description": "Test-only Codex policy process-tree helper"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CODEX_POLICY_GRANDCHILD_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the Codex policy grandchild fixture used to verify process-tree containment.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/codex_policy_test.go", "description": "Test-only Codex policy grandchild helper"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CODEX_POLICY_READY_PATH",
+      "category": "test_fixture",
+      "purpose": "Test-only ready-signal path shared with the Codex policy process-tree fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test marker path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/codex_policy_test.go", "description": "Codex policy process-tree readiness fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CODEX_POLICY_MARKER_PATH",
+      "category": "test_fixture",
+      "purpose": "Test-only descendant marker path used by the Codex policy process-tree fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test marker path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/codex_policy_test.go", "description": "Codex policy descendant-cleanup fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_E2E_CODEX_POLICY_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the bounded Codex app-server fixture used by native connector lifecycle E2E tests.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "test/e2e/codex_policy_fixture_windows_test.go", "description": "Native Windows E2E Codex policy fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_GATEWAY_CODEX_APP_SERVER_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the bounded Codex app-server fixture used by gateway package tests.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/codex_setup_fixture_windows_test.go", "description": "Native Windows gateway Codex policy fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the native CAS V2 hard-exit subprocess fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 hard-exit fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_PATH",
+      "category": "test_fixture",
+      "purpose": "Target path passed to the native CAS V2 hard-exit fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test target path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 hard-exit target"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_STATE",
+      "category": "test_fixture",
+      "purpose": "Recovery-state directory passed to the native CAS V2 hard-exit fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test state path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 hard-exit state fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_OPERATION",
+      "category": "test_fixture",
+      "purpose": "Mutation operation selected for the native CAS V2 hard-exit fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined operation", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 operation selector"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_PHASE",
+      "category": "test_fixture",
+      "purpose": "Durability phase at which the native CAS V2 fixture terminates its subprocess.",
+      "default": "unset",
+      "accepted_values": ["test-defined CAS phase", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 hard-exit phase selector"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_OCCURRENCE",
+      "category": "test_fixture",
+      "purpose": "One-based phase occurrence at which the native CAS V2 fixture terminates its subprocess.",
+      "default": "1",
+      "accepted_values": ["positive decimal integer", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 hard-exit occurrence selector"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_RECOVER",
+      "category": "test_fixture",
+      "purpose": "Requests recovery instead of a new mutation in the native CAS V2 hard-exit fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 recovery selector"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_ABORT",
+      "category": "test_fixture",
+      "purpose": "Injects an abort decision into the native CAS V2 hard-exit fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 abort fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_HARD_EXIT_SAFE_ABORT",
+      "category": "test_fixture",
+      "purpose": "Injects a pre-publication safe abort into the native CAS V2 hard-exit fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 safe-abort fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_POST_P_REPARSE_TARGET",
+      "category": "test_fixture",
+      "purpose": "Replacement reparse target injected after the CAS V2 publication point for fail-closed topology tests.",
+      "default": "unset",
+      "accepted_values": ["absolute test target path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 post-publication reparse fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_1177_RECREATE_LIVE",
+      "category": "test_fixture",
+      "purpose": "Recreates a live target during the CAS V2 1177 hard-exit regression fixture.",
+      "default": "unset",
+      "accepted_values": ["test payload", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 recreated-live fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_FORCE_SHORT_REPAIR",
+      "category": "test_fixture",
+      "purpose": "Forces deterministic short-name repair paths in native CAS V2 tests.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 short-name repair fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the native CAS V2 cross-process lock fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_PATH",
+      "category": "test_fixture",
+      "purpose": "Target path passed to the native CAS V2 cross-process lock fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test target path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock target"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_STATE",
+      "category": "test_fixture",
+      "purpose": "Recovery-state directory passed to the native CAS V2 cross-process lock fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test state path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock state fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_PAYLOAD",
+      "category": "test_fixture",
+      "purpose": "Mutation payload passed to the native CAS V2 cross-process lock fixture.",
+      "default": "unset",
+      "accepted_values": ["test payload", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock payload fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_READY",
+      "category": "test_fixture",
+      "purpose": "Ready-signal path shared with the native CAS V2 cross-process lock fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test marker path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock readiness fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_RELEASE",
+      "category": "test_fixture",
+      "purpose": "Release-signal path shared with the native CAS V2 cross-process lock fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test marker path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock release fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_ONLY",
+      "category": "test_fixture",
+      "purpose": "Requests lock-only behavior from the native CAS V2 cross-process fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock-only selector"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_HOLD_PHASE",
+      "category": "test_fixture",
+      "purpose": "CAS phase at which the native cross-process fixture holds its transaction lock.",
+      "default": "unset",
+      "accepted_values": ["test-defined CAS phase", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock hold-phase selector"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_HIDE_TARGET",
+      "category": "test_fixture",
+      "purpose": "Temporarily hides the live target in the native CAS V2 lock fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 hidden-target fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_V2_LOCK_EXIT_HELD",
+      "category": "test_fixture",
+      "purpose": "Terminates the native CAS V2 lock fixture while the transaction lock remains held.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock hard-exit fixture"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_LONG_PATH_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the isolated native Setup long-path helper subprocess.",
+      "default": "unset",
+      "accepted_values": ["test-defined value", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/long_path_windows_test.go", "description": "Native Windows test fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_LOCK_TEST_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the cross-process native Setup mutex fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined value", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/setup_lock_windows_test.go", "description": "Native Windows test fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_MAINTENANCE_TEST_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the isolated native Setup maintenance-gateway helper subprocess.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/maintenance_gateway_windows_test.go", "description": "Native Windows test fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_SERVICE_CONTROL_TEST_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the isolated native Setup gateway and watchdog stop-command helper subprocess.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/maintenance_gateway_windows_test.go", "description": "Native Windows service-control test fixture; never read by production runtime paths"},
+        {"location": "cmd/defenseclaw-setup/recovery_windows_test.go", "description": "Enables the delayed owned-process exit regression fixture"}
+      ],
+      "since": "0.8.6"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_TEST_GATEWAY_STOP",
+      "category": "test_fixture",
+      "purpose": "Carries the absolute stop-marker path for the delayed native Setup gateway-exit fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined absolute path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/maintenance_gateway_windows_test.go", "description": "Writes the gateway stop marker from the isolated control subprocess"},
+        {"location": "cmd/defenseclaw-setup/recovery_windows_test.go", "description": "Supplies the private gateway stop-marker path"}
+      ],
+      "since": "0.8.6"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_TEST_WATCHDOG_STOP",
+      "category": "test_fixture",
+      "purpose": "Carries the absolute stop-marker path for the delayed native Setup watchdog-exit fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined absolute path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/maintenance_gateway_windows_test.go", "description": "Writes the watchdog stop marker from the isolated control subprocess"},
+        {"location": "cmd/defenseclaw-setup/recovery_windows_test.go", "description": "Supplies the private watchdog stop-marker path"}
+      ],
+      "since": "0.8.6"
+    },
+    {
+      "name": "DEFENSECLAW_MANAGED_BREAKAWAY_CHILD",
+      "category": "test_fixture",
+      "purpose": "Selects the detached managed-breakaway child subprocess fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows process-tree test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_MANAGED_BREAKAWAY_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the managed-breakaway parent subprocess fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows process-tree test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_PROCESSUTIL_INHERITED_OUTPUT_CHILD",
+      "category": "test_fixture",
+      "purpose": "Selects the inherited-output descendant subprocess fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows inherited-output test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_PROCESSUTIL_INHERITED_OUTPUT_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the inherited-output parent subprocess fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows inherited-output test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_PROCESS_TREE_GRANDCHILD",
+      "category": "test_fixture",
+      "purpose": "Selects the process-tree grandchild subprocess fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows process-tree test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_PROCESS_TREE_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the process-tree parent subprocess fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows process-tree test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_PROCESS_TREE_MARKER",
+      "category": "test_fixture",
+      "purpose": "Marker path written by the managed-breakaway process-tree fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test marker path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows process-tree test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_PROCESS_TREE_PID_FILE",
+      "category": "test_fixture",
+      "purpose": "PID-record path shared with the process-tree cancellation fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test PID path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/processutil/command_windows_test.go", "description": "Native Windows process-tree test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_CANCEL_TEST_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the parent-cancellation native Setup helper subprocess.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "cmd/defenseclaw-setup/main_test.go", "description": "Native Windows test fixture; never read by production runtime paths"}],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_TIMEOUT_TEST_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the bounded native Setup child-timeout helper.",
+      "default": "unset",
+      "accepted_values": ["test-defined value", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/main_test.go", "description": "Native Windows test fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_LAUNCHER_LOGICAL_CWD",
+      "category": "test_fixture",
+      "purpose": "Carries the expected logical working directory to the long-CWD launcher fixture.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined value",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cmd/defenseclaw-launcher/long_cwd_windows_test.go",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_LAUNCHER_LONG_CWD_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the isolated long-CWD launcher helper subprocess.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined value",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cmd/defenseclaw-launcher/long_cwd_windows_test.go",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_GRACEFUL_STOP_MARKER",
+      "category": "test_fixture",
+      "purpose": "Carries the marker used by the authenticated graceful-stop daemon fixture.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined value",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/daemon/daemon_test.go",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_GRACEFUL_STOP_OBSERVED",
+      "category": "test_fixture",
+      "purpose": "Carries the observation marker used to prove the daemon graceful-stop fixture received its shutdown request.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined value",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/daemon/daemon_test.go",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_GRACEFUL_STOP_RELEASE",
+      "category": "test_fixture",
+      "purpose": "Carries the release marker used to let the daemon graceful-stop fixture finish after observing shutdown.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined value",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/daemon/daemon_test.go",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_WATCHDOG_WAIT_READY",
+      "category": "test_fixture",
+      "purpose": "Carries the readiness marker used by the native watchdog original-handle wait fixture.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined value",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/watchdog_pidfile_windows_test.go",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_WATCHDOG_WAIT_EXIT",
+      "category": "test_fixture",
+      "purpose": "Selects the native watchdog original-handle wait fixture.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined value",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/watchdog_pidfile_windows_test.go",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_WINDOWS_NOTIFICATION",
+      "category": "test_fixture",
+      "purpose": "Enables the attended native Windows notification delivery test.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/notify/notify_windows_test.go",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_AUTHENTICODE_HELPER",
+      "category": "test_fixture",
+      "purpose": "Carries the Authenticode PowerShell helper path to the native unsigned-PE regression fixture.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/tests/test_windows_installer_artifacts.py",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_UNSIGNED_PE",
+      "category": "test_fixture",
+      "purpose": "Carries an unsigned portable-executable fixture path to the native Authenticode evidence regression.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/tests/test_windows_installer_artifacts.py",
+          "description": "Native Windows test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.0"
     },
     {
       "name": "DEFENSECLAW_GATEWAY_URL",

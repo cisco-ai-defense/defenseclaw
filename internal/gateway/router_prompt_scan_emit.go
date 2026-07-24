@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -69,8 +68,8 @@ func sessionPromptScannerName(v *ScanVerdict) string {
 }
 
 // buildSessionPromptScanResult converts a stream-path prompt verdict into a
-// ScanResult for LogScanWithCorrelation. User-derived text is redacted
-// before any field is persisted or emitted to gateway.jsonl.
+// ScanResult for LogScanWithCorrelation. It preserves source facts for the
+// central per-destination redaction boundary.
 func buildSessionPromptScanResult(verdict *ScanVerdict, messageID string, elapsed time.Duration) *scanner.ScanResult {
 	if verdict == nil || messageID == "" {
 		return nil
@@ -85,12 +84,12 @@ func buildSessionPromptScanResult(verdict *ScanVerdict, messageID string, elapse
 			OriginalID:  "session-prompt",
 			Category:    CatGeneral,
 			Severity:    verdict.Severity,
-			Title:       redaction.ForSinkReason(verdict.Reason),
+			Title:       stripLogInjectionRunes(verdict.Reason),
 		}}
 	}
 	findings := make([]scanner.Finding, 0, len(nfs))
 	for _, nf := range nfs {
-		title := strings.TrimSpace(redaction.Reason(nf.Title))
+		title := strings.TrimSpace(stripLogInjectionRunes(nf.Title))
 		if title == "" {
 			title = nf.CanonicalID
 		}

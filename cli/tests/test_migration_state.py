@@ -27,13 +27,14 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
 from defenseclaw import migration_state
+
+from tests.permissions import assert_owner_only_file
 
 
 class TestStateRoundtrip(unittest.TestCase):
@@ -67,8 +68,7 @@ class TestStateRoundtrip(unittest.TestCase):
                 data_dir,
                 migration_state.MigrationState(package_version="0.5.0"),
             )
-            mode = stat.S_IMODE(os.stat(migration_state.state_path(data_dir)).st_mode)
-        self.assertEqual(mode, 0o600, "cursor file must be 0o600 — owner-only")
+            assert_owner_only_file(migration_state.state_path(data_dir))
 
     def test_save_is_atomic_no_temp_file_left_behind(self):
         with tempfile.TemporaryDirectory() as data_dir:

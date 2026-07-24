@@ -44,7 +44,7 @@ The alias defaults Hermes to observe mode and can join an existing hook-connecto
 defenseclaw setup hermes
 ```
 
-Confirms once, wires the hooks block in `~/.hermes/config.yaml`, restarts the gateway. Findings flow to `~/.defenseclaw/gateway.jsonl` and the TUI; no traffic is intercepted, no requests are blocked. Pass `--yes` to skip the confirmation in CI.
+Confirms once, wires the hooks block in `~/.hermes/config.yaml`, and restarts the gateway. Findings flow to mandatory SQLite event history and the TUI; configured v8 destinations receive only the buckets/signals their routes select. No traffic is intercepted and no requests are blocked. Pass `--yes` to skip the confirmation in CI.
 
 </Tab>
 

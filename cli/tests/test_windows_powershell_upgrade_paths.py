@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "scripts" / "install.ps1"
 RESOLVER = ROOT / "scripts" / "upgrade.ps1"
 RELEASE_HARNESS = ROOT / "scripts" / "test-upgrade-release-windows.ps1"
+LEGACY_INLINE_INSTALLER = "function Install-Uv {" in INSTALLER.read_text(encoding="utf-8")
 
 
 def _main_body(source: str) -> str:
@@ -46,6 +47,261 @@ def _powershell_python_here_string(source: str, variable: str) -> str:
     return source[start : source.index("\n'@", start)]
 
 
+def _powershell_checksum_parser(source: str) -> str:
+    version_helpers = source[source.index("function Assert-Version {") : source.index("function Test-Integer {")]
+    checksum_parser = source[source.index("function Read-Checksums {") : source.index("function Assert-Hash {")]
+    return (
+        "Set-StrictMode -Version Latest\n"
+        "$ErrorActionPreference='Stop'\n"
+        "$script:VersionPattern='^\\d+\\.\\d+\\.\\d+$'\n"
+        "function Fail { param([string]$Message) throw $Message }\n" + version_helpers + checksum_parser
+    )
+
+
+def _powershell_manifest_validator(source: str) -> str:
+    version_helpers = source[source.index("function Assert-Version {") : source.index("function Get-Home {")]
+    manifest_validator = source[source.index("function Property {") : source.index("function Assert-SafeZip {")]
+    return (
+        "Set-StrictMode -Version Latest\n"
+        "$ErrorActionPreference='Stop'\n"
+        "$script:VersionPattern='^\\d+\\.\\d+\\.\\d+$'\n"
+        "$script:ResolverProtocol=2\n"
+        "function Fail { param([string]$Message) throw $Message }\n" + version_helpers + manifest_validator
+    )
+
+
+def _hard_cut_manifest(windows_sources: object) -> dict[str, object]:
+    version = "0.8.5"
+    return {
+        "schema_version": 2,
+        "release_version": version,
+        "min_upgrade_protocol": 2,
+        "controller_upgrade_protocol": 2,
+        "migration_failure_policy": "fail",
+        "required_cli_migrations": [version],
+        "tested_source_versions": ["0.8.4", "0.8.3"],
+        "platform_tested_source_versions": {"windows": windows_sources},
+        "runtime_config_version": 8,
+        "release_artifacts": {
+            "wheel": f"defenseclaw-{version}-2-py3-none-any.dcwheel",
+            "gateways": {
+                platform: {
+                    arch: f"defenseclaw_{version}_protocol2_{platform}_{arch}.dcgateway" for arch in ("amd64", "arm64")
+                }
+                for platform in ("darwin", "linux", "windows")
+            },
+        },
+        "minimum_source_version": "0.8.4",
+        "required_bridge_version": "0.8.4",
+        "auto_bridge_from": ["0.8.3"],
+    }
+
+
+def _run_powershell_manifest_validation(
+    tmp_path: Path,
+    windows_sources: object,
+) -> subprocess.CompletedProcess[str]:
+    executable = shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")
+    assert executable is not None
+    source = RESOLVER.read_text(encoding="utf-8")
+    manifest = tmp_path / "upgrade-manifest.json"
+    manifest.write_text(json.dumps(_hard_cut_manifest(windows_sources)), encoding="utf-8")
+    command = (
+        _powershell_manifest_validator(source)
+        + "\n$raw=Get-Content -Raw -LiteralPath $env:MANIFEST | ConvertFrom-Json\n"
+        + "Validate-Manifest -Raw $raw -ReleaseVersion '0.8.5'\n"
+    )
+    return subprocess.run(
+        [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env={
+            **os.environ,
+            "POWERSHELL_TELEMETRY_OPTOUT": "1",
+            "MANIFEST": str(manifest),
+        },
+    )
+
+
+@pytest.mark.skipif(
+    not (shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")),
+    reason="PowerShell is unavailable on this host",
+)
+def test_windows_manifest_refuses_unpublished_bridge_before_mutation(tmp_path: Path) -> None:
+    completed = _run_powershell_manifest_validation(tmp_path, [])
+    output = completed.stdout + completed.stderr
+
+    assert completed.returncode != 0
+    assert "Windows upgrades to 0.8.5 are unsupported by the signed release policy" in output
+    assert "Required bridge 0.8.4 was not published for Windows" in output
+    assert "No changes were made" in output
+
+
+@pytest.mark.skipif(
+    not (shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")),
+    reason="PowerShell is unavailable on this host",
+)
+def test_windows_manifest_rejects_nonempty_matrix_without_bridge(tmp_path: Path) -> None:
+    completed = _run_powershell_manifest_validation(tmp_path, ["0.8.3"])
+    output = completed.stdout + completed.stderr
+
+    assert completed.returncode != 0
+    assert "Required bridge is absent from the signed Windows tested-source matrix" in output
+    assert "was not published for Windows" not in output
+
+
+@pytest.mark.skipif(
+    not (shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")),
+    reason="PowerShell is unavailable on this host",
+)
+def test_windows_checksum_parser_accepts_only_signed_legacy_goreleaser_rows(
+    tmp_path: Path,
+) -> None:
+    executable = shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")
+    assert executable is not None
+    source = RESOLVER.read_text(encoding="utf-8")
+    parser = _powershell_checksum_parser(source)
+    checksums = tmp_path / "checksums.txt"
+    digest = "a" * 64
+    artifact = "defenseclaw-0.8.3-py3-none-any.whl"
+    checksums.write_text(
+        "\n".join(
+            (
+                f"{digest}  defenseclaw_darwin_amd64_v1/defenseclaw",
+                f"{digest}  defenseclaw_darwin_arm64_v8.0/defenseclaw",
+                f"{digest}  defenseclaw_linux_amd64_v1/defenseclaw",
+                f"{digest}  defenseclaw_linux_arm64_v8.0/defenseclaw",
+                f"{digest}  defenseclaw_windows_amd64_v1/defenseclaw.exe",
+                f"{digest}  defenseclaw_windows_arm64_v8.0/defenseclaw.exe",
+                f"{digest}  {artifact}",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    command = (
+        parser
+        + "\n$parsed=Read-Checksums -Path $env:CHECKSUMS -ReleaseVersion '0.8.3'\n"
+        + f"if($parsed.Count -ne 1 -or -not $parsed.ContainsKey('{artifact}')){{exit 9}}\n"
+    )
+
+    completed = subprocess.run(
+        [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env={
+            **os.environ,
+            "POWERSHELL_TELEMETRY_OPTOUT": "1",
+            "CHECKSUMS": str(checksums),
+        },
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(
+    not (shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")),
+    reason="PowerShell is unavailable on this host",
+)
+def test_windows_checksum_parser_accepts_modern_flat_manifest(tmp_path: Path) -> None:
+    executable = shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")
+    assert executable is not None
+    source = RESOLVER.read_text(encoding="utf-8")
+    parser = _powershell_checksum_parser(source)
+    checksums = tmp_path / "checksums.txt"
+    artifact = "defenseclaw-0.8.4-py3-none-any.whl"
+    checksums.write_text(f"{'a' * 64}  {artifact}\n", encoding="utf-8")
+    command = (
+        parser
+        + "\n$parsed=Read-Checksums -Path $env:CHECKSUMS -ReleaseVersion '0.8.4'\n"
+        + f"if($parsed.Count -ne 1 -or -not $parsed.ContainsKey('{artifact}')){{exit 9}}\n"
+    )
+
+    completed = subprocess.run(
+        [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env={
+            **os.environ,
+            "POWERSHELL_TELEMETRY_OPTOUT": "1",
+            "CHECKSUMS": str(checksums),
+        },
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(
+    not (shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")),
+    reason="PowerShell is unavailable on this host",
+)
+@pytest.mark.parametrize(
+    ("release_version", "nested_name"),
+    [
+        ("0.8.4", "defenseclaw_windows_amd64_v1/defenseclaw.exe"),
+        ("0.8.3", "unknown/path"),
+        ("0.8.3", "../checksums.txt"),
+        ("0.8.3", r"unknown\path"),
+    ],
+)
+def test_windows_checksum_parser_rejects_modern_or_unknown_nested_rows(
+    tmp_path: Path,
+    release_version: str,
+    nested_name: str,
+) -> None:
+    executable = shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")
+    assert executable is not None
+    source = RESOLVER.read_text(encoding="utf-8")
+    parser = _powershell_checksum_parser(source)
+    checksums = tmp_path / "checksums.txt"
+    checksums.write_text(f"{'a' * 64}  {nested_name}\n", encoding="utf-8")
+    command = parser + f"\nRead-Checksums -Path $env:CHECKSUMS -ReleaseVersion '{release_version}'\n"
+
+    completed = subprocess.run(
+        [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env={
+            **os.environ,
+            "POWERSHELL_TELEMETRY_OPTOUT": "1",
+            "CHECKSUMS": str(checksums),
+        },
+    )
+
+    assert completed.returncode != 0
+    assert "Invalid checksum artifact name." in completed.stderr
+
+
+def test_windows_native_bootstrap_delegates_authenticated_install_lifecycle() -> None:
+    source = INSTALLER.read_text(encoding="utf-8")
+    main = _main_body(source)
+    handoff = source[source.index("function Invoke-NativeSetup") : source.index("function Main")]
+
+    assert not LEGACY_INLINE_INSTALLER
+    assert "function Ensure-Python {" not in source
+    assert 'SetEnvironmentVariable("Path"' not in source
+    assert "DefenseClawSetup-x64.exe" in source
+    assert main.index("Assert-NativeWindowsX64") < main.index("Stage-RemoteBundle")
+    assert main.index("Assert-CompatibleLayoutRequest") < main.index("Stage-RemoteBundle")
+    assert main.index("Stage-RemoteBundle") < main.index("Invoke-NativeSetup")
+    assert main.index("Stage-LocalBundle") < main.index("Invoke-NativeSetup")
+    assert "Remove-PrivateStageRoot -Path $bundle.Root" in main
+    assert handoff.index("Assert-Sha256") < handoff.index("Assert-SetupAuthenticode")
+    assert handoff.index("Assert-SetupAuthenticode") < handoff.index("Invoke-BoundedNativeProcess")
+
+
+@pytest.mark.skipif(
+    not LEGACY_INLINE_INSTALLER,
+    reason="0.8.6 delegates the install transaction to native Setup",
+)
 def test_windows_installer_refuses_existing_install_before_any_dependency_or_artifact_work() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
     main = _main_body(source)
@@ -76,6 +332,10 @@ def test_windows_installer_refuses_existing_install_before_any_dependency_or_art
     assert "if($count -eq 0){break}" in source
 
 
+@pytest.mark.skipif(
+    not LEGACY_INLINE_INSTALLER,
+    reason="0.8.6 delegates PATH and runtime ownership to native Setup",
+)
 def test_windows_fresh_installer_never_delegates_persistent_path_or_python_registration() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
     install_uv = source[source.index("function Install-Uv {") : source.index("function Ensure-Python {")]
@@ -96,6 +356,10 @@ def test_windows_fresh_installer_never_delegates_persistent_path_or_python_regis
     assert "Persistent PATH was not modified" in install_uv
 
 
+@pytest.mark.skipif(
+    not LEGACY_INLINE_INSTALLER,
+    reason="0.8.6 native Setup has its own rollback and lifecycle acceptance suite",
+)
 def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
     main = _main_body(source)
@@ -131,6 +395,10 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
         "NAMESPACE_RETIRE_TIMEOUT_MS",
         "ConfigureTestNamespaceRetirementDelay",
         "ClearTestNamespaceRetirementDelay",
+        "ConfigureTestDeleteBindingDelay",
+        "ClearTestDeleteBindingDelay",
+        "OpenSnapshotObservationHandle",
+        "OpenRetirementHandle",
         "ConfigureTestMoveOutAfterSnapshot",
         "ClearTestMoveOutAfterSnapshot",
         "ConfigureTestEmptyDirectoryDeleteFailures",
@@ -194,17 +462,35 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
     assert tree_delete.index("current.Dispose()") < tree_delete.index("WaitForNamespaceRetirement(")
     assert "return RetireRootNamespaceExact(" in tree_delete
     assert "never resnapshot or acquire fresh delete authority" in tree_delete
-    assert tree_delete.count("SnapshotDirectory(path, 1, entries, ref bytes)") == 1
+    assert tree_delete.count("SnapshotDirectory(path, 1, entries, ref bytes, deadline)") == 1
+    assert "StartTestDeleteBindingDelay()" in tree_delete
+    snapshot = source[source.index("private void SnapshotDirectory") : source.index("public bool DeleteTreeExact()")]
+    assert "OpenSnapshotObservationHandle(child, deadline)" in snapshot
+    assert "OpenRetirementHandle" not in snapshot
+    retirement_open = source[
+        source.index("private static SafeFileHandle OpenRetirementHandle") : source.index(
+            "private static SafeFileHandle OpenParentHandle"
+        )
+    ]
+    assert "FILE_SHARE_READ | FILE_SHARE_WRITE" in retirement_open
+    assert "FILE_SHARE_DELETE" not in retirement_open
+    assert "ERROR_ACCESS_DENIED" in retirement_open
+    assert "ERROR_SHARING_VIOLATION" in retirement_open
+    assert "ERROR_DELETE_PENDING" in retirement_open
+    assert "timed out binding exact fresh-install path for retirement" in retirement_open
     observer = source[
         source.index("private static NamespaceObservation ObserveNamespace") : source.index(
             "private static long NewNamespaceRetirementDeadline"
         )
     ]
-    assert "FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE" in source[
-        source.index("private static SafeFileHandle OpenNamespaceObservationHandle") : source.index(
-            "private static TestRetainer TakeTestNamespaceRetainer"
-        )
-    ]
+    assert (
+        "FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE"
+        in source[
+            source.index("private static SafeFileHandle OpenNamespaceObservationHandle") : source.index(
+                "private static TestRetainer TakeTestNamespaceRetainer"
+            )
+        ]
+    )
     assert "ERROR_FILE_NOT_FOUND" in observer
     assert "ERROR_PATH_NOT_FOUND" in observer
     assert "ERROR_ACCESS_DENIED" in observer
@@ -233,10 +519,15 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
         "Fresh-install payload rollback completed; retry is safe"
     )
     self_test_branch = main.index("if ($NativePrivateDirectorySelfTestRoot)")
-    assert self_test_branch < main.index(
-        "Invoke-NativePrivateDirectorySelfTest -Root $NativePrivateDirectorySelfTestRoot",
-        self_test_branch,
-    ) < main.index("return", self_test_branch) < main.index("Assert-FreshInstall")
+    assert (
+        self_test_branch
+        < main.index(
+            "Invoke-NativePrivateDirectorySelfTest -Root $NativePrivateDirectorySelfTestRoot",
+            self_test_branch,
+        )
+        < main.index("return", self_test_branch)
+        < main.index("Assert-FreshInstall")
+    )
     assert "Fresh-install fault injection requires -TestMode" in main
     assert "[Parameter(DontShow = $true)][switch]$TestMode" in source
     assert "[Parameter(DontShow = $true)][switch]$InjectFailureBeforeShim" in source
@@ -246,48 +537,79 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
     assert "[Parameter(DontShow = $true)][switch]$InjectFailureAfterFreshDirectoryMove" in source
     assert '[Parameter(DontShow = $true)][string]$NativePrivateDirectorySelfTestRoot = ""' in source
 
-    harness = (ROOT / "scripts/test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")
-    assert "-InjectFailureBeforeShim" in harness
-    assert "Invoke-FreshInstaller -InjectConcurrentShimBeforePublish" in harness
-    assert "InjectPolicyCleanupFailure" in harness
-    assert "InjectPolicyCustodyMoveBeforeCleanup" in harness
-    assert "Invoke-FreshInstaller -InjectFailureAfterFreshDirectoryMove" in harness
-    assert "Post-move fresh-directory cleanup was not exact" in harness
-    assert "Persistent User PATH was not modified" in harness
-    assert "Modern fresh install mutated the persistent user PATH" in harness
-    assert 'defenseclaw.cmd`" init' in harness
-    assert 'Join-Path $HomeRoot ".local\\bin"' in harness
-    assert 'Join-Path $HomeRoot ".local/bin"' not in harness
-    assert "Remove-MovedPolicyCustodyResidue" in harness
-    assert "Creation-bound policy custody was not preserved" in harness
-    assert "Remove-InjectedPolicyResidue" in harness
-    assert "Fresh Windows install did not survive policy cleanup failure" in harness
-    assert "Policy cleanup failure or residual retirement changed installed bytes" in harness
-    assert "powershell.exe" in harness
-    assert "Get-Command powershell.exe -CommandType Application -ErrorAction Stop" in harness
-    assert "WindowsPowerShellCommand" not in harness
-    assert "Windows PowerShell 5.1 could not parse/compile install.ps1" in harness
-    assert "-NativePrivateDirectorySelfTestRoot $legacyNativeRoot" in harness
-    assert "Windows PowerShell 5.1 native private lifecycle failed" in harness
-    assert "-NativePrivateDirectorySelfTestRoot $modernNativeRoot" in harness
-    assert "PowerShell 7 native private lifecycle failed" in harness
     assert "Native private directory lifecycle passed" in source
     assert "Native snapshotted-child move-out refusal passed" in source
     assert "Native fresh directory fault boundaries passed" in source
     assert "Native empty directory rollback retry passed" in source
     assert "Native delayed tree-root namespace retirement passed" in source
     assert "Native delayed child namespace retirement passed" in source
+    assert "Native delayed exact DELETE binding passed" in source
     assert "Native namespace retirement wait passed" in source
     assert "Native post-move rollback topology passed" in source
     assert "Native private-directory self-test accepted a file as its parent" in source
-    assert "Fresh-install payload rollback completed; retry is safe" in harness
-    assert "Concurrent unclaimed shim disappeared during rollback" in harness
-    assert "Failed fresh install left installer-created binary directories behind" in harness
-    assert "Assert-NoFreshPayload -Context $postMove.Output" in harness
-    assert "--- post-move installer output ---" in harness
-    assert "bounded residual path inventory (names and kinds only)" in harness
 
 
+def test_windows_release_bootstrap_smoke_tracks_native_setup_layout() -> None:
+    harness = (ROOT / "scripts/test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")
+    disposable = (ROOT / "scripts/invoke-windows-setup-standard-user-ci.ps1").read_text(encoding="utf-8")
+
+    # Both the release candidate and PR-native regression must enter through the
+    # same disposable real-user profile. Environment-variable fake homes cannot
+    # model Windows Known Folders or the native Setup registry surface.
+    assert "invoke-windows-setup-standard-user-ci.ps1" in harness
+    assert "-Mode bootstrap-acceptance" in harness
+    assert "-ArtifactRoot $ReleaseDir" in harness
+    assert "-TargetVersion $TargetVersion" in harness
+    assert "'bootstrap-acceptance'" in disposable
+    assert "test-fresh-install-release-windows.ps1" in disposable
+    assert "install.ps1" in disposable
+
+    for asset in (
+        "DefenseClawSetup-x64.exe",
+        "DefenseClawSetup-x64.exe.provenance.json",
+        "upgrade-manifest.json",
+        "checksums.txt",
+        "checksums.txt.sig",
+        "checksums.txt.pem",
+        "checksums.txt.bundle",
+        "cosign-windows-amd64.exe",
+    ):
+        assert asset in disposable
+
+    assert "GetFolderPath([Environment+SpecialFolder]::UserProfile)" in harness
+    assert "[Environment+SpecialFolder]::LocalApplicationData" in harness
+    assert "Programs\\DefenseClaw" in harness
+    assert "DefenseClaw\\InstallerCache" in harness
+    assert "Uninstall\\DefenseClaw" in harness
+    assert "Native DefenseClaw Setup completed successfully" in harness
+    assert "Assert-ExactVersion -Executable $launcher" in harness
+    assert "Assert-ExactVersion -Executable $gateway" in harness
+    assert "$first = Invoke-CapturedProcess" in harness
+    assert "$second = Invoke-CapturedProcess" in harness
+    assert "DELETEUSERDATA=1" in harness
+    assert 'GetEnvironmentVariable("Path", "User")' in harness
+    assert "uninstall did not restore the original user PATH exactly" in harness
+
+    for obsolete in (
+        "$env:USERPROFILE = $HomeRoot",
+        "$env:DEFENSECLAW_HOME = Join-Path $HomeRoot",
+        '".defenseclaw/.venv/Scripts/defenseclaw.exe"',
+        '".local\\bin\\defenseclaw-gateway.exe"',
+        "Persistent User PATH was not modified",
+        "Second fresh-installer invocation unexpectedly succeeded",
+        "InjectFailureBeforeShim",
+        "InjectConcurrentShimBeforePublish",
+        "InjectPolicyCleanupFailure",
+        "InjectPolicyCustodyMoveBeforeCleanup",
+        "InjectFailureAfterFreshDirectoryMove",
+    ):
+        assert obsolete not in harness
+
+
+@pytest.mark.skipif(
+    not LEGACY_INLINE_INSTALLER,
+    reason="0.8.6 native Setup owns installation custody; the script only stages authenticated assets",
+)
 def test_windows_private_custody_cleanup_is_creation_bound_and_identity_exact() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
 
@@ -413,9 +735,7 @@ def test_windows_private_custody_cleanup_is_creation_bound_and_identity_exact() 
     assert '$maximumAttempts = if ($entry.Kind -ceq "EmptyDirectory") { 20 } else { 1 }' in undo
     assert "$removed = Remove-FreshInstallClaim -Entry $entry" in undo
     assert "Start-Sleep -Milliseconds (50 * $attempt)" in undo
-    retry = undo[
-        undo.index("$maximumAttempts = if") : undo.index("if (-not $removed)")
-    ]
+    retry = undo[undo.index("$maximumAttempts = if") : undo.index("if (-not $removed)")]
     assert retry.index("Remove-FreshInstallClaim") < retry.index("Start-Sleep")
     assert undo.index("if (-not $removed)") < undo.index("$entry.Native.Dispose()")
 
@@ -460,6 +780,7 @@ def test_windows_phase_one_custody_keeps_pep427_wheel_names() -> None:
 def test_windows_resolver_has_fail_closed_bridge_and_fresh_controller_contract() -> None:
     source = RESOLVER.read_text(encoding="utf-8")
     main = _main_body(source)
+    validator = source[source.index("function Validate-Manifest {") : source.index("function Assert-SafeZip {")]
 
     assert "$versionMatches" in source
     assert "$gatewayProcesses" in source
@@ -502,7 +823,19 @@ def test_windows_resolver_has_fail_closed_bridge_and_fresh_controller_contract()
     assert "Do not force $($final.Manifest.RequiredBridge)" in source
     assert "contact DefenseClaw support for a validated state-aware recovery path" in source
     assert "Bridge $bridgeVersion does not declare $installed in its tested Windows source matrix" in source
-    assert "-I -m defenseclaw.main upgrade" in source
+    assert "-I -B -m defenseclaw.main upgrade" in source
+    unsupported_windows = (
+        'Fail "Windows upgrades to $ReleaseVersion are unsupported by the signed release policy. '
+        "Required bridge $bridge was not published for Windows. No changes were made: "
+        'no services were stopped and no installed artifacts were changed."'
+    )
+    assert unsupported_windows in validator
+    assert "platform_tested_source_versions must contain exactly the Windows source list" in validator
+    assert "Required bridge is absent from the signed Windows tested-source matrix" in validator
+    assert validator.index("if($tested -notcontains $bridge){") < validator.index(unsupported_windows)
+    assert validator.index(unsupported_windows) < validator.index(
+        'Fail "Windows tested-source list must not be empty."'
+    )
 
     release_gate = (ROOT / "scripts/test-upgrade-release-windows.ps1").read_text(encoding="utf-8")
     assert "defenseclaw-$TargetVersion-2-py3-none-any.whl" in release_gate
@@ -608,10 +941,10 @@ def test_windows_resolver_binds_hard_cut_provenance_before_mutation() -> None:
     assert "installed source config loader has an unsupported signature" in runtime_paths
     assert "except TypeError" not in runtime_paths
     assert runtime_paths.index("$env:DEFENSECLAW_HOME=$controllerHome") < runtime_paths.index(
-        "(Get-Python) -I -c $resolver"
+        "(Get-Python) -I -B -c $resolver"
     )
     assert runtime_paths.index("$env:DEFENSECLAW_CONFIG=$configPath") < runtime_paths.index(
-        "(Get-Python) -I -c $resolver"
+        "(Get-Python) -I -B -c $resolver"
     )
     assert "Get-ControllerHome" in source
     assert "Get-PhaseOneDirectoryIdentity" in source
@@ -738,9 +1071,7 @@ def test_windows_runtime_path_resolver_supports_published_and_scoped_loaders(
         "def make_config(active):\n"
         "    with open(active, encoding='utf-8') as stream:\n"
         "        raw = json.load(stream)\n"
-        "    return Config(raw)\n"
-        + loader
-        + "module.load = load\n"
+        "    return Config(raw)\n" + loader + "module.load = load\n"
         "package = types.ModuleType('defenseclaw')\n"
         "package.__path__ = []\n"
         "package.config = module\n"
@@ -846,7 +1177,7 @@ def test_windows_success_health_is_bounded_healthy_and_version_bound() -> None:
         'gateway.get("state") in {"running", "disabled"}',
         'provenance.get("binary_version") == expected_version',
         "cfg.gateway.resolved_token() if loopback else",
-        "-I -c $probe",
+        "-I -B -c $probe",
     ):
         assert required in helper
     assert "(Get-Gateway) status" not in helper
@@ -983,11 +1314,85 @@ def test_windows_release_authentication_output_cannot_pollute_manifest_return() 
     assert "$candidateReleaseOutput" not in source
 
 
+def test_windows_unpublished_runtime_gate_executes_sealed_resolver_without_mutation() -> None:
+    source = RELEASE_HARNESS.read_text(encoding="utf-8")
+    policy_start = source.index("function Assert-UnpublishedWindowsCandidatePolicy")
+    policy = source[policy_start : source.index("function Cleanup")]
+    refusal = source[
+        source.index("function Test-UnpublishedWindowsResolverRefusal") : source.index(
+            "function Test-ProtectedMaterializationCollision"
+        )
+    ]
+    main = _main_body(source)
+
+    assert "[switch]$UnpublishedWindowsRefusalOnly" in source
+    assert "@($windows.Value).Count -ne 0" in policy
+    assert '$platformNames -notcontains "windows"' in policy
+    assert "truthful hard cut with an unpublished Windows bridge" in policy
+    assert "Get-CandidateResolverPath" in refusal
+    assert '"-LatestVersionOverride", $TargetVersion' in refusal
+    assert "Start-RefusalSentinel" in refusal
+    assert "Assert-SnapshotsEqual" in refusal
+    assert "Assert-NoSucceededReceipt" in refusal
+    assert "persistent user PATH" in refusal
+    assert "unsupported by the signed release policy" in refusal
+    assert "was not published for Windows" in refusal
+    assert "No changes were made" in refusal
+    branch = main.index("if ($UnpublishedWindowsRefusalOnly)")
+    candidate_copy = main.index("[void](Copy-CandidateRelease)")
+    candidate_policy = main.index("Assert-UnpublishedWindowsCandidatePolicy", branch)
+    resolver_refusal = main.index("Test-UnpublishedWindowsResolverRefusal", branch)
+    ordinary_matrix = main.index("$hardCut = Assert-CandidatePolicy", branch)
+    assert candidate_copy < branch < candidate_policy < resolver_refusal < ordinary_matrix
+
+
+@pytest.mark.skipif(
+    not (shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")),
+    reason="PowerShell is unavailable on this host",
+)
+def test_windows_unpublished_runtime_policy_accepts_only_an_empty_matrix(
+    tmp_path: Path,
+) -> None:
+    executable = shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")
+    assert executable is not None
+    source = RELEASE_HARNESS.read_text(encoding="utf-8")
+    start = source.index("function Assert-UnpublishedWindowsCandidatePolicy")
+    helper = source[start : source.index("function Cleanup", start)]
+    prelude = (
+        "Set-StrictMode -Version Latest\n"
+        "$ErrorActionPreference='Stop'\n"
+        "function Fail { param([string]$Message) throw $Message }\n"
+        "function Compare-Version { param([string]$Left,[string]$Right) "
+        "return ([version]$Left).CompareTo([version]$Right) }\n"
+        "function Get-Property { param([object]$Object,[string]$Name) "
+        "if($null -eq $Object){return $null}; return $Object.PSObject.Properties[$Name] }\n"
+        "$script:HardCutVersion='0.8.5'\n"
+        "$script:BridgeVersion='0.8.4'\n"
+        "$TargetVersion='0.8.5'\n" + helper + "\n$raw=Get-Content -Raw -LiteralPath $env:MANIFEST | ConvertFrom-Json\n"
+        "Assert-UnpublishedWindowsCandidatePolicy -Manifest $raw\n"
+    )
+    manifest = tmp_path / "upgrade-manifest.json"
+
+    for windows_sources, should_pass in (([], True), (["0.8.3"], False)):
+        manifest.write_text(json.dumps(_hard_cut_manifest(windows_sources)), encoding="utf-8")
+        completed = subprocess.run(
+            [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", prelude],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env={
+                **os.environ,
+                "POWERSHELL_TELEMETRY_OPTOUT": "1",
+                "MANIFEST": str(manifest),
+            },
+        )
+        assert (completed.returncode == 0) is should_pass, completed.stdout + completed.stderr
+
+
 def test_windows_release_snapshot_accumulators_accept_their_initial_empty_list() -> None:
     source = RELEASE_HARNESS.read_text(encoding="utf-8")
-    snapshot_path = source[
-        source.index("function Add-SnapshotPath") : source.index("function Add-SnapshotTree")
-    ]
+    snapshot_path = source[source.index("function Add-SnapshotPath") : source.index("function Add-SnapshotTree")]
     snapshot_tree = source[
         source.index("function Add-SnapshotTree") : source.index("function Write-InstalledStateSnapshot")
     ]
@@ -1003,6 +1408,45 @@ def test_windows_release_snapshot_accumulators_accept_their_initial_empty_list()
     assert "Add-SnapshotTree -Rows $rows" in source
 
 
+def test_windows_release_snapshot_keeps_python_bytecode_in_custody() -> None:
+    source = RELEASE_HARNESS.read_text(encoding="utf-8")
+    snapshot_tree = source[
+        source.index("function Add-SnapshotTree") : source.index("function Write-InstalledStateSnapshot")
+    ]
+    snapshot_assertion = source[
+        source.index("function Assert-SnapshotsEqual") : source.index("function Assert-NoSucceededReceipt")
+    ]
+
+    assert "Add-SnapshotPath -Rows $Rows" in snapshot_tree
+    assert "isRuntimeBytecodeCache" not in snapshot_tree
+    assert "__pycache__" not in snapshot_tree
+    assert ".pyc" not in snapshot_tree
+    assert 'Write-Host ("snapshot added: {0}" -f $path)' in snapshot_assertion
+    assert 'Write-Host ("snapshot removed: {0}" -f $path)' in snapshot_assertion
+    assert 'Write-Host ("snapshot changed: {0}" -f $path)' in snapshot_assertion
+
+
+def test_windows_hard_cut_refusal_exercises_a_cold_cache_without_env_suppression() -> None:
+    source = RELEASE_HARNESS.read_text(encoding="utf-8")
+    start = source.index("function Test-HardCutExplicitRefusal")
+    end = source.index("\n}\n\nfunction Test-UnpublishedWindowsResolverRefusal", start)
+    refusal = source[start:end]
+
+    cold_cache = refusal.index('Get-ChildItem -LiteralPath $packageRoot -Directory -Filter "__pycache__"')
+    snapshot = refusal.index("Write-InstalledStateSnapshot -Case $Case -Output $before")
+    unsuppress = refusal.index('[Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $null, "Process")')
+    invoke = refusal.index("Invoke-ExternalLogged", unsuppress)
+    after_snapshot = refusal.index("Write-InstalledStateSnapshot -Case $Case -Output $after")
+
+    assert cold_cache < snapshot < unsuppress < invoke < after_snapshot
+    assert (
+        refusal.count(
+            '[Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $bytecodeEnvironment, "Process")'
+        )
+        >= 2
+    )
+
+
 @pytest.mark.skipif(
     not (shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")),
     reason="PowerShell is unavailable on this host",
@@ -1011,9 +1455,7 @@ def test_powershell_release_snapshot_helpers_bind_an_empty_accumulator() -> None
     executable = shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")
     assert executable is not None
     source = RELEASE_HARNESS.read_text(encoding="utf-8")
-    helpers = source[
-        source.index("function Add-SnapshotPath") : source.index("function Write-InstalledStateSnapshot")
-    ]
+    helpers = source[source.index("function Add-SnapshotPath") : source.index("function Write-InstalledStateSnapshot")]
     command = (
         "$ErrorActionPreference='Stop'\n"
         + helpers
@@ -1032,6 +1474,57 @@ def test_powershell_release_snapshot_helpers_bind_an_empty_accumulator() -> None
         timeout=30,
         check=False,
         env={**os.environ, "POWERSHELL_TELEMETRY_OPTOUT": "1"},
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or not (shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")),
+    reason="Windows PowerShell filesystem and ACL semantics are unavailable on this host",
+)
+def test_powershell_release_snapshot_keeps_bytecode_and_reparse_entries(
+    tmp_path: Path,
+) -> None:
+    executable = shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")
+    assert executable is not None
+    source = RELEASE_HARNESS.read_text(encoding="utf-8")
+    helpers = source[source.index("function Add-SnapshotPath") : source.index("function Write-InstalledStateSnapshot")]
+    command = (
+        "$ErrorActionPreference='Stop'\n"
+        + helpers
+        + "\n$root=$env:SNAPSHOT_ROOT\n"
+        + "$real=New-Item -ItemType Directory -Path (Join-Path $root 'real') -Force\n"
+        + "$cache=New-Item -ItemType Directory -Path (Join-Path $real.FullName '__pycache__') -Force\n"
+        + "[IO.File]::WriteAllText((Join-Path $cache.FullName 'module.pyc'),'cache')\n"
+        + "[IO.File]::WriteAllText((Join-Path $real.FullName 'module.pyc'),'cache')\n"
+        + "[IO.File]::WriteAllText((Join-Path $real.FullName 'module.pyo'),'preserve')\n"
+        + "[IO.File]::WriteAllText((Join-Path $real.FullName 'cache-index'),'preserve')\n"
+        + "$linked=New-Item -ItemType Directory -Path (Join-Path $root 'linked') -Force\n"
+        + "$target=New-Item -ItemType Directory -Path (Join-Path $root 'target') -Force\n"
+        + "[void](New-Item -ItemType Junction -Path (Join-Path $linked.FullName '__pycache__') -Target $target.FullName -Force)\n"
+        + "$rows=New-Object System.Collections.Generic.List[object]\n"
+        + "$seen=@{}\n"
+        + "$case=[pscustomobject]@{Root=$root}\n"
+        + "Add-SnapshotTree -Rows $rows -Seen $seen -Case $case -Path $root\n"
+        + "$paths=@($rows|ForEach-Object{[string]$_.path})\n"
+        + "if($paths -notcontains 'real/__pycache__'){throw 'real __pycache__ was omitted'}\n"
+        + "if($paths -notcontains 'real/__pycache__/module.pyc'){throw 'cached .pyc was omitted'}\n"
+        + "if($paths -notcontains 'real/module.pyc'){throw 'standalone .pyc was omitted'}\n"
+        + "if($paths -notcontains 'real/module.pyo'){throw '.pyo was incorrectly ignored'}\n"
+        + "if($paths -notcontains 'real/cache-index'){throw 'broad cache name was incorrectly ignored'}\n"
+        + "if($paths -notcontains 'linked/__pycache__'){throw 'reparse __pycache__ was incorrectly ignored'}\n"
+    )
+    completed = subprocess.run(
+        [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env={
+            **os.environ,
+            "POWERSHELL_TELEMETRY_OPTOUT": "1",
+            "SNAPSHOT_ROOT": str(tmp_path),
+        },
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
@@ -1077,11 +1570,25 @@ def test_windows_release_harness_accepts_both_reviewed_config_map_topologies() -
         assert set(config_versions) == set(published)
         for version in published:
             major, minor, patch = (int(component) for component in version.split("."))
-            expected = 7 if (major, minor, patch) >= (0, 8, 3) else 6 if (
-                major,
-                minor,
-                patch,
-            ) >= (0, 7, 1) else 5
+            expected = (
+                8
+                if (major, minor, patch) >= (0, 8, 5)
+                else 7
+                if (
+                    major,
+                    minor,
+                    patch,
+                )
+                >= (0, 8, 3)
+                else 6
+                if (
+                    major,
+                    minor,
+                    patch,
+                )
+                >= (0, 7, 1)
+                else 5
+            )
             assert config_versions[version] == expected
         if "0.8.4" in config_versions:
             assert config_versions["0.8.4"] == 7
@@ -1099,9 +1606,7 @@ def test_windows_release_harness_accepts_both_reviewed_config_map_topologies() -
     ]
     without_bridge["published_baseline_config_versions"].pop("0.8.4", None)
     without_bridge["platform_published_baselines"]["windows"] = [
-        version
-        for version in without_bridge["platform_published_baselines"]["windows"]
-        if version != "0.8.4"
+        version for version in without_bridge["platform_published_baselines"]["windows"] if version != "0.8.4"
     ]
     assert_reviewed_topology(without_bridge)
 
@@ -1132,7 +1637,9 @@ def test_native_windows_release_harness_proves_refusal_bridge_and_exact_rollback
     assert "published_baseline_config_versions" in source
     assert "Upgrade baseline policy must be a schema_version 2 object" in source
     assert "Published baseline config-version keys must exactly match published_baselines" in source
-    assert "Published baseline $value must seed historical config version $expectedConfigVersion" in source
+    assert "Get-CandidateRuntimeConfigVersion" in source
+    assert "no newer" in source
+    assert "$env:UPGRADE_BASELINE_POLICY" in source
     assert "$script:BaselineConfigVersions.ContainsKey($script:BridgeVersion) -and" in source
     assert "if ([int]$script:BaselineConfigVersions[$script:BridgeVersion]" not in source
     assert "Get-PublishedBaselineConfigVersion" in source

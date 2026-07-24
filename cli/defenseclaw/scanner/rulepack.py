@@ -388,6 +388,12 @@ class RulePackOverlayScanner:
         existing = {(f.id, f.location) for f in result.findings}
         for f in new:
             if (f.id, f.location) not in existing:
+                # Canonical v8 attributes nested findings to the parent scan
+                # producer; retain the overlay engine as finding metadata.
+                provenance = f"analyzer:{f.scanner}" if f.scanner else ""
+                if provenance and provenance not in f.tags:
+                    f.tags.append(provenance)
+                f.scanner = result.scanner
                 result.findings.append(f)
 
 

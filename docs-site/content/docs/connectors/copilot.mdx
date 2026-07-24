@@ -46,7 +46,7 @@ Global setup is the default because DefenseClaw is intended to govern the operat
 defenseclaw setup copilot
 ```
 
-Confirms once, writes `~/.copilot/hooks/defenseclaw.json`, restarts the gateway. Findings flow to `~/.defenseclaw/gateway.jsonl` and the TUI; no traffic is intercepted, no requests are blocked. Pass `--yes` to skip the confirmation in CI.
+Confirms once, writes `~/.copilot/hooks/defenseclaw.json`, and restarts the gateway. Findings flow to mandatory SQLite event history and the TUI; configured v8 destinations receive only the buckets/signals their routes select. No traffic is intercepted and no requests are blocked. Pass `--yes` to skip the confirmation in CI.
 
 </Tab>
 

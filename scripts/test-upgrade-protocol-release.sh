@@ -12,6 +12,7 @@ umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly FIRST_SCHEMA2_RELEASE="0.8.4"
+readonly OBSERVABILITY_V8_HARD_CUT_VERSION="0.8.5"
 REFUSAL_CONTRACT_ONLY=0
 
 # shellcheck source=scripts/test-upgrade-release.sh
@@ -49,12 +50,23 @@ parse_protocol_args() {
                 ;;
         esac
     done
-    parse_args "${shared_args[@]}"
+    if [[ "${#shared_args[@]}" -gt 0 ]]; then
+        parse_args "${shared_args[@]}"
+    else
+        parse_args
+    fi
 }
 
 protocol_cleanup() {
     local status=$?
     local pid
+    # The protocol harness replaces the base smoke harness's EXIT trap below.
+    # Preserve its most important guarantee: a source/target gateway that was
+    # started inside the throwaway HOME must be stopped even when a later
+    # assertion aborts before the success path's explicit stop. Otherwise the
+    # sandbox gateway can keep the real API port (18970) after WORKDIR is
+    # deleted and make the developer's ordinary hooks fail authentication.
+    stop_smoke_gateway
     if [[ "${REFUSAL_SENTINEL_PIDS[0]+set}" == "set" ]]; then
         for pid in "${REFUSAL_SENTINEL_PIDS[@]}"; do
             kill "${pid}" >/dev/null 2>&1 || true
@@ -121,40 +133,22 @@ manifest_array_contains() {
     grep -Fxq "${expected}" <<<"${values}"
 }
 
-prepare_required_bridge_assets() {
-    [[ -n "${REQUIRED_BRIDGE_VERSION}" ]] || return 0
-    [[ "${REQUIRED_BRIDGE_VERSION}" != "${TARGET_VERSION}" ]] || return 0
+manifest_windows_sources_are_empty() {
+    python3 - "${RELEASE_ROOT}/${TARGET_VERSION}/upgrade-manifest.json" <<'PY'
+import json
+import sys
 
-    local bridge_dir="${RELEASE_ROOT}/${REQUIRED_BRIDGE_VERSION}"
-    local previous_from="${FROM_VERSION}"
-    local asset
-    local bridge_wheel="defenseclaw-${REQUIRED_BRIDGE_VERSION}-2-py3-none-any.dcwheel"
-    local bridge_gateway="defenseclaw_${REQUIRED_BRIDGE_VERSION}_protocol2_${OS_NAME}_${ARCH_NAME}.dcgateway"
-    mkdir -p "${bridge_dir}"
-    for asset in \
-        "${bridge_wheel}" \
-        "${bridge_gateway}" \
-        checksums.txt \
-        checksums.txt.sig \
-        checksums.txt.pem \
-        upgrade-manifest.json; do
-        download_old_asset "${asset}" "${bridge_dir}/${asset}" \
-            "${REQUIRED_BRIDGE_VERSION}" \
-            || die "required bridge asset is unavailable: ${REQUIRED_BRIDGE_VERSION}/${asset}"
-    done
-    local cosign_path
-    cosign_path="$(command -v cosign)" \
-        || die "cosign is required to authenticate published bridge ${REQUIRED_BRIDGE_VERSION}"
-    python3 "${ROOT}/scripts/historical_release_auth.py" \
-        --version "${REQUIRED_BRIDGE_VERSION}" \
-        --release-dir "${bridge_dir}" \
-        --cosign "${cosign_path}" \
-        --asset "${bridge_wheel}" \
-        --asset "${bridge_gateway}" \
-        --asset upgrade-manifest.json \
-        || die "required bridge authentication failed: ${REQUIRED_BRIDGE_VERSION}"
-    FROM_VERSION="${previous_from}"
-    ok "Authenticated published bridge assets: ${REQUIRED_BRIDGE_VERSION} (${OS_NAME}/${ARCH_NAME})"
+with open(sys.argv[1], encoding="utf-8") as handle:
+    platform_tested = json.load(handle).get("platform_tested_source_versions")
+if not isinstance(platform_tested, dict) or set(platform_tested) != {"windows"}:
+    raise SystemExit(
+        "platform_tested_source_versions must contain exactly the Windows source list"
+    )
+windows = platform_tested["windows"]
+if not isinstance(windows, list):
+    raise SystemExit("platform_tested_source_versions.windows must be a list")
+raise SystemExit(0 if not windows else 1)
+PY
 }
 
 baseline_protocol() {
@@ -385,33 +379,6 @@ restore_stop_probe() {
     fi
 }
 
-install_curl_rewrite_probe() {
-    local shim_dir="$1"
-    local real_curl
-    real_curl="$(command -v curl)"
-    mkdir -p "${shim_dir}"
-    cat > "${shim_dir}/curl" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-: "${UPGRADE_GATE_REAL_CURL:?}"
-: "${UPGRADE_GATE_RELEASE_URL:?}"
-prefix="https://github.com/cisco-ai-defense/defenseclaw/releases/download"
-latest="https://api.github.com/repos/cisco-ai-defense/defenseclaw/releases/latest"
-args=()
-for argument in "$@"; do
-    if [[ "${argument}" == "${latest}" ]]; then
-        printf '{"tag_name":"%s"}\n' "${UPGRADE_GATE_TARGET_VERSION:?}"
-        exit 0
-    fi
-    argument="${argument//${prefix}/${UPGRADE_GATE_RELEASE_URL}}"
-    args+=("${argument}")
-done
-exec "${UPGRADE_GATE_REAL_CURL}" "${args[@]}"
-SH
-    chmod 700 "${shim_dir}/curl"
-    printf '%s\n' "${real_curl}"
-}
-
 assert_no_success_receipt() {
     python3 - "${SMOKE_HOME}/.defenseclaw/.upgrade-receipts" <<'PY'
 import json
@@ -472,36 +439,6 @@ PY
     bash -n "${posix_resolver}" \
         || die "candidate resolver asset is not valid Bash"
     ok "Reviewed release-owned resolver assets are complete and checksum-bound"
-}
-
-assert_staged_success_receipt() {
-    python3 - \
-        "${SMOKE_HOME}/.defenseclaw/.upgrade-receipts" \
-        "${REQUIRED_BRIDGE_VERSION}" \
-        "${TARGET_VERSION}" <<'PY'
-import json
-from pathlib import Path
-import sys
-
-root = Path(sys.argv[1])
-bridge, target = sys.argv[2:]
-receipts = [
-    json.loads(path.read_text(encoding="utf-8"))
-    for path in sorted(root.glob("*.json"))
-]
-terminal = [receipt for receipt in receipts if receipt.get("target_version") == target]
-if len(terminal) != 1:
-    raise SystemExit(f"expected one terminal target receipt, got {len(terminal)}")
-receipt = terminal[0]
-if receipt.get("from_version") != bridge:
-    raise SystemExit(f"target receipt did not originate from bridge {bridge}")
-if receipt.get("status") != "succeeded" or receipt.get("migration_status") != "completed":
-    raise SystemExit(f"target receipt is not fully successful: {receipt!r}")
-if receipt.get("artifacts_verified") is not True or receipt.get("failure_code"):
-    raise SystemExit(f"target receipt lacks verified terminal facts: {receipt!r}")
-if any(receipt.get("status") in {"pending", "partial"} for receipt in receipts):
-    raise SystemExit("staged upgrade left a pending or partial receipt")
-PY
 }
 
 prepare_refusal_home() {
@@ -566,6 +503,24 @@ verify_refusal_invariants() {
             grep -Eiq "schema|protocol|minimum source|required bridge|upgrade bridge|without --version|upgrade.*first|source version|tested.*matrix|published-baseline" "${log_file}" \
                 || die "refusal log did not explain the protocol/source bridge requirement"
             ;;
+        artifact-provenance)
+            # A protocol-2 controller must not honor the legacy test-only
+            # --allow-unverified escape hatch for a modern target.  In an
+            # unsigned PR candidate this authentication refusal necessarily
+            # happens before the signed schema/source policy can be trusted.
+            grep -Fq -- \
+                "--allow-unverified cannot bypass mandatory 0.8.4+ manifest or artifact provenance checks" \
+                "${log_file}" \
+                || die "modern controller did not reject the legacy unverified override"
+            grep -Fq \
+                "checksums.txt is not signed (no Sigstore signature/certificate assets were published)" \
+                "${log_file}" \
+                || die "modern controller did not identify the unsigned candidate envelope"
+            grep -Fq \
+                "Modern release provenance is mandatory; --allow-unverified cannot override it." \
+                "${log_file}" \
+                || die "modern controller did not explain the mandatory provenance boundary"
+            ;;
         legacy-schema)
             grep -Eiq "schema|protocol|upgrade script shipped with that release" "${log_file}" \
                 || die "legacy schema-aware refusal did not explain its forward-compatibility gate"
@@ -579,6 +534,16 @@ verify_refusal_invariants() {
                 || die "legacy controller did not prove both conventional artifact HEAD requests"
             grep -Eiq "(^|[^[:alnum:]_])(tar|gzip)([^[:alnum:]_]|$)|not (in )?gzip format|non-zero exit status|CalledProcessError" "${log_file}" \
                 || die "legacy controller did not fail at canonical gateway extraction"
+            ;;
+        immutable-bridge-empty-windows)
+            # The published 0.8.4 controller predates the schema-2 allowance
+            # for an empty platform list.  The current resolver understands
+            # that truthful value as "Windows unsupported", but the immutable
+            # bridge must fail closed before mutation when it reads it.
+            grep -Fq \
+                "upgrade-manifest.json platform_tested_source_versions.windows must be a non-empty version list." \
+                "${log_file}" \
+                || die "immutable 0.8.4 controller did not prove its known empty-Windows pre-mutation refusal"
             ;;
         *) die "unknown installed-controller refusal mode: ${refusal_mode}" ;;
     esac
@@ -655,6 +620,7 @@ run_candidate_updater_refusal() {
     HOME="${SMOKE_HOME}" \
     DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
     OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
+    PYTHONDONTWRITEBYTECODE=1 \
     UPGRADE_GATE_STOP_MARKER="${REFUSAL_STOP_MARKER}" \
     UPGRADE_GATE_REAL_GATEWAY="${REFUSAL_REAL_GATEWAY}" \
     UPGRADE_GATE_REAL_CURL="${real_curl}" \
@@ -671,57 +637,17 @@ run_candidate_updater_refusal() {
     ok "Candidate-owned updater refused source ${baseline} pre-mutation"
 }
 
-run_candidate_explicit_bridge_refusal() {
-    local baseline="$1"
-    log "Proving the release-owned resolver repairs the immutable explicit-target hint"
-    prepare_refusal_home "${baseline}" "candidate-explicit-bridge"
-
-    local curl_shim="${SMOKE_HOME}/.upgrade-test-bin"
-    local real_curl
-    real_curl="$(install_curl_rewrite_probe "${curl_shim}")"
-    local before="${WORKDIR}/${baseline}-candidate-explicit.before.json"
-    local after="${WORKDIR}/${baseline}-candidate-explicit.after.json"
-    local log_file="${WORKDIR}/${baseline}-candidate-explicit-refusal.log"
-    snapshot_state "${before}"
-
-    set +e
-    HOME="${SMOKE_HOME}" \
-    DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
-    OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
-    UPGRADE_GATE_STOP_MARKER="${REFUSAL_STOP_MARKER}" \
-    UPGRADE_GATE_REAL_GATEWAY="${REFUSAL_REAL_GATEWAY}" \
-    UPGRADE_GATE_REAL_CURL="${real_curl}" \
-    UPGRADE_GATE_RELEASE_URL="${RELEASE_URL}" \
-    PATH="${curl_shim}:${SMOKE_HOME}/.local/bin:${PATH}" \
-        bash "${RELEASE_ROOT}/${TARGET_VERSION}/defenseclaw-upgrade.sh" \
-        --yes --version "${TARGET_VERSION}" \
-        >"${log_file}" 2>&1
-    local status=$?
-    set -e
-
-    verify_refusal_invariants "${before}" "${after}" "${baseline}" "${log_file}" "${status}"
-    grep -Fq "defenseclaw-upgrade.XXXXXX" "${log_file}" \
-        || die "release-owned explicit-target refusal omitted unique temporary custody"
-    grep -Fq "releases/download/${TARGET_VERSION}/" "${log_file}" \
-        || die "release-owned explicit-target refusal omitted the target release asset URL"
-    grep -Fq "cosign verify-blob" "${log_file}" \
-        || die "release-owned explicit-target refusal omitted resolver provenance verification"
-    grep -Fq "DefenseClaw upgrade resolver complete v1" "${log_file}" \
-        || die "release-owned explicit-target refusal omitted the completeness check"
-    grep -Fq 'bash "$d/defenseclaw-upgrade.sh" --yes' "${log_file}" \
-        || die "release-owned explicit-target refusal omitted the exact no-version invocation"
-    if grep -Fq "upgrade.sh | bash" "${log_file}"; then
-        die "release-owned explicit-target refusal still streams a network response into bash"
-    fi
-    grep -Fq "there is intentionally no --version argument" "${log_file}" \
-        || die "release-owned explicit-target refusal did not disambiguate the immutable hint"
-    restore_stop_probe
-    ok "Release-owned resolver converted the immutable explicit hint into the exact staged command"
-}
-
 run_candidate_updater_staged_success() {
     local baseline="$1"
-    log "Proving one-command staged upgrade ${baseline} -> ${REQUIRED_BRIDGE_VERSION} -> ${TARGET_VERSION}"
+    local invocation="${2:-latest}"
+    local expected_path
+    local -a resolver_args=(--yes)
+    case "${invocation}" in
+        latest) ;;
+        explicit) resolver_args+=(--version "${TARGET_VERSION}") ;;
+        *) die "unknown staged resolver invocation: ${invocation}" ;;
+    esac
+    log "Proving ${invocation} resolver staging ${baseline} -> ${REQUIRED_BRIDGE_VERSION} -> ${TARGET_VERSION}"
     FROM_VERSION="${baseline}"
     SMOKE_HOME="${WORKDIR}/staged-${baseline}"
     rm -rf "${SMOKE_HOME}"
@@ -739,6 +665,7 @@ run_candidate_updater_staged_success() {
     if ! HOME="${SMOKE_HOME}" \
         DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
         OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
+        PYTHONDONTWRITEBYTECODE=1 \
         DOCKER_HOST="${UPGRADE_SMOKE_DOCKER_HOST:-unix://${SMOKE_HOME}/no-docker.sock}" \
         DEFENSECLAW_UPGRADE_TEST_MODE=1 \
         DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL="${RELEASE_URL}" \
@@ -747,21 +674,30 @@ run_candidate_updater_staged_success() {
         UPGRADE_GATE_TARGET_VERSION="${TARGET_VERSION}" \
         PATH="${curl_shim}:${SMOKE_HOME}/.local/bin:${PATH}" \
             bash "${RELEASE_ROOT}/${TARGET_VERSION}/defenseclaw-upgrade.sh" \
-            --yes >"${log_file}" 2>&1; then
+            "${resolver_args[@]}" >"${log_file}" 2>&1; then
         tail_v8_upgrade_log_secret_safe "${log_file}"
         die "one-command staged upgrade failed: ${baseline} -> ${TARGET_VERSION}"
     fi
 
-    grep -Fq "${baseline} → ${REQUIRED_BRIDGE_VERSION} bridge → fresh controller → ${TARGET_VERSION}" \
+    expected_path="${baseline} → ${REQUIRED_BRIDGE_VERSION} bridge → fresh controller → ${TARGET_VERSION}"
+    if [[ "${baseline}" == "${REQUIRED_BRIDGE_VERSION}" ]]; then
+        expected_path="Refresh authenticated ${baseline} bridge → fresh controller → ${TARGET_VERSION}"
+        if version_lt "${OBSERVABILITY_V8_HARD_CUT_VERSION}" "${TARGET_VERSION}"; then
+            expected_path="Refresh authenticated ${baseline} bridge → fresh controller → ${OBSERVABILITY_V8_HARD_CUT_VERSION} → ${TARGET_VERSION}"
+        fi
+    elif version_lt "${OBSERVABILITY_V8_HARD_CUT_VERSION}" "${TARGET_VERSION}"; then
+        expected_path="${baseline} → ${REQUIRED_BRIDGE_VERSION} bridge → fresh controller → ${OBSERVABILITY_V8_HARD_CUT_VERSION} → ${TARGET_VERSION}"
+    fi
+    grep -Fq "${expected_path}" \
         "${log_file}" || die "staged upgrade log did not prove the resolved bridge handoff"
     verify_upgrade
-    assert_staged_success_receipt
     stop_smoke_gateway
-    ok "One-command staged upgrade passed: ${baseline} -> ${REQUIRED_BRIDGE_VERSION} -> ${TARGET_VERSION}"
+    ok "${invocation} resolver staged upgrade passed: ${baseline} -> ${REQUIRED_BRIDGE_VERSION} -> ${TARGET_VERSION}"
 }
 
 run_candidate_updater_direct_success() {
     local baseline="$1"
+    local expected_path
     log "Proving release-owned resolver upgrade ${baseline} -> ${TARGET_VERSION}"
     FROM_VERSION="${baseline}"
     SMOKE_HOME="${WORKDIR}/release-resolver-${baseline}"
@@ -780,6 +716,7 @@ run_candidate_updater_direct_success() {
     if ! HOME="${SMOKE_HOME}" \
         DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
         OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
+        PYTHONDONTWRITEBYTECODE=1 \
         DOCKER_HOST="${UPGRADE_SMOKE_DOCKER_HOST:-unix://${SMOKE_HOME}/no-docker.sock}" \
         DEFENSECLAW_UPGRADE_TEST_MODE=1 \
         DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL="${RELEASE_URL}" \
@@ -793,6 +730,14 @@ run_candidate_updater_direct_success() {
         die "release-owned resolver upgrade failed: ${baseline} -> ${TARGET_VERSION}"
     fi
 
+    if [[ -n "${REQUIRED_BRIDGE_VERSION}" && "${baseline}" == "${REQUIRED_BRIDGE_VERSION}" ]]; then
+        expected_path="Refresh authenticated ${baseline} bridge → fresh controller → ${TARGET_VERSION}"
+        if version_lt "${OBSERVABILITY_V8_HARD_CUT_VERSION}" "${TARGET_VERSION}"; then
+            expected_path="Refresh authenticated ${baseline} bridge → fresh controller → ${OBSERVABILITY_V8_HARD_CUT_VERSION} → ${TARGET_VERSION}"
+        fi
+        grep -Fq "${expected_path}" \
+            "${log_file}" || die "release-owned resolver log did not prove the authenticated bridge refresh"
+    fi
     verify_upgrade
     stop_smoke_gateway
     ok "Release-owned resolver upgrade passed: ${baseline} -> ${TARGET_VERSION}"
@@ -823,6 +768,13 @@ run_protocol_case() {
         else
             installed_refusal_mode="artifact-envelope"
         fi
+    elif [[ "${REFUSAL_CONTRACT_ONLY}" == "1" ]] && ! candidate_has_checksum_signature; then
+        # The PR refusal job deliberately has no release-workflow Fulcio
+        # identity.  A modern controller therefore must stop at immutable
+        # artifact authentication, before it may trust candidate schema or
+        # source-version policy.  Older controllers retain their separate
+        # schema/artifact compatibility assertions above.
+        installed_refusal_mode="artifact-provenance"
     fi
 
     local source_too_old=0
@@ -832,6 +784,26 @@ run_protocol_case() {
     local protocol_too_old=0
     if (( supported_protocol < CANDIDATE_MIN_PROTOCOL )); then
         protocol_too_old=1
+    fi
+    local immutable_bridge_empty_windows_refusal=0
+    if [[ "${baseline}" == "${FIRST_SCHEMA2_RELEASE}" \
+        && "${baseline}" == "${REQUIRED_BRIDGE_VERSION}" ]] \
+        && manifest_windows_sources_are_empty; then
+        # The signed policy is truthful: Windows cannot cross a hard cut when
+        # 0.8.4 was not published there.  The immutable 0.8.4 controller did
+        # not yet accept an empty platform matrix, so prove that known refusal
+        # and let the current release-owned resolver own the positive path.
+        immutable_bridge_empty_windows_refusal=1
+    fi
+    local resolver_owned_post_cut_bridge=0
+    if [[ -n "${REQUIRED_BRIDGE_VERSION}" \
+        && "${baseline}" == "${REQUIRED_BRIDGE_VERSION}" ]] \
+        && version_lt "${OBSERVABILITY_V8_HARD_CUT_VERSION}" "${TARGET_VERSION}"; then
+        # The immutable 0.8.4 controller owns only the 0.8.4 -> 0.8.5 hard
+        # cut.  Sending it directly to a later target preserves the 0.8.4
+        # dependency graph and recreates the release failure this gate exists
+        # to prevent.  The current release-owned resolver must insert 0.8.5.
+        resolver_owned_post_cut_bridge=1
     fi
 
     if [[ -n "${REQUIRED_BRIDGE_VERSION}" && "${baseline}" == "${REQUIRED_BRIDGE_VERSION}" ]]; then
@@ -872,22 +844,31 @@ run_protocol_case() {
             return
         fi
 
-        if [[ "${legacy_schema_one_controller}" -eq 1 \
-              || "${protocol_too_old}" -eq 1 \
-              || "${source_too_old}" -eq 1 ]]; then
+        if [[ "${immutable_bridge_empty_windows_refusal}" -eq 1 ]]; then
+            run_installed_controller_refusal "${baseline}" "immutable-bridge-empty-windows"
+        elif [[ "${resolver_owned_post_cut_bridge}" -eq 1 ]]; then
+            log "Required bridge ${baseline} uses the release-owned ${OBSERVABILITY_V8_HARD_CUT_VERSION} bootstrap path"
+        elif [[ "${legacy_schema_one_controller}" -eq 1 \
+                || "${protocol_too_old}" -eq 1 \
+                || "${source_too_old}" -eq 1 ]]; then
             run_installed_controller_refusal "${baseline}" "${installed_refusal_mode}"
         else
             log "Schema-2 baseline ${baseline} is capable; requiring installed-controller success"
             run_one_upgrade_smoke "${baseline}"
         fi
 
-        if [[ "${source_too_old}" -eq 1 ]]; then
+        if [[ "${resolver_owned_post_cut_bridge}" -eq 1 ]]; then
+            run_candidate_updater_staged_success "${baseline}"
+        elif [[ "${source_too_old}" -eq 1 ]]; then
             [[ -n "${REQUIRED_BRIDGE_VERSION}" ]] \
                 || die "tested source ${baseline} requires a bridge, but the signed bridge contract is absent"
             manifest_array_contains auto_bridge_from "${baseline}" \
                 || die "tested pre-bridge source ${baseline} is absent from auto_bridge_from"
-            run_candidate_explicit_bridge_refusal "${baseline}"
-            run_candidate_updater_staged_success "${baseline}"
+            # Frozen schema-1 controllers hand their selected target to the
+            # current release-owned resolver with --version.  Prove that exact
+            # immutable handoff now stages the bridge instead of producing a
+            # second refusal and another command for the operator.
+            run_candidate_updater_staged_success "${baseline}" explicit
         else
             run_candidate_updater_direct_success "${baseline}"
         fi

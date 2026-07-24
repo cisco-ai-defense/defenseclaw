@@ -21,6 +21,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 UPGRADE_SCRIPT = ROOT / "scripts" / "upgrade.sh"
+POSIX_UPGRADE_RUNTIME_ONLY = pytest.mark.skipif(
+    os.name == "nt",
+    reason="upgrade.sh phase-one runtime contracts require POSIX signals, ownership, symlinks, and executables",
+)
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -393,6 +397,7 @@ esac
     (release / "checksums.txt.pem").write_text("test certificate\n", encoding="utf-8")
 
 
+@POSIX_UPGRADE_RUNTIME_ONLY
 @pytest.mark.parametrize(
     (
         "crash_point",
@@ -548,9 +553,12 @@ if [[ "$*" == *"from defenseclaw import __version__"* ]]; then
   printf '%s\n' '0.8.4'
   exit 0
 fi
+if [[ "${1:-}" == '-I' && "${2:-}" == '-B' && "${3:-}" == '-' ]]; then
+  exec "${TARGET_RUNTIME_PYTHON:?}" "$@"
+fi
 if [[ -n "${MIGRATION_FROM_VERSION:-}" ]]; then
   chmod 700 "${MIGRATION_DEFENSECLAW_HOME}"
-  printf '%s\n' 'bridge-mutated' > "${DEFENSECLAW_CONFIG}"
+  printf '%s\n' 'config_version: 7' 'bridge: mutated' > "${DEFENSECLAW_CONFIG}"
   printf '%s\n' 'target-backup' > "${DEFENSECLAW_CONFIG}.pre-observability-migration.bak"
   printf '%s\n' 'target-lock' > "${DEFENSECLAW_CONFIG}.lock"
   printf '%s\n' 'target-fixed-temp' > "${DEFENSECLAW_CONFIG}.tmp-f3395"
@@ -695,6 +703,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
             "FIXTURE_ROOT": str(fixtures),
             "TARGET_PYTHON_TEMPLATE": str(target_python_template),
             "TARGET_CLI_TEMPLATE": str(target_cli_template),
+            "TARGET_RUNTIME_PYTHON": sys.executable,
             "UPGRADE_EVENT_LOG": str(event_log),
         }
     )
@@ -858,7 +867,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
             assert result.returncode == 0, output
             assert "Recovering Interrupted Bridge Upgrade" in output
             assert "Recovered the interrupted phase-one release" in output
-            assert config_path.read_bytes() == b"bridge-mutated\n"
+            assert config_path.read_bytes() == b"config_version: 7\nbridge: mutated\n"
             assert not (
                 controller_home / ".upgrade-recovery" / "phase-one-active.json"
             ).exists()
@@ -994,7 +1003,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
             retained_configs = list(custody_roots[0].glob("0-config.yaml"))
             assert len(retained_configs) == 1
             deadline = time.monotonic() + 5
-            expected_retained = b"bridge-mutated\npost-quarantine-user-write\n"
+            expected_retained = b"config_version: 7\nbridge: mutated\npost-quarantine-user-write\n"
             while (
                 retained_configs[0].read_bytes() != expected_retained
                 and time.monotonic() < deadline
@@ -1092,6 +1101,7 @@ def test_bridge_rollback_health_is_version_bound_and_custody_is_collision_safe()
     assert 'probe_environment["PYTHONDONTWRITEBYTECODE"] = "1"' in script
 
 
+@POSIX_UPGRADE_RUNTIME_ONLY
 def test_gateway_pid_parser_accepts_legacy_integer_with_live_binary_identity(tmp_path: Path) -> None:
     gateway = tmp_path / "defenseclaw-gateway"
     _compile_source_gateway(gateway)
@@ -1124,6 +1134,7 @@ def test_gateway_pid_parser_accepts_legacy_integer_with_live_binary_identity(tmp
             process.wait(timeout=10)
 
 
+@POSIX_UPGRADE_RUNTIME_ONLY
 def test_source_venv_identity_rejects_same_version_substitution(tmp_path: Path) -> None:
     script = UPGRADE_SCRIPT.read_text(encoding="utf-8")
     match = re.search(
@@ -1150,6 +1161,7 @@ def test_source_venv_identity_rejects_same_version_substitution(tmp_path: Path) 
     assert identity(str(source)) != identity(str(substitute))
 
 
+@POSIX_UPGRADE_RUNTIME_ONLY
 def test_path_shadow_cli_is_refused_before_service_stop(tmp_path: Path) -> None:
     home = tmp_path / "home"
     controller = home / ".defenseclaw"

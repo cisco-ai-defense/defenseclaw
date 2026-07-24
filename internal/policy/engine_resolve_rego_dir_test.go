@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -117,6 +118,25 @@ func TestResolveRegoDir_FallbackOnEmptyDir(t *testing.T) {
 	}
 }
 
+func TestResolveRegoDir_FailsClosedOnInvalidCanonicalPath(t *testing.T) {
+	dir := t.TempDir()
+	canonical := filepath.Join(dir, "rego")
+	if err := os.WriteFile(canonical, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write invalid canonical path: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "legacy.rego"), []byte("package legacy\n"), 0o600); err != nil {
+		t.Fatalf("write legacy module: %v", err)
+	}
+	mustWriteJSON(t, filepath.Join(dir, "data.json"), map[string]interface{}{})
+
+	if got := resolveRegoDir(dir); got != canonical {
+		t.Fatalf("resolveRegoDir(%q) = %q, want invalid canonical path %q", dir, got, canonical)
+	}
+	if _, err := New(dir); err == nil {
+		t.Fatal("policy.New downgraded from invalid canonical path to legacy flat policy")
+	}
+}
+
 // TestNew_LoadsCanonicalNestedLayoutEndToEnd is the integration-shaped
 // counterpart to the unit test above: it exercises the full policy.New →
 // readDataJSON → store load chain, so we'd catch a regression where a
@@ -173,6 +193,121 @@ layer := data.guardrail.layer
 	}
 	if got := res["layer"]; got != "nested" {
 		t.Fatalf("data.defenseclaw.guardrail.layer = %v, want %q (loader picked the wrong layout)", got, "nested")
+	}
+}
+
+func TestEngineTreatsPolicyDirectoryGlobCharactersLiterally(t *testing.T) {
+	parent := t.TempDir()
+	policyDir := filepath.Join(parent, "policy[literal]")
+	sibling := filepath.Join(parent, "policyl")
+	if err := os.MkdirAll(policyDir, 0o700); err != nil {
+		t.Fatalf("create literal policy directory: %v", err)
+	}
+	if err := os.MkdirAll(sibling, 0o700); err != nil {
+		t.Fatalf("create sibling directory: %v", err)
+	}
+
+	module := `package defenseclaw
+
+import rego.v1
+
+admission := {
+	"verdict": "allowed",
+	"reason": "literal policy directory",
+	"file_action": "allow",
+	"install_action": "allow",
+	"runtime_action": "allow",
+}
+`
+	if err := os.WriteFile(filepath.Join(policyDir, "admission.rego"), []byte(module), 0o600); err != nil {
+		t.Fatalf("write literal policy module: %v", err)
+	}
+	mustWriteJSON(t, filepath.Join(policyDir, "data.json"), map[string]interface{}{})
+
+	outsideModule := filepath.Join(sibling, "outside.rego")
+	if err := os.WriteFile(outsideModule, []byte("not valid Rego"), 0o600); err != nil {
+		t.Fatalf("write outside module: %v", err)
+	}
+
+	engine, err := New(policyDir)
+	if err != nil {
+		t.Fatalf("policy.New: %v", err)
+	}
+	if err := engine.Compile(); err != nil {
+		t.Fatalf("Compile read a sibling matched by policy-root glob characters: %v", err)
+	}
+	if _, err := os.Stat(outsideModule); err != nil {
+		t.Fatalf("outside module was mutated: %v", err)
+	}
+}
+
+func TestNewExactDoesNotQuarantineInvalidModule(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteJSON(t, filepath.Join(dir, "data.json"), map[string]interface{}{})
+	modulePath := filepath.Join(dir, "invalid.rego")
+	if err := os.WriteFile(modulePath, []byte("not valid Rego"), 0o600); err != nil {
+		t.Fatalf("write invalid module: %v", err)
+	}
+
+	engine, err := NewExact(dir)
+	if err != nil {
+		t.Fatalf("NewExact: %v", err)
+	}
+	if err := engine.Compile(); err == nil {
+		t.Fatal("Compile accepted invalid module")
+	}
+	if _, err := os.Stat(modulePath); err != nil {
+		t.Fatalf("read-only exact engine mutated invalid module: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".policy_quarantine")); !os.IsNotExist(err) {
+		t.Fatalf("read-only exact engine created quarantine directory: %v", err)
+	}
+}
+
+func TestLoadDataExactMergesSupplementalAndFailsClosed(t *testing.T) {
+	t.Run("merge", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWriteJSON(t, filepath.Join(dir, "data.json"), map[string]interface{}{
+			"marker": "base",
+			"config": map[string]interface{}{},
+		})
+		mustWriteJSON(t, filepath.Join(dir, "data-sandbox.json"), map[string]interface{}{
+			"marker":   "supplemental",
+			"firewall": map[string]interface{}{"default_action": "deny"},
+		})
+
+		data, err := LoadDataExact(dir)
+		if err != nil {
+			t.Fatalf("LoadDataExact: %v", err)
+		}
+		if data["marker"] != "supplemental" || data["firewall"] == nil || data["config"] == nil {
+			t.Fatalf("effective data = %#v", data)
+		}
+	})
+
+	for _, test := range []struct {
+		name string
+		file string
+		data string
+	}{
+		{name: "base null", file: "data.json", data: "null"},
+		{name: "base array", file: "data.json", data: "[]"},
+		{name: "supplemental malformed", file: "data-sandbox.json", data: "{"},
+		{name: "supplemental null", file: "data-sandbox.json", data: "null"},
+		{name: "supplemental array", file: "data-sandbox.json", data: "[]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWriteJSON(t, filepath.Join(dir, "data.json"), map[string]interface{}{})
+			if err := os.WriteFile(filepath.Join(dir, test.file), []byte(test.data), 0o600); err != nil {
+				t.Fatalf("write malformed data: %v", err)
+			}
+
+			_, err := LoadDataExact(dir)
+			if err == nil || !strings.Contains(err.Error(), test.file) {
+				t.Fatalf("LoadDataExact error = %v, want %s failure", err, test.file)
+			}
+		})
 	}
 }
 
