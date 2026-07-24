@@ -2007,6 +2007,185 @@ finally:
 PY
 }
 
+repair_clean_081_observability_placeholder() {
+    [[ "${BRIDGE_PHASE1}" -eq 1 \
+       && "${CURRENT_VERSION}" == "0.8.1" \
+       && "${RELEASE_VERSION}" == "0.8.4" \
+       && "${STAGED_FINAL_VERSION}" == "${OBSERVABILITY_V8_HARD_CUT_VERSION}" ]] \
+        || return 0
+
+    "${VENV_PYTHON}" - "${CONFIG_PATH}" "${DATA_DIR}" <<'PY'
+import os
+import stat
+import sys
+
+import yaml
+from yaml.composer import ComposerError
+from yaml.constructor import ConstructorError
+from yaml.events import AliasEvent
+from yaml.nodes import MappingNode
+
+from defenseclaw.config import locked_config_yaml, write_config_yaml_secure
+
+
+class StrictLoader(yaml.SafeLoader):
+    def compose_node(self, parent, index):
+        if self.check_event(AliasEvent):
+            event = self.peek_event()
+            raise ComposerError(None, None, "aliases are not allowed", event.start_mark)
+        return super().compose_node(parent, index)
+
+    def construct_mapping(self, node, deep=False):
+        if not isinstance(node, MappingNode):
+            raise ConstructorError(None, None, "expected a mapping", node.start_mark)
+        result = {}
+        for key_node, value_node in node.value:
+            if key_node.tag != "tag:yaml.org,2002:str" or key_node.value == "<<":
+                raise ConstructorError(None, None, "mapping keys must be unique strings", key_node.start_mark)
+            key = self.construct_object(key_node, deep=deep)
+            if key in result:
+                raise ConstructorError(None, None, "duplicate mapping key", key_node.start_mark)
+            result[key] = self.construct_object(value_node, deep=deep)
+        return result
+
+
+def exact(actual, expected):
+    if isinstance(actual, dict) or isinstance(expected, dict):
+        return (
+            isinstance(actual, dict)
+            and isinstance(expected, dict)
+            and len(actual) == len(expected)
+            and all(
+                key in actual
+                and type(next(item for item in actual if item == key)) is type(key)
+                and exact(actual[key], value)
+                for key, value in expected.items()
+            )
+        )
+    if isinstance(actual, list) or isinstance(expected, list):
+        return (
+            isinstance(actual, list)
+            and isinstance(expected, list)
+            and len(actual) == len(expected)
+            and all(exact(left, right) for left, right in zip(actual, expected))
+        )
+    return type(actual) is type(expected) and actual == expected
+
+
+destination = {
+    "name": "generic-otlp",
+    "preset": "generic-otlp",
+    "enabled": False,
+    "endpoint": "",
+    "protocol": "grpc",
+    "tls": {"ca_cert": "", "insecure": False},
+    "batch": {
+        "max_queue_size": 2048,
+        "max_export_batch_size": 512,
+        "scheduled_delay_ms": 5000,
+    },
+    "traces": {"enabled": True, "endpoint": "", "protocol": "", "url_path": ""},
+    "logs": {"enabled": True, "endpoint": "", "protocol": "", "url_path": ""},
+    "metrics": {
+        "enabled": True,
+        "endpoint": "",
+        "protocol": "",
+        "url_path": "",
+        "export_interval_s": 60,
+    },
+}
+placeholder = {
+    "enabled": False,
+    "traces": {"sampler": "always_on", "sampler_arg": "1.0"},
+    "logs": {"emit_individual_findings": False},
+    "destinations": [destination],
+    "resource": {"attributes": {}},
+}
+
+config_path, data_dir = map(os.path.abspath, sys.argv[1:])
+
+
+def is_observability_decision(name):
+    return (
+        name in {
+            "DEFENSECLAW_DISABLE_REDACTION",
+            "DEFENSECLAW_JSONL_DISABLE",
+            "DEFENSECLAW_PERSIST_JUDGE",
+            "OTEL_SERVICE_NAME",
+        }
+        or name.startswith(("OTEL_", "DEFENSECLAW_OTEL_", "OPENCLAW_OTEL_"))
+    )
+
+
+if any(is_observability_decision(name) for name in os.environ):
+    raise RuntimeError("0.8.1 placeholder recovery refuses ambient observability decisions")
+environment_path = os.path.join(data_dir, ".env")
+if os.path.lexists(environment_path):
+    environment_info = os.lstat(environment_path)
+    if (
+        stat.S_ISLNK(environment_info.st_mode)
+        or not stat.S_ISREG(environment_info.st_mode)
+        or environment_info.st_uid != os.geteuid()
+        or environment_info.st_size > 1024 * 1024
+    ):
+        raise RuntimeError("0.8.1 placeholder recovery environment is unsafe")
+    with open(environment_path, encoding="utf-8") as stream:
+        for raw_line in stream:
+            line = raw_line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                name = line.removeprefix("export ").split("=", 1)[0].strip()
+                if is_observability_decision(name):
+                    raise RuntimeError("0.8.1 placeholder recovery refuses persisted observability decisions")
+
+with locked_config_yaml(config_path):
+    source_info = os.lstat(config_path)
+    if (
+        stat.S_ISLNK(source_info.st_mode)
+        or not stat.S_ISREG(source_info.st_mode)
+        or source_info.st_uid != os.geteuid()
+        or not 0 < source_info.st_size <= 4 * 1024 * 1024
+    ):
+        raise RuntimeError("0.8.1 placeholder recovery config is unsafe")
+    descriptor = os.open(
+        config_path,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if not os.path.samestat(source_info, opened):
+            raise RuntimeError("0.8.1 placeholder recovery config changed while opening")
+        raw = b""
+        while len(raw) <= source_info.st_size:
+            chunk = os.read(descriptor, source_info.st_size + 1 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
+    finally:
+        os.close(descriptor)
+    if len(raw) != source_info.st_size:
+        raise RuntimeError("0.8.1 placeholder recovery config changed while reading")
+    document = yaml.load(raw, Loader=StrictLoader)
+    if (
+        not isinstance(document, dict)
+        or "config_version" in document
+        or not exact(document.get("otel"), placeholder)
+        or ("observability" in document and document["observability"] not in ({}, []))
+        or ("audit_sinks" in document and document["audit_sinks"] not in ({}, []))
+    ):
+        raise RuntimeError("0.8.1 placeholder recovery source is not the exact clean release shape")
+    current_info = os.lstat(config_path)
+    if not os.path.samestat(source_info, current_info):
+        raise RuntimeError("0.8.1 placeholder recovery config changed before activation")
+    del document["otel"]["destinations"]
+    write_config_yaml_secure(config_path, document)
+
+if os.environ.get("DEFENSECLAW_TEST_FAIL_AFTER_081_PLACEHOLDER_REPAIR") == "1":
+    raise RuntimeError("injected failure after 0.8.1 placeholder repair")
+PY
+    ok "Repaired the exact clean 0.8.1 disabled OTel placeholder under phase-one rollback custody"
+}
+
+
 complete_bridge_phase1_recovery_journal() {
     local expected_plan_id="$1"
     local terminal_controller="${2:-bridge}"
@@ -3744,6 +3923,8 @@ STAGED_FINAL_VERSION=""
 STAGED_FINAL_MIN_PROTOCOL=""
 POST_HARD_CUT_FINAL_VERSION=""
 EXISTING_BRIDGE_REFRESH=0
+HARD_CUT_CURSOR_RECOVERY=0
+HARD_CUT_CURSOR_RECOVERY_CANDIDATE=0
 
 # ── Detect currently installed version ───────────────────────────────────────
 
@@ -4008,7 +4189,7 @@ fi
 
 if [[ "${CURRENT_VERSION}" != "unknown" ]] && version_gte "${CURRENT_VERSION}" "0.8.5"; then
     hard_cut_state="$("${DEFENSECLAW_VENV}/bin/python" -I -B - "${CONFIG_PATH}" \
-        "${DATA_DIR}/.migration_state.json" <<'PY' 2>/dev/null || true
+        "${DATA_DIR}/.migration_state.json" "${CURRENT_VERSION}" <<'PY' 2>/dev/null || true
 import json
 import os
 import stat
@@ -4024,13 +4205,16 @@ def bounded_regular(path, limit):
     return info
 
 
-config_path, cursor_path = sys.argv[1:]
+config_path, cursor_path, current_version = sys.argv[1:]
 bounded_regular(config_path, 4 * 1024 * 1024)
 with open(config_path, encoding="utf-8") as stream:
     config = yaml.safe_load(stream)
-bounded_regular(cursor_path, 1024 * 1024)
-with open(cursor_path, encoding="utf-8") as stream:
-    cursor = json.load(stream)
+cursor = None
+cursor_absent = not os.path.lexists(cursor_path)
+if not cursor_absent:
+    bounded_regular(cursor_path, 1024 * 1024)
+    with open(cursor_path, encoding="utf-8") as stream:
+        cursor = json.load(stream)
 valid = (
     isinstance(config, dict)
     and config.get("config_version") == 8
@@ -4039,10 +4223,19 @@ valid = (
     and isinstance(cursor.get("applied"), list)
     and "0.8.5" in cursor["applied"]
 )
-print("valid" if valid else "invalid")
+clean_086_candidate = (
+    current_version == "0.8.6"
+    and cursor_absent
+    and isinstance(config, dict)
+    and type(config.get("config_version")) is int
+    and config["config_version"] == 8
+)
+print("valid" if valid else ("clean-0.8.6-missing-cursor" if clean_086_candidate else "invalid"))
 PY
 )"
-    if [[ "${hard_cut_state}" != "valid" ]]; then
+    if [[ "${hard_cut_state}" == "clean-0.8.6-missing-cursor" ]]; then
+        HARD_CUT_CURSOR_RECOVERY_CANDIDATE=1
+    elif [[ "${hard_cut_state}" != "valid" ]]; then
         die "CLI and gateway report hard-cut version ${CURRENT_VERSION}, but config-v8 migration state is absent or invalid and no recoverable journal is active. No changes were made.
   Unsupported manual overwrite detected.
   Recovery path: restore the exact 0.8.4 CLI, gateway, config, environment, and migration cursor from the pre-hard-cut backup, verify 0.8.4 health, then run this release-owned resolver without --version."
@@ -4979,6 +5172,212 @@ prepare_release_contract() {
     enforce_tested_source_matrix
     preflight_release_artifacts
 }
+
+authenticate_clean_086_missing_cursor_source() {
+    local requested_version="${RELEASE_VERSION}"
+    local source_root="${STAGING_DIR}/authenticated-source-0.8.6"
+    local source_wheel
+    mkdir -p "${source_root}"
+
+    RELEASE_VERSION="0.8.6"
+    configure_release
+    section "Authenticating Published 0.8.6 Source"
+    prepare_release_contract
+    python3 - "${RELEASE_PROVENANCE_FILE}" "${UPGRADE_MANIFEST_FILE}" <<'PY' \
+        || die "Published 0.8.6 lacks the exact source-install identity required for missing-cursor recovery. No changes were made."
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    provenance = json.load(stream)
+with open(sys.argv[2], encoding="utf-8") as stream:
+    manifest = json.load(stream)
+identity = provenance.get("source_install_identity")
+if not (
+    provenance.get("release_version") == "0.8.6"
+    and isinstance(identity, dict)
+    and identity.get("schema_version") == 1
+    and identity.get("source_release") == "0.8.6"
+    and type(identity.get("source_install_compatibility_epoch")) is int
+    and identity["source_install_compatibility_epoch"] == 2
+    and type(identity.get("runtime_config_version")) is int
+    and identity["runtime_config_version"] == 8
+    and manifest.get("schema_version") == 2
+    and manifest.get("release_version") == "0.8.6"
+    and type(manifest.get("runtime_config_version")) is int
+    and manifest["runtime_config_version"] == 8
+    and manifest.get("required_bridge_version") == "0.8.4"
+    and "0.8.5" in manifest.get("required_cli_migrations", [])
+):
+    raise SystemExit("0.8.6 source-install identity differs")
+PY
+
+    fetch_artifact "${WHL_URL}" "${source_root}/${WHL_NAME}"
+    verify_checksum "${source_root}/${WHL_NAME}" "${WHL_NAME}"
+    source_wheel="${source_root}/${MATERIALIZED_WHL_NAME}"
+    materialize_protected_artifact \
+        "${source_root}/${WHL_NAME}" "${source_wheel}" "${VERIFIED_CHECKSUM}" \
+        || die "Could not materialize the authenticated 0.8.6 source wheel. No changes were made."
+    preflight_python_wheel "${source_wheel}"
+
+    DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
+        "${DEFENSECLAW_VENV}/bin/python" -I -B - \
+        "${source_wheel}" "${CONFIG_PATH}" "${DATA_DIR}" "${BACKUP_ROOT}" <<'PY' \
+        || die "Installed 0.8.6 mutable state is not the exact clean missing-cursor shape. No changes were made."
+import hashlib
+import os
+from pathlib import Path, PurePosixPath
+import stat
+import sys
+import zipfile
+
+wheel_path, config_path, data_dir, backup_root = map(os.path.abspath, sys.argv[1:])
+uid = os.geteuid()
+sys.path.insert(0, wheel_path)
+from defenseclaw.observability.v8_config import load_validate_v8  # noqa: E402
+
+
+def read_regular(path, limit):
+    info = os.lstat(path)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != uid
+        or not 0 < info.st_size <= limit
+    ):
+        raise RuntimeError(f"unsafe clean 0.8.6 file: {path}")
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if not os.path.samestat(info, opened):
+            raise RuntimeError("clean 0.8.6 file changed while opening")
+        raw = b""
+        while len(raw) <= info.st_size:
+            chunk = os.read(descriptor, info.st_size + 1 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
+        if len(raw) != info.st_size:
+            raise RuntimeError("clean 0.8.6 file changed while reading")
+        return raw
+    finally:
+        os.close(descriptor)
+
+
+if os.path.lexists(os.path.join(data_dir, ".migration_state.json")):
+    raise RuntimeError("clean 0.8.6 recovery requires a completely absent migration cursor")
+source = load_validate_v8(
+    read_regular(config_path, 4 * 1024 * 1024),
+    source_name="config.yaml",
+).source
+legacy_roots = {"audit_db", "audit_sinks", "judge_bodies_db", "otel", "splunk"}
+if (
+    type(source.get("config_version")) is not int
+    or source["config_version"] != 8
+    or "observability" not in source
+    or source["observability"] != {}
+    or any(name in source for name in legacy_roots)
+):
+    raise RuntimeError("clean 0.8.6 config has migration or observability residue")
+
+
+def decision_name(name):
+    return (
+        name in {
+            "DEFENSECLAW_DISABLE_REDACTION",
+            "DEFENSECLAW_JSONL_DISABLE",
+            "DEFENSECLAW_PERSIST_JUDGE",
+            "OTEL_SERVICE_NAME",
+        }
+        or name.startswith(("OTEL_", "DEFENSECLAW_OTEL_", "OPENCLAW_OTEL_"))
+    )
+
+
+if any(decision_name(name) for name in os.environ):
+    raise RuntimeError("clean 0.8.6 recovery refuses ambient observability decisions")
+environment_path = os.path.join(data_dir, ".env")
+if os.path.lexists(environment_path):
+    environment = read_regular(environment_path, 1024 * 1024).decode("utf-8")
+    for raw_line in environment.splitlines():
+        line = raw_line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            name = line.removeprefix("export ").split("=", 1)[0].strip()
+            if decision_name(name):
+                raise RuntimeError("clean 0.8.6 environment has observability decisions")
+
+for residue in (
+    config_path + ".pre-observability-migration.bak",
+    os.path.join(data_dir, ".upgrade-receipts"),
+    os.path.join(data_dir, ".upgrade-recovery"),
+):
+    if os.path.lexists(residue):
+        raise RuntimeError("clean 0.8.6 state has upgrade or migration residue")
+if os.path.lexists(backup_root):
+    backup_info = os.lstat(backup_root)
+    if (
+        stat.S_ISLNK(backup_info.st_mode)
+        or not stat.S_ISDIR(backup_info.st_mode)
+        or backup_info.st_uid != uid
+        or any(Path(backup_root).iterdir())
+    ):
+        raise RuntimeError("clean 0.8.6 state has prior or unsafe upgrade backups")
+
+expected = {}
+with zipfile.ZipFile(wheel_path) as archive:
+    infos = archive.infolist()
+    if len(infos) > 8192 or len({info.filename for info in infos}) != len(infos):
+        raise RuntimeError("authenticated 0.8.6 wheel has unsafe members")
+    for info in infos:
+        path = PurePosixPath(info.filename)
+        prefix = ("defenseclaw", "_data", "local_observability_stack")
+        if path.is_absolute() or ".." in path.parts:
+            raise RuntimeError("authenticated 0.8.6 wheel has an unsafe path")
+        if info.is_dir() or path.parts[:3] != prefix or len(path.parts) <= 3:
+            continue
+        if info.file_size > 64 * 1024 * 1024:
+            raise RuntimeError("authenticated 0.8.6 stack member exceeds its bound")
+        expected["/".join(path.parts[3:])] = hashlib.sha256(archive.read(info)).hexdigest()
+if not expected:
+    raise RuntimeError("authenticated 0.8.6 wheel lacks its local stack")
+
+stack_root = os.path.join(data_dir, "observability-stack")
+if not os.path.lexists(stack_root):
+    raise SystemExit(0)
+stack_info = os.lstat(stack_root)
+if (
+    stat.S_ISLNK(stack_info.st_mode)
+    or not stat.S_ISDIR(stack_info.st_mode)
+    or stack_info.st_uid != uid
+):
+    raise RuntimeError("clean 0.8.6 local stack is missing or unsafe")
+actual = {}
+for current, names, files in os.walk(stack_root, topdown=True, followlinks=False):
+    current_info = os.lstat(current)
+    if stat.S_ISLNK(current_info.st_mode) or not stat.S_ISDIR(current_info.st_mode):
+        raise RuntimeError("clean 0.8.6 local stack has an unsafe directory")
+    for name in names:
+        child = os.lstat(os.path.join(current, name))
+        if stat.S_ISLNK(child.st_mode) or not stat.S_ISDIR(child.st_mode):
+            raise RuntimeError("clean 0.8.6 local stack has an unsafe child")
+    for name in files:
+        path = os.path.join(current, name)
+        relative = os.path.relpath(path, stack_root).replace(os.sep, "/")
+        if len(actual) >= 4096:
+            raise RuntimeError("clean 0.8.6 local stack exceeds its file bound")
+        actual[relative] = hashlib.sha256(read_regular(path, 64 * 1024 * 1024)).hexdigest()
+if actual != expected:
+    raise RuntimeError("clean 0.8.6 local stack differs from the authenticated release")
+PY
+
+    HARD_CUT_CURSOR_RECOVERY=1
+    RELEASE_VERSION="${requested_version}"
+    configure_release
+    ok "Authenticated the exact clean 0.8.6 missing-cursor compatibility state"
+}
+
 
 capture_hard_cut_target_controller_contract() {
     local expected matches
@@ -7203,13 +7602,17 @@ validate_tarball_members() {
     done <<< "${details}"
 }
 
+if [[ "${HARD_CUT_CURSOR_RECOVERY_CANDIDATE}" -eq 1 ]]; then
+    authenticate_clean_086_missing_cursor_source
+fi
 prepare_release_contract
 FINAL_RELEASE_PROVENANCE_BRIDGE_CHECKSUMS_SHA256="${RELEASE_PROVENANCE_BRIDGE_CHECKSUMS_SHA256}"
 resolve_staged_upgrade
 
 if [[ "${CURRENT_VERSION}" != "unknown" \
       && "${CURRENT_VERSION}" == "${RELEASE_VERSION}" \
-      && -z "${STAGED_FINAL_VERSION}" ]]; then
+      && -z "${STAGED_FINAL_VERSION}" \
+      && "${HARD_CUT_CURSOR_RECOVERY}" -ne 1 ]]; then
     same_version_recovery="clean"
     if [[ -n "${RELEASE_PROVENANCE_FILE}" ]]; then
         [[ -x "${DEFENSECLAW_VENV}/bin/python" \
@@ -7744,6 +8147,8 @@ if [[ "${UPGRADE_INCOMPLETE}" -eq 1 ]]; then
 fi
 
 if [[ "${BRIDGE_PHASE1}" -eq 1 ]]; then
+    repair_clean_081_observability_placeholder \
+        || die "The migrated bridge state is not the exact clean 0.8.1 observability placeholder eligible for rollback-safe repair"
     restore_bridge_config_comments
     bridge_phase1_cleanup_owned_temporaries \
         || die "Could not remove resolver-owned mutation temporaries before sealing bridge state"
