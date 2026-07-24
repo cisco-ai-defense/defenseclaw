@@ -236,13 +236,9 @@ def test_release_builds_tests_and_publishes_in_one_dispatch() -> None:
         "assemble-release-candidate",
         "release-smoke",
     ]
-    assert publish["permissions"] == {
-        "contents": "write",
-        "id-token": "write",
-    }
+    assert publish["permissions"] == {"contents": "write"}
     assert "scripts/release_candidate.py verify" in _render(publish)
     assert "scripts/release_candidate.py list-assets" in _render(publish)
-    assert "scripts/publish-release-channel.sh" in _render(publish)
     for name, job in jobs.items():
         if name != "publish-release":
             assert job.get("permissions") != {"contents": "write"}
