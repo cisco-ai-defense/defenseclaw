@@ -54,9 +54,9 @@ def test_release_verifier_accepts_a_genuine_timestamped_authenticode_pe() -> Non
     helper = ROOT / "scripts" / "windows-authenticode.ps1"
     command = r"""
 Set-StrictMode -Version Latest
-. $env:DEFENSECLAW_AUTHENTICODE_HELPER
+. $env:AUTHENTICODE_FIXTURE_HELPER
 $evidence = Get-DefenseClawAuthenticodeEvidence `
-    -Path $env:DEFENSECLAW_SIGNED_PE `
+    -Path $env:AUTHENTICODE_SIGNED_PE `
     -InstalledPath 'fixtures/pwsh.exe' `
     -SbomFileName './fixtures/pwsh.exe'
 if ([string]$evidence.observed.status -cne 'Valid' -or
@@ -67,11 +67,11 @@ if ([string]$evidence.observed.status -cne 'Valid' -or
     [string]::IsNullOrWhiteSpace([string]$evidence.observed.timestamp.token_sha256)) {
     throw 'the genuine signed fixture lacks signer or RFC3161 evidence'
 }
-Assert-DefenseClawAuthenticodeEvidence $env:DEFENSECLAW_SIGNED_PE $evidence | Out-Null
+Assert-DefenseClawAuthenticodeEvidence $env:AUTHENTICODE_SIGNED_PE $evidence | Out-Null
 """
     env = os.environ.copy()
-    env["DEFENSECLAW_AUTHENTICODE_HELPER"] = str(helper)
-    env["DEFENSECLAW_SIGNED_PE"] = pwsh
+    env["AUTHENTICODE_FIXTURE_HELPER"] = str(helper)
+    env["AUTHENTICODE_SIGNED_PE"] = pwsh
     subprocess.run(
         [pwsh, "-NoProfile", "-NonInteractive", "-Command", command],
         check=True,
@@ -113,12 +113,12 @@ def test_release_verifier_rejects_malformed_win_certificate_bytes(tmp_path: Path
 
     helper = ROOT / "scripts" / "windows-authenticode.ps1"
     command = (
-        ". $env:DEFENSECLAW_AUTHENTICODE_HELPER; "
-        "Get-DefenseClawEmbeddedAuthenticodeCms $env:DEFENSECLAW_MALFORMED_PE"
+        ". $env:AUTHENTICODE_FIXTURE_HELPER; "
+        "Get-DefenseClawEmbeddedAuthenticodeCms $env:AUTHENTICODE_MALFORMED_PE"
     )
     env = os.environ.copy()
-    env["DEFENSECLAW_AUTHENTICODE_HELPER"] = str(helper)
-    env["DEFENSECLAW_MALFORMED_PE"] = str(executable)
+    env["AUTHENTICODE_FIXTURE_HELPER"] = str(helper)
+    env["AUTHENTICODE_MALFORMED_PE"] = str(executable)
     result = subprocess.run(
         [pwsh, "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
