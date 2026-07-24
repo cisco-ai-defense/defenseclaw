@@ -4045,7 +4045,9 @@ PY
     if [[ "${hard_cut_state}" != "valid" ]]; then
         die "CLI and gateway report hard-cut version ${CURRENT_VERSION}, but config-v8 migration state is absent or invalid and no recoverable journal is active. No changes were made.
   Unsupported manual overwrite detected.
-  Recovery path: restore the exact 0.8.4 CLI, gateway, config, environment, and migration cursor from the pre-hard-cut backup, verify 0.8.4 health, then run this release-owned resolver without --version."
+  Authenticated interrupted hard-cut transactions are recovered before this check only while their private phase-two journal remains present. A receipt or version string alone is not rollback authority.
+  Recovery path: restore the exact 0.8.4 CLI, gateway, config, environment, and migration cursor together from the same resolver-owned pre-hard-cut backup, verify 0.8.4 health, then run this release-owned resolver without --version.
+  If no complete resolver-owned backup exists, preserve the installation and contact DefenseClaw support. Do not mark 0.8.5 applied or copy individual artifacts."
     fi
 fi
 

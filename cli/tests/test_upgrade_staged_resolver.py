@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -598,6 +599,46 @@ def test_manual_hard_cut_artifacts_over_v7_state_refuse_before_release_download(
     assert not curl_log.exists()
 
 
+def test_stale_pre_cut_cursor_without_recovery_journal_fails_closed(resolver_env) -> None:
+    env, mutation_log, curl_log = resolver_env("0.8.6")
+    data_home = Path(env["DEFENSECLAW_HOME"])
+    data_home.mkdir()
+    managed_python = data_home / ".venv" / "bin" / "python"
+    managed_python.parent.mkdir(parents=True)
+    _write_executable(
+        managed_python,
+        f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
+    )
+    (data_home / "config.yaml").write_text(
+        f"config_version: 8\ndata_dir: {json.dumps(str(data_home))}\n",
+        encoding="utf-8",
+    )
+    (data_home / ".migration_state.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "package_version": "0.8.1",
+                "applied": ["0.8.0"],
+                "applied_at": {"0.8.0": "2026-07-24T00:00:00Z"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = _run(env, "--version", "0.8.7", "--plan")
+
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "config-v8 migration state is absent or invalid and no recoverable journal is active" in output
+    assert "private phase-two journal remains present" in output
+    assert "A receipt or version string alone is not rollback authority" in output
+    assert "Do not mark 0.8.5 applied or copy individual artifacts" in output
+    assert "No changes were made" in output
+    assert not mutation_log.exists()
+    assert not curl_log.exists()
+
+
 def test_bridge_source_refreshes_before_direct_hard_cut(resolver_env) -> None:
     env, mutation_log, curl_log = resolver_env("0.8.4")
 
@@ -630,7 +671,7 @@ def test_bridge_source_stages_hard_cut_before_post_cut_target(resolver_env, targ
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX release-owned resolver")
 def test_modern_resolver_bootstraps_cosign_before_mutation(resolver_env) -> None:
-    env, mutation_log, _curl_log = resolver_env("0.8.3")
+    env, mutation_log, _curl_log = resolver_env("0.8.1")
     fake_bin = Path(env["PATH"].split(os.pathsep, 1)[0])
     (fake_bin / "cosign").unlink()
     controlled_system_bin = fake_bin.parent / "system-bin"
@@ -653,6 +694,7 @@ def test_modern_resolver_bootstraps_cosign_before_mutation(resolver_env) -> None
     assert result.returncode == 0, output
     assert "Cosign was not found; authenticating temporary Cosign 2.6.3" in output
     assert "Temporary Cosign verifier authenticated" in output
+    assert "0.8.1 → 0.8.4 bridge → fresh controller → 0.8.5 → 0.8.7" in output
     assert not mutation_log.exists()
 
 
