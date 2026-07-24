@@ -70,10 +70,16 @@ first_party_allow_list:
     # attacker path that merely contains the subsequence; only home-anchored
     # markers are trustworthy. (Mirror of default.yaml.)
     source_path_contains:
+
       - ".openclaw/extensions/defenseclaw"
       - ".zeptoclaw/extensions/defenseclaw"
       - ".claude/extensions/defenseclaw"
       - ".codex/extensions/defenseclaw"
+  - target_type: plugin
+    target_name: insightclaw
+    reason: approved insightclaw observability plugin
+    source_path_contains:
+      - ".openclaw/extensions/insightclaw"
   - target_type: skill
     target_name: codeguard
     reason: first-party DefenseClaw skill

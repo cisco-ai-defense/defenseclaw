@@ -482,6 +482,135 @@ def check_metrics_catalog(doc: dict) -> bool:
     return ok
 
 
+# Valid OTel instrument types accepted in the InsightClaw schema's $defs.metricDef.
+_INSIGHTCLAW_VALID_TYPES = {"counter", "histogram", "updowncounter", "gauge"}
+
+
+def check_insightclaw_metrics_catalog(doc: dict) -> bool:
+    """Validate schemas/otel/insightclaw-metrics.schema.json.
+
+    The InsightClaw plugin has its own OTLP pipeline and emits
+    ``openclaw.*`` metrics independently of DefenseClaw. This schema is
+    the contract the plugin author builds against, so we cannot
+    cross-check against Go source. Instead we enforce structural
+    integrity:
+
+    - ``x-emitted-metrics`` catalog is present and is a list.
+    - No duplicate metric names.
+    - Every entry has ``name``, ``type``, ``unit``, ``description``,
+      and ``attributes``.
+    - ``type`` is one of the valid OTel instrument types.
+    - ``description`` is non-empty.
+    - Every metric name is prefixed with ``openclaw.``.
+    - ``experimental`` when present is a boolean.
+    """
+    ok = True
+    catalog = doc.get("x-emitted-metrics")
+    if not isinstance(catalog, list):
+        print(
+            "check_schemas: otel/insightclaw-metrics.schema.json: "
+            "missing x-emitted-metrics catalog",
+            file=sys.stderr,
+        )
+        return False
+
+    seen: dict[str, int] = {}
+    for idx, item in enumerate(catalog):
+        if not isinstance(item, dict):
+            print(
+                f"check_schemas: otel/insightclaw-metrics.schema.json: "
+                f"catalog[{idx}] is not an object",
+                file=sys.stderr,
+            )
+            ok = False
+            continue
+
+        name = str(item.get("name") or "")
+        if not name:
+            print(
+                f"check_schemas: otel/insightclaw-metrics.schema.json: "
+                f"catalog[{idx}] missing name",
+                file=sys.stderr,
+            )
+            ok = False
+            continue
+
+        if name in seen:
+            print(
+                f"check_schemas: otel/insightclaw-metrics.schema.json: "
+                f"duplicate metric name {name!r} (first at index {seen[name]})",
+                file=sys.stderr,
+            )
+            ok = False
+        else:
+            seen[name] = idx
+
+        if not name.startswith("openclaw."):
+            print(
+                f"check_schemas: otel/insightclaw-metrics.schema.json: "
+                f"{name!r} does not start with 'openclaw.'",
+                file=sys.stderr,
+            )
+            ok = False
+
+        metric_type = item.get("type")
+        if metric_type not in _INSIGHTCLAW_VALID_TYPES:
+            print(
+                f"check_schemas: otel/insightclaw-metrics.schema.json: "
+                f"{name}.type={metric_type!r}, want one of "
+                f"{sorted(_INSIGHTCLAW_VALID_TYPES)}",
+                file=sys.stderr,
+            )
+            ok = False
+
+        if not str(item.get("unit") or "").strip():
+            print(
+                f"check_schemas: otel/insightclaw-metrics.schema.json: "
+                f"{name} missing unit",
+                file=sys.stderr,
+            )
+            ok = False
+
+        if not str(item.get("description") or "").strip():
+            print(
+                f"check_schemas: otel/insightclaw-metrics.schema.json: "
+                f"{name} missing description",
+                file=sys.stderr,
+            )
+            ok = False
+
+        if "attributes" not in item:
+            print(
+                f"check_schemas: otel/insightclaw-metrics.schema.json: "
+                f"{name} missing attributes",
+                file=sys.stderr,
+            )
+            ok = False
+        elif not isinstance(item.get("attributes"), dict):
+            print(
+                f"check_schemas: otel/insightclaw-metrics.schema.json: "
+                f"{name}.attributes must be an object",
+                file=sys.stderr,
+            )
+            ok = False
+
+        experimental = item.get("experimental")
+        if experimental is not None and not isinstance(experimental, bool):
+            print(
+                f"check_schemas: otel/insightclaw-metrics.schema.json: "
+                f"{name}.experimental must be a boolean, got {experimental!r}",
+                file=sys.stderr,
+            )
+            ok = False
+
+    if ok:
+        print(
+            f"check_schemas: otel/insightclaw-metrics.schema.json catalog OK "
+            f"({len(catalog)} metrics)"
+        )
+    return ok
+
+
 GATEWAYLOG_SCHEMA_DIR = ROOT / "internal" / "gatewaylog" / "schemas"
 CLI_EMBED_SCHEMA_DIR = ROOT / "internal" / "cli" / "embed"
 CLI_GO_DIR = ROOT / "internal" / "cli"
@@ -689,6 +818,12 @@ def main() -> int:
         print("check_schemas: schemas/otel/metrics.schema.json missing", file=sys.stderr)
         ok = False
 
+    insightclaw_path = SCHEMA_DIR / "otel" / "insightclaw-metrics.schema.json"
+    if insightclaw_path.exists():
+        if not check_insightclaw_metrics_catalog(load_json(insightclaw_path)):
+            ok = False
+    else:
+        print("check_schemas: schemas/otel/insightclaw-metrics.schema.json missing", file=sys.stderr)
     for name in RUNTIME_SPAN_SCHEMA_NAMES:
         span_path = SCHEMA_DIR / "otel" / name
         if not span_path.exists():

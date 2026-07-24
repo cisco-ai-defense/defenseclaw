@@ -95,6 +95,83 @@ func TestDefaultYAMLDataJSONParity_OverlappingKeys(t *testing.T) {
 	})
 }
 
+// TestDefaultYAMLDataJSONParity_FirstPartyProvenanceMarkers verifies every
+// first-party allow-list entry carries at least one provenance marker.
+//
+// Why this exists: admission.rego currently treats a missing/empty
+// source_path_contains list as a provenance match. An empty marker list would
+// therefore allow name-only bypasses under allow_list_bypass_scan=true.
+// Guarding this in parity tests prevents accidental policy drift from creating
+// that bypass path.
+func TestDefaultYAMLDataJSONParity_FirstPartyProvenanceMarkers(t *testing.T) {
+	_, selfPath, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot resolve caller path")
+	}
+	repoRoot := filepath.Join(filepath.Dir(selfPath), "..", "..")
+
+	yamlPath := filepath.Join(repoRoot, "policies", "default.yaml")
+	jsonPath := filepath.Join(repoRoot, "policies", "rego", "data.json")
+
+	yamlBytes, err := os.ReadFile(yamlPath)
+	if err != nil {
+		t.Fatalf("read default.yaml: %v", err)
+	}
+	jsonBytes, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatalf("read data.json: %v", err)
+	}
+
+	var yamlData map[string]any
+	if err := yaml.Unmarshal(yamlBytes, &yamlData); err != nil {
+		t.Fatalf("parse default.yaml: %v", err)
+	}
+	var jsonData map[string]any
+	if err := json.Unmarshal(jsonBytes, &jsonData); err != nil {
+		t.Fatalf("parse data.json: %v", err)
+	}
+
+	assertNonEmptyProvenanceMarkers(t, "default.yaml", yamlData)
+	assertNonEmptyProvenanceMarkers(t, "data.json", jsonData)
+}
+
+func assertNonEmptyProvenanceMarkers(t *testing.T, source string, data map[string]any) {
+	t.Helper()
+
+	raw, ok := data["first_party_allow_list"]
+	if !ok {
+		t.Fatalf("%s: missing first_party_allow_list", source)
+	}
+
+	entries, ok := raw.([]any)
+	if !ok {
+		t.Fatalf("%s: first_party_allow_list has unexpected type %T", source, raw)
+	}
+
+	for i, item := range entries {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("%s: first_party_allow_list[%d] has unexpected type %T", source, i, item)
+		}
+
+		targetType, _ := entry["target_type"].(string)
+		targetName, _ := entry["target_name"].(string)
+
+		markers, ok := entry["source_path_contains"]
+		if !ok {
+			t.Fatalf("%s: first_party_allow_list[%d] (%s/%s) missing source_path_contains", source, i, targetType, targetName)
+		}
+
+		prefixes, ok := markers.([]any)
+		if !ok {
+			t.Fatalf("%s: first_party_allow_list[%d] (%s/%s) source_path_contains has unexpected type %T", source, i, targetType, targetName, markers)
+		}
+		if len(prefixes) == 0 {
+			t.Fatalf("%s: first_party_allow_list[%d] (%s/%s) must include at least one provenance marker in source_path_contains", source, i, targetType, targetName)
+		}
+	}
+}
+
 // canonicalize normalizes the value shapes produced by the YAML and
 // JSON decoders so deep-equality is meaningful.
 //
