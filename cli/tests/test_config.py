@@ -401,6 +401,7 @@ class TestAIDiscoveryConfig(unittest.TestCase):
         self.assertTrue(cfg.ai_discovery.enabled)
         self.assertEqual(cfg.ai_discovery.mode, "enhanced")
         self.assertTrue(cfg.ai_discovery.include_shell_history)
+        self.assertFalse(cfg.ai_discovery.lookup_model_provenance_online)
         self.assertEqual(
             cfg.ai_discovery.confidence_policy_path,
             os.path.join(cfg.data_dir, "confidence.yaml"),
@@ -418,6 +419,45 @@ class TestAIDiscoveryConfig(unittest.TestCase):
             {"enabled": True, "confidence_policy_path": "/tmp/custom-confidence.yaml"}
         )
         self.assertEqual(cfg.confidence_policy_path, "/tmp/custom-confidence.yaml")
+
+    def test_merge_online_model_provenance_is_explicit_opt_in(self):
+        disabled = config_mod._merge_ai_discovery({"enabled": True})
+        enabled = config_mod._merge_ai_discovery(
+            {"enabled": True, "lookup_model_provenance_online": True}
+        )
+        self.assertFalse(disabled.lookup_model_provenance_online)
+        self.assertTrue(enabled.lookup_model_provenance_online)
+
+    def test_merge_online_model_provenance_uses_fail_closed_bool_parsing(self):
+        for raw_value in ("false", "no", "invalid", [], None):
+            with self.subTest(raw_value=raw_value):
+                cfg = config_mod._merge_ai_discovery(
+                    {"lookup_model_provenance_online": raw_value}
+                )
+                self.assertFalse(cfg.lookup_model_provenance_online)
+
+        cfg = config_mod._merge_ai_discovery(
+            {"lookup_model_provenance_online": "true"}
+        )
+        self.assertTrue(cfg.lookup_model_provenance_online)
+
+    def test_online_model_provenance_opt_in_is_serialized(self):
+        cfg = default_config()
+        cfg.ai_discovery.lookup_model_provenance_online = True
+        data = config_mod._config_to_dict(cfg)
+        self.assertTrue(
+            data["ai_discovery"]["lookup_model_provenance_online"]
+        )
+
+    def test_online_model_provenance_default_is_explicitly_serialized_false(self):
+        cfg = default_config()
+        data = config_mod._config_to_dict(cfg)
+        self.assertIn("ai_discovery", data)
+        self.assertIn("lookup_model_provenance_online", data["ai_discovery"])
+        self.assertIs(
+            data["ai_discovery"]["lookup_model_provenance_online"],
+            False,
+        )
 
     def test_merge_trusted_binary_policy(self):
         cfg = config_mod._merge_ai_discovery(

@@ -147,11 +147,17 @@ read is regular-file checked and bounded by `ai_discovery.max_file_bytes`.
 Every `local_model` signal keeps dynamic identity in a dedicated `model` block
 (`id`, `status`, and optional format, provider, recipe, modality, device, size,
 and pinned fields), rather than in low-cardinality product labels. The local usage
-API and `inventory.db` history retain that block for operator inventory. Exported
-records still flow through the selected destination's v8 routes and redaction
-profile. Normal discovery sanitization omits extended model metadata, model
-basenames, and path hashes while retaining lifecycle correlation through an
-installation-scoped HMAC pseudonym. Raw paths additionally require
+API and `inventory.db` history retain that block for operator inventory. Canonical
+v8 `ai_component.*` logs export only the bounded provenance subset: publisher,
+country, derivation flags, evidence source/confidence, and optional root/base
+names. The installed artifact's model ID is never exported or used as a metric
+label. Root/base names are included only for a reviewed exact lineage or a
+successful public Hub lookup. Those names and config-derived quantization text
+are classified as log-only `content` so the selected destination redaction
+profile can transform or remove them; all other extended operational model
+metadata, model basenames, and path hashes stay omitted while lifecycle
+correlation uses an installation-scoped HMAC pseudonym. Raw paths
+additionally require
 `ai_discovery.store_raw_local_paths=true` and a v8 profile that preserves path
 fields. Shell commands, process arguments, prompts, model-binary contents, endpoint
 URLs, and environment-variable values are never emitted.

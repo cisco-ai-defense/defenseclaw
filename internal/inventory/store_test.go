@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -175,6 +176,11 @@ func TestInventoryStorePersistsLocalModelMetadata(t *testing.T) {
 		ID: "org/private-model", Status: "loaded", Format: "gguf",
 		Provider: "lemonade", Recipe: "llamacpp", Modality: "llm",
 		Device: "gpu", SizeBytes: 1234, Pinned: true,
+		Provenance: &LocalModelProvenance{
+			Publisher: "Alibaba Cloud", CountryCode: "CN", RootModel: "Qwen/Qwen3-4B",
+			BaseModels: []string{"Qwen/Qwen3-4B"}, Quantized: modelBool(true),
+			Quantization: "Q4_K_M", Derivation: "quantized", Source: "gguf_metadata", Confidence: "medium",
+		},
 	}
 	report := AIDiscoveryReport{
 		Summary: AIDiscoverySummary{
@@ -203,7 +209,7 @@ func TestInventoryStorePersistsLocalModelMetadata(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw.String), &got); err != nil {
 		t.Fatalf("unmarshal model_json: %v", err)
 	}
-	if got != *want {
+	if !reflect.DeepEqual(got, *want) {
 		t.Fatalf("model round trip = %+v, want %+v", got, *want)
 	}
 }

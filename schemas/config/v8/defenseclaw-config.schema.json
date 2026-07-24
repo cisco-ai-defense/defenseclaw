@@ -1041,6 +1041,11 @@
         "include_network_domains": {
           "type": "boolean"
         },
+        "lookup_model_provenance_online": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt in to public model-lineage enrichment that sends trusted exact repository IDs to the fixed Hugging Face API."
+        },
         "max_files_per_scan": {
           "type": "integer",
           "minimum": 1,

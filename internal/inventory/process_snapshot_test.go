@@ -46,6 +46,17 @@ func windowsAgentCatalog() []AISignature {
 	}
 }
 
+func windowsProcessParityCatalog() []AISignature {
+	return append(windowsAgentCatalog(),
+		AISignature{ID: "ollama", Name: "Ollama", ProcessNames: []string{"ollama"}},
+		AISignature{ID: "jan", Name: "Jan", ProcessNames: []string{"Jan", "jan.exe"}},
+		AISignature{ID: "lmstudio", Name: "LM Studio", ProcessNames: []string{"LM Studio", "lms"}},
+		AISignature{ID: "claude-desktop", Name: "Claude Desktop", ProcessNames: []string{"Claude"}},
+		AISignature{ID: "first-collision", Name: "First collision", ProcessNames: []string{"shared-helper"}},
+		AISignature{ID: "second-collision", Name: "Second collision", ProcessNames: []string{"SHARED-HELPER.EXE"}},
+	)
+}
+
 func TestCollectWindowsSnapshotAndClassifyAgents(t *testing.T) {
 	started := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
 	reader := fakeWindowsSnapshotReader{
@@ -85,6 +96,76 @@ func TestCollectWindowsSnapshotAndClassifyAgents(t *testing.T) {
 	}
 	if procs[0].User != `WORKSTATION\kevin` || !procs[0].StartedAt.Equal(started) || !procs[0].Windows {
 		t.Fatalf("metadata not preserved: %+v", procs[0])
+	}
+}
+
+func TestClassifyWindowsProcessesMapsUniqueCatalogAliases(t *testing.T) {
+	procs := []processInfo{
+		{PID: 1, Comm: `C:\Program Files\Ollama\OLLAMA.EXE`, Windows: true},
+		{PID: 2, Comm: "Jan.exe", Windows: true},
+		{PID: 3, Comm: "LM Studio.exe", Windows: true},
+		{PID: 4, Comm: "Claude.exe", Windows: true},
+		{PID: 5, Comm: "shared-helper.exe", Windows: true},
+	}
+	classifyWindowsProcesses(procs, windowsProcessParityCatalog())
+
+	want := map[int]string{
+		1: "ollama",
+		2: "jan",
+		3: "lmstudio",
+		// Claude Code and Claude Desktop both claim Claude.exe. Basename-only
+		// process inventory cannot distinguish them, so it fails closed.
+		4: "",
+		// Every cross-signature collision fails closed.
+		5: "",
+	}
+	for _, proc := range procs {
+		if proc.Connector != want[proc.PID] {
+			t.Errorf("PID %d connector = %q, want %q", proc.PID, proc.Connector, want[proc.PID])
+		}
+	}
+}
+
+func TestWindowsProcessAliasesIncludesReviewedLauncherAliases(t *testing.T) {
+	aliases := windowsProcessAliases(windowsAgentCatalog())
+	for _, test := range []struct {
+		name string
+		want string
+	}{
+		{name: "codex-app-server.exe", want: "codex"},
+		{name: "codex-exec.exe", want: "codex"},
+		{name: "codex_exec.exe", want: "codex"},
+		{name: "claude-code.exe", want: "claudecode"},
+	} {
+		if got := aliases[normalizedWindowsProcessName(test.name)]; got != test.want {
+			t.Errorf("launcher alias %q = %q, want %q", test.name, got, test.want)
+		}
+	}
+}
+
+func TestClassifyWindowsProcessesRestrictsNodeInheritanceToAgentCLIs(t *testing.T) {
+	procs := []processInfo{
+		{PID: 10, PPID: 1, Comm: "codex.exe", Windows: true},
+		{PID: 11, PPID: 10, Comm: "cmd.exe", Windows: true},
+		{PID: 12, PPID: 11, Comm: "node.exe", Windows: true},
+		{PID: 20, PPID: 1, Comm: "ollama.exe", Windows: true},
+		{PID: 21, PPID: 20, Comm: "cmd.exe", Windows: true},
+		{PID: 22, PPID: 21, Comm: "node.exe", Windows: true},
+	}
+	classifyWindowsProcesses(procs, windowsProcessParityCatalog())
+
+	want := map[int]string{
+		10: "codex",
+		11: "",
+		12: "codex",
+		20: "ollama",
+		21: "",
+		22: "",
+	}
+	for _, proc := range procs {
+		if proc.Connector != want[proc.PID] {
+			t.Errorf("PID %d connector = %q, want %q", proc.PID, proc.Connector, want[proc.PID])
+		}
 	}
 }
 

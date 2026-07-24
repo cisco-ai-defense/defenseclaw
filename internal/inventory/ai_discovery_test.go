@@ -169,6 +169,271 @@ func TestLoadAISignatures_ContainsRequiredSurfaces(t *testing.T) {
 	}
 }
 
+func TestLoadAISignatures_CoversRequestedProductCatalog(t *testing.T) {
+	type requiredProduct struct {
+		label     string
+		id        string
+		connector string
+	}
+	required := []requiredProduct{
+		{label: "Cursor", id: "cursor", connector: "cursor"},
+		{label: "GitHub Copilot CLI", id: "copilot", connector: "copilot"},
+		{label: "ChatGPT Desktop", id: "chatgpt-desktop"},
+		{label: "Claude Code", id: "claudecode", connector: "claudecode"},
+		{label: "OpenAI Codex", id: "codex", connector: "codex"},
+		{label: "Ollama", id: "ollama"},
+		{label: "Gemini CLI", id: "geminicli", connector: "geminicli"},
+		{label: "Claude Desktop", id: "claude-desktop"},
+		{label: "Notion", id: "notion"},
+		{label: "Perplexity Comet", id: "perplexity-comet"},
+		{label: "Cline CLI", id: "cline"},
+		{label: "Continue CLI", id: "continue"},
+		{label: "Aider", id: "aider"},
+		{label: "Zed", id: "zed"},
+		{label: "Warp", id: "warp"},
+		{label: "LM Studio", id: "lmstudio"},
+		{label: "Replit Agent", id: "replit"},
+		{label: "Raycast", id: "raycast"},
+		{label: "GPT4All", id: "gpt4all"},
+		{label: "Devin", id: "devin"},
+		{label: "Sourcegraph Cody CLI", id: "cody"},
+		{label: "Google Antigravity", id: "antigravity", connector: "antigravity"},
+		{label: "Goose", id: "goose"},
+		{label: "Open WebUI", id: "open-webui"},
+		{label: "AnythingLLM", id: "anythingllm"},
+		{label: "Jan AI", id: "jan"},
+		{label: "LobeChat", id: "lobechat"},
+		{label: "Qwen Code", id: "qwen-code"},
+		{label: "llama.cpp", id: "llamacpp"},
+		{label: "Trae", id: "trae"},
+		{label: "OpenHands", id: "openhands", connector: "openhands"},
+		{label: "Pieces for Developers", id: "pieces"},
+		{label: "Amp", id: "amp"},
+		{label: "Void", id: "void"},
+		{label: "Kiro CLI", id: "kiro"},
+		{label: "Auggie (Augment Code CLI)", id: "auggie"},
+		{label: "Plandex CLI", id: "plandex"},
+		{label: "SWE-agent", id: "swe-agent"},
+		{label: "KoboldCpp", id: "koboldcpp"},
+		{label: "LocalAI", id: "localai"},
+		{label: "Pinokio", id: "pinokio"},
+		{label: "Mistral Vibe", id: "mistral-vibe"},
+		{label: "Crush", id: "crush"},
+		{label: "GPTScript", id: "gptscript"},
+		{label: "Docker Agent", id: "docker-agent"},
+		{label: "Msty", id: "msty"},
+		{label: "BoltAI", id: "boltai"},
+		{label: "UiPath Assistant", id: "uipath-assistant"},
+		{label: "Wave Terminal", id: "wave-terminal"},
+		{label: "Tabby Terminal", id: "tabby-terminal"},
+		{label: "UI-TARS Desktop", id: "ui-tars-desktop"},
+		{label: "Backyard AI", id: "backyard-ai"},
+		{label: "Dia Browser", id: "dia-browser"},
+		{label: "BrowserOS", id: "browseros"},
+		{label: "opencode", id: "opencode", connector: "opencode"},
+		{label: "RA.Aid", id: "ra-aid"},
+		{label: "Chat2DB", id: "chat2db"},
+		{label: "monday.com Desktop", id: "monday-desktop"},
+		{label: "Eigent", id: "eigent"},
+		{label: "Melty", id: "melty"},
+		{label: "bloop", id: "bloop"},
+		{label: "Forge", id: "forge"},
+		{label: "Sculptor", id: "sculptor"},
+		{label: "Crab Code", id: "crab-code"},
+		{label: "cmux", id: "cmux"},
+		{label: "opcode", id: "opcode"},
+		{label: "Smelt", id: "smelt"},
+		{label: "klaw", id: "klaw"},
+		{label: "Agent Deck", id: "agent-deck"},
+		{label: "Agent of Empires", id: "agent-of-empires"},
+		{label: "Agent! for macOS", id: "agent-macos"},
+		{label: "BetterBot", id: "betterbot"},
+		{label: "Cyclop One", id: "cyclop-one"},
+		{label: "Fazm", id: "fazm"},
+		{label: "OpenClaw", id: "openclaw", connector: "openclaw"},
+		{label: "Zia Search", id: "zia-search"},
+	}
+	if got, want := len(required), 76; got != want {
+		t.Fatalf("requested product fixture has %d entries, want %d", got, want)
+	}
+	requestedIDs := make(map[string]string, len(required))
+	for _, product := range required {
+		if previous, duplicate := requestedIDs[product.id]; duplicate {
+			t.Fatalf("requested products %q and %q share signature ID %q", previous, product.label, product.id)
+		}
+		requestedIDs[product.id] = product.label
+	}
+
+	sigs, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	byID := make(map[string]AISignature, len(sigs))
+	for _, sig := range sigs {
+		byID[sig.ID] = sig
+	}
+	for _, want := range required {
+		sig, ok := byID[want.id]
+		if !ok {
+			t.Errorf("requested product %q is missing signature %q", want.label, want.id)
+			continue
+		}
+		if sig.SupportedConnector != want.connector {
+			t.Errorf("requested product %q connector = %q, want %q", want.label, sig.SupportedConnector, want.connector)
+		}
+		concreteEvidence := len(sig.BinaryNames) + len(sig.ProcessNames) + len(sig.ApplicationNames) +
+			len(sig.ConfigPaths) + len(sig.ExtensionIDs) + len(sig.MCPPaths) + len(sig.PackageNames) +
+			len(sig.EnvVarNames) + len(sig.LocalEndpoints)
+		if concreteEvidence == 0 {
+			t.Errorf("requested product %q signature %q has no concrete local discovery evidence", want.label, want.id)
+		}
+	}
+
+	raw, err := aiSignatureFS.ReadFile("ai_signatures.json")
+	if err != nil {
+		t.Fatalf("read built-in AI discovery catalog: %v", err)
+	}
+	if strings.Contains(strings.ToLower(string(raw)), "spiffe://") {
+		t.Fatal("built-in AI discovery catalog must not embed SPIFFE identities")
+	}
+}
+
+func TestContinuousDiscoveryCopilotBinaryIgnoresPlainGitHubCLI(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("executable PATH fixture uses Unix permission bits")
+	}
+
+	sigs, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	var copilot *AISignature
+	for i := range sigs {
+		if sigs[i].ID == "copilot" {
+			copilot = &sigs[i]
+			break
+		}
+	}
+	if copilot == nil {
+		t.Fatal("copilot signature missing")
+	}
+
+	binDir := t.TempDir()
+	ghPath := filepath.Join(binDir, "gh")
+	mustWrite(t, ghPath, "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(ghPath, 0o700); err != nil {
+		t.Fatalf("chmod gh fixture: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	svc := &ContinuousDiscoveryService{catalog: []AISignature{*copilot}}
+	if got := svc.detectBinaries(); len(got) != 0 {
+		t.Fatalf("plain gh executable produced Copilot signals: %+v", got)
+	}
+
+	copilotPath := filepath.Join(binDir, "copilot")
+	mustWrite(t, copilotPath, "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(copilotPath, 0o700); err != nil {
+		t.Fatalf("chmod copilot fixture: %v", err)
+	}
+	got := svc.detectBinaries()
+	if len(got) != 1 || got[0].SignatureID != "copilot" || got[0].Detector != "binary" {
+		t.Fatalf("standalone copilot executable produced unexpected signals: %+v", got)
+	}
+}
+
+func TestContinuousDiscoveryDetectsRequestedCLIConfigFixtures(t *testing.T) {
+	home := t.TempDir()
+	fixtures := []struct {
+		id       string
+		relative string
+	}{
+		{id: "amp", relative: ".config/amp/settings.json"},
+		{id: "kiro", relative: ".kiro/settings/cli.json"},
+		{id: "auggie", relative: ".augment/settings.json"},
+		{id: "mistral-vibe", relative: ".vibe/config.toml"},
+		{id: "crush", relative: ".config/crush/crush.json"},
+	}
+
+	sigs, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	wanted := make(map[string]bool, len(fixtures))
+	for _, fixture := range fixtures {
+		wanted[fixture.id] = true
+		mustWrite(t, filepath.Join(home, filepath.FromSlash(fixture.relative)), "{}")
+	}
+	var catalog []AISignature
+	for _, sig := range sigs {
+		if wanted[sig.ID] {
+			catalog = append(catalog, sig)
+		}
+	}
+	if len(catalog) != len(fixtures) {
+		t.Fatalf("loaded %d requested CLI fixture signatures, want %d", len(catalog), len(fixtures))
+	}
+
+	svc := &ContinuousDiscoveryService{
+		opts:    AIDiscoveryOptions{HomeDir: home},
+		catalog: catalog,
+	}
+	detected := make(map[string]bool, len(fixtures))
+	for _, signal := range svc.detectConfigPaths() {
+		detected[signal.SignatureID] = true
+	}
+	for _, fixture := range fixtures {
+		if !detected[fixture.id] {
+			t.Errorf("config fixture %q did not detect signature %q", fixture.relative, fixture.id)
+		}
+	}
+}
+
+func TestEditorExtensionNameMatchesExactOrVersionedDirectory(t *testing.T) {
+	for _, entry := range []string{"github.copilot", "github.copilot-1.320.0"} {
+		if !editorExtensionNameMatches(entry, "github.copilot") {
+			t.Errorf("expected %q to match the GitHub Copilot extension ID", entry)
+		}
+	}
+	for _, entry := range []string{"fake-github.copilot-wrapper", "github.copilot-chat"} {
+		if editorExtensionNameMatches(entry, "github.copilot") {
+			t.Errorf("unexpected substring extension match for %q", entry)
+		}
+	}
+}
+
+func TestApplicationNameMatchesExactOrReverseDNSName(t *testing.T) {
+	for _, tc := range []struct {
+		have string
+		want string
+	}{
+		{have: "Notion.app", want: "Notion.app"},
+		{have: "dev.zed.Zed.desktop", want: "Zed.app"},
+		{have: "Cursor.lnk", want: "Cursor.app"},
+		{have: "Claude.app.lnk", want: "Claude.app"},
+		{have: "LM Studio.exe", want: "LM Studio"},
+		{have: "Jan.appref-ms", want: "Jan.app"},
+		{have: "package-id:OpenAI.ChatGPT-Desktop", want: "package-id:OpenAI.ChatGPT-Desktop"},
+	} {
+		if !applicationNameMatches(tc.have, tc.want) {
+			t.Errorf("expected application %q to match %q", tc.have, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		have string
+		want string
+	}{
+		{have: "Notion Calendar.app", want: "Notion.app"},
+		{have: "WaveSomething.desktop", want: "Wave.app"},
+		{have: "Cursor Helper.exe", want: "Cursor.app"},
+		{have: "package-id:Fake.OpenAI.ChatGPT-Desktop", want: "package-id:OpenAI.ChatGPT-Desktop"},
+	} {
+		if applicationNameMatches(tc.have, tc.want) {
+			t.Errorf("unexpected substring application match: %q matched %q", tc.have, tc.want)
+		}
+	}
+}
+
 func TestLoadAISignatures_LemonadeServerSurface(t *testing.T) {
 	sigs, err := LoadAISignatures()
 	if err != nil {
@@ -257,6 +522,41 @@ func TestHermesSignatureIncludesNativeWindowsPaths(t *testing.T) {
 	}
 	if !stringSliceContains(hermes.EnvVarNames, "HERMES_HOME") {
 		t.Errorf("Hermes environment variables missing HERMES_HOME: %v", hermes.EnvVarNames)
+	}
+}
+
+func TestDesktopSignaturesIncludeNativeWindowsPaths(t *testing.T) {
+	sigs, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	byID := make(map[string]AISignature, len(sigs))
+	for _, sig := range sigs {
+		byID[sig.ID] = sig
+	}
+	wants := map[string][]string{
+		"claude-desktop": {"$APPDATA/Claude/claude_desktop_config.json"},
+		"jan":            {"$APPDATA/Jan/data"},
+		"msty":           {"$APPDATA/Msty"},
+		"wave-terminal":  {"$APPDATA/waveterm"},
+		"gpt4all":        {"$LOCALAPPDATA/nomic.ai/GPT4All"},
+		"anythingllm":    {"$APPDATA/anythingllm-desktop/storage"},
+	}
+	for id, paths := range wants {
+		sig, ok := byID[id]
+		if !ok {
+			t.Errorf("signature %q missing", id)
+			continue
+		}
+		for _, want := range paths {
+			if !stringSliceContains(sig.ConfigPaths, want) {
+				t.Errorf("%s config paths missing %q: %v", id, want, sig.ConfigPaths)
+			}
+		}
+	}
+	claude := byID["claude-desktop"]
+	if !stringSliceContains(claude.MCPPaths, "$APPDATA/Claude/claude_desktop_config.json") {
+		t.Errorf("claude-desktop MCP paths missing native Windows config: %v", claude.MCPPaths)
 	}
 }
 
@@ -965,6 +1265,33 @@ func TestIngestExternalReport_DoesNotNotifyAutomationObservers(t *testing.T) {
 	}
 }
 
+func TestIngestExternalReportRecomputesModelProvenance(t *testing.T) {
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, Mode: "enhanced", DataDir: t.TempDir(), HomeDir: t.TempDir(),
+	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
+	report := AIDiscoveryReport{
+		Summary: AIDiscoverySummary{ScanID: "external-model"},
+		Signals: []AISignal{{
+			Category: SignalLocalModel, State: AIStateSeen,
+			Model: &LocalModelInfo{
+				ID: "Qwen/Qwen3-4B", Status: "installed",
+				Provenance: &LocalModelProvenance{
+					Publisher: "Meta", CountryCode: "US", RootModel: "meta-llama/Llama-3",
+					Source: "catalog_exact", Confidence: "high",
+				},
+			},
+		}},
+	}
+	if err := svc.IngestExternalReport(context.Background(), &report); err != nil {
+		t.Fatalf("IngestExternalReport: %v", err)
+	}
+	got := report.Signals[0].Model.Provenance
+	if got == nil || got.Publisher != "Alibaba Cloud" || got.CountryCode != "CN" || got.RootModel != "Qwen/Qwen3-4B" {
+		t.Fatalf("external provenance was trusted instead of recomputed: %+v", got)
+	}
+}
+
 // TestRunScan_NonFullTickShipsFullInventoryConsistentWithSummary
 // pins the Bug A fix: on a process-only ticker tick, the API
 // payload must still expose every active fingerprint (so the
@@ -1487,7 +1814,14 @@ func TestValidateSanitizedAIDiscoveryReportValidatesModelMetadata(t *testing.T) 
 		Summary: AIDiscoverySummary{ScanID: "scan-model"},
 		Signals: []AISignal{{
 			Category: SignalLocalModel,
-			Model:    &LocalModelInfo{ID: "Qwen3-0.6B-GGUF", Status: "installed", Format: "gguf"},
+			Model: &LocalModelInfo{
+				ID: "Qwen3-0.6B-GGUF", Status: "installed", Format: "gguf",
+				Provenance: &LocalModelProvenance{
+					Publisher: "Alibaba Cloud", CountryCode: "CN", RootModel: "Qwen/Qwen3-0.6B",
+					Quantized: modelBool(true), Quantization: "Q4_K_M", Derivation: "quantized",
+					Source: "catalog_family", Confidence: "medium",
+				},
+			},
 		}},
 	}
 	if err := ValidateSanitizedAIDiscoveryReport(base); err != nil {
@@ -1509,6 +1843,17 @@ func TestValidateSanitizedAIDiscoveryReportValidatesModelMetadata(t *testing.T) 
 	badUnicodeControl.Signals[0].Model.ID = "private\u009bmodel"
 	if err := ValidateSanitizedAIDiscoveryReport(badUnicodeControl); err == nil {
 		t.Fatal("model id containing a Unicode C1 control accepted")
+	}
+
+	badCountry := cloneAIDiscoveryReport(base)
+	badCountry.Signals[0].Model.Provenance.CountryCode = "ZZ"
+	if err := ValidateSanitizedAIDiscoveryReport(badCountry); err == nil {
+		t.Fatal("unsupported model provenance country code accepted")
+	}
+	badDerivation := cloneAIDiscoveryReport(base)
+	badDerivation.Signals[0].Model.Provenance.Derivation = "distilled"
+	if err := ValidateSanitizedAIDiscoveryReport(badDerivation); err == nil {
+		t.Fatal("inconsistent model derivation accepted")
 	}
 
 	missingModel := cloneAIDiscoveryReport(base)
@@ -2018,5 +2363,114 @@ func TestHashPath_KeyedVsUnsalted(t *testing.T) {
 	legacy2 := hashPath(samplePath)
 	if legacy2 != legacy {
 		t.Fatalf("after key removal, legacy digest changed: was %q, now %q — SetPathHashKey(nil) rollback is broken", legacy, legacy2)
+	}
+}
+
+func TestAIStateStorePersistsInternalModelProvenanceLifecycle(t *testing.T) {
+	t.Parallel()
+	store := NewAIStateStore(filepath.Join(t.TempDir(), "ai-discovery-state.json"))
+	resolvedAt := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	wantHash := hashValue("hub-provenance")
+	want := AISignal{
+		Fingerprint:                  "model-fingerprint",
+		SignalID:                     "model-signal",
+		SignatureID:                  "local-model",
+		Name:                         "Model",
+		Vendor:                       "Local",
+		Product:                      "Local Model Artifact",
+		Category:                     SignalLocalModel,
+		Detector:                     "model_file",
+		State:                        AIStateSeen,
+		Confidence:                   0.9,
+		Source:                       "sidecar",
+		FirstSeen:                    resolvedAt.Add(-time.Hour),
+		LastSeen:                     resolvedAt,
+		EvidenceHash:                 hashValue("local-evidence"),
+		ModelProvenanceHubResolvedAt: resolvedAt,
+		ModelProvenanceHubHash:       wantHash,
+		Model: &LocalModelInfo{
+			ID: "Qwen/Qwen3-4B", Status: "installed",
+			Provenance: &LocalModelProvenance{
+				Publisher: "Alibaba Cloud", CountryCode: "CN", RootModel: "Qwen/Qwen3-4B",
+				BaseModels: []string{"Qwen/Qwen3-4B"}, Source: "huggingface_hub", Confidence: "high",
+			},
+		},
+	}
+	state := aiStateFile{Signals: map[string]aiStoredSignal{
+		want.Fingerprint: {AISignal: want},
+	}}
+	if err := store.Save(state); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	got, ok := loaded.Signals[want.Fingerprint]
+	if !ok {
+		t.Fatal("persisted model signal is missing")
+	}
+	if !got.ModelProvenanceHubResolvedAt.Equal(resolvedAt) ||
+		got.ModelProvenanceHubHash != wantHash ||
+		got.StoredModelProvenanceHubResolvedAt == nil ||
+		!got.StoredModelProvenanceHubResolvedAt.Equal(resolvedAt) ||
+		got.StoredModelProvenanceHubHash != wantHash {
+		t.Fatalf("Hub lifecycle fields did not round trip: %+v", got)
+	}
+	publicJSON, err := json.Marshal(got.AISignal)
+	if err != nil {
+		t.Fatalf("marshal public signal: %v", err)
+	}
+	publicText := string(publicJSON)
+	if strings.Contains(publicText, "model_provenance_hub_resolved_at") ||
+		strings.Contains(publicText, "model_provenance_hub_hash") ||
+		strings.Contains(publicText, wantHash) {
+		t.Fatalf("public signal leaked internal Hub lifecycle fields: %s", publicJSON)
+	}
+}
+
+func TestAIStoredSignalModelProvenanceHubResolvedAtJSON(t *testing.T) {
+	t.Parallel()
+	resolvedAt := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	zero := time.Time{}
+
+	for _, tc := range []struct {
+		name       string
+		resolvedAt *time.Time
+		want       string
+	}{
+		{name: "absent"},
+		{name: "legacy zero", resolvedAt: &zero},
+		{name: "populated", resolvedAt: &resolvedAt, want: `"2026-07-20T12:00:00Z"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "ai-discovery-state.json")
+			store := NewAIStateStore(path)
+			if err := store.Save(aiStateFile{Signals: map[string]aiStoredSignal{
+				"model": {StoredModelProvenanceHubResolvedAt: tc.resolvedAt},
+			}}); err != nil {
+				t.Fatalf("save state: %v", err)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read state: %v", err)
+			}
+			var state struct {
+				Signals map[string]map[string]json.RawMessage `json:"signals"`
+			}
+			if err := json.Unmarshal(raw, &state); err != nil {
+				t.Fatalf("decode state: %v", err)
+			}
+			got, present := state.Signals["model"]["model_provenance_hub_resolved_at"]
+			if tc.want == "" {
+				if present {
+					t.Fatalf("absent Hub timestamp serialized as %s", got)
+				}
+				return
+			}
+			if !present || string(got) != tc.want {
+				t.Fatalf("Hub timestamp JSON = %s (present %t), want %s", got, present, tc.want)
+			}
+		})
 	}
 }

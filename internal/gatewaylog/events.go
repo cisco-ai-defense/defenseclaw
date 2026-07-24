@@ -897,15 +897,33 @@ type AIDiscoveryComponent struct {
 // private repository names. Local `/api/v1/ai-usage` responses still carry the
 // model block regardless of outbound sink redaction.
 type AIDiscoveryModel struct {
-	ID        string `json:"id"`
-	Status    string `json:"status"`
-	Format    string `json:"format,omitempty"`
-	Provider  string `json:"provider,omitempty"`
-	Recipe    string `json:"recipe,omitempty"`
-	Modality  string `json:"modality,omitempty"`
-	Device    string `json:"device,omitempty"`
-	SizeBytes int64  `json:"size_bytes,omitempty"`
-	Pinned    bool   `json:"pinned,omitempty"`
+	ID         string                      `json:"id"`
+	Status     string                      `json:"status"`
+	Format     string                      `json:"format,omitempty"`
+	Provider   string                      `json:"provider,omitempty"`
+	Recipe     string                      `json:"recipe,omitempty"`
+	Modality   string                      `json:"modality,omitempty"`
+	Device     string                      `json:"device,omitempty"`
+	SizeBytes  int64                       `json:"size_bytes,omitempty"`
+	Pinned     bool                        `json:"pinned,omitempty"`
+	Provenance *AIDiscoveryModelProvenance `json:"provenance,omitempty"`
+}
+
+// AIDiscoveryModelProvenance mirrors inventory.LocalModelProvenance for
+// historical extended envelopes. Runtime v8 emits a bounded provenance subset
+// through canonical ai_component logs instead of serializing this legacy model
+// block.
+type AIDiscoveryModelProvenance struct {
+	Publisher    string   `json:"publisher,omitempty"`
+	CountryCode  string   `json:"country_code,omitempty"`
+	RootModel    string   `json:"root_model,omitempty"`
+	BaseModels   []string `json:"base_models,omitempty"`
+	Quantized    *bool    `json:"quantized,omitempty"`
+	Quantization string   `json:"quantization,omitempty"`
+	Distilled    *bool    `json:"distilled,omitempty"`
+	Derivation   string   `json:"derivation,omitempty"`
+	Source       string   `json:"source,omitempty"`
+	Confidence   string   `json:"confidence,omitempty"`
 }
 
 // AIDiscoveryRuntime mirrors inventory.ProcessRuntime.

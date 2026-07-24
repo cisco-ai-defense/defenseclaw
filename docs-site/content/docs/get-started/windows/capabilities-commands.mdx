@@ -21,6 +21,7 @@ the release actually qualifies.
 | OpenHands, OmniGent, OpenClaw, and ZeptoClaw setup | **Unsupported** | Their required WSL, terminal/sandbox, or proxy topology is not hosted by native Windows DefenseClaw. |
 | Python CLI | **Supported** | Packaged launcher and embedded runtime; PowerShell and cmd. Individual optional/network subcommands retain their caveats below. |
 | TUI | **Supported** | Native console input, UTF-8 output, clipboard support, managed process cancellation, and safe fallback when redraw is unavailable. |
+| AI Discovery and model provenance | **Supported** | Native process enumeration covers unique exact executable aliases across the full discovery catalog and fails closed on shared aliases. Classic installed-app metadata and current-user Store/MSIX/UWP registrations from the supported AppsFolder Shell API, PowerShell history, AppData editor-extension stores, and common local-model roots use bounded native discovery. The TUI keeps models in a separate table with ISO country code/flag, publisher, root/base, and derivation. Public Hugging Face enrichment is off by default and requires explicit opt-in. |
 | Gateway start/status/restart/stop | **Supported** | Detached current-user process with authenticated PID/start/executable identity. Not a Windows service. |
 | Logon startup | **Supported** | Installer-owned HKCU Run value and no-console startup helper when a connector is configured. |
 | Watchdog | **Limited** | Config-enabled detached process with protected identity. Not a service or Scheduled Task. |
@@ -59,7 +60,7 @@ or an advanced operation; it does not mean every listed subcommand is broken.
 
 | Command family | Public subcommands | Windows classification |
 | --- | --- | --- |
-| `agent` | `components`, `history`, `show`; `confidence explain`, `confidence policy default/show/validate`; `discover`; `discovery disable/enable/scan/setup/status`; `processes`; `signatures disable/enable/install/list/validate`; `usage` | **Supported** for local inventory/discovery; external metadata sources are optional. |
+| `agent` | `components`, `history`, `show`; `confidence explain`, `confidence policy default/show/validate`; `discover`; `discovery disable/enable/scan/setup/status`; `processes`; `signatures disable/enable/install/list/validate`; `usage` | **Supported** for local inventory/discovery. Public Hugging Face model-card enrichment is optional, transmits an exact recovered repository ID, and remains off until `--lookup-model-provenance-online` (or the matching interactive/config setting) is selected. |
 | `aibom` | `scan` | **Supported** local scan. |
 | `alerts` | `acknowledge`, `dismiss`; the group itself lists/shows alerts | **Supported**. |
 | `audit` | `log-activity` | **Supported**. Audit export is on `defenseclaw-gateway`. |

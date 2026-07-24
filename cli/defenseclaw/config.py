@@ -2076,6 +2076,7 @@ class AIDiscoveryConfig:
     include_package_manifests: bool = True
     include_env_var_names: bool = True
     include_network_domains: bool = True
+    lookup_model_provenance_online: bool = False
     max_files_per_scan: int = 1000
     max_file_bytes: int = 512 * 1024
     store_raw_local_paths: bool = False
@@ -4679,6 +4680,9 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         include_package_manifests=bool(raw.get("include_package_manifests", True)),
         include_env_var_names=bool(raw.get("include_env_var_names", True)),
         include_network_domains=bool(raw.get("include_network_domains", True)),
+        lookup_model_provenance_online=_coerce_bool(
+            raw.get("lookup_model_provenance_online", False)
+        ),
         max_files_per_scan=int(raw.get("max_files_per_scan", 1000) or 1000),
         max_file_bytes=int(raw.get("max_file_bytes", 512 * 1024) or 512 * 1024),
         store_raw_local_paths=bool(raw.get("store_raw_local_paths", False)),

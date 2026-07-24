@@ -1003,6 +1003,15 @@ def discovery() -> None:
     ),
 )
 @click.option(
+    "--lookup-model-provenance-online/--no-lookup-model-provenance-online",
+    "lookup_model_provenance_online",
+    default=None,
+    help=(
+        "Send trusted exact model repository IDs to the fixed Hugging Face "
+        "API for lineage enrichment (default: off)."
+    ),
+)
+@click.option(
     "--allow-workspace-signatures/--no-allow-workspace-signatures",
     "allow_workspace_signatures",
     default=None,
@@ -1047,6 +1056,7 @@ def discovery_enable(
     include_package_manifests: bool | None,
     include_env_var_names: bool | None,
     include_network_domains: bool | None,
+    lookup_model_provenance_online: bool | None,
     allow_workspace_signatures: bool | None,
     store_raw_local_paths: bool | None,
     restart: bool,
@@ -1084,6 +1094,7 @@ def discovery_enable(
         include_package_manifests=include_package_manifests,
         include_env_var_names=include_env_var_names,
         include_network_domains=include_network_domains,
+        lookup_model_provenance_online=lookup_model_provenance_online,
         allow_workspace_signatures=allow_workspace_signatures,
         store_raw_local_paths=store_raw_local_paths,
     )
@@ -1303,10 +1314,10 @@ def discovery_status(
 ) -> None:
     """Show on-disk + live AI discovery status.
 
-    Reports the value persisted in ``config.yaml`` *and* what the
-    running sidecar reports via ``GET /api/v1/ai-usage`` so operators
-    can spot the "configured-on, sidecar-stale" drift that produces
-    the HTTP 503 from ``defenseclaw agent usage --refresh``.
+    Reports values persisted in ``config.yaml`` alongside the fields
+    the running sidecar exposes via ``GET /api/v1/ai-usage``. Drift is
+    evaluated only for fields present in the live response; the JSON
+    comparison block identifies settings that could not be verified.
     """
     cfg = _require_loaded_config(app)
     ad = cfg.ai_discovery
@@ -1320,9 +1331,18 @@ def discovery_status(
         "include_package_manifests": bool(ad.include_package_manifests),
         "include_env_var_names": bool(ad.include_env_var_names),
         "include_network_domains": bool(ad.include_network_domains),
+        "lookup_model_provenance_online": bool(
+            ad.lookup_model_provenance_online
+        ),
     }
 
-    live: dict[str, Any] = {"reachable": False, "enabled": None, "summary": None, "error": ""}
+    live: dict[str, Any] = {
+        "reachable": False,
+        "enabled": None,
+        "lookup_model_provenance_online": None,
+        "summary": None,
+        "error": "",
+    }
     try:
         client = _usage_client(
             app,
@@ -1333,7 +1353,16 @@ def discovery_status(
         try:
             payload = client.ai_usage()
             live["reachable"] = True
-            live["enabled"] = bool(payload.get("enabled", False))
+            enabled = payload.get("enabled")
+            if isinstance(enabled, bool):
+                live["enabled"] = enabled
+            lookup_model_provenance_online = payload.get(
+                "lookup_model_provenance_online"
+            )
+            if isinstance(lookup_model_provenance_online, bool):
+                live["lookup_model_provenance_online"] = (
+                    lookup_model_provenance_online
+                )
             live["summary"] = payload.get("summary") or {}
         except requests.ConnectionError as exc:
             live["error"] = f"sidecar unavailable: {exc}"
@@ -1345,15 +1374,29 @@ def discovery_status(
     except click.ClickException as exc:
         live["error"] = str(exc.message)
 
-    drift = (
-        live["reachable"]
-        and live["enabled"] is not None
-        and live["enabled"] != on_disk["enabled"]
+    checked_fields = tuple(
+        key
+        for key in ("enabled", "lookup_model_provenance_online")
+        if live[key] is not None
     )
+    drift_fields = tuple(
+        key for key in checked_fields if live[key] != on_disk[key]
+    )
+    unverified_fields = tuple(key for key in on_disk if key not in checked_fields)
+    drift = bool(drift_fields)
 
     if as_json:
         click.echo(json.dumps(
-            {"on_disk": on_disk, "live": live, "drift": drift},
+            {
+                "on_disk": on_disk,
+                "live": live,
+                "drift": drift,
+                "comparison": {
+                    "checked_fields": checked_fields,
+                    "drift_fields": drift_fields,
+                    "unverified_fields": unverified_fields,
+                },
+            },
             indent=2,
             sort_keys=True,
         ))
@@ -1366,6 +1409,11 @@ def discovery_status(
     ux.kv("Mode", on_disk["mode"] or "(unset)", indent="  ")
     ux.kv("Scan roots", ", ".join(on_disk["scan_roots"]) or "(none)", indent="  ")
     ux.kv("Scan interval", f"{on_disk['scan_interval_min']} min", indent="  ")
+    ux.kv(
+        "Online model provenance",
+        "enabled" if on_disk["lookup_model_provenance_online"] else "disabled",
+        indent="  ",
+    )
 
     click.echo()
     ux.section("Live (sidecar)")
@@ -1377,16 +1425,36 @@ def discovery_status(
             indent="  ",
         )
     else:
-        ux.kv("Service", "running" if live["enabled"] else "disabled", indent="  ")
+        if live["enabled"] is None:
+            ux.kv("Service", "not reported", indent="  ")
+        else:
+            ux.kv("Service", "running" if live["enabled"] else "disabled", indent="  ")
         summary = live["summary"] or {}
         ux.kv("Last scan", str(summary.get("scanned_at") or "-"), indent="  ")
         ux.kv("Active signals", str(summary.get("active_signals", 0)), indent="  ")
         ux.kv("New signals", str(summary.get("new_signals", 0)), indent="  ")
+        if live["lookup_model_provenance_online"] is None:
+            ux.kv(
+                "Online model provenance",
+                "not reported (live setting unverified)",
+                indent="  ",
+            )
+        else:
+            ux.kv(
+                "Online model provenance",
+                (
+                    "enabled"
+                    if live["lookup_model_provenance_online"]
+                    else "disabled"
+                ),
+                indent="  ",
+            )
 
     if drift:
         click.echo()
         ux.warn(
-            "Drift: config and sidecar disagree — restart the gateway "
+            "Drift: sidecar disagrees with on-disk config for "
+            f"{', '.join(drift_fields)} — restart the gateway "
             "('defenseclaw-gateway restart') to sync.",
             indent="  ",
         )
@@ -1521,6 +1589,10 @@ def discovery_setup(
         "  Inspect provider domains and vetted loopback model metadata APIs?",
         default=bool(ad.include_network_domains),
     )
+    lookup_model_provenance_online = click.confirm(
+        "  Look up trusted exact model IDs on Hugging Face for provenance?",
+        default=bool(ad.lookup_model_provenance_online),
+    )
 
     # ----- Safety ---------------------------------------------------------
     click.echo()
@@ -1548,6 +1620,7 @@ def discovery_setup(
         include_package_manifests=include_package_manifests,
         include_env_var_names=include_env_var_names,
         include_network_domains=include_network_domains,
+        lookup_model_provenance_online=lookup_model_provenance_online,
         allow_workspace_signatures=allow_workspace_signatures,
         store_raw_local_paths=store_raw_local_paths,
     )
@@ -1747,6 +1820,7 @@ def _build_discovery_overrides(
     include_package_manifests: bool | None = None,
     include_env_var_names: bool | None = None,
     include_network_domains: bool | None = None,
+    lookup_model_provenance_online: bool | None = None,
     allow_workspace_signatures: bool | None = None,
     store_raw_local_paths: bool | None = None,
 ) -> dict[str, Any]:
@@ -1784,6 +1858,10 @@ def _build_discovery_overrides(
         overrides["include_env_var_names"] = bool(include_env_var_names)
     if include_network_domains is not None:
         overrides["include_network_domains"] = bool(include_network_domains)
+    if lookup_model_provenance_online is not None:
+        overrides["lookup_model_provenance_online"] = bool(
+            lookup_model_provenance_online
+        )
     if allow_workspace_signatures is not None:
         overrides["allow_workspace_signatures"] = bool(allow_workspace_signatures)
     if store_raw_local_paths is not None:

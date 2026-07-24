@@ -97,7 +97,7 @@ set the global default. `guardrail status` is read-only and takes no
 | `agent confidence policy show [--source merged\|default] [--json]` | Print the active confidence policy YAML. `merged` (default) is what the engine actually loaded; `default` is the embedded baseline so you can diff against your override. |
 | `agent confidence policy default [--json]` | Print the embedded default policy — typically piped to `~/.defenseclaw/confidence_policy.yaml` as a starting point for an override. |
 | `agent confidence policy validate PATH [--json]` | Dry-run a candidate policy file against the sidecar's loader + validator. Exits non-zero on failure with the same diagnostic the loader would print at boot. |
-| `agent discovery enable [--mode] [--scan-roots] [--scan-interval-min N] [--process-interval-s N] [--max-files-per-scan N] [--max-file-bytes N] [--include-shell-history/--no-include-shell-history] [--include-package-manifests/--no-...] [--include-env-var-names/--no-...] [--include-network-domains/--no-...] [--allow-workspace-signatures/--no-...] [--store-raw-local-paths/--no-...] [--restart/--no-restart] [--scan/--no-scan] [--yes]` | Flip `ai_discovery.enabled=true`, save config, bounce the gateway, and trigger a first scan in one step. Re-running on an already-enabled install with new tuning flags applies the diff and bounces the sidecar (recorded as `ai_discovery-update` in canonical local history). |
+| `agent discovery enable [--mode] [--scan-roots] [--scan-interval-min N] [--process-interval-s N] [--max-files-per-scan N] [--max-file-bytes N] [--include-shell-history/--no-include-shell-history] [--include-package-manifests/--no-...] [--include-env-var-names/--no-...] [--include-network-domains/--no-...] [--lookup-model-provenance-online/--no-...] [--allow-workspace-signatures/--no-...] [--store-raw-local-paths/--no-...] [--restart/--no-restart] [--scan/--no-scan] [--yes]` | Flip `ai_discovery.enabled=true`, save config, bounce the gateway, and trigger a first scan in one step. Public Hugging Face model-card enrichment is separately opt-in because it transmits recovered `owner/repository` IDs. Re-running on an already-enabled install with new tuning flags applies the diff and bounces the sidecar (recorded as `ai_discovery-update` in canonical local history). |
 | `agent discovery disable [--restart/--no-restart] [--yes]` | Flip `ai_discovery.enabled=false`, save config, and bounce the gateway so the service stops |
 | `agent discovery setup [--restart/--no-restart] [--scan/--no-scan] [--yes]` | Walk an interactive wizard for every current `ai_discovery.*` knob (mode, scan/process intervals, scan roots, file caps, detection sources, and signature/path privacy). Destination routing is owned separately by observability v8. Each prompt defaults to the current config value so pressing Enter on every step is a no-op. |
 | `agent discovery status [--json]` | Show on-disk + live AI discovery state and warn on drift between the two |
@@ -120,15 +120,40 @@ variable names, and loopback service on port `13305`. Bounded reads of the
 documented [`/v1/models`](https://lemonade-server.ai/docs/api/openai/) metadata
 list downloaded models; `/v1/health` reports loaded models. Filesystem discovery
 also covers GGUF/GGML, MLX, safetensors, ONNX/ORT, Core ML, TFLite, Q4NX, Hugging Face
-caches, and Ollama stores. It stats and groups model artifacts but never reads
-model-binary contents; small Ollama manifest JSON is the bounded exception.
+caches, and Ollama stores. It stats and groups model artifacts without reading
+tensor payloads; only bounded GGUF header metadata and small adjacent JSON/Ollama
+metadata are read.
 Inference and model-control API routes are never called.
 
+On Windows, discovery resolves Profile/AppData/Program Files through token-bound
+Known Folders, covers unique exact process aliases from the full catalog (shared
+aliases fail closed), classic desktop apps and current-user Store/MSIX/UWP apps
+through the supported AppsFolder Shell API, PowerShell history, AppData
+editor-extension stores, and specialized GPT4All, Jan, and AnythingLLM model
+roots. Only bounded display and path-free package identity names enter the
+existing hashed application matcher.
+
+The nested `model.provenance` block reports the root publisher and ISO country,
+root/base model IDs, quantization/distillation, derivation, evidence source, and
+confidence. Country refers to the root-weight publisher rather than a quantizer,
+uploader, runtime, or download location. The terminal and macOS surfaces derive
+the two-letter-code flag locally. Online Hugging Face model-info enrichment is
+off by default and must be enabled explicitly; it uses only exact IDs recovered
+from Hugging Face cache paths, explicit Hub URLs in embedded metadata, or reviewed
+exact lineage rules. It uses a fixed host, no redirects, bounded responses, and
+no private token; relative paths and family-derived filename guesses stay local.
+
 The local usage API retains model IDs for operator display and filtering.
-Outbound canonical records follow each v8 destination's field-class redaction
-profile. Normal discovery sanitization omits extended model metadata, model
-basenames, and path hashes while retaining an installation-scoped HMAC lifecycle
-pseudonym. Raw paths additionally require
+Canonical v8 `ai_component.*` logs carry the bounded provenance subset for
+`local_model` signals, but never the installed artifact's model ID and never as
+metric labels. Publisher, country, derivation flags, evidence source, and
+confidence are metadata fields. Root/base model names are exported only for a
+reviewed exact lineage or a successful public Hub lookup; root/base names and
+config-derived quantization text are log-only `content` fields so each
+destination's redaction profile can transform or remove them. Normal discovery
+sanitization otherwise omits extended operational
+model metadata, model basenames, and path hashes while retaining an
+installation-scoped HMAC lifecycle pseudonym. Raw paths additionally require
 `ai_discovery.store_raw_local_paths=true` and a selected v8 projection that
 preserves the `path` field class. Authenticated Lemonade discovery uses
 only `LEMONADE_API_KEY` after the configured origin passes a credential-free

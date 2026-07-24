@@ -124,7 +124,7 @@ func testLogFamily() *testGeneratedLogFamily {
 			{
 				key: "tags", typeOf: familyFieldStringArray, requirement: familyRequirementOptional,
 				fieldClass: FieldClassIdentifier, source: familyValueInput,
-				constraints: familyFieldConstraints{maxUTF8Bytes: 12, maxItems: 3},
+				constraints: familyFieldConstraints{maxUTF8Bytes: 32, maxItemUTF8Bytes: 12, maxItems: 3},
 			},
 			{
 				key: "secret", typeOf: familyFieldString, requirement: familyRequirementConditional,
@@ -146,6 +146,64 @@ func validLogBuildInput() familyLogBuildInput {
 			{key: "tags", value: []string{"one", "two"}, present: true},
 		},
 		conditions: familyConditionFacts{{id: "secret-available", state: familyConditionFalse}},
+	}
+}
+
+func TestFamilyBuilderStringArrayBoundsAreShapeAware(t *testing.T) {
+	descriptor := familyFieldDescriptor{
+		key: "tags", typeOf: familyFieldStringArray, requirement: familyRequirementOptional,
+		fieldClass: FieldClassIdentifier, source: familyValueInput,
+		constraints: familyFieldConstraints{
+			maxUTF8Bytes: 20, maxItemUTF8Bytes: 4, minItems: 1, maxItems: 3,
+		},
+	}
+	if err := validateFamilyFieldConstraintDescriptor(descriptor); err != nil {
+		t.Fatalf("valid string-array descriptor: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		value []string
+		ok    bool
+	}{
+		{name: "within item and aggregate limits", value: []string{"éé", "a"}, ok: true},
+		{name: "item UTF-8 limit", value: []string{"aaaaa"}},
+		{name: "canonical JSON aggregate limit", value: []string{"aaaa", "bbbb", "cccc"}},
+		{name: "item count limit", value: []string{"a", "b", "c", "d"}},
+		{name: "invalid UTF-8", value: []string{string([]byte{0xff})}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateFamilyFieldValue(descriptor, tc.value)
+			if tc.ok && err != nil {
+				t.Fatalf("valid string array rejected: %v", err)
+			}
+			if !tc.ok && !IsFamilyBuildError(err, FamilyBuildConstraint) {
+				t.Fatalf("invalid string array error = %v", err)
+			}
+		})
+	}
+	if err := validateFamilyFieldValue(descriptor, []string(nil)); !IsFamilyBuildError(err, FamilyBuildInvalidType) {
+		t.Fatalf("present nil string array error = %v", err)
+	}
+	multibyte := descriptor
+	multibyte.constraints.maxItemUTF8Bytes = 3
+	if err := validateFamilyFieldValue(multibyte, []string{"éé"}); !IsFamilyBuildError(err, FamilyBuildConstraint) {
+		t.Fatalf("four-byte string under three-byte item limit error = %v", err)
+	}
+	escaped := descriptor
+	escaped.constraints.maxUTF8Bytes = 6
+	if err := validateFamilyFieldValue(escaped, []string{"\n"}); err != nil {
+		t.Fatalf("six-byte canonical escaped array rejected: %v", err)
+	}
+	escaped.constraints.maxUTF8Bytes = 5
+	if err := validateFamilyFieldValue(escaped, []string{"\n"}); !IsFamilyBuildError(err, FamilyBuildConstraint) {
+		t.Fatalf("escaped canonical aggregate boundary error = %v", err)
+	}
+
+	builder, _ := testFamilyBuilder(t)
+	input := validLogBuildInput()
+	input.values[1].value = []string(nil)
+	if _, err := builder.buildGeneratedLog(testLogFamily(), input); !IsFamilyBuildError(err, FamilyBuildInvalidType) {
+		t.Fatalf("generated builder present nil string array error = %v", err)
 	}
 }
 

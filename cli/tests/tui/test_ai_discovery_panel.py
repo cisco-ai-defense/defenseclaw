@@ -26,6 +26,11 @@ from defenseclaw.tui.panels.ai_discovery import (
     humanize_age,
     state_weight,
 )
+from defenseclaw.tui.services.ai_discovery_state import (
+    AIUsageModelProvenance,
+    country_flag,
+    format_model_country,
+)
 
 
 def _snapshot_with_component(count: int = 3) -> AIUsageSnapshot:
@@ -68,6 +73,28 @@ def test_ai_discovery_no_snapshot_and_disabled_states() -> None:
     panel.set_snapshot(AIUsageSnapshot(enabled=False))
     assert "disabled" in panel.empty_state()
     assert "agent discovery enable" in panel.empty_state()
+
+
+def test_ai_discovery_snapshot_decodes_and_surfaces_live_model_lookup_state() -> None:
+    offline = AIUsageSnapshot.from_mapping({"enabled": True})
+    assert offline.lookup_model_provenance_online is False
+
+    online = AIUsageSnapshot.from_mapping(
+        {
+            "enabled": True,
+            "lookup_model_provenance_online": True,
+            "summary": {"active_signals": 1, "files_scanned": 2},
+        }
+    )
+    assert online.lookup_model_provenance_online is True
+
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(online)
+    assert panel.header_parts() == (
+        "active=1",
+        "files=2",
+        "model-lookup=online",
+    )
 
 
 def test_ai_discovery_scan_uses_the_usage_scan_command() -> None:
@@ -200,6 +227,18 @@ def test_ai_discovery_groups_and_details_local_models() -> None:
                         format="gguf",
                         provider="lemonade",
                         size_bytes=400_000_000,
+                        provenance=AIUsageModelProvenance(
+                            publisher="Alibaba Cloud",
+                            country_code="CN",
+                            root_model="Qwen/Qwen3-0.6B",
+                            base_models=("Qwen/Qwen3-0.6B",),
+                            quantized=True,
+                            quantization="Q4_K_M",
+                            distilled=False,
+                            derivation="quantized",
+                            source="catalog_exact",
+                            confidence="high",
+                        ),
                     ),
                     **base,
                 ),
@@ -207,7 +246,7 @@ def test_ai_discovery_groups_and_details_local_models() -> None:
                     signal_id="loaded",
                     detector="model_runtime",
                     model=AIUsageModel(
-                        id="Qwen3-0.6B-GGUF",
+                        id="qWEN3-0.6b-gguf",
                         status="loaded",
                         format="gguf",
                         provider="lemonade",
@@ -216,29 +255,120 @@ def test_ai_discovery_groups_and_details_local_models() -> None:
                         pinned=True,
                     ),
                     runtime=AIUsageRuntime(pid=4321),
-                    **base,
+                    **{
+                        **base,
+                        "state": "new",
+                        "product": "Local Model Artifact",
+                        "vendor": "Local",
+                    },
                 ),
             ),
         )
     )
 
-    assert len(panel.rows) == 1
-    row = panel.rows[0]
+    assert panel.rows == ()
+    assert len(panel.model_rows) == 1
+    row = panel.model_rows[0]
+    assert row.state == "new"
     assert row.model == "Qwen3-0.6B-GGUF"
     assert set(row.model_statuses) == {"installed", "loaded"}
     assert row.model_formats == ("gguf",)
-    assert "Model status" in panel.data_table_columns()
-    model_index = panel.data_table_columns().index("Model")
-    assert panel.data_table_rows()[0][model_index] == "Qwen3-0.6B-GGUF"
+    assert "Model" not in panel.data_table_columns()
+    assert panel.model_table_columns() == (
+        "State",
+        "Model",
+        "Country",
+        "Publisher",
+        "Root",
+        "Derivation",
+        "Status",
+        "Format",
+    )
+    model_cells = panel.model_table_rows()[0]
+    assert model_cells[1] == "Qwen3-0.6B-GGUF"
+    assert model_cells[2] == "CN 🇨🇳"
+    assert model_cells[3] == "Alibaba Cloud"
+    assert model_cells[4] == "Qwen/Qwen3-0.6B"
+    assert model_cells[5] == "quantized · Q4_K_M"
 
     panel.set_filter("qwen3")
-    assert len(panel.filtered) == 1
+    assert panel.filtered == ()
+    assert len(panel.filtered_models) == 1
     panel.toggle_detail()
     detail = "\n".join(panel.detail_lines(now=now))
+    assert "publisher=Alibaba Cloud" in detail
+    assert "country=CN 🇨🇳" in detail
+    assert "root=Qwen/Qwen3-0.6B" in detail
+    assert "quantized=true" in detail
     assert "status=installed" in detail
     assert "status=loaded" in detail
     assert "recipe=llamacpp" in detail
     assert "runtime: pid=4321" in detail
+
+
+def test_ai_discovery_detail_renders_ambiguous_multi_base_root_label() -> None:
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(
+                    signal_id="merged-model",
+                    state="seen",
+                    category="local_model",
+                    product="Local Model Artifact",
+                    detector="model_file",
+                    model=AIUsageModel(
+                        id="private/merged-model",
+                        provenance=AIUsageModelProvenance(
+                            base_models=("acme/base-a", "acme/base-b"),
+                            source="gguf_metadata",
+                            confidence="medium",
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+
+    panel.set_model_cursor(0)
+    panel.toggle_detail()
+    detail = "\n".join(panel.detail_lines())
+
+    assert "root=ambiguous (2)" in detail
+    assert "base_models=acme/base-a,acme/base-b" in detail
+
+
+def test_non_local_signal_with_model_metadata_stays_in_product_table() -> None:
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(
+                    signal_id="desktop-model",
+                    state="seen",
+                    category="desktop_app",
+                    product="Acme Model Studio",
+                    vendor="Acme",
+                    detector="application",
+                    model=AIUsageModel(
+                        id="acme/embedded-model",
+                        status="available",
+                        format="safetensors",
+                    ),
+                ),
+            ),
+        )
+    )
+
+    assert panel.model_rows == ()
+    assert len(panel.rows) == 1
+    row = panel.rows[0]
+    assert row.product == "Acme Model Studio"
+    assert row.categories == ("desktop_app",)
+    assert row.model_statuses == ("available",)
+    assert row.model_formats == ("safetensors",)
 
 
 def test_ai_usage_model_metadata_is_safely_coerced() -> None:
@@ -250,12 +380,35 @@ def test_ai_usage_model_metadata_is_safely_coerced() -> None:
                 "status": "installed",
                 "size_bytes": "not-a-number",
                 "pinned": "false",
+                "provenance": {
+                    "publisher": "Acme AI",
+                    "country_code": "us",
+                    "root_model": "acme/root",
+                    "base_models": ["acme/base-a", "acme/base-b"],
+                    "quantized": "true",
+                    "quantization": "Q5_K_M",
+                    "derivation": "distilled+quantized",
+                    "source": "model_metadata",
+                    "confidence": "medium",
+                },
             },
         }
     )
     assert signal.model is not None
     assert signal.model.size_bytes == 0
     assert signal.model.pinned is False
+    assert signal.model.provenance is not None
+    assert signal.model.provenance.country_code == "US"
+    assert signal.model.provenance.base_models == ("acme/base-a", "acme/base-b")
+    assert signal.model.provenance.root_label == "acme/root"
+    assert signal.model.provenance.quantized is True
+    assert signal.model.provenance.distilled is None
+
+    ambiguous = AIUsageModelProvenance.from_mapping(
+        {"base_models": ["acme/base-a", "acme/base-b"]}
+    )
+    assert ambiguous is not None
+    assert ambiguous.root_label == "ambiguous (2)"
 
     numeric = AIUsageSignal.from_mapping(
         {"category": "local_model", "model": {"id": "other", "size_bytes": -42, "pinned": "true"}}
@@ -263,6 +416,68 @@ def test_ai_usage_model_metadata_is_safely_coerced() -> None:
     assert numeric.model is not None
     assert numeric.model.size_bytes == 0
     assert numeric.model.pinned is True
+
+
+def test_ai_model_country_flag_and_optional_boolean_validation() -> None:
+    assert country_flag("us") == "🇺🇸"
+    assert format_model_country("us") == "US 🇺🇸"
+    assert format_model_country("USA") == ""
+    assert format_model_country("éx") == ""
+
+    model = AIUsageModel.from_mapping(
+        {
+            "id": "model",
+            "status": "installed",
+            "provenance": {
+                "country_code": "USA",
+                "quantized": "not-known",
+                "distilled": False,
+            },
+        }
+    )
+    assert model is not None
+    assert model.provenance is not None
+    assert model.provenance.country_code == ""
+    assert model.provenance.quantized is None
+    assert model.provenance.distilled is False
+
+
+def test_ai_discovery_keyboard_filter_searches_products_and_model_provenance() -> None:
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(state="seen", product="Codex", vendor="OpenAI"),
+                AIUsageSignal(
+                    state="seen",
+                    category="local_model",
+                    product="Local Model Artifact",
+                    model=AIUsageModel(
+                        id="Qwen3",
+                        status="installed",
+                        provenance=AIUsageModelProvenance(
+                            publisher="Alibaba Cloud",
+                            country_code="CN",
+                            root_model="Qwen/Qwen3",
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+
+    assert panel.handle_key("/").handled is True
+    for character in "alibaba":
+        assert panel.handle_key(character).handled is True
+    assert panel.handle_key("enter").handled is True
+    assert panel.filtered == ()
+    assert [row.model for row in panel.filtered_models] == ["Qwen3"]
+    assert panel.empty_state() == ""
+
+    assert panel.handle_key("esc").handled is True
+    assert len(panel.filtered) == 1
+    assert len(panel.filtered_models) == 1
 
 
 def test_ai_discovery_header_churn_rules() -> None:
@@ -279,7 +494,11 @@ def test_ai_discovery_header_churn_rules() -> None:
             ),
         )
     )
-    assert panel.header_parts() == ("active=755", "files=2103")
+    assert panel.header_parts() == (
+        "active=755",
+        "files=2103",
+        "model-lookup=offline",
+    )
 
     panel.set_snapshot(
         AIUsageSnapshot(
@@ -287,7 +506,13 @@ def test_ai_discovery_header_churn_rules() -> None:
             summary=AIUsageSummary(active_signals=755, new_signals=5, changed_signals=2, files_scanned=2103),
         )
     )
-    assert panel.header_parts() == ("active=755", "new=5", "changed=2", "files=2103")
+    assert panel.header_parts() == (
+        "active=755",
+        "new=5",
+        "changed=2",
+        "files=2103",
+        "model-lookup=offline",
+    )
 
 
 def test_ai_discovery_normalizes_across_detectors_and_searches_aggregates() -> None:
@@ -362,6 +587,85 @@ def test_ai_discovery_cursor_clamps_on_filter() -> None:
     assert panel.cursor_at() == 0
     panel.toggle_detail()
     assert panel.detail_open is True
+
+
+def test_ai_discovery_model_cursor_and_scroll_use_model_viewport() -> None:
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(
+                    signal_id="agent",
+                    state="seen",
+                    category="ai_cli",
+                    product="Codex",
+                    detector="binary",
+                ),
+                *(
+                    AIUsageSignal(
+                        signal_id=f"model-{index}",
+                        state="seen",
+                        category="local_model",
+                        product="Local Model Artifact",
+                        detector="model_file",
+                        model=AIUsageModel(id=f"Model-{index:02d}"),
+                    )
+                    for index in range(8)
+                ),
+            ),
+        )
+    )
+    panel.set_size(width=120, height=10)
+
+    panel.set_model_cursor(7)
+    assert panel.active_table == "models"
+    assert panel.cursor_at() == 7
+    assert panel.selected() is not None
+    assert panel.selected().model == "Model-07"
+    assert panel.scroll_offset() == 3
+
+    panel.cursor_up()
+    assert panel.cursor_at() == 6
+    assert panel.selected() is not None
+    assert panel.selected().model == "Model-06"
+    assert panel.scroll_offset() == 2
+
+    panel.set_cursor(0)
+    assert panel.active_table == "agents"
+    assert panel.cursor_at() == 0
+    assert panel.scroll_offset() == 0
+
+
+def test_ai_discovery_table_toggle_is_keyboard_reachable_and_closes_stale_detail() -> None:
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(signal_id="agent", state="seen", product="Codex"),
+                AIUsageSignal(
+                    signal_id="model",
+                    state="seen",
+                    category="local_model",
+                    model=AIUsageModel(id="Qwen/Qwen3"),
+                ),
+            ),
+        )
+    )
+    panel.toggle_detail()
+    assert panel.detail_open is True
+
+    action = panel.handle_key("t")
+    assert action.handled is True
+    assert action.table_changed is True
+    assert panel.active_table == "models"
+    assert panel.detail_open is False
+    assert "Local models" in action.hint
+
+    action = panel.handle_key("t")
+    assert action.table_changed is True
+    assert panel.active_table == "agents"
 
 
 def test_format_confidence_state_weight_and_humanize_age() -> None:

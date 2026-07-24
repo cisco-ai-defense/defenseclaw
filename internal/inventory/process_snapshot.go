@@ -80,33 +80,18 @@ func processSnapshot() ([]processInfo, error) {
 var processSnapshotSource = platformProcessSnapshot
 
 // classifyWindowsProcesses uses executable basenames only. Exact aliases are
-// intentionally narrow; an unrelated command whose arguments mention an agent
-// is never visible to this classifier. A node child may inherit an already
-// classified parent, which covers managed npm launchers without reading argv.
+// intentionally narrow; an unrelated command whose arguments mention an AI
+// product is never visible to this classifier. Ambiguous catalog aliases fail
+// closed: for example, a basename-only Claude.exe observation cannot safely
+// distinguish Claude Code from Claude Desktop. A node child may inherit only a
+// Codex or Claude Code parent, which covers managed npm launchers without
+// turning desktop-app helper processes into additional product instances.
 func classifyWindowsProcesses(procs []processInfo, catalog []AISignature) {
-	aliases := map[string]string{
-		"codex":            "codex",
-		"codex-app-server": "codex",
-		"codex-exec":       "codex",
-		"codex_exec":       "codex",
-		"claude":           "claudecode",
-		"claude-code":      "claudecode",
-	}
-	allowed := make(map[string]bool, len(catalog))
-	for _, sig := range catalog {
-		if sig.ID == "codex" || sig.ID == "claudecode" {
-			allowed[sig.ID] = true
-			for _, name := range sig.ProcessNames {
-				if normalizedWindowsProcessName(name) != "" {
-					aliases[normalizedWindowsProcessName(name)] = sig.ID
-				}
-			}
-		}
-	}
+	aliases := windowsProcessAliases(catalog)
 	byPID := make(map[int]*processInfo, len(procs))
 	for i := range procs {
 		byPID[procs[i].PID] = &procs[i]
-		if connector := aliases[normalizedWindowsProcessName(procs[i].Comm)]; allowed[connector] {
+		if connector := aliases[normalizedWindowsProcessName(procs[i].Comm)]; connector != "" {
 			procs[i].Connector = connector
 		}
 	}
@@ -118,10 +103,76 @@ func classifyWindowsProcesses(procs []processInfo, catalog []AISignature) {
 		for parent := byPID[procs[i].PPID]; parent != nil && !seen[parent.PID]; parent = byPID[parent.PPID] {
 			seen[parent.PID] = true
 			if parent.Connector != "" {
-				procs[i].Connector = parent.Connector
+				if windowsNodeParentConnector(parent.Connector) {
+					procs[i].Connector = parent.Connector
+				}
 				break
 			}
 		}
+	}
+}
+
+// windowsProcessAliases builds one exact basename index for every catalog
+// signature. Multiple case/suffix spellings owned by the same signature are
+// harmless, while aliases claimed by different signatures are omitted so a
+// basename alone cannot invent a product identity.
+func windowsProcessAliases(catalog []AISignature) map[string]string {
+	owners := make(map[string]map[string]struct{})
+	present := make(map[string]bool, len(catalog))
+	add := func(alias, id string) {
+		alias = normalizedWindowsProcessName(alias)
+		id = normalizeAIID(id)
+		if alias == "" || id == "" {
+			return
+		}
+		if owners[alias] == nil {
+			owners[alias] = make(map[string]struct{})
+		}
+		owners[alias][id] = struct{}{}
+	}
+	for _, sig := range catalog {
+		id := normalizeAIID(sig.ID)
+		if id == "" {
+			continue
+		}
+		present[id] = true
+		for _, name := range sig.ProcessNames {
+			add(name, id)
+		}
+	}
+
+	// These native/npm launcher basenames are intentionally recognized even
+	// when an older/custom catalog lists only the primary command name.
+	for id, aliases := range map[string][]string{
+		"codex":      {"codex", "codex-app-server", "codex-exec", "codex_exec"},
+		"claudecode": {"claude", "claude-code"},
+	} {
+		if !present[id] {
+			continue
+		}
+		for _, alias := range aliases {
+			add(alias, id)
+		}
+	}
+
+	resolved := make(map[string]string, len(owners))
+	for alias, ids := range owners {
+		if len(ids) != 1 {
+			continue
+		}
+		for id := range ids {
+			resolved[alias] = id
+		}
+	}
+	return resolved
+}
+
+func windowsNodeParentConnector(connector string) bool {
+	switch normalizeAIID(connector) {
+	case "codex", "claudecode":
+		return true
+	default:
+		return false
 	}
 }
 

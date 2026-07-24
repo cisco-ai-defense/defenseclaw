@@ -47,6 +47,7 @@ from defenseclaw.tui.app import (
 from defenseclaw.tui.executor import CommandEvent
 from defenseclaw.tui.panels.ai_discovery import (
     AIDiscoveryPanelModel,
+    AIUsageModel,
     AIUsageSignal,
     AIUsageSnapshot,
     AIUsageSummary,
@@ -69,6 +70,7 @@ from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupPanelModel
 from defenseclaw.tui.panels.skills import SkillRow, SkillsPanelModel
 from defenseclaw.tui.panels.tools import ToolsPanelModel
 from defenseclaw.tui.screens.mode_picker import ModePickerScreen
+from defenseclaw.tui.services.ai_discovery_state import AIUsageModelProvenance
 from defenseclaw.tui.services.gateway_log_views import GatewayLogRow
 from defenseclaw.tui.services.setup_state import ConfigField, ConfigSection, CredentialRow
 from defenseclaw.tui.services.tui_state import STATE_FILENAME
@@ -3318,6 +3320,161 @@ async def test_ai_discovery_open_detail_toggles_when_row_selected() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ai_discovery_renders_models_in_separate_table_with_detail() -> None:
+    provenance = AIUsageModelProvenance(
+        publisher="Alibaba Cloud",
+        country_code="CN",
+        root_model="Qwen/Qwen3",
+        quantized=True,
+        quantization="Q4_K_M",
+        derivation="quantized",
+        source="catalog_exact",
+        confidence="high",
+    )
+    ai_model = AIDiscoveryPanelModel()
+    ai_model.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(state="seen", product="Codex", vendor="OpenAI"),
+                AIUsageSignal(
+                    state="seen",
+                    category="local_model",
+                    product="Local Model Artifact",
+                    detector="model_file",
+                    model=AIUsageModel(
+                        id="Qwen3-Q4_K_M",
+                        status="installed",
+                        format="gguf",
+                        provenance=provenance,
+                    ),
+                ),
+            ),
+        )
+    )
+    app = DefenseClawTUI(ai_discovery_model=ai_model)
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("V")
+        await pilot.pause()
+
+        product_table = app.query_one("#panel-table", DataTable)
+        model_table = app.query_one("#ai-model-table", DataTable)
+        assert product_table.row_count == 1
+        assert model_table.row_count == 1
+        assert "Codex" in str(product_table.get_cell_at((0, 2)))
+        assert "Qwen3-Q4_K_M" in str(model_table.get_cell_at((0, 1)))
+        assert "CN 🇨🇳" in str(model_table.get_cell_at((0, 2)))
+        assert app.query_one("#ai-model-table-label", Static).has_class("hidden") is False
+
+        ai_model.set_model_cursor(0)
+        model_table.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert ai_model.detail_open is True
+        assert "publisher=Alibaba Cloud" in app.detail_text
+        assert "root=Qwen/Qwen3" in app.detail_text
+
+
+@pytest.mark.asyncio
+async def test_ai_discovery_keyboard_focus_selects_the_matching_table() -> None:
+    ai_model = AIDiscoveryPanelModel()
+    ai_model.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(signal_id="agent-a", state="seen", product="Claude"),
+                AIUsageSignal(signal_id="agent-b", state="seen", product="Codex"),
+                AIUsageSignal(
+                    signal_id="model-a",
+                    state="seen",
+                    category="local_model",
+                    model=AIUsageModel(id="Model-A"),
+                ),
+                AIUsageSignal(
+                    signal_id="model-b",
+                    state="seen",
+                    category="local_model",
+                    model=AIUsageModel(id="Model-B"),
+                ),
+            ),
+        )
+    )
+    app = DefenseClawTUI(ai_discovery_model=ai_model)
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("V")
+        await pilot.pause()
+
+        product_table = app.query_one("#panel-table", DataTable)
+        model_table = app.query_one("#ai-model-table", DataTable)
+
+        assert ai_model.active_table == "agents"
+        product_cursor = ai_model.cursor
+
+        await pilot.press("t")
+        await pilot.pause()
+        assert ai_model.active_table == "models"
+        assert app.focused is model_table
+        await pilot.press("down")
+        await pilot.pause()
+        assert ai_model.model_cursor == 1
+        assert ai_model.cursor == product_cursor
+
+        # Change both row sets so neither table can take its idempotent render
+        # fast path. Late product focus/highlight events from the redraw must
+        # not steal the model viewport that visibly owns keyboard focus.
+        previous_product_signature = app._last_table_signature
+        previous_model_signature = app._last_ai_model_table_signature
+        ai_model.set_snapshot(
+            AIUsageSnapshot(
+                enabled=True,
+                signals=(
+                    AIUsageSignal(
+                        signal_id="agent-a", state="changed", product="Claude"
+                    ),
+                    AIUsageSignal(signal_id="agent-b", state="seen", product="Codex"),
+                    AIUsageSignal(
+                        signal_id="model-a",
+                        state="seen",
+                        category="local_model",
+                        model=AIUsageModel(id="Model-A"),
+                    ),
+                    AIUsageSignal(
+                        signal_id="model-b",
+                        state="seen",
+                        category="local_model",
+                        model=AIUsageModel(id="Model-B", status="loaded"),
+                    ),
+                ),
+            )
+        )
+        app._render_chrome()
+        await pilot.pause()
+        assert app._last_table_signature != previous_product_signature
+        assert app._last_ai_model_table_signature != previous_model_signature
+        assert ai_model.active_table == "models"
+        assert app.focused is model_table
+        assert ai_model.model_cursor == 1
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert ai_model.detail_open is True
+        assert "Model-B" in ai_model.detail_header()
+
+        await pilot.press("enter")
+        await pilot.press("t")
+        await pilot.pause()
+        assert ai_model.active_table == "agents"
+        assert app.focused is product_table
+        await pilot.press("enter")
+        await pilot.pause()
+        assert ai_model.detail_open is True
+        assert ai_model.selected_agent() is not None
+        assert ai_model.selected_agent().product in ai_model.detail_header()
+
+
+@pytest.mark.asyncio
 async def test_ai_discovery_enter_toggles_detail_exactly_once_per_press() -> None:
     """Each ``enter`` press flips the detail panel exactly once.
 
@@ -3388,7 +3545,25 @@ async def test_ai_discovery_export_button_writes_snapshot(tmp_path) -> None:
         enabled=True,
         summary=AIUsageSummary(scan_id="scan-1", total_signals=1),
         signals=(
-            AIUsageSignal(name="openai-agent", vendor="OpenAI", category="chat"),
+            AIUsageSignal(
+                name="local-model",
+                vendor="Local",
+                category="local_model",
+                model=AIUsageModel(
+                    id="Qwen3",
+                    status="installed",
+                    provenance=AIUsageModelProvenance(
+                        publisher="Alibaba Cloud",
+                        country_code="CN",
+                        root_model="Qwen/Qwen3",
+                        quantized=False,
+                        distilled=False,
+                        derivation="base",
+                        source="catalog_exact",
+                        confidence="high",
+                    ),
+                ),
+            ),
         ),
     )
     ai_model = AIDiscoveryPanelModel()
@@ -3404,10 +3579,18 @@ async def test_ai_discovery_export_button_writes_snapshot(tmp_path) -> None:
         matches = list(tmp_path.glob("defenseclaw-ai-usage-*.json"))
         assert len(matches) == 1, f"expected exactly one export, got {matches}"
         target = matches[0]
+        _assert_sensitive_export_is_owner_only(target)
         body = json.loads(target.read_text(encoding="utf-8"))
         assert body["enabled"] is True
         assert body["summary"]["scan_id"] == "scan-1"
-        assert body["signals"][0]["name"] == "openai-agent"
+        assert body["signals"][0]["name"] == "local-model"
+        provenance = body["signals"][0]["model"]["provenance"]
+        assert provenance["country_code"] == "CN"
+        assert provenance["quantized"] is False
+        assert provenance["distilled"] is False
+        assert provenance["derivation"] == "base"
+        assert provenance["source"] == "catalog_exact"
+        assert provenance["confidence"] == "high"
 
 
 def test_safe_body_renderable_falls_back_on_invalid_style() -> None:

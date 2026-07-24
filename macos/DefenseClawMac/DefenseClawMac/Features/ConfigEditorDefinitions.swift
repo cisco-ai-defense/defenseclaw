@@ -553,6 +553,8 @@ enum ConfigEditorCatalog {
                       hint: "Detect env var names only."),
                 .init(label: "Provider Domains", key: "ai_discovery.include_network_domains", kind: .bool,
                       hint: "Detect provider domains."),
+                .init(label: "Online Model Provenance", key: "ai_discovery.lookup_model_provenance_online", kind: .bool,
+                      hint: "Send public-looking model IDs to Hugging Face for lineage enrichment."),
                 .init(label: "Max Files", key: "ai_discovery.max_files_per_scan", kind: .int, hint: "Max files per scan."),
                 .init(label: "Max File Bytes", key: "ai_discovery.max_file_bytes", kind: .int, hint: "Skip larger files."),
                 .init(label: "Store Raw Local Paths", key: "ai_discovery.store_raw_local_paths", kind: .bool,

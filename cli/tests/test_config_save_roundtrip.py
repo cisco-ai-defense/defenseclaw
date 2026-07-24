@@ -226,6 +226,12 @@ class TestConfigSaveV8HardCutover(unittest.TestCase):
             for removed in ("audit_sinks", "otel", "privacy", "splunk"):
                 self.assertNotIn(removed, persisted)
             self.assertNotIn("emit_otel", persisted.get("ai_discovery", {}))
+            self.assertFalse(
+                persisted.get("ai_discovery", {}).get(
+                    "lookup_model_provenance_online",
+                    False,
+                )
+            )
 
     def test_fresh_v8_preparation_rejects_loaded_configs(self):
         cfg = default_config()
@@ -254,12 +260,16 @@ class TestConfigSaveV8HardCutover(unittest.TestCase):
                 cfg.ai_discovery.include_package_manifests = True
                 cfg.ai_discovery.include_env_var_names = True
                 cfg.ai_discovery.include_network_domains = True
+                cfg.ai_discovery.lookup_model_provenance_online = True
                 cfg.save()
 
             with open(config_path, encoding="utf-8") as stream:
                 persisted = yaml.safe_load(stream)
 
             self.assertTrue(persisted["ai_discovery"]["enabled"])
+            self.assertTrue(
+                persisted["ai_discovery"]["lookup_model_provenance_online"]
+            )
             self.assertNotIn("emit_otel", persisted["ai_discovery"])
 
     def test_loaded_v8_save_preserves_graph_and_uses_local_database(self):
