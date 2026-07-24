@@ -850,25 +850,27 @@ def test_release_publish_retries_only_after_absence_and_reconciles_ambiguity() -
     create = _step(publish, "Publish tag and selected sealed assets")
 
     assert publish["timeout-minutes"] == "45"
-    assert text.count("scripts/release_api_retry.py require-absent") == 1
+    assert text.count("scripts/release_api_retry.py require-absent") == 2
     assert "scripts/release_api_retry.py reconcile-create" in namespace["run"]
     assert "--candidate-root release-candidate" in namespace["run"]
     assert "--omit-windows-binaries" not in namespace["run"]
-    assert "--check-main" not in namespace["run"]
+    assert "--check-main" in namespace["run"]
     assert create["if"] == ("steps.release-namespace.outputs.create_required == 'true'")
     assert "for attempt in 1 2 3" in rendered
+    assert "scripts/release_api_retry.py require-absent" in create["run"]
     assert "timeout --signal=TERM --kill-after=30s 10m" in rendered
     assert rendered.count("scripts/release_api_retry.py reconcile-create") == 2
-    assert "--check-main" not in rendered
+    assert rendered.count("--check-main") == 3
     assert 'reconcile_status" != "10"' in rendered
     assert "refusing another create" in rendered
     assert "Release API retries exhausted" in rendered
     assert "scripts/release_api_retry.py prove-published" in rendered
     create_index = rendered.index('gh release create "$RELEASE_TAG"')
     precheck_index = rendered.index("scripts/release_api_retry.py reconcile-create")
+    main_check_index = rendered.index("scripts/release_api_retry.py require-absent", precheck_index)
     reconcile_index = rendered.rindex("scripts/release_api_retry.py reconcile-create")
     prove_index = rendered.index("scripts/release_api_retry.py prove-published")
-    assert precheck_index < create_index < reconcile_index < prove_index
+    assert precheck_index < main_check_index < create_index < reconcile_index < prove_index
 
 
 def test_every_release_remote_action_is_commit_pinned() -> None:
