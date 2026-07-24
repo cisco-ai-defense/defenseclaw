@@ -83,6 +83,17 @@ def test_public_delegation_forwards_exact_intent_and_marks_handoff() -> None:
                 "VERSION": "poisoned",
                 "PYTHONHOME": "/poisoned/home",
                 "PYTHONPATH": "/poisoned/path",
+                "BASH_ENV": "/poisoned/bash-env",
+                "ENV": "/poisoned/env",
+                "SHELLOPTS": "xtrace",
+                "BASHOPTS": "extdebug",
+                "BASH_XTRACEFD": "9",
+                "IFS": "poisoned",
+                "LD_PRELOAD": "/poisoned/preload",
+                "LD_LIBRARY_PATH": "/poisoned/library",
+                "DYLD_INSERT_LIBRARIES": "/poisoned/insert",
+                "DYLD_LIBRARY_PATH": "/poisoned/dyld-library",
+                "BASH_FUNC_poisoned%%": "() { printf poisoned; }",
                 "PRESERVED_OPERATOR_VALUE": "yes",
             },
             clear=True,
@@ -120,6 +131,19 @@ def test_public_delegation_forwards_exact_intent_and_marks_handoff() -> None:
     assert "VERSION" not in child_env
     assert "PYTHONHOME" not in child_env
     assert "PYTHONPATH" not in child_env
+    assert {
+        "BASH_ENV",
+        "ENV",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "BASH_XTRACEFD",
+        "IFS",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "BASH_FUNC_poisoned%%",
+    }.isdisjoint(child_env)
     assert run.call_args.kwargs["check"] is False
     assert "shell" not in run.call_args.kwargs
     bash.assert_stable.assert_called_once_with()
@@ -286,6 +310,42 @@ def test_tampered_or_missing_evidence_fails_before_resolver_execution(mode: str)
     coherence.assert_not_called()
 
 
+@_POSIX_ONLY
+def test_signed_but_truncated_resolver_is_rejected() -> None:
+    truncated = b"#!/usr/bin/env bash\nprintf 'resolver\\n'\n"
+    digest = hashlib.sha256(truncated).hexdigest()
+    bash = SimpleNamespace(path="/private/bash", assert_stable=Mock())
+
+    with (
+        patch.object(
+            upgrade_module,
+            "_trusted_system_bash",
+            return_value=nullcontext(bash),
+        ),
+        patch.object(
+            upgrade_module,
+            "_download_private_release_asset",
+            side_effect=_evidence_downloader(
+                truncated,
+                checksum_rows=[f"{digest}  defenseclaw-upgrade.sh"],
+            ),
+        ),
+        patch.object(
+            upgrade_module,
+            "_cosign_verifier",
+            return_value=nullcontext("/private/cosign"),
+        ),
+        patch.object(
+            upgrade_module.subprocess,
+            "run",
+            return_value=Mock(returncode=0),
+        ),
+        pytest.raises(OSError, match="completeness marker"),
+    ):
+        with upgrade_module._authenticated_release_resolver("9.9.9"):
+            pass
+
+
 @pytest.mark.parametrize(
     "arguments",
     (
@@ -397,6 +457,63 @@ def test_private_downloader_enforces_streamed_size_and_owner_only_mode() -> None
             "checksums.txt.sig",
             str(Path(directory, "oversized")),
             4,
+        )
+
+
+@_POSIX_ONLY
+def test_private_downloader_rejects_redirect_outside_pinned_hosts() -> None:
+    response = Mock(
+        status_code=302,
+        headers={"location": "https://untrusted.example/evidence"},
+    )
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch.object(upgrade_module.requests, "get", return_value=response),
+        pytest.raises(OSError, match="pinned HTTPS host set"),
+    ):
+        upgrade_module._download_private_release_asset(
+            "9.9.9",
+            "checksums.txt.sig",
+            "/unused/evidence",
+            16,
+        )
+
+
+@_POSIX_ONLY
+def test_private_downloader_rejects_redirect_without_location() -> None:
+    response = Mock(status_code=302, headers={})
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch.object(upgrade_module.requests, "get", return_value=response),
+        pytest.raises(OSError, match="no location"),
+    ):
+        upgrade_module._download_private_release_asset(
+            "9.9.9",
+            "checksums.txt.sig",
+            "/unused/evidence",
+            16,
+        )
+
+
+@_POSIX_ONLY
+def test_private_downloader_rejects_six_redirects() -> None:
+    responses = [
+        Mock(
+            status_code=302,
+            headers={"location": f"https://github.com/redirect-{hop}"},
+        )
+        for hop in range(6)
+    ]
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch.object(upgrade_module.requests, "get", side_effect=responses),
+        pytest.raises(OSError, match="redirect limit"),
+    ):
+        upgrade_module._download_private_release_asset(
+            "9.9.9",
+            "checksums.txt.sig",
+            "/unused/evidence",
+            16,
         )
 
 

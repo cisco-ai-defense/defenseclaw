@@ -351,6 +351,15 @@ def test_checksum_proof_bundle_is_required_but_not_self_referential() -> None:
     assert policy["published_baselines"][0] == "0.8.7"
 
 
+def test_release_before_bundle_threshold_authenticates_without_bundle() -> None:
+    release, downloads = _release("0.8.6")
+
+    assert all(asset["name"] != "checksums.txt.bundle" for asset in release["assets"])
+
+    policy = _resolve("0.8.7", [(release, downloads)])
+    assert policy["published_baselines"][0] == "0.8.6"
+
+
 def test_checksum_proof_bundle_must_have_exact_immutable_custody() -> None:
     release, downloads = _release("0.8.7")
     release = copy.deepcopy(release)

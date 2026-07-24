@@ -1278,6 +1278,9 @@ def test_clean_081_placeholder_repair_matches_only_post_bridge_release_shape(
         assert set(repaired["otel"]) == {"enabled", "traces", "logs", "resource"}
     else:
         assert result.returncode != 0
+        assert "not the exact clean release shape" in result.stdout + result.stderr, (
+            result.stdout + result.stderr
+        )
         assert config_path.read_text(encoding="utf-8") == source
 
 

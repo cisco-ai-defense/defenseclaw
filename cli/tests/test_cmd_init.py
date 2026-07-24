@@ -1601,6 +1601,30 @@ class TestInitStartsGateway(unittest.TestCase):
             self.assertIn("not found", result.output)
             self.assertIn("make gateway-install", result.output)
 
+    @patch("defenseclaw.bootstrap.finalize_first_run_config")
+    @patch("defenseclaw.commands.cmd_init._start_gateway", side_effect=RuntimeError("start failed"))
+    @patch("defenseclaw.commands.cmd_init._install_guardrail")
+    @patch("defenseclaw.commands.cmd_init._install_scanners")
+    @patch("defenseclaw.config.detect_environment", return_value="macos")
+    @patch("defenseclaw.config.default_data_path")
+    def test_cursor_is_not_published_when_sidecar_setup_fails(
+        self,
+        mock_path,
+        _mock_env,
+        _mock_scanners,
+        _mock_guardrail,
+        _mock_start_gateway,
+        mock_finalize,
+    ):
+        mock_path.return_value = Path(self.tmp_dir)
+
+        app = AppContext()
+        result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIsInstance(result.exception, RuntimeError)
+        mock_finalize.assert_not_called()
+
     def test_start_gateway_binary_missing(self):
         from defenseclaw.commands.cmd_init import _start_gateway
         from defenseclaw.config import default_config

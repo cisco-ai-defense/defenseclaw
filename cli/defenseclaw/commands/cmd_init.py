@@ -416,10 +416,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         is_new_config=is_new_config,
     )
 
-    from defenseclaw.bootstrap import finalize_first_run_config
-
-    finalize_first_run_config(cfg, was_config_absent=is_new_config)
-
     # Sandbox setup (Linux only)
     if sandbox:
         already_configured = cfg.openshell.is_standalone()
@@ -464,6 +460,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         if guardrail_ok and sidecar_started:
             click.echo("  " + ux.dim("Restarting sidecar to apply guardrail config..."))
             _restart_gateway_quiet()
+
+    from defenseclaw.bootstrap import finalize_first_run_config
+
+    finalize_first_run_config(cfg, was_config_absent=is_new_config)
 
     # Final completion banner. We render it as a plain divider with
     # bold success text so the eye lands here when the operator

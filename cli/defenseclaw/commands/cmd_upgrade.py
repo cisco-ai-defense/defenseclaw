@@ -1915,6 +1915,21 @@ def _maybe_delegate_public_upgrade(argv: list[str]) -> None:
             child_env.pop("VERSION", None)
             child_env.pop("PYTHONHOME", None)
             child_env.pop("PYTHONPATH", None)
+            for name in (
+                "BASH_ENV",
+                "ENV",
+                "SHELLOPTS",
+                "BASHOPTS",
+                "BASH_XTRACEFD",
+                "IFS",
+                "LD_PRELOAD",
+                "LD_LIBRARY_PATH",
+                "DYLD_INSERT_LIBRARIES",
+                "DYLD_LIBRARY_PATH",
+            ):
+                child_env.pop(name, None)
+            for name in [key for key in child_env if key.startswith("BASH_FUNC_")]:
+                child_env.pop(name, None)
             child_env[_UPGRADE_HANDOFF_ENV] = "1"
             completed = subprocess.run(
                 [bash.path, resolver, *resolver_args],
