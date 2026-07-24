@@ -681,6 +681,8 @@ def test_windows_release_accepts_signed_or_explicitly_unverified_setup_and_is_fr
     assert "invoke-windows-setup-standard-user-ci.ps1" in rendered
     assert "-Mode setup-acceptance" in rendered
     assert "-AllowCurrentUserSetupAcceptance" not in rendered
+    assert "Upload native Setup diagnostics on failure" in rendered
+    assert "defenseclaw-release-setup-diagnostics/**" in rendered
     windows_contract = (ROOT / "scripts/live-connector-e2e/test-windows.ps1").read_text(encoding="utf-8")
     assert "production release does not depend on provider-backed Windows live radar" in (windows_contract)
     assert "needs\\.windows-installer\\.outputs\\.artifact_id" in windows_contract

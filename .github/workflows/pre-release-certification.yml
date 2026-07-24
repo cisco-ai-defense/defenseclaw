@@ -181,4 +181,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/test-fresh-install-release-windows.ps1 `
             -ReleaseDir "$env:GITHUB_WORKSPACE/release-candidate/dist" `
-            -TargetVersion "$env:RELEASE_TAG"
+            -TargetVersion "$env:RELEASE_TAG" `
+            -DiagnosticsRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-release-bootstrap-diagnostics')
+      - name: Upload Windows bootstrap diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-windows-bootstrap-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/defenseclaw-release-bootstrap-diagnostics/**
+          if-no-files-found: warn
+          retention-days: 7

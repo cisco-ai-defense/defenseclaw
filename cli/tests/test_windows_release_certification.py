@@ -70,8 +70,14 @@ def test_release_accepts_signed_or_explicitly_unverified_setup_and_exact_four_si
     assert "-DiagnosticsRoot (Join-Path $env:RUNNER_TEMP" in acceptance_run
     assert "-TimeoutSeconds 2400" in acceptance_run
 
+    diagnostics = _step(windows, "Upload native Setup diagnostics on failure")
+    assert diagnostics["if"] == "${{ failure() || cancelled() }}"
+    assert diagnostics["with"]["path"] == ("${{ runner.temp }}/defenseclaw-release-setup-diagnostics/**")
+    assert diagnostics["with"]["if-no-files-found"] == "warn"
+
     upload = next(step for step in windows["steps"] if step.get("id") == "windows-installer-artifact")
-    assert windows["steps"].index(acceptance) < windows["steps"].index(upload)
+    assert windows["steps"].index(acceptance) < windows["steps"].index(diagnostics)
+    assert windows["steps"].index(diagnostics) < windows["steps"].index(upload)
     assert upload["with"]["path"] == (
         "windows-installer-output/DefenseClawSetup-x64.exe\n"
         "windows-installer-output/DefenseClawSetup-x64.exe.sha256\n"
@@ -118,6 +124,11 @@ def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> 
     assert "scripts/test-fresh-install-release-windows.ps1" in rendered
     assert "-TargetVersion" in rendered
     assert "-SuccessPathOnly" not in rendered
+    assert "defenseclaw-release-bootstrap-diagnostics" in rendered
+    diagnostics = _step(job, "Upload Windows bootstrap diagnostics on failure")
+    assert diagnostics["if"] == "${{ failure() || cancelled() }}"
+    assert diagnostics["with"]["path"] == ("${{ runner.temp }}/defenseclaw-release-bootstrap-diagnostics/**")
+    assert diagnostics["with"]["if-no-files-found"] == "warn"
 
     smoke_text = SMOKE_PATH.read_text(encoding="utf-8")
     for retired in (
