@@ -232,7 +232,9 @@ class GitHubReleaseAPI:
                     return item
             if len(releases) < 100:
                 return None
-        raise ReleaseAPIError(f"GitHub release listing exceeded {MAX_RELEASE_LIST_PAGES} pages while probing {tag!r}")
+        raise ReleaseAPIError(
+            f"GitHub release listing exceeded {MAX_RELEASE_LIST_PAGES} pages while probing {tag!r}"
+        )
 
     def resolve_tag_commit(self, payload: dict[str, object]) -> str:
         current = payload
@@ -282,7 +284,9 @@ def require_absent_namespace(
 def require_main_commit(api: GitHubReleaseAPI, expected_commit: str) -> None:
     remote_main = api.main_commit()
     if remote_main != expected_commit:
-        raise ReleaseAPIError(f"main advanced during certification: expected {expected_commit}, found {remote_main}")
+        raise ReleaseAPIError(
+            f"main advanced during certification: expected {expected_commit}, found {remote_main}"
+        )
 
 
 def _candidate_release_json(payload: dict[str, object]) -> dict[str, object]:
