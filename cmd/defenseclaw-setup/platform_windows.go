@@ -205,6 +205,10 @@ func openManagedPIDRecord(pidPath string) (*os.File, bool, error) {
 		err := fmt.Errorf("managed gateway PID path is not a regular file: %s", pidPath)
 		return nil, false, errors.Join(err, windows.CloseHandle(handle))
 	}
+	// PID records are process-identity proofs, not user documents. Reject every
+	// reparse tag—not only name-surrogate links—so validation never depends on
+	// cloud hydration, compression, deduplication, or another filter driver's
+	// interpretation of the record.
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 		err := fmt.Errorf("managed gateway PID path is a reparse point: %s", pidPath)
 		return nil, false, errors.Join(err, windows.CloseHandle(handle))

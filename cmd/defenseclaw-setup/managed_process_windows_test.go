@@ -27,6 +27,24 @@ func TestReadManagedPIDRecordTreatsMissingPathAsAbsent(t *testing.T) {
 	}
 }
 
+func TestReadManagedPIDRecordReturnsDecodedState(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "watchdog.pid")
+	want := pidState{
+		PID:           4242,
+		Executable:    `C:\DefenseClaw\gateway.exe`,
+		StartIdentity: "start-identity",
+	}
+	writeManagedPIDRecordTestFixture(t, pidPath, want)
+
+	got, exists, err := readManagedPIDRecord(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists || got != want {
+		t.Fatalf("valid PID record returned state=%+v exists=%t; want state=%+v exists=true", got, exists, want)
+	}
+}
+
 func TestManagedPIDRecordAbsentErrorsIncludeDeletePending(t *testing.T) {
 	for name, err := range map[string]error{
 		"file missing":   windows.ERROR_FILE_NOT_FOUND,
@@ -86,6 +104,21 @@ func TestDecodeManagedPIDRecordUsesOpenedHandleAfterPathReplacement(t *testing.T
 	}
 	if got != original {
 		t.Fatalf("decoded replacement path instead of opened record: got %+v want %+v", got, original)
+	}
+}
+
+func TestOpenManagedPIDRecordRejectsDirectory(t *testing.T) {
+	pidPath := t.TempDir()
+	file, exists, err := openManagedPIDRecord(pidPath)
+	if file != nil {
+		_ = file.Close()
+		t.Fatal("directory PID record returned an open file")
+	}
+	if exists {
+		t.Fatal("directory PID record was reported as usable")
+	}
+	if err == nil || !strings.Contains(err.Error(), "is not a regular file") {
+		t.Fatalf("directory PID record error = %v", err)
 	}
 }
 
