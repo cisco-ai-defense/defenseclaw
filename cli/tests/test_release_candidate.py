@@ -1157,6 +1157,15 @@ def test_posix_only_publish_set_omits_only_windows_binaries() -> None:
     } <= posix_only
 
 
+def test_signed_rescue_bootstrap_starts_with_release_channel_protocol() -> None:
+    assert "defenseclaw-rescue.sh" not in release_candidate.resolver_asset_names("0.8.7")
+    assert "defenseclaw-rescue.sh" in release_candidate.resolver_asset_names("0.8.8")
+    assert (
+        release_candidate.RESOLVER_COMPLETENESS_MARKERS["defenseclaw-rescue.sh"]
+        == b"# DefenseClaw rescue bootstrap complete v1"
+    )
+
+
 def test_windows_setup_custody_starts_at_086_and_survives_legacy_omission() -> None:
     assert release_candidate.windows_installer_asset_names("0.8.5") == ()
     assert release_candidate.release_proof_asset_names("0.8.5") == (
@@ -1978,6 +1987,7 @@ def test_local_release_harness_stages_exact_reviewed_resolvers(tmp_path: Path) -
 
 def test_exact_reviewed_release_sources_have_cross_platform_lf_attributes() -> None:
     reviewed = (
+        "scripts/defenseclaw-rescue.sh",
         "scripts/upgrade.sh",
         "scripts/upgrade.ps1",
         "cli/defenseclaw/install_publish.py",

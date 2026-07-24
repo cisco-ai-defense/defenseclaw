@@ -39,6 +39,7 @@ import platform
 import re
 import secrets
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -184,6 +185,18 @@ _V8_RECOVERY_ENTRY_RE = re.compile(r"^observability-v8-[0-9a-f]{32}$")
 _MAX_PREEXISTING_V8_RECOVERY_ENTRIES = 256
 _MAX_V8_RECOVERY_FILE_BYTES = 64 * 1024 * 1024
 _MAX_HARD_CUT_MIGRATION_SOURCE_BYTES = 4 * 1024 * 1024
+_AUDIT_DATABASE_FILENAME = "audit.db"
+_AUDIT_DATABASE_RECOVERY_DIRECTORY = "audit-corrupt"
+_AUDIT_DATABASE_RECOVERY_MARKER = ".audit-recovery.json"
+_AUDIT_DATABASE_RECOVERY_FILES = (
+    "audit.db-wal",
+    "audit.db-shm",
+    "audit.db-journal",
+    "audit.db",
+)
+_MAX_AUDIT_DATABASE_RECOVERY_MARKER_BYTES = 64 * 1024
+_AUDIT_DATABASE_PREFLIGHT_TIMEOUT_SECONDS = 5.0
+_AUDIT_DATABASE_MUTATION_TIMEOUT_SECONDS = 30.0
 _HELD_PHASE_TWO_MUTATOR_LEASE: object | None = None
 _PHASE_TWO_MUTATOR_SURVIVED_TIMEOUT = False
 
@@ -290,6 +303,21 @@ class _HardCutRollbackPlan:
     )
 
 
+@dataclass(frozen=True)
+class _InstalledStateRecoveryPlan:
+    """Read-only preflight result consumed only after backup and quiescence."""
+
+    replay_observability_v8: bool = False
+    reconstruct_pre_hard_cut_cursor: bool = False
+    recover_corrupt_audit: bool = False
+    audit_db_path: str | None = None
+    audit_db_identity: tuple[int, int] | None = None
+
+    @property
+    def required(self) -> bool:
+        return self.replay_observability_v8 or self.reconstruct_pre_hard_cut_cursor or self.recover_corrupt_audit
+
+
 _INSTALLED_MIGRATION_SCRIPT = """
 import inspect
 import json
@@ -364,6 +392,16 @@ class _LocalBundleUpgradeInvocationError(RuntimeError):
 @click.option("--version", "target_version", default=None, help="Upgrade to a specific release version (e.g. 0.3.1)")
 @click.option("--health-timeout", default=60, type=int, help="Seconds to wait for gateway health after restart")
 @click.option(
+    "--recover-corrupt-audit",
+    is_flag=True,
+    default=False,
+    help=(
+        "After corruption is proven by a bounded read-only SQLite check, "
+        "preserve audit.db and its sidecars in the upgrade backup and "
+        "activate a fresh local audit store."
+    ),
+)
+@click.option(
     "--allow-unverified",
     is_flag=True,
     default=False,
@@ -380,6 +418,7 @@ def upgrade(
     yes: bool,
     target_version: str | None,
     health_timeout: int,
+    recover_corrupt_audit: bool,
     allow_unverified: bool,
 ) -> None:
     """Upgrade DefenseClaw to the latest version.
@@ -435,15 +474,6 @@ def upgrade(
     ux.kv("Installed version", current_version, indent="  ", key_width=22)
     ux.kv("Target version", target_version, indent="  ", key_width=22)
 
-    # ── Same-version repair ──────────────────────────────────────────────────
-
-    if target_version == current_version:
-        click.echo()
-        ux.subhead(
-            f"Already at version {current_version}; verifying the release contract "
-            "without re-installing or re-running migrations.",
-        )
-
     # ── Platform detection ───────────────────────────────────────────────────
 
     os_name, arch = _detect_platform()
@@ -451,6 +481,14 @@ def upgrade(
     recovery_home = _upgrade_recovery_home()
     data_dir = _resolved_upgrade_data_dir(app.cfg, recovery_home=recovery_home)
     active_config_path = _active_upgrade_config_path(recovery_home)
+    configured_audit_db = getattr(app.cfg, "audit_db", "") if app.cfg is not None else ""
+    audit_db_path = os.path.abspath(
+        os.path.expanduser(
+            configured_audit_db
+            if isinstance(configured_audit_db, str) and configured_audit_db.strip()
+            else os.path.join(data_dir, _AUDIT_DATABASE_FILENAME)
+        )
+    )
     if current_version != controller_version:
         _preflight_staged_target_controller_source(
             source_version=current_version,
@@ -458,12 +496,38 @@ def upgrade(
             target_version=target_version,
             recovery_home=recovery_home,
         )
-    _preflight_installed_source_coherence(
+    recovery_plan_result = _preflight_installed_source_coherence(
         current_version,
         os_name,
         data_dir,
         config_path=active_config_path,
+        recover_corrupt_audit=recover_corrupt_audit,
+        audit_db_path=audit_db_path,
+        recovery_home=recovery_home,
     )
+    # A large number of focused upgrade tests patch the historical preflight
+    # as a void function. Treat non-plan test doubles as the legacy no-op result
+    # while production always receives the frozen plan returned below.
+    recovery_plan = (
+        recovery_plan_result
+        if isinstance(recovery_plan_result, _InstalledStateRecoveryPlan)
+        else _InstalledStateRecoveryPlan()
+    )
+
+    # ── Same-version repair ──────────────────────────────────────────────────
+
+    if target_version == current_version:
+        click.echo()
+        if recovery_plan.required:
+            ux.warn(
+                f"DefenseClaw {current_version} requires authenticated local-state recovery; "
+                "the same-version release will be reinstalled and health-checked."
+            )
+        else:
+            ux.subhead(
+                f"Already at version {current_version}; verifying the release contract "
+                "without re-installing or re-running migrations.",
+            )
 
     # ── Pre-flight: verify artifacts exist ───────────────────────────────────
 
@@ -742,7 +806,7 @@ def upgrade(
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise
 
-    if target_version == current_version:
+    if target_version == current_version and not recovery_plan.required:
         try:
             recovery_authority = find_resumable_upgrade_receipt(
                 data_dir,
@@ -888,6 +952,15 @@ def upgrade(
             f"    {ux.dim('3.')} Run version-specific migrations and refresh any installed local observability bundle"
         )
         click.echo(f"    {ux.dim('4.')} Restart services and verify health")
+        recovery_step = 5
+        if recovery_plan.replay_observability_v8:
+            click.echo(f"    {ux.dim(str(recovery_step) + '.')} Replay every missing idempotent migration")
+            recovery_step += 1
+        if recovery_plan.recover_corrupt_audit:
+            click.echo(
+                f"    {ux.dim(str(recovery_step) + '.')} "
+                "Preserve a proven-corrupt audit database in private backup custody"
+            )
         click.echo()
         if not click.confirm("  Proceed?", default=False):
             ux.subhead("Aborted.")
@@ -1100,10 +1173,52 @@ def upgrade(
             )
         raise SystemExit(1) from None
 
-    upgrade_phase = "install"
+    upgrade_phase = "source_repair"
     upgrade_body_failed = False
     migration_failed = False
+    restart_expected_version = current_version
     try:
+        openclaw_home = os.path.expanduser(app.cfg.claw.home_dir if app.cfg else "~/.openclaw")
+        if recovery_plan.replay_observability_v8:
+            ux.banner("Repairing Migration Cursor")
+            _replay_missing_observability_v8_migration(
+                current_version,
+                openclaw_home,
+                data_dir,
+                config_path=active_config_path,
+                reconstruct_pre_hard_cut_cursor=recovery_plan.reconstruct_pre_hard_cut_cursor,
+            )
+            ux.ok("Replayed every missing migration and durably repaired the migration cursor")
+
+        if recovery_plan.recover_corrupt_audit:
+            ux.banner("Preserving Corrupt Audit Store")
+            audit_path = recovery_plan.audit_db_path
+            if not isinstance(audit_path, str) or not audit_path:
+                restart_services = False
+                raise OSError("corrupt-audit recovery plan lacks the resolved database path")
+            try:
+                audit_custody = _quarantine_corrupt_audit_database(
+                    data_dir,
+                    backup_dir,
+                    audit_db_path=audit_path,
+                    recovery_home=recovery_home,
+                    expected_identity=recovery_plan.audit_db_identity,
+                )
+            except BaseException:
+                # Restarting the source is safe when no move marker was
+                # published: the active SQLite tuple is still authoritative.
+                # Once a durable marker exists, one or more tuple members may
+                # already be in custody, so only an exact flagged retry may
+                # resume the transaction.
+                restart_services = not os.path.lexists(os.path.join(data_dir, _AUDIT_DATABASE_RECOVERY_MARKER))
+                raise
+            if audit_custody is None:
+                ux.ok("Post-quiescence audit database is healthy; no audit files were moved")
+            else:
+                ux.ok(f"Preserved corrupt audit SQLite files: {audit_custody}")
+                ux.ok("The restarted gateway will initialize and health-check a fresh local audit store")
+
+        upgrade_phase = "install"
         ux.banner("Installing Artifacts")
 
         # Pass backup_dir so the previous gateway binary is snapshotted
@@ -1112,6 +1227,7 @@ def upgrade(
         # incident.
         installed_gateway_path = _install_gateway(gw_binary_path, os_name, backup_dir=backup_dir)
         _verify_installed_gateway_version(installed_gateway_path, target_version)
+        restart_expected_version = target_version
         _install_wheel(
             whl_path,
             os_name,
@@ -1120,7 +1236,6 @@ def upgrade(
 
         ux.banner("Running Migrations")
 
-        openclaw_home = os.path.expanduser(app.cfg.claw.home_dir if app.cfg else "~/.openclaw")
         # Thread the operator's data_dir through so migrations that
         # touch ``<data_dir>/.env`` / ``<data_dir>/active_connector.json``
         # / etc. (introduced in the connector-v3 wave, PR #194) hit the
@@ -1286,11 +1401,20 @@ def upgrade(
             )
         elif not restart_services:
             ux.banner("Services Remain Stopped")
-            ux.subhead(
-                "Keep the recovery journal and run the release-owned resolver with no version override; "
-                "it will wait for any mutator and recover from the retained bridge state.",
-                indent="  ",
-            )
+            if recovery_plan.recover_corrupt_audit and os.path.lexists(
+                os.path.join(data_dir, _AUDIT_DATABASE_RECOVERY_MARKER)
+            ):
+                ux.subhead(
+                    "Keep the private audit recovery marker and re-run this authenticated "
+                    "upgrade with --recover-corrupt-audit to resume exact custody.",
+                    indent="  ",
+                )
+            else:
+                ux.subhead(
+                    "Keep the recovery journal and run the release-owned resolver with no version override; "
+                    "it will wait for any mutator and recover from the retained bridge state.",
+                    indent="  ",
+                )
         else:
             try:
                 _start_and_verify_services(
@@ -1299,7 +1423,7 @@ def upgrade(
                     data_dir=data_dir,
                     local_bundle_upgrade=local_bundle_upgrade,
                     os_name=os_name,
-                    expected_version=target_version,
+                    expected_version=restart_expected_version,
                     rollback_plan=rollback_plan,
                     config_path=active_config_path,
                     recovery_home=recovery_home,
@@ -1760,6 +1884,7 @@ def _reload_post_upgrade_config(
 
 def _upgrade_failure_code(phase: str) -> str:
     return {
+        "source_repair": "migration_failed",
         "install": "install_failed",
         "migration": "migration_failed",
         "required_migration": "required_migration_failed",
@@ -2286,17 +2411,484 @@ def _fail_installed_source_coherence(message: str) -> NoReturn:
     raise SystemExit(1)
 
 
+def _is_private_regular_file(info: os.stat_result) -> bool:
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or getattr(info, "st_file_attributes", 0) & 0x00000400
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+    ):
+        return False
+    if os.name == "posix":
+        current_uid = getattr(os, "geteuid", os.getuid)()
+        if info.st_uid != current_uid or stat.S_IMODE(info.st_mode) & 0o077:
+            return False
+    return True
+
+
+def _audit_sqlite_error_is_proven_corruption(exc: sqlite3.DatabaseError) -> bool:
+    """Recognize only SQLite's value-safe corruption result codes.
+
+    Busy/locked databases, permission failures, I/O errors, and bounded-check
+    interrupts are deliberately indeterminate. They must never authorize moving
+    a durable audit store out of the active data directory.
+    """
+
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, bool) or not isinstance(code, int):
+        return False
+    primary = code & 0xFF
+    return primary in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}
+
+
+def _classify_audit_database(
+    data_dir: str,
+    *,
+    audit_db_path: str | None = None,
+    timeout_seconds: float = _AUDIT_DATABASE_PREFLIGHT_TIMEOUT_SECONDS,
+    include_wal: bool = False,
+) -> str:
+    """Return absent/healthy/wal-pending/corrupt/indeterminate/unsafe.
+
+    The live preflight uses SQLite's immutable mode so it cannot write even
+    the shared-memory sidecar. Immutable mode deliberately ignores WAL
+    contents, so a successful main-database check is ``wal-pending`` whenever
+    a WAL exists. After the gateway is quiesced, ``include_wal`` uses a
+    read-only connection to validate the logical database including WAL while
+    proving that the durable main/WAL inodes did not change. SQLite may rebuild
+    the disposable SHM index during that second probe.
+    """
+
+    path = os.path.abspath(os.path.expanduser(audit_db_path or os.path.join(data_dir, _AUDIT_DATABASE_FILENAME)))
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        return "absent"
+    except OSError:
+        return "indeterminate"
+    if not _is_private_regular_file(before):
+        return "unsafe"
+
+    durable_paths = (path, path + "-wal") if include_wal and os.path.lexists(path + "-wal") else (path,)
+    durable_before: dict[str, os.stat_result] = {}
+    for durable_path in durable_paths:
+        try:
+            info = os.lstat(durable_path)
+        except OSError:
+            return "indeterminate"
+        if not _is_private_regular_file(info):
+            return "unsafe"
+        durable_before[durable_path] = info
+
+    connection: sqlite3.Connection | None = None
+    deadline = time.monotonic() + max(0.01, timeout_seconds)
+    result = "indeterminate"
+    try:
+        query = "?mode=ro" if include_wal else "?mode=ro&immutable=1"
+        connection = sqlite3.connect(
+            Path(path).as_uri() + query,
+            uri=True,
+            timeout=min(max(0.01, timeout_seconds), 1.0),
+        )
+        connection.execute("PRAGMA query_only=ON")
+        connection.set_progress_handler(
+            lambda: int(time.monotonic() >= deadline),
+            1_000,
+        )
+        row = connection.execute("PRAGMA quick_check(1)").fetchone()
+    except sqlite3.DatabaseError as exc:
+        result = "corrupt" if _audit_sqlite_error_is_proven_corruption(exc) else "indeterminate"
+    else:
+        if row == ("ok",):
+            result = "healthy"
+        elif row is not None:
+            result = "corrupt"
+    finally:
+        if connection is not None:
+            connection.close()
+
+    for durable_path, durable_info in durable_before.items():
+        try:
+            after = os.lstat(durable_path)
+        except OSError:
+            return "indeterminate"
+        if (
+            not _is_private_regular_file(after)
+            or not os.path.samestat(durable_info, after)
+            or durable_info.st_size != after.st_size
+            or durable_info.st_mtime_ns != after.st_mtime_ns
+        ):
+            # A live gateway may legitimately write during preflight. The
+            # result cannot authorize custody mutation unless the durable
+            # database view remained stable.
+            return "indeterminate"
+    if result == "healthy" and not include_wal and os.path.lexists(path + "-wal"):
+        return "wal-pending"
+    return result
+
+
+def _private_directory_info(path: str) -> os.stat_result:
+    info = os.lstat(path)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or getattr(info, "st_file_attributes", 0) & 0x00000400
+        or not stat.S_ISDIR(info.st_mode)
+    ):
+        raise OSError("recovery custody is not a real directory")
+    if os.name == "posix":
+        current_uid = getattr(os, "geteuid", os.getuid)()
+        if info.st_uid != current_uid or stat.S_IMODE(info.st_mode) & 0o077:
+            raise OSError("recovery custody is not private and current-user-owned")
+    return info
+
+
+def _stable_owned_directory_info(path: str) -> os.stat_result:
+    """Require a real current-user directory that others cannot modify."""
+
+    info = os.lstat(path)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or getattr(info, "st_file_attributes", 0) & 0x00000400
+        or not stat.S_ISDIR(info.st_mode)
+    ):
+        raise OSError("audit database parent is not a real directory")
+    if os.name == "posix":
+        current_uid = getattr(os, "geteuid", os.getuid)()
+        if info.st_uid != current_uid or stat.S_IMODE(info.st_mode) & 0o022:
+            raise OSError("audit database parent is not stable and current-user-owned")
+    return info
+
+
+def _audit_database_recovery_sources(audit_db_path: str) -> tuple[tuple[str, str], ...]:
+    """Map a configured SQLite tuple to the marker's canonical custody names."""
+
+    source = os.path.abspath(os.path.expanduser(audit_db_path))
+    return (
+        ("audit.db-wal", source + "-wal"),
+        ("audit.db-shm", source + "-shm"),
+        ("audit.db-journal", source + "-journal"),
+        ("audit.db", source),
+    )
+
+
+def _audit_database_inode_identity(audit_db_path: str) -> tuple[int, int] | None:
+    try:
+        info = os.lstat(os.path.abspath(os.path.expanduser(audit_db_path)))
+    except FileNotFoundError:
+        return None
+    if not _is_private_regular_file(info):
+        raise OSError("audit database identity is unsafe")
+    return info.st_dev, info.st_ino
+
+
+def _audit_recovery_backup_roots(
+    data_dir: str,
+    *,
+    recovery_home: str | None,
+) -> frozenset[str]:
+    controller_home = os.path.abspath(os.path.expanduser(recovery_home or _upgrade_recovery_home()))
+    return frozenset(
+        {
+            os.path.abspath(os.path.join(data_dir, "backups")),
+            os.path.join(controller_home, "backups"),
+        }
+    )
+
+
+def _validated_audit_recovery_custody(
+    custody_value: object,
+    *,
+    data_dir: str,
+    recovery_home: str | None,
+) -> str:
+    if not isinstance(custody_value, str) or not os.path.isabs(custody_value):
+        raise OSError("audit recovery custody path is invalid")
+    custody = os.path.abspath(custody_value)
+    if custody != custody_value:
+        raise OSError("audit recovery custody path is not canonical")
+    backup_roots = _audit_recovery_backup_roots(
+        data_dir,
+        recovery_home=recovery_home,
+    )
+    matching_roots = [root for root in backup_roots if os.path.dirname(os.path.dirname(custody)) == root]
+    if (
+        len(matching_roots) != 1
+        or os.path.basename(custody) != _AUDIT_DATABASE_RECOVERY_DIRECTORY
+        or not os.path.basename(os.path.dirname(custody)).startswith("upgrade-")
+    ):
+        raise OSError("audit recovery custody escapes the trusted backup roots")
+    _private_directory_info(matching_roots[0])
+    _private_directory_info(os.path.dirname(custody))
+    _private_directory_info(custody)
+    return custody
+
+
+def _audit_recovery_identity_record_is_valid(record: object) -> bool:
+    return (
+        isinstance(record, dict)
+        and set(record) == {"device", "inode", "size", "mtime_ns"}
+        and all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in record.values())
+    )
+
+
+def _load_audit_recovery_marker(
+    data_dir: str,
+    *,
+    recovery_home: str | None = None,
+) -> dict[str, object] | None:
+    marker_path = os.path.join(data_dir, _AUDIT_DATABASE_RECOVERY_MARKER)
+    try:
+        before = os.lstat(marker_path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise OSError("audit recovery marker could not be inspected") from exc
+    if not _is_private_regular_file(before) or not 0 < before.st_size <= _MAX_AUDIT_DATABASE_RECOVERY_MARKER_BYTES:
+        raise OSError("audit recovery marker is unsafe")
+    try:
+        with open(marker_path, encoding="utf-8") as stream:
+            payload = json.load(stream)
+        after = os.lstat(marker_path)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise OSError("audit recovery marker is invalid") from exc
+    if (
+        not _is_private_regular_file(after)
+        or not os.path.samestat(before, after)
+        or before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+        or not isinstance(payload, dict)
+        or set(payload) != {"schema", "source", "custody", "files", "identities"}
+        or type(payload.get("schema")) is not int
+        or payload.get("schema") != 2
+        or not isinstance(payload.get("source"), str)
+        or not isinstance(payload.get("custody"), str)
+        or payload.get("files") != list(_AUDIT_DATABASE_RECOVERY_FILES)
+        or not isinstance(payload.get("identities"), dict)
+    ):
+        raise OSError("audit recovery marker is invalid")
+
+    source = payload["source"]
+    if not os.path.isabs(source) or os.path.abspath(source) != source:
+        raise OSError("audit recovery source path is not canonical")
+    identities = payload["identities"]
+    if (
+        set(identities) - set(_AUDIT_DATABASE_RECOVERY_FILES)
+        or "audit.db" not in identities
+        or any(not _audit_recovery_identity_record_is_valid(record) for record in identities.values())
+    ):
+        raise OSError("audit recovery identity set is invalid")
+    _validated_audit_recovery_custody(
+        payload["custody"],
+        data_dir=data_dir,
+        recovery_home=recovery_home,
+    )
+    return payload
+
+
+def _fail_audit_database_preflight(message: str) -> NoReturn:
+    ux.err(message, indent="  ")
+    ux.subhead(
+        "No changes were made: no target artifacts were downloaded, no services were stopped, "
+        "and no installed files were changed.",
+        indent="    ",
+    )
+    raise SystemExit(1)
+
+
+def _preflight_audit_database_recovery(
+    data_dir: str,
+    *,
+    recover_corrupt_audit: bool,
+    audit_db_path: str,
+    recovery_home: str | None = None,
+) -> bool:
+    try:
+        marker = _load_audit_recovery_marker(
+            data_dir,
+            recovery_home=recovery_home,
+        )
+    except OSError:
+        _fail_audit_database_preflight(
+            "An audit recovery marker exists but its private custody cannot be authenticated."
+        )
+    if marker is not None:
+        marker_audit_path = marker.get("source")
+        if not isinstance(marker_audit_path, str) or os.path.abspath(
+            os.path.expanduser(marker_audit_path)
+        ) != os.path.abspath(audit_db_path):
+            _fail_audit_database_preflight(
+                "The active audit database path does not match the interrupted recovery marker."
+            )
+        if not recover_corrupt_audit:
+            _fail_audit_database_preflight(
+                "An interrupted corrupt-audit recovery is pending. Re-run with "
+                "--recover-corrupt-audit to resume its authenticated private-custody transaction."
+            )
+        ux.warn("Resuming an interrupted corrupt-audit private-custody transaction.")
+        return True
+
+    state = _classify_audit_database(data_dir, audit_db_path=audit_db_path)
+    if state == "unsafe":
+        _fail_audit_database_preflight("The local audit database is not a private, current-user-owned regular file.")
+    if state in {"corrupt", "wal-pending"}:
+        if not recover_corrupt_audit:
+            if state == "corrupt":
+                _fail_audit_database_preflight(
+                    "The local audit SQLite store is corrupt. Re-run with "
+                    "--recover-corrupt-audit to preserve it in private backup custody "
+                    "and activate a fresh store."
+                )
+            ux.warn(
+                "The active audit database has a WAL that immutable live preflight "
+                "cannot inspect; normal upgrade will continue without moving audit data."
+            )
+            return False
+        if os.name != "posix":
+            _fail_audit_database_preflight(
+                "Built-in corrupt-audit recovery is currently supported on macOS and Linux only; "
+                "use the authenticated Windows release resolver."
+            )
+        try:
+            audit_parent_info = _stable_owned_directory_info(
+                os.path.dirname(os.path.abspath(audit_db_path)) or os.curdir
+            )
+            data_dir_info = _private_directory_info(os.path.abspath(data_dir))
+        except OSError:
+            _fail_audit_database_preflight("The corrupt audit database cannot enter stable private backup custody.")
+        if audit_parent_info.st_dev != data_dir_info.st_dev:
+            _fail_audit_database_preflight(
+                "The corrupt audit database is on a different filesystem from the managed backup root; "
+                "non-atomic cross-filesystem recovery is refused."
+            )
+        if state == "corrupt":
+            ux.warn(
+                "The local audit SQLite store is corrupt; exact durable database bytes will be "
+                "preserved in the upgrade backup after the gateway is stopped."
+            )
+        else:
+            ux.warn(
+                "The active audit database has a WAL; corruption recovery will run a "
+                "WAL-aware read-only integrity check after the gateway is stopped."
+            )
+        return True
+    if state == "indeterminate":
+        if recover_corrupt_audit:
+            _fail_audit_database_preflight(
+                "The bounded audit SQLite check could not prove corruption; "
+                "--recover-corrupt-audit therefore refuses to move the database."
+            )
+        ux.warn(
+            "The bounded read-only audit SQLite check was inconclusive; "
+            "normal fail-closed gateway readiness remains in effect."
+        )
+    elif recover_corrupt_audit:
+        ux.subhead(
+            "--recover-corrupt-audit was requested, but the local audit database "
+            f"is {state}; no audit files will be moved.",
+            indent="  ",
+        )
+    return False
+
+
+def _observability_v8_cursor_recovery_mode(data_dir: str, current_version: str) -> str:
+    """Return valid/replay/bootstrap/invalid for a hard-cut cursor.
+
+    A missing or JSON-damaged private cursor can be reconstructed from a
+    config-v8 installation by inferring only pre-hard-cut history, then running
+    the real 0.8.5 callable. A structurally valid partial cursor is preserved
+    and every missing idempotent callable runs; no valid record is synthesized.
+    """
+
+    from defenseclaw.migrations import MIGRATIONS
+
+    path = os.path.join(data_dir, ".migration_state.json")
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        return "bootstrap"
+    except OSError:
+        return "invalid"
+    if not _is_private_regular_file(before) or not 0 < before.st_size <= 1024 * 1024:
+        return "invalid"
+    try:
+        with open(path, encoding="utf-8") as stream:
+            raw = json.load(stream)
+        after = os.lstat(path)
+    except (UnicodeError, json.JSONDecodeError):
+        return "bootstrap"
+    except OSError:
+        return "invalid"
+    if (
+        not _is_private_regular_file(after)
+        or not os.path.samestat(before, after)
+        or before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+        or not isinstance(raw, dict)
+        or raw.get("schema") != 1
+    ):
+        return "invalid"
+
+    package_version = raw.get("package_version")
+    applied = raw.get("applied")
+    applied_at = raw.get("applied_at")
+    if (
+        not isinstance(package_version, str)
+        or _CANONICAL_VERSION_RE.fullmatch(package_version) is None
+        or _version_key(package_version) > _version_key(current_version)
+        or not isinstance(applied, list)
+        or any(not isinstance(item, str) for item in applied)
+        or len(applied) != len(set(applied))
+        or not isinstance(applied_at, dict)
+        or set(applied_at) != set(applied)
+        or any(not isinstance(value, str) or not value for value in applied_at.values())
+    ):
+        return "invalid"
+
+    expected = [
+        version
+        for version, _description, _function in MIGRATIONS
+        if _version_key(version) <= _version_key(current_version)
+    ]
+    if (
+        _OBSERVABILITY_V8_MIGRATION_VERSION not in expected
+        or any(_CANONICAL_VERSION_RE.fullmatch(version) is None for version in applied)
+        or any(version not in expected for version in applied)
+        or applied != sorted(applied, key=_version_key)
+    ):
+        return "invalid"
+    return "valid" if applied == expected else "replay"
+
+
 def _preflight_installed_source_coherence(
     current_version: str,
     os_name: str,
     data_dir: str,
     *,
     config_path: str | None = None,
-) -> None:
-    """Reject manual/partial release overwrites before target I/O or mutation."""
+    recover_corrupt_audit: bool = False,
+    audit_db_path: str | None = None,
+    recovery_home: str | None = None,
+) -> _InstalledStateRecoveryPlan:
+    """Reject incoherent state and return a read-only, narrowly scoped plan."""
+
+    replay_observability_v8 = False
+    reconstruct_pre_hard_cut_cursor = False
+    resolved_audit_db_path = os.path.abspath(
+        os.path.expanduser(audit_db_path or os.path.join(data_dir, _AUDIT_DATABASE_FILENAME))
+    )
 
     if _version_key(current_version) < _version_key(_STRICT_SIGSTORE_RELEASE_VERSION):
-        return
+        recover_audit = _preflight_audit_database_recovery(
+            data_dir,
+            recover_corrupt_audit=recover_corrupt_audit,
+            audit_db_path=resolved_audit_db_path,
+            recovery_home=recovery_home,
+        )
+        return _InstalledStateRecoveryPlan(
+            recover_corrupt_audit=recover_audit,
+            audit_db_path=resolved_audit_db_path,
+            audit_db_identity=(_audit_database_inode_identity(resolved_audit_db_path) if recover_audit else None),
+        )
 
     gateway_path = os.path.expanduser(os.path.join("~/.local/bin", _installed_gateway_filename(os_name)))
     try:
@@ -2327,29 +2919,47 @@ def _preflight_installed_source_coherence(
         actual = reported[0] if len(reported) == 1 else "unverifiable"
         _fail_installed_source_coherence(f"Installed component version drift: CLI={current_version}, gateway={actual}.")
 
-    if _version_key(current_version) < _version_key(_OBSERVABILITY_V8_MIGRATION_VERSION):
-        return
+    if _version_key(current_version) >= _version_key(_OBSERVABILITY_V8_MIGRATION_VERSION):
+        from defenseclaw.config import ConfigVersionError, source_config_version
 
-    from defenseclaw import migration_state
-    from defenseclaw.config import ConfigVersionError, source_config_version
+        try:
+            config_version = source_config_version(path=config_path or _active_upgrade_config_path())
+        except ConfigVersionError:
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} configuration schema could not be verified."
+            )
+        if config_version != _TARGET_CONFIG_VERSION:
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} requires config_version "
+                f"{_TARGET_CONFIG_VERSION}; found {config_version!r}."
+            )
+        cursor_recovery_mode = _observability_v8_cursor_recovery_mode(data_dir, current_version)
+        if cursor_recovery_mode == "invalid":
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} has invalid migration cursor metadata."
+            )
+        if cursor_recovery_mode != "valid":
+            replay_observability_v8 = True
+            reconstruct_pre_hard_cut_cursor = cursor_recovery_mode == "bootstrap"
+            detail = "a missing or damaged cursor" if reconstruct_pre_hard_cut_cursor else "a valid partial cursor"
+            ux.warn(
+                f"Installed DefenseClaw {current_version} has {detail}; every missing "
+                "idempotent migration will be replayed after backup and gateway quiescence."
+            )
 
-    try:
-        config_version = source_config_version(path=config_path or _active_upgrade_config_path())
-    except ConfigVersionError:
-        _fail_installed_source_coherence(
-            f"Installed DefenseClaw {current_version} configuration schema could not be verified."
-        )
-    if config_version != _TARGET_CONFIG_VERSION:
-        _fail_installed_source_coherence(
-            f"Installed DefenseClaw {current_version} requires config_version "
-            f"{_TARGET_CONFIG_VERSION}; found {config_version!r}."
-        )
-    state = migration_state.load(data_dir)
-    if not migration_state.is_applied(state, _OBSERVABILITY_V8_MIGRATION_VERSION):
-        _fail_installed_source_coherence(
-            f"Installed DefenseClaw {current_version} lacks the applied "
-            f"{_OBSERVABILITY_V8_MIGRATION_VERSION} migration cursor."
-        )
+    recover_audit = _preflight_audit_database_recovery(
+        data_dir,
+        recover_corrupt_audit=recover_corrupt_audit,
+        audit_db_path=resolved_audit_db_path,
+        recovery_home=recovery_home,
+    )
+    return _InstalledStateRecoveryPlan(
+        replay_observability_v8=replay_observability_v8,
+        reconstruct_pre_hard_cut_cursor=reconstruct_pre_hard_cut_cursor,
+        recover_corrupt_audit=recover_audit,
+        audit_db_path=resolved_audit_db_path,
+        audit_db_identity=(_audit_database_inode_identity(resolved_audit_db_path) if recover_audit else None),
+    )
 
 
 def _preflight_check(
@@ -6413,6 +7023,238 @@ def _assert_gateway_quiesced(data_dir: str, *, gateway_path: str | None = None) 
         raise OSError("exact gateway status still reports a live service after stop")
 
 
+def _replay_missing_observability_v8_migration(
+    current_version: str,
+    openclaw_home: str,
+    data_dir: str,
+    *,
+    config_path: str,
+    reconstruct_pre_hard_cut_cursor: bool = False,
+) -> int:
+    """Run every missing callable and require a complete durable cursor."""
+
+    from defenseclaw import migration_state
+    from defenseclaw.migrations import MIGRATIONS, run_migrations
+
+    expected = [
+        version
+        for version, _description, _function in MIGRATIONS
+        if _version_key(version) <= _version_key(current_version)
+    ]
+    if reconstruct_pre_hard_cut_cursor:
+        state = migration_state.bootstrap(
+            None,
+            from_version="0.8.4",
+            package_version=current_version,
+            registry_versions=expected,
+        )
+        if migration_state.is_applied(state, _OBSERVABILITY_V8_MIGRATION_VERSION):
+            raise OSError("migration cursor reconstruction synthesized the hard-cut entry")
+        migration_state.save(data_dir, state)
+
+    previous_home = os.environ.get("DEFENSECLAW_HOME")
+    previous_config = os.environ.get("DEFENSECLAW_CONFIG")
+    os.environ["DEFENSECLAW_HOME"] = os.path.abspath(data_dir)
+    os.environ["DEFENSECLAW_CONFIG"] = os.path.abspath(config_path)
+    try:
+        count = run_migrations(
+            current_version,
+            current_version,
+            openclaw_home,
+            data_dir,
+            upgrade_handles_local_bundle=True,
+            strict_required=(_OBSERVABILITY_V8_MIGRATION_VERSION,),
+            controller_owns_local_bundle_transaction=True,
+        )
+    finally:
+        if previous_home is None:
+            os.environ.pop("DEFENSECLAW_HOME", None)
+        else:
+            os.environ["DEFENSECLAW_HOME"] = previous_home
+        if previous_config is None:
+            os.environ.pop("DEFENSECLAW_CONFIG", None)
+        else:
+            os.environ["DEFENSECLAW_CONFIG"] = previous_config
+
+    state = migration_state.load(data_dir)
+    if (
+        count < 1
+        or state is None
+        or any(not migration_state.is_applied(state, version) for version in expected)
+        or state.applied_at.get(_OBSERVABILITY_V8_MIGRATION_VERSION) in {None, migration_state.BOOTSTRAP_SENTINEL}
+    ):
+        raise OSError("idempotent migration replay did not durably repair the complete cursor")
+    return count
+
+
+def _audit_recovery_identity(info: os.stat_result) -> dict[str, int]:
+    return {
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "size": info.st_size,
+        "mtime_ns": info.st_mtime_ns,
+    }
+
+
+def _audit_recovery_identity_matches(info: os.stat_result, expected: object) -> bool:
+    if not _is_private_regular_file(info) or not _audit_recovery_identity_record_is_valid(expected):
+        return False
+    actual = _audit_recovery_identity(info)
+    return actual == expected
+
+
+def _write_private_json(path: str, payload: dict[str, object], *, protect_parent: bool) -> None:
+    from defenseclaw.file_permissions import atomic_write_private_bytes
+
+    encoded = (json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+    if len(encoded) > _MAX_AUDIT_DATABASE_RECOVERY_MARKER_BYTES:
+        raise OSError("audit recovery metadata exceeds its bounded envelope")
+    atomic_write_private_bytes(path, encoded, protect_parent=protect_parent)
+
+
+def _quarantine_corrupt_audit_database(
+    data_dir: str,
+    backup_dir: str,
+    *,
+    audit_db_path: str,
+    recovery_home: str | None = None,
+    expected_identity: tuple[int, int] | None = None,
+) -> str | None:
+    """Move one proven-corrupt SQLite tuple into resumable private custody."""
+
+    if os.name != "posix":
+        raise OSError("corrupt-audit private custody is supported on POSIX only")
+
+    normalized_data_dir = os.path.abspath(data_dir)
+    normalized_backup_dir = os.path.abspath(backup_dir)
+    normalized_audit_db_path = os.path.abspath(os.path.expanduser(audit_db_path))
+    audit_parent = os.path.dirname(normalized_audit_db_path) or os.curdir
+    recovery_sources = _audit_database_recovery_sources(normalized_audit_db_path)
+    _private_directory_info(normalized_data_dir)
+    audit_parent_info = _stable_owned_directory_info(audit_parent)
+
+    marker_path = os.path.join(normalized_data_dir, _AUDIT_DATABASE_RECOVERY_MARKER)
+    marker = _load_audit_recovery_marker(
+        normalized_data_dir,
+        recovery_home=recovery_home,
+    )
+    if marker is None:
+        backup_info = _private_directory_info(normalized_backup_dir)
+        matching_backup_roots = [
+            root
+            for root in _audit_recovery_backup_roots(
+                normalized_data_dir,
+                recovery_home=recovery_home,
+            )
+            if os.path.dirname(normalized_backup_dir) == root
+        ]
+        if len(matching_backup_roots) != 1 or not os.path.basename(normalized_backup_dir).startswith("upgrade-"):
+            raise OSError("audit recovery backup escapes the managed private root")
+        _private_directory_info(matching_backup_roots[0])
+        if audit_parent_info.st_dev != backup_info.st_dev:
+            raise OSError("audit recovery custody must share the audit database filesystem")
+
+        current_identity = _audit_database_inode_identity(normalized_audit_db_path)
+        if expected_identity is not None and current_identity != expected_identity:
+            raise OSError("audit database inode changed after the live integrity probe")
+        state = _classify_audit_database(
+            normalized_data_dir,
+            audit_db_path=normalized_audit_db_path,
+            timeout_seconds=_AUDIT_DATABASE_MUTATION_TIMEOUT_SECONDS,
+            include_wal=True,
+        )
+        if state in {"healthy", "absent"}:
+            return None
+        if state != "corrupt":
+            raise OSError(
+                "post-quiescence audit check did not prove SQLITE_CORRUPT/SQLITE_NOTADB; the database was not moved"
+            )
+
+        custody = os.path.join(normalized_backup_dir, _AUDIT_DATABASE_RECOVERY_DIRECTORY)
+        if os.path.lexists(custody):
+            raise OSError("audit recovery custody target already exists")
+        os.mkdir(custody, 0o700)
+        os.chmod(custody, 0o700)
+        custody_info = _private_directory_info(custody)
+        if custody_info.st_dev != audit_parent_info.st_dev:
+            raise OSError("audit recovery custody is not on the database filesystem")
+        _fsync_posix_directory(normalized_backup_dir)
+
+        identities: dict[str, dict[str, int]] = {}
+        for name, source in recovery_sources:
+            try:
+                info = os.lstat(source)
+            except FileNotFoundError:
+                continue
+            if not _is_private_regular_file(info) or info.st_dev != audit_parent_info.st_dev:
+                raise OSError(f"audit recovery input is unsafe: {name}")
+            identities[name] = _audit_recovery_identity(info)
+        if "audit.db" not in identities:
+            raise OSError("proven-corrupt audit database disappeared before custody")
+
+        marker = {
+            "schema": 2,
+            "source": normalized_audit_db_path,
+            "custody": custody,
+            "files": list(_AUDIT_DATABASE_RECOVERY_FILES),
+            "identities": identities,
+        }
+        _write_private_json(marker_path, marker, protect_parent=False)
+        _fsync_posix_directory(normalized_data_dir)
+    else:
+        custody = _validated_audit_recovery_custody(
+            marker.get("custody"),
+            data_dir=normalized_data_dir,
+            recovery_home=recovery_home,
+        )
+
+    custody_info = _private_directory_info(custody)
+    if custody_info.st_dev != audit_parent_info.st_dev:
+        raise OSError("audit recovery custody changed filesystems")
+    marker_audit_path = marker.get("source")
+    if (
+        not isinstance(marker_audit_path, str)
+        or marker_audit_path != normalized_audit_db_path
+        or marker.get("files") != list(_AUDIT_DATABASE_RECOVERY_FILES)
+    ):
+        raise OSError("audit recovery marker does not match the active configured store")
+    records = marker.get("identities")
+    if not isinstance(records, dict) or "audit.db" not in records:
+        raise OSError("audit recovery inventory lacks the main database")
+
+    for name, source in recovery_sources:
+        destination = os.path.join(custody, name)
+        source_exists = os.path.lexists(source)
+        destination_exists = os.path.lexists(destination)
+        expected = records.get(name)
+        if expected is None:
+            if source_exists or destination_exists:
+                raise OSError(f"unexpected audit recovery file appeared: {name}")
+            continue
+        if source_exists == destination_exists:
+            raise OSError(f"audit recovery cannot establish unique custody for {name}")
+        observed = os.lstat(source if source_exists else destination)
+        if not _audit_recovery_identity_matches(observed, expected):
+            raise OSError(f"audit recovery file identity changed: {name}")
+        if source_exists:
+            os.rename(source, destination)
+            _fsync_posix_directory(custody)
+            _fsync_posix_directory(audit_parent)
+
+    main_source = normalized_audit_db_path
+    main_destination = os.path.join(custody, "audit.db")
+    if os.path.lexists(main_source) or not _audit_recovery_identity_matches(
+        os.lstat(main_destination),
+        records["audit.db"],
+    ):
+        raise OSError("audit recovery did not establish main-database custody")
+
+    os.unlink(marker_path)
+    _fsync_posix_directory(normalized_data_dir)
+    _fsync_posix_directory(custody)
+    return custody
+
+
 def _capture_source_gateway_running_state(gateway_path: str, data_dir: str) -> bool:
     """Prove whether the authenticated source gateway is running before mutation."""
 
@@ -6544,6 +7386,7 @@ def _create_backup(cfg, *, data_dir: str | None = None) -> str:
     for fname in (
         "config.yaml",
         ".env",
+        ".migration_state.json",
         "guardrail_runtime.json",
         "device.key",
         "active_connector.json",

@@ -821,7 +821,7 @@ def test_publish_uses_all_assets_from_the_exact_tested_candidate() -> None:
     jobs = _workflow()["jobs"]
     publish = jobs["publish-release"]
     assert publish["environment"] == "release"
-    assert publish["permissions"] == {"contents": "write"}
+    assert publish["permissions"] == {"contents": "write", "id-token": "write"}
     for name, job in jobs.items():
         if name != "publish-release":
             assert job.get("permissions") != {"contents": "write"}

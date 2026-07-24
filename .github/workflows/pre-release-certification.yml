@@ -116,6 +116,10 @@ jobs:
           RELEASE_TAG: ${{ inputs.version }}
           RELEASE_COMMIT: ${{ inputs.commit }}
           UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS: "1"
+          # The newest authenticated source also exercises the two field
+          # states that stranded real 0.8.6 hosts: a missing hard-cut cursor
+          # and an explicitly recovered corrupt local audit store.
+          UPGRADE_SMOKE_FIELD_RECOVERY_CASES: ${{ matrix.baseline == fromJSON(inputs.baselines)[0] && '1' || '0' }}
         run: |
           set -euo pipefail
           test "$RUNNER_ARCH" = "${{ matrix.platform.runner_arch }}"

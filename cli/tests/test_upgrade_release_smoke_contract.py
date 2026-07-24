@@ -259,7 +259,10 @@ def test_posix_resolver_owns_dynamic_receipt_and_bundle_phases() -> None:
     gateway_activation = source.index('mv -f "${BRIDGE_GATEWAY_INSTALL_TEMP}"', stop)
     target_activation = source.index('UPGRADE_RECEIPT_FAILURE_CODE="interrupted"', gateway_activation)
     launcher = source.index('ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw"', target_activation)
-    migration = source.index('kwargs = {"upgrade_handles_local_bundle": True}', stop)
+    # Cursor repair may invoke the installed release's migration runner before
+    # target activation. This assertion is about the target-owned migration
+    # phase, so select the invocation that follows launcher activation.
+    migration = source.index('kwargs = {"upgrade_handles_local_bundle": True}', launcher)
     required = source.index('if [[ "${UPGRADE_INCOMPLETE}" -eq 1 ]]', migration)
     start = source.index("# ── Start services", required)
     health = source.index('if [[ "${HEALTH_OK}" -eq 0 ]]', start)

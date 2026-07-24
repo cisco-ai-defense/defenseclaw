@@ -1960,12 +1960,13 @@ def test_windows_bootstrap_binds_native_setup_to_authenticated_signed_outer_byte
     assert execute < main.index("} finally {") < cleanup
 
 
-def test_cli_docs_describe_authenticated_same_version_upgrade_as_noop() -> None:
+def test_cli_docs_describe_authenticated_same_version_upgrade_recovery_exception() -> None:
     cli = (ROOT / "docs/CLI.md").read_text(encoding="utf-8")
     normalized = " ".join(cli.split())
 
-    assert "An authenticated same-version request is a no-op" in normalized
-    assert "it does not reinstall artifacts or run migrations" in normalized
+    assert "An authenticated same-version request is normally a no-op" in normalized
+    assert "--recover-corrupt-audit" in normalized
+    assert "field-recovery cases below are the exceptions" in normalized
     assert "run automatically even during same-version upgrades" not in normalized
 
 

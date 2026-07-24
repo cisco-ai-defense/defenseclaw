@@ -20,7 +20,7 @@ already-selected reviewed commit while its release is running.
 
 ```bash
 gh workflow run release.yaml --ref main \
-  -f version=0.8.7 \
+  -f version=0.8.8 \
   -f immutable_releases_confirmed=true
 ```
 
@@ -84,6 +84,16 @@ immutable GitHub release. It publishes the selected Linux, macOS, and Windows
 assets from the sealed candidate and verifies the remote asset bytes. A failed
 gate leaves no release to promote and requires a new dispatch after the problem
 is fixed.
+
+Starting with `0.8.8`, the sealed candidate also contains the external
+`defenseclaw-rescue.sh` bootstrap. After proving the immutable remote release,
+the workflow signs a strict stable-channel document and fast-forwards the
+dedicated `release-channel` branch. The channel may point to a newer immutable
+resolver; no workflow replaces assets on an existing tag. If that final pointer
+update fails, the release remains valid and the prior stable pointer remains in
+place for a safe retry. See
+[Authenticated release channel and rescue bootstrap](RELEASE_CHANNEL.md) for
+the field-level trust and recovery contract.
 
 ## What belongs before merge
 

@@ -127,10 +127,18 @@ UPGRADE_BASELINES_PATH = Path(
 HISTORICAL_ARTIFACT_DIGESTS_PATH = ROOT / "release" / "historical-artifact-digests.json"
 RUNTIME_CONFIG_PATH = ROOT / "internal" / "config" / "config.go"
 RESOLVER_COMPLETENESS_MARKER = b"# DefenseClaw upgrade resolver complete v1"
+RESCUE_COMPLETENESS_MARKER = b"# DefenseClaw rescue bootstrap complete v1"
 RESOLVER_ASSET_SOURCES = {
     "defenseclaw-upgrade.sh": ROOT / "scripts" / "upgrade.sh",
     "defenseclaw-upgrade.ps1": ROOT / "scripts" / "upgrade.ps1",
+    "defenseclaw-rescue.sh": ROOT / "scripts" / "defenseclaw-rescue.sh",
 }
+RESOLVER_COMPLETENESS_MARKERS = {
+    "defenseclaw-upgrade.sh": RESOLVER_COMPLETENESS_MARKER,
+    "defenseclaw-upgrade.ps1": RESOLVER_COMPLETENESS_MARKER,
+    "defenseclaw-rescue.sh": RESCUE_COMPLETENESS_MARKER,
+}
+RELEASE_CHANNEL_BOOTSTRAP_START_VERSION = (0, 8, 8)
 MAX_RESOLVER_BYTES = 4 * 1024 * 1024
 MAX_RELEASE_CERTIFICATE_BYTES = 64 * 1024
 MAX_EFFECTIVE_UPGRADE_BASELINES_BYTES = 1024 * 1024
@@ -547,7 +555,10 @@ def resolver_asset_names(version: str) -> tuple[str, ...]:
     _validate_version(version)
     if tuple(map(int, version.split("."))) < (0, 8, 4):
         return ()
-    return tuple(sorted(RESOLVER_ASSET_SOURCES))
+    names = {"defenseclaw-upgrade.sh", "defenseclaw-upgrade.ps1"}
+    if tuple(map(int, version.split("."))) >= RELEASE_CHANNEL_BOOTSTRAP_START_VERSION:
+        names.add("defenseclaw-rescue.sh")
+    return tuple(sorted(names))
 
 
 def release_identity_asset_names(version: str) -> tuple[str, ...]:
@@ -665,7 +676,7 @@ def _validated_resolver_source(name: str) -> Path:
         raise CandidateError(f"reviewed resolver source is not a regular file: {source}")
     if not payload or len(payload) > MAX_RESOLVER_BYTES or b"\0" in payload:
         raise CandidateError(f"reviewed resolver source has invalid content: {source}")
-    if payload.splitlines()[-1] != RESOLVER_COMPLETENESS_MARKER:
+    if payload.splitlines()[-1] != RESOLVER_COMPLETENESS_MARKERS[name]:
         raise CandidateError(f"reviewed resolver source lacks its completeness marker: {source}")
     # Windows does not preserve Git's POSIX executable bit in os.stat().
     # Enforce the reviewed mode where the host exposes POSIX permissions;

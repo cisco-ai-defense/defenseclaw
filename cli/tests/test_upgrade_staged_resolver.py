@@ -590,9 +590,8 @@ def test_manual_hard_cut_artifacts_over_v7_state_refuse_before_release_download(
 
     output = result.stdout + result.stderr
     assert result.returncode != 0
-    assert "config-v8 migration state is absent or invalid" in output
-    assert "Unsupported manual overwrite detected" in output
-    assert "restore the exact 0.8.4 CLI, gateway, config, environment, and migration cursor" in output
+    assert "config-v8 migration state is invalid and cannot be reconstructed safely" in output
+    assert "restore one exact release-owned backup or contact support" in output
     assert "No changes were made" in output
     assert not mutation_log.exists()
     assert not curl_log.exists()

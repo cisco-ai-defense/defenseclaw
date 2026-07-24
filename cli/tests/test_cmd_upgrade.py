@@ -3,6 +3,7 @@ import io
 import json
 import os
 import signal
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -35,6 +36,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _capture_rollback_file,
     _capture_source_gateway_running_state,
     _check_post_upgrade_drift,
+    _classify_audit_database,
     _cleanup_hard_cut_mutation_temporaries,
     _copy_distribution_metadata,
     _crash_bundle_rollback_result,
@@ -62,6 +64,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _hold_phase_two_lease_for_command_lifetime,
     _install_gateway,
     _install_wheel,
+    _InstalledStateRecoveryPlan,
     _load_hard_cut_recovery_journal,
     _LocalBundleUpgradeInvocationError,
     _mark_hard_cut_bundle_mutation_intent,
@@ -80,9 +83,11 @@ from defenseclaw.commands.cmd_upgrade import (
     _preflight_wheel_install,
     _prepare_hard_cut_rollback_plan,
     _print_migration_cursor_summary,
+    _quarantine_corrupt_audit_database,
     _recover_interrupted_hard_cut,
     _refresh_target_dotenv_environment,
     _release_download_base,
+    _replay_missing_observability_v8_migration,
     _require_bridge_checksums_provenance,
     _require_bridge_environment_accepts_target_wheel,
     _require_hard_cut_manifest_contract,
@@ -656,6 +661,22 @@ class TestUpgradeBackup(unittest.TestCase):
             )
             self.assertTrue(os.path.isfile(copied))
 
+    def test_create_backup_captures_migration_cursor_before_replay(self):
+        cfg = Config()
+        with TemporaryDirectory() as data_dir:
+            cfg.data_dir = data_dir
+            cfg.claw.home_dir = os.path.join(data_dir, "openclaw")
+            cursor = Path(data_dir, ".migration_state.json")
+            cursor.write_text('{"schema":1,"applied":[]}\n', encoding="utf-8")
+            cursor.chmod(0o600)
+
+            backup_dir = _create_backup(cfg)
+
+            self.assertEqual(
+                Path(backup_dir, ".migration_state.json").read_bytes(),
+                cursor.read_bytes(),
+            )
+
     @unittest.skipIf(os.name != "posix", "POSIX mode contract")
     def test_create_backup_tightens_legacy_root_and_makes_unique_private_directories(self):
         cfg = Config()
@@ -691,6 +712,201 @@ class TestUpgradeBackup(unittest.TestCase):
                 _create_backup(cfg)
 
             self.assertEqual(os.listdir(target), [])
+
+
+@unittest.skipIf(os.name != "posix", "POSIX SQLite custody fixture")
+class TestUpgradeAuditRecovery(unittest.TestCase):
+    @staticmethod
+    def _private_file(path: Path, payload: bytes) -> None:
+        path.write_bytes(payload)
+        path.chmod(0o600)
+
+    def test_classifier_uses_configured_audit_path_and_proves_notadb(self):
+        with TemporaryDirectory() as data_dir:
+            configured = Path(data_dir, "custom-events.sqlite")
+            self._private_file(configured, b"not-a-sqlite-database")
+
+            state = _classify_audit_database(
+                data_dir,
+                audit_db_path=str(configured),
+            )
+
+            self.assertEqual(state, "corrupt")
+            self.assertFalse(Path(data_dir, "audit.db").exists())
+
+    def test_busy_or_locked_database_never_authorizes_recovery(self):
+        with TemporaryDirectory() as data_dir:
+            configured = Path(data_dir, "custom-events.sqlite")
+            with sqlite3.connect(configured) as connection:
+                connection.execute("CREATE TABLE events(id INTEGER PRIMARY KEY)")
+            configured.chmod(0o600)
+            locked = sqlite3.OperationalError("database is locked")
+            locked.sqlite_errorcode = sqlite3.SQLITE_BUSY
+
+            with patch(
+                "defenseclaw.commands.cmd_upgrade.sqlite3.connect",
+                side_effect=locked,
+            ):
+                state = _classify_audit_database(
+                    data_dir,
+                    audit_db_path=str(configured),
+                )
+
+            self.assertEqual(state, "indeterminate")
+            self.assertTrue(configured.exists())
+
+    def test_classifier_does_not_rewrite_live_wal_sidecars(self):
+        with TemporaryDirectory() as data_dir:
+            configured = Path(data_dir, "audit.db")
+            with sqlite3.connect(configured) as writer:
+                writer.execute("PRAGMA journal_mode=WAL")
+                writer.execute("CREATE TABLE events(id INTEGER PRIMARY KEY)")
+                writer.commit()
+                configured.chmod(0o600)
+                sidecars = [
+                    path
+                    for path in (
+                        Path(str(configured) + "-wal"),
+                        Path(str(configured) + "-shm"),
+                    )
+                    if path.exists()
+                ]
+                for path in sidecars:
+                    path.chmod(0o600)
+                before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in sidecars}
+
+                state = _classify_audit_database(
+                    data_dir,
+                    audit_db_path=str(configured),
+                )
+
+                self.assertEqual(state, "wal-pending")
+                self.assertTrue(sidecars)
+                self.assertEqual(
+                    {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in sidecars},
+                    before,
+                )
+                durable = [configured, Path(str(configured) + "-wal")]
+                durable_before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in durable}
+
+                wal_aware_state = _classify_audit_database(
+                    data_dir,
+                    audit_db_path=str(configured),
+                    include_wal=True,
+                )
+
+                self.assertEqual(wal_aware_state, "healthy")
+                self.assertEqual(
+                    {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in durable},
+                    durable_before,
+                )
+
+    def test_quarantine_moves_configured_sqlite_tuple_and_keeps_default_store(self):
+        with TemporaryDirectory() as data_dir:
+            root = Path(data_dir)
+            audit_parent = root / "local-state"
+            audit_parent.mkdir(mode=0o700)
+            configured = audit_parent / "events.sqlite"
+            self._private_file(configured, b"not-a-sqlite-database")
+            self._private_file(Path(str(configured) + "-wal"), b"wal-bytes")
+            self._private_file(Path(str(configured) + "-shm"), b"shm-bytes")
+            default_store = root / "audit.db"
+            with sqlite3.connect(default_store) as connection:
+                connection.execute("CREATE TABLE preserved(id INTEGER PRIMARY KEY)")
+            default_store.chmod(0o600)
+            backup = root / "backups" / "upgrade-test"
+            backup.mkdir(parents=True, mode=0o700)
+            (root / "backups").chmod(0o700)
+            backup.chmod(0o700)
+
+            custody = _quarantine_corrupt_audit_database(
+                data_dir,
+                str(backup),
+                audit_db_path=str(configured),
+            )
+
+            self.assertEqual(custody, str(backup / "audit-corrupt"))
+            self.assertFalse(configured.exists())
+            self.assertEqual(Path(custody, "audit.db").read_bytes(), b"not-a-sqlite-database")
+            self.assertEqual(Path(custody, "audit.db-wal").read_bytes(), b"wal-bytes")
+            # A WAL-aware read-only probe may rebuild SQLite's disposable SHM
+            # index. Durable main/WAL bytes remain exact and are what carry
+            # audit history.
+            self.assertTrue(Path(custody, "audit.db-shm").is_file())
+            self.assertEqual(stat.S_IMODE(os.stat(custody).st_mode), 0o700)
+            self.assertTrue(default_store.exists())
+            self.assertFalse((root / ".audit-recovery.json").exists())
+            self.assertEqual(
+                sorted(path.name for path in Path(custody).iterdir()),
+                ["audit.db", "audit.db-shm", "audit.db-wal"],
+            )
+
+    def test_python_resumes_exact_shell_schema_two_marker_from_controller_backup(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            data_dir = root / "data"
+            data_dir.mkdir(mode=0o700)
+            controller_home = root / "controller"
+            controller_home.mkdir(mode=0o700)
+            controller_backups = controller_home / "backups"
+            controller_backups.mkdir(mode=0o700)
+            old_backup = controller_backups / "upgrade-shell"
+            old_backup.mkdir(mode=0o700)
+            custody = old_backup / "audit-corrupt"
+            custody.mkdir(mode=0o700)
+
+            audit_parent = root / "local-state"
+            audit_parent.mkdir(mode=0o700)
+            configured = audit_parent / "events.sqlite"
+            wal = Path(str(configured) + "-wal")
+            self._private_file(custody / "audit.db", b"not-a-sqlite-database")
+            self._private_file(wal, b"wal-bytes")
+
+            def identity(path: Path) -> dict[str, int]:
+                info = path.lstat()
+                return {
+                    "device": info.st_dev,
+                    "inode": info.st_ino,
+                    "size": info.st_size,
+                    "mtime_ns": info.st_mtime_ns,
+                }
+
+            marker = {
+                "schema": 2,
+                "source": str(configured),
+                "custody": str(custody),
+                "files": [
+                    "audit.db-wal",
+                    "audit.db-shm",
+                    "audit.db-journal",
+                    "audit.db",
+                ],
+                "identities": {
+                    "audit.db": identity(custody / "audit.db"),
+                    "audit.db-wal": identity(wal),
+                },
+            }
+            marker_path = data_dir / ".audit-recovery.json"
+            marker_path.write_text(json.dumps(marker) + "\n", encoding="utf-8")
+            marker_path.chmod(0o600)
+
+            current_backup_root = data_dir / "backups"
+            current_backup_root.mkdir(mode=0o700)
+            current_backup = current_backup_root / "upgrade-python"
+            current_backup.mkdir(mode=0o700)
+
+            resumed = _quarantine_corrupt_audit_database(
+                str(data_dir),
+                str(current_backup),
+                audit_db_path=str(configured),
+                recovery_home=str(controller_home),
+            )
+
+            self.assertEqual(resumed, str(custody))
+            self.assertFalse(marker_path.exists())
+            self.assertFalse(wal.exists())
+            self.assertEqual((custody / "audit.db").read_bytes(), b"not-a-sqlite-database")
+            self.assertEqual((custody / "audit.db-wal").read_bytes(), b"wal-bytes")
 
 
 @unittest.skipIf(os.name == "nt", "POSIX hard-cut rollback fixture")
@@ -3986,6 +4202,78 @@ class TestUpgradeSameVersionRepair(unittest.TestCase):
         self.assertEqual(unproven_bundle_result.exit_code, 1)
         self.assertIn("no verified target-install receipt exists", unproven_bundle_result.output)
 
+    def test_same_version_recovery_plan_bypasses_authenticated_noop(self):
+        class StopAtBackupError(RuntimeError):
+            pass
+
+        runner = CliRunner()
+        app = AppContext()
+        app.cfg = Config()
+        with TemporaryDirectory() as data_dir, ExitStack() as stack:
+            app.cfg.data_dir = data_dir
+            app.cfg.claw.home_dir = data_dir
+            stack.enter_context(patch("defenseclaw.__version__", "9.9.9"))
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._preflight_installed_source_coherence",
+                    return_value=_InstalledStateRecoveryPlan(replay_observability_v8=True),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._detect_platform",
+                    return_value=("darwin", "arm64"),
+                )
+            )
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_check"))
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._require_hard_cut_manifest_contract"))
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._download_checksums",
+                    return_value={
+                        "defenseclaw_9.9.9_darwin_arm64.tar.gz": "0" * 64,
+                        "defenseclaw-9.9.9-py3-none-any.whl": "0" * 64,
+                        "upgrade-manifest.json": "0" * 64,
+                    },
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._download_upgrade_manifest",
+                    return_value=None,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._download_gateway",
+                    return_value=("/tmp/defenseclaw-gateway", "gateway.tar.gz"),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._download_wheel",
+                    return_value=("/tmp/defenseclaw.whl", "defenseclaw.whl"),
+                )
+            )
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_wheel_install"))
+            create_backup = stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._create_backup",
+                    side_effect=StopAtBackupError,
+                )
+            )
+
+            result = runner.invoke(
+                upgrade,
+                ["--yes", "--version", "9.9.9"],
+                obj=app,
+            )
+
+        self.assertIsInstance(result.exception, StopAtBackupError)
+        self.assertIn("same-version release will be reinstalled", result.output)
+        self.assertNotIn("Version Already Verified", result.output)
+        create_backup.assert_called_once()
+
     def test_interrupted_same_version_bundle_recovery_is_retryable(self):
         app = AppContext()
         app.cfg = Config()
@@ -4900,6 +5188,9 @@ class TestUpgradeServiceVerification(unittest.TestCase):
             "darwin",
             selected,
             config_path=config_path,
+            recover_corrupt_audit=False,
+            audit_db_path=os.path.join(selected, "audit.db"),
+            recovery_home=recovery_home,
         )
         self.assertEqual(self.create_backup.call_args.kwargs["data_dir"], selected)
         migration_call = self.run_installed_migrations.call_args
@@ -6994,22 +7285,127 @@ class TestUpgradeManifest(unittest.TestCase):
 
             config.write_text("config_version: 8\n", encoding="utf-8")
             with runner.isolation() as (out, _err, _):
-                with self.assertRaises(SystemExit):
-                    _preflight_installed_source_coherence("0.8.5", "linux", str(data_dir))
-                self.assertIn("lacks the applied 0.8.5 migration cursor", out.getvalue().decode())
+                plan = _preflight_installed_source_coherence(
+                    "0.8.5",
+                    "linux",
+                    str(data_dir),
+                )
+                self.assertTrue(plan.replay_observability_v8)
+                self.assertTrue(plan.reconstruct_pre_hard_cut_cursor)
+                self.assertIn("missing or damaged cursor", out.getvalue().decode())
 
+            cursor.write_text("{broken\n", encoding="utf-8")
+            cursor.chmod(0o600)
+            damaged_plan = _preflight_installed_source_coherence(
+                "0.8.5",
+                "linux",
+                str(data_dir),
+            )
+            self.assertTrue(damaged_plan.replay_observability_v8)
+            self.assertTrue(damaged_plan.reconstruct_pre_hard_cut_cursor)
+
+            from defenseclaw.migrations import MIGRATIONS
+
+            expected = [version for version, _description, _function in MIGRATIONS]
             cursor.write_text(
                 json.dumps(
                     {
                         "schema": 1,
                         "package_version": "0.8.5",
-                        "applied": ["0.8.5"],
-                        "applied_at": {"0.8.5": "test"},
+                        "applied": expected,
+                        "applied_at": {version: "test" for version in expected},
                     }
                 ),
                 encoding="utf-8",
             )
-            _preflight_installed_source_coherence("0.8.5", "linux", str(data_dir))
+            cursor.chmod(0o600)
+            valid_plan = _preflight_installed_source_coherence("0.8.5", "linux", str(data_dir))
+            self.assertFalse(valid_plan.replay_observability_v8)
+
+    @unittest.skipIf(os.name == "nt", "POSIX installed-source fixture")
+    def test_v8_cursor_missing_only_085_returns_real_replay_plan(self):
+        from defenseclaw import migration_state
+        from defenseclaw.migrations import MIGRATIONS
+
+        with (
+            TemporaryDirectory() as root,
+            patch.dict(os.environ, {"HOME": root}),
+            patch(
+                "defenseclaw.commands.cmd_upgrade.subprocess.run",
+                return_value=Mock(
+                    returncode=0,
+                    stdout="defenseclaw version 0.8.6\n",
+                    stderr="",
+                ),
+            ),
+        ):
+            home = Path(root)
+            gateway = home / ".local/bin/defenseclaw-gateway"
+            gateway.parent.mkdir(parents=True)
+            gateway.write_bytes(b"gateway")
+            gateway.chmod(0o755)
+            data_dir = home / ".defenseclaw"
+            data_dir.mkdir(mode=0o700)
+            (data_dir / "config.yaml").write_text("config_version: 8\n", encoding="utf-8")
+            expected = [version for version, _description, _function in MIGRATIONS if version != "0.8.5"]
+            migration_state.save(
+                str(data_dir),
+                migration_state.MigrationState(
+                    package_version="0.8.6",
+                    applied=expected,
+                    applied_at={version: "bootstrap" for version in expected},
+                ),
+            )
+
+            plan = _preflight_installed_source_coherence(
+                "0.8.6",
+                "linux",
+                str(data_dir),
+                audit_db_path=str(data_dir / "custom-audit.db"),
+            )
+
+            self.assertTrue(plan.replay_observability_v8)
+            self.assertFalse(plan.recover_corrupt_audit)
+            self.assertEqual(plan.audit_db_path, str(data_dir / "custom-audit.db"))
+
+    def test_cursor_repair_calls_real_migration_runner_instead_of_synthesizing_bit(self):
+        from defenseclaw import migration_state
+
+        with TemporaryDirectory() as data_dir:
+            initial = migration_state.MigrationState(
+                package_version="0.8.6",
+                applied=["0.3.0", "0.4.0", "0.5.0", "0.7.0", "0.8.0"],
+                applied_at={version: "bootstrap" for version in ("0.3.0", "0.4.0", "0.5.0", "0.7.0", "0.8.0")},
+            )
+            migration_state.save(data_dir, initial)
+
+            def run_real_callable(*args, **kwargs):
+                self.assertEqual(args[:2], ("0.8.6", "0.8.6"))
+                self.assertEqual(kwargs["strict_required"], ("0.8.5",))
+                state = migration_state.load(data_dir)
+                migration_state.mark_applied(state, "0.8.5", package_version="0.8.6")
+                migration_state.save(data_dir, state)
+                return 1
+
+            with patch(
+                "defenseclaw.migrations.run_migrations",
+                side_effect=run_real_callable,
+            ) as migration_runner:
+                count = _replay_missing_observability_v8_migration(
+                    "0.8.6",
+                    data_dir,
+                    data_dir,
+                    config_path=os.path.join(data_dir, "config.yaml"),
+                )
+
+            self.assertEqual(count, 1)
+            migration_runner.assert_called_once()
+            self.assertTrue(
+                migration_state.is_applied(
+                    migration_state.load(data_dir),
+                    "0.8.5",
+                )
+            )
 
     def test_downgrade_refusal_precedes_platform_network_and_mutation(self):
         runner = CliRunner()
