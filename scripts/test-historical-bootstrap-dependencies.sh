@@ -142,7 +142,7 @@ def function(name: str, following: str) -> str:
     return source[start:end]
 
 
-post_cut = function("continue_post_hard_cut_upgrade", "handoff_existing_bridge_to_hard_cut")
+post_cut = function("continue_post_hard_cut_upgrade", "validate_tarball_members")
 if not (
     "env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \\\n"
     "        DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 \\\n"
@@ -165,8 +165,8 @@ historical_handoff = (
     '        UV_EXCLUDE_NEWER="${HISTORICAL_BOOTSTRAP_EXCLUDE_NEWER}" \\\n'
     '        "${TARGET_CONTROLLER_CLI}" upgrade'
 )
-if source.count(historical_handoff) != 2:
-    raise SystemExit("historical constraints are not scoped to both authenticated hard-cut handoffs")
+if source.count(historical_handoff) != 1:
+    raise SystemExit("historical constraints are not scoped to the single authenticated hard-cut handoff")
 if "UV_CONSTRAINT=''" in source or "UV_OVERRIDE=''" in source or "UV_EXCLUDE_NEWER=''" in source:
     raise SystemExit("empty uv environment assignments are parsed as values by current uv releases")
 

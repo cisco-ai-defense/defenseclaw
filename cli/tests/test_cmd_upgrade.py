@@ -46,6 +46,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _download_gateway,
     _download_release_provenance,
     _download_upgrade_manifest,
+    _download_windows_setup,
     _enforce_upgrade_source_contract,
     _enforce_windows_self_update_policy,
     _execute_hard_cut_rollback,
@@ -5232,26 +5233,33 @@ class TestUpgradeServiceVerification(unittest.TestCase):
             )
 
     def test_gateway_environment_preserves_fresh_process_readiness_handoff(self):
+        data_dir = "/private/upgrade-data"
+        config_path = "/private/controller/config.yaml"
         with patch.dict(
             os.environ,
-            {"DEFENSECLAW_UPGRADE_FRESH_PROCESS": "1"},
+            {
+                "DEFENSECLAW_UPGRADE_FRESH_PROCESS": "1",
+                "DEFENSECLAW_HOME": "/attacker/home",
+                "DEFENSECLAW_CONFIG": "/attacker/config.yaml",
+            },
             clear=True,
         ):
             environment = cmd_upgrade_module._gateway_process_environment(
-                "/private/upgrade-data",
-                config_path="/private/controller/config.yaml",
+                data_dir,
+                config_path=config_path,
             )
 
         self.assertEqual(environment["DEFENSECLAW_UPGRADE_FRESH_PROCESS"], "1")
-        self.assertEqual(environment["DEFENSECLAW_HOME"], "/private/upgrade-data")
+        self.assertEqual(environment["DEFENSECLAW_HOME"], os.path.abspath(data_dir))
         self.assertEqual(
             environment["DEFENSECLAW_CONFIG"],
-            "/private/controller/config.yaml",
+            os.path.abspath(config_path),
         )
 
     def test_fresh_process_health_uses_current_strict_gateway_contract_once(self):
         cfg = Config()
         cfg.data_dir = "/private/upgrade-data"
+        config_path = "/private/controller/config.yaml"
 
         with TemporaryDirectory() as install_dir:
             gateway_binary = Path(install_dir, "defenseclaw-gateway")
@@ -5264,6 +5272,8 @@ class TestUpgradeServiceVerification(unittest.TestCase):
                     {
                         "DEFENSECLAW_UPGRADE_FRESH_PROCESS": "1",
                         "DEFENSECLAW_GATEWAY_BIN": "/attacker/override",
+                        "DEFENSECLAW_HOME": "/attacker/home",
+                        "DEFENSECLAW_CONFIG": "/attacker/config.yaml",
                         "PATH": "/attacker/path",
                     },
                     clear=True,
@@ -5272,7 +5282,7 @@ class TestUpgradeServiceVerification(unittest.TestCase):
                 patch("defenseclaw.gateway.canonical_install_path", return_value=str(gateway_binary)),
                 patch(
                     "defenseclaw.config.config_path",
-                    return_value=Path("/private/controller/config.yaml"),
+                    return_value=Path(config_path),
                 ),
                 patch(
                     "defenseclaw.commands.cmd_upgrade.subprocess.run",
@@ -5296,10 +5306,13 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         )
         self.assertEqual(run.call_args.kwargs["timeout"], 65)
         self.assertFalse(run.call_args.kwargs["check"])
-        self.assertEqual(run.call_args.kwargs["env"]["DEFENSECLAW_HOME"], "/private/upgrade-data")
+        self.assertEqual(
+            run.call_args.kwargs["env"]["DEFENSECLAW_HOME"],
+            os.path.abspath(cfg.data_dir),
+        )
         self.assertEqual(
             run.call_args.kwargs["env"]["DEFENSECLAW_CONFIG"],
-            "/private/controller/config.yaml",
+            os.path.abspath(config_path),
         )
         self.assertEqual(run.call_args.kwargs["env"]["DEFENSECLAW_UPGRADE_FRESH_PROCESS"], "1")
         legacy_client.assert_not_called()
@@ -6375,6 +6388,43 @@ class TestUpgradeManifest(unittest.TestCase):
         payload.update(overrides)
         return payload
 
+    @staticmethod
+    def _windows_installer_manifest() -> dict[str, object]:
+        return {
+            "windows_installer": {
+                "asset": "DefenseClawSetup-x64.exe",
+                "architectures": ["amd64"],
+                "handoff_args": ["/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user"],
+                "authenticode": {
+                    "required": False,
+                    "publisher": "Cisco Systems, Inc.",
+                },
+                "managed_policy": "respect",
+            },
+        }
+
+    @staticmethod
+    def _windows_setup_provenance(
+        setup_sha256: str,
+        *,
+        unsigned: bool,
+        source_commit: str = "a" * 40,
+        version: str = "9.9.9",
+    ) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "artifact": "DefenseClawSetup-x64.exe",
+            "artifact_sha256": setup_sha256,
+            "version": version,
+            "source_commit": source_commit,
+            "distribution_flavor": "oss",
+            "built_at_utc": "2026-07-23T00:00:00Z",
+            "unsigned": unsigned,
+            "authenticode": {},
+            "inputs": {},
+            "toolchain": {},
+        }
+
     def test_validate_accepts_complete_hard_cut_bridge_graph(self):
         manifest = _validate_upgrade_manifest(self._hard_cut_manifest(), "0.8.5")
 
@@ -7077,7 +7127,7 @@ class TestUpgradeManifest(unittest.TestCase):
                 "architectures": ["amd64"],
                 "handoff_args": ["/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user"],
                 "authenticode": {
-                    "required": True,
+                    "required": False,
                     "publisher": "Cisco Systems, Inc.",
                 },
                 "managed_policy": "respect",
@@ -7087,7 +7137,7 @@ class TestUpgradeManifest(unittest.TestCase):
         manifest = _validate_upgrade_manifest(payload, "9.9.9")
 
         self.assertEqual(manifest["windows_installer"]["asset"], "DefenseClawSetup-x64.exe")
-        self.assertTrue(manifest["windows_installer"]["authenticode"]["required"])
+        self.assertFalse(manifest["windows_installer"]["authenticode"]["required"])
 
     def test_validate_rejects_wrong_windows_installer_asset(self):
         payload = {
@@ -7109,7 +7159,7 @@ class TestUpgradeManifest(unittest.TestCase):
                 "architectures": ["amd64"],
                 "handoff_args": ["/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user"],
                 "authenticode": {
-                    "required": True,
+                    "required": False,
                     "publisher": "Cisco Systems, Inc.",
                 },
                 "managed_policy": "respect",
@@ -7195,10 +7245,115 @@ class TestUpgradeManifest(unittest.TestCase):
 
         self.assertEqual(ctx.exception.code, 1)
 
+    def _download_windows_setup_fixture(
+        self,
+        staging_dir: str,
+        *,
+        provenance_unsigned: bool,
+        observed_unsigned: bool,
+        provenance_source_commit: str = "a" * 40,
+        expected_source_commit: str = "a" * 40,
+    ) -> tuple[str, str]:
+        setup_bytes = b"authenticated native Setup fixture"
+        setup_sha256 = hashlib.sha256(setup_bytes).hexdigest()
+        provenance = self._windows_setup_provenance(
+            setup_sha256,
+            unsigned=provenance_unsigned,
+            source_commit=provenance_source_commit,
+        )
+        provenance_bytes = json.dumps(provenance, sort_keys=True).encode("utf-8")
+        checksums = {
+            "DefenseClawSetup-x64.exe": setup_sha256,
+            "DefenseClawSetup-x64.exe.provenance.json": hashlib.sha256(provenance_bytes).hexdigest(),
+        }
+
+        def download(_url: str, destination: str) -> None:
+            name = os.path.basename(destination)
+            payload = setup_bytes if name == "DefenseClawSetup-x64.exe" else provenance_bytes
+            Path(destination).write_bytes(payload)
+
+        with (
+            patch(
+                "defenseclaw.commands.cmd_upgrade._download_file",
+                side_effect=download,
+            ) as download_mock,
+            patch(
+                "defenseclaw.commands.cmd_upgrade._verify_windows_setup_authenticode",
+                return_value=observed_unsigned,
+            ),
+        ):
+            result = _download_windows_setup(
+                "9.9.9",
+                staging_dir,
+                checksums,
+                self._windows_installer_manifest(),
+                expected_source_commit=expected_source_commit,
+            )
+
+        downloaded_names = {os.path.basename(call.args[1]) for call in download_mock.call_args_list}
+        self.assertEqual(
+            downloaded_names,
+            {
+                "DefenseClawSetup-x64.exe",
+                "DefenseClawSetup-x64.exe.provenance.json",
+            },
+        )
+        return result
+
+    def test_windows_setup_download_accepts_matching_signed_and_unsigned_provenance(self):
+        for unsigned in (False, True):
+            with self.subTest(unsigned=unsigned), TemporaryDirectory() as staging:
+                setup_path, setup_name = self._download_windows_setup_fixture(
+                    staging,
+                    provenance_unsigned=unsigned,
+                    observed_unsigned=unsigned,
+                )
+                self.assertEqual(setup_name, "DefenseClawSetup-x64.exe")
+                self.assertEqual(os.path.basename(setup_path), setup_name)
+
+    def test_windows_setup_download_rejects_both_signing_state_mismatch_directions(self):
+        for provenance_unsigned, observed_unsigned in (
+            (False, True),
+            (True, False),
+        ):
+            with (
+                self.subTest(
+                    provenance_unsigned=provenance_unsigned,
+                    observed_unsigned=observed_unsigned,
+                ),
+                TemporaryDirectory() as staging,
+                self.assertRaises(SystemExit) as ctx,
+            ):
+                self._download_windows_setup_fixture(
+                    staging,
+                    provenance_unsigned=provenance_unsigned,
+                    observed_unsigned=observed_unsigned,
+                )
+            self.assertEqual(ctx.exception.code, 1)
+
+    def test_windows_setup_download_binds_release_provenance_source_commit(self):
+        with TemporaryDirectory() as staging, self.assertRaises(SystemExit) as ctx:
+            self._download_windows_setup_fixture(
+                staging,
+                provenance_unsigned=True,
+                observed_unsigned=True,
+                provenance_source_commit="b" * 40,
+                expected_source_commit="a" * 40,
+            )
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_native_windows_authenticated_artifact_set_includes_setup_provenance(self):
+        source = Path(cmd_upgrade_module.__file__).read_text(encoding="utf-8")
+        start = source.index("artifact_names = [")
+        end = source.index("if checksums is not None:", start)
+        artifact_set = source[start:end]
+        self.assertIn("_WINDOWS_SETUP_ASSET", artifact_set)
+        self.assertIn("_WINDOWS_SETUP_PROVENANCE_ASSET", artifact_set)
+
     def test_authenticode_verification_requires_valid_publisher(self):
         installer = {
             "authenticode": {
-                "required": True,
+                "required": False,
                 "publisher": "Cisco Systems, Inc.",
             },
         }
@@ -7218,12 +7373,13 @@ class TestUpgradeManifest(unittest.TestCase):
                 return_value=Mock(returncode=0, stdout=signed, stderr=""),
             ),
         ):
-            _verify_windows_setup_authenticode("setup.exe", installer)
+            unsigned = _verify_windows_setup_authenticode("setup.exe", installer)
+        self.assertFalse(unsigned)
 
-    def test_authenticode_verification_rejects_unsigned_setup(self):
+    def test_authenticode_verification_accepts_explicitly_unverified_setup(self):
         installer = {
             "authenticode": {
-                "required": True,
+                "required": False,
                 "publisher": "Cisco Systems, Inc.",
             },
         }
@@ -7237,16 +7393,14 @@ class TestUpgradeManifest(unittest.TestCase):
                 "defenseclaw.commands.cmd_upgrade.subprocess.run",
                 return_value=Mock(returncode=0, stdout=unsigned, stderr=""),
             ),
-            self.assertRaises(SystemExit) as ctx,
         ):
-            _verify_windows_setup_authenticode("setup.exe", installer)
-
-        self.assertEqual(ctx.exception.code, 1)
+            unsigned = _verify_windows_setup_authenticode("setup.exe", installer)
+        self.assertTrue(unsigned)
 
     def test_authenticode_verification_rejects_publisher_lookalike(self):
         installer = {
             "authenticode": {
-                "required": True,
+                "required": False,
                 "publisher": "Cisco Systems, Inc.",
             },
         }
@@ -7265,11 +7419,16 @@ class TestUpgradeManifest(unittest.TestCase):
                 "defenseclaw.commands.cmd_upgrade.subprocess.run",
                 return_value=Mock(returncode=0, stdout=signed, stderr=""),
             ),
+            patch("defenseclaw.commands.cmd_upgrade.ux.subhead") as guidance,
             self.assertRaises(SystemExit) as ctx,
         ):
             _verify_windows_setup_authenticode("setup.exe", installer)
 
         self.assertEqual(ctx.exception.code, 1)
+        self.assertIn(
+            "unexpected signing state or untrusted signature",
+            guidance.call_args.args[0],
+        )
 
     def test_windows_setup_handoff_uses_silent_upgrade_shape(self):
         runner = CliRunner()
@@ -7279,7 +7438,7 @@ class TestUpgradeManifest(unittest.TestCase):
                 "architectures": ["amd64"],
                 "handoff_args": ["/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user"],
                 "authenticode": {
-                    "required": True,
+                    "required": False,
                     "publisher": "Cisco Systems, Inc.",
                 },
                 "managed_policy": "respect",
@@ -7435,10 +7594,13 @@ class TestGatewayWindowsArchive(unittest.TestCase):
         with TemporaryDirectory() as tmp:
 
             def fake_download(_url, dest):
-                self._write_zip(dest, {
-                    "defenseclaw.exe": "MZ\x00gateway",
-                    "defenseclaw-hook.exe": "MZ\x00hook",
-                })
+                self._write_zip(
+                    dest,
+                    {
+                        "defenseclaw.exe": "MZ\x00gateway",
+                        "defenseclaw-hook.exe": "MZ\x00hook",
+                    },
+                )
 
             with patch("defenseclaw.commands.cmd_upgrade._download_file", side_effect=fake_download):
                 binary, archive_name = _download_gateway("9.9.9", "windows", "amd64", tmp)
@@ -7604,9 +7766,7 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
                 os.path.normpath(target),
                 os.path.join(fake_home, ".local", "bin", "defenseclaw-gateway.exe"),
             )
-            installed_hook = os.path.join(
-                fake_home, ".local", "bin", "defenseclaw-hook.exe"
-            )
+            installed_hook = os.path.join(fake_home, ".local", "bin", "defenseclaw-hook.exe")
             with open(installed_hook, "rb") as stream:
                 self.assertEqual(stream.read(), b"hook")
 
@@ -7638,12 +7798,15 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
             def fake_expanduser(path):
                 return path.replace("~", fake_home, 1)
 
-            with patch(
-                "defenseclaw.commands.cmd_upgrade.os.path.expanduser",
-                side_effect=fake_expanduser,
-            ), patch(
-                "defenseclaw.commands.cmd_upgrade.os.replace",
-                side_effect=fail_gateway_replace,
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_upgrade.os.path.expanduser",
+                    side_effect=fake_expanduser,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade.os.replace",
+                    side_effect=fail_gateway_replace,
+                ),
             ):
                 with self.assertRaises(PermissionError):
                     _install_gateway(gateway, "windows")

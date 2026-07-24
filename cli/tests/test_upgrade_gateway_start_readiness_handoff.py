@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_post_hard_cut_continuation_scopes_fresh_process_marker_to_frozen_controller() -> None:
     resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
     start = resolver.index("continue_post_hard_cut_upgrade() {")
-    end = resolver.index("\nhandoff_existing_bridge_to_hard_cut() {", start)
+    end = resolver.index("\nvalidate_tarball_members() {", start)
     continuation = resolver[start:end]
 
     marker = "DEFENSECLAW_UPGRADE_FRESH_PROCESS=1"
@@ -31,16 +31,12 @@ def test_post_hard_cut_continuation_scopes_fresh_process_marker_to_frozen_contro
     assert continuation.index('STAGING_DIR=""') < continuation.index(marker)
     assert continuation.index(marker) < continuation.index(controller)
     assert (
-        "env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \\\n"
-        f"        {marker} \\\n"
-        f"        {controller}"
+        f"env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \\\n        {marker} \\\n        {controller}"
     ) in continuation
 
 
 def test_fresh_health_process_delegates_one_strict_versioned_readiness_budget() -> None:
-    upgrade_source = (ROOT / "cli" / "defenseclaw" / "commands" / "cmd_upgrade.py").read_text(
-        encoding="utf-8"
-    )
+    upgrade_source = (ROOT / "cli" / "defenseclaw" / "commands" / "cmd_upgrade.py").read_text(encoding="utf-8")
     gateway_source = (ROOT / "internal" / "cli" / "daemon.go").read_text(encoding="utf-8")
 
     assert 'os.environ.get(_UPGRADE_HANDOFF_ENV) == "1"' in upgrade_source

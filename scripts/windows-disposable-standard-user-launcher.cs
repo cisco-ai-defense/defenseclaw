@@ -703,6 +703,16 @@ namespace DefenseClaw
                 commandLine.Append(' ');
                 commandLine.Append(QuoteWindowsArgument(argument));
             }
+            // CreateProcessWithLogonW has a 1,024-character lpCommandLine
+            // ceiling, unlike CreateProcessW's much larger limit. Reject an
+            // unsafe harness shape before Windows reports an opaque logon
+            // failure that looks like bad disposable-user credentials.
+            if (commandLine.Length > 1024)
+            {
+                throw new ArgumentException(
+                    "disposable standard-user command line exceeds the " +
+                    "CreateProcessWithLogonW 1024-character limit");
+            }
             return commandLine;
         }
 

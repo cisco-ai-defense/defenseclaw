@@ -204,6 +204,19 @@
       "since": "0.8.4"
     },
     {
+      "name": "DEFENSECLAW_TEST_BASH",
+      "category": "test_fixture",
+      "purpose": "Selects the Bash executable used by release-workflow tests so macOS CI can exercise wrappers with the system Bash runtime.",
+      "default": "unset (auto-detect Bash, including Git Bash on Windows)",
+      "accepted_values": ["absolute path to a Bash executable", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/tests/test_release_workflow_staged.py", "description": "Selects the Bash executable used to run POSIX release-workflow contract tests"}
+      ],
+      "since": "0.8.7"
+    },
+    {
       "name": "DEFENSECLAW_TEST_PHASE1_RECOVERY_CRASH",
       "category": "test_fixture",
       "purpose": "Injects a process-kill cut point while replaying the POSIX phase-one gateway publication journal so crash recovery is tested at each ownership boundary.",

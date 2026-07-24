@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
@@ -40,6 +42,9 @@ MAX_CERTIFICATE_BYTES = 64 * 1024
 MAX_SIGNATURE_BYTES = 16 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_RELEASE_PAGES = 20
+MAX_DOWNLOAD_ATTEMPTS = 4
+INITIAL_DOWNLOAD_RETRY_DELAY_SECONDS = 1.0
+TRANSIENT_HTTP_STATUSES = frozenset({408, 425, 429})
 
 
 class BaselineResolutionError(RuntimeError):
@@ -82,10 +87,7 @@ def _checked_policy(path: Path) -> dict[str, Any]:
         raise BaselineResolutionError("checked baseline floor must be unique descending semver")
     if not isinstance(configs, dict) or set(configs) != set(versions):
         raise BaselineResolutionError("checked baseline config map does not match its versions")
-    if any(
-        not isinstance(value, int) or isinstance(value, bool) or value < 1
-        for value in configs.values()
-    ):
+    if any(not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in configs.values()):
         raise BaselineResolutionError("checked baseline config versions must be positive")
     if not isinstance(platforms, dict) or set(platforms) != {"windows"}:
         raise BaselineResolutionError("checked baseline platforms must contain exactly windows")
@@ -152,11 +154,15 @@ def _asset_map(release: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _required_windows_assets(version: str) -> set[str]:
-    names: set[str] = set()
+    names = {
+        "DefenseClawSetup-x64.exe",
+        "DefenseClawSetup-x64.exe.sha256",
+        "DefenseClawSetup-x64.exe.provenance.json",
+        "DefenseClawSetup-x64.exe.sbom.json",
+    }
     for arch in ("amd64", "arm64"):
         protected = f"defenseclaw_{version}_protocol2_windows_{arch}.dcgateway"
-        archive = f"defenseclaw_{version}_windows_{arch}.zip"
-        names.update((protected, f"{protected}.sbom.json", archive, f"{archive}.sbom.json"))
+        names.update((protected, f"{protected}.sbom.json"))
     return names
 
 
@@ -189,6 +195,7 @@ def _download(
     *,
     token: str | None = None,
     accept: str = "application/octet-stream",
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> bytes:
     headers = {
         "Accept": accept,
@@ -198,14 +205,35 @@ def _download(
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            length = response.headers.get("Content-Length")
-            if length is not None and int(length) > max_bytes:
-                raise BaselineResolutionError(f"download exceeds bound: {url}")
-            payload = response.read(max_bytes + 1)
-    except (OSError, ValueError, urllib.error.URLError) as exc:
-        raise BaselineResolutionError(f"could not download {url}: {exc}") from exc
+    for attempt in range(1, MAX_DOWNLOAD_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                length = response.headers.get("Content-Length")
+                if length is not None and int(length) > max_bytes:
+                    raise BaselineResolutionError(f"download exceeds bound: {url}")
+                payload = response.read(max_bytes + 1)
+            break
+        except urllib.error.HTTPError as exc:
+            transient = exc.code in TRANSIENT_HTTP_STATUSES or 500 <= exc.code < 600
+            if not transient:
+                raise BaselineResolutionError(f"could not download {url}: {exc}") from exc
+            failure: Exception = exc
+        except (http.client.HTTPException, OSError, urllib.error.URLError) as exc:
+            failure = exc
+        except ValueError as exc:
+            raise BaselineResolutionError(f"could not download {url}: {exc}") from exc
+
+        if attempt == MAX_DOWNLOAD_ATTEMPTS:
+            raise BaselineResolutionError(
+                f"could not download {url} after {MAX_DOWNLOAD_ATTEMPTS} attempts: {failure}"
+            ) from failure
+        delay = INITIAL_DOWNLOAD_RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
+        print(
+            f"transient download failure for {url}; "
+            f"retrying attempt {attempt + 1}/{MAX_DOWNLOAD_ATTEMPTS} in {delay:g}s",
+            file=sys.stderr,
+        )
+        sleeper(delay)
     if len(payload) == 0 or len(payload) > max_bytes:
         raise BaselineResolutionError(f"download is empty or exceeds bound: {url}")
     return payload
@@ -342,9 +370,7 @@ def resolve_effective_policy(
         raise BaselineResolutionError("candidate runtime config version must be positive")
     checked = _checked_policy(checked_policy_path)
     checked_versions = list(checked["published_baselines"])
-    eligible_checked_versions = [
-        version for version in checked_versions if _version_key(version) < target_key
-    ]
+    eligible_checked_versions = [version for version in checked_versions if _version_key(version) < target_key]
     dynamic_floor_key = max(
         (_version_key(version) for version in eligible_checked_versions),
         default=None,
@@ -353,9 +379,7 @@ def resolve_effective_policy(
         checked["published_baseline_config_versions"][version] > candidate_runtime_config_version
         for version in eligible_checked_versions
     ):
-        raise BaselineResolutionError(
-            "eligible checked baseline config version is newer than the candidate runtime"
-        )
+        raise BaselineResolutionError("eligible checked baseline config version is newer than the candidate runtime")
     candidates: dict[str, dict[str, Any]] = {}
     for release in releases:
         if not isinstance(release, dict):
@@ -375,10 +399,7 @@ def resolve_effective_policy(
         candidates[tag] = release
 
     dynamic_versions = sorted(candidates, key=_version_key, reverse=True)
-    configs = {
-        version: checked["published_baseline_config_versions"][version]
-        for version in eligible_checked_versions
-    }
+    configs = {version: checked["published_baseline_config_versions"][version] for version in eligible_checked_versions}
     windows = [
         version
         for version in checked["platform_published_baselines"]["windows"]
@@ -399,9 +420,7 @@ def resolve_effective_policy(
 
     versions = [*dynamic_versions, *eligible_checked_versions]
     if not versions:
-        raise BaselineResolutionError(
-            f"no supported published baseline predates candidate {target_version}"
-        )
+        raise BaselineResolutionError(f"no supported published baseline predates candidate {target_version}")
     ordered_configs = {version: configs[version] for version in versions}
     return {
         "schema_version": 2,

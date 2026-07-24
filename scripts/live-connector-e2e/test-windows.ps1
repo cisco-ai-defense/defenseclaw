@@ -619,11 +619,45 @@ private-secret-name = "DefenseClaw must remain redacted"
         DEFENSECLAW_HOME = $ownedRoot
     } -PassThru -WindowStyle Hidden
     try {
-        Start-Sleep -Milliseconds 250
+        $expectedProductExecutable = Get-NormalizedExecutablePath $productExecutable
+        $productStartIdentity = ''
+        $productLiveExecutable = ''
+        $productIdentityReady = $false
+        $productIdentityStopwatch = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            do {
+                $productProbe = $null
+                try {
+                    $productProbe = [Diagnostics.Process]::GetProcessById($productDescendant.Id)
+                    $productLiveExecutable = Get-NormalizedExecutablePath `
+                        ([string]$productProbe.MainModule.FileName)
+                    $productStartIdentity = Get-NativeProcessStartIdentity $productProbe
+                } catch {
+                    $productLiveExecutable = ''
+                    $productStartIdentity = ''
+                } finally {
+                    if ($null -ne $productProbe) { $productProbe.Dispose() }
+                }
+                $productIdentityReady =
+                    -not [string]::IsNullOrWhiteSpace($productStartIdentity) -and
+                    [string]::Equals(
+                        $productLiveExecutable,
+                        $expectedProductExecutable,
+                        [StringComparison]::OrdinalIgnoreCase
+                    )
+                if ($productIdentityReady) { break }
+                Start-Sleep -Milliseconds 100
+            } while ($productIdentityStopwatch.Elapsed -lt [TimeSpan]::FromSeconds(5))
+        } finally {
+            $productIdentityStopwatch.Stop()
+        }
+        if (-not $productIdentityReady) {
+            throw 'managed cleanup fixture setup failed: matching executable and nonempty start identity were not queryable within 5 seconds'
+        }
         $productPID = @{
             pid = $productDescendant.Id
             executable = $productExecutable
-            start_identity = Get-NativeProcessStartIdentity $productDescendant
+            start_identity = $productStartIdentity
         } | ConvertTo-Json -Compress
         [IO.File]::WriteAllText((Join-Path $ownedRoot 'gateway.pid'), $productPID)
         Stop-IsolatedProcessTree -ProductExecutablePaths @($productExecutable) `
@@ -759,13 +793,14 @@ private-secret-name = "DefenseClaw must remain redacted"
     Assert-True ([regex]::Matches(
         $nativeWorkflowText,
         '(?m)^\s*run: \./scripts/initialize-windows-native-ci-paths\.ps1 '
-    ).Count -eq 6) 'every native Windows job uses the shared isolated-path initializer'
+    ).Count -eq 7) 'every native Windows job uses the shared isolated-path initializer'
     foreach ($leafContract in @(
         '-Leaf go -DiagnosticsLeaf windows-native-diagnostics-go',
         "-Leaf ('py-' + `$env:PYTHON_SHARD) -DiagnosticsLeaf ('windows-native-diagnostics-python-' + `$env:PYTHON_SHARD)",
         '-Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell',
         '-Leaf pkg -DiagnosticsLeaf windows-native-diagnostics-package -ArtifactLeaf windows-native-dist',
         '-Leaf acc -DiagnosticsLeaf windows-native-diagnostics-acceptance -ArtifactLeaf windows-native-dist',
+        '-Leaf bootstrap -DiagnosticsLeaf windows-native-diagnostics-bootstrap -ArtifactLeaf windows-bootstrap-fixture',
         "-Leaf ('ct-' + `$env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + `$env:CONNECTOR) -ArtifactLeaf windows-native-dist"
     )) {
         Assert-True ($nativeWorkflowText.Contains($leafContract)) `
@@ -999,7 +1034,8 @@ private-secret-name = "DefenseClaw must remain redacted"
         $nativeHarnessText -match '\./internal/tools/windowsresources' -and
         $nativeHarnessText -match 'DefenseClawWindowsResourceIcon\.png' -and
         $nativeHarnessText -match 'DefenseClawWindowsResourceVersion\.txt' -and
-        $standardUserCIText -match '\$resourceVerifierInputs = @\(' -and
+        $standardUserCIText -match
+            '(?s)\$resourceVerifierInputs = if \(\$Mode -eq ''bootstrap-acceptance''\) \{\s*@\(\)\s*\} else \{\s*@\(' -and
         $standardUserCIText -match '\[IO\.File\]::Copy\(\$source, \$destination, \$false\)') `
         'packaged lifecycle carries an offline immutable Windows resource verifier into the disposable child'
     Assert-True ($standardUserCIText -match 'Publish-BoundedDisposableContractResults' -and
@@ -1119,8 +1155,8 @@ private-secret-name = "DefenseClaw must remain redacted"
         'disposable acceptance revalidates the exact single-link Setup handle before and after the lifecycle'
     Assert-True ($releaseWorkflowText -match 'invoke-windows-setup-standard-user-ci\.ps1' -and
         $releaseWorkflowText -match '-Mode setup-acceptance' -and
-        $releaseWorkflowText -notmatch '(?s)Validate the exact signed installer lifecycle.*?-AllowCurrentUserSetupAcceptance') `
-        'signed Setup acceptance uses the same real standard-user boundary'
+        $releaseWorkflowText -notmatch '(?s)Validate the exact installer lifecycle.*?-AllowCurrentUserSetupAcceptance') `
+        'Setup acceptance uses the same real standard-user boundary'
     Assert-True ($nativeWorkflowText -match 'Always clean isolated processes, listeners, and temp state') 'required jobs have cleanup safety nets'
     $pathSnapshotFunction = [regex]::Match(
         $nativeHarnessText,
@@ -1202,24 +1238,19 @@ private-secret-name = "DefenseClaw must remain redacted"
     Assert-True ($windowsLiveJob -notmatch 'shell:\s*bash') 'Windows live jobs never select Bash'
     Assert-True ($windowsLiveJob -match "github.event_name == 'workflow_dispatch'") `
         'Connector Live Windows radar remains manual-only'
-    $releaseCertificationJob = [regex]::Match(
-        $releaseWorkflowText,
-        '(?ms)^  windows-real-client-certification:.*?(?=^  [a-z0-9][a-z0-9-]*:|\z)'
-    ).Value
-    Assert-True ($releaseCertificationJob -match 'needs:\s*\[release-preflight,\s*windows-installer\]' -and
-        $releaseCertificationJob -match '-Operation release-certification' -and
-        $releaseCertificationJob -match 'secrets.OPENAI_API_KEY' -and
-        $releaseCertificationJob -match 'secrets.ANTHROPIC_API_KEY' -and
-        $releaseCertificationJob -notmatch 'continue-on-error') `
-        'production release has a required provider-backed Windows real-client gate'
+    Assert-True ($releaseWorkflowText -notmatch '(?m)^  windows-real-client-certification:' -and
+        $releaseWorkflowText -notmatch 'secrets\.OPENAI_API_KEY' -and
+        $releaseWorkflowText -notmatch 'secrets\.ANTHROPIC_API_KEY' -and
+        $releaseWorkflowText -notmatch '-Operation release-certification') `
+        'production release does not depend on provider-backed Windows live radar'
     $releaseAssemblyJob = [regex]::Match(
         $releaseWorkflowText,
         '(?ms)^  assemble-release-candidate:.*?(?=^  [a-z0-9][a-z0-9-]*:|\z)'
     ).Value
-    Assert-True ($releaseAssemblyJob -match 'windows-real-client-certification' -and
-        $releaseAssemblyJob -match 'artifact-ids:\s*\$\{\{ needs\.windows-real-client-certification\.outputs\.artifact_id \}\}' -and
+    Assert-True ($releaseAssemblyJob -match 'needs:\s*\[release-preflight,\s*build-runtime-candidate,\s*macos-app,\s*windows-installer\]' -and
+        $releaseAssemblyJob -match 'artifact-ids:\s*\$\{\{ needs\.windows-installer\.outputs\.artifact_id \}\}' -and
         $releaseAssemblyJob -match '--windows-dir candidate-input/windows') `
-        'immutable release publication consumes only the certified Windows artifact bundle'
+        'immutable release assembly consumes the tested Windows artifact bundle directly'
     Assert-True ($liveWorkflowText -match 'shell:\s*bash') 'Unix Bash harness remains present'
     Assert-True ($liveWorkflowText -notmatch '(?m)^  windows-(harness-static|contract):') 'deterministic Windows jobs moved out of live radar'
     Assert-True ($ciWorkflowText -notmatch '(?m)^  windows-(hook-path|installer-smoke):') 'legacy partial Windows jobs were removed'
