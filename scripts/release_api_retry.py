@@ -266,8 +266,6 @@ def require_absent_namespace(
     tag: str,
     expected_main_commit: str | None = None,
 ) -> None:
-    if expected_main_commit is not None:
-        require_main_commit(api, expected_main_commit)
     tag_payload = api.tag_ref(tag)
     release_payload = api.release_by_tag(tag)
     if tag_payload is not None or release_payload is not None:
@@ -277,6 +275,10 @@ def require_absent_namespace(
         if release_payload is not None:
             occupied.append("release")
         raise ReleaseAPIError(f"remote release namespace {tag!r} is occupied by {', '.join(occupied)}")
+    # Keep this as the final successful API proof before publication. Namespace
+    # probes can be slow enough for protected main to advance while they run.
+    if expected_main_commit is not None:
+        require_main_commit(api, expected_main_commit)
 
 
 def require_main_commit(api: GitHubReleaseAPI, expected_commit: str) -> None:

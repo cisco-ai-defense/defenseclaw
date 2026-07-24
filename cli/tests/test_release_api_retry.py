@@ -249,17 +249,21 @@ class _NamespaceAPI:
         self.observations = list(observations)
         self.main = main
         self.tag_commit = tag_commit
+        self.calls: list[str] = []
         self._current: tuple[dict[str, object] | None, dict[str, object] | None] | None = None
 
     def main_commit(self) -> str:
+        self.calls.append("main")
         return self.main
 
     def tag_ref(self, _tag: str) -> dict[str, object] | None:
+        self.calls.append("tag")
         assert self.observations
         self._current = self.observations.pop(0)
         return self._current[0]
 
     def release_by_tag(self, _tag: str) -> dict[str, object] | None:
+        self.calls.append("release")
         assert self._current is not None
         return self._current[1]
 
@@ -267,21 +271,29 @@ class _NamespaceAPI:
         return self.tag_commit
 
 
-def test_namespace_preflight_checks_main_and_both_namespaces() -> None:
+def test_namespace_preflight_checks_main_after_proving_absence() -> None:
     absent = _NamespaceAPI([(None, None)])
     release_api_retry.require_absent_namespace(
         absent,
         tag=TAG,
         expected_main_commit=COMMIT,
     )
+    assert absent.calls == ["tag", "release", "main"]
 
-    advanced = _NamespaceAPI([(None, None)], main="b" * 40)
+    class AdvancingMainAPI(_NamespaceAPI):
+        def release_by_tag(self, tag: str) -> dict[str, object] | None:
+            payload = super().release_by_tag(tag)
+            self.main = "b" * 40
+            return payload
+
+    advanced = AdvancingMainAPI([(None, None)])
     with pytest.raises(release_api_retry.ReleaseAPIError, match="main advanced"):
         release_api_retry.require_absent_namespace(
             advanced,
             tag=TAG,
             expected_main_commit=COMMIT,
         )
+    assert advanced.calls == ["tag", "release", "main"]
 
     occupied = _NamespaceAPI([({"object": {}}, None)])
     with pytest.raises(release_api_retry.ReleaseAPIError, match="occupied by tag"):

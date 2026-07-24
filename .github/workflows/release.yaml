@@ -996,7 +996,8 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --tag "$RELEASE_TAG" \
             --commit "$RELEASE_COMMIT" \
-            --candidate-root release-candidate
+            --candidate-root release-candidate \
+            --check-main
           namespace_status=$?
           set -e
           case "$namespace_status" in
@@ -1035,6 +1036,11 @@ jobs:
 
           published=0
           for attempt in 1 2 3; do
+            python3 scripts/release_api_retry.py require-absent \
+              --repository "$GITHUB_REPOSITORY" \
+              --tag "$RELEASE_TAG" \
+              --commit "$RELEASE_COMMIT" \
+              --check-main
             if timeout --signal=TERM --kill-after=30s 10m \
               gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
@@ -1052,7 +1058,8 @@ jobs:
               --repository "$GITHUB_REPOSITORY" \
               --tag "$RELEASE_TAG" \
               --commit "$RELEASE_COMMIT" \
-              --candidate-root release-candidate
+              --candidate-root release-candidate \
+              --check-main
             reconcile_status=$?
             set -e
             if [[ "$reconcile_status" == "0" ]]; then
