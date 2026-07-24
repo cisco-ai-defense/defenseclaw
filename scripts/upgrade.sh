@@ -28,11 +28,14 @@
 # release install (install.sh) and is release-specific.
 #
 # Usage:
-#   ./scripts/upgrade.sh [--yes] [--version VERSION] [--plan] [--help]
+#   ./scripts/upgrade.sh [--yes] [--version VERSION] [--recover-corrupt-audit] [--plan] [--help]
 #
 # Options:
 #   --yes, -y             Skip confirmation prompts
 #   --version VERSION     Select a specific final release (required bridges are still staged)
+#   --recover-corrupt-audit
+#                         Preserve a corrupt audit SQLite set in upgrade backup
+#                         custody and activate a fresh local audit store
 #   --plan                Verify contracts and print the resolved path only
 #   --help, -h            Show this help
 #
@@ -3640,12 +3643,16 @@ ensure_upgrade_lock_before_mutation() {
 
 YES=0
 PLAN_ONLY=0
+RECOVER_CORRUPT_AUDIT=0
 RELEASE_VERSION="${VERSION:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --yes|-y)   YES=1; shift ;;
         --plan)     PLAN_ONLY=1; shift ;;
+        --recover-corrupt-audit)
+            RECOVER_CORRUPT_AUDIT=1
+            shift ;;
         --version)
             [[ $# -lt 2 ]] && die "--version requires a value"
             RELEASE_VERSION="$2"; shift 2 ;;
@@ -3659,6 +3666,9 @@ while [[ $# -gt 0 ]]; do
   Options:
     --yes, -y             Skip confirmation prompts
     --version VERSION     Select a specific final release; required bridges are still staged
+    --recover-corrupt-audit
+                          Preserve a corrupt audit SQLite set in upgrade backup
+                          custody and activate a fresh local audit store
     --plan                Verify release contracts and print the path; make no changes
     --help, -h            Show this help
 
@@ -3830,12 +3840,14 @@ configured_data_dir = os.path.expanduser(cfg.data_dir or controller_home)
 if not os.path.isabs(configured_data_dir):
     raise RuntimeError("configured data_dir must be absolute for a staged upgrade")
 data_dir = os.path.abspath(configured_data_dir)
+audit_db = os.path.abspath(os.path.expanduser(cfg.audit_db or os.path.join(data_dir, "audit.db")))
 openclaw_home = os.path.abspath(
     os.path.expanduser(requested_openclaw if openclaw_explicit == "1" else cfg.claw.home_dir)
 )
 for label, value in (
     ("configured data_dir", data_dir),
     ("active config path", config_path),
+    ("configured audit database", audit_db),
     ("resolved OpenClaw home", openclaw_home),
 ):
     if any(character in value for character in ("\n", "\r", "\t")):
@@ -3883,14 +3895,16 @@ if (
     or config_info.st_uid != os.geteuid()
 ):
     raise RuntimeError("active config path must be a stable current-user-owned real file")
-print("\t".join((data_dir, config_path, openclaw_home)))
+print("\t".join((data_dir, config_path, openclaw_home, audit_db)))
 PY
     )" || die "Could not resolve a stable controller-home/data-dir/config-path split from the installed source controller. No changes were made."
-    IFS=$'\t' read -r DATA_DIR CONFIG_PATH RESOLVED_OPENCLAW_HOME <<< "${runtime_paths}"
-    [[ -n "${DATA_DIR}" && -n "${CONFIG_PATH}" && -n "${RESOLVED_OPENCLAW_HOME}" ]] \
+    IFS=$'\t' read -r DATA_DIR CONFIG_PATH RESOLVED_OPENCLAW_HOME AUDIT_DB_PATH <<< "${runtime_paths}"
+    [[ -n "${DATA_DIR}" && -n "${CONFIG_PATH}" && -n "${RESOLVED_OPENCLAW_HOME}" \
+        && -n "${AUDIT_DB_PATH}" ]] \
         || die "Installed source returned an incomplete runtime path contract. No changes were made."
     OPENCLAW_HOME="${RESOLVED_OPENCLAW_HOME}"
 else
+    AUDIT_DB_PATH="${DATA_DIR}/audit.db"
     CONFIG_PATH="$(python3 - "${CONFIG_PATH}" <<'PY'
 import os
 import sys
@@ -3910,7 +3924,8 @@ PY
 fi
 [[ -n "${DATA_DIR}" && "${DATA_DIR}" == /* \
    && -n "${CONFIG_PATH}" && "${CONFIG_PATH}" == /* \
-   && -n "${OPENCLAW_HOME}" && "${OPENCLAW_HOME}" == /* ]] \
+   && -n "${OPENCLAW_HOME}" && "${OPENCLAW_HOME}" == /* \
+   && -n "${AUDIT_DB_PATH}" && "${AUDIT_DB_PATH}" == /* ]] \
     || die "Resolved runtime paths are invalid; no changes were made."
 
 if [[ "${COMPONENT_VERSION_SPLIT}" -eq 1 ]]; then
@@ -4006,15 +4021,26 @@ PY
     warn "Found an authenticated interrupted ${CURRENT_VERSION} → ${RELEASE_VERSION} artifact activation; the resolver will re-verify the release and resume it."
 fi
 
+MIGRATION_CURSOR_REPAIR_NEEDED=0
+MIGRATION_CURSOR_RECONSTRUCT_NEEDED=0
+AUDIT_DB_RECOVERY_NEEDED=0
+AUDIT_DB_RECOVERY_USE_DATA_ROOT=0
+AUDIT_DB_RECOVERY_BACKUP_ROOT="${BACKUP_ROOT}"
+AUDIT_DB_RECOVERY_BACKUP_DIR=""
+AUDIT_DB_RECOVERY_CUSTODY=""
+AUDIT_DB_PREFLIGHT_IDENTITY=""
+
 if [[ "${CURRENT_VERSION}" != "unknown" ]] && version_gte "${CURRENT_VERSION}" "0.8.5"; then
     hard_cut_state="$("${DEFENSECLAW_VENV}/bin/python" -I -B - "${CONFIG_PATH}" \
-        "${DATA_DIR}/.migration_state.json" <<'PY' 2>/dev/null || true
+        "${DATA_DIR}/.migration_state.json" "${CURRENT_VERSION}" <<'PY' 2>/dev/null || true
 import json
 import os
+import re
 import stat
 import sys
 
 import yaml
+from defenseclaw.migrations import MIGRATIONS
 
 
 def bounded_regular(path, limit):
@@ -4024,30 +4050,340 @@ def bounded_regular(path, limit):
     return info
 
 
-config_path, cursor_path = sys.argv[1:]
+config_path, cursor_path, current_version = sys.argv[1:]
 bounded_regular(config_path, 4 * 1024 * 1024)
 with open(config_path, encoding="utf-8") as stream:
     config = yaml.safe_load(stream)
-bounded_regular(cursor_path, 1024 * 1024)
-with open(cursor_path, encoding="utf-8") as stream:
-    cursor = json.load(stream)
-valid = (
-    isinstance(config, dict)
-    and config.get("config_version") == 8
-    and isinstance(cursor, dict)
-    and cursor.get("schema") == 1
-    and isinstance(cursor.get("applied"), list)
-    and "0.8.5" in cursor["applied"]
+if not isinstance(config, dict) or config.get("config_version") != 8:
+    print("invalid")
+    raise SystemExit
+
+try:
+    bounded_regular(cursor_path, 1024 * 1024)
+except FileNotFoundError:
+    print("repairable-bootstrap")
+    raise SystemExit
+except (OSError, ValueError):
+    print("invalid")
+    raise SystemExit
+
+try:
+    with open(cursor_path, encoding="utf-8") as stream:
+        cursor = json.load(stream)
+except (OSError, UnicodeError, json.JSONDecodeError):
+    # The exact original remains available for backup custody before this
+    # resolver replaces it with release-derived bootstrap metadata.
+    print("repairable-bootstrap")
+    raise SystemExit
+
+if (
+    not isinstance(cursor, dict)
+    or isinstance(cursor.get("schema"), bool)
+    or cursor.get("schema") != 1
+):
+    print("invalid")
+    raise SystemExit
+applied = cursor.get("applied")
+if not isinstance(applied, list) or any(not isinstance(item, str) for item in applied):
+    print("invalid")
+    raise SystemExit
+
+canonical = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
+registry_versions = {version for version, _description, _function in MIGRATIONS}
+version_key = lambda value: tuple(map(int, value.split(".")))
+applied_at = cursor.get("applied_at", {})
+if (
+    len(applied) != len(set(applied))
+    or any(canonical.fullmatch(item) is None for item in applied)
+    or any(item not in registry_versions for item in applied)
+    or any(version_key(item) > version_key(current_version) for item in applied)
+    or applied != sorted(applied, key=version_key)
+    or not isinstance(applied_at, dict)
+    or set(applied_at) != set(applied)
+    or any(
+        not isinstance(key, str)
+        or key not in applied
+        or not isinstance(value, str)
+        or not value
+        for key, value in applied_at.items()
+    )
+):
+    print("invalid")
+    raise SystemExit
+
+package_version = cursor.get("package_version", "")
+if package_version:
+    try:
+        if (
+            not isinstance(package_version, str)
+            or canonical.fullmatch(package_version) is None
+            or tuple(map(int, package_version.split("."))) > tuple(map(int, current_version.split(".")))
+        ):
+            print("invalid")
+            raise SystemExit
+    except (AttributeError, TypeError, ValueError):
+        print("invalid")
+        raise SystemExit
+expected = sorted(
+    (version for version in registry_versions if version_key(version) <= version_key(current_version)),
+    key=version_key,
 )
-print("valid" if valid else "invalid")
+if applied == expected:
+    print("valid")
+    raise SystemExit
+if any(item not in expected for item in applied):
+    print("invalid")
+    raise SystemExit
+print("repairable-replay")
 PY
 )"
-    if [[ "${hard_cut_state}" != "valid" ]]; then
-        die "CLI and gateway report hard-cut version ${CURRENT_VERSION}, but config-v8 migration state is absent or invalid and no recoverable journal is active. No changes were made.
-  Unsupported manual overwrite detected.
-  Recovery path: restore the exact 0.8.4 CLI, gateway, config, environment, and migration cursor from the pre-hard-cut backup, verify 0.8.4 health, then run this release-owned resolver without --version."
-    fi
+    case "${hard_cut_state}" in
+        valid) ;;
+        repairable-bootstrap)
+            MIGRATION_CURSOR_REPAIR_NEEDED=1
+            MIGRATION_CURSOR_RECONSTRUCT_NEEDED=1
+            warn "DefenseClaw ${CURRENT_VERSION} has config-v8 state but a missing or damaged migration cursor; the authenticated resolver will reconstruct pre-hard-cut history and replay every missing migration after backup and service stop."
+            ;;
+        repairable-replay)
+            MIGRATION_CURSOR_REPAIR_NEEDED=1
+            warn "DefenseClaw ${CURRENT_VERSION} has valid config-v8 state but an incomplete migration cursor; the authenticated resolver will replay every missing migration after backup and service stop."
+            ;;
+        *)
+            die "CLI and gateway report hard-cut version ${CURRENT_VERSION}, but config-v8 migration state is invalid and cannot be reconstructed safely. No changes were made.
+  Recovery path: restore one exact release-owned backup or contact support; do not copy individual wheel or gateway artifacts over this installation."
+            ;;
+    esac
 fi
+
+audit_db_probe="$(python3 - "${DATA_DIR}" "${AUDIT_DB_PATH}" "${BACKUP_ROOT}" <<'PY' 2>/dev/null || true
+import json
+import os
+import sqlite3
+import stat
+import sys
+import time
+from pathlib import Path
+
+data_dir = Path(sys.argv[1])
+path = Path(sys.argv[2])
+backup_root = Path(sys.argv[3]).absolute()
+marker = data_dir / ".audit-recovery.json"
+
+
+def corrupt_state() -> str:
+    try:
+        audit_device = path.parent.stat().st_dev
+        if audit_device == backup_root.parent.stat().st_dev:
+            return "corrupt"
+        if audit_device == data_dir.stat().st_dev:
+            return "corrupt-data-backup"
+        return "corrupt-cross-device"
+    except OSError:
+        return "unavailable"
+
+
+if os.path.lexists(marker):
+    try:
+        marker_info = marker.lstat()
+    except OSError:
+        print("invalid")
+        raise SystemExit
+    if (
+        stat.S_ISLNK(marker_info.st_mode)
+        or not stat.S_ISREG(marker_info.st_mode)
+        or marker_info.st_uid != os.geteuid()
+        or stat.S_IMODE(marker_info.st_mode) & 0o077
+        or not 0 < marker_info.st_size <= 64 * 1024
+    ):
+        print("invalid")
+    else:
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            custody = Path(payload["custody"]).absolute()
+            allowed_roots = {
+                backup_root,
+                (data_dir / "backups").absolute(),
+            }
+            matching_roots = [
+                root
+                for root in allowed_roots
+                if os.path.commonpath((str(custody), str(root))) == str(root)
+                and custody.parent.parent == root
+            ]
+            valid_marker = (
+                isinstance(payload, dict)
+                and payload.get("schema") == 2
+                and payload.get("source") == str(path.absolute())
+                and payload.get("files") == [
+                    "audit.db-wal",
+                    "audit.db-shm",
+                    "audit.db-journal",
+                    "audit.db",
+                ]
+                and isinstance(payload.get("custody"), str)
+                and isinstance(payload.get("identities"), dict)
+                and len(matching_roots) == 1
+                and custody.name == "audit-corrupt"
+                and custody.parent.name.startswith("upgrade-")
+            )
+        except (KeyError, OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            valid_marker = False
+        print("interrupted" if valid_marker else "invalid")
+    raise SystemExit
+try:
+    info = path.lstat()
+except FileNotFoundError:
+    print("absent")
+    raise SystemExit
+except OSError:
+    print("invalid")
+    raise SystemExit
+
+if (
+    stat.S_ISLNK(info.st_mode)
+    or not stat.S_ISREG(info.st_mode)
+    or info.st_uid != os.geteuid()
+    or stat.S_IMODE(info.st_mode) & 0o077
+):
+    print("invalid")
+    raise SystemExit
+
+identity = f"{info.st_dev}:{info.st_ino}"
+deadline = time.monotonic() + 15.0
+connection = None
+try:
+    connection = sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True, timeout=1.0)
+    connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+    row = connection.execute("PRAGMA quick_check(1)").fetchone()
+except sqlite3.OperationalError as exc:
+    code = getattr(exc, "sqlite_errorcode", 0) & 0xFF
+    corrupt_codes = {
+        getattr(sqlite3, "SQLITE_CORRUPT", 11),
+        getattr(sqlite3, "SQLITE_NOTADB", 26),
+    }
+    if code in corrupt_codes:
+        print(f"{corrupt_state()}\t{identity}")
+    elif "interrupted" in str(exc).lower():
+        print("unchecked")
+    else:
+        print("unavailable")
+except sqlite3.DatabaseError as exc:
+    code = getattr(exc, "sqlite_errorcode", 0) & 0xFF
+    corrupt_codes = {
+        getattr(sqlite3, "SQLITE_CORRUPT", 11),
+        getattr(sqlite3, "SQLITE_NOTADB", 26),
+    }
+    print(f"{corrupt_state()}\t{identity}" if code in corrupt_codes else f"unavailable\t{identity}")
+else:
+    wal = Path(f"{path}-wal")
+    if row == ("ok",) and os.path.lexists(wal):
+        try:
+            wal_info = wal.lstat()
+        except OSError:
+            state = "unavailable"
+        else:
+            if (
+                stat.S_ISLNK(wal_info.st_mode)
+                or not stat.S_ISREG(wal_info.st_mode)
+                or wal_info.st_uid != os.geteuid()
+                or stat.S_IMODE(wal_info.st_mode) & 0o077
+            ):
+                state = "invalid"
+            else:
+                custody_state = corrupt_state()
+                state = (
+                    "wal-pending-cross-device"
+                    if custody_state == "corrupt-cross-device"
+                    else "wal-pending-data-backup"
+                    if custody_state == "corrupt-data-backup"
+                    else "wal-pending"
+                    if custody_state == "corrupt"
+                    else "unavailable"
+                )
+    else:
+        state = "healthy" if row == ("ok",) else corrupt_state()
+    print(f"{state}\t{identity}")
+finally:
+    if connection is not None:
+        connection.close()
+PY
+)"
+IFS=$'\t' read -r audit_db_state AUDIT_DB_PREFLIGHT_IDENTITY <<< "${audit_db_probe}"
+case "${audit_db_state}" in
+    healthy|absent) ;;
+    wal-pending)
+        if [[ "${RECOVER_CORRUPT_AUDIT}" -eq 1 ]]; then
+            AUDIT_DB_RECOVERY_NEEDED=1
+            warn "The active audit database has a WAL; corruption recovery will run a WAL-aware read-only integrity check after the gateway is stopped."
+        else
+            warn "The active audit database has a WAL that immutable live preflight cannot inspect; normal upgrade will continue without moving audit data."
+        fi
+        ;;
+    wal-pending-data-backup)
+        if [[ "${RECOVER_CORRUPT_AUDIT}" -eq 1 ]]; then
+            AUDIT_DB_RECOVERY_NEEDED=1
+            AUDIT_DB_RECOVERY_USE_DATA_ROOT=1
+            AUDIT_DB_RECOVERY_BACKUP_ROOT="${DATA_DIR}/backups"
+            warn "The active audit database has a WAL; corruption recovery will use same-filesystem data-directory custody and a WAL-aware read-only check after the gateway is stopped."
+        else
+            warn "The active audit database has a WAL that immutable live preflight cannot inspect; normal upgrade will continue without moving audit data."
+        fi
+        ;;
+    wal-pending-cross-device)
+        if [[ "${RECOVER_CORRUPT_AUDIT}" -eq 1 ]]; then
+            die "The configured audit SQLite store has a WAL but resides on a different filesystem from the managed backup root. No changes were made.
+  Move the configured audit store onto the DefenseClaw data filesystem or preserve it manually before selecting a fresh local store; the resolver will not perform a non-atomic cross-filesystem recovery."
+        fi
+        warn "The active audit database has a WAL that immutable live preflight cannot inspect; normal upgrade will continue without moving audit data."
+        ;;
+    unchecked)
+        if [[ "${RECOVER_CORRUPT_AUDIT}" -eq 1 ]]; then
+            die "The bounded read-only audit database integrity probe did not finish. No changes were made.
+  Retry after local audit activity settles; the resolver will not move audit bytes without an explicit SQLite corruption result."
+        fi
+        warn "The bounded read-only audit integrity probe did not finish; normal upgrade will continue without moving audit data."
+        ;;
+    unavailable)
+        if [[ "${RECOVER_CORRUPT_AUDIT}" -eq 1 ]]; then
+            die "The local audit database could not be checked safely. No changes were made.
+  Retry after local audit activity settles; only SQLite's explicit corruption result may authorize fresh-store recovery."
+        fi
+        warn "The live audit database could not be checked conclusively; normal upgrade will continue without moving audit data."
+        ;;
+    corrupt)
+        if [[ "${RECOVER_CORRUPT_AUDIT}" -ne 1 ]]; then
+            die "The local audit SQLite store is corrupt. No target artifacts were downloaded and no installed state changed.
+  Re-run this authenticated resolver with --recover-corrupt-audit to move audit.db and its SQLite sidecars into private upgrade-backup custody, activate a fresh local audit store, and retain the corrupt bytes for offline forensics."
+        fi
+        AUDIT_DB_RECOVERY_NEEDED=1
+        warn "The local audit SQLite store is corrupt; exact database bytes will be preserved in private upgrade-backup custody before a fresh store is activated."
+        ;;
+    corrupt-data-backup)
+        if [[ "${RECOVER_CORRUPT_AUDIT}" -ne 1 ]]; then
+            die "The local audit SQLite store is corrupt. No target artifacts were downloaded and no installed state changed.
+  Re-run this authenticated resolver with --recover-corrupt-audit to move audit.db and its SQLite sidecars into private same-filesystem data-directory custody, activate a fresh local audit store, and retain the corrupt bytes for offline forensics."
+        fi
+        AUDIT_DB_RECOVERY_NEEDED=1
+        AUDIT_DB_RECOVERY_USE_DATA_ROOT=1
+        AUDIT_DB_RECOVERY_BACKUP_ROOT="${DATA_DIR}/backups"
+        warn "The local audit SQLite store is corrupt; exact database bytes will be preserved in private same-filesystem data-directory custody before a fresh store is activated."
+        ;;
+    corrupt-cross-device)
+        die "The configured audit SQLite store is corrupt but resides on a different filesystem from the managed backup root. No changes were made.
+  Move the configured audit store onto the DefenseClaw data filesystem or preserve it manually before selecting a fresh local store; the resolver will not perform a non-atomic cross-filesystem recovery."
+        ;;
+    interrupted)
+        if [[ "${RECOVER_CORRUPT_AUDIT}" -ne 1 ]]; then
+            die "An interrupted audit-store recovery marker is present. No changes were made.
+  Re-run this authenticated resolver with --recover-corrupt-audit to resume the exact private-custody operation before upgrading."
+        fi
+        AUDIT_DB_RECOVERY_NEEDED=1
+        warn "An interrupted audit-store recovery will be resumed from its durable private-custody marker."
+        ;;
+    *)
+        die "The local audit database path is unsafe or unreadable. No changes were made."
+        ;;
+esac
 
 if [[ "${CURRENT_VERSION}" != "unknown" ]]; then
     validate_version "${CURRENT_VERSION}"
@@ -7209,7 +7545,9 @@ resolve_staged_upgrade
 
 if [[ "${CURRENT_VERSION}" != "unknown" \
       && "${CURRENT_VERSION}" == "${RELEASE_VERSION}" \
-      && -z "${STAGED_FINAL_VERSION}" ]]; then
+      && -z "${STAGED_FINAL_VERSION}" \
+      && "${MIGRATION_CURSOR_REPAIR_NEEDED}" -eq 0 \
+      && "${AUDIT_DB_RECOVERY_NEEDED}" -eq 0 ]]; then
     same_version_recovery="clean"
     if [[ -n "${RELEASE_PROVENANCE_FILE}" ]]; then
         [[ -x "${DEFENSECLAW_VENV}/bin/python" \
@@ -7352,6 +7690,14 @@ if [[ "${YES}" -eq 0 ]]; then
     printf "    2. Stop gateway, install pre-downloaded artifacts\n"
     printf "    3. Run version-specific migrations\n"
     printf "    4. Restart services and verify health\n"
+    recovery_step=5
+    if [[ "${MIGRATION_CURSOR_REPAIR_NEEDED}" -eq 1 ]]; then
+        printf "    %s. Replay every missing idempotent migration\n" "${recovery_step}"
+        recovery_step=$((recovery_step + 1))
+    fi
+    if [[ "${AUDIT_DB_RECOVERY_NEEDED}" -eq 1 ]]; then
+        printf "    %s. Preserve the corrupt audit SQLite set in backup custody and activate a fresh store\n" "${recovery_step}"
+    fi
     printf "       ${DIM}Source: github.com/${REPO}/releases/tag/${RELEASE_VERSION}${NC}\n\n"
     read -r -p "  Proceed? [y/N] " REPLY
     case "$REPLY" in
@@ -7428,6 +7774,47 @@ fi
 
 ok "Backup saved to: ${BACKUP_DIR}"
 
+AUDIT_DB_RECOVERY_BACKUP_DIR="${BACKUP_DIR}"
+if [[ "${AUDIT_DB_RECOVERY_NEEDED}" -eq 1 \
+      && "${AUDIT_DB_RECOVERY_USE_DATA_ROOT}" -eq 1 ]]; then
+    AUDIT_DB_RECOVERY_BACKUP_DIR="$(python3 - \
+        "${AUDIT_DB_RECOVERY_BACKUP_ROOT}" "${TIMESTAMP}" <<'PY'
+import os
+import stat
+import sys
+import tempfile
+
+root = os.path.abspath(os.path.expanduser(sys.argv[1]))
+timestamp = sys.argv[2]
+parent = os.path.dirname(root)
+parent_info = os.lstat(parent)
+if (
+    stat.S_ISLNK(parent_info.st_mode)
+    or not stat.S_ISDIR(parent_info.st_mode)
+    or parent_info.st_uid != os.geteuid()
+    or stat.S_IMODE(parent_info.st_mode) & 0o022
+):
+    raise SystemExit("audit backup parent must be a stable current-user-owned directory")
+try:
+    os.mkdir(root, 0o700)
+except FileExistsError:
+    pass
+root_info = os.lstat(root)
+if (
+    stat.S_ISLNK(root_info.st_mode)
+    or not stat.S_ISDIR(root_info.st_mode)
+    or root_info.st_uid != os.geteuid()
+):
+    raise SystemExit("audit backup root must be a current-user-owned real directory")
+os.chmod(root, 0o700)
+directory = tempfile.mkdtemp(prefix=f"upgrade-{timestamp}-audit-", dir=root)
+os.chmod(directory, 0o700)
+print(directory)
+PY
+)" || die "Could not create private same-filesystem audit recovery custody; no services changed."
+    ok "Audit recovery custody prepared: ${AUDIT_DB_RECOVERY_BACKUP_DIR}"
+fi
+
 # Provenance-authenticated direct upgrades commit their receipt before the
 # first service or installed-file mutation. Staged hard cuts keep receipt and
 # rollback custody in the fresh target controller instead.
@@ -7438,6 +7825,368 @@ if [[ "${BRIDGE_PHASE1}" -eq 1 ]]; then
 fi
 
 # ── Stop services ─────────────────────────────────────────────────────────────
+
+repair_hard_cut_migration_cursor() {
+    [[ "${MIGRATION_CURSOR_REPAIR_NEEDED}" -eq 1 ]] || return 0
+    if ! DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
+        "${DEFENSECLAW_VENV}/bin/python" -I -B - \
+        "${DATA_DIR}" "${CONFIG_PATH}" "${OPENCLAW_HOME}" "${CURRENT_VERSION}" \
+        "${MIGRATION_CURSOR_RECONSTRUCT_NEEDED}" <<'PY'
+import inspect
+import os
+import stat
+import sys
+
+from defenseclaw import migration_state
+from defenseclaw.config import ConfigVersionError, source_config_version
+from defenseclaw.migrations import MIGRATIONS, run_migrations
+
+data_dir, config_path, openclaw_home, current_version, reconstruct_raw = sys.argv[1:]
+reconstruct = reconstruct_raw == "1"
+data_info = os.lstat(data_dir)
+if (
+    stat.S_ISLNK(data_info.st_mode)
+    or not stat.S_ISDIR(data_info.st_mode)
+    or data_info.st_uid != os.geteuid()
+    or stat.S_IMODE(data_info.st_mode) & 0o077
+):
+    raise RuntimeError("migration cursor repair data directory is unsafe")
+try:
+    if source_config_version(path=config_path) != 8:
+        raise RuntimeError("migration cursor repair requires config-v8")
+except ConfigVersionError as exc:
+    raise RuntimeError("migration cursor repair could not validate config-v8") from exc
+
+cursor_path = migration_state.state_path(data_dir)
+if os.path.lexists(cursor_path):
+    cursor_info = os.lstat(cursor_path)
+    if (
+        stat.S_ISLNK(cursor_info.st_mode)
+        or not stat.S_ISREG(cursor_info.st_mode)
+        or cursor_info.st_uid != os.geteuid()
+        or stat.S_IMODE(cursor_info.st_mode) & 0o077
+        or not 0 < cursor_info.st_size <= 1024 * 1024
+    ):
+        raise RuntimeError("migration cursor repair input is unsafe")
+if migration_state.is_future_schema(data_dir):
+    raise RuntimeError("migration cursor repair refuses a future-schema cursor")
+
+expected = [
+    version
+    for version, _description, _function in MIGRATIONS
+    if tuple(map(int, version.split("."))) <= tuple(map(int, current_version.split(".")))
+]
+if reconstruct:
+    # Infer only pre-hard-cut history. The actual 0.8.5 migration must execute
+    # below and earn its cursor entry; never manufacture the hard-cut bit from
+    # a package-version claim.
+    state = migration_state.bootstrap(
+        None,
+        from_version="0.8.4",
+        package_version=current_version,
+        registry_versions=expected,
+    )
+    migration_state.save(data_dir, state)
+    if migration_state.is_applied(state, "0.8.5"):
+        raise RuntimeError("migration cursor repair unexpectedly synthesized the hard-cut entry")
+
+run_kwargs = {"upgrade_handles_local_bundle": True}
+if "controller_owns_local_bundle_transaction" in inspect.signature(run_migrations).parameters:
+    run_kwargs["controller_owns_local_bundle_transaction"] = True
+count = run_migrations(
+    current_version,
+    current_version,
+    openclaw_home,
+    data_dir,
+    **run_kwargs,
+)
+repaired = migration_state.load(data_dir)
+if (
+    count < 1
+    or repaired is None
+    or any(not migration_state.is_applied(repaired, version) for version in expected)
+    or repaired.applied_at.get("0.8.5") in {None, migration_state.BOOTSTRAP_SENTINEL}
+):
+    raise RuntimeError("idempotent migration replay did not durably repair the complete cursor")
+PY
+    then
+        return 1
+    fi
+    ok "Replayed every missing migration and repaired the cursor for ${CURRENT_VERSION}"
+}
+
+quarantine_corrupt_audit_store() {
+    [[ "${AUDIT_DB_RECOVERY_NEEDED}" -eq 1 ]] || return 0
+    if ! AUDIT_DB_RECOVERY_CUSTODY="$(python3 - \
+        "${DATA_DIR}" \
+        "${AUDIT_DB_RECOVERY_BACKUP_DIR}" \
+        "${AUDIT_DB_PATH}" \
+        "${AUDIT_DB_RECOVERY_BACKUP_ROOT}" \
+        "${AUDIT_DB_PREFLIGHT_IDENTITY}" <<'PY'
+import json
+import os
+from pathlib import Path
+import secrets
+import sqlite3
+import stat
+import sys
+import time
+
+data_dir = Path(sys.argv[1]).absolute()
+backup_dir = Path(sys.argv[2]).absolute()
+audit_db = Path(sys.argv[3]).absolute()
+backup_root = Path(sys.argv[4]).absolute()
+preflight_identity = sys.argv[5]
+marker = data_dir / ".audit-recovery.json"
+names = ("audit.db-wal", "audit.db-shm", "audit.db-journal", "audit.db")
+sources = (
+    ("audit.db-wal", Path(f"{audit_db}-wal")),
+    ("audit.db-shm", Path(f"{audit_db}-shm")),
+    ("audit.db-journal", Path(f"{audit_db}-journal")),
+    ("audit.db", audit_db),
+)
+
+
+def private_directory(path: Path) -> os.stat_result:
+    info = path.lstat()
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) & 0o077
+    ):
+        raise RuntimeError(f"unsafe private directory: {path}")
+    return info
+
+
+def sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def safe_file_identity(path: Path) -> dict:
+    info = path.lstat()
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) & 0o077
+        or info.st_nlink != 1
+    ):
+        raise RuntimeError(f"unsafe audit recovery input: {path.name}")
+    return {
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "size": info.st_size,
+        "mtime_ns": info.st_mtime_ns,
+    }
+
+
+def identity_string(identity: dict) -> str:
+    return f"{identity['device']}:{identity['inode']}"
+
+
+def validate_record(record: object) -> dict:
+    if not isinstance(record, dict) or set(record) != {
+        "device",
+        "inode",
+        "size",
+        "mtime_ns",
+    }:
+        raise RuntimeError("invalid audit recovery identity record")
+    if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in record.values()):
+        raise RuntimeError("invalid audit recovery identity value")
+    return record
+
+
+def require_still_corrupt(path: Path) -> bool:
+    wal = Path(f"{path}-wal")
+    durable_paths = [path]
+    if os.path.lexists(wal):
+        durable_paths.append(wal)
+    before = {str(item): safe_file_identity(item) for item in durable_paths}
+    deadline = time.monotonic() + 15.0
+    connection = None
+    result = "indeterminate"
+    try:
+        query = "?mode=ro" if len(durable_paths) > 1 else "?mode=ro&immutable=1"
+        connection = sqlite3.connect(path.as_uri() + query, uri=True, timeout=1.0)
+        connection.execute("PRAGMA query_only=ON")
+        connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        row = connection.execute("PRAGMA quick_check(1)").fetchone()
+    except sqlite3.DatabaseError as exc:
+        code = getattr(exc, "sqlite_errorcode", 0) & 0xFF
+        if code in {
+            getattr(sqlite3, "SQLITE_CORRUPT", 11),
+            getattr(sqlite3, "SQLITE_NOTADB", 26),
+        }:
+            result = "corrupt"
+    else:
+        if row == ("ok",):
+            result = "healthy"
+        elif row is not None:
+            result = "corrupt"
+    finally:
+        if connection is not None:
+            connection.close()
+    after = {str(item): safe_file_identity(item) for item in durable_paths}
+    if before != after:
+        raise RuntimeError("durable audit database bytes changed during the quiesced integrity probe")
+    if result == "indeterminate":
+        raise RuntimeError("quiesced audit database corruption could not be established")
+    return result == "corrupt"
+
+
+private_directory(data_dir)
+audit_parent_info = audit_db.parent.lstat()
+if (
+    stat.S_ISLNK(audit_parent_info.st_mode)
+    or not stat.S_ISDIR(audit_parent_info.st_mode)
+    or audit_parent_info.st_uid != os.geteuid()
+    or stat.S_IMODE(audit_parent_info.st_mode) & 0o022
+):
+    raise RuntimeError("unsafe audit database parent")
+
+if os.path.lexists(marker):
+    marker_info = marker.lstat()
+    if (
+        stat.S_ISLNK(marker_info.st_mode)
+        or not stat.S_ISREG(marker_info.st_mode)
+        or marker_info.st_uid != os.geteuid()
+        or stat.S_IMODE(marker_info.st_mode) & 0o077
+        or not 0 < marker_info.st_size <= 64 * 1024
+    ):
+        raise RuntimeError("unsafe interrupted audit recovery marker")
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != 2
+        or payload.get("files") != list(names)
+        or payload.get("source") != str(audit_db)
+        or not isinstance(payload.get("custody"), str)
+        or not isinstance(payload.get("identities"), dict)
+    ):
+        raise RuntimeError("invalid interrupted audit recovery marker")
+    custody = Path(payload["custody"]).absolute()
+    allowed_roots = {
+        backup_root,
+        (data_dir / "backups").absolute(),
+    }
+    matching_roots = [
+        root
+        for root in allowed_roots
+        if os.path.commonpath((str(custody), str(root))) == str(root)
+        and custody.parent.parent == root
+    ]
+    if (
+        len(matching_roots) != 1
+        or custody.name != "audit-corrupt"
+        or not custody.parent.name.startswith("upgrade-")
+    ):
+        raise RuntimeError("audit recovery custody escapes the backup root")
+    private_directory(matching_roots[0])
+    private_directory(custody.parent)
+    private_directory(custody)
+    identities = payload["identities"]
+    if set(identities) - set(names) or "audit.db" not in identities:
+        raise RuntimeError("invalid interrupted audit recovery identity set")
+    for record in identities.values():
+        validate_record(record)
+else:
+    private_directory(backup_root)
+    private_directory(backup_dir)
+    if audit_db.parent.stat().st_dev != backup_dir.stat().st_dev:
+        raise RuntimeError("audit recovery requires same-filesystem private backup custody")
+    main_identity = safe_file_identity(audit_db)
+    if not preflight_identity or identity_string(main_identity) != preflight_identity:
+        raise RuntimeError("audit database identity changed after the live integrity probe")
+    if not require_still_corrupt(audit_db):
+        print("__healthy__")
+        raise SystemExit
+    identities = {}
+    for name, source in sources:
+        if os.path.lexists(source):
+            identities[name] = safe_file_identity(source)
+    if "audit.db" not in identities:
+        raise RuntimeError("audit database disappeared before recovery custody")
+    custody = backup_dir / "audit-corrupt"
+    if os.path.lexists(custody):
+        raise RuntimeError("audit recovery custody target already exists")
+    custody.mkdir(mode=0o700)
+    private_directory(custody)
+    sync_directory(backup_dir)
+    payload = {
+        "schema": 2,
+        "source": str(audit_db),
+        "custody": str(custody),
+        "files": list(names),
+        "identities": identities,
+    }
+    temporary = data_dir / f".audit-recovery.{secrets.token_hex(16)}.tmp"
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    try:
+        encoded = (json.dumps(payload, sort_keys=True) + "\n").encode()
+        view = memoryview(encoded)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short audit recovery marker write")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.rename(temporary, marker)
+    sync_directory(data_dir)
+
+for name, source in sources:
+    destination = custody / name
+    source_exists = os.path.lexists(source)
+    destination_exists = os.path.lexists(destination)
+    recorded = identities.get(name)
+    if recorded is None:
+        if source_exists or destination_exists:
+            raise RuntimeError(f"unexpected audit recovery file appeared: {name}")
+        continue
+    if source_exists and destination_exists:
+        raise RuntimeError(f"audit recovery source and custody both contain {name}")
+    if not source_exists and not destination_exists:
+        raise RuntimeError(f"audit recovery lost recorded file: {name}")
+    observed = safe_file_identity(source if source_exists else destination)
+    if observed != validate_record(recorded):
+        raise RuntimeError(f"audit recovery identity changed: {name}")
+    if source_exists:
+        os.rename(source, destination)
+        sync_directory(custody)
+        sync_directory(source.parent)
+
+if (
+    safe_file_identity(custody / "audit.db") != validate_record(identities["audit.db"])
+    or os.path.lexists(audit_db)
+):
+    raise RuntimeError("audit recovery did not establish exact main-database custody")
+marker.unlink()
+sync_directory(data_dir)
+print(custody)
+PY
+    )"; then
+        return 1
+    fi
+    if [[ "${AUDIT_DB_RECOVERY_CUSTODY}" == "__healthy__" ]]; then
+        AUDIT_DB_RECOVERY_CUSTODY=""
+        ok "Post-quiescence audit database is healthy; no audit files were moved"
+        return 0
+    fi
+    [[ -n "${AUDIT_DB_RECOVERY_CUSTODY}" ]] || return 1
+    ok "Preserved corrupt audit SQLite set: ${AUDIT_DB_RECOVERY_CUSTODY}"
+    ok "Fresh local audit store will be initialized and health-checked by the target gateway"
+}
 
 assert_gateway_quiesced() {
     local pid_path="${DATA_DIR}/gateway.pid" pid_fields pid_state pid
@@ -7452,6 +8201,14 @@ assert_gateway_quiesced() {
 
 section "Stopping Services"
 
+SOURCE_GATEWAY_WAS_RUNNING=0
+source_gateway_pid_fields="$(gateway_pid_status \
+    "${DATA_DIR}/gateway.pid" "${INSTALL_DIR}/defenseclaw-gateway")" \
+    || die "Gateway PID custody is invalid before stop; refusing field-state recovery"
+if [[ "${source_gateway_pid_fields%%$'\t'*}" == "live" ]]; then
+    SOURCE_GATEWAY_WAS_RUNNING=1
+fi
+
 step "Stopping defenseclaw-gateway ..."
 if [[ "${BRIDGE_PHASE1}" -eq 1 ]]; then
     # Arm rollback before the stop: even a stop command that exits non-zero may
@@ -7462,6 +8219,28 @@ DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
     "${INSTALL_DIR}/defenseclaw-gateway" stop 2>/dev/null \
     && ok "Gateway stopped" || warn "Gateway was not running"
 assert_gateway_quiesced
+if ! repair_hard_cut_migration_cursor; then
+    if [[ "${SOURCE_GATEWAY_WAS_RUNNING}" -eq 1 ]]; then
+        DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
+            "${INSTALL_DIR}/defenseclaw-gateway" start 9>&- >/dev/null 2>&1 \
+            && warn "Migration-cursor repair failed; the source gateway was restarted." \
+            || warn "Migration-cursor repair failed and the source gateway could not be restarted."
+    fi
+    die "Could not reconstruct migration cursor metadata; target artifacts were not installed."
+fi
+if ! quarantine_corrupt_audit_store; then
+    if [[ ! -e "${DATA_DIR}/.audit-recovery.json" \
+        && ! -L "${DATA_DIR}/.audit-recovery.json" \
+        && "${SOURCE_GATEWAY_WAS_RUNNING}" -eq 1 ]]; then
+        DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
+            "${INSTALL_DIR}/defenseclaw-gateway" start 9>&- >/dev/null 2>&1 \
+            && warn "Audit-store recovery was refused safely; the source gateway was restarted." \
+            || warn "Audit-store recovery was refused and the source gateway could not be restarted."
+    else
+        warn "Audit-store recovery custody is incomplete; its durable marker was retained for an exact retry."
+    fi
+    die "Could not preserve the corrupt audit SQLite set; target artifacts were not installed."
+fi
 if [[ "${BRIDGE_PHASE1}" -eq 1 ]]; then
     post_stop_health="$(bridge_source_health_observation)" \
         || die "Could not verify source health quiescence after stop; the source will be restored."

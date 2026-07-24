@@ -40,11 +40,13 @@ MAX_RELEASE_INVENTORY_BYTES = 8 * 1024 * 1024
 MAX_CHECKSUMS_BYTES = 8 * 1024 * 1024
 MAX_CERTIFICATE_BYTES = 64 * 1024
 MAX_SIGNATURE_BYTES = 16 * 1024
+MAX_BUNDLE_BYTES = 16 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_RELEASE_PAGES = 20
 MAX_DOWNLOAD_ATTEMPTS = 4
 INITIAL_DOWNLOAD_RETRY_DELAY_SECONDS = 1.0
 TRANSIENT_HTTP_STATUSES = frozenset({408, 425, 429})
+SIGSTORE_BUNDLE_START_VERSION = (0, 8, 7)
 
 
 class BaselineResolutionError(RuntimeError):
@@ -289,6 +291,21 @@ def _authenticate_release(
         "checksums.txt.sig": MAX_SIGNATURE_BYTES,
         "upgrade-manifest.json": MAX_MANIFEST_BYTES,
     }
+    authentication_assets = {
+        "checksums.txt",
+        "checksums.txt.pem",
+        "checksums.txt.sig",
+    }
+    # The Sigstore bundle is proof *about* checksums.txt and is necessarily
+    # created after that signed manifest. Like the detached certificate and
+    # signature, it cannot be self-referentially listed inside checksums.txt.
+    # It is nevertheless a required immutable release asset starting with the
+    # first published release that shipped one (0.8.7), and its downloaded
+    # bytes must match GitHub's immutable asset digest before it is admitted.
+    # The immutable 0.8.6 release predates bundle publication.
+    if _version_key(version) >= SIGSTORE_BUNDLE_START_VERSION:
+        required_metadata["checksums.txt.bundle"] = MAX_BUNDLE_BYTES
+        authentication_assets.add("checksums.txt.bundle")
     missing = sorted(set(required_metadata) - set(assets))
     if missing:
         raise BaselineResolutionError(f"immutable release {version} lacks authentication assets: {missing}")
@@ -320,7 +337,6 @@ def _authenticate_release(
     # platform payloads intentionally omitted at publication (0.8.4's Windows
     # bytes are the precedent), so signed-but-unpublished entries do not widen
     # platform support and are not themselves an error.
-    authentication_assets = {"checksums.txt", "checksums.txt.pem", "checksums.txt.sig"}
     for name, item in assets.items():
         if name in authentication_assets:
             continue

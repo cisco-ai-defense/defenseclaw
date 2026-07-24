@@ -532,9 +532,14 @@ environment, cursor, and managed bundle before reporting rollback.
 
 **Version-specific migrations** are defined in `cli/defenseclaw/migrations.py`
 and run while an authenticated upgrade advances across the release boundary
-that owns them. An authenticated same-version request is a no-op: it does not
-reinstall artifacts or run migrations. Each migration is keyed to the release
-it ships with. For example, the v0.3.0 migration removes
+that owns them. An authenticated same-version request is normally a no-op.
+The two explicit field-recovery cases below are the exceptions: incomplete
+hard-cut cursor metadata replays every missing idempotent migration, and
+`--recover-corrupt-audit` replaces an explicitly proven-corrupt active store
+only after preserving its exact durable database and WAL bytes. A WAL-aware
+read-only probe may rebuild SQLite's disposable shared-memory index before the
+tuple enters custody. Each migration is keyed to the release it ships with. For
+example, the v0.3.0 migration removes
 legacy `models.providers.defenseclaw`, `models.providers.litellm`, and
 `agents.defaults.model.primary` prefixed entries from `openclaw.json` (written
 by 0.2.0's guardrail setup) while preserving plugin registration.
@@ -555,6 +560,10 @@ the v7 file.
 - `--yes`, `-y` — skip confirmation prompts
 - `--version VERSION` — select a specific final release; required bridges are
   still staged (default: latest)
+- `--recover-corrupt-audit` — after a bounded immutable SQLite integrity check
+  proves corruption, preserve the configured audit database and its WAL/SHM
+  sidecars in private, crash-resumable upgrade-backup custody and activate a
+  fresh local store. This separate opt-in is required even with `--yes`.
 - `--allow-unverified` — legacy-only unsafe override. It cannot bypass the
   signed manifest, checksum, bridge, or migration requirements for `0.8.4+`.
 
@@ -579,6 +588,22 @@ matrix is empty. Use the current target-release POSIX resolver on every
 | Any Windows source | The `0.8.4` release contains no Windows gateway/rollback binary, so no Windows hard-cut path is published. The PowerShell resolver fails closed before stopping services. Keep the current installation unchanged. |
 | A source outside the published matrix, including assetless `0.7.0`, `0.2.x`, or historical `0.3.x` releases | No tested in-place path is inferred. Remain on the current version and contact support for a source-specific, state-aware recovery plan. Do not uninstall, overwrite state, or force an intermediate hop. |
 | Direct installer from `0.8.3 → 0.8.5` | Refused before service stop or installed mutation. Manual artifact copying is unsupported because it bypasses bridge selection and rollback. Use the release-owned resolver; selecting a final version there does not bypass the bridge. |
+
+If a valid config-v8 installation is missing only its `0.8.5` migration-cursor
+record, use the authenticated current target-release resolver. After backup and
+verified gateway quiescence, it reconstructs pre-hard-cut cursor history,
+executes the real idempotent `0.8.5` migration, and requires a non-bootstrap
+cursor record before installing target artifacts. Frozen installed CLIs cannot
+gain this repair retroactively.
+
+If gateway startup reports SQLite corruption in the configured local audit
+store, rerun that same authenticated resolver with
+`--recover-corrupt-audit`. The resolver never treats a timeout, lock, generic
+I/O error, or unsafe path as proof of corruption. A successful recovery moves
+the exact main database and present SQLite sidecars into
+`backups/upgrade-*/audit-corrupt/`, retains them for offline forensics, and
+health-checks a newly initialized active store. Historical records in that
+custody file are not automatically imported into the fresh active database.
 
 **Examples:**
 

@@ -975,6 +975,40 @@ release-owned resolver materializes them privately. The conventional `.whl`,
 extracting, or package-installing either form is not a supported manual path;
 use the resolver so the bridge and rollback contract cannot be skipped.
 
+#### Recovering incomplete field state
+
+The current target-release POSIX resolver also handles two field states that a
+frozen installed CLI cannot repair retroactively:
+
+- A config-v8 installation with a missing, damaged, or valid-but-incomplete
+  cursor is backed up and stopped. Missing pre-hard-cut history can be inferred,
+  but every absent idempotent migration is executed and `0.8.5` must earn a
+  real timestamp; the resolver never synthesizes the hard-cut record from a
+  version string.
+- A configured local audit SQLite store that a bounded integrity probe proves
+  corrupt can be moved into private upgrade-backup custody before a fresh store
+  is initialized:
+
+  ```bash
+  bash defenseclaw-upgrade.sh --yes --recover-corrupt-audit
+  ```
+
+  The separate flag is required even with `--yes` because the retained
+  historical audit records are no longer queried by the new active database.
+  Live preflight uses immutable mode. If a WAL exists, the resolver waits until
+  the gateway is stopped and performs a WAL-aware read-only check while proving
+  the durable database and WAL identities did not change. Those durable bytes,
+  plus the post-probe SHM index and any journal, are retained under
+  `backups/upgrade-*/audit-corrupt/`; do not delete that custody directory. A
+  timeout, lock, generic I/O error, unsafe path, or changed inode is never
+  reclassified as corruption and never authorizes moving the store.
+
+Use the authenticated current target-release resolver asset, not the frozen
+installed command, when an older release refuses before downloading target
+artifacts. The resolver supports the same recovery when the target artifacts
+were already installed but gateway readiness failed, so a same-version retry
+does not leave the host stranded.
+
 #### 0.8.5 hard cut and the 0.8.4 bridge
 
 An installed `0.8.3` or older controller must not install `0.8.5` directly.

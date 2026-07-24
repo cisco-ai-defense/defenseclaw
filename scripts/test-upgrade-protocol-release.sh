@@ -743,6 +743,144 @@ run_candidate_updater_direct_success() {
     ok "Release-owned resolver upgrade passed: ${baseline} -> ${TARGET_VERSION}"
 }
 
+run_candidate_updater_field_recovery_success() {
+    local baseline="$1"
+    local recovery_case="$2"
+    local -a resolver_args=(--yes)
+    local audit_db=""
+    local inherited_smoke_home="${SMOKE_HOME}"
+    local SMOKE_HOME="${inherited_smoke_home}"
+    local FROM_VERSION="${FROM_VERSION}"
+    log "Proving release-owned resolver field recovery (${recovery_case}) ${baseline} -> ${TARGET_VERSION}"
+    if [[ "${recovery_case}" == "corrupt-audit-same-version" ]]; then
+        [[ "${baseline}" == "${TARGET_VERSION}" \
+            && -x "${SMOKE_HOME}/.defenseclaw/.venv/bin/python" ]] \
+            || die "same-version field recovery requires an installed target fixture"
+        FROM_VERSION="${TARGET_VERSION}"
+    else
+        FROM_VERSION="${baseline}"
+        SMOKE_HOME="${WORKDIR}/field-recovery-${baseline}-${recovery_case}"
+        rm -rf "${SMOKE_HOME}"
+        mkdir -p "${SMOKE_HOME}"
+        install_baseline
+        seed_upgrade_fixture
+        prepare_isolated_docker_path
+        start_source_gateway_canary
+    fi
+
+    case "${recovery_case}" in
+        missing-v8-cursor)
+            python3 - "${SMOKE_HOME}/.defenseclaw/.migration_state.json" <<'PY' \
+                || die "field-recovery migration cursor fixture could not be written"
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+document = json.loads(path.read_text(encoding="utf-8"))
+document["applied"] = [item for item in document["applied"] if item != "0.8.5"]
+document.setdefault("applied_at", {}).pop("0.8.5", None)
+path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+            ;;
+        corrupt-audit|corrupt-audit-same-version)
+            stop_smoke_gateway
+            audit_db="$(
+                HOME="${SMOKE_HOME}" \
+                DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+                PYTHONDONTWRITEBYTECODE=1 \
+                    "${SMOKE_HOME}/.defenseclaw/.venv/bin/python" -I -B - <<'PY'
+from defenseclaw.config import load
+
+print(load().audit_db)
+PY
+            )" || die "field-recovery audit fixture path could not be resolved"
+            [[ -n "${audit_db}" && "${audit_db}" == "${SMOKE_HOME}/"* ]] \
+                || die "field-recovery audit fixture escaped its isolated home"
+            python3 - "${audit_db}" <<'PY' \
+                || die "field-recovery corrupt audit fixture could not be written"
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+if not path.is_file() or path.is_symlink():
+    raise SystemExit("field-recovery audit fixture is unavailable")
+path.write_bytes(b"DefenseClaw corrupt audit fixture\n")
+path.chmod(0o600)
+PY
+            resolver_args+=(--recover-corrupt-audit)
+            ;;
+        *) die "unknown field-recovery case: ${recovery_case}" ;;
+    esac
+
+    local curl_shim="${SMOKE_HOME}/.upgrade-test-bin"
+    local real_curl
+    local log_file="${SMOKE_HOME}/upgrade.log"
+    real_curl="$(install_curl_rewrite_probe "${curl_shim}")"
+
+    if ! HOME="${SMOKE_HOME}" \
+        DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+        OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
+        PYTHONDONTWRITEBYTECODE=1 \
+        DOCKER_HOST="${UPGRADE_SMOKE_DOCKER_HOST:-unix://${SMOKE_HOME}/no-docker.sock}" \
+        DEFENSECLAW_UPGRADE_TEST_MODE=1 \
+        DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL="${RELEASE_URL}" \
+        UPGRADE_GATE_REAL_CURL="${real_curl}" \
+        UPGRADE_GATE_RELEASE_URL="${RELEASE_URL}" \
+        UPGRADE_GATE_TARGET_VERSION="${TARGET_VERSION}" \
+        PATH="${curl_shim}:${SMOKE_HOME}/.local/bin:${PATH}" \
+            bash "${RELEASE_ROOT}/${TARGET_VERSION}/defenseclaw-upgrade.sh" \
+            "${resolver_args[@]}" >"${log_file}" 2>&1; then
+        tail_v8_upgrade_log_secret_safe "${log_file}"
+        die "release-owned resolver field recovery failed (${recovery_case}): ${baseline} -> ${TARGET_VERSION}"
+    fi
+
+    verify_upgrade
+    case "${recovery_case}" in
+        missing-v8-cursor)
+            grep -Fq "Replayed every missing migration and repaired the cursor" "${log_file}" \
+                || die "field recovery did not report idempotent 0.8.5 migration replay"
+            python3 - "${SMOKE_HOME}/.defenseclaw/.migration_state.json" <<'PY' \
+                || die "field-recovery migration cursor verification failed"
+import json
+from pathlib import Path
+import sys
+
+document = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if "0.8.5" not in document.get("applied", []):
+    raise SystemExit("field recovery did not record 0.8.5")
+if document.get("applied_at", {}).get("0.8.5") in {None, "bootstrap"}:
+    raise SystemExit("field recovery synthesized rather than executing 0.8.5")
+PY
+            ;;
+        corrupt-audit|corrupt-audit-same-version)
+            grep -Fq "Preserved corrupt audit SQLite set:" "${log_file}" \
+                || die "field recovery did not report corrupt audit custody"
+            python3 - "${SMOKE_HOME}/.defenseclaw" "${audit_db}" <<'PY' \
+                || die "field-recovery audit custody verification failed"
+from pathlib import Path
+import sqlite3
+import sys
+
+data_dir = Path(sys.argv[1])
+audit_db = Path(sys.argv[2])
+custody = list((data_dir / "backups").glob("upgrade-*/audit-corrupt/audit.db"))
+if len(custody) != 1:
+    raise SystemExit(f"expected one corrupt audit custody file, found {len(custody)}")
+if custody[0].read_bytes() != b"DefenseClaw corrupt audit fixture\n":
+    raise SystemExit("corrupt audit custody did not preserve exact source bytes")
+if (data_dir / ".audit-recovery.json").exists():
+    raise SystemExit("completed audit recovery retained its in-progress marker")
+with sqlite3.connect(audit_db) as connection:
+    if connection.execute("PRAGMA quick_check(1)").fetchone() != ("ok",):
+        raise SystemExit("fresh target audit database failed quick_check")
+PY
+            ;;
+    esac
+    stop_smoke_gateway
+    ok "Release-owned resolver field recovery passed (${recovery_case}): ${baseline} -> ${TARGET_VERSION}"
+}
+
 run_protocol_case() {
     local baseline="$1"
     if version_lte "${TARGET_VERSION}" "${baseline}"; then
@@ -835,6 +973,10 @@ run_protocol_case() {
                 run_candidate_updater_staged_success "${baseline}"
             else
                 run_candidate_updater_direct_success "${baseline}"
+                if [[ "${UPGRADE_SMOKE_FIELD_RECOVERY_CASES:-0}" == "1" ]]; then
+                    run_candidate_updater_field_recovery_success "${baseline}" missing-v8-cursor
+                    run_candidate_updater_field_recovery_success "${TARGET_VERSION}" corrupt-audit-same-version
+                fi
             fi
             return
         fi
@@ -871,6 +1013,10 @@ run_protocol_case() {
             run_candidate_updater_staged_success "${baseline}" explicit
         else
             run_candidate_updater_direct_success "${baseline}"
+            if [[ "${UPGRADE_SMOKE_FIELD_RECOVERY_CASES:-0}" == "1" ]]; then
+                run_candidate_updater_field_recovery_success "${baseline}" missing-v8-cursor
+                run_candidate_updater_field_recovery_success "${TARGET_VERSION}" corrupt-audit-same-version
+            fi
         fi
         return
     fi

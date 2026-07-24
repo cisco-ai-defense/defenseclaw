@@ -2,6 +2,7 @@
 # Linux, macOS, and Windows runners. Keep their checkout representation stable.
 scripts/upgrade.sh text eol=lf
 scripts/upgrade.ps1 text eol=lf
+scripts/defenseclaw-rescue.sh text eol=lf
 cli/defenseclaw/install_publish.py text eol=lf
 schemas/config/v8/defenseclaw-config.schema.json text eol=lf
 schemas/config/v8/reference/observability.yaml text eol=lf
