@@ -1034,7 +1034,8 @@ private-secret-name = "DefenseClaw must remain redacted"
         $nativeHarnessText -match '\./internal/tools/windowsresources' -and
         $nativeHarnessText -match 'DefenseClawWindowsResourceIcon\.png' -and
         $nativeHarnessText -match 'DefenseClawWindowsResourceVersion\.txt' -and
-        $standardUserCIText -match '\$resourceVerifierInputs = @\(' -and
+        $standardUserCIText -match
+            '(?s)\$resourceVerifierInputs = if \(\$Mode -eq ''bootstrap-acceptance''\) \{\s*@\(\)\s*\} else \{\s*@\(' -and
         $standardUserCIText -match '\[IO\.File\]::Copy\(\$source, \$destination, \$false\)') `
         'packaged lifecycle carries an offline immutable Windows resource verifier into the disposable child'
     Assert-True ($standardUserCIText -match 'Publish-BoundedDisposableContractResults' -and
