@@ -384,6 +384,10 @@ jobs:
           } else {
             'source=candidate' >> $env:GITHUB_OUTPUT
           }
+          # GitHub's pwsh wrapper exits with the last native exit code. A
+          # missing release is the expected pre-publication branch, not an
+          # error after its candidate fallback has been selected.
+          $global:LASTEXITCODE = 0
       - name: Download authenticated public bootstrap fixture
         if: ${{ steps.fixture.outputs.source == 'release' }}
         env:
