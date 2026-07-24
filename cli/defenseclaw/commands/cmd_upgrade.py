@@ -1339,7 +1339,7 @@ def upgrade(
             else:
                 if not upgrade_body_failed:
                     if checksums is not None and not effective_allow_unverified:
-                        supersede_prior_upgrade_receipts(receipt_path)
+                        _supersede_prior_upgrade_receipts_best_effort(receipt_path)
                     complete_upgrade_receipt(
                         receipt_path,
                         status="partial" if migration_failed else "succeeded",
@@ -1489,7 +1489,7 @@ def _recover_interrupted_same_version_upgrade(
             config_path=config_path,
             recovery_home=recovery_home,
         )
-        supersede_prior_upgrade_receipts(receipt_path)
+        _supersede_prior_upgrade_receipts_best_effort(receipt_path)
         complete_upgrade_receipt(
             receipt_path,
             status="partial" if migration_failed else "succeeded",
@@ -1776,6 +1776,19 @@ def _record_failed_upgrade_receipt(path, failure_code: str) -> None:
         ux.warn(
             "Could not finalize the upgrade compliance failure receipt; "
             "the pending receipt remains and will be classified on retry.",
+            indent="  ",
+        )
+
+
+def _supersede_prior_upgrade_receipts_best_effort(path: Path) -> None:
+    """Keep a successful target health proof from depending on old receipt cleanup."""
+
+    try:
+        supersede_prior_upgrade_receipts(path)
+    except (OSError, ValueError):
+        ux.warn(
+            "Target health is proven, but old upgrade receipt cleanup was deferred; "
+            "a later authenticated upgrade will reconcile it.",
             indent="  ",
         )
 
