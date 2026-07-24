@@ -2124,7 +2124,7 @@ func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider
 	if instanceName != "" {
 		fmt.Fprintf(os.Stderr, "[guardrail] direct-provider mode: model=%q instance=%q\n", cfgModel, instanceName)
 	} else {
-		fmt.Fprintf(os.Stderr, "[guardrail] direct-provider mode: using configured model %q provider=%q base_url=%q\n", cfgModel, p.cfg.LLM.Provider, baseURL)
+		fmt.Fprintf(os.Stderr, "[guardrail] direct-provider mode: using configured model %q provider=%q\n", cfgModel, p.cfg.LLM.Provider)
 	}
 
 	registry, _, _ := providerRegistrySnapshot()
