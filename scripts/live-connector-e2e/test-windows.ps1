@@ -1202,24 +1202,19 @@ private-secret-name = "DefenseClaw must remain redacted"
     Assert-True ($windowsLiveJob -notmatch 'shell:\s*bash') 'Windows live jobs never select Bash'
     Assert-True ($windowsLiveJob -match "github.event_name == 'workflow_dispatch'") `
         'Connector Live Windows radar remains manual-only'
-    $releaseCertificationJob = [regex]::Match(
-        $releaseWorkflowText,
-        '(?ms)^  windows-real-client-certification:.*?(?=^  [a-z0-9][a-z0-9-]*:|\z)'
-    ).Value
-    Assert-True ($releaseCertificationJob -match 'needs:\s*\[release-preflight,\s*windows-installer\]' -and
-        $releaseCertificationJob -match '-Operation release-certification' -and
-        $releaseCertificationJob -match 'secrets.OPENAI_API_KEY' -and
-        $releaseCertificationJob -match 'secrets.ANTHROPIC_API_KEY' -and
-        $releaseCertificationJob -notmatch 'continue-on-error') `
-        'production release has a required provider-backed Windows real-client gate'
+    Assert-True ($releaseWorkflowText -notmatch '(?m)^  windows-real-client-certification:' -and
+        $releaseWorkflowText -notmatch 'secrets\.OPENAI_API_KEY' -and
+        $releaseWorkflowText -notmatch 'secrets\.ANTHROPIC_API_KEY' -and
+        $releaseWorkflowText -notmatch '-Operation release-certification') `
+        'production release does not depend on provider-backed Windows live radar'
     $releaseAssemblyJob = [regex]::Match(
         $releaseWorkflowText,
         '(?ms)^  assemble-release-candidate:.*?(?=^  [a-z0-9][a-z0-9-]*:|\z)'
     ).Value
-    Assert-True ($releaseAssemblyJob -match 'windows-real-client-certification' -and
-        $releaseAssemblyJob -match 'artifact-ids:\s*\$\{\{ needs\.windows-real-client-certification\.outputs\.artifact_id \}\}' -and
+    Assert-True ($releaseAssemblyJob -match 'needs:\s*\[release-preflight,\s*build-runtime-candidate,\s*macos-app,\s*windows-installer\]' -and
+        $releaseAssemblyJob -match 'artifact-ids:\s*\$\{\{ needs\.windows-installer\.outputs\.artifact_id \}\}' -and
         $releaseAssemblyJob -match '--windows-dir candidate-input/windows') `
-        'immutable release publication consumes only the certified Windows artifact bundle'
+        'immutable release assembly consumes the tested signed Windows artifact bundle directly'
     Assert-True ($liveWorkflowText -match 'shell:\s*bash') 'Unix Bash harness remains present'
     Assert-True ($liveWorkflowText -notmatch '(?m)^  windows-(harness-static|contract):') 'deterministic Windows jobs moved out of live radar'
     Assert-True ($ciWorkflowText -notmatch '(?m)^  windows-(hook-path|installer-smoke):') 'legacy partial Windows jobs were removed'

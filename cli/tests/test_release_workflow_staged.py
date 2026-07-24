@@ -646,6 +646,14 @@ def test_windows_release_requires_signed_setup_and_fresh_install_only() -> None:
     assert "invoke-windows-setup-standard-user-ci.ps1" in rendered
     assert "-Mode setup-acceptance" in rendered
     assert "-AllowCurrentUserSetupAcceptance" not in rendered
+    windows_contract = (ROOT / "scripts/live-connector-e2e/test-windows.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "production release does not depend on provider-backed Windows live radar" in (
+        windows_contract
+    )
+    assert "needs\\.windows-installer\\.outputs\\.artifact_id" in windows_contract
+    assert "tested signed Windows artifact bundle directly" in windows_contract
 
     upload = next(step for step in windows["steps"] if step.get("id") == "windows-installer-artifact")
     expected = (
