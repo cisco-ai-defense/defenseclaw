@@ -102,6 +102,32 @@ def test_protect_private_file_rejects_path_replacement(monkeypatch, tmp_path):
         file_permissions.protect_private_file(target)
 
 
+def test_open_regular_file_no_follow_requests_binary_mode(monkeypatch, tmp_path):
+    target = tmp_path / "target"
+    target.write_bytes(b"line one\r\nline two\r\n")
+    real_open = os.open
+    native_binary_flag = getattr(os, "O_BINARY", 0)
+    binary_flag = native_binary_flag or 0x8000
+    observed_flags: list[int] = []
+
+    monkeypatch.setattr(file_permissions.os, "O_BINARY", binary_flag, raising=False)
+
+    def record_open(path, flags, *args, **kwargs):
+        observed_flags.append(flags)
+        native_flags = flags if native_binary_flag else flags & ~binary_flag
+        return real_open(path, native_flags, *args, **kwargs)
+
+    monkeypatch.setattr(file_permissions.os, "open", record_open)
+
+    descriptor = file_permissions.open_regular_file_no_follow(target)
+    try:
+        assert os.read(descriptor, 1024) == b"line one\r\nline two\r\n"
+    finally:
+        os.close(descriptor)
+
+    assert observed_flags[0] & binary_flag
+
+
 @pytest.mark.parametrize(("_name", "module", "write"), _ATOMIC_WRITERS)
 @pytest.mark.parametrize("failure_stage", ["permission", "serialize", "replace"])
 def test_atomic_writers_close_and_remove_staging_file_on_failure(
