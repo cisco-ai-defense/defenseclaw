@@ -39,7 +39,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from defenseclaw.connector_paths import omnigent_config_path
+from defenseclaw.connector_paths import (
+    connector_config_files,
+    hermes_config_path,
+    omnigent_config_path,
+)
 from defenseclaw.inventory import agent_discovery
 
 if TYPE_CHECKING:
@@ -192,7 +196,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
 
     Safe to call repeatedly. Each step is idempotent:
 
-    * directories — ``os.makedirs(exist_ok=True)``
+    * directories — private owner/SYSTEM-only creation (idempotent)
     * policy seeding — skipped when destination already exists
     * audit DB — ``Store.init()`` runs ``CREATE TABLE IF NOT EXISTS``
     * gateway token — re-read from ``openclaw.json`` on every call
@@ -203,6 +207,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
     """
     from defenseclaw.config import config_path
     from defenseclaw.db import Store
+    from defenseclaw.file_permissions import make_private_directory
 
     report = BootstrapReport(
         data_dir=cfg.data_dir,
@@ -218,7 +223,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
         if not d:
             continue
         try:
-            os.makedirs(d, exist_ok=True)
+            make_private_directory(d)
             report.dirs_created.append(d)
         except OSError as exc:
             report.errors.append(f"mkdir {d}: {exc}")
@@ -235,7 +240,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
             continue
         if os.path.realpath(d).startswith(data_real + os.sep):
             try:
-                os.makedirs(d, exist_ok=True)
+                make_private_directory(d)
                 report.dirs_created.append(d)
             except OSError as exc:
                 report.errors.append(f"mkdir {d}: {exc}")
@@ -1061,12 +1066,12 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "defenseclaw setup openclaw",
         )
     if connector == "codex":
-        path = os.path.expanduser("~/.codex/config.toml")
+        path = connector_config_files("codex")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Codex config found")
         return StepResult("Connector", "warn", "Codex config not found yet", "defenseclaw setup codex")
     if connector == "claudecode":
-        path = os.path.expanduser("~/.claude/settings.json")
+        path = connector_config_files("claudecode")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Claude Code settings found")
         return StepResult("Connector", "warn", "Claude Code settings not found yet", "defenseclaw setup claude-code")
@@ -1076,7 +1081,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             return StepResult("Connector", "pass", "ZeptoClaw config found")
         return StepResult("Connector", "warn", "ZeptoClaw config not found yet", "defenseclaw setup zeptoclaw")
     if connector == "hermes":
-        path = os.path.expanduser("~/.hermes/config.yaml")
+        path = hermes_config_path()
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Hermes config found")
         return StepResult("Connector", "warn", "Hermes config not found yet", "defenseclaw setup hermes")

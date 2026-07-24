@@ -28,6 +28,7 @@ type fakeRetentionReaper struct {
 	updates       []int64
 	started       chan struct{}
 	responses     chan fakeRetentionResponse
+	stop          <-chan struct{}
 	updateStarted chan int64
 	updateRelease <-chan struct{}
 }
@@ -94,6 +95,8 @@ func (reaper *fakeRetentionReaper) Run(ctx context.Context) (audit.RetentionRunR
 	var response fakeRetentionResponse
 	select {
 	case response = <-reaper.responses:
+	case <-reaper.stop:
+		response.result = successfulRetentionResult()
 	case <-ctx.Done():
 		response.err = ctx.Err()
 	}
@@ -310,7 +313,7 @@ func TestRetentionControllerPublishesOnlyBoundedFailureOutcomesAndRecovers(t *te
 	}
 }
 
-func TestRetentionControllerStopCancelsAndWaitsForActiveRun(t *testing.T) {
+func TestRetentionControllerStopDrainsAndWaitsForActiveRun(t *testing.T) {
 	reaper := newFakeRetentionReaper(90)
 	controller, err := newRetentionController(reaper, RetentionControllerOptions{})
 	if err != nil {
@@ -320,7 +323,15 @@ func TestRetentionControllerStopCancelsAndWaitsForActiveRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	receiveRetentionTest(t, reaper.started)
-	if err := controller.Stop(t.Context()); err != nil {
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- controller.Stop(t.Context()) }()
+	select {
+	case err := <-stopDone:
+		t.Fatalf("stop returned before the active retention run drained: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	reaper.responses <- fakeRetentionResponse{result: successfulRetentionResult()}
+	if err := receiveRetentionTest(t, stopDone); err != nil {
 		t.Fatal(err)
 	}
 	if _, active, maxActive, _ := reaper.snapshot(); active != 0 || maxActive != 1 {

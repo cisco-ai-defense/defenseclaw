@@ -26,6 +26,7 @@ mocked ``subprocess.run``.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -493,7 +494,9 @@ class TestRefreshLocalObservabilityStack(unittest.TestCase):
         with open(custom, "w", encoding="utf-8") as handle:
             handle.write('{"title": "custom"}\n')
 
-        digest = hashlib.sha256(b'{"title": "retired"}\n').hexdigest()
+        # Text-mode writes use CRLF on Windows. Hash the exact bytes that the
+        # refresh code will inspect instead of assuming a POSIX newline.
+        digest = hashlib.sha256(Path(retired).read_bytes()).hexdigest()
         with patch.dict(
             "defenseclaw.bundle_refresh._LOCAL_OBSERVABILITY_RETIRED_SHA256",
             {"grafana/dashboards/defenseclaw-reliability.json": frozenset({digest})},
@@ -609,6 +612,44 @@ class TestIsComposeProjectRunning(unittest.TestCase):
         # OSError must NOT propagate — callers treat False as
         # "nothing to stop".
         self.assertFalse(is_compose_project_running("any-project"))
+
+
+class TestInstalledBundleVersion(unittest.TestCase):
+    def test_manifest_version_is_a_bounded_safe_string(self) -> None:
+        from defenseclaw.bundle_refresh import (
+            LocalObservabilityUpgradeError,
+            installed_local_observability_bundle_version,
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            destination = Path(root, "observability-stack")
+            destination.mkdir()
+            self.assertEqual(installed_local_observability_bundle_version(root), "")
+
+            manifest = destination / ".defenseclaw-bundle-manifest.json"
+            document = {
+                "schema_version": 1,
+                "bundle_version": "",
+                "files": [],
+                "dashboard_uids": [],
+                "named_volumes": [],
+            }
+            for accepted in ("dev", "01.2.3", "0.8.6-rc.1+build.7"):
+                with self.subTest(bundle_version=accepted):
+                    document["bundle_version"] = accepted
+                    manifest.write_text(json.dumps(document), encoding="utf-8")
+                    self.assertEqual(
+                        installed_local_observability_bundle_version(root),
+                        accepted,
+                    )
+
+            for invalid in ("", "a" * 65, "0.8.6/rc1", "0.8.6 rc1"):
+                with self.subTest(bundle_version=invalid):
+                    document["bundle_version"] = invalid
+                    manifest.write_text(json.dumps(document), encoding="utf-8")
+                    with self.assertRaises(LocalObservabilityUpgradeError) as raised:
+                        installed_local_observability_bundle_version(root)
+                    self.assertEqual(raised.exception.code, "installed_manifest_invalid")
 
 
 if __name__ == "__main__":

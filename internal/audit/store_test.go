@@ -552,7 +552,7 @@ func TestInitIdempotent(t *testing.T) {
 }
 
 func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	store, err := NewStore(":memory:")
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
@@ -607,6 +607,69 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 	}
 	if len(alerts) != 2 || !alertIDs["eligible-alert"] || !alertIDs["v8-finding"] {
 		t.Fatalf("alerts=%+v", alerts)
+	}
+}
+
+func TestAlertAcknowledgementTargetsSupportExactAndBroadSelectors(t *testing.T) {
+	store, err := NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	for _, event := range []Event{
+		{ID: "alert-a", Timestamp: base, Action: "scan-finding", Target: "skill://one", Severity: "HIGH", Connector: "codex"},
+		{ID: "alert-b", Timestamp: base.Add(time.Minute), Action: "scan-finding", Target: "skill://two", Severity: "LOW", Connector: "claudecode"},
+		{ID: "alert-c", Timestamp: base.Add(2 * time.Minute), Action: "scan-finding", Target: "skill://one", Severity: "HIGH", Connector: "codex"},
+	} {
+		if err := store.LogEvent(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stamp := base.Add(3 * time.Minute).Format(time.RFC3339Nano)
+	if _, err := store.db.Exec(`INSERT INTO alert_acknowledgement_projection (
+		alert_id, disposition, actor, disposition_at, projection_version,
+		source, source_event_id, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"alert-a", AlertDispositionAcknowledged, "test", stamp, 3,
+		"modern", "receipt-a", stamp,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	broad, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
+		Connector: "CODEX", Target: "skill://one", Severity: "HIGH",
+		Since: base.Add(time.Minute), Before: base.Add(3 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(broad) != 1 || broad[0].AlertID != "alert-c" || broad[0].ProjectionVersion != 0 {
+		t.Fatalf("broad targets=%+v", broad)
+	}
+
+	exact, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
+		AlertIDs: []string{"missing", "alert-c", "alert-a"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exact) != 2 || exact[0].AlertID != "alert-a" || exact[0].ProjectionVersion != 3 ||
+		exact[1].AlertID != "alert-c" || exact[1].ProjectionVersion != 0 {
+		t.Fatalf("exact targets=%+v", exact)
+	}
+
+	injected, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
+		Target: "skill://one' OR 1=1 --", Severity: "HIGH",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(injected) != 0 {
+		t.Fatalf("selector value changed SQL semantics: %+v", injected)
 	}
 }
 

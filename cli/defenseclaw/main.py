@@ -22,12 +22,13 @@ mirroring the Cobra root command in internal/cli/root.go.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
 import click
 
-from defenseclaw import __version__
+from defenseclaw import __version__, ux
 from defenseclaw.commands.cmd_agent import agent
 from defenseclaw.commands.cmd_aibom import aibom
 from defenseclaw.commands.cmd_alerts import alerts
@@ -110,8 +111,34 @@ def _is_help_invocation(ctx: click.Context) -> bool:
     return any(a in {"-h", "--help"} for a in argv)
 
 
+def _emit_version_json(ctx: click.Context, _param: click.Parameter | None, value: bool) -> None:
+    """Emit a stable installer-facing version record before config loading."""
+    if not value or ctx.resilient_parsing:
+        return
+    click.echo(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "defenseclaw-cli",
+                "version": __version__,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+    ctx.exit()
+
+
 @click.group()
 @click.version_option(version=__version__, prog_name="defenseclaw")
+@click.option(
+    "--version-json",
+    is_flag=True,
+    is_eager=True,
+    expose_value=False,
+    callback=_emit_version_json,
+    help="Emit the exact build version as JSON and exit.",
+)
 @click.pass_context
 def cli(ctx: click.Context) -> None:
     """Enterprise governance layer for AI coding agents.
@@ -134,20 +161,16 @@ def cli(ctx: click.Context) -> None:
 
     invoked = ctx.invoked_subcommand
     if invoked == "upgrade" and not _is_help_invocation(ctx):
-        recovery_home = os.path.abspath(
-            os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw")
-        )
+        recovery_home = os.path.abspath(os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw"))
         recovery_root = os.path.join(recovery_home, ".upgrade-recovery")
         recovery_journals = tuple(
-            os.path.join(recovery_root, name)
-            for name in ("phase-one-active.json", "phase-two-active.json")
+            os.path.join(recovery_root, name) for name in ("phase-one-active.json", "phase-two-active.json")
         )
         if any(os.path.lexists(path) for path in recovery_journals):
-            click.echo(
+            ux.echo(
                 "Interrupted staged-upgrade recovery requires the release-owned resolver. "
                 "Use the target-tag command below without --version/-Version; "
-                "no recovery mutation was attempted.\n"
-                + authenticated_resolver_instructions(__version__),
+                "no recovery mutation was attempted.\n" + authenticated_resolver_instructions(__version__),
                 err=True,
             )
             raise SystemExit(1)
@@ -161,7 +184,7 @@ def cli(ctx: click.Context) -> None:
             try:
                 cfg_mod.require_v8_config(allow_missing=invoked in ALLOW_MISSING_V8_PREFLIGHT)
             except cfg_mod.ConfigVersionError as exc:
-                click.echo(str(exc), err=True)
+                ux.echo(str(exc), err=True)
                 raise SystemExit(1) from exc
         return
 
@@ -169,13 +192,13 @@ def cli(ctx: click.Context) -> None:
         try:
             cfg_mod.require_v8_config()
         except cfg_mod.ConfigVersionError as exc:
-            click.echo(str(exc), err=True)
+            ux.echo(str(exc), err=True)
             raise SystemExit(1) from exc
 
     try:
         app.cfg = cfg_mod.load()
     except Exception as exc:
-        click.echo(
+        ux.echo(
             f"Failed to load config — run 'defenseclaw init' first: {exc}",
             err=True,
         )
@@ -201,12 +224,12 @@ def cli(ctx: click.Context) -> None:
 
         result = validate_config()
         if not result.ok:
-            click.echo("Config validation failed:", err=True)
+            ux.echo("Config validation failed:", err=True)
             if result.parse_error:
-                click.echo(f"  ✗ {result.parse_error}", err=True)
+                ux.echo(f"  ✗ {result.parse_error}", err=True)
             for issue in result.errors:
-                click.echo(f"  ✗ {issue}", err=True)
-            click.echo(
+                ux.echo(f"  ✗ {issue}", err=True)
+            ux.echo(
                 "  Run 'defenseclaw config validate' for details, or 'defenseclaw doctor --fix' to auto-repair.",
                 err=True,
             )
@@ -216,7 +239,7 @@ def cli(ctx: click.Context) -> None:
         app.store = Store(app.cfg.audit_db)
         app.store.init()
     except Exception as exc:
-        click.echo(f"Failed to open audit store: {exc}", err=True)
+        ux.echo(f"Failed to open audit store: {exc}", err=True)
         raise SystemExit(1)
 
     app.logger = Logger.from_config(app.cfg) if source_is_v8 else Logger.no_runtime()
@@ -282,8 +305,12 @@ def _try_launch_tui() -> bool:
     argv = sys.argv[1:]
     if argv and not all(a.startswith("-") for a in argv):
         return False
-    if any(a in {"-h", "--help", "--version"} for a in argv):
+    if any(a in {"-h", "--help", "--version", "--version-json"} for a in argv):
         return False
+
+    if not ux.terminal_supports_tui():
+        ux.echo(ux.TUI_UNAVAILABLE_MESSAGE, err=True)
+        return True
 
     from defenseclaw.tui import run_textual_tui
 
@@ -314,6 +341,7 @@ def _force_utf8_io() -> None:
 
 def main() -> None:
     """Entrypoint: try TUI handoff first, fall back to Click CLI."""
+    ux.configure_console_output()
     _force_utf8_io()
     if not _try_launch_tui():
         cli()

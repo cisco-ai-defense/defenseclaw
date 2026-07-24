@@ -55,6 +55,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -147,6 +148,15 @@ class LocalObservabilityUpgradeError(RuntimeError):
         self.code = code
         self.phase = phase
         super().__init__(f"local observability bundle upgrade failed ({code}, {phase})")
+
+
+@dataclass(frozen=True)
+class _LocalObservabilityBackupCustodyIdentity:
+    """Exact filesystem identities created before an external recorder runs."""
+
+    parent: os.stat_result
+    root: os.stat_result
+    restart_intent: os.stat_result
 
 
 class _WindowsSecuritySnapshot(Protocol):
@@ -270,7 +280,14 @@ _LOCAL_OBSERVABILITY_DEST_REL: str = "observability-stack"
 _LOCAL_OBSERVABILITY_MANIFEST = ".defenseclaw-bundle-manifest.json"
 _LOCAL_OBSERVABILITY_RESTART_INTENT = "restart-intent.json"
 _LOCAL_OBSERVABILITY_MANIFEST_SCHEMA = 1
+_BUNDLE_VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$")
 _MAX_BUNDLE_ROLLBACK_METADATA_BYTES = 4 * 1024 * 1024
+_NOFOLLOW_DIRECTORY_OPEN_FLAGS = (
+    getattr(os, "O_RDONLY", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
 _LOCAL_OBSERVABILITY_REQUIRED_FILES: tuple[str, ...] = (
     "bin/openclaw-observability-bridge",
     "docker-compose.yml",
@@ -354,23 +371,39 @@ def refresh_local_observability_stack(
         bundle_source=str(bundle),
     )
 
+    try:
+        _assert_safe_bundle_destination(Path(data_dir), Path(dest))
+    except OSError as exc:
+        result.errors.append(f"unsafe observability destination: {exc}")
+        return result
+
     if not bundle.is_dir():
         result.skipped_reason = f"bundled source missing ({bundle})"
         return result
 
     if not os.path.isdir(dest):
         try:
-            shutil.copytree(str(bundle), dest)
+            Path(dest).mkdir(parents=False)
         except OSError as exc:
             result.errors.append(f"initial seed: {exc}")
             return result
+        refreshed, _preserved, errors = _rsync_overwrite(
+            src=Path(bundle),
+            dest=Path(dest),
+            preserve=(),
+        )
+        result.errors.extend(errors)
+        if errors:
+            return result
         result.errors.extend(
             _ensure_local_observability_container_access(
-                Path(dest), Path(bundle), include_operator_custom=True,
+                Path(dest),
+                Path(bundle),
+                include_operator_custom=True,
             )
         )
         result.refreshed = True
-        result.refreshed_paths.append("(initial seed)")
+        result.refreshed_paths.extend(refreshed or ["(initial seed)"])
         return result
 
     preserve: tuple[str, ...] = ()
@@ -398,7 +431,9 @@ def refresh_local_observability_stack(
 
     result.errors.extend(
         _ensure_local_observability_container_access(
-            Path(dest), Path(bundle), include_operator_custom=True,
+            Path(dest),
+            Path(bundle),
+            include_operator_custom=True,
         )
     )
     return result
@@ -410,6 +445,7 @@ def upgrade_local_observability_stack(
     *,
     bundle_version: str,
     fault_injector: Callable[[str, str | None], None] | None = None,
+    restart_intent_recorder: Callable[[bool], None] | None = None,
 ) -> LocalObservabilityUpgradeResult:
     """Safely refresh an installed local-observability stack during upgrade.
 
@@ -441,6 +477,19 @@ def upgrade_local_observability_stack(
         target_manifest_sha256=target.sha256,
         restart_required=was_running,
     )
+    if restart_intent_recorder is not None:
+        try:
+            backup_custody_identity = _snapshot_local_observability_backup_custody(backup_root)
+        except OSError as exc:
+            raise LocalObservabilityUpgradeError("backup_failed", "backup") from exc
+        try:
+            restart_intent_recorder(was_running)
+        except Exception as exc:
+            _discard_local_observability_backup_custody(
+                backup_root,
+                backup_custody_identity,
+            )
+            raise LocalObservabilityUpgradeError("backup_failed", "backup") from exc
     if fault_injector:
         try:
             fault_injector("after_restart_intent", None)
@@ -526,6 +575,149 @@ def _prepare_local_observability_backup_custody(
     return backup_root
 
 
+def _snapshot_local_observability_backup_custody(
+    backup_root: Path,
+) -> _LocalObservabilityBackupCustodyIdentity:
+    """Bind cleanup to the exact parent, root, and intent this attempt made."""
+
+    parent = os.lstat(backup_root.parent)
+    root = os.lstat(backup_root)
+    restart_intent = os.lstat(backup_root / _LOCAL_OBSERVABILITY_RESTART_INTENT)
+    if (
+        _is_rollback_link_or_reparse(parent)
+        or not stat.S_ISDIR(parent.st_mode)
+        or _is_rollback_link_or_reparse(root)
+        or not stat.S_ISDIR(root.st_mode)
+        or _is_rollback_link_or_reparse(restart_intent)
+        or not stat.S_ISREG(restart_intent.st_mode)
+    ):
+        raise OSError("unsafe local observability backup custody")
+    return _LocalObservabilityBackupCustodyIdentity(
+        parent=parent,
+        root=root,
+        restart_intent=restart_intent,
+    )
+
+
+def _discard_local_observability_backup_custody(
+    backup_root: Path,
+    expected: _LocalObservabilityBackupCustodyIdentity,
+) -> None:
+    """Best-effort removal of only this attempt's still-pristine custody.
+
+    The external receipt recorder runs before any service or bundle mutation.
+    If it fails, leaving our private restart-intent directory behind would make
+    an otherwise safe retry fail with ``backup_collision``.  Cleanup is bound
+    to the filesystem identities captured before the callback and refuses to
+    traverse links or remove a directory containing any unexpected member.
+    """
+
+    try:
+        if os.name == "posix":
+            _discard_local_observability_backup_custody_at(
+                backup_root,
+                expected,
+            )
+        else:
+            _discard_local_observability_backup_custody_by_path(
+                backup_root,
+                expected,
+            )
+    except OSError:
+        # The recorder's exception remains the authoritative failure. If the
+        # custody changed concurrently, retaining it is safer than deleting an
+        # artifact that no longer belongs exclusively to this attempt.
+        return
+
+
+def _discard_local_observability_backup_custody_at(
+    backup_root: Path,
+    expected: _LocalObservabilityBackupCustodyIdentity,
+) -> None:
+    """Remove pristine custody through no-follow directory descriptors."""
+
+    parent_descriptor = os.open(backup_root.parent, _NOFOLLOW_DIRECTORY_OPEN_FLAGS)
+    try:
+        if not os.path.samestat(os.fstat(parent_descriptor), expected.parent):
+            return
+        root_descriptor = os.open(
+            backup_root.name,
+            _NOFOLLOW_DIRECTORY_OPEN_FLAGS,
+            dir_fd=parent_descriptor,
+        )
+        try:
+            if not os.path.samestat(os.fstat(root_descriptor), expected.root):
+                return
+            intent_info = os.stat(
+                _LOCAL_OBSERVABILITY_RESTART_INTENT,
+                dir_fd=root_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(intent_info.st_mode)
+                or not os.path.samestat(intent_info, expected.restart_intent)
+                or os.listdir(root_descriptor) != [_LOCAL_OBSERVABILITY_RESTART_INTENT]
+            ):
+                return
+            os.unlink(
+                _LOCAL_OBSERVABILITY_RESTART_INTENT,
+                dir_fd=root_descriptor,
+            )
+            os.fsync(root_descriptor)
+            named_root = os.stat(
+                backup_root.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if not os.path.samestat(named_root, expected.root) or os.listdir(root_descriptor):
+                return
+            os.rmdir(backup_root.name, dir_fd=parent_descriptor)
+            os.fsync(parent_descriptor)
+        finally:
+            os.close(root_descriptor)
+    finally:
+        os.close(parent_descriptor)
+
+
+def _discard_local_observability_backup_custody_by_path(
+    backup_root: Path,
+    expected: _LocalObservabilityBackupCustodyIdentity,
+) -> None:
+    """Path-safe fallback for platforms without POSIX directory descriptors."""
+
+    parent = os.lstat(backup_root.parent)
+    root = os.lstat(backup_root)
+    intent_path = backup_root / _LOCAL_OBSERVABILITY_RESTART_INTENT
+    intent = os.lstat(intent_path)
+    if (
+        _is_rollback_link_or_reparse(parent)
+        or not stat.S_ISDIR(parent.st_mode)
+        or not os.path.samestat(parent, expected.parent)
+        or _is_rollback_link_or_reparse(root)
+        or not stat.S_ISDIR(root.st_mode)
+        or not os.path.samestat(root, expected.root)
+        or _is_rollback_link_or_reparse(intent)
+        or not stat.S_ISREG(intent.st_mode)
+        or not os.path.samestat(intent, expected.restart_intent)
+    ):
+        return
+    members = list(os.scandir(backup_root))
+    if len(members) != 1 or members[0].name != _LOCAL_OBSERVABILITY_RESTART_INTENT:
+        return
+    intent_path.unlink()
+    if os.listdir(backup_root):
+        return
+    current_parent = os.lstat(backup_root.parent)
+    current_root = os.lstat(backup_root)
+    if not os.path.samestat(current_parent, expected.parent) or not os.path.samestat(
+        current_root,
+        expected.root,
+    ):
+        return
+    backup_root.rmdir()
+    _fsync_directory(backup_root.parent)
+
+
 def restart_upgraded_local_observability_stack(
     data_dir: str,
     *,
@@ -575,6 +767,23 @@ def restart_upgraded_local_observability_stack(
         named_volumes=_LOCAL_OBSERVABILITY_NAMED_VOLUMES,
         degraded_errors=tuple(errors),
     )
+
+
+def installed_local_observability_bundle_version(data_dir: str) -> str | None:
+    """Return the installed bundle version without mutating the stack.
+
+    ``None`` means no local-observability stack is installed. An empty string
+    identifies a legacy installed stack with no managed manifest, which also
+    requires authenticated reconciliation before a same-version success.
+    """
+
+    destination = Path(data_dir).expanduser().absolute() / _LOCAL_OBSERVABILITY_DEST_REL
+    if not destination.exists() and not destination.is_symlink():
+        return None
+    if destination.is_symlink() or not destination.is_dir():
+        raise LocalObservabilityUpgradeError("unsafe_install_root", "preflight")
+    manifest = _read_installed_bundle_manifest(destination)
+    return manifest.bundle_version if manifest is not None else ""
 
 
 def _build_local_observability_manifest(source: Path, bundle_version: str) -> _BundleManifest:
@@ -693,7 +902,12 @@ def _read_installed_bundle_manifest(destination: Path) -> _BundleManifest | None
         files_raw = document["files"]
         dashboards_raw = document["dashboard_uids"]
         volumes_raw = document["named_volumes"]
-        if not isinstance(bundle_version, str) or not isinstance(files_raw, list) or len(files_raw) > 4096:
+        if (
+            not isinstance(bundle_version, str)
+            or _BUNDLE_VERSION_RE.fullmatch(bundle_version) is None
+            or not isinstance(files_raw, list)
+            or len(files_raw) > 4096
+        ):
             raise ValueError("invalid manifest fields")
         files: list[_BundleFile] = []
         seen: set[str] = set()
@@ -851,11 +1065,7 @@ def _activate_local_observability_manifest(
     # DefenseClaw-managed; destination-only paths remain operator-owned.
     target_paths = set(target_by_path) | {_LOCAL_OBSERVABILITY_MANIFEST}
     candidate_managed_paths = target_paths | managed_retired
-    existing_paths = {
-        relative
-        for relative in candidate_managed_paths
-        if (destination / relative).exists()
-    }
+    existing_paths = {relative for relative in candidate_managed_paths if (destination / relative).exists()}
     created_paths = candidate_managed_paths - existing_paths
     managed_paths = existing_paths | created_paths
     if created_paths - target_paths:
@@ -967,9 +1177,7 @@ def _activate_local_observability_manifest(
             target_entry = target_by_path.get(relative)
             expected_digest = target.sha256 if target_entry is None else target_entry.sha256
             expected_mode = 0o600 if target_entry is None else target_entry.mode
-            if old_sha256[relative] != expected_digest or (
-                os.name == "posix" and old_modes[relative] != expected_mode
-            ):
+            if old_sha256[relative] != expected_digest or (os.name == "posix" and old_modes[relative] != expected_mode):
                 changed.append(relative)
             if fault_injector:
                 fault_injector("before_activate", relative)
@@ -1164,9 +1372,7 @@ _WINDOWS_ROLLBACK_MEMBER_MAX_BYTES = 256 * 1024 * 1024
 
 
 def _is_rollback_link_or_reparse(info: os.stat_result) -> bool:
-    return stat.S_ISLNK(info.st_mode) or bool(
-        getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
-    )
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 def _rollback_directory_info(path: Path) -> os.stat_result:
@@ -1264,14 +1470,8 @@ def _rollback_path_parts(relative: str) -> tuple[str, ...]:
 def _open_rollback_root_descriptor(path: Path) -> int:
     """Open and bind a real rollback root without accepting a swapped leaf."""
 
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
     try:
-        descriptor = os.open(path, flags)
+        descriptor = os.open(path, _NOFOLLOW_DIRECTORY_OPEN_FLAGS)
     except OSError as exc:
         raise OSError("unsafe local observability rollback root") from exc
     try:
@@ -1298,17 +1498,11 @@ def _open_rollback_parent(
 ) -> int | None:
     """Open one managed file's parent without following any path component."""
 
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
     current = os.dup(root_descriptor)
     try:
         for part in parts:
             try:
-                child = os.open(part, flags, dir_fd=current)
+                child = os.open(part, _NOFOLLOW_DIRECTORY_OPEN_FLAGS, dir_fd=current)
             except FileNotFoundError:
                 if not create:
                     os.close(current)
@@ -1321,7 +1515,7 @@ def _open_rollback_parent(
                 else:
                     os.fsync(current)
                 try:
-                    child = os.open(part, flags, dir_fd=current)
+                    child = os.open(part, _NOFOLLOW_DIRECTORY_OPEN_FLAGS, dir_fd=current)
                 except OSError as exc:
                     raise OSError("unsafe local observability rollback destination ancestor") from exc
             except OSError as exc:
@@ -1352,12 +1546,7 @@ def _restore_rollback_file_at(
 ) -> None:
     """Atomically restore, flush, and verify one file below a trusted dirfd."""
 
-    source_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+    source_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         source_descriptor = os.open(
             backup_name,
@@ -1386,13 +1575,7 @@ def _restore_rollback_file_at(
             destination_name,
             missing_ok=True,
         )
-        create_flags = (
-            os.O_RDWR
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-        )
+        create_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         for _ in range(128):
             temporary_name = f".rollback-{secrets.token_hex(8)}"
             try:
@@ -1427,9 +1610,8 @@ def _restore_rollback_file_at(
             )
         except OSError as exc:
             raise OSError("backup member changed during restore") from exc
-        if (
-            not _rollback_source_snapshot_unchanged(source_before, source_after)
-            or not os.path.samestat(source_before, source_named_after)
+        if not _rollback_source_snapshot_unchanged(source_before, source_after) or not os.path.samestat(
+            source_before, source_named_after
         ):
             raise OSError("backup member changed during restore")
         if _sha256_descriptor(temporary_descriptor) != expected_digest:
@@ -1466,7 +1648,6 @@ def _restore_rollback_file_at(
                 os.fsync(parent_descriptor)
             except OSError:
                 pass
-
 
 
 def _rollback_file_info_at(
@@ -1546,12 +1727,7 @@ def _restore_rollback_file_by_path(
     source_named_before = _rollback_file_info(backup_path, missing_ok=False)
     if source_named_before is None:
         raise OSError("backup member missing")
-    source_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+    source_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         source_descriptor = os.open(backup_path, source_flags)
     except OSError as exc:
@@ -1560,10 +1736,7 @@ def _restore_rollback_file_by_path(
     temporary_descriptor = -1
     try:
         source_before = os.fstat(source_descriptor)
-        if (
-            not stat.S_ISREG(source_before.st_mode)
-            or not os.path.samestat(source_before, source_named_before)
-        ):
+        if not stat.S_ISREG(source_before.st_mode) or not os.path.samestat(source_before, source_named_before):
             raise OSError("backup member missing")
         destination_before = _rollback_file_info(destination_path, missing_ok=True)
         if os.name == "nt":
@@ -1579,13 +1752,7 @@ def _restore_rollback_file_by_path(
                 expected_digest,
             )
             return
-        create_flags = (
-            os.O_RDWR
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-        )
+        create_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         for _ in range(128):
             candidate = destination_path.parent / f".rollback-{secrets.token_hex(8)}"
             try:
@@ -1713,10 +1880,7 @@ def _restore_windows_rollback_file_by_path(
         created = True
         os.chmod(temporary_path, mode)
         temporary_flags = (
-            os.O_RDWR
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
+            os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         )
         temporary_descriptor = os.open(temporary_path, temporary_flags)
         try:
@@ -2022,6 +2186,10 @@ def _remove_retired_paths(
     """Remove explicit bundle tombstones while preserving custom files."""
     removed: list[str] = []
     errors: list[str] = []
+    try:
+        _assert_safe_bundle_destination(dest, dest)
+    except OSError as exc:
+        return removed, [f"unsafe retired-path root: {exc}"]
     root = dest.resolve()
     for rel in retired_paths:
         rel_path = Path(rel)
@@ -2040,7 +2208,7 @@ def _remove_retired_paths(
         if not reviewed_digests:
             errors.append(f"refused unreviewed retired path: {rel}")
             continue
-        if candidate.is_symlink() or not candidate.is_file():
+        if _is_reparse_or_symlink(candidate) or not candidate.is_file():
             errors.append(f"refused non-regular retired path: {rel}")
             continue
         try:
@@ -2235,7 +2403,12 @@ def _rsync_overwrite(
     preserved: list[str] = []
     errors: list[str] = []
 
-    preserve_norm = tuple(p.strip("/") for p in preserve if p)
+    preserve_norm = tuple(p.replace("\\", "/").strip("/") for p in preserve if p)
+
+    try:
+        _assert_safe_bundle_destination(dest, dest)
+    except OSError as exc:
+        return refreshed, preserved, [f"unsafe destination root: {exc}"]
 
     for root, dirs, files in os.walk(src):
         rel_root = os.path.relpath(root, src)
@@ -2247,7 +2420,11 @@ def _rsync_overwrite(
         # caller can show what survived.
         kept_dirs: list[str] = []
         for d in dirs:
-            rel_dir = os.path.join(rel_root, d) if rel_root else d
+            source_dir = Path(root) / d
+            if _is_reparse_or_symlink(source_dir):
+                errors.append(f"refused reparse/symlink source directory: {source_dir}")
+                continue
+            rel_dir = Path(os.path.join(rel_root, d) if rel_root else d).as_posix()
             if _path_is_preserved(rel_dir, preserve_norm):
                 preserved.append(rel_dir)
                 continue
@@ -2255,7 +2432,7 @@ def _rsync_overwrite(
         dirs[:] = kept_dirs
 
         for fname in files:
-            rel_file = os.path.join(rel_root, fname) if rel_root else fname
+            rel_file = Path(os.path.join(rel_root, fname) if rel_root else fname).as_posix()
             if _path_is_preserved(rel_file, preserve_norm):
                 preserved.append(rel_file)
                 continue
@@ -2263,8 +2440,12 @@ def _rsync_overwrite(
             src_path = os.path.join(root, fname)
             dest_path = os.path.join(str(dest), rel_file)
             try:
+                if _is_reparse_or_symlink(Path(src_path)):
+                    raise OSError(f"refused reparse/symlink source file: {src_path}")
+                _assert_safe_bundle_destination(dest, Path(dest_path))
                 os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
-                _atomic_copy_file(src_path, dest_path)
+                _assert_safe_bundle_destination(dest, Path(dest_path))
+                _atomic_copy_file(src_path, dest_path, root=dest)
             except OSError as exc:
                 errors.append(f"{rel_file}: {exc}")
                 continue
@@ -2275,7 +2456,7 @@ def _rsync_overwrite(
 
 def _path_is_preserved(rel: str, preserve: tuple[str, ...]) -> bool:
     """Return True if ``rel`` exactly matches or is nested under any preserve entry."""
-    rel_norm = rel.strip("/")
+    rel_norm = rel.replace("\\", "/").strip("/")
     for p in preserve:
         if rel_norm == p:
             return True
@@ -2284,7 +2465,12 @@ def _path_is_preserved(rel: str, preserve: tuple[str, ...]) -> bool:
     return False
 
 
-def _atomic_copy_file(src_path: str, dest_path: str) -> None:
+def _atomic_copy_file(
+    src_path: str,
+    dest_path: str,
+    *,
+    root: Path | None = None,
+) -> None:
     """``shutil.copy2`` to a same-directory tmp file, then ``os.replace``.
 
     Preserves mode bits via ``copy2``. Same-directory tmp file is
@@ -2293,6 +2479,8 @@ def _atomic_copy_file(src_path: str, dest_path: str) -> None:
     on Linux when ``data_dir`` is on an external volume.
     """
     dest_dir = os.path.dirname(dest_path) or "."
+    if root is not None:
+        _assert_safe_bundle_destination(root, Path(dest_path))
     fd, tmp_path = tempfile.mkstemp(
         prefix=".refresh-",
         dir=dest_dir,
@@ -2306,6 +2494,8 @@ def _atomic_copy_file(src_path: str, dest_path: str) -> None:
             _fsync_claimed_file(fd, Path(tmp_path))
         finally:
             os.close(fd)
+        if root is not None:
+            _assert_safe_bundle_destination(root, Path(dest_path))
         os.replace(tmp_path, dest_path)
         _fsync_directory(Path(dest_dir))
     except OSError:
@@ -2316,6 +2506,50 @@ def _atomic_copy_file(src_path: str, dest_path: str) -> None:
         except OSError:
             pass
         raise
+
+
+def _is_reparse_or_symlink(path: Path) -> bool:
+    """Recognize POSIX links and Windows junction/reparse points via lstat."""
+
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+
+
+def _assert_safe_bundle_destination(root: Path, candidate: Path) -> None:
+    """Reject lexical escapes and existing reparse ancestors below ``root``."""
+
+    root_abs = Path(os.path.abspath(root))
+    candidate_abs = Path(os.path.abspath(candidate))
+    try:
+        relative = candidate_abs.relative_to(root_abs)
+    except ValueError as exc:
+        raise OSError(f"path escapes bundle root: {candidate_abs}") from exc
+
+    try:
+        resolved_root = root_abs.resolve(strict=True)
+    except OSError as exc:
+        raise OSError(f"bundle root cannot be resolved: {root_abs}") from exc
+    resolved_candidate = candidate_abs.resolve(strict=False)
+    try:
+        resolved_candidate.relative_to(resolved_root)
+    except ValueError as exc:
+        raise OSError(
+            f"resolved path escapes canonical bundle root: {resolved_candidate}"
+        ) from exc
+
+    current = root_abs
+    if _is_reparse_or_symlink(current):
+        raise OSError(f"bundle root is a reparse/symlink: {current}")
+    for part in relative.parts:
+        current = current / part
+        if _is_reparse_or_symlink(current):
+            raise OSError(f"destination contains a reparse/symlink: {current}")
 
 
 def _restore_local_observability_backup(
@@ -2629,9 +2863,7 @@ _WINDOWS_ROLLBACK_MEMBER_MAX_BYTES = 256 * 1024 * 1024
 
 
 def _is_rollback_link_or_reparse(info: os.stat_result) -> bool:
-    return stat.S_ISLNK(info.st_mode) or bool(
-        getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
-    )
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 def _rollback_directory_info(path: Path) -> os.stat_result:
@@ -2729,14 +2961,8 @@ def _rollback_path_parts(relative: str) -> tuple[str, ...]:
 def _open_rollback_root_descriptor(path: Path) -> int:
     """Open and bind a real rollback root without accepting a swapped leaf."""
 
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
     try:
-        descriptor = os.open(path, flags)
+        descriptor = os.open(path, _NOFOLLOW_DIRECTORY_OPEN_FLAGS)
     except OSError as exc:
         raise OSError("unsafe local observability rollback root") from exc
     try:
@@ -2763,17 +2989,11 @@ def _open_rollback_parent(
 ) -> int | None:
     """Open one managed file's parent without following any path component."""
 
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
     current = os.dup(root_descriptor)
     try:
         for part in parts:
             try:
-                child = os.open(part, flags, dir_fd=current)
+                child = os.open(part, _NOFOLLOW_DIRECTORY_OPEN_FLAGS, dir_fd=current)
             except FileNotFoundError:
                 if not create:
                     os.close(current)
@@ -2786,7 +3006,7 @@ def _open_rollback_parent(
                 else:
                     os.fsync(current)
                 try:
-                    child = os.open(part, flags, dir_fd=current)
+                    child = os.open(part, _NOFOLLOW_DIRECTORY_OPEN_FLAGS, dir_fd=current)
                 except OSError as exc:
                     raise OSError("unsafe local observability rollback destination ancestor") from exc
             except OSError as exc:
@@ -2817,12 +3037,7 @@ def _restore_rollback_file_at(
 ) -> None:
     """Atomically restore, flush, and verify one file below a trusted dirfd."""
 
-    source_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+    source_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         source_descriptor = os.open(
             backup_name,
@@ -2851,13 +3066,7 @@ def _restore_rollback_file_at(
             destination_name,
             missing_ok=True,
         )
-        create_flags = (
-            os.O_RDWR
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-        )
+        create_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         for _ in range(128):
             temporary_name = f".rollback-{secrets.token_hex(8)}"
             try:
@@ -2892,9 +3101,8 @@ def _restore_rollback_file_at(
             )
         except OSError as exc:
             raise OSError("backup member changed during restore") from exc
-        if (
-            not _rollback_source_snapshot_unchanged(source_before, source_after)
-            or not os.path.samestat(source_before, source_named_after)
+        if not _rollback_source_snapshot_unchanged(source_before, source_after) or not os.path.samestat(
+            source_before, source_named_after
         ):
             raise OSError("backup member changed during restore")
         if _sha256_descriptor(temporary_descriptor) != expected_digest:
@@ -2931,7 +3139,6 @@ def _restore_rollback_file_at(
                 os.fsync(parent_descriptor)
             except OSError:
                 pass
-
 
 
 def _rollback_file_info_at(
@@ -2996,12 +3203,7 @@ def _restore_rollback_file_by_path(
     source_named_before = _rollback_file_info(backup_path, missing_ok=False)
     if source_named_before is None:
         raise OSError("backup member missing")
-    source_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+    source_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         source_descriptor = os.open(backup_path, source_flags)
     except OSError as exc:
@@ -3010,10 +3212,7 @@ def _restore_rollback_file_by_path(
     temporary_descriptor = -1
     try:
         source_before = os.fstat(source_descriptor)
-        if (
-            not stat.S_ISREG(source_before.st_mode)
-            or not os.path.samestat(source_before, source_named_before)
-        ):
+        if not stat.S_ISREG(source_before.st_mode) or not os.path.samestat(source_before, source_named_before):
             raise OSError("backup member missing")
         destination_before = _rollback_file_info(destination_path, missing_ok=True)
         if os.name == "nt":
@@ -3030,13 +3229,7 @@ def _restore_rollback_file_by_path(
                 windows_security,
             )
             return
-        create_flags = (
-            os.O_RDWR
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-        )
+        create_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         for _ in range(128):
             candidate = destination_path.parent / f".rollback-{secrets.token_hex(8)}"
             try:
@@ -3179,10 +3372,7 @@ def _restore_windows_rollback_file_by_path(
         # A POSIX mode cannot encode Windows ACE order or inheritance state.
         _ = mode
         temporary_flags = (
-            os.O_RDWR
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
+            os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         )
         temporary_descriptor = os.open(temporary_path, temporary_flags)
         try:
@@ -3229,10 +3419,7 @@ def _restore_windows_rollback_file_by_path(
         if restored_info is None or not os.path.samestat(staged_info, restored_info):
             raise OSError("restored member identity changed during publish")
         restored_flags = (
-            os.O_RDONLY
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         )
         restored_descriptor = os.open(destination_path, restored_flags)
         try:
@@ -3299,11 +3486,7 @@ def _open_created_rollback_claim_at(
             dir_fd=parent_descriptor,
             follow_symlinks=False,
         )
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or not stat.S_ISREG(named.st_mode)
-            or not os.path.samestat(before, named)
-        ):
+        if not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(named.st_mode) or not os.path.samestat(before, named):
             raise OSError("target-created rollback claim is unsafe")
         if _sha256_descriptor(descriptor) != expected_digest:
             raise OSError("target-created rollback claim digest mismatch")
@@ -3367,13 +3550,16 @@ def _rename_no_replace_at(
         ctypes.c_uint,
     ]
     function.restype = ctypes.c_int
-    if function(
-        source_parent_descriptor,
-        os.fsencode(source_name),
-        destination_parent_descriptor,
-        os.fsencode(destination_name),
-        flag,
-    ) == 0:
+    if (
+        function(
+            source_parent_descriptor,
+            os.fsencode(source_name),
+            destination_parent_descriptor,
+            os.fsencode(destination_name),
+            flag,
+        )
+        == 0
+    ):
         return
     code = ctypes.get_errno()
     if code == errno.EEXIST:
@@ -3704,11 +3890,7 @@ def _open_created_rollback_claim_by_path(
                 str(claim_path),
             )
         else:
-            flags = (
-                os.O_RDONLY
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_NOFOLLOW", 0)
-            )
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
             descriptor = os.open(claim_path, flags)
     except OSError as exc:
         raise OSError("target-created rollback claim is unavailable") from exc
@@ -3971,6 +4153,7 @@ __all__ = [
     "LocalObservabilityUpgradeResult",
     "RefreshResult",
     "SPLUNK_COMPOSE_PROJECT",
+    "installed_local_observability_bundle_version",
     "is_compose_project_running",
     "refresh_local_observability_stack",
     "refresh_splunk_bridge",

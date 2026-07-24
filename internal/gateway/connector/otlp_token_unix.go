@@ -25,6 +25,12 @@ import (
 	"syscall"
 )
 
+// otlpValidateDirectory is a no-op on Unix, where the existing token-file
+// mode and ownership checks remain the compatibility contract.
+func otlpValidateDirectory(_ string) error {
+	return nil
+}
+
 // otlpOpenNoFollow returns O_NOFOLLOW flag value for symlink-safe file opens.
 func otlpOpenNoFollow() int {
 	return syscall.O_NOFOLLOW
@@ -46,9 +52,8 @@ func otlpValidatePerm(path string, info os.FileInfo) error {
 // that the target user just created.
 func otlpValidateOwner(path string, info os.FileInfo) error {
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		effectiveUID := os.Geteuid()
-		if int(stat.Uid) != effectiveUID {
-			return fmt.Errorf("OTLP path-token %s uid %d does not match effective uid %d", path, stat.Uid, effectiveUID)
+		if int(stat.Uid) != os.Geteuid() && !hookAPITrustedOwner(stat.Uid) {
+			return fmt.Errorf("OTLP path-token %s uid %d is not root, effective uid %d, real uid %d, or the defenseclaw service uid", path, stat.Uid, os.Geteuid(), os.Getuid())
 		}
 	}
 	return nil
@@ -67,7 +72,7 @@ func otlpPathTokenNeedsSecureReplacement(_ string) (bool, error) {
 }
 
 func createSecureOTLPPathTokenTempFile(tokenPath string) (*os.File, string, error) {
-	tmp, err := os.CreateTemp(filepath.Dir(tokenPath), "."+filepath.Base(tokenPath)+".tmp-*")
+	tmp, err := os.CreateTemp(filepath.Dir(tokenPath), otlpPathTokenTempPrefix(tokenPath)+"*")
 	if err != nil {
 		return nil, "", err
 	}

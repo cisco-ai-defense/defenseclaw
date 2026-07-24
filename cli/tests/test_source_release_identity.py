@@ -15,6 +15,7 @@ import pytest
 from scripts import release_candidate, source_release_identity
 
 ROOT = Path(__file__).resolve().parents[2]
+BASH = shutil.which("bash") or "/bin/bash"
 VERSION_PATHS = (
     "Makefile",
     "pyproject.toml",
@@ -80,7 +81,7 @@ def _preflight(
     requested_mode = f"dev-{mode}" if dev_reclaim else mode
     return subprocess.run(
         [
-            "/bin/bash",
+            BASH,
             str(ROOT / "scripts/source-install-preflight.sh"),
             requested_mode,
             str(repo),
@@ -101,7 +102,7 @@ def _marker_payload(repo: Path, gateway: Path) -> dict[str, object]:
     return {
         "schema_version": 2,
         "checkout_root": str(repo.resolve()),
-        "source_release": "0.8.5",
+        "source_release": "0.8.6",
         "source_install_compatibility_epoch": 2,
         "runtime_config_version": 8,
         "gateway_sha256": hashlib.sha256(gateway.read_bytes()).hexdigest(),
@@ -111,20 +112,20 @@ def _marker_payload(repo: Path, gateway: Path) -> dict[str, object]:
 def test_reviewed_source_identity_binds_every_canonical_version_source() -> None:
     identity = source_release_identity.validate_source_tree(
         ROOT,
-        expected_release="0.8.5",
+        expected_release="0.8.6",
     )
 
     assert identity == {
         "schema_version": 1,
-        "source_release": "0.8.5",
+        "source_release": "0.8.6",
         "source_install_compatibility_epoch": 2,
         "runtime_config_version": 8,
     }
-    assert set(source_release_identity.checked_in_version_sources(ROOT).values()) == {"0.8.5"}
+    assert set(source_release_identity.checked_in_version_sources(ROOT).values()) == {"0.8.6"}
     assert source_release_identity.compatibility_config_version(ROOT) == 7
     assert source_release_identity.observability_v8_config_version(ROOT) == 8
     assert source_release_identity.runtime_config_version(ROOT) == 8
-    assert release_candidate._reviewed_source_install_identity("0.8.5") == identity
+    assert release_candidate._reviewed_source_install_identity("0.8.6") == identity
 
 
 def test_dynamic_release_identity_uses_dispatch_version_with_reviewed_epoch() -> None:
@@ -149,7 +150,7 @@ def test_hard_cut_cannot_reuse_bridge_source_identity(tmp_path: Path) -> None:
 
     with pytest.raises(
         source_release_identity.SourceIdentityError,
-        match="release 0.8.5 must use source-install compatibility epoch 2",
+        match=r"release 0.8.5\+ cannot reuse the 0.8.4 bridge source-install identity",
     ):
         source_release_identity.validate_source_tree(repo)
 
@@ -158,10 +159,17 @@ def test_release_stamp_is_idempotent_for_checked_in_development_version(tmp_path
     repo = _copy_source_fixture(tmp_path)
     stamp = repo / "scripts/stamp-version.sh"
     shutil.copy2(ROOT / "scripts/stamp-version.sh", stamp)
-    before = {relative: (repo / relative).read_bytes() for relative in VERSION_PATHS}
+
+    def reviewed_bytes(relative: str) -> bytes:
+        payload = (repo / relative).read_bytes()
+        # Native Windows helpers may preserve or emit CRLF while the POSIX
+        # stamper emits LF. Repository content is compared canonically.
+        return payload.replace(b"\r\n", b"\n") if os.name == "nt" else payload
+
+    before = {relative: reviewed_bytes(relative) for relative in VERSION_PATHS}
 
     completed = subprocess.run(
-        ["/bin/bash", str(stamp), "0.8.5"],
+        [BASH, str(stamp), "0.8.6"],
         cwd=repo,
         text=True,
         capture_output=True,
@@ -170,7 +178,7 @@ def test_release_stamp_is_idempotent_for_checked_in_development_version(tmp_path
     )
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert {relative: (repo / relative).read_bytes() for relative in VERSION_PATHS} == before
+    assert {relative: reviewed_bytes(relative) for relative in VERSION_PATHS} == before
 
 
 def test_release_stamp_applies_dynamic_future_version_to_every_release_surface(
@@ -181,7 +189,7 @@ def test_release_stamp_applies_dynamic_future_version_to_every_release_surface(
     shutil.copy2(ROOT / "scripts/stamp-version.sh", stamp)
 
     completed = subprocess.run(
-        ["/bin/bash", str(stamp), "9.8.7"],
+        [BASH, str(stamp), "9.8.7"],
         cwd=repo,
         text=True,
         capture_output=True,
@@ -190,9 +198,7 @@ def test_release_stamp_applies_dynamic_future_version_to_every_release_surface(
     )
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert set(source_release_identity.checked_in_version_sources(repo).values()) == {
-        "9.8.7"
-    }
+    assert set(source_release_identity.checked_in_version_sources(repo).values()) == {"9.8.7"}
     identity = source_release_identity.validate_source_tree(
         repo,
         expected_release="9.8.7",
@@ -206,7 +212,7 @@ def test_hard_cut_source_cannot_be_restamped_as_the_bridge(tmp_path: Path) -> No
     shutil.copy2(ROOT / "scripts/stamp-version.sh", stamp)
 
     completed = subprocess.run(
-        ["/bin/bash", str(stamp), "0.8.4"],
+        [BASH, str(stamp), "0.8.4"],
         cwd=repo,
         text=True,
         capture_output=True,
@@ -215,9 +221,7 @@ def test_hard_cut_source_cannot_be_restamped_as_the_bridge(tmp_path: Path) -> No
     )
 
     assert completed.returncode != 0
-    assert "release 0.8.4 must use source-install compatibility epoch 1" in (
-        completed.stdout + completed.stderr
-    )
+    assert "release 0.8.4 must use source-install compatibility epoch 1" in (completed.stdout + completed.stderr)
 
 
 @pytest.mark.parametrize(
@@ -251,7 +255,7 @@ def test_hard_cut_source_identity_rejects_either_config_literal_drifting(
     path.write_text(source.replace(old, new), encoding="utf-8")
 
     with pytest.raises(source_release_identity.SourceIdentityError, match=message):
-        source_release_identity.validate_source_tree(repo, expected_release="0.8.5")
+        source_release_identity.validate_source_tree(repo, expected_release="0.8.6")
 
 
 def test_release_workflow_stamps_dispatch_version_and_tags_reviewed_commit() -> None:
@@ -262,13 +266,9 @@ def test_release_workflow_stamps_dispatch_version_and_tags_reviewed_commit() -> 
     expected = workflow.index('--expected-release "$RELEASE_TAG"', build_stamp)
     extension_build = workflow.index("run: make extensions", expected)
     restore_generated = workflow.index("git restore --worktree --", extension_build)
-    cleanliness_check = workflow.index(
-        "git status --porcelain --untracked-files=all", restore_generated
-    )
+    cleanliness_check = workflow.index("git status --porcelain --untracked-files=all", restore_generated)
     gateway_build = workflow.index("goreleaser/goreleaser-action@", extension_build)
-    package_stamp = workflow.index(
-        'scripts/stamp-version.sh "$RELEASE_TAG"', build_stamp + 1
-    )
+    package_stamp = workflow.index('scripts/stamp-version.sh "$RELEASE_TAG"', build_stamp + 1)
     publish = workflow.index('gh release create "$RELEASE_TAG"')
 
     assert (
@@ -289,7 +289,13 @@ def test_release_workflow_stamps_dispatch_version_and_tags_reviewed_commit() -> 
     assert "Require reviewed source release identity" not in workflow
     assert "git diff --exit-code --" not in workflow[tracked:expected]
     assert '--target "$RELEASE_COMMIT"' in workflow[publish:]
-    assert 'test "$remote_commit" = "$RELEASE_COMMIT"' in workflow[publish:]
+    proof = workflow.index("scripts/release_api_retry.py prove-published", publish)
+    assert publish < proof
+    proof_command = workflow[proof : proof + 500]
+    assert '--tag "$RELEASE_TAG"' in proof_command
+    assert '--commit "$RELEASE_COMMIT"' in proof_command
+    assert "--candidate-root release-candidate" in proof_command
+    assert "--omit-windows-binaries" not in proof_command
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
@@ -384,10 +390,11 @@ def test_make_all_dev_reclaim_replaces_prior_release_marker_and_gateway(
         dev_reclaim=True,
     )
     assert claimed.returncode == 0, claimed.stdout + claimed.stderr
+    current_release = source_release_identity.validate_source_tree(repo)["source_release"]
     validated = source_release_identity.validate_marker(
         marker,
         checkout_root=repo,
-        source_release="0.8.5",
+        source_release=str(current_release),
         compatibility_epoch=2,
         runtime_version=8,
     )
@@ -468,9 +475,7 @@ def test_direct_install_ignores_developer_reclaim_environment_switch(
     # environment-variable registry merely because the negative test exercises
     # it. Construct it at runtime so the static inventory continues to report
     # only variables that production code actually supports.
-    unsupported_reclaim_env = "_".join(
-        ("DEFENSECLAW", "SOURCE", "DEV", "RECLAIM")
-    )
+    unsupported_reclaim_env = "_".join(("DEFENSECLAW", "SOURCE", "DEV", "RECLAIM"))
     monkeypatch.setenv(unsupported_reclaim_env, "1")
 
     completed = _preflight(tmp_path, repo, install_dir, "publish-gateway")
@@ -567,7 +572,7 @@ def test_source_preflight_propagates_path_resolution_failures(tmp_path: Path) ->
     ):
         completed = subprocess.run(
             [
-                "/bin/bash",
+                BASH,
                 str(ROOT / "scripts/source-install-preflight.sh"),
                 "check",
                 str(ROOT),
@@ -637,7 +642,7 @@ python3() {
 
     completed = subprocess.run(
         [
-            "/bin/bash",
+            BASH,
             str(ROOT / "scripts/source-install-preflight.sh"),
             "ensure-dir",
             str(ROOT),
@@ -686,7 +691,7 @@ python3() {
 
     completed = subprocess.run(
         [
-            "/bin/bash",
+            BASH,
             str(ROOT / "scripts/source-install-preflight.sh"),
             "ensure-dir",
             str(ROOT),

@@ -1880,6 +1880,7 @@ def _convert_otel_destination(
             "replace the legacy OTLP CA certificate with an absolute path before upgrading",
         )
     by_transport: dict[tuple[str, bool], list[str]] = {}
+    implicit_local_http_security: dict[str, bool] = {}
     for signal in enabled_signals:
         protocol = _protocol(signals[signal].get("protocol") or global_protocol, f"{path}.{signal}.protocol", ctx)
         signal_endpoint_override = signals[signal].get("endpoint")
@@ -1893,7 +1894,25 @@ def _convert_otel_destination(
             ctx=ctx,
             path=resolved_endpoint_path,
         )
+        if is_local and protocol == "http/protobuf" and "insecure" not in source_tls:
+            implicit_local_http_security[resolved_endpoint_path] = insecure
         by_transport.setdefault((protocol, insecure), []).append(signal)
+    if set(implicit_local_http_security.values()) == {False, True}:
+        # Generic remote destinations can be split into exact TLS transport
+        # groups. The reserved local-observability identity cannot: its trace
+        # projection is name-bound, so silently splitting a mixed implicit
+        # HTTP policy would change the released v7 routing contract.
+        conflicting_path = next(
+            field_path
+            for field_path, insecure in implicit_local_http_security.items()
+            if not insecure
+        )
+        raise _error(
+            ctx,
+            "mixed_otel_transport_security",
+            conflicting_path,
+            "use one HTTP endpoint scheme per destination or split the destination before upgrading",
+        )
     groups: list[tuple[str, list[str], bool, bool]] = []
     global_insecure = _legacy_otlp_endpoint_insecure(
         source.get("endpoint"),

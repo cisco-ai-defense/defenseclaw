@@ -20,10 +20,15 @@ from __future__ import annotations
 
 import click
 
+from defenseclaw import ux
+
 
 @click.command("tui")
 def tui() -> None:
     """Launch the DefenseClaw interactive Textual dashboard."""
+    if not ux.terminal_supports_tui():
+        raise click.ClickException(ux.TUI_UNAVAILABLE_MESSAGE)
+
     from defenseclaw.tui import run_textual_tui
 
     run_textual_tui()

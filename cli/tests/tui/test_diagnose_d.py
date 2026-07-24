@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
-from defenseclaw.tui.app import DefenseClawTUI, _diagnose_summary_line
+from defenseclaw.tui.app import DefenseClawTUI, _communicate_captured, _diagnose_summary_line
 
 
 @dataclass
@@ -154,6 +154,44 @@ class _FakeProc:
 
 
 @pytest.mark.asyncio
+async def test_communicate_captured_reaps_child_after_communication_error() -> None:
+    """Pipe/decoder failures must not leave a Windows child or transport alive."""
+
+    events: list[str] = []
+
+    class _Transport:
+        def close(self) -> None:
+            events.append("close")
+
+    class _BrokenProc:
+        returncode: int | None = None
+        _transport = _Transport()
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            raise OSError("pipe read failed")
+
+        def kill(self) -> None:
+            events.append("kill")
+
+        async def wait(self) -> int:
+            events.append("wait")
+            self.returncode = -9
+            return self.returncode
+
+    async def _fake_exec(*_args: object, **_kwargs: object) -> _BrokenProc:
+        return _BrokenProc()
+
+    import defenseclaw.tui.app as app_mod
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(app_mod.asyncio, "create_subprocess_exec", _fake_exec)
+        with pytest.raises(OSError, match="pipe read failed"):
+            await _communicate_captured("defenseclaw", ("doctor",))
+
+    assert events == ["kill", "wait", "close"]
+
+
+@pytest.mark.asyncio
 async def test_run_diagnose_background_success_toast(tmp_path: Path) -> None:
     """Zero-exit + good summary → green ``success`` toast with the
     summary line appended."""
@@ -205,6 +243,46 @@ async def test_run_diagnose_background_failure_toast(tmp_path: Path) -> None:
     assert level == "warn"
     assert "exit 2" in msg
     assert "gateway unreachable" in msg
+
+
+@pytest.mark.asyncio
+async def test_run_diagnose_background_reaps_child_after_pipe_error(tmp_path: Path) -> None:
+    """A failed pipe read must reap the doctor child and close its transport."""
+
+    app = _make_app(tmp_path)
+    captured = _capture_toasts(app)
+    events: list[str] = []
+
+    class _Transport:
+        def close(self) -> None:
+            events.append("close")
+
+    class _BrokenProc:
+        returncode: int | None = None
+        _transport = _Transport()
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            raise OSError("pipe read failed")
+
+        def kill(self) -> None:
+            events.append("kill")
+
+        async def wait(self) -> int:
+            events.append("wait")
+            self.returncode = -9
+            return self.returncode
+
+    async def _fake_exec(*_args: object, **_kwargs: object) -> _BrokenProc:
+        return _BrokenProc()
+
+    import defenseclaw.tui.app as app_mod
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(app_mod.asyncio, "create_subprocess_exec", _fake_exec)
+        await app._run_diagnose_background()
+
+    assert events == ["kill", "wait", "close"]
+    assert captured[-1] == ("error", "Diagnose failed while reading output: pipe read failed")
 
 
 @pytest.mark.asyncio
@@ -347,12 +425,17 @@ async def test_background_clears_flag_on_timeout(tmp_path: Path) -> None:
         def kill(self) -> None:
             killed.append(True)
 
+        async def wait(self) -> int:
+            self.returncode = -9
+            return self.returncode
+
     async def _fake_exec(*_args: object, **_kwargs: object) -> _HangingProc:
         return _HangingProc()
 
     async def _fake_wait_for(_aw, timeout: float) -> tuple[bytes, bytes]:
         # Pretend we hit the timeout immediately so the test doesn't
         # wait 60 real seconds.
+        _aw.close()
         raise __import__("asyncio").TimeoutError
 
     import defenseclaw.tui.app as app_mod
@@ -379,7 +462,10 @@ def test_action_sets_diagnose_running_before_dispatch(tmp_path: Path) -> None:
     assert app._diagnose_running is False
     # Stop the worker from actually firing — we only want to observe
     # the synchronous side-effect (flag set + info toast emitted).
-    app.run_worker = lambda *_a, **_k: None  # type: ignore[assignment]
+    def _discard_worker(awaitable, *_args, **_kwargs) -> None:
+        awaitable.close()
+
+    app.run_worker = _discard_worker  # type: ignore[assignment]
     captured = _capture_toasts(app)
 
     app.action_run_diagnose()

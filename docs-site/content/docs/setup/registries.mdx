@@ -163,9 +163,9 @@ Each entry is run through the MCP scanner (transport probe + behavioral introspe
       type: 'subcommand',
       description: 'Mark an entry rejected (always blocked, even if the scanner is clean). --type skill|mcp required.',
     },
-    'require --type skill|mcp|plugin --enabled|--disabled': {
+    'require --type skill|mcp --enabled|--disabled [--connector <name>]': {
       type: 'subcommand',
-      description: 'Toggle asset_policy.<type>.registry_required. When enabled, an asset must match a rule in the (type) registry list to bypass the default deny.',
+      description: 'Scope registry_required to one connector, or update the global default and reconcile every active connector. Inactive connector overrides are preserved.',
     },
     'wizard': {
       type: 'subcommand',
@@ -210,6 +210,15 @@ Once entries are flowing in, `asset_policy.<type>.registry_required` flips the c
 defenseclaw registry require --type skill --enabled
 defenseclaw registry require --type mcp   --enabled
 ```
+
+An unscoped operation is broad operator intent: it updates the global default
+and clears only the targeted `registry_required` override on every active
+connector, so stale opposite overrides cannot keep enforcement disabled. All
+other per-connector fields and the global registry rule/filter lists remain
+unchanged. `--connector <name>` changes only that connector's explicit
+override. Known but inactive connector overrides are preserved so future
+activation does not silently inherit a weaker or stronger posture than the one
+previously saved.
 
 When `registry_required=true`:
 

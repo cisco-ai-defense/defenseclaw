@@ -10,10 +10,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // TestIsValidOTLPScope_NegativeCases protects the lazy-reload path
@@ -38,6 +41,8 @@ func TestIsValidOTLPScope_NegativeCases(t *testing.T) {
 		{"empty", "", false},
 		{"validCodex", OTLPScopeCodex, true},
 		{"validGemini", OTLPScopeGeminiCLI, true},
+		{"validCodex", OTLPScopeCodex, true},
+		{"validClaude", OTLPScopeClaude, true},
 		{"upper", "GEMINICLI", false},
 		{"trailingSpace", "geminicli ", false},
 		{"leadingSpace", " geminicli", false},
@@ -89,7 +94,7 @@ func TestEnsureOTLPPathToken_IsolatesConnectorScopes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stat scoped token %s: %v", scope, err)
 		}
-		if got := info.Mode().Perm(); got != 0o600 {
+		if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0o600 {
 			t.Errorf("scoped token %s mode=%#o want 0600", scope, got)
 		}
 	}
@@ -152,9 +157,20 @@ func TestCodexScopedOTLPToken_SetupTeardownRace(t *testing.T) {
 	if err != nil || loaded != final {
 		t.Fatalf("race left mismatched token state: matched=%v err=%v", loaded == final, err)
 	}
-	temps, err := filepath.Glob(filepath.Join(dir, "hooks", ".otlp-codex.token.tmp-*"))
-	if err != nil || len(temps) != 0 {
-		t.Fatalf("race left token temp files: count=%d err=%v", len(temps), err)
+	tokenPath, err := OTLPPathTokenFilePath(dir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var temps []string
+	for _, prefix := range otlpPathTokenOwnedTempPrefixes(tokenPath) {
+		matches, globErr := filepath.Glob(filepath.Join(filepath.Dir(tokenPath), prefix+"*"))
+		if globErr != nil {
+			t.Fatalf("glob token temp files: %v", globErr)
+		}
+		temps = append(temps, matches...)
+	}
+	if len(temps) != 0 {
+		t.Fatalf("race left token temp files: count=%d", len(temps))
 	}
 }
 
@@ -297,8 +313,11 @@ func TestCodexLifecycle_CrossProcessSetupTeardownTransaction(t *testing.T) {
 			if err != nil {
 				t.Fatalf("iteration %d read installed config: %v", iteration, err)
 			}
-			if got := strings.Count(string(raw), "/otlp/codex/"+token+"/v1/"); got != 3 {
-				t.Fatalf("iteration %d config references live token %d times, want 3", iteration, got)
+			if got := strings.Count(string(raw), "Bearer "+token); got != 3 {
+				t.Fatalf("iteration %d config references live scoped bearer %d times, want 3", iteration, got)
+			}
+			if strings.Contains(string(raw), "/otlp/codex/"+token) {
+				t.Fatalf("iteration %d config leaked the scoped bearer into an OTLP endpoint", iteration)
 			}
 		} else if token != "" {
 			t.Fatalf("iteration %d left an orphaned scoped token after restored config", iteration)
@@ -394,6 +413,9 @@ func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
 			name: "wide_mode",
 			setup: func(t *testing.T, path string) {
 				t.Helper()
+				if runtime.GOOS == "windows" {
+					t.Skip("POSIX mode bits do not represent an NTFS DACL; see native DACL coverage")
+				}
 				if err := os.WriteFile(path, []byte(token), 0o644); err != nil {
 					t.Fatal(err)
 				}
@@ -403,6 +425,22 @@ func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
 			name: "symlink",
 			setup: func(t *testing.T, path string) {
 				t.Helper()
+				if runtime.GOOS == "windows" {
+					hooksDir := filepath.Dir(path)
+					targetHooksDir := filepath.Join(t.TempDir(), "hooks")
+					if err := os.Mkdir(targetHooksDir, 0o700); err != nil {
+						t.Fatalf("create redirected hooks directory: %v", err)
+					}
+					target := filepath.Join(targetHooksDir, filepath.Base(path))
+					if err := safefile.WritePrivate(target, []byte(token)); err != nil {
+						t.Fatalf("write redirected token: %v", err)
+					}
+					if err := os.Remove(hooksDir); err != nil {
+						t.Fatalf("remove empty hooks directory: %v", err)
+					}
+					createTestDirectoryRedirect(t, hooksDir, targetHooksDir)
+					return
+				}
 				target := filepath.Join(filepath.Dir(path), "target.token")
 				if err := os.WriteFile(target, []byte(token), 0o600); err != nil {
 					t.Fatal(err)
@@ -445,8 +483,22 @@ func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
 				t.Fatal(err)
 			}
 			tc.setup(t, path)
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read unsafe token before provisioning attempt: %v", err)
+			}
 			if got, err := LoadOTLPPathToken(dir, OTLPScopeGeminiCLI); err == nil {
 				t.Fatalf("LoadOTLPPathToken succeeded with token %q, want error", got)
+			}
+			if got, err := EnsureOTLPPathToken(dir, OTLPScopeGeminiCLI); err == nil {
+				t.Fatalf("EnsureOTLPPathToken succeeded with token %q, want error", got)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read unsafe token after provisioning attempt: %v", err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatal("rejected provisioning modified the existing unsafe token")
 			}
 		})
 	}
@@ -472,5 +524,104 @@ func TestLoadOTLPPathToken_AcceptsStrictTokenFile(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("token = %q, want %q", got, want)
+	}
+}
+
+func TestRemoveOTLPPathTokenRevokesAndIsIdempotent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	first, err := EnsureOTLPPathToken(dir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := OTLPPathTokenFilePath(dir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.WritePrivate(path+".tmp", []byte(strings.Repeat("d", 64)+"\n")); err != nil {
+		t.Fatal(err)
+	}
+	currentTemp := filepath.Join(filepath.Dir(path), otlpPathTokenTempPrefix(path)+"abc123")
+	priorTemp := filepath.Join(filepath.Dir(path), "."+otlpPathTokenTempPrefix(path)+strings.Repeat("a", 32))
+	foreignLookalike := filepath.Join(filepath.Dir(path), otlpPathTokenTempPrefix(path)+"not.owned")
+	for _, artifact := range []string{currentTemp, priorTemp, foreignLookalike} {
+		if err := safefile.WritePrivate(artifact, []byte(strings.Repeat("e", 64)+"\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := RemoveOTLPPathToken(dir, OTLPScopeCodex); err != nil {
+		t.Fatalf("RemoveOTLPPathToken: %v", err)
+	}
+	for _, artifact := range []string{path, path + ".tmp", currentTemp, priorTemp} {
+		if _, err := os.Lstat(artifact); !os.IsNotExist(err) {
+			t.Fatalf("token artifact survived removal: %s (err=%v)", artifact, err)
+		}
+	}
+	if _, err := os.Lstat(foreignLookalike); err != nil {
+		t.Fatalf("non-owned token temp lookalike was removed: %v", err)
+	}
+	if got, err := LoadOTLPPathToken(dir, OTLPScopeCodex); err != nil || got != "" {
+		t.Fatalf("LoadOTLPPathToken after removal = %q, %v", got, err)
+	}
+	if err := RemoveOTLPPathToken(dir, OTLPScopeCodex); err != nil {
+		t.Fatalf("idempotent RemoveOTLPPathToken: %v", err)
+	}
+	second, err := EnsureOTLPPathToken(dir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == first {
+		t.Fatal("token was reused after revocation")
+	}
+}
+
+func TestOTLPPathTokenScopeForConnector(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		scope OTLPPathTokenScope
+		ok    bool
+	}{
+		{name: "codex", scope: OTLPScopeCodex, ok: true},
+		{name: " ClaudeCode ", scope: OTLPScopeClaude, ok: true},
+		{name: "geminicli", scope: OTLPScopeGeminiCLI, ok: true},
+		{name: "cursor", ok: false},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := OTLPPathTokenScopeForConnector(tc.name)
+			if got != tc.scope || ok != tc.ok {
+				t.Fatalf("OTLPPathTokenScopeForConnector(%q) = %q, %v; want %q, %v", tc.name, got, ok, tc.scope, tc.ok)
+			}
+		})
+	}
+}
+
+func TestResolveSetupOTLPPathTokenUsesSuppliedTokenWithoutLocalSidecar(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	want := strings.Repeat("c", 64)
+	got, err := resolveSetupOTLPPathToken(dir, OTLPScopeCodex, "  "+want+"\n")
+	if err != nil {
+		t.Fatalf("resolveSetupOTLPPathToken: %v", err)
+	}
+	if got != want {
+		t.Fatalf("token = %q, want supplied token", got)
+	}
+	path, err := OTLPPathTokenFilePath(dir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("per-user token sidecar exists after supplied token: %v", err)
+	}
+}
+
+func TestResolveSetupOTLPPathTokenRejectsInvalidSuppliedToken(t *testing.T) {
+	t.Parallel()
+	if _, err := resolveSetupOTLPPathToken(t.TempDir(), OTLPScopeClaude, "not-a-token"); err == nil {
+		t.Fatal("resolveSetupOTLPPathToken accepted an invalid supplied token")
 	}
 }

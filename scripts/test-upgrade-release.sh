@@ -80,9 +80,9 @@ Options:
 
 Examples:
   make upgrade-legacy-smoke
-  make upgrade-legacy-smoke-matrix
+  make upgrade-legacy-smoke-matrix ARGS="--target-version X.Y.Z"
   scripts/test-upgrade-release.sh --from-version 0.7.2
-  scripts/test-upgrade-release.sh --from-versions "0.8.3,0.8.2,0.8.1,0.8.0,0.7.2,0.7.1"
+  scripts/test-upgrade-release.sh --from-versions "0.8.5,0.8.4,0.8.3,0.8.2,0.8.1,0.8.0,0.7.2,0.7.1"
   scripts/test-upgrade-release.sh --release-dir dist --baseline-mode seed
 
 For a Linux host without the repo's Go toolchain, build/copy artifacts first:
@@ -406,8 +406,8 @@ platforms = policy["platform_published_baselines"]
 if type(platforms) is not dict or set(platforms) != {"windows"}:
     fail("platform_published_baselines must contain exactly the reviewed Windows subset")
 windows_versions = platforms["windows"]
-if type(windows_versions) is not list or not windows_versions:
-    fail("reviewed Windows baseline subset must be a non-empty array")
+if type(windows_versions) is not list:
+    fail("reviewed Windows baseline subset must be an array")
 if (
     any(type(item) is not str or item not in config_versions for item in windows_versions)
     or len(set(windows_versions)) != len(windows_versions)
@@ -456,6 +456,25 @@ def parse(version: str) -> tuple[int, ...]:
 
 raise SystemExit(0 if parse(sys.argv[1]) <= parse(sys.argv[2]) else 1)
 PY
+}
+
+expected_upgrade_receipt_source() {
+    local source_version="$1" target_version="$2" required_bridge_version="${3:-}"
+    local receipt_source="${source_version}"
+
+    # A request that crosses beyond the v8 activation release completes as two
+    # transactions: source -> 0.8.5, then 0.8.5 -> target. The canonical target
+    # receipt truthfully records the final transaction rather than the original
+    # request. A request ending at 0.8.5 still records the required bridge as
+    # its source, including legacy routes that first stage through that bridge.
+    if ! version_lte "${V8_ACTIVATION_VERSION}" "${source_version}" \
+        && ! version_lte "${target_version}" "${V8_ACTIVATION_VERSION}"; then
+        receipt_source="${V8_ACTIVATION_VERSION}"
+    elif [[ -n "${required_bridge_version}" ]] \
+        && ! version_lte "${required_bridge_version}" "${source_version}"; then
+        receipt_source="${required_bridge_version}"
+    fi
+    printf '%s\n' "${receipt_source}"
 }
 
 target_uses_observability_v8() {
@@ -850,42 +869,68 @@ SH
     printf '%s\n' "${real_curl}"
 }
 
-prepare_required_bridge_assets() {
-    [[ -n "${REQUIRED_BRIDGE_VERSION}" ]] || return 0
-    [[ "${REQUIRED_BRIDGE_VERSION}" != "${TARGET_VERSION}" ]] || return 0
-
-    local bridge_dir="${RELEASE_ROOT}/${REQUIRED_BRIDGE_VERSION}"
+prepare_authenticated_upgrade_release_assets() {
+    local version="$1"
+    local label="$2"
+    local include_provenance="${3:-0}"
+    local release_dir="${RELEASE_ROOT}/${version}"
     local previous_from="${FROM_VERSION}"
     local asset
-    local bridge_wheel="defenseclaw-${REQUIRED_BRIDGE_VERSION}-2-py3-none-any.dcwheel"
-    local bridge_gateway="defenseclaw_${REQUIRED_BRIDGE_VERSION}_protocol2_${OS_NAME}_${ARCH_NAME}.dcgateway"
-    mkdir -p "${bridge_dir}"
-    for asset in \
-        "${bridge_wheel}" \
-        "${bridge_gateway}" \
-        checksums.txt \
-        checksums.txt.sig \
-        checksums.txt.pem \
-        upgrade-manifest.json; do
-        download_old_asset "${asset}" "${bridge_dir}/${asset}" \
-            "${REQUIRED_BRIDGE_VERSION}" \
-            || die "required bridge asset is unavailable: ${REQUIRED_BRIDGE_VERSION}/${asset}"
+    local wheel="defenseclaw-${version}-2-py3-none-any.dcwheel"
+    local gateway="defenseclaw_${version}_protocol2_${OS_NAME}_${ARCH_NAME}.dcgateway"
+    local -a assets=(
+        "${wheel}"
+        "${gateway}"
+        checksums.txt
+        checksums.txt.sig
+        checksums.txt.pem
+        upgrade-manifest.json
+    )
+    local -a authenticated_assets=("${wheel}" "${gateway}" upgrade-manifest.json)
+    if [[ "${include_provenance}" == "1" ]]; then
+        assets+=(release-provenance.json)
+        authenticated_assets+=(release-provenance.json)
+    fi
+
+    mkdir -p "${release_dir}"
+    for asset in "${assets[@]}"; do
+        download_old_asset "${asset}" "${release_dir}/${asset}" "${version}" \
+            || die "${label} asset is unavailable: ${version}/${asset}"
     done
     local cosign_command cosign_path
     cosign_command="$(command -v cosign)" \
-        || die "cosign is required to authenticate published bridge ${REQUIRED_BRIDGE_VERSION}"
+        || die "cosign is required to authenticate published ${label} ${version}"
     cosign_path="$(abs_path "${cosign_command}")" \
-        || die "cosign is required to authenticate published bridge ${REQUIRED_BRIDGE_VERSION}"
-    python3 "${ROOT}/scripts/historical_release_auth.py" \
-        --version "${REQUIRED_BRIDGE_VERSION}" \
-        --release-dir "${bridge_dir}" \
-        --cosign "${cosign_path}" \
-        --asset "${bridge_wheel}" \
-        --asset "${bridge_gateway}" \
-        --asset upgrade-manifest.json \
-        || die "required bridge authentication failed: ${REQUIRED_BRIDGE_VERSION}"
+        || die "cosign is required to authenticate published ${label} ${version}"
+    local -a authentication_args=(
+        --version "${version}"
+        --release-dir "${release_dir}"
+        --cosign "${cosign_path}"
+    )
+    for asset in "${authenticated_assets[@]}"; do
+        authentication_args+=(--asset "${asset}")
+    done
+    python3 "${ROOT}/scripts/historical_release_auth.py" "${authentication_args[@]}" \
+        || die "${label} authentication failed: ${version}"
     FROM_VERSION="${previous_from}"
-    ok "Authenticated published bridge assets: ${REQUIRED_BRIDGE_VERSION} (${OS_NAME}/${ARCH_NAME})"
+    ok "Authenticated published ${label} assets: ${version} (${OS_NAME}/${ARCH_NAME})"
+}
+
+prepare_required_bridge_assets() {
+    if [[ -n "${REQUIRED_BRIDGE_VERSION}" \
+        && "${REQUIRED_BRIDGE_VERSION}" != "${TARGET_VERSION}" ]]; then
+        local bridge_provenance=0
+        [[ "${REQUIRED_BRIDGE_VERSION}" == "${V8_ACTIVATION_VERSION}" ]] \
+            && bridge_provenance=1
+        prepare_authenticated_upgrade_release_assets \
+            "${REQUIRED_BRIDGE_VERSION}" "required bridge" "${bridge_provenance}"
+    fi
+
+    if ! version_lte "${TARGET_VERSION}" "${V8_ACTIVATION_VERSION}" \
+        && [[ "${REQUIRED_BRIDGE_VERSION}" != "${V8_ACTIVATION_VERSION}" ]]; then
+        prepare_authenticated_upgrade_release_assets \
+            "${V8_ACTIVATION_VERSION}" "hard-cut bootstrap" 1
+    fi
 }
 
 tail_log() {
@@ -1441,8 +1486,11 @@ seed_native_v8_observability_fixture() {
     local data_dir="${SMOKE_HOME}/.defenseclaw"
     local openclaw_home="${SMOKE_HOME}/.openclaw"
     local evidence_dir="${SMOKE_HOME}/fixture-evidence"
+    local baseline_python="${data_dir}/.venv/bin/python"
     mkdir -p "${data_dir}/state" "${openclaw_home}" "${evidence_dir}"
     chmod 700 "${data_dir}" "${data_dir}/state" "${openclaw_home}" "${evidence_dir}"
+    [[ -x "${baseline_python}" ]] \
+        || die "published config-v8 baseline interpreter is unavailable"
 
     cat >"${data_dir}/config.yaml" <<YAML
 # ┌──── OBSERVABILITY UPGRADE SMOKE ────┐
@@ -1508,9 +1556,6 @@ ENV
     # A real config-v8 host already has the v8 activation recorded. Seed the
     # cursor through the authenticated published baseline's own state API so a
     # later candidate must preserve, rather than invent, that history.
-    local baseline_python="${data_dir}/.venv/bin/python"
-    [[ -x "${baseline_python}" ]] \
-        || die "published config-v8 baseline interpreter is unavailable"
     HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${data_dir}" \
         "${baseline_python}" -I - "${data_dir}" "${FROM_VERSION}" <<'PY'
 import os
@@ -1560,6 +1605,74 @@ PY
     cp -p "${data_dir}/.env" "${evidence_dir}/environment.historical.source"
 }
 
+seed_already_v8_observability_fixture() {
+    resolve_baseline_config_version
+    [[ "${FROM_CONFIG_VERSION}" == "8" ]] \
+        || die "already-v8 fixture requested for config-v${FROM_CONFIG_VERSION} source ${FROM_VERSION}"
+    log "Seeding canonical comment-heavy config-v8 fixture for ${FROM_VERSION}"
+    local data_dir="${SMOKE_HOME}/.defenseclaw"
+    local evidence_dir="${SMOKE_HOME}/fixture-evidence"
+    mkdir -p "${data_dir}/state" "${evidence_dir}"
+    chmod 700 "${data_dir}" "${data_dir}/state" "${evidence_dir}"
+
+    cat >"${data_dir}/config.yaml" <<YAML
+# ┌──── ALREADY-V8 UPGRADE SMOKE ────┐
+# exact comments, order, and bytes must survive a post-hard-cut upgrade
+config_version: 8
+data_dir: ${data_dir}
+guardrail:
+  enabled: false
+gateway:
+  fleet_mode: disabled
+  watcher:
+    enabled: false
+observability:
+  defaults:
+    collect:
+      logs: true
+      traces: true
+      metrics: true
+    redaction_profile: strict
+  local:
+    path: ${data_dir}/state/audit-custom.db
+    judge_bodies_path: ${data_dir}/state/judge-custom.db
+    retention_days: 37
+  destinations:
+    - name: upgrade-smoke-jsonl
+      kind: jsonl
+      path: ${data_dir}/gateway-upgrade-smoke.jsonl
+      rotation:
+        max_size_mb: 17
+        max_backups: 3
+        max_age_days: 11
+        compress: true
+      send:
+        signals: [logs]
+        buckets: [platform.health]
+        redaction_profile: strict
+notifications:
+  enabled: true # unrelated application setting survives
+YAML
+    cat >"${data_dir}/.env" <<'ENV'
+# exact already-v8 environment bytes must survive
+PRESERVE_UPGRADE_SMOKE_ENV=already-v8-preserved
+ENV
+    chmod 600 "${data_dir}/config.yaml" "${data_dir}/.env"
+    cp -p "${data_dir}/config.yaml" "${evidence_dir}/config.historical.source"
+    cp -p "${data_dir}/.env" "${evidence_dir}/environment.historical.source"
+
+    cp -R "${ROOT}/bundles/local_observability_stack" "${data_dir}/observability-stack"
+    mkdir -p \
+        "${data_dir}/observability-stack/operator" \
+        "${data_dir}/observability-stack/grafana/dashboards"
+    cat >"${data_dir}/observability-stack/operator/volume-continuity.txt" <<'EOF'
+operator-owned volume continuity marker
+EOF
+    cat >"${data_dir}/observability-stack/grafana/dashboards/team-upgrade-smoke.json" <<'EOF'
+{"title":"Operator Custom Dashboard","uid":"team-upgrade-smoke"}
+EOF
+}
+
 seed_upgrade_fixture() {
     resolve_baseline_config_version
     if target_uses_observability_v8; then
@@ -1573,6 +1686,70 @@ seed_upgrade_fixture() {
     else
         seed_pre_v8_otel_fixture
     fi
+}
+
+bootstrap_already_v8_migration_cursor() {
+    [[ "${FROM_CONFIG_VERSION}" == "8" ]] || return 0
+    local data_dir="${SMOKE_HOME}/.defenseclaw"
+    local evidence_dir="${SMOKE_HOME}/fixture-evidence"
+    local venv_python="${data_dir}/.venv/bin/python"
+    local bootstrap_log="${SMOKE_HOME}/bootstrap-v8-cursor.log"
+    [[ -x "${venv_python}" ]] || die "installed ${FROM_VERSION} Python is unavailable for cursor bootstrap"
+    mkdir -p "${SMOKE_HOME}/.openclaw"
+
+    log "Bootstrapping the ${FROM_VERSION} migration cursor through the installed source wheel"
+    if ! HOME="${SMOKE_HOME}" \
+        DEFENSECLAW_HOME="${data_dir}" \
+        DEFENSECLAW_CONFIG="${data_dir}/config.yaml" \
+        OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
+        "${venv_python}" - \
+            "${FROM_VERSION}" \
+            "${V8_ACTIVATION_VERSION}" \
+            "${SMOKE_HOME}/.openclaw" \
+            "${data_dir}" >"${bootstrap_log}" 2>&1 <<'PY'
+import json
+from pathlib import Path
+import sys
+
+from defenseclaw import migration_state
+from defenseclaw.migrations import run_migrations
+
+source_version = sys.argv[1]
+activation_version = sys.argv[2]
+openclaw_home = sys.argv[3]
+data_dir = Path(sys.argv[4])
+config_path = data_dir / "config.yaml"
+environment_path = data_dir / ".env"
+config_before = config_path.read_bytes()
+environment_before = environment_path.read_bytes()
+
+count = run_migrations(
+    source_version,
+    source_version,
+    openclaw_home,
+    str(data_dir),
+    upgrade_handles_local_bundle=True,
+)
+state = migration_state.load(str(data_dir))
+if state is None or not migration_state.is_applied(state, activation_version):
+    raise SystemExit("installed source migration machinery did not record observability-v8")
+if source_version == activation_version and count != 1:
+    raise SystemExit(f"same-version observability-v8 bootstrap count={count}; want 1")
+if config_path.read_bytes() != config_before or environment_path.read_bytes() != environment_before:
+    raise SystemExit("already-v8 cursor bootstrap changed the canonical source fixture")
+if list((data_dir / "backups").glob("observability-v8-*/manifest.json")):
+    raise SystemExit("already-v8 cursor bootstrap created a v7-to-v8 activation manifest")
+cursor = json.loads(Path(migration_state.state_path(str(data_dir))).read_text(encoding="utf-8"))
+if activation_version not in cursor.get("applied", []):
+    raise SystemExit("serialized cursor omits observability-v8")
+print(f"bootstrap_migrations={count}")
+PY
+    then
+        tail_log "${bootstrap_log}"
+        die "installed ${FROM_VERSION} migration machinery could not bootstrap the v8 cursor"
+    fi
+    cp -p "${data_dir}/.migration_state.json" "${evidence_dir}/migration-cursor.source"
+    ok "Installed ${FROM_VERSION} machinery recorded the already-v8 cursor without activation"
 }
 
 run_v8_source_contract_tests() {
@@ -1912,6 +2089,17 @@ config_bytes = config_path.read_bytes()
 environment_bytes = environment_path.read_bytes()
 historical_config = (evidence_dir / "config.historical.source").read_bytes()
 historical_environment = (evidence_dir / "environment.historical.source").read_bytes()
+historical_environment_values = dotenv_values(evidence_dir / "environment.historical.source")
+historical_gateway_token = historical_environment_values.get("DEFENSECLAW_GATEWAY_TOKEN")
+if (
+    not isinstance(historical_gateway_token, str)
+    or len(historical_gateway_token) != 64
+    or any(
+        character not in "0123456789abcdef"
+        for character in historical_gateway_token
+    )
+):
+    raise SystemExit("native-v8 fixture has no canonical generated gateway token")
 
 if config_bytes != historical_config:
     raise SystemExit("native-v8 config bytes changed without a target config migration")
@@ -1944,9 +2132,9 @@ if not isinstance(historical_gateway_token, str) or re.fullmatch(r"[0-9a-f]{64}"
     raise SystemExit("historical fixture gateway token is missing or invalid")
 expected_environment = {
     "PRESERVE_UPGRADE_SMOKE_ENV": "preserved",
-    "DEFENSECLAW_GATEWAY_TOKEN": historical_gateway_token,
     "DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION": "Bearer upgrade-smoke-v8-otlp-value",
     "DEFENSECLAW_V8_FIXTURE_HTTP_BEARER": "upgrade-smoke-v8-http-value",
+    "DEFENSECLAW_GATEWAY_TOKEN": historical_gateway_token,
 }
 actual_environment = dotenv_values(environment_path)
 if any(actual_environment.get(name) != value for name, value in expected_environment.items()):
@@ -2419,11 +2607,10 @@ print("local_bundle_manifest=target_exact_custom_preserved")
 PY
         fi
 
-        local receipt_from="${FROM_VERSION}"
-        if [[ -n "${REQUIRED_BRIDGE_VERSION}" ]] \
-            && ! version_lte "${REQUIRED_BRIDGE_VERSION}" "${FROM_VERSION}"; then
-            receipt_from="${REQUIRED_BRIDGE_VERSION}"
-        fi
+        local receipt_from
+        receipt_from="$(expected_upgrade_receipt_source \
+            "${FROM_VERSION}" "${TARGET_VERSION}" "${REQUIRED_BRIDGE_VERSION}")" \
+            || die "could not resolve the canonical target receipt source"
         "${venv_python}" "${ROOT}/scripts/check_upgrade_receipt.py" \
             --data-dir "${SMOKE_HOME}/.defenseclaw" \
             --from-version "${receipt_from}" \
@@ -2498,50 +2685,20 @@ print("installed_target_tui_origin=venv")
 print("installed_target_tui_mount=ok")
 PY
 
-    local policy_rows_before=""
     if target_uses_observability_v8; then
-        policy_rows_before="$("${venv_python}" -I -B - "${SMOKE_HOME}/.defenseclaw" <<'PY'
-from pathlib import Path
-import sqlite3
-import sys
-
-import yaml
-
-data_dir = Path(sys.argv[1])
-config = yaml.safe_load((data_dir / "config.yaml").read_text(encoding="utf-8")) or {}
-configured = (((config.get("observability") or {}).get("local") or {}).get("path"))
-if configured is None:
-    database = data_dir / "audit.db"
-elif not isinstance(configured, str) or not configured.strip():
-    raise SystemExit("configured audit database path is invalid")
-else:
-    database = Path(configured).expanduser()
-    if not database.is_absolute():
-        database = data_dir / database
-connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
-try:
-    count = connection.execute(
-        "SELECT COUNT(*) FROM audit_events WHERE event_name = 'policy.updated' AND mandatory = 1"
-    ).fetchone()[0]
-finally:
-    connection.close()
-print(count)
-PY
-)" || die "could not snapshot mandatory policy rows immediately before reload"
-        [[ "${policy_rows_before}" =~ ^[0-9]+$ ]] \
-            || die "invalid mandatory policy row count immediately before reload"
-
-        "${venv_python}" -I -B - "${SMOKE_HOME}/.defenseclaw" "${policy_rows_before}" <<'PY'
+        "${venv_python}" -I -B - "${SMOKE_HOME}/.defenseclaw" <<'PY'
+import json
 from pathlib import Path
 import sqlite3
 import sys
 import time
+import uuid
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import yaml
 
 data_dir = Path(sys.argv[1])
-before = int(sys.argv[2])
 config = yaml.safe_load((data_dir / "config.yaml").read_text(encoding="utf-8")) or {}
 port = int((config.get("gateway") or {}).get("api_port") or 18970)
 token = ""
@@ -2553,18 +2710,49 @@ for line in (data_dir / ".env").read_text(encoding="utf-8").splitlines():
 if not token:
     raise SystemExit("target gateway token is unavailable for the post-status write probe")
 
+probe_id = str(uuid.uuid4())
+body = json.dumps(
+    {
+        "id": probe_id,
+        "action": "policy-reload",
+        "target": "release-upgrade-smoke:" + probe_id,
+        "actor": "release-upgrade-smoke",
+        "details": "synthetic post-status SQLite continuity probe; no policy state changed",
+        "severity": "INFO",
+    }
+).encode("utf-8")
 request = Request(
-    f"http://127.0.0.1:{port}/policy/reload",
-    data=b"",
+    f"http://127.0.0.1:{port}/audit/event",
+    data=body,
     method="POST",
     headers={
         "Authorization": "Bearer " + token,
+        "Content-Type": "application/json",
+        "X-DefenseClaw-Client": "release-upgrade-smoke",
         "X-DefenseClaw-Token": token,
     },
 )
-with urlopen(request, timeout=10) as response:
-    if response.status != 200:
-        raise SystemExit(f"post-status policy reload returned HTTP {response.status}")
+try:
+    with urlopen(request, timeout=10) as response:
+        response_body = response.read(4097)
+        if len(response_body) > 4096:
+            raise SystemExit("post-status audit write returned an oversized response")
+        result = json.loads(response_body)
+        if response.status != 200 or result != {"status": "ok"}:
+            raise SystemExit("post-status audit write was not acknowledged")
+except HTTPError as exc:
+    try:
+        response_body = exc.read(4096).decode("utf-8", errors="replace")
+    except OSError:
+        response_body = "<response body unavailable after read timeout>"
+    raise SystemExit(
+        f"post-status audit write returned HTTP {exc.code}: {response_body}"
+    ) from exc
+except (URLError, OSError) as exc:
+    reason = getattr(exc, "reason", type(exc).__name__)
+    raise SystemExit(f"post-status audit write request/read failed: {reason}") from exc
+except (json.JSONDecodeError, UnicodeError) as exc:
+    raise SystemExit("post-status audit write returned invalid JSON") from exc
 
 local = (config.get("observability") or {}).get("local") or {}
 configured = local.get("path")
@@ -2578,14 +2766,35 @@ else:
         database = data_dir / database
 deadline = time.monotonic() + 10
 while True:
-    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    connection = None
     try:
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=0.2)
         after = connection.execute(
-            "SELECT COUNT(*) FROM audit_events WHERE event_name = 'policy.updated' AND mandatory = 1"
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE id = ? AND action = 'policy-reload' "
+            "AND event_name = 'policy.updated' AND mandatory = 1",
+            (probe_id,),
         ).fetchone()[0]
+    except sqlite3.OperationalError as exc:
+        code = getattr(exc, "sqlite_errorcode", None)
+        busy_code = getattr(sqlite3, "SQLITE_BUSY", 5)
+        locked_code = getattr(sqlite3, "SQLITE_LOCKED", 6)
+        retryable = code is not None and (code & 0xFF) in {
+            busy_code,
+            locked_code,
+        }
+        if code is None:
+            message = str(exc).lower()
+            retryable = message == "database is busy" or message.startswith(
+                ("database is locked", "database table is locked", "database schema is locked")
+            )
+        if not retryable:
+            raise
+        after = 0
     finally:
-        connection.close()
-    if after > before:
+        if connection is not None:
+            connection.close()
+    if after == 1:
         break
     if time.monotonic() >= deadline:
         raise SystemExit("fresh SQLite readers cannot see the mandatory write made after status")

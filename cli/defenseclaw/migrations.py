@@ -57,6 +57,14 @@ import yaml
 from defenseclaw import migration_state as migration_state_helpers
 from defenseclaw import ux
 from defenseclaw.file_lock import locked_file_update
+from defenseclaw.file_permissions import (
+    copy_windows_dacl,
+    delete_file_durable,
+    replace_file_durable,
+    set_file_mode,
+)
+
+_OBSERVABILITY_V8_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 if TYPE_CHECKING:
     from defenseclaw.observability.v8_migration import V8MigrationResult
@@ -65,6 +73,7 @@ _OBSERVABILITY_V8_PREFLIGHT_BINDING_ENV = "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGH
 _UPGRADE_MUTATION_TOKEN_ENV = "DEFENSECLAW_UPGRADE_MUTATION_TOKEN"
 _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES = 4 * 1024 * 1024
 _WINDOWS_REPARSE_POINT_ATTRIBUTE = 0x00000400
+_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # These target-wheel dependencies are resolved lazily. Older upgrade clients
@@ -274,8 +283,7 @@ class ObservabilityV8PreflightBinding:
         present = payload.get("environment_file_present")
         digests = {key: payload.get(key) for key in fields if key.endswith("_sha256")}
         if not isinstance(present, bool) or any(
-            not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
-            for value in digests.values()
+            not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None for value in digests.values()
         ):
             raise ObservabilityV8UpgradeMigrationError("preflight_binding_invalid")
         return cls(
@@ -302,8 +310,8 @@ def _prepare_observability_v8_migration(
         # command creates a native v8 document.
         return None
 
-    environment, environment_file_present, environment_file_sha256 = (
-        _observability_v8_upgrade_environment_snapshot(environment_path)
+    environment, environment_file_present, environment_file_sha256 = _observability_v8_upgrade_environment_snapshot(
+        environment_path
     )
     environment.pop(_OBSERVABILITY_V8_PREFLIGHT_BINDING_ENV, None)
     environment.pop(_UPGRADE_MUTATION_TOKEN_ENV, None)
@@ -381,22 +389,13 @@ def _read_stable_observability_v8_upgrade_file(
         raise ObservabilityV8UpgradeMigrationError(failure_code) from None
     if (
         stat.S_ISLNK(named_before.st_mode)
-        or getattr(named_before, "st_file_attributes", 0)
-        & _WINDOWS_REPARSE_POINT_ATTRIBUTE
+        or getattr(named_before, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT_ATTRIBUTE
         or not stat.S_ISREG(named_before.st_mode)
-        or (
-            not allow_oversize_sentinel
-            and named_before.st_size > _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES
-        )
+        or (not allow_oversize_sentinel and named_before.st_size > _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES)
     ):
         raise ObservabilityV8UpgradeMigrationError(failure_code)
 
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = -1
     try:
         descriptor = os.open(path, flags)
@@ -407,10 +406,7 @@ def _read_stable_observability_v8_upgrade_file(
                 opened_before,
                 named_before,
             )
-            or (
-                not allow_oversize_sentinel
-                and opened_before.st_size > _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES
-            )
+            or (not allow_oversize_sentinel and opened_before.st_size > _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES)
         ):
             raise ObservabilityV8UpgradeMigrationError(failure_code)
 
@@ -433,10 +429,7 @@ def _read_stable_observability_v8_upgrade_file(
         except OSError:
             raise ObservabilityV8UpgradeMigrationError(failure_code) from None
         if (
-            (
-                len(payload) > _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES
-                and not allow_oversize_sentinel
-            )
+            (len(payload) > _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES and not allow_oversize_sentinel)
             or not _observability_v8_upgrade_file_snapshot_unchanged(
                 opened_before,
                 opened_after,
@@ -446,17 +439,13 @@ def _read_stable_observability_v8_upgrade_file(
                 named_after,
             )
             or stat.S_ISLNK(named_after.st_mode)
-            or getattr(named_after, "st_file_attributes", 0)
-            & _WINDOWS_REPARSE_POINT_ATTRIBUTE
+            or getattr(named_after, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT_ATTRIBUTE
             or not stat.S_ISREG(named_after.st_mode)
             or not _observability_v8_upgrade_named_snapshot_unchanged(
                 opened_after,
                 named_after,
             )
-            or (
-                len(payload) <= _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES
-                and len(payload) != opened_after.st_size
-            )
+            or (len(payload) <= _MAX_OBSERVABILITY_V8_UPGRADE_FILE_BYTES and len(payload) != opened_after.st_size)
         ):
             raise ObservabilityV8UpgradeMigrationError(failure_code)
         return bytes(payload)
@@ -499,9 +488,7 @@ def preflight_observability_v8_upgrade(
         return None
 
     validation_environment = dict(prepared.environment)
-    validation_environment.update(
-        {edit.name: edit.value for edit in prepared.migration.environment_edits}
-    )
+    validation_environment.update({edit.name: edit.value for edit in prepared.migration.environment_edits})
     _validate_observability_v8_candidate(
         prepared.migration.candidate,
         validation_environment,
@@ -537,8 +524,7 @@ def _observability_v8_preflight_binding(
             for dependency in prepared.migration.environment_dependencies
         ),
         environment_edits_sha256=_observability_v8_binding_rows_sha256(
-            (edit.name, edit.value_sha256, edit.operation)
-            for edit in prepared.migration.environment_edits
+            (edit.name, edit.value_sha256, edit.operation) for edit in prepared.migration.environment_edits
         ),
     )
 
@@ -556,9 +542,15 @@ def _observability_v8_binding_rows_sha256(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _expected_observability_v8_preflight_binding(
-) -> tuple[bool, ObservabilityV8PreflightBinding | None]:
-    if not os.environ.get(_UPGRADE_MUTATION_TOKEN_ENV):
+def _valid_upgrade_mutation_token() -> bool:
+    """Return whether the controller supplied one filename-safe capability."""
+
+    token = os.environ.get(_UPGRADE_MUTATION_TOKEN_ENV)
+    return isinstance(token, str) and re.fullmatch(r"[0-9a-f]{32}", token) is not None
+
+
+def _expected_observability_v8_preflight_binding() -> tuple[bool, ObservabilityV8PreflightBinding | None]:
+    if not _valid_upgrade_mutation_token():
         return False, None
     raw = os.environ.get(_OBSERVABILITY_V8_PREFLIGHT_BINDING_ENV)
     if raw is None:
@@ -572,6 +564,18 @@ def _expected_observability_v8_preflight_binding(
     if payload is None:
         return True, None
     return True, ObservabilityV8PreflightBinding.from_payload(payload)
+
+
+def _controller_has_hard_cut_bundle_custody() -> bool:
+    """Return whether the child received the paired hard-cut capability."""
+
+    if not _valid_upgrade_mutation_token():
+        return False
+    try:
+        binding_present, _binding = _expected_observability_v8_preflight_binding()
+    except ObservabilityV8UpgradeMigrationError:
+        return False
+    return binding_present
 
 
 def _migrate_observability_v8(ctx: MigrationContext) -> None:
@@ -594,17 +598,13 @@ def _migrate_observability_v8(ctx: MigrationContext) -> None:
     config_path = os.path.abspath(os.path.expanduser(ctx.active_config_path()))
     environment_path = os.path.join(data_dir, ".env")
     _assert_observability_v8_upgrade_quiesced(data_dir)
-    expected_binding_present, expected_binding = (
-        _expected_observability_v8_preflight_binding()
-    )
+    expected_binding_present, expected_binding = _expected_observability_v8_preflight_binding()
     prepared = _prepare_observability_v8_migration(
         data_dir=data_dir,
         config_path=config_path,
     )
     if expected_binding_present:
-        current_binding = (
-            _observability_v8_preflight_binding(prepared) if prepared is not None else None
-        )
+        current_binding = _observability_v8_preflight_binding(prepared) if prepared is not None else None
         if current_binding != expected_binding:
             raise ObservabilityV8UpgradeMigrationError("preflight_source_changed")
     if prepared is None:
@@ -646,19 +646,103 @@ def _migrate_observability_v8(ctx: MigrationContext) -> None:
         # of target-private exception classes. Preserve the value-free refusal
         # code used by the controller when a source changed after preflight.
         if getattr(exc, "code", None) == "preflight_source_changed":
-            raise ObservabilityV8UpgradeMigrationError(
-                "preflight_source_changed"
-            ) from None
+            raise ObservabilityV8UpgradeMigrationError("preflight_source_changed") from None
         raise
     _refresh_observability_v8_bundle_for_legacy_upgrader(ctx, data_dir, activation)
     if activation.activated:
         ctx.changes.append("activated observability configuration schema v8")
 
 
+def preflight_required_migrations(
+    from_version: str,
+    to_version: str,
+    openclaw_home: str,
+    data_dir: str,
+    required_versions: list[str] | tuple[str, ...],
+    scratch_dir: str,
+) -> int:
+    """Exercise required target migrations without mutating live state.
+
+    Native Setup calls this from the staged target interpreter while the old
+    runtime is still live.  Each supported preflight may read a bounded secure
+    snapshot, but candidate files are confined to ``scratch_dir`` and no
+    migration cursor, config, environment, service, or connector state is
+    published.
+    """
+
+    del openclaw_home  # Reserved for future required-migration preflights.
+    if not isinstance(required_versions, (list, tuple)) or any(
+        not isinstance(version, str) for version in required_versions
+    ):
+        raise ObservabilityV8UpgradeMigrationError("preflight_manifest_invalid")
+    scratch = os.path.abspath(os.path.expanduser(scratch_dir))
+    if not os.path.isabs(scratch_dir) or not os.path.isdir(scratch):
+        raise ObservabilityV8UpgradeMigrationError("preflight_root_invalid")
+    scratch_metadata = os.lstat(scratch)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if stat.S_ISLNK(scratch_metadata.st_mode) or (
+        getattr(scratch_metadata, "st_file_attributes", 0) & reparse_flag
+    ):
+        raise ObservabilityV8UpgradeMigrationError("preflight_root_invalid")
+
+    selected = [
+        version
+        for version in dict.fromkeys(required_versions)
+        if _ver_tuple(from_version) < _ver_tuple(version) <= _ver_tuple(to_version)
+    ]
+    for version in selected:
+        if version != "0.8.5":
+            raise ObservabilityV8UpgradeMigrationError("required_preflight_unsupported")
+        ctx = MigrationContext(
+            openclaw_home="",
+            data_dir=data_dir,
+            from_version=from_version,
+            to_version=to_version,
+            config_path=os.path.join(data_dir, "config.yaml"),
+            upgrade_handles_local_bundle=True,
+        )
+        _preflight_observability_v8(ctx, scratch)
+    return len(selected)
+
+
+def _preflight_observability_v8(ctx: MigrationContext, scratch_dir: str) -> None:
+    """Convert and target-validate a read-only snapshot in staged custody."""
+
+    data_dir = os.path.abspath(os.path.expanduser(ctx.data_dir))
+    config_path = os.path.abspath(os.path.expanduser(ctx.active_config_path()))
+    environment_path = os.path.join(data_dir, ".env")
+    try:
+        common = os.path.commonpath((os.path.normcase(data_dir), os.path.normcase(config_path)))
+    except ValueError:
+        raise ObservabilityV8UpgradeMigrationError("preflight_path_escape") from None
+    if common != os.path.normcase(data_dir):
+        raise ObservabilityV8UpgradeMigrationError("preflight_path_escape")
+    source = _read_observability_v8_upgrade_source(config_path)
+    if source is None:
+        return
+    environment = _observability_v8_upgrade_environment(environment_path)
+    migration = convert_v7_observability_to_v8(
+        source,
+        environment,
+        source_name=config_path,
+        effective_data_dir=data_dir,
+    )
+    protected = dict(environment)
+    protected.update({edit.name: edit.value for edit in migration.environment_edits})
+    _validate_observability_v8_candidate(
+        migration.candidate,
+        protected,
+        data_dir=data_dir,
+        candidate_directory=scratch_dir,
+    )
+
+
 def _refresh_observability_v8_bundle_for_legacy_upgrader(
     ctx: MigrationContext,
     data_dir: str,
     activation,
+    *,
+    restart_intent_receipt: str | None = None,
 ) -> None:
     """Bridge released upgrade clients to the target bundle transaction.
 
@@ -681,6 +765,7 @@ def _refresh_observability_v8_bundle_for_legacy_upgrader(
         data_dir,
         backup_directory,
         ctx.to_version,
+        restart_intent_receipt=restart_intent_receipt,
     )
     if result.get("installed") is True:
         ctx.changes.append("refreshed local observability bundle for the target release")
@@ -748,6 +833,8 @@ def _run_observability_v8_bundle_upgrade_in_target(
     data_dir: str,
     backup_directory: str,
     target_version: str,
+    *,
+    restart_intent_receipt: str | None = None,
 ) -> dict[str, object]:
     """Refresh/restart through a clean interpreter from the installed wheel."""
 
@@ -756,34 +843,59 @@ def _run_observability_v8_bundle_upgrade_in_target(
     script = """
 import json
 import sys
+from pathlib import Path
 
 from defenseclaw.bundle_refresh import (
     LocalObservabilityUpgradeError,
     restart_upgraded_local_observability_stack,
     upgrade_local_observability_stack,
 )
+from defenseclaw.upgrade_receipt import (
+    clear_local_bundle_restart_intent,
+    record_local_bundle_restart_intent,
+)
 
 try:
+    receipt = Path(sys.argv[4]) if sys.argv[4] else None
     result = upgrade_local_observability_stack(
         sys.argv[1],
         sys.argv[2],
         bundle_version=sys.argv[3],
+        restart_intent_recorder=(
+            None
+            if receipt is None
+            else lambda required: record_local_bundle_restart_intent(
+                receipt,
+                restart_required=required,
+            )
+        ),
     )
     payload = result.to_dict()
     payload["ok"] = True
+    restart_succeeded = not result.restart_required
     if result.restart_required:
         try:
             restarted = restart_upgraded_local_observability_stack(sys.argv[1])
             payload["restarted"] = restarted.restarted
             payload["degraded_errors"] = list(restarted.degraded_errors)
+            restart_succeeded = restarted.restarted and not restarted.degraded_errors
         except LocalObservabilityUpgradeError as exc:
             payload["degraded_errors"] = [f"{exc.code}:{exc.phase}"]
+    if receipt is not None and restart_succeeded:
+        try:
+            clear_local_bundle_restart_intent(receipt)
+        except Exception:
+            degraded_errors = payload.setdefault("degraded_errors", [])
+            if isinstance(degraded_errors, list):
+                degraded_errors.append("restart_intent_cleanup_failed")
+            else:
+                payload["degraded_errors"] = ["restart_intent_cleanup_failed"]
 except LocalObservabilityUpgradeError as exc:
     payload = {"ok": False, "code": exc.code, "phase": exc.phase}
 except Exception:
     payload = {"ok": False, "code": "unexpected_failure", "phase": "invoke"}
 
-with open(sys.argv[4], "w", encoding="utf-8") as handle:
+with open(sys.argv[5], "w", encoding="utf-8") as handle:
     json.dump(payload, handle, sort_keys=True)
 sys.exit(0 if payload["ok"] else 1)
 """
@@ -791,11 +903,14 @@ sys.exit(0 if payload["ok"] else 1)
         completed = subprocess.run(
             [
                 sys.executable,
+                "-I",
+                "-B",
                 "-c",
                 script,
                 data_dir,
                 backup_directory,
                 target_version,
+                restart_intent_receipt or "",
                 result_path,
             ],
             capture_output=True,
@@ -857,9 +972,7 @@ def _assert_observability_v8_upgrade_quiesced(data_dir: str) -> None:
 def _observability_v8_upgrade_environment(environment_path: str) -> dict[str, str]:
     """Return the active dotenv plus ambient overrides without mutation."""
 
-    snapshot, _present, _sha256 = _observability_v8_upgrade_environment_snapshot(
-        environment_path
-    )
+    snapshot, _present, _sha256 = _observability_v8_upgrade_environment_snapshot(environment_path)
     return snapshot
 
 
@@ -868,19 +981,24 @@ def _observability_v8_upgrade_environment_snapshot(
 ) -> tuple[dict[str, str], bool, str]:
     """Return parsed values and a value-free identity of the exact dotenv bytes."""
 
-    snapshot, present, digest = _read_observability_v8_upgrade_dotenv_snapshot(
-        environment_path
+    snapshot, present, digest = _read_observability_v8_upgrade_dotenv_snapshot(environment_path)
+    # POSIX permits exported shell functions and other ambient entries whose
+    # names cannot be referenced by the v8 ``$NAME`` grammar (for example,
+    # ``BASH_FUNC_which%%``). They are unrelated to config conversion and must
+    # not make an otherwise valid upgrade fail. The managed dotenv remains
+    # strict: its parser rejects every malformed assignment before this merge.
+    snapshot.update(
+        (name, value)
+        for name, value in os.environ.items()
+        if _ENVIRONMENT_NAME.fullmatch(name) is not None
     )
-    snapshot.update(os.environ)
     return snapshot, present, digest
 
 
 def _read_observability_v8_upgrade_dotenv(environment_path: str) -> dict[str, str]:
     """Read the exact active dotenv without the legacy parser's silent loss."""
 
-    snapshot, _present, _sha256 = _read_observability_v8_upgrade_dotenv_snapshot(
-        environment_path
-    )
+    snapshot, _present, _sha256 = _read_observability_v8_upgrade_dotenv_snapshot(environment_path)
     return snapshot
 
 
@@ -953,13 +1071,21 @@ def _validate_observability_v8_candidate(
             candidate_file.write(candidate)
             candidate_file.flush()
             os.fsync(candidate_file.fileno())
-        inspected = inspect_v8_config(
-            "validate",
-            config_path=candidate_path,
-            data_dir=data_dir,
-            environment_overrides=protected_environment,
-            gateway_binary=gateway_binary,
-        )
+        try:
+            inspected = inspect_v8_config(
+                "validate",
+                config_path=candidate_path,
+                data_dir=data_dir,
+                environment_overrides=protected_environment,
+                gateway_binary=gateway_binary,
+            )
+        except Exception as exc:
+            from defenseclaw.config_inspect import ConfigInspectError
+            from defenseclaw.observability.v8_activation import V8CandidateValidationError
+
+            if isinstance(exc, ConfigInspectError) and exc.field_path and exc.reason:
+                raise V8CandidateValidationError(exc.field_path, exc.reason) from None
+            raise
         if inspected.valid is not True or inspected.config_version != 8:
             raise ObservabilityV8UpgradeMigrationError("target_validation_invalid")
     finally:
@@ -1099,7 +1225,7 @@ def _migrate_0_3_0_surgical(oc_json: str) -> None:
     # follow-up: the previous implementation used a non-atomic
     # ``open(..., "w") + json.dump`` pair which could leave the user's
     # Codex MCP config truncated mid-write if the process was killed.
-    # Route through the atomic temp-file + os.replace helper used for
+    # Route through the durable same-directory replacement helper used for
     # every other migration write so a crash here is harmless: either
     # the new content is fully present or the old file is intact. We
     # use mode=0o644 (not 0o600) because openclaw.json is a regular
@@ -1309,16 +1435,7 @@ def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
         new_lines.append(line)
     if rewritten == 0:
         return
-    try:
-        # Atomic rewrite via tempfile + rename to avoid a partial
-        # write if the operator interrupts us mid-migration.
-        tmp = config_path + ".tmp-f3395"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.writelines(new_lines)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, config_path)
-    except OSError as exc:
-        ux.warn(f"could not migrate token_env in {config_path}: {exc}", indent="    ")
+    if not _atomic_write_text(config_path, "".join(new_lines), mode=0o600):
         return
     ctx.changes.append(f"migrated {rewritten} stale gateway.token_env reference(s) in config.yaml")
 
@@ -1351,6 +1468,14 @@ def _migrate_0_4_0_tighten_perms(ctx: MigrationContext) -> None:
         if not os.path.isfile(path):
             continue
         try:
+            if os.name == "nt":
+                from defenseclaw.file_permissions import protect_private_file, windows_acl_write_error
+
+                problem = windows_acl_write_error(path)
+                protect_private_file(path)
+                if problem is not None:
+                    ctx.changes.append(f"tightened Windows DACL on {name}")
+                continue
             current = os.stat(path).st_mode & 0o777
             if current == 0o600:
                 continue
@@ -1366,6 +1491,15 @@ def _migrate_0_4_0_tighten_perms(ctx: MigrationContext) -> None:
         for filename in files:
             path = os.path.join(root, filename)
             try:
+                if os.name == "nt":
+                    from defenseclaw.file_permissions import protect_private_file, windows_acl_write_error
+
+                    problem = windows_acl_write_error(path)
+                    protect_private_file(path)
+                    if problem is not None:
+                        rel = os.path.relpath(path, ctx.data_dir)
+                        ctx.changes.append(f"tightened Windows DACL on {rel}")
+                    continue
                 current = os.stat(path).st_mode & 0o777
                 if current == 0o600:
                     continue
@@ -1388,7 +1522,7 @@ def _migrate_0_4_0_remove_legacy_codex_env(ctx: MigrationContext) -> None:
         if not os.path.isfile(path):
             continue
         try:
-            os.remove(path)
+            delete_file_durable(path)
             ctx.changes.append(
                 f"removed legacy codex env override {name} (S8.1: replaced by ~/.codex/config.toml patch)"
             )
@@ -1559,14 +1693,8 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
     if not os.path.isfile(cfg_path):
         return
 
-    try:
-        # newline="" preserves the file's existing line endings (CRLF on a
-        # Windows operator's config) so the surgical insert below does not
-        # silently normalize the whole file to LF.
-        with open(cfg_path, newline="") as f:
-            text = f.read()
-    except OSError as exc:
-        ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
+    text = _read_config_text(cfg_path)
+    if text is None:
         return
 
     block_match = _GUARDRAIL_HOOK_FAIL_MODE_RE.search(text)
@@ -1833,8 +1961,9 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
     in the *target* directory so the bytes never exist on disk under a
     predictable name, applies the file mode from creation, refuses to
     write through a pre-existing symlink at ``path``, and calls
-    :func:`os.fsync` before :func:`os.replace` so a crash mid-rename
-    cannot leave a half-written file. For secret-bearing writes
+    :func:`os.fsync` before the write-through native replacement so a crash
+    cannot leave a half-written file or an uncommitted Windows rename. For
+    secret-bearing writes
     (``mode <= 0o600``) the parent directory is tightened to 0o700 first,
     even when it already exists with a more permissive mode. Non-secret
     writes (``mode > 0o600``, e.g. the surgical ``openclaw.json``
@@ -1891,7 +2020,10 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
             suffix=os.path.basename(path) or ".tmp",
             dir=parent,
         )
-        os.fchmod(fd, effective_mode)
+        if os.name == "nt" and mode > 0o600 and os.path.exists(path):
+            copy_windows_dacl(path, tmp_path)
+        else:
+            set_file_mode(fd, tmp_path, effective_mode, set_owner=True)
         # newline="" writes ``body`` byte-for-byte (no \n -> os.linesep
         # translation), so a caller that preserved a file's CRLF endings
         # does not get them doubled to \r\r\n on Windows.
@@ -1900,7 +2032,7 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
             f.write(body)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, path)
+        replace_file_durable(tmp_path, path)
         # Re-apply the effective mode after replace in case the FS quirks
         # restored a different mode (e.g. tmpfs ACL inheritance).
         try:
@@ -1940,7 +2072,7 @@ def _read_config_text(cfg_path: str) -> str | None:
     (and occasionally forgotten) per migration.
     """
     try:
-        with open(cfg_path, newline="") as f:
+        with open(cfg_path, encoding="utf-8", newline="") as f:
             return f.read()
     except OSError as exc:
         ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
@@ -2182,9 +2314,10 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
        flat path that is NOT in ``_LEGACY_FLAT_REGO_FILENAMES`` is left
        alone so a hand-curated custom rule never disappears mid-upgrade.
 
-    3. Atomic on a per-file basis: each ``os.remove`` either succeeds or
-       leaves the file in place; we never half-delete a file. A failure
-       to remove one file does not abort the migration.
+    3. Durable on a per-file basis: each live name is atomically renamed to an
+       inert tombstone before deletion. A crash cannot resurrect a legacy
+       filename that a downgraded process would consume again. A failure to
+       remove one file does not abort the migration.
 
     4. Idempotent: re-running on a clean install (no flat residue) is a
        no-op.
@@ -2220,7 +2353,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
         if not os.path.isfile(flat_path):
             continue
         try:
-            os.remove(flat_path)
+            delete_file_durable(flat_path)
             removed_rego.append(name)
         except OSError as exc:
             ux.warn(f"could not remove {flat_path}: {exc}", indent="    ")
@@ -2260,7 +2393,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
         return
 
     # Skip symlinks: filecmp on a symlink would resolve through it and
-    # potentially short-circuit to "identical", but then ``os.remove``
+    # potentially short-circuit to "identical", but then durable deletion
     # would unlink the symlink while the operator's intent was a live
     # alias. Leave symlinks for operators to retire manually.
     if os.path.islink(flat_data):
@@ -2279,7 +2412,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
 
     if identical:
         try:
-            os.remove(flat_data)
+            delete_file_durable(flat_data)
             ctx.changes.append(f"removed duplicate {flat_data} (canonical {nested_data} is the one the loader reads)")
         except OSError as exc:
             ux.warn(f"could not remove {flat_data}: {exc}", indent="    ")
@@ -2302,7 +2435,7 @@ def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
             )
             return
     try:
-        os.replace(flat_data, backup_path)
+        replace_file_durable(flat_data, backup_path)
         ctx.changes.append(
             f"preserved operator-edited {flat_data} as {backup_path} "
             f"(differed from canonical {nested_data}; the gateway no longer "
@@ -2675,7 +2808,7 @@ def _migrate_0_8_0_guardrail_runtime_json(ctx: MigrationContext) -> None:
         return
 
     try:
-        os.remove(runtime_path)
+        delete_file_durable(runtime_path)
     except OSError as exc:
         ux.warn(f"could not delete {runtime_path}: {exc}", indent="    ")
         return
@@ -3085,6 +3218,8 @@ def run_migrations(
     data_dir: str | None = None,
     *,
     upgrade_handles_local_bundle: bool = False,
+    strict_required: tuple[str, ...] = (),
+    controller_owns_local_bundle_transaction: bool = False,
 ) -> int:
     """Run all applicable migrations up to ``to_version``.
 
@@ -3131,6 +3266,21 @@ def run_migrations(
     so that operators with a non-default ``DEFENSECLAW_HOME`` get
     their migration applied at the right path.
 
+    ``strict_required`` is reserved for authenticated upgrade controllers.
+    A listed migration retains its bounded exception instead of being reduced
+    to a later missing-cursor error, so native Setup can roll back before it
+    commits an unusable target runtime. Ordinary CLI callers preserve the
+    historical continue-and-retry behavior.
+
+    ``controller_owns_local_bundle_transaction`` is a capability handshake,
+    not a release-version check. Controllers that advertise it reconcile the
+    installed local-observability bundle after migrations. A controller that
+    only advertises the older ``upgrade_handles_local_bundle`` boolean is the
+    published v8 controller whose normal v8-to-v8 path skipped that phase; the
+    target wheel repairs the omission after the migration loop. Authenticated
+    hard-cut controllers retain exclusive rollback custody and are never
+    repaired from inside the migration runner.
+
     Returns the number of migrations actually executed (excludes
     cursor-skipped ones). Failures don't increment the counter and
     don't leave a cursor entry — the next upgrade will retry them.
@@ -3160,8 +3310,12 @@ def run_migrations(
 
     from_t = _ver_tuple(from_version)
     to_t = _ver_tuple(to_version)
+    strict = frozenset(strict_required)
+    if any(not isinstance(version, str) for version in strict_required):
+        raise ValueError("strict required migrations must be version strings")
     same_version_reapply = from_t == to_t
     applied_count = 0
+    migration_failed = False
 
     # Load the cursor; treat "missing" / "unparseable" / "future
     # schema" as "first upgrade on this host" and bootstrap from
@@ -3170,6 +3324,7 @@ def run_migrations(
     # ``from_version`` so we don't replay history on a host that's
     # already in steady state.
     state = migration_state.load(data_dir)
+    deferred_strict_bootstrap = state is None and bool(strict)
     if state is None:
         # ``load`` collapses several cases to ``None``. Most of them
         # (missing / empty / corrupt cursor) are safe to bootstrap. But a
@@ -3195,14 +3350,15 @@ def run_migrations(
             package_version=to_version,
             registry_versions=[v for v, _, _ in MIGRATIONS],
         )
-        # Persist the bootstrap snapshot eagerly so a crash mid-run
-        # still leaves the host with a usable cursor for next time.
-        # save() failure is non-fatal: we'll just bootstrap again
-        # next upgrade (still idempotent).
-        try:
-            migration_state.save(data_dir, state)
-        except OSError as exc:
-            ux.warn(f"could not persist migration cursor: {exc}", indent="    ")
+        # Ordinary CLI upgrades persist the bootstrap snapshot eagerly so a
+        # crash mid-run leaves a usable cursor. A strict native-Setup run must
+        # not write even this metadata before its required migration succeeds:
+        # a candidate refusal must leave the old runtime's data byte-identical.
+        if not strict:
+            try:
+                migration_state.save(data_dir, state)
+            except OSError as exc:
+                ux.warn(f"could not persist migration cursor: {exc}", indent="    ")
 
     for ver, desc, fn in MIGRATIONS:
         ver_t = _ver_tuple(ver)
@@ -3241,13 +3397,16 @@ def run_migrations(
             data_dir=data_dir,
             from_version=from_version,
             to_version=to_version,
-            upgrade_handles_local_bundle=upgrade_handles_local_bundle,
+            upgrade_handles_local_bundle=(upgrade_handles_local_bundle or controller_owns_local_bundle_transaction),
         )
         try:
             fn(ctx)
             ux.ok(f"Migration {ver} applied.", indent="    ")
-        except Exception as exc:  # noqa: BLE001 — never abort upgrade on migration error
+        except Exception as exc:  # noqa: BLE001 - strict native setup must retain exact refusal
+            migration_failed = True
             ux.err(f"migration {ver} failed: {exc}", indent="    ")
+            if ver in strict:
+                raise
             ux.subhead(
                 "upgrade will continue; run 'defenseclaw doctor --fix' afterwards",
                 indent="    ",
@@ -3272,6 +3431,79 @@ def run_migrations(
         try:
             migration_state.save(data_dir, state)
         except OSError as exc:
+            if ver in strict:
+                raise
             ux.warn(f"could not persist migration cursor after {ver}: {exc}", indent="    ")
+
+    if deferred_strict_bootstrap:
+        missing_required = sorted(
+            version for version in strict if not migration_state.is_applied(state, version)
+        )
+        if missing_required:
+            raise RuntimeError(
+                "required migrations are missing: " + ", ".join(missing_required)
+            )
+        # Strict native Setup must preserve refusal atomicity, including for a
+        # host with no prior cursor. Persist the bootstrap only after every
+        # required migration has either completed or been conservatively
+        # recorded by bootstrap. This also covers a same-version packaged run
+        # where no registry callable executes and therefore cannot save state.
+        migration_state.save(data_dir, state)
+
+    normalized_data_dir = os.path.abspath(os.path.expanduser(data_dir))
+    local_bundle_installed = os.path.lexists(os.path.join(normalized_data_dir, "observability-stack"))
+    if (
+        upgrade_handles_local_bundle
+        and not controller_owns_local_bundle_transaction
+        and not _controller_has_hard_cut_bundle_custody()
+        and not migration_failed
+        and local_bundle_installed
+    ):
+        # Compatibility with the immutable first v8 controller. It claimed
+        # ownership of bundle refresh but only executed that phase for a
+        # hard-cut rollback plan, so ordinary v8-to-v8 upgrades left the
+        # installed bundle stamped at the source release. Reconcile from the
+        # authenticated target wheel without naming either release. The
+        # mutation token suppresses this fallback during a staged hard cut,
+        # where the bridge controller owns the recovery journal and performs
+        # the refresh after required migrations.
+        legacy_context = MigrationContext(
+            openclaw_home=openclaw_home,
+            data_dir=normalized_data_dir,
+            from_version=from_version,
+            to_version=to_version,
+        )
+        try:
+            from defenseclaw.upgrade_receipt import find_resumable_upgrade_receipt
+
+            restart_intent_receipt = find_resumable_upgrade_receipt(
+                normalized_data_dir,
+                target_version=to_version,
+            )
+        except (OSError, ValueError):
+            raise ObservabilityV8UpgradeMigrationError("local_bundle_receipt_invalid") from None
+        if restart_intent_receipt is None:
+            # Every published controller that advertises the legacy bundle
+            # ownership flag creates this authenticated receipt before target
+            # mutation. Older pre-receipt controllers do not advertise the
+            # flag and run the migration-owned refresh path above instead.
+            raise ObservabilityV8UpgradeMigrationError("local_bundle_receipt_missing")
+        _refresh_observability_v8_bundle_for_legacy_upgrader(
+            legacy_context,
+            normalized_data_dir,
+            None,
+            restart_intent_receipt=os.fspath(restart_intent_receipt),
+        )
+    elif (
+        migration_failed
+        and upgrade_handles_local_bundle
+        and not controller_owns_local_bundle_transaction
+        and not _controller_has_hard_cut_bundle_custody()
+        and local_bundle_installed
+    ):
+        ux.warn(
+            "local observability bundle refresh was deferred because a target migration failed",
+            indent="    ",
+        )
 
     return applied_count

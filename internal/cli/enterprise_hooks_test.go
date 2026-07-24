@@ -5,11 +5,14 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
@@ -20,6 +23,9 @@ import (
 )
 
 func TestWriteEnterpriseHookGuardianState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
+	}
 	dir := t.TempDir()
 	authorizationDir := t.TempDir()
 	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
@@ -62,6 +68,9 @@ func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 }
 
 func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("enterprise hook guardian symlink writer is unreachable on native Windows; lifecycle gate coverage remains active")
+	}
 	dir := t.TempDir()
 	t.Setenv(hookGuardianAuthorizationDirEnv, t.TempDir())
 	outside := filepath.Join(t.TempDir(), "outside.json")
@@ -78,6 +87,9 @@ func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
 }
 
 func TestWriteEnterpriseHookGuardianStatePreservesProtectedTargets(t *testing.T) {
+	originalOwnershipSetter := enterpriseHookAuthorizationOwnershipSetter
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	t.Cleanup(func() { enterpriseHookAuthorizationOwnershipSetter = originalOwnershipSetter })
 	dir := t.TempDir()
 	authorizationDir := t.TempDir()
 	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
@@ -147,6 +159,9 @@ func TestPreviousEnterpriseHookSuccessIgnoresServiceWritableStatus(t *testing.T)
 }
 
 func TestEnterpriseHookScopedTokenUsesManagedDataDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("enterprise hook scoped tokens are unsupported on native Windows; lifecycle gate coverage remains active")
+	}
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatalf("chmod managed data dir: %v", err)
@@ -176,6 +191,42 @@ func TestEnterpriseHookScopedTokenUsesManagedDataDir(t *testing.T) {
 	}
 }
 
+func TestEnterpriseHookScopedOTLPTokenUsesManagedDataDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("enterprise OTLP scoped tokens are unsupported on native Windows; lifecycle gate coverage remains active")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod managed data dir: %v", err)
+	}
+	token, err := enterpriseHookScopedOTLPToken(dir, "codex")
+	if err != nil {
+		t.Fatalf("enterpriseHookScopedOTLPToken: %v", err)
+	}
+	if len(token) != 64 {
+		t.Fatalf("token length = %d, want 64", len(token))
+	}
+	path, err := connector.OTLPPathTokenFilePath(dir, connector.OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read scoped OTLP token: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != token {
+		t.Fatalf("token file does not contain the returned token")
+	}
+	if info, err := os.Stat(path); err != nil {
+		t.Fatalf("stat scoped OTLP token: %v", err)
+	} else if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("scoped OTLP token mode = %o, want 600", got)
+	}
+	if token, err := enterpriseHookScopedOTLPToken(dir, "cursor"); err != nil || token != "" {
+		t.Fatalf("non-OTLP connector token = %q, %v; want empty", token, err)
+	}
+}
+
 func TestEnterpriseHookWatchEventRelevantIgnoresLockHousekeeping(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -193,6 +244,150 @@ func TestEnterpriseHookWatchEventRelevantIgnoresLockHousekeeping(t *testing.T) {
 				t.Fatalf("enterpriseHookWatchEventRelevant(%+v) = %v, want %v", tc.event, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestEnterpriseHookWatchEventInSettleWindow(t *testing.T) {
+	base := time.Date(2026, 7, 17, 15, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name        string
+		now         time.Time
+		settleUntil time.Time
+		op          fsnotify.Op
+		want        bool
+	}{
+		{
+			// Zero settleUntil means "never reconciled yet" — the
+			// watcher must not suppress the very first fsnotify event
+			// after boot; otherwise startup-time tamper is missed.
+			name:        "never reconciled: not suppressed",
+			now:         base,
+			settleUntil: time.Time{},
+			op:          fsnotify.Write,
+			want:        false,
+		},
+		{
+			// Chmod event well inside the post-reconcile settle
+			// window: this is the guardian's own chmod tail from
+			// hardenInstallFootprint. Suppress to break the
+			// self-trigger loop.
+			name:        "chmod inside window: suppressed",
+			now:         base.Add(500 * time.Millisecond),
+			settleUntil: base.Add(2 * time.Second),
+			op:          fsnotify.Chmod,
+			want:        true,
+		},
+		{
+			// Write event inside window — same rationale as Chmod;
+			// reconcile writes hook scripts and .token files, so
+			// their post-reconcile tail must be suppressed too.
+			name:        "write inside window: suppressed",
+			now:         base.Add(500 * time.Millisecond),
+			settleUntil: base.Add(2 * time.Second),
+			op:          fsnotify.Write,
+			want:        true,
+		},
+		{
+			// Right at the boundary — Before() is strictly less-than,
+			// so an event at exactly settleUntil is NOT suppressed.
+			name:        "chmod at boundary: not suppressed",
+			now:         base.Add(2 * time.Second),
+			settleUntil: base.Add(2 * time.Second),
+			op:          fsnotify.Chmod,
+			want:        false,
+		},
+		{
+			// Event after the window closed.
+			name:        "chmod outside window: not suppressed",
+			now:         base.Add(3 * time.Second),
+			settleUntil: base.Add(2 * time.Second),
+			op:          fsnotify.Chmod,
+			want:        false,
+		},
+		{
+			// Remove inside window: this IS suppressed. The guardian's
+			// atomicWriteFile uses os.Rename over the destination,
+			// which on macOS fires an fsnotify REMOVE on the target.
+			// So a REMOVE inside the settle window is our own
+			// atomic-write finishing, not a user tamper. Real user
+			// Remove events happen outside the settle window and
+			// still trigger reconcile within (settle window + debounce).
+			name:        "remove inside window: suppressed (atomic-write tail)",
+			now:         base.Add(500 * time.Millisecond),
+			settleUntil: base.Add(2 * time.Second),
+			op:          fsnotify.Remove,
+			want:        true,
+		},
+		{
+			// Remove OUTSIDE the settle window: real user tamper. The
+			// guardian's atomic-write tail lives inside the window
+			// (typically ~ms); anything after the window is a user
+			// action and must trigger reconcile.
+			name:        "remove outside window: not suppressed",
+			now:         base.Add(3 * time.Second),
+			settleUntil: base.Add(2 * time.Second),
+			op:          fsnotify.Remove,
+			want:        false,
+		},
+		{
+			// Rename inside window: same rationale as Remove — macOS
+			// rename(2) generates NOTE_RENAME on the source path
+			// alongside NOTE_DELETE on the destination.
+			name:        "rename inside window: suppressed",
+			now:         base.Add(500 * time.Millisecond),
+			settleUntil: base.Add(2 * time.Second),
+			op:          fsnotify.Rename,
+			want:        true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := enterpriseHookWatchEventInSettleWindow(tc.now, tc.settleUntil, tc.op)
+			if got != tc.want {
+				t.Fatalf("enterpriseHookWatchEventInSettleWindow(now=%v settleUntil=%v op=%v) = %v, want %v", tc.now, tc.settleUntil, tc.op, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEnterpriseHookReconcileRowsHash(t *testing.T) {
+	rowsA := []enterpriseHookReconcileRow{
+		{User: "alice", UserHome: "/Users/alice", Connector: "codex", OK: true},
+		{User: "bob", UserHome: "/Users/bob", Connector: "cursor", OK: true},
+	}
+	rowsB := []enterpriseHookReconcileRow{
+		{User: "bob", UserHome: "/Users/bob", Connector: "cursor", OK: true},
+		{User: "alice", UserHome: "/Users/alice", Connector: "codex", OK: true},
+	}
+	rowsC := []enterpriseHookReconcileRow{
+		{User: "alice", UserHome: "/Users/alice", Connector: "codex", OK: false, Error: "boom"},
+		{User: "bob", UserHome: "/Users/bob", Connector: "cursor", OK: true},
+	}
+	rowsD := []enterpriseHookReconcileRow{
+		{User: "alice", UserHome: "/Users/alice", Connector: "codex", OK: true},
+		{User: "bob", UserHome: "/Users/bob", Connector: "cursor", OK: true},
+		{User: "charlie", UserHome: "/Users/charlie", Connector: "claudecode", OK: true},
+	}
+
+	// Row order must not matter — the watcher iterates in whatever
+	// order the manifest resolves, but a "nothing changed" hash must
+	// still match after a benign reorder.
+	if h1, h2 := enterpriseHookReconcileRowsHash(rowsA), enterpriseHookReconcileRowsHash(rowsB); h1 != h2 {
+		t.Fatalf("row-order should not affect hash: A=%s B=%s", h1, h2)
+	}
+	// Same identities but one now failed → hash must differ so the
+	// watch loop treats it as a change (operator needs to see it).
+	if h1, h2 := enterpriseHookReconcileRowsHash(rowsA), enterpriseHookReconcileRowsHash(rowsC); h1 == h2 {
+		t.Fatalf("outcome change (OK true→false) must flip the hash, both = %s", h1)
+	}
+	// Adding a new target must flip the hash.
+	if h1, h2 := enterpriseHookReconcileRowsHash(rowsA), enterpriseHookReconcileRowsHash(rowsD); h1 == h2 {
+		t.Fatalf("adding a target must flip the hash, both = %s", h1)
+	}
+	// Empty input has a stable, non-empty representative — callers
+	// use hash equality to detect "no change", and the boot-time
+	// zero-value ("") must not collide with an actual empty run.
+	if got := enterpriseHookReconcileRowsHash(nil); got == "" {
+		t.Fatalf("empty rows must have a non-empty hash, got %q", got)
 	}
 }
 
@@ -253,5 +448,65 @@ func TestEnterpriseHookManagedRuntimeRejectsUserOwnedDataDir(t *testing.T) {
 	err := validateEnterpriseHookManagedRuntime()
 	if err == nil || !strings.Contains(err.Error(), "data_dir trust check failed") {
 		t.Fatalf("validateEnterpriseHookManagedRuntime error = %v, want data_dir trust check failure", err)
+	}
+}
+
+func TestEnterpriseHooksUninstallAcceptsSIDWithoutDeletedProfile(t *testing.T) {
+	originalConnector := enterpriseHookConnector
+	originalUser := enterpriseHookUser
+	originalHome := enterpriseHookUserHome
+	originalSID := enterpriseHookSID
+	originalDataDir := enterpriseHookDataDir
+	originalJSON := enterpriseHookJSON
+	originalRemove := enterpriseHooksRemoveManagedPolicy
+	t.Cleanup(func() {
+		enterpriseHookConnector = originalConnector
+		enterpriseHookUser = originalUser
+		enterpriseHookUserHome = originalHome
+		enterpriseHookSID = originalSID
+		enterpriseHookDataDir = originalDataDir
+		enterpriseHookJSON = originalJSON
+		enterpriseHooksRemoveManagedPolicy = originalRemove
+	})
+
+	enterpriseHookConnector = "claudecode"
+	enterpriseHookUser = ""
+	enterpriseHookUserHome = ""
+	enterpriseHookSID = "S-1-5-21-111-222-333-1001"
+	enterpriseHookDataDir = ""
+	enterpriseHookJSON = false
+	called := false
+	enterpriseHooksRemoveManagedPolicy = func(_ context.Context, opts enterprisehooks.InstallOptions) error {
+		called = true
+		if opts.OwnerSID != enterpriseHookSID || opts.UserHome != "" || opts.ConnectorName != "claudecode" {
+			t.Fatalf("RemoveManagedPolicy opts = %+v", opts)
+		}
+		return nil
+	}
+	cmd := &cobra.Command{}
+	cmd.SetOut(&strings.Builder{})
+	if err := runEnterpriseHooksUninstall(cmd, nil); err != nil {
+		t.Fatalf("runEnterpriseHooksUninstall: %v", err)
+	}
+	if !called {
+		t.Fatal("RemoveManagedPolicy was not called")
+	}
+}
+
+func TestResolveEnterpriseHookTargetValuesResolvesSIDOnlyProfile(t *testing.T) {
+	original := enterpriseHookSIDProfilePath
+	t.Cleanup(func() { enterpriseHookSIDProfilePath = original })
+	enterpriseHookSIDProfilePath = func(sid string) (string, error) {
+		if sid != "S-1-5-21-111-222-333-1001" {
+			t.Fatalf("resolver SID = %q", sid)
+		}
+		return `C:\Users\alice`, nil
+	}
+	target, err := resolveEnterpriseHookTargetValues("", "", -1, -1, "S-1-5-21-111-222-333-1001", "")
+	if err != nil {
+		t.Fatalf("resolveEnterpriseHookTargetValues: %v", err)
+	}
+	if target.home != `C:\Users\alice` || target.sid != "S-1-5-21-111-222-333-1001" {
+		t.Fatalf("target = %+v, want resolved SID-only profile", target)
 	}
 }

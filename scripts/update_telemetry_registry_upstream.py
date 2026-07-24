@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
-import fcntl
 import hashlib
 import io
 import json
@@ -30,6 +29,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Final
 
 import yaml
+
+if os.name == "nt":
+    from defenseclaw import windows_acl
+    from defenseclaw.file_lock import locked_file_update
+else:
+    import fcntl
+
 from generate_telemetry_registry import (
     EXPECTED_DEPENDENCIES,
     NORMALIZED_SNAPSHOT_FORMAT,
@@ -47,6 +53,7 @@ MAX_AUTHORED_JSON_NESTING: Final = 256
 MAX_LOCK_BYTES: Final = 16 * 1024 * 1024
 LEGACY_NORMALIZED_SNAPSHOT_FORMAT: Final = "defenseclaw-normalized-semconv-v1"
 _PROCESS_UPDATE_LOCK: Final = threading.Lock()
+_WINDOWS_REPOSITORY_LOCK_BASENAME: Final = ".defenseclaw-telemetry-upstream"
 ALLOWED_REPOSITORIES: Final = {
     "otel_core": "https://github.com/open-telemetry/semantic-conventions",
     "otel_genai": "https://github.com/open-telemetry/semantic-conventions-genai",
@@ -847,14 +854,41 @@ def _structural_input_outputs(
 
 
 def _directory_open_flags() -> int:
-    if not hasattr(os, "O_NOFOLLOW"):
-        raise RegistryError("telemetry upstream update requires O_NOFOLLOW")
-    return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW
+    return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _is_link_or_reparse(metadata: os.stat_result) -> bool:
+    return stat.S_ISLNK(metadata.st_mode) or bool(
+        getattr(metadata, "st_file_attributes", 0) & 0x00000400
+    )
+
+
+def _real_directory_metadata(path: Path) -> os.stat_result:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise RegistryError("telemetry upstream directory chain is missing or unsafe") from exc
+    if _is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
+        raise RegistryError("telemetry upstream parent is not a real directory")
+    return metadata
+
+
+def _close_directory_descriptor(descriptor: int | Path) -> None:
+    if isinstance(descriptor, int):
+        os.close(descriptor)
 
 
 @contextlib.contextmanager
 def _directory_descriptor(path: Path):  # type: ignore[no-untyped-def]
     absolute = path.absolute()
+    if os.name == "nt":
+        try:
+            with windows_acl.hold_directory_chain(os.fspath(absolute)):
+                _real_directory_metadata(absolute)
+                yield absolute
+        except windows_acl.WindowsAclError as exc:
+            raise RegistryError("telemetry upstream directory chain is missing or unsafe") from exc
+        return
     flags = _directory_open_flags()
     descriptor = os.open(absolute.anchor, flags)
     try:
@@ -876,6 +910,26 @@ def _directory_descriptor(path: Path):  # type: ignore[no-untyped-def]
 @contextlib.contextmanager
 def _repository_update_lock(root: Path):  # type: ignore[no-untyped-def]
     with _PROCESS_UPDATE_LOCK:
+        if os.name == "nt":
+            # Windows cannot flock a directory. Reuse the CLI's dependency-free
+            # byte-range lock primitive on one durable repository sentinel.
+            # The sentinel must remain in place: unlinking it after release can
+            # split concurrent waiters across distinct file identities.
+            stack = contextlib.ExitStack()
+            try:
+                stack.enter_context(
+                    locked_file_update(os.fspath(root / _WINDOWS_REPOSITORY_LOCK_BASENAME))
+                )
+            except OSError as exc:
+                stack.close()
+                raise RegistryError("cannot acquire telemetry upstream repository lock") from exc
+            try:
+                with windows_acl.hold_directory_chain(os.fspath(root.absolute())):
+                    _real_directory_metadata(root.absolute())
+                    yield root.absolute()
+            finally:
+                stack.close()
+            return
         with _directory_descriptor(root) as root_descriptor:
             try:
                 fcntl.flock(root_descriptor, fcntl.LOCK_EX)
@@ -888,13 +942,37 @@ def _repository_update_lock(root: Path):  # type: ignore[no-untyped-def]
 
 
 def _open_relative_directory(
-    root_descriptor: int,
+    root_descriptor: int | Path,
     parts: tuple[str, ...],
     *,
     create: bool,
     mode: int,
     created: dict[tuple[str, ...], tuple[int, int]] | None = None,
-) -> int:
+) -> int | Path:
+    if isinstance(root_descriptor, Path):
+        current = root_descriptor
+        prefix: list[str] = []
+        _real_directory_metadata(current)
+        for part in parts:
+            prefix.append(part)
+            candidate = current / part
+            try:
+                metadata = candidate.lstat()
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    candidate.mkdir(mode=mode)
+                except FileExistsError:
+                    metadata = candidate.lstat()
+                else:
+                    metadata = candidate.lstat()
+                    if created is not None:
+                        created[tuple(prefix)] = (metadata.st_dev, metadata.st_ino)
+            if _is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
+                raise RegistryError("telemetry upstream parent is not a real directory")
+            current = candidate
+        return current
     flags = _directory_open_flags()
     descriptor = os.dup(root_descriptor)
     prefix: list[str] = []
@@ -930,13 +1008,13 @@ def _open_relative_directory(
 
 
 def _open_parent_directory(
-    root_descriptor: int,
+    root_descriptor: int | Path,
     relative: str,
     *,
     create: bool,
     mode: int,
     created: dict[tuple[str, ...], tuple[int, int]] | None = None,
-) -> tuple[int, str]:
+) -> tuple[int | Path, str]:
     parts = PurePosixPath(relative).parts
     return (
         _open_relative_directory(
@@ -950,21 +1028,32 @@ def _open_parent_directory(
     )
 
 
-def _entry_metadata(parent_descriptor: int, name: str) -> os.stat_result | None:
+def _entry_metadata(parent_descriptor: int | Path, name: str) -> os.stat_result | None:
     try:
-        return os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        metadata = (
+            (parent_descriptor / name).lstat()
+            if isinstance(parent_descriptor, Path)
+            else os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        )
     except FileNotFoundError:
         return None
+    if _is_link_or_reparse(metadata):
+        raise RegistryError("telemetry upstream target is a symlink or reparse point")
+    return metadata
 
 
 def _regular_identity(metadata: os.stat_result, *, require_single_link: bool) -> tuple[int, int]:
-    if not stat.S_ISREG(metadata.st_mode) or (require_single_link and metadata.st_nlink != 1):
+    if (
+        _is_link_or_reparse(metadata)
+        or not stat.S_ISREG(metadata.st_mode)
+        or (require_single_link and metadata.st_nlink != 1)
+    ):
         raise RegistryError("telemetry upstream target is not a safe regular file")
     return metadata.st_dev, metadata.st_ino
 
 
 def _read_regular_entry(
-    parent_descriptor: int,
+    parent_descriptor: int | Path,
     name: str,
     *,
     max_bytes: int,
@@ -973,11 +1062,18 @@ def _read_regular_entry(
     if entry_before is None:
         raise RegistryError("telemetry upstream repository file is missing")
     identity = _regular_identity(entry_before, require_single_link=True)
-    descriptor = os.open(
-        name,
-        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-        dir_fd=parent_descriptor,
-    )
+    try:
+        descriptor = (
+            windows_acl.open_regular_mutation_fd(os.fspath(parent_descriptor / name))
+            if isinstance(parent_descriptor, Path)
+            else os.open(
+                name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_descriptor,
+            )
+        )
+    except OSError as exc:
+        raise RegistryError("telemetry upstream repository file changed while opening") from exc
     payload = bytearray()
     too_large = False
     try:
@@ -1009,7 +1105,7 @@ def _read_regular_entry(
 
 
 def _read_repository_file(
-    root_descriptor: int,
+    root_descriptor: int | Path,
     relative: str,
     *,
     max_bytes: int,
@@ -1023,11 +1119,11 @@ def _read_repository_file(
     try:
         return _read_regular_entry(parent_descriptor, name, max_bytes=max_bytes)
     finally:
-        os.close(parent_descriptor)
+        _close_directory_descriptor(parent_descriptor)
 
 
 def _validate_repository_digest(
-    root_descriptor: int,
+    root_descriptor: int | Path,
     relative: str,
     expected_digest: str,
 ) -> None:
@@ -1045,10 +1141,14 @@ def _validate_repository_digest(
         identity = _regular_identity(entry_before, require_single_link=True)
         if entry_before.st_size > MAX_EXPANDED_BYTES:
             raise RegistryError(f"telemetry upstream candidate reference exceeds the read limit: {relative}")
-        descriptor = os.open(
-            name,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-            dir_fd=parent_descriptor,
+        descriptor = (
+            windows_acl.open_regular_mutation_fd(os.fspath(parent_descriptor / name))
+            if isinstance(parent_descriptor, Path)
+            else os.open(
+                name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_descriptor,
+            )
         )
         opened_before = os.fstat(descriptor)
         if _regular_identity(opened_before, require_single_link=True) != identity:
@@ -1082,17 +1182,17 @@ def _validate_repository_digest(
     finally:
         if descriptor is not None:
             os.close(descriptor)
-        os.close(parent_descriptor)
+        _close_directory_descriptor(parent_descriptor)
 
 
-def _directory_identity(descriptor: int) -> tuple[int, int]:
-    metadata = os.fstat(descriptor)
+def _directory_identity(descriptor: int | Path) -> tuple[int, int]:
+    metadata = _real_directory_metadata(descriptor) if isinstance(descriptor, Path) else os.fstat(descriptor)
     if not stat.S_ISDIR(metadata.st_mode):
         raise RegistryError("telemetry upstream parent descriptor is not a directory")
     return metadata.st_dev, metadata.st_ino
 
 
-def _validate_parent_binding(root_descriptor: int, state: dict[str, Any]) -> None:
+def _validate_parent_binding(root_descriptor: int | Path, state: dict[str, Any]) -> None:
     expected_identity = state["parent_identity"]
     if _directory_identity(state["parent_descriptor"]) != expected_identity:
         raise RegistryError("telemetry upstream held parent directory changed identity")
@@ -1106,10 +1206,10 @@ def _validate_parent_binding(root_descriptor: int, state: dict[str, Any]) -> Non
         if _directory_identity(current_descriptor) != expected_identity:
             raise RegistryError("telemetry upstream target parent left its canonical namespace")
     finally:
-        os.close(current_descriptor)
+        _close_directory_descriptor(current_descriptor)
 
 
-def _validate_installed_target(root_descriptor: int, state: dict[str, Any]) -> None:
+def _validate_installed_target(root_descriptor: int | Path, state: dict[str, Any]) -> None:
     _validate_parent_binding(root_descriptor, state)
     expected_identity = state["installed_identity"]
     expected_payload = state["expected_payload"]
@@ -1126,7 +1226,11 @@ def _validate_installed_target(root_descriptor: int, state: dict[str, Any]) -> N
         raise RegistryError("telemetry upstream installed target changed before verification")
 
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+    descriptor = (
+        windows_acl.open_regular_mutation_fd(os.fspath(parent_descriptor / name))
+        if isinstance(parent_descriptor, Path)
+        else os.open(name, flags, dir_fd=parent_descriptor)
+    )
     matches = True
     digest = hashlib.sha256()
     offset = 0
@@ -1163,7 +1267,7 @@ def _validate_installed_target(root_descriptor: int, state: dict[str, Any]) -> N
 
 
 def _validate_original_lock(
-    root_descriptor: int,
+    root_descriptor: int | Path,
     state: dict[str, Any],
     expected_identity: tuple[int, int],
     expected_payload: bytes,
@@ -1181,7 +1285,7 @@ def _validate_original_lock(
 
 
 def _validate_candidate_references(
-    root_descriptor: int,
+    root_descriptor: int | Path,
     references: tuple[tuple[str, str], ...],
 ) -> None:
     for relative, expected_digest in references:
@@ -1189,7 +1293,7 @@ def _validate_candidate_references(
 
 
 def _write_staged_file(
-    transaction_descriptor: int,
+    transaction_descriptor: int | Path,
     relative: str,
     payload: bytes,
     mode: int,
@@ -1202,28 +1306,72 @@ def _write_staged_file(
     )
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     descriptor: int | None = None
+    target = parent_descriptor / name if isinstance(parent_descriptor, Path) else None
     try:
-        descriptor = os.open(name, flags, 0o600, dir_fd=parent_descriptor)
-        os.fchmod(descriptor, mode)
+        descriptor = (
+            os.open(target, flags, 0o600)
+            if target is not None
+            else os.open(name, flags, 0o600, dir_fd=parent_descriptor)
+        )
+        fchmod = getattr(os, "fchmod", None)
+        if fchmod is not None:
+            fchmod(descriptor, mode)
+        opened = os.fstat(descriptor)
+        opened_identity = _regular_identity(opened, require_single_link=True)
+        named_identity = (
+            _regular_identity(target.lstat(), require_single_link=True)
+            if target is not None
+            else opened_identity
+        )
+        if opened_identity != named_identity:
+            raise RegistryError("telemetry upstream staged file changed while opening")
         with os.fdopen(descriptor, "wb", closefd=True) as stream:
             descriptor = None
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        os.fsync(parent_descriptor)
+        if isinstance(parent_descriptor, int):
+            os.fsync(parent_descriptor)
     except BaseException:
         if descriptor is not None:
             os.close(descriptor)
         with contextlib.suppress(FileNotFoundError):
-            os.unlink(name, dir_fd=parent_descriptor)
+            if target is not None:
+                target.unlink()
+            else:
+                os.unlink(name, dir_fd=parent_descriptor)
         raise
     finally:
-        os.close(parent_descriptor)
+        _close_directory_descriptor(parent_descriptor)
 
 
 def _create_transaction_directory(
-    root_descriptor: int,
-) -> tuple[str, int, tuple[int, int]]:
+    root_descriptor: int | Path,
+) -> tuple[str, int | Path, tuple[int, int]]:
+    if isinstance(root_descriptor, Path):
+        for _attempt in range(32):
+            name = f".telemetry-upstream-update-{secrets.token_hex(16)}"
+            path = root_descriptor / name
+            identity: tuple[int, int] | None = None
+            try:
+                path.mkdir(mode=0o700)
+            except FileExistsError:
+                continue
+            try:
+                metadata = _real_directory_metadata(path)
+                identity = (metadata.st_dev, metadata.st_ino)
+                return name, path, identity
+            except BaseException as exc:
+                if identity is not None:
+                    with contextlib.suppress(BaseException):
+                        _remove_tree_at(root_descriptor, name, identity)
+                else:
+                    with contextlib.suppress(OSError):
+                        path.rmdir()
+                if not isinstance(exc, Exception):
+                    raise
+                raise RegistryError("cannot initialize telemetry upstream transaction directory") from exc
+        raise RegistryError("cannot allocate telemetry upstream transaction directory")
     flags = _directory_open_flags()
     for _attempt in range(32):
         name = f".telemetry-upstream-update-{secrets.token_hex(16)}"
@@ -1242,7 +1390,9 @@ def _create_transaction_directory(
             descriptor = os.open(name, flags, dir_fd=root_descriptor)
             if _directory_identity(descriptor) != identity:
                 raise RegistryError("telemetry upstream transaction directory changed during initialization")
-            os.fchmod(descriptor, 0o700)
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is not None:
+                fchmod(descriptor, 0o700)
             os.fsync(descriptor)
             return name, descriptor, identity
         except BaseException as exc:
@@ -1262,10 +1412,38 @@ def _create_transaction_directory(
 
 
 def _remove_tree_at(
-    parent_descriptor: int,
+    parent_descriptor: int | Path,
     name: str,
     expected_identity: tuple[int, int],
 ) -> None:
+    if isinstance(parent_descriptor, Path):
+        path = parent_descriptor / name
+        metadata = _real_directory_metadata(path)
+        if (metadata.st_dev, metadata.st_ino) != expected_identity:
+            raise RegistryError("telemetry upstream transaction directory was replaced")
+        try:
+            with windows_acl.hold_directory_chain(os.fspath(path)):
+                for child in tuple(path.iterdir()):
+                    child_metadata = child.lstat()
+                    if _is_link_or_reparse(child_metadata):
+                        raise RegistryError("telemetry upstream transaction contains a reparse point")
+                    if stat.S_ISDIR(child_metadata.st_mode):
+                        _remove_tree_at(
+                            path,
+                            child.name,
+                            (child_metadata.st_dev, child_metadata.st_ino),
+                        )
+                    elif stat.S_ISREG(child_metadata.st_mode):
+                        windows_acl.delete_regular_file_by_handle(os.fspath(child))
+                    else:
+                        raise RegistryError("telemetry upstream transaction contains a special file")
+        except windows_acl.WindowsAclError as exc:
+            raise RegistryError("telemetry upstream transaction cleanup could not bind its directory") from exc
+        metadata = _real_directory_metadata(path)
+        if (metadata.st_dev, metadata.st_ino) != expected_identity:
+            raise RegistryError("telemetry upstream transaction directory changed during cleanup")
+        path.rmdir()
+        return
     flags = _directory_open_flags()
     descriptor = os.open(name, flags, dir_fd=parent_descriptor)
     try:
@@ -1297,7 +1475,7 @@ def _remove_tree_at(
 
 
 def _remove_created_directories(
-    root_descriptor: int,
+    root_descriptor: int | Path,
     created: dict[tuple[str, ...], tuple[int, int]],
 ) -> None:
     for parts in sorted(created, key=lambda item: (len(item), item), reverse=True):
@@ -1308,13 +1486,20 @@ def _remove_created_directories(
             mode=0o755,
         )
         try:
-            metadata = os.stat(parts[-1], dir_fd=parent_descriptor, follow_symlinks=False)
+            metadata = _entry_metadata(parent_descriptor, parts[-1])
+            if metadata is None:
+                raise RegistryError(
+                    "telemetry upstream created directory disappeared during rollback"
+                )
             if (metadata.st_dev, metadata.st_ino) != created[parts]:
                 raise RegistryError("telemetry upstream created directory changed during rollback")
-            os.rmdir(parts[-1], dir_fd=parent_descriptor)
-            os.fsync(parent_descriptor)
+            if isinstance(parent_descriptor, Path):
+                (parent_descriptor / parts[-1]).rmdir()
+            else:
+                os.rmdir(parts[-1], dir_fd=parent_descriptor)
+                os.fsync(parent_descriptor)
         finally:
-            os.close(parent_descriptor)
+            _close_directory_descriptor(parent_descriptor)
 
 
 def _rollback_rendered(
@@ -1372,6 +1557,242 @@ def _rollback_rendered(
             os.close(backup_descriptor)
 
 
+def _rollback_rendered_windows(
+    root: Path,
+    transaction: Path,
+    states: list[dict[str, Any]],
+) -> None:
+    """Restore exact pre-publication file objects after a Windows failure."""
+
+    for state in reversed(states):
+        installed_identity = state["installed_identity"]
+        if installed_identity is None:
+            continue
+        _validate_parent_binding(root, state)
+        parent = state["parent_descriptor"]
+        if not isinstance(parent, Path):
+            raise RegistryError("telemetry upstream Windows parent binding is invalid")
+        name = PurePosixPath(state["relative"]).name
+        target = parent / name
+        current = _entry_metadata(parent, name)
+        if current is None or _regular_identity(current, require_single_link=True) != installed_identity:
+            raise RegistryError("telemetry upstream target changed during rollback")
+
+        prior_identity = state["prior_identity"]
+        if prior_identity is None:
+            windows_acl.delete_regular_file_by_handle(os.fspath(target))
+            state["installed_identity"] = None
+            continue
+
+        backup_parent, backup_name = _open_parent_directory(
+            transaction,
+            f"backup/{state['relative']}",
+            create=False,
+            mode=0o700,
+        )
+        discard_parent, discard_name = _open_parent_directory(
+            transaction,
+            f"discard/{state['relative']}",
+            create=True,
+            mode=0o700,
+        )
+        assert isinstance(backup_parent, Path) and isinstance(discard_parent, Path)
+        backup = backup_parent / backup_name
+        discard = discard_parent / discard_name
+        backup_metadata = _entry_metadata(backup_parent, backup_name)
+        if backup_metadata is None or _regular_identity(
+            backup_metadata,
+            require_single_link=True,
+        ) != prior_identity:
+            raise RegistryError("telemetry upstream backup changed during rollback")
+        if os.path.lexists(discard):
+            raise RegistryError("telemetry upstream rollback discard path collision")
+        windows_acl.replace_file(os.fspath(target), os.fspath(backup), os.fspath(discard))
+        restored = _entry_metadata(parent, name)
+        if restored is None or _regular_identity(restored, require_single_link=True) != prior_identity:
+            raise RegistryError("telemetry upstream prior target restore was not exact")
+        windows_acl.delete_regular_file_by_handle(os.fspath(discard))
+        state["installed_identity"] = None
+
+
+def _install_rendered_windows(
+    root: Path,
+    normalized: dict[str, bytes],
+    targets: list[str],
+    lock_relative: str,
+    *,
+    expected_lock_identity: tuple[int, int] | None,
+    expected_lock_payload: bytes | None,
+    candidate_references: tuple[tuple[str, str], ...],
+) -> None:
+    """Native Windows counterpart to the descriptor-relative POSIX commit."""
+
+    created_directories: dict[tuple[str, ...], tuple[int, int]] = {}
+    states: list[dict[str, Any]] = []
+    root = root.absolute()
+    with windows_acl.hold_directory_chain(os.fspath(root)):
+        _real_directory_metadata(root)
+        transaction_name, transaction_descriptor, transaction_identity = _create_transaction_directory(root)
+        assert isinstance(transaction_descriptor, Path)
+        transaction = transaction_descriptor
+        remove_transaction = True
+        committed = False
+        try:
+            with contextlib.ExitStack() as leases:
+                leases.enter_context(windows_acl.hold_directory(os.fspath(transaction)))
+                held_parents: set[str] = set()
+                for relative in targets:
+                    parent_descriptor, name = _open_parent_directory(
+                        root,
+                        relative,
+                        create=True,
+                        mode=0o755,
+                        created=created_directories,
+                    )
+                    assert isinstance(parent_descriptor, Path)
+                    parent_key = os.path.normcase(os.fspath(parent_descriptor))
+                    if parent_key not in held_parents:
+                        leases.enter_context(windows_acl.hold_directory(os.fspath(parent_descriptor)))
+                        held_parents.add(parent_key)
+                    metadata = _entry_metadata(parent_descriptor, name)
+                    prior_identity = (
+                        None
+                        if metadata is None
+                        else _regular_identity(metadata, require_single_link=True)
+                    )
+                    state = {
+                        "relative": relative,
+                        "parent_descriptor": parent_descriptor,
+                        "parent_parts": PurePosixPath(relative).parts[:-1],
+                        "parent_identity": _directory_identity(parent_descriptor),
+                        "prior_identity": prior_identity,
+                        "installed_identity": None,
+                        "installed_sha256": _sha256(normalized[relative]),
+                        "expected_payload": normalized[relative],
+                        "mode": 0o644,
+                    }
+                    states.append(state)
+                    _write_staged_file(
+                        transaction,
+                        relative,
+                        normalized[relative],
+                        0o644,
+                    )
+
+                lock_state = states[-1]
+                if lock_state["relative"] != lock_relative:
+                    raise RegistryError("telemetry upstream lock is not the final publication state")
+                if expected_lock_identity is not None and expected_lock_payload is not None:
+                    _validate_original_lock(
+                        root,
+                        lock_state,
+                        expected_lock_identity,
+                        expected_lock_payload,
+                    )
+
+                for state in states:
+                    relative = state["relative"]
+                    parent = state["parent_descriptor"]
+                    assert isinstance(parent, Path)
+                    name = PurePosixPath(relative).name
+                    target = parent / name
+                    _validate_parent_binding(root, state)
+                    if relative == lock_relative:
+                        for candidate in states:
+                            if candidate["installed_identity"] is None:
+                                _validate_parent_binding(root, candidate)
+                            else:
+                                _validate_installed_target(root, candidate)
+                        _validate_candidate_references(root, candidate_references)
+                        if expected_lock_identity is not None and expected_lock_payload is not None:
+                            _validate_original_lock(
+                                root,
+                                state,
+                                expected_lock_identity,
+                                expected_lock_payload,
+                            )
+
+                    staged_parent, staged_name = _open_parent_directory(
+                        transaction,
+                        f"new/{relative}",
+                        create=False,
+                        mode=0o700,
+                    )
+                    backup_parent, backup_name = _open_parent_directory(
+                        transaction,
+                        f"backup/{relative}",
+                        create=True,
+                        mode=0o700,
+                    )
+                    assert isinstance(staged_parent, Path) and isinstance(backup_parent, Path)
+                    staged = staged_parent / staged_name
+                    backup = backup_parent / backup_name
+                    staged_metadata = _entry_metadata(staged_parent, staged_name)
+                    if staged_metadata is None:
+                        raise RegistryError("telemetry upstream staged output disappeared")
+                    staged_identity = _regular_identity(staged_metadata, require_single_link=True)
+                    current = _entry_metadata(parent, name)
+                    prior_identity = state["prior_identity"]
+                    if prior_identity is None:
+                        if current is not None:
+                            raise RegistryError("telemetry upstream target appeared during publication")
+                        windows_acl.move_file_no_replace(os.fspath(staged), os.fspath(target))
+                        state["installed_identity"] = staged_identity
+                    else:
+                        if current is None or _regular_identity(
+                            current,
+                            require_single_link=True,
+                        ) != prior_identity:
+                            raise RegistryError("telemetry upstream target changed during publication")
+                        if os.path.lexists(backup):
+                            raise RegistryError("telemetry upstream backup path collision")
+                        windows_acl.replace_file(
+                            os.fspath(target),
+                            os.fspath(staged),
+                            os.fspath(backup),
+                        )
+                        # ReplaceFileW has already changed the live target and
+                        # moved the prior object into the transaction backup.
+                        # Record that commit edge before any fallible backup
+                        # verification so synchronous failures are guaranteed
+                        # to route this state through rollback.
+                        state["installed_identity"] = staged_identity
+                        backup_metadata = _entry_metadata(backup_parent, backup_name)
+                        if backup_metadata is None or _regular_identity(
+                            backup_metadata,
+                            require_single_link=True,
+                        ) != prior_identity:
+                            raise RegistryError("telemetry upstream backup is not exact")
+                    _validate_installed_target(root, state)
+                    if relative == lock_relative:
+                        for candidate in states:
+                            _validate_installed_target(root, candidate)
+                        _validate_candidate_references(root, candidate_references)
+                committed = True
+        except BaseException as publication_exc:
+            try:
+                _rollback_rendered_windows(root, transaction, states)
+                _remove_created_directories(root, created_directories)
+            except BaseException as rollback_exc:
+                remove_transaction = False
+                raise RegistryError(
+                    "telemetry upstream rollback failed; transaction evidence was preserved"
+                ) from rollback_exc
+            if not isinstance(publication_exc, Exception):
+                raise
+            raise RegistryError("telemetry upstream publication failed and was rolled back") from publication_exc
+        finally:
+            if remove_transaction:
+                try:
+                    _remove_tree_at(root, transaction_name, transaction_identity)
+                except BaseException as cleanup_exc:
+                    if committed:
+                        raise RegistryError(
+                            "telemetry upstream update committed; transaction cleanup failed"
+                        ) from cleanup_exc
+                    raise
+
+
 def _install_rendered(
     root: Path,
     rendered: dict[str, bytes],
@@ -1426,6 +1847,18 @@ def _install_rendered(
     if lock_relative not in normalized:
         raise RegistryError("telemetry upstream update is missing its lock commit marker")
     targets = sorted(normalized, key=lambda item: (item == lock_relative, item))
+
+    if os.name == "nt":
+        _install_rendered_windows(
+            root,
+            normalized,
+            targets,
+            lock_relative,
+            expected_lock_identity=expected_lock_identity,
+            expected_lock_payload=expected_lock_payload,
+            candidate_references=candidate_references,
+        )
+        return
 
     created_directories: dict[tuple[str, ...], tuple[int, int]] = {}
     states: list[dict[str, Any]] = []

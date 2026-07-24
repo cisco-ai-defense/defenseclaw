@@ -38,12 +38,26 @@ On **macOS**, OpenShell is not available. DefenseClaw still works for scanning, 
 
 ### Windows support
 
-On **Windows**, DefenseClaw is **hook-only**. The hook-based connectors —
-Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, and
-OpenHands — are fully supported. Their hook decisions run **natively in the
-`defenseclaw-gateway` binary** (the agent invokes `defenseclaw-gateway hook --connector <name>
---event <event>`), so Windows needs **no Git Bash, no `jq`, and no shell
-shims** — there are zero external prerequisites beyond the binary itself.
+On **native Windows**, DefenseClaw is **hook-only**. The current Windows
+connector scope deliberately excludes WSL and requires both the upstream agent
+and the complete DefenseClaw hook path to run directly on Windows.
+
+- **Supported and certified:** Codex and Claude Code.
+- **Not certified:** Cursor, Windsurf, Gemini CLI, Copilot CLI, Antigravity,
+  OpenCode, and Hermes. Their cross-platform setup code is not a native Windows
+  support commitment.
+- **Unsupported:** OpenHands, OmniGent, OpenClaw, and ZeptoClaw. Their required
+  WSL, terminal/sandbox, or local-proxy topology is not hosted by native
+  Windows DefenseClaw.
+
+The certified connectors invoke the native `defenseclaw-hook.exe` entrypoint;
+they do not add a WSL, Git Bash, `jq`, or POSIX-shell dependency. Upstream
+agent prerequisites still apply, including Git for Windows for Claude Code.
+
+WSL availability is tracked for upstream research in
+[`CONNECTOR-MATRIX.md`](CONNECTOR-MATRIX.md), but it is not part of the current
+DefenseClaw Windows support or release-certification scope. A connector that
+only works through WSL does not qualify as Windows-supported.
 
 The proxy connectors **OpenClaw** and **ZeptoClaw** are **not supported on
 Windows**: they require the local guardrail proxy, which DefenseClaw does not
@@ -131,7 +145,7 @@ directly; it performs the guarded developer publication itself.
 | Tool | Minimum | Check | Install |
 |------|---------|-------|---------|
 | Go | 1.26.4+ | `go version` | [go.dev/dl](https://go.dev/dl/) or `brew install go` |
-| Python | 3.10+ (3.12 recommended) | `python3 --version` | System package manager or [python.org](https://python.org) |
+| Python | 3.10-3.13 (3.12 recommended) | `python3 --version` | System package manager or [python.org](https://python.org) |
 | uv | latest | `uv --version` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | Node.js / npm | 18+ | `node --version` | [nodejs.org](https://nodejs.org) or `brew install node` |
 | Git | any | `git --version` | System package manager |
@@ -323,10 +337,46 @@ installation before dependency or artifact changes.
 ### Cut a GitHub Release
 
 The manually dispatched `Release` GitHub Actions workflow is the only supported
-way to cut a release. It validates the requested version, builds and signs all
-artifacts, runs the native upgrade gates, and creates the remote tag and GitHub
-release together only after protected release approval. This ordering keeps
-Immutable Releases from stranding half-built assets.
+way to cut a release. One dispatch from a reviewed `main` commit validates the
+requested version, builds and signs the Linux, macOS, and Windows artifacts,
+tests those exact candidate bytes, and publishes them. A merge to `main` is the
+review-and-CI boundary.
+
+Before publication, the same run proves:
+
+- `install.sh` installs the exact candidate on Linux and macOS;
+- the latest authenticated older release, the published `0.8.5` and `0.8.4`
+  boundaries, and representative `0.7.x`, `0.6.x`, and `0.5.x` releases
+  upgrade successfully on Linux and macOS;
+- the unified macOS app is Developer ID signed and notarized when all Apple
+  signing credentials are available, or ad-hoc signed and published with
+  explicit `-unverified` names when none are configured;
+- `install.ps1` delegates to the native Windows Setup and installs the exact
+  candidate successfully, whether Authenticode-signed or explicitly
+  unverified and authenticated by the release Sigstore checksums; and
+- the sealed candidate contains the expected Linux, macOS, and Windows
+  binaries.
+
+The first native Windows release is fresh-install-only; the release workflow
+tests installation and exact installed-version verification.
+
+Apple release credentials are an all-or-none group: complete credentials must
+produce notarized assets, no credentials intentionally produce the unverified
+artifacts above, and a partial credential set stops the run.
+Windows Authenticode credentials use the same all-or-none rule: both values
+produce Cisco-signed Setup bytes, neither produces an explicitly unverified
+Setup that remains authenticated by release checksums and provenance, and a
+partial pair stops the run.
+
+Each selected pre-`0.8.4` POSIX source must visibly traverse the authenticated
+published `0.8.4` bridge and its fresh-controller handoff into the `0.8.5+`
+updater before reaching the target. The release gate verifies both historical
+and bridge rollback snapshots, final version-bound health, and the exact staged
+path; it does not allow a seeded fixture to bypass either hop.
+
+The selected commit remains valid if a later change merges to `main` while the
+release is running; that ordinary repository activity does not invalidate
+already-built and tested candidate bytes.
 
 The workflow input is the published-version authority. It stamps the requested
 version into its isolated build checkout before producing the CLI, gateway,
@@ -342,13 +392,16 @@ checksummed release assets still carry the requested version everywhere.
 Preferred — from the Actions UI:
 
 ```
-Actions -> Release -> Run workflow -> version: 0.4.0
+Actions -> Release -> Run workflow -> version: 0.8.7
+  -> immutable_releases_confirmed: true
 ```
 
-Or dispatch the same workflow with GitHub CLI:
+Or dispatch it with GitHub CLI:
 
 ```bash
-gh workflow run release.yaml --ref main -f version=0.4.0
+gh workflow run release.yaml --ref main \
+  -f version=0.8.7 \
+  -f immutable_releases_confirmed=true
 ```
 
 Do not create or push the tag yourself. The workflow must retain exclusive
@@ -376,7 +429,7 @@ make clean        # Full clean (binaries, venv, node_modules, coverage)
 End users can install a released version without cloning the repo:
 
 ```bash
-VERSION=0.8.4
+VERSION=0.8.6
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 ```
@@ -384,14 +437,12 @@ curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 The installer detects the platform, downloads the correct gateway
 binary + CLI wheel + plugin tarball, installs them, and prompts to run
 `defenseclaw init --enable-guardrail`. Use `--yes` / `-y` to skip
-confirmations. The release installers are fresh-install-only. If the CLI,
-gateway, or managed virtual environment already exists, they exit before
+confirmations. The macOS/Linux release scripts are fresh-install-only. If the
+CLI, gateway, or managed virtual environment already exists, they exit before
 platform/dependency setup or artifact replacement. Use the authenticated
 current release-owned `scripts/upgrade.sh` resolver for an existing POSIX
-pre-bridge host. The signed `scripts/upgrade.ps1` surface is refusal-only
-because this cut publishes no Windows runtime. A `0.8.3`-or-older built-in
-`defenseclaw upgrade` safely refuses a hard-cut target but cannot perform the
-required two-process bridge handoff retroactively.
+installation. Windows uses the authenticated native Setup described below for
+a fresh installation; no upgrade from a pre-native Windows release is claimed.
 
 Authenticated POSIX installs keep a private, mode-0700 same-filesystem custody
 directory for inactive rollback objects. A durable mode-0600 in-progress marker
@@ -404,7 +455,7 @@ artifact work.
 Pin a specific version:
 
 ```bash
-VERSION=0.8.4
+VERSION=0.8.6
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
 ```
@@ -416,7 +467,7 @@ OpenClaw runtime and the DefenseClaw plugin). You can pick a different
 connector — or skip connector setup entirely — with `--connector`:
 
 ```bash
-VERSION=0.8.4
+VERSION=0.8.6
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 
 # Codex (no OpenClaw, no plugin tarball; patches ~/.codex/config.toml + hooks)
@@ -439,6 +490,34 @@ Run interactively (without `--yes` and without `--connector`) and the
 installer prompts which connector to use. The picked connector is
 recorded at `~/.defenseclaw/picked_connector` so the CLI's `defenseclaw
 setup` defaults to it on the next invocation.
+
+### Native Windows Setup
+
+Native Windows releases publish a signed `DefenseClawSetup-x64.exe` for x64
+Windows. Download Setup from the GitHub release, then double-click it for the
+graphical wizard or run it quietly from the signed-in, non-elevated user's
+interactive desktop session:
+
+```powershell
+.\DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1
+```
+
+Setup installs the CLI/TUI, native gateway, no-console hook launcher, and
+managed Python runtime under `%LOCALAPPDATA%\Programs\DefenseClaw`, and adds its
+managed `bin` directory to the current user's `PATH`. Use
+`CONNECTOR=claudecode` for Claude Code or `CONNECTOR=none` to configure a
+connector later.
+
+Quiet mode does not authorize service, SYSTEM, session-zero, elevated, or
+background/batch installation. A configured Codex or Claude Code connector
+requires gateway startup; only `CONNECTOR=none STARTGATEWAY=0` is a supported
+stopped CLI-only install. See the complete
+[native Windows guide](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/)
+for lifecycle, support, security, and troubleshooting boundaries.
+
+The first native Windows release gate qualifies fresh installation and exact
+installed-version verification. It makes no in-place upgrade claim from older
+POSIX-only releases.
 
 ---
 
@@ -733,17 +812,16 @@ running `defenseclaw doctor` for the full report.
 
 ### Unsupported historical sources
 
-Automatic upgrades are supported only from versions named in the candidate's
-published-baseline matrix. Sources outside it—including assetless `0.7.0`,
-pre-upgrader `0.2.x`, and historical `0.3.x` releases—have no tested in-place
-path. The resolver fails closed before stopping services and prints the exact
-tested source versions.
+Each release proves upgrades from the latest authenticated older release, the
+published `0.8.5` hard-cut boundary, the published `0.8.4` bridge boundary, and
+the newest authenticated `0.7.x`, `0.6.x`, and `0.5.x` releases on both Linux
+and macOS. Sources outside the signed published-baseline policy have no
+supported in-place path. The resolver fails closed before stopping services
+and prints the allowed source versions.
 
-Support is platform-specific. POSIX release gates cover the reviewed global
-matrix through `0.4.0`. Release `0.8.4` published no Windows gateway or
-rollback binary, so this hard cut has no supported Windows source version; the
-PowerShell resolver fails closed before stopping services. Global POSIX
-coverage must not be treated as a Windows upgrade claim.
+Support is platform-specific. The first native Windows release is qualified as
+a fresh install and does not claim an upgrade from an earlier POSIX-only
+release.
 
 If the installed version is not in that list, remain on the current version and
 contact support for a source-specific, state-aware recovery plan. Do not infer
@@ -781,8 +859,7 @@ of whether Cosign is already installed.
 
 The supported staged path is the authenticated current-release
 `defenseclaw-upgrade.sh` asset in latest mode (or the equivalent
-`scripts/upgrade.sh` from a trusted current-release checkout). The signed
-PowerShell resolver remains a preflight refusal surface only. An
+`scripts/upgrade.sh` from a trusted current-release checkout). An
 already-published `0.8.3`-or-older
 `defenseclaw upgrade` command cannot gain the new two-hop orchestration after
 installation, so its signed protocol check deliberately refuses the hard cut
@@ -883,10 +960,12 @@ pre-bridge sources.
 Do not replace the managed CLI wheel through `pip`, `uv`, or another package
 manager, and do not copy the wheel or gateway archive over an existing
 installation. Those operations cannot provide bridge selection, durable
-rollback, or version-bound health verification. The local shell and PowerShell
-installers are fresh-install-only and refuse existing managed state before
-dependency setup or artifact replacement. Every supported existing POSIX host,
-including one already on `0.8.4`, must use the target-release upgrade resolver.
+rollback, or version-bound health verification. The local shell and legacy
+PowerShell script installers are fresh-install-only and refuse existing managed
+state before dependency setup or artifact replacement. Native Windows Setup
+separately supports fresh install, repair, same-version servicing, and
+uninstall. Every supported existing POSIX host, including one already on
+`0.8.4`, must use the target-release upgrade resolver.
 
 For protocol-2 releases, the installable bytes are published only inside
 manifest-bound `.dcwheel` and `.dcgateway` protected envelopes. Their payloads
@@ -905,10 +984,8 @@ target release. Follow the complete Sigstore and SHA-256 bootstrap in the
 authenticated checkout of that release. Do not stream an unauthenticated
 network response into a shell.
 
-Windows cannot cross this hard cut because the published `0.8.4` bridge has no
-Windows gateway or rollback binary. The signed `scripts/upgrade.ps1` resolver
-is retained only to refuse before stopping services and explain that no tested
-path exists. Keep the current Windows installation unchanged.
+The native Windows Setup is a fresh-install path. It is not a bridge for an
+older POSIX-only release.
 
 An explicit `0.8.3 → 0.8.5` request is intentionally rejected before backup,
 service stop, or installed-file mutation. Fresh installers also refuse to

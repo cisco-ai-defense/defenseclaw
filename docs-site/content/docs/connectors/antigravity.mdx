@@ -146,7 +146,7 @@ The response shaper contains the spec-conformant Stop `{"decision":"block"}` for
   </Folder>
 </Files>
 
-Antigravity now publishes MCP, skills, rules, and plugin customization surfaces in addition to hooks. DefenseClaw writes hooks only to the global `~/.gemini/config/hooks.json` path, reads and writes MCP servers from `~/.gemini/config/mcp_config.json` and `<workspace>/.agents/mcp_config.json`, and supports the AgentSkills folder form under `skills/<skill>/SKILL.md`. CLI direct-markdown skills, rules, plugins, and plugin-contained agents are treated as discovery/scan surfaces until Google publishes enough install and lifecycle semantics for DefenseClaw to mutate them safely.
+Antigravity publishes MCP, skills, rules, and plugin customization surfaces in addition to hooks. DefenseClaw writes hooks only to the global `~/.gemini/config/hooks.json` path, reads and writes MCP servers from `~/.gemini/config/mcp_config.json` and `<workspace>/.agents/mcp_config.json`, supports the AgentSkills folder form under `skills/<skill>/SKILL.md`, and installs plugins with a root `plugin.json` into `~/.gemini/config/plugins/<plugin>/` or the selected workspace's `.agents/plugins/<plugin>/`. The CLI-managed `~/.gemini/antigravity-cli/plugins/` path is also discovered. CLI direct-markdown skills, rules, and plugin-contained agents remain discovery/scan surfaces.
 
 `claw.workspace_dir` is intentionally not honored by Antigravity hook setup. Antigravity merges discovered `hooks.json` files from the global, project, and legacy locations, so layering DefenseClaw hooks across multiple files would cause duplicate hook firings. Workspace MCP and asset discovery still use the workspace paths above when a workspace is explicitly selected.
 

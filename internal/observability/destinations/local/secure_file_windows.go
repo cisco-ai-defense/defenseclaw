@@ -183,7 +183,7 @@ func validateWindowsHandleACL(handle windows.Handle, ownerOnly bool) error {
 		return ioFailure()
 	}
 	owner, _, err := descriptor.Owner()
-	if err != nil || !windowsAllowedPrincipal(owner) {
+	if err != nil || !windowsAllowedOwner(owner) {
 		return unsafeFailure()
 	}
 	dacl, _, err := descriptor.DACL()
@@ -206,7 +206,7 @@ func validateWindowsHandleACL(handle windows.Handle, ownerOnly bool) error {
 			continue
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		if !windowsAllowedPrincipal(sid) && (ownerOnly || windowsWriteLikeAccess(ace.Mask)) {
+		if !windowsAllowedACEPrincipal(sid) && (ownerOnly || windowsWriteLikeAccess(ace.Mask)) {
 			return unsafeFailure()
 		}
 	}
@@ -223,7 +223,7 @@ func windowsWriteLikeAccess(mask windows.ACCESS_MASK) bool {
 	return mask&(writeLike|fileDeleteChild) != 0
 }
 
-func windowsAllowedPrincipal(sid *windows.SID) bool {
+func windowsAllowedOwner(sid *windows.SID) bool {
 	if sid == nil {
 		return false
 	}
@@ -232,4 +232,20 @@ func windowsAllowedPrincipal(sid *windows.SID) bool {
 		return true
 	}
 	return sid.IsWellKnown(windows.WinLocalSystemSid) || sid.IsWellKnown(windows.WinBuiltinAdministratorsSid)
+}
+
+func windowsAllowedACEPrincipal(sid *windows.SID) bool {
+	if sid == nil {
+		return false
+	}
+	// OWNER RIGHTS is an owner-relative principal, not a separate account.
+	// DefenseClaw's native and Python private-directory writers use it so a
+	// protected DACL remains portable across backup/restore while still
+	// granting access only to the separately validated current owner. Accept it
+	// only in an ACE; an object's owner must remain a concrete current-user,
+	// LocalSystem, or Administrators SID.
+	if sid.IsWellKnown(windows.WinCreatorOwnerRightsSid) {
+		return true
+	}
+	return windowsAllowedOwner(sid)
 }

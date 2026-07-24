@@ -1490,7 +1490,7 @@ make check-schemas
 make check-grafana-dashboards
 uv run python -m pytest cli/tests/test_agent360_dashboard.py cli/tests/test_grafana_dashboards.py -q
 make check-upgrade-manifest
-make upgrade-smoke-matrix ARGS="--baseline-mode seed"
+make upgrade-smoke-matrix ARGS="--target-version X.Y.Z --baseline-mode seed"
 ```
 
 Phase PRs may run a justified subset while stacked, but the final integration PR

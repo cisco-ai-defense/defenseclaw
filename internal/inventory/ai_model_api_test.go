@@ -1019,8 +1019,8 @@ func TestLocalEndpointsForSignatureAddsLemonadePresenceAndConfiguredPorts(t *tes
 	t.Setenv("USERPROFILE", tmp)
 	t.Setenv("LEMONADE_PORT", "32124")
 	t.Setenv("LEMONADE_HOST", "127.0.0.1")
-	t.Setenv("LEMONADE_CACHE_DIR", "")
 	configDir := filepath.Join(tmp, ".cache", "lemonade")
+	t.Setenv("LEMONADE_CACHE_DIR", configDir)
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}

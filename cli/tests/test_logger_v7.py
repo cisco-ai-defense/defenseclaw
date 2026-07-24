@@ -329,30 +329,42 @@ def test_from_config_keeps_ambiguous_transport_failure_fail_closed(
     assert "secret" not in str(caught.value)
 
 
-def test_from_config_keeps_server_rejection_fail_closed() -> None:
+def test_from_config_keeps_server_rejection_fail_closed(tmp_path: Path) -> None:
     cfg = SimpleNamespace(
         config_version=8,
+        data_dir=str(tmp_path),
         gateway=SimpleNamespace(
             api_bind="127.0.0.1",
             api_port=18970,
+            token_env="DEFENSECLAW_GATEWAY_TOKEN",
             resolved_token=lambda: "gateway-token",
         ),
         openshell=None,
         guardrail=None,
     )
+    (tmp_path / ".env").write_text(
+        "DEFENSECLAW_GATEWAY_TOKEN=different-persisted-token\n",
+        encoding="utf-8",
+    )
 
     class RejectingRecorder:
         def emit_cli_observability(self, _payload) -> None:
-            raise requests.HTTPError("private rejection body")
+            response = requests.Response()
+            response.status_code = 500
+            raise requests.HTTPError("private rejection body", response=response)
 
         def close(self) -> None:
             return
 
     with (
-        patch("defenseclaw.logger.OrchestratorClient", return_value=RejectingRecorder()),
+        patch(
+            "defenseclaw.logger.OrchestratorClient",
+            return_value=RejectingRecorder(),
+        ) as client,
         pytest.raises(CanonicalObservabilityError) as caught,
     ):
         Logger.from_config(cfg).log_action("setup-hook-connector", "config", "secret")
+    assert client.call_count == 1
     assert type(caught.value) is CanonicalObservabilityError
     assert "private rejection body" not in str(caught.value)
     assert "secret" not in str(caught.value)
@@ -362,6 +374,11 @@ def test_from_config_refreshes_token_created_after_logger_initialization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Register an undo entry even when the host process did not already carry
+    # this variable.  The production dotenv loader writes directly to
+    # os.environ after logger initialization, which pytest cannot otherwise
+    # know it needs to remove at teardown.
+    monkeypatch.setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
     monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
     gateway = SimpleNamespace(
         api_bind="127.0.0.1",
@@ -389,6 +406,186 @@ def test_from_config_refreshes_token_created_after_logger_initialization(
     assert recorder.closed
 
 
+@pytest.mark.parametrize(
+    ("token_env", "dotenv", "refreshed_token"),
+    [
+        (
+            "DEFENSECLAW_GATEWAY_TOKEN",
+            "DEFENSECLAW_GATEWAY_TOKEN=fresh-canonical-token\n",
+            "fresh-canonical-token",
+        ),
+        (
+            "OPENCLAW_GATEWAY_TOKEN",
+            "DEFENSECLAW_GATEWAY_TOKEN=unselected-canonical-token\nOPENCLAW_GATEWAY_TOKEN=fresh-legacy-token\n",
+            "fresh-legacy-token",
+        ),
+        (
+            "",
+            "OPENCLAW_GATEWAY_TOKEN=fresh-legacy-token\nDEFENSECLAW_GATEWAY_TOKEN=fresh-canonical-token\n",
+            "fresh-canonical-token",
+        ),
+    ],
+)
+def test_from_config_retries_stale_builtin_token_after_gateway_restart(
+    tmp_path: Path,
+    token_env: str,
+    dotenv: str,
+    refreshed_token: str,
+) -> None:
+    gateway = SimpleNamespace(
+        api_bind="127.0.0.1",
+        api_port=18970,
+        token_env=token_env,
+        resolved_token=lambda: "stale-pre-restart-token",
+    )
+    cfg = SimpleNamespace(
+        config_version=8,
+        data_dir=str(tmp_path),
+        gateway=gateway,
+        openshell=None,
+        guardrail=None,
+    )
+    (tmp_path / ".env").write_text(dotenv, encoding="utf-8")
+
+    rejected = _Recorder()
+
+    def reject_stale(_payload) -> None:
+        response = requests.Response()
+        response.status_code = 401
+        raise requests.HTTPError("private authentication response", response=response)
+
+    rejected.emit_cli_observability = reject_stale  # type: ignore[method-assign]
+    accepted = _Recorder()
+    clients: list[tuple[str, _Recorder]] = []
+
+    def client_factory(**kwargs):
+        token = kwargs["token"]
+        recorder = rejected if token == "stale-pre-restart-token" else accepted
+        clients.append((token, recorder))
+        return recorder
+
+    with patch("defenseclaw.logger.OrchestratorClient", side_effect=client_factory):
+        logger = Logger.from_config(cfg)
+        logger.log_action("setup-guardrail", "config", "disabled connector=codex")
+        logger.log_action("setup-guardrail", "config", "second event")
+
+    assert [token for token, _recorder in clients] == [
+        "stale-pre-restart-token",
+        refreshed_token,
+        refreshed_token,
+    ]
+    assert [payload["action"]["details"] for payload in accepted.payloads] == [
+        "disabled connector=codex",
+        "second event",
+    ]
+    assert rejected.closed
+    assert accepted.closed
+
+
+def test_from_config_second_401_after_token_refresh_remains_fail_closed(
+    tmp_path: Path,
+) -> None:
+    gateway = SimpleNamespace(
+        api_bind="127.0.0.1",
+        api_port=18970,
+        token_env="DEFENSECLAW_GATEWAY_TOKEN",
+        resolved_token=lambda: "stale-pre-restart-token",
+    )
+    cfg = SimpleNamespace(
+        config_version=8,
+        data_dir=str(tmp_path),
+        gateway=gateway,
+        openshell=None,
+        guardrail=None,
+    )
+    (tmp_path / ".env").write_text(
+        "DEFENSECLAW_GATEWAY_TOKEN=fresh-post-restart-token\n",
+        encoding="utf-8",
+    )
+    attempted_tokens: list[str] = []
+
+    class RejectingRecorder:
+        def __init__(self, token: str) -> None:
+            self.token = token
+
+        def emit_cli_observability(self, _payload) -> None:
+            response = requests.Response()
+            response.status_code = 401
+            raise requests.HTTPError("private authentication response", response=response)
+
+        def close(self) -> None:
+            return
+
+    def client_factory(**kwargs):
+        attempted_tokens.append(kwargs["token"])
+        return RejectingRecorder(kwargs["token"])
+
+    with (
+        patch(
+            "defenseclaw.logger.OrchestratorClient",
+            side_effect=client_factory,
+        ),
+        pytest.raises(CanonicalObservabilityError),
+    ):
+        Logger.from_config(cfg).log_action(
+            "setup-guardrail",
+            "config",
+            "disabled connector=codex",
+        )
+
+    assert attempted_tokens == [
+        "stale-pre-restart-token",
+        "fresh-post-restart-token",
+    ]
+
+
+def test_from_config_does_not_replace_custom_token_env_after_401(
+    tmp_path: Path,
+) -> None:
+    gateway = SimpleNamespace(
+        api_bind="127.0.0.1",
+        api_port=18970,
+        token_env="OPERATOR_PINNED_GATEWAY_TOKEN",
+        resolved_token=lambda: "operator-token",
+    )
+    cfg = SimpleNamespace(
+        config_version=8,
+        data_dir=str(tmp_path),
+        gateway=gateway,
+        openshell=None,
+        guardrail=None,
+    )
+    (tmp_path / ".env").write_text(
+        "DEFENSECLAW_GATEWAY_TOKEN=unrelated-default-token\n",
+        encoding="utf-8",
+    )
+
+    class RejectingRecorder:
+        def emit_cli_observability(self, _payload) -> None:
+            response = requests.Response()
+            response.status_code = 401
+            raise requests.HTTPError("private authentication response", response=response)
+
+        def close(self) -> None:
+            return
+
+    with (
+        patch(
+            "defenseclaw.logger.OrchestratorClient",
+            return_value=RejectingRecorder(),
+        ) as client,
+        pytest.raises(CanonicalObservabilityError),
+    ):
+        Logger.from_config(cfg).log_action(
+            "setup-guardrail",
+            "config",
+            "disabled connector=codex",
+        )
+
+    assert client.call_count == 1
+    assert client.call_args.kwargs["token"] == "operator-token"
+
+
 def test_explicit_no_runtime_capability_buffers_and_writes_nothing() -> None:
     logger = Logger.no_runtime()
     logger.log_action("policy-reload", "default", "owner=alice@example.com")
@@ -407,7 +604,7 @@ def test_no_runtime_capability_is_confined_to_bootstrap_and_recovery() -> None:
     callers = {
         path.relative_to(package).as_posix()
         for path in package.rglob("*.py")
-        if path.name != "logger.py" and "Logger.no_runtime()" in path.read_text()
+        if path.name != "logger.py" and "Logger.no_runtime()" in path.read_text(encoding="utf-8")
     }
     assert callers == {
         "bootstrap.py",
@@ -462,10 +659,10 @@ def test_real_v8_config_reaches_an_ordinary_command(tmp_path: Path) -> None:
         "\n".join(
             (
                 "config_version: 8",
-                f'data_dir: "{tmp_path}"',
+                f'data_dir: "{tmp_path.as_posix()}"',
                 "observability:",
                 "  local:",
-                f'    path: "{tmp_path / "audit.db"}"',
+                f'    path: "{(tmp_path / "audit.db").as_posix()}"',
             )
         )
         + "\n",

@@ -276,6 +276,7 @@ count = run_migrations(
     sys.argv[3],
     sys.argv[4],
     upgrade_handles_local_bundle=True,
+    controller_owns_local_bundle_transaction=True,
 )
 print(f"developer_target_migrations={count}")
 PY
@@ -287,9 +288,11 @@ PY
     if ! HOME="${SMOKE_HOME}" \
         DEFENSECLAW_HOME="${data_dir}" \
         DEFENSECLAW_CONFIG="${data_dir}/config.yaml" \
+        DEFENSECLAW_SIDECAR_DIAG=1 \
         OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
         PATH="${install_dir}:${PATH}" \
             "${install_dir}/defenseclaw-gateway" start >>"${log_file}" 2>&1; then
+        tail_v8_upgrade_log_secret_safe "${data_dir}/gateway.log"
         tail_v8_upgrade_log_secret_safe "${log_file}"
         die "fresh target gateway failed to start"
     fi
@@ -314,6 +317,7 @@ _poll_health(configuration, int(sys.argv[2]), expected_version=sys.argv[3])
 print("developer_fresh_process_health=ok")
 PY
     then
+        tail_v8_upgrade_log_secret_safe "${data_dir}/gateway.log"
         tail_v8_upgrade_log_secret_safe "${log_file}"
         die "fresh target exact-version health check failed"
     fi
@@ -457,11 +461,27 @@ expected_environment = (
     if legacy_source
     else {
         "PRESERVE_UPGRADE_SMOKE_ENV": "preserved",
+        "DEFENSECLAW_GATEWAY_TOKEN": "upgrade-smoke-v8-gateway-fixture",
         "DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION":
             "Bearer upgrade-smoke-v8-otlp-value",
         "DEFENSECLAW_V8_FIXTURE_HTTP_BEARER": "upgrade-smoke-v8-http-value",
     }
 )
+if not legacy_source:
+    historical_environment = dotenv_values(
+        evidence_dir / "environment.historical.source"
+    )
+    historical_gateway_token = historical_environment.get("DEFENSECLAW_GATEWAY_TOKEN")
+    if (
+        not isinstance(historical_gateway_token, str)
+        or len(historical_gateway_token) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in historical_gateway_token
+        )
+    ):
+        raise SystemExit("native-v8 fixture has no canonical generated gateway token")
+    expected_environment["DEFENSECLAW_GATEWAY_TOKEN"] = historical_gateway_token
 actual_environment = dotenv_values(data_dir / ".env")
 for name, value in expected_environment.items():
     if actual_environment.get(name) != value:

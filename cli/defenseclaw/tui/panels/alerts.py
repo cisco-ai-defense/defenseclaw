@@ -470,6 +470,12 @@ class AlertsPanelModel:
     def set_severity_filter_exact(self, severity: SeverityFilter) -> None:
         self.severity_filter = severity
         self.show_all_severities = True
+        if self.store is not None and severity in {"", "MEDIUM", "LOW"}:
+            # The default alert load is intentionally limited to actionable
+            # severities. Toolbar buttons must hydrate the complete store just
+            # like their keyboard equivalents before showing All/Medium/Low.
+            self.refresh()
+            return
         self.apply_filter()
 
     def set_severity_filter(self, severity: SeverityFilter) -> None:
@@ -533,6 +539,15 @@ class AlertsPanelModel:
 
     def filtered_ids(self) -> list[str]:
         return [row.event.id for row in self.filtered if not row.event.id.startswith("gw:")]
+
+    def all_ids(self) -> list[str]:
+        return sorted(
+            {
+                row.event.id
+                for row in self.flat_rows()
+                if not row.event.id.startswith("gw:")
+            }
+        )
 
     def severity_counts(self) -> dict[str, int]:
         if self._severity_counts_cache is not None:
@@ -621,17 +636,16 @@ class AlertsPanelModel:
             copied = self.copy_detail_text()
             if not copied:
                 return AlertPanelAction(True, hint="No alert detail to copy.")
-            return AlertPanelAction(True, hint="Alert detail copied.", copy_text=copied)
+            return AlertPanelAction(True, hint="Copied alert detail.", copy_text=copied)
         if key == "d":
             row = self.selected()
             if row is None or row.event.id.startswith("gw:"):
                 return AlertPanelAction(True, hint="No audit alert selected to dismiss.")
-            severity = row.event.severity or self.severity_filter or "all"
             return AlertPanelAction(
                 True,
                 AlertCommandIntent(
                     label="alerts dismiss selected",
-                    args=("alerts", "dismiss", "--severity", severity),
+                    args=_alert_id_command_args("dismiss", [row.event.id]),
                     hint=f"Dismissing selected alert {row.event.id}.",
                 ),
             )
@@ -642,28 +656,32 @@ class AlertsPanelModel:
                 True,
                 AlertCommandIntent(
                     label=f"alerts acknowledge {len(self.selected_ids)} selected",
-                    args=("alerts", "acknowledge", "--severity", self.severity_filter or "all"),
+                    args=_alert_id_command_args("acknowledge", self.selected_ids),
                     hint=f"Acknowledging {len(self.selected_ids)} selected alert(s).",
                 ),
             )
         if key == "c":
-            if not self.filtered_ids():
+            filtered_ids = self.filtered_ids()
+            if not filtered_ids:
                 return AlertPanelAction(True, hint="No filtered alerts to clear.")
             return AlertPanelAction(
                 True,
                 AlertCommandIntent(
                     label="alerts dismiss filtered",
-                    args=("alerts", "dismiss", "--severity", self.severity_filter or "all"),
-                    hint=f"Clearing {len(self.filtered_ids())} filtered alert(s).",
+                    args=_alert_id_command_args("dismiss", filtered_ids),
+                    hint=f"Clearing {len(filtered_ids)} filtered alert(s).",
                 ),
             )
         if key == "C":
+            all_ids = self.all_ids()
+            if not all_ids:
+                return AlertPanelAction(True, hint="No active alerts to clear.")
             return AlertPanelAction(
                 True,
                 AlertCommandIntent(
                     label="alerts dismiss all",
-                    args=("alerts", "dismiss", "--severity", "all"),
-                    hint="Clearing all active alerts.",
+                    args=_alert_id_command_args("dismiss", all_ids),
+                    hint=f"Clearing all {len(all_ids)} loaded active alert(s).",
                 ),
             )
         return AlertPanelAction(False)
@@ -1100,6 +1118,18 @@ def _alert_filter_change(old: str, new: str) -> AlertFilterChange | None:
     if old == new:
         return None
     return AlertFilterChange(panel="alerts", filter_type="severity", old=old, new=new)
+
+
+def _alert_id_command_args(command: str, alert_ids: list[str] | set[str]) -> tuple[str, ...]:
+    ids = sorted(set(alert_ids))
+    args = ["alerts", command]
+    for alert_id in ids:
+        args.extend(("--id", alert_id))
+    if len(ids) > 1:
+        # The TUI's CommandPreviewScreen is the user confirmation boundary.
+        # Avoid asking for a second prompt in its noninteractive subprocess.
+        args.append("--yes")
+    return tuple(args)
 
 
 def _alert_row_key(row: AlertRow) -> str:

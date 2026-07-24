@@ -112,7 +112,7 @@ func agentPhaseCodePointer(meta llmEventMeta) *int {
 	if strings.TrimSpace(meta.Phase) == "" {
 		return nil
 	}
-	value := telemetry.AgentPhaseCode(meta.Phase)
+	value := gatewaylog.AgentPhaseCode(meta.Phase)
 	return &value
 }
 
@@ -1296,6 +1296,7 @@ type hookSessionState struct {
 type hookPhaseState struct {
 	phase         string
 	sequence      int64
+	meta          llmEventMeta
 	canonicalMeta llmEventMeta
 	canonical     bool
 }
@@ -1392,6 +1393,9 @@ func hookPhaseDefaults(meta llmEventMeta) llmEventMeta {
 	if meta.Phase == "" {
 		meta.Phase = hookLifecyclePhase("", meta.LifecycleEvent, meta.LifecycleState)
 	}
+	if phase, ok := gatewaylog.NormalizeAgentPhase(meta.Phase); ok {
+		meta.Phase = phase
+	}
 	if meta.OperationID == "" {
 		meta.OperationID = hookOperationID(meta)
 	}
@@ -1454,6 +1458,7 @@ func (a *APIServer) enrichHookPhaseLocked(meta llmEventMeta, key string) llmEven
 	state.sequence++
 	state.phase = meta.Phase
 	meta.Sequence = state.sequence
+	state.meta = meta
 	a.putHookPhaseCursorLocked(key, state)
 	return meta
 }
@@ -1470,6 +1475,34 @@ func (a *APIServer) enrichHookPhase(meta llmEventMeta) llmEventMeta {
 		a.hookPhaseStates = make(map[string]hookPhaseState)
 	}
 	return a.enrichHookPhaseLocked(meta, key)
+}
+
+func (a *APIServer) hookPhaseSnapshot(meta llmEventMeta) (llmEventMeta, bool) {
+	if a == nil {
+		return llmEventMeta{}, false
+	}
+	key := hookPhaseStateKey(meta)
+	if key == "" {
+		return llmEventMeta{}, false
+	}
+	a.llmPromptMu.Lock()
+	defer a.llmPromptMu.Unlock()
+	if state, ok := a.hookPhaseStates[key]; ok && !state.canonical {
+		return state.meta, true
+	}
+	// Starts rotate ExecutionID, so decision projections may only reconstruct
+	// the stable identity. Use the newest non-canonical cursor for this session.
+	for i := len(a.hookPhaseStateOrder) - 1; i >= 0; i-- {
+		state, exists := a.hookPhaseStates[a.hookPhaseStateOrder[i]]
+		if !exists || state.canonical || state.meta.Source != meta.Source || state.meta.SessionID != meta.SessionID {
+			continue
+		}
+		if meta.AgentID != "" && state.meta.AgentID != meta.AgentID {
+			continue
+		}
+		return state.meta, true
+	}
+	return llmEventMeta{}, false
 }
 
 // prepareHookLifecycleTransition atomically decides whether a normalized

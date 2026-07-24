@@ -18,8 +18,8 @@ is running. The standalone ``Connectors:`` row was folded into a single
 * One line per connector with its effective mode under a single ``Agents``
   header, for ANY connector count — a single-connector install renders the
   same section (one row), not a separate legacy ``Agent:`` block.
-* Called with no host/port (config-only), no ``/health`` fetch occurs, so the
-  roster lists connectors + mode without live counters.
+* Called with no bound health snapshot (config-only), the roster lists
+  connectors + mode without live counters.
 """
 
 from __future__ import annotations
@@ -29,7 +29,11 @@ import io
 import json
 import os
 import sys
+import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -59,7 +63,7 @@ def _cfg(actives, *, modes=None, disabled=None):
 def _render(cfg) -> str:
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        # No host/port → config-only roster, no /health fetch.
+        # No bound health snapshot → config-only roster.
         _print_agents(cfg)
     return buf.getvalue()
 
@@ -73,6 +77,17 @@ class TestPrintAgentsRoster(unittest.TestCase):
         self.assertIn("1 active", out)
         self.assertIn("Codex (codex)", out)
         self.assertIn("mode=action", out)
+
+    def test_roster_reports_effective_fail_mode_and_provenance(self):
+        report = {
+            "effective": "open",
+            "provenance": "process-env",
+        }
+        with patch.object(cmd_status, "_effective_status_fail_mode", return_value=report):
+            out = _render(_cfg(["codex"], modes={"codex": "action"}))
+
+        self.assertIn("fail-mode=open", out)
+        self.assertIn("provenance=process-env", out)
 
     def test_zero_connectors_shows_no_active(self):
         out = _render(_cfg([]))
@@ -121,17 +136,57 @@ class TestPrintAgentsRoster(unittest.TestCase):
 
 
 def _render_live(cfg, health: dict) -> str:
-    """Render with the sidecar up: patch the raw /health fetch so the real
-    ``_fetch_health_connectors`` parsing path runs against ``health``."""
+    """Render the real connector parsing path against bound health."""
     buf = io.StringIO()
-    with patch.object(cmd_status, "_fetch_health", return_value=health):
-        with contextlib.redirect_stdout(buf):
-            cmd_status._print_agents(cfg, "127.0.0.1", 8787)
+    with contextlib.redirect_stdout(buf):
+        cmd_status._print_agents(cfg, health=health)
     return buf.getvalue()
 
 
+@contextlib.contextmanager
+def _owned_status_endpoint(runtime_data_dir: str, health: dict, expected_token: str):
+    """Serve a disposable loopback status/health endpoint owned by this test."""
+    seen_paths: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - stdlib handler contract
+            seen_paths.append(self.path)
+            if self.path == "/status":
+                if self.headers.get("Authorization") == f"Bearer {expected_token}":
+                    payload = {"runtime": {"data_dir": runtime_data_dir}, "health": health}
+                    status = 200
+                else:
+                    payload = {"error": "unauthorized"}
+                    status = 401
+            elif self.path == "/health":
+                payload = health
+                status = 200
+            else:
+                payload = {"error": "not found"}
+                status = 404
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_port, seen_paths
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 class TestPrintAgentsLiveCounters(unittest.TestCase):
-    """With ``/health`` ``connectors[]`` present, every active agent renders its
+    """With bound ``connectors[]`` health present, every active agent renders its
     own live counters — there is no privileged "primary" tally."""
 
     def test_each_connector_renders_its_own_counters(self):
@@ -303,7 +358,7 @@ class TestStatusDbErrorSurfacing(unittest.TestCase):
 
     def _invoke(self):
         runner = CliRunner()
-        with patch("defenseclaw.gateway.OrchestratorClient.is_running", return_value=False):
+        with patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None):
             return runner.invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
 
     def test_db_error_surfaces_and_stays_exit_zero(self):
@@ -329,6 +384,9 @@ class TestStatusJson(unittest.TestCase):
 
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
+        # Keep unit status tests config-only; runtime provenance has a dedicated
+        # disposable-state test in test_fail_mode_runtime.py.
+        self.app.cfg.data_dir = ""
         from defenseclaw.config import PerConnectorGuardrailConfig
 
         gc = self.app.cfg.guardrail
@@ -343,7 +401,7 @@ class TestStatusJson(unittest.TestCase):
 
     def _invoke_json(self):
         runner = CliRunner()
-        with patch("defenseclaw.gateway.OrchestratorClient.is_running", return_value=False):
+        with patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None):
             return runner.invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
 
     def test_json_is_valid_and_has_core_keys(self):
@@ -369,6 +427,24 @@ class TestStatusJson(unittest.TestCase):
         self.assertEqual(by_name["hermes"]["mode"], "observe")
         self.assertTrue(by_name["codex"]["enabled"])
 
+    def test_json_roster_reports_canonical_fail_mode_projection(self):
+        report = {
+            "effective": "closed",
+            "provenance": "windows-sidecar",
+            "configured": "open",
+            "desired": "open",
+            "runtime": "closed",
+            "current": False,
+            "drift": ["windows-sidecar-closed"],
+            "sources": [],
+        }
+        with patch.object(cmd_status, "_effective_status_fail_mode", return_value=report):
+            result = self._invoke_json()
+
+        doc = json.loads(result.output)
+        by_name = {c["name"]: c for c in doc["connectors"]}
+        self.assertEqual(by_name["codex"]["fail_mode"], report)
+
     def test_json_db_error_is_explicit_null_not_dropped(self):
         self.app.store.get_counts = MagicMock(side_effect=RuntimeError("locked"))
         result = self._invoke_json()
@@ -377,6 +453,82 @@ class TestStatusJson(unittest.TestCase):
         self.assertIsNone(doc["enforcement"])
         self.assertIsNone(doc["activity"])
         self.assertEqual(doc["audit_db_error"], "locked")
+
+
+class TestStatusProfileIdentity(unittest.TestCase):
+    def test_status_ignores_foreign_loopback_health_and_accepts_matching_profile(self):
+        with tempfile.TemporaryDirectory(prefix="win-aud-078-") as root:
+            isolated_home = Path(root) / "isolated-home"
+            ambient_home = Path(root) / "ambient-home"
+            isolated_home.mkdir()
+            ambient_home.mkdir()
+            app, app_tmp, db_path = make_app_context(str(isolated_home))
+            runner = CliRunner()
+            isolated_config = isolated_home / "config.yaml"
+            owned_token = f"owned-endpoint-{os.getpid()}-{id(app)}"
+            env = {
+                "DEFENSECLAW_HOME": str(isolated_home),
+                "DEFENSECLAW_CONFIG": str(isolated_config),
+                "DEFENSECLAW_GATEWAY_TOKEN": owned_token,
+                "OPENCLAW_GATEWAY_TOKEN": "",
+            }
+            foreign_marker = "foreign-profile-only"
+            foreign_state_file = ambient_home / "application_protection_state.json"
+            foreign_health = {
+                "connectors": [{"name": foreign_marker, "state": "running", "requests": 99}],
+                "application_protection": {
+                    "state": "running",
+                    "details": {
+                        "active": [{"connector": foreign_marker, "source": "automatic"}],
+                        "state_file": str(foreign_state_file),
+                    },
+                },
+            }
+
+            try:
+                with _owned_status_endpoint(str(ambient_home), foreign_health, owned_token) as (port, seen):
+                    app.cfg.gateway.api_port = port
+                    with patch.dict(os.environ, env, clear=False):
+                        human = runner.invoke(status_cmd, [], obj=app, catch_exceptions=False)
+                        result = runner.invoke(status_cmd, ["--json"], obj=app, catch_exceptions=False)
+                self.assertEqual(human.exit_code, 0, msg=human.output)
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertEqual(seen, ["/status", "/status"])
+                self.assertIn("not running", human.output)
+                self.assertNotIn(foreign_marker, human.output)
+                self.assertNotIn(str(ambient_home), human.output)
+                doc = json.loads(result.output)
+                rendered = json.dumps(doc)
+                self.assertFalse(doc["sidecar"]["running"])
+                self.assertNotIn(foreign_marker, rendered)
+                self.assertNotIn(str(ambient_home), rendered)
+                self.assertEqual(
+                    os.path.normcase(doc["application_protection"]["state_file"]),
+                    os.path.normcase(str(isolated_home / "application_protection_state.json")),
+                )
+
+                matching_marker = "matching-profile-only"
+                matching_health = {
+                    "connectors": [{"name": matching_marker, "state": "running", "requests": 7}],
+                    "application_protection": {
+                        "state": "running",
+                        "details": {
+                            "active": [{"connector": matching_marker, "source": "automatic"}],
+                            "state_file": str(isolated_home / "application_protection_state.json"),
+                        },
+                    },
+                }
+                with _owned_status_endpoint(str(isolated_home), matching_health, owned_token) as (port, seen):
+                    app.cfg.gateway.api_port = port
+                    with patch.dict(os.environ, env, clear=False):
+                        result = runner.invoke(status_cmd, ["--json"], obj=app, catch_exceptions=False)
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertEqual(seen, ["/status"])
+                doc = json.loads(result.output)
+                self.assertTrue(doc["sidecar"]["running"])
+                self.assertIn(matching_marker, json.dumps(doc))
+            finally:
+                cleanup_app(app, db_path, app_tmp)
 
 
 if __name__ == "__main__":

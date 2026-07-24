@@ -721,6 +721,50 @@ func TestRetentionStartupReinstallsForgedTimestampTrigger(t *testing.T) {
 	}
 }
 
+func TestRetentionStartupRetriesTransientCrossProcessBusy(t *testing.T) {
+	store, _ := newRetentionStores(t)
+
+	locker, err := store.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := locker.Exec(`UPDATE schema_version SET version=version`); err != nil {
+		_ = locker.Rollback()
+		t.Fatal(err)
+	}
+
+	// A separate process gets a separate database/sql pool. Disable its driver
+	// busy timeout so this test specifically exercises the application-level
+	// retry around startup's trigger-repair transaction.
+	reopened, err := sql.Open("sqlite", store.dbPath+"?_pragma=busy_timeout(0)")
+	if err != nil {
+		_ = locker.Rollback()
+		t.Fatal(err)
+	}
+	reopened.SetMaxOpenConns(1)
+	reopened.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := ensureRetentionTimestampInfrastructureOnce(reopened); !isSQLiteBusy(err) {
+		_ = locker.Rollback()
+		t.Fatalf("unretried startup verification did not surface the held write lock: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- ensureRetentionTimestampInfrastructure(reopened) }()
+	time.Sleep(35 * time.Millisecond)
+	if err := locker.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("startup verification did not recover after the lock cleared: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("startup verification did not complete after the lock cleared")
+	}
+}
+
 func TestRetentionStartupReinstallsForgedScanIntegrityTriggers(t *testing.T) {
 	store, _ := newRetentionStores(t)
 	path := store.dbPath

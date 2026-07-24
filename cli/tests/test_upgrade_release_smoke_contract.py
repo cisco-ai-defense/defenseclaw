@@ -22,6 +22,8 @@ import hashlib
 import json
 import os
 import re
+import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -31,6 +33,7 @@ import pytest
 import yaml
 from defenseclaw.migrations import run_migrations
 from defenseclaw.observability.v8_config import load_validate_v8
+from defenseclaw.upgrade_receipt import begin_upgrade_receipt
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "test-upgrade-release.sh"
@@ -42,11 +45,46 @@ MAKEFILE = ROOT / "Makefile"
 BASELINE_POLICY = ROOT / "release" / "upgrade-baselines.json"
 PRE_RELEASE_CERTIFICATION = ROOT / ".github" / "workflows" / "pre-release-certification.yml"
 RECEIPT_CHECK = ROOT / "scripts" / "check_upgrade_receipt.py"
+POSIX_UPGRADE_CUSTODY = pytest.mark.skipif(
+    os.name == "nt",
+    reason="descriptor-relative POSIX ownership, mode, exchange, and quarantine contract",
+)
+
+
+def _bash_executable() -> str:
+    """Select a real Bash runtime without invoking Windows' WSL app alias."""
+
+    if os.name != "nt":
+        return shutil.which("bash") or "bash"
+
+    candidates: list[Path] = []
+    git = shutil.which("git")
+    if git:
+        git_path = Path(git).resolve()
+        # A normal Git for Windows install exposes git.exe from either cmd/ or
+        # bin/.  Its Bash runtime is always under the sibling bin directory.
+        candidates.append(git_path.parent.parent / "bin" / "bash.exe")
+    for variable in ("ProgramFiles", "ProgramFiles(x86)", "LocalAppData"):
+        root = os.environ.get(variable)
+        if root:
+            candidates.append(Path(root) / "Git" / "bin" / "bash.exe")
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    pytest.skip("Git Bash is required for the POSIX upgrade-smoke contract on Windows")
 
 
 def _source_script(command: str, *arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", "-c", f'source "$1"; {command}', "upgrade-smoke-contract", str(SCRIPT), *arguments],
+        [
+            _bash_executable(),
+            "-c",
+            f'source "$1"; {command}',
+            "upgrade-smoke-contract",
+            str(SCRIPT),
+            *arguments,
+        ],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -66,6 +104,7 @@ def test_developer_activation_is_isolated_from_every_production_upgrade_surface(
     assert 'source "${ROOT}/scripts/test-upgrade-release.sh"' in source
     assert "run_migrations(" in source
     assert "upgrade_handles_local_bundle=True" in source
+    assert "controller_owns_local_bundle_transaction=True" in source
     assert "_poll_health(configuration" in source
     assert '[[ -n "${RELEASE_ROOT}" ]]' in source
     assert '[[ "${BASELINE_MODE}" == "seed" ]]' in source
@@ -101,7 +140,7 @@ def test_developer_activation_rejects_nonisolated_invocations_before_network(
     message: str,
 ) -> None:
     completed = subprocess.run(
-        [str(DEVELOPER_ACTIVATION_SCRIPT), *arguments],
+        [_bash_executable(), str(DEVELOPER_ACTIVATION_SCRIPT), *arguments],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -115,7 +154,7 @@ def test_developer_activation_rejects_nonisolated_invocations_before_network(
 def test_developer_activation_removes_ambient_runtime_overrides() -> None:
     completed = subprocess.run(
         [
-            "bash",
+            _bash_executable(),
             "-c",
             'source "$1"; '
             "export DEFENSECLAW_DISABLE_REDACTION=true "
@@ -172,6 +211,119 @@ def test_source_gateway_canary_waits_for_exact_version_bound_health() -> None:
     assert "did not reach version-bound health" in canary
 
 
+def test_audit_event_probe_is_policy_independent_and_satisfies_gateway_contract() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("probe_id = str(uuid.uuid4())")
+    end = source.index('\nlocal = (config.get("observability")', start)
+    request = source[start:end]
+
+    assert '"action": "policy-reload"' in request
+    assert '"id": probe_id' in request
+    assert '"target": "release-upgrade-smoke:" + probe_id' in request
+    assert '"actor": "release-upgrade-smoke"' in request
+    assert '"details": "synthetic post-status SQLite continuity probe; no policy state changed"' in request
+    assert '"severity": "INFO"' in request
+    assert 'f"http://127.0.0.1:{port}/audit/event"' in request
+    assert "data=body" in request
+    assert '"Authorization": "Bearer " + token' in request
+    assert '"Content-Type": "application/json"' in request
+    assert '"X-DefenseClaw-Client": "release-upgrade-smoke"' in request
+    assert '"X-DefenseClaw-Token": token' in request
+    assert "/policy/reload" not in request
+    assert "response.status != 200" in request
+    assert 'result != {"status": "ok"}' in request
+
+    persistence = source[end : source.index('print("post_status_mandatory_sqlite_write=ok")', end)]
+    assert "WHERE id = ? AND action = 'policy-reload'" in persistence
+    assert "AND event_name = 'policy.updated' AND mandatory = 1" in persistence
+    assert "(probe_id,)" in persistence
+    assert 'getattr(sqlite3, "SQLITE_BUSY", 5)' in persistence
+    assert 'getattr(sqlite3, "SQLITE_LOCKED", 6)' in persistence
+    assert 'message == "database is busy"' in persistence
+    assert '"database table is locked"' in persistence
+    assert "timeout=0.2" in persistence
+    assert "if after == 1:" in persistence
+
+
+def test_posix_resolver_owns_dynamic_receipt_and_bundle_phases() -> None:
+    source = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+
+    receipt_function = source[
+        source.index("begin_release_upgrade_receipt() {") : source.index(
+            "\n}\n\nfinish_release_upgrade_receipt()", source.index("begin_release_upgrade_receipt() {")
+        )
+    ]
+    backup = source.index('ok "Backup saved to: ${BACKUP_DIR}"')
+    receipt = source.index("begin_release_upgrade_receipt\n", backup)
+    stop = source.index("# ── Stop services", receipt)
+    gateway_activation = source.index('mv -f "${BRIDGE_GATEWAY_INSTALL_TEMP}"', stop)
+    target_activation = source.index('UPGRADE_RECEIPT_FAILURE_CODE="interrupted"', gateway_activation)
+    launcher = source.index('ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw"', target_activation)
+    migration = source.index('kwargs = {"upgrade_handles_local_bundle": True}', stop)
+    required = source.index('if [[ "${UPGRADE_INCOMPLETE}" -eq 1 ]]', migration)
+    start = source.index("# ── Start services", required)
+    health = source.index('if [[ "${HEALTH_OK}" -eq 0 ]]', start)
+    suppress_failed_trap = source.index("UPGRADE_RECEIPT_TERMINAL=1", health)
+    complete = source.index("finish_release_upgrade_receipt succeeded", suppress_failed_trap)
+
+    assert (
+        backup
+        < receipt
+        < stop
+        < gateway_activation
+        < target_activation
+        < launcher
+        < migration
+        < required
+        < start
+        < health
+        < suppress_failed_trap
+        < complete
+    )
+    assert receipt_function.index("local receipt_path receipt_name") < receipt_function.index(
+        'UPGRADE_RECEIPT_PATH="${receipt_path}"'
+    )
+    assert "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}" in receipt_function
+    migration_phase = source[stop:required]
+    assert "TARGET_PYTHON_STDIN_ARGS=(-)" in migration_phase
+    assert "TARGET_PYTHON_STDIN_ARGS=(-I -B -)" in migration_phase
+    assert '"${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" "${UPGRADE_RECEIPT_PATH}"' in migration_phase
+    assert "delegate_prior_upgrade_receipts(Path(receipt_path))" in migration_phase
+    assert 'os.environ["MIGRATION_TO_VERSION"]' in migration_phase
+    assert "record_upgrade_migrations(" in migration_phase
+    assert '"${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" "${UPGRADE_MANIFEST_FILE}"' in source[migration:required]
+    assert '"${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" <<\'PY\'' in source[start:health]
+
+    same_version = source.index('same_version_recovery="clean"')
+    recovery = source.index('section "Recovering Incomplete Upgrade"', same_version)
+    clean_noop = source.index('section "Version Already Verified"', recovery)
+    assert same_version < recovery < clean_noop < backup
+    same_version_phase = source[same_version:clean_noop]
+    assert "find_resumable_upgrade_receipt" in same_version_phase
+    assert "find_verified_installed_upgrade_receipt" in same_version_phase
+    assert "installed_local_observability_bundle_version" in same_version_phase
+    assert 'print("untrusted-bundle-drift")' in same_version_phase
+    assert '"${DEFENSECLAW_VENV}/bin/defenseclaw" upgrade --yes' in same_version_phase
+
+    split = source.index('if [[ "${COMPONENT_VERSION_SPLIT}" -eq 1 ]]')
+    hard_cut_state = source.index('hard_cut_state="$(', split)
+    split_phase = source[split:hard_cut_state]
+    assert "find_resumable_upgrade_receipt" not in split_phase
+    assert "MAX_UPGRADE_RECEIPTS" in split_phase
+    assert "UPGRADE_RECEIPT_DIRECTORY" in split_phase
+    assert "load_upgrade_receipt" in split_phase
+    assert "receipt.from_version == source_version" in split_phase
+    assert "receipt.target_version == target_version" in split_phase
+    assert "receipt.artifacts_verified" in split_phase
+    assert 'receipt.migration_status == "pending"' in split_phase
+    assert "receipt.migration_count is None" in split_phase
+    assert 'receipt.status == "pending" and receipt.failure_code == ""' in split_phase
+    assert 'receipt.status == "failed" and receipt.failure_code == "interrupted"' in split_phase
+    assert "latest_created_at = max(" in split_phase
+    assert "if created_at == latest_created_at" in split_phase
+    assert 'print("recover" if len(latest) == 1 else "invalid")' in split_phase
+
+
 @pytest.mark.parametrize(("baseline", "config_version"), [("0.8.3", 7), ("0.4.0", 5)])
 def test_historical_canary_fixture_is_hermetic_before_gateway_start(
     tmp_path: Path,
@@ -196,9 +348,11 @@ def test_historical_canary_fixture_is_hermetic_before_gateway_start(
     openclaw_home = home / ".openclaw"
     assert openclaw_home.is_dir()
     assert not openclaw_home.is_symlink()
-    assert stat.S_IMODE(openclaw_home.stat().st_mode) == 0o700
+    if os.name != "nt":
+        assert stat.S_IMODE(openclaw_home.stat().st_mode) == 0o700
 
 
+@pytest.mark.skipif(os.name == "nt", reason="private POSIX mode/ownership contract")
 def test_protected_release_test_artifact_is_authenticated_before_private_decode(
     tmp_path: Path,
 ) -> None:
@@ -225,6 +379,7 @@ def test_protected_release_test_artifact_is_authenticated_before_private_decode(
     assert destination.stat().st_mode & 0o077 == 0
 
 
+@pytest.mark.skipif(os.name == "nt", reason="private POSIX mode/ownership contract")
 def test_protected_release_test_artifact_rejects_checksum_mismatch_without_output(
     tmp_path: Path,
 ) -> None:
@@ -376,21 +531,23 @@ def test_bridge_comment_restore_is_ordered_before_seal_and_uses_source_snapshot(
             "removed_activation_temp = False", recovery_start
         )
     ]
-    assert resume.index("cleanup_owned_temporaries()") < resume.index(
-        'print(f"bridge\\t{bridge_version}\\t{plan_id}")'
-    )
+    assert resume.index("cleanup_owned_temporaries()") < resume.index('print(f"bridge\\t{bridge_version}\\t{plan_id}")')
     cleanup_start = source.index("def cleanup_owned_temporaries() -> None:")
     cleanup_end = source.index("\n\ndef restore_state_before_artifacts()", cleanup_start)
     cleanup = source[cleanup_start:cleanup_end]
     assert "members = list(entries)" not in cleanup
-    assert "members.append(entry.name)" in cleanup
+    assert "members.append((entry.name, entry.inode()))" in cleanup
     assert "members.append(entry)" not in cleanup
+    assert "for name, observed_inode in members:" in cleanup
     assert "os.lstat(name, dir_fd=descriptor)" in cleanup
     assert "entry.stat(" not in cleanup
     assert "entry.is_symlink()" not in cleanup
+    assert "info.st_dev != directory_device" in cleanup
+    assert "info.st_ino != observed_inode" in cleanup
     assert "if len(members) == 100000:" in cleanup
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_bridge_comment_restore_keeps_semantics_order_and_mode(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     source = tmp_path / "source.yaml"
@@ -440,6 +597,7 @@ otel:
 
 
 @pytest.mark.parametrize("unsafe_kind", ["source-symlink", "source-hardlink", "source-oversize", "active-symlink"])
+@POSIX_UPGRADE_CUSTODY
 def test_bridge_comment_restore_rejects_unsafe_leaves(tmp_path: Path, unsafe_kind: str) -> None:
     tmp_path.chmod(0o700)
     source = tmp_path / "source.yaml"
@@ -469,6 +627,7 @@ def test_bridge_comment_restore_rejects_unsafe_leaves(tmp_path: Path, unsafe_kin
     assert "configuration source" in completed.stderr
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_bridge_comment_restore_cas_rejects_concurrent_active_edit(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     source = tmp_path / "source.yaml"
@@ -493,6 +652,7 @@ def test_bridge_comment_restore_cas_rejects_concurrent_active_edit(tmp_path: Pat
 
 
 @pytest.mark.parametrize("commit_check", ["pre-unlink", "final-readback"])
+@POSIX_UPGRADE_CUSTODY
 def test_bridge_comment_restore_commit_checks_include_metadata(
     tmp_path: Path,
     commit_check: str,
@@ -520,6 +680,7 @@ def test_bridge_comment_restore_commit_checks_include_metadata(
     assert "was not committed exactly" in completed.stderr
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_bridge_comment_restore_crash_temp_is_cleaned_before_resumed_custody_closes(
     tmp_path: Path,
 ) -> None:
@@ -541,9 +702,7 @@ def test_bridge_comment_restore_crash_temp_is_cleaned_before_resumed_custody_clo
     assert program.count(needle) == 1
     program = program.replace(
         needle,
-        "    atomic_exchange(active_path, temporary)\n"
-        "    os.kill(os.getpid(), 9)\n"
-        "    swapped = True",
+        "    atomic_exchange(active_path, temporary)\n    os.kill(os.getpid(), 9)\n    swapped = True",
         1,
     )
 
@@ -568,6 +727,7 @@ def test_bridge_comment_restore_crash_temp_is_cleaned_before_resumed_custody_clo
     assert active.read_bytes() == b"# operator guide\n" + original_active
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_resumed_cleanup_root_replacement_cannot_redirect_unlink(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     token = "a" * 32
@@ -612,6 +772,69 @@ def test_resumed_cleanup_root_replacement_cannot_redirect_unlink(tmp_path: Path)
     assert replacement.read_text(encoding="utf-8") == "replacement-must-survive\n"
 
 
+@POSIX_UPGRADE_CUSTODY
+def test_resumed_cleanup_entry_replacement_before_inspection_is_rejected(
+    tmp_path: Path,
+) -> None:
+    tmp_path.chmod(0o700)
+    token = "a" * 32
+    data_home = tmp_path / "data"
+    openclaw_home = tmp_path / "openclaw"
+    config_parent = tmp_path / "config-root"
+    data_home.mkdir(mode=0o700)
+    openclaw_home.mkdir(mode=0o700)
+    config_parent.mkdir(mode=0o700)
+    config_path = config_parent / "active.yaml"
+    config_path.write_text("config_version: 7\n", encoding="utf-8")
+    temporary_name = f".active.yaml.upgrade-{token}.owned.tmp"
+    temporary = config_parent / temporary_name
+    temporary.write_text("enumerated-sensitive-bytes\n", encoding="utf-8")
+    enumerated = config_parent / f"{temporary_name}.enumerated"
+    program = _phase_one_recovery_cleanup_program()
+    needle = "        for name, observed_inode in members:\n"
+    assert program.count(needle) == 1
+    program = program.replace(
+        needle,
+        f"        if any(name == {temporary_name!r} for name, _inode in members):\n"
+        "            os.rename(\n"
+        f"                {temporary_name!r},\n"
+        f"                {temporary_name + '.enumerated'!r},\n"
+        "                src_dir_fd=descriptor,\n"
+        "                dst_dir_fd=descriptor,\n"
+        "            )\n"
+        "            replacement = os.open(\n"
+        f"                {temporary_name!r},\n"
+        "                os.O_WRONLY | os.O_CREAT | os.O_EXCL,\n"
+        "                0o600,\n"
+        "                dir_fd=descriptor,\n"
+        "            )\n"
+        "            try:\n"
+        "                os.write(replacement, b'replacement-must-survive\\n')\n"
+        "                os.fsync(replacement)\n"
+        "            finally:\n"
+        "                os.close(replacement)\n"
+        f"{needle}",
+        1,
+    )
+
+    completed = _run_phase_one_recovery_cleanup(
+        data_home,
+        openclaw_home,
+        config_path,
+        f"phase-one-{token}",
+        program=program,
+    )
+
+    assert completed.returncode != 0
+    assert "identity changed before inspection" in completed.stderr
+    assert enumerated.read_text(encoding="utf-8") == "enumerated-sensitive-bytes\n"
+    assert temporary.read_text(encoding="utf-8") == "replacement-must-survive\n"
+    assert not list(
+        config_parent.glob(f".defenseclaw-cleanup-{token}-*.quarantine")
+    )
+
+
+@POSIX_UPGRADE_CUSTODY
 def test_resumed_cleanup_entry_replacement_is_quarantined_not_deleted(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     token = "a" * 32
@@ -669,9 +892,7 @@ def test_resumed_cleanup_entry_replacement_is_quarantined_not_deleted(tmp_path: 
     inspected = config_parent / f"{temporary_name}.inspected"
     assert inspected.read_text(encoding="utf-8") == "inspected-sensitive-bytes\n"
     assert not temporary.exists()
-    quarantines = list(
-        config_parent.glob(f".defenseclaw-cleanup-{token}-*.quarantine")
-    )
+    quarantines = list(config_parent.glob(f".defenseclaw-cleanup-{token}-*.quarantine"))
     assert len(quarantines) == 1
     assert quarantines[0].read_text(encoding="utf-8") == "replacement-must-survive\n"
 
@@ -687,6 +908,7 @@ def test_resumed_cleanup_entry_replacement_is_quarantined_not_deleted(tmp_path: 
     assert quarantines[0].read_text(encoding="utf-8") == "replacement-must-survive\n"
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_resumed_cleanup_replays_matching_crash_left_quarantine(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     token = "a" * 32
@@ -723,9 +945,7 @@ def test_resumed_cleanup_replays_matching_crash_left_quarantine(tmp_path: Path) 
 
     assert crashed.returncode < 0
     assert not temporary.exists()
-    quarantines = list(
-        config_parent.glob(f".defenseclaw-cleanup-{token}-*.quarantine")
-    )
+    quarantines = list(config_parent.glob(f".defenseclaw-cleanup-{token}-*.quarantine"))
     assert len(quarantines) == 1
     assert quarantines[0].read_text(encoding="utf-8") == "crash-left-sensitive-bytes\n"
 
@@ -737,9 +957,7 @@ def test_resumed_cleanup_replays_matching_crash_left_quarantine(tmp_path: Path) 
     )
 
     assert replay.returncode == 0, replay.stderr
-    assert not list(
-        config_parent.glob(f".defenseclaw-cleanup-{token}-*.quarantine")
-    )
+    assert not list(config_parent.glob(f".defenseclaw-cleanup-{token}-*.quarantine"))
 
 
 @pytest.mark.parametrize(
@@ -811,7 +1029,7 @@ def test_v8_fixture_covers_each_historical_config_family(
 
 @pytest.mark.parametrize(
     ("version", "config_version"),
-    [("0.8.3", "7"), ("0.8.2", "6"), ("0.6.6", "5")],
+    [("0.8.4", "7"), ("0.8.3", "7"), ("0.8.2", "6"), ("0.6.6", "5")],
 )
 def test_reviewed_baseline_config_version_lookup(
     version: str,
@@ -834,6 +1052,17 @@ def test_baseline_config_policy_fails_closed_and_allows_pre_bridge_topology(
     }
     policy = tmp_path / "upgrade-baselines.json"
     policy.write_text(json.dumps(valid), encoding="utf-8")
+    completed = _source_script(
+        'UPGRADE_BASELINE_POLICY="$2"; published_baseline_config_version "$3"',
+        str(policy),
+        "0.8.3",
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "7"
+
+    first_windows_release = json.loads(json.dumps(valid))
+    first_windows_release["platform_published_baselines"]["windows"] = []
+    policy.write_text(json.dumps(first_windows_release), encoding="utf-8")
     completed = _source_script(
         'UPGRADE_BASELINE_POLICY="$2"; published_baseline_config_version "$3"',
         str(policy),
@@ -958,6 +1187,7 @@ def test_future_candidate_fails_closed_for_unreviewed_source_config_family(
     assert "no reviewed upgrade fixture exists for config-v9 baseline 0.8.6" in completed.stderr
 
 
+@POSIX_UPGRADE_CUSTODY
 def test_native_v8_fixture_is_strict_and_later_migration_preserves_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -966,10 +1196,9 @@ def test_native_v8_fixture_is_strict_and_later_migration_preserves_it(
     home = tmp_path / "home"
     baseline_python = home / ".defenseclaw/.venv/bin/python"
     baseline_python.parent.mkdir(parents=True)
+    interpreter = "python" if os.name == "nt" else shlex.quote(sys.executable)
     baseline_python.write_text(
-        f"""#!/bin/sh
-exec "{ROOT / ".venv/bin/python"}" "$@"
-""",
+        f'#!/bin/sh\nexec {interpreter} "$@"\n',
         encoding="utf-8",
     )
     baseline_python.chmod(0o700)
@@ -987,11 +1216,18 @@ exec "{ROOT / ".venv/bin/python"}" "$@"
     openclaw_home = home / ".openclaw"
     assert openclaw_home.is_dir()
     assert not openclaw_home.is_symlink()
-    assert stat.S_IMODE(openclaw_home.stat().st_mode) == 0o700
+    if os.name != "nt":
+        assert stat.S_IMODE(openclaw_home.stat().st_mode) == 0o700
     config_path = data_dir / "config.yaml"
     environment_path = data_dir / ".env"
     config_before = config_path.read_bytes()
     environment_before = environment_path.read_bytes()
+    gateway_token_match = re.search(
+        rb"^DEFENSECLAW_GATEWAY_TOKEN=([0-9a-f]{64})$",
+        environment_before,
+        re.MULTILINE,
+    )
+    assert gateway_token_match is not None
     source = load_validate_v8(config_before, source_name=str(config_path)).source
     assert source["config_version"] == 8
     assert not {"otel", "audit_sinks", "privacy"}.intersection(source)
@@ -1000,7 +1236,8 @@ exec "{ROOT / ".venv/bin/python"}" "$@"
     assert destinations["existing-otlp"]["headers"] == {
         "Authorization": {"env": "DEFENSECLAW_V8_FIXTURE_OTLP_AUTHORIZATION"}
     }
-    assert stat.S_IMODE(environment_path.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(environment_path.stat().st_mode) == 0o600
     assert (home / "fixture-evidence/config.historical.source").read_bytes() == config_before
     assert (home / "fixture-evidence/environment.historical.source").read_bytes() == environment_before
     baseline_bundle_manifest = json.loads(
@@ -1009,6 +1246,12 @@ exec "{ROOT / ".venv/bin/python"}" "$@"
     assert baseline_bundle_manifest["bundle_version"] == "0.8.5"
 
     monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    begin_upgrade_receipt(
+        str(data_dir),
+        from_version="0.8.5",
+        target_version="0.8.6",
+        artifacts_verified=True,
+    )
     count = run_migrations(
         "0.8.5",
         "0.8.6",
@@ -1019,7 +1262,10 @@ exec "{ROOT / ".venv/bin/python"}" "$@"
     assert count == 0
     assert config_path.read_bytes() == config_before
     assert environment_path.read_bytes() == environment_before
-    assert not list((data_dir / "backups").glob("observability-v8-*/manifest.json"))
+    refreshed_bundle_manifest = json.loads(
+        (data_dir / "observability-stack/.defenseclaw-bundle-manifest.json").read_text(encoding="utf-8")
+    )
+    assert refreshed_bundle_manifest["bundle_version"] == "0.8.6"
     cursor = json.loads((data_dir / ".migration_state.json").read_text(encoding="utf-8"))
     assert "0.8.5" in cursor["applied"]
 
@@ -1040,10 +1286,37 @@ def test_v8_verifier_proves_historical_and_bridge_backup_layers() -> None:
         "config.historical.source",
         "phase1-source-gateway",
         "phase two retained no distinct byte-exact config-v7 bridge backup",
-        'receipt_from="${REQUIRED_BRIDGE_VERSION}"',
+        "expected_upgrade_receipt_source",
     ):
         assert contract in text
     assert 'facts.get("from_version") != source' in RECEIPT_CHECK.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("source", "target", "required_bridge", "expected"),
+    [
+        ("0.8.4", "0.8.7", "0.8.4", "0.8.5"),
+        ("0.8.3", "0.8.7", "0.8.4", "0.8.5"),
+        ("0.8.3", "0.8.5", "0.8.4", "0.8.4"),
+        ("0.8.5", "0.8.7", "0.8.4", "0.8.5"),
+        ("0.8.6", "0.8.7", "0.8.4", "0.8.6"),
+    ],
+)
+def test_expected_upgrade_receipt_source_matches_final_transaction(
+    source: str,
+    target: str,
+    required_bridge: str,
+    expected: str,
+) -> None:
+    completed = _source_script(
+        'expected_upgrade_receipt_source "$2" "$3" "$4"',
+        source,
+        target,
+        required_bridge,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.strip() == expected
 
 
 def test_hard_cut_source_tree_ships_the_v8_runtime_and_forward_keyed_migration() -> None:
@@ -1066,6 +1339,12 @@ def test_matrix_matches_every_reviewed_published_baseline_and_schema() -> None:
     baselines = policy["published_baselines"]
 
     assert policy["schema_version"] == 2
+    assert line.strip() == "UPGRADE_SMOKE_FROM ?="
+    makefile = MAKEFILE.read_text(encoding="utf-8")
+    assert "target_version=''" in makefile
+    assert "dynamic upgrade matrix requires" in makefile
+    assert '--target-version "$$target_version"' in makefile
+    assert '--target-version=*) target_version="$${1#--target-version=}"' in makefile
     assert baselines[0] == "0.8.4"
     assert policy["published_baseline_config_versions"] == {
         "0.8.4": 7,
@@ -1091,7 +1370,6 @@ def test_matrix_matches_every_reviewed_published_baseline_and_schema() -> None:
         "0.8.1",
         "0.8.0",
     ]
-    assert line.split("?=", 1)[1].split() == baselines
 
 
 def test_bridge_harness_keeps_v8_source_contracts_strictly_target_gated() -> None:
@@ -1107,12 +1385,31 @@ def test_bridge_harness_keeps_v8_source_contracts_strictly_target_gated() -> Non
     assert 'if [[ "${BASH_SOURCE[0]}" == "$0" ]]' in script
 
 
-def test_historical_release_matrices_do_not_repeat_source_contract_suite() -> None:
+def test_historical_release_matrix_does_not_repeat_source_contract_suite() -> None:
     workflow = PRE_RELEASE_CERTIFICATION.read_text(encoding="utf-8")
-    linux = workflow[workflow.index("  linux-upgrade:") : workflow.index("  macos-upgrade:")]
-    macos = workflow[workflow.index("  macos-upgrade:") : workflow.index("  windows-unpublished-refusal:")]
-    for job in (linux, macos):
-        assert job.count('UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS: "1"') == 1
+    posix = workflow[workflow.index("  posix-upgrade:") : workflow.index("  windows-fresh-install:")]
+    assert posix.count('UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS: "1"') == 1
+    job = yaml.load(workflow, Loader=yaml.BaseLoader)["jobs"]["posix-upgrade"]
+    assert job["strategy"]["matrix"] == {
+        "baseline": "${{ fromJSON(inputs.baselines) }}",
+        "platform": [
+            {
+                "runner": "ubuntu-latest",
+                "name": "linux-amd64",
+                "runner_arch": "X64",
+            },
+            {
+                "runner": "macos-15",
+                "name": "darwin-arm64",
+                "runner_arch": "ARM64",
+            },
+        ],
+    }
+    assert "--success-path-only" in posix
+    assert "baseline_dependencies=published" in posix
+    assert 'if [[ "$BASELINE" == "0.8.4" ]]' in posix
+    assert "baseline_dependencies=target" in posix
+    assert '--baseline-dependencies "$baseline_dependencies"' in posix
 
 
 def test_success_receipt_verifier_uses_canonical_audit_and_queue_acknowledgement() -> None:
@@ -1199,6 +1496,10 @@ def test_retired_named_otel_backup_is_checked_only_for_pre_v8_targets() -> None:
     assert script.count("config.yaml.pre-observability-migration.bak") == 1
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the isolated Docker shim exercises the POSIX upgrade harness",
+)
 def test_docker_isolation_reports_stopped_fixture_and_forbids_mutation(tmp_path: Path) -> None:
     home = tmp_path / "home"
     completed = _source_script(

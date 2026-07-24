@@ -24,6 +24,14 @@ from __future__ import annotations
 import os
 import shutil
 
+from defenseclaw.inventory.plugin_identity import (
+    PluginIdentityError,
+    canonical_plugin_id,
+    filesystem_identity_key,
+    is_link_or_reparse,
+    validate_plugin_id,
+)
+
 
 class PluginEnforcer:
     def __init__(self, quarantine_dir: str) -> None:
@@ -53,20 +61,31 @@ class PluginEnforcer:
         return dest
 
     def quarantine(
-        self, plugin_name: str, source_path: str, connector: str = "",
+        self,
+        plugin_name: str,
+        source_path: str,
+        connector: str = "",
     ) -> str | None:
         """Move plugin directory to quarantine. Returns quarantine path or None."""
-        if os.path.islink(source_path):
+        if is_link_or_reparse(source_path):
             return None
         real_path = os.path.realpath(source_path)
         if not os.path.exists(real_path):
+            return None
+        try:
+            source_id, _manifest = canonical_plugin_id(source_path)
+            if filesystem_identity_key(source_id, os.path.dirname(source_path)) != filesystem_identity_key(
+                validate_plugin_id(plugin_name), os.path.dirname(source_path)
+            ):
+                return None
+        except PluginIdentityError:
             return None
         dest = self._quarantine_path(plugin_name, connector)
         if dest is None:
             return None
         os.makedirs(os.path.dirname(dest), exist_ok=True)
-        if os.path.exists(dest):
-            shutil.rmtree(dest)
+        if os.path.lexists(dest):
+            return None
         shutil.move(real_path, dest)
         return dest
 
@@ -81,7 +100,15 @@ class PluginEnforcer:
         src = self._quarantine_path(plugin_name, connector)
         if src is None:
             return False
-        if not os.path.exists(src):
+        if is_link_or_reparse(src) or not os.path.exists(src):
+            return False
+        try:
+            source_id, _manifest = canonical_plugin_id(src)
+            if filesystem_identity_key(source_id, os.path.dirname(src)) != filesystem_identity_key(
+                validate_plugin_id(plugin_name), os.path.dirname(src)
+            ):
+                return False
+        except PluginIdentityError:
             return False
         real_dest = os.path.realpath(restore_path)
         if allowed_roots:
@@ -90,6 +117,8 @@ class PluginEnforcer:
                 for r in allowed_roots
             ):
                 return False
+        if os.path.lexists(restore_path):
+            return False
         os.makedirs(os.path.dirname(restore_path), exist_ok=True)
         shutil.move(src, restore_path)
         return True

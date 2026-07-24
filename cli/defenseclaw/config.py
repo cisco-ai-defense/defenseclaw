@@ -29,7 +29,7 @@ import platform
 import stat
 import subprocess
 import sys
-import tempfile
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -37,7 +37,7 @@ from typing import Any
 
 import yaml
 
-from defenseclaw import connector_paths
+from defenseclaw import connector_paths, credential_provenance
 from defenseclaw import migration_state as migration_state_helpers
 
 # Back-compat re-exports — internal-but-imported-by-tests helpers that
@@ -67,6 +67,7 @@ from defenseclaw.connector_paths import (  # noqa: F401
     _read_openclaw_json as _read_openclaw_config,
 )
 from defenseclaw.file_lock import locked_file_update
+from defenseclaw.file_permissions import atomic_write_text_secure, make_private_directory
 
 _log = logging.getLogger(__name__)
 _llm_migration_warned_keys: set[tuple[str, ...]] = set()
@@ -95,8 +96,9 @@ def source_config_version(*, path: str | None = None) -> int | None:
     """Read only ``config_version`` without loading either runtime schema.
 
     The 0.8.4 bridge remains a config-v7 runtime.  It uses this bounded YAML
-    node inspection solely to prove that the separately verified 0.8.5 wheel
-    can migrate the source before any installed artifact is changed.
+    node inspection solely to prove that the separately verified first-v8-or-
+    later target wheel can migrate the source before any installed artifact is
+    changed.
 
     This preflight deliberately does not source ``.env``, construct legacy
     compatibility dataclasses, resolve secrets, or apply runtime defaults.
@@ -133,6 +135,10 @@ def require_v8_config(*, path: str | None = None, allow_missing: bool = False) -
     version = source_config_version(path=path)
     if version is None and allow_missing:
         return
+    if version is None:
+        raise ConfigVersionError(
+            "DefenseClaw is not initialized — run 'defenseclaw init' first."
+        )
     if version != 8:
         raise ConfigVersionError(
             "Configuration schema v8 is required — run 'defenseclaw upgrade' first."
@@ -1816,11 +1822,9 @@ class GuardrailConfig:
     # by ``_migrate_0_4_0_seed_hook_fail_mode`` so the flip is a
     # NEW-INSTALL-ONLY behavior change.
     #
-    # Transport-layer failures (gateway unreachable / 5xx) are
-    # handled separately by each hook's ``fail_unreachable`` helper
-    # and ALWAYS allow unless the operator opts into strict
-    # availability via ``DEFENSECLAW_STRICT_AVAILABILITY=1`` —
-    # regardless of this field's value. Mirrors
+    # Transport-layer failures (gateway unreachable / timeout / 5xx)
+    # follow this same mode. ``DEFENSECLAW_STRICT_AVAILABILITY=1``
+    # remains an unconditional force-closed override. Mirrors
     # ``GuardrailConfig.HookFailMode`` in internal/config/config.go.
     hook_fail_mode: str = "closed"
     # ``llm_role`` is the operator's answer to "should DefenseClaw's
@@ -1905,11 +1909,19 @@ class GuardrailConfig:
         return self.hilt
 
     def effective_hook_fail_mode(self, connector: str = "") -> str:
-        """Per-connector override > global > ``"open"`` (non-"closed")."""
+        """Explicit connector posture > observe compatibility > global.
+
+        Existing observe-only installs remain fail-open when they only carry
+        the legacy global value. A connector-scoped value is an explicit
+        runtime response-integrity choice, however, and must not be collapsed
+        back to open merely because policy findings are being observed.
+        """
         pc = self._connector_override(connector)
         if pc is not None and pc.hook_fail_mode.strip():
             if pc.hook_fail_mode.strip().lower() == "closed":
                 return "closed"
+            return "open"
+        if self.effective_mode(connector).strip().lower() != "action":
             return "open"
         if self.hook_fail_mode.strip().lower() == "closed":
             return "closed"
@@ -2004,22 +2016,21 @@ class NotificationSourceFilter:
 def _default_notifications_enabled() -> bool:
     """Mirror Go's ``config.DefaultNotificationsEnabled``.
 
-    Darwin is the only platform with a consumer-grade desktop
-    notification surface that every user already has running, so it
-    opts in by default. Every other OS waits for an explicit
-    ``defenseclaw setup notifications on`` opt-in. Implemented as a
+    macOS and native Windows both have an attended consumer desktop
+    notification surface, so fresh installs opt in by default. Every other OS
+    waits for an explicit ``defenseclaw setup notifications on`` opt-in. Implemented as a
     free function (not a literal default) so the platform check is
     evaluated at config-construction time, not module-import time —
     important for unit tests that monkey-patch ``platform.system``.
     """
-    return platform.system() == "Darwin"
+    return platform.system() in {"Darwin", "Windows"}
 
 
 @dataclass
 class NotificationsConfig:
     """User-session OS notifications. Mirrors internal/config.NotificationsConfig.
 
-    Master switch ``enabled`` defaults to ``True`` on darwin and
+    Master switch ``enabled`` defaults to ``True`` on macOS and Windows and
     ``False`` elsewhere — same matrix as Go's
     ``DefaultNotificationsEnabled``. ``defenseclaw setup
     notifications`` (the single-prompt onboarding wizard) is still
@@ -2593,6 +2604,37 @@ class Config:
         with locked_config_yaml(path):
             self._save_locked(path)
 
+    def save_verified(self, verify: Callable[[str], None]) -> None:
+        """Persist, verify the exact written generation, and roll back on failure.
+
+        Verification runs while the canonical per-config lock is held. If it
+        fails after the atomic replacement, the prior v8 document is restored
+        atomically before the original error is re-raised.
+        """
+        path = str(config_path_for_data_dir(self.data_dir))
+        previous_source_version = self._source_config_version
+        previous_snapshot = copy.deepcopy(self._loaded_v8_modeled_snapshot)
+        with locked_config_yaml(path):
+            existed = os.path.exists(path)
+            existing = _load_existing_config_yaml(path)
+            self._save_locked(path)
+            try:
+                verify(path)
+            except Exception as verify_error:
+                self._source_config_version = previous_source_version
+                self._loaded_v8_modeled_snapshot = previous_snapshot
+                try:
+                    if existed:
+                        write_config_yaml_secure(path, existing)
+                    else:
+                        os.unlink(path)
+                except Exception as rollback_error:
+                    raise RuntimeError(
+                        "config verification failed and the previous configuration "
+                        f"could not be restored: {rollback_error}"
+                    ) from verify_error
+                raise
+
     def _save_locked(self, path: str) -> None:
         """Persist using an already-held config lock."""
 
@@ -2628,7 +2670,15 @@ class Config:
 @contextmanager
 def locked_config_yaml(path: str):
     """Hold an exclusive per-config lock for a read/merge/write cycle."""
-
+    directory = os.path.dirname(path) or "."
+    # On elevated Windows accounts, a directory created with bare
+    # ``os.makedirs`` can inherit the token's default owner (for example the
+    # Administrators group) instead of the interactive user's SID.  The
+    # subsequent fail-closed config/audit writers then correctly refuse to
+    # mutate that foreign-owned directory.  Apply the private creation DACL at
+    # creation time so the config lock is never exposed in a permissive or
+    # ambiguously owned parent.
+    make_private_directory(directory)
     with locked_file_update(path):
         yield
 
@@ -2636,55 +2686,16 @@ def locked_config_yaml(path: str):
 def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
     """Atomically write YAML without widening config.yaml permissions."""
     _assert_config_write_allowed(path, data)
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
-    existing_mode: int | None = None
-    try:
-        existing_mode = stat.S_IMODE(os.stat(path).st_mode)
-    except FileNotFoundError:
-        pass
-    except OSError:
-        existing_mode = None
+
+    def write_yaml(stream) -> None:
+        yaml.safe_dump(data, stream, default_flow_style=False, sort_keys=False)
 
     token_suffix = migration_state_helpers.upgrade_mutation_temp_suffix()
-    fd, tmp = tempfile.mkstemp(
+    atomic_write_text_secure(
+        path,
+        write_yaml,
         prefix=f".{os.path.basename(path)}.{token_suffix}",
-        suffix=".tmp",
-        dir=directory,
     )
-    descriptor_chmod = getattr(os, "fchmod", None)
-    if descriptor_chmod is not None:
-        descriptor_chmod(fd, 0o600)
-    else:
-        os.chmod(tmp, 0o600)
-    try:
-        with os.fdopen(fd, "w") as f:
-            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-            f.flush()
-            os.fsync(f.fileno())
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-    if existing_mode is not None and existing_mode != 0o600:
-        target_mode = existing_mode & 0o600
-        if target_mode == 0o600 and existing_mode & 0o077 == 0o040:
-            target_mode = 0o640
-        elif target_mode == 0:
-            target_mode = 0o600
-        try:
-            os.chmod(tmp, target_mode)
-        except OSError as exc:
-            _log.warning(
-                "config.save: cannot mirror %o mode onto %s (%s); writing as 0600",
-                existing_mode,
-                tmp,
-                exc,
-            )
-    os.replace(tmp, path)
     try:
         dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
     except OSError:
@@ -4384,6 +4395,8 @@ def _load_dotenv_into_os(data_dir: str) -> None:
     even when not exported in the user's shell profile.
     """
     env_path = os.path.join(data_dir, ".env")
+    credential_provenance.begin_dotenv_load(data_dir, env_path)
+    seen_keys: set[str] = set()
     try:
         with open(env_path) as f:
             for line in f:
@@ -4394,8 +4407,17 @@ def _load_dotenv_into_os(data_dir: str) -> None:
                 key, value = key.strip(), value.strip()
                 if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
                     value = value[1:-1]
-                if key and key not in os.environ:
-                    os.environ[key] = value
+                if key and key not in seen_keys:
+                    seen_keys.add(key)
+                    injected = key not in os.environ
+                    if injected:
+                        os.environ[key] = value
+                    credential_provenance.note_dotenv_candidate(
+                        data_dir,
+                        key,
+                        value,
+                        injected=injected,
+                    )
     except FileNotFoundError:
         pass
     except OSError as exc:
@@ -4746,7 +4768,7 @@ def _merge_notifications(raw: dict[str, Any] | None) -> NotificationsConfig:
     """Build a :class:`NotificationsConfig` from the YAML ``notifications:`` block.
 
     Defaults are platform-conditional for the master switch (true on
-    darwin, false elsewhere — see :func:`_default_notifications_enabled`)
+    macOS and Windows, false elsewhere — see :func:`_default_notifications_enabled`)
     and on for every category and source so that once an operator
     opts in via ``defenseclaw setup notifications`` they immediately
     see every block surface; tuning down is then a matter of

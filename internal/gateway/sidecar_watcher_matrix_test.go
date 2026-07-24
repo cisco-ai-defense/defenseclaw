@@ -11,13 +11,41 @@
 package gateway
 
 import (
+	"context"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
+
+func TestRunWatcherWithoutConfiguredDirectoriesRemainsHealthy(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Gateway.Watcher.Enabled = true
+	cfg.Gateway.Watcher.Skill.Enabled = false
+	cfg.Gateway.Watcher.Plugin.Enabled = false
+
+	health := NewSidecarHealth()
+	sidecar := &Sidecar{cfg: cfg, health: health}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := sidecar.runWatcher(ctx); err != nil {
+		t.Fatalf("runWatcher() error = %v", err)
+	}
+	snap := health.Snapshot()
+	if snap.Watcher.State != StateRunning {
+		t.Fatalf("watcher state = %q, want %q", snap.Watcher.State, StateRunning)
+	}
+	if snap.Watcher.LastError != "" {
+		t.Fatalf("watcher error = %q, want empty", snap.Watcher.LastError)
+	}
+	if got := snap.Watcher.Details["idle"]; got != "no directories configured" {
+		t.Fatalf("watcher idle detail = %v", got)
+	}
+}
 
 // TestResolveWatcherDirs_PerConnectorMatrix is the C4 / S1.3 matrix
 // test the plan calls for: prove that for every built-in connector,
@@ -204,6 +232,10 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 //     dedicated matrix rather than reusing the openclaw/zeptoclaw/
 //     claudecode/codex one above.
 func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
+	hermesSkillFragment := filepath.Join(".hermes", "skills")
+	if runtime.GOOS == "windows" {
+		hermesSkillFragment = filepath.Join("hermes", "skills")
+	}
 	cases := []struct {
 		name            string
 		ctor            func() connector.Connector
@@ -214,7 +246,7 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 			name:            "hermes",
 			ctor:            func() connector.Connector { return connector.NewHermesConnector() },
 			expectSkillSrc:  watcherDirsFromConnector,
-			expectSkillFrag: filepath.Join(".hermes", "skills"),
+			expectSkillFrag: hermesSkillFragment,
 		},
 		{
 			name:            "cursor",

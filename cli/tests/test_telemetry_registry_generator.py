@@ -1211,7 +1211,9 @@ def _fixture_root(tmp_path: Path) -> Path:
                 source = ROOT / relative_path
                 target = root / relative_path
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(source.read_bytes())
+                # A Windows checkout may materialize this pinned JSON with
+                # CRLF; the lock owns the canonical LF representation.
+                target.write_bytes(source.read_bytes().replace(b"\r\n", b"\n"))
                 assert _sha256(target.read_bytes()) == digest
                 structural_inputs.append({"upstream_path": upstream_path, "path": relative_path, "sha256": digest})
             lock_dependencies[-1]["structural_inputs"] = structural_inputs
@@ -1643,6 +1645,107 @@ def _load_updater_module(name: str):
     return module
 
 
+def test_updater_help_imports_on_native_platform() -> None:
+    completed = subprocess.run(
+        [sys.executable, str(UPDATER), "--help"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--archive DEPENDENCY=PATH" in completed.stdout
+
+
+def test_updater_repository_lock_serializes_processes_and_releases(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    driver = r"""
+import importlib.util
+import pathlib
+import sys
+import time
+
+script = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(script.parent))
+spec = importlib.util.spec_from_file_location("telemetry_updater_lock_driver", script)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+root = pathlib.Path(sys.argv[2])
+ready = pathlib.Path(sys.argv[3])
+acquired = pathlib.Path(sys.argv[4])
+release_arg = sys.argv[5]
+release = None if release_arg == "-" else pathlib.Path(release_arg)
+ready.write_text("ready\n", encoding="utf-8")
+with module._repository_update_lock(root):
+    acquired.write_text("acquired\n", encoding="utf-8")
+    while release is not None and not release.exists():
+        time.sleep(0.01)
+"""
+    first_ready = tmp_path / "first-ready"
+    first_acquired = tmp_path / "first-acquired"
+    first_release = tmp_path / "first-release"
+    second_ready = tmp_path / "second-ready"
+    second_acquired = tmp_path / "second-acquired"
+
+    def start(ready: Path, acquired: Path, release: Path | None) -> subprocess.Popen[str]:
+        return subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                driver,
+                str(UPDATER),
+                str(root),
+                str(ready),
+                str(acquired),
+                "-" if release is None else str(release),
+            ],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    def wait_for(path: Path, process: subprocess.Popen[str], timeout: float = 15) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if path.exists():
+                return
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                pytest.fail(f"lock helper exited before {path.name}: {stdout}{stderr}")
+            time.sleep(0.01)
+        pytest.fail(f"timed out waiting for {path.name}")
+
+    first = start(first_ready, first_acquired, first_release)
+    second: subprocess.Popen[str] | None = None
+    try:
+        wait_for(first_acquired, first)
+        second = start(second_ready, second_acquired, None)
+        wait_for(second_ready, second)
+        time.sleep(0.25)
+        assert not second_acquired.exists(), "second process entered while first held the lock"
+
+        first_release.write_text("release\n", encoding="utf-8")
+        wait_for(second_acquired, second)
+        first_stdout, first_stderr = first.communicate(timeout=15)
+        second_stdout, second_stderr = second.communicate(timeout=15)
+        assert first.returncode == 0, first_stdout + first_stderr
+        assert second.returncode == 0, second_stdout + second_stderr
+
+        module = _load_updater_module("telemetry_updater_lock_release")
+        with module._repository_update_lock(root):
+            pass
+    finally:
+        for process in (first, second):
+            if process is not None and process.poll() is None:
+                process.terminate()
+                process.wait(timeout=10)
+
+
 def _install_synthetic_candidate_renderers(
     module: ModuleType,
     ir: Any,
@@ -1933,6 +2036,37 @@ def test_write_check_is_deterministic_and_offline(tmp_path: Path) -> None:
         document = json.loads(decoded)
         assert document["artifact"] == logical
         assert len(document["materialized_view_sha256"]) == 64
+
+
+def test_crlf_snapshot_checkout_preserves_pinned_digest_and_outputs(tmp_path: Path) -> None:
+    root = _fixture_root(tmp_path)
+    lock = yaml.safe_load(
+        (root / "schemas/telemetry/v8/semconv.lock.yaml").read_text(encoding="utf-8")
+    )
+    for dependency in lock["dependencies"]:
+        snapshot = root / dependency["snapshot"]["path"]
+        payload = snapshot.read_bytes()
+        assert b"\r\n" not in payload and b"\n" in payload
+        snapshot.write_bytes(payload.replace(b"\n", b"\r\n"))
+
+    generated = _run(root, "--write")
+
+    assert generated.returncode == 0, generated.stderr
+    assert _run(root, "--check").returncode == 0
+
+
+def test_generated_go_drift_check_accepts_crlf_but_not_content_drift(tmp_path: Path) -> None:
+    module = _load_generator_module("telemetry_registry_crlf_generated_go")
+    relative = module.GO_CANDIDATE_OUTPUT_PATHS[0]
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    expected = b"package observability\n\nconst generated = true\n"
+    target.write_bytes(expected.replace(b"\n", b"\r\n"))
+
+    assert module._drift(tmp_path, {relative: expected}) == []
+
+    target.write_bytes(target.read_bytes() + b"// changed\r\n")
+    assert module._drift(tmp_path, {relative: expected}) == [f"stale={relative}"]
 
 
 def test_snapshot_tampering_fails_without_partial_output(tmp_path: Path) -> None:
@@ -4149,7 +4283,7 @@ attributes:
             payload = (
                 ROOT / "schemas/telemetry/v8/upstream/otel-genai-b028dceecdad117461a785c3af35315e7184e813/"
                 f"model/gen-ai/{filename}"
-            ).read_bytes()
+            ).read_bytes().replace(b"\r\n", b"\n")
             info = tarfile.TarInfo(f"semantic-conventions-genai/model/gen-ai/{filename}")
             info.size = len(payload)
             archive.addfile(info, io.BytesIO(payload))
@@ -4202,7 +4336,7 @@ def _full_genai_upstream_archive(path: Path) -> None:
             payload = (
                 ROOT / "schemas/telemetry/v8/upstream/otel-genai-b028dceecdad117461a785c3af35315e7184e813/"
                 f"model/gen-ai/{filename}"
-            ).read_bytes()
+            ).read_bytes().replace(b"\r\n", b"\n")
             info = tarfile.TarInfo(f"semantic-conventions-genai/model/gen-ai/{filename}")
             info.size = len(payload)
             archive.addfile(info, io.BytesIO(payload))
@@ -7706,17 +7840,29 @@ def test_updater_mid_publish_failure_restores_prior_bytes_and_inodes(
         "schemas/telemetry/v8/upstream/rollback-b.json": b"new-b\n",
         "schemas/telemetry/v8/semconv.lock.yaml": b"new-lock\n",
     }
-    original_link = module.os.link
     calls = 0
+    if os.name == "nt":
+        original_replace = module.windows_acl.replace_file
 
-    def fail_once(*args: Any, **kwargs: Any) -> None:
-        nonlocal calls
-        calls += 1
-        if calls == 4:
-            raise OSError("injected publication failure")
-        original_link(*args, **kwargs)
+        def fail_once(*args: Any, **kwargs: Any) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("injected publication failure")
+            original_replace(*args, **kwargs)
 
-    monkeypatch.setattr(module.os, "link", fail_once)
+        monkeypatch.setattr(module.windows_acl, "replace_file", fail_once)
+    else:
+        original_link = module.os.link
+
+        def fail_once(*args: Any, **kwargs: Any) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 4:
+                raise OSError("injected publication failure")
+            original_link(*args, **kwargs)
+
+        monkeypatch.setattr(module.os, "link", fail_once)
 
     with pytest.raises(
         module.RegistryError,
@@ -7729,6 +7875,64 @@ def test_updater_mid_publish_failure_restores_prior_bytes_and_inodes(
     for path, (payload, inode) in before.items():
         assert path.read_bytes() == payload
         assert path.stat().st_ino == inode
+    assert not tuple(root.glob(".telemetry-upstream-update-*"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native ReplaceFileW rollback regression")
+def test_updater_windows_failure_after_replace_restores_prior_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _fixture_root(tmp_path)
+    module = _load_updater_module("telemetry_updater_windows_post_replace_rollback")
+    target = root / "schemas/telemetry/v8/upstream/post-replace.json"
+    lock_path = root / "schemas/telemetry/v8/semconv.lock.yaml"
+    target.write_bytes(b"old-snapshot\n")
+    before_target = (target.read_bytes(), target.stat().st_ino)
+    before_lock = (lock_path.read_bytes(), lock_path.stat().st_ino)
+    original_replace = module.windows_acl.replace_file
+    original_metadata = module._entry_metadata
+    calls = 0
+    replacement_completed = False
+    injected = False
+
+    def observed_replace(*args: Any, **kwargs: Any) -> None:
+        nonlocal calls, replacement_completed
+        calls += 1
+        original_replace(*args, **kwargs)
+        replacement_completed = True
+
+    def fail_first_verification(*args: Any, **kwargs: Any) -> Any:
+        nonlocal injected
+        if replacement_completed and not injected:
+            injected = True
+            raise OSError("injected failure after successful replacement")
+        return original_metadata(*args, **kwargs)
+
+    monkeypatch.setattr(module.windows_acl, "replace_file", observed_replace)
+    monkeypatch.setattr(module, "_entry_metadata", fail_first_verification)
+
+    with pytest.raises(
+        module.RegistryError,
+        match="telemetry upstream publication failed and was rolled back",
+    ) as exc_info:
+        module._install_rendered(
+            root,
+            {
+                "schemas/telemetry/v8/upstream/post-replace.json": b"new-snapshot\n",
+                "schemas/telemetry/v8/semconv.lock.yaml": b"new-lock\n",
+            },
+            "schemas/telemetry/v8/semconv.lock.yaml",
+        )
+
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert str(exc_info.value.__cause__) == "injected failure after successful replacement"
+    assert target.read_bytes() == before_target[0]
+    assert target.stat().st_ino == before_target[1]
+    assert lock_path.read_bytes() == before_lock[0]
+    assert lock_path.stat().st_ino == before_lock[1]
+    assert injected is True
+    assert calls >= 2  # publish plus rollback restore
     assert not tuple(root.glob(".telemetry-upstream-update-*"))
 
 
@@ -7746,13 +7950,17 @@ def test_updater_transaction_directory_substitution_blocks_cleanup(
     def substitute(parent_descriptor: int, name: str, identity: tuple[int, int]) -> None:
         nonlocal replacement_name
         replacement_name = name
-        module.os.rename(
-            name,
-            f"{name}.original",
-            src_dir_fd=parent_descriptor,
-            dst_dir_fd=parent_descriptor,
-        )
-        module.os.mkdir(name, mode=0o700, dir_fd=parent_descriptor)
+        if isinstance(parent_descriptor, Path):
+            (parent_descriptor / name).rename(parent_descriptor / f"{name}.original")
+            (parent_descriptor / name).mkdir(mode=0o700)
+        else:
+            module.os.rename(
+                name,
+                f"{name}.original",
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            module.os.mkdir(name, mode=0o700, dir_fd=parent_descriptor)
         original_remove(parent_descriptor, name, identity)
 
     monkeypatch.setattr(module, "_remove_tree_at", substitute)
@@ -7788,24 +7996,32 @@ def test_updater_post_commit_cleanup_fsync_failure_reports_live_commit(
     lock_path = root / "schemas/telemetry/v8/semconv.lock.yaml"
     output_path = root / "schemas/telemetry/v8/upstream/cleanup-fsync.json"
     original_remove = module._remove_tree_at
-    original_fsync = module.os.fsync
     injected = False
+    if os.name == "nt":
 
-    def fail_cleanup_fsync(parent_descriptor: int, name: str, identity: tuple[int, int]) -> None:
-        nonlocal injected
-
-        def fail_once(descriptor: int) -> None:
+        def fail_cleanup_fsync(parent_descriptor: int, name: str, identity: tuple[int, int]) -> None:
             nonlocal injected
-            if not injected:
-                injected = True
-                raise OSError("injected transaction cleanup fsync failure")
-            original_fsync(descriptor)
+            injected = True
+            raise OSError("injected transaction cleanup fsync failure")
 
-        monkeypatch.setattr(module.os, "fsync", fail_once)
-        try:
-            original_remove(parent_descriptor, name, identity)
-        finally:
-            monkeypatch.setattr(module.os, "fsync", original_fsync)
+    else:
+        original_fsync = module.os.fsync
+
+        def fail_cleanup_fsync(parent_descriptor: int, name: str, identity: tuple[int, int]) -> None:
+            nonlocal injected
+
+            def fail_once(descriptor: int) -> None:
+                nonlocal injected
+                if not injected:
+                    injected = True
+                    raise OSError("injected transaction cleanup fsync failure")
+                original_fsync(descriptor)
+
+            monkeypatch.setattr(module.os, "fsync", fail_once)
+            try:
+                original_remove(parent_descriptor, name, identity)
+            finally:
+                monkeypatch.setattr(module.os, "fsync", original_fsync)
 
     monkeypatch.setattr(module, "_remove_tree_at", fail_cleanup_fsync)
 
@@ -7950,14 +8166,19 @@ def test_updater_namespace_swap_cannot_publish_through_detached_parent(
     before_lock = (lock_path.read_bytes(), lock_path.stat().st_ino)
     original_validate = module._validate_parent_binding
     swapped = False
+    blocked = False
     upstream_validations = 0
 
-    def swap_before_validation(root_descriptor: int, state: dict[str, Any]) -> None:
-        nonlocal swapped, upstream_validations
+    def swap_before_validation(root_descriptor: int | Path, state: dict[str, Any]) -> None:
+        nonlocal blocked, swapped, upstream_validations
         if state["parent_parts"] == ("schemas", "telemetry", "v8", "upstream"):
             upstream_validations += 1
             if not swapped and upstream_validations == swap_on_upstream_validation:
-                upstream.rename(displaced)
+                try:
+                    upstream.rename(displaced)
+                except OSError as exc:
+                    blocked = True
+                    raise module.RegistryError("canonical namespace swap was blocked") from exc
                 upstream.mkdir()
                 swapped = True
         original_validate(root_descriptor, state)
@@ -7977,11 +8198,13 @@ def test_updater_namespace_swap_cannot_publish_through_detached_parent(
             "schemas/telemetry/v8/semconv.lock.yaml",
         )
 
-    assert swapped is True
+    assert blocked is (os.name == "nt")
+    assert swapped is (os.name != "nt")
     assert isinstance(exc_info.value.__cause__, module.RegistryError)
     assert "canonical namespace" in str(exc_info.value.__cause__)
     assert not (upstream / "namespace-swap.json").exists()
-    assert not (displaced / "namespace-swap.json").exists()
+    if displaced.exists():
+        assert not (displaced / "namespace-swap.json").exists()
     assert lock_path.read_bytes() == before_lock[0]
     assert lock_path.stat().st_ino == before_lock[1]
     assert not tuple(root.glob(".telemetry-upstream-update-*"))
@@ -8419,17 +8642,29 @@ def test_updater_transaction_bootstrap_failure_removes_exact_created_inode(
 ) -> None:
     root = _fixture_root(tmp_path)
     module = _load_updater_module("telemetry_updater_bootstrap_cleanup")
-    original_fsync = module.os.fsync
     injected = False
+    if os.name == "nt":
+        original_metadata = module._real_directory_metadata
 
-    def fail_first_fsync(descriptor: int) -> None:
-        nonlocal injected
-        if not injected:
-            injected = True
-            raise OSError("injected bootstrap failure")
-        original_fsync(descriptor)
+        def fail_first_metadata(path: Path) -> os.stat_result:
+            nonlocal injected
+            if not injected and path.name.startswith(".telemetry-upstream-update-"):
+                injected = True
+                raise OSError("injected bootstrap failure")
+            return original_metadata(path)
 
-    monkeypatch.setattr(module.os, "fsync", fail_first_fsync)
+        monkeypatch.setattr(module, "_real_directory_metadata", fail_first_metadata)
+    else:
+        original_fsync = module.os.fsync
+
+        def fail_first_fsync(descriptor: int) -> None:
+            nonlocal injected
+            if not injected:
+                injected = True
+                raise OSError("injected bootstrap failure")
+            original_fsync(descriptor)
+
+        monkeypatch.setattr(module.os, "fsync", fail_first_fsync)
 
     with module._directory_descriptor(root) as root_descriptor:
         with pytest.raises(module.RegistryError, match="cannot initialize telemetry upstream transaction directory"):

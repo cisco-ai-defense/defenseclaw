@@ -112,6 +112,56 @@ def test_bridge_rejects_protocol_drift_and_never_echoes_helper_stdout() -> None:
         config_inspect.inspect_v8_config("validate", config_path="config.yaml")
 
 
+def test_validation_refusal_preserves_exact_safe_field_and_reason() -> None:
+    secret = "must-not-appear-in-diagnostic"
+    failure = {
+        "wire_version": 2,
+        "kind": "validation_error",
+        "config_version": 8,
+        "path": "$.observability.destinations[0].protocol",
+        "reason": "[config_schema_invalid] configuration violates the enum constraint; expected one of [grpc,http/protobuf]",
+    }
+    with (
+        patch.object(config_inspect, "resolve_gateway_binary", return_value="gateway"),
+        patch.object(
+            config_inspect.subprocess,
+            "run",
+            return_value=_completed(stdout=json.dumps(failure), stderr=secret, returncode=1),
+        ),
+        pytest.raises(config_inspect.ConfigInspectError) as caught,
+    ):
+        config_inspect.inspect_v8_config("validate", config_path="config.yaml")
+
+    assert caught.value.field_path == failure["path"]
+    assert caught.value.reason == failure["reason"]
+    assert f"field={failure['path']}" in str(caught.value)
+    assert f"reason={failure['reason']}" in str(caught.value)
+    assert secret not in str(caught.value)
+
+
+def test_validation_refusal_rejects_multiline_structured_diagnostic() -> None:
+    failure = {
+        "wire_version": 2,
+        "kind": "validation_error",
+        "config_version": 8,
+        "path": "$.observability\n.secret",
+        "reason": "unsafe\nsecond line",
+    }
+    with (
+        patch.object(config_inspect, "resolve_gateway_binary", return_value="gateway"),
+        patch.object(
+            config_inspect.subprocess,
+            "run",
+            return_value=_completed(stdout=json.dumps(failure), stderr="", returncode=1),
+        ),
+        pytest.raises(config_inspect.ConfigInspectError) as caught,
+    ):
+        config_inspect.inspect_v8_config("validate", config_path="config.yaml")
+
+    assert caught.value.field_path is None
+    assert caught.value.reason is None
+
+
 def test_bridge_missing_binary_and_timeout_are_actionable() -> None:
     with (
         patch.object(config_inspect, "resolve_gateway_binary", return_value=None),
