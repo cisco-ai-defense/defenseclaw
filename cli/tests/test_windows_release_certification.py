@@ -199,6 +199,29 @@ def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> 
         assert obsolete not in FRESH_INSTALL
 
 
+def test_disposable_setup_failure_preserves_bounded_native_log_before_profile_cleanup() -> None:
+    fixed_source = r"DefenseClaw\InstallerState\setup.log"
+    fixed_destination = "native-setup.log"
+    capture = "Copy-DisposableNativeSetupLog"
+    generic_handoff = "Copy-BoundedDisposableDiagnostics"
+    profile_cleanup = "Remove-DisposableProfileAndAccount $accountName $accountSid"
+
+    assert fixed_source in DISPOSABLE_LAUNCHER
+    assert fixed_destination in DISPOSABLE_LAUNCHER
+    assert "[Environment+SpecialFolder]::LocalApplicationData" in DISPOSABLE_LAUNCHER
+    assert "DisposableFileGuard]::CopyBoundedRegularFile(" in DISPOSABLE_LAUNCHER
+    assert re.search(
+        r"(?s)CopyBoundedRegularFile\(\s*\$source,\s*\$destination,\s*65536\s*\)",
+        DISPOSABLE_LAUNCHER,
+    )
+    assert "-AllowedRoot $localAppData -RequireExists" in DISPOSABLE_LAUNCHER
+    assert "-AllowedRoot $SandboxRoot -RequireExists" in DISPOSABLE_LAUNCHER
+    assert "native Setup log preservation failed" in DISPOSABLE_LAUNCHER
+    assert DISPOSABLE_LAUNCHER.rindex(capture) < DISPOSABLE_LAUNCHER.rindex(generic_handoff)
+    assert DISPOSABLE_LAUNCHER.rindex(generic_handoff) < DISPOSABLE_LAUNCHER.index(profile_cleanup)
+    assert "Copy-Item" not in DISPOSABLE_LAUNCHER
+
+
 def test_publish_includes_windows_binaries_without_an_omission_mode() -> None:
     workflow = _workflow(RELEASE_PATH)
     jobs = workflow["jobs"]

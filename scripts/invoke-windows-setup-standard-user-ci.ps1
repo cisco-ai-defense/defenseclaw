@@ -219,6 +219,41 @@ function Test-ActualChildFilesystemBoundary {
     }
 }
 
+function Copy-DisposableNativeSetupLog {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DiagnosticsRoot,
+        [Parameter(Mandatory)][string]$SandboxRoot
+    )
+
+    $localAppData = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::LocalApplicationData
+    )
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        throw 'disposable user has no LocalApplicationData known folder'
+    }
+    $source = Join-Path $localAppData 'DefenseClaw\InstallerState\setup.log'
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { return }
+
+    $source = Assert-DisposableNoReparseAncestors -Path $source `
+        -AllowedRoot $localAppData -RequireExists
+    $destinationRoot = Assert-DisposableNoReparseAncestors `
+        -Path $DiagnosticsRoot -AllowedRoot $SandboxRoot -RequireExists
+    $destinationRootItem = Get-Item -LiteralPath $destinationRoot `
+        -Force -ErrorAction Stop
+    if (-not $destinationRootItem.PSIsContainer) {
+        throw 'disposable native Setup diagnostic destination is not a directory'
+    }
+    $destination = Join-Path $destinationRoot 'native-setup.log'
+    $null = Assert-DisposableNoReparseAncestors -Path $destination `
+        -AllowedRoot $destinationRoot
+    [void][DefenseClaw.DisposableFileGuard]::CopyBoundedRegularFile(
+        $source,
+        $destination,
+        65536
+    )
+}
+
 function Invoke-ChildMode {
     $result = [IO.Path]::GetFullPath($ResultPath)
     $state = [IO.Path]::GetFullPath($StateRoot)
@@ -371,6 +406,21 @@ function Invoke-ChildMode {
         Write-ChildProgress $progress "${Mode}-failed"
         $failure = $_
         if (-not [string]::IsNullOrWhiteSpace($DiagnosticsRoot)) {
+            try {
+                Copy-DisposableNativeSetupLog `
+                    -DiagnosticsRoot ([IO.Path]::GetFullPath($DiagnosticsRoot)) `
+                    -SandboxRoot $sandboxRoot
+            } catch {
+                $failure = [Management.Automation.ErrorRecord]::new(
+                    [InvalidOperationException]::new(
+                        "$($failure.Exception.Message); native Setup log preservation failed: $($_.Exception.Message)",
+                        $failure.Exception
+                    ),
+                    'DisposableNativeSetupLogPreservationFailed',
+                    [Management.Automation.ErrorCategory]::OperationStopped,
+                    $state
+                )
+            }
             try {
                 & $nativeHarness -Operation capture -StateRoot $state `
                     -DiagnosticsRoot ([IO.Path]::GetFullPath($DiagnosticsRoot))
