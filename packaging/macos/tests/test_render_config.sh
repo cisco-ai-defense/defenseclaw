@@ -100,6 +100,26 @@ t_redaction_pass_through_off() {
   assert_contains "${out}" "disable_redaction: true" "renderer emits redaction OFF when true is passed"
 }
 
+t_default_aid_endpoint_matches_go() {
+  # Sync guard: the shell-side DEFAULT_AID_ENDPOINT constant in
+  # installer_lib.sh must match the Go viper default in
+  # internal/config/config.go. install.sh's rc-1 / rc-2 fallback
+  # renders this URL into config.yaml, and the daemon on boot also
+  # falls back to the viper default when config.yaml omits the
+  # cisco_ai_defense block — the two must agree or a manually-edited
+  # config that drops the block would silently swap the endpoint. If
+  # either side moves the URL, this test fails at CI time so drift is
+  # caught immediately.
+  local shell_default go_default
+  shell_default="${DEFAULT_AID_ENDPOINT}"
+  go_default="$(grep -oE 'viper\.SetDefault\("cisco_ai_defense\.endpoint",[[:space:]]*"[^"]+"' \
+    "${REPO_ROOT}/internal/config/config.go" \
+    | head -1 \
+    | sed -E 's/.*"cisco_ai_defense\.endpoint",[[:space:]]*"([^"]+)".*/\1/')"
+  assert_eq "${shell_default}" "${go_default}" \
+    "DEFAULT_AID_ENDPOINT in installer_lib.sh matches viper default in config.go"
+}
+
 t_yaml_parses() {
   # Best-effort: if python3 + a yaml module exist, parse the output to
   # catch indentation regressions.
@@ -350,4 +370,5 @@ run_case "_read_json_field reads AVC env_config.json shape"       t_read_json_fi
 run_case "otel block enabled for managed AID sink"               t_otel_block_enabled_for_managed_sink
 run_case "ai_discovery enabled for endpoint inventory"           t_ai_discovery_enabled_for_endpoint_inventory
 run_case "resolve_aid_endpoint precedence + validation"           t_resolve_aid_endpoint_precedence
+run_case "DEFAULT_AID_ENDPOINT matches Go viper default"          t_default_aid_endpoint_matches_go
 run_case "rendered YAML parses"     t_yaml_parses

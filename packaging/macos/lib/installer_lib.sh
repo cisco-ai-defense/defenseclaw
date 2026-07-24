@@ -15,6 +15,23 @@
 #   - parse strings, render YAML, run pure file I/O against caller-owned
 #     paths (e.g. a tmpdir under /tmp/dctest-XXXX).
 
+# ---- shared constants --------------------------------------------------
+
+# Default AI Defense inspect endpoint used when env_config.json is absent
+# or malformed at install time. Must match
+# viper.SetDefault("cisco_ai_defense.endpoint", ...) in
+# internal/config/config.go so the shell + Go sides agree on the
+# managed_enterprise fallback. The sync-guard test
+# t_default_aid_endpoint_matches_go under packaging/macos/tests/
+# catches drift on every CI run.
+#
+# Declared conditionally so tests that re-source this library across
+# cases (the harness sources it per-test-file) don't trip the bash
+# "readonly variable" error on the second source. First definition wins.
+if [[ -z "${DEFAULT_AID_ENDPOINT:-}" ]]; then
+  readonly DEFAULT_AID_ENDPOINT="https://us.api.inspect.aidefense.security.cisco.com"
+fi
+
 # ---- connector list parsing --------------------------------------------
 
 # parse_connectors LIST -> echoes one normalized connector per line.

@@ -580,9 +580,25 @@ AID_ENDPOINT="$(resolve_aid_endpoint "${OVERRIDE_ENDPOINT}" "${CONFIG_FILE}")" |
 if (( _ep_rc == 3 )); then
   die "--override-endpoint must be an HTTPS bare origin (no userinfo, path, query, or fragment) — got: ${OVERRIDE_ENDPOINT}"
 elif (( _ep_rc == 2 )); then
-  die "--config-file ${CONFIG_FILE} is malformed: expected a JSON object with a valid \"cisco_ai_defense_endpoint\" URL. If AVC's drop is missing, pass --override-endpoint URL for adhoc testing."
+  # Malformed env_config.json (bad JSON, missing cisco_ai_defense_endpoint
+  # field, or bad URL shape). Fall through to the US-prod default so a
+  # stale, corrupt, or partially-written AVC drop can't brick the
+  # install. Loud WARN so operators can still find the misconfig in
+  # install.log. Trust-check failures (root ownership / write bits /
+  # symlinks) are a separate concern — those still die at line 576
+  # BEFORE this resolver runs, so tampering with the file's perms
+  # cannot piggyback onto this fallback.
+  warn "env_config.json at ${CONFIG_FILE} is malformed (expected a JSON object with a valid \"cisco_ai_defense_endpoint\" URL). Installing with default endpoint ${DEFAULT_AID_ENDPOINT}."
+  AID_ENDPOINT="${DEFAULT_AID_ENDPOINT}"
 elif (( _ep_rc == 1 )); then
-  die "env_config.json not found at ${CONFIG_FILE}; the AVC module must drop this file before installing, or pass --override-endpoint URL for adhoc testing."
+  # Missing env_config.json is expected under the AVC packaging
+  # sequencing where AVC installs DefenseClaw before its own bundle
+  # drops env_config.json. Fall through to the US-prod default so
+  # the daemon boots and starts serving traffic; a later env_config
+  # arrival will require a reinstall (or a manual endpoint edit) to
+  # take effect on this branch.
+  warn "env_config.json not found at ${CONFIG_FILE}. Installing with default endpoint ${DEFAULT_AID_ENDPOINT}."
+  AID_ENDPOINT="${DEFAULT_AID_ENDPOINT}"
 elif (( _ep_rc != 0 )); then
   die "could not resolve AI Defense endpoint (rc=${_ep_rc})"
 fi

@@ -217,36 +217,64 @@ t_install_override_endpoint_rejects_path_query_fragment() {
   done
 }
 
-t_install_missing_config_file_exits_nonzero() {
-  # No --override-endpoint AND a --config-file path that doesn't
-  # exist → fail-closed with a message that names the missing file
-  # and points operators at either the AVC drop or --override-endpoint.
+t_install_missing_config_file_falls_back_to_default() {
+  # Missing env_config.json is expected under the AVC packaging
+  # sequencing where AVC installs DefenseClaw before its own bundle
+  # drops env_config.json. Installer must warn and continue with the
+  # US-prod default rather than fail-close — a dummy or absent file
+  # from a broken AVC drop must not brick the install.
+  #
+  # We can't drive install.sh far enough to complete a real install
+  # in this harness (it eventually needs root, a real binary, and
+  # launchctl). What we CAN prove is that the resolver branch no
+  # longer says "not found ... die" — it says "warn and default".
+  # Grep for the warn substring plus the default endpoint URL; the
+  # non-zero exit code comes from a downstream stage, not this branch.
   local case_dir; case_dir="$(mktest_tmp)"
   local out rc=0
   out="$("${INSTALL_SH}" --config-file "${case_dir}/does-not-exist.json" 2>&1)" || rc=$?
-  assert_status "${rc}" 1 "missing --config-file should exit non-zero"
-  assert_contains "${out}" "env_config.json not found at" "names the missing file"
-  assert_contains "${out}" "AVC module must drop this file" "explains next step"
-  assert_contains "${out}" "--override-endpoint URL for adhoc testing" \
-    "points operators at the adhoc-testing seam"
+  assert_contains "${out}" "env_config.json not found at" \
+    "installer names the missing env_config.json in the warn line"
+  assert_contains "${out}" "https://us.api.inspect.aidefense.security.cisco.com" \
+    "installer falls through to the US-prod default endpoint"
+  assert_contains "${out}" "Installing with default endpoint" \
+    "warn line spells out the fallback"
+  assert_not_contains "${out}" "AVC module must drop this file before installing" \
+    "old fail-fast message must be gone"
+  assert_not_contains "${out}" "the AVC module must drop this file" \
+    "old fail-fast message must be gone (variant)"
 }
 
-t_install_malformed_config_file_exits_nonzero() {
-  # Config file exists but is not a JSON object with a valid
-  # "cisco_ai_defense_endpoint" URL. Installer must die() before any
-  # mutation with a message that names the offending file. Skips the
-  # trust check via DC_INSTALLER_SKIP_ROOT_CHECK=1 (test fixtures under
-  # a tmpdir cannot be root-owned; the trust check is exercised end-
-  # to-end in the manual verification steps).
+t_install_malformed_config_file_falls_back_to_default() {
+  # A dummy / partially-written / stale env_config.json (bad JSON,
+  # missing field, or bad URL shape) must not brick the install either.
+  # The AVC installer sometimes drops a placeholder before its real
+  # bundle lands; treating that as fatal would create a support burden
+  # every time AVC's ordering slipped. Fall through to US-prod default
+  # with a WARN so operators can still find the misconfig in install.log.
+  #
+  # Trust-check failures (root ownership / write bits / symlinks) are
+  # separate and still hard-fail before the resolver runs — this
+  # relaxation applies only to the content branch.
   local case_dir; case_dir="$(mktest_tmp)"
   local cfg="${case_dir}/env_config.json"
   printf '{"cisco_ai_defense_endpoint":"not-a-url"}\n' >"${cfg}"
   local out rc=0
   out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 "${INSTALL_SH}" --config-file "${cfg}" 2>&1)" || rc=$?
-  assert_status "${rc}" 1 "malformed --config-file should exit non-zero"
-  assert_contains "${out}" "--config-file ${cfg} is malformed" "names the offending file"
-  assert_contains "${out}" "cisco_ai_defense_endpoint" \
-    "identifies the required field"
+  assert_contains "${out}" "is malformed" \
+    "installer names the malformed condition in the warn line"
+  assert_contains "${out}" "${cfg}" \
+    "warn line names the offending file"
+  assert_contains "${out}" "https://us.api.inspect.aidefense.security.cisco.com" \
+    "installer falls through to the US-prod default endpoint on malformed"
+  assert_contains "${out}" "Installing with default endpoint" \
+    "warn line spells out the fallback"
+  # The new contract prefixes the message with the WARN label; a
+  # regression to the die() path would emit an ERROR prefix instead.
+  # This is the cleanest signal of "did we go the warn+fallback way
+  # vs the old fail-hard way" without pinning brittle exact wording.
+  assert_contains "${out}" "WARN" \
+    "malformed env_config.json emits a WARN, not a fatal error"
 }
 
 t_install_config_file_trust_check_fires_on_world_writable() {
@@ -346,8 +374,8 @@ run_case "install --override-endpoint garbage rejected"  t_install_bad_override_
 run_case "install --override-endpoint plaintext http:// rejected" t_install_override_endpoint_rejects_plaintext_http
 run_case "install --override-endpoint userinfo rejected"          t_install_override_endpoint_rejects_userinfo
 run_case "install --override-endpoint path/query/fragment rejected" t_install_override_endpoint_rejects_path_query_fragment
-run_case "install missing --config-file rejected"        t_install_missing_config_file_exits_nonzero
-run_case "install malformed --config-file rejected"      t_install_malformed_config_file_exits_nonzero
+run_case "install missing --config-file falls back to US-prod default"     t_install_missing_config_file_falls_back_to_default
+run_case "install malformed --config-file falls back to US-prod default"   t_install_malformed_config_file_falls_back_to_default
 run_case "install world-writable --config-file rejected" t_install_config_file_trust_check_fires_on_world_writable
 run_case "install DEFAULT_CONFIG_FILE=AVC path"          t_install_default_config_file_path
 run_case "install DEFAULT_MODE=action (managed_enterprise)" t_install_default_mode_is_action
