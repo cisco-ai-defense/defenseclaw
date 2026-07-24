@@ -17,6 +17,11 @@ import defenseclaw.main as main_module
 import pytest
 from defenseclaw.resolver_hint import RESOLVER_COMPLETENESS_MARKER
 
+_POSIX_ONLY = pytest.mark.skipif(
+    os.name != "posix",
+    reason="release-resolver authentication uses POSIX file custody",
+)
+
 
 def _resolver_payload() -> bytes:
     return f"#!/usr/bin/env bash\nprintf 'resolver\\n'\n{RESOLVER_COMPLETENESS_MARKER}\n".encode()
@@ -82,6 +87,7 @@ def test_public_delegation_forwards_exact_intent_and_marks_handoff() -> None:
             clear=True,
         ),
         patch.object(upgrade_module.platform, "system", return_value="Linux"),
+        patch.object(upgrade_module.os, "name", "posix"),
         patch.object(upgrade_module, "_fetch_latest_version", return_value="9.9.9"),
         patch.object(
             upgrade_module,
@@ -123,6 +129,7 @@ def test_latest_mode_stays_implicit_for_resolver_auto_bridge() -> None:
     with (
         patch.dict(os.environ, {}, clear=True),
         patch.object(upgrade_module.platform, "system", return_value="Linux"),
+        patch.object(upgrade_module.os, "name", "posix"),
         patch.object(upgrade_module, "_fetch_latest_version", return_value="9.9.9"),
         patch.object(
             upgrade_module,
@@ -176,6 +183,7 @@ def test_upgrade_help_bypasses_launcher() -> None:
     latest.assert_not_called()
 
 
+@_POSIX_ONLY
 def test_authentication_uses_exact_identity_digest_marker_and_syntax() -> None:
     resolver = _resolver_payload()
     bash = SimpleNamespace(path="/bin/bash", assert_stable=Mock())
@@ -223,6 +231,7 @@ def test_authentication_uses_exact_identity_digest_marker_and_syntax() -> None:
     bash.assert_stable.assert_called_once_with()
 
 
+@_POSIX_ONLY
 @pytest.mark.parametrize("mode", ("tampered", "missing", "duplicate"))
 def test_tampered_or_missing_evidence_fails_before_resolver_execution(mode: str) -> None:
     signed = _resolver_payload()
@@ -287,6 +296,7 @@ def test_unsupported_public_intent_fails_before_latest_lookup(arguments: list[st
     with (
         patch.dict(os.environ, {}, clear=True),
         patch.object(upgrade_module.platform, "system", return_value="Linux"),
+        patch.object(upgrade_module.os, "name", "posix"),
         patch.object(upgrade_module, "_fetch_latest_version") as latest,
         pytest.raises(SystemExit) as raised,
     ):
@@ -309,6 +319,7 @@ def test_windows_bypasses_shim_and_preserves_existing_native_setup_path() -> Non
     parse_intent.assert_not_called()
 
 
+@_POSIX_ONLY
 def test_system_bash_is_root_owned_bounded_and_stable_while_open() -> None:
     with upgrade_module._trusted_system_bash() as bash:
         named = os.lstat(bash.path)
@@ -332,6 +343,7 @@ def test_system_bash_is_root_owned_bounded_and_stable_while_open() -> None:
             bash.assert_stable()
 
 
+@_POSIX_ONLY
 def test_system_bash_rejects_group_or_world_writable_metadata() -> None:
     trusted = os.lstat("/bin/bash")
     writable = SimpleNamespace(
@@ -345,6 +357,7 @@ def test_system_bash_rejects_group_or_world_writable_metadata() -> None:
     assert not upgrade_module._system_bash_info_is_trusted(writable)
 
 
+@_POSIX_ONLY
 def test_private_downloader_enforces_streamed_size_and_owner_only_mode() -> None:
     response = Mock(
         status_code=200,
