@@ -3341,6 +3341,83 @@ def test_hard_cut_auto_bridge_exactly_matches_older_published_baselines(
         release_candidate._validate_upgrade_manifest(manifest_path, "0.8.5")
 
 
+def test_unpublished_windows_bridge_retains_direct_post_hard_cut_baselines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = tmp_path / "upgrade-baselines.json"
+    policy.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "published_baselines": ["0.8.7", "0.8.4", "0.8.3"],
+                "published_baseline_config_versions": {
+                    "0.8.7": 8,
+                    "0.8.4": 7,
+                    "0.8.3": 7,
+                },
+                "platform_published_baselines": {"windows": ["0.8.7", "0.8.3"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    digest_policy = tmp_path / "historical-artifact-digests.json"
+    digest_policy.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "signed_wheel_coverage_starts_at": "0.8.3",
+                "signed_checksum_exceptions": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        release_candidate,
+        "HISTORICAL_ARTIFACT_DIGESTS_PATH",
+        digest_policy,
+    )
+    manifest_path = tmp_path / "upgrade-manifest.json"
+    manifest = {
+        "schema_version": 2,
+        "runtime_config_version": 8,
+        "release_version": "0.8.8",
+        "min_upgrade_protocol": 2,
+        "controller_upgrade_protocol": 2,
+        "migration_failure_policy": "fail",
+        "minimum_source_version": "0.8.4",
+        "required_bridge_version": "0.8.4",
+        "auto_bridge_from": ["0.8.3"],
+        "tested_source_versions": ["0.8.7", "0.8.4", "0.8.3"],
+        "platform_tested_source_versions": {"windows": ["0.8.7"]},
+        "release_artifacts": release_candidate._expected_release_artifacts("0.8.8"),
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(
+        release_candidate,
+        "_runtime_config_version_from_source",
+        lambda _version: 8,
+    )
+
+    release_candidate._validate_upgrade_manifest(
+        manifest_path,
+        "0.8.8",
+        baseline_policy_path=policy,
+    )
+
+    manifest["platform_tested_source_versions"]["windows"].append("0.8.3")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(
+        release_candidate.CandidateError,
+        match="must exactly match the reviewed Windows matrix",
+    ):
+        release_candidate._validate_upgrade_manifest(
+            manifest_path,
+            "0.8.8",
+            baseline_policy_path=policy,
+        )
+
+
 def test_bridge_candidate_accepts_schema_two_policy_before_bridge_is_published(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

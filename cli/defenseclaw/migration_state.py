@@ -294,6 +294,38 @@ def save(data_dir: str, state: MigrationState) -> None:
     )
 
 
+def save_if_absent(data_dir: str, state: MigrationState) -> bool:
+    """Atomically save a cursor only when no cursor path already exists.
+
+    Fresh-install bootstrap is allowed to create migration state, but it must
+    never reinterpret or replace state that is already present.  In
+    particular, :func:`load` deliberately maps corrupt, unknown-schema, and
+    future-schema documents to ``None``; using ``load`` as the existence test
+    would therefore destroy recovery evidence.  ``lexists`` treats every
+    existing directory entry, including a broken symlink, as authoritative.
+
+    The sibling update lock serializes the check with other cooperative
+    create-if-absent callers.  The actual publication still goes through
+    :func:`save`, retaining its private-directory, owner-only file, atomic
+    replacement, and durability guarantees.
+
+    Returns ``True`` when this call created the cursor and ``False`` when an
+    existing path was preserved byte-for-byte.
+    """
+    from defenseclaw.file_lock import locked_file_update
+    from defenseclaw.file_permissions import make_private_directory
+
+    target = state_path(data_dir)
+    if os.path.lexists(target):
+        return False
+    make_private_directory(data_dir)
+    with locked_file_update(target):
+        if os.path.lexists(target):
+            return False
+        save(data_dir, state)
+        return True
+
+
 def is_applied(state: MigrationState | None, version: str) -> bool:
     """True iff ``state`` exists AND records ``version`` as applied.
 

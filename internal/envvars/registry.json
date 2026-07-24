@@ -2798,6 +2798,22 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_FAIL_AFTER_081_PLACEHOLDER_REPAIR",
+      "category": "test_fixture",
+      "purpose": "Injects a failure after the clean 0.8.1 placeholder repair to verify phase-one rollback.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "scripts/upgrade.sh",
+          "description": "Authenticated resolver rollback fixture; never set by production upgrade paths"
+        }
+      ],
+      "since": "0.8.8"
+    },
+    {
       "name": "DEFENSECLAW_GATEWAY_URL",
       "category": "test_fixture",
       "purpose": "Base URL of an external gateway for the security-suite e2e tier (TestSecuritySuiteE2E). When set, the test posts to that gateway's /api/v1/inspect/* endpoints; when unset, the tier runs against an in-process inspect server.",

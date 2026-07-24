@@ -21,6 +21,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -95,6 +96,34 @@ class BootstrapEnvTests(unittest.TestCase):
         self.assertEqual(report.errors, [], msg=report.errors)
         for expected in (cfg.data_dir, cfg.quarantine_dir, cfg.plugin_dir, cfg.policy_dir):
             self.assertIn(os.path.abspath(expected), created)
+
+    def test_windows_zero_link_count_accepts_regular_recovery_file(self):
+        from types import SimpleNamespace
+
+        from defenseclaw import bootstrap
+
+        with (
+            patch(
+                "defenseclaw.file_permissions.open_regular_file_no_follow",
+                return_value=17,
+            ),
+            patch.object(bootstrap.os, "name", "nt"),
+            patch.object(
+                bootstrap.os,
+                "fstat",
+                return_value=SimpleNamespace(st_nlink=0, st_size=6),
+            ),
+            patch.object(bootstrap.os, "read", side_effect=[b"config", b""]),
+            patch.object(bootstrap.os, "close") as close,
+        ):
+            raw = bootstrap._read_bounded_regular_file(
+                "config.yaml",
+                1024,
+                private=False,
+            )
+
+        self.assertEqual(raw, b"config")
+        close.assert_called_once_with(17)
 
     def test_creates_audit_db_file(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
@@ -177,6 +206,207 @@ class BootstrapEnvTests(unittest.TestCase):
             result = _connector_readiness(cfg, "omnigent")
 
         self.assertEqual(result.status, "warn")
+
+
+class FreshMigrationCursorTests(unittest.TestCase):
+    """Fresh v8 publication seeds one non-clobbering migration cursor."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def _run_first_run(self, data_dir: str):
+        from defenseclaw.bootstrap import (
+            FirstRunOptions,
+            StepResult,
+            run_first_run,
+        )
+
+        with (
+            patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
+            patch(
+                "defenseclaw.bootstrap._quiet_guardrail_setup",
+                return_value=StepResult("Guardrail", "pass", "test"),
+            ),
+        ):
+            return run_first_run(
+                FirstRunOptions(
+                    connector="codex",
+                    profile="observe",
+                    skip_install=True,
+                    start_gateway=False,
+                    verify=False,
+                )
+            )
+
+    def test_successful_fresh_first_run_bootstraps_registry_through_0_8_5(self):
+        from defenseclaw import __version__, migration_state
+        from defenseclaw.migrations import MIGRATIONS, _ver_tuple
+
+        data_dir = os.path.join(self._tmp.name, "fresh")
+        report = self._run_first_run(data_dir)
+
+        self.assertNotEqual(report.status, "needs_attention")
+        state = migration_state.load(data_dir)
+        self.assertIsNotNone(state)
+        assert state is not None
+        expected = [
+            version
+            for version, _description, _migration in MIGRATIONS
+            if _ver_tuple(version) <= _ver_tuple(__version__)
+        ]
+        self.assertEqual(state.applied, expected)
+        self.assertEqual(state.package_version, __version__)
+        self.assertEqual(state.applied_at["0.8.5"], migration_state.BOOTSTRAP_SENTINEL)
+        self.assertTrue(
+            all(state.applied_at[version] == migration_state.BOOTSTRAP_SENTINEL for version in expected)
+        )
+
+    def test_rerun_preserves_bootstrapped_cursor_byte_for_byte(self):
+        from defenseclaw import migration_state
+
+        data_dir = os.path.join(self._tmp.name, "rerun")
+        self._run_first_run(data_dir)
+        cursor_path = migration_state.state_path(data_dir)
+        with open(cursor_path, "rb") as stream:
+            original = stream.read()
+
+        self._run_first_run(data_dir)
+
+        with open(cursor_path, "rb") as stream:
+            self.assertEqual(stream.read(), original)
+
+    def test_existing_valid_future_unknown_and_corrupt_cursors_are_preserved(self):
+        from defenseclaw import migration_state
+
+        payloads = {
+            "valid": b'{"schema":1,"package_version":"operator","applied":["0.8.0"]}\n',
+            "future": b'{"schema":999,"opaque":{"keep":true}}\n',
+            "unknown": b'{"schema":"next","opaque":{"keep":true}}\n',
+            "corrupt": b'{"schema":',
+        }
+        for label, payload in payloads.items():
+            with self.subTest(label=label):
+                data_dir = os.path.join(self._tmp.name, label)
+                os.makedirs(data_dir)
+                cursor_path = migration_state.state_path(data_dir)
+                with open(cursor_path, "wb") as stream:
+                    stream.write(payload)
+
+                self._run_first_run(data_dir)
+
+                with open(cursor_path, "rb") as stream:
+                    self.assertEqual(stream.read(), payload)
+
+    def test_final_config_save_failure_does_not_create_cursor(self):
+        from defenseclaw import migration_state
+        from defenseclaw.config import Config
+
+        data_dir = os.path.join(self._tmp.name, "save-failure")
+        original_save = Config.save
+        save_calls = 0
+
+        def fail_final_save(cfg):
+            nonlocal save_calls
+            save_calls += 1
+            if save_calls == 1:
+                return original_save(cfg)
+            raise OSError("injected final config save failure")
+
+        with patch.object(Config, "save", new=fail_final_save):
+            report = self._run_first_run(data_dir)
+
+        self.assertTrue(os.path.isfile(os.path.join(data_dir, "config.yaml")))
+        self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
+        self.assertTrue(
+            any(step.name == "Config Save" and step.status == "fail" for step in report.setup)
+        )
+
+    def test_later_setup_exception_does_not_create_cursor(self):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import FirstRunOptions, run_first_run
+
+        data_dir = os.path.join(self._tmp.name, "setup-failure")
+        with (
+            patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
+            patch(
+                "defenseclaw.bootstrap._quiet_guardrail_setup",
+                side_effect=RuntimeError("injected setup failure"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "injected setup failure"),
+        ):
+            run_first_run(
+                FirstRunOptions(
+                    connector="codex",
+                    profile="observe",
+                    skip_install=True,
+                    start_gateway=False,
+                    verify=False,
+                )
+            )
+
+        self.assertTrue(os.path.isfile(os.path.join(data_dir, "config.yaml")))
+        self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
+
+    def test_cursor_publication_failure_is_repaired_on_rerun(self):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import _fresh_migration_pending_path
+
+        data_dir = os.path.join(self._tmp.name, "cursor-retry")
+        with patch.object(
+            migration_state,
+            "save_if_absent",
+            side_effect=OSError("injected cursor publication failure"),
+        ):
+            first_report = self._run_first_run(data_dir)
+
+        self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
+        self.assertTrue(os.path.isfile(_fresh_migration_pending_path(data_dir)))
+        self.assertTrue(
+            any(
+                step.name == "Migration State"
+                and step.status == "fail"
+                and step.next_command == "defenseclaw init"
+                for step in first_report.setup
+            )
+        )
+
+        second_report = self._run_first_run(data_dir)
+
+        self.assertIsNotNone(migration_state.load(data_dir))
+        self.assertFalse(os.path.lexists(_fresh_migration_pending_path(data_dir)))
+        self.assertTrue(
+            any(
+                step.name == "Migration State"
+                and step.status == "pass"
+                and "recovered pending fresh cursor" in step.detail
+                for step in second_report.setup
+            )
+        )
+
+    def test_cursor_retry_refuses_config_changed_after_failed_publication(self):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import _fresh_migration_pending_path
+
+        data_dir = os.path.join(self._tmp.name, "cursor-retry-tampered")
+        with patch.object(
+            migration_state,
+            "save_if_absent",
+            side_effect=OSError("injected cursor publication failure"),
+        ):
+            self._run_first_run(data_dir)
+
+        config_path = os.path.join(data_dir, "config.yaml")
+        with open(config_path, "a", encoding="utf-8") as stream:
+            stream.write("# operator change\n")
+        changed = Path(config_path).read_bytes()
+
+        report = self._run_first_run(data_dir)
+
+        self.assertEqual(report.status, "needs_attention")
+        self.assertEqual(Path(config_path).read_bytes(), changed)
+        self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
+        self.assertTrue(os.path.isfile(_fresh_migration_pending_path(data_dir)))
 
 
 # ---------------------------------------------------------------------------

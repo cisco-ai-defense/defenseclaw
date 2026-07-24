@@ -314,7 +314,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     click.echo(f"  Platform:      {ux.bold(env)}")
 
     cfg_file = config_path()
-    is_new_config = not os.path.exists(cfg_file)
+    is_new_config = not os.path.lexists(cfg_file)
     if is_new_config:
         cfg = default_config()
         prepare_fresh_v8_config(cfg)
@@ -324,6 +324,20 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         if getattr(cfg, "_source_config_version", None) != 8:
             raise click.ClickException("configuration schema v8 is required; run 'defenseclaw upgrade' first")
         click.echo("  Config:        " + ux.dim("preserved existing"))
+
+    from defenseclaw.bootstrap import (
+        FreshMigrationStateError,
+        repair_pending_first_run_config,
+    )
+
+    try:
+        repaired_migration_state = repair_pending_first_run_config(cfg)
+    except FreshMigrationStateError as exc:
+        raise click.ClickException(
+            f"could not recover pending fresh migration state: {exc}; rerun 'defenseclaw init' after repair"
+        ) from exc
+    if repaired_migration_state:
+        click.echo("  Migration:     " + ux._style("recovered pending fresh cursor", fg="green"))
 
     cfg.environment = env
     click.echo(f"  Claw mode:     {ux.bold(cfg.claw.mode)}")
@@ -416,8 +430,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         is_new_config=is_new_config,
     )
 
-    cfg.save()
-
     # Sandbox setup (Linux only)
     if sandbox:
         already_configured = cfg.openshell.is_standalone()
@@ -462,6 +474,17 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         if guardrail_ok and sidecar_started:
             click.echo("  " + ux.dim("Restarting sidecar to apply guardrail config..."))
             _restart_gateway_quiet()
+
+    from defenseclaw.bootstrap import finalize_first_run_config
+
+    try:
+        finalize_first_run_config(cfg, was_config_absent=is_new_config)
+    except FreshMigrationStateError as exc:
+        store.close()
+        raise click.ClickException(
+            f"config was saved but its fresh migration cursor was not published: {exc}; "
+            "rerun 'defenseclaw init' to retry safely"
+        ) from exc
 
     # Final completion banner. We render it as a plain divider with
     # bold success text so the eye lands here when the operator

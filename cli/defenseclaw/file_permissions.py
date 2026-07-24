@@ -153,7 +153,10 @@ def open_regular_file_no_follow(path: str | os.PathLike[str]) -> int:
     _reject_reparse_chain(os.path.dirname(target) or os.curdir)
     expected = _reject_reparse_path(target, allow_missing=False)
     assert expected is not None
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    # Windows CRT text mode translates CRLF while ``fstat().st_size`` reports
+    # the exact bytes on disk. Callers that bind security evidence to the
+    # opened file size must therefore always receive a binary descriptor.
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(target, flags)
     try:
         opened = os.fstat(fd)
