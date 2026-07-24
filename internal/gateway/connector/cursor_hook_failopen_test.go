@@ -43,6 +43,24 @@ import (
 // .token file to exercise the missing-token branch.
 func runCursorHook(t *testing.T, apiAddr, failMode string, tokenPresent bool, extraEnv ...string) (string, string, error) {
 	t.Helper()
+	return runCursorHookWithInput(
+		t,
+		apiAddr,
+		failMode,
+		tokenPresent,
+		`{"hook_event_name":"beforeShellExecution"}`,
+		extraEnv...,
+	)
+}
+
+func runCursorHookWithInput(
+	t *testing.T,
+	apiAddr, failMode string,
+	tokenPresent bool,
+	input string,
+	extraEnv ...string,
+) (string, string, error) {
+	t.Helper()
 	dir := t.TempDir()
 	if err := writeHookScriptsCommonWithFailMode(dir, apiAddr, "tok-test", failMode, []string{"cursor-hook.sh"}); err != nil {
 		t.Fatalf("writeHookScriptsCommonWithFailMode: %v", err)
@@ -55,7 +73,7 @@ func runCursorHook(t *testing.T, apiAddr, failMode string, tokenPresent bool, ex
 	dcHome := t.TempDir()
 
 	cmd := exec.Command("bash", filepath.Join(dir, "cursor-hook.sh"))
-	cmd.Stdin = strings.NewReader(`{"hook_event_name":"beforeShellExecution"}`)
+	cmd.Stdin = strings.NewReader(input)
 	cmd.Env = append(os.Environ(),
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
@@ -85,19 +103,47 @@ func assertAllowEnvelope(t *testing.T, out string) {
 	}
 }
 
+func assertDenyEnvelope(t *testing.T, out string) {
+	t.Helper()
+	trimmed := strings.TrimSpace(out)
+	if trimmed == "" {
+		t.Fatal("stdout is empty; fail-closed Cursor paths must emit an explicit deny")
+	}
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(trimmed), &obj); err != nil {
+		t.Fatalf("stdout is not a JSON object: %v\ngot: %q", err, trimmed)
+	}
+	if obj["permission"] != "deny" {
+		t.Fatalf(`stdout permission = %v, want "deny"; got: %q`, obj["permission"], trimmed)
+	}
+	if continued, ok := obj["continue"].(bool); !ok || continued {
+		t.Fatalf(`stdout continue = %v, want false; got: %q`, obj["continue"], trimmed)
+	}
+}
+
 func TestCursorHook_FailOpenOnUnreachableEmitsAllow(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
-	// Fail mode "closed" => hooks.json would carry failClosed:true, but
-	// a transport failure without strict-availability must still fail
-	// OPEN (a DefenseClaw outage must never brick the agent). Port 1 is
-	// unreachable.
-	stdout, stderr, err := runCursorHook(t, "127.0.0.1:1", "closed", true)
+	stdout, stderr, err := runCursorHook(t, "127.0.0.1:1", "open", true)
 	if err != nil {
 		t.Fatalf("expected exit 0 (fail-open), got %v; stderr=%s", err, stderr)
 	}
 	assertAllowEnvelope(t, stdout)
+}
+
+func TestCursorHook_FailClosedOnUnreachableEmitsDeny(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	stdout, stderr, err := runCursorHook(t, "127.0.0.1:1", "closed", true)
+	if err == nil {
+		t.Fatalf("expected exit 2 (fail-closed), got exit 0; stdout=%s", stdout)
+	}
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("expected exit 2 (fail-closed), got %v; stderr=%s", err, stderr)
+	}
+	assertDenyEnvelope(t, stdout)
 }
 
 func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {
@@ -134,8 +180,8 @@ func TestCursorHook_MissingTokenFailsOpenWithAllow(t *testing.T) {
 	}
 	// No .token file and no DEFENSECLAW_GATEWAY_TOKEN, not strict =>
 	// historical allow-and-warn, but must emit an explicit allow so a
-	// failClosed:true entry does not read the silent exit 0 as a block.
-	stdout, stderr, err := runCursorHook(t, "127.0.0.1:1", "closed", false)
+	// fail-open entry never depends on Cursor's empty-output fallback.
+	stdout, stderr, err := runCursorHook(t, "127.0.0.1:1", "open", false)
 	if err != nil {
 		t.Fatalf("expected exit 0 (fail-open on missing token), got %v; stderr=%s", err, stderr)
 	}
@@ -147,19 +193,20 @@ func TestCursorHook_MissingTokenFailsOpenWithAllow(t *testing.T) {
 
 // TestCursorHook_StrictMissingTokenBlocks pins the other side of the
 // contract: with DEFENSECLAW_STRICT_AVAILABILITY=1 a missing token
-// still fails closed (exit 2), matching the shared helper's behavior.
+// still emits current main's explicit deny and exits 2.
 func TestCursorHook_StrictMissingTokenBlocks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
-	stdout, stderr, err := runCursorHook(t, "127.0.0.1:1", "closed", false, "DEFENSECLAW_STRICT_AVAILABILITY=1")
+	stdout, stderr, err := runCursorHook(t, "127.0.0.1:1", "open", false, "DEFENSECLAW_STRICT_AVAILABILITY=1")
 	if err == nil {
 		t.Fatalf("expected exit 2 under strict availability, got exit 0; stdout=%s", stdout)
 	}
-	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() != 2 {
-		t.Errorf("exit code = %d, want 2 (fail-closed)", exitErr.ExitCode())
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("expected exit 2 under strict availability, got %v; stderr=%s", err, stderr)
 	}
 	if !strings.Contains(stderr, "blocking cursor tool") {
 		t.Errorf("stderr should announce blocking under strict availability, got: %q", stderr)
 	}
+	assertDenyEnvelope(t, stdout)
 }

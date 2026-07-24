@@ -197,11 +197,10 @@ func TestEffectiveResolvers_SafeFallbacks(t *testing.T) {
 	if got := g.EffectiveMode(""); got != "observe" {
 		t.Errorf("EffectiveMode empty = %q, want observe", got)
 	}
-	// An unset hook fail mode now resolves to "closed" (fail-safe / deny
-	// by default): a blank or misconfigured value blocks the tool call
-	// rather than silently allowing it through the response-layer gate.
-	if got := g.EffectiveHookFailModeFor(""); got != "closed" {
-		t.Errorf("EffectiveHookFailModeFor empty = %q, want closed", got)
+	// An observe-only connector with no explicit override retains the
+	// historical fail-open behavior on every platform.
+	if got := g.EffectiveHookFailModeFor(""); got != "open" {
+		t.Errorf("EffectiveHookFailModeFor empty = %q, want open", got)
 	}
 	if got := g.EffectiveBlockMessage(""); got != "" {
 		t.Errorf("EffectiveBlockMessage empty = %q, want empty", got)
@@ -217,6 +216,23 @@ func TestEffectiveResolvers_SafeFallbacks(t *testing.T) {
 	}
 	if got := nilG.EffectiveHILT("x"); got != (HILTConfig{}) {
 		t.Errorf("nil EffectiveHILT = %+v, want zero", got)
+	}
+}
+
+func TestEffectiveHookFailMode_ExplicitOverrideWinsInObserve(t *testing.T) {
+	g := &GuardrailConfig{
+		Mode:         "observe",
+		HookFailMode: "closed",
+		Connectors: map[string]PerConnectorGuardrailConfig{
+			"codex":      {HookFailMode: "closed"},
+			"claudecode": {},
+		},
+	}
+	if got := g.EffectiveHookFailModeFor("codex"); got != "closed" {
+		t.Fatalf("explicit connector fail mode = %q, want closed", got)
+	}
+	if got := g.EffectiveHookFailModeFor("claudecode"); got != "open" {
+		t.Fatalf("unoverridden observe connector fail mode = %q, want open", got)
 	}
 }
 
@@ -333,6 +349,7 @@ func TestGuardrailValidate(t *testing.T) {
 		// multi-connector support and were never load-gated), so even an
 		// odd global value passes — only the connectors map is checked.
 		{"global_fields_not_validated", GuardrailConfig{Mode: "blarg", HookFailMode: "halfopen", HILT: HILTConfig{MinSeverity: "SPICY"}}, ""},
+		{"ipv6_metadata_allowlist_rejected", GuardrailConfig{AllowPrivateUpstreams: []string{"fd00:ec2::254"}}, "cloud metadata address"},
 		{
 			name: "bad_connector_mode_named",
 			cfg: GuardrailConfig{Connectors: map[string]PerConnectorGuardrailConfig{

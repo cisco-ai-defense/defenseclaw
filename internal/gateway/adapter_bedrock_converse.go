@@ -54,7 +54,7 @@ type bedrockConverseAdapter struct{}
 // Name implements FormatAdapter.
 func (bedrockConverseAdapter) Name() string { return "bedrock-converse" }
 
-// InjectionSite is the gateway.jsonl label written when InjectSystem
+// InjectionSite is the canonical observability label used when InjectSystem
 // succeeds. Distinct from anthropic/system and gemini/systemInstruction
 // so operators can see wire-format distribution in dashboards.
 func (bedrockConverseAdapter) InjectionSite() string { return "bedrock-converse/system" }

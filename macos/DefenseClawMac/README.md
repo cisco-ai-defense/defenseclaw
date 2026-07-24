@@ -27,7 +27,7 @@ Native SwiftUI companion app for [Cisco DefenseClaw](https://github.com/cisco-ai
 Every DefenseClaw release builds two Apple Silicon artifacts:
 
 - `DefenseClawMac-<version>-macos-arm64[-unverified].dmg` — the recommended unified installer. Mount it, drag `DefenseClawMac.app` to `/Applications`, launch it, then select **Install DefenseClaw Runtime** on first run.
-- `DefenseClawMac-<version>-macos-arm64[-unverified].zip` — the smaller app-only artifact used by the in-app self-updater. It does not replace or reinstall the independently updating runtime.
+- `DefenseClawMac-<version>-macos-arm64[-unverified].zip` — the smaller app-only artifact. Only the verified form without `-unverified` is eligible for in-app self-update; it does not replace or reinstall the independently updating runtime.
 
 The app inside the DMG contains an embedded `Contents/Resources/RuntimePayload` with the matching release's:
 
@@ -38,9 +38,17 @@ The app inside the DMG contains an embedded `Contents/Resources/RuntimePayload` 
 
 On first run, the app installs that payload into the user's normal DefenseClaw locations. It can download Python dependencies from PyPI and install `uv` or Python if they are missing, so the installer is unified but not fully offline. Configuration, tokens, and the audit database are preserved during install or repair.
 
-The current release does not require Apple credentials. Both ad-hoc artifacts are deliberately labeled `unverified`; macOS may require users to right-click the app and choose **Open**. The same release script automatically signs and notarizes the app-only build, unified app, and DMG when the documented GitHub environment secrets are added.
+The production GitHub release workflow Developer ID signs and notarizes the app
+when all Apple credentials are available. If all five are absent, it publishes
+clearly labeled, ad-hoc-signed `-unverified` artifacts for manual download and
+installation. A partial credential group, or any invalid configured credential,
+stops the release instead of silently falling back. The in-app self-updater
+never offers `-unverified` assets and always requires code-signature and
+Gatekeeper validation.
 
-### Enable Apple verification later
+Before extracting an accepted update ZIP, the app verifies its GitHub-provided SHA-256 digest and inspects the archive manifest. It rejects empty archives, absolute or traversal paths, link entries, multiple app bundles, and content outside one top-level `.app`. After extraction it validates the bundle identity, version, runtime boundary, code signature, and Gatekeeper assessment before replacing the running app.
+
+### Optional production Apple verification
 
 Add these secrets to the GitHub `release` environment:
 
@@ -51,7 +59,12 @@ Add these secrets to the GitHub `release` environment:
 - `MACOS_NOTARY_KEY_ID`: App Store Connect API key ID.
 - `MACOS_NOTARY_ISSUER_ID`: App Store Connect issuer ID.
 
-All signing and notary values must be present to remove the `-unverified` suffix. Certificates are imported into a temporary keychain, sensitive temporary files are removed on exit, and the original user keychain search list is restored.
+All five signing/notary values produce verified release assets. Production,
+local, and pull-request builds may omit all five to produce ad-hoc-signed,
+explicitly unverified manual-download assets; partial credentials fail in every
+mode. Certificates are imported into a temporary keychain, sensitive temporary
+files are removed on exit, and the original user keychain search list is
+restored.
 
 ## Requirements
 
@@ -77,7 +90,11 @@ make dist-cli
 make macos-app-release
 ```
 
-The last target writes the unified DMG and app-only update zip to `dist/`. By default both are ad-hoc signed and carry the `-unverified` suffix.
+The last target writes the unified DMG and app-only update zip to `dist/`.
+Local invocations without Apple credentials produce ad-hoc artifacts carrying
+the `-unverified` suffix. The production workflow signs and notarizes when the
+complete credential set is available; with no credentials it publishes only
+the clearly named manual-download artifacts, never an in-app update.
 
 ## Runtime connections
 

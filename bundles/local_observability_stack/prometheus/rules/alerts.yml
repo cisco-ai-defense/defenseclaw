@@ -18,13 +18,13 @@ groups:
           severity: critical
           surface: gateway
         annotations:
-          summary: "gateway.jsonl events are being dropped for schema violations"
+          summary: "Canonical telemetry records are being rejected for schema violations"
           description: |
-            gatewaylog.Writer is rejecting events because they fail runtime
-            JSON-schema validation. Any sustained non-zero rate means our
-            observability contract is broken.
+            The v8 schema gate is rejecting generated telemetry records before
+            destination delivery because they fail canonical registry validation.
+            Any sustained non-zero rate means our observability contract is broken.
             Open Runtime & Reliability → "Schema violations by event type / code".
-          runbook: "docs/OBSERVABILITY-CONTRACT.md#runbook-schema-violations"
+          runbook: "https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/OBSERVABILITY.md#runbook-schema-violations"
 
       - alert: DefenseClawGatewayErrorsSpike
         expr: sum(rate(defenseclaw_gateway_errors_total[5m])) > 0.5
@@ -69,23 +69,8 @@ groups:
           summary: "Block SLO below 99% over 10m"
           description: |
             Admission-block decisions are not completing under the 2s SLO.
-            Open Runtime & Reliability → "Block and TUI refresh SLO compliance".
-          runbook: "docs/OBSERVABILITY-CONTRACT.md#runbook-block-slo"
-
-      - alert: DefenseClawTUIRefreshSLOBreach
-        expr: |
-          slo:defenseclaw_tui_refresh:ratio_5m < 0.99
-          and on()
-          sum(rate(defenseclaw_slo_tui_refresh_milliseconds_count[5m])) > 0.01
-        for: 15m
-        labels:
-          severity: warning
-          slo: tui-refresh-under-5s
-        annotations:
-          summary: "TUI refresh SLO below 99% over 15m"
-          description: |
-            Bubbletea dashboards are not refreshing inside the 5s SLO.
-            Open Runtime & Reliability → "Block and TUI refresh SLO compliance".
+            Open Runtime & Reliability → "Admission block SLO compliance".
+          runbook: "https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/OBSERVABILITY.md#runbook-block-slo"
 
   - name: defenseclaw.pipeline
     rules:
@@ -101,7 +86,7 @@ groups:
             At least one exporter ({{ $labels.exporter }}) has not sent a
             batch for 5+ minutes. Observability is blind; check OTel
             Collector health and network reachability.
-          runbook: "docs/OBSERVABILITY-CONTRACT.md#runbook-exporter-stalled"
+          runbook: "https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/OBSERVABILITY.md#runbook-exporter-stalled"
 
       - alert: DefenseClawOTLPExporterErrors
         expr: sum(rate(defenseclaw_telemetry_exporter_errors_total[5m])) > 0.1
@@ -115,11 +100,11 @@ groups:
             Exporter errors above 6/min for 10m — spans/metrics/logs may be
             dropped. Open Runtime & Reliability → "OTLP exporter errors by signal".
 
-      # NOTE: defenseclaw.audit.sink.failures is recorded with
-      # attributes sink.kind / sink.name / sink.reason (see
-      # internal/telemetry/metrics.go::RecordSinkFailure). Group by
-      # sink_name to page with the offending sink identifier; we
-      # deliberately do NOT group by sink.reason because a flapping
+      # NOTE: defenseclaw.audit.sink.failures is generated with canonical
+      # defenseclaw.metric.sink.{kind,name,reason} attributes and projected to
+      # the frozen local labels sink_kind / sink_name / sink_reason. Group by
+      # sink_name to page with the offending destination identifier; we
+      # deliberately do NOT group by sink_reason because a flapping
       # reason should still count as one outage.
       - alert: DefenseClawAuditSinkFailures
         expr: sum by (sink_kind, sink_name) (rate(defenseclaw_audit_sink_failures_total[5m])) > 0.1
@@ -128,12 +113,12 @@ groups:
           severity: critical
           surface: audit
         annotations:
-          summary: "Audit sink {{ $labels.sink_kind }}/{{ $labels.sink_name }} is failing"
+          summary: "Observability destination {{ $labels.sink_kind }}/{{ $labels.sink_name }} is failing"
           description: |
-            A configured audit sink is returning errors for 10 minutes.
+            A configured observability destination is returning errors for 10 minutes.
             Compliance downstreams may be missing events. Open Runtime &
             Reliability → "Sink batches delivered vs dropped".
-          runbook: "docs/OBSERVABILITY-CONTRACT.md#runbook-audit-sink"
+          runbook: "https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/OBSERVABILITY.md#runbook-audit-sink"
 
       - alert: DefenseClawAuditSinkCircuitOpen
         expr: max by (sink_kind, sink_name) (defenseclaw_audit_sink_circuit_state) > 0.5
@@ -142,28 +127,26 @@ groups:
           severity: warning
           surface: audit
         annotations:
-          summary: "Audit sink circuit breaker open ({{ $labels.sink_name }})"
+          summary: "Observability destination circuit breaker open ({{ $labels.sink_name }})"
           description: |
-            The breaker for sink {{ $labels.sink_kind }}/{{ $labels.sink_name }}
+            The breaker for destination {{ $labels.sink_kind }}/{{ $labels.sink_name }}
             is non-closed (open or half-open) for 5+ minutes.
 
   - name: defenseclaw.security
     rules:
       - alert: DefenseClawBlockRateSpike
-        expr: |
-          sum(rate(defenseclaw_gateway_verdicts_total{verdict_action="block"}[5m]))
-          /
-          clamp_min(sum(rate(defenseclaw_gateway_verdicts_total[5m])), 0.0001)
-          > 0.25
+        expr: service:defenseclaw_guardrail_block_ratio:5m > 0.25
         for: 10m
         labels:
           severity: warning
           surface: security
         annotations:
-          summary: "More than 25% of gateway verdicts are blocks"
+          summary: "More than 25% of guardrail evaluations are blocks"
           description: |
             Either a real attack is in progress or a recent policy/scanner
-            change is producing false positives. Open Guardrail Evaluations →
+            change is producing false positives. The ratio uses canonical
+            metric.defenseclaw.guardrail.evaluations and its generated
+            guardrail_action_taken label. Open Guardrail Evaluations →
             "Verdict funnel (hook event x action)" and
             "Per-connector verdict summary (1h)".
 
@@ -319,7 +302,7 @@ groups:
 
   - name: defenseclaw.observability_pipeline
     rules:
-      # Loki silently drops log entries that exceed `max_line_size` or
+      # Loki rejects log entries that exceed `max_line_size` or
       # `max_structured_metadata_size`. Without this alert an oversize
       # audit event simply disappears from Grafana — exactly the
       # observability gap that compromises forensic / compliance use
@@ -348,24 +331,29 @@ groups:
             being silently dropped before they reach Grafana / the
             on-call dashboards.
 
-            Most common cause: `privacy.disable_redaction=true` on the
-            sidecar combined with a chat-completion request that
-            embedded a large file or tool output. The full payload
-            still lives in the local SQLite audit DB and (if
-            configured) the audit OTLP-logs sink to your SIEM, but
-            Grafana's Loki view is now incomplete.
+            Common causes are a route that sends high-volume `model.io`
+            or `tool.activity` content to Loki with `redaction_profile: none`,
+            or collector limits below the size of the selected projection.
+            Mandatory SQLite history remains available under its own effective
+            profile, but Grafana's Loki view is now incomplete.
 
             Remediation:
-              1. Confirm the OTel Collector's `transform/loki-payload-cap`
-                 processor is wired into the logs pipeline (see
-                 bundles/local_observability_stack/otel-collector/config.yaml).
-              2. If the discard rate is sustained, raise
-                 `max_line_size` / `max_structured_metadata_size` in
-                 bundles/local_observability_stack/loki/loki.yaml.
-              3. Consider re-enabling redaction on the sidecar
-                 (`defenseclaw setup redaction on`)
-                 — raw payloads still exist in the audit DB and remain
-                 viewable on the workstation via DEFENSECLAW_REVEAL_PII=1.
+              1. Confirm the OTel Collector logs pipeline contains only
+                 resource enrichment and batching; it must not mutate the
+                 canonical post-redaction projection.
+              2. Inspect
+                 `observability.destinations[].routes[].selector.buckets`
+                 and the selected profile. Narrow high-volume routes or
+                 define and apply a bounded profile under
+                 `observability.redaction_profiles`.
+              3. Validate and apply the reviewed policy:
+                 `defenseclaw config validate`
+                 `defenseclaw config show --effective --section observability`
+                 `defenseclaw observability plan`
+                 `defenseclaw-gateway restart`
+              4. If a valid canonical projection still reaches the configured
+                 ceiling, update the registered v8 size contract and Loki
+                 limits together; do not add collector-side truncation.
 
   - name: defenseclaw.ai_discovery
     rules:

@@ -19,8 +19,8 @@
 Parity layer for the runtime ``webhooks[]`` list consumed by
 ``internal/gateway/webhook.go``. Provides:
 
-* ``writer`` — YAML CRUD (atomic tmp+rename) mirroring the observability
-  writer for ``audit_sinks[]``.
+* ``writer`` — YAML CRUD (atomic tmp+rename) alongside the canonical v8
+  observability destination writer.
 * ``dispatch`` — pure-Python formatters for slack/pagerduty/webex/generic
   payloads plus a ``send_synthetic`` helper used by
   ``defenseclaw setup webhook test``.

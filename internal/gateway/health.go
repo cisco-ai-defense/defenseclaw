@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"context"
 	"sort"
 	"strings"
 	"sync"
@@ -24,7 +25,22 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 )
+
+const observabilityV8HealthSnapshotTimeout = 100 * time.Millisecond
+
+type observabilityV8HealthSource interface {
+	DestinationHealthSnapshot(context.Context) (observabilityruntime.DestinationHealthSnapshot, error)
+}
+
+type observabilityV8FailureObservation struct {
+	generation uint64
+	code       string
+	occurredAt time.Time
+}
 
 type SubsystemState string
 
@@ -50,6 +66,7 @@ type ConnectorHealth struct {
 	State              SubsystemState               `json:"state"`
 	Source             string                       `json:"source,omitempty"`
 	Since              time.Time                    `json:"since"`
+	LastActivityAt     *time.Time                   `json:"last_activity_at,omitempty"`
 	ToolInspectionMode connector.ToolInspectionMode `json:"tool_inspection_mode"`
 	SubprocessPolicy   connector.SubprocessPolicy   `json:"subprocess_policy"`
 	Requests           int64                        `json:"requests"`
@@ -60,21 +77,17 @@ type ConnectorHealth struct {
 }
 
 type HealthSnapshot struct {
-	StartedAt             time.Time       `json:"started_at"`
-	UptimeMs              int64           `json:"uptime_ms"`
-	Gateway               SubsystemHealth `json:"gateway"`
-	Watcher               SubsystemHealth `json:"watcher"`
-	Config                SubsystemHealth `json:"config"`
-	API                   SubsystemHealth `json:"api"`
-	Guardrail             SubsystemHealth `json:"guardrail"`
-	Telemetry             SubsystemHealth `json:"telemetry"`
-	AIDiscovery           SubsystemHealth `json:"ai_discovery"`
-	ApplicationProtection SubsystemHealth `json:"application_protection"`
-	// Sinks reports the aggregate health of all configured audit sinks
-	// (splunk_hec, otlp_logs, http_jsonl, …). Details["sinks"] holds
-	// per-sink state for the TUI/CLI to render individual rows.
-	Sinks   SubsystemHealth  `json:"sinks"`
-	Sandbox *SubsystemHealth `json:"sandbox,omitempty"`
+	StartedAt             time.Time        `json:"started_at"`
+	UptimeMs              int64            `json:"uptime_ms"`
+	Gateway               SubsystemHealth  `json:"gateway"`
+	Watcher               SubsystemHealth  `json:"watcher"`
+	Config                SubsystemHealth  `json:"config"`
+	API                   SubsystemHealth  `json:"api"`
+	Guardrail             SubsystemHealth  `json:"guardrail"`
+	Telemetry             SubsystemHealth  `json:"telemetry"`
+	AIDiscovery           SubsystemHealth  `json:"ai_discovery"`
+	ApplicationProtection SubsystemHealth  `json:"application_protection"`
+	Sandbox               *SubsystemHealth `json:"sandbox,omitempty"`
 	// Managed reports the local UDS gRPC server (internal/ipc) that
 	// serves the DefenseClaw ↔ AVC contract. Present only when the
 	// server has been started (managed_enterprise or managed.enabled).
@@ -87,19 +100,25 @@ type HealthSnapshot struct {
 }
 
 type SidecarHealth struct {
-	mu                    sync.RWMutex
-	gateway               SubsystemHealth
-	watcher               SubsystemHealth
-	config                SubsystemHealth
-	api                   SubsystemHealth
-	guardrail             SubsystemHealth
-	telemetry             SubsystemHealth
-	aiDiscovery           SubsystemHealth
-	applicationProtection SubsystemHealth
-	sinks                 SubsystemHealth
-	sandbox               *SubsystemHealth
-	managed               *SubsystemHealth
-	startedAt             time.Time
+	mu                                 sync.RWMutex
+	gateway                            SubsystemHealth
+	watcher                            SubsystemHealth
+	config                             SubsystemHealth
+	api                                SubsystemHealth
+	guardrail                          SubsystemHealth
+	telemetry                          SubsystemHealth
+	aiDiscovery                        SubsystemHealth
+	applicationProtection              SubsystemHealth
+	sandbox                            *SubsystemHealth
+	startedAt                          time.Time
+	observabilityV8Source              observabilityV8HealthSource
+	observabilityV8ActiveGeneration    uint64
+	observabilityV8Failures            map[string]observabilityV8FailureObservation
+	observabilityV8RetentionState      string
+	observabilityV8RetentionFailure    string
+	observabilityV8RetentionDays       int64
+	observabilityV8EventHistoryFailure string
+	managed                            *SubsystemHealth
 
 	// subscribers receive a non-blocking notification after every Set*
 	// call, so long-lived consumers (like the IPC GetHealth stream)
@@ -133,6 +152,7 @@ type connectorStats struct {
 	subprocessPolicy   connector.SubprocessPolicy
 
 	requests         atomic.Int64
+	lastActivityAt   atomic.Int64
 	errors           atomic.Int64
 	toolInspections  atomic.Int64
 	toolBlocks       atomic.Int64
@@ -140,18 +160,41 @@ type connectorStats struct {
 }
 
 func (s *connectorStats) snapshot() ConnectorHealth {
+	// Load Requests before LastActivityAt. RecordConnectorRequestFor stores the
+	// timestamp first, so a snapshot that observes a new request can never pair
+	// that count with a missing activity timestamp.
+	requests := s.requests.Load()
+	var lastActivityAt *time.Time
+	if unixNanos := s.lastActivityAt.Load(); unixNanos > 0 {
+		activityAt := time.Unix(0, unixNanos).UTC()
+		lastActivityAt = &activityAt
+	}
 	return ConnectorHealth{
 		Name:               s.name,
 		State:              s.state,
 		Source:             s.source,
 		Since:              s.since,
+		LastActivityAt:     lastActivityAt,
 		ToolInspectionMode: s.toolInspectionMode,
 		SubprocessPolicy:   s.subprocessPolicy,
-		Requests:           s.requests.Load(),
+		Requests:           requests,
 		Errors:             s.errors.Load(),
 		ToolInspections:    s.toolInspections.Load(),
 		ToolBlocks:         s.toolBlocks.Load(),
 		SubprocessBlocks:   s.subprocessBlocks.Load(),
+	}
+}
+
+func (s *connectorStats) recordActivity(at time.Time) {
+	candidate := at.UnixNano()
+	for {
+		current := s.lastActivityAt.Load()
+		if candidate <= current {
+			return
+		}
+		if s.lastActivityAt.CompareAndSwap(current, candidate) {
+			return
+		}
 	}
 }
 
@@ -173,7 +216,6 @@ func NewSidecarHealth() *SidecarHealth {
 		telemetry:             disabled,
 		aiDiscovery:           disabled,
 		applicationProtection: disabled,
-		sinks:                 disabled,
 		startedAt:             now,
 	}
 }
@@ -250,6 +292,142 @@ func (h *SidecarHealth) SetTelemetry(state SubsystemState, lastErr string, detai
 	h.notifySubscribers()
 }
 
+func (h *SidecarHealth) bindObservabilityV8HealthSource(source observabilityV8HealthSource) {
+	if h == nil || source == nil {
+		return
+	}
+	h.mu.Lock()
+	h.observabilityV8Source = source
+	h.telemetry = SubsystemHealth{State: StateRunning, Since: time.Now()}
+	if h.observabilityV8Failures == nil {
+		h.observabilityV8Failures = make(map[string]observabilityV8FailureObservation)
+	}
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+func (h *SidecarHealth) clearObservabilityV8HealthSource() {
+	if h == nil {
+		return
+	}
+	changed := false
+	h.mu.Lock()
+	if h.observabilityV8Source != nil {
+		h.observabilityV8Source = nil
+		h.observabilityV8ActiveGeneration = 0
+		h.observabilityV8Failures = nil
+		h.telemetry = SubsystemHealth{State: StateStopped, Since: time.Now()}
+		changed = true
+	}
+	h.mu.Unlock()
+	if changed {
+		h.notifySubscribers()
+	}
+}
+
+func (h *SidecarHealth) observeObservabilityV8Failure(
+	destination string,
+	generation uint64,
+	code string,
+	occurredAt time.Time,
+) {
+	if h == nil || generation == 0 || !observability.IsStableToken(destination) ||
+		len(destination) > 64 || !validObservabilityV8FailureCode(code) || occurredAt.IsZero() {
+		return
+	}
+	h.mu.Lock()
+	if h.observabilityV8ActiveGeneration != 0 && generation < h.observabilityV8ActiveGeneration {
+		h.mu.Unlock()
+		return
+	}
+	if h.observabilityV8Failures == nil {
+		h.observabilityV8Failures = make(map[string]observabilityV8FailureObservation)
+	}
+	if len(h.observabilityV8Failures) >= configObservabilityV8MaxHealthDestinations {
+		if _, exists := h.observabilityV8Failures[destination]; !exists {
+			h.mu.Unlock()
+			return
+		}
+	}
+	current := h.observabilityV8Failures[destination]
+	if generation < current.generation ||
+		(generation == current.generation && occurredAt.Before(current.occurredAt)) {
+		h.mu.Unlock()
+		return
+	}
+	h.observabilityV8Failures[destination] = observabilityV8FailureObservation{
+		generation: generation, code: code, occurredAt: occurredAt.UTC(),
+	}
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+func validObservabilityV8FailureCode(code string) bool {
+	switch code {
+	case string(delivery.HealthReasonQueueFull), string(delivery.HealthReasonRetryable),
+		string(delivery.HealthReasonPartial), string(delivery.HealthReasonDeliveryFailed),
+		string(delivery.HealthReasonOriginLoop),
+		"generation_mismatch", "pipeline_failed", "projection_failed",
+		"route_identity_mismatch", "unsupported_shape", "payload_failed",
+		"queue_rejected", "panic_isolated", "compatibility_projection_failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *SidecarHealth) setObservabilityV8Retention(state string, days int64, failure string) {
+	if h == nil || days < 0 || !validObservabilityV8RetentionState(state) ||
+		!validObservabilityV8RetentionFailure(failure) {
+		return
+	}
+	h.mu.Lock()
+	h.observabilityV8RetentionState = state
+	h.observabilityV8RetentionDays = days
+	h.observabilityV8RetentionFailure = failure
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+func validObservabilityV8RetentionFailure(failure string) bool {
+	switch failure {
+	case "", "run_failed", "scheduler_failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *SidecarHealth) setObservabilityV8EventHistoryFailure(code string) {
+	if h == nil || !validObservabilityV8EventHistoryFailure(code) {
+		return
+	}
+	h.mu.Lock()
+	h.observabilityV8EventHistoryFailure = code
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+func validObservabilityV8EventHistoryFailure(code string) bool {
+	switch code {
+	case "projection_rejected", "integrity_unsigned", "integrity_signing_failed", "sqlite_write_failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func validObservabilityV8RetentionState(state string) bool {
+	switch state {
+	case "waiting_for_readiness", "healthy", "degraded", "disabled", "stopped":
+		return true
+	default:
+		return false
+	}
+}
+
+const configObservabilityV8MaxHealthDestinations = 65
+
 func (h *SidecarHealth) SetAIDiscovery(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
 	h.aiDiscovery = SubsystemHealth{
@@ -265,21 +443,6 @@ func (h *SidecarHealth) SetAIDiscovery(state SubsystemState, lastErr string, det
 func (h *SidecarHealth) SetApplicationProtection(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
 	h.applicationProtection = SubsystemHealth{
-		State:     state,
-		Since:     time.Now(),
-		LastError: lastErr,
-		Details:   details,
-	}
-	h.mu.Unlock()
-	h.notifySubscribers()
-}
-
-// SetSinks reports the aggregate audit-sink health. Details should
-// include "count" (int), "kinds" ([]string), and optionally "sinks"
-// ([]map) with per-sink rows for richer rendering.
-func (h *SidecarHealth) SetSinks(state SubsystemState, lastErr string, details map[string]interface{}) {
-	h.mu.Lock()
-	h.sinks = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
@@ -475,8 +638,14 @@ func (h *SidecarHealth) statsFor(name string) *connectorStats {
 	return s
 }
 
-// RecordConnectorRequestFor increments the request counter for a connector.
-func (h *SidecarHealth) RecordConnectorRequestFor(name string) { h.statsFor(name).requests.Add(1) }
+// RecordConnectorRequestFor records one accepted hook event for a connector.
+// The timestamp is stored before the count so a concurrent health snapshot
+// never exposes a new request without its matching activity time.
+func (h *SidecarHealth) RecordConnectorRequestFor(name string) {
+	stats := h.statsFor(name)
+	stats.recordActivity(time.Now())
+	stats.requests.Add(1)
+}
 
 // RecordConnectorErrorFor increments the error counter for a connector.
 func (h *SidecarHealth) RecordConnectorErrorFor(name string) { h.statsFor(name).errors.Add(1) }
@@ -502,8 +671,6 @@ func (h *SidecarHealth) RecordSubprocessBlock()  { h.RecordSubprocessBlockFor(""
 
 func (h *SidecarHealth) Snapshot() HealthSnapshot {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-
 	snap := HealthSnapshot{
 		StartedAt:             h.startedAt,
 		UptimeMs:              time.Since(h.startedAt).Milliseconds(),
@@ -515,10 +682,18 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		Telemetry:             h.telemetry,
 		AIDiscovery:           h.aiDiscovery,
 		ApplicationProtection: h.applicationProtection,
-		Sinks:                 h.sinks,
 		Sandbox:               h.sandbox,
 		Managed:               h.managed,
 	}
+	source := h.observabilityV8Source
+	failures := make(map[string]observabilityV8FailureObservation, len(h.observabilityV8Failures))
+	for name, failure := range h.observabilityV8Failures {
+		failures[name] = failure
+	}
+	retentionState := h.observabilityV8RetentionState
+	retentionFailure := h.observabilityV8RetentionFailure
+	retentionDays := h.observabilityV8RetentionDays
+	eventHistoryFailure := h.observabilityV8EventHistoryFailure
 
 	if len(h.connStats) > 0 {
 		names := make([]string, 0, len(h.connStats))
@@ -544,6 +719,195 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 			snap.Connector = &ch
 		}
 	}
+	h.mu.RUnlock()
+
+	if source != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), observabilityV8HealthSnapshotTimeout)
+		live, ok := readObservabilityV8HealthSnapshot(ctx, source)
+		cancel()
+		if ok {
+			failures = h.reconcileObservabilityV8Failures(live)
+			snap.Telemetry = renderObservabilityV8Health(
+				snap.Telemetry.Since, live, failures,
+				retentionState, retentionFailure, retentionDays, eventHistoryFailure,
+			)
+		}
+	}
 
 	return snap
+}
+
+func (h *SidecarHealth) reconcileObservabilityV8Failures(
+	snapshot observabilityruntime.DestinationHealthSnapshot,
+) map[string]observabilityV8FailureObservation {
+	active := make(map[string]struct{}, len(snapshot.Destinations))
+	for _, destination := range snapshot.Destinations {
+		active[destination.Name] = struct{}{}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.observabilityV8ActiveGeneration = snapshot.Generation
+	result := make(map[string]observabilityV8FailureObservation, len(h.observabilityV8Failures))
+	for name, failure := range h.observabilityV8Failures {
+		_, exists := active[name]
+		if !exists || failure.generation != snapshot.Generation {
+			delete(h.observabilityV8Failures, name)
+			continue
+		}
+		result[name] = failure
+	}
+	return result
+}
+
+func readObservabilityV8HealthSnapshot(
+	ctx context.Context,
+	source observabilityV8HealthSource,
+) (snapshot observabilityruntime.DestinationHealthSnapshot, ok bool) {
+	if ctx == nil || source == nil {
+		return observabilityruntime.DestinationHealthSnapshot{}, false
+	}
+	defer func() {
+		if recover() != nil {
+			snapshot = observabilityruntime.DestinationHealthSnapshot{}
+			ok = false
+		}
+	}()
+	snapshot, err := source.DestinationHealthSnapshot(ctx)
+	return snapshot, err == nil
+}
+
+func renderObservabilityV8Health(
+	since time.Time,
+	snapshot observabilityruntime.DestinationHealthSnapshot,
+	failures map[string]observabilityV8FailureObservation,
+	retentionState string,
+	retentionFailure string,
+	retentionDays int64,
+	eventHistoryFailure string,
+) SubsystemHealth {
+	details := make(map[string]interface{}, 6)
+	details["generation"] = snapshot.Generation
+	destinations := make([]map[string]interface{}, 0, len(snapshot.Destinations))
+	aggregate := StateRunning
+	for _, destination := range snapshot.Destinations {
+		row := map[string]interface{}{
+			"name": destination.Name, "kind": string(destination.Kind),
+			"enabled": destination.Enabled, "generation": snapshot.Generation,
+		}
+		signals := make([]string, len(destination.Signals))
+		for index, signal := range destination.Signals {
+			signals[index] = string(signal)
+		}
+		row["signals"] = signals
+		if destination.State != "" {
+			row["state"] = string(destination.State)
+		}
+		if destination.Reason != "" {
+			row["reason"] = destination.Reason
+		}
+		if destination.Queue != nil {
+			row["queue"] = renderObservabilityV8Queue(*destination.Queue, destination.Counters)
+		}
+		row["counters"] = renderObservabilityV8Counters(destination.Counters)
+		queueRows := make([]map[string]interface{}, 0, len(destination.Sources))
+		signalRows := make([]map[string]interface{}, 0, len(destination.Sources))
+		for _, source := range destination.Sources {
+			signalRow := map[string]interface{}{
+				"signal": source.Signal, "state": string(source.State),
+				"counters": renderObservabilityV8Counters(source.Counters),
+			}
+			if source.Reason != "" {
+				signalRow["reason"] = source.Reason
+			}
+			if !source.LastSuccess.IsZero() {
+				signalRow["last_success_at"] = source.LastSuccess.UTC().Format(time.RFC3339Nano)
+			}
+			if !source.LastFailure.IsZero() {
+				signalRow["last_failure_at"] = source.LastFailure.UTC().Format(time.RFC3339Nano)
+			}
+			if source.Queue != nil {
+				queue := renderObservabilityV8Queue(*source.Queue, source.Counters)
+				signalRow["queue"] = queue
+				queueRow := renderObservabilityV8Queue(*source.Queue, source.Counters)
+				queueRow["signal"] = source.Signal
+				queueRow["state"] = string(source.State)
+				if source.Reason != "" {
+					queueRow["reason"] = source.Reason
+				}
+				if !source.LastSuccess.IsZero() {
+					queueRow["last_success_at"] = source.LastSuccess.UTC().Format(time.RFC3339Nano)
+				}
+				if !source.LastFailure.IsZero() {
+					queueRow["last_failure_at"] = source.LastFailure.UTC().Format(time.RFC3339Nano)
+				}
+				queueRows = append(queueRows, queueRow)
+			}
+			signalRows = append(signalRows, signalRow)
+		}
+		if len(signalRows) > 0 {
+			row["signal_health"] = signalRows
+		}
+		if len(queueRows) > 0 {
+			row["queues"] = queueRows
+		}
+		lastFailure := destination.LastFailure
+		if observed, ok := failures[destination.Name]; ok &&
+			observed.generation == snapshot.Generation &&
+			!destination.LastSuccess.After(observed.occurredAt) {
+			row["failure"] = observed.code
+			if observed.occurredAt.After(lastFailure) {
+				lastFailure = observed.occurredAt
+			}
+			aggregate = StateError
+		}
+		if !destination.LastSuccess.IsZero() {
+			row["last_success_at"] = destination.LastSuccess.UTC().Format(time.RFC3339Nano)
+		}
+		if !lastFailure.IsZero() {
+			row["last_failure_at"] = lastFailure.UTC().Format(time.RFC3339Nano)
+		}
+		if destination.Enabled && (destination.State == delivery.HealthDegraded ||
+			destination.State == delivery.HealthFailing || destination.State == delivery.HealthStopped) {
+			aggregate = StateError
+		}
+		destinations = append(destinations, row)
+	}
+	details["destination_count"] = len(destinations)
+	details["destinations"] = destinations
+	if validObservabilityV8RetentionState(retentionState) {
+		details["retention_state"] = retentionState
+		details["retention_days"] = retentionDays
+		if retentionFailure != "" {
+			details["retention_failure"] = retentionFailure
+		}
+		if retentionState == "degraded" {
+			aggregate = StateError
+		}
+	}
+	if eventHistoryFailure != "" {
+		details["event_history_failure"] = eventHistoryFailure
+		aggregate = StateError
+	}
+	return SubsystemHealth{State: aggregate, Since: since, Details: details}
+}
+
+func renderObservabilityV8Queue(
+	queue delivery.QueueSnapshot,
+	counters delivery.Counters,
+) map[string]interface{} {
+	return map[string]interface{}{
+		"items": queue.Items, "bytes": queue.Bytes,
+		"in_flight_items": queue.InFlightItems, "in_flight_bytes": queue.InFlightBytes,
+		"max_items": queue.MaxItems, "max_bytes": queue.MaxBytes,
+		"dropped":  counters.Dropped,
+		"counters": renderObservabilityV8Counters(counters),
+	}
+}
+
+func renderObservabilityV8Counters(counters delivery.Counters) map[string]interface{} {
+	return map[string]interface{}{
+		"accepted": counters.Accepted, "delivered": counters.Delivered,
+		"retried": counters.Retried, "dropped": counters.Dropped,
+		"rejected": counters.Rejected,
+	}
 }

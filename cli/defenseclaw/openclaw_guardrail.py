@@ -382,7 +382,8 @@ def _preserve_ownership(path: str):
     breaking sandbox user access. Skipped entirely for non-root
     callers since ``os.chown`` requires elevated privileges.
     """
-    if os.getuid() != 0:
+    getuid = getattr(os, "getuid", None)
+    if getuid is None or getuid() != 0:
         yield
         return
 
@@ -570,8 +571,10 @@ def _backup(path: str) -> None:
         dst_fh.write(contents)
     with contextlib.suppress(OSError):
         shutil.copystat(path, bak)
-    with contextlib.suppress(OSError):
-        os.chown(bak, st.st_uid, st.st_gid)
+    chown = getattr(os, "chown", None)
+    if chown is not None:
+        with contextlib.suppress(OSError):
+            chown(bak, st.st_uid, st.st_gid)
 
 
 def _install_codeguard_skill_deferred(openclaw_config_file: str) -> None:

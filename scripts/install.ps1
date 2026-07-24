@@ -16,37 +16,29 @@
 
 <#
 .SYNOPSIS
-    DefenseClaw installer for Windows (PowerShell).
+    Authenticated bootstrap for the native DefenseClaw Windows installer.
 
 .DESCRIPTION
-    Installs DefenseClaw from pre-built release artifacts on Windows. The Go
-    gateway ships as defenseclaw_<version>_windows_<arch>.zip (containing
-    defenseclaw.exe) and the CLI ships as a pure-Python wheel. This is the
-    Windows counterpart to scripts/install.sh; it lands:
+    This script is retained for compatibility with older PowerShell install
+    commands. It does not install Python, uv, wheels, or individual gateway
+    artifacts. It authenticates the release metadata and the native
+    DefenseClawSetup-x64.exe, then delegates the complete install transaction
+    to that executable.
 
-      * <home>\bin\defenseclaw-gateway.exe  (the Go gateway/sidecar binary)
-      * <home>\bin\defenseclaw.cmd          (shim to the CLI in the venv)
-
-    and adds that bin dir to the user PATH. Only Python + uv are required; no Go,
-    Node.js, or git. Connector-specific wiring (Codex, Claude Code, ...) is done
-    by the cross-platform CLI via `defenseclaw init` / `quickstart`.
-
-    Layout matches scripts/install.sh and `defenseclaw upgrade`: binaries land in
-    %USERPROFILE%\.local\bin and the CLI venv lives in
-    %USERPROFILE%\.defenseclaw\.venv, so an installed setup upgrades in place.
+    Remote mode downloads only fixed release assets from GitHub and a pinned
+    Cosign verifier. Local mode performs no downloads and expects a complete
+    release bundle plus a pinned Cosign executable.
 
 .EXAMPLE
-    $Version = "0.8.3"
+    $Version = "X.Y.Z" # Replace with the release shown on GitHub.
     $InstallUrl = "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/$Version/scripts/install.ps1"
     & ([scriptblock]::Create((irm $InstallUrl))) -Version $Version
 
 .EXAMPLE
-    # Pin a version and pick a connector, non-interactively:
-    .\install.ps1 -Version 0.7.0 -Connector codex -Yes -Quickstart
+    .\install.ps1 -Version X.Y.Z -Connector codex -Yes -Quickstart
 
 .EXAMPLE
-    # Install from a locally built dist directory (for testing):
-    .\install.ps1 -Local .\dist
+    .\install.ps1 -Local .\release -CosignPath .\tools\cosign-windows-amd64.exe -Yes
 #>
 
 [CmdletBinding()]
@@ -54,10 +46,12 @@ param(
     [string]$Connector = "",
     [string]$Version = "",
     [string]$Local = "",
+    [string]$CosignPath = "",
     [ValidateSet("observe", "action", "")]
     [string]$QuickstartMode = "",
     [switch]$Quickstart,
     [switch]$NoOpenclaw,
+    [switch]$NoPersistPath,
     [switch]$Yes,
     [switch]$Help
 )
@@ -65,443 +59,973 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# Prefer TLS 1.2+ on older Windows PowerShell (5.1) where the default can still
-# be TLS 1.0/1.1; PowerShell 7 already negotiates modern protocols.
 try {
-    [Net.ServicePointManager]::SecurityProtocol = `
+    [Net.ServicePointManager]::SecurityProtocol =
         [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 } catch {
-    # Property is read-only / unavailable on this host; ignore.
+    # PowerShell editions that do not expose this legacy property already use
+    # the operating system TLS policy.
 }
 
-# ── Configuration ─────────────────────────────────────────────────────────────
-
 $Repo = "cisco-ai-defense/defenseclaw"
-$DefenseClawHome = if ($env:DEFENSECLAW_HOME) { $env:DEFENSECLAW_HOME } else { Join-Path $env:USERPROFILE ".defenseclaw" }
-$Venv = Join-Path $DefenseClawHome ".venv"
-# Binaries go to %USERPROFILE%\.local\bin to match scripts/install.sh and
-# `defenseclaw upgrade` (which replaces the gateway there). The venv stays under
-# DEFENSECLAW_HOME so a custom home still relocates the heavy CLI environment.
-$InstallDir = Join-Path $env:USERPROFILE ".local\bin"
-
-# Keep in sync with cli/defenseclaw/connector_paths.py KNOWN_CONNECTORS.
-# PowerShell runs on Windows, where OpenClaw/ZeptoClaw proxy connectors are
-# intentionally hidden because the native Windows path is hook-only.
+$SetupAsset = "DefenseClawSetup-x64.exe"
+$ProvenanceAsset = "$SetupAsset.provenance.json"
+$UpgradeManifestAsset = "upgrade-manifest.json"
+$ChecksumsAsset = "checksums.txt"
+$ChecksumsSignatureAsset = "checksums.txt.sig"
+$ChecksumsCertificateAsset = "checksums.txt.pem"
+$ChecksumsBundleAsset = "checksums.txt.bundle"
+$ExpectedPublisher = "Cisco Systems, Inc."
+$SigstoreOIDCIssuer = "https://token.actions.githubusercontent.com"
+$CosignVersion = "2.6.2"
+$CosignAsset = "cosign-windows-amd64.exe"
+$CosignSha256 = "DD6C61E510DA627BCAED4CD9DB844EC11CACD09826D814D89F7F68D40FEB07BE"
+$CosignMaximumBytes = 268435456
+$CosignUrl = "https://github.com/sigstore/cosign/releases/download/v$CosignVersion/$CosignAsset"
 $ConnectorChoices = @(
-    "codex", "claudecode", "hermes", "cursor",
-    "windsurf", "geminicli", "copilot", "openhands",
-    "antigravity", "opencode", "omnigent", "none"
+    "codex",
+    "claudecode",
+    "none"
 )
-$HookConnectors = $ConnectorChoices | Where-Object { $_ -notin @("codex", "claudecode", "none") }
+$HookConnectors = @()
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-
-function Write-Info  { param([string]$Msg) Write-Host "  > $Msg" -ForegroundColor Blue }
-function Write-Ok    { param([string]$Msg) Write-Host "  + $Msg" -ForegroundColor Green }
-function Write-Warn2 { param([string]$Msg) Write-Host "  ! $Msg" -ForegroundColor Yellow }
-function Write-Err2  { param([string]$Msg) Write-Host "  x $Msg" -ForegroundColor Red }
-function Write-Step  { param([string]$Msg) Write-Host "`n--- $Msg" -ForegroundColor Cyan }
-function Die         { param([string]$Msg) Write-Err2 $Msg; exit 1 }
+function Write-Ok    { param([string]$Message) Write-Host "  + $Message" -ForegroundColor Green }
+function Write-Warn2 { param([string]$Message) Write-Host "  ! $Message" -ForegroundColor Yellow }
+function Write-Err2  { param([string]$Message) Write-Host "  x $Message" -ForegroundColor Red }
+function Write-Step  { param([string]$Message) Write-Host "`n--- $Message" -ForegroundColor Cyan }
+function Die         { param([string]$Message) throw $Message }
 
 function Show-Help {
     @"
 
-DefenseClaw Installer (Windows)
+DefenseClaw native Windows bootstrap
 
 Usage:
-  `$Version = "0.8.3"
+  `$Version = "X.Y.Z" # Replace with the release shown on GitHub.
   `$InstallUrl = "https://raw.githubusercontent.com/$Repo/`$Version/scripts/install.ps1"
   & ([scriptblock]::Create((irm `$InstallUrl))) -Version `$Version
-  .\install.ps1 -Local .\dist                 # from a local build
-  .\install.ps1 -Yes                          # non-interactive
-  .\install.ps1 -Connector codex -Quickstart  # pick connector + bootstrap
+  .\install.ps1 -Version X.Y.Z -Connector codex -Yes -Quickstart
+  .\install.ps1 -Local .\release -CosignPath .\cosign-windows-amd64.exe
 
 Options:
-  -Connector <name>    Pick agent connector ($($ConnectorChoices -join '|'))
-  -NoOpenclaw          Install gateway/CLI only when no connector is selected
-  -Version <x.y.z>     Install a specific release version
-  -Local <dir>         Install from a local dist directory instead of downloading
-  -Quickstart          Run 'defenseclaw quickstart --non-interactive' post-install
-  -QuickstartMode <m>  Pass --mode m to quickstart (observe|action)
-  -Yes                 Skip confirmation prompts (for CI/automation)
+  -Connector <name>    Configure a connector ($($ConnectorChoices -join '|'))
+  -NoOpenclaw          Legacy alias for -Connector none
+  -Version <x.y.z>     Install one exact release (latest when omitted remotely)
+  -Local <dir>         Use a complete local release bundle without network access
+  -CosignPath <file>   Pinned Cosign binary for -Local (or place it in <dir>)
+  -Quickstart          Configure the selected connector and start the gateway
+  -QuickstartMode <m>  Quickstart policy mode (observe|action)
+  -Yes                 Run native Setup silently without confirmation prompts
   -Help                Show this help
 
-Environment variables:
-  DEFENSECLAW_HOME     Install root (default: %USERPROFILE%\.defenseclaw)
+Local bundle requirements:
+  $SetupAsset, $ProvenanceAsset, $UpgradeManifestAsset, $ChecksumsAsset,
+  $ChecksumsSignatureAsset, $ChecksumsCertificateAsset, $ChecksumsBundleAsset,
+  and a pinned Cosign binary.
+
+Compatibility notes:
+  -NoPersistPath is no longer supported because native Setup owns PATH lifecycle.
+  A non-default DEFENSECLAW_HOME is not supported by the per-user native layout.
 
 "@ | Write-Host
 }
 
-# ── Utilities ─────────────────────────────────────────────────────────────────
-
-function Test-HasCommand {
-    param([string]$Name)
-    return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
+function Test-ReleaseVersion {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    return $Value -match '^\d+\.\d+\.\d+$'
 }
 
-# ── Platform detection ────────────────────────────────────────────────────────
-
-function Get-Arch {
-    Write-Step "Detecting platform"
-    # PROCESSOR_ARCHITEW6432 is set when a 32-bit process runs on 64-bit Windows;
-    # prefer it so we never mistake WOW64 for a real 32-bit OS.
-    $raw = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
-    switch ($raw.ToUpper()) {
-        "AMD64" { $arch = "amd64" }
-        "ARM64" { $arch = "arm64" }
-        "X86"   { Die "32-bit Windows is not supported (need amd64 or arm64)." }
-        default { Die "Unsupported architecture: $raw" }
+function Assert-NativeWindowsX64 {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        Die "scripts/install.ps1 supports native Windows only. Use scripts/install.sh on macOS or Linux."
     }
-    Write-Ok "Windows ($arch)"
-    return $arch
+    $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+    if (-not [string]::Equals($architecture, "X64", [StringComparison]::OrdinalIgnoreCase)) {
+        switch ($architecture.ToUpperInvariant()) {
+            "ARM64" { Die "Windows ARM64 is not certified, including x64 emulation; use native Windows x64 (amd64)." }
+            "X86"   { Die "32-bit Windows is not supported; use native Windows x64 (amd64)." }
+            default { Die "Unsupported native Windows architecture: $architecture" }
+        }
+    }
 }
 
-# ── Dependency: uv ────────────────────────────────────────────────────────────
+function Assert-CompatibleLayoutRequest {
+    if ($NoPersistPath) {
+        Die "-NoPersistPath has no safe native Setup equivalent. Native Setup must own the user PATH entry so repair and uninstall remain consistent."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:DEFENSECLAW_HOME)) {
+        $profile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        $nativeHome = [IO.Path]::GetFullPath((Join-Path $profile ".defenseclaw")).TrimEnd('\')
+        $requestedHome = [IO.Path]::GetFullPath($env:DEFENSECLAW_HOME).TrimEnd('\')
+        if (-not $requestedHome.Equals($nativeHome, [StringComparison]::OrdinalIgnoreCase)) {
+            Die "Native Windows Setup uses $nativeHome; custom DEFENSECLAW_HOME '$requestedHome' is not supported by this compatibility bootstrap."
+        }
+    }
+}
 
-function Install-Uv {
-    Write-Step "Checking uv"
-    if (Test-HasCommand "uv") {
-        Write-Ok "uv found"
+function Set-PrivateDirectoryProtection {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Die "Bootstrap staging root must be a regular directory: $Path"
+    }
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    if ($null -eq $identity.User) { Die "Current Windows identity has no user SID" }
+    $system = [Security.Principal.SecurityIdentifier]::new("S-1-5-18")
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetOwner($identity.User)
+    $security.SetAccessRuleProtection($true, $false)
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    foreach ($sid in @($identity.User, $system)) {
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        [void]$security.AddAccessRule($rule)
+    }
+    if ($null -ne $item.PSObject.Methods["SetAccessControl"]) {
+        $item.SetAccessControl($security)
+    } else {
+        [IO.FileSystemAclExtensions]::SetAccessControl(
+            [IO.DirectoryInfo]$item,
+            [Security.AccessControl.DirectorySecurity]$security
+        )
+    }
+}
+
+function New-PrivateStageRoot {
+    $root = Join-Path ([IO.Path]::GetTempPath()) (
+        ".defenseclaw-bootstrap-" + [guid]::NewGuid().ToString("N")
+    )
+    [IO.Directory]::CreateDirectory($root) | Out-Null
+    try {
+        Set-PrivateDirectoryProtection -Path $root
+    } catch {
+        Remove-Item -LiteralPath $root -Force -ErrorAction SilentlyContinue
+        throw
+    }
+    return [IO.Path]::GetFullPath($root)
+}
+
+function Remove-PrivateStageRoot {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $temp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
+    if (-not ([IO.Path]::GetDirectoryName($full)).Equals(
+            $temp, [StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetFileName($full) -notmatch '^\.defenseclaw-bootstrap-[0-9a-f]{32}$') {
+        Die "Refusing to clean an unexpected bootstrap staging path: $full"
+    }
+    $item = Get-Item -LiteralPath $full -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return }
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        [IO.Directory]::Delete($full)
         return
     }
-    Write-Info "Installing uv..."
+    Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop
+}
+
+function Assert-RegularFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [long]$MaximumBytes = 0
+    )
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        $item.Length -le 0) {
+        Die "$Label must be a non-empty regular file: $Path"
+    }
+    if ($MaximumBytes -gt 0 -and $item.Length -gt $MaximumBytes) {
+        Die "$Label exceeds its $MaximumBytes-byte limit: $Path"
+    }
+}
+
+function Copy-RegularFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [long]$MaximumBytes = 0
+    )
+
+    Assert-RegularFile -Path $Source -Label $Label -MaximumBytes $MaximumBytes
+    $inputStream = [IO.File]::Open(
+        $Source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read
+    )
     try {
-        Invoke-RestMethod -Uri "https://astral.sh/uv/install.ps1" | Invoke-Expression
+        $outputStream = [IO.File]::Open(
+            $Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None
+        )
+        try {
+            $inputStream.CopyTo($outputStream)
+            $outputStream.Flush($true)
+        } finally {
+            $outputStream.Dispose()
+        }
+    } finally {
+        $inputStream.Dispose()
+    }
+    Assert-RegularFile -Path $Destination -Label $Label -MaximumBytes $MaximumBytes
+}
+
+function Invoke-DownloadFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [long]$MaximumBytes = 0
+    )
+
+    try {
+        Invoke-WebRequest -Uri $Uri -OutFile $Destination -UseBasicParsing
     } catch {
-        Die "Failed to install uv. Install manually: https://docs.astral.sh/uv/"
+        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+        Die "Could not download required $Label from ${Uri}: $($_.Exception.Message)"
     }
-    # uv's installer drops the binary in %USERPROFILE%\.local\bin; surface it on
-    # PATH for the rest of this process so subsequent calls resolve.
-    $uvDir = Join-Path $env:USERPROFILE ".local\bin"
-    if (Test-Path $uvDir) { $env:PATH = "$uvDir;$env:PATH" }
-    if (-not (Test-HasCommand "uv")) {
-        Die "uv installed but not found on PATH. Open a new terminal and re-run."
-    }
-    Write-Ok "uv installed"
+    Assert-RegularFile -Path $Destination -Label $Label -MaximumBytes $MaximumBytes
 }
 
-# ── Dependency: Python ────────────────────────────────────────────────────────
+function Get-Sha256Hex {
+    param([Parameter(Mandatory = $true)][string]$Path)
 
-function Ensure-Python {
-    Write-Step "Checking Python"
-    # uv manages an interpreter for us; ask it for 3.12 and install on demand.
-    # This avoids depending on a system Python being present or new enough.
-    & uv python install 3.12 *> $null
-    Write-Ok "Python 3.12 (managed by uv)"
+    $stream = [IO.File]::Open(
+        $Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read
+    )
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "")
+        } finally {
+            $sha256.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
 }
 
-# ── Resolve release version ───────────────────────────────────────────────────
+function Get-ByteSha256Hex {
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
 
-function Resolve-Version {
-    if ($Local) { return $null }
-    Write-Step "Resolving version"
-    if ($Version) {
-        Write-Ok "Using specified version: $Version"
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha256.ComputeHash($Bytes))).Replace("-", "")
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+function Assert-Sha256 {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Expected,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    if ($Expected -notmatch '^[0-9a-fA-F]{64}$') {
+        Die "Expected SHA-256 for $Label is malformed"
+    }
+    $actual = Get-Sha256Hex -Path $Path
+    if (-not $actual.Equals($Expected, [StringComparison]::OrdinalIgnoreCase)) {
+        Die "SHA-256 mismatch for ${Label}: expected $Expected, got $actual"
+    }
+}
+
+function Get-AuthenticatedChecksum {
+    [CmdletBinding(DefaultParameterSetName = 'Path')]
+    param(
+        [Parameter(Mandatory = $true, ParameterSetName = 'Path')][string]$ChecksumsPath,
+        [Parameter(Mandatory = $true, ParameterSetName = 'Content')][string]$ChecksumsContent,
+        [Parameter(Mandatory = $true)][string]$FileName
+    )
+
+    $found = @()
+    $lines = if ($PSCmdlet.ParameterSetName -eq 'Content') {
+        $ChecksumsContent -split '\r?\n'
+    } else {
+        [IO.File]::ReadAllLines($ChecksumsPath)
+    }
+    foreach ($line in $lines) {
+        if ($line -match '^([0-9a-fA-F]{64})[ \t]+\*?(.+?)[ \t]*$') {
+            $listedName = $Matches[2].Trim().Replace('\', '/')
+            if ($listedName.StartsWith('./', [StringComparison]::Ordinal)) {
+                $listedName = $listedName.Substring(2)
+            }
+            if ($listedName.Equals($FileName, [StringComparison]::Ordinal)) {
+                $found += $Matches[1]
+            }
+        }
+    }
+    if ($found.Count -ne 1) {
+        Die "Authenticated $ChecksumsAsset contains $($found.Count) entries for $FileName; expected exactly one"
+    }
+    return $found[0]
+}
+
+function Invoke-CosignVerification {
+    param(
+        [Parameter(Mandatory = $true)][string]$Verifier,
+        [Parameter(Mandatory = $true)][string]$ChecksumsPath,
+        [Parameter(Mandatory = $true)][string]$SignaturePath,
+        [Parameter(Mandatory = $true)][string]$CertificatePath,
+        [Parameter(Mandatory = $true)][string]$BundlePath,
+        [Parameter(Mandatory = $true)][string]$ReleaseVersion
+    )
+
+    Assert-Sha256 -Path $Verifier -Expected $CosignSha256 -Label "pinned Cosign verifier"
+    $before = @{}
+    foreach ($path in @(
+        $Verifier, $ChecksumsPath, $SignaturePath, $CertificatePath, $BundlePath
+    )) {
+        $before[$path] = Get-Sha256Hex -Path $path
+    }
+    # Release candidates are signed before tag creation by the protected main
+    # workflow.  Do not accept a tag-ref identity: it is not the reviewed
+    # signing path and would broaden the offline trust policy unnecessarily.
+    $identity = "^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$"
+    $previousErrorActionPreference = $ErrorActionPreference
+    $output = @()
+    $exitCode = 1
+    $verifyArguments = @(
+        "verify-blob",
+        "--certificate", $CertificatePath,
+        "--signature", $SignaturePath,
+        "--bundle", $BundlePath,
+        "--offline",
+        "--certificate-identity-regexp", $identity,
+        "--certificate-oidc-issuer", $SigstoreOIDCIssuer,
+        $ChecksumsPath
+    )
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = @(& $Verifier @verifyArguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        Die "Release checksum signature verification failed (exit $exitCode): $(($output -join ' ').Trim())"
+    }
+    foreach ($path in $before.Keys) {
+        $after = Get-Sha256Hex -Path $path
+        if (-not $after.Equals($before[$path], [StringComparison]::OrdinalIgnoreCase)) {
+            Die "Release verification input changed while Cosign was running: $path"
+        }
+    }
+    $authenticatedBytes = [IO.File]::ReadAllBytes($ChecksumsPath)
+    $authenticatedHash = Get-ByteSha256Hex -Bytes $authenticatedBytes
+    if (-not $authenticatedHash.Equals(
+        $before[$ChecksumsPath], [StringComparison]::OrdinalIgnoreCase)) {
+        Die "Release checksum content changed after Cosign verification: $ChecksumsPath"
+    }
+    try {
+        $authenticatedContent = [Text.UTF8Encoding]::new($false, $true).GetString($authenticatedBytes)
+    } catch {
+        Die "Authenticated $ChecksumsAsset is not valid UTF-8: $($_.Exception.Message)"
+    }
+    Write-Ok "Release checksum signature verified (Sigstore)"
+    return $authenticatedContent
+}
+
+function Assert-UpgradeManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ReleaseVersion
+    )
+
+    try {
+        $manifest = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        Die "Could not parse authenticated ${UpgradeManifestAsset}: $($_.Exception.Message)"
+    }
+    if (-not (Test-ReleaseVersion -Value $ReleaseVersion)) {
+        Die "Authenticated upgrade manifest was checked against an invalid release version"
+    }
+    $expectedSchema = if ([version]$ReleaseVersion -ge [version]"0.8.4") { 2 } else { 1 }
+    if ([int]$manifest.schema_version -ne $expectedSchema -or
+        -not ([string]$manifest.release_version).Equals($ReleaseVersion, [StringComparison]::Ordinal)) {
+        Die "Authenticated upgrade manifest does not describe DefenseClaw $ReleaseVersion"
+    }
+    $releaseArtifactsProperty = $manifest.PSObject.Properties["release_artifacts"]
+    if ($expectedSchema -eq 1) {
+        if ($null -ne $releaseArtifactsProperty) {
+            Die "Authenticated legacy upgrade manifest declares unsupported protected release artifacts"
+        }
+    } else {
+        if ($null -eq $releaseArtifactsProperty -or $null -eq $releaseArtifactsProperty.Value) {
+            Die "Authenticated schema-2 upgrade manifest does not declare protected release artifacts"
+        }
+        $releaseArtifacts = $releaseArtifactsProperty.Value
+        $releaseArtifactNames = @($releaseArtifacts.PSObject.Properties.Name)
+        if ($releaseArtifactNames.Count -ne 2 -or
+            $releaseArtifactNames -notcontains "wheel" -or
+            $releaseArtifactNames -notcontains "gateways") {
+            Die "Authenticated schema-2 upgrade manifest has an invalid protected release-artifact surface"
+        }
+        $expectedWheel = "defenseclaw-$ReleaseVersion-2-py3-none-any.dcwheel"
+        if (-not ([string]$releaseArtifacts.wheel).Equals(
+            $expectedWheel, [StringComparison]::Ordinal)) {
+            Die "Authenticated schema-2 upgrade manifest does not select the exact protected wheel"
+        }
+        $gateways = $releaseArtifacts.gateways
+        if ($null -eq $gateways) {
+            Die "Authenticated schema-2 upgrade manifest has an invalid protected gateway surface"
+        }
+        $gatewayPlatformNames = @($gateways.PSObject.Properties.Name)
+        if ($gatewayPlatformNames.Count -ne 3 -or
+            $gatewayPlatformNames -notcontains "darwin" -or
+            $gatewayPlatformNames -notcontains "linux" -or
+            $gatewayPlatformNames -notcontains "windows") {
+            Die "Authenticated schema-2 upgrade manifest has an invalid protected gateway surface"
+        }
+        foreach ($platform in @("darwin", "linux", "windows")) {
+            $platformGateways = $gateways.PSObject.Properties[$platform].Value
+            if ($null -eq $platformGateways) {
+                Die "Authenticated schema-2 upgrade manifest has an invalid $platform gateway surface"
+            }
+            $gatewayArchitectureNames = @($platformGateways.PSObject.Properties.Name)
+            if ($gatewayArchitectureNames.Count -ne 2 -or
+                $gatewayArchitectureNames -notcontains "amd64" -or
+                $gatewayArchitectureNames -notcontains "arm64") {
+                Die "Authenticated schema-2 upgrade manifest has an invalid $platform gateway surface"
+            }
+            foreach ($architecture in @("amd64", "arm64")) {
+                $expectedGateway =
+                    "defenseclaw_${ReleaseVersion}_protocol2_${platform}_${architecture}.dcgateway"
+                if (-not ([string]$platformGateways.PSObject.Properties[$architecture].Value).Equals(
+                    $expectedGateway, [StringComparison]::Ordinal)) {
+                    Die "Authenticated schema-2 upgrade manifest does not select the exact protected $platform/$architecture gateway"
+                }
+            }
+        }
+    }
+
+    $installerProperty = $manifest.PSObject.Properties["windows_installer"]
+    $installer = if ($null -eq $installerProperty) { $null } else { $installerProperty.Value }
+    if ($null -eq $installer) {
+        Die "Authenticated upgrade manifest does not select $SetupAsset"
+    }
+    $installerNames = @($installer.PSObject.Properties.Name)
+    if ($installerNames.Count -ne 5 -or
+        $installerNames -notcontains "asset" -or
+        $installerNames -notcontains "architectures" -or
+        $installerNames -notcontains "handoff_args" -or
+        $installerNames -notcontains "authenticode" -or
+        $installerNames -notcontains "managed_policy") {
+        Die "Authenticated upgrade manifest has an invalid native Windows installer surface"
+    }
+    if (-not ([string]$installer.asset).Equals($SetupAsset, [StringComparison]::Ordinal)) {
+        Die "Authenticated upgrade manifest does not select $SetupAsset"
+    }
+    $architectures = @($installer.architectures)
+    if ($architectures.Count -ne 1 -or
+        -not ([string]$architectures[0]).Equals("amd64", [StringComparison]::Ordinal)) {
+        Die "Authenticated upgrade manifest does not describe the exact native Windows amd64 surface"
+    }
+    $handoffArgs = @($installer.handoff_args)
+    $expectedHandoffArgs = @("/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user")
+    if ($handoffArgs.Count -ne $expectedHandoffArgs.Count) {
+        Die "Authenticated upgrade manifest has an unsupported native Setup handoff"
+    }
+    for ($index = 0; $index -lt $expectedHandoffArgs.Count; $index++) {
+        if (-not ([string]$handoffArgs[$index]).Equals(
+            $expectedHandoffArgs[$index], [StringComparison]::Ordinal)) {
+            Die "Authenticated upgrade manifest has an unsupported native Setup handoff"
+        }
+    }
+    $authenticode = $installer.authenticode
+    if ($null -eq $authenticode) {
+        Die "Authenticated upgrade manifest does not declare the optional pinned DefenseClaw publisher"
+    }
+    $authenticodeNames = @($authenticode.PSObject.Properties.Name)
+    if ($authenticodeNames.Count -ne 2 -or
+        $authenticodeNames -notcontains "required" -or
+        $authenticodeNames -notcontains "publisher" -or
+        $authenticode.required -ne $false -or
+        -not ([string]$authenticode.publisher).Equals(
+            $ExpectedPublisher, [StringComparison]::Ordinal)) {
+        Die "Authenticated upgrade manifest does not declare the optional pinned DefenseClaw publisher"
+    }
+    if (-not ([string]$installer.managed_policy).Equals("respect", [StringComparison]::Ordinal)) {
+        Die "Authenticated upgrade manifest has an unsupported Windows managed-policy contract"
+    }
+}
+
+function Assert-SetupProvenance {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ReleaseVersion,
+        [Parameter(Mandatory = $true)][string]$SetupSha256
+    )
+
+    try {
+        $provenance = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        Die "Could not parse authenticated ${ProvenanceAsset}: $($_.Exception.Message)"
+    }
+    if ([int]$provenance.schema_version -ne 1 -or
+        -not ([string]$provenance.artifact).Equals($SetupAsset, [StringComparison]::Ordinal) -or
+        -not ([string]$provenance.version).Equals($ReleaseVersion, [StringComparison]::Ordinal) -or
+        -not ([string]$provenance.distribution_flavor).Equals("oss", [StringComparison]::Ordinal)) {
+        Die "Authenticated Setup provenance does not describe the exact DefenseClaw $ReleaseVersion OSS artifact"
+    }
+    if ($provenance.unsigned -isnot [bool]) {
+        Die "Authenticated Setup provenance does not declare its signing state"
+    }
+    if ([string]$provenance.source_commit -notmatch '^[0-9a-fA-F]{40}$') {
+        Die "Authenticated Setup provenance has an invalid source commit"
+    }
+    $claimedSha256 = [string]$provenance.artifact_sha256
+    if ($claimedSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+        -not $claimedSha256.Equals($SetupSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        Die "Authenticated Setup provenance does not match the exact authenticated checksum for $SetupAsset"
+    }
+    return [bool]$provenance.unsigned
+}
+
+function Assert-SetupAuthenticode {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][bool]$Unsigned
+    )
+
+    if (-not $Unsigned -and -not [string]::IsNullOrWhiteSpace($Local)) {
+        $exitCode = Invoke-BoundedNativeProcess -FilePath $Path `
+            -Arguments @('/verify') -TimeoutSeconds 120 -Hidden
+        if ($exitCode -ne 0) {
+            Die "Setup offline signing-policy verification failed (exit $exitCode)"
+        }
+        Write-Ok "Setup Authenticode signature verified offline ($ExpectedPublisher)"
+        return
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    $publisher = ""
+    if ($null -ne $signature.SignerCertificate) {
+        $publisher = $signature.SignerCertificate.GetNameInfo(
+            [Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+            $false
+        )
+    }
+    if ($Unsigned) {
+        if ([string]$signature.Status -ne "NotSigned" -or
+            -not [string]::IsNullOrEmpty($publisher)) {
+            Die "Setup signing state conflicts with authenticated provenance: status='$($signature.Status)', publisher='$publisher'"
+        }
+        Write-Warn2 "Setup is explicitly unverified by Authenticode; release Sigstore checksums authenticated its exact bytes"
+        return
+    }
+    if ([string]$signature.Status -ne "Valid" -or
+        -not $publisher.Equals($ExpectedPublisher, [StringComparison]::Ordinal)) {
+        Die "Setup Authenticode signature is not trusted: status='$($signature.Status)', publisher='$publisher'"
+    }
+    Write-Ok "Setup Authenticode signature verified ($ExpectedPublisher)"
+}
+
+function Resolve-RemoteVersion {
+    if (-not [string]::IsNullOrWhiteSpace($Version)) {
+        if (-not (Test-ReleaseVersion -Value $Version)) {
+            Die "Invalid -Version '$Version'; expected x.y.z"
+        }
         return $Version
     }
     try {
-        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" `
-            -Headers @{ "User-Agent" = "defenseclaw-installer" }
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers @{
+            "User-Agent" = "defenseclaw-native-bootstrap"
+        }
     } catch {
-        Die "Failed to fetch latest release. Use -Version x.y.z or -Local <dir>."
+        Die "Failed to resolve the latest release. Use -Version x.y.z or -Local <dir>."
     }
-    $tag = $rel.tag_name
-    if ($tag -notmatch '^\d+\.\d+\.\d+$') {
-        Die "Could not parse release version from tag '$tag'."
+    $tag = [string]$release.tag_name
+    if (-not (Test-ReleaseVersion -Value $tag)) {
+        Die "Could not parse an exact release version from tag '$tag'"
     }
-    Write-Ok "Latest release: $tag"
     return $tag
 }
 
-# ── Artifact fetch + checksum verification ────────────────────────────────────
+function Resolve-LocalCosignSource {
+    param([Parameter(Mandatory = $true)][string]$LocalRoot)
 
-function Get-Artifact {
-    param([string]$Name, [string]$Dest)
-    if ($Local) {
-        $match = Get-ChildItem -Path (Join-Path $Local $Name) -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $match) { Die "Artifact not found: $Local\$Name" }
-        Copy-Item $match.FullName $Dest -Force
-        return $match.Name
+    if (-not [string]::IsNullOrWhiteSpace($CosignPath)) {
+        return (Resolve-Path -LiteralPath $CosignPath -ErrorAction Stop).Path
     }
-    $url = "https://github.com/$Repo/releases/download/$script:ReleaseVersion/$Name"
+    foreach ($candidate in @(
+        (Join-Path $LocalRoot $CosignAsset),
+        (Join-Path $LocalRoot "cosign.exe")
+    )) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    $command = Get-Command cosign.exe -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -ne $command) { return $command.Source }
+    Die "Local/offline mode requires pinned Cosign $CosignVersion. Supply -CosignPath or place $CosignAsset in '$LocalRoot'."
+}
+
+function Read-LocalManifestVersion {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
     try {
-        Invoke-WebRequest -Uri $url -OutFile $Dest -UseBasicParsing
+        $manifest = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+        $value = [string]$manifest.release_version
     } catch {
-        Die "Failed to download: $url"
+        Die "Could not read local ${UpgradeManifestAsset}: $($_.Exception.Message)"
     }
-    return $Name
+    if (-not (Test-ReleaseVersion -Value $value)) {
+        Die "Local upgrade manifest has an invalid release_version '$value'"
+    }
+    return $value
 }
 
-# Verify a downloaded file against the release checksums.txt. Skipped for -Local
-# installs (the operator built the artifacts themselves). Returns nothing; dies
-# on mismatch so a corrupted or tampered download never gets installed.
-function Test-Checksum {
-    param([string]$File, [string]$FileName)
-    if ($Local) { return }
-    if (-not $script:ChecksumsFile) {
-        $tmp = [System.IO.Path]::GetTempFileName()
-        try {
-            Invoke-WebRequest -Uri "https://github.com/$Repo/releases/download/$script:ReleaseVersion/checksums.txt" `
-                -OutFile $tmp -UseBasicParsing
-            $script:ChecksumsFile = $tmp
-        } catch {
-            Write-Warn2 "Could not download checksums.txt - skipping verification"
-            return
-        }
-    }
-    $expected = $null
-    foreach ($line in Get-Content $script:ChecksumsFile) {
-        $parts = $line -split '\s+', 2
-        if ($parts.Count -eq 2 -and $parts[1].Trim() -eq $FileName) {
-            $expected = $parts[0].Trim().ToLower()
-            break
-        }
-    }
-    if (-not $expected) {
-        Write-Warn2 "No checksum entry for $FileName - skipping verification"
-        return
-    }
-    $actual = (Get-FileHash -Path $File -Algorithm SHA256).Hash.ToLower()
-    if ($expected -ne $actual) {
-        Die "Checksum mismatch for ${FileName}: expected $expected, got $actual"
+function Invoke-StagedChecksumVerification {
+    param(
+        [Parameter(Mandatory = $true)][string]$StageRoot,
+        [Parameter(Mandatory = $true)][string]$ReleaseVersion,
+        [Parameter(Mandatory = $true)][string]$Verifier
+    )
+
+    $checksums = Join-Path $StageRoot $ChecksumsAsset
+    $signature = Join-Path $StageRoot $ChecksumsSignatureAsset
+    $certificate = Join-Path $StageRoot $ChecksumsCertificateAsset
+    $sigstoreBundle = Join-Path $StageRoot $ChecksumsBundleAsset
+
+    return Invoke-CosignVerification -Verifier $Verifier -ChecksumsPath $checksums `
+        -SignaturePath $signature -CertificatePath $certificate -BundlePath $sigstoreBundle `
+        -ReleaseVersion $ReleaseVersion
+}
+
+function Complete-StagedBundleVerification {
+    param(
+        [Parameter(Mandatory = $true)][string]$StageRoot,
+        [Parameter(Mandatory = $true)][string]$ReleaseVersion,
+        [Parameter(Mandatory = $true)][string]$ChecksumsContent
+    )
+
+    $setup = Join-Path $StageRoot $SetupAsset
+    $setupSha = Get-AuthenticatedChecksum -ChecksumsContent $ChecksumsContent -FileName $SetupAsset
+    Assert-StagedUpgradeManifest -StageRoot $StageRoot -ReleaseVersion $ReleaseVersion `
+        -ChecksumsContent $ChecksumsContent
+    $setupUnsigned = Assert-StagedSetupProvenance -StageRoot $StageRoot -ReleaseVersion $ReleaseVersion `
+        -SetupSha256 $setupSha -ChecksumsContent $ChecksumsContent
+    Assert-Sha256 -Path $setup -Expected $setupSha -Label $SetupAsset
+    Assert-SetupAuthenticode -Path $setup -Unsigned $setupUnsigned
+
+    return [pscustomobject]@{
+        Root = $StageRoot
+        Setup = $setup
+        SetupSha256 = $setupSha
+        Unsigned = $setupUnsigned
+        Version = $ReleaseVersion
     }
 }
 
-# ── Install: gateway binary ───────────────────────────────────────────────────
+function Assert-StagedUpgradeManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$StageRoot,
+        [Parameter(Mandatory = $true)][string]$ReleaseVersion,
+        [Parameter(Mandatory = $true)][string]$ChecksumsContent
+    )
 
-function Install-Gateway {
-    param([string]$Arch)
-    Write-Step "Installing gateway"
-    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("dc-gw-" + [guid]::NewGuid())
-    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $manifest = Join-Path $StageRoot $UpgradeManifestAsset
+    $manifestSha = Get-AuthenticatedChecksum -ChecksumsContent $ChecksumsContent `
+        -FileName $UpgradeManifestAsset
+    Assert-Sha256 -Path $manifest -Expected $manifestSha -Label $UpgradeManifestAsset
+    Assert-UpgradeManifest -Path $manifest -ReleaseVersion $ReleaseVersion
+}
+
+function Assert-StagedSetupProvenance {
+    param(
+        [Parameter(Mandatory = $true)][string]$StageRoot,
+        [Parameter(Mandatory = $true)][string]$ReleaseVersion,
+        [Parameter(Mandatory = $true)][string]$SetupSha256,
+        [Parameter(Mandatory = $true)][string]$ChecksumsContent
+    )
+
+    $provenance = Join-Path $StageRoot $ProvenanceAsset
+    $provenanceSha = Get-AuthenticatedChecksum -ChecksumsContent $ChecksumsContent `
+        -FileName $ProvenanceAsset
+    Assert-Sha256 -Path $provenance -Expected $provenanceSha -Label $ProvenanceAsset
+    Assert-SetupProvenance -Path $provenance -ReleaseVersion $ReleaseVersion `
+        -SetupSha256 $SetupSha256
+}
+
+function Stage-RemoteBundle {
+    param([Parameter(Mandatory = $true)][string]$ReleaseVersion)
+
+    $stage = New-PrivateStageRoot
     try {
-        if ($Local) {
-            # Accept either the zip or a raw defenseclaw.exe in the local dir.
-            $zip = Get-ChildItem -Path (Join-Path $Local "defenseclaw_*_windows_$Arch.zip") -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($zip) {
-                Expand-Archive -Path $zip.FullName -DestinationPath $tmp -Force
-            } else {
-                $exe = Get-ChildItem -Path (Join-Path $Local "defenseclaw*.exe") -ErrorAction SilentlyContinue | Select-Object -First 1
-                if (-not $exe) { Die "No windows zip or defenseclaw.exe found in $Local" }
-                Copy-Item $exe.FullName (Join-Path $tmp "defenseclaw.exe") -Force
+        $releaseBase = "https://github.com/$Repo/releases/download/$ReleaseVersion"
+        $cosign = Join-Path $stage $CosignAsset
+        Invoke-DownloadFile -Uri $CosignUrl -Destination $cosign -Label "pinned Cosign verifier" -MaximumBytes $CosignMaximumBytes
+        Assert-Sha256 -Path $cosign -Expected $CosignSha256 -Label "pinned Cosign verifier"
+        # Authenticate the release root before downloading the large executable
+        # or any metadata that will influence the handoff.
+        foreach ($asset in @(
+            @{ Name = $ChecksumsAsset; Maximum = 16777216 },
+            @{ Name = $ChecksumsSignatureAsset; Maximum = 1048576 },
+            @{ Name = $ChecksumsCertificateAsset; Maximum = 1048576 },
+            @{ Name = $ChecksumsBundleAsset; Maximum = 16777216 }
+        )) {
+            Invoke-DownloadFile -Uri "$releaseBase/$($asset.Name)" `
+                -Destination (Join-Path $stage $asset.Name) -Label $asset.Name `
+                -MaximumBytes $asset.Maximum
+        }
+        $authenticatedChecksums = Invoke-StagedChecksumVerification -StageRoot $stage `
+            -ReleaseVersion $ReleaseVersion -Verifier $cosign
+        Invoke-DownloadFile -Uri "$releaseBase/$UpgradeManifestAsset" `
+            -Destination (Join-Path $stage $UpgradeManifestAsset) `
+            -Label $UpgradeManifestAsset -MaximumBytes 1048576
+        Assert-StagedUpgradeManifest -StageRoot $stage -ReleaseVersion $ReleaseVersion `
+            -ChecksumsContent $authenticatedChecksums
+        Invoke-DownloadFile -Uri "$releaseBase/$ProvenanceAsset" `
+            -Destination (Join-Path $stage $ProvenanceAsset) `
+            -Label $ProvenanceAsset -MaximumBytes 1048576
+        $setupSha = Get-AuthenticatedChecksum `
+            -ChecksumsContent $authenticatedChecksums -FileName $SetupAsset
+        $null = Assert-StagedSetupProvenance -StageRoot $stage -ReleaseVersion $ReleaseVersion `
+            -SetupSha256 $setupSha -ChecksumsContent $authenticatedChecksums
+        Invoke-DownloadFile -Uri "$releaseBase/$SetupAsset" `
+            -Destination (Join-Path $stage $SetupAsset) `
+            -Label $SetupAsset -MaximumBytes 2147483648
+        return Complete-StagedBundleVerification -StageRoot $stage `
+            -ReleaseVersion $ReleaseVersion -ChecksumsContent $authenticatedChecksums
+    } catch {
+        Remove-PrivateStageRoot -Path $stage
+        throw
+    }
+}
+
+function Stage-LocalBundle {
+    $resolved = Resolve-Path -LiteralPath $Local -ErrorAction Stop
+    $localRoot = [IO.Path]::GetFullPath($resolved.Path)
+    $rootItem = Get-Item -LiteralPath $localRoot -Force -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Die "-Local must name a regular release directory: $localRoot"
+    }
+
+    $stage = New-PrivateStageRoot
+    try {
+        foreach ($asset in @(
+            @{ Name = $ChecksumsAsset; Maximum = 16777216 },
+            @{ Name = $ChecksumsSignatureAsset; Maximum = 1048576 },
+            @{ Name = $ChecksumsCertificateAsset; Maximum = 1048576 },
+            @{ Name = $ChecksumsBundleAsset; Maximum = 16777216 },
+            @{ Name = $UpgradeManifestAsset; Maximum = 1048576 },
+            @{ Name = $ProvenanceAsset; Maximum = 1048576 }
+        )) {
+            Copy-RegularFile -Source (Join-Path $localRoot $asset.Name) `
+                -Destination (Join-Path $stage $asset.Name) -Label $asset.Name `
+                -MaximumBytes $asset.Maximum
+        }
+        $releaseVersion = if ([string]::IsNullOrWhiteSpace($Version)) {
+            Read-LocalManifestVersion -Path (Join-Path $stage $UpgradeManifestAsset)
+        } else {
+            if (-not (Test-ReleaseVersion -Value $Version)) {
+                Die "Invalid -Version '$Version'; expected x.y.z"
             }
-        } else {
-            $zipName = "defenseclaw_${script:ReleaseVersion}_windows_${Arch}.zip"
-            $zipPath = Join-Path $tmp $zipName
-            $resolved = Get-Artifact -Name $zipName -Dest $zipPath
-            Test-Checksum -File $zipPath -FileName $resolved
-            Expand-Archive -Path $zipPath -DestinationPath $tmp -Force
+            $Version
         }
-        $binary = Join-Path $tmp "defenseclaw.exe"
-        if (-not (Test-Path $binary)) { Die "defenseclaw.exe missing from archive" }
-        Copy-Item $binary (Join-Path $InstallDir "defenseclaw-gateway.exe") -Force
-    } finally {
-        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+        $cosignSource = Resolve-LocalCosignSource -LocalRoot $localRoot
+        $cosign = Join-Path $stage $CosignAsset
+        Copy-RegularFile -Source $cosignSource -Destination $cosign `
+            -Label "pinned Cosign verifier" -MaximumBytes $CosignMaximumBytes
+        Assert-Sha256 -Path $cosign -Expected $CosignSha256 -Label "pinned Cosign verifier"
+        $authenticatedChecksums = Invoke-StagedChecksumVerification -StageRoot $stage `
+            -ReleaseVersion $releaseVersion -Verifier $cosign
+        Assert-StagedUpgradeManifest -StageRoot $stage -ReleaseVersion $releaseVersion `
+            -ChecksumsContent $authenticatedChecksums
+        $setupSha = Get-AuthenticatedChecksum `
+            -ChecksumsContent $authenticatedChecksums -FileName $SetupAsset
+        $null = Assert-StagedSetupProvenance -StageRoot $stage -ReleaseVersion $releaseVersion `
+            -SetupSha256 $setupSha -ChecksumsContent $authenticatedChecksums
+        Copy-RegularFile -Source (Join-Path $localRoot $SetupAsset) `
+            -Destination (Join-Path $stage $SetupAsset) -Label $SetupAsset `
+            -MaximumBytes 2147483648
+        return Complete-StagedBundleVerification -StageRoot $stage `
+            -ReleaseVersion $releaseVersion -ChecksumsContent $authenticatedChecksums
+    } catch {
+        Remove-PrivateStageRoot -Path $stage
+        throw
     }
-    Write-Ok "Gateway installed -> $InstallDir\defenseclaw-gateway.exe"
 }
 
-# ── Install: Python CLI (from wheel) ──────────────────────────────────────────
-
-function Install-Cli {
-    Write-Step "Installing DefenseClaw CLI"
-    Write-Info "Creating Python environment..."
-    & uv venv $Venv --python 3.12 --quiet 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        & uv venv $Venv --quiet
-        if ($LASTEXITCODE -ne 0) { Die "Failed to create Python virtual environment" }
+function Resolve-SelectedConnector {
+    $selected = $Connector.Trim().ToLowerInvariant()
+    switch ($selected) {
+        "claude"      { $selected = "claudecode" }
+        "claude-code" { $selected = "claudecode" }
     }
-    $venvPython = Join-Path $Venv "Scripts\python.exe"
+    if ($NoOpenclaw -and [string]::IsNullOrWhiteSpace($selected)) {
+        $selected = "none"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($selected) -and
+        $ConnectorChoices -notcontains $selected) {
+        Die "Invalid -Connector '$Connector'. Choices: $($ConnectorChoices -join ', ')"
+    }
+    return $selected
+}
 
-    Write-Info "Installing from wheel..."
-    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("dc-cli-" + [guid]::NewGuid())
-    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+function New-SetupArgumentList {
+    param([string]$SelectedConnector)
+
+    $arguments = @("/norestart", "INSTALLSCOPE=user")
+    if ($Yes) { $arguments = @("/quiet") + $arguments }
+    if ($Yes -and [string]::IsNullOrWhiteSpace($SelectedConnector)) {
+        $SelectedConnector = "none"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($SelectedConnector)) {
+        $arguments += "CONNECTOR=$SelectedConnector"
+    }
+    if ($Quickstart) {
+        $mode = if ([string]::IsNullOrWhiteSpace($QuickstartMode)) { "observe" } else { $QuickstartMode }
+        if (-not ($Yes -and $SelectedConnector -eq "none")) {
+            $arguments += "MODE=$mode"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($SelectedConnector) -and
+            $SelectedConnector -ne "none") {
+            $arguments += "STARTGATEWAY=1"
+        } elseif ($SelectedConnector -eq "none" -or $Yes) {
+            $arguments += "STARTGATEWAY=0"
+        }
+    } elseif (-not [string]::IsNullOrWhiteSpace($QuickstartMode)) {
+        Write-Warn2 "-QuickstartMode is ignored unless -Quickstart is specified"
+    }
+    return [string[]]$arguments
+}
+
+function Invoke-BoundedNativeProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 86400)][int]$TimeoutSeconds,
+        [switch]$Hidden
+    )
+
+    $start = @{
+        FilePath = $FilePath
+        PassThru = $true
+    }
+    if ($Arguments.Count -gt 0) { $start['ArgumentList'] = $Arguments }
+    if ($Hidden) { $start['WindowStyle'] = 'Hidden' }
+    $process = Start-Process @start
     try {
-        if ($Local) {
-            $whl = Get-ChildItem -Path (Join-Path $Local "defenseclaw-*.whl") -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $whl) { Die "No wheel found in $Local" }
-            $whlPath = $whl.FullName
-        } else {
-            $whlName = "defenseclaw-${script:ReleaseVersion}-py3-none-any.whl"
-            $whlPath = Join-Path $tmp $whlName
-            $resolved = Get-Artifact -Name $whlName -Dest $whlPath
-            Test-Checksum -File $whlPath -FileName $resolved
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            $treeKillError = $null
+            try {
+                $process.Kill($true)
+            } catch {
+                $treeKillError = $_.Exception.Message
+                $systemDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::System)
+                $taskkillPath = Join-Path $systemDirectory 'taskkill.exe'
+                $taskkill = Start-Process -FilePath $taskkillPath `
+                    -ArgumentList @('/PID', [string]$process.Id, '/T', '/F') `
+                    -PassThru -WindowStyle Hidden
+                try {
+                    if (-not $taskkill.WaitForExit(10000)) {
+                        try { $taskkill.Kill() } catch {}
+                        throw "Timed out while terminating native process tree: $FilePath"
+                    }
+                } finally {
+                    $taskkill.Dispose()
+                }
+            }
+            if (-not $process.WaitForExit(10000)) {
+                throw "Native process timed out and cleanup did not complete: $FilePath"
+            }
+            if ($treeKillError) {
+                Write-Warn2 "Used taskkill fallback for timed-out native process tree: $treeKillError"
+            }
+            throw "Native process timed out after $TimeoutSeconds seconds: $FilePath"
         }
-        & uv pip install --python $venvPython --quiet $whlPath
-        if ($LASTEXITCODE -ne 0) { Die "Failed to install CLI from wheel" }
+        return [int]$process.ExitCode
     } finally {
-        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
-    }
-
-    # A .cmd shim on PATH is more robust than relying on the venv's Scripts dir
-    # (which would also expose uv/python). PATHEXT includes .CMD, so
-    # `defenseclaw` and shutil.which("defenseclaw") both resolve to it.
-    $cliExe = Join-Path $Venv "Scripts\defenseclaw.exe"
-    $shim = Join-Path $InstallDir "defenseclaw.cmd"
-    "@echo off`r`n`"$cliExe`" %*`r`n" | Set-Content -Path $shim -Encoding Ascii -NoNewline
-
-    if (Test-Path $cliExe) {
-        Write-Ok "CLI installed -> $shim"
-    } else {
-        Write-Warn2 "CLI installed but $cliExe not found - check dependencies"
+        $process.Dispose()
     }
 }
 
-# ── Connector selection ───────────────────────────────────────────────────────
+function Invoke-NativeSetup {
+    param(
+        [Parameter(Mandatory = $true)][string]$SetupPath,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256,
+        [Parameter(Mandatory = $true)][bool]$Unsigned,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
 
-function Select-Connector {
-    if ($script:PickedConnector) { return }
-    if ($Yes) { $script:PickedConnector = "none"; return }
-
-    Write-Step "Pick agent connector"
-    Write-Info "DefenseClaw can guard several agent frameworks. Pick one to integrate now;"
-    Write-Info "you can switch later with 'defenseclaw init --connector <name>'."
-    Write-Host ""
-    $i = 1
-    foreach ($v in $ConnectorChoices) {
-        switch ($v) {
-            "codex"      { Write-Host "    $i) codex      - patch %USERPROFILE%\.codex\config.toml + hooks" }
-            "claudecode" { Write-Host "    $i) claudecode - patch %USERPROFILE%\.claude\settings.json hooks" }
-            "hermes"     { Write-Host "    $i) hermes     - configure Hermes Agent hooks" }
-            "cursor"     { Write-Host "    $i) cursor     - configure Cursor hooks" }
-            "windsurf"   { Write-Host "    $i) windsurf   - configure Windsurf hooks" }
-            "geminicli"  { Write-Host "    $i) geminicli  - configure Gemini CLI hooks" }
-            "copilot"    { Write-Host "    $i) copilot    - configure GitHub Copilot CLI hooks" }
-            "openhands"  { Write-Host "    $i) openhands  - configure OpenHands hooks" }
-            "antigravity" { Write-Host "    $i) antigravity - configure Antigravity hooks" }
-            "opencode"   { Write-Host "    $i) opencode   - configure OpenCode hooks" }
-            "omnigent"   { Write-Host "    $i) omnigent   - configure OmniGent hooks" }
-            "none"       { Write-Host "    $i) none       - install gateway/CLI only; pick later" }
-            default      { Write-Host "    $i) $v" }
-        }
-        $i++
-    }
-    Write-Host ""
-    $choice = Read-Host "  Choice [1-$($ConnectorChoices.Count), default 1=codex]"
-    if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "1" }
-    $idx = 0
-    if ([int]::TryParse($choice, [ref]$idx) -and $idx -ge 1 -and $idx -le $ConnectorChoices.Count) {
-        $script:PickedConnector = $ConnectorChoices[$idx - 1]
-    } else {
-        Write-Warn2 "Invalid choice '$choice', defaulting to codex"
-        $script:PickedConnector = "codex"
-    }
-    Write-Ok "Picked connector: $script:PickedConnector"
+    # Repeat both independent checks immediately before execution. The setup
+    # file lives in a private directory, but this also detects same-user or
+    # security-product replacement between initial verification and handoff.
+    Assert-Sha256 -Path $SetupPath -Expected $ExpectedSha256 -Label $SetupAsset
+    Assert-SetupAuthenticode -Path $SetupPath -Unsigned $Unsigned
+    Write-Step "Starting authenticated native Setup"
+    return Invoke-BoundedNativeProcess -FilePath $SetupPath -Arguments $Arguments `
+        -TimeoutSeconds 3600
 }
-
-function Save-PickedConnector {
-    if (-not $script:PickedConnector -or $script:PickedConnector -eq "none") { return }
-    New-Item -ItemType Directory -Force -Path $DefenseClawHome | Out-Null
-    Set-Content -Path (Join-Path $DefenseClawHome "picked_connector") -Value $script:PickedConnector
-}
-
-# ── Optional: quickstart ──────────────────────────────────────────────────────
-
-function Invoke-Quickstart {
-    if (-not $Quickstart) { return }
-    Write-Step "Running quickstart"
-    if (-not $script:PickedConnector -or $script:PickedConnector -eq "none") {
-        Write-Warn2 "Quickstart skipped (no connector). Run 'defenseclaw init' when ready."
-        return
-    }
-    $cliExe = Join-Path $Venv "Scripts\defenseclaw.exe"
-    if (-not (Test-Path $cliExe)) { Write-Warn2 "CLI not found - skipping quickstart"; return }
-    $args = @("quickstart", "--non-interactive", "--yes", "--connector", $script:PickedConnector)
-    if ($QuickstartMode) { $args += @("--mode", $QuickstartMode) }
-    & $cliExe @args
-    if ($LASTEXITCODE -eq 0) { Write-Ok "Quickstart completed" } else { Write-Warn2 "Quickstart reported errors - run 'defenseclaw doctor'" }
-}
-
-# ── PATH configuration ────────────────────────────────────────────────────────
-
-function Add-ToPath {
-    # Persist InstallDir on the user PATH (idempotent) and add it to this
-    # process so quickstart and `defenseclaw-gateway` resolve immediately.
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if (-not $userPath) { $userPath = "" }
-    $entries = $userPath -split ';' | Where-Object { $_ -ne "" }
-    if ($entries -notcontains $InstallDir) {
-        $newPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
-        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-        Write-Step "PATH updated"
-        Write-Info "Added $InstallDir to your user PATH."
-        Write-Info "Open a new terminal for it to take effect."
-    }
-    if (($env:PATH -split ';') -notcontains $InstallDir) {
-        $env:PATH = "$InstallDir;$env:PATH"
-    }
-}
-
-# ── Success ───────────────────────────────────────────────────────────────────
-
-function Write-Success {
-    Write-Host ""
-    Write-Host "  ============================================================" -ForegroundColor Green
-    Write-Host "         DefenseClaw installed successfully!" -ForegroundColor Green
-    Write-Host "  ============================================================" -ForegroundColor Green
-    Write-Host ""
-    switch ($script:PickedConnector) {
-        "codex"      { Write-Host "  Get started (Codex):`n`n    defenseclaw init --connector codex`n" -ForegroundColor Cyan }
-        "claudecode" { Write-Host "  Get started (Claude Code):`n`n    defenseclaw init --connector claudecode`n" -ForegroundColor Cyan }
-        { $_ -in $HookConnectors } {
-            Write-Host "  Get started ($script:PickedConnector):`n`n    defenseclaw init --connector $script:PickedConnector`n" -ForegroundColor Cyan
-        }
-        default      { Write-Host "  Get started (pick a connector later):`n`n    defenseclaw init`n" -ForegroundColor Cyan }
-    }
-}
-
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 function Main {
-    if ($Help) { Show-Help; return }
+    if ($Help) { Show-Help; return 0 }
+    Assert-NativeWindowsX64
+    Assert-CompatibleLayoutRequest
 
     Write-Host ""
-    Write-Host "  DefenseClaw Installer (Windows)" -ForegroundColor White
-    Write-Host "  Enterprise Governance for Agentic AI" -ForegroundColor DarkGray
+    Write-Host "  DefenseClaw native Windows bootstrap" -ForegroundColor White
+    Write-Host "  Authenticated handoff to $SetupAsset" -ForegroundColor DarkGray
 
-    $script:PickedConnector = ""
-    $script:ChecksumsFile = $null
-    $script:ReleaseVersion = $null
-
-    # Validate -Connector and reconcile with -NoOpenclaw.
-    if ($Connector) {
-        if ($ConnectorChoices -notcontains $Connector) {
-            Die "Invalid -Connector '$Connector'. Choices: $($ConnectorChoices -join ', ')"
+    $selectedConnector = Resolve-SelectedConnector
+    $arguments = New-SetupArgumentList -SelectedConnector $selectedConnector
+    $bundle = $null
+    try {
+        if ([string]::IsNullOrWhiteSpace($Local)) {
+            $releaseVersion = Resolve-RemoteVersion
+            Write-Step "Authenticating DefenseClaw $releaseVersion release assets"
+            $bundle = Stage-RemoteBundle -ReleaseVersion $releaseVersion
+        } else {
+            Write-Step "Authenticating local/offline release assets"
+            $bundle = Stage-LocalBundle
         }
-        $script:PickedConnector = $Connector
-    }
-    if ($NoOpenclaw) {
-        if (-not $script:PickedConnector) {
-            $script:PickedConnector = "none"
+        Write-Ok "Authenticated $SetupAsset for DefenseClaw $($bundle.Version)"
+        $exitCode = Invoke-NativeSetup -SetupPath $bundle.Setup `
+            -ExpectedSha256 $bundle.SetupSha256 -Unsigned $bundle.Unsigned `
+            -Arguments $arguments
+        if ($exitCode -eq 0) {
+            Write-Ok "Native DefenseClaw Setup completed successfully"
+        } else {
+            Write-Err2 "Native DefenseClaw Setup exited with code $exitCode"
+        }
+        return $exitCode
+    } finally {
+        if ($null -ne $bundle -and -not [string]::IsNullOrWhiteSpace($bundle.Root)) {
+            Remove-PrivateStageRoot -Path $bundle.Root
         }
     }
-
-    if ($Local) {
-        $Local = (Resolve-Path $Local).Path
-        Write-Info "Installing from local directory: $Local"
-    }
-
-    $arch = Get-Arch
-    Install-Uv
-    Ensure-Python
-    $script:ReleaseVersion = Resolve-Version
-    Select-Connector
-    Install-Gateway -Arch $arch
-    Install-Cli
-
-    $cliWiredConnectors = @("codex", "claudecode") + $HookConnectors
-    switch ($script:PickedConnector) {
-        { $_ -in $cliWiredConnectors } {
-            Write-Info "Connector '$script:PickedConnector' wires up via the CLI (no OpenClaw runtime needed)."
-        }
-        default      { Write-Info "Skipping connector setup - run 'defenseclaw init' when ready" }
-    }
-
-    Save-PickedConnector
-    Invoke-Quickstart
-    Add-ToPath
-    Write-Success
 }
 
-Main
+# Dot-sourcing exposes the small verification and argument-building seams to
+# regression tests without initiating downloads or installation. -File and the
+# documented in-memory scriptblock invocation both execute Main.
+if ($MyInvocation.InvocationName -ne '.') {
+    try {
+        $result = Main
+        if ([int]$result -ne 0) {
+            if ([string]::IsNullOrWhiteSpace($PSCommandPath)) {
+                throw "Native DefenseClaw Setup exited with code $result"
+            }
+            exit [int]$result
+        }
+        # A script downloaded and invoked as an in-memory ScriptBlock runs in
+        # the caller's PowerShell process. Returning here keeps that terminal
+        # open; -File invocations still receive an exact process exit code.
+        if (-not [string]::IsNullOrWhiteSpace($PSCommandPath)) { exit 0 }
+    } catch {
+        Write-Err2 $_.Exception.Message
+        if ([string]::IsNullOrWhiteSpace($PSCommandPath)) { throw }
+        exit 1
+    }
+}

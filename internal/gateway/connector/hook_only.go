@@ -25,10 +25,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"gopkg.in/yaml.v3"
 )
 
@@ -289,7 +290,14 @@ func (c *hookOnlyConnector) Description() string                    { return c.d
 func (c *hookOnlyConnector) HookAPIPath() string                    { return c.apiPath }
 func (c *hookOnlyConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
 func (c *hookOnlyConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
-func (c *hookOnlyConnector) HookScriptNames(SetupOpts) []string     { return []string{c.scriptName} }
+func (c *hookOnlyConnector) HookScriptNames(SetupOpts) []string {
+	// Cursor's PowerShell adapter is required only for its native Windows
+	// transport. Unix and macOS continue to use the existing shell hook.
+	if c.name == "cursor" && runtime.GOOS == "windows" {
+		return []string{c.scriptName, "cursor-hook.ps1"}
+	}
+	return []string{c.scriptName}
+}
 func (c *hookOnlyConnector) HookCapabilities(opts SetupOpts) HookCapability {
 	return c.Capabilities(opts).Hooks
 }
@@ -345,11 +353,56 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 		// empirical agy-version notes.
 		profile.Decode = antigravityProfileDecode
 	}
+	if c.name == "cursor" {
+		profile.Decode = cursorProfileDecode
+	}
+	if c.name == "windsurf" {
+		profile.Decode = windsurfProfileDecode
+	}
 	// NOTE: hermes needs no Decode override. Its nested `extra` content
 	// is recovered by the generic decoder's ContentEnvelopeKey fallback
 	// (declared on the hermes hook contract), and its wire replies are
 	// shaped by the hermes case in hookOnlyProfileRespond.
 	return ApplyHookContract(profile, opts)
+}
+
+// Cursor documents generation_id as the identifier for one user-message
+// generation. Keep that connector-native turn mapping out of the generic
+// decoder so another connector's generation identifier cannot become a turn.
+func cursorProfileDecode(payload map[string]interface{}) HookProfileRequest {
+	return HookProfileRequest{
+		ConnectorName: "cursor",
+		HookEventName: hookFirstString(payload,
+			"hook_event_name", "hookEventName",
+			"event_type", "eventType",
+			"event_name", "eventName",
+			"agent_action_name",
+		),
+		TurnID: hookFirstString(payload,
+			"generation_id", "generationId",
+			"turn_id", "turnId", "turnID",
+		),
+		Payload: payload,
+	}
+}
+
+// Windsurf documents execution_id as one Cascade agent turn. This is a
+// connector-scoped semantic mapping, not a generic execution-to-turn alias.
+func windsurfProfileDecode(payload map[string]interface{}) HookProfileRequest {
+	return HookProfileRequest{
+		ConnectorName: "windsurf",
+		HookEventName: hookFirstString(payload,
+			"hook_event_name", "hookEventName",
+			"event_type", "eventType",
+			"event_name", "eventName",
+			"agent_action_name",
+		),
+		TurnID: hookFirstString(payload,
+			"execution_id", "executionId",
+			"turn_id", "turnId", "turnID",
+		),
+		Payload: payload,
+	}
 }
 
 func copilotNativeOTLPSpec(opts SetupOpts) *NativeOTLPSpec {
@@ -382,11 +435,13 @@ func copilotNativeOTLPSpec(opts SetupOpts) *NativeOTLPSpec {
 // telemetry object embedded in settings.json.
 func geminiCLINativeOTLPSpec(opts SetupOpts) *NativeOTLPSpec {
 	spec := &NativeOTLPSpec{
-		Kind:           NativeOTLPJSONBlock,
-		Endpoint:       "http://" + strings.TrimSpace(opts.APIAddr),
-		Protocol:       "http",
-		PathScope:      OTLPScopeGeminiCLI,
-		LogUserPrompts: redaction.DisableAll(),
+		Kind:      NativeOTLPJSONBlock,
+		Endpoint:  "http://" + strings.TrimSpace(opts.APIAddr),
+		Protocol:  "http",
+		PathScope: OTLPScopeGeminiCLI,
+		// Native source capture must remain full-fidelity. Central v8 routing
+		// applies the selected redaction profile to each destination copy.
+		LogUserPrompts: true,
 	}
 	// Best-effort: mint or load the scoped token here so the spec
 	// can render its endpoint deterministically. patchGeminiTelemetry
@@ -394,8 +449,8 @@ func geminiCLINativeOTLPSpec(opts SetupOpts) *NativeOTLPSpec {
 	// block; this duplicates the cheap lookup so callers that only
 	// want the descriptive spec (parity tests, doctor reports) see
 	// the resolved URL.
-	if opts.DataDir != "" {
-		if tok, err := EnsureOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI); err == nil && tok != "" {
+	if opts.DataDir != "" || strings.TrimSpace(opts.OTLPPathToken) != "" {
+		if tok, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI, opts.OTLPPathToken); err == nil && tok != "" {
 			spec.PathToken = tok
 		}
 	}
@@ -434,13 +489,13 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			WritePaths:      []string{hermesConfigPath(opts)},
 			SupportsBackup:  true,
 			SupportsRestore: true,
-			Notes:           []string{"MCP servers are merged into ~/.hermes/config.yaml."},
+			Notes:           []string{"MCP servers are merged into the resolved Hermes config.yaml (HERMES_HOME or the platform default)."},
 		}
 		caps.Skills = SurfaceCapability{
 			Supported:      true,
 			Scope:          "user",
-			ReadPaths:      []string{homePath(".hermes", "skills")},
-			WritePaths:     []string{homePath(".hermes", "skills")},
+			ReadPaths:      []string{filepath.Join(hermespath.HomeDir(), "skills")},
+			WritePaths:     []string{filepath.Join(hermespath.HomeDir(), "skills")},
 			InstallTargets: []string{"skill"},
 			RequiresOptIn:  true,
 		}
@@ -734,10 +789,11 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 }
 
 // hookCommand returns the command an agent runs for this connector's hook. On
-// Unix it is the bundled .sh path; on Windows it is the native DefenseClaw
-// `hook` subcommand invocation. The same value is used at setup, teardown, and
-// VerifyClean so the JSON/YAML hook removers (which match on the exact command
-// string) recognize the entries DefenseClaw inserted.
+// Unix it is the bundled .sh path. Most Windows connectors use the native
+// DefenseClaw `hook` subcommand; Cursor uses a PowerShell adapter because its
+// object pipeline does not preserve native stdin JSON. The same value is used
+// at setup, teardown, and VerifyClean so the JSON/YAML hook removers (which
+// match on the exact command string) recognize the entries DefenseClaw added.
 func (c *hookOnlyConnector) hookCommand(opts SetupOpts) string {
 	return hookInvocationCommand(c.name, filepath.Join(opts.DataDir, "hooks", c.scriptName))
 }
@@ -832,7 +888,20 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 		return nil
 	}
 	needle := c.hookCommand(opts)
-	if bytes.Contains(data, []byte(needle)) || bytes.Contains(data, []byte(c.scriptName)) {
+	if c.name == "antigravity" {
+		var cfg map[string]interface{}
+		if err := json.Unmarshal(data, &cfg); err == nil &&
+			structuredHookCommandReferences(cfg, []string{
+				needle,
+				legacyAntigravityWindowsHookCommand(),
+				legacyAntigravityNonWaitingWindowsHookCommand(),
+			}) {
+			return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
+		}
+	}
+	if bytes.Contains(data, []byte(needle)) || bytes.Contains(data, []byte(c.scriptName)) ||
+		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityWindowsHookCommand()))) ||
+		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityNonWaitingWindowsHookCommand()))) {
 		return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
 	}
 	return nil
@@ -926,7 +995,12 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 	case "hermes":
 		err = patchHermesHooks(path, hookScript)
 	case "cursor":
-		err = patchCursorHooks(path, hookScript, c.effectiveFailClosed(opts))
+		err = patchCursorHooks(
+			path,
+			hookScript,
+			filepath.Join(opts.DataDir, "hooks", c.scriptName),
+			c.effectiveFailClosed(opts),
+		)
 	case "windsurf":
 		err = patchWindsurfHooks(path, hookScript)
 	case "geminicli":
@@ -954,8 +1028,15 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string) error {
 		return removeHermesHooks(path, hookScript)
 	case "geminicli":
 		return removeGeminiConfigEntries(path, hookScript)
-	case "cursor", "windsurf", "copilot", "openhands", "antigravity":
+	case "cursor", "windsurf", "copilot", "openhands":
 		return removeJSONHookReferences(path, hookScript)
+	case "antigravity":
+		return removeJSONHookReferences(
+			path,
+			hookScript,
+			legacyAntigravityWindowsHookCommand(),
+			legacyAntigravityNonWaitingWindowsHookCommand(),
+		)
 	default:
 		return nil
 	}
@@ -970,7 +1051,7 @@ func hermesConfigPath(SetupOpts) string {
 	if HermesConfigPathOverride != "" {
 		return HermesConfigPathOverride
 	}
-	return homePath(".hermes", "config.yaml")
+	return hermespath.ConfigPath()
 }
 
 // opencodePluginPath resolves the destination of DefenseClaw's bridge
@@ -1335,7 +1416,7 @@ func removeHermesHooks(path, hookScript string) error {
 	return atomicWriteFile(path, data, 0o600)
 }
 
-func patchCursorHooks(path, hookScript string, failClosed bool) error {
+func patchCursorHooks(path, hookScript, legacyShellScript string, failClosed bool) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
 		return err
@@ -1371,9 +1452,37 @@ func patchCursorHooks(path, hookScript string, failClosed bool) error {
 			"timeout":    30000,
 			"failClosed": failClosed,
 		}
-		hooks[event] = appendUniqueFlatHook(hooks[event], hookScript, entry)
+		// Replace instead of merely appending. This both migrates the previous
+		// direct-native Windows command to the PowerShell adapter and refreshes
+		// failClosed when the connector moves between observe and action mode.
+		// Entries not owned by DefenseClaw are preserved in their original order.
+		hooks[event] = replaceManagedCursorHooks(hooks[event], hookScript, legacyShellScript, entry)
 	}
 	return writeJSONObject(path, cfg)
+}
+
+func replaceManagedCursorHooks(raw interface{}, hookScript, legacyShellScript string, entry map[string]interface{}) []interface{} {
+	list, _ := raw.([]interface{})
+	out := make([]interface{}, 0, len(list)+1)
+	for _, item := range list {
+		if managedHookCommandEntry(item, hookScript) ||
+			managedHookCommandEntry(item, legacyShellScript) ||
+			managedCursorNativeHookEntry(item) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return append(out, entry)
+}
+
+func managedCursorNativeHookEntry(raw interface{}) bool {
+	entry, ok := raw.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	command, _ := entry["command"].(string)
+	command = strings.TrimSpace(command)
+	return strings.HasSuffix(command, nativeHookFlag+"cursor") && isNativeHookCommand(command)
 }
 
 func patchWindsurfHooks(path, hookScript string) error {
@@ -1471,16 +1580,9 @@ func patchGeminiTelemetry(path string, opts SetupOpts) error {
 	if err != nil {
 		return err
 	}
-	pathToken := ""
-	if opts.DataDir != "" {
-		if tok, mintErr := EnsureOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI); mintErr == nil {
-			pathToken = tok
-		} else {
-			return fmt.Errorf("mint scoped Gemini CLI OTLP token: %w", mintErr)
-		}
-	}
-	if pathToken == "" {
-		return fmt.Errorf("mint scoped Gemini CLI OTLP token: data dir is required")
+	pathToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI, opts.OTLPPathToken)
+	if err != nil {
+		return fmt.Errorf("resolve scoped Gemini CLI OTLP token: %w", err)
 	}
 	telemetry := ensureJSONObject(cfg, "telemetry")
 
@@ -1543,8 +1645,16 @@ func patchCopilotHooks(path, hookScript string) error {
 	} {
 		entry := map[string]interface{}{
 			"type":       "command",
-			"bash":       shellWord(hookScript),
 			"timeoutSec": 30,
+		}
+		if runtime.GOOS == "windows" {
+			// Copilot selects the command field by host OS. A `bash`-only
+			// entry is ignored on Windows even when its value names a native
+			// executable. PowerShell requires the call operator before a quoted
+			// executable path, otherwise the path is parsed as a string literal.
+			entry["powershell"] = "& " + hookScript
+		} else {
+			entry["bash"] = shellWord(hookScript)
 		}
 		hooks[event] = appendUniqueFlatHook(hooks[event], hookScript, entry)
 	}
@@ -1672,21 +1782,15 @@ var antigravityLifecycleEvents = []string{
 // scope antigravityLifecycleEvents to the verified-emitting
 // subset.
 //
-// The "command" field is written as a bare path WITHOUT
-// shellWord() quoting. agy v1.0.x invokes the configured command
-// via direct exec(), not through a shell, so any surrounding
-// single quotes added by shellWord() would become literal
-// characters in the exec path and the hook would silently
-// no-fire (verified empirically via the v0.5.0 antigravity smoke
-// test: D1=bare-path-OK, D2=sh -c-OK, D3=direct-exec-FAILS-127).
-// This intentionally diverges from the other patch* helpers
-// (Claude Code, Gemini CLI, OpenHands, etc.), which all run
-// through a shell and where shellWord() correctly handles
-// homedirs containing whitespace. If a future agy release
-// switches to shell invocation we should revisit and add quoting
-// back for spaces/special characters; until then, agy users with
-// paths containing whitespace need DEFENSECLAW_HOME pointed at a
-// whitespace-free directory.
+// The "command" field is written WITHOUT shellWord() quoting. agy v1.0.x
+// tokenizes the command itself and passes quote characters through to direct
+// exec, so shell quoting becomes literal path bytes and the hook silently
+// no-fires (verified empirically via the v0.5.0 Antigravity smoke test). On
+// Unix hookScript is the bare absolute .sh path. On Windows it is a
+// tokenizer-safe PowerShell command whose encoded script invokes the absolute
+// managed defenseclaw-hook.exe path. The visible command has no quoted tokens
+// or user-profile path segments for agy to mis-tokenize, and the launcher lookup
+// does not depend on Antigravity's current directory or PATH.
 func patchAntigravityHooks(path, hookScript string) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
@@ -1792,7 +1896,7 @@ func appendUniqueGeminiHookGroup(raw interface{}, hookScript string, group map[s
 	return append(list, group)
 }
 
-func removeJSONHookReferences(path, hookScript string) error {
+func removeJSONHookReferences(path string, hookScripts ...string) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1800,7 +1904,7 @@ func removeJSONHookReferences(path, hookScript string) error {
 		}
 		return err
 	}
-	pruned, _ := removeHookScriptReferences(cfg, hookScript).(map[string]interface{})
+	pruned, _ := removeHookScriptReferences(cfg, hookScripts...).(map[string]interface{})
 	if pruned == nil {
 		pruned = map[string]interface{}{}
 	}
@@ -1858,21 +1962,21 @@ func removeManagedGeminiTelemetry(cfg map[string]interface{}) {
 	}
 }
 
-func removeHookScriptReferences(raw interface{}, hookScript string) interface{} {
+func removeHookScriptReferences(raw interface{}, hookScripts ...string) interface{} {
 	switch v := raw.(type) {
 	case []interface{}:
 		out := make([]interface{}, 0, len(v))
 		for _, item := range v {
-			if containsHookScript(item, hookScript) {
+			if containsHookScript(item, hookScripts...) {
 				continue
 			}
-			out = append(out, removeHookScriptReferences(item, hookScript))
+			out = append(out, removeHookScriptReferences(item, hookScripts...))
 		}
 		return out
 	case map[string]interface{}:
 		out := make(map[string]interface{}, len(v))
 		for key, value := range v {
-			out[key] = removeHookScriptReferences(value, hookScript)
+			out[key] = removeHookScriptReferences(value, hookScripts...)
 		}
 		pruneEmptyMapArrays(out)
 		return out
@@ -1909,23 +2013,33 @@ func pruneEmptyMapArrays(obj map[string]interface{}) {
 	}
 }
 
-func containsHookScript(raw interface{}, hookScript string) bool {
+func containsHookScript(raw interface{}, hookScripts ...string) bool {
 	switch v := raw.(type) {
 	case []interface{}:
 		for _, item := range v {
-			if containsHookScript(item, hookScript) {
+			if containsHookScript(item, hookScripts...) {
 				return true
 			}
 		}
 	case map[string]interface{}:
-		if managedHookCommandEntry(v, hookScript) {
-			return true
+		for _, hookScript := range hookScripts {
+			if managedHookCommandEntry(v, hookScript) {
+				return true
+			}
 		}
 		if hooks, ok := v["hooks"]; ok {
-			return containsHookScript(hooks, hookScript)
+			return containsHookScript(hooks, hookScripts...)
 		}
 	}
 	return false
+}
+
+func legacyAntigravityWindowsHookCommand() string {
+	return windowsHookBinaryName + " " + nativeHookFlag + "antigravity"
+}
+
+func legacyAntigravityNonWaitingWindowsHookCommand() string {
+	return legacyWindowsNativePowerShellHookCommandForBinary("antigravity", defenseclawHookBinary())
 }
 
 func managedHookCommandEntry(raw interface{}, hookScript string) bool {
@@ -1966,6 +2080,12 @@ func shellWord(s string) string {
 	// single-quoting would corrupt the executable path and break invocation,
 	// so pass these through unchanged. Unix .sh paths still get quoted.
 	if isNativeHookCommand(s) {
+		return s
+	}
+	// Cursor's Windows adapter is already a complete PowerShell invocation.
+	// Wrapping it in shell single quotes would turn the call operator and path
+	// into inert text when Cursor inserts the command after `$input |`.
+	if strings.HasPrefix(s, "& '") && strings.HasSuffix(s, "'") {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"

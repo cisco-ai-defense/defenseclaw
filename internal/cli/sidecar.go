@@ -26,6 +26,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
@@ -58,18 +59,13 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 			"[sidecar] WARNING: --token is deprecated and will be removed in a future release. "+
 				"Secrets on argv are visible to any local user via ps(1) / /proc/<pid>/cmdline. "+
 				"Set DEFENSECLAW_GATEWAY_TOKEN (or gateway.token in config) instead.")
-		cfg.Gateway.Token = sidecarToken
 	}
+	materializeSidecarGatewayToken(&cfg.Gateway, sidecarToken)
 	if sidecarHost != "" {
 		cfg.Gateway.Host = sidecarHost
 	}
 	if sidecarPort > 0 {
 		cfg.Gateway.Port = sidecarPort
-	}
-
-	// Resolve token from env var if not set directly (via flag or config).
-	if cfg.Gateway.Token == "" {
-		cfg.Gateway.Token = cfg.Gateway.ResolvedToken()
 	}
 
 	shell := sandbox.NewWithFallback(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir, cfg.PolicyDir)
@@ -101,7 +97,7 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 	}
 	fmt.Println()
 
-	sc, err := gateway.NewSidecar(cfg, auditStore, auditLog, shell, otelProvider)
+	sc, err := gateway.NewSidecar(cfg, auditStore, auditLog, shell)
 	if err != nil {
 		return fmt.Errorf("sidecar: init: %w", err)
 	}
@@ -132,6 +128,12 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if err := bootstrapConfiguredObservabilityRuntime(ctx, cfg, activeObservabilityV8Startup, sc); err != nil {
+		return err
+	}
+	if err := sc.EmitPostBootstrapPlatformHealth(); err != nil {
+		return fmt.Errorf("sidecar: post-bootstrap platform health: %w", err)
+	}
 
 	// Always capture the common shutdown signals so we can cancel ctx
 	// cleanly. Previously this function also installed wide signal
@@ -212,6 +214,52 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 			os.Getpid())
 	}
 	return runErr
+}
+
+func materializeSidecarGatewayToken(gatewayConfig *config.GatewayConfig, explicit string) {
+	if explicit != "" {
+		gatewayConfig.Token = explicit
+		return
+	}
+	// Materialize the documented custom env -> canonical env -> legacy env ->
+	// inline-config ladder before the API server captures its authentication
+	// token. Daemon readiness uses the same ResolvedToken contract; resolving
+	// only when Token was empty let a stale inline token disagree with a newer
+	// environment token and made a healthy sidecar answer its parent with 401.
+	gatewayConfig.Token = gatewayConfig.ResolvedToken()
+}
+
+type observabilityRuntimeBootstrapper interface {
+	BootstrapObservabilityRuntime(context.Context, string, []byte) (bool, error)
+}
+
+// bootstrapConfiguredObservabilityRuntime is the single CLI activation gate
+// between Sidecar construction and serving. A Config without the validated v8
+// source snapshot is rejected, as is a bootstrap that reports a no-op: the target
+// runtime must never fall through to legacy exporters or serve partially bound.
+func bootstrapConfiguredObservabilityRuntime(
+	ctx context.Context,
+	c *config.Config,
+	startup *observabilityV8Startup,
+	bootstrapper observabilityRuntimeBootstrapper,
+) error {
+	if c == nil {
+		return fmt.Errorf("sidecar: observability bootstrap: config is unavailable")
+	}
+	if c.ConfigVersion != 8 {
+		return fmt.Errorf("sidecar: observability bootstrap requires schema v8; run 'defenseclaw upgrade' first")
+	}
+	if ctx == nil || startup == nil || strings.TrimSpace(startup.sourceName) == "" || len(startup.raw) == 0 || bootstrapper == nil {
+		return fmt.Errorf("sidecar: observability v8 bootstrap state is incomplete")
+	}
+	bound, err := bootstrapper.BootstrapObservabilityRuntime(ctx, startup.sourceName, startup.raw)
+	if err != nil {
+		return fmt.Errorf("sidecar: observability v8 bootstrap: %w", err)
+	}
+	if !bound {
+		return fmt.Errorf("sidecar: observability v8 bootstrap did not bind a runtime")
+	}
+	return nil
 }
 
 // sidecarDiagEnabled reports whether DEFENSECLAW_SIDECAR_DIAG is set to a

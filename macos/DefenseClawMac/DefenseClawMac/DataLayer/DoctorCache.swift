@@ -87,7 +87,7 @@ struct DoctorCache: Sendable, Equatable {
 
     /// Load <data_dir>/doctor_cache.json; nil when missing/unparseable
     /// (callers keep their previous value — TUI keeps last-good on error).
-    static func load(dataDirectory: URL = ConfigStore.dataDirectory) -> DoctorCache? {
+    static func load(dataDirectory: URL) -> DoctorCache? {
         let url = dataDirectory.appendingPathComponent("doctor_cache.json")
         guard let data = try? Data(contentsOf: url),
               let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]

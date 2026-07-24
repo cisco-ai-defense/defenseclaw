@@ -2,17 +2,23 @@
 
 ## Summary
 
-The Cursor connector installs `cursor-hook.sh` into `~/.cursor/hooks.json`. When
-an operator chooses a fail-closed install, those entries are written with
-`"failClosed": true`. Cursor treats a `failClosed: true` hook that produces
-**empty stdout** as a hook failure and blocks the operation.
+The Cursor connector installs `cursor-hook.sh` into `~/.cursor/hooks.json`.
+Cursor treats a `failClosed: true` hook that produces **empty stdout** as a hook
+failure and blocks the operation.
 
-Several fail-**open** paths in `cursor-hook.sh` exited `0` with no stdout. On a
-fail-closed install that silent exit was misread by Cursor as a fail-closed
-"no output" failure, so a deliberate fail-open (a gateway outage, a missing
-token, or a disabled install) was silently inverted into a block. Because the
-hook is wired onto `preToolUse` / `beforeShellExecution` / `beforeReadFile`,
-that block hit every tool at once, and the agent could not self-recover.
+The original v6 hook had several fail-**open** paths that exited `0` with no
+stdout. The most dangerous was the early `.disabled` path: a user could disable
+DefenseClaw while a previously written `failClosed: true` entry remained in
+`hooks.json`, and Cursor would reinterpret the silent allow as a failure. Since
+the hook is wired onto `preToolUse` / `beforeShellExecution` /
+`beforeReadFile`, that could block every tool at once and prevent the agent from
+self-recovering.
+
+Current `main` has since made failure-mode handling consistent and emits
+`{"continue":true}` on its allow paths. This reconciled change retains those
+semantics and strengthens the invariant by using one explicit
+`{"continue":true,"permission":"allow"}` envelope everywhere the shell hook
+allows.
 
 This change makes `cursor-hook.sh` emit an explicit allow envelope
 (`{"continue":true,"permission":"allow"}`) on every allow / observe / fail-open
@@ -21,35 +27,41 @@ emitting an explicit deny, and strict-availability installs still fail closed.
 
 ## Scope
 
-This affects only fail-closed Cursor installs (`failClosed: true` in
-`hooks.json`, which requires an explicit fail-closed opt-in at setup).
+This affects only the Cursor shell hook. It does not change the selected failure
+mode:
 
-Observe-mode and default installs already write `failClosed: false`, and the
-gateway already returns a concrete allow envelope for Cursor on the normal
-response path, so those installs were never at risk. This is a hardening of the
-transport and disabled paths for the fail-closed case, and it lines up the
-shell with the same "never emit empty stdout for Cursor" invariant the gateway
-already enforces on its side.
+- `FAIL_MODE=open` transport, response, token, and oversized-input failures
+  continue to allow.
+- `FAIL_MODE=closed`, managed hooks, and
+  `DEFENSECLAW_STRICT_AVAILABILITY=1` continue to block availability failures
+  with an explicit deny and the existing exit status.
+- The `.disabled` / absent-install path remains an unconditional allow, which is
+  the recovery path that must work even when an older `failClosed: true`
+  declaration is still present.
+
+The gateway already returns a concrete Cursor envelope on the normal response
+path. This change makes the shell layer follow the same "never rely on empty
+stdout for an allow" invariant.
 
 ## Root cause
 
 Cursor's documented behavior: a hook entry marked `failClosed: true` that
 returns no output is treated as a failure, and the gated operation is blocked.
 
-Before this change, these branches in `cursor-hook.sh` fell through to a bare
-`exit 0` with no stdout:
+On the original PR base, these branches in `cursor-hook.sh` fell through to a
+bare `exit 0` with no stdout:
 
 - the `.disabled` marker / absent-install early exit (non-managed installs)
-- the missing-token branch (non-strict), via the shared
-  `defenseclaw_handle_missing_token`
+- the missing-token branch in open mode
 - `fail_unreachable` on the fail-open (non-strict) path
 - `fail_response` when `FAIL_MODE=open`
 - the oversized-payload guard on the fail-open path
 - the success path when the gateway answered with no `hook_output`
 
-On a fail-closed install each of these turned into a block, contradicting the
-project's own stated contract that "a DefenseClaw outage must NEVER brick the
-user's coding agent" (see `_hardening.sh`).
+Newer `main` already replaced those silent exits with `{"continue":true}` and
+made closed, managed, and strict availability paths block consistently. The
+remaining change is to centralize the richer allow envelope without regressing
+those newer deny paths.
 
 ## The fix
 
@@ -57,33 +69,33 @@ All changes are contained in `internal/gateway/connector/hooks/cursor-hook.sh`
 (Cursor only). No shared helper and no other connector is touched, so the blast
 radius is limited to Cursor.
 
-- A small `emit_cursor_allow` helper prints the allow envelope.
+- A small `emit_cursor_allow` helper is defined before the early disabled check
+  and prints the allow envelope.
 - Every fail-open path above now emits that envelope before `exit 0`.
-- The missing-token branch keeps the shared helper for the strict / managed
-  fail-closed case (it logs, warns on stderr, and exits `2`), and on the
-  fail-open case it logs, warns, and emits an explicit allow.
-- Block decisions still emit an explicit deny; strict-availability installs
-  still exit `2` and block.
+- The missing-token branch in open mode logs, warns, and emits an explicit
+  allow.
+- Closed, managed, and strict availability paths retain current `main`'s
+  `{"continue":false,"permission":"deny",...}` envelopes and exit behavior.
 
-Exit codes are unchanged on every path. The only behavioral difference is that
-paths which previously produced empty stdout now produce an explicit allow (or
-deny) object. On a fail-open (`failClosed:false`) install this is a no-op,
-because Cursor allowed regardless. On a fail-closed install it restores the
-intended allow instead of an accidental block.
+Relative to current `main`, exit codes and block semantics are unchanged. The
+behavioral difference is that every shell-generated allow now also carries
+`"permission":"allow"`.
 
 ## Tests
 
-`internal/gateway/connector/cursor_hook_failopen_test.go` renders the real
-hook template with `FAIL_MODE=closed` and runs it under `bash`:
+`internal/gateway/connector/cursor_hook_failopen_test.go` renders the real hook
+template and runs it under `bash`:
 
 - `TestCursorHook_FailOpenOnUnreachableEmitsAllow` — unreachable gateway,
-  non-strict: exit `0` with an explicit allow.
+  open mode: exit `0` with an explicit allow.
+- `TestCursorHook_FailClosedOnUnreachableEmitsDeny` — closed mode: exit `2`
+  with current `main`'s explicit `continue:false` deny.
 - `TestCursorHook_DisabledMarkerEmitsAllow` — `.disabled` present: exit `0`
   with an explicit allow.
-- `TestCursorHook_MissingTokenFailsOpenWithAllow` — no token, non-strict:
+- `TestCursorHook_MissingTokenFailsOpenWithAllow` — no token, open mode:
   exit `0` with an explicit allow and an "allowing cursor tool" stderr line.
 - `TestCursorHook_StrictMissingTokenBlocks` — `DEFENSECLAW_STRICT_AVAILABILITY=1`:
-  still exits `2` and blocks (the fail-closed contract is preserved).
+  exits `2` with an explicit deny even when `FAIL_MODE=open`.
 
 `internal/gateway/connector/cursor_hook_invariant_test.go` runs the real hook
 against a stub gateway to lock the invariant so this can never regress:
@@ -95,14 +107,13 @@ against a stub gateway to lock the invariant so this can never regress:
   `TestCursorHook_GatewayDenyEnvelopePassedThrough` — real allow/deny verdicts
   reach Cursor verbatim (the hardening does not swallow decisions).
 - `TestCursorHook_NeverEmptyStdout` — table across observe-empty, null
-  `hook_output`, `5xx`, and unreachable: stdout is always a valid, non-empty
-  permission object.
+  `hook_output`, `5xx`, unreachable, and a payload larger than 1 MiB: every
+  fail-open case exits `0` with a valid, non-empty permission object.
 - `TestCursorHooks_ObserveModeWritesFailClosedFalse` — a default / observe
   install writes `failClosed:false` (pairs with the existing
   `TestCursorHooks_FailClosedOnlyWhenExplicit`).
 
-The full `internal/gateway/connector` and `internal/gateway` suites pass with
-the change (Go 1.26.4).
+The focused Cursor connector-hook tests pass with Go 1.26.4.
 
 ## Preventing recurrence
 
@@ -133,8 +144,8 @@ differ and should be verified individually rather than changed blind.
 
 ## Why this helps
 
-Any operator who runs Cursor in a fail-closed configuration is protected from
-being locked out by a gateway restart, a token rotation, or an intentional
-`.disabled`. The transport and disabled paths now behave the way the code
-already documents them, and the shell layer matches the gateway's existing
-guarantee that a Cursor response is never empty stdout.
+An open-mode Cursor install no longer depends on Cursor's empty-output fallback,
+and an intentional `.disabled` remains a reliable recovery path even if an old
+`failClosed: true` declaration is still present. Operators who deliberately
+select closed, managed, or strict availability behavior still receive an
+explicit deny on gateway or token failures.

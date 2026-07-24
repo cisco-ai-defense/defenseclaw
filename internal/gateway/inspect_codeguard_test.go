@@ -40,6 +40,10 @@ func TestInspectTool_WriteFile_CodeGuardAlert(t *testing.T) {
 		t.Errorf("severity = %q, want HIGH", verdict.Severity)
 	}
 	assertHasFinding(t, verdict.Findings, "codeguard:CG-EXEC-001")
+	if len(verdict.DetailedFindings) != 1 || verdict.DetailedFindings[0].RuleID != "CG-EXEC-001" ||
+		verdict.DetailedFindings[0].Title == "" || verdict.DetailedFindings[0].Severity != "HIGH" {
+		t.Fatalf("structured CodeGuard findings=%+v", verdict.DetailedFindings)
+	}
 }
 
 func TestInspectTool_WriteFile_CodeGuardAllow(t *testing.T) {

@@ -1,0 +1,4 @@
+{
+  "title": "Native Windows",
+  "pages": ["index", "install-lifecycle", "connectors-enforcement", "capabilities-commands", "telemetry-security", "paths-troubleshooting"]
+}

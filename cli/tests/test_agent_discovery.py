@@ -20,11 +20,17 @@ import json
 import os
 import stat
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+from defenseclaw import file_permissions
+from defenseclaw.config import PerConnectorGuardrailConfig, default_config
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.inventory import agent_discovery as ad
+
+from tests.permissions import grant_everyone, set_known_windows_directory_acl
 
 
 def _signal(name: str, installed: bool = False) -> ad.AgentSignal:
@@ -35,6 +41,7 @@ def _signal(name: str, installed: bool = False) -> ad.AgentSignal:
         binary_path="",
         version="",
         error="",
+        configured=installed,
     )
 
 
@@ -49,6 +56,21 @@ def _discovery(*installed: str, cache_hit: bool = False) -> ad.AgentDiscovery:
 def _pin_home(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / ".defenseclaw"))
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+
+@pytest.fixture
+def windows_host_no_path(monkeypatch) -> None:
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+
+
+@pytest.fixture(autouse=True)
+def isolate_configured_package_manager_roots(monkeypatch) -> None:
+    """Keep unit scans independent of npm/pnpm installed on the test host."""
+
+    monkeypatch.setattr(ad, "_windows_configured_package_manager_bin_prefixes", lambda: ())
+    monkeypatch.setattr(ad, "_windows_current_user_known_folder", lambda _identifier: "")
 
 
 def test_discovery_trust_config_honors_config_override(monkeypatch, tmp_path):
@@ -85,7 +107,10 @@ def test_cache_miss_hit_and_ttl_expiry(monkeypatch, tmp_path):
 
     cache_file = Path(os.environ["DEFENSECLAW_HOME"]) / ad.CACHE_FILENAME
     assert cache_file.is_file()
-    assert stat.S_IMODE(cache_file.stat().st_mode) == 0o600
+    if os.name == "nt":
+        assert ad._windows_acl_write_error(str(cache_file)) is None
+    else:
+        assert stat.S_IMODE(cache_file.stat().st_mode) == 0o600
 
     calls.clear()
     monkeypatch.setattr(ad, "_scan_agent", lambda name, **_kwargs: (_ for _ in ()).throw(AssertionError(name)))
@@ -101,6 +126,49 @@ def test_cache_miss_hit_and_ttl_expiry(monkeypatch, tmp_path):
     assert refreshed.cache_hit is False
     assert refreshed.agents["codex"].installed is False
     assert refreshed.agents["claudecode"].installed is True
+
+
+def test_cache_write_failure_is_truthful_and_preserves_existing(monkeypatch, tmp_path):
+    cache = tmp_path / ad.CACHE_FILENAME
+    cache.write_text("ORIGINAL\n", encoding="utf-8")
+
+    def fail(*_args, **_kwargs):
+        raise PermissionError("injected ACL failure")
+
+    monkeypatch.setattr(ad, "atomic_write_private_bytes", fail)
+
+    assert ad._write_cache(_discovery("codex"), data_dir=tmp_path) is False
+    assert cache.read_text(encoding="utf-8") == "ORIGINAL\n"
+
+
+def test_cache_refuses_symlinked_parent_without_escape(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = tmp_path / "linked-cache"
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    assert ad._write_cache(_discovery("codex"), data_dir=linked) is False
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows DACL convergence")
+@pytest.mark.allow_subprocess
+def test_cache_removes_inherited_everyone_write_on_windows(tmp_path):
+    cache_dir = tmp_path / "agent cache 雪"
+    cache_dir.mkdir()
+    set_known_windows_directory_acl(cache_dir, everyone_write=True)
+
+    assert ad._write_cache(_discovery("codex"), data_dir=cache_dir) is True
+    assert ad._write_cache(_discovery("claudecode"), data_dir=cache_dir) is True
+
+    cache = cache_dir / ad.CACHE_FILENAME
+    assert file_permissions.windows_acl_write_error(cache_dir) is None
+    assert file_permissions.windows_acl_write_error(cache) is None
+    assert json.loads(cache.read_text(encoding="utf-8"))["agents"]["claudecode"]["installed"] is True
+    assert list(cache_dir.glob(f".{ad.CACHE_FILENAME}.*.tmp")) == []
 
 
 def test_schema_version_mismatch_rescans(monkeypatch, tmp_path):
@@ -127,6 +195,853 @@ def test_schema_version_mismatch_rescans(monkeypatch, tmp_path):
     assert disc.agents["openclaw"].installed is True
 
 
+def test_empty_connector_home_does_not_detect_opencode(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".config" / "opencode" / "plugins").mkdir(parents=True)
+    (tmp_path / ".opencode").mkdir()
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("opencode")
+
+    assert signal.installed is False
+    assert signal.config_path == ""
+    assert signal.binary_path == ""
+
+
+def test_config_evidence_helper_rejects_directories(tmp_path):
+    directory = tmp_path / "config-parent"
+    directory.mkdir()
+
+    assert ad._first_existing_file((str(directory),)) == ""
+
+
+@pytest.mark.parametrize(
+    ("connector", "empty_dir"),
+    [
+        ("claudecode", (".claude",)),
+        ("openhands", (".openhands",)),
+        ("antigravity", (".gemini", "antigravity-cli")),
+        ("omnigent", (".omnigent",)),
+    ],
+)
+def test_empty_connector_directories_are_not_install_evidence(
+    monkeypatch,
+    tmp_path,
+    connector,
+    empty_dir,
+):
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    tmp_path.joinpath(*empty_dir).mkdir(parents=True)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent(connector)
+
+    assert signal.installed is False
+    assert signal.config_path == ""
+    assert signal.binary_path == ""
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        (".config", "opencode", "opencode.json"),
+        (".config", "opencode", "opencode.jsonc"),
+        (".config", "opencode", "plugins", "defenseclaw.js"),
+        ("opencode.json",),
+        ("opencode.jsonc",),
+    ],
+)
+def test_meaningful_opencode_files_are_configuration_evidence(monkeypatch, tmp_path, relative_path):
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path.joinpath(*relative_path)
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("opencode")
+
+    assert signal.installed is False
+    assert signal.configured is True
+    assert signal.config_path == str(config)
+
+
+def test_empty_home_has_no_config_only_false_positives(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "roaming-app-data"))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "program-files"))
+    monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path / "program-files-x86"))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signals = {name: ad._scan_agent(name) for name in KNOWN_CONNECTORS}
+
+    assert {name for name, signal in signals.items() if signal.installed} == set()
+
+
+@pytest.mark.parametrize(
+    ("connector", "relative_config"),
+    [
+        ("codex", (".codex", "config.toml")),
+        ("claudecode", (".claude", "settings.json")),
+        ("openclaw", (".openclaw", "openclaw.json")),
+        ("zeptoclaw", (".zeptoclaw", "config.json")),
+        ("hermes", (".hermes", "config.yaml")),
+        ("cursor", (".cursor", "hooks.json")),
+        ("windsurf", (".codeium", "windsurf", "hooks.json")),
+        ("geminicli", (".gemini", "settings.json")),
+        ("copilot", (".copilot", "mcp-config.json")),
+        ("openhands", (".openhands", "hooks.json")),
+        ("antigravity", (".gemini", "config", "hooks.json")),
+        ("opencode", (".config", "opencode", "opencode.json")),
+        ("omnigent", (".omnigent", "config.yaml")),
+    ],
+)
+def test_each_connector_tracks_meaningful_config_separately_from_installation(
+    monkeypatch,
+    tmp_path,
+    connector,
+    relative_config,
+):
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path.joinpath(*relative_config)
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    if connector == "hermes":
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent(connector)
+
+    assert signal.installed is False
+    assert signal.configured is True
+    assert ad._path_key(signal.config_path) == ad._path_key(str(config))
+
+
+@pytest.mark.parametrize(
+    ("connector", "variable", "file_name"),
+    [
+        ("codex", "CODEX_HOME", "config.toml"),
+        ("claudecode", "CLAUDE_CONFIG_DIR", "settings.json"),
+    ],
+)
+def test_codex_and_claude_discovery_honor_client_config_homes(
+    monkeypatch,
+    tmp_path,
+    connector,
+    variable,
+    file_name,
+):
+    _pin_home(monkeypatch, tmp_path / "default-home")
+    configured_home = tmp_path / f"custom-{connector}"
+    monkeypatch.setenv(variable, str(configured_home))
+    config = configured_home / file_name
+    config.parent.mkdir(parents=True)
+    config.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent(connector)
+
+    assert signal.configured is True
+    assert signal.config_path == str(config)
+
+
+def test_hermes_legacy_windows_config_is_not_current_configuration_evidence(
+    monkeypatch,
+    tmp_path,
+):
+    _pin_home(monkeypatch, tmp_path)
+    legacy = tmp_path / ".hermes" / "config.yaml"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("hooks: {}\n", encoding="utf-8")
+    effective = tmp_path / "local-app-data" / "hermes" / "config.yaml"
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    monkeypatch.setattr(ad, "hermes_config_path", lambda: str(effective))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("hermes")
+
+    assert signal.installed is False
+    assert signal.configured is False
+    assert signal.config_path == ""
+
+
+def test_hermes_native_windows_venv_is_discovered_without_path(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    home = tmp_path / "home"
+    local_app_data = tmp_path / "local-app-data"
+    binary = local_app_data / "hermes" / "hermes-agent" / "venv" / "Scripts" / "hermes.exe"
+    config = local_app_data / "hermes" / "config.yaml"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"test executable")
+    config.write_text("hooks: {}\n", encoding="utf-8")
+    _pin_home(monkeypatch, home)
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.setattr(ad, "hermes_config_path", lambda: str(config))
+    monkeypatch.setattr(
+        ad,
+        "_version_for_agent_binary",
+        lambda name, path, _args, **_kwargs: (
+            ("Hermes Agent v0.17.0", "")
+            if name == "hermes" and ad._path_key(path) == ad._path_key(str(binary))
+            else ("", "bad")
+        ),
+    )
+
+    signal = ad._scan_agent("hermes")
+
+    assert signal.installed is True
+    assert signal.configured is True
+    assert ad._path_key(signal.binary_path) == ad._path_key(str(binary))
+    assert ad._path_key(signal.config_path) == ad._path_key(str(config))
+    assert signal.version == "Hermes Agent v0.17.0"
+
+
+def test_antigravity_windows_cli_fallback_is_detected(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    _pin_home(monkeypatch, tmp_path)
+    local_app_data = tmp_path / "local-app-data"
+    agy = local_app_data / "agy" / "bin" / "agy.exe"
+    agy.parent.mkdir(parents=True)
+    agy.write_bytes(b"test executable")
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setattr(
+        ad,
+        "_version_for_agent_binary",
+        lambda name, path, _args, **_kwargs: (
+            ("1.0.13", "") if name == "antigravity" and path == str(agy) else ("", "bad")
+        ),
+    )
+
+    signal = ad._scan_agent("antigravity")
+
+    assert signal.installed is True
+    assert signal.binary_path == str(agy)
+    assert signal.config_path == ""
+    assert signal.version == "1.0.13"
+
+
+def test_antigravity_gui_fallback_reads_metadata_without_launch(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    _pin_home(monkeypatch, tmp_path)
+    local_app_data = tmp_path / "local-app-data"
+    gui = local_app_data / "Programs" / "antigravity" / "Antigravity.exe"
+    gui.parent.mkdir(parents=True)
+    gui.write_bytes(b"test executable")
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setattr(ad, "_windows_file_version_for_binary", lambda path, **_kwargs: ("2.2.1", ""))
+    monkeypatch.setattr(
+        ad.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("GUI executable was launched")),
+    )
+
+    signal = ad._scan_agent("antigravity")
+
+    assert signal.installed is True
+    assert signal.binary_path == str(gui)
+    assert signal.config_path == ""
+    assert signal.version == "2.2.1"
+
+
+def test_antigravity_windows_roots_are_narrow_trusted_prefixes(monkeypatch, tmp_path):
+    local_app_data = tmp_path / "local-app-data"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+
+    prefixes = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
+
+    assert ad._path_key(str(local_app_data / "agy" / "bin")) in prefixes
+    assert ad._path_key(str(local_app_data / "Programs" / "antigravity")) in prefixes
+    assert ad._path_key(str(local_app_data)) not in prefixes
+
+
+def test_codex_desktop_runtime_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
+    local_app_data = tmp_path / "local-app-data"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+
+    prefixes = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
+    runtime_root = local_app_data / "OpenAI" / "Codex" / "runtimes"
+
+    assert ad._path_key(str(runtime_root)) in prefixes
+    assert ad._path_key(str(runtime_root.parent)) not in prefixes
+    assert ad._path_key(str(local_app_data / "OpenAI")) not in prefixes
+    assert ad._path_key(str(local_app_data)) not in prefixes
+
+
+def test_codex_windows_discovery_skips_nonlaunchable_path_alias(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    local_app_data = tmp_path / "local-app-data"
+    alias = local_app_data / "Microsoft" / "WindowsApps" / "codex.exe"
+    desktop = local_app_data / "OpenAI" / "Codex" / "bin" / "release-hash" / "codex.exe"
+    alias.parent.mkdir(parents=True)
+    desktop.parent.mkdir(parents=True)
+    alias.write_bytes(b"protected alias")
+    desktop.write_bytes(b"desktop cli")
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: str(alias))
+
+    probes: list[str] = []
+
+    def version(name, path, _args, **_kwargs):
+        assert name == "codex"
+        probes.append(path)
+        if ad._path_key(path) == ad._path_key(str(alias)):
+            return "", "version probe failed: [WinError 5] Access is denied"
+        if ad._path_key(path) == ad._path_key(str(desktop)):
+            return "codex-cli 0.144.3", ""
+        return "", "not launchable"
+
+    monkeypatch.setattr(ad, "_version_for_agent_binary", version)
+
+    signal = ad._scan_agent("codex")
+
+    assert signal.installed is True
+    assert signal.version == "codex-cli 0.144.3"
+    assert ad._path_key(signal.binary_path) == ad._path_key(str(desktop))
+    assert probes[0] == str(alias)
+    assert str(desktop) in probes
+
+
+def test_codex_windows_discovery_uses_token_bound_local_app_data(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    known_local_app_data = tmp_path / "token-local-app-data"
+    redirected_local_app_data = tmp_path / "redirected-local-app-data"
+    desktop = known_local_app_data / "OpenAI" / "Codex" / "bin" / "release-hash" / "codex.exe"
+    desktop.parent.mkdir(parents=True)
+    desktop.write_bytes(b"desktop cli")
+    monkeypatch.setenv("LOCALAPPDATA", str(redirected_local_app_data))
+    monkeypatch.setattr(
+        ad,
+        "_windows_current_user_known_folder",
+        lambda identifier: (
+            str(known_local_app_data)
+            if identifier == "F1B32785-6FBA-4FCF-9D55-7B8E7F157091"
+            else ""
+        ),
+    )
+    monkeypatch.setattr(
+        ad,
+        "_version_for_agent_binary",
+        lambda name, path, _args, **_kwargs: (
+            ("codex-cli 0.133.0", "")
+            if name == "codex" and ad._path_key(path) == ad._path_key(str(desktop))
+            else ("", "not launchable")
+        ),
+    )
+
+    signal = ad._scan_agent("codex")
+    trusted = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
+
+    assert signal.installed is True
+    assert signal.version == "codex-cli 0.133.0"
+    assert ad._path_key(signal.binary_path) == ad._path_key(str(desktop))
+    assert ad._path_key(str(desktop.parents[1])) in trusted
+
+
+def test_codex_desktop_bin_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
+    local_app_data = tmp_path / "local-app-data"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+
+    prefixes = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
+    desktop_bin = local_app_data / "OpenAI" / "Codex" / "bin"
+
+    assert ad._path_key(str(desktop_bin)) in prefixes
+    assert ad._path_key(str(desktop_bin.parent)) not in prefixes
+
+
+def test_codex_windows_discovery_ignores_ambient_package_manager_prefixes(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    home = tmp_path / "home"
+    local_app_data = tmp_path / "local-app-data"
+    roaming_app_data = tmp_path / "roaming-app-data"
+    bun_install = tmp_path / "custom-bun"
+    pnpm_home = tmp_path / "custom-pnpm"
+    npm_prefix = tmp_path / "custom-npm"
+    volta_home = tmp_path / "custom-volta"
+    _pin_home(monkeypatch, home)
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setenv("APPDATA", str(roaming_app_data))
+    monkeypatch.setenv("BUN_INSTALL", str(bun_install))
+    monkeypatch.setenv("PNPM_HOME", str(pnpm_home))
+    monkeypatch.setenv("NPM_CONFIG_PREFIX", str(npm_prefix))
+    monkeypatch.setenv("VOLTA_HOME", str(volta_home))
+
+    prefixes = {
+        ad._path_key(path)
+        for path in ad._windows_package_manager_bin_prefixes(
+            local_app_data=str(local_app_data),
+            roaming_app_data=str(roaming_app_data),
+            home=str(home),
+        )
+    }
+    documented = {
+        home / ".bun" / "bin",
+        home / ".volta" / "bin",
+        local_app_data / "pnpm",
+        roaming_app_data / "npm",
+    }
+    ambient = {
+        bun_install / "bin",
+        pnpm_home,
+        npm_prefix,
+        volta_home / "bin",
+    }
+    documented_keys = {ad._path_key(str(path)) for path in documented}
+    ambient_keys = {ad._path_key(str(path)) for path in ambient}
+    assert documented_keys <= prefixes
+    assert ambient_keys.isdisjoint(prefixes)
+
+    candidates = {
+        ad._path_key(path)
+        for path in ad._windows_binary_candidates("codex", "codex")
+    }
+    for prefix in documented:
+        assert ad._path_key(str(prefix / "codex.exe")) in candidates
+    for prefix in ambient:
+        assert ad._path_key(str(prefix / "codex.exe")) not in candidates
+
+    trusted = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
+    assert documented_keys <= trusted
+    assert ambient_keys.isdisjoint(trusted)
+
+
+def test_windows_package_manager_prefixes_ignore_relative_environment_roots(
+    monkeypatch,
+    tmp_path,
+):
+    _pin_home(monkeypatch, tmp_path / "home")
+    monkeypatch.setenv("BUN_INSTALL", "relative-bun")
+    monkeypatch.setenv("PNPM_HOME", "relative-pnpm")
+    monkeypatch.setenv("NPM_CONFIG_PREFIX", "relative-npm")
+    monkeypatch.setenv("VOLTA_HOME", "relative-volta")
+
+    prefixes = ad._windows_package_manager_bin_prefixes(
+        local_app_data="",
+        roaming_app_data="",
+        home="",
+    )
+
+    assert prefixes == ()
+
+
+def _stub_windows_manager_folders(monkeypatch, tmp_path: Path) -> ad._WindowsPackageManagerFolders:
+    folders = ad._WindowsPackageManagerFolders(
+        profile=str(tmp_path / "token-profile"),
+        local_app_data=str(tmp_path / "token-local"),
+        roaming_app_data=str(tmp_path / "token-roaming"),
+        program_files=str(tmp_path / "program-files"),
+        program_files_x86=str(tmp_path / "program-files-x86"),
+        system_directory=str(tmp_path / "windows" / "System32"),
+    )
+    for path in folders:
+        Path(path).mkdir(parents=True)
+    monkeypatch.setattr(ad, "_windows_package_manager_folders", lambda: folders)
+    return folders
+
+
+def test_windows_package_manager_probe_discovers_user_npmrc_prefix_without_ambient_environment(
+    monkeypatch,
+    tmp_path,
+):
+    folders = _stub_windows_manager_folders(monkeypatch, tmp_path)
+    custom_prefix = tmp_path / "configured-only-in-npmrc"
+    custom_prefix.mkdir()
+    npm = Path(folders.local_app_data) / "Programs" / "DevTools" / "node" / "npm.cmd"
+    npm.parent.mkdir(parents=True)
+    npm.write_text("@echo off\n", encoding="utf-8")
+    poisoned = tmp_path / "project-controlled"
+    for name in ("HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA"):
+        monkeypatch.setenv(name, str(poisoned))
+    monkeypatch.setenv("NPM_CONFIG_PREFIX", str(poisoned / "npm"))
+    monkeypatch.setenv("NPM_CONFIG_USERCONFIG", str(poisoned / ".npmrc"))
+    monkeypatch.setenv("PNPM_HOME", str(poisoned / "pnpm"))
+    monkeypatch.setenv("NODE_OPTIONS", "--require=project-controlled.js")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_windows_package_manager_executable_candidates",
+        lambda manager: (str(npm),) if manager == "npm" else (),
+    )
+    monkeypatch.setattr(
+        ad,
+        "_trusted_windows_package_manager_path",
+        lambda manager, path: manager == "npm" and path == str(npm),
+    )
+    monkeypatch.setattr(
+        ad,
+        "_validated_windows_configured_bin_prefix",
+        lambda path: path if ad._path_key(path) == ad._path_key(str(custom_prefix)) else "",
+    )
+    calls: list[list[str]] = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        assert kwargs["shell"] is False
+        assert kwargs["timeout"] == ad.PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is False
+        assert kwargs["stdin"] is subprocess.DEVNULL
+        assert kwargs["cwd"] == folders.profile
+        assert kwargs["close_fds"] is True
+        expected_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        assert kwargs["creationflags"] == expected_flags
+        environment = kwargs["env"]
+        assert environment["HOME"] == folders.profile
+        assert environment["USERPROFILE"] == folders.profile
+        assert environment["LOCALAPPDATA"] == folders.local_app_data
+        assert environment["APPDATA"] == folders.roaming_app_data
+        assert environment["NPM_CONFIG_USERCONFIG"] == str(Path(folders.profile) / ".npmrc")
+        assert "NPM_CONFIG_PREFIX" not in environment
+        assert "PNPM_HOME" not in environment
+        assert "NODE_OPTIONS" not in environment
+        return subprocess.CompletedProcess(command, 0, stdout=str(custom_prefix).encode(), stderr=b"")
+
+    monkeypatch.setattr(ad.subprocess, "run", run)
+
+    prefixes = ad._probe_windows_configured_package_manager_bin_prefixes()
+
+    assert prefixes == (str(custom_prefix),)
+    assert calls == [[str(npm), "config", "get", "prefix", "--location=user"]]
+
+
+def test_windows_package_manager_probe_discovers_pnpm_global_bin_dir(
+    monkeypatch,
+    tmp_path,
+):
+    folders = _stub_windows_manager_folders(monkeypatch, tmp_path)
+    configured = tmp_path / "configured-pnpm-bin"
+    configured.mkdir()
+    pnpm = Path(folders.local_app_data) / "pnpm" / "pnpm.cmd"
+    pnpm.parent.mkdir(parents=True, exist_ok=True)
+    pnpm.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_windows_package_manager_executable_candidates",
+        lambda manager: (str(pnpm),) if manager == "pnpm" else (),
+    )
+    monkeypatch.setattr(
+        ad,
+        "_trusted_windows_package_manager_path",
+        lambda manager, path: manager == "pnpm" and path == str(pnpm),
+    )
+    monkeypatch.setattr(ad, "_validated_windows_configured_bin_prefix", lambda path: path)
+    calls: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout=str(configured).encode(), stderr=b"")
+
+    monkeypatch.setattr(ad.subprocess, "run", run)
+
+    assert ad._probe_windows_configured_package_manager_bin_prefixes() == (str(configured),)
+    assert calls == [[str(pnpm), "config", "get", "global-bin-dir", "--location=user"]]
+
+
+def test_windows_devtools_node_is_a_narrow_package_manager_bootstrap_root(
+    monkeypatch,
+    tmp_path,
+):
+    folders = _stub_windows_manager_folders(monkeypatch, tmp_path)
+    npm = Path(folders.local_app_data) / "Programs" / "DevTools" / "node" / "npm.cmd"
+    npm.parent.mkdir(parents=True)
+    npm.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    candidates = ad._windows_package_manager_executable_candidates("npm")
+
+    assert str(npm) in candidates
+    roots = ad._windows_package_manager_static_roots("npm", folders)
+    assert str(npm.parent) in roots
+    assert folders.local_app_data not in roots
+
+
+def test_windows_package_manager_probe_never_executes_untrusted_path(
+    monkeypatch,
+    tmp_path,
+):
+    _stub_windows_manager_folders(monkeypatch, tmp_path)
+    planted = tmp_path / "path-plant" / "npm.cmd"
+    planted.parent.mkdir()
+    planted.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_windows_package_manager_executable_candidates",
+        lambda manager: (str(planted),) if manager == "npm" else (),
+    )
+    monkeypatch.setattr(ad, "_trusted_windows_package_manager_path", lambda _manager, _path: False)
+    monkeypatch.setattr(
+        ad.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("untrusted manager executed")),
+    )
+
+    assert ad._probe_windows_configured_package_manager_bin_prefixes() == ()
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        b"relative-prefix\n",
+        b"undefined\n",
+        b"C:\\first\nC:\\second\n",
+        b"\x00C:\\invalid\n",
+    ],
+)
+def test_windows_package_manager_probe_rejects_ambiguous_or_relative_output(
+    monkeypatch,
+    tmp_path,
+    stdout,
+):
+    _stub_windows_manager_folders(monkeypatch, tmp_path)
+    npm = tmp_path / "trusted-node" / "npm.cmd"
+    npm.parent.mkdir()
+    npm.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_windows_package_manager_executable_candidates",
+        lambda manager: (str(npm),) if manager == "npm" else (),
+    )
+    monkeypatch.setattr(ad, "_trusted_windows_package_manager_path", lambda _manager, _path: True)
+    monkeypatch.setattr(ad, "_validated_windows_configured_bin_prefix", lambda path: path)
+    monkeypatch.setattr(
+        ad.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, stdout=stdout, stderr=b""),
+    )
+
+    assert ad._probe_windows_configured_package_manager_bin_prefixes() == ()
+
+
+def test_windows_package_manager_probe_timeout_is_best_effort(
+    monkeypatch,
+    tmp_path,
+):
+    _stub_windows_manager_folders(monkeypatch, tmp_path)
+    npm = tmp_path / "trusted-node" / "npm.cmd"
+    npm.parent.mkdir()
+    npm.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_windows_package_manager_executable_candidates",
+        lambda manager: (str(npm),) if manager == "npm" else (),
+    )
+    monkeypatch.setattr(ad, "_trusted_windows_package_manager_path", lambda _manager, _path: True)
+    monkeypatch.setattr(
+        ad.subprocess,
+        "run",
+        lambda command, **_kwargs: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(command, ad.PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS)
+        ),
+    )
+
+    assert ad._probe_windows_configured_package_manager_bin_prefixes() == ()
+
+
+def test_windows_package_manager_probe_keeps_npm_prefix_when_pnpm_fails(
+    monkeypatch,
+    tmp_path,
+):
+    folders = _stub_windows_manager_folders(monkeypatch, tmp_path)
+    npm_prefix = tmp_path / "configured-npm"
+    npm_prefix.mkdir()
+    npm = Path(folders.local_app_data) / "Programs" / "DevTools" / "node" / "npm.cmd"
+    npm.parent.mkdir(parents=True)
+    npm.write_text("@echo off\n", encoding="utf-8")
+    pnpm = tmp_path / "trusted-pnpm" / "pnpm.cmd"
+    pnpm.parent.mkdir()
+    pnpm.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_windows_package_manager_executable_candidates",
+        lambda manager: {"npm": (str(npm),), "pnpm": (str(pnpm),)}[manager],
+    )
+    monkeypatch.setattr(ad, "_trusted_windows_package_manager_path", lambda _manager, _path: True)
+    monkeypatch.setattr(ad, "_validated_windows_configured_bin_prefix", lambda path: path)
+
+    def run(command, **_kwargs):
+        if command[0] == str(npm):
+            return subprocess.CompletedProcess(command, 0, stdout=str(npm_prefix).encode(), stderr=b"")
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout=b"",
+            stderr=b"global bin directory is not on PATH",
+        )
+
+    monkeypatch.setattr(ad.subprocess, "run", run)
+
+    assert ad._probe_windows_configured_package_manager_bin_prefixes() == (str(npm_prefix),)
+
+
+def test_windows_manager_probe_cache_signature_ignores_ambient_profile_poisoning(
+    monkeypatch,
+    tmp_path,
+):
+    _stub_windows_manager_folders(monkeypatch, tmp_path)
+    monkeypatch.setattr(ad, "_windows_package_manager_executable_candidates", lambda _manager: ())
+    monkeypatch.setenv("HOME", str(tmp_path / "poison-one"))
+    monkeypatch.setenv("NPM_CONFIG_USERCONFIG", str(tmp_path / "poison-one" / ".npmrc"))
+    first = ad._windows_manager_probe_signature()
+
+    monkeypatch.setenv("HOME", str(tmp_path / "poison-two"))
+    monkeypatch.setenv("NPM_CONFIG_USERCONFIG", str(tmp_path / "poison-two" / ".npmrc"))
+
+    assert ad._windows_manager_probe_signature() == first
+
+
+def test_windows_configured_binary_requires_containment_extension_and_safe_chain(
+    monkeypatch,
+    tmp_path,
+):
+    prefix = tmp_path / "configured-bin"
+    prefix.mkdir()
+    binary = prefix / "codex.cmd"
+    binary.write_text("@echo off\n", encoding="utf-8")
+    outside = tmp_path / "outside" / "codex.cmd"
+    outside.parent.mkdir()
+    outside.write_text("@echo off\n", encoding="utf-8")
+    text_file = prefix / "codex.txt"
+    text_file.write_text("not executable\n", encoding="utf-8")
+    monkeypatch.setattr(ad, "_validated_windows_configured_bin_prefix", lambda _path: str(prefix))
+    monkeypatch.setattr(ad, "_windows_path_chain_has_no_reparse_points", lambda *_args: True)
+    monkeypatch.setattr(ad, "_windows_acl_chain_is_safe", lambda *_args: True)
+
+    assert ad._trusted_windows_configured_binary_path(str(binary), str(prefix))
+    assert not ad._trusted_windows_configured_binary_path(str(outside), str(prefix))
+    assert not ad._trusted_windows_configured_binary_path(str(text_file), str(prefix))
+
+    monkeypatch.setattr(ad, "_windows_path_chain_has_no_reparse_points", lambda *_args: False)
+    assert not ad._trusted_windows_configured_binary_path(str(binary), str(prefix))
+
+    monkeypatch.setattr(ad, "_windows_path_chain_has_no_reparse_points", lambda *_args: True)
+    monkeypatch.setattr(ad, "_windows_acl_chain_is_safe", lambda *_args: False)
+    assert not ad._trusted_windows_configured_binary_path(str(binary), str(prefix))
+
+
+def test_windows_configured_manager_prefix_is_candidate_and_trusted_root(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    configured = tmp_path / "custom-npm-prefix"
+    configured.mkdir()
+    wrapper = configured / "codex.cmd"
+    wrapper.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(
+        ad,
+        "_windows_configured_package_manager_bin_prefixes",
+        lambda: (str(configured),),
+    )
+    monkeypatch.setattr(
+        ad,
+        "_trusted_windows_configured_binary_path",
+        lambda path, prefix: (
+            ad._path_key(path) == ad._path_key(str(wrapper)) and ad._path_key(prefix) == ad._path_key(str(configured))
+        ),
+    )
+
+    candidates = {ad._path_key(path) for path in ad._windows_binary_candidates("codex", "codex")}
+    trusted = {ad._path_key(path) for path in ad._trusted_bin_prefixes()}
+
+    assert ad._path_key(str(wrapper)) in candidates
+    assert ad._path_key(str(configured)) in trusted
+
+
+def test_hermes_windows_venv_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
+    local_app_data = tmp_path / "local-app-data"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+
+    prefixes = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
+    hermes_scripts = local_app_data / "hermes" / "hermes-agent" / "venv" / "Scripts"
+
+    assert ad._path_key(str(hermes_scripts)) in prefixes
+    assert ad._path_key(str(hermes_scripts.parent)) not in prefixes
+    assert ad._path_key(str(hermes_scripts.parent.parent)) not in prefixes
+    assert ad._path_key(str(local_app_data / "hermes")) not in prefixes
+    assert ad._path_key(str(local_app_data)) not in prefixes
+
+
+@pytest.mark.parametrize(
+    ("connector", "relative_binary"),
+    [
+        ("codex", ("local", "Programs", "OpenAI", "Codex", "bin", "codex.exe")),
+        ("claudecode", ("home", ".local", "bin", "claude.exe")),
+        ("openclaw", ("home", ".local", "bin", "openclaw.exe")),
+        ("zeptoclaw", ("home", ".local", "bin", "zeptoclaw.exe")),
+        (
+            "hermes",
+            (
+                "local",
+                "hermes",
+                "hermes-agent",
+                "venv",
+                "Scripts",
+                "hermes.exe",
+            ),
+        ),
+        ("cursor", ("local", "Programs", "cursor", "resources", "app", "bin", "cursor.cmd")),
+        ("windsurf", ("local", "Programs", "Windsurf", "bin", "windsurf.exe")),
+        ("geminicli", ("roaming", "npm", "gemini.cmd")),
+        ("copilot", ("roaming", "npm", "copilot.cmd")),
+        ("openhands", ("home", ".local", "bin", "openhands.exe")),
+        ("antigravity", ("local", "agy", "bin", "agy.exe")),
+        ("opencode", ("home", ".opencode", "bin", "opencode.exe")),
+        ("omnigent", ("home", ".local", "bin", "omnigent.exe")),
+    ],
+)
+def test_windows_discovery_finds_known_binary_outside_path(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+    connector,
+    relative_binary,
+):
+    home = tmp_path / "home"
+    local = tmp_path / "local-app-data"
+    roaming = tmp_path / "roaming-app-data"
+    roots = {"home": home, "local": local, "roaming": roaming}
+    binary = roots[relative_binary[0]].joinpath(*relative_binary[1:])
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_bytes(b"test executable")
+    _pin_home(monkeypatch, home)
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setenv("APPDATA", str(roaming))
+
+    resolved = ad._binary_path_for_agent(connector, ad._SPECS[connector])
+
+    assert ad._path_key(resolved) == ad._path_key(str(binary))
+
+
 def test_timeout_sets_error_and_does_not_mark_binary_only_install(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     monkeypatch.setattr(ad.shutil, "which", lambda name: "/usr/local/bin/codex")
@@ -142,7 +1057,7 @@ def test_timeout_sets_error_and_does_not_mark_binary_only_install(monkeypatch, t
 
     signal = ad._scan_agent("codex")
 
-    assert signal.binary_path == "/usr/local/bin/codex"
+    assert signal.binary_path == os.path.abspath("/usr/local/bin/codex")
     assert signal.config_path == ""
     assert signal.installed is False
     assert "timed out" in signal.error
@@ -168,11 +1083,11 @@ def test_version_probe_uses_no_shell_and_list_args(monkeypatch, tmp_path):
     assert signal.installed is True
     assert signal.version == "codex 1.2.3"
     args, kwargs = calls[0]
-    assert args == ["/opt/bin/codex", "--version"]
+    assert args == [os.path.abspath("/opt/bin/codex"), "--version"]
     assert kwargs["shell"] is False
     assert kwargs["timeout"] == 2.0
     assert kwargs["capture_output"] is True
-    assert kwargs["text"] is True
+    assert kwargs["text"] is False
 
 
 def test_openhands_version_probe_prefers_cli_line_after_banner(monkeypatch, tmp_path):
@@ -199,7 +1114,7 @@ OpenHands CLI 1.16.0
     assert signal.installed is True
     assert signal.version == "OpenHands CLI 1.16.0"
     args, kwargs = calls[0]
-    assert args == ["/opt/bin/openhands", "--version"]
+    assert args == [os.path.abspath("/opt/bin/openhands"), "--version"]
     assert kwargs["timeout"] == 8.0
     assert kwargs["env"]["OPENHANDS_SUPPRESS_BANNER"] == "1"
 
@@ -224,6 +1139,86 @@ def test_hermes_version_probe_gets_longer_timeout(monkeypatch, tmp_path):
     assert kwargs["timeout"] == 8.0
 
 
+def test_version_probe_decodes_utf8_hermes_output_from_isolated_subprocess(
+    monkeypatch,
+    tmp_path,
+):
+    fixture = tmp_path / "hermes_version_fixture.py"
+    fixture.write_text(
+        "import sys\n"
+        "sys.stdout.buffer.write("
+        "b'Hermes Agent v0.13.0 \\xc2\\xb7 upstream abc "
+        "\\xc2\\xb7 local def\\n'"
+        ")\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path, **_kwargs: True)
+
+    version, error = ad._version_for_binary(sys.executable, (str(fixture),))
+
+    assert error == ""
+    assert version == "Hermes Agent v0.13.0 \u00b7 upstream abc \u00b7 local def"
+    assert "\u00c2" not in version
+
+
+def test_version_probe_decoder_preserves_legacy_windows_output(monkeypatch):
+    monkeypatch.setattr(ad.locale, "getpreferredencoding", lambda _setlocale=False: "cp1252")
+
+    output = ad._decode_version_probe_output(b"Cursor 3.9.16 caf\xe9")
+
+    assert output == "Cursor 3.9.16 caf\u00e9"
+
+
+def test_windows_executable_suffixes_preserve_agent_specific_probe_rules(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path, **_kwargs: True)
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="SDK banner\nOpenHands CLI 1.16.0\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+
+    version, error = ad._version_for_binary(r"C:\Tools\openhands.EXE", ("--version",))
+
+    assert error == ""
+    assert version == "OpenHands CLI 1.16.0"
+    assert calls[0][1]["timeout"] == 8.0
+    assert calls[0][1]["env"]["OPENHANDS_SUPPRESS_BANNER"] == "1"
+
+
+def test_claude_version_probe_gets_longer_timeout_with_exe_suffix(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path, **_kwargs: True)
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="2.1.196 (Claude Code)\n", stderr="")
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+
+    version, error = ad._version_for_binary(r"C:\Tools\claude.EXE", ("--version",))
+
+    assert error == ""
+    assert version == "2.1.196 (Claude Code)"
+    assert calls[0][1]["timeout"] == 8.0
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PATHEXT regression")
+def test_which_discovers_cmd_wrapper(monkeypatch, tmp_path):
+    wrapper = tmp_path / "cursor.CMD"
+    wrapper.write_text("@echo 3.9.16\r\n", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+
+    assert ad._path_key(ad._which("cursor")) == ad._path_key(str(wrapper))
+
+
 def test_omnigent_discovery_honors_config_home(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     config_home = tmp_path / "omnigent-config-home"
@@ -235,8 +1230,44 @@ def test_omnigent_discovery_honors_config_home(monkeypatch, tmp_path):
 
     signal = ad._scan_agent("omnigent")
 
-    assert signal.installed is True
+    assert signal.installed is False
+    assert signal.configured is True
     assert signal.config_path == str(config_path)
+
+
+def test_config_state_marks_selected_observe_connectors_active():
+    disc = _discovery()
+    disc.agents["hermes"] = ad.AgentSignal(
+        name="hermes",
+        installed=False,
+        config_path="/tmp/.hermes/config.yaml",
+        binary_path="",
+        version="",
+        error="",
+        configured=True,
+    )
+    disc.agents["windsurf"] = ad.AgentSignal(
+        name="windsurf",
+        installed=False,
+        config_path="/tmp/.codeium/windsurf/hooks.json",
+        binary_path="",
+        version="",
+        error="",
+        configured=True,
+    )
+    cfg = default_config()
+    cfg.guardrail.connectors = {
+        "hermes": PerConnectorGuardrailConfig(mode="observe"),
+        "windsurf": PerConnectorGuardrailConfig(mode="observe"),
+    }
+
+    ad.apply_config_state(disc, cfg)
+
+    for name in ("hermes", "windsurf"):
+        assert disc.agents[name].installed is False
+        assert disc.agents[name].configured is True
+        assert disc.agents[name].active is True
+        assert disc.agents[name].mode == "observe"
 
 
 def test_omnigent_discovery_does_not_fall_back_when_config_home_is_set(monkeypatch, tmp_path):
@@ -308,7 +1339,7 @@ def test_version_probe_refuses_binary_outside_trusted_prefix_when_enabled(monkey
 def test_trust_check_accepts_canonical_prefix(monkeypatch, tmp_path):
     # Add tmp_path as a trusted prefix and place a real, non-world-writable
     # binary inside it.
-    binary = tmp_path / "bin" / "codex"
+    binary = tmp_path / "bin" / ("codex.exe" if os.name == "nt" else "codex")
     binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_text("#!/bin/sh\nexit 0\n")
     binary.chmod(0o755)
@@ -317,6 +1348,44 @@ def test_trust_check_accepts_canonical_prefix(monkeypatch, tmp_path):
     assert ad._is_trusted_binary_path(str(binary)) is True
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL regression")
+def test_windows_acl_distinguishes_owner_control_from_everyone_write(tmp_path):
+    safe = tmp_path / "safe"
+    unsafe = tmp_path / "everyone-write"
+    safe.mkdir()
+    unsafe.mkdir()
+    grant_everyone(unsafe)
+
+    _safe_path, safe_error = ad.validate_trusted_prefix(str(safe))
+    _unsafe_path, unsafe_error = ad.validate_trusted_prefix(str(unsafe))
+
+    assert safe_error is None
+    assert unsafe_error is not None
+    assert "Everyone" in unsafe_error
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path comparison regression")
+def test_windows_trust_check_is_case_insensitive(monkeypatch, tmp_path):
+    binary = tmp_path / "bin" / "codex.EXE"
+    binary.parent.mkdir()
+    binary.write_bytes(b"MZ")
+    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(tmp_path).swapcase())
+
+    assert ad._is_trusted_binary_path(str(binary)) is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows prefix policy")
+def test_windows_defaults_are_narrow_and_reject_drive_root():
+    local_app_data = os.environ["LOCALAPPDATA"]
+    expected = os.path.join(local_app_data, "Programs", "OpenAI", "Codex", "bin")
+    default_keys = {ad._path_key(path) for path in ad._builtin_trusted_bin_prefixes()}
+
+    assert ad._path_key(expected) in default_keys
+    assert ad._path_key(local_app_data) not in default_keys
+    assert ad._expand_bin_prefixes((Path(local_app_data).anchor,)) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires unprivileged POSIX symlinks")
 def test_trust_check_canonicalises_operator_prefix_symlink(monkeypatch, tmp_path):
     real_root = tmp_path / "real-tools"
     binary = real_root / "bin" / "omnigent"
@@ -335,7 +1404,7 @@ def test_trust_check_canonicalises_operator_prefix_symlink(monkeypatch, tmp_path
 def test_trust_check_accepts_config_prefix_when_required(monkeypatch, tmp_path):
     data_dir = tmp_path / ".defenseclaw"
     data_dir.mkdir()
-    binary = tmp_path / "tools" / "codex"
+    binary = tmp_path / "tools" / ("codex.exe" if os.name == "nt" else "codex")
     binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_text("#!/bin/sh\nexit 0\n")
     binary.chmod(0o755)
@@ -360,6 +1429,7 @@ def test_trust_check_accepts_config_prefix_when_required(monkeypatch, tmp_path):
     assert signal.version == "codex 1.2.3"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX Homebrew layout")
 def test_trust_check_accepts_homebrew_symlink_targets(monkeypatch, tmp_path):
     homebrew = tmp_path / "homebrew"
     real = homebrew / "lib" / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
@@ -386,6 +1456,7 @@ def test_trust_check_accepts_homebrew_symlink_targets(monkeypatch, tmp_path):
     assert ad._is_trusted_binary_path(str(link)) is True
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership semantics")
 def test_operator_prefix_still_applies_after_default_prefix_ownership_failure(
     monkeypatch,
     tmp_path,
@@ -414,6 +1485,7 @@ def test_operator_prefix_still_applies_after_default_prefix_ownership_failure(
     assert ad._is_trusted_binary_path(str(binary)) is True
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX Homebrew ownership/symlink semantics")
 def test_trust_check_operator_prefix_wins_over_failed_default_ownership(monkeypatch, tmp_path):
     # Regression: Homebrew npm globals live under a default prefix
     # (/opt/homebrew/lib/node_modules) that fails F-0421 root-ownership on
@@ -440,6 +1512,7 @@ def test_trust_check_operator_prefix_wins_over_failed_default_ownership(monkeypa
     assert ad._is_trusted_binary_path(str(link)) is True
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires unprivileged POSIX symlinks")
 def test_trust_check_accepts_claude_local_share_target(monkeypatch, tmp_path):
     real = tmp_path / ".local" / "share" / "claude" / "versions" / "2.1.139"
     real.parent.mkdir(parents=True, exist_ok=True)
@@ -462,6 +1535,7 @@ def test_trust_check_accepts_claude_local_share_target(monkeypatch, tmp_path):
     assert ad._is_trusted_binary_path(str(link)) is True
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode-bit policy")
 def test_trust_check_rejects_world_writable_parent(monkeypatch, tmp_path):
     binary = tmp_path / "bin" / "codex"
     binary.parent.mkdir(parents=True, exist_ok=True)
@@ -474,6 +1548,7 @@ def test_trust_check_rejects_world_writable_parent(monkeypatch, tmp_path):
     assert ad._is_trusted_binary_path(str(binary)) is False
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires unprivileged POSIX symlinks")
 def test_trust_check_follows_symlinks(monkeypatch, tmp_path):
     real = tmp_path / "untrusted" / "real-bin"
     real.parent.mkdir(parents=True, exist_ok=True)
@@ -489,6 +1564,7 @@ def test_trust_check_follows_symlinks(monkeypatch, tmp_path):
     assert ad._is_trusted_binary_path(str(link)) is False
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX default-prefix policy")
 def test_default_trusted_prefixes_excludes_user_writable_roots():
     # Regression guard for the secure default: user-writable tool roots
     # are intentionally NOT auto-trusted. A local agent running as the
@@ -511,6 +1587,7 @@ def test_default_trusted_prefixes_excludes_user_writable_roots():
     assert "/usr/local/bin" in ad._TRUSTED_BIN_PREFIXES_DEFAULT
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX standalone symlink layout")
 def test_trust_check_codex_standalone_symlink_requires_opt_in(monkeypatch, tmp_path):
     # Reproduce the Codex standalone layout under a fake HOME and assert
     # the secure-default behavior plus the documented opt-in escape

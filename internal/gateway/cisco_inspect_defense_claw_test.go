@@ -14,8 +14,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 // fakeCloudProvider is a scriptable cloudreg.Provider used to drive the
@@ -96,7 +98,7 @@ func TestDefenseClawInspect_WireShape(t *testing.T) {
 		t.Fatal("expected non-nil client")
 	}
 
-	verdict := c.Inspect([]ChatMessage{
+	verdict := c.Inspect(t.Context(), []ChatMessage{
 		{Role: "system", Content: "You are a helpful assistant."},
 		{Role: "user", Content: "hello"},
 	})
@@ -199,7 +201,7 @@ func TestDefenseClawInspect_UnauthorizedRefreshAndRetry(t *testing.T) {
 		Endpoint:  srv.URL,
 		TimeoutMs: 3000,
 	}, prov)
-	verdict := c.Inspect([]ChatMessage{{Role: "user", Content: "hi"}})
+	verdict := c.Inspect(t.Context(), []ChatMessage{{Role: "user", Content: "hi"}})
 	if verdict == nil {
 		t.Fatal("expected non-nil verdict after 401 → refresh → 200 retry")
 	}
@@ -239,7 +241,7 @@ func TestDefenseClawInspect_UnauthorizedTwiceReturnsNil(t *testing.T) {
 		Endpoint:  srv.URL,
 		TimeoutMs: 3000,
 	}, prov)
-	verdict := c.Inspect([]ChatMessage{{Role: "user", Content: "hi"}})
+	verdict := c.Inspect(t.Context(), []ChatMessage{{Role: "user", Content: "hi"}})
 	if verdict != nil {
 		t.Fatalf("expected nil verdict after repeated 401, got %#v", verdict)
 	}
@@ -247,6 +249,89 @@ func TestDefenseClawInspect_UnauthorizedTwiceReturnsNil(t *testing.T) {
 	// still 401 → gives up. Two upstream calls.
 	if got := atomic.LoadInt32(&calls); got != 2 {
 		t.Errorf("upstream call count = %d, want 2", got)
+	}
+}
+
+func TestDefenseClawInspect_RequestContextCancelsUpstream(t *testing.T) {
+	requestStarted := make(chan struct{}, 1)
+	requestCancelled := make(chan struct{}, 1)
+	c := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{
+		Endpoint: "https://inspect.example.test", TimeoutMs: 5000,
+	}, newFakeCloudProvider("cmid-token"))
+	c.client = &http.Client{Transport: ciscoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requestStarted <- struct{}{}
+		<-request.Context().Done()
+		requestCancelled <- struct{}{}
+		return nil, request.Context().Err()
+	})}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	result := make(chan *ScanVerdict, 1)
+	go func() {
+		result <- c.Inspect(ctx, []ChatMessage{{Role: "user", Content: "cancel"}})
+	}()
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("managed Cisco request did not reach the transport")
+	}
+	cancel()
+	select {
+	case <-requestCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("managed Cisco upstream did not observe caller cancellation")
+	}
+	select {
+	case verdict := <-result:
+		if verdict != nil {
+			t.Fatalf("cancelled managed request verdict=%+v, want nil", verdict)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("managed Cisco inspection did not return after cancellation")
+	}
+}
+
+func TestSidecarManagedInspectorBindsActiveV8Runtime(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	sidecar := &Sidecar{
+		cfg: &config.Config{
+			DeploymentMode: "managed_enterprise",
+			CiscoAIDefense: config.CiscoAIDefenseConfig{Endpoint: srv.URL, TimeoutMs: 3000},
+		},
+		observabilityV8Lifecycle: runtime,
+		cmidProviderInst:         newFakeCloudProvider("cmid-token"),
+	}
+	inspector := sidecar.newManagedInspector(t.Context(), "test inspector unavailable")
+	if inspector == nil {
+		t.Fatal("expected managed inspector")
+	}
+	client, ok := inspector.(*CiscoDefenseClawInspectClient)
+	if !ok {
+		t.Fatalf("managed inspector type=%T", inspector)
+	}
+	if client.observabilityV8Runtime() == nil {
+		t.Fatal("managed inspector was not bound to the active v8 runtime")
+	}
+
+	ctx, _ := ciscoCorrelatedContext(t)
+	verdict := inspector.Inspect(ctx, []ChatMessage{{Role: "user", Content: "hello"}})
+	if verdict == nil || verdict.Action != "allow" {
+		t.Fatalf("managed verdict=%+v", verdict)
+	}
+	metrics := ciscoMetricMap(capture.metricSnapshot())
+	latencies := metrics[observability.TelemetryInstrumentDefenseClawCiscoInspectLatency]
+	if len(latencies) != 1 ||
+		latencies[0].Attributes()["defenseclaw.outcome"] != string(observability.OutcomeCompleted) {
+		t.Fatalf("managed generated metrics=%v", metrics)
+	}
+	if spans := capture.snapshot(); len(spans) != 0 {
+		t.Fatalf("managed client fabricated %d standalone spans", len(spans))
 	}
 }
 

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
+
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -181,13 +183,7 @@ func TestRepairPairing_FailsClosedOnCorruptPairedJSON(t *testing.T) {
 			if string(b) != string(original) {
 				t.Fatalf("backup contents differ from original\nwant: %s\ngot:  %s", original, b)
 			}
-			info, err := os.Stat(filepath.Join(devicesDir, e.Name()))
-			if err != nil {
-				t.Fatalf("stat backup: %v", err)
-			}
-			if info.Mode().Perm() != 0o600 {
-				t.Errorf("backup perm = %v, want 0600", info.Mode().Perm())
-			}
+			testenv.AssertPrivateFile(t, filepath.Join(devicesDir, e.Name()))
 		}
 	}
 	if !foundBackup {
@@ -210,13 +206,7 @@ func TestRepairPairing_AtomicWriteAndPerms(t *testing.T) {
 		t.Fatalf("repair pairing: %v", err)
 	}
 	pairedPath := filepath.Join(home, ".openclaw", "devices", "paired.json")
-	info, err := os.Stat(pairedPath)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Errorf("paired.json perm = %v, want 0600 (no longer world-readable)", info.Mode().Perm())
-	}
+	testenv.AssertPrivateFile(t, pairedPath)
 
 	// No temp-file remnants beside the destination.
 	entries, _ := os.ReadDir(filepath.Dir(pairedPath))
@@ -323,6 +313,9 @@ func TestReadOpenClawGatewayToken(t *testing.T) {
 // URL is a stub (Setup just substitutes api_base in the on-disk
 // config; no network calls happen).
 func TestReadZeptoClawProviderKeys_FromConfigJSON(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ZeptoClaw is not certified on native Windows; platform gate coverage remains active")
+	}
 	tmpHome := t.TempDir()
 	zcDir := filepath.Join(tmpHome, ".zeptoclaw")
 	if err := os.MkdirAll(zcDir, 0o755); err != nil {
@@ -505,13 +498,7 @@ func TestPersistRefreshedToken(t *testing.T) {
 			t.Errorf("hooks/.token content:\n%s", s)
 		}
 
-		info, err := os.Stat(tokenPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Mode().Perm() != 0o600 {
-			t.Errorf("hooks/.token perm = %v, want 0600", info.Mode().Perm())
-		}
+		testenv.AssertPrivateFile(t, tokenPath)
 	})
 
 	t.Run("silently skips hooks/.token when hooks dir missing", func(t *testing.T) {

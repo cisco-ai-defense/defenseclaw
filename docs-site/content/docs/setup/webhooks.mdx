@@ -8,19 +8,19 @@ keywords:
   - Webex webhook
   - generic HMAC webhook
   - DefenseClaw notifier
-  - DefenseClaw audit sink
+  - DefenseClaw telemetry destination
   - SSRF guard
 ---
 
 `defenseclaw setup webhook` manages the **notifier** webhooks the gateway dispatches when a guardrail or asset-policy event clears your minimum-severity threshold. Four destinations are supported out of the box; every one of them is configurable interactively or via a fully-flagged non-interactive form.
 
-<Callout title="Notifiers vs audit sinks — important">
+<Callout title="Notifiers vs telemetry destinations — important">
 There are two webhook surfaces, and they are intentionally separated:
 
 - **Notifiers** (`defenseclaw setup webhook`) — chat/incident pings shaped to the destination's API (Slack blocks, PagerDuty Events v2, Webex `messages`, or generic JSON). Severity-gated, deduped, exactly the events you'd page someone for. **This page.**
-- **Audit sinks** (`defenseclaw setup observability add webhook`) — every event the gateway emits, posted as JSONL. No severity gate; intended for SIEMs and data lakes.
+- **HTTP JSONL telemetry destinations** (`defenseclaw setup observability add webhook`) — canonical v8 log projections posted as JSON Lines. Omitted policy selects every collected log bucket; `send`/`routes` and destination redaction can narrow it. It has an independent bounded queue and is intended for SIEMs and data lakes.
 
-Pick the surface that matches the consumer. Most installs run one notifier (Slack) and zero or one audit sinks.
+Pick the surface that matches the consumer. Most installs run one notifier (Slack) and zero or more independent telemetry destinations.
 </Callout>
 
 ## The four webhook types

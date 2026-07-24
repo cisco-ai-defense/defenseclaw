@@ -28,6 +28,8 @@ The wrapper accepts exactly three flags. The underlying guardrail config falls b
 | `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks + OTLP env vars wire in. |
 | `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also bring up the bundled Prom/Loki/Tempo/Grafana stack via `setup local-observability up`. |
 
+Redaction remains a v8 bucket/profile policy (`none` for fresh v8). Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`; then follow [Redaction → Verify policy](/docs/reference/redaction#verify-policy).
+
 The alias defaults Gemini CLI to observe mode and can join an existing hook-connector roster when you choose **Add**. To tune Gemini CLI after install, keep using [`defenseclaw setup guardrail --connector geminicli`](/docs/setup/guardrail) — see the variations below.
 
 #### Common variations — pick the recipe that fits your phase
@@ -40,7 +42,7 @@ The alias defaults Gemini CLI to observe mode and can join an existing hook-conn
 defenseclaw setup geminicli
 ```
 
-Confirms once, wires the hooks against `~/.gemini/settings.json`, points OTLP at the gateway, restarts the gateway. Findings flow to `~/.defenseclaw/gateway.jsonl` and the TUI; no traffic is intercepted, no requests are blocked. Pass `--yes` to skip the confirmation in CI.
+Confirms once, wires the hooks against `~/.gemini/settings.json`, points OTLP at the gateway, and restarts the gateway. Findings flow to mandatory SQLite event history and the TUI; configured v8 destinations receive only the buckets/signals their routes select. No traffic is intercepted and no requests are blocked. Pass `--yes` to skip the confirmation in CI.
 
 </Tab>
 

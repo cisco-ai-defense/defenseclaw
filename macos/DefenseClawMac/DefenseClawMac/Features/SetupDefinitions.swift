@@ -214,7 +214,7 @@ enum TUIWizards {
                 key: "secret",
                 label: "API key",
                 kind: .secure(placeholder: "Leave blank to keep the existing key"),
-                help: "When supplied, the key is written to ~/.defenseclaw/.env through hidden stdin and never placed in argv."
+                help: "When supplied, the key is written to the selected installation's .env through hidden stdin and never placed in argv."
             ),
             WizardField(
                 key: "scanner-mode",
@@ -247,21 +247,42 @@ enum TUIWizards {
         commandBuilder: llmCommands,
         secretInputField: "api-key",
         validation: llmValidation,
+        liveDefaults: llmLiveDefaults,
         fields: [
             WizardField(key: "provider", label: "Provider", kind: .choice(options: llmProviders), defaultValue: "anthropic"),
             WizardField(key: "model", label: "Model", kind: .text(placeholder: "claude-sonnet-4-6")),
             WizardField(key: "role", label: "Role", kind: .choice(options: ["unified", "agent", "judge"]), defaultValue: "unified"),
             WizardField(key: "api-key", label: "API key", kind: .secure(placeholder: "Stored via hidden stdin, never argv"),
                         help: "When supplied, the key is written with `keys set` through stdin; only the env var name reaches setup llm."),
-            WizardField(key: "api-key-env", label: "API key env var", kind: .text(placeholder: "ANTHROPIC_API_KEY")),
-            WizardField(key: "base-url", label: "Base URL", kind: .text(placeholder: "https://…"),
-                        visibleWhen: (key: "provider", equals: needsBaseURL)),
+            WizardField(key: "api-key-env", label: "API key env var", kind: .text(placeholder: "DEFENSECLAW_LLM_KEY"), defaultValue: "DEFENSECLAW_LLM_KEY"),
+            WizardField(key: "base-url", label: "Base URL", kind: .text(placeholder: "optional provider endpoint"),
+                        help: "Optional for every provider; local and custom providers commonly require it."),
+            WizardField(key: "timeout", label: "Timeout (seconds)", kind: .text(placeholder: "30"), defaultValue: "30"),
+            WizardField(key: "max-retries", label: "Max retries", kind: .text(placeholder: "2"), defaultValue: "2"),
             WizardField(key: "bedrock-region", label: "AWS region", kind: .text(placeholder: "us-east-1"),
                         visibleWhen: (key: "provider", equals: ["bedrock"])),
             WizardField(key: "bedrock-auth-mode", label: "Bedrock auth", kind: .choice(options: ["api_key", "iam_credentials", "profile", "instance_role"]),
-                        defaultValue: "profile", visibleWhen: (key: "provider", equals: ["bedrock"])),
+                        defaultValue: "api_key", visibleWhen: (key: "provider", equals: ["bedrock"])),
         ]
     )
+
+    static func llmLiveDefaults(_ raw: YAMLNode) -> [String: String] {
+        var out: [String: String] = [:]
+        if let provider = raw["llm.provider"]?.string, llmProviders.contains(provider) {
+            out["provider"] = provider
+        }
+        if let model = raw["llm.model"]?.string { out["model"] = model }
+        if let env = raw["llm.api_key_env"]?.string { out["api-key-env"] = env }
+        if let baseURL = raw["llm.base_url"]?.string { out["base-url"] = baseURL }
+        if let timeout = raw["llm.timeout"]?.int { out["timeout"] = String(timeout) }
+        if let retries = raw["llm.max_retries"]?.int { out["max-retries"] = String(retries) }
+        if let region = raw["llm.bedrock.region"]?.string { out["bedrock-region"] = region }
+        if let auth = raw["llm.bedrock.auth_mode"]?.string,
+           ["api_key", "iam_credentials", "profile", "instance_role"].contains(auth) {
+            out["bedrock-auth-mode"] = auth
+        }
+        return out
+    }
 
     private static let localObservability = WizardDefinition(
         id: "local-observability", title: "Local OTel", icon: "chart.bar.xaxis",
@@ -395,25 +416,40 @@ enum TUIWizards {
         id: "custom-providers", title: "Custom Providers", icon: "point.3.connected.trianglepath.dotted",
         blurb: "List, add, inspect, or remove custom LLM provider overlays.",
         baseArgs: ["setup", "provider"], commandBuilder: providerCommands,
-        validation: { v in
-            let action = value(v, "action", "list")
-            if action == "add" {
-                if value(v, "name").isEmpty { return "Provider name is required for add (blank routes into the CLI's interactive wizard)." }
-                if value(v, "domain").isEmpty, value(v, "base-url").isEmpty {
-                    return "Supply at least one domain or a base URL."
-                }
-            }
-            if action == "remove", value(v, "name").isEmpty { return "Provider name is required for remove." }
-            return nil
-        },
+        validation: providerValidation,
         fields: [
             WizardField(key: "action", label: "Action", kind: .choice(options: ["list", "show", "add", "remove"]), defaultValue: "list"),
             WizardField(key: "name", label: "Provider name", kind: .text(placeholder: "internal-llm"), visibleWhen: (key: "action", equals: ["add", "remove"])),
-            WizardField(key: "base-provider-type", label: "Provider family", kind: .choice(options: llmProviders.filter { $0 != "custom" }), defaultValue: "openai", visibleWhen: (key: "action", equals: ["add"])),
+            WizardField(key: "base-provider-type", label: "Provider family", kind: .choice(options: [""] + llmProviders.filter { $0 != "custom" }), visibleWhen: (key: "action", equals: ["add"]), help: "Blank lets the runtime infer the upstream family."),
             WizardField(key: "base-url", label: "Base URL", kind: .text(placeholder: "https://llm.internal:8443"), visibleWhen: (key: "action", equals: ["add"])),
             WizardField(key: "domain", label: "Domains", kind: .text(placeholder: "comma-separated domains"), visibleWhen: (key: "action", equals: ["add"])),
             WizardField(key: "env-key", label: "API key env vars", kind: .text(placeholder: "comma-separated names"), visibleWhen: (key: "action", equals: ["add"])),
+            WizardField(key: "profile-id", label: "OpenClaw profile ID", kind: .text(placeholder: "optional auth profile"), visibleWhen: (key: "action", equals: ["add"])),
+            WizardField(key: "ollama-port", label: "Ollama ports", kind: .text(placeholder: "11434,11435"), visibleWhen: (key: "action", equals: ["add"])),
+            WizardField(key: "allowed-request", label: "Allowed request types", kind: .text(placeholder: "chat,embedding,responses"), visibleWhen: (key: "action", equals: ["add"])),
             WizardField(key: "available-model", label: "Available models", kind: .text(placeholder: "comma-separated model ids"), visibleWhen: (key: "action", equals: ["add"])),
+            WizardField(key: "request-path-override", label: "Request path overrides", kind: .text(placeholder: "chat=/v1/chat/completions"), visibleWhen: (key: "action", equals: ["add"])),
+            WizardField(key: "ca-cert-file", label: "CA certificate file", kind: .text(placeholder: "/path/to/ca.pem"), visibleWhen: (key: "action", equals: ["add"])),
+            WizardField(key: "insecure-skip-verify", label: "Disable TLS verification", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "action", equals: ["add"]), help: "Trusted labs only. Mutually exclusive with a CA certificate."),
+
+            WizardField(key: "bedrock-region", label: "Bedrock region", kind: .text(placeholder: "us-east-1"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "base-provider-type", equals: ["bedrock"])),
+            WizardField(key: "bedrock-auth-mode", label: "Bedrock auth", kind: .choice(options: ["", "api_key", "iam_credentials", "profile", "instance_role"]), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "base-provider-type", equals: ["bedrock"])),
+            WizardField(key: "bedrock-access-key-env", label: "AWS access-key env", kind: .text(placeholder: "AWS_ACCESS_KEY_ID"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "base-provider-type", equals: ["bedrock"]), visibleWhen3: (key: "bedrock-auth-mode", equals: ["iam_credentials"])),
+            WizardField(key: "bedrock-secret-key-env", label: "AWS secret-key env", kind: .text(placeholder: "AWS_SECRET_ACCESS_KEY"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "base-provider-type", equals: ["bedrock"]), visibleWhen3: (key: "bedrock-auth-mode", equals: ["iam_credentials"])),
+            WizardField(key: "bedrock-session-token-env", label: "AWS session-token env", kind: .text(placeholder: "AWS_SESSION_TOKEN"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "base-provider-type", equals: ["bedrock"]), visibleWhen3: (key: "bedrock-auth-mode", equals: ["iam_credentials"])),
+            WizardField(key: "bedrock-profile-name", label: "AWS profile name", kind: .text(placeholder: "default"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "base-provider-type", equals: ["bedrock"]), visibleWhen3: (key: "bedrock-auth-mode", equals: ["profile"])),
+            WizardField(key: "bedrock-inference-profile", label: "Inference profile prefix", kind: .text(placeholder: "us."), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "base-provider-type", equals: ["bedrock"])),
+            WizardField(key: "bedrock-deployment", label: "Bedrock aliases", kind: .text(placeholder: "alias=model-id,fast=model-id"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "base-provider-type", equals: ["bedrock"])),
+
+            WizardField(key: "vertex-project-id", label: "Vertex project ID", kind: .text(placeholder: "gcp-project"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "base-provider-type", equals: ["vertex_ai"])),
+            WizardField(key: "vertex-region", label: "Vertex region", kind: .text(placeholder: "us-central1"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "base-provider-type", equals: ["vertex_ai"])),
+            WizardField(key: "vertex-auth-mode", label: "Vertex auth", kind: .choice(options: ["", "service_account", "adc", "workload_identity"]), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "base-provider-type", equals: ["vertex_ai"])),
+            WizardField(key: "vertex-service-account-json-env", label: "Service-account JSON env", kind: .text(placeholder: "GOOGLE_APPLICATION_CREDENTIALS"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "base-provider-type", equals: ["vertex_ai"]), visibleWhen3: (key: "vertex-auth-mode", equals: ["service_account"])),
+
+            WizardField(key: "azure-endpoint", label: "Azure endpoint", kind: .text(placeholder: "https://name.openai.azure.com"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "base-provider-type", equals: ["azure"])),
+            WizardField(key: "azure-api-version", label: "Azure API version", kind: .text(placeholder: "2024-10-21"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "base-provider-type", equals: ["azure"])),
+            WizardField(key: "azure-auth-mode", label: "Azure auth", kind: .choice(options: ["", "api_key", "managed_identity"]), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "base-provider-type", equals: ["azure"])),
+            WizardField(key: "azure-deployment-alias", label: "Azure deployment aliases", kind: .text(placeholder: "model=deployment"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "base-provider-type", equals: ["azure"])),
             WizardField(key: "reload", label: "Reload sidecar", kind: .bool, defaultValue: "yes", visibleWhen: (key: "action", equals: ["add", "remove"])),
         ]
     )
@@ -512,23 +548,11 @@ enum TUIWizards {
         id: "guardrail", title: "Guardrail", icon: "shield.checkered",
         blurb: "Configure guardrail mode, scanners, detection strategy, and judge.",
         baseArgs: ["setup", "guardrail"], appendNonInteractive: true,
-        liveDefaults: { raw in
-            // Prefill from live config so an apply with untouched fields
-            // never silently downgrades the current posture.
-            var out: [String: String] = [:]
-            if let mode = raw["guardrail.mode"]?.string { out["mode"] = mode }
-            if let scanner = raw["guardrail.scanner_mode"]?.string { out["scanner-mode"] = scanner }
-            if let strategy = raw["guardrail.detection_strategy"]?.string { out["detection-strategy"] = strategy }
-            if let packDir = raw["guardrail.rule_pack_dir"]?.string, !packDir.isEmpty {
-                let pack = (packDir as NSString).lastPathComponent
-                if ["default", "strict", "permissive"].contains(pack) { out["rule-pack"] = pack }
-            }
-            if let message = raw["guardrail.block_message"]?.string { out["block-message"] = message }
-            if let judge = raw["guardrail.judge.model"]?.string { out["judge-model"] = judge }
-            return out
-        },
+        validation: guardrailValidation,
+        liveDefaults: guardrailLiveDefaults,
         fields: [
-            WizardField(key: "connector", label: "Connector", kind: .choice(options: connectors), defaultValue: "claudecode"),
+            WizardField(key: "connector", label: "Connector", kind: .choice(options: [""] + connectors),
+                        help: "Choose a connector. Multi-connector installs start blank to avoid targeting the wrong peer."),
             WizardField(key: "mode", label: "Mode", kind: .choice(options: ["observe", "action"]), defaultValue: "observe"),
             WizardField(key: "scanner-mode", label: "Scanner mode", kind: .choice(options: ["local", "remote", "both"]), defaultValue: "local"),
             WizardField(key: "detection-strategy", label: "Detection strategy", kind: .choice(options: ["regex_only", "regex_judge", "judge_first"]), defaultValue: "regex_only"),
@@ -537,6 +561,39 @@ enum TUIWizards {
             WizardField(key: "block-message", label: "Block message", kind: .text(placeholder: "optional message")),
         ]
     )
+
+    static func guardrailLiveDefaults(_ raw: YAMLNode) -> [String: String] {
+        // Prefill from live config so an apply with untouched fields never
+        // silently downgrades posture or targets the wrong connector.
+        var out: [String: String] = [:]
+        let connectorOverrides = raw["guardrail.connectors"]?.mapping ?? [:]
+        if connectorOverrides.count > 1 {
+            out["connector"] = ""
+        } else if connectorOverrides.count == 1,
+                  let onlyConnector = connectorOverrides.keys.first,
+                  connectors.contains(onlyConnector) {
+            out["connector"] = onlyConnector
+        } else if let connector = raw["guardrail.connector"]?.string ?? raw["claw.mode"]?.string,
+                  connectors.contains(connector) {
+            out["connector"] = connector
+        }
+        if let mode = raw["guardrail.mode"]?.string { out["mode"] = mode }
+        if let scanner = raw["guardrail.scanner_mode"]?.string { out["scanner-mode"] = scanner }
+        if let strategy = raw["guardrail.detection_strategy"]?.string { out["detection-strategy"] = strategy }
+        if let packDir = raw["guardrail.rule_pack_dir"]?.string, !packDir.isEmpty {
+            let pack = (packDir as NSString).lastPathComponent
+            if ["default", "strict", "permissive"].contains(pack) { out["rule-pack"] = pack }
+        }
+        if let message = raw["guardrail.block_message"]?.string { out["block-message"] = message }
+        if let judge = raw["guardrail.judge.model"]?.string { out["judge-model"] = judge }
+        return out
+    }
+
+    static func guardrailValidation(_ values: [String: String]) -> String? {
+        value(values, "connector").isEmpty
+            ? "Choose the connector whose guardrail settings should be updated."
+            : nil
+    }
 
     private static let splunk = WizardDefinition(
         id: "splunk", title: "Splunk", icon: "waveform.path.ecg.rectangle",
@@ -577,51 +634,67 @@ enum TUIWizards {
             let token = value(v, "token")
             return token.isEmpty ? [:] : ["DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN": token]
         },
-        validation: { v in
-            let action = value(v, "action", "add")
-            if ["enable", "disable", "remove"].contains(action), value(v, "name").isEmpty {
-                return "Destination name is required for \(action)."
-            }
-            if action == "add", value(v, "preset", "local-otlp") == "webhook", value(v, "endpoint").isEmpty {
-                return "The webhook preset requires an endpoint URL."
-            }
-            return nil
-        },
+        validation: observabilityValidation,
         fields: [
-            WizardField(key: "action", label: "Action", kind: .choice(options: ["add", "list", "enable", "disable", "remove"]), defaultValue: "add"),
-            WizardField(key: "preset", label: "Destination", kind: .choice(options: ["local-otlp", "otlp", "splunk-o11y", "splunk-hec", "splunk-enterprise", "datadog", "honeycomb", "newrelic", "grafana-cloud", "webhook"]), defaultValue: "local-otlp", visibleWhen: (key: "action", equals: ["add"])),
-            WizardField(key: "name", label: "Destination name", kind: .text(placeholder: "name"), visibleWhen: (key: "action", equals: ["add", "enable", "disable", "remove"])),
-            WizardField(key: "endpoint", label: "Endpoint", kind: .text(placeholder: "host:port or URL"), visibleWhen: (key: "action", equals: ["add"])),
+            WizardField(key: "action", label: "Action", kind: .choice(options: ["add", "list", "enable", "disable", "remove", "test"]), defaultValue: "add"),
+            WizardField(key: "preset", label: "Destination", kind: .choice(options: ["local-otlp", "otlp", "splunk-o11y", "splunk-hec", "splunk-enterprise", "datadog", "honeycomb", "newrelic", "grafana-cloud", "galileo", "webhook"]), defaultValue: "local-otlp", visibleWhen: (key: "action", equals: ["add"])),
+            WizardField(key: "name", label: "Destination name", kind: .text(placeholder: "name"), visibleWhen: (key: "action", equals: ["add", "enable", "disable", "remove", "test"])),
+            WizardField(key: "enabled", label: "Enable destination", kind: .bool, defaultValue: "yes", visibleWhen: (key: "action", equals: ["add"])),
+            WizardField(key: "signals-o11y", label: "Signals", kind: .text(placeholder: "traces,metrics"), defaultValue: "traces,metrics", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["splunk-o11y"])),
+            WizardField(key: "signals-galileo", label: "Signals", kind: .choice(options: ["traces"]), defaultValue: "traces", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["galileo"])),
+            WizardField(key: "signals-general", label: "Signals", kind: .text(placeholder: "traces,metrics,logs"), defaultValue: "traces,metrics,logs", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["local-otlp", "otlp", "datadog", "honeycomb", "newrelic", "grafana-cloud"])),
+            WizardField(key: "realm", label: "Splunk realm", kind: .text(placeholder: "us1"), defaultValue: "us1", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["splunk-o11y"])),
+            WizardField(key: "site", label: "Datadog site", kind: .text(placeholder: "us5"), defaultValue: "us5", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["datadog"])),
+            WizardField(key: "region", label: "Region / zone", kind: .text(placeholder: "us or prod-us-east-0"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["newrelic", "grafana-cloud"])),
+            WizardField(key: "dataset", label: "Honeycomb dataset", kind: .text(placeholder: "defenseclaw"), defaultValue: "defenseclaw", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["honeycomb"])),
+            WizardField(key: "endpoint", label: "Endpoint", kind: .text(placeholder: "host:port or URL"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["splunk-enterprise", "galileo", "otlp"])),
+            WizardField(key: "protocol", label: "OTLP protocol", kind: .choice(options: ["grpc", "http"]), defaultValue: "grpc", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["otlp"])),
+            WizardField(key: "project", label: "Galileo project", kind: .text(placeholder: "project name or ID"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["galileo"])),
+            WizardField(key: "logstream", label: "Galileo Log stream", kind: .text(placeholder: "default"), defaultValue: "default", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["galileo"])),
+            WizardField(key: "host", label: "Splunk HEC host", kind: .text(placeholder: "localhost"), defaultValue: "localhost", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["splunk-hec"])),
+            WizardField(key: "port", label: "Splunk HEC port", kind: .text(placeholder: "8088"), defaultValue: "8088", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["splunk-hec"])),
+            WizardField(key: "index", label: "Splunk index", kind: .text(placeholder: "defenseclaw"), defaultValue: "defenseclaw", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["splunk-hec", "splunk-enterprise"])),
+            WizardField(key: "source", label: "Splunk source", kind: .text(placeholder: "defenseclaw"), defaultValue: "defenseclaw", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["splunk-hec", "splunk-enterprise"])),
+            WizardField(key: "sourcetype", label: "Splunk sourcetype", kind: .text(placeholder: "_json"), defaultValue: "_json", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["splunk-hec", "splunk-enterprise"])),
+            WizardField(key: "url", label: "Webhook URL", kind: .text(placeholder: "https://…"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["webhook"])),
+            WizardField(key: "method", label: "Webhook method", kind: .choice(options: ["POST", "PUT"]), defaultValue: "POST", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["webhook"])),
+            WizardField(key: "url-path", label: "Webhook URL path", kind: .text(placeholder: "/events"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["webhook"])),
+            WizardField(key: "verify-tls-hec", label: "Verify HEC TLS", kind: .bool, defaultValue: "no", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["splunk-hec"])),
+            WizardField(key: "verify-tls-webhook", label: "Verify webhook TLS", kind: .bool, defaultValue: "yes", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["webhook"])),
             WizardField(key: "token", label: "Token / API key", kind: .secure(placeholder: "optional token"), visibleWhen: (key: "action", equals: ["add"])),
-            WizardField(key: "signals", label: "Signals", kind: .text(placeholder: "traces,metrics,logs"), visibleWhen: (key: "action", equals: ["add"])),
-            WizardField(key: "connector", label: "Connector", kind: .choice(options: ["all"] + connectors), defaultValue: "all"),
+            WizardField(key: "dry-run", label: "Preview without writing", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "action", equals: ["add"])),
             WizardField(key: "json", label: "JSON output", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "action", equals: ["list"])),
+            WizardField(key: "test-timeout", label: "Probe timeout", kind: .text(placeholder: "5"), defaultValue: "5", visibleWhen: (key: "action", equals: ["test"])),
+            WizardField(key: "write-probe", label: "Send a content-free probe", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "action", equals: ["test"])),
         ]
     )
 
     private static let webhooks = WizardDefinition(
         id: "webhooks", title: "Webhooks", icon: "link.badge.plus",
-        blurb: "Add, list, enable, disable, or remove alert notifier webhooks.",
+        blurb: "Add, inspect, test, enable, disable, or remove alert notifier webhooks.",
         baseArgs: ["setup", "webhook"], commandBuilder: webhookCommands,
-        validation: { v in
-            let action = value(v, "action", "add")
-            if action == "add", value(v, "url").isEmpty { return "Webhook URL is required for add." }
-            if ["enable", "disable", "remove"].contains(action), value(v, "name").isEmpty {
-                return "Destination name is required for \(action)."
-            }
-            return nil
-        },
+        validation: webhookValidation,
         fields: [
-            WizardField(key: "action", label: "Action", kind: .choice(options: ["add", "list", "enable", "disable", "remove"]), defaultValue: "add"),
+            WizardField(key: "action", label: "Action", kind: .choice(options: ["add", "list", "show", "enable", "disable", "remove", "test"]), defaultValue: "add"),
             WizardField(key: "type", label: "Type", kind: .choice(options: ["slack", "pagerduty", "webex", "generic"]), defaultValue: "slack", visibleWhen: (key: "action", equals: ["add"])),
-            WizardField(key: "name", label: "Destination name", kind: .text(placeholder: "name"), visibleWhen: (key: "action", equals: ["add", "enable", "disable", "remove"])),
+            WizardField(key: "name", label: "Destination name", kind: .text(placeholder: "name"), visibleWhen: (key: "action", equals: ["add", "show", "enable", "disable", "remove", "test"])),
             WizardField(key: "url", label: "Webhook URL", kind: .text(placeholder: "https://…"), visibleWhen: (key: "action", equals: ["add"])),
-            WizardField(key: "secret-env", label: "Secret env var", kind: .text(placeholder: "DEFENSECLAW_WEBHOOK_SECRET"), visibleWhen: (key: "type", equals: ["pagerduty", "webex", "generic"])),
-            WizardField(key: "room-id", label: "Webex room ID", kind: .text(placeholder: "room id"), visibleWhen: (key: "type", equals: ["webex"])),
-            WizardField(key: "min-severity", label: "Minimum severity", kind: .choice(options: ["critical", "high", "medium", "low", "info"]), defaultValue: "high", visibleWhen: (key: "action", equals: ["add"])),
-            WizardField(key: "events", label: "Events", kind: .text(placeholder: "block,scan,guardrail,drift,health"), visibleWhen: (key: "action", equals: ["add"])),
-            WizardField(key: "connector", label: "Connector", kind: .choice(options: ["all"] + connectors), defaultValue: "all"),
-            WizardField(key: "json", label: "JSON output", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "action", equals: ["list"])),
+            WizardField(key: "slack-secret-env", label: "Slack secret env (optional)", kind: .text(placeholder: "optional env var"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "type", equals: ["slack"])),
+            WizardField(key: "pagerduty-secret-env", label: "PagerDuty routing-key env", kind: .text(placeholder: "DEFENSECLAW_PD_ROUTING_KEY"), defaultValue: "DEFENSECLAW_PD_ROUTING_KEY", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "type", equals: ["pagerduty"])),
+            WizardField(key: "webex-secret-env", label: "Webex bot-token env", kind: .text(placeholder: "DEFENSECLAW_WEBEX_TOKEN"), defaultValue: "DEFENSECLAW_WEBEX_TOKEN", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "type", equals: ["webex"])),
+            WizardField(key: "generic-hmac", label: "Sign with HMAC-SHA256", kind: .bool, defaultValue: "yes", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "type", equals: ["generic"])),
+            WizardField(key: "generic-secret-env", label: "HMAC secret env", kind: .text(placeholder: "DEFENSECLAW_WEBHOOK_SECRET"), defaultValue: "DEFENSECLAW_WEBHOOK_SECRET", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "type", equals: ["generic"]), visibleWhen3: (key: "generic-hmac", equals: ["yes"])),
+            WizardField(key: "room-id", label: "Webex room ID", kind: .text(placeholder: "room id"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "type", equals: ["webex"])),
+            WizardField(key: "enabled", label: "Enable webhook", kind: .bool, defaultValue: "yes", visibleWhen: (key: "action", equals: ["add"])),
+            WizardField(key: "min-severity", label: "Minimum severity", kind: .choice(options: ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]), defaultValue: "HIGH", visibleWhen: (key: "action", equals: ["add"])),
+            WizardField(key: "events", label: "Events", kind: .text(placeholder: "block,scan,guardrail,drift,health"), defaultValue: "block,scan,guardrail,drift,health", visibleWhen: (key: "action", equals: ["add"])),
+            WizardField(key: "timeout-seconds", label: "Delivery timeout (seconds)", kind: .text(placeholder: "10"), defaultValue: "10", visibleWhen: (key: "action", equals: ["add"])),
+            WizardField(key: "cooldown-seconds", label: "Dedup cooldown (seconds)", kind: .text(placeholder: "300; 0 disables"), visibleWhen: (key: "action", equals: ["add"])),
+            WizardField(key: "connector", label: "Connector", kind: .choice(options: ["all"] + connectors), defaultValue: "all", visibleWhen: (key: "action", equals: ["add", "list", "enable", "disable", "remove"])),
+            WizardField(key: "dry-run-add", label: "Preview without writing", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "action", equals: ["add"])),
+            WizardField(key: "json", label: "JSON output", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "action", equals: ["list", "show"])),
+            WizardField(key: "test-timeout", label: "Test timeout", kind: .text(placeholder: "5"), defaultValue: "5", visibleWhen: (key: "action", equals: ["test"])),
+            WizardField(key: "dry-run-test", label: "Format test payload without delivery", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "action", equals: ["test"])),
         ]
     )
 
@@ -686,17 +759,21 @@ enum TUIWizards {
         id: "ai-discovery", title: "AI Discovery", icon: "sparkle.magnifyingglass",
         blurb: "Enable, disable, and tune AI discovery cadence, scope, and privacy.",
         baseArgs: ["agent", "discovery"], commandBuilder: aiDiscoveryCommands,
+        validation: aiDiscoveryValidation,
+        liveDefaults: aiDiscoveryLiveDefaults,
         fields: [
             WizardField(key: "enable", label: "Enable", kind: .bool, defaultValue: "yes"),
             WizardField(key: "mode", label: "Mode", kind: .choice(options: ["passive", "enhanced"]), defaultValue: "enhanced", visibleWhen: (key: "enable", equals: ["yes"])),
             WizardField(key: "scan-interval-min", label: "Scan interval (minutes)", kind: .text(placeholder: "5"), defaultValue: "5", visibleWhen: (key: "enable", equals: ["yes"])),
             WizardField(key: "process-interval-s", label: "Process poll (seconds)", kind: .text(placeholder: "60"), defaultValue: "60", visibleWhen: (key: "enable", equals: ["yes"])),
             WizardField(key: "scan-roots", label: "Scan roots", kind: .text(placeholder: "~"), defaultValue: "~", visibleWhen: (key: "enable", equals: ["yes"])),
+            WizardField(key: "max-files-per-scan", label: "Max files per scan", kind: .text(placeholder: "1000"), defaultValue: "1000", visibleWhen: (key: "enable", equals: ["yes"])),
+            WizardField(key: "max-file-bytes", label: "Max bytes per file", kind: .text(placeholder: "524288"), defaultValue: "524288", visibleWhen: (key: "enable", equals: ["yes"])),
             WizardField(key: "include-shell-history", label: "Include shell history", kind: .bool, defaultValue: "yes", visibleWhen: (key: "enable", equals: ["yes"])),
             WizardField(key: "include-package-manifests", label: "Include package manifests", kind: .bool, defaultValue: "yes", visibleWhen: (key: "enable", equals: ["yes"])),
             WizardField(key: "include-env-var-names", label: "Include env var names", kind: .bool, defaultValue: "yes", visibleWhen: (key: "enable", equals: ["yes"])),
             WizardField(key: "include-network-domains", label: "Include network domains", kind: .bool, defaultValue: "yes", visibleWhen: (key: "enable", equals: ["yes"])),
-            WizardField(key: "emit-otel", label: "Emit OTel", kind: .bool, defaultValue: "yes", visibleWhen: (key: "enable", equals: ["yes"])),
+            WizardField(key: "allow-workspace-signatures", label: "Honor workspace signatures", kind: .bool, defaultValue: "no", visibleWhen: (key: "enable", equals: ["yes"]), help: "Off by default because workspace-supplied signatures can change discovery results."),
             WizardField(key: "store-raw-local-paths", label: "Store raw local paths", kind: .bool, defaultValue: "no", visibleWhen: (key: "enable", equals: ["yes"])),
             WizardField(key: "restart", label: "Restart gateway", kind: .bool, defaultValue: "yes"),
             WizardField(key: "scan", label: "Scan immediately", kind: .bool, defaultValue: "yes", visibleWhen: (key: "enable", equals: ["yes"])),
@@ -771,7 +848,7 @@ enum TUIWizards {
 
     /// Secret hygiene: the API key travels via `keys set` on stdin; setup llm
     /// only ever sees the env-var NAME.
-    private static func llmCommands(_ v: [String: String], _ mask: Bool) -> [[String]] {
+    static func llmCommands(_ v: [String: String], _ mask: Bool) -> [[String]] {
         var commands: [[String]] = []
         if !value(v, "api-key").isEmpty {
             commands.append(["keys", "set", value(v, "api-key-env")])
@@ -782,8 +859,10 @@ enum TUIWizards {
         append(v, "role", flag: "--role", to: &args)
         append(v, "api-key-env", flag: "--api-key-env", to: &args)
         append(v, "base-url", flag: "--base-url", to: &args)
-        append(v, "bedrock-region", flag: "--bedrock-region", to: &args)
+        append(v, "timeout", flag: "--timeout", to: &args)
+        append(v, "max-retries", flag: "--max-retries", to: &args)
         if value(v, "provider") == "bedrock" {
+            append(v, "bedrock-region", flag: "--bedrock-region", to: &args)
             append(v, "bedrock-auth-mode", flag: "--bedrock-auth-mode", to: &args)
         }
         args.append("--non-interactive")
@@ -791,9 +870,16 @@ enum TUIWizards {
         return commands
     }
 
-    private static func llmValidation(_ v: [String: String]) -> String? {
+    static func llmValidation(_ v: [String: String]) -> String? {
+        if value(v, "model").isEmpty { return "Model is required." }
         if !value(v, "api-key").isEmpty, value(v, "api-key-env").isEmpty {
             return "API key env var name is required when supplying an API key."
+        }
+        if Int(value(v, "timeout", "30")).map({ $0 >= 0 }) != true {
+            return "Timeout must be a non-negative integer."
+        }
+        if Int(value(v, "max-retries", "2")).map({ $0 >= 0 }) != true {
+            return "Max retries must be a non-negative integer."
         }
         return nil
     }
@@ -985,7 +1071,7 @@ enum TUIWizards {
         return [args]
     }
 
-    private static func providerCommands(_ v: [String: String], _ mask: Bool) -> [[String]] {
+    static func providerCommands(_ v: [String: String], _ mask: Bool) -> [[String]] {
         let action = value(v, "action", "list")
         if action == "list" || action == "show" { return [["setup", "provider", action]] }
         var args = ["setup", "provider", action]
@@ -993,12 +1079,111 @@ enum TUIWizards {
         if action == "add" {
             appendCSV(v, "domain", flag: "--domain", to: &args)
             appendCSV(v, "env-key", flag: "--env-key", to: &args)
+            append(v, "profile-id", flag: "--profile-id", to: &args)
+            appendCSV(v, "ollama-port", flag: "--ollama-port", to: &args)
+            appendCSV(v, "allowed-request", flag: "--allowed-request", to: &args)
             appendCSV(v, "available-model", flag: "--available-model", to: &args)
+            appendCSV(v, "request-path-override", flag: "--request-path-override", to: &args)
             append(v, "base-provider-type", flag: "--base-provider-type", to: &args)
             append(v, "base-url", flag: "--base-url", to: &args)
+            append(v, "ca-cert-file", flag: "--ca-cert-file", to: &args)
+            flag(v, "insecure-skip-verify", "--insecure-skip-verify", to: &args)
+
+            switch value(v, "base-provider-type") {
+            case "bedrock":
+                append(v, "bedrock-region", flag: "--bedrock-region", to: &args)
+                let auth = value(v, "bedrock-auth-mode")
+                append(v, "bedrock-auth-mode", flag: "--bedrock-auth-mode", to: &args)
+                if auth == "iam_credentials" {
+                    append(v, "bedrock-access-key-env", flag: "--bedrock-access-key-env", to: &args)
+                    append(v, "bedrock-secret-key-env", flag: "--bedrock-secret-key-env", to: &args)
+                    append(v, "bedrock-session-token-env", flag: "--bedrock-session-token-env", to: &args)
+                } else if auth == "profile" {
+                    append(v, "bedrock-profile-name", flag: "--bedrock-profile-name", to: &args)
+                }
+                append(v, "bedrock-inference-profile", flag: "--bedrock-inference-profile", to: &args)
+                appendCSV(v, "bedrock-deployment", flag: "--bedrock-deployment", to: &args)
+            case "vertex_ai":
+                append(v, "vertex-project-id", flag: "--vertex-project-id", to: &args)
+                append(v, "vertex-region", flag: "--vertex-region", to: &args)
+                let auth = value(v, "vertex-auth-mode")
+                append(v, "vertex-auth-mode", flag: "--vertex-auth-mode", to: &args)
+                if auth == "service_account" {
+                    append(v, "vertex-service-account-json-env", flag: "--vertex-service-account-json-env", to: &args)
+                }
+            case "azure":
+                append(v, "azure-endpoint", flag: "--azure-endpoint", to: &args)
+                append(v, "azure-api-version", flag: "--azure-api-version", to: &args)
+                append(v, "azure-auth-mode", flag: "--azure-auth-mode", to: &args)
+                appendCSV(v, "azure-deployment-alias", flag: "--azure-deployment-alias", to: &args)
+            default:
+                break
+            }
         }
         if !yes(v, "reload") { args.append("--no-reload") }
         return [args]
+    }
+
+    static func providerValidation(_ v: [String: String]) -> String? {
+        let action = value(v, "action", "list")
+        if ["add", "remove"].contains(action), value(v, "name").isEmpty {
+            return "Provider name is required for \(action)."
+        }
+        guard action == "add" else { return nil }
+        if value(v, "domain").isEmpty, value(v, "base-url").isEmpty {
+            return "Supply at least one domain or a base URL."
+        }
+        let baseURL = value(v, "base-url")
+        if !baseURL.isEmpty, !baseURL.contains("://") {
+            return "Base URL must include a scheme, such as https://."
+        }
+        let requestTypes = Set(["chat", "completion", "embedding", "rerank", "image", "audio", "responses"])
+        for request in csvValues(v, "allowed-request") where !requestTypes.contains(request.lowercased()) {
+            return "Unsupported request type: \(request)."
+        }
+        for override in csvValues(v, "request-path-override") {
+            let pair = override.split(separator: "=", maxSplits: 1).map(String.init)
+            guard pair.count == 2,
+                  requestTypes.contains(pair[0].lowercased()),
+                  pair[1].hasPrefix("/"),
+                  pair[1].count > 1 else {
+                return "Request path overrides must use a supported type and an absolute path (for example chat=/v1/chat/completions)."
+            }
+        }
+        for key in csvValues(v, "env-key") where !isEnvironmentVariableName(key) {
+            return "Invalid API key environment variable name: \(key)."
+        }
+        for port in csvValues(v, "ollama-port") where Int(port).map({ $0 > 0 }) != true {
+            return "Ollama ports must be positive integers."
+        }
+        let family = value(v, "base-provider-type")
+        let aliases = family == "bedrock"
+            ? csvValues(v, "bedrock-deployment")
+            : family == "azure" ? csvValues(v, "azure-deployment-alias") : []
+        for alias in aliases {
+            let pair = alias.split(separator: "=", maxSplits: 1).map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if pair.count != 2 || pair.contains(where: \.isEmpty) {
+                return "Deployment aliases must use non-empty name=value pairs."
+            }
+        }
+        let caFile = value(v, "ca-cert-file")
+        if !caFile.isEmpty, yes(v, "insecure-skip-verify") {
+            return "Choose either a CA certificate or Disable TLS verification, not both."
+        }
+        if !caFile.isEmpty {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: caFile, isDirectory: &isDirectory),
+                  !isDirectory.boolValue,
+                  let text = try? String(contentsOfFile: caFile, encoding: .utf8),
+                  text.split(separator: "\n").first(where: {
+                      !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                  })?.contains("BEGIN CERTIFICATE") == true else {
+                return "CA certificate must be a readable PEM file whose first nonblank line contains BEGIN CERTIFICATE."
+            }
+        }
+        return nil
     }
 
     private static func splunkCommands(_ v: [String: String], _ mask: Bool) -> [[String]] {
@@ -1014,47 +1199,187 @@ enum TUIWizards {
         return [args]
     }
 
-    private static func observabilityCommands(_ v: [String: String], _ mask: Bool) -> [[String]] {
+    static func observabilityCommands(_ v: [String: String], _ mask: Bool) -> [[String]] {
         let action = value(v, "action", "add")
         var args = ["setup", "observability", action]
         if action == "add" {
             let preset = value(v, "preset", "local-otlp")
             args += [preset, "--non-interactive"]
             append(v, "name", flag: "--name", to: &args)
-            // The webhook preset reads --url, not --endpoint.
-            append(v, "endpoint", flag: preset == "webhook" ? "--url" : "--endpoint", to: &args)
-            append(v, "signals", flag: "--signals", to: &args)
+            let signalKey: String? = switch preset {
+            case "splunk-o11y": "signals-o11y"
+            case "galileo": "signals-galileo"
+            case "local-otlp", "otlp", "datadog", "honeycomb", "newrelic", "grafana-cloud":
+                "signals-general"
+            default: nil
+            }
+            if let signalKey { append(v, signalKey, flag: "--signals", to: &args) }
+            args.append(yes(v, "enabled") ? "--enabled" : "--disabled")
+            flag(v, "dry-run", "--dry-run", to: &args)
+            let keys: [String]
+            switch preset {
+            case "splunk-o11y": keys = ["realm"]
+            case "splunk-hec": keys = ["host", "port", "index", "source", "sourcetype"]
+            case "splunk-enterprise": keys = ["endpoint", "index", "source", "sourcetype"]
+            case "datadog": keys = ["site"]
+            case "honeycomb": keys = ["dataset"]
+            case "newrelic", "grafana-cloud": keys = ["region"]
+            case "galileo": keys = ["endpoint", "project", "logstream"]
+            case "otlp": keys = ["endpoint", "protocol"]
+            case "webhook": keys = ["url", "method", "url-path"]
+            default: keys = []
+            }
+            for key in keys { append(v, key, flag: "--\(key)", to: &args) }
+            if preset == "splunk-hec" {
+                args.append(yes(v, "verify-tls-hec") ? "--verify-tls" : "--no-verify-tls")
+            } else if preset == "webhook" {
+                args.append(yes(v, "verify-tls-webhook") ? "--verify-tls" : "--no-verify-tls")
+            }
         } else if ["enable", "disable", "remove"].contains(action) {
             let name = value(v, "name")
             if !name.isEmpty { args.append(name) }
             if action == "remove" { args.append("--yes") }
         } else if action == "list" {
             flag(v, "json", "--json", to: &args)
+        } else if action == "test" {
+            let name = value(v, "name")
+            if !name.isEmpty { args.append(name) }
+            append(v, "test-timeout", flag: "--timeout", to: &args)
+            flag(v, "write-probe", "--write-probe", to: &args)
         }
-        connector(v, to: &args)
         return [args]
     }
 
-    private static func webhookCommands(_ v: [String: String], _ mask: Bool) -> [[String]] {
+    static func observabilityValidation(_ v: [String: String]) -> String? {
+        let action = value(v, "action", "add")
+        if ["enable", "disable", "remove", "test"].contains(action), value(v, "name").isEmpty {
+            return "Destination name is required for \(action)."
+        }
+        if action == "test", Double(value(v, "test-timeout", "5")).map({ $0 > 0 }) != true {
+            return "Probe timeout must be a positive number."
+        }
+        guard action == "add" else { return nil }
+        let preset = value(v, "preset", "local-otlp")
+        let signalKey: String? = switch preset {
+        case "splunk-o11y": "signals-o11y"
+        case "galileo": "signals-galileo"
+        case "local-otlp", "otlp", "datadog", "honeycomb", "newrelic", "grafana-cloud":
+            "signals-general"
+        default: nil
+        }
+        let signals = signalKey.map { csvValues(v, $0) } ?? []
+        if signals.contains(where: { !["traces", "metrics", "logs"].contains($0) }) {
+            return "Signals may contain only traces, metrics, and logs."
+        }
+        if preset == "galileo", signals != ["traces"] {
+            return "The Galileo preset supports traces only."
+        }
+        let required: [(String, String)]
+        switch preset {
+        case "splunk-o11y": required = [("realm", "Splunk realm")]
+        case "splunk-hec": required = [("host", "Splunk HEC host"), ("port", "Splunk HEC port")]
+        case "splunk-enterprise": required = [("endpoint", "Splunk Enterprise endpoint")]
+        case "datadog": required = [("site", "Datadog site")]
+        case "honeycomb": required = [("dataset", "Honeycomb dataset")]
+        case "newrelic", "grafana-cloud": required = [("region", "Region / zone")]
+        case "galileo": required = [
+            ("endpoint", "Galileo endpoint"),
+            ("project", "Galileo project"),
+            ("logstream", "Galileo Log stream"),
+        ]
+        case "otlp": required = [("endpoint", "OTLP endpoint")]
+        case "webhook": required = [("url", "Webhook URL")]
+        default: required = []
+        }
+        if let missing = required.first(where: { value(v, $0.0).isEmpty }) {
+            return "\(missing.1) is required."
+        }
+        if preset == "splunk-hec", Int(value(v, "port")).map({ $0 > 0 }) != true {
+            return "Splunk HEC port must be a positive integer."
+        }
+        return nil
+    }
+
+    static func webhookCommands(_ v: [String: String], _ mask: Bool) -> [[String]] {
         let action = value(v, "action", "add")
         var args = ["setup", "webhook", action]
         if action == "add" {
-            args += [value(v, "type", "slack"), "--non-interactive"]
+            let type = value(v, "type", "slack")
+            args += [type, "--non-interactive"]
             append(v, "name", flag: "--name", to: &args)
             append(v, "url", flag: "--url", to: &args)
-            append(v, "secret-env", flag: "--secret-env", to: &args)
-            append(v, "room-id", flag: "--room-id", to: &args)
+            let secretKey: String? = switch type {
+            case "slack": "slack-secret-env"
+            case "pagerduty": "pagerduty-secret-env"
+            case "webex": "webex-secret-env"
+            case "generic" where yes(v, "generic-hmac"): "generic-secret-env"
+            default: nil
+            }
+            if let secretKey { append(v, secretKey, flag: "--secret-env", to: &args) }
+            if type == "webex" { append(v, "room-id", flag: "--room-id", to: &args) }
             append(v, "min-severity", flag: "--min-severity", to: &args)
             append(v, "events", flag: "--events", to: &args)
+            append(v, "timeout-seconds", flag: "--timeout-seconds", to: &args)
+            append(v, "cooldown-seconds", flag: "--cooldown-seconds", to: &args)
+            args.append(yes(v, "enabled") ? "--enabled" : "--disabled")
+            flag(v, "dry-run-add", "--dry-run", to: &args)
+            connector(v, to: &args)
         } else if ["enable", "disable", "remove"].contains(action) {
             let name = value(v, "name")
             if !name.isEmpty { args.append(name) }
             if action == "remove" { args.append("--yes") }
+            connector(v, to: &args)
         } else if action == "list" {
             flag(v, "json", "--json", to: &args)
+            connector(v, to: &args)
+        } else if action == "show" {
+            let name = value(v, "name")
+            if !name.isEmpty { args.append(name) }
+            flag(v, "json", "--json", to: &args)
+        } else if action == "test" {
+            let name = value(v, "name")
+            if !name.isEmpty { args.append(name) }
+            flag(v, "dry-run-test", "--dry-run", to: &args)
+            append(v, "test-timeout", flag: "--timeout", to: &args)
         }
-        connector(v, to: &args)
         return [args]
+    }
+
+    static func webhookValidation(_ v: [String: String]) -> String? {
+        let action = value(v, "action", "add")
+        if ["show", "enable", "disable", "remove", "test"].contains(action), value(v, "name").isEmpty {
+            return "Webhook name is required for \(action)."
+        }
+        if action == "test", Double(value(v, "test-timeout", "5")).map({ $0 > 0 }) != true {
+            return "Test timeout must be a positive number."
+        }
+        guard action == "add" else { return nil }
+        if value(v, "url").isEmpty { return "Webhook URL is required for add." }
+        let type = value(v, "type", "slack")
+        let secretKey: String? = switch type {
+        case "pagerduty": "pagerduty-secret-env"
+        case "webex": "webex-secret-env"
+        case "generic" where yes(v, "generic-hmac"): "generic-secret-env"
+        default: nil
+        }
+        if let secretKey {
+            let env = value(v, secretKey)
+            if env.isEmpty { return "A secret environment variable is required for \(type)." }
+            if !isEnvironmentVariableName(env) { return "Invalid secret environment variable name: \(env)." }
+        }
+        if type == "webex", value(v, "room-id").isEmpty { return "Webex room ID is required." }
+        if Int(value(v, "timeout-seconds", "10")).map({ $0 > 0 }) != true {
+            return "Delivery timeout must be a positive integer."
+        }
+        let cooldown = value(v, "cooldown-seconds")
+        if !cooldown.isEmpty, Int(cooldown).map({ $0 >= 0 }) != true {
+            return "Dedup cooldown must be a non-negative integer."
+        }
+        let allowedEvents = Set(["block", "scan", "guardrail", "drift", "health"])
+        if csvValues(v, "events").contains(where: { !allowedEvents.contains($0) }) {
+            return "Events may contain only block, scan, guardrail, drift, and health."
+        }
+        return nil
     }
 
     private static func registryCommands(_ v: [String: String], _ mask: Bool) -> [[String]] {
@@ -1099,23 +1424,85 @@ enum TUIWizards {
         return commands
     }
 
-    private static func aiDiscoveryCommands(_ v: [String: String], _ mask: Bool) -> [[String]] {
+    static func aiDiscoveryCommands(_ v: [String: String], _ mask: Bool) -> [[String]] {
         if !yes(v, "enable") {
             var args = ["agent", "discovery", "disable", "--yes"]
             if !yes(v, "restart") { args.append("--no-restart") }
             return [args]
         }
         var args = ["agent", "discovery", "enable", "--yes"]
-        for key in ["mode", "scan-interval-min", "process-interval-s", "scan-roots"] {
+        for key in ["mode", "scan-interval-min", "process-interval-s", "scan-roots",
+                    "max-files-per-scan", "max-file-bytes"] {
             append(v, key, flag: "--\(key)", to: &args)
         }
         for key in ["include-shell-history", "include-package-manifests", "include-env-var-names",
-                    "include-network-domains", "emit-otel", "store-raw-local-paths"] {
+                    "include-network-domains", "allow-workspace-signatures", "store-raw-local-paths"] {
             args.append(yes(v, key) ? "--\(key)" : "--no-\(key)")
         }
         if !yes(v, "restart") { args.append("--no-restart") }
         if !yes(v, "scan") { args.append("--no-scan") }
         return [args]
+    }
+
+    static func aiDiscoveryLiveDefaults(_ raw: YAMLNode) -> [String: String] {
+        var out: [String: String] = [:]
+        if let enabled = raw["ai_discovery.enabled"]?.bool {
+            out["enable"] = enabled ? "yes" : "no"
+        }
+        if let mode = raw["ai_discovery.mode"]?.string,
+           ["passive", "enhanced"].contains(mode) {
+            out["mode"] = mode
+        }
+        for (configKey, fieldKey) in [
+            ("scan_interval_min", "scan-interval-min"),
+            ("process_interval_s", "process-interval-s"),
+            ("max_files_per_scan", "max-files-per-scan"),
+            ("max_file_bytes", "max-file-bytes"),
+        ] {
+            if let number = raw["ai_discovery.\(configKey)"]?.int {
+                out[fieldKey] = String(number)
+            }
+        }
+        if let roots = raw["ai_discovery.scan_roots"] {
+            switch roots {
+            case .scalar(let value) where !value.isEmpty:
+                out["scan-roots"] = value
+            case .sequence(let items):
+                let value = items.compactMap(\.string).joined(separator: ", ")
+                if !value.isEmpty { out["scan-roots"] = value }
+            default:
+                break
+            }
+        }
+        for (configKey, fieldKey) in [
+            ("include_shell_history", "include-shell-history"),
+            ("include_package_manifests", "include-package-manifests"),
+            ("include_env_var_names", "include-env-var-names"),
+            ("include_network_domains", "include-network-domains"),
+            ("allow_workspace_signatures", "allow-workspace-signatures"),
+            ("store_raw_local_paths", "store-raw-local-paths"),
+        ] {
+            if let enabled = raw["ai_discovery.\(configKey)"]?.bool {
+                out[fieldKey] = enabled ? "yes" : "no"
+            }
+        }
+        return out
+    }
+
+    static func aiDiscoveryValidation(_ values: [String: String]) -> String? {
+        guard yes(values, "enable") else { return nil }
+        for (key, label, range) in [
+            ("scan-interval-min", "Scan interval", 1...1_440),
+            ("process-interval-s", "Process poll", 5...3_600),
+            ("max-files-per-scan", "Max files per scan", 10...100_000),
+            ("max-file-bytes", "Max bytes per file", 4_096...16_777_216),
+        ] {
+            let raw = value(values, key)
+            guard let number = Int(raw), range.contains(number) else {
+                return "\(label) must be an integer from \(range.lowerBound) through \(range.upperBound)."
+            }
+        }
+        return nil
     }
 
     private static func splunkDashboardCommands(_ v: [String: String], _ mask: Bool) -> [[String]] {
@@ -1176,8 +1563,20 @@ enum TUIWizards {
     }
 
     private static func appendCSV(_ values: [String: String], _ key: String, flag: String, to args: inout [String]) {
-        value(values, key).split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }.forEach { args += [flag, $0] }
+        csvValues(values, key).forEach { args += [flag, $0] }
+    }
+
+    private static func csvValues(_ values: [String: String], _ key: String) -> [String] {
+        value(values, key).split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func isEnvironmentVariableName(_ value: String) -> Bool {
+        value.range(
+            of: #"^[A-Za-z_][A-Za-z0-9_]*$"#,
+            options: .regularExpression
+        ) != nil
     }
 
     private static func flag(_ values: [String: String], _ key: String, _ flag: String, to args: inout [String]) {

@@ -2,7 +2,8 @@
 
 Each test corresponds to a confirmed finding and asserts the *secure*
 (fail-closed) behavior plus the explicit ``--allow-unverified`` opt-out where
-one exists.
+one exists for legacy releases.  DefenseClaw 0.8.4+ provenance is mandatory
+and cannot be bypassed.
 
 Findings covered:
 
@@ -45,7 +46,8 @@ from defenseclaw.llm import _merge_defaults
 class TestUpgradeFailsClosedWithoutChecksums(unittest.TestCase):
     """F-0201 / F-0703: when neither checksums.txt nor GitHub asset digests
     are available, the upgrade must abort before any artifact is installed —
-    unless the operator explicitly opts in with --allow-unverified."""
+    unless the operator explicitly opts in for a legacy release with
+    --allow-unverified.  DefenseClaw 0.8.4+ always fails closed."""
 
     def test_upgrade_aborts_when_no_integrity_metadata(self):
         runner = CliRunner()
@@ -55,7 +57,10 @@ class TestUpgradeFailsClosedWithoutChecksums(unittest.TestCase):
         with TemporaryDirectory() as data_dir, ExitStack() as stack:
             app.cfg.data_dir = data_dir
             app.cfg.claw.home_dir = data_dir
-            stack.enter_context(patch("defenseclaw.__version__", "9.9.9"))
+            stack.enter_context(patch("defenseclaw.__version__", "9.9.8"))
+            stack.enter_context(
+                patch("defenseclaw.commands.cmd_upgrade._preflight_installed_source_coherence")
+            )
             stack.enter_context(patch(
                 "defenseclaw.commands.cmd_upgrade._detect_platform",
                 return_value=("darwin", "arm64"),
@@ -90,7 +95,7 @@ class TestUpgradeFailsClosedWithoutChecksums(unittest.TestCase):
         with TemporaryDirectory() as data_dir, ExitStack() as stack:
             app.cfg.data_dir = data_dir
             app.cfg.claw.home_dir = data_dir
-            stack.enter_context(patch("defenseclaw.__version__", "9.9.9"))
+            stack.enter_context(patch("defenseclaw.__version__", "0.8.2"))
             stack.enter_context(patch(
                 "defenseclaw.commands.cmd_upgrade._detect_platform",
                 return_value=("darwin", "arm64"),
@@ -112,12 +117,12 @@ class TestUpgradeFailsClosedWithoutChecksums(unittest.TestCase):
                 "defenseclaw.commands.cmd_upgrade._download_gateway",
                 return_value=(
                     "/tmp/defenseclaw-gateway",
-                    "defenseclaw_9.9.9_darwin_arm64.tar.gz",
+                    "defenseclaw_0.8.3_darwin_arm64.tar.gz",
                 ),
             ))
             stack.enter_context(patch(
                 "defenseclaw.commands.cmd_upgrade._download_wheel",
-                return_value=("/tmp/defenseclaw.whl", "defenseclaw-9.9.9-py3-none-any.whl"),
+                return_value=("/tmp/defenseclaw.whl", "defenseclaw-0.8.3-py3-none-any.whl"),
             ))
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_wheel_install"))
             install_gateway = stack.enter_context(
@@ -135,7 +140,12 @@ class TestUpgradeFailsClosedWithoutChecksums(unittest.TestCase):
                 return_value="/tmp/backup",
             ))
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._run_silent"))
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._assert_gateway_quiesced"))
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._poll_health"))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._reload_post_upgrade_config",
+                return_value=app.cfg,
+            ))
             stack.enter_context(patch(
                 "defenseclaw.commands.cmd_upgrade.subprocess.run",
                 return_value=Mock(returncode=0),
@@ -146,7 +156,7 @@ class TestUpgradeFailsClosedWithoutChecksums(unittest.TestCase):
 
             result = runner.invoke(
                 upgrade,
-                ["--yes", "--allow-unverified", "--version", "9.9.9"],
+                ["--yes", "--allow-unverified", "--version", "0.8.3"],
                 obj=app,
             )
 
@@ -160,14 +170,19 @@ class TestUpgradeRefusesUnsignedAssetDigests(unittest.TestCase):
     remote release service and are NOT a substitute for the Sigstore-verified
     checksums.txt. When checksums.txt is unavailable but unsigned asset digests
     ARE present, the upgrade must still refuse without --allow-unverified (this
-    is the regression: it previously proceeded as if verified). With the flag
-    it proceeds, but the unsigned digests are not used to fake verification."""
+    is the regression: it previously proceeded as if verified). For a legacy
+    release the flag proceeds, but the unsigned digests are not used to fake
+    verification. DefenseClaw 0.8.4+ does not permit this override."""
 
     @staticmethod
-    def _common_patches(stack, app, data_dir):
+    def _common_patches(stack, app, data_dir, *, version="9.9.9"):
         app.cfg.data_dir = data_dir
         app.cfg.claw.home_dir = data_dir
-        stack.enter_context(patch("defenseclaw.__version__", "9.9.9"))
+        installed = "0.8.2" if version == "0.8.3" else "9.9.8"
+        stack.enter_context(patch("defenseclaw.__version__", installed))
+        stack.enter_context(
+            patch("defenseclaw.commands.cmd_upgrade._preflight_installed_source_coherence")
+        )
         stack.enter_context(patch(
             "defenseclaw.commands.cmd_upgrade._detect_platform",
             return_value=("darwin", "arm64"),
@@ -182,8 +197,8 @@ class TestUpgradeRefusesUnsignedAssetDigests(unittest.TestCase):
         stack.enter_context(patch(
             "defenseclaw.commands.cmd_upgrade._fetch_release_asset_digests",
             return_value={
-                "defenseclaw_9.9.9_darwin_arm64.tar.gz": "a" * 64,
-                "defenseclaw-9.9.9-py3-none-any.whl": "b" * 64,
+                f"defenseclaw_{version}_darwin_arm64.tar.gz": "a" * 64,
+                f"defenseclaw-{version}-py3-none-any.whl": "b" * 64,
                 "upgrade-manifest.json": "c" * 64,
             },
         ))
@@ -226,7 +241,7 @@ class TestUpgradeRefusesUnsignedAssetDigests(unittest.TestCase):
         app.cfg = Config()
 
         with TemporaryDirectory() as data_dir, ExitStack() as stack:
-            self._common_patches(stack, app, data_dir)
+            self._common_patches(stack, app, data_dir, version="0.8.3")
             stack.enter_context(patch(
                 "defenseclaw.commands.cmd_upgrade._download_upgrade_manifest",
                 return_value=None,
@@ -235,12 +250,12 @@ class TestUpgradeRefusesUnsignedAssetDigests(unittest.TestCase):
                 "defenseclaw.commands.cmd_upgrade._download_gateway",
                 return_value=(
                     "/tmp/defenseclaw-gateway",
-                    "defenseclaw_9.9.9_darwin_arm64.tar.gz",
+                    "defenseclaw_0.8.3_darwin_arm64.tar.gz",
                 ),
             ))
             stack.enter_context(patch(
                 "defenseclaw.commands.cmd_upgrade._download_wheel",
-                return_value=("/tmp/defenseclaw.whl", "defenseclaw-9.9.9-py3-none-any.whl"),
+                return_value=("/tmp/defenseclaw.whl", "defenseclaw-0.8.3-py3-none-any.whl"),
             ))
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._preflight_wheel_install"))
             install_gateway = stack.enter_context(
@@ -258,7 +273,12 @@ class TestUpgradeRefusesUnsignedAssetDigests(unittest.TestCase):
                 return_value="/tmp/backup",
             ))
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._run_silent"))
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._assert_gateway_quiesced"))
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._poll_health"))
+            stack.enter_context(patch(
+                "defenseclaw.commands.cmd_upgrade._reload_post_upgrade_config",
+                return_value=app.cfg,
+            ))
             stack.enter_context(patch(
                 "defenseclaw.commands.cmd_upgrade.subprocess.run",
                 return_value=Mock(returncode=0),
@@ -269,7 +289,7 @@ class TestUpgradeRefusesUnsignedAssetDigests(unittest.TestCase):
 
             result = runner.invoke(
                 upgrade,
-                ["--yes", "--allow-unverified", "--version", "9.9.9"],
+                ["--yes", "--allow-unverified", "--version", "0.8.3"],
                 obj=app,
             )
 
@@ -293,11 +313,11 @@ class TestUnsignedChecksumManifestRejected(unittest.TestCase):
     untrusted and must not authenticate artifacts by default."""
 
     @staticmethod
-    def _write_manifest(tmp):
+    def _write_manifest(tmp, *, version="9.9.9"):
         path = os.path.join(tmp, "checksums.txt")
         sha = "a" * 64
         with open(path, "w", encoding="utf-8") as f:
-            f.write(f"{sha}  defenseclaw-9.9.9-py3-none-any.whl\n")
+            f.write(f"{sha}  defenseclaw-{version}-py3-none-any.whl\n")
         return path, sha
 
     def test_unsigned_manifest_fails_closed(self):
@@ -313,13 +333,13 @@ class TestUnsignedChecksumManifestRejected(unittest.TestCase):
 
     def test_allow_unverified_accepts_unsigned_manifest(self):
         with TemporaryDirectory() as tmp:
-            checksums_path, sha = self._write_manifest(tmp)
+            checksums_path, sha = self._write_manifest(tmp, version="0.8.3")
             with patch(
                 "defenseclaw.commands.cmd_upgrade._download_optional_release_asset",
                 side_effect=[checksums_path, None, None],
             ):
-                result = _download_checksums("9.9.9", tmp, allow_unverified=True)
-            self.assertEqual(result, {"defenseclaw-9.9.9-py3-none-any.whl": sha})
+                result = _download_checksums("0.8.3", tmp, allow_unverified=True)
+            self.assertEqual(result, {"defenseclaw-0.8.3-py3-none-any.whl": sha})
 
     def test_incomplete_signature_assets_fail_closed(self):
         """Only one of .sig/.pem present is still unverifiable."""
@@ -337,7 +357,7 @@ class TestUnsignedChecksumManifestRejected(unittest.TestCase):
 
 
 class TestSigstoreCosignMissingWarns(unittest.TestCase):
-    """Signed checksums remain usable when cosign is unavailable locally."""
+    """Legacy signed checksums remain usable when cosign is unavailable locally."""
 
     def test_missing_cosign_with_signature_warns_and_continues(self):
         with TemporaryDirectory() as tmp:
@@ -359,7 +379,7 @@ class TestSigstoreCosignMissingWarns(unittest.TestCase):
             ) as run_mock, patch(
                 "defenseclaw.commands.cmd_upgrade.ux.warn"
             ) as warn_mock:
-                _verify_checksums_sigstore("9.9.9", tmp, checksums)
+                _verify_checksums_sigstore("0.8.3", tmp, checksums)
 
         run_mock.assert_not_called()
         warn_mock.assert_called_once()

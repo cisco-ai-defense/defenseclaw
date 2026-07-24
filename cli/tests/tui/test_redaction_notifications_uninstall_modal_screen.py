@@ -8,7 +8,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Redaction, notifications, and uninstall modal parity tests."""
+"""Notifications and uninstall modal parity tests."""
 
 from __future__ import annotations
 
@@ -19,12 +19,6 @@ from defenseclaw.tui.screens.notifications import (
     build_notifications_model,
     desired_notifications_action,
     notifications_command,
-)
-from defenseclaw.tui.screens.redaction import (
-    RedactionToggleScreen,
-    build_redaction_model,
-    desired_redaction_action,
-    redaction_command,
 )
 from defenseclaw.tui.screens.uninstall import (
     UninstallOption,
@@ -53,46 +47,33 @@ class ModalHarness(App[ConsequenceAction | None]):
         self.result = result
 
 
-def test_redaction_model_matches_go_oracle_copy_and_argv() -> None:
-    assert desired_redaction_action(False) == "off"
-    assert redaction_command(False).args == ("setup", "redaction", "off", "--yes")
-    assert desired_redaction_action(True) == "on"
-    assert redaction_command(True).args == ("setup", "redaction", "on", "--yes")
-
-    off_model = build_redaction_model(False)
-    off_copy = "\n".join((off_model.summary, *off_model.details, off_model.consequence))
-    assert "SQLite audit DB" in off_copy
-    assert "Splunk HEC" in off_copy
-    assert "OTel log exporters" in off_copy
-    assert "webhooks" in off_copy
-    assert "gateway.log" in off_copy
-    assert "Logs panel" in off_copy
-
-    on_model = build_redaction_model(True)
-    on_copy = "\n".join((on_model.summary, *on_model.details))
-    assert "already-emitted" in on_copy
-
-
 def test_notifications_model_matches_go_oracle_copy_and_argv() -> None:
     assert desired_notifications_action(True) == "off"
     assert notifications_command(True).args == ("setup", "notifications", "off", "--yes")
     assert desired_notifications_action(False) == "on"
     assert notifications_command(False).args == ("setup", "notifications", "on", "--yes")
 
-    on_model = build_notifications_model(False)
+    on_model = build_notifications_model(False, "Linux")
     on_copy = "\n".join((on_model.summary, *on_model.details, on_model.consequence))
     assert "asset-policy blocks" in on_copy
     assert "would-blocks" in on_copy
     assert "HITL approval" in on_copy
     assert "does not approve" in on_copy
 
-    off_model = build_notifications_model(True)
+    off_model = build_notifications_model(True, "Darwin")
     off_copy = "\n".join((off_model.summary, *off_model.details))
-    assert "Audit DB" in off_copy
-    assert "Splunk" in off_copy
-    assert "OTel" in off_copy
+    assert "Event history" in off_copy
+    assert "telemetry destinations" in off_copy
     assert "webhooks" in off_copy
     assert "not affected" in off_copy
+
+
+def test_windows_notifications_model_is_native_and_has_toggle_command() -> None:
+    model = build_notifications_model(True, "Windows")
+    assert model.title == "Desktop notifications"
+    assert "Will become:" in model.summary
+    assert model.actions[0].label == "Confirm"
+    assert model.actions[0].command == notifications_command(True)
 
 
 def test_uninstall_model_defaults_to_dry_run_and_maps_all_argv() -> None:
@@ -107,42 +88,9 @@ def test_uninstall_model_defaults_to_dry_run_and_maps_all_argv() -> None:
 
 
 @pytest.mark.asyncio
-async def test_redaction_modal_off_requires_second_confirm() -> None:
-    # Disabling redaction is a danger action: the first Enter only arms it.
-    app = ModalHarness(RedactionToggleScreen(currently_disabled=False))
-
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.result is None  # armed, not yet confirmed
-
-        await pilot.press("enter")
-        await pilot.pause()
-
-        assert app.result is not None
-        assert app.result.command is not None
-        assert app.result.command.args == ("setup", "redaction", "off", "--yes")
-
-
-@pytest.mark.asyncio
-async def test_redaction_modal_on_confirms_in_one_step() -> None:
-    # Re-enabling redaction is benign (danger=False) -> single Enter confirms.
-    app = ModalHarness(RedactionToggleScreen(currently_disabled=True))
-
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.press("enter")
-        await pilot.pause()
-
-        assert app.result is not None
-        assert app.result.command is not None
-        assert app.result.command.args == ("setup", "redaction", "on", "--yes")
-
-
-@pytest.mark.asyncio
 async def test_uninstall_modal_renders_red_danger_border() -> None:
-    from textual.containers import Vertical
-
     from defenseclaw.tui.theme import DEFAULT_TOKENS
+    from textual.containers import Vertical
 
     app = ModalHarness(UninstallScreen())
     async with app.run_test(size=(110, 34)) as pilot:
@@ -153,7 +101,7 @@ async def test_uninstall_modal_renders_red_danger_border() -> None:
 
 @pytest.mark.asyncio
 async def test_notifications_modal_click_confirms_cli_argv() -> None:
-    app = ModalHarness(NotificationsToggleScreen(currently_enabled=False))
+    app = ModalHarness(NotificationsToggleScreen(currently_enabled=False, system="Linux"))
 
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.click("#consequence-action-0")

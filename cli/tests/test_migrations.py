@@ -20,12 +20,14 @@ import importlib
 import json
 import os
 import shutil
-import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import yaml
+from defenseclaw.file_permissions import set_file_mode
 from defenseclaw.migrations import (
     _LEGACY_FLAT_REGO_FILENAMES,
     MigrationContext,
@@ -38,12 +40,13 @@ from defenseclaw.migrations import (
     _migrate_0_5_0_strip_codex_enforcement_keys,
     _migrate_0_8_0,
     _migrate_0_8_0_guardrail_runtime_json,
-    _migrate_config_v7_named_otel_destinations,
     _parse_dotenv,
     _read_active_connector_from_yaml,
     _yaml_scalar,
     run_migrations,
 )
+
+from tests.permissions import assert_owner_only_file, grant_everyone
 
 
 def _write_json(path: str, data: dict) -> None:
@@ -63,6 +66,22 @@ def _ctx(openclaw_home: str, data_dir: str | None = None) -> MigrationContext:
         openclaw_home=openclaw_home,
         data_dir=data_dir or tempfile.mkdtemp(prefix="dclaw-mig-data-"),
     )
+
+
+class TestMigrationImportIsolation(unittest.TestCase):
+    def test_target_migrations_load_with_legacy_config_cached(self):
+        """A wheel replacement must not couple new migrations to old config."""
+        script = """
+import sys
+import types
+
+legacy_config = types.ModuleType("defenseclaw.config")
+sys.modules["defenseclaw.config"] = legacy_config
+
+import defenseclaw.migrations
+assert not hasattr(legacy_config, "locked_file_update")
+"""
+        subprocess.run([sys.executable, "-c", script], check=True)
 
 
 class TestYAMLScalarRendering(unittest.TestCase):
@@ -453,9 +472,15 @@ class TestRunMigrations(unittest.TestCase):
         import defenseclaw.commands.cmd_version as cmd_version
         from defenseclaw import migration_state
 
+        installed_version = defenseclaw.__version__
         defenseclaw.__version__ = "0.7.0"
         cmd_version.__version__ = "0.7.0"
-        for attr in ("detect_schema", "is_future_schema", "FutureSchemaError"):
+        for attr in (
+            "detect_schema",
+            "is_future_schema",
+            "FutureSchemaError",
+            "upgrade_mutation_temp_suffix",
+        ):
             delattr(migration_state, attr)
 
         calls: list[str] = []
@@ -476,9 +501,10 @@ class TestRunMigrations(unittest.TestCase):
 
         self.assertEqual(count, 1)
         self.assertEqual(calls, ["0.8.0"])
-        self.assertEqual(refreshed_version, "0.8.0")
-        self.assertEqual(refreshed_cmd_version, "0.8.0")
+        self.assertEqual(refreshed_version, installed_version)
+        self.assertEqual(refreshed_cmd_version, installed_version)
 
+    @unittest.skipIf(os.name == "nt", "legacy restart shim is POSIX-only")
     def test_legacy_openclaw_restart_shim_for_pre_061_upgrade(self):
         with (
             tempfile.TemporaryDirectory() as data_dir,
@@ -538,9 +564,7 @@ class TestMigrate040TokenBootstrap(unittest.TestCase):
         # 32 bytes hex == 64 chars
         self.assertEqual(len(token), 64)
         self.assertTrue(all(c in "0123456789abcdef" for c in token))
-        # File mode is 0o600.
-        mode = stat.S_IMODE(os.stat(env_path).st_mode)
-        self.assertEqual(mode, 0o600)
+        assert_owner_only_file(env_path)
         # Change log contains the bootstrap entry.
         self.assertTrue(
             any("DEFENSECLAW_GATEWAY_TOKEN" in c for c in ctx.changes),
@@ -628,15 +652,22 @@ class TestMigrate040PermsTighten(unittest.TestCase):
         device_key = os.path.join(self.data_dir, "device.key")
         with open(device_key, "w") as f:
             f.write("secretkey")
-        os.chmod(device_key, 0o644)
+        if os.name == "nt":
+            grant_everyone(device_key)
+        else:
+            os.chmod(device_key, 0o644)
 
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
 
-        mode = stat.S_IMODE(os.stat(device_key).st_mode)
-        self.assertEqual(mode, 0o600)
+        assert_owner_only_file(device_key)
+        change_text = (
+            "tightened Windows DACL on device.key"
+            if os.name == "nt"
+            else "tightened perms on device.key"
+        )
         self.assertTrue(
-            any("tightened perms on device.key" in c for c in ctx.changes),
+            any(change_text in c for c in ctx.changes),
             msg=ctx.changes,
         )
 
@@ -664,15 +695,18 @@ class TestMigrate040PermsTighten(unittest.TestCase):
         os.makedirs(os.path.dirname(managed), exist_ok=True)
         with open(managed, "w") as f:
             f.write("{}")
-        os.chmod(managed, 0o644)
+        if os.name == "nt":
+            grant_everyone(managed)
+        else:
+            os.chmod(managed, 0o644)
 
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
 
-        mode = stat.S_IMODE(os.stat(managed).st_mode)
-        self.assertEqual(mode, 0o600)
+        assert_owner_only_file(managed)
+        relative = os.path.join("connector_backups", "codex", "config.toml.json")
         self.assertTrue(
-            any("connector_backups/codex/config.toml.json" in c for c in ctx.changes),
+            any(relative in c for c in ctx.changes),
             msg=ctx.changes,
         )
 
@@ -1070,13 +1104,13 @@ class TestMigrate040SeedHookFailMode(unittest.TestCase):
             "  mode: action\n"
             '  block_message: "Blocked by DefenseClaw — see #sec-help"\n'
         )
-        with open(cfg_path, "w") as f:
+        with open(cfg_path, "w", encoding="utf-8") as f:
             f.write(original)
 
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
 
-        with open(cfg_path) as f:
+        with open(cfg_path, encoding="utf-8") as f:
             new = f.read()
 
         # All five comments survived byte-for-byte.
@@ -1712,11 +1746,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
 
     def test_managed_config_never_consumes_service_runtime_overlay(self):
         runtime_path = os.path.join(self.data_dir, "guardrail_runtime.json")
-        self._write(
-            "deployment_mode: managed_enterprise\n"
-            "guardrail:\n"
-            "  mode: action\n"
-        )
+        self._write("deployment_mode: managed_enterprise\nguardrail:\n  mode: action\n")
         _write_json(runtime_path, {"mode": "observe"})
         before = self._read()
 
@@ -1845,6 +1875,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
         self.assertIn("0.7.0", cursor["applied"])
         self.assertIn("0.8.0", cursor["applied"])
 
+    @unittest.skip("retired v7 intermediate migration; upgrade converts directly to v8")
     def test_upgrade_persists_flat_otel_and_preserves_named_routes(self):
         self._write(
             "config_version: 6\n"
@@ -1870,7 +1901,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
         )
 
         ctx = self._ctx()
-        self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
+        self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))  # noqa: F821
 
         with open(self.cfg_path) as handle:
             doc = yaml.safe_load(handle) or {}
@@ -1901,10 +1932,11 @@ class TestMigrate080Compatibility(unittest.TestCase):
         # route, and it must leave the already-canonical file byte-identical.
         after = self._read()
         second = self._ctx()
-        self.assertFalse(_migrate_config_v7_named_otel_destinations(second))
+        self.assertFalse(_migrate_config_v7_named_otel_destinations(second))  # noqa: F821
         self.assertEqual(self._read(), after)
         self.assertFalse(any("named otel.destinations" in change for change in second.changes))
 
+    @unittest.skip("retired v7 intermediate migration; upgrade converts directly to v8")
     def test_upgrade_persists_environment_backed_signal_exporter(self):
         self._write("config_version: 6\notel:\n  enabled: true\n")
         environment = {
@@ -1913,7 +1945,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
         }
         with patch.dict(os.environ, environment, clear=False):
             ctx = self._ctx()
-            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
+            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))  # noqa: F821
 
         with open(self.cfg_path) as handle:
             destination = (yaml.safe_load(handle) or {})["otel"]["destinations"][0]
@@ -1930,6 +1962,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
         self.assertIsNot(destination["logs"].get("enabled"), True)
         self.assertTrue(any("named otel.destinations" in change for change in ctx.changes))
 
+    @unittest.skip("retired v7 writer module")
     def test_upgrade_isolates_stale_observability_writer_from_legacy_client(self):
         self._write("config_version: 6\notel:\n  enabled: true\n  endpoint: 127.0.0.1:4317\n")
         from defenseclaw.observability import writer
@@ -1938,7 +1971,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
         try:
             delattr(writer, "migrate_flat_otel")
             ctx = self._ctx()
-            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
+            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))  # noqa: F821
             # The old parent module remains untouched; the newly installed
             # writer was loaded only in the isolated child interpreter.
             self.assertFalse(hasattr(writer, "migrate_flat_otel"))
@@ -1953,6 +1986,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
             if not hasattr(writer, "migrate_flat_otel"):
                 writer.migrate_flat_otel = original
 
+    @unittest.skip("retired v7 writer module")
     def test_upgrade_isolates_stale_config_dependency_from_066_client(self):
         self._write("config_version: 6\notel:\n  enabled: true\n  endpoint: 127.0.0.1:4317\n")
         from defenseclaw import config
@@ -1964,7 +1998,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
         try:
             delattr(config, "locked_config_yaml")
             ctx = self._ctx()
-            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))
+            self.assertTrue(_migrate_config_v7_named_otel_destinations(ctx))  # noqa: F821
             self.assertFalse(hasattr(config, "locked_config_yaml"))
             with open(self.cfg_path) as handle:
                 doc = yaml.safe_load(handle) or {}
@@ -1977,6 +2011,7 @@ class TestMigrate080Compatibility(unittest.TestCase):
             if not hasattr(config, "locked_config_yaml"):
                 config.locked_config_yaml = original
 
+    @unittest.skip("retired v7 intermediate migration; upgrade converts directly to v8")
     def test_config_migration_preserves_parent_module_identities(self):
         self._write("config_version: 6\notel:\n  enabled: true\n  endpoint: 127.0.0.1:4317\n")
         from defenseclaw import connector_paths, safety
@@ -1984,10 +2019,11 @@ class TestMigrate080Compatibility(unittest.TestCase):
         safety_error = safety.SafetyError
         skill_dirs = connector_paths.skill_dirs
 
-        self.assertTrue(_migrate_config_v7_named_otel_destinations(self._ctx()))
+        self.assertTrue(_migrate_config_v7_named_otel_destinations(self._ctx()))  # noqa: F821
         self.assertIs(safety.SafetyError, safety_error)
         self.assertIs(connector_paths.skill_dirs, skill_dirs)
 
+    @unittest.skip("retired v7 intermediate migration; upgrade converts directly to v8")
     def test_already_applied_080_cursor_still_runs_config_v7_migration(self):
         self._write("config_version: 6\notel:\n  enabled: true\n  endpoint: 127.0.0.1:4317\n")
 
@@ -2047,12 +2083,16 @@ class TestAtomicWriteTextModePreservation(unittest.TestCase):
         path = os.path.join(self.tmp, "config.yaml")
         with open(path, "w") as f:
             f.write("old\n")
-        os.chmod(path, 0o600)
+        if os.name == "nt":
+            with open(path, "r+") as f:
+                set_file_mode(f.fileno(), path, 0o600)
+        else:
+            os.chmod(path, 0o600)
 
         # Default mode is 0o644, but the existing 0o600 must win.
         self.assertTrue(_atomic_write_text(path, "new\n"))
 
-        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        assert_owner_only_file(path)
         with open(path) as f:
             self.assertEqual(f.read(), "new\n")
 
@@ -2060,7 +2100,25 @@ class TestAtomicWriteTextModePreservation(unittest.TestCase):
         path = os.path.join(self.tmp, "fresh.json")
         # File does not exist yet → the explicit mode pins the perms.
         self.assertTrue(_atomic_write_text(path, "{}", mode=0o600))
-        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        assert_owner_only_file(path)
+
+    def test_scopes_temp_prefix_to_valid_upgrade_attempt(self):
+        path = os.path.join(self.tmp, "config.yaml")
+        token = "0123456789abcdef" * 2
+        original_mkstemp = tempfile.mkstemp
+        with (
+            patch.dict(
+                os.environ,
+                {"DEFENSECLAW_UPGRADE_MUTATION_TOKEN": token},
+            ),
+            patch("tempfile.mkstemp", wraps=original_mkstemp) as mkstemp,
+        ):
+            self.assertTrue(_atomic_write_text(path, "new\n"))
+
+        self.assertEqual(
+            mkstemp.call_args.kwargs["prefix"],
+            f".tmp.upgrade-{token}.",
+        )
 
 
 if __name__ == "__main__":

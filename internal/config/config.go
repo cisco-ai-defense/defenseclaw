@@ -21,24 +21,24 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
-// ReportConfigLoadError is wired by telemetry.NewProvider to emit OTel on Load failures.
+// ReportConfigLoadError is wired by the unified v8 runtime to emit a generated
+// platform-health signal when legacy/recovery config decoding fails.
 // Nil in binaries/tests that do not install the hook.
 var ReportConfigLoadError func(ctx context.Context, reason string)
-
-var privacyDisableRedactionWarnOnce sync.Once
 
 // DefenseClawLLMKeyEnv is the canonical environment variable holding the
 // unified LLM API key that powers every LLM-using component in DefenseClaw
@@ -77,10 +77,11 @@ const (
 )
 
 type ClawConfig struct {
-	Mode         ClawMode `mapstructure:"mode"          yaml:"mode"`
-	HomeDir      string   `mapstructure:"home_dir"      yaml:"home_dir"`
-	ConfigFile   string   `mapstructure:"config_file"   yaml:"config_file"`
-	WorkspaceDir string   `mapstructure:"workspace_dir" yaml:"workspace_dir,omitempty"`
+	Mode                 ClawMode `mapstructure:"mode"                       yaml:"mode"`
+	HomeDir              string   `mapstructure:"home_dir"                   yaml:"home_dir"`
+	ConfigFile           string   `mapstructure:"config_file"                yaml:"config_file"`
+	WorkspaceDir         string   `mapstructure:"workspace_dir"              yaml:"workspace_dir,omitempty"`
+	OpenClawHomeOriginal string   `mapstructure:"openclaw_home_original"     yaml:"openclaw_home_original,omitempty"`
 }
 
 // AgentConfig [v7] pins the logical agent identity for this
@@ -116,8 +117,10 @@ type AgentConfig struct {
 	Name string `mapstructure:"name" yaml:"name,omitempty"`
 }
 
-// CurrentConfigVersion is bumped when the config schema changes in a way
-// that requires migration (new required fields, renamed keys, etc.).
+// CurrentConfigVersion is the last compatibility-decoder version used by the
+// explicit release upgrader. The strict target runtime is schema v8 and is
+// loaded through LoadRuntimeV8FromBytes plus the observability-v8 compiler; do
+// not use this constant to select target-runtime behavior.
 //
 // v4: replaces the legacy `splunk:` block with a generic `audit_sinks:`
 // list; decouples OTel from any vendor-specific auto-injection. There is
@@ -212,22 +215,16 @@ type Config struct {
 	ClaudeCode      AgentHookConfig            `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
 	Codex           AgentHookConfig            `mapstructure:"codex"            yaml:"codex,omitempty"`
 	ConnectorHooks  map[string]AgentHookConfig `mapstructure:"connector_hooks"  yaml:"connector_hooks,omitempty"`
-	// AuditSinks is the v4 replacement for the legacy `splunk:` block.
-	// It supports an arbitrary number of named sinks of any registered
-	// kind (splunk_hec, otlp_logs, http_jsonl). Legacy `splunk:` keys are
-	// detected at Load() and emit a hard migration error.
+	// AuditSinks preserves v7 decoder fidelity for the explicit upgrade path.
+	// Runtime-v8 loading clears it before any service is constructed; canonical
+	// export ownership lives in observability.destinations/routes.
 	AuditSinks []AuditSink     `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
 	Webhooks   []WebhookConfig `mapstructure:"webhooks"         yaml:"webhooks"`
-	// Observability carries the per-connector audit-sink / webhook routing
-	// overrides (D5b). An empty/absent block preserves the legacy
-	// global-only behavior. A connector's events route to its
-	// observability.connectors[<name>].{audit_sinks,webhooks} when set,
-	// falling back to the global AuditSinks / Webhooks otherwise; resolution
-	// goes through the ObservabilityConfig.Effective* resolvers. Mirrors the
-	// Python `observability:` block written by `defenseclaw setup
-	// observability/webhook --connector`.
+	// Observability decodes the notification-only connector compatibility
+	// subset used by webhook setup. The canonical v8 telemetry graph is parsed
+	// and compiled independently; connector audit_sinks survive here only as
+	// release-upgrader input and never own target-runtime routing.
 	Observability         ObservabilityConfig         `mapstructure:"observability"    yaml:"observability,omitempty"`
-	Privacy               PrivacyConfig               `mapstructure:"privacy"          yaml:"privacy,omitempty"`
 	AIDiscovery           AIDiscoveryConfig           `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
 	ApplicationProtection ApplicationProtectionConfig `mapstructure:"application_protection" yaml:"application_protection,omitempty"`
 	Notifications         NotificationsConfig         `mapstructure:"notifications"    yaml:"notifications,omitempty"`
@@ -235,34 +232,6 @@ type Config struct {
 	// (Cisco Secure Client). Only active when ManagedIPCEnabled()
 	// returns true — see managed.go.
 	Managed ManagedIPCConfig `mapstructure:"managed" yaml:"managed,omitempty"`
-}
-
-// PrivacyConfig groups privacy/redaction toggles. Today it carries
-// only the redaction kill-switch; future fields (per-sink redaction
-// scope, custom redactor profiles) land here so operators have a
-// single section to audit.
-//
-// Scope: this is a deliberate, persistent operator decision.
-// Defaults match the existing redacting-by-default behavior so a
-// fresh install or a config without a `privacy:` block keeps the
-// historical contract documented in OBSERVABILITY.md.
-type PrivacyConfig struct {
-	// DisableRedaction, when true, instructs the sidecar to bypass
-	// every ForSink* redaction helper at startup — including
-	// persistent sinks (SQLite audit, OTel log exporters, Splunk
-	// HEC, webhooks). Equivalent to setting
-	// DEFENSECLAW_DISABLE_REDACTION=1 but persisted in config so
-	// the choice survives restarts and TUI invocations without
-	// per-shell env-var ceremony.
-	//
-	// WARNING: this violates the unconditional-redaction contract
-	// documented in OBSERVABILITY.md. Only enable on single-tenant
-	// installs where every downstream sink already lives inside
-	// the same trust boundary (e.g. lab / prompt-engineering use).
-	// The CLI emits a loud warning on flip-on, and config loaders emit
-	// a once-per-process warning when they observe the setting so the
-	// runtime state stays auditable without spamming reload loops.
-	DisableRedaction bool `mapstructure:"disable_redaction" yaml:"disable_redaction,omitempty"`
 }
 
 // AIDiscoveryConfig controls continuous, sidecar-native visibility for
@@ -809,7 +778,20 @@ type OTelSpanFilterOperationConfig struct {
 // per exporter, but duplicate/empty names would make CLI lifecycle operations
 // nondeterministic and must fail fast.
 func (c OTelConfig) ValidateNamedDestinations() error {
-	if c.Enabled && len(c.Destinations) == 0 {
+	return c.validateNamedDestinations(false)
+}
+
+// HasManagedAIDLogSink reports whether the managed Cisco AI Defense event
+// export is required by this source. The v8 target runtime materializes that
+// capability as a canonical destination; the legacy decoder uses the same
+// predicate only to avoid rejecting a managed source before migration.
+func (c *Config) HasManagedAIDLogSink() bool {
+	return c != nil && managed.IsManagedEnterprise(c.DeploymentMode) &&
+		strings.TrimSpace(c.CiscoAIDefense.Endpoint) != ""
+}
+
+func (c OTelConfig) validateNamedDestinations(hasImplicitSink bool) error {
+	if c.Enabled && len(c.Destinations) == 0 && !hasImplicitSink {
 		return fmt.Errorf("otel.enabled requires at least one named destination in otel.destinations[]")
 	}
 	seen := make(map[string]struct{}, len(c.Destinations))
@@ -958,9 +940,9 @@ type FirewallConfig struct {
 	AnchorName string `mapstructure:"anchor_name" yaml:"anchor_name"`
 }
 
-// WebhookConfig is one entry in the top-level “webhooks[]“ list. These
-// are notifier webhooks (chat/incident), NOT audit sinks — audit
-// forwarding lives in “audit_sinks[]“. See docs/OBSERVABILITY.md §7.
+// WebhookConfig is one entry in the top-level “webhooks[]“ list. These are
+// notifier webhooks (chat/incident), not telemetry destinations. Canonical v8
+// forwarding lives in observability.destinations/routes.
 //
 // CooldownSeconds is a tri-state on purpose (see webhook.go
 // “webhookDefaultCooldown = 300s“):
@@ -1399,6 +1381,11 @@ type GuardrailConfig struct {
 	// and emitted as an EventEgress with branch="shape".
 	AllowUnknownLLMDomains bool `mapstructure:"allow_unknown_llm_domains" yaml:"allow_unknown_llm_domains,omitempty"`
 
+	// AllowPrivateUpstreams is a list of specific IP addresses that are
+	// exempt from the SSRF private-address block for LLM upstream forwarding.
+	// Loopback, link-local, and cloud-metadata IPs are never exempted.
+	AllowPrivateUpstreams []string `mapstructure:"allow_private_upstreams" yaml:"allow_private_upstreams,omitempty"`
+
 	// HookFailMode is the operator-chosen response-layer fail mode
 	// for every generated hook script (codex-hook, claude-code-hook,
 	// inspect-*). Two values are supported:
@@ -1701,6 +1688,9 @@ func (g *GuardrailConfig) Validate() error {
 			}
 		}
 	}
+	if err := validateAllowPrivateUpstreams(g.AllowPrivateUpstreams); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1737,6 +1727,37 @@ func validateGuardrailMinSeverity(sev string) error {
 	}
 }
 
+// validateAllowPrivateUpstreams checks that each entry is a valid IP
+// address (not CIDR, not loopback/link-local/metadata).
+func validateAllowPrivateUpstreams(ips []string) error {
+	for _, raw := range ips {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		if strings.Contains(s, "/") {
+			return fmt.Errorf("guardrail.allow_private_upstreams: %q is a CIDR — specify individual IPs only (e.g. %q)", s, strings.SplitN(s, "/", 2)[0])
+		}
+		ip := net.ParseIP(s)
+		if ip == nil {
+			return fmt.Errorf("guardrail.allow_private_upstreams: %q is not a valid IP address", s)
+		}
+		if netguard.IsCloudMetadataIP(ip) {
+			return fmt.Errorf("guardrail.allow_private_upstreams: cloud metadata address %q is not allowed", s)
+		}
+		if ip.IsLoopback() {
+			return fmt.Errorf("guardrail.allow_private_upstreams: loopback address %q is not allowed (Ollama uses a dedicated bypass)", s)
+		}
+		if ip.IsMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("guardrail.allow_private_upstreams: %q is not a valid upstream address", s)
+		}
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return fmt.Errorf("guardrail.allow_private_upstreams: link-local address %q is not allowed", s)
+		}
+	}
+	return nil
+}
+
 // EffectiveHookFailMode returns the operator-chosen hook fail mode,
 // defaulting to "closed" when unset (CodeGuard rule
 // codeguard-0-authorization-access-control: deny by default). The
@@ -1763,13 +1784,11 @@ func (g *GuardrailConfig) EffectiveHookFailMode() string {
 }
 
 // EffectiveHookFailModeFor returns the hook fail mode for the named
-// connector: a per-connector override (when set) wins, otherwise it
-// falls back to the global EffectiveHookFailMode(). This is the additive
-// multi-connector sibling — the global EffectiveHookFailMode() keeps its
-// original no-arg signature and behavior so existing single-connector
-// callers (sidecar boot, config-edit surfaces) are untouched; only the
-// per-connector boot loop calls this variant. Pass "" to resolve the
-// global value. Pure lookup — never errors, never mutates.
+// connector. An explicit connector override wins even in observe mode: it is
+// an operator-selected response-integrity posture, not a policy verdict.
+// Observe-only connectors without an override retain the historical fail-open
+// behavior; action mode falls through to the global value. Pass "" to resolve
+// the global connector mode/value. Pure lookup — never errors, never mutates.
 func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
 	if g == nil {
 		return "closed"
@@ -1786,6 +1805,9 @@ func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
 			}
 			return "closed"
 		}
+	}
+	if !strings.EqualFold(strings.TrimSpace(g.EffectiveMode(connector)), "action") {
+		return "open"
 	}
 	return g.EffectiveHookFailMode()
 }
@@ -2137,11 +2159,183 @@ func LoadFromFile(configFile string) (*Config, error) {
 	return loadFromFile(configFile, false)
 }
 
+// LoadFromBytes applies the same defaults, migrations, environment bindings,
+// compatibility decoding, and validation as LoadFromFile, but decodes the
+// supplied immutable source bytes instead of rereading configFile. configFile
+// remains the source identity for relative defaults, diagnostics, trust checks,
+// and ConfigFilePath. Runtime-file migration is deliberately disabled because
+// a captured snapshot must never cause an ambient-path rewrite.
+func LoadFromBytes(configFile string, raw []byte) (*Config, error) {
+	return loadConfigSource(configFile, false, append([]byte(nil), raw...), true, true, false, true)
+}
+
+// LoadCandidateFromBytes decodes an exact reload candidate without publishing
+// process-global provenance. The caller must set version.SetContentHash only
+// after the candidate has passed every compile/apply transaction boundary.
+func LoadCandidateFromBytes(configFile string, raw []byte) (*Config, error) {
+	return loadConfigSource(configFile, false, append([]byte(nil), raw...), true, false, false, true)
+}
+
+// LoadRuntimeV8FromBytes decodes the non-observability portions of an exact
+// schema-v8 source for the target gateway runtime. The caller remains
+// responsible for compiling the canonical ObservabilityV8 plan from the same
+// immutable bytes before activation. Unlike LoadFromBytes, this entrypoint
+// never consults v7 OTel environment variables, runs flat-OTel migration, or
+// validates/retains legacy audit-sink routing state.
+func LoadRuntimeV8FromBytes(configFile string, raw []byte) (*Config, error) {
+	document, err := ParseV8YAML(configFile, raw)
+	if err != nil {
+		return nil, err
+	}
+	candidate, err := loadConfigSource(configFile, false, append([]byte(nil), raw...), true, true, true, true)
+	if err != nil {
+		return nil, err
+	}
+	applyRuntimeV8DataDirDefaults(candidate, document, candidate.DataDir)
+	return candidate, nil
+}
+
+// LoadRuntimeV8CandidateFromBytes is the reload counterpart of
+// LoadRuntimeV8FromBytes. It keeps process-wide provenance unchanged until the
+// source-aware reload transaction has committed.
+func LoadRuntimeV8CandidateFromBytes(configFile string, raw []byte) (*Config, error) {
+	return loadRuntimeV8CandidateFromBytes(configFile, raw, true)
+}
+
+// LoadRuntimeV8InspectionCandidateFromBytes decodes the same immutable target
+// candidate without publishing provenance or requiring the staged copy to have
+// the live managed-enterprise path identity. The caller must independently
+// bind and validate its isolated source and data roots before invoking this
+// read-only helper. Live activation and reload must use the strict loaders.
+func LoadRuntimeV8InspectionCandidateFromBytes(configFile string, raw []byte) (*Config, error) {
+	return loadRuntimeV8CandidateFromBytes(configFile, raw, false)
+}
+
+func loadRuntimeV8CandidateFromBytes(configFile string, raw []byte, enforceManagedTrust bool) (*Config, error) {
+	document, err := ParseV8YAML(configFile, raw)
+	if err != nil {
+		return nil, err
+	}
+	candidate, err := loadConfigSource(
+		configFile,
+		false,
+		append([]byte(nil), raw...),
+		true,
+		false,
+		true,
+		enforceManagedTrust,
+	)
+	if err != nil {
+		return nil, err
+	}
+	applyRuntimeV8DataDirDefaults(candidate, document, candidate.DataDir)
+	return candidate, nil
+}
+
+// ResolveObservabilityV8ManagedAIDOptionsForInspection decodes only the
+// release-owned managed-destination inputs from one exact schema-v8 source.
+// It applies the same defaults and environment bindings as runtime decoding,
+// but never publishes provenance and returns no activatable Config. Managed
+// path trust is intentionally an activation concern: read-only plan/status
+// inspection compiles a private exact-byte snapshot whose temporary path is
+// not the authoritative service config path.
+func ResolveObservabilityV8ManagedAIDOptionsForInspection(
+	configFile string,
+	raw []byte,
+) (ObservabilityV8ManagedAIDOptions, error) {
+	candidate, err := loadConfigSource(
+		configFile,
+		false,
+		append([]byte(nil), raw...),
+		true,
+		false,
+		true,
+		false,
+	)
+	if err != nil {
+		return ObservabilityV8ManagedAIDOptions{}, err
+	}
+	return ObservabilityV8ManagedAIDOptions{
+		DeploymentMode:    candidate.DeploymentMode,
+		Endpoint:          candidate.CiscoAIDefense.Endpoint,
+		SourceContentHash: ObservabilityV8SourceContentHash(raw),
+	}, nil
+}
+
+// ApplyRuntimeV8DataDirDefaultsFromBytes re-bases only omitted path fields on
+// the canonical compiler-selected data directory. It is used after compilation
+// when data_dir was defaulted externally (for example by a reload transaction).
+// Explicit operator paths are preserved.
+func ApplyRuntimeV8DataDirDefaultsFromBytes(candidate *Config, source string, raw []byte, dataDir string) error {
+	document, err := ParseV8YAML(source, raw)
+	if err != nil {
+		return err
+	}
+	applyRuntimeV8DataDirDefaults(candidate, document, dataDir)
+	return nil
+}
+
+func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, dataDir string) {
+	if candidate == nil || document == nil || strings.TrimSpace(dataDir) == "" {
+		return
+	}
+	root := v8DocumentRoot(document.Document)
+	has := func(path ...string) bool {
+		current := root
+		for _, segment := range path {
+			current = v8YAMLMapValue(current, segment)
+			if current == nil {
+				return false
+			}
+		}
+		return true
+	}
+	if !has("quarantine_dir") {
+		candidate.QuarantineDir = filepath.Join(dataDir, "quarantine")
+	}
+	if !has("plugin_dir") {
+		candidate.PluginDir = filepath.Join(dataDir, "plugins")
+	}
+	if !has("policy_dir") {
+		candidate.PolicyDir = filepath.Join(dataDir, "policies")
+	}
+	if !has("scanners", "codeguard") {
+		candidate.Scanners.CodeGuard = filepath.Join(dataDir, "codeguard-rules")
+	}
+	if !has("ai_discovery", "confidence_policy_path") {
+		candidate.AIDiscovery.ConfidencePolicyPath = filepath.Join(dataDir, "confidence.yaml")
+	}
+	if !has("firewall", "config_file") {
+		candidate.Firewall.ConfigFile = filepath.Join(dataDir, "firewall.yaml")
+	}
+	if !has("firewall", "rules_file") {
+		candidate.Firewall.RulesFile = filepath.Join(dataDir, "firewall.pf.conf")
+	}
+	if !has("guardrail", "rule_pack_dir") {
+		candidate.Guardrail.RulePackDir = filepath.Join(dataDir, "policies", "guardrail", "default")
+	}
+	if !has("gateway", "device_key_file") {
+		candidate.Gateway.DeviceKeyFile = filepath.Join(dataDir, "device.key")
+	}
+}
+
 func LoadFromFileWithRuntimeMigration(configFile string) (*Config, error) {
 	return loadFromFile(configFile, true)
 }
 
 func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
+	return loadConfigSource(configFile, migrateRuntime, nil, false, true, false, true)
+}
+
+func loadConfigSource(
+	configFile string,
+	migrateRuntime bool,
+	sourceBytes []byte,
+	sourceProvided bool,
+	publishProvenance bool,
+	runtimeV8 bool,
+	enforceManagedTrust bool,
+) (*Config, error) {
 	// viper holds a process-global keystore. Without resetting it, a
 	// previous Load() (e.g. from another binary path or test case)
 	// leaves stale keys behind — including a legacy `splunk.*` block
@@ -2163,7 +2357,7 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 	if err := validateDeploymentMode(pinnedDeploymentMode); err != nil {
 		return nil, fmt.Errorf("config: %s: %w", managed.DeploymentModeEnv, err)
 	}
-	if managed.IsManagedEnterprise(pinnedDeploymentMode) {
+	if enforceManagedTrust && managed.IsManagedEnterprise(pinnedDeploymentMode) {
 		if err := managed.ValidateTrustedConfigPath(configFile); err != nil {
 			if ReportConfigLoadError != nil {
 				ReportConfigLoadError(context.Background(), "managed_config_untrusted")
@@ -2175,7 +2369,7 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 	viper.SetConfigFile(configFile)
 	viper.SetConfigType("yaml")
 
-	setDefaults(dataDir)
+	setDefaults(dataDir, !runtimeV8)
 
 	// Pre-extract otel.resource.attributes from the raw YAML. OTel
 	// semconv keys are dotted (service.name, defenseclaw.preset, …)
@@ -2185,7 +2379,16 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 	// yaml.v3 (literal keys), then strip it from the bytes we feed to
 	// Viper so Viper never sees the problematic shape, and reinstate
 	// it on the decoded Config afterwards.
-	otelAttrs, cleanedBytes, err := extractOTelResourceAttributes(configFile)
+	var otelAttrs map[string]string
+	var cleanedBytes []byte
+	var err error
+	if runtimeV8 {
+		cleanedBytes = sourceBytes
+	} else if sourceProvided {
+		otelAttrs, cleanedBytes, err = extractOTelResourceAttributesBytes(sourceBytes)
+	} else {
+		otelAttrs, cleanedBytes, err = extractOTelResourceAttributes(configFile)
+	}
 	if err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "otel_attrs_parse")
@@ -2193,7 +2396,7 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 		return nil, fmt.Errorf("config: parse otel.resource.attributes: %w", err)
 	}
 
-	if cleanedBytes != nil {
+	if sourceProvided || cleanedBytes != nil {
 		if err := viper.ReadConfig(bytes.NewReader(cleanedBytes)); err != nil {
 			if ReportConfigLoadError != nil {
 				ReportConfigLoadError(context.Background(), "read_config")
@@ -2223,18 +2426,19 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 		viper.Set("guardrail.hilt", viper.Get("guardrail.hitl"))
 	}
 
-	// v3 → v4 hard migration: the `splunk:` block was removed in favor
-	// of audit_sinks. Detect any populated legacy keys and refuse to
-	// start so operators don't silently lose Splunk forwarding.
-	if legacy := detectLegacySplunk(); legacy != "" {
-		if ReportConfigLoadError != nil {
-			ReportConfigLoadError(context.Background(), "legacy_splunk")
+	// Legacy `splunk:` configuration must pass through the release upgrader.
+	// Detect populated keys and refuse to start so operators do not silently
+	// lose forwarding or bypass the atomic config-v8 migration transaction.
+	if !runtimeV8 {
+		if legacy := detectLegacySplunk(); legacy != "" {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "legacy_splunk")
+			}
+			return nil, fmt.Errorf("config: legacy `splunk:` block found in %s (key %s). "+
+				"Run `defenseclaw upgrade --yes` to migrate supported legacy observability "+
+				"configuration to config v8; see docs/OBSERVABILITY.md for the current schema",
+				configFile, legacy)
 		}
-		return nil, fmt.Errorf("config: legacy `splunk:` block found in %s (key %s). "+
-			"DefenseClaw v4 replaced it with `audit_sinks:`. "+
-			"Run `defenseclaw setup observability migrate-splunk --apply` "+
-			"or see docs/OBSERVABILITY.md for the new schema",
-			configFile, legacy)
 	}
 
 	var cfg Config
@@ -2243,6 +2447,11 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 			ReportConfigLoadError(context.Background(), "unmarshal")
 		}
 		return nil, fmt.Errorf("config: unmarshal: %w", err)
+	}
+	if runtimeV8 {
+		if err := restoreRuntimeV8GuardrailConnectors(&cfg, sourceBytes); err != nil {
+			return nil, err
+		}
 	}
 	cfg.ConfigFilePath = configFile
 
@@ -2253,8 +2462,14 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 	}
 
 	migrateConfig(&cfg)
-	migrateFlatOTelConfigFromViper(&cfg)
-	warnDisableRedactionConfig(&cfg)
+	if runtimeV8 {
+		if cfg.ConfigVersion != ObservabilityV8ConfigVersion {
+			return nil, fmt.Errorf("config: schema v8 is required; run defenseclaw upgrade first")
+		}
+		clearLegacyObservabilityRuntimeConfig(&cfg)
+	} else {
+		migrateFlatOTelConfigFromViper(&cfg)
+	}
 	cfg.DeploymentMode = normalizeDeploymentMode(cfg.DeploymentMode)
 	if pinnedDeploymentMode != "" {
 		if cfg.DeploymentMode != "" && cfg.DeploymentMode != pinnedDeploymentMode {
@@ -2269,7 +2484,7 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 		}
 		return nil, err
 	}
-	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+	if enforceManagedTrust && managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if !managed.IsManagedEnterprise(pinnedDeploymentMode) {
 			if err := managed.ValidateTrustedConfigPath(configFile); err != nil {
 				if ReportConfigLoadError != nil {
@@ -2294,18 +2509,20 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 		return nil, err
 	}
 
-	if err := cfg.OTel.ValidateNamedDestinations(); err != nil {
-		if ReportConfigLoadError != nil {
-			ReportConfigLoadError(context.Background(), "otel_destination_invalid")
-		}
-		return nil, fmt.Errorf("config: otel: %w", err)
-	}
-	for i := range cfg.AuditSinks {
-		if err := cfg.AuditSinks[i].Validate(); err != nil {
+	if !runtimeV8 {
+		if err := cfg.OTel.validateNamedDestinations(cfg.HasManagedAIDLogSink()); err != nil {
 			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "audit_sink_invalid")
+				ReportConfigLoadError(context.Background(), "otel_destination_invalid")
 			}
-			return nil, fmt.Errorf("config: audit_sinks[%d]: %w", i, err)
+			return nil, fmt.Errorf("config: otel: %w", err)
+		}
+		for i := range cfg.AuditSinks {
+			if err := cfg.AuditSinks[i].Validate(); err != nil {
+				if ReportConfigLoadError != nil {
+					ReportConfigLoadError(context.Background(), "audit_sink_invalid")
+				}
+				return nil, fmt.Errorf("config: audit_sinks[%d]: %w", i, err)
+			}
 		}
 	}
 
@@ -2322,18 +2539,20 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 		}
 		return nil, fmt.Errorf("config: observability: %w", err)
 	}
-	for _, name := range cfg.Observability.ConnectorNames() {
-		pc := cfg.Observability.Connectors[name]
-		if pc.AuditSinks == nil {
-			continue
-		}
-		for i := range *pc.AuditSinks {
-			if err := (*pc.AuditSinks)[i].Validate(); err != nil {
-				if ReportConfigLoadError != nil {
-					ReportConfigLoadError(context.Background(), "audit_sink_invalid")
+	if !runtimeV8 {
+		for _, name := range cfg.Observability.ConnectorNames() {
+			pc := cfg.Observability.Connectors[name]
+			if pc.AuditSinks == nil {
+				continue
+			}
+			for i := range *pc.AuditSinks {
+				if err := (*pc.AuditSinks)[i].Validate(); err != nil {
+					if ReportConfigLoadError != nil {
+						ReportConfigLoadError(context.Background(), "audit_sink_invalid")
+					}
+					return nil, fmt.Errorf(
+						"config: observability.connectors[%q].audit_sinks[%d]: %w", name, i, err)
 				}
-				return nil, fmt.Errorf(
-					"config: observability.connectors[%q].audit_sinks[%d]: %w", name, i, err)
 			}
 		}
 	}
@@ -2422,7 +2641,9 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 	// extractOTelResourceAttributes; fall back to a re-marshal when
 	// the file did not exist (first boot / default config) so the
 	// hash is still stable across identical in-memory configs.
-	seedProvenanceOnLoad(configFile, &cfg)
+	if publishProvenance {
+		seedProvenanceOnLoadSource(configFile, &cfg, sourceBytes, sourceProvided)
+	}
 
 	// Managed-enterprise config is an administrator-owned trust boundary while
 	// data_dir is intentionally writable by the lower-privilege service account.
@@ -2445,22 +2666,43 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 	return &cfg, nil
 }
 
-func guardrailRuntimeMigrationAllowed(requested bool, deploymentMode string) bool {
-	return requested && !managed.IsManagedEnterprise(deploymentMode)
+// restoreRuntimeV8GuardrailConnectors closes a Viper decode gap for connector
+// entries whose policy value is an empty mapping (for example, codex: {}).
+// Those entries are semantically meaningful roster members, but Viper omits
+// them while unmarshalling. Decode this one dynamic map from the same immutable
+// target-runtime bytes before migration/defaulting and validation continue.
+func restoreRuntimeV8GuardrailConnectors(cfg *Config, raw []byte) error {
+	var source struct {
+		Guardrail struct {
+			Connectors map[string]PerConnectorGuardrailConfig `yaml:"connectors"`
+		} `yaml:"guardrail"`
+	}
+	if err := yaml.Unmarshal(raw, &source); err != nil {
+		return fmt.Errorf("config: decode schema-v8 guardrail.connectors: %w", err)
+	}
+	cfg.Guardrail.Connectors = source.Guardrail.Connectors
+	return nil
 }
 
-func warnDisableRedactionConfig(cfg *Config) {
-	if cfg == nil || !cfg.Privacy.DisableRedaction {
+// clearLegacyObservabilityRuntimeConfig makes the general application Config
+// a one-way consumer of the v8 compiler. These fields remain on Config solely
+// so the upgrade/preview loaders can decode historical v7 sources; no target
+// runtime object may carry them past this boundary.
+func clearLegacyObservabilityRuntimeConfig(cfg *Config) {
+	if cfg == nil {
 		return
 	}
-	privacyDisableRedactionWarnOnce.Do(func() {
-		fmt.Fprintln(os.Stderr,
-			"warning: privacy.disable_redaction=true — ALL sinks (audit DB, "+
-				"OTel logs, webhooks, Splunk HEC) will receive UNREDACTED "+
-				"prompts, judge bodies, and verdict reasons. Disable in "+
-				"shared/multi-tenant deployments via "+
-				"`defenseclaw setup redaction on`.")
-	})
+	cfg.OTel = OTelConfig{}
+	cfg.AuditSinks = nil
+	cfg.AIDiscovery.EmitOTel = false
+	for name, connector := range cfg.Observability.Connectors {
+		connector.AuditSinks = nil
+		cfg.Observability.Connectors[name] = connector
+	}
+}
+
+func guardrailRuntimeMigrationAllowed(requested bool, deploymentMode string) bool {
+	return requested && !managed.IsManagedEnterprise(deploymentMode)
 }
 
 // seedProvenanceOnLoad stamps the process-wide content hash from the
@@ -2470,6 +2712,22 @@ func warnDisableRedactionConfig(cfg *Config) {
 // is the correct behavior for transient read races (editor saving
 // in-place under us) where the next successful Load() will re-seed.
 func seedProvenanceOnLoad(configFile string, cfg *Config) {
+	seedProvenanceOnLoadSource(configFile, cfg, nil, false)
+}
+
+func seedProvenanceOnLoadSource(configFile string, cfg *Config, sourceBytes []byte, sourceProvided bool) {
+	if sourceProvided && len(sourceBytes) > 0 {
+		version.SetContentHash(sourceBytes)
+		return
+	}
+	if sourceProvided {
+		// Preserve the file loader's empty-source behavior without consulting a
+		// path that may now contain different bytes.
+		if data, err := yaml.Marshal(cfg); err == nil && len(data) > 0 {
+			version.SetContentHash(data)
+		}
+		return
+	}
 	if data, err := os.ReadFile(configFile); err == nil && len(data) > 0 {
 		version.SetContentHash(data)
 		return
@@ -2510,7 +2768,10 @@ func extractOTelResourceAttributes(configFile string) (map[string]string, []byte
 		}
 		return nil, nil, fmt.Errorf("read %s: %w", configFile, err)
 	}
+	return extractOTelResourceAttributesBytes(data)
+}
 
+func extractOTelResourceAttributesBytes(data []byte) (map[string]string, []byte, error) {
 	var root yaml.Node
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return nil, nil, fmt.Errorf("yaml unmarshal: %w", err)
@@ -3104,7 +3365,7 @@ func (c *Config) Save() error {
 	return nil
 }
 
-func setDefaults(dataDir string) {
+func setDefaults(dataDir string, legacyObservability bool) {
 	viper.SetDefault("data_dir", dataDir)
 	viper.SetDefault("audit_db", filepath.Join(dataDir, DefaultAuditDBName))
 	viper.SetDefault("judge_bodies_db", filepath.Join(dataDir, DefaultJudgeBodiesDBName))
@@ -3180,7 +3441,9 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("watch.rescan_interval_min", 60)
 	viper.SetDefault("watch.rescan_content_gated", true)
 
-	viper.SetDefault("audit_sinks", []AuditSink{})
+	if legacyObservability {
+		viper.SetDefault("audit_sinks", []AuditSink{})
+	}
 
 	viper.SetDefault("skill_actions.critical.file", string(FileActionQuarantine))
 	viper.SetDefault("skill_actions.critical.runtime", string(RuntimeDisable))
@@ -3257,7 +3520,9 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("ai_discovery.include_network_domains", true)
 	viper.SetDefault("ai_discovery.max_files_per_scan", 1000)
 	viper.SetDefault("ai_discovery.max_file_bytes", 512*1024)
-	viper.SetDefault("ai_discovery.emit_otel", true)
+	if legacyObservability {
+		viper.SetDefault("ai_discovery.emit_otel", true)
+	}
 	viper.SetDefault("ai_discovery.store_raw_local_paths", false)
 	viper.SetDefault("ai_discovery.confidence_policy_path", filepath.Join(dataDir, "confidence.yaml"))
 	viper.SetDefault("ai_discovery.require_trusted_binary_paths", false)
@@ -3358,7 +3623,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("gateway.reconnect_ms", 800)
 	viper.SetDefault("gateway.max_reconnect_ms", 15000)
 	viper.SetDefault("gateway.approval_timeout_s", 30)
-	viper.SetDefault("gateway.api_port", 18970)
+	viper.SetDefault("gateway.api_port", DefaultGatewayAPIPort)
 	viper.SetDefault("gateway.watcher.enabled", true)
 	viper.SetDefault("gateway.watcher.skill.enabled", true)
 	viper.SetDefault("gateway.watcher.skill.take_action", true)
@@ -3372,8 +3637,8 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("gateway.watchdog.interval", 30)
 	viper.SetDefault("gateway.watchdog.debounce", 2)
 
-	// User-session OS notifications. Master switch defaults to true
-	// on darwin and false elsewhere — see DefaultNotificationsEnabled
+	// User-session OS notifications. Master switch defaults to true on macOS
+	// and native Windows and false elsewhere — see DefaultNotificationsEnabled
 	// in notifications.go for the rationale. block_enforced and
 	// hitl_approval default ON so the user sees real blocks and
 	// real chat-side asks; block_would_block defaults OFF so the
@@ -3391,15 +3656,17 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("notifications.dedup_window", NotificationsDefaultDedupWindow)
 	viper.SetDefault("notifications.max_per_minute", NotificationsDefaultMaxPerMinute)
 
-	viper.SetDefault("otel.enabled", false)
-	viper.SetDefault("otel.traces.sampler", "always_on")
-	viper.SetDefault("otel.traces.sampler_arg", "1.0")
-	viper.SetDefault("otel.logs.emit_individual_findings", false)
-	viper.SetDefault("otel.metrics.export_interval_s", 60)
-	viper.SetDefault("otel.metrics.temporality", "delta")
-	viper.SetDefault("otel.batch.max_export_batch_size", 512)
-	viper.SetDefault("otel.batch.scheduled_delay_ms", 5000)
-	viper.SetDefault("otel.batch.max_queue_size", 2048)
+	if legacyObservability {
+		viper.SetDefault("otel.enabled", false)
+		viper.SetDefault("otel.traces.sampler", "always_on")
+		viper.SetDefault("otel.traces.sampler_arg", "1.0")
+		viper.SetDefault("otel.logs.emit_individual_findings", false)
+		viper.SetDefault("otel.metrics.export_interval_s", 60)
+		viper.SetDefault("otel.metrics.temporality", "delta")
+		viper.SetDefault("otel.batch.max_export_batch_size", 512)
+		viper.SetDefault("otel.batch.scheduled_delay_ms", 5000)
+		viper.SetDefault("otel.batch.max_queue_size", 2048)
 
-	_ = viper.BindEnv("otel.enabled", "DEFENSECLAW_OTEL_ENABLED")
+		_ = viper.BindEnv("otel.enabled", "DEFENSECLAW_OTEL_ENABLED")
+	}
 }

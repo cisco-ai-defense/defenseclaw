@@ -27,12 +27,14 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 from defenseclaw import migration_state
+
+from tests.permissions import assert_owner_only_file
 
 
 class TestStateRoundtrip(unittest.TestCase):
@@ -66,8 +68,7 @@ class TestStateRoundtrip(unittest.TestCase):
                 data_dir,
                 migration_state.MigrationState(package_version="0.5.0"),
             )
-            mode = stat.S_IMODE(os.stat(migration_state.state_path(data_dir)).st_mode)
-        self.assertEqual(mode, 0o600, "cursor file must be 0o600 — owner-only")
+            assert_owner_only_file(migration_state.state_path(data_dir))
 
     def test_save_is_atomic_no_temp_file_left_behind(self):
         with tempfile.TemporaryDirectory() as data_dir:
@@ -80,6 +81,63 @@ class TestStateRoundtrip(unittest.TestCase):
                 if f.startswith(".migration_state.") and f.endswith(".tmp")
             ]
         self.assertEqual(stragglers, [], "tempfile must be renamed away by os.replace")
+
+    def test_save_scopes_temp_prefix_to_valid_upgrade_attempt(self):
+        token = "0123456789abcdef" * 2
+        original_mkstemp = migration_state.tempfile.mkstemp
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            patch.dict(
+                os.environ,
+                {"DEFENSECLAW_UPGRADE_MUTATION_TOKEN": token},
+            ),
+            patch.object(
+                migration_state.tempfile,
+                "mkstemp",
+                wraps=original_mkstemp,
+            ) as mkstemp,
+        ):
+            migration_state.save(
+                data_dir,
+                migration_state.MigrationState(package_version="0.8.4"),
+            )
+
+        self.assertEqual(
+            mkstemp.call_args.kwargs["prefix"],
+            f".migration_state.upgrade-{token}.",
+        )
+
+
+class TestUpgradeMutationTempSuffix(unittest.TestCase):
+    """Upgrade crash cleanup only receives an exact, filename-safe token."""
+
+    def test_valid_lowercase_hex_token_is_scoped(self):
+        token = "0123456789abcdef" * 2
+        with patch.dict(
+            os.environ,
+            {"DEFENSECLAW_UPGRADE_MUTATION_TOKEN": token},
+        ):
+            suffix = migration_state.upgrade_mutation_temp_suffix()
+        self.assertEqual(suffix, f"upgrade-{token}.")
+
+    def test_absent_or_invalid_token_has_empty_suffix(self):
+        with patch.dict(os.environ):
+            os.environ.pop("DEFENSECLAW_UPGRADE_MUTATION_TOKEN", None)
+            self.assertEqual(migration_state.upgrade_mutation_temp_suffix(), "")
+
+        for token in (
+            "",
+            "a" * 31,
+            "a" * 33,
+            "A" * 32,
+            "g" * 32,
+            "a" * 31 + ".",
+        ):
+            with self.subTest(token=token), patch.dict(
+                os.environ,
+                {"DEFENSECLAW_UPGRADE_MUTATION_TOKEN": token},
+            ):
+                self.assertEqual(migration_state.upgrade_mutation_temp_suffix(), "")
 
 
 class TestLoadFailureModes(unittest.TestCase):

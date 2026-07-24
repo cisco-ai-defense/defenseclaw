@@ -46,10 +46,11 @@ Open the live dashboard:
 defenseclaw tui
 ```
 
-Or stream the JSONL fan-out from the gateway:
+Or inspect a scriptable snapshot from mandatory SQLite event history:
 
 ```bash
-tail -f ~/.defenseclaw/gateway.jsonl | jq 'select(.connector == "claudecode")'
+defenseclaw-gateway audit export --limit 200 --output - \
+  | jq 'select(.connector == "claudecode")'
 ```
 
 Open Claude Code and use it normally. Every prompt, tool call, and response shows up. Run this for a week — you want a real picture of your agent's behaviour before the first block decision.
@@ -124,8 +125,8 @@ the shell runs.
 
 ```bash
 defenseclaw alerts --limit 10
-# or live-tail the JSONL fan-out filtered by severity:
-tail -f ~/.defenseclaw/gateway.jsonl \
+# or inspect the mandatory SQLite history filtered by severity:
+defenseclaw-gateway audit export --limit 200 --output - \
   | jq 'select(.connector == "claudecode" and (.severity == "HIGH" or .severity == "CRITICAL"))'
 ```
 

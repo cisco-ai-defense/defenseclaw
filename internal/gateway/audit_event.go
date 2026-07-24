@@ -12,31 +12,23 @@ package gateway
 
 import (
 	"context"
+	"errors"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
-// persistAuditEvent routes audit events through audit.Logger when
-// available so redaction, sink fanout, and OTel counters all stay
-// consistent. Direct store writes remain as a fallback for tests and
-// reduced wiring paths that only have the SQLite handle.
-func persistAuditEvent(logger *audit.Logger, store *audit.Store, event audit.Event) error {
-	if logger != nil {
-		return logger.LogEvent(event)
+// persistAuditEvent requires the canonical logger; direct Store writes are not
+// an ordinary target-runtime capability.
+func persistAuditEvent(logger *audit.Logger, event audit.Event) error {
+	if logger == nil {
+		return errors.New("gateway: canonical audit logger unavailable")
 	}
-	if store != nil {
-		return store.LogEvent(event)
-	}
-	return nil
+	return logger.LogEvent(event)
 }
 
-func persistAuditEventCtx(ctx context.Context, logger *audit.Logger, store *audit.Store, event audit.Event) error {
-	if logger != nil {
-		return logger.LogEventCtx(ctx, event)
+func persistAuditEventCtx(ctx context.Context, logger *audit.Logger, event audit.Event) error {
+	if logger == nil {
+		return errors.New("gateway: canonical audit logger unavailable")
 	}
-	if store != nil {
-		audit.ApplyEnvelope(&event, audit.EnvelopeFromContext(ctx))
-		return store.LogEvent(event)
-	}
-	return nil
+	return logger.LogEventCtx(ctx, event)
 }

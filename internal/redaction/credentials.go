@@ -181,7 +181,7 @@ func isCredentialScrubDevMode() bool {
 	}
 	// Heuristic for `go test` runs that don't set GO_TEST: the test
 	// binary's argv[0] ends with ".test".
-	if a := os.Args; len(a) > 0 && strings.HasSuffix(a[0], ".test") {
+	if a := os.Args; len(a) > 0 && strings.HasSuffix(strings.TrimSuffix(a[0], ".exe"), ".test") {
 		return true
 	}
 	return false

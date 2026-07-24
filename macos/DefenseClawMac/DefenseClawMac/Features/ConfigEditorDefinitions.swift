@@ -555,8 +555,6 @@ enum ConfigEditorCatalog {
                       hint: "Detect provider domains."),
                 .init(label: "Max Files", key: "ai_discovery.max_files_per_scan", kind: .int, hint: "Max files per scan."),
                 .init(label: "Max File Bytes", key: "ai_discovery.max_file_bytes", kind: .int, hint: "Skip larger files."),
-                .init(label: "Emit OTel", key: "ai_discovery.emit_otel", kind: .bool,
-                      hint: "Emit sanitized AI visibility telemetry."),
                 .init(label: "Store Raw Local Paths", key: "ai_discovery.store_raw_local_paths", kind: .bool,
                       hint: "Store raw paths locally only."),
             ]

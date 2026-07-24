@@ -1,0 +1,48 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": { "stringValue": "claude-code" }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": { "name": "claude-code" },
+          "spans": [
+            {
+              "traceId": "EREREREREREREREREREREQ==",
+              "spanId": "IiIiIiIiIiI=",
+              "name": "claude_code.tool",
+              "kind": 1,
+              "startTimeUnixNano": "1783987200000000000",
+              "endTimeUnixNano": "1783987200001000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": { "stringValue": "execute_tool" }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": { "stringValue": "Read" }
+                },
+                {
+                  "key": "tool_use_id",
+                  "value": { "stringValue": "claude-tool-source-backed-1" }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": { "stringValue": "claude-tool-source-backed-1" }
+                }
+              ],
+              "status": { "code": 1 }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

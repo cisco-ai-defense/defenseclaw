@@ -32,6 +32,7 @@ validation, audit drill-down) silently depend on:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,7 @@ SCRIPT = ROOT / "scripts" / "check_schemas.py"
 SCHEMA_DIR = ROOT / "schemas"
 RESOURCE_SCHEMA = SCHEMA_DIR / "otel" / "resource.schema.json"
 GALILEO_PROFILE_SCHEMA = SCHEMA_DIR / "otel" / "galileo-export-profile.schema.json"
+UNICODE13_GENERATOR = ROOT / "scripts" / "generate_unicode13_repertoire.py"
 
 
 class TestCheckSchemasResourceEnum(unittest.TestCase):
@@ -90,6 +92,52 @@ class TestCheckSchemasResourceEnum(unittest.TestCase):
         enum = set(doc["properties"]["defenseclaw.claw.mode"].get("enum", []))
         self.assertNotIn("nemoclaw", enum)
         self.assertIn("opencode", enum)
+
+
+class TestUnicode13RepertoireDrift(unittest.TestCase):
+    def test_offline_generator_check_passes_and_detects_tampering(self) -> None:
+        clean = subprocess.run(
+            [sys.executable, str(UNICODE13_GENERATOR), "--check"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = Path(tmp)
+            owned_paths = (
+                Path("schemas/telemetry/v8/redaction/unicode-age-13.0.json"),
+                Path("internal/observability/redaction/unicode13.go"),
+                Path("cli/defenseclaw/observability/unicode13.py"),
+            )
+            for relative in owned_paths:
+                destination = repository / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes((ROOT / relative).read_bytes())
+            manifest = repository / owned_paths[0]
+            document = json.loads(manifest.read_text(encoding="utf-8"))
+            document["scalar_count"] += 1
+            manifest.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+            tampered = subprocess.run(
+                [
+                    sys.executable,
+                    str(UNICODE13_GENERATOR),
+                    "--check",
+                    "--repository",
+                    str(repository),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertNotEqual(tampered.returncode, 0)
+            self.assertIn("generated file is stale", tampered.stderr + tampered.stdout)
 
 
 class TestCheckSchemasDriftDetection(unittest.TestCase):
@@ -168,6 +216,33 @@ class TestCheckSchemasDriftDetection(unittest.TestCase):
 
 
 class TestCheckSchemasCoversOtelTree(unittest.TestCase):
+    def test_missing_directly_owned_public_schema_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            schema_dir = Path(tmp)
+            for source in SCHEMA_DIR.rglob("*.json"):
+                target = schema_dir / source.relative_to(SCHEMA_DIR)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read_bytes())
+            (schema_dir / "scan-result.json").unlink()
+
+            shim = (
+                "import importlib.util, pathlib, sys\n"
+                f"spec = importlib.util.spec_from_file_location('check_schemas', r'{SCRIPT}')\n"
+                "mod = importlib.util.module_from_spec(spec)\n"
+                "spec.loader.exec_module(mod)\n"
+                f"mod.SCHEMA_DIR = pathlib.Path(r'{schema_dir}')\n"
+                "sys.exit(0 if mod.check_public_schema_inventory() else 1)\n"
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", shim],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("scan-result.json", result.stderr)
+
     def test_otel_subdir_is_walked(self) -> None:
         # Sanity: corrupt schemas/otel/metrics.schema.json and ensure
         # the script catches it (proves rglob covers the subtree).
@@ -198,7 +273,7 @@ class TestCheckSchemasCoversOtelTree(unittest.TestCase):
                 check=False,
             )
             self.assertNotEqual(res.returncode, 0)
-            self.assertIn("otel/metrics.schema.json", res.stderr)
+            self.assertIn(os.fspath(Path("otel") / "metrics.schema.json"), res.stderr)
 
 
 class TestCliEmbedSchemaMirrors(unittest.TestCase):

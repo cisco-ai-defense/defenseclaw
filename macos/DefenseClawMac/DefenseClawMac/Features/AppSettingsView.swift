@@ -32,7 +32,7 @@ struct AppSettingsView: View {
                 .frame(width: 560, height: 300)
                 .tabItem { Label("Notifications", systemImage: "bell.badge") }
             ConnectionSettings()
-                .frame(width: 560, height: 420)
+                .frame(width: 560, height: 540)
                 .tabItem { Label("Connection", systemImage: "network") }
         }
     }
@@ -94,13 +94,25 @@ private struct GeneralSettings: View {
                 if let update = appState.availableRuntimeUpdate {
                     LabeledContent("Available", value: update.tag)
                     runtimeStatus
-                    if case .failed = appState.runtimeUpgradeState, !appState.runtimeUpgradeLog.isEmpty {
+                    if let command = runtimeUpgradeCommand {
+                        Button("Copy Upgrade Command") {
+                            copyToPasteboard(command)
+                        }
+                        .controlSize(.small)
+                        Text(command)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                            .textSelection(.enabled)
+                            .accessibilityLabel("Authenticated runtime upgrade command")
+                    }
+                    if shouldShowRuntimeUpgradeLog {
                         Button("Copy Full Upgrade Log") {
                             copyToPasteboard(appState.runtimeUpgradeLog)
                         }
                         .controlSize(.small)
                     }
-                    Text("Runs `defenseclaw upgrade --yes`: downloads release artifacts, migrates, and restarts the gateway. Configuration is preserved.")
+                    Text("The app does not run a bare CLI upgrade. Choose Show Upgrade Command below, then copy the runnable command that authenticates the release-owned defenseclaw-upgrade.sh asset, checksums.txt manifest, signature, and certificate before running latest mode without --version. The same path is documented at https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -109,13 +121,11 @@ private struct GeneralSettings: View {
                 if let payload = RuntimePayload.bundled {
                     LabeledContent("Bundled payload", value: "v\(payload.version)")
                     installStateRow
-                    Button(appState.installedRuntimeVersion == nil
-                           ? "Install Runtime v\(payload.version) (bundled)"
-                           : "Repair / Reinstall Runtime (v\(payload.version) bundled)") {
+                    Button("Install Runtime v\(payload.version) (fresh install only)") {
                         Task { await appState.installBundledRuntime() }
                     }
                     .disabled(appState.runtimeInstallState.isRunning || runtimeActionDisabled)
-                    Text("Lays the runtime bundled in this app into ~/.defenseclaw and ~/.local/bin. Configuration, tokens, and the audit database are never touched. Dependency download from PyPI requires network.")
+                    Text("Fresh installs only. If an existing or partial runtime is detected, this action makes no changes and directs you to the release-owned latest-mode upgrade resolver. A true fresh install lays the bundled runtime into \(appState.installationContext.homeRoot.path) and ~/.local/bin. Configuration, tokens, and the audit database are never touched. Dependency download from PyPI requires network.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -191,15 +201,32 @@ private struct GeneralSettings: View {
         case .checking:
             Text("Checking…").font(.caption).foregroundStyle(.secondary)
         case .installing, .downloading:
-            Text(appState.runtimeUpgradeLogTail.isEmpty ? "Running `defenseclaw upgrade`…" : appState.runtimeUpgradeLogTail)
+            Text(appState.runtimeUpgradeLogTail.isEmpty ? "Preparing release-owned resolver guidance…" : appState.runtimeUpgradeLogTail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+        case .actionRequired(let guidance, _):
+            Text(guidance).font(.caption).foregroundStyle(Cisco.blue).lineLimit(3)
         case .failed(let why):
             Text(why).font(.caption).foregroundStyle(Cisco.red).lineLimit(2)
         default:
             EmptyView()
         }
+    }
+
+    private var shouldShowRuntimeUpgradeLog: Bool {
+        guard !appState.runtimeUpgradeLog.isEmpty else { return false }
+        return switch appState.runtimeUpgradeState {
+        case .failed: true
+        default: false
+        }
+    }
+
+    private var runtimeUpgradeCommand: String? {
+        if case .actionRequired(_, let command) = appState.runtimeUpgradeState {
+            return command
+        }
+        return nil
     }
 
     private var macAppButtonTitle: String {
@@ -214,8 +241,8 @@ private struct GeneralSettings: View {
     private var runtimeButtonTitle: String {
         switch appState.runtimeUpgradeState {
         case .checking: "Checking Runtime…"
-        case .downloading, .installing: "Upgrading Runtime…"
-        default: appState.availableRuntimeUpdate == nil ? "Check Runtime" : "Upgrade Runtime"
+        case .downloading, .installing: "Preparing Upgrade Command…"
+        default: appState.availableRuntimeUpdate == nil ? "Check Runtime" : "Show Upgrade Command"
         }
     }
 
@@ -260,9 +287,9 @@ private struct GeneralSettings: View {
     }
 
     private var runtimeActionDisabled: Bool {
+        if !appState.installationMutationsAllowed { return true }
         if appState.runtimeVersionCheckInProgress { return true }
-        // Bundled-payload install and `defenseclaw upgrade` mutate the same
-        // venv/gateway — one at a time.
+        // Do not overlap bundled-payload installation with upgrade guidance.
         if appState.runtimeInstallState.isRunning { return true }
         return switch appState.runtimeUpgradeState {
         case .checking, .downloading, .installing: true
@@ -350,6 +377,9 @@ private struct NotificationSettings: View {
 private struct ConnectionSettings: View {
     @Environment(AppState.self) private var appState
     @AppStorage(CLIRunner.pathOverrideKey) private var binaryPath = ""
+    @State private var configPathOverride = UserDefaults.standard.string(
+        forKey: InstallationContext.configPathOverrideKey
+    ) ?? ""
 
     var body: some View {
         Form {
@@ -357,11 +387,48 @@ private struct ConnectionSettings: View {
                 LabeledContent("Endpoint", value: "http://\(appState.config.gatewayHost):\(appState.config.gatewayPort)")
                 LabeledContent("Token", value: appState.config.gatewayToken == nil ? "not set" : "configured (hidden)")
             }
+            Section("Installation") {
+                LabeledContent("Selected by", value: appState.installationContext.source.label)
+                LabeledContent("Access", value: appState.installationContext.accessMode.label)
+                if let reason = appState.installationReadOnlyReason {
+                    Label(reason, systemImage: "lock.shield")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Config path override")
+                    TextField("absolute path to config.yaml", text: $configPathOverride)
+                        .textFieldStyle(.roundedBorder)
+                    Text("DEFENSECLAW_CONFIG takes precedence. Leave blank to use DEFENSECLAW_HOME, the managed package, or ~/.defenseclaw.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Button("Apply Installation") {
+                        appState.applyInstallationConfigOverride(configPathOverride)
+                    }
+                    .disabled(!appState.installationContextSwitchAllowed)
+                    Button("Use Automatic Selection") {
+                        configPathOverride = ""
+                        appState.applyInstallationConfigOverride("")
+                    }
+                    .disabled(
+                        !appState.installationContextSwitchAllowed
+                            || (configPathOverride.isEmpty
+                                && appState.installationContext.source != .appOverride)
+                    )
+                }
+            }
             // Paths get their own line, monospaced + selectable, so long
             // values aren't clipped by the label/value column truncation.
             Section("Files") {
-                pathRow("Config", ConfigStore.configURL.path)
-                pathRow("Audit DB", ConfigStore.auditDBURL.path)
+                pathRow("Config", appState.installationContext.configURL.path)
+                pathRow("Data", appState.installationContext.dataDirectory.path)
+                pathRow("Environment", appState.installationContext.environmentURL.path)
+                pathRow("Audit DB", appState.installationContext.auditDBURL.path)
+                pathRow("Virtual environment", appState.installationContext.venvURL.path)
+                pathRow("Gateway log", appState.installationContext.gatewayLogURL.path)
             }
             Section("defenseclaw CLI") {
                 VStack(alignment: .leading, spacing: 4) {

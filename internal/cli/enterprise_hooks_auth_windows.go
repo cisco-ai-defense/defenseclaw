@@ -12,4 +12,20 @@
 
 package cli
 
-func setEnterpriseHookAuthorizationOwnership(string) error { return nil }
+import (
+	"os"
+
+	"golang.org/x/sys/windows"
+)
+
+func setEnterpriseHookAuthorizationOwnership(path string) error {
+	owner, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	return setEnterpriseWindowsManagedProtection(path, owner, info.IsDir())
+}

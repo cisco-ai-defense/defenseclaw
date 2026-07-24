@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cisco.secureclient.defenseclaw.hook-enumerator</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/opt/cisco/secureclient/defenseclaw/lib/render-targets.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/opt/cisco/secureclient/defenseclaw</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SUPPORT_DIR</key>
+    <string>/opt/cisco/secureclient/defenseclaw</string>
+    <key>DEFENSECLAW_CONFIG</key>
+    <string>/opt/cisco/secureclient/defenseclaw/etc/config.yaml</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>StandardOutPath</key>
+  <string>/Library/Logs/Cisco/SecureClient/DefenseClaw/hook-enumerator.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Library/Logs/Cisco/SecureClient/DefenseClaw/hook-enumerator.err.log</string>
+</dict>
+</plist>

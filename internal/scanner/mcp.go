@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
 // mcpScanTargetLooksLikeURL returns true when “target“ parses as a
@@ -208,13 +209,9 @@ func (s *MCPScanner) buildArgs(target string) []string {
 
 func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
 	start := time.Now()
-	ctx, sp := BeginScanSpan(ctx, s.Name(), target, InferTargetType(s.Name()), AgentIdentity{})
 	exitCode := 0
 	var scanErr error
 	var result *ScanResult
-	defer func() {
-		FinishScanSpan(sp, result, exitCode, scanErr)
-	}()
 
 	// ("MCP scan target is passed to a remote-
 	// capable scanner without URL guarding"): mcp-scanner accepts
@@ -243,7 +240,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	}
 
 	args := s.buildArgs(target)
-	cmd := exec.CommandContext(ctx, s.Config.Binary, args...)
+	cmd := processutil.CommandContext(ctx, s.Config.Binary, args...)
 	// Inherit the gateway's environment (like the plugin scanner):
 	// the Python CLI resolves LLM / Cisco AI Defense credentials from
 	// its own config, so no scanner-specific env injection is needed.
@@ -273,11 +270,8 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 			scanErr = fmt.Errorf("scanner: %s not found at %q — install with: pip install defenseclaw (the mcpscanner SDK is provided by cisco-ai-mcp-scanner)", s.Name(), s.Config.Binary)
 			return nil, scanErr
 		}
-		if exitCode != 0 {
-			EmitSubprocessExitFromContext(ctx, s.Config.Binary, exitCode, stderrStr)
-		}
 		if stdout.Len() == 0 {
-			scanErr = fmt.Errorf("scanner: %s failed: %s", s.Name(), stderrStr)
+			scanErr = fmt.Errorf("scanner: %s exited %d: %s", s.Name(), exitCode, stderrStr)
 			return nil, scanErr
 		}
 	}

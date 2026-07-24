@@ -36,11 +36,11 @@ import (
 // reintroduces a silent `exit 0` fails CI instead of shipping a
 // lockout.
 
-// runCursorHookAgainst renders cursor-hook.sh pointed at apiAddr and
-// runs it, returning stdout/stderr/exit error.
-func runCursorHookAgainst(t *testing.T, apiAddr string) (string, string, error) {
+// runCursorHookAgainst renders cursor-hook.sh pointed at apiAddr with the
+// requested failure mode and input, returning stdout/stderr/exit error.
+func runCursorHookAgainst(t *testing.T, apiAddr, failMode, input string) (string, string, error) {
 	t.Helper()
-	return runCursorHook(t, apiAddr, "closed", true)
+	return runCursorHookWithInput(t, apiAddr, failMode, true, input)
 }
 
 // stubGatewayAddr stands up an httptest server that returns the given
@@ -64,7 +64,12 @@ func TestCursorHook_ObserveEmptyHookOutputEmitsAllow(t *testing.T) {
 	// with no hook_output. This is the exact case that produced the
 	// original total lockout. The hook must emit an explicit allow.
 	addr := stubGatewayAddr(t, http.StatusOK, `{}`)
-	stdout, stderr, err := runCursorHookAgainst(t, addr)
+	stdout, stderr, err := runCursorHookAgainst(
+		t,
+		addr,
+		"closed",
+		`{"hook_event_name":"beforeShellExecution"}`,
+	)
 	if err != nil {
 		t.Fatalf("expected exit 0, got %v; stderr=%s", err, stderr)
 	}
@@ -77,7 +82,12 @@ func TestCursorHook_GatewayAllowEnvelopePassedThrough(t *testing.T) {
 	}
 	addr := stubGatewayAddr(t, http.StatusOK,
 		`{"hook_output":{"continue":true,"permission":"allow"}}`)
-	stdout, stderr, err := runCursorHookAgainst(t, addr)
+	stdout, stderr, err := runCursorHookAgainst(
+		t,
+		addr,
+		"closed",
+		`{"hook_event_name":"beforeShellExecution"}`,
+	)
 	if err != nil {
 		t.Fatalf("expected exit 0, got %v; stderr=%s", err, stderr)
 	}
@@ -90,20 +100,21 @@ func TestCursorHook_GatewayDenyEnvelopePassedThrough(t *testing.T) {
 	}
 	// A real block decision must still reach Cursor verbatim — the
 	// fail-open hardening must not swallow deny verdicts.
-	addr := stubGatewayAddr(t, http.StatusOK,
-		`{"hook_output":{"continue":true,"permission":"deny","user_message":"blocked by policy"}}`)
-	stdout, _, err := runCursorHookAgainst(t, addr)
+	want := `{"continue":false,"permission":"deny","user_message":"blocked by policy"}`
+	addr := stubGatewayAddr(t, http.StatusOK, `{"hook_output":`+want+`}`)
+	stdout, _, err := runCursorHookAgainst(
+		t,
+		addr,
+		"closed",
+		`{"hook_event_name":"beforeShellExecution"}`,
+	)
 	if err != nil {
 		t.Fatalf("expected exit 0 (decision carried in body), got %v", err)
 	}
-	trimmed := strings.TrimSpace(stdout)
-	var obj map[string]interface{}
-	if e := json.Unmarshal([]byte(trimmed), &obj); e != nil {
-		t.Fatalf("stdout not JSON: %q", trimmed)
+	if got := strings.TrimSpace(stdout); got != want {
+		t.Fatalf("deny envelope changed in transit:\ngot:  %s\nwant: %s", got, want)
 	}
-	if obj["permission"] != "deny" {
-		t.Fatalf(`permission = %v, want "deny"; stdout=%q`, obj["permission"], trimmed)
-	}
+	assertDenyEnvelope(t, stdout)
 }
 
 // TestCursorHook_NeverEmptyStdout is the umbrella guard: across every
@@ -125,7 +136,12 @@ func TestCursorHook_NeverEmptyStdout(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			stdout, stderr, err := runCursorHookAgainst(t, tc.addr(t))
+			stdout, stderr, err := runCursorHookAgainst(
+				t,
+				tc.addr(t),
+				"open",
+				`{"hook_event_name":"beforeShellExecution"}`,
+			)
 			if err != nil {
 				t.Fatalf("expected exit 0 (fail-open), got %v; stderr=%s", err, stderr)
 			}
@@ -142,6 +158,19 @@ func TestCursorHook_NeverEmptyStdout(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("oversized_fail_open", func(t *testing.T) {
+		stdout, stderr, err := runCursorHookAgainst(
+			t,
+			"127.0.0.1:1",
+			"open",
+			strings.Repeat("x", (1<<20)+1),
+		)
+		if err != nil {
+			t.Fatalf("expected exit 0 for oversized fail-open input, got %v; stderr=%s", err, stderr)
+		}
+		assertAllowEnvelope(t, stdout)
+	})
 }
 
 // TestCursorHooks_ObserveModeWritesFailClosedFalse pins the config

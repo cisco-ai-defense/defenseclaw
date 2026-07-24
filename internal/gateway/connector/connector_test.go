@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -35,7 +36,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -110,6 +110,91 @@ func TestManagedFileBackup_SkipsWhenUserEditedAfterSetup(t *testing.T) {
 	if string(got) != `{"hooks":["defenseclaw","user-added"]}` {
 		t.Fatalf("drifted bytes changed: %q", got)
 	}
+}
+
+func TestManagedFileBackup_RejectsDifferentTargetPath(t *testing.T) {
+	t.Run("recapture", func(t *testing.T) {
+		dir := t.TempDir()
+		first := filepath.Join(dir, "first", "config.json")
+		second := filepath.Join(dir, "second", "config.json")
+		for _, path := range []string{first, second} {
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(`{"hooks":["original"]}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := captureManagedFileBackup(dir, "claudecode", "settings", first); err != nil {
+			t.Fatalf("capture first: %v", err)
+		}
+		if err := captureManagedFileBackup(dir, "claudecode", "settings", second); err == nil {
+			t.Fatal("recapture accepted a different target path")
+		}
+	})
+
+	t.Run("post hash", func(t *testing.T) {
+		dir := t.TempDir()
+		first := filepath.Join(dir, "first.json")
+		second := filepath.Join(dir, "second.json")
+		if err := os.WriteFile(first, []byte(`{"hooks":["original"]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(second, []byte(`{"hooks":["managed"]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := captureManagedFileBackup(dir, "codex", "config", first); err != nil {
+			t.Fatalf("capture: %v", err)
+		}
+		if err := updateManagedFileBackupPostHash(dir, "codex", "config", second); err == nil {
+			t.Fatal("post-hash update accepted a different target path")
+		}
+	})
+
+	t.Run("restore", func(t *testing.T) {
+		dir := t.TempDir()
+		first := filepath.Join(dir, "first.json")
+		second := filepath.Join(dir, "second.json")
+		original := []byte(`{"hooks":["original"]}`)
+		managed := []byte(`{"hooks":["defenseclaw"]}`)
+		if err := os.WriteFile(first, original, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := captureManagedFileBackup(dir, "codex", "config", first); err != nil {
+			t.Fatalf("capture: %v", err)
+		}
+		if err := os.WriteFile(first, managed, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := updateManagedFileBackupPostHash(dir, "codex", "config", first); err != nil {
+			t.Fatalf("post hash: %v", err)
+		}
+		// Match the managed hash deliberately: without target binding, restore
+		// would overwrite this unrelated file with first's pristine bytes.
+		if err := os.WriteFile(second, managed, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		restored, err := restoreManagedFileBackupIfUnchanged(dir, "codex", "config", second)
+		if err == nil {
+			t.Fatal("restore accepted a different target path")
+		}
+		if restored {
+			t.Fatal("restore reported success for a different target path")
+		}
+		for _, path := range []string{first, second} {
+			got, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatalf("read %s: %v", path, readErr)
+			}
+			if string(got) != string(managed) {
+				t.Fatalf("different-path restore changed %s to %q", path, got)
+			}
+		}
+		if _, statErr := os.Stat(managedFileBackupPath(dir, "codex", "config")); statErr != nil {
+			t.Fatalf("different-path restore removed recovery metadata: %v", statErr)
+		}
+	})
 }
 
 func TestAtomicWriteFile_PreservesSymlinkedDotfile(t *testing.T) {
@@ -902,8 +987,7 @@ func TestOpenClaw_Uninstall_RemovesAllDefenseClawLoadPaths(t *testing.T) {
 	paths := plugins["load"].(map[string]interface{})["paths"].([]interface{})
 	foundOther := false
 	for _, path := range paths {
-		text := fmt.Sprint(path)
-		if strings.Contains(text, "defenseclaw") {
+		if isDefenseClawLoadPath(path) {
 			t.Fatalf("DefenseClaw load path survived uninstall: %v", paths)
 		}
 		if s, _ := path.(string); s == otherPath {
@@ -1046,6 +1130,9 @@ func TestOpenClaw_Teardown_RemovesExtensionAndConfig(t *testing.T) {
 
 func requireOpenClawExtensionBundle(t *testing.T) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenClaw requires the guardrail proxy and is intentionally unsupported by the native Windows hook-only build")
+	}
 	if !OpenClawExtensionAvailable() {
 		t.Skip("OpenClaw extension bundle is optional; run `make extensions` before this test")
 	}
@@ -1230,6 +1317,732 @@ func TestClaudeCode_Setup_PatchesSettings(t *testing.T) {
 	}
 }
 
+func TestClaudeCode_Setup_HonorsClaudeConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	claudeConfigDir := filepath.Join(dir, "custom-claude-config")
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeConfigDir)
+	previous := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = ""
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	settingsPath := filepath.Join(claudeConfigDir, "settings.json")
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read CLAUDE_CONFIG_DIR settings: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatalf("parse CLAUDE_CONFIG_DIR settings: %v", err)
+	}
+	if _, ok := settings["hooks"].(map[string]interface{}); !ok {
+		t.Fatalf("CLAUDE_CONFIG_DIR settings have no hooks object: %s", raw)
+	}
+
+	targets := c.ComponentTargets(filepath.Join(dir, "workspace"))
+	for component, expected := range map[string]string{
+		"skill":   filepath.Join(claudeConfigDir, "skills"),
+		"plugin":  filepath.Join(claudeConfigDir, "plugins"),
+		"mcp":     settingsPath,
+		"agent":   filepath.Join(claudeConfigDir, "agents"),
+		"command": filepath.Join(claudeConfigDir, "commands"),
+		"config":  settingsPath,
+	} {
+		if !slices.Contains(targets[component], expected) {
+			t.Errorf("ComponentTargets(%q) = %v, missing CLAUDE_CONFIG_DIR path %q", component, targets[component], expected)
+		}
+	}
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean after CLAUDE_CONFIG_DIR teardown: %v", err)
+	}
+	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+		t.Fatalf("CLAUDE_CONFIG_DIR settings remained after teardown: %v", err)
+	}
+}
+
+func TestClaudeCode_SetupRefreshDeduplicatesManagedHooksAcrossBinaryPathChange(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native absolute hook-command refresh is Windows-specific")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	thirdPartyCommand := `C:\Tools\team-hook.exe --notify`
+	initial := fmt.Sprintf(
+		`{"hooks":{"Notification":[{"hooks":[{"type":"command","command":%q}]}]}}`,
+		thirdPartyCommand,
+	)
+	if err := os.WriteFile(settingsPath, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	previousBinaryOverride := defenseclawHookBinaryOverride
+	t.Cleanup(func() {
+		ClaudeCodeSettingsPathOverride = previousSettingsOverride
+		defenseclawHookBinaryOverride = previousBinaryOverride
+	})
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	firstBinary := filepath.Join(dir, "installed", windowsHookBinaryName)
+	secondBinary := filepath.Join(dir, "source-build", windowsHookBinaryName)
+	defenseclawHookBinaryOverride = firstBinary
+	firstCommand := firstBinary
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("first Setup: %v", err)
+	}
+	defenseclawHookBinaryOverride = secondBinary
+	secondCommand := secondBinary
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("refresh Setup: %v", err)
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("idempotent Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	hooks, ok := settings["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("hooks missing after Setup: %T", settings["hooks"])
+	}
+
+	managedCount := 0
+	thirdPartyCount := 0
+	for _, rawEntries := range hooks {
+		entries, _ := rawEntries.([]interface{})
+		for _, rawEntry := range entries {
+			entry, _ := rawEntry.(map[string]interface{})
+			commands, _ := entry["hooks"].([]interface{})
+			for _, rawCommand := range commands {
+				command, _ := rawCommand.(map[string]interface{})
+				value, _ := command["command"].(string)
+				switch value {
+				case secondCommand:
+					managedCount++
+				case thirdPartyCommand:
+					thirdPartyCount++
+				}
+				if value == firstCommand {
+					t.Fatalf("stale managed command survived refresh: %q", value)
+				}
+			}
+		}
+	}
+	if managedCount != len(hookGroups) {
+		t.Fatalf("managed hook count=%d, want %d (one per event)", managedCount, len(hookGroups))
+	}
+	if thirdPartyCount != 1 {
+		t.Fatalf("third-party hook count=%d, want 1", thirdPartyCount)
+	}
+}
+
+func claudeCodePreTrackingWindowsExecMatrix(command string) map[string]interface{} {
+	hooks := map[string]interface{}{}
+	for _, group := range hookGroups {
+		handler := map[string]interface{}{
+			"type":    "command",
+			"command": command,
+			"args":    []interface{}{"hook", "--connector", "claudecode"},
+			"timeout": group.timeout,
+		}
+		if group.async {
+			handler["async"] = true
+		}
+		entry := map[string]interface{}{
+			"hooks": []interface{}{handler},
+		}
+		if group.matcher != "" {
+			entry["matcher"] = group.matcher
+		}
+		hooks[group.eventType] = []interface{}{entry}
+	}
+	return hooks
+}
+
+func claudeCodeFirstTestHookGroup(
+	hooks map[string]interface{},
+	eventType string,
+) map[string]interface{} {
+	return hooks[eventType].([]interface{})[0].(map[string]interface{})
+}
+
+func claudeCodeFirstTestHookHandler(
+	hooks map[string]interface{},
+	eventType string,
+) map[string]interface{} {
+	group := claudeCodeFirstTestHookGroup(hooks, eventType)
+	return group["hooks"].([]interface{})[0].(map[string]interface{})
+}
+
+func TestInferPreTrackedClaudeCodeManagedCommandsRequiresExactWindowsExecMatrix(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("pre-tracking native exec migration is Windows-specific")
+	}
+	command := filepath.Join(t.TempDir(), "old-source-build", windowsHookBinaryName)
+	exact := claudeCodePreTrackingWindowsExecMatrix(command)
+	commands, err := inferPreTrackedClaudeCodeManagedCommands(exact, map[string]interface{}{}, true)
+	if err != nil {
+		t.Fatalf("infer exact predecessor matrix: %v", err)
+	}
+	if len(commands) != 1 || commands[0] != command {
+		t.Fatalf("exact predecessor commands = %#v, want [%q]", commands, command)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(map[string]interface{})
+	}{
+		{
+			name: "matcher mismatch",
+			mutate: func(hooks map[string]interface{}) {
+				claudeCodeFirstTestHookGroup(hooks, "SessionStart")["matcher"] = "startup"
+			},
+		},
+		{
+			name: "empty matcher serialized",
+			mutate: func(hooks map[string]interface{}) {
+				claudeCodeFirstTestHookGroup(hooks, "UserPromptSubmit")["matcher"] = ""
+			},
+		},
+		{
+			name: "timeout mismatch",
+			mutate: func(hooks map[string]interface{}) {
+				handler := claudeCodeFirstTestHookHandler(hooks, "PreToolUse")
+				handler["timeout"] = handler["timeout"].(int) + 1
+			},
+		},
+		{
+			name: "asynchronous handler omitted",
+			mutate: func(hooks map[string]interface{}) {
+				delete(claudeCodeFirstTestHookHandler(hooks, "MessageDisplay"), "async")
+			},
+		},
+		{
+			name: "explicit false async on blocking handler",
+			mutate: func(hooks map[string]interface{}) {
+				claudeCodeFirstTestHookHandler(hooks, "PreToolUse")["async"] = false
+			},
+		},
+		{
+			name: "async alias present",
+			mutate: func(hooks map[string]interface{}) {
+				claudeCodeFirstTestHookHandler(hooks, "PreToolUse")["asyncRewake"] = false
+			},
+		},
+		{
+			name: "handler type mismatch",
+			mutate: func(hooks map[string]interface{}) {
+				claudeCodeFirstTestHookHandler(hooks, "PreToolUse")["type"] = "prompt"
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hooks := claudeCodePreTrackingWindowsExecMatrix(command)
+			tt.mutate(hooks)
+			commands, err := inferPreTrackedClaudeCodeManagedCommands(
+				hooks,
+				map[string]interface{}{},
+				true,
+			)
+			if err != nil {
+				t.Fatalf("infer wrong-shape predecessor matrix: %v", err)
+			}
+			if len(commands) != 0 {
+				t.Fatalf("inferred wrong-shape predecessor commands = %#v, want none", commands)
+			}
+		})
+	}
+}
+
+func TestInferPreTrackedClaudeCodeManagedCommandsRejectsPristineIdentity(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("pre-tracking native exec migration is Windows-specific")
+	}
+	command := filepath.Join(t.TempDir(), "old-source-build", windowsHookBinaryName)
+	current := claudeCodePreTrackingWindowsExecMatrix(command)
+	pristine := claudeCodePreTrackingWindowsExecMatrix(command)
+	claudeCodeFirstTestHookHandler(pristine, "SessionStart")["timeout"] = 1
+
+	commands, err := inferPreTrackedClaudeCodeManagedCommands(current, pristine, true)
+	if err != nil {
+		t.Fatalf("infer matrix with ambiguous pristine identity: %v", err)
+	}
+	if len(commands) != 0 {
+		t.Fatalf("inferred ambiguous pristine commands = %#v, want none", commands)
+	}
+}
+
+func TestClaudeCode_SetupMigratesPreTrackingWindowsExecMatrixAfterBinaryMove(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("pre-tracking native exec migration is Windows-specific")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	oldBinary := filepath.Join(dir, "old-source-build", windowsHookBinaryName)
+	newBinary := filepath.Join(dir, "new-install", windowsHookBinaryName)
+	foreignBinary := `C:\OtherProduct\defenseclaw-hook.exe`
+	hooks := claudeCodePreTrackingWindowsExecMatrix(oldBinary)
+	hooks["Notification"] = append(hooks["Notification"].([]interface{}), map[string]interface{}{
+		"hooks": []interface{}{
+			map[string]interface{}{
+				"type":        "command",
+				"command":     foreignBinary,
+				"args":        []interface{}{"hook", "--connector", "claudecode"},
+				"timeout":     15,
+				"user_option": "preserve-me",
+			},
+		},
+	})
+	raw, err := json.Marshal(map[string]interface{}{"hooks": hooks})
+	if err != nil {
+		t.Fatalf("marshal pre-tracking Windows settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, raw, 0o600); err != nil {
+		t.Fatalf("write pre-tracking Windows settings: %v", err)
+	}
+
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	previousBinaryOverride := defenseclawHookBinaryOverride
+	defenseclawHookBinaryOverride = newBinary
+	t.Cleanup(func() {
+		ClaudeCodeSettingsPathOverride = previousSettingsOverride
+		defenseclawHookBinaryOverride = previousBinaryOverride
+	})
+
+	c := NewClaudeCodeConnector()
+	// The pre-tracking Windows Setup wrote this protected backup but intentionally
+	// did not populate the Windows managed-command list.
+	if err := c.saveBackup(dir, claudeCodeBackup{HadHooksKey: false}); err != nil {
+		t.Fatalf("save pre-tracking Windows backup: %v", err)
+	}
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	updated, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read migrated settings: %v", err)
+	}
+	settings := map[string]interface{}{}
+	if err := json.Unmarshal(updated, &settings); err != nil {
+		t.Fatalf("parse migrated settings: %v", err)
+	}
+	oldCount := 0
+	newCount := 0
+	foreignCount := 0
+	for _, rawGroups := range settings["hooks"].(map[string]interface{}) {
+		for _, rawGroup := range rawGroups.([]interface{}) {
+			for _, rawHandler := range rawGroup.(map[string]interface{})["hooks"].([]interface{}) {
+				handler := rawHandler.(map[string]interface{})
+				switch handler["command"] {
+				case oldBinary:
+					oldCount++
+				case newBinary:
+					newCount++
+				case foreignBinary:
+					foreignCount++
+					if handler["user_option"] != "preserve-me" {
+						t.Fatalf("foreign handler metadata changed: %#v", handler)
+					}
+				}
+			}
+		}
+	}
+	if oldCount != 0 || newCount != len(hookGroups) || foreignCount != 1 {
+		t.Fatalf("migrated old=%d new=%d foreign=%d, want 0/%d/1", oldCount, newCount, foreignCount, len(hookGroups))
+	}
+}
+
+func TestClaudeCode_SetupPreservesForeignSameBasenameExecHook(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows exec-form ownership is Windows-specific")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	foreignCommand := `C:\OtherProduct\defenseclaw-hook.exe`
+	foreignHandler := map[string]interface{}{
+		"type":        "command",
+		"command":     foreignCommand,
+		"args":        []interface{}{"hook", "--connector", "claudecode"},
+		"timeout":     15,
+		"user_option": "preserve-me",
+	}
+	settings := map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"PreToolUse": []interface{}{
+				map[string]interface{}{
+					"matcher": "*",
+					"hooks":   []interface{}{foreignHandler},
+				},
+			},
+		},
+	}
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, raw, 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	previousBinaryOverride := defenseclawHookBinaryOverride
+	defenseclawHookBinaryOverride = filepath.Join(dir, "managed", windowsHookBinaryName)
+	t.Cleanup(func() {
+		ClaudeCodeSettingsPathOverride = previousSettingsOverride
+		defenseclawHookBinaryOverride = previousBinaryOverride
+	})
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	updated, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if err := json.Unmarshal(updated, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	hooks := settings["hooks"].(map[string]interface{})
+	entries := hooks["PreToolUse"].([]interface{})
+	foreignCount := 0
+	managedCount := 0
+	for _, rawEntry := range entries {
+		entry := rawEntry.(map[string]interface{})
+		for _, rawHandler := range entry["hooks"].([]interface{}) {
+			handler := rawHandler.(map[string]interface{})
+			switch handler["command"] {
+			case foreignCommand:
+				foreignCount++
+				if handler["user_option"] != "preserve-me" {
+					t.Fatalf("foreign handler metadata changed: %#v", handler)
+				}
+			case defenseclawHookBinaryOverride:
+				managedCount++
+			}
+		}
+	}
+	if foreignCount != 1 || managedCount != 1 {
+		t.Fatalf("PreToolUse foreign=%d managed=%d, want 1 each: %#v", foreignCount, managedCount, entries)
+	}
+}
+
+func TestClaudeCode_SetupRefreshPreservesForeignHandlerInManagedMatcherGroup(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previousSettingsOverride })
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("first Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	hooks := settings["hooks"].(map[string]interface{})
+	entries := hooks["PreToolUse"].([]interface{})
+	sharedGroup := entries[0].(map[string]interface{})
+	sharedGroup["user_metadata"] = "preserve-me"
+	foreignCommand := "/usr/bin/user-shared-hook"
+	foreignHandler := map[string]interface{}{
+		"type":        "command",
+		"command":     foreignCommand,
+		"timeout":     17,
+		"user_option": "preserve-me-too",
+	}
+	sharedHandlers := sharedGroup["hooks"].([]interface{})
+	sharedGroup["hooks"] = append(sharedHandlers, foreignHandler)
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal mixed settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, out, 0o600); err != nil {
+		t.Fatalf("write mixed settings: %v", err)
+	}
+
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("refresh Setup: %v", err)
+	}
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read refreshed settings: %v", err)
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse refreshed settings: %v", err)
+	}
+	hooks = settings["hooks"].(map[string]interface{})
+	entries = hooks["PreToolUse"].([]interface{})
+	foreignCount := 0
+	managedCount := 0
+	for _, rawEntry := range entries {
+		entry := rawEntry.(map[string]interface{})
+		if isOwnedHook(entry, filepath.Join(dir, "hooks")) {
+			managedCount++
+		}
+		for _, rawHandler := range entry["hooks"].([]interface{}) {
+			handler := rawHandler.(map[string]interface{})
+			if handler["command"] == foreignCommand {
+				foreignCount++
+				if entry["matcher"] != "*" || entry["user_metadata"] != "preserve-me" {
+					t.Fatalf("foreign matcher-group metadata was not preserved: %#v", entry)
+				}
+				if handler["user_option"] != "preserve-me-too" {
+					t.Fatalf("foreign handler metadata was not preserved: %#v", handler)
+				}
+			}
+		}
+	}
+	if foreignCount != 1 {
+		t.Fatalf("foreign handler count=%d, want 1; entries=%#v", foreignCount, entries)
+	}
+	if managedCount != 1 {
+		t.Fatalf("managed matcher-group count=%d, want 1; entries=%#v", managedCount, entries)
+	}
+}
+
+func TestClaudeCode_SetupRefreshRemovesKnownPreUpgradeCommandWithoutClaimingRepoPath(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("canonical native install command is Windows-specific")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	installedCommand := windowsQuoteExe(
+		filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName),
+	) + " " + nativeHookFlag + "claudecode"
+	repoCommand := `"C:\Users\test\src\defenseclaw\defenseclaw-gateway.exe" hook --connector claudecode`
+	foreignCommand := `"C:\OtherProduct\defenseclaw-gateway.exe" hook --connector claudecode`
+	hooks := map[string]interface{}{}
+	for _, group := range hookGroups {
+		hooks[group.eventType] = []interface{}{
+			map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{"type": "command", "command": installedCommand},
+				},
+			},
+			map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{"type": "command", "command": repoCommand},
+				},
+			},
+		}
+	}
+	hooks["Notification"] = append(hooks["Notification"].([]interface{}), map[string]interface{}{
+		"hooks": []interface{}{
+			map[string]interface{}{"type": "command", "command": foreignCommand},
+		},
+	})
+	settings := map[string]interface{}{
+		"hooks": hooks,
+	}
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, raw, 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	previousBinaryOverride := defenseclawHookBinaryOverride
+	defenseclawHookBinaryOverride = filepath.Join(dir, "installed", windowsHookBinaryName)
+	t.Cleanup(func() {
+		ClaudeCodeSettingsPathOverride = previousSettingsOverride
+		defenseclawHookBinaryOverride = previousBinaryOverride
+	})
+
+	// The pre-tracking Windows state left ManagedHookCommands empty. This is the
+	// predecessor backup state behind the live duplicate report. The canonical
+	// installed path remains provably ours; the arbitrary source-tree path lacks
+	// the exact predecessor matcher/timeout/async evidence required for migration and
+	// must remain foreign, just like the isolated third-party hook above.
+	c := NewClaudeCodeConnector()
+	if err := c.saveBackup(dir, claudeCodeBackup{
+		HadHooksKey: false,
+	}); err != nil {
+		t.Fatalf("seed legacy backup: %v", err)
+	}
+	opts := SetupOpts{
+		DataDir:  dir,
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "test-token",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("idempotent Setup: %v", err)
+	}
+
+	updated, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if err := json.Unmarshal(updated, &settings); err != nil {
+		t.Fatalf("parse updated settings: %v", err)
+	}
+	installedFound := false
+	repoFound := false
+	foreignFound := false
+	managedCount := 0
+	currentCommand := defenseclawHookBinary()
+	hooks, ok := settings["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("hooks = %T, want object", settings["hooks"])
+	}
+	for eventType, rawEntries := range hooks {
+		entries, ok := rawEntries.([]interface{})
+		if !ok {
+			t.Fatalf("hooks[%q] = %T, want array", eventType, rawEntries)
+		}
+		for entryIndex, rawEntry := range entries {
+			entry, ok := rawEntry.(map[string]interface{})
+			if !ok {
+				t.Fatalf("hooks[%q][%d] = %T, want object", eventType, entryIndex, rawEntry)
+			}
+			rawHooks, ok := entry["hooks"].([]interface{})
+			if !ok {
+				t.Fatalf("hooks[%q][%d].hooks = %T, want array", eventType, entryIndex, entry["hooks"])
+			}
+			for hookIndex, rawHook := range rawHooks {
+				hook, ok := rawHook.(map[string]interface{})
+				if !ok {
+					t.Fatalf("hooks[%q][%d].hooks[%d] = %T, want object", eventType, entryIndex, hookIndex, rawHook)
+				}
+				command, _ := hook["command"].(string)
+				installedFound = installedFound || command == installedCommand
+				repoFound = repoFound || command == repoCommand
+				foreignFound = foreignFound || command == foreignCommand
+				if command == currentCommand {
+					managedCount++
+				}
+			}
+		}
+	}
+	if installedFound {
+		t.Fatal("known installed pre-upgrade managed command survived refresh")
+	}
+	if !repoFound {
+		t.Fatal("untracked source-tree command was claimed without exact migration evidence")
+	}
+	if managedCount != len(hookGroups) {
+		t.Fatalf("managed hook count=%d, want %d", managedCount, len(hookGroups))
+	}
+	if !foreignFound {
+		t.Fatal("third-party hook was removed")
+	}
+}
+
+func TestLegacyClaudeCodeNativeHookCommandRequiresExactSignature(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("legacy native command signature is Windows-specific")
+	}
+	knownLegacyGateway := filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName)
+	valid := []string{
+		windowsQuoteExe(knownLegacyGateway) + " " + nativeHookFlag + "claudecode",
+		"& " + windowsQuoteExe(knownLegacyGateway) + " " + nativeHookFlag + "claudecode",
+		`defenseclaw-gateway.exe hook --connector claudecode`,
+	}
+	for _, command := range valid {
+		if !isLegacyClaudeCodeNativeHookCommand(command) {
+			t.Errorf("valid managed command was not recognized: %q", command)
+		}
+	}
+
+	invalid := []string{
+		`"C:\Tools\team-hook.exe" hook --connector claudecode`,
+		`"C:\OtherProduct\defenseclaw-hook.exe" hook --connector claudecode`,
+		`"C:\OtherProduct\defenseclaw-gateway.exe" hook --connector claudecode`,
+		`"C:\Tools\defenseclaw-gateway.exe" hook --connector codex`,
+		`"C:\Tools\defenseclaw-gateway.exe" hook --connector claudecode --extra`,
+		`"C:\Tools\defenseclaw-gateway.exe" hook --connector claudecode & whoami`,
+		`"C:\Tools\defenseclaw-gateway.exe hook --connector claudecode`,
+		`C:\Program Files\DefenseClaw\defenseclaw-gateway.exe hook --connector claudecode`,
+		`& whoami; "C:\Tools\defenseclaw-gateway.exe" hook --connector claudecode`,
+	}
+	for _, command := range invalid {
+		if isLegacyClaudeCodeNativeHookCommand(command) {
+			t.Errorf("non-exact command was recognized as managed: %q", command)
+		}
+	}
+}
+
+func TestTrackedClaudeCodeLegacyCommandNormalizesCallOperatorAndQuotes(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("legacy PowerShell command normalization is Windows-specific")
+	}
+	executable := `C:\Users\test user\src\defenseclaw-gateway.exe`
+	doubleQuoted := `"` + executable + `" hook --connector claudecode`
+	calledSingleQuoted := `& '` + executable + `' hook --connector claudecode`
+	cases := []struct {
+		name    string
+		current string
+		managed string
+	}{
+		{name: "operator-added-call-operator", current: calledSingleQuoted, managed: doubleQuoted},
+		{name: "operator-removed-call-operator", current: doubleQuoted, managed: calledSingleQuoted},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := map[string]interface{}{"type": "command", "command": tc.current}
+			if !hookUsesTrackedClaudeCodeCommand(handler, []string{tc.managed}) {
+				t.Fatalf("semantically identical legacy command was not tracked\ncurrent: %s\nmanaged: %s", tc.current, tc.managed)
+			}
+		})
+	}
+	foreign := map[string]interface{}{
+		"type":    "command",
+		"command": `& 'C:\OtherProduct\defenseclaw-gateway.exe' hook --connector claudecode`,
+	}
+	if hookUsesTrackedClaudeCodeCommand(foreign, []string{doubleQuoted}) {
+		t.Fatal("different executable path matched the protected legacy command")
+	}
+	execCommand := `C:\moved\defenseclaw-hook.exe`
+	wrongExecArgs := map[string]interface{}{
+		"type":    "command",
+		"command": execCommand,
+		"args":    []interface{}{"hook", "--connector", "codex"},
+	}
+	if hookUsesTrackedClaudeCodeCommand(wrongExecArgs, []string{execCommand}) {
+		t.Fatal("backup-recorded exec path matched a different argument vector")
+	}
+}
+
 // TestClaudeCode_Setup_RegistersFullEventCoverage verifies the Claude
 // Code hook registration matches the current documented lifecycle, with the
 // event-type specific matchers Claude Code expects.
@@ -1305,6 +2118,233 @@ func TestClaudeCode_Setup_RegistersFullEventCoverage(t *testing.T) {
 	}
 }
 
+func TestClaudeCode_Setup_UsesDocumentedTimeoutSeconds(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+
+	c := NewClaudeCodeConnector()
+	if err := c.Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	hooks := settings["hooks"].(map[string]interface{})
+	for event, want := range map[string]float64{
+		"MessageDisplay": 10,
+		"PreToolUse":     30,
+		"SessionEnd":     60,
+		"Stop":           90,
+	} {
+		entries := hooks[event].([]interface{})
+		handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+		if got := handler["timeout"].(float64); got != want {
+			t.Errorf("%s timeout = %v, want %v seconds", event, got, want)
+		}
+	}
+	messageHandler := hooks["MessageDisplay"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	if asynchronous, _ := messageHandler["async"].(bool); !asynchronous {
+		t.Fatalf("MessageDisplay async = %#v, want true", messageHandler["async"])
+	}
+	preToolHandler := hooks["PreToolUse"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	if asynchronous, err := claudeCodeHandlerAsync(preToolHandler); err != nil || asynchronous {
+		t.Fatalf("PreToolUse asynchronous = %v, err=%v; enforcing hook must be synchronous", asynchronous, err)
+	}
+}
+
+func TestVerifyClaudeCodeHookMatrixRejectsAsyncAliasesOnEnforcingEvents(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	if err := NewClaudeCodeConnector().Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := map[string]interface{}{}
+	if err := json.Unmarshal(raw, &base); err != nil {
+		t.Fatal(err)
+	}
+	baseHooks := base["hooks"].(map[string]interface{})
+	baseHandler := baseHooks["PreToolUse"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	expectedCommand := baseHandler["command"].(string)
+	var expectedArgs []string
+	if rawArgs, exists := baseHandler["args"].([]interface{}); exists {
+		for _, rawArg := range rawArgs {
+			expectedArgs = append(expectedArgs, rawArg.(string))
+		}
+	}
+
+	for _, alias := range []string{"asyncRewake", "async_rewake"} {
+		t.Run(alias, func(t *testing.T) {
+			candidate := map[string]interface{}{}
+			if err := json.Unmarshal(raw, &candidate); err != nil {
+				t.Fatal(err)
+			}
+			hooks := candidate["hooks"].(map[string]interface{})
+			handler := hooks["PreToolUse"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+			handler[alias] = true
+			err := verifyClaudeCodeHookMatrix(hooks, expectedCommand, expectedArgs, filepath.Join(dir, "hooks"))
+			if err == nil || !strings.Contains(err.Error(), "asynchronous") {
+				t.Fatalf("verification error = %v, want asynchronous-enforcement rejection", err)
+			}
+		})
+	}
+
+	candidate := map[string]interface{}{}
+	if err := json.Unmarshal(raw, &candidate); err != nil {
+		t.Fatal(err)
+	}
+	hooks := candidate["hooks"].(map[string]interface{})
+	messageHandler := hooks["MessageDisplay"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	messageHandler["async"] = false
+	if err := verifyClaudeCodeHookMatrix(hooks, expectedCommand, expectedArgs, filepath.Join(dir, "hooks")); err == nil || !strings.Contains(err.Error(), "must be asynchronous") {
+		t.Fatalf("verification error = %v, want MessageDisplay async requirement", err)
+	}
+}
+
+func TestVerifyClaudeCodeHookMatrixRejectsMalformedUnexpectedEvent(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previousSettingsOverride })
+
+	if err := NewClaudeCodeConnector().Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := map[string]interface{}{}
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatal(err)
+	}
+	hooks := settings["hooks"].(map[string]interface{})
+	preToolHandler := hooks["PreToolUse"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	expectedCommand := preToolHandler["command"].(string)
+	var expectedArgs []string
+	if rawArgs, exists := preToolHandler["args"].([]interface{}); exists {
+		for _, rawArg := range rawArgs {
+			expectedArgs = append(expectedArgs, rawArg.(string))
+		}
+	}
+	baseline, err := json.Marshal(hooks)
+	if err != nil {
+		t.Fatalf("marshal baseline hooks: %v", err)
+	}
+	cases := map[string]struct {
+		value interface{}
+		want  string
+	}{
+		"event": {
+			value: map[string]interface{}{"hooks": []interface{}{}},
+			want:  "UnexpectedEvent: event groups have unsupported type",
+		},
+		"group": {
+			value: []interface{}{"malformed-group"},
+			want:  "UnexpectedEvent: event group 0 has unsupported type",
+		},
+		"hooks": {
+			value: []interface{}{map[string]interface{}{"hooks": "malformed-handlers"}},
+			want:  "UnexpectedEvent: event group 0 hooks have unsupported type",
+		},
+		"handler": {
+			value: []interface{}{map[string]interface{}{"hooks": []interface{}{"malformed-handler"}}},
+			want:  "UnexpectedEvent: event group 0 handler 0 has unsupported type",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			candidate := map[string]interface{}{}
+			if err := json.Unmarshal(baseline, &candidate); err != nil {
+				t.Fatalf("clone baseline hooks: %v", err)
+			}
+			candidate["UnexpectedEvent"] = tc.value
+			err := verifyClaudeCodeHookMatrix(candidate, expectedCommand, expectedArgs, filepath.Join(dir, "hooks"))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("verification error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestClaudeCode_Setup_WindowsUsesShellFreeExecForm(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows Claude Code exec form")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+	oldOverride := defenseclawHookBinaryOverride
+	defenseclawHookBinaryOverride = filepath.Join(dir, "Defense Claw", windowsHookBinaryName)
+	defer func() { defenseclawHookBinaryOverride = oldOverride }()
+
+	c := NewClaudeCodeConnector()
+	if err := c.Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	hooks := settings["hooks"].(map[string]interface{})
+	entries := hooks["PreToolUse"].([]interface{})
+	handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	if got := handler["command"]; got != defenseclawHookBinaryOverride {
+		t.Fatalf("command = %q, want exact executable path %q", got, defenseclawHookBinaryOverride)
+	}
+	wantArgs := []interface{}{"hook", "--connector", "claudecode"}
+	if got := handler["args"]; !reflect.DeepEqual(got, wantArgs) {
+		t.Fatalf("args = %#v, want %#v", got, wantArgs)
+	}
+	if _, present := handler["shell"]; present {
+		t.Fatal("exec-form hook must not select a shell")
+	}
+	if !isOwnedHook(entries[0], filepath.Join(dir, "hooks")) {
+		t.Fatal("exec-form hook was not recognized as DefenseClaw-owned")
+	}
+
+	foreign := map[string]interface{}{"hooks": []interface{}{map[string]interface{}{
+		"type": "command", "command": defenseclawHookBinaryOverride,
+		"args": []interface{}{"version"},
+	}}}
+	if isOwnedHook(foreign, filepath.Join(dir, "hooks")) {
+		t.Fatal("unrelated invocation of the same executable was claimed as owned")
+	}
+}
+
 // firstMatcher returns the "matcher" field of the first entry in a
 // Claude Code hook event array, or "" when absent.
 func firstMatcher(eventEntries interface{}) string {
@@ -1337,6 +2377,9 @@ func TestClaudeCode_Teardown_RestoresSettings(t *testing.T) {
 	}
 	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
+	}
+	if token, err := LoadOTLPPathToken(dir, OTLPScopeClaude); err != nil || token != "" {
+		t.Fatalf("Claude scoped OTLP token survived teardown: token=%q err=%v", token, err)
 	}
 
 	data, _ := os.ReadFile(settingsPath)
@@ -1390,7 +2433,7 @@ func TestClaudeCode_Teardown_WritesDisabledHookForCachedProcesses(t *testing.T) 
 	if err != nil {
 		t.Fatalf("disabled hook missing after teardown: %v", err)
 	}
-	if info.Mode()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 		t.Fatalf("disabled hook is not executable: mode %v", info.Mode())
 	}
 
@@ -1604,7 +2647,7 @@ func TestEveryHookOwner_TeardownLeavesTombstone(t *testing.T) {
 			if err != nil {
 				t.Fatalf("tombstone missing after Teardown — cached host PIDs would hit exit-127: %v", err)
 			}
-			if info.Mode()&0o111 == 0 {
+			if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 				t.Errorf("tombstone is not executable: mode %v — cached PIDs would still hit a fork/exec failure", info.Mode())
 			}
 
@@ -1692,6 +2735,312 @@ func TestClaudeCode_Teardown_PreservesUserHooksAddedAfterSetup(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "/usr/bin/true") || !strings.Contains(string(data), "/tmp/user-added-hook") {
 		t.Fatalf("user hooks were not preserved:\n%s", data)
+	}
+}
+
+func TestClaudeCode_Teardown_UsesTrackedManagedCommandsDuringSurgicalCleanup(t *testing.T) {
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "claude-settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("mkdir settings: %v", err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	managedCommand := `"C:\\moved\\defenseclaw-gateway.exe" hook --connector claudecode`
+	foreignCommand := "/usr/bin/user-hook"
+	settings := map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"PreToolUse": []interface{}{
+				map[string]interface{}{
+					"matcher":       "*",
+					"user_metadata": "preserve-me",
+					"hooks": []interface{}{
+						map[string]interface{}{"type": "command", "command": managedCommand},
+						map[string]interface{}{
+							"type":        "command",
+							"command":     foreignCommand,
+							"user_option": "preserve-me-too",
+						},
+					},
+				},
+			},
+		},
+	}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	ClaudeCodeSettingsPathOverride = settingsPath
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+
+	c := NewClaudeCodeConnector()
+	if err := c.saveBackup(dir, claudeCodeBackup{
+		HadHooksKey:         true,
+		ManagedHookCommands: []string{managedCommand},
+	}); err != nil {
+		t.Fatalf("save backup: %v", err)
+	}
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	restored, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read restored settings: %v", err)
+	}
+	if strings.Contains(string(restored), managedCommand) {
+		t.Fatalf("tracked managed command survived teardown:\n%s", restored)
+	}
+	if !strings.Contains(string(restored), foreignCommand) {
+		t.Fatalf("foreign hook was removed:\n%s", restored)
+	}
+	var restoredSettings map[string]interface{}
+	if err := json.Unmarshal(restored, &restoredSettings); err != nil {
+		t.Fatalf("parse restored settings: %v", err)
+	}
+	restoredHooks := restoredSettings["hooks"].(map[string]interface{})
+	entries := restoredHooks["PreToolUse"].([]interface{})
+	if len(entries) != 1 {
+		t.Fatalf("restored matcher-group count=%d, want 1: %#v", len(entries), entries)
+	}
+	entry := entries[0].(map[string]interface{})
+	if entry["matcher"] != "*" || entry["user_metadata"] != "preserve-me" {
+		t.Fatalf("foreign matcher-group metadata was not preserved: %#v", entry)
+	}
+	handlers := entry["hooks"].([]interface{})
+	if len(handlers) != 1 {
+		t.Fatalf("restored handler count=%d, want 1: %#v", len(handlers), handlers)
+	}
+	handler := handlers[0].(map[string]interface{})
+	if handler["command"] != foreignCommand || handler["user_option"] != "preserve-me-too" {
+		t.Fatalf("foreign handler metadata was not preserved: %#v", handler)
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean after surgical teardown: %v", err)
+	}
+}
+
+func TestClaudeCode_TeardownRejectsUnsupportedHookShapesWithoutRewritingSettings(t *testing.T) {
+	cases := map[string]func(map[string]interface{}){
+		"non-array-event": func(settings map[string]interface{}) {
+			hooks := settings["hooks"].(map[string]interface{})
+			hooks["UnexpectedEvent"] = map[string]interface{}{"future": "shape"}
+		},
+		"non-map-root": func(settings map[string]interface{}) {
+			settings["hooks"] = "future-hook-schema"
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			settingsPath := filepath.Join(dir, "claude-settings.json")
+			if err := os.WriteFile(settingsPath, []byte(`{}`), 0o600); err != nil {
+				t.Fatalf("write initial settings: %v", err)
+			}
+			previousSettingsOverride := ClaudeCodeSettingsPathOverride
+			ClaudeCodeSettingsPathOverride = settingsPath
+			t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previousSettingsOverride })
+
+			c := NewClaudeCodeConnector()
+			opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+			if err := c.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			raw, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatalf("read configured settings: %v", err)
+			}
+			settings := map[string]interface{}{}
+			if err := json.Unmarshal(raw, &settings); err != nil {
+				t.Fatalf("parse configured settings: %v", err)
+			}
+			mutate(settings)
+			malformed, err := json.MarshalIndent(settings, "", "  ")
+			if err != nil {
+				t.Fatalf("marshal malformed settings: %v", err)
+			}
+			if err := os.WriteFile(settingsPath, malformed, 0o600); err != nil {
+				t.Fatalf("write malformed settings: %v", err)
+			}
+
+			err = c.Teardown(context.Background(), opts)
+			if err == nil || !strings.Contains(err.Error(), "unsupported type") {
+				t.Fatalf("Teardown error = %v, want unsupported-shape refusal", err)
+			}
+			after, readErr := os.ReadFile(settingsPath)
+			if readErr != nil {
+				t.Fatalf("read settings after refusal: %v", readErr)
+			}
+			if !bytes.Equal(after, malformed) {
+				t.Fatalf("Teardown rewrote unsupported settings\nbefore:\n%s\nafter:\n%s", malformed, after)
+			}
+		})
+	}
+}
+
+func TestClaudeCode_TeardownMigratesPreTrackingExecMatrixAfterBinaryMove(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("pre-tracking native exec migration is Windows-specific")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	oldBinary := filepath.Join(dir, "old-source-build", windowsHookBinaryName)
+	foreignBinary := `C:\OtherProduct\defenseclaw-hook.exe`
+	hooks := claudeCodePreTrackingWindowsExecMatrix(oldBinary)
+	// Drift after the predecessor Setup forces surgical restore. This isolated
+	// same-basename exec hook was never part of DefenseClaw's complete matrix.
+	hooks["Notification"] = append(hooks["Notification"].([]interface{}), map[string]interface{}{
+		"hooks": []interface{}{
+			map[string]interface{}{
+				"type":        "command",
+				"command":     foreignBinary,
+				"args":        []interface{}{"hook", "--connector", "claudecode"},
+				"timeout":     15,
+				"user_option": "preserve-me",
+			},
+		},
+	})
+	raw, err := json.MarshalIndent(map[string]interface{}{"hooks": hooks}, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal predecessor settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, raw, 0o600); err != nil {
+		t.Fatalf("write predecessor settings: %v", err)
+	}
+
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	previousBinaryOverride := defenseclawHookBinaryOverride
+	defenseclawHookBinaryOverride = filepath.Join(dir, "new-install", windowsHookBinaryName)
+	t.Cleanup(func() {
+		ClaudeCodeSettingsPathOverride = previousSettingsOverride
+		defenseclawHookBinaryOverride = previousBinaryOverride
+	})
+
+	c := NewClaudeCodeConnector()
+	// This is the pre-tracking Windows backup shape: protected, but without a
+	// command allow-list.
+	if err := c.saveBackup(dir, claudeCodeBackup{HadHooksKey: false}); err != nil {
+		t.Fatalf("save predecessor backup: %v", err)
+	}
+	if err := c.Teardown(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	restored, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read restored settings: %v", err)
+	}
+	restoredSettings := map[string]interface{}{}
+	if err := json.Unmarshal(restored, &restoredSettings); err != nil {
+		t.Fatalf("parse restored settings: %v", err)
+	}
+	oldCount := 0
+	foreignCount := 0
+	for _, rawGroups := range restoredSettings["hooks"].(map[string]interface{}) {
+		for _, rawGroup := range rawGroups.([]interface{}) {
+			for _, rawHandler := range rawGroup.(map[string]interface{})["hooks"].([]interface{}) {
+				handler := rawHandler.(map[string]interface{})
+				switch handler["command"] {
+				case oldBinary:
+					oldCount++
+				case foreignBinary:
+					foreignCount++
+					if handler["user_option"] != "preserve-me" {
+						t.Fatalf("foreign handler metadata changed: %#v", handler)
+					}
+				}
+			}
+		}
+	}
+	if oldCount != 0 || foreignCount != 1 {
+		t.Fatalf("restored old=%d foreign=%d, want 0/1:\n%s", oldCount, foreignCount, restored)
+	}
+}
+
+func TestClaudeCode_TeardownPreservesForeignSameBasenameExecHook(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows exec-form ownership is Windows-specific")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "claude-settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	previousBinaryOverride := defenseclawHookBinaryOverride
+	defenseclawHookBinaryOverride = filepath.Join(dir, "managed", windowsHookBinaryName)
+	t.Cleanup(func() {
+		ClaudeCodeSettingsPathOverride = previousSettingsOverride
+		defenseclawHookBinaryOverride = previousBinaryOverride
+	})
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	settings := map[string]interface{}{}
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	foreignCommand := `C:\OtherProduct\defenseclaw-hook.exe`
+	foreignHandler := map[string]interface{}{
+		"type":        "command",
+		"command":     foreignCommand,
+		"args":        []interface{}{"hook", "--connector", "claudecode"},
+		"timeout":     15,
+		"user_option": "preserve-me",
+	}
+	hooks := settings["hooks"].(map[string]interface{})
+	entries := hooks["PreToolUse"].([]interface{})
+	hooks["PreToolUse"] = append(entries, map[string]interface{}{
+		"matcher": "*",
+		"hooks":   []interface{}{foreignHandler},
+	})
+	updated, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal drifted settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, updated, 0o600); err != nil {
+		t.Fatalf("write drifted settings: %v", err)
+	}
+	// Simulate an upgrade moving the active launcher after registration. The
+	// protected backup must still identify the exact old exec-form path, while
+	// the unrelated same-basename executable remains foreign.
+	defenseclawHookBinaryOverride = filepath.Join(dir, "new-install", windowsHookBinaryName)
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	restored, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read restored settings: %v", err)
+	}
+	if err := json.Unmarshal(restored, &settings); err != nil {
+		t.Fatalf("parse restored settings: %v", err)
+	}
+	hooks = settings["hooks"].(map[string]interface{})
+	entries = hooks["PreToolUse"].([]interface{})
+	if len(entries) != 1 {
+		t.Fatalf("PreToolUse group count=%d, want only foreign group: %#v", len(entries), entries)
+	}
+	handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	if handler["command"] != foreignCommand || handler["user_option"] != "preserve-me" {
+		t.Fatalf("foreign same-basename handler was removed or changed: %#v", handler)
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean treated foreign same-basename handler as managed: %v", err)
 	}
 }
 
@@ -2010,13 +3359,41 @@ func TestCodex_Setup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hook script not created: %v", err)
 	}
-	if info.Mode()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 		t.Error("hook script not executable")
 	}
 	data, _ := os.ReadFile(hookPath)
 	if !strings.Contains(string(data), "127.0.0.1:18970") {
 		t.Error("hook script missing API addr")
 	}
+}
+
+func codexHookConfigPathForTest(configPath string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(filepath.Dir(configPath), codexManagedConfigLogicalName)
+	}
+	return configPath
+}
+
+func readCodexHookDocumentForTest(t *testing.T, configPath string) (string, []byte, map[string]interface{}) {
+	t.Helper()
+	hookPath := codexHookConfigPathForTest(configPath)
+	raw, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read Codex hook config %s: %v", hookPath, err)
+	}
+	document := map[string]interface{}{}
+	if err := toml.Unmarshal(raw, &document); err != nil {
+		t.Fatalf("parse Codex hook config %s: %v", hookPath, err)
+	}
+	return hookPath, raw, document
+}
+
+func verifyInstalledCodexHooksForTest(hooks map[string]interface{}, configPath, hooksDir string) error {
+	if runtime.GOOS == "windows" {
+		return verifyManagedCodexHookMatrix(hooks, configPath, hooksDir)
+	}
+	return verifyTrustedCodexHookMatrix(hooks, configPath, hooksDir)
 }
 
 // TestCodex_Setup_DoesNotRewriteProvidersToProxy verifies hook-only Setup
@@ -2056,8 +3433,9 @@ env_key = "OPENAI_API_KEY"
 	if !strings.Contains(s, "https://api.openai.com/v1") {
 		t.Errorf("expected original openai base_url to remain; got:\n%s", patched)
 	}
-	if !strings.Contains(s, "PreToolUse") {
-		t.Error("expected hooks table to be installed")
+	_, hookRaw, _ := readCodexHookDocumentForTest(t, configPath)
+	if !strings.Contains(string(hookRaw), "PreToolUse") {
+		t.Error("expected hooks table to be installed in the effective hook config")
 	}
 
 	if _, err := os.Stat(filepath.Join(dir, "codex_env.sh")); !os.IsNotExist(err) {
@@ -2107,15 +3485,21 @@ env_key = "OPENAI_API_KEY"
 	// Mask off the file-type bits — only the permission bits matter
 	// here. We assert exactly 0o600: any group/world bit means a
 	// shared-host user can read provider env-var names + base URLs.
-	if mode := info.Mode().Perm(); mode != 0o600 {
+	if mode := info.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o600 {
 		t.Errorf("config.toml mode = %#o, want 0o600", mode)
+	}
+	if runtime.GOOS == "windows" {
+		managedInfo, err := os.Stat(codexHookConfigPathForTest(configPath))
+		if err != nil || managedInfo.IsDir() {
+			t.Fatalf("managed_config.toml private file missing: info=%v err=%v", managedInfo, err)
+		}
 	}
 }
 
 // TestCodex_Setup_RegistersHooksInline verifies the Codex connector
 // writes an inline [hooks] HookEventsToml struct into config.toml
-// covering all six Codex events and pointing at the generated
-// codex-hook.sh. The hooks key is NOT a path to a hooks.json file —
+// covering all ten Codex events and pointing at the platform-native hook
+// command. The hooks key is NOT a path to a hooks.json file —
 // that would trigger a TOML parse error at codex startup.
 func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 	dir := t.TempDir()
@@ -2139,12 +3523,16 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 		t.Error("hooks.json was written — should be inline in config.toml instead")
 	}
 
-	raw, _ := os.ReadFile(configPath)
+	hookConfigPath, raw, parsed := readCodexHookDocumentForTest(t, configPath)
 	content := string(raw)
 
-	// The [hooks] table must be present with each of the six events
+	// The [hooks] table must be present with each required event
 	// listed as sub-tables.
-	for _, evt := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop"} {
+	for _, evt := range []string{
+		"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest",
+		"PostToolUse", "SubagentStart", "SubagentStop", "PreCompact",
+		"PostCompact", "Stop",
+	} {
 		if !strings.Contains(content, "hooks."+evt) && !strings.Contains(content, "hooks\n"+evt) {
 			// Accept either dotted or nested rendering.
 			if !strings.Contains(content, evt) {
@@ -2152,16 +3540,16 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(content, "codex-hook.sh") {
+	if runtime.GOOS == "windows" {
+		if strings.Contains(strings.ToLower(content), ".sh") {
+			t.Errorf("Windows config.toml contains a Unix hook dependency\nfile:\n%s", content)
+		}
+	} else if !strings.Contains(content, "codex-hook.sh") {
 		t.Errorf("config.toml [hooks] missing codex-hook.sh reference\nfile:\n%s", content)
 	}
 
 	// Re-parse to ensure it's valid TOML and codex's expected shape
 	// (hooks is a table, not a string).
-	var parsed map[string]interface{}
-	if err := toml.Unmarshal(raw, &parsed); err != nil {
-		t.Fatalf("config.toml did not round-trip as valid TOML: %v", err)
-	}
 	if _, isString := parsed["hooks"].(string); isString {
 		t.Error("hooks key is a string — codex requires HookEventsToml struct")
 	}
@@ -2169,36 +3557,59 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 		t.Errorf("hooks key is not a table, got %T", parsed["hooks"])
 	}
 	hooks := parsed["hooks"].(map[string]interface{})
-	state, ok := hooks["state"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("hooks.state missing — Codex would ask the user to review DefenseClaw hooks")
+	if err := verifyInstalledCodexHooksForTest(hooks, hookConfigPath, filepath.Join(dir, "hooks")); err != nil {
+		t.Fatalf("Setup did not create source-trusted required hooks: %v", err)
 	}
-	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
-	for _, tc := range []struct {
-		eventType string
-		eventKey  string
-		matcher   string
-		timeout   int
-	}{
-		{"SessionStart", "session_start", "startup|resume|clear", 30},
-		{"UserPromptSubmit", "user_prompt_submit", "", 30},
-		{"PreToolUse", "pre_tool_use", "*", 30},
-		{"PermissionRequest", "permission_request", "*", 30},
-		{"PostToolUse", "post_tool_use", "*", 30},
-		{"Stop", "stop", "", 90},
+	if runtime.GOOS == "windows" {
+		matchers := hooks["PreToolUse"].([]interface{})
+		handlers := matchers[0].(map[string]interface{})["hooks"].([]interface{})
+		handler := handlers[0].(map[string]interface{})
+		wantFallback := hookInvocationCommandFor("windows", "codex", "")
+		if got, _ := handler["command"].(string); got != wantFallback {
+			t.Errorf("command = %q, want hardened native fallback %q", got, wantFallback)
+		}
+		if got, _ := handler["command_windows"].(string); got != windowsCodexHookCommand() {
+			t.Errorf("command_windows = %q, want managed absolute invocation %q", got, windowsCodexHookCommand())
+		}
+	}
+}
+
+func TestCodex_Setup_HonorsCodexHome(t *testing.T) {
+	dir := t.TempDir()
+	codexHome := filepath.Join(dir, "custom-codex-home")
+	t.Setenv("CODEX_HOME", codexHome)
+	previous := CodexConfigPathOverride
+	CodexConfigPathOverride = ""
+	t.Cleanup(func() { CodexConfigPathOverride = previous })
+
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	configPath := filepath.Join(codexHome, "config.toml")
+	hookConfigPath := codexHookConfigPathForTest(configPath)
+	raw, err := os.ReadFile(hookConfigPath)
+	if err != nil {
+		t.Fatalf("read CODEX_HOME hook config: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("parse CODEX_HOME config: %v", err)
+	}
+	if _, ok := parsed["hooks"].(map[string]interface{}); !ok {
+		t.Fatalf("CODEX_HOME config has no hooks table: %s", raw)
+	}
+
+	targets := c.ComponentTargets(filepath.Join(dir, "workspace"))
+	for component, expected := range map[string]string{
+		"skill":  filepath.Join(codexHome, "skills"),
+		"plugin": filepath.Join(codexHome, "plugins"),
+		"mcp":    configPath,
 	} {
-		key := fmt.Sprintf("%s:%s:0:0", configPath, tc.eventKey)
-		entry, ok := state[key].(map[string]interface{})
-		if !ok {
-			t.Fatalf("hooks.state missing trusted entry for %s (%s); state=%v", tc.eventType, key, state)
-		}
-		gotHash, _ := entry["trusted_hash"].(string)
-		wantHash := codexCommandHookHash(tc.eventKey, tc.matcher, hookPath, tc.timeout)
-		if gotHash != wantHash {
-			t.Errorf("trusted_hash for %s = %q, want %q", tc.eventType, gotHash, wantHash)
-		}
-		if _, ok := entry["enabled"]; ok {
-			t.Errorf("trusted state for %s should not force enabled; got %v", tc.eventType, entry)
+		if !slices.Contains(targets[component], expected) {
+			t.Errorf("ComponentTargets(%q) = %v, missing CODEX_HOME path %q", component, targets[component], expected)
 		}
 	}
 }
@@ -2290,7 +3701,8 @@ env_key = "OPENROUTER_API_KEY"
 
 	// Hooks MUST still be installed — they're the entry point for
 	// tool-call telemetry into /api/v1/codex/hook.
-	hooks, ok := parsed["hooks"].(map[string]interface{})
+	_, _, hookDocument := readCodexHookDocumentForTest(t, configPath)
+	hooks, ok := hookDocument["hooks"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("[hooks] table missing in observability mode — telemetry wouldn't fire (got=%T)", parsed["hooks"])
 	}
@@ -2303,12 +3715,10 @@ env_key = "OPENROUTER_API_KEY"
 	if _, ok := hooks["PostToolUse"]; !ok {
 		t.Error("hooks.PostToolUse missing — tool-result telemetry lost")
 	}
-	features, _ := parsed["features"].(map[string]interface{})
-	if v, _ := features["hooks"].(bool); !v {
-		t.Errorf("features.hooks must be true in observability mode (hooks would otherwise be ignored by codex), got=%v", features)
-	}
-	if _, legacy := features["codex_hooks"]; legacy {
-		t.Errorf("deprecated features.codex_hooks should be removed to avoid Codex startup warnings, got=%v", features)
+	if features, ok := parsed["features"].(map[string]interface{}); ok {
+		if _, managed := features["hooks"]; managed {
+			t.Errorf("Setup must not manufacture a hooks feature decision; Codex enables hooks by default, got=%v", features)
+		}
 	}
 
 	// Subprocess sandbox JSON must NOT be created — that's
@@ -2391,8 +3801,9 @@ openai_base_url = "` + tc.staleURL + `"
 			}
 			// Hooks must still be installed — the heal only removes the
 			// proxy redirect, not the telemetry wiring this Setup adds.
-			if _, ok := parsed["hooks"].(map[string]interface{}); !ok {
-				t.Errorf("[hooks] table missing after heal (got=%T)", parsed["hooks"])
+			_, _, hookDocument := readCodexHookDocumentForTest(t, configPath)
+			if _, ok := hookDocument["hooks"].(map[string]interface{}); !ok {
+				t.Errorf("[hooks] table missing after heal (got=%T)", hookDocument["hooks"])
 			}
 		})
 	}
@@ -2452,11 +3863,11 @@ func TestIsDefenseClawCodexProxyRedirect(t *testing.T) {
 // model + token counts, timing) never reach the gateway and the
 // observability story has a hole the hook script alone can't cover.
 //
-// We assert log_user_prompt = false (privacy default; UserPromptSubmit
-// hook captures the prompt text with redaction control) and that the
-// otlp-http endpoint matches the gateway API address. The token
-// header is asserted present and equal to opts.APIToken so the
-// receiver can authenticate the codex CLI process.
+// We assert log_user_prompt = true because v8 captures source facts before
+// applying per-destination redaction, and that the OTLP endpoint matches the
+// gateway API address. Authentication uses a connector-scoped Authorization
+// bearer so Codex never receives the master API bearer and the credential
+// never appears in an endpoint URL.
 func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -2477,6 +3888,10 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
+	scopedToken, err := LoadOTLPPathToken(dir, OTLPScopeCodex)
+	if err != nil || scopedToken == "" {
+		t.Fatalf("load scoped Codex OTLP token: present=%v err=%v", scopedToken != "", err)
+	}
 
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
@@ -2486,13 +3901,16 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	if err := toml.Unmarshal(raw, &parsed); err != nil {
 		t.Fatalf("invalid TOML after Setup: %v", err)
 	}
+	if bytes.Contains(raw, []byte(opts.APIToken)) {
+		t.Fatal("config.toml leaked Codex's hook credential into native OTLP configuration")
+	}
 
 	otelBlock, ok := parsed["otel"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("[otel] block missing — codex's native OTel exporter won't fire (got=%T:\n%s", parsed["otel"], raw)
 	}
-	if v, _ := otelBlock["log_user_prompt"].(bool); v {
-		t.Errorf("log_user_prompt = true in default; should be false (UserPromptSubmit hook captures prompts with redaction)")
+	if v, _ := otelBlock["log_user_prompt"].(bool); !v {
+		t.Errorf("log_user_prompt = false; v8 source capture must preserve prompts for destination routing")
 	}
 	exporter, _ := otelBlock["exporter"].(map[string]interface{})
 	if exporter == nil {
@@ -2506,8 +3924,15 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	if !strings.Contains(endpoint, "127.0.0.1:18970") {
 		t.Errorf("otlp-http endpoint = %q, want gateway API address (127.0.0.1:18970)", endpoint)
 	}
-	if !strings.Contains(endpoint, "/v1/logs") {
-		t.Errorf("otlp-http endpoint = %q, want /v1/logs path (the OTLP-HTTP logs sub-path)", endpoint)
+	if !strings.HasSuffix(endpoint, "/v1/logs") {
+		t.Error("logs exporter does not use the standard OTLP logs path")
+	}
+	scoped, err := LoadOTLPPathToken(dir, OTLPScopeCodex)
+	if err != nil || scoped == "" {
+		t.Fatalf("LoadOTLPPathToken(codex) = %q, %v", scoped, err)
+	}
+	if strings.Contains(endpoint, scoped) || strings.Contains(endpoint, "/otlp/codex/") {
+		t.Errorf("otlp-http endpoint leaked connector-scoped Codex credential: %q", endpoint)
 	}
 	// protocol = "json" is REQUIRED by codex's deserializer
 	// (codex-rs/config/src/types.rs::OtelExporterKind::OtlpHttp). Omitting
@@ -2525,11 +3950,16 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	}
 	headers, _ := otlphttp["headers"].(map[string]interface{})
 	if headers == nil {
-		t.Fatal("[otel.exporter.otlp-http.headers] missing — receiver auth would fail")
+		t.Fatal("[otel.exporter.otlp-http.headers] missing — attribution/CSRF metadata would be lost")
 	}
-	if headers["x-defenseclaw-token"] != "test-token-codex-otel" {
-		t.Errorf("x-defenseclaw-token header = %v, want %q",
-			headers["x-defenseclaw-token"], "test-token-codex-otel")
+	if _, leaked := headers["x-defenseclaw-token"]; leaked {
+		t.Errorf("Codex OTel headers leaked the general API token: %v", headers)
+	}
+	if got := headers["authorization"]; got != "Bearer "+scoped {
+		t.Errorf("Codex OTel Authorization = %q, want connector-scoped bearer", got)
+	}
+	if headers["x-defenseclaw-source"] != "codex" || headers["x-defenseclaw-client"] != "codex-otel/1.0" {
+		t.Fatal("Codex native OTLP attribution headers are incomplete")
 	}
 
 	traceExporter, _ := otelBlock["trace_exporter"].(map[string]interface{})
@@ -2538,8 +3968,8 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	}
 	traceOTLPHTTP, _ := traceExporter["otlp-http"].(map[string]interface{})
 	traceEndpoint, _ := traceOTLPHTTP["endpoint"].(string)
-	if !strings.Contains(traceEndpoint, "/v1/traces") {
-		t.Errorf("trace exporter endpoint = %q, want /v1/traces", traceEndpoint)
+	if !strings.HasSuffix(traceEndpoint, "/v1/traces") || strings.Contains(traceEndpoint, scopedToken) {
+		t.Error("trace exporter does not use the credential-free standard OTLP traces path")
 	}
 	if traceOTLPHTTP["protocol"] != "json" {
 		t.Errorf("trace exporter protocol = %v, want json", traceOTLPHTTP["protocol"])
@@ -2551,17 +3981,15 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	}
 	metricsOTLPHTTP, _ := metricsExporter["otlp-http"].(map[string]interface{})
 	metricsEndpoint, _ := metricsOTLPHTTP["endpoint"].(string)
-	if !strings.Contains(metricsEndpoint, "/v1/metrics") {
-		t.Errorf("metrics exporter endpoint = %q, want /v1/metrics", metricsEndpoint)
+	if !strings.HasSuffix(metricsEndpoint, "/v1/metrics") || strings.Contains(metricsEndpoint, scopedToken) {
+		t.Error("metrics exporter does not use the credential-free standard OTLP metrics path")
 	}
 	if metricsOTLPHTTP["protocol"] != "json" {
 		t.Errorf("metrics exporter protocol = %v, want json", metricsOTLPHTTP["protocol"])
 	}
 }
 
-func TestCodex_Setup_RawModeEnablesPromptLoggingAndTeardownRestores(t *testing.T) {
-	redaction.SetDisableAll(true)
-	t.Cleanup(func() { redaction.SetDisableAll(false) })
+func TestCodex_Setup_SourceCaptureEnablesPromptLoggingAndTeardownRestores(t *testing.T) {
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -2597,13 +4025,11 @@ log_user_prompt = false
 	}
 	otelBlock, _ := parsed["otel"].(map[string]interface{})
 	if got, _ := otelBlock["log_user_prompt"].(bool); !got {
-		t.Fatalf("log_user_prompt = %v, want true when redaction is disabled", got)
+		t.Fatalf("log_user_prompt = %v, want true for v8 source capture", got)
 	}
 
-	// Force the surgical restore path and flip the runtime switch back
-	// before teardown. Detection must still recognize the raw-mode OTel
-	// block and restore the operator's pristine value.
-	redaction.SetDisableAll(false)
+	// Force the surgical restore path. Detection must still recognize the
+	// v8-managed OTel block and restore the operator's pristine value.
 	discardManagedFileBackup(dir, c.Name(), "config.toml")
 	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
@@ -2623,24 +4049,19 @@ log_user_prompt = false
 	}
 }
 
-// TestCodex_Setup_WiresNotifyBridge pins the agent-turn-complete
-// telemetry path. Codex shells out to `notify` with a JSON arg
-// describing each completed turn (per https://developers.openai.com
-// /codex/config-advanced). Our Setup writes a per-instance bash
-// bridge that POSTs the JSON to /api/v1/codex/notify. Without
-// this wiring, the third independent observability channel (after
-// hooks + OTel) would be dark.
+// TestCodex_Setup_WiresNotifyBridge pins the agent-turn-complete telemetry
+// path. Codex appends a JSON arg to the configured notify argv array. Windows
+// invokes the no-console launcher's native notify subcommand; Unix keeps the per-instance
+// Bash bridge that POSTs to /api/v1/codex/notify.
 //
-// Asserts:
-//   - notify-bridge.sh exists at DataDir, mode 0o700 (operator-only)
-//   - bridge body baked the operator-supplied APIToken AND the
-//     gateway notify endpoint (no env-var indirection — codex's
-//     subshell can scrub env)
-//   - config.toml emits notify = ["bash", "<DataDir>/notify-bridge.sh"]
-//     in the canonical TOML array form (codex parses this; a
-//     non-array would silently disable the bridge with no log).
+// Asserts the platform-specific artifact plus the canonical TOML argv array:
+// Windows writes ["<hook.exe>", "notify"] with no shell bridge; Unix writes
+// ["bash", "<DataDir>/notify-bridge.sh"] and keeps the operator-only bridge.
 func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`)
+	}
 	configPath := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(configPath, []byte(`model = "gpt-5"
 `), 0o600); err != nil {
@@ -2661,22 +4082,28 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 	}
 
 	bridgePath := filepath.Join(dir, "notify-bridge.sh")
-	info, err := os.Stat(bridgePath)
-	if err != nil {
-		t.Fatalf("notify-bridge.sh missing — agent-turn-complete telemetry won't fire: %v", err)
-	}
-	if info.Mode().Perm() != 0o700 {
-		t.Errorf("notify-bridge.sh mode = %v, want 0o700 (operator-only — token is baked in)", info.Mode().Perm())
-	}
-	bridge, err := os.ReadFile(bridgePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(bridge), "test-token-codex-notify") {
-		t.Error("bridge missing baked-in APIToken — receiver would reject every call as unauthenticated")
-	}
-	if !strings.Contains(string(bridge), "127.0.0.1:18970/api/v1/codex/notify") {
-		t.Errorf("bridge missing gateway notify endpoint URL; body:\n%s", bridge)
+	if runtime.GOOS == "windows" {
+		if _, err := os.Stat(bridgePath); !os.IsNotExist(err) {
+			t.Fatalf("Windows setup left Bash notify bridge behind: %v", err)
+		}
+	} else {
+		info, err := os.Stat(bridgePath)
+		if err != nil {
+			t.Fatalf("notify-bridge.sh missing — agent-turn-complete telemetry won't fire: %v", err)
+		}
+		if info.Mode().Perm() != 0o700 {
+			t.Errorf("notify-bridge.sh mode = %v, want 0o700 (operator-only — token is baked in)", info.Mode().Perm())
+		}
+		bridge, err := os.ReadFile(bridgePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(bridge), "test-token-codex-notify") {
+			t.Error("bridge missing baked-in APIToken — receiver would reject every call as unauthenticated")
+		}
+		if !strings.Contains(string(bridge), "127.0.0.1:18970/api/v1/codex/notify") {
+			t.Errorf("bridge missing gateway notify endpoint URL; body:\n%s", bridge)
+		}
 	}
 
 	// config.toml notify entry must be the array shape codex parses.
@@ -2690,45 +4117,47 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 		t.Fatalf("notify entry not an array (got %T) — codex would silently disable the bridge", parsed["notify"])
 	}
 	if len(notify) != 2 {
-		t.Errorf("notify array has %d entries, want 2 ([bash, bridge.sh]); got %v", len(notify), notify)
+		t.Fatalf("notify array has %d entries, want 2; got %v", len(notify), notify)
 	}
-	if first, _ := notify[0].(string); first != "bash" {
-		t.Errorf("notify[0] = %q, want \"bash\"", first)
-	}
-	if second, _ := notify[1].(string); !strings.HasSuffix(second, "/notify-bridge.sh") {
-		t.Errorf("notify[1] = %q, want path ending in /notify-bridge.sh", second)
+	if runtime.GOOS == "windows" {
+		if first, _ := notify[0].(string); first != `C:\Program Files\DefenseClaw\defenseclaw-hook.exe` {
+			t.Errorf("notify[0] = %q, want installed no-console hook path", first)
+		}
+		if second, _ := notify[1].(string); second != "notify" {
+			t.Errorf("notify[1] = %q, want native notify subcommand", second)
+		}
+		if strings.Contains(strings.ToLower(string(raw)), "bash") ||
+			strings.Contains(strings.ToLower(string(raw)), "curl") ||
+			strings.Contains(strings.ToLower(string(raw)), "jq") {
+			t.Errorf("Windows config contains a Unix notify dependency:\n%s", raw)
+		}
+	} else {
+		if first, _ := notify[0].(string); first != "bash" {
+			t.Errorf("notify[0] = %q, want \"bash\"", first)
+		}
+		if second, _ := notify[1].(string); !strings.HasSuffix(second, "/notify-bridge.sh") {
+			t.Errorf("notify[1] = %q, want path ending in /notify-bridge.sh", second)
+		}
 	}
 }
 
-// TestCodex_Setup_EnablesHooksFeature confirms the connector writes
-// features.hooks = true into config.toml. Without this, Codex
-// ignores any registered hooks because the feature gate defaults to
-// off.
-func TestCodex_Setup_EnablesHooksFeature(t *testing.T) {
+// TestCodex_Setup_RejectsExplicitlyDisabledHooks prevents the installer from
+// reporting success when the user's active Codex configuration disables hooks.
+func TestCodex_Setup_RejectsExplicitlyDisabledHooks(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	os.WriteFile(configPath, []byte(`model_provider = "openai"
+[features]
+hooks = false
 `), 0o644)
 	CodexConfigPathOverride = configPath
 	defer func() { CodexConfigPathOverride = "" }()
 
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	if err := c.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-
-	data, _ := os.ReadFile(configPath)
-	var parsed map[string]interface{}
-	if err := toml.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("invalid TOML after Setup: %v", err)
-	}
-	features, _ := parsed["features"].(map[string]interface{})
-	if v, _ := features["hooks"].(bool); !v {
-		t.Errorf("config.toml missing hooks feature flag; features=%v\nfile:\n%s", features, data)
-	}
-	if _, legacy := features["codex_hooks"]; legacy {
-		t.Errorf("config.toml still contains deprecated codex_hooks feature flag\nfile:\n%s", data)
+	err := c.Setup(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "hooks are disabled") {
+		t.Fatalf("Setup error = %v, want explicit disabled-hooks error", err)
 	}
 }
 
@@ -2740,10 +4169,67 @@ func TestCodexCommandHookHashMatchesCodexCanonicalIdentity(t *testing.T) {
 	}
 }
 
+func TestCodexHookStateKeySourceMatchesWindowsAbsolutePathNormalization(t *testing.T) {
+	tests := map[string]string{
+		`\\?\D:\c\codex\config.toml`:            `D:\c\codex\config.toml`,
+		`\\.\D:\c\codex\config.toml`:            `D:\c\codex\config.toml`,
+		`\\?\UNC\server\share\config.toml`:      `\\server\share\config.toml`,
+		`\\.\UNC\server\share\config.toml`:      `\\server\share\config.toml`,
+		`\\?\GLOBALROOT\Device\HarddiskVolume1`: `\\?\GLOBALROOT\Device\HarddiskVolume1`,
+	}
+	for input, want := range tests {
+		if got := codexNormalizeHookKeySourceForPlatform("windows", input); got != want {
+			t.Errorf("normalize %q = %q, want %q", input, got, want)
+		}
+		if got := codexNormalizeHookKeySourceForPlatform("linux", input); got != input {
+			t.Errorf("non-Windows normalize %q = %q, want unchanged", input, got)
+		}
+	}
+}
+
+func TestCodexCommandHookHashSelectsWindowsCommandAndStatus(t *testing.T) {
+	got, err := codexCommandHookHashForPlatform("windows", "pre_tool_use", "*", map[string]interface{}{
+		"type":            "command",
+		"command":         "generic-command",
+		"command_windows": "windows-command",
+		"timeout":         30,
+		"async":           false,
+		"statusMessage":   "Checking DefenseClaw policy",
+	})
+	if err != nil {
+		t.Fatalf("codexCommandHookHashForPlatform: %v", err)
+	}
+	const want = "sha256:00d233bf308896ec04f67e2fee61ac2962df3c0afbe80c9d8bc6975ec3697786"
+	if got != want {
+		t.Fatalf("Windows command hook hash = %q, want %q", got, want)
+	}
+
+	generic, err := codexCommandHookHashForPlatform("linux", "pre_tool_use", "*", map[string]interface{}{
+		"type":            "command",
+		"command":         "generic-command",
+		"command_windows": "windows-command",
+		"timeout":         30,
+		"async":           false,
+		"statusMessage":   "Checking DefenseClaw policy",
+	})
+	if err != nil {
+		t.Fatalf("generic command hook hash: %v", err)
+	}
+	if generic == got {
+		t.Fatal("Windows command override did not affect Codex's normalized trust hash")
+	}
+}
+
 func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o700); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\n# defenseclaw-managed-hook v2\n"), 0o700); err != nil {
+		t.Fatalf("write owned hook: %v", err)
+	}
 	key := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 0, 0)
 	otherKey := codexHookStateKey(codexHookStateKeySource(configPath), "post_tool_use", 2, 0)
 
@@ -2755,18 +4241,29 @@ func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
 			"trusted_hash": "sha256:unrelated",
 		},
 	}
-	hooks := map[string]interface{}{"state": state}
-	if removeOwnedCodexHookState(hooks, configPath, hookPath) {
+	hooks := buildCodexHooksTable(configPath, hookPath)
+	hooks["state"] = state
+	removed, err := removeOwnedCodexHookState(hooks, configPath, filepath.Dir(hookPath))
+	if err != nil {
+		t.Fatalf("inspect user replacement trust: %v", err)
+	}
+	if removed {
 		t.Fatalf("user replacement trust state was removed: %v", hooks)
 	}
 	if _, ok := state[key]; !ok {
 		t.Fatalf("user replacement trust entry missing: %v", state)
 	}
 
-	state[key] = map[string]interface{}{
-		"trusted_hash": codexCommandHookHash("pre_tool_use", "*", hookPath, 30),
+	locations, err := ownedCodexHookLocations(runtime.GOOS, "pre_tool_use", hooks["PreToolUse"], filepath.Dir(hookPath))
+	if err != nil || len(locations) != 1 {
+		t.Fatalf("locate owned hook: locations=%v err=%v", locations, err)
 	}
-	if !removeOwnedCodexHookState(hooks, configPath, hookPath) {
+	state[key] = map[string]interface{}{"trusted_hash": locations[0].currentHash}
+	removed, err = removeOwnedCodexHookState(hooks, configPath, filepath.Dir(hookPath))
+	if err != nil {
+		t.Fatalf("remove DefenseClaw trust: %v", err)
+	}
+	if !removed {
 		t.Fatal("DefenseClaw-owned trust state was not removed")
 	}
 	if _, ok := state[key]; ok {
@@ -2775,21 +4272,470 @@ func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
 	if _, ok := state[otherKey]; !ok {
 		t.Fatalf("unrelated trust entry removed: %v", state)
 	}
+
+	state[key] = map[string]interface{}{
+		"trusted_hash": legacyHashForOwnedCodexLocation("pre_tool_use", locations[0]),
+	}
+	removed, err = removeOwnedCodexHookState(hooks, configPath, filepath.Dir(hookPath))
+	if err != nil {
+		t.Fatalf("remove legacy DefenseClaw trust: %v", err)
+	}
+	if !removed {
+		t.Fatal("legacy DefenseClaw trust state was not removed during upgrade")
+	}
+	if _, ok := state[key]; ok {
+		t.Fatalf("legacy DefenseClaw trust entry still present: %v", state)
+	}
+	if _, ok := state[otherKey]; !ok {
+		t.Fatalf("unrelated trust entry removed with legacy state: %v", state)
+	}
 }
 
-// TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust is
-// the end-to-end pin for the "user replaced our hook script with their
-// own" workflow: after Setup, the operator may swap the hook command
-// out (or change the timeout/matcher) for any of the events. On
-// Teardown, DefenseClaw must NOT delete those entries because the
-// trusted_hash no longer matches what we wrote. Removing them would
-// silently re-prompt the user to trust their own hooks on next Codex
-// launch — a confusing security UX failure.
-func TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust(t *testing.T) {
+func TestCodexSetupPreservesUnrelatedStateAndUsesMergedPositions(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(configPath, []byte(`model_provider = "openai"
-`), 0o600); err != nil {
+	userKey := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 0, 0)
+	userState := map[string]interface{}{
+		"trusted_hash": "sha256:user-owned",
+		"enabled":      false,
+	}
+	seed := map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"PreToolUse": []interface{}{map[string]interface{}{
+				"matcher": "^Shell$",
+				"hooks": []interface{}{map[string]interface{}{
+					"type":    "command",
+					"command": "user-policy.exe",
+					"timeout": 7,
+				}},
+			}},
+			"state": map[string]interface{}{userKey: userState},
+		},
+	}
+	raw, err := toml.Marshal(seed)
+	if err != nil {
+		t.Fatalf("marshal seed config: %v", err)
+	}
+	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
+		t.Fatalf("write seed config: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+
+	conn := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	configuredRaw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read configured file: %v", err)
+	}
+	configured := map[string]interface{}{}
+	if err := toml.Unmarshal(configuredRaw, &configured); err != nil {
+		t.Fatalf("parse configured file: %v", err)
+	}
+	hooks := configured["hooks"].(map[string]interface{})
+	state := hooks["state"].(map[string]interface{})
+	if got := state[userKey]; !codexValueMatches(got, userState) {
+		t.Fatalf("unrelated user state changed: got %#v want %#v", got, userState)
+	}
+	defenseClawKey := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 1, 0)
+	if runtime.GOOS == "windows" {
+		if _, ok := state[defenseClawKey]; ok {
+			t.Fatalf("Windows setup synthesized unsupported user trust state %q: %v", defenseClawKey, state)
+		}
+		managedPath, _, managedDocument := readCodexHookDocumentForTest(t, configPath)
+		managedHooks := managedDocument["hooks"].(map[string]interface{})
+		if _, exists := managedHooks["state"]; exists {
+			t.Fatalf("managed source contains private hooks.state: %#v", managedHooks["state"])
+		}
+		if err := verifyManagedCodexHookMatrix(managedHooks, managedPath, filepath.Join(dir, "hooks")); err != nil {
+			t.Fatalf("configured managed hooks are incomplete: %v", err)
+		}
+	} else {
+		if _, ok := state[defenseClawKey]; !ok {
+			t.Fatalf("merged position state key %q missing: %v", defenseClawKey, state)
+		}
+		if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(dir, "hooks")); err != nil {
+			t.Fatalf("configured hooks are not fully trusted: %v", err)
+		}
+	}
+
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	restoredRaw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read restored file: %v", err)
+	}
+	restored := map[string]interface{}{}
+	if err := toml.Unmarshal(restoredRaw, &restored); err != nil {
+		t.Fatalf("parse restored file: %v", err)
+	}
+	restoredState := restored["hooks"].(map[string]interface{})["state"].(map[string]interface{})
+	if got := restoredState[userKey]; !codexValueMatches(got, userState) {
+		t.Fatalf("unrelated user state not restored: got %#v want %#v", got, userState)
+	}
+	if _, exists := restoredState[defenseClawKey]; exists {
+		t.Fatalf("DefenseClaw trust state survived teardown: %v", restoredState)
+	}
+}
+
+func TestCodexRepairPreservesOwnedPositionBeforeLaterTrustedUserHook(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, nil, 0o600); err != nil {
+		t.Fatalf("write empty config: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+
+	conn := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("initial Setup: %v", err)
+	}
+	registrationPath := codexHookConfigPathForTest(configPath)
+	raw, err := os.ReadFile(registrationPath)
+	if err != nil {
+		t.Fatalf("read initial config: %v", err)
+	}
+	cfg := map[string]interface{}{}
+	if err := toml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse initial config: %v", err)
+	}
+	hooks := cfg["hooks"].(map[string]interface{})
+	groups := hooks["PreToolUse"].([]interface{})
+	if len(groups) != 1 {
+		t.Fatalf("initial PreToolUse group count = %d, want 1", len(groups))
+	}
+	userHandler := map[string]interface{}{
+		"type":    "command",
+		"command": "user-policy.exe",
+		"timeout": int64(7),
+		"async":   false,
+	}
+	userGroup := map[string]interface{}{
+		"matcher": "^Shell$",
+		"hooks":   []interface{}{userHandler},
+	}
+	hooks["PreToolUse"] = append(groups, userGroup)
+	userHash, err := codexCommandHookHashForPlatform(runtime.GOOS, "pre_tool_use", "^Shell$", userHandler)
+	if err != nil {
+		t.Fatalf("hash user hook: %v", err)
+	}
+	userKey := codexHookStateKey(codexHookStateKeySource(registrationPath), "pre_tool_use", 1, 0)
+	userState := map[string]interface{}{"trusted_hash": userHash, "enabled": true, "note": "preserve"}
+	if runtime.GOOS != "windows" {
+		state := hooks["state"].(map[string]interface{})
+		state[userKey] = userState
+	}
+	edited, err := toml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal user edit: %v", err)
+	}
+	if err := os.WriteFile(registrationPath, edited, 0o600); err != nil {
+		t.Fatalf("write user edit: %v", err)
+	}
+
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	repairedRaw, err := os.ReadFile(registrationPath)
+	if err != nil {
+		t.Fatalf("read repaired config: %v", err)
+	}
+	repaired := map[string]interface{}{}
+	if err := toml.Unmarshal(repairedRaw, &repaired); err != nil {
+		t.Fatalf("parse repaired config: %v", err)
+	}
+	repairedHooks := repaired["hooks"].(map[string]interface{})
+	repairedGroups := repairedHooks["PreToolUse"].([]interface{})
+	if len(repairedGroups) != 2 {
+		t.Fatalf("repaired group count = %d, want 2: %#v", len(repairedGroups), repairedGroups)
+	}
+	firstHandlers := repairedGroups[0].(map[string]interface{})["hooks"].([]interface{})
+	if !isOwnedHookHandler(firstHandlers[0], filepath.Join(dir, "hooks")) {
+		t.Fatalf("DefenseClaw handler moved out of group 0: %#v", repairedGroups)
+	}
+	secondHandlers := repairedGroups[1].(map[string]interface{})["hooks"].([]interface{})
+	if got := secondHandlers[0].(map[string]interface{})["command"]; got != "user-policy.exe" {
+		t.Fatalf("trusted user hook moved or changed: got %#v", got)
+	}
+	if runtime.GOOS != "windows" {
+		repairedState := repairedHooks["state"].(map[string]interface{})
+		if got := repairedState[userKey]; !codexValueMatches(got, userState) {
+			t.Fatalf("trusted user state changed: got %#v want %#v", got, userState)
+		}
+	} else if _, exists := repairedHooks["state"]; exists {
+		t.Fatalf("managed repair synthesized hooks.state: %#v", repairedHooks["state"])
+	}
+	if err := verifyInstalledCodexHooksForTest(repairedHooks, registrationPath, filepath.Join(dir, "hooks")); err != nil {
+		t.Fatalf("repaired DefenseClaw matrix is not source-trusted: %v", err)
+	}
+}
+
+func TestCodexSetupAndTeardownRejectMalformedOwnedTrustIdentityWithoutRewritingConfig(t *testing.T) {
+	mutations := map[string]func(map[string]interface{}){
+		"timeout": func(handler map[string]interface{}) { handler["timeout"] = "thirty" },
+		"async":   func(handler map[string]interface{}) { handler["async"] = "false" },
+		"command": func(handler map[string]interface{}) {
+			if _, exists := handler["command_windows"]; !exists {
+				handler["command_windows"] = handler["command"]
+			}
+			handler["command"] = int64(7)
+		},
+	}
+	for operation, run := range map[string]func(Connector, SetupOpts) error{
+		"setup": func(conn Connector, opts SetupOpts) error {
+			return conn.Setup(context.Background(), opts)
+		},
+		"teardown": func(conn Connector, opts SetupOpts) error {
+			return conn.Teardown(context.Background(), opts)
+		},
+	} {
+		for field, mutate := range mutations {
+			t.Run(operation+"/"+field, func(t *testing.T) {
+				dir := t.TempDir()
+				configPath := filepath.Join(dir, "config.toml")
+				if err := os.WriteFile(configPath, nil, 0o600); err != nil {
+					t.Fatalf("write empty config: %v", err)
+				}
+				previous := CodexConfigPathOverride
+				CodexConfigPathOverride = configPath
+				t.Cleanup(func() { CodexConfigPathOverride = previous })
+				conn := NewCodexConnector()
+				opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+				if err := conn.Setup(context.Background(), opts); err != nil {
+					t.Fatalf("initial Setup: %v", err)
+				}
+				registrationPath := codexHookConfigPathForTest(configPath)
+				raw, err := os.ReadFile(registrationPath)
+				if err != nil {
+					t.Fatalf("read configured file: %v", err)
+				}
+				cfg := map[string]interface{}{}
+				if err := toml.Unmarshal(raw, &cfg); err != nil {
+					t.Fatalf("parse configured file: %v", err)
+				}
+				hooks := cfg["hooks"].(map[string]interface{})
+				groups := hooks["PreToolUse"].([]interface{})
+				handler := groups[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+				mutate(handler)
+				malformed, err := toml.Marshal(cfg)
+				if err != nil {
+					t.Fatalf("marshal malformed config: %v", err)
+				}
+				if err := os.WriteFile(registrationPath, malformed, 0o600); err != nil {
+					t.Fatalf("write malformed config: %v", err)
+				}
+
+				err = run(conn, opts)
+				if err == nil || (!strings.Contains(err.Error(), "unsupported type") &&
+					!strings.Contains(err.Error(), "empty command")) {
+					t.Fatalf("%s error = %v, want owned identity type rejection", operation, err)
+				}
+				after, readErr := os.ReadFile(registrationPath)
+				if readErr != nil {
+					t.Fatalf("read config after rejection: %v", readErr)
+				}
+				if !bytes.Equal(after, malformed) {
+					t.Fatalf("%s rewrote malformed config despite discovery failure\nbefore:\n%s\nafter:\n%s", operation, malformed, after)
+				}
+			})
+		}
+	}
+}
+
+func TestCodexRepairRefusesSharedMatcherDriftWithoutChangingUserHandlerSemantics(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, nil, 0o600); err != nil {
+		t.Fatalf("write empty config: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+	conn := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("initial Setup: %v", err)
+	}
+	registrationPath := codexHookConfigPathForTest(configPath)
+	raw, err := os.ReadFile(registrationPath)
+	if err != nil {
+		t.Fatalf("read configured file: %v", err)
+	}
+	cfg := map[string]interface{}{}
+	if err := toml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse configured file: %v", err)
+	}
+	hooks := cfg["hooks"].(map[string]interface{})
+	groups := hooks["PreToolUse"].([]interface{})
+	shared := groups[0].(map[string]interface{})
+	shared["matcher"] = "^UserSelectedMatcher$"
+	shared["user_metadata"] = "preserve"
+	handlers := shared["hooks"].([]interface{})
+	shared["hooks"] = append(handlers, map[string]interface{}{
+		"type":    "command",
+		"command": "user-policy.exe",
+		"timeout": int64(7),
+	})
+	edited, err := toml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal shared matcher edit: %v", err)
+	}
+	if err := os.WriteFile(registrationPath, edited, 0o600); err != nil {
+		t.Fatalf("write shared matcher edit: %v", err)
+	}
+
+	err = conn.Setup(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "unrelated handler semantics") {
+		t.Fatalf("repair error = %v, want shared matcher refusal", err)
+	}
+	after, readErr := os.ReadFile(registrationPath)
+	if readErr != nil {
+		t.Fatalf("read config after refusal: %v", readErr)
+	}
+	if !bytes.Equal(after, edited) {
+		t.Fatalf("repair changed shared user handler semantics despite refusal\nbefore:\n%s\nafter:\n%s", edited, after)
+	}
+}
+
+func TestCodexSetupRefusesUnownedStateCollision(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	collisionKey := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 1, 0)
+	seed := map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"PreToolUse": []interface{}{map[string]interface{}{
+				"hooks": []interface{}{map[string]interface{}{
+					"type":    "command",
+					"command": "user-policy.exe",
+				}},
+			}},
+			"state": map[string]interface{}{
+				collisionKey: map[string]interface{}{"trusted_hash": "sha256:unrelated"},
+			},
+		},
+	}
+	raw, err := toml.Marshal(seed)
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+
+	err = NewCodexConnector().Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"})
+	if runtime.GOOS == "windows" {
+		if err != nil {
+			t.Fatalf("managed-source Setup was blocked by unrelated user trust state: %v", err)
+		}
+	} else if err == nil || !strings.Contains(err.Error(), "belongs to another hook") {
+		t.Fatalf("Setup error = %v, want state-collision refusal", err)
+	}
+	after, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatalf("read config after refusal: %v", readErr)
+	}
+	if runtime.GOOS != "windows" && string(after) != string(raw) {
+		t.Fatalf("Setup rewrote config despite state collision\nbefore:\n%s\nafter:\n%s", raw, after)
+	}
+	if runtime.GOOS == "windows" {
+		parsed := map[string]interface{}{}
+		if err := toml.Unmarshal(after, &parsed); err != nil {
+			t.Fatal(err)
+		}
+		preserved := parsed["hooks"].(map[string]interface{})["state"].(map[string]interface{})
+		if _, exists := preserved[collisionKey]; !exists {
+			t.Fatalf("unrelated user state collision was not preserved: %#v", preserved)
+		}
+	}
+}
+
+func TestVerifyTrustedCodexHookMatrixRejectsIncompleteOrModifiedRegistration(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, nil, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+	if err := NewCodexConnector().Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	registrationPath := codexHookConfigPathForTest(configPath)
+	raw, err := os.ReadFile(registrationPath)
+	if err != nil {
+		t.Fatalf("read configured file: %v", err)
+	}
+	parseHooks := func(t *testing.T) map[string]interface{} {
+		t.Helper()
+		cfg := map[string]interface{}{}
+		if err := toml.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("parse configured file: %v", err)
+		}
+		return cfg["hooks"].(map[string]interface{})
+	}
+	hooksDir := filepath.Join(dir, "hooks")
+
+	t.Run("missing event", func(t *testing.T) {
+		hooks := parseHooks(t)
+		delete(hooks, "PostCompact")
+		if err := verifyInstalledCodexHooksForTest(hooks, registrationPath, hooksDir); err == nil || !strings.Contains(err.Error(), "PostCompact") {
+			t.Fatalf("verification error = %v, want missing PostCompact", err)
+		}
+	})
+
+	t.Run("modified trust", func(t *testing.T) {
+		hooks := parseHooks(t)
+		if runtime.GOOS == "windows" {
+			if _, exists := hooks["state"]; exists {
+				t.Fatalf("managed hook config contains synthesized hooks.state: %#v", hooks["state"])
+			}
+			if err := verifyManagedCodexHookMatrix(hooks, registrationPath, hooksDir); err != nil {
+				t.Fatalf("managed hook matrix is not source-trusted: %v", err)
+			}
+			return
+		}
+		state := hooks["state"].(map[string]interface{})
+		key := codexHookStateKey(codexHookStateKeySource(registrationPath), "stop", 0, 0)
+		state[key].(map[string]interface{})["trusted_hash"] = "sha256:modified"
+		if err := verifyTrustedCodexHookMatrix(hooks, registrationPath, hooksDir); err == nil || !strings.Contains(err.Error(), "not trusted") {
+			t.Fatalf("verification error = %v, want modified trust rejection", err)
+		}
+	})
+
+	t.Run("async handler", func(t *testing.T) {
+		hooks := parseHooks(t)
+		groups := hooks["PreToolUse"].([]interface{})
+		handlers := groups[0].(map[string]interface{})["hooks"].([]interface{})
+		handlers[0].(map[string]interface{})["async"] = true
+		if err := verifyInstalledCodexHooksForTest(hooks, registrationPath, hooksDir); err == nil || !strings.Contains(err.Error(), "async") {
+			t.Fatalf("verification error = %v, want async rejection", err)
+		}
+	})
+}
+
+// TestCodex_SetupTeardownRoundtripPreservesExistingUserHooks proves that
+// DefenseClaw merges its entries and restores the user's hook table exactly.
+func TestCodex_SetupTeardownRoundtripPreservesExistingUserHooks(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	original := `model_provider = "openai"
+
+[[hooks.PreToolUse]]
+matcher = "^Shell$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "user-policy.exe"
+timeout = 7
+`
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
 
@@ -2807,11 +4753,6 @@ func TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust(t *testing.T
 		t.Fatalf("setup: %v", err)
 	}
 
-	// Operator simulates editing config.toml to register their own
-	// PreToolUse hook in place of (or alongside) ours. We model this
-	// by overwriting only the trust-state entry for that event. The
-	// real hook command stays whatever Setup wrote; what matters is
-	// that the trusted_hash diverges from codexCommandHookHash().
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("read config after setup: %v", err)
@@ -2824,27 +4765,38 @@ func TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust(t *testing.T
 	if hooks == nil {
 		t.Fatalf("hooks block missing after Setup; cannot exercise user-modified branch")
 	}
-	state, _ := hooks["state"].(map[string]interface{})
-	if state == nil {
-		t.Fatalf("hooks.state missing after Setup; cannot exercise user-modified branch")
-	}
-	preToolUseKey := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 0, 0)
-	if _, ok := state[preToolUseKey]; !ok {
-		t.Fatalf("expected DefenseClaw to install pre_tool_use trust entry at %q; state=%v", preToolUseKey, state)
-	}
-	state[preToolUseKey] = map[string]interface{}{
-		"trusted_hash": "sha256:user-replacement-do-not-touch",
-	}
-	rewritten, err := toml.Marshal(parsed)
-	if err != nil {
-		t.Fatalf("re-marshal config: %v", err)
-	}
-	if err := os.WriteFile(configPath, rewritten, 0o600); err != nil {
-		t.Fatalf("write user-modified config: %v", err)
+	preToolUse, _ := hooks["PreToolUse"].([]interface{})
+	if runtime.GOOS == "windows" {
+		if len(preToolUse) != 1 {
+			t.Fatalf("Setup changed existing user hook table; got %d entries\n%s", len(preToolUse), raw)
+		}
+		managedPath, _, managedDocument := readCodexHookDocumentForTest(t, configPath)
+		managedHooks := managedDocument["hooks"].(map[string]interface{})
+		if err := verifyManagedCodexHookMatrix(managedHooks, managedPath, filepath.Join(dir, "hooks")); err != nil {
+			t.Fatalf("Setup managed hooks are incomplete: %v", err)
+		}
+		if _, exists := managedHooks["state"]; exists {
+			t.Fatalf("Setup manufactured trust state in managed config: %#v", managedHooks["state"])
+		}
+	} else {
+		if len(preToolUse) != 2 {
+			t.Fatalf("Setup replaced existing PreToolUse hooks; got %d entries\n%s", len(preToolUse), raw)
+		}
+		if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(dir, "hooks")); err != nil {
+			t.Fatalf("Setup hooks are not fully trusted: %v", err)
+		}
+		state := hooks["state"].(map[string]interface{})
+		ownedKey := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 1, 0)
+		if _, ok := state[ownedKey]; !ok {
+			t.Fatalf("position-aware DefenseClaw state key %q missing: %v", ownedKey, state)
+		}
 	}
 
 	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("teardown: %v", err)
+	}
+	if token, err := LoadOTLPPathToken(dir, OTLPScopeCodex); err != nil || token != "" {
+		t.Fatalf("Codex scoped OTLP token survived teardown: token=%q err=%v", token, err)
 	}
 
 	postRaw, err := os.ReadFile(configPath)
@@ -2856,30 +4808,14 @@ func TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust(t *testing.T
 		t.Fatalf("unmarshal post-teardown config: %v", err)
 	}
 
-	postHooks, _ := post["hooks"].(map[string]interface{})
-	if postHooks == nil {
-		t.Fatalf("teardown deleted entire hooks block even though user edits remain:\n%s", postRaw)
+	postHooks := post["hooks"].(map[string]interface{})
+	entries := postHooks["PreToolUse"].([]interface{})
+	if len(entries) != 1 {
+		t.Fatalf("Teardown did not restore the original hook table; got %d entries\n%s", len(entries), postRaw)
 	}
-	postState, _ := postHooks["state"].(map[string]interface{})
-	if postState == nil {
-		t.Fatalf("teardown deleted hooks.state even though user edit at %q must be preserved", preToolUseKey)
-	}
-	entry, ok := postState[preToolUseKey].(map[string]interface{})
-	if !ok {
-		t.Fatalf("teardown removed user trust entry at %q; state=%v", preToolUseKey, postState)
-	}
-	if got, _ := entry["trusted_hash"].(string); got != "sha256:user-replacement-do-not-touch" {
-		t.Fatalf("teardown clobbered user trusted_hash: got=%q want=sha256:user-replacement-do-not-touch", got)
-	}
-
-	// Untouched DefenseClaw entries (other events) must be removed,
-	// since their trusted_hash still matches what we wrote — that's
-	// the recognition signal teardown relies on.
-	for _, eventKey := range []string{"session_start", "user_prompt_submit", "permission_request", "post_tool_use", "stop"} {
-		key := codexHookStateKey(codexHookStateKeySource(configPath), eventKey, 0, 0)
-		if _, present := postState[key]; present {
-			t.Errorf("teardown failed to remove DefenseClaw-owned trust entry for %s at %q", eventKey, key)
-		}
+	handlers := entries[0].(map[string]interface{})["hooks"].([]interface{})
+	if got := handlers[0].(map[string]interface{})["command"]; got != "user-policy.exe" {
+		t.Fatalf("Teardown changed the user's command: got %v", got)
 	}
 }
 
@@ -2903,6 +4839,25 @@ env_key = "OPENAI_API_KEY"
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		for _, path := range []string{
+			configPath,
+			filepath.Join(dir, ".defenseclaw-v2-protocol.lock"),
+		} {
+			file, err := os.Open(path)
+			if err != nil {
+				t.Fatalf("open protected Codex lifecycle artifact %s: %v", filepath.Base(path), err)
+			}
+			privateErr := validateAtomicTransformBoundFilePrivatePlatform(file)
+			closeErr := file.Close()
+			if privateErr != nil {
+				t.Fatalf("Codex Setup left %s without a protected private DACL: %v", filepath.Base(path), privateErr)
+			}
+			if closeErr != nil {
+				t.Fatalf("close protected Codex lifecycle artifact %s: %v", filepath.Base(path), closeErr)
+			}
+		}
 	}
 	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
@@ -2956,7 +4911,7 @@ func TestCodex_Teardown_WritesDisabledHookForCachedProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("disabled hook missing after teardown: %v", err)
 	}
-	if info.Mode()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 		t.Fatalf("disabled hook is not executable: mode %v", info.Mode())
 	}
 
@@ -3003,7 +4958,8 @@ func TestCodex_Teardown_PreservesUserHooksAddedAfterSetup(t *testing.T) {
 		t.Fatalf("Setup: %v", err)
 	}
 
-	data, err := os.ReadFile(configPath)
+	registrationPath := codexHookConfigPathForTest(configPath)
+	data, err := os.ReadFile(registrationPath)
 	if err != nil {
 		t.Fatalf("read setup config: %v", err)
 	}
@@ -3028,7 +4984,7 @@ func TestCodex_Teardown_PreservesUserHooksAddedAfterSetup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal user-edited config: %v", err)
 	}
-	if err := os.WriteFile(configPath, out, 0o600); err != nil {
+	if err := os.WriteFile(registrationPath, out, 0o600); err != nil {
 		t.Fatalf("write user-edited config: %v", err)
 	}
 
@@ -3036,7 +4992,7 @@ func TestCodex_Teardown_PreservesUserHooksAddedAfterSetup(t *testing.T) {
 		t.Fatalf("Teardown: %v", err)
 	}
 
-	data, err = os.ReadFile(configPath)
+	data, err = os.ReadFile(registrationPath)
 	if err != nil {
 		t.Fatalf("read restored config: %v", err)
 	}
@@ -3096,6 +5052,277 @@ func TestCodex_TeardownWithoutBackup_RemovesManagedConfig(t *testing.T) {
 	}
 }
 
+func TestCodexExactRestoreSanitizesStaleManagedTelemetry(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "codex", "config.toml")
+	dataDir := filepath.Join(dir, "defenseclaw")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatalf("create Codex config directory: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+	if runtime.GOOS == "windows" {
+		setHookBinaryOverride(t, filepath.Join(dir, "DefenseClaw", windowsHookBinaryName))
+	}
+
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}
+	otel, err := buildCodexOtelBlockWithPathToken(opts, strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatalf("build stale managed Codex OTel block: %v", err)
+	}
+	otel["operator_note"] = "preserve"
+	notify := interface{}(codexShellNotifyCommand(opts))
+	if runtime.GOOS == "windows" {
+		notify = codexNativeNotifyCommand()
+	}
+	stale := map[string]interface{}{
+		"model":  "gpt-5",
+		"otel":   otel,
+		"notify": notify,
+	}
+	staleRaw, err := toml.Marshal(stale)
+	if err != nil {
+		t.Fatalf("marshal stale managed Codex config: %v", err)
+	}
+	if err := os.WriteFile(configPath, staleRaw, 0o600); err != nil {
+		t.Fatalf("write stale managed Codex config: %v", err)
+	}
+	managedBackup := &managedFileBackup{
+		Existed:       true,
+		PristineBytes: staleRaw,
+		PostSHA256:    managedFileSnapshotHash(staleRaw, true),
+	}
+	exact, ok := managedFileBackupTransform(managedBackup, staleRaw, true)
+	if !ok || exact.Remove {
+		t.Fatalf("contaminated managed backup did not select exact restore: ok=%t remove=%t", ok, exact.Remove)
+	}
+	cleaned, err := restoreOwnedCodexConfigFromTOML(
+		exact.Data,
+		true,
+		codexConfigBackup{},
+		opts,
+		configPath,
+	)
+	if err != nil {
+		t.Fatalf("sanitize contaminated pristine snapshot: %v", err)
+	}
+	if cleaned.Remove {
+		t.Fatal("contaminated pristine snapshot removed unrelated operator config")
+	}
+	if bytes.Equal(cleaned.Data, exact.Data) {
+		t.Fatal("contaminated pristine snapshot was reported unchanged")
+	}
+	if err := os.WriteFile(configPath, cleaned.Data, 0o600); err != nil {
+		t.Fatalf("publish sanitized exact restore: %v", err)
+	}
+	restored := map[string]interface{}{}
+	restoredRaw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read sanitized Codex config: %v", err)
+	}
+	if err := toml.Unmarshal(restoredRaw, &restored); err != nil {
+		t.Fatalf("parse sanitized Codex config: %v", err)
+	}
+	if restored["model"] != "gpt-5" {
+		t.Fatalf("teardown changed unrelated Codex config: %#v", restored)
+	}
+	restoredOtel, _ := restored["otel"].(map[string]interface{})
+	if len(restoredOtel) != 1 || restoredOtel["operator_note"] != "preserve" {
+		t.Fatalf("teardown did not preserve only operator OTel config: %#v", restoredOtel)
+	}
+	if _, exists := restored["notify"]; exists {
+		t.Fatalf("teardown resurrected managed Codex notify config: %#v", restored["notify"])
+	}
+	if err := NewCodexConnector().VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean after contaminated-pristine teardown: %v", err)
+	}
+}
+
+func TestCodexExactRestorePreservesOperatorTelemetryBytes(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	operator := []byte(`# operator formatting must survive exact restoration
+notify = ["operator-notify.exe", "--quiet"]
+
+[otel]
+log_user_prompt = true
+operator_note = "preserve"
+
+[otel.exporter.otlp-http]
+endpoint = "https://otel.example.com/v1/logs"
+protocol = "json"
+`)
+	operatorConfig := map[string]interface{}{}
+	if err := toml.Unmarshal(operator, &operatorConfig); err != nil {
+		t.Fatalf("parse operator-only pristine snapshot: %v", err)
+	}
+	originalOtel, err := json.Marshal(operatorConfig["otel"])
+	if err != nil {
+		t.Fatalf("capture operator OTel preimage: %v", err)
+	}
+	originalNotify, err := json.Marshal(operatorConfig["notify"])
+	if err != nil {
+		t.Fatalf("capture operator notify preimage: %v", err)
+	}
+	backup := codexConfigBackup{
+		HadOtelBlock:   true,
+		OriginalOtel:   originalOtel,
+		HadNotify:      true,
+		OriginalNotify: originalNotify,
+	}
+
+	cleaned, err := restoreOwnedCodexConfigFromTOML(
+		operator,
+		true,
+		backup,
+		opts,
+		configPath,
+	)
+	if err != nil {
+		t.Fatalf("inspect operator-only pristine snapshot: %v", err)
+	}
+	if cleaned.Remove {
+		t.Fatal("operator-only pristine snapshot was reported removed")
+	}
+	if !bytes.Equal(cleaned.Data, operator) {
+		t.Fatalf("operator-only pristine snapshot changed byte-for-byte:\n%s", cleaned.Data)
+	}
+}
+
+func TestCodexSurgicalRestoreRejectsStaleManagedTelemetryBackup(t *testing.T) {
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		setHookBinaryOverride(t, filepath.Join(dir, "DefenseClaw", windowsHookBinaryName))
+	}
+	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	currentOtel, err := buildCodexOtelBlockWithPathToken(opts, strings.Repeat("b", 64))
+	if err != nil {
+		t.Fatalf("build managed Codex OTel block: %v", err)
+	}
+	staleOtel := make(map[string]interface{}, len(currentOtel)+1)
+	for key, value := range currentOtel {
+		staleOtel[key] = value
+	}
+	staleOtel["operator_note"] = "preserve"
+	notify := interface{}(codexShellNotifyCommand(opts))
+	if runtime.GOOS == "windows" {
+		notify = codexNativeNotifyCommand()
+	}
+	originalOtel, err := json.Marshal(staleOtel)
+	if err != nil {
+		t.Fatalf("marshal contaminated Codex OTel field backup: %v", err)
+	}
+	originalNotify, err := json.Marshal(notify)
+	if err != nil {
+		t.Fatalf("marshal contaminated Codex notify field backup: %v", err)
+	}
+	backup := codexConfigBackup{
+		HadOtelBlock:   true,
+		OriginalOtel:   originalOtel,
+		HadNotify:      true,
+		OriginalNotify: originalNotify,
+	}
+	cfg := map[string]interface{}{"otel": currentOtel, "notify": notify}
+
+	restoreCodexOtelEntries(cfg, backup, opts)
+	if err := restoreCodexNotify(cfg, backup, opts); err != nil {
+		t.Fatalf("restore Codex notify: %v", err)
+	}
+	restoredOtel, _ := cfg["otel"].(map[string]interface{})
+	if len(restoredOtel) != 1 || restoredOtel["operator_note"] != "preserve" {
+		t.Fatalf("surgical restore resurrected managed Codex OTel config: %#v", restoredOtel)
+	}
+	if _, exists := cfg["notify"]; exists {
+		t.Fatalf("surgical restore resurrected managed Codex notify config: %#v", cfg["notify"])
+	}
+}
+
+func TestCodexSurgicalRestorePreservesOperatorTelemetryBackup(t *testing.T) {
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		setHookBinaryOverride(t, filepath.Join(dir, "DefenseClaw", windowsHookBinaryName))
+	}
+	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	managedOtel, err := buildCodexOtelBlockWithPathToken(opts, strings.Repeat("c", 64))
+	if err != nil {
+		t.Fatalf("build managed Codex OTel block: %v", err)
+	}
+	operatorOtel := map[string]interface{}{
+		"log_user_prompt": false,
+		"operator_note":   "preserve",
+		"exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "https://otel.example.com/v1/logs",
+				"protocol": "json",
+			},
+		},
+	}
+	operatorNotify := []interface{}{"operator-notify.exe", "--quiet"}
+	originalOtel, err := json.Marshal(operatorOtel)
+	if err != nil {
+		t.Fatalf("marshal operator Codex OTel field backup: %v", err)
+	}
+	originalNotify, err := json.Marshal(operatorNotify)
+	if err != nil {
+		t.Fatalf("marshal operator Codex notify field backup: %v", err)
+	}
+	backup := codexConfigBackup{
+		HadOtelBlock:   true,
+		OriginalOtel:   originalOtel,
+		HadNotify:      true,
+		OriginalNotify: originalNotify,
+	}
+	managedNotify := interface{}(codexShellNotifyCommand(opts))
+	if runtime.GOOS == "windows" {
+		managedNotify = codexNativeNotifyCommand()
+	}
+	cfg := map[string]interface{}{"otel": managedOtel, "notify": managedNotify}
+
+	restoreCodexOtelEntries(cfg, backup, opts)
+	if err := restoreCodexNotify(cfg, backup, opts); err != nil {
+		t.Fatalf("restore Codex notify: %v", err)
+	}
+	if !codexValueMatches(cfg["otel"], operatorOtel) {
+		t.Fatalf("surgical restore changed operator Codex OTel config: %#v", cfg["otel"])
+	}
+	if !codexValueMatches(cfg["notify"], operatorNotify) {
+		t.Fatalf("surgical restore changed operator Codex notify config: %#v", cfg["notify"])
+	}
+}
+
+func TestCodex_TeardownKeepsScopedOTLPTokenWhenConfigCleanupFails(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	defer func() { CodexConfigPathOverride = "" }()
+
+	conn := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "hook-token"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	before, err := LoadOTLPPathToken(dir, OTLPScopeCodex)
+	if err != nil || before == "" {
+		t.Fatalf("load pre-teardown token: present=%v err=%v", before != "", err)
+	}
+	// Drift the config into invalid TOML so exact backup restoration is skipped
+	// and surgical cleanup cannot prove that the managed endpoint is gone.
+	if err := os.WriteFile(configPath, []byte("[otel\ninvalid"), 0o600); err != nil {
+		t.Fatalf("write invalid config: %v", err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err == nil {
+		t.Fatal("Teardown succeeded despite uncleanable Codex config")
+	}
+	after, err := LoadOTLPPathToken(dir, OTLPScopeCodex)
+	if err != nil || after != before {
+		t.Fatalf("failed teardown revoked or changed the scoped token: retained=%v err=%v", after == before, err)
+	}
+}
+
 func TestCodex_VerifyCleanDetectsConfigResidue(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -3106,9 +5333,20 @@ func TestCodex_VerifyCleanDetectsConfigResidue(t *testing.T) {
 	if err := os.WriteFile(hookPath, []byte("#!/bin/bash\n# defenseclaw-managed-hook v2\n"), 0o700); err != nil {
 		t.Fatalf("write hook: %v", err)
 	}
+	pathToken, err := EnsureOTLPPathToken(dir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatalf("mint Codex OTLP token: %v", err)
+	}
+	otelBlock, err := buildCodexOtelBlockWithPathToken(
+		SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test"},
+		pathToken,
+	)
+	if err != nil {
+		t.Fatalf("render Codex OTLP block: %v", err)
+	}
 	cfg := map[string]interface{}{
 		"hooks": buildCodexHooksTable(configPath, hookPath),
-		"otel":  buildCodexOtelBlock(SetupOpts{APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}),
+		"otel":  otelBlock,
 		"notify": []interface{}{
 			"bash",
 			filepath.Join(dir, "notify-bridge.sh"),
@@ -3138,6 +5376,106 @@ func TestCodex_VerifyCleanDetectsConfigResidue(t *testing.T) {
 	}
 }
 
+func TestCodex_VerifyCleanReportsMalformedConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[hooks\n"), 0o600); err != nil {
+		t.Fatalf("write malformed config: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+
+	err := NewCodexConnector().VerifyClean(SetupOpts{DataDir: dir})
+	if err == nil || !strings.Contains(err.Error(), "parse codex config") {
+		t.Fatalf("VerifyClean error = %v, want parse failure", err)
+	}
+}
+
+func TestCodex_SetupRefusesUnknownHooksShape(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`hooks = "user-managed-source"
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+
+	err := NewCodexConnector().Setup(context.Background(), SetupOpts{DataDir: dir})
+	if err == nil || !strings.Contains(err.Error(), "refusing to replace") {
+		t.Fatalf("Setup error = %v, want unsupported-shape refusal", err)
+	}
+	raw, readErr := os.ReadFile(configPath)
+	if readErr != nil || string(raw) != "hooks = \"user-managed-source\"\n" {
+		t.Fatalf("Setup changed unsupported user hooks config: readErr=%v content=%q", readErr, raw)
+	}
+}
+
+func TestCodex_VerifyCleanReportsMalformedHooksJSONShape(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, nil, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "hooks.json"), []byte(`{"hooks":"unknown"}`), 0o600); err != nil {
+		t.Fatalf("write hooks.json: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+
+	err := NewCodexConnector().VerifyClean(SetupOpts{DataDir: dir})
+	if err == nil || !strings.Contains(err.Error(), "hooks has unsupported type") {
+		t.Fatalf("VerifyClean error = %v, want hooks.json shape failure", err)
+	}
+}
+
+func TestCodex_TeardownPreservesUnrelatedHooksJSONEntries(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`model_provider = "openai"
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+
+	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o700); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\n# defenseclaw-managed-hook v6\n"), 0o700); err != nil {
+		t.Fatalf("write hook: %v", err)
+	}
+	owned := filepath.ToSlash(hookPath)
+	hooksJSON := fmt.Sprintf(`{
+  "hooks": {
+    "PreToolUse": [
+      {"hooks": [{"type": "command", "command": %q}]},
+      {"hooks": [{"type": "command", "command": "user-policy.exe"}]}
+    ]
+  }
+}`, owned)
+	path := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(path, []byte(hooksJSON), 0o600); err != nil {
+		t.Fatalf("write hooks.json: %v", err)
+	}
+
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := NewCodexConnector().Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read preserved hooks.json: %v", err)
+	}
+	if strings.Contains(string(raw), owned) || !strings.Contains(string(raw), "user-policy.exe") {
+		t.Fatalf("Teardown did not surgically preserve hooks.json:\n%s", raw)
+	}
+	if err := NewCodexConnector().VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean after surgical hooks.json cleanup: %v", err)
+	}
+}
+
 func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T) {
 	opts := SetupOpts{APIAddr: "127.0.0.1:18970"}
 	legacy := map[string]interface{}{
@@ -3156,6 +5494,69 @@ func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T)
 	if !codexOtelBlockLooksManaged(legacy, opts) {
 		t.Fatal("legacy DefenseClaw-managed Codex [otel] block was not recognized")
 	}
+	for _, signal := range []string{"logs", "metrics", "traces"} {
+		current := map[string]interface{}{
+			"metrics_exporter": map[string]interface{}{
+				"otlp-http": map[string]interface{}{
+					"endpoint": "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/" + signal,
+					"protocol": "json",
+				},
+			},
+		}
+		if !codexOtelBlockLooksManaged(current, opts) {
+			t.Fatalf("headerless scoped Codex %s endpoint was not recognized", signal)
+		}
+	}
+	loopbackAlias := map[string]interface{}{
+		"trace_exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://localhost:18970/otlp/codex/" + strings.Repeat("b", 64) + "/v1/traces",
+			},
+		},
+	}
+	if !codexOtelBlockLooksManaged(loopbackAlias, opts) {
+		t.Fatal("equivalent local Codex scoped endpoint was not recognized")
+	}
+	portDrift := map[string]interface{}{
+		"exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://127.0.0.1:43189/otlp/codex/" + strings.Repeat("c", 64) + "/v1/logs",
+			},
+		},
+	}
+	if !codexOtelBlockLooksManaged(portDrift, opts) {
+		t.Fatal("scoped Codex endpoint was not recognized after gateway API port drift")
+	}
+	legacyPortDrift := map[string]interface{}{
+		"metrics_exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://localhost:43189/v1/metrics",
+				"headers": map[string]interface{}{
+					"x-defenseclaw-client": "codex-otel/1.0",
+					"x-defenseclaw-source": "codex",
+				},
+			},
+		},
+	}
+	if !codexOtelBlockLooksManaged(legacyPortDrift, opts) {
+		t.Fatal("legacy Codex endpoint was not recognized after gateway API port drift")
+	}
+	for marker, headers := range map[string]map[string]interface{}{
+		"source only": {"x-defenseclaw-source": "codex"},
+		"client only": {"x-defenseclaw-client": "codex-otel/1.0"},
+	} {
+		ambiguousLegacyDrift := map[string]interface{}{
+			"exporter": map[string]interface{}{
+				"otlp-http": map[string]interface{}{
+					"endpoint": "http://127.0.0.1:43189/v1/logs",
+					"headers":  headers,
+				},
+			},
+		}
+		if codexOtelBlockLooksManaged(ambiguousLegacyDrift, opts) {
+			t.Errorf("port-drifted legacy endpoint with %s was classified as managed", marker)
+		}
+	}
 
 	user := map[string]interface{}{
 		"exporter": map[string]interface{}{
@@ -3168,6 +5569,531 @@ func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T)
 	}
 	if codexOtelBlockLooksManaged(user, opts) {
 		t.Fatal("non-DefenseClaw Codex [otel] block was classified as managed")
+	}
+	for name, endpoint := range map[string]string{
+		"short token":       "http://127.0.0.1:18970/otlp/codex/abc/v1/logs",
+		"remote host":       "http://collector.example/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
+		"query":             "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs?x=1",
+		"empty query":       "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs?",
+		"other scope":       "http://127.0.0.1:18970/otlp/geminicli/" + strings.Repeat("a", 64) + "/v1/logs",
+		"missing port":      "http://localhost/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
+		"zero port":         "http://localhost:0/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
+		"oversized port":    "http://localhost:70000/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
+		"shared no headers": "http://127.0.0.1:18970/v1/logs",
+	} {
+		candidate := map[string]interface{}{"exporter": map[string]interface{}{"otlp-http": map[string]interface{}{"endpoint": endpoint}}}
+		if codexOtelBlockLooksManaged(candidate, opts) {
+			t.Errorf("operator-owned/nonmatching endpoint %q classified as managed", name)
+		}
+	}
+}
+
+func TestRestoreCodexOtelEntriesRemovesManagedExporterAfterGatewayPortDrift(t *testing.T) {
+	cfg := map[string]interface{}{
+		"otel": map[string]interface{}{
+			"log_user_prompt":  true,
+			"operator_setting": "preserve",
+			"exporter": map[string]interface{}{
+				"otlp-http": map[string]interface{}{
+					"endpoint": "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("d", 64) + "/v1/logs",
+					"protocol": "json",
+					"headers": map[string]interface{}{
+						"authorization":        "Bearer redacted-test-token",
+						"x-defenseclaw-client": "codex-otel/1.0",
+						"x-defenseclaw-source": "codex",
+					},
+				},
+			},
+		},
+	}
+	backup := codexConfigBackup{
+		HadOtelBlock: true,
+		OriginalOtel: json.RawMessage(`{"environment":"staging"}`),
+	}
+
+	// Native acceptance changes gateway.api_port before uninstall. Exercise
+	// the surgical restore directly: the old scoped exporter is still owned,
+	// while current operator fields and displaced original fields survive.
+	restoreCodexOtelEntries(cfg, backup, SetupOpts{APIAddr: "127.0.0.1:43189"})
+	restored, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToLower(string(restored)), "defenseclaw") {
+		t.Fatalf("surgical restore left a product registration after API port drift: %s", restored)
+	}
+	otel, ok := cfg["otel"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("surgical restore removed the operator OTel table: %#v", cfg)
+	}
+	if otel["operator_setting"] != "preserve" || otel["environment"] != "staging" {
+		t.Fatalf("surgical restore discarded operator/original fields: %#v", otel)
+	}
+	if _, exists := otel["exporter"]; exists {
+		t.Fatalf("surgical restore retained the old managed exporter: %#v", otel)
+	}
+}
+
+func TestRestoreCodexOtelEntriesScrubsPairedMarkersFromDriftedExporter(t *testing.T) {
+	currentExporter := map[string]interface{}{
+		"otlp-http": map[string]interface{}{
+			"endpoint": "https://operator.example.test/v1/logs",
+			"protocol": "json",
+			"headers": map[string]interface{}{
+				"authorization":        "Bearer synthetic-product-token",
+				"x-defenseclaw-client": "codex-otel/1.0",
+				"x-defenseclaw-source": "codex",
+				"x-operator-header":    "preserve-current",
+			},
+		},
+	}
+	savedExporter := map[string]interface{}{
+		"otlp-http": map[string]interface{}{
+			"endpoint": "https://original.example.test/v1/logs",
+			"protocol": "json",
+			"headers": map[string]interface{}{
+				"authorization": "Bearer synthetic-operator-token",
+			},
+		},
+	}
+	original, err := json.Marshal(map[string]interface{}{"exporter": savedExporter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := map[string]interface{}{"otel": map[string]interface{}{"exporter": currentExporter}}
+	restoreCodexOtelEntries(cfg, codexConfigBackup{HadOtelBlock: true, OriginalOtel: original}, SetupOpts{})
+
+	otel := cfg["otel"].(map[string]interface{})
+	exporter := otel["exporter"].(map[string]interface{})
+	http := exporter["otlp-http"].(map[string]interface{})
+	if http["endpoint"] != "https://operator.example.test/v1/logs" {
+		t.Fatalf("surgical cleanup replaced drifted operator endpoint: %#v", http)
+	}
+	headers := http["headers"].(map[string]interface{})
+	for key, want := range map[string]interface{}{
+		"authorization":     "Bearer synthetic-operator-token",
+		"x-operator-header": "preserve-current",
+	} {
+		if headers[key] != want {
+			t.Fatalf("restored header %s = %#v, want %#v: %#v", key, headers[key], want, headers)
+		}
+	}
+	for _, key := range []string{"x-defenseclaw-client", "x-defenseclaw-source"} {
+		if _, exists := headers[key]; exists {
+			t.Fatalf("surgical cleanup restored product-owned header %s: %#v", key, headers)
+		}
+	}
+
+	contaminatedOriginal, err := json.Marshal(map[string]interface{}{
+		"exporter": map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": "http://127.0.0.1:43189/v1/logs",
+				"headers": map[string]interface{}{
+					"authorization":        "Bearer synthetic-stale-backup-token",
+					"x-defenseclaw-client": "codex-otel/legacy",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withContaminatedOriginal := map[string]interface{}{"otel": map[string]interface{}{"exporter": currentExporter}}
+	currentHeaders := codexExporterHeaders(currentExporter)
+	currentHeaders["authorization"] = "Bearer synthetic-product-token"
+	currentHeaders["x-defenseclaw-client"] = "codex-otel/legacy"
+	currentHeaders["x-defenseclaw-source"] = "codex-legacy"
+	restoreCodexOtelEntries(withContaminatedOriginal, codexConfigBackup{
+		HadOtelBlock: true,
+		OriginalOtel: contaminatedOriginal,
+	}, SetupOpts{})
+	cleaned := codexExporterHeaders(withContaminatedOriginal["otel"].(map[string]interface{})["exporter"])
+	for _, key := range []string{"authorization", "x-defenseclaw-client", "x-defenseclaw-source"} {
+		if _, exists := cleaned[key]; exists {
+			t.Fatalf("surgical cleanup retained product header %s: %#v", key, cleaned)
+		}
+	}
+	if cleaned["x-operator-header"] != "preserve-current" {
+		t.Fatalf("surgical cleanup discarded unrelated header: %#v", cleaned)
+	}
+}
+
+func TestCodexVerifyCleanReportsExactDriftedHeaderResidueWithoutValues(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	config := `notify = ["operator-notify", "notify"]
+
+[otel.exporter.otlp-http]
+endpoint = "https://operator.example.test/v1/logs"
+
+[otel.exporter.otlp-http.headers]
+authorization = "Bearer synthetic-secret-value"
+x-defenseclaw-client = "codex-otel/1.0"
+x-defenseclaw-source = "codex"
+
+[otel.metrics_exporter.otlp-http]
+endpoint = "https://operator.example.test/v1/metrics"
+
+[otel.metrics_exporter.otlp-http.headers]
+x-defenseclaw-client = "codex-otel/1.0"
+`
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := CodexConfigPathOverride
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = previous })
+
+	err := NewCodexConnector().VerifyClean(SetupOpts{DataDir: dir})
+	if err == nil {
+		t.Fatal("VerifyClean accepted exact DefenseClaw header residue")
+	}
+	message := err.Error()
+	for _, path := range []string{
+		"otel.exporter.otlp-http.headers.x-defenseclaw-client",
+		"otel.exporter.otlp-http.headers.x-defenseclaw-source",
+		"otel.metrics_exporter.otlp-http.headers.x-defenseclaw-client",
+	} {
+		if !strings.Contains(message, path) {
+			t.Fatalf("VerifyClean diagnostic missing safe path %q: %s", path, message)
+		}
+	}
+	if strings.Contains(message, "synthetic-secret-value") || strings.Contains(message, "operator.example.test") {
+		t.Fatalf("VerifyClean diagnostic leaked configuration values: %s", message)
+	}
+}
+
+func TestRestoreOwnedCodexConfigFromTOMLCleansStaleManagedSnapshot(t *testing.T) {
+	opts := SetupOpts{
+		DataDir:       filepath.Join(`D:\`, "synthetic-defenseclaw-data"),
+		APIAddr:       "127.0.0.1:43189",
+		OTLPPathToken: strings.Repeat("a", 48),
+	}
+	otel, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedHook := filepath.Join(`C:\`, "Program Files", "DefenseClaw", windowsHookBinaryName)
+	setHookBinaryOverride(t, managedHook)
+	stale := map[string]interface{}{
+		"model_provider": "openai",
+		"notify":         []string{managedHook, "notify"},
+		"otel":           otel,
+	}
+	raw, err := toml.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	restored, err := restoreOwnedCodexConfigFromTOML(
+		raw,
+		true,
+		codexConfigBackup{},
+		opts,
+		filepath.Join(`C:\`, "Users", "fixture", ".codex", "config.toml"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Remove {
+		t.Fatal("restore removed operator-owned config")
+	}
+	cfg := map[string]interface{}{}
+	if err := toml.Unmarshal(restored.Data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["model_provider"] != "openai" {
+		t.Fatalf("restore discarded operator field: %#v", cfg)
+	}
+	if _, exists := cfg["notify"]; exists {
+		t.Fatalf("restore retained managed notify registration: %#v", cfg)
+	}
+	if _, exists := cfg["otel"]; exists {
+		t.Fatalf("restore retained managed OTel registration: %#v", cfg)
+	}
+
+	operatorOnly := []byte("model_provider = \"openai\"  # preserve spacing\nnotify = [\"operator-tool\", \"notify\"]\n")
+	unchanged, err := restoreOwnedCodexConfigFromTOML(
+		operatorOnly,
+		true,
+		codexConfigBackup{},
+		opts,
+		filepath.Join(`C:\`, "Users", "fixture", ".codex", "config.toml"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Remove || !bytes.Equal(unchanged.Data, operatorOnly) {
+		t.Fatalf("operator-only config was not byte-identical after restore:\n%s", unchanged.Data)
+	}
+}
+
+func TestRestoreOwnedCodexConfigFromTOMLRejectsContaminatedLegacyOriginals(t *testing.T) {
+	opts := SetupOpts{
+		DataDir:       filepath.Join(`D:\`, "synthetic-defenseclaw-data"),
+		APIAddr:       "127.0.0.1:43189",
+		OTLPPathToken: strings.Repeat("b", 48),
+	}
+	managedOtel, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedHook := filepath.Join(`C:\`, "Program Files", "DefenseClaw", windowsHookBinaryName)
+	setHookBinaryOverride(t, managedHook)
+	managedNotify := []string{managedHook, "notify"}
+	stale := map[string]interface{}{
+		"model_provider": "openai",
+		"notify":         managedNotify,
+		"otel":           managedOtel,
+	}
+	raw, err := toml.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	contaminatedOtel := make(map[string]interface{}, len(managedOtel)+1)
+	for key, value := range managedOtel {
+		contaminatedOtel[key] = value
+	}
+	contaminatedOtel["environment"] = "staging"
+	originalOtel, err := json.Marshal(contaminatedOtel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalNotify, err := json.Marshal(managedNotify)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := restoreOwnedCodexConfigFromTOML(
+		raw,
+		true,
+		codexConfigBackup{
+			HadOtelBlock:   true,
+			OriginalOtel:   originalOtel,
+			HadNotify:      true,
+			OriginalNotify: originalNotify,
+		},
+		opts,
+		filepath.Join(`C:\`, "Users", "fixture", ".codex", "config.toml"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Remove {
+		t.Fatal("restore removed operator-owned config")
+	}
+	restoredConfig := map[string]interface{}{}
+	if err := toml.Unmarshal(restored.Data, &restoredConfig); err != nil {
+		t.Fatal(err)
+	}
+	if restoredConfig["model_provider"] != "openai" {
+		t.Fatalf("restore discarded operator field: %#v", restoredConfig)
+	}
+	if _, exists := restoredConfig["notify"]; exists {
+		t.Fatalf("restore resurrected contaminated managed notify: %#v", restoredConfig)
+	}
+	gotOtel, ok := restoredConfig["otel"].(map[string]interface{})
+	if !ok || gotOtel["environment"] != "staging" {
+		t.Fatalf("restore discarded unrelated legacy OTel field: %#v", restoredConfig)
+	}
+	for _, key := range codexOtelExporterKeys {
+		if _, exists := gotOtel[key]; exists {
+			t.Fatalf("restore resurrected contaminated managed OTel field %s: %#v", key, gotOtel)
+		}
+	}
+	if strings.Contains(strings.ToLower(string(restored.Data)), "defenseclaw") {
+		t.Fatalf("restore retained a managed registration: %s", restored.Data)
+	}
+
+	operatorExporter := map[string]interface{}{
+		"otlp-http": map[string]interface{}{
+			"endpoint": "https://otel.example.test/v1/logs",
+			"protocol": "json",
+		},
+	}
+	operatorOtel, err := json.Marshal(map[string]interface{}{"exporter": operatorExporter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operatorNotify, err := json.Marshal([]string{"operator-notify", "notify"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operatorRestored, err := restoreOwnedCodexConfigFromTOML(
+		raw,
+		true,
+		codexConfigBackup{
+			HadOtelBlock:   true,
+			OriginalOtel:   operatorOtel,
+			HadNotify:      true,
+			OriginalNotify: operatorNotify,
+		},
+		opts,
+		filepath.Join(`C:\`, "Users", "fixture", ".codex", "config.toml"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operatorConfig := map[string]interface{}{}
+	if err := toml.Unmarshal(operatorRestored.Data, &operatorConfig); err != nil {
+		t.Fatal(err)
+	}
+	if !codexValueMatches(operatorConfig["notify"], []interface{}{"operator-notify", "notify"}) {
+		t.Fatalf("restore discarded operator notify: %#v", operatorConfig)
+	}
+	operatorRestoredOtel, ok := operatorConfig["otel"].(map[string]interface{})
+	if !ok || !codexValueMatches(operatorRestoredOtel["exporter"], operatorExporter) {
+		t.Fatalf("restore discarded operator exporter: %#v", operatorConfig)
+	}
+}
+
+func TestRestoreOwnedCodexConfigFromTOMLRejectsDriftedMarkerResidueInLegacyOriginals(t *testing.T) {
+	opts := SetupOpts{
+		DataDir:       filepath.Join(`D:\`, "synthetic-defenseclaw-data"),
+		APIAddr:       "127.0.0.1:43189",
+		OTLPPathToken: strings.Repeat("c", 48),
+	}
+	managedOtel, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedHook := filepath.Join(`C:\`, "Program Files", "DefenseClaw", windowsHookBinaryName)
+	setHookBinaryOverride(t, managedHook)
+	raw, err := toml.Marshal(map[string]interface{}{
+		"model_provider": "openai",
+		"notify":         []string{managedHook, "notify"},
+		"otel":           managedOtel,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	contaminatedOtel := map[string]interface{}{"environment": "staging"}
+	for index, key := range codexOtelExporterKeys {
+		contaminatedOtel[key] = map[string]interface{}{
+			"otlp-http": map[string]interface{}{
+				"endpoint": fmt.Sprintf("https://otel.example.test/v1/signal-%d", index),
+				"protocol": "json",
+				"headers": map[string]interface{}{
+					"authorization":        "redacted-test-credential",
+					"x-defenseclaw-source": "obsolete-marker-value",
+					"x-defenseclaw-client": "obsolete-client-value",
+				},
+			},
+		}
+	}
+	originalOtel, err := json.Marshal(contaminatedOtel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := restoreOwnedCodexConfigFromTOML(
+		raw,
+		true,
+		codexConfigBackup{HadOtelBlock: true, OriginalOtel: originalOtel},
+		opts,
+		filepath.Join(`C:\`, "Users", "fixture", ".codex", "config.toml"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Remove {
+		t.Fatal("restore removed operator-owned config")
+	}
+	restoredConfig := map[string]interface{}{}
+	if err := toml.Unmarshal(restored.Data, &restoredConfig); err != nil {
+		t.Fatal(err)
+	}
+	if restoredConfig["model_provider"] != "openai" {
+		t.Fatalf("restore discarded operator field: %#v", restoredConfig)
+	}
+	restoredOtel, ok := restoredConfig["otel"].(map[string]interface{})
+	if !ok || restoredOtel["environment"] != "staging" {
+		t.Fatalf("restore discarded unrelated legacy OTel field: %#v", restoredConfig)
+	}
+	for _, key := range codexOtelExporterKeys {
+		if _, exists := restoredOtel[key]; exists {
+			t.Fatalf("restore resurrected drifted marker residue at otel.%s", key)
+		}
+	}
+	if strings.Contains(strings.ToLower(string(restored.Data)), "defenseclaw") ||
+		strings.Contains(string(restored.Data), "redacted-test-credential") {
+		t.Fatalf("restore retained contaminated telemetry metadata: %s", restored.Data)
+	}
+}
+
+func TestCodexNotifyLooksManagedAcceptsSameBoundLegacyBridgePath(t *testing.T) {
+	dataDir := t.TempDir()
+	nested := filepath.Join(dataDir, "legacy-path-segment")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bridge := filepath.Join(dataDir, "notify-bridge.sh")
+	if err := os.WriteFile(bridge, []byte("synthetic bridge\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	equivalent := filepath.Join(nested, "..", "notify-bridge.sh")
+	if !codexNotifyLooksManaged([]interface{}{"bash", equivalent}, SetupOpts{DataDir: dataDir}) {
+		t.Fatalf("same bound legacy bridge path was not recognized: %q", equivalent)
+	}
+	foreign := filepath.Join(filepath.Dir(dataDir), "other", "notify-bridge.sh")
+	if codexNotifyLooksManaged([]interface{}{"bash", foreign}, SetupOpts{DataDir: dataDir}) {
+		t.Fatalf("foreign legacy bridge path was accepted: %q", foreign)
+	}
+}
+
+func TestRestoreCodexConfigAfterRepeatedSetupAndGatewayPortChange(t *testing.T) {
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		setHookBinaryOverride(t, filepath.Join(dir, "bin", windowsHookBinaryName))
+	}
+	configPath := filepath.Join(dir, "config.toml")
+	pristine := []byte("model_provider = \"openai\"\n")
+	if err := os.WriteFile(configPath, pristine, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := CodexConfigPathOverride
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = previous })
+
+	connector := NewCodexConnector()
+	first := SetupOpts{
+		DataDir:       dir,
+		APIAddr:       "127.0.0.1:18970",
+		OTLPPathToken: strings.Repeat("a", 48),
+	}
+	if err := connector.patchCodexConfig(first, filepath.Join(dir, "hooks", "codex-hook.sh")); err != nil {
+		t.Fatalf("first config patch: %v", err)
+	}
+	// Model an upgrade from a predecessor that wrote the field-level backup but
+	// not the newer managed-file snapshot. The candidate must not treat the
+	// already-managed current config as pristine and resurrect it on uninstall.
+	discardManagedFileBackup(dir, connector.Name(), "config.toml")
+	second := first
+	second.APIAddr = "127.0.0.1:43189"
+	if err := connector.patchCodexConfig(second, filepath.Join(dir, "hooks", "codex-hook.sh")); err != nil {
+		t.Fatalf("second config patch: %v", err)
+	}
+	if err := connector.restoreCodexConfig(second); err != nil {
+		t.Fatalf("config restore after port change: %v", err)
+	}
+
+	got, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoredCfg := map[string]interface{}{}
+	if err := toml.Unmarshal(got, &restoredCfg); err != nil {
+		t.Fatalf("parse restored config: %v", err)
+	}
+	pristineCfg := map[string]interface{}{}
+	if err := toml.Unmarshal(pristine, &pristineCfg); err != nil {
+		t.Fatalf("parse pristine config: %v", err)
+	}
+	if !codexValueMatches(restoredCfg, pristineCfg) {
+		t.Fatalf("restored config differs semantically from pristine state: %#v", restoredCfg)
+	}
+	if strings.Contains(strings.ToLower(string(got)), "defenseclaw") {
+		t.Fatalf("restored config retained a managed registration: %s", got)
 	}
 }
 
@@ -3482,6 +6408,9 @@ func TestZeptoClaw_Route_SkipsEntriesWithNoAPIKey(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_IsIdempotent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	}
 	// On every sidecar boot, Setup runs. If it overwrites the backup each
 	// time, the second boot captures the already-patched api_base (the
 	// proxy URL) as the "original", losing the user's real upstream. The
@@ -3558,12 +6487,24 @@ func TestZeptoClaw_Setup_UsesHookFailMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read inspect-tool.sh: %v", err)
 	}
-	if !strings.Contains(string(body), `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"`) {
-		t.Fatalf("inspect-tool.sh did not render closed fail mode:\n%s", string(body))
+	if !strings.Contains(string(body), `FAIL_MODE="$(defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR")"`) {
+		t.Fatalf("inspect-tool.sh did not use the shared runtime fail mode:\n%s", string(body))
+	}
+	runtimeBody, err := os.ReadFile(filepath.Join(dir, "hooks", ".hookcfg.zeptoclaw"))
+	if err != nil {
+		t.Fatalf("read ZeptoClaw hook runtime state: %v", err)
+	}
+	for _, want := range []string{"DEFENSECLAW_CONNECTOR=zeptoclaw", "DEFENSECLAW_FAIL_MODE=closed"} {
+		if !strings.Contains(string(runtimeBody), want) {
+			t.Errorf("ZeptoClaw hook runtime state missing %q:\n%s", want, runtimeBody)
+		}
 	}
 }
 
 func TestZeptoClaw_Setup_LoadsProviderSnapshot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	}
 	// After Setup(), the connector must retain the user's provider table
 	// in memory so Route() can look up upstreams. Otherwise we'd have to
 	// re-read the (already-patched) config file on every request.
@@ -3618,6 +6559,9 @@ func TestResolveSubprocessPolicy(t *testing.T) {
 // --- Subprocess enforcement tests ---
 
 func TestWriteShimScripts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell shims and symlinks are not used by native Windows connectors")
+	}
 	dir := t.TempDir()
 	if err := WriteShimScripts(dir, "127.0.0.1:18970"); err != nil {
 		t.Fatalf("WriteShimScripts failed: %v", err)
@@ -3645,6 +6589,9 @@ func TestWriteShimScripts(t *testing.T) {
 }
 
 func TestWriteShimScripts_ContentHasAPIAddr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell shims and symlinks are not used by native Windows connectors")
+	}
 	dir := t.TempDir()
 	addr := "127.0.0.1:18970"
 	if err := WriteShimScripts(dir, addr); err != nil {
@@ -3677,7 +6624,7 @@ func TestWriteHookScript(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hook script not created: %v", err)
 	}
-	if info.Mode()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 		t.Error("hook script not executable")
 	}
 }
@@ -3718,7 +6665,7 @@ func TestWriteAllHookScripts_CreatesAllFour(t *testing.T) {
 			t.Errorf("hook %s not created: %v", name, err)
 			continue
 		}
-		if info.Mode()&0o111 == 0 {
+		if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 			t.Errorf("hook %s not executable", name)
 		}
 		data, _ := os.ReadFile(path)
@@ -3767,12 +6714,19 @@ func TestOpenClawHookWriter_WritesGenericHooksOnly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read generic hook %s: %v", name, err)
 		}
-		if !strings.Contains(string(body), ".hook-openclaw.token") {
-			t.Errorf("generic hook %s does not reference connector-scoped token sidecar", name)
+		if !strings.Contains(string(body), "defenseclaw_shared_hook_token_file") {
+			t.Errorf("generic hook %s does not resolve the connector-scoped token at invocation time", name)
 		}
-		if !strings.Contains(string(body), "X-DefenseClaw-Connector: openclaw") {
-			t.Errorf("generic hook %s does not bind scoped token to OpenClaw", name)
+		if !strings.Contains(string(body), "X-DefenseClaw-Connector: ${RUNTIME_CONNECTOR}") {
+			t.Errorf("generic hook %s does not bind the scoped token to the runtime connector", name)
 		}
+	}
+	runtimeState, err := os.ReadFile(filepath.Join(hookDir, hookConfigSidecarName+".openclaw"))
+	if err != nil {
+		t.Fatalf("read OpenClaw runtime sidecar: %v", err)
+	}
+	if !strings.Contains(string(runtimeState), "DEFENSECLAW_CONNECTOR=openclaw") {
+		t.Fatalf("OpenClaw runtime sidecar does not select the connector:\n%s", runtimeState)
 	}
 	for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "hermes-hook.sh"} {
 		if _, err := os.Stat(filepath.Join(hookDir, name)); !os.IsNotExist(err) {
@@ -3896,6 +6850,9 @@ func TestConnectorScopedHookReadFailureClearsGenericEnv(t *testing.T) {
 // runtime-computed Authorization header.
 func runHookAndReturnCurlArgs(t *testing.T, scriptPath string, extraEnv map[string]string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell-hook runtime is covered by native defenseclaw-hook.exe tests on Windows")
+	}
 	stubDir := t.TempDir()
 	argFile := filepath.Join(stubDir, "curl-args.txt")
 	stub := filepath.Join(stubDir, "curl")
@@ -4128,6 +7085,9 @@ func TestWriteSandboxPolicy(t *testing.T) {
 }
 
 func TestTeardownSubprocessEnforcement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell shims and symlinks are not used by native Windows connectors")
+	}
 	dir := t.TempDir()
 	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000"}
 
@@ -4611,8 +7571,8 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	if env["OTEL_LOGS_EXPORTER"] != "otlp" {
 		t.Errorf("OTEL_LOGS_EXPORTER = %v, want \"otlp\"", env["OTEL_LOGS_EXPORTER"])
 	}
-	if _, present := env["OTEL_LOG_USER_PROMPTS"]; present {
-		t.Errorf("OTEL_LOG_USER_PROMPTS should be absent by default; got %v", env["OTEL_LOG_USER_PROMPTS"])
+	if env["OTEL_LOG_USER_PROMPTS"] != "1" {
+		t.Errorf("OTEL_LOG_USER_PROMPTS = %v, want \"1\" for v8 source capture", env["OTEL_LOG_USER_PROMPTS"])
 	}
 	if env["OTEL_METRICS_EXPORTER"] != "otlp" {
 		t.Errorf("OTEL_METRICS_EXPORTER = %v, want \"otlp\"", env["OTEL_METRICS_EXPORTER"])
@@ -4621,26 +7581,143 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	if !strings.Contains(endpoint, "127.0.0.1:18970") {
 		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %q, want gateway API address", endpoint)
 	}
+	scoped, err := LoadOTLPPathToken(dir, OTLPScopeClaude)
+	if err != nil || scoped == "" {
+		t.Fatalf("LoadOTLPPathToken(claudecode) = %q, %v", scoped, err)
+	}
+	if strings.Contains(endpoint, scoped) || strings.Contains(endpoint, "/otlp/claudecode/") {
+		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT leaked connector-scoped Claude credential: %q", endpoint)
+	}
 	headers, _ := env["OTEL_EXPORTER_OTLP_HEADERS"].(string)
-	if !strings.Contains(headers, "x-defenseclaw-token=test-token-claude-otel") {
-		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing token; got %q", headers)
+	if strings.Contains(headers, "x-defenseclaw-token=") || strings.Contains(headers, "test-token-claude-otel") {
+		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS leaked the general API token; got %q", headers)
 	}
 	if !strings.Contains(headers, "x-defenseclaw-source=claudecode") {
 		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing source attribution; got %q", headers)
+	}
+	if !slices.Contains(splitOTelHeader(headers), "authorization=Bearer "+scoped) {
+		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing connector-scoped Authorization; got %q", headers)
+	}
+	for _, key := range []string{
+		"OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+		"OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+		"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+	} {
+		value, _ := env[key].(string)
+		if !strings.Contains(value, "authorization=Bearer "+scoped) || strings.Contains(value, "Bearer%20") {
+			t.Errorf("%s does not use Claude's literal managed Authorization contract", key)
+		}
+	}
+	probes, err := LoadClaudeCodeNativeOTLPProbes()
+	if err != nil {
+		t.Fatalf("LoadClaudeCodeNativeOTLPProbes: %v", err)
+	}
+	if len(probes) != 2 {
+		t.Fatalf("Claude native OTLP probes = %d, want logs and metrics", len(probes))
+	}
+	for _, probe := range probes {
+		if probe.Headers.Get("Authorization") != "Bearer "+scoped {
+			t.Fatalf("Claude %s probe did not preserve the literal scoped bearer", probe.Signal)
+		}
+		if probe.Headers.Get("X-DefenseClaw-Source") != "claudecode" {
+			t.Fatalf("Claude %s probe source = %q", probe.Signal, probe.Headers.Get("X-DefenseClaw-Source"))
+		}
+		if !strings.HasSuffix(probe.Endpoint, "/v1/"+string(probe.Signal)) {
+			t.Fatalf("Claude %s probe endpoint does not select its signal", probe.Signal)
+		}
 	}
 	if env["OTEL_SERVICE_NAME"] != "claudecode" {
 		t.Errorf("OTEL_SERVICE_NAME = %v, want \"claudecode\"", env["OTEL_SERVICE_NAME"])
 	}
 	if info, err := os.Stat(settingsPath); err != nil {
 		t.Fatalf("stat settings.json: %v", err)
-	} else if mode := info.Mode().Perm(); mode != 0o600 {
+	} else if mode := info.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o600 {
 		t.Errorf("settings.json mode = %#o, want 0600 because OTel headers include the gateway token", mode)
 	}
 }
 
-func TestClaudeCode_Setup_RawModeEnablesPromptLoggingAndTeardownRestores(t *testing.T) {
-	redaction.SetDisableAll(true)
-	t.Cleanup(func() { redaction.SetDisableAll(false) })
+func TestApplyClaudeCodeManagedOtelEnvMigratesPercentEncodedNativeOTLPBearer(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	previousSettingsOverride := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previousSettingsOverride })
+
+	scopedToken := strings.Repeat("a", 64)
+	legacyHeaders := "authorization=Bearer%20" + scopedToken +
+		",x-defenseclaw-client=claudecode-otel%2F1.0,x-defenseclaw-source=claudecode"
+	legacyEnv := map[string]interface{}{
+		"CLAUDE_CODE_ENABLE_TELEMETRY":        "1",
+		"OTEL_LOGS_EXPORTER":                  "otlp",
+		"OTEL_METRICS_EXPORTER":               "otlp",
+		"OTEL_EXPORTER_OTLP_HEADERS":          legacyHeaders,
+		"OTEL_EXPORTER_OTLP_LOGS_HEADERS":     legacyHeaders,
+		"OTEL_EXPORTER_OTLP_METRICS_HEADERS":  legacyHeaders,
+		"OTEL_EXPORTER_OTLP_TRACES_HEADERS":   legacyHeaders,
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":    "http://127.0.0.1:18970/v1/logs",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://127.0.0.1:18970/v1/metrics",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  "http://127.0.0.1:18970/v1/traces",
+		"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL":    "http/json",
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/json",
+		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL":  "http/json",
+	}
+	opts := SetupOpts{
+		DataDir:       dir,
+		APIAddr:       "127.0.0.1:18970",
+		OTLPPathToken: scopedToken,
+	}
+	applyClaudeCodeManagedOtelEnv(legacyEnv, buildClaudeCodeOtelEnv(opts))
+	settings := map[string]interface{}{"env": legacyEnv}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, ok := settings["env"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("migrated Claude settings env has type %T", settings["env"])
+	}
+	for _, key := range []string{
+		"OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+		"OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+		"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+	} {
+		value, _ := env[key].(string)
+		if strings.Contains(value, "Bearer%20") || !strings.Contains(value, "authorization=Bearer "+scopedToken) {
+			t.Errorf("%s was not migrated to Claude's literal Authorization contract", key)
+		}
+	}
+	if _, err := LoadClaudeCodeNativeOTLPProbes(); err != nil {
+		t.Fatalf("migrated Claude native OTLP contract is not probeable: %v", err)
+	}
+}
+
+func TestClaudeCodeOtelHeadersAreDefenseClawOnlyRecognizesScopedBearers(t *testing.T) {
+	scopedToken := strings.Repeat("a", 64)
+	for _, headers := range []string{
+		"authorization=Bearer " + scopedToken + ",x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode",
+		"authorization=Bearer%20" + scopedToken + ",x-defenseclaw-client=claudecode-otel%2F1.0,x-defenseclaw-source=claudecode",
+	} {
+		if !claudeCodeOtelHeadersAreDefenseClawOnly(headers) {
+			t.Errorf("DefenseClaw-only Claude headers were not recognized")
+		}
+	}
+	for _, headers := range []string{
+		"authorization=Bearer operator-token,x-defenseclaw-source=claudecode",
+		"authorization=Bearer " + scopedToken + ",x-operator-trace=keep,x-defenseclaw-source=claudecode",
+		"authorization=Bearer " + scopedToken + ",x-defenseclaw-client=claudecode-otel/1.0",
+	} {
+		if claudeCodeOtelHeadersAreDefenseClawOnly(headers) {
+			t.Errorf("operator or incomplete Claude headers were claimed as DefenseClaw-only")
+		}
+	}
+}
+
+func TestClaudeCode_Setup_SourceCaptureEnablesPromptLoggingAndTeardownRestores(t *testing.T) {
 
 	dir := t.TempDir()
 	settingsDir := filepath.Join(dir, "claude-settings")
@@ -4681,13 +7758,11 @@ func TestClaudeCode_Setup_RawModeEnablesPromptLoggingAndTeardownRestores(t *test
 	}
 	env, _ := settings["env"].(map[string]interface{})
 	if env["OTEL_LOG_USER_PROMPTS"] != "1" {
-		t.Fatalf("OTEL_LOG_USER_PROMPTS = %v, want \"1\" when redaction is disabled", env["OTEL_LOG_USER_PROMPTS"])
+		t.Fatalf("OTEL_LOG_USER_PROMPTS = %v, want \"1\" for v8 source capture", env["OTEL_LOG_USER_PROMPTS"])
 	}
 
-	// Force the backup-driven restore path and turn redaction back on
-	// before teardown. The prompt logging setting should still return
-	// to the operator's original value.
-	redaction.SetDisableAll(false)
+	// Force the backup-driven restore path. The prompt logging setting should
+	// still return to the operator's original value.
 	discardManagedFileBackup(dir, c.Name(), "settings.json")
 	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
@@ -4710,6 +7785,178 @@ func TestClaudeCode_Setup_RawModeEnablesPromptLoggingAndTeardownRestores(t *test
 	}
 }
 
+func TestClaudeCode_TeardownCleansManagedStateFromStalePristineSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "test-token-stale-pristine",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	managed, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupPath := managedFileBackupPath(dir, c.Name(), "settings.json")
+	backup, err := loadManagedFileBackupPath(backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce an upgrade from a predecessor that captured an existing
+	// DefenseClaw registration as pristine while recording the same bytes as
+	// its post-Setup image. The exact restore must not resurrect that state.
+	backup.Existed = true
+	backup.Mode = 0o600
+	backup.PristineBytes = append([]byte(nil), managed...)
+	backup.PristineSHA256 = sha256Hex(managed)
+	if err := writeManagedFileBackup(backupPath, backup); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown with stale pristine snapshot: %v", err)
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean after stale pristine cleanup: %v", err)
+	}
+}
+
+func TestClaudeCode_TeardownCleansDefenseClawOtelFromContaminatedPristineEnv(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	oldOpts := SetupOpts{
+		DataDir:       dir,
+		ProxyAddr:     "127.0.0.1:4000",
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "old-api-token",
+		OTLPPathToken: strings.Repeat("a", 64),
+	}
+	oldManaged := buildClaudeCodeOtelEnv(oldOpts)
+	oldDefenseClawHeaders := "x-defenseclaw-client=claudecode-otel%2F0.9," +
+		"x-defenseclaw-source=claudecode,x-defenseclaw-token=" + strings.Repeat("c", 64)
+	operatorMixedHeaders := "x-defenseclaw-source=claudecode,x-operator-trace=keep"
+	pristine := map[string]interface{}{
+		"autoUpdatesChannel": "latest",
+		"env": map[string]interface{}{
+			"OTEL_EXPORTER_OTLP_ENDPOINT":     oldManaged["OTEL_EXPORTER_OTLP_ENDPOINT"],
+			"OTEL_EXPORTER_OTLP_HEADERS":      oldDefenseClawHeaders,
+			"OTEL_EXPORTER_OTLP_LOGS_HEADERS": operatorMixedHeaders,
+			"OTEL_RESOURCE_ATTRIBUTES":        oldManaged["OTEL_RESOURCE_ATTRIBUTES"],
+			"OTEL_LOGS_EXPORTER":              "console",
+			"OTEL_SERVICE_NAME":               "operator-claude",
+			"PATH":                            "/operator/bin",
+		},
+	}
+	data, err := json.MarshalIndent(pristine, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reproduce mixed-connector repair after an older Claude registration lost
+	// its restore metadata: the new Setup captures the old DefenseClaw env as
+	// pristine, then writes a new connector-scoped endpoint over it.
+	newOpts := oldOpts
+	newOpts.APIToken = "new-api-token"
+	newOpts.OTLPPathToken = strings.Repeat("b", 64)
+	c := NewClaudeCodeConnector()
+	if err := c.Setup(context.Background(), newOpts); err != nil {
+		t.Fatalf("Setup over stale Claude env: %v", err)
+	}
+	if err := c.Teardown(context.Background(), newOpts); err != nil {
+		t.Fatalf("Teardown after mixed-connector repair: %v", err)
+	}
+	// Teardown discards exact ownership metadata after its internal check. This
+	// second verification is the installer's independent reconciliation gate.
+	if err := c.VerifyClean(newOpts); err != nil {
+		t.Fatalf("installer VerifyClean after teardown: %v", err)
+	}
+
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := map[string]interface{}{}
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored["autoUpdatesChannel"] != "latest" {
+		t.Fatalf("unrelated top-level setting changed: %v", restored)
+	}
+	env, ok := restored["env"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("operator env missing after teardown: %v", restored)
+	}
+	for key, want := range map[string]interface{}{
+		"OTEL_EXPORTER_OTLP_LOGS_HEADERS": operatorMixedHeaders,
+		"OTEL_LOGS_EXPORTER":              "console",
+		"OTEL_SERVICE_NAME":               "operator-claude",
+		"PATH":                            "/operator/bin",
+	} {
+		if got := env[key]; got != want {
+			t.Errorf("env[%s] = %v, want preserved %v", key, got, want)
+		}
+	}
+	for _, key := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_RESOURCE_ATTRIBUTES",
+	} {
+		if _, present := env[key]; present {
+			t.Errorf("stale DefenseClaw env[%s] survived teardown: %v", key, env)
+		}
+	}
+}
+
+func TestClaudeCode_TeardownExactSnapshotPreservesPristineBytes(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	pristine := []byte("{\n\t\"operator\":true, \"env\" : { \"PATH\" : \"/custom/bin\" }\n}\n")
+	if err := os.WriteFile(settingsPath, pristine, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "test-token-exact-pristine",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	got, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, pristine) {
+		t.Fatalf("exact pristine bytes changed:\n got: %q\nwant: %q", got, pristine)
+	}
+}
+
 func TestClaudeCode_TeardownWithoutBackup_RemovesManagedHooksAndOtel(t *testing.T) {
 	dir := t.TempDir()
 	settingsDir := filepath.Join(dir, "claude-settings")
@@ -4725,6 +7972,140 @@ func TestClaudeCode_TeardownWithoutBackup_RemovesManagedHooksAndOtel(t *testing.
 
 	c := NewClaudeCodeConnector()
 	opts := SetupOpts{
+		DataDir:       dir,
+		ProxyAddr:     "127.0.0.1:4000",
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		OTLPPathToken: strings.Repeat("a", 64),
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings before stale endpoint injection: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse settings before stale endpoint injection: %v", err)
+	}
+	env := settings["env"].(map[string]interface{})
+	staleOpts := opts
+	staleOpts.OTLPPathToken = strings.Repeat("b", 64)
+	staleEnv := buildClaudeCodeOtelEnv(staleOpts)
+	for _, key := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+	} {
+		env[key] = staleEnv[key]
+	}
+	data, err = json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal settings with stale endpoints: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatalf("write settings with stale endpoints: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "claudecode_backup.json")); err != nil {
+		t.Fatalf("remove backup: %v", err)
+	}
+	discardManagedFileBackup(dir, c.Name(), "settings.json")
+
+	// Without exact backup metadata, teardown must still recognize stale
+	// DefenseClaw-scoped endpoints while leaving unrelated operator env untouched.
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown without backup: %v", err)
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean after backupless teardown: %v", err)
+	}
+
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	settings = map[string]interface{}{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	if hooks, ok := settings["hooks"].(map[string]interface{}); ok && len(hooks) > 0 {
+		t.Fatalf("DefenseClaw hooks survived teardown without backup: %v", hooks)
+	}
+	env, _ = settings["env"].(map[string]interface{})
+	if env["PATH"] != "/usr/bin" {
+		t.Fatalf("non-OTel env key was not preserved: %v", env)
+	}
+	for _, key := range claudeCodeOtelEnvKeys {
+		if _, present := env[key]; present {
+			t.Fatalf("DefenseClaw OTel env %s survived teardown without backup: %v", key, env)
+		}
+	}
+}
+
+func TestClaudeCode_VerifyCleanChecksManagedEnvWithoutHooks(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	opts := SetupOpts{
+		DataDir:       dir,
+		APIAddr:       "127.0.0.1:18970",
+		OTLPPathToken: "verify-clean-token",
+	}
+	managed := buildClaudeCodeOtelEnv(opts)
+	settings := map[string]interface{}{
+		"env": map[string]interface{}{
+			"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": managed["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"],
+		},
+	}
+	body, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewClaudeCodeConnector().VerifyClean(opts); err == nil ||
+		!strings.Contains(err.Error(), "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") {
+		t.Fatalf("VerifyClean managed per-signal endpoint error = %v", err)
+	}
+
+	// Generic operator values are not ownership markers and may legitimately
+	// equal DefenseClaw's exporter/protocol choices after a pristine restore.
+	settings["env"] = map[string]interface{}{
+		"OTEL_LOGS_EXPORTER":               "otlp",
+		"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL": "http/json",
+	}
+	body, err = json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewClaudeCodeConnector().VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean operator-only env: %v", err)
+	}
+}
+
+func TestClaudeCode_Teardown_MissingSettingsParentDoesNotRecreateIt(t *testing.T) {
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "claude-settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{"env":{"PATH":"/usr/bin"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{
 		DataDir:   dir,
 		ProxyAddr: "127.0.0.1:4000",
 		APIAddr:   "127.0.0.1:18970",
@@ -4733,37 +8114,51 @@ func TestClaudeCode_TeardownWithoutBackup_RemovesManagedHooksAndOtel(t *testing.
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	if err := os.Remove(filepath.Join(dir, "claudecode_backup.json")); err != nil {
-		t.Fatalf("remove backup: %v", err)
+	legacyBackup := filepath.Join(dir, "claudecode_backup.json")
+	managedBackup := managedFileBackupPath(dir, c.Name(), "settings.json")
+	for _, path := range []string{legacyBackup, managedBackup} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected Claude restore metadata %s: %v", path, err)
+		}
 	}
-	discardManagedFileBackup(dir, c.Name(), "settings.json")
+	unrelated := filepath.Join(dir, "operator-data.txt")
+	if err := os.WriteFile(unrelated, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	otherBackup := managedFileBackupPath(dir, "codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(otherBackup), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(otherBackup, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
-	if err := c.Teardown(context.Background(), opts); err != nil {
-		t.Fatalf("Teardown without backup: %v", err)
+	if err := os.RemoveAll(settingsDir); err != nil {
+		t.Fatalf("remove settings parent: %v", err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := c.Teardown(context.Background(), opts); err != nil {
+			t.Fatalf("Teardown attempt %d: %v", attempt, err)
+		}
+		if _, err := os.Lstat(settingsDir); !os.IsNotExist(err) {
+			t.Fatalf("Teardown attempt %d recreated settings directory: %v", attempt, err)
+		}
+		if _, err := os.Lstat(settingsPath + ".lock"); !os.IsNotExist(err) {
+			t.Fatalf("Teardown attempt %d left settings lock: %v", attempt, err)
+		}
+	}
+	for _, path := range []string{legacyBackup, managedBackup} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("Claude restore metadata survived teardown at %s: %v", path, err)
+		}
+	}
+	for _, path := range []string{unrelated, otherBackup} {
+		if data, err := os.ReadFile(path); err != nil || string(data) != "keep" {
+			t.Fatalf("unrelated state changed at %s: data=%q err=%v", path, data, err)
+		}
 	}
 	if err := c.VerifyClean(opts); err != nil {
-		t.Fatalf("VerifyClean after backupless teardown: %v", err)
-	}
-
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatalf("read settings: %v", err)
-	}
-	var settings map[string]interface{}
-	if err := json.Unmarshal(data, &settings); err != nil {
-		t.Fatalf("parse settings: %v", err)
-	}
-	if hooks, ok := settings["hooks"].(map[string]interface{}); ok && len(hooks) > 0 {
-		t.Fatalf("DefenseClaw hooks survived teardown without backup: %v", hooks)
-	}
-	env, _ := settings["env"].(map[string]interface{})
-	if env["PATH"] != "/usr/bin" {
-		t.Fatalf("non-OTel env key was not preserved: %v", env)
-	}
-	for _, key := range claudeCodeOtelEnvKeys {
-		if _, present := env[key]; present {
-			t.Fatalf("DefenseClaw OTel env %s survived teardown without backup: %v", key, env)
-		}
+		t.Fatalf("VerifyClean: %v", err)
 	}
 }
 
@@ -4835,7 +8230,12 @@ func TestClaudeCode_Teardown_RestoresPreExistingOtelEnvKeys(t *testing.T) {
 	pristine := `{
 		"env": {
 			"OTEL_LOGS_EXPORTER": "console",
+			"OTEL_TRACES_EXPORTER": "otlp",
 			"OTEL_EXPORTER_OTLP_ENDPOINT": "https://collector.example/v1",
+			"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "https://logs.example/v1/logs",
+			"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "grpc",
+			"OTEL_EXPORTER_OTLP_TRACES_HEADERS": "Authorization=secret",
+			"OTEL_LOG_USER_PROMPTS": "1",
 			"OTEL_SERVICE_NAME": "operator-claude",
 			"PATH": "/custom/bin:/usr/bin"
 		}
@@ -4856,6 +8256,29 @@ func TestClaudeCode_Teardown_RestoresPreExistingOtelEnvKeys(t *testing.T) {
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := settings["env"].(map[string]interface{})
+	managedEnv := buildClaudeCodeOtelEnv(opts)
+	for _, key := range claudeCodeOtelEnvKeys {
+		got, present := env[key]
+		want, managed := managedEnv[key]
+		if managed && (!present || got != want) {
+			t.Errorf("managed %s = %v, want %q", key, got, want)
+		}
+		if !managed && present {
+			t.Errorf("disabled managed %s survived setup with value %v", key, got)
+		}
+	}
+	if env["PATH"] != "/custom/bin:/usr/bin" {
+		t.Errorf("PATH = %v after setup, want pristine value", env["PATH"])
+	}
 
 	// Force the surgical backup path instead of exact managed-file
 	// restore so this test exercises claudecode_backup.json's env
@@ -4870,20 +8293,31 @@ func TestClaudeCode_Teardown_RestoresPreExistingOtelEnvKeys(t *testing.T) {
 		t.Fatalf("VerifyClean: %v", err)
 	}
 
-	data, err := os.ReadFile(settingsPath)
+	data, err = os.ReadFile(settingsPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var settings map[string]interface{}
+	settings = map[string]interface{}{}
 	if err := json.Unmarshal(data, &settings); err != nil {
 		t.Fatal(err)
 	}
-	env, _ := settings["env"].(map[string]interface{})
+	env, _ = settings["env"].(map[string]interface{})
 	if env["OTEL_LOGS_EXPORTER"] != "console" {
 		t.Errorf("OTEL_LOGS_EXPORTER = %v, want pristine value", env["OTEL_LOGS_EXPORTER"])
 	}
 	if env["OTEL_EXPORTER_OTLP_ENDPOINT"] != "https://collector.example/v1" {
 		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %v, want pristine value", env["OTEL_EXPORTER_OTLP_ENDPOINT"])
+	}
+	for key, want := range map[string]interface{}{
+		"OTEL_TRACES_EXPORTER":                "otlp",
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":    "https://logs.example/v1/logs",
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "grpc",
+		"OTEL_EXPORTER_OTLP_TRACES_HEADERS":   "Authorization=secret",
+		"OTEL_LOG_USER_PROMPTS":               "1",
+	} {
+		if env[key] != want {
+			t.Errorf("%s = %v, want pristine value %v", key, env[key], want)
+		}
 	}
 	if env["OTEL_SERVICE_NAME"] != "operator-claude" {
 		t.Errorf("OTEL_SERVICE_NAME = %v, want pristine value", env["OTEL_SERVICE_NAME"])
@@ -4896,7 +8330,171 @@ func TestClaudeCode_Teardown_RestoresPreExistingOtelEnvKeys(t *testing.T) {
 	}
 }
 
+func TestClaudeCode_Teardown_PreservesManagedEnvChangedAfterSetup(t *testing.T) {
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "claude-settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	pristine := `{
+		"env": {
+			"OTEL_METRICS_EXPORTER": "operator-before",
+			"OTEL_EXPORTER_OTLP_PROTOCOL": "grpc-before",
+			"OTEL_SERVICE_NAME": "operator-before",
+			"PATH": "/operator/before"
+		}
+	}`
+	if err := os.WriteFile(settingsPath, []byte(pristine), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "test-token",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env := settings["env"].(map[string]interface{})
+	if env["OTEL_METRICS_EXPORTER"] != "otlp" || env["OTEL_SERVICE_NAME"] != "claudecode" {
+		t.Fatalf("Setup did not write expected managed env: %v", env)
+	}
+
+	// Simulate operator edits after Setup. Teardown may restore/delete only
+	// keys whose current value is still the exact value DefenseClaw wrote.
+	operatorValues := map[string]string{}
+	for _, key := range claudeCodeOtelEnvKeys {
+		if _, present := env[key]; !present {
+			t.Fatalf("Setup did not write managed env %s: %v", key, env)
+		}
+		switch key {
+		case "CLAUDE_CODE_ENABLE_TELEMETRY", "OTEL_METRICS_EXPORTER":
+			// Leave one added key and one overwritten key unchanged so teardown
+			// must delete/restore them respectively.
+		case "OTEL_EXPORTER_OTLP_PROTOCOL":
+			// Removing an overwritten key is also an operator change; teardown
+			// must not resurrect its pre-Setup value.
+			delete(env, key)
+		default:
+			// Keep the old value as a prefix to prove ownership is exact-value
+			// based, not a broad marker/prefix heuristic.
+			value := env[key].(string) + ",operator-after=1"
+			env[key] = value
+			operatorValues[key] = value
+		}
+	}
+	env["PATH"] = "/operator/after"
+	drifted, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, drifted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean after operator-preserving teardown: %v", err)
+	}
+
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings = map[string]interface{}{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env = settings["env"].(map[string]interface{})
+	operatorValues["OTEL_METRICS_EXPORTER"] = "operator-before"
+	operatorValues["PATH"] = "/operator/after"
+	for key, want := range operatorValues {
+		if got := env[key]; got != want {
+			t.Errorf("env[%s] = %v after teardown, want %q", key, got, want)
+		}
+	}
+	if _, present := env["CLAUDE_CODE_ENABLE_TELEMETRY"]; present {
+		t.Errorf("unchanged DefenseClaw-added env survived teardown: %v", env)
+	}
+	if _, present := env["OTEL_EXPORTER_OTLP_PROTOCOL"]; present {
+		t.Errorf("operator-removed env was resurrected during teardown: %v", env)
+	}
+}
+
+func TestClaudeCode_VerifyCleanChecksEveryManagedEnvKeyWithoutValidHooks(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+	opts := SetupOpts{
+		DataDir:       dir,
+		APIAddr:       "127.0.0.1:18970",
+		OTLPPathToken: strings.Repeat("a", 64),
+		HookFailMode:  "closed",
+	}
+	managed := buildClaudeCodeOtelEnv(opts)
+	if len(managed) != len(claudeCodeOtelEnvKeys) {
+		t.Fatalf("managed env has %d keys, canonical ownership list has %d: %v", len(managed), len(claudeCodeOtelEnvKeys), managed)
+	}
+	if err := NewClaudeCodeConnector().saveBackup(dir, claudeCodeBackup{
+		EnvBackupCaptured: true,
+		ManagedEnv:        managed,
+	}); err != nil {
+		t.Fatalf("save exact managed env backup: %v", err)
+	}
+	keys := make([]string, 0, len(managed))
+	for key := range managed {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+
+	for i, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			settings := map[string]interface{}{
+				"env": map[string]interface{}{key: managed[key]},
+			}
+			if i%2 != 0 {
+				// A malformed hooks subtree must not suppress the independent
+				// env ownership check.
+				settings["hooks"] = "not-an-object"
+			}
+			data, err := json.Marshal(settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			err = NewClaudeCodeConnector().VerifyClean(opts)
+			if err == nil || !strings.Contains(err.Error(), "env["+key+"]") {
+				t.Fatalf("VerifyClean error = %v, want managed env residue for %s", err, key)
+			}
+		})
+	}
+}
+
 func TestZeptoClaw_Setup_Surface1_PatchesConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	}
 	dir := t.TempDir()
 
 	configDir := filepath.Join(dir, "zeptoclaw-config")
@@ -4971,6 +8569,9 @@ func TestZeptoClaw_Setup_Surface1_PatchesConfig(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_PreservesExistingHooks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	}
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "zeptoclaw-config.json")
 	// ZeptoClaw's real hooks schema: before_tool/after_tool are arrays.
@@ -5072,6 +8673,9 @@ func TestZeptoClaw_Teardown_Surface1_RestoresConfig(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_ProducesValidZeptoClawConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	}
 	// Regression test: before the fix, Setup wrote config["hooks"] as
 	// {before_tool: <string path>, ...}, which ZeptoClaw rejected with
 	// "expected a sequence" because its HooksConfig defines before_tool as
@@ -5174,19 +8778,14 @@ func TestIsLoopback_IPv6Variants(t *testing.T) {
 	}
 }
 
-// TestHookScript_FailOpenOnUnreachable_Default asserts the post-PR
-// behavior: when the gateway is unreachable (transport failure), the
-// hook ALWAYS allows the agent to proceed by default — regardless of
-// FAIL_MODE. A DefenseClaw outage must not brick the user's agent.
-// Operators who want strict availability must opt in explicitly via
-// DEFENSECLAW_STRICT_AVAILABILITY=1 (see the next test).
+// TestHookScript_FailClosedOnUnreachable_Default asserts that the effective
+// fail mode has one meaning for both response and transport failures. The
+// safer fresh-install default is closed, so an unreachable gateway blocks.
 //
 // NOTE on fail_mode in the failure log: this is metadata recording
-// the configured response-layer fail mode at write time, not the
-// transport-layer behavior under test. Post-, the safer default
-// for response-layer failures is "closed", so the metadata reflects
-// that. The transport-layer fail-open behavior remains unchanged.
-func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
+// the effective fail mode at write time. The category remains transport so
+// operators can distinguish an outage from a malformed or rejected response.
+func TestHookScript_FailClosedOnUnreachable_Default(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -5209,12 +8808,14 @@ func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
 	)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("hook should fail-open (exit 0) on transport failure by default, got: %v", err)
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("hook should fail-closed (exit 2) on transport failure by default, got: %v", err)
 	}
 
-	// Even though the hook allowed, a structured failure record must
-	// still be written so operators can detect the outage in
+	// Even though the hook blocked, a structured failure record must
+	// still be written so operators can diagnose the outage in
 	// monitoring. The category MUST be "transport" so a triage
 	// dashboard can tell infrastructure outages apart from
 	// misconfiguration (response-layer 4xx / parse errors).
@@ -5227,10 +8828,8 @@ func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 		`"connector":"claudecode"`,
 		`"hook":"claude-code-hook"`,
 		`"category":"transport"`,
-		// The response-layer default is "closed", so the failure log
-		// metadata reflects that. The functional invariant under test
-		// (hook exits 0 / allows agent on transport failure) is
-		// unchanged — that is the `category=transport` dimension above.
+		// The fresh-install default is closed for both response and
+		// transport failures.
 		`"fail_mode":"closed"`,
 	} {
 		if !strings.Contains(logText, want) {
@@ -5280,13 +8879,9 @@ func TestHookScript_FailureLogEscapesFailMode(t *testing.T) {
 	}
 }
 
-// TestHookScript_FailClosedOnUnreachable_StrictAvailability covers
-// the operator opt-in for strict availability: when
-// DEFENSECLAW_STRICT_AVAILABILITY=1 is set, the hook MUST exit 2 on
-// transport failures even though the response-layer FAIL_MODE
-// default is "open". This is the escape hatch for sites that prefer
-// to take the agent down rather than miss policy enforcement during
-// a gateway outage.
+// TestHookScript_FailClosedOnUnreachable_StrictAvailability covers the
+// strict-availability force-closed override: even an explicit fail-open
+// connector must exit 2 on an unreachable gateway when the override is set.
 //
 // Also pins the operator-facing stderr contract: the verb the hook
 // prints MUST match what it actually does on exit. The pre-fix code
@@ -5309,6 +8904,7 @@ func TestHookScript_FailClosedOnUnreachable_StrictAvailability(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
+		"DEFENSECLAW_FAIL_MODE=open",
 		"DEFENSECLAW_STRICT_AVAILABILITY=1",
 	)
 	var stderr bytes.Buffer
@@ -5409,13 +9005,10 @@ func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
 	}
 }
 
-// TestHookScript_FailOpen_Override covers the legacy operator
-// override: DEFENSECLAW_FAIL_MODE=open forces the response-layer
-// handler to allow even if the baked-in template default was
-// "closed". Transport failures are NOT routed through this — they
-// have their own DEFENSECLAW_STRICT_AVAILABILITY toggle — but
-// response-layer failures (which won't fire here against an
-// unreachable gateway) would respect this override.
+// TestHookScript_FailOpen_Override covers the operator override:
+// DEFENSECLAW_FAIL_MODE=open allows both response and transport failures even
+// when the baked-in template default is closed. Strict availability can still
+// force this path closed, as covered above.
 func TestHookScript_FailOpen_Override(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -5442,7 +9035,7 @@ func TestHookScript_FailOpen_Override(t *testing.T) {
 //
 // Contract:
 //   - Explicit "closed" stays closed when the connector supports it.
-//   - Empty / invalid HookFailMode normalizes to "open".
+//   - Empty / invalid HookFailMode normalizes to "closed".
 func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -5610,7 +9203,7 @@ func TestManagedEnterpriseHookFailsClosedWhenTokenIsMissing(t *testing.T) {
 	}
 }
 
-func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
+func TestCodexHookScript_FailClosed_DefaultForObservabilitySetup(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -5630,8 +9223,10 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 		"PATH="+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
 	)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("observability Codex hook should fail-open by default, got: %v", err)
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("observability Codex hook should fail-closed by default, got: %v", err)
 	}
 	failureLog, err := os.ReadFile(filepath.Join(dcHome, "logs", "hook-failures.jsonl"))
 	if err != nil {
@@ -5647,10 +9242,7 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 		// down / network error) rather than a response failure
 		// (4xx / parse error). Operators triage these differently.
 		`"category":"transport"`,
-		// Response-layer default is "closed" — transport-layer
-		// fail-open behavior under test here is unchanged (the hook
-		// still exits 0 and the agent still proceeds when the gateway
-		// is unreachable).
+		// The effective closed mode applies to transport failures too.
 		`"fail_mode":"closed"`,
 	} {
 		if !strings.Contains(logText, want) {
@@ -5744,6 +9336,107 @@ func TestCodexHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
 	// stderr" because we used the wrong protocol path.
 	if strings.TrimSpace(stderr.String()) != "" {
 		t.Errorf("stderr should be empty when block goes via structured stdout JSON, got: %q", stderr.String())
+	}
+}
+
+// TestClaudeCodeHookScript_SuppressesCursorCompatibilityImport verifies the
+// overlap between Cursor's native hook support and its Claude Code hook
+// compatibility layer. Cursor 2.4+ imports ~/.claude/settings.json and invokes
+// those hooks with Cursor-shaped payloads in addition to invoking its native
+// ~/.cursor/hooks.json hooks. When both DefenseClaw connectors are installed,
+// the Claude wrapper must ignore only that imported copy so one Cursor event is
+// not attributed to both cursor and claudecode. Genuine Claude Code payloads
+// must continue to reach the Claude endpoint.
+func TestClaudeCodeHookScript_SuppressesCursorCompatibilityImport(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+
+	var (
+		requestsMu sync.Mutex
+		paths      []string
+		auth       []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestsMu.Lock()
+		paths = append(paths, r.URL.Path)
+		auth = append(auth, r.Header.Get("Authorization"))
+		requestsMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"action":"allow","severity":"INFO","mode":"observe","would_block":false}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, SetupOpts{APIAddr: addr, APIToken: "claude-token"}, &ClaudeCodeConnector{}); err != nil {
+		t.Fatalf("write Claude Code hook: %v", err)
+	}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, SetupOpts{APIAddr: addr, APIToken: "cursor-token"}, NewCursorConnector()); err != nil {
+		t.Fatalf("write Cursor hook: %v", err)
+	}
+
+	runHook := func(name, payload string) (string, string) {
+		t.Helper()
+		cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+		cmd.Stdin = strings.NewReader(payload)
+		cmd.Env = append(os.Environ(),
+			"PATH="+os.Getenv("PATH"),
+			"DEFENSECLAW_HOME="+t.TempDir(),
+		)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("%s hook invocation failed: %v\nstdout=%q\nstderr=%q", name, err, stdout.String(), stderr.String())
+		}
+		return stdout.String(), stderr.String()
+	}
+
+	cursorPayload := `{"hook_event_name":"preToolUse","cursor_version":"3.10.17","session_id":"cursor-session","tool_name":"Shell","tool_input":{"command":"echo ok"}}`
+	stdout, stderr := runHook("Cursor compatibility", cursorPayload)
+	if stdout != "" || stderr != "" {
+		t.Fatalf("suppressed Cursor compatibility hook wrote output: stdout=%q stderr=%q", stdout, stderr)
+	}
+	requestsMu.Lock()
+	if len(paths) != 0 {
+		t.Errorf("Cursor compatibility hook sent %d Claude requests, want 0: %v", len(paths), paths)
+	}
+	requestsMu.Unlock()
+
+	claudePayload := `{"hook_event_name":"PreToolUse","session_id":"claude-session","tool_name":"Bash","tool_input":{"command":"echo ok"}}`
+	stdout, stderr = runHook("genuine Claude Code", claudePayload)
+	if stdout != "" || stderr != "" {
+		t.Fatalf("allowed Claude Code hook wrote output: stdout=%q stderr=%q", stdout, stderr)
+	}
+	requestsMu.Lock()
+	if len(paths) != 1 || paths[0] != "/api/v1/claude-code/hook" {
+		t.Fatalf("Claude request paths = %v, want [/api/v1/claude-code/hook]", paths)
+	}
+	if len(auth) != 1 || auth[0] != "Bearer claude-token" {
+		t.Fatalf("Claude request authorization = %v, want connector-scoped Claude token", auth)
+	}
+	requestsMu.Unlock()
+
+	// Cursor teardown leaves a v0 script tombstone so already-running host
+	// processes do not fail with command-not-found. A stale scoped token can
+	// remain beside it; that alone must not suppress the Claude compatibility
+	// path when the native Cursor bridge is no longer active.
+	tombstone := "#!/bin/sh\n# defenseclaw-managed-hook v0 (disabled tombstone)\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "cursor-hook.sh"), []byte(tombstone), 0o700); err != nil {
+		t.Fatalf("write Cursor tombstone: %v", err)
+	}
+	stdout, stderr = runHook("Cursor compatibility without active native bridge", cursorPayload)
+	if stdout != "" || stderr != "" {
+		t.Fatalf("allowed Claude compatibility hook wrote output: stdout=%q stderr=%q", stdout, stderr)
+	}
+	requestsMu.Lock()
+	defer requestsMu.Unlock()
+	if len(paths) != 2 || paths[1] != "/api/v1/claude-code/hook" {
+		t.Fatalf("requests after Cursor teardown = %v, want second request on Claude endpoint", paths)
+	}
+	if len(auth) != 2 || auth[1] != "Bearer claude-token" {
+		t.Fatalf("authorization after Cursor teardown = %v, want connector-scoped Claude token", auth)
 	}
 }
 
@@ -5991,6 +9684,9 @@ func TestPatchOpenClawConfig_Concurrent(t *testing.T) {
 }
 
 func TestZeptoClaw_Setup_EmptyProviders_Fails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ZeptoClaw setup is unsupported on native Windows")
+	}
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "zeptoclaw-config.json")
 	os.WriteFile(configPath, []byte(`{}`), 0o644)
@@ -6091,6 +9787,18 @@ func TestConnectorState_CorruptedFile(t *testing.T) {
 
 func TestTeardownPreviousConnector_ViaRegistry(t *testing.T) {
 	dir := t.TempDir()
+	codexHome := filepath.Join(dir, "codex-home")
+	CodexConfigPathOverride = filepath.Join(codexHome, "config.toml")
+	defer func() { CodexConfigPathOverride = "" }()
+	// Model connector switching after the user's Codex home was removed. The
+	// teardown lock must safely recreate its parent rather than failing before
+	// the Claude connector can be selected.
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatalf("create removed Codex home fixture: %v", err)
+	}
+	if err := os.RemoveAll(codexHome); err != nil {
+		t.Fatalf("remove Codex home fixture: %v", err)
+	}
 
 	if err := SaveActiveConnector(dir, "codex"); err != nil {
 		t.Fatalf("save: %v", err)
@@ -6250,6 +9958,10 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		out = append(out, vendor)
 		return out
 	}
+	cursorScripts := withVendor("cursor-hook.sh")
+	if runtime.GOOS == "windows" {
+		cursorScripts = append(cursorScripts, "cursor-hook.ps1")
+	}
 
 	cases := []struct {
 		ctor func() Connector
@@ -6261,7 +9973,7 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		{func() Connector { return NewCodexConnector() }, "codex", withVendor("codex-hook.sh")},
 		{func() Connector { return NewClaudeCodeConnector() }, "claudecode", withVendor("claude-code-hook.sh")},
 		{func() Connector { return NewHermesConnector() }, "hermes", withVendor("hermes-hook.sh")},
-		{func() Connector { return NewCursorConnector() }, "cursor", withVendor("cursor-hook.sh")},
+		{func() Connector { return NewCursorConnector() }, "cursor", cursorScripts},
 		{func() Connector { return NewWindsurfConnector() }, "windsurf", withVendor("windsurf-hook.sh")},
 		{func() Connector { return NewGeminiCLIConnector() }, "geminicli", withVendor("geminicli-hook.sh")},
 		{func() Connector { return NewCopilotConnector() }, "copilot", withVendor("copilot-hook.sh")},
@@ -6461,13 +10173,20 @@ func TestCodex_AgentPaths_Specifics(t *testing.T) {
 	conn := NewCodexConnector()
 	paths := conn.AgentPaths(SetupOpts{DataDir: dataDir})
 
-	if len(paths.PatchedFiles) != 1 || paths.PatchedFiles[0] != cfg {
-		t.Errorf("PatchedFiles = %v, want [%q]", paths.PatchedFiles, cfg)
+	wantPatched := []string{cfg}
+	if runtime.GOOS == "windows" {
+		wantPatched = append(wantPatched, filepath.Join(filepath.Dir(cfg), codexManagedConfigLogicalName))
+	}
+	if !slices.Equal(paths.PatchedFiles, wantPatched) {
+		t.Errorf("PatchedFiles = %v, want %v", paths.PatchedFiles, wantPatched)
 	}
 	wantBackups := []string{
 		filepath.Join(dataDir, "connector_backups", "codex", "config.toml.json"),
 		filepath.Join(dataDir, "codex_config_backup.json"),
 		filepath.Join(dataDir, "codex_backup.json"),
+	}
+	if runtime.GOOS == "windows" {
+		wantBackups = append(wantBackups, filepath.Join(dataDir, "connector_backups", "codex", "managed_config.toml.json"))
 	}
 	if len(paths.BackupFiles) != len(wantBackups) {
 		t.Errorf("BackupFiles = %v, want %v", paths.BackupFiles, wantBackups)
@@ -6553,6 +10272,10 @@ func TestOpenClaw_AgentPaths_Specifics(t *testing.T) {
 //   - openclaw   owns no vendor template (fetch-interceptor plugin)
 //   - zeptoclaw  owns no vendor template (config-only)
 func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
+	cursorHooks := []string{"cursor-hook.sh"}
+	if runtime.GOOS == "windows" {
+		cursorHooks = append(cursorHooks, "cursor-hook.ps1")
+	}
 	cases := []struct {
 		name string
 		ctor func() Connector
@@ -6561,7 +10284,7 @@ func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []string{"claude-code-hook.sh"}},
 		{"codex", func() Connector { return NewCodexConnector() }, []string{"codex-hook.sh"}},
 		{"hermes", func() Connector { return NewHermesConnector() }, []string{"hermes-hook.sh"}},
-		{"cursor", func() Connector { return NewCursorConnector() }, []string{"cursor-hook.sh"}},
+		{"cursor", func() Connector { return NewCursorConnector() }, cursorHooks},
 		{"windsurf", func() Connector { return NewWindsurfConnector() }, []string{"windsurf-hook.sh"}},
 		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []string{"geminicli-hook.sh"}},
 		{"copilot", func() Connector { return NewCopilotConnector() }, []string{"copilot-hook.sh"}},
@@ -6987,9 +10710,15 @@ func TestZeptoClawConfigPath_ZEPTOCLAW_HOME(t *testing.T) {
 
 	t.Run("falls back to HOME/.zeptoclaw when ZEPTOCLAW_HOME unset", func(t *testing.T) {
 		t.Setenv("ZEPTOCLAW_HOME", "")
-		t.Setenv("HOME", "/home/testuser")
-		got := zeptoClawConfigPath()
-		want := filepath.Join("/home/testuser", ".zeptoclaw", "config.json")
+		home := t.TempDir()
+		var got string
+		if err := WithUserHomeDir(home, func() error {
+			got = zeptoClawConfigPath()
+			return nil
+		}); err != nil {
+			t.Fatalf("override user home: %v", err)
+		}
+		want := filepath.Join(home, ".zeptoclaw", "config.json")
 		if got != want {
 			t.Errorf("zeptoClawConfigPath() = %q, want %q", got, want)
 		}
@@ -7017,9 +10746,15 @@ func TestZeptoClawHomeDir(t *testing.T) {
 
 	t.Run("falls back to HOME/.zeptoclaw", func(t *testing.T) {
 		t.Setenv("ZEPTOCLAW_HOME", "")
-		t.Setenv("HOME", "/home/testuser")
-		got := zeptoClawHomeDir()
-		want := filepath.Join("/home/testuser", ".zeptoclaw")
+		home := t.TempDir()
+		var got string
+		if err := WithUserHomeDir(home, func() error {
+			got = zeptoClawHomeDir()
+			return nil
+		}); err != nil {
+			t.Fatalf("override user home: %v", err)
+		}
+		want := filepath.Join(home, ".zeptoclaw")
 		if got != want {
 			t.Errorf("zeptoClawHomeDir() = %q, want %q", got, want)
 		}

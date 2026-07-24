@@ -59,11 +59,13 @@ def _set_plugin_dir(app: AppContext, plugin_dir: str) -> None:
 
 # ── status ────────────────────────────────────────────────────────────────
 
+
 class TestStatusCommand(unittest.TestCase):
     @patch("defenseclaw.gateway.OrchestratorClient")
     @patch("shutil.which", return_value=None)
     def test_status_no_store(self, _which, _oc):
         from defenseclaw.commands.cmd_status import status
+
         _oc.return_value.is_running.return_value = False
 
         result = _invoke(status, app=_make_app(store=None))
@@ -92,6 +94,7 @@ class TestStatusCommand(unittest.TestCase):
     @patch("shutil.which", return_value="/usr/bin/openshell")
     def test_status_with_sandbox(self, _which, _oc):
         from defenseclaw.commands.cmd_status import status
+
         _oc.return_value.is_running.return_value = True
 
         result = _invoke(status, app=_make_app(store=None))
@@ -101,15 +104,18 @@ class TestStatusCommand(unittest.TestCase):
 
 # ── alerts ────────────────────────────────────────────────────────────────
 
+
 class TestAlertsCommand(unittest.TestCase):
     def test_alerts_no_store(self):
         from defenseclaw.commands.cmd_alerts import alerts
+
         result = _invoke(alerts, app=_make_app(store=None))
         self.assertEqual(result.exit_code, 0)
         self.assertIn("No audit store", result.output)
 
     def test_alerts_empty(self):
         from defenseclaw.commands.cmd_alerts import alerts
+
         store = MagicMock()
         store.list_alerts.return_value = []
         result = _invoke(alerts, app=_make_app(store=store))
@@ -118,6 +124,7 @@ class TestAlertsCommand(unittest.TestCase):
 
     def test_alerts_with_data(self):
         from defenseclaw.commands.cmd_alerts import alerts
+
         store = MagicMock()
         store.list_alerts.return_value = [
             Event(
@@ -136,9 +143,11 @@ class TestAlertsCommand(unittest.TestCase):
 
 # ── plugin ────────────────────────────────────────────────────────────────
 
+
 class TestPluginCommands(unittest.TestCase):
     def test_plugin_help(self):
         from defenseclaw.commands.cmd_plugin import plugin
+
         runner = CliRunner()
         result = runner.invoke(plugin, ["--help"])
         self.assertEqual(result.exit_code, 0)
@@ -149,6 +158,7 @@ class TestPluginCommands(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     def test_plugin_list_empty(self, _mock_oc):
         from defenseclaw.commands.cmd_plugin import list_plugins
+
         with tempfile.TemporaryDirectory() as tmpdir:
             app = _make_app()
             _set_plugin_dir(app, tmpdir)
@@ -158,6 +168,7 @@ class TestPluginCommands(unittest.TestCase):
 
     def test_plugin_list_with_plugins(self):
         from defenseclaw.commands.cmd_plugin import list_plugins
+
         with tempfile.TemporaryDirectory() as tmpdir:
             os.makedirs(os.path.join(tmpdir, "my-plugin"))
             app = _make_app()
@@ -168,6 +179,7 @@ class TestPluginCommands(unittest.TestCase):
 
     def test_plugin_install_from_dir(self):
         from defenseclaw.commands.cmd_plugin import install
+
         with tempfile.TemporaryDirectory() as plugin_src:
             with tempfile.TemporaryDirectory() as plugin_dest:
                 with open(os.path.join(plugin_src, "manifest.json"), "w") as f:
@@ -181,9 +193,12 @@ class TestPluginCommands(unittest.TestCase):
 
     def test_plugin_install_already_exists(self):
         from defenseclaw.commands.cmd_plugin import install
+
         with tempfile.TemporaryDirectory() as plugin_src:
             with tempfile.TemporaryDirectory() as plugin_dest:
                 name = os.path.basename(plugin_src)
+                with open(os.path.join(plugin_src, "manifest.json"), "w") as f:
+                    f.write("{}")
                 os.makedirs(os.path.join(plugin_dest, name))
                 app = _make_app()
                 _set_plugin_dir(app, plugin_dest)
@@ -193,6 +208,7 @@ class TestPluginCommands(unittest.TestCase):
 
     def test_plugin_remove_success(self):
         from defenseclaw.commands.cmd_plugin import remove
+
         with tempfile.TemporaryDirectory() as tmpdir:
             os.makedirs(os.path.join(tmpdir, "del-me"))
             app = _make_app()
@@ -204,6 +220,7 @@ class TestPluginCommands(unittest.TestCase):
 
     def test_plugin_remove_not_found(self):
         from defenseclaw.commands.cmd_plugin import remove
+
         with tempfile.TemporaryDirectory() as tmpdir:
             app = _make_app()
             _set_plugin_dir(app, tmpdir)
@@ -215,6 +232,7 @@ class TestPluginCommands(unittest.TestCase):
     @patch("defenseclaw.registry.fetch_npm_package")
     def test_plugin_install_from_registry(self, mock_fetch, mock_scan):
         from defenseclaw.commands.cmd_plugin import install
+
         app = _make_app()
         _set_plugin_dir(app, tempfile.mkdtemp())
 
@@ -222,10 +240,13 @@ class TestPluginCommands(unittest.TestCase):
         os.makedirs(plugin_src, exist_ok=True)
         with open(os.path.join(plugin_src, "plugin.py"), "w") as f:
             f.write("# code\n")
+        with open(os.path.join(plugin_src, "package.json"), "w") as f:
+            f.write('{"name":"some-registry-plugin"}')
         mock_fetch.return_value = plugin_src
 
         mock_scan.return_value = ScanResult(
-            scanner="plugin-scanner", target=plugin_src,
+            scanner="plugin-scanner",
+            target=plugin_src,
             timestamp=datetime.now(timezone.utc),
             findings=[],
         )
@@ -237,9 +258,11 @@ class TestPluginCommands(unittest.TestCase):
 
 # ── mcp ───────────────────────────────────────────────────────────────────
 
+
 class TestMCPCommands(unittest.TestCase):
     def test_mcp_help(self):
         from defenseclaw.commands.cmd_mcp import mcp
+
         runner = CliRunner()
         result = runner.invoke(mcp, ["--help"])
         self.assertEqual(result.exit_code, 0)
@@ -253,7 +276,8 @@ class TestMCPCommands(unittest.TestCase):
 
         mock_inst = MockScanner.return_value
         mock_inst.scan.return_value = ScanResult(
-            scanner="mcp-scanner", target="http://localhost:3000",
+            scanner="mcp-scanner",
+            target="http://localhost:3000",
             timestamp=datetime.now(timezone.utc),
         )
 
@@ -268,7 +292,8 @@ class TestMCPCommands(unittest.TestCase):
 
         mock_inst = MockScanner.return_value
         mock_inst.scan.return_value = ScanResult(
-            scanner="mcp-scanner", target="http://localhost:3000",
+            scanner="mcp-scanner",
+            target="http://localhost:3000",
             timestamp=datetime.now(timezone.utc),
             findings=[Finding(id="m1", severity="HIGH", title="No TLS")],
         )
@@ -318,6 +343,7 @@ class TestMCPCommands(unittest.TestCase):
 
 
 # ── init ──────────────────────────────────────────────────────────────────
+
 
 class TestInitCommand(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_init._install_guardrail")

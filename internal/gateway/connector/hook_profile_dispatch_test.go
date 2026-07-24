@@ -41,15 +41,15 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 		// wire replies come from the shared hookOnlyProfileRespond
 		// hermes case.
 		{"hermes", func() Connector { return NewHermesConnector() }, false, true, true},
-		{"cursor", func() Connector { return NewCursorConnector() }, false, true, true},
-		{"windsurf", func() Connector { return NewWindsurfConnector() }, false, true, true},
+		{"cursor", func() Connector { return NewCursorConnector() }, true, true, true},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }, true, true, true},
 		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, false, true, true},
 		{"copilot", func() Connector { return NewCopilotConnector() }, false, true, true},
 		{"openhands", func() Connector { return NewOpenHandsConnector() }, false, true, true},
-		// Antigravity is the only generic hook-only connector that
-		// SETS Decode, because agy v1 ships a nested `toolCall`
-		// wire shape that the generic normalizer can't read. See
-		// antigravity_hook_profile.go.
+		// Antigravity uses Decode because agy v1 ships a nested
+		// `toolCall` wire shape that the generic normalizer cannot read.
+		// Cursor and Windsurf use Decode only for their connector-native
+		// generation/execution-to-turn semantics.
 		{"antigravity", func() Connector { return NewAntigravityConnector() }, true, true, true},
 		// opencode controls its own flat wire shape (the bridge plugin we
 		// ship), so it needs no Decode; Respond comes from the shared
@@ -73,6 +73,47 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 			}
 			if got := profile.Respond != nil; got != tc.wantRespond {
 				t.Errorf("%s Respond set=%v want=%v", tc.name, got, tc.wantRespond)
+			}
+		})
+	}
+}
+
+func TestHookOnlyProfiles_MapDocumentedNativeTurnIDs(t *testing.T) {
+	cases := []struct {
+		name    string
+		profile func(map[string]interface{}) HookProfileRequest
+		payload map[string]interface{}
+		want    string
+	}{
+		{"cursor generation", cursorProfileDecode, map[string]interface{}{"generation_id": "gen-7"}, "gen-7"},
+		{"cursor explicit turn fallback", cursorProfileDecode, map[string]interface{}{"turn_id": "turn-7"}, "turn-7"},
+		{"windsurf execution", windsurfProfileDecode, map[string]interface{}{"execution_id": "exec-9"}, "exec-9"},
+		{"windsurf explicit turn fallback", windsurfProfileDecode, map[string]interface{}{"turn_id": "turn-9"}, "turn-9"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.profile(tc.payload).TurnID; got != tc.want {
+				t.Fatalf("TurnID=%q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHookOnlyProfiles_DoNotCrossMapUnrelatedIDsToTurns(t *testing.T) {
+	cases := []struct {
+		name    string
+		profile func(map[string]interface{}) HookProfileRequest
+		payload map[string]interface{}
+	}{
+		{"cursor execution", cursorProfileDecode, map[string]interface{}{"execution_id": "exec-7"}},
+		{"cursor tool call", cursorProfileDecode, map[string]interface{}{"tool_call_id": "tool-7"}},
+		{"windsurf generation", windsurfProfileDecode, map[string]interface{}{"generation_id": "gen-9"}},
+		{"windsurf step", windsurfProfileDecode, map[string]interface{}{"step_id": "step-9"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.profile(tc.payload).TurnID; got != "" {
+				t.Fatalf("TurnID=%q want empty", got)
 			}
 		})
 	}
@@ -181,21 +222,26 @@ func TestClaudeCodeProfileMapVerdict(t *testing.T) {
 		CanBlock:     true,
 		CanAskNative: true,
 		AskEvents:    []string{"PreToolUse"},
-		BlockEvents:  []string{"UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop"},
+		BlockEvents:  []string{"UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolBatch", "ConfigChange", "Stop"},
 	}
 	cases := []struct {
 		name         string
 		raw          string
 		event        string
 		mode         string
+		payload      map[string]interface{}
 		wantAction   string
 		wantWouldBlk bool
 	}{
-		{"observe_block", "block", "PreToolUse", "observe", "allow", true},
-		{"action_block_enforceable", "block", "PreToolUse", "action", "block", false},
-		{"action_block_unenforceable", "block", "SessionStart", "action", "allow", true},
-		{"action_confirm_ask_event", "confirm", "PreToolUse", "action", "confirm", false},
-		{"action_confirm_non_ask_event", "confirm", "PostToolUse", "action", "alert", false},
+		{"observe_block", "block", "PreToolUse", "observe", nil, "allow", true},
+		{"action_block_enforceable", "block", "PreToolUse", "action", nil, "block", false},
+		{"action_block_unenforceable", "block", "SessionStart", "action", nil, "allow", true},
+		{"post_tool_use_is_advisory", "block", "PostToolUse", "action", nil, "allow", true},
+		{"post_tool_batch_stops_next_model_call", "block", "PostToolBatch", "action", nil, "block", false},
+		{"policy_config_change_is_advisory", "block", "ConfigChange", "action", map[string]interface{}{"source": "policy_settings"}, "allow", true},
+		{"user_config_change_is_enforceable", "block", "ConfigChange", "action", map[string]interface{}{"source": "user_settings"}, "block", false},
+		{"action_confirm_ask_event", "confirm", "PreToolUse", "action", nil, "confirm", false},
+		{"action_confirm_non_ask_event", "confirm", "PostToolUse", "action", nil, "alert", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -204,6 +250,7 @@ func TestClaudeCodeProfileMapVerdict(t *testing.T) {
 				Event:     tc.event,
 				Mode:      tc.mode,
 				Caps:      caps,
+				Payload:   tc.payload,
 			})
 			if out.Action != tc.wantAction {
 				t.Errorf("Action=%q want %q", out.Action, tc.wantAction)
@@ -670,7 +717,11 @@ func TestCursorProfileRespond_AlwaysEmitsEnvelope(t *testing.T) {
 			out := hookOnlyProfileRespond(HookRespondInput{
 				Req: HookProfileRequest{
 					ConnectorName: "cursor",
-					HookEventName: "beforeSubmitPrompt",
+					// Permission-gated event: block→deny, confirm→ask,
+					// alert/allow→allow. beforeSubmitPrompt is continue-gated
+					// and covered separately (see
+					// TestCursorProfileRespond_BeforeSubmitPromptBlockUsesContinue).
+					HookEventName: "beforeShellExecution",
 				},
 				Action:            tc.action,
 				RawAction:         tc.rawAction,
@@ -691,6 +742,42 @@ func TestCursorProfileRespond_AlwaysEmitsEnvelope(t *testing.T) {
 				t.Errorf("Output mismatch\n got: %#v\nwant: %#v", out.Output, tc.expected)
 			}
 		})
+	}
+}
+
+// TestCursorProfileRespond_BeforeSubmitPromptBlockUsesContinue pins the
+// continue-gated contract for Cursor's beforeSubmitPrompt: per
+// https://cursor.com/docs/hooks it blocks ONLY via {"continue":false}
+// and ignores the `permission` field. Emitting the permission-gated
+// {"continue":true,"permission":"deny"} shape here silently submits the
+// prompt (regression guard for the block-message-never-shown bug).
+func TestCursorProfileRespond_BeforeSubmitPromptBlockUsesContinue(t *testing.T) {
+	out := hookOnlyProfileRespond(HookRespondInput{
+		Req: HookProfileRequest{
+			ConnectorName: "cursor",
+			HookEventName: "beforeSubmitPrompt",
+		},
+		Action:    "block",
+		RawAction: "block",
+		Reason:    "matched SEC-AWS-KEY",
+		Caps:      HookCapability{CanBlock: true},
+	})
+	if out.FieldName != "hook_output" {
+		t.Errorf("FieldName=%q want hook_output", out.FieldName)
+	}
+	want := map[string]interface{}{
+		"continue":      false,
+		"user_message":  "matched SEC-AWS-KEY",
+		"agent_message": "matched SEC-AWS-KEY",
+	}
+	if !reflect.DeepEqual(out.Output, want) {
+		t.Errorf("beforeSubmitPrompt block Output mismatch\n got: %#v\nwant: %#v", out.Output, want)
+	}
+	if cont, _ := out.Output["continue"].(bool); cont {
+		t.Errorf("beforeSubmitPrompt block must set continue:false to actually block the prompt")
+	}
+	if _, hasPerm := out.Output["permission"]; hasPerm {
+		t.Errorf("beforeSubmitPrompt block must not rely on `permission` (Cursor ignores it): %#v", out.Output)
 	}
 }
 

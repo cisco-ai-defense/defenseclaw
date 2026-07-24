@@ -1,8 +1,16 @@
 # DefenseClaw OpenTelemetry Specification
 
-DefenseClaw exports four categories of telemetry to **Splunk Observability Cloud**
-via OTLP (gRPC or HTTP/protobuf). This document is the canonical reference
-for attribute names, signal types, payload schemas, and configuration.
+> [!WARNING]
+> **Historical v7 reference.** This document describes the retired direct OTel
+> provider/configuration model. It is retained for migration and compatibility
+> archaeology and is not authoritative for a `config_version: 8` runtime. Use
+> [DefenseClaw Observability v8](OBSERVABILITY.md), the
+> [v8 design index](design/observability-v8/README.md), and the authored registry
+> under [`schemas/telemetry/v8/`](../schemas/telemetry/v8/) for current behavior.
+
+DefenseClaw v7 exported four categories of telemetry to **Splunk Observability
+Cloud** via OTLP (gRPC or HTTP/protobuf). The remaining sections preserve that
+version's attribute, signal, payload-schema, and configuration reference.
 
 > **Audience**: DefenseClaw contributors, Splunk integration engineers, SOC
 > teams building dashboards and detectors.

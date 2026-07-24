@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from defenseclaw.commands.cmd_setup import (
     _apply_hook_connector_setup,
     _check_connector_version_supported_for_setup,
+    _print_connector_observability_banner,
 )
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACT_MANIFEST,
@@ -71,23 +72,123 @@ class TestConnectorContractManifest(unittest.TestCase):
             self.assertTrue(compat.supported)
 
     def test_codex_version_range_matches_contract(self) -> None:
-        known = resolve_connector_contract("codex", "codex 0.124.0")
-        self.assertEqual(known.status, STATUS_KNOWN)
-        self.assertEqual(known.normalized_version, "0.124.0")
-        self.assertEqual(known.contract.contract_id, "codex-hooks-v1")
-        self.assertEqual(known.contract.hook_script_version, "v6")
-        self.assertIn("~/.codex/config.toml", known.contract.hook_config_path_templates)
-        self.assertIn("tool_call", known.contract.aid_surfaces)
+        expected = (
+            (
+                "0.124.0",
+                "codex-hooks-v1",
+                (
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PreToolUse",
+                    "PermissionRequest",
+                    "PostToolUse",
+                    "Stop",
+                ),
+            ),
+            (
+                "0.128.99",
+                "codex-hooks-v1",
+                (
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PreToolUse",
+                    "PermissionRequest",
+                    "PostToolUse",
+                    "Stop",
+                ),
+            ),
+            (
+                "0.129.0",
+                "codex-hooks-v2",
+                (
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PreToolUse",
+                    "PermissionRequest",
+                    "PostToolUse",
+                    "PreCompact",
+                    "PostCompact",
+                    "Stop",
+                ),
+            ),
+            (
+                "0.132.99",
+                "codex-hooks-v2",
+                (
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PreToolUse",
+                    "PermissionRequest",
+                    "PostToolUse",
+                    "PreCompact",
+                    "PostCompact",
+                    "Stop",
+                ),
+            ),
+            (
+                "0.133.0",
+                "codex-hooks-v3",
+                (
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PreToolUse",
+                    "PermissionRequest",
+                    "PostToolUse",
+                    "SubagentStart",
+                    "SubagentStop",
+                    "PreCompact",
+                    "PostCompact",
+                    "Stop",
+                ),
+            ),
+        )
+        for version, contract_id, events in expected:
+            with self.subTest(version=version):
+                known = resolve_connector_contract("codex", f"codex {version}")
+                self.assertEqual(known.status, STATUS_KNOWN)
+                self.assertEqual(known.normalized_version, version)
+                self.assertEqual(known.contract.contract_id, contract_id)
+                self.assertEqual(known.contract.events, events)
+                self.assertEqual(known.contract.hook_script_version, "v6")
+                self.assertIn("~/.codex/config.toml", known.contract.hook_config_path_templates)
+                self.assertIn("tool_call", known.contract.aid_surfaces)
+
+        unversioned = resolve_connector_contract("codex", "")
+        self.assertEqual(unversioned.status, STATUS_UNVERSIONED)
+        self.assertEqual(unversioned.contract.contract_id, "codex-hooks-v3")
+        self.assertTrue(unversioned.contract.default_for_unversioned)
+        self.assertTrue(unversioned.contract.native_otlp)
+        self.assertEqual(unversioned.contract.native_otlp_auth, "path-token-loopback")
+        self.assertEqual(
+            unversioned.contract.native_otlp_signals,
+            ("logs", "metrics", "traces"),
+        )
+        self.assertEqual(
+            unversioned.contract.native_otlp_endpoint_template,
+            "/otlp/codex/<scoped-token>/v1/<signal>",
+        )
+        self.assertNotIn(
+            "Authorization",
+            unversioned.contract.native_otlp_endpoint_template,
+        )
 
         older = resolve_connector_contract("codex", "codex 0.123.0")
         self.assertEqual(older.status, STATUS_UNKNOWN)
         self.assertFalse(older.supported)
 
+    def test_codex_setup_banner_describes_scoped_otlp_routes(self) -> None:
+        with patch("defenseclaw.commands.cmd_setup.click.echo") as echo:
+            _print_connector_observability_banner("codex")
+        rendered = "\n".join(str(call.args[0]) for call in echo.call_args_list if call.args)
+        self.assertIn("/otlp/codex/<token>/v1/<signal>", rendered)
+        self.assertNotIn("Native OTel — documented agent telemetry → /v1/logs", rendered)
+
     def test_claude_aliases_resolve_to_claudecode(self) -> None:
-        compat = resolve_connector_contract("claude-code", "Claude Code 2.1.144")
+        compat = resolve_connector_contract("claude-code", "Claude Code 2.1.152")
         self.assertEqual(compat.status, STATUS_KNOWN)
         self.assertEqual(compat.connector, "claudecode")
         self.assertEqual(compat.contract.contract_id, "claudecode-hooks-v1")
+        self.assertEqual(compat.contract.hook_script_version, "v7")
         self.assertIn("event_content", compat.contract.aid_surfaces)
 
     def test_unversioned_connectors_use_default_contract(self) -> None:
@@ -121,6 +222,18 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertLess(
             templates.index("$OMNIGENT_CONFIG_HOME/config.yaml"),
             templates.index("~/.omnigent/config.yaml"),
+        )
+
+    def test_hermes_contract_advertises_native_windows_path_precedence(self) -> None:
+        compat = resolve_connector_contract("hermes", "")
+
+        self.assertEqual(
+            compat.contract.hook_config_path_templates,
+            (
+                "$HERMES_HOME/config.yaml",
+                "%LOCALAPPDATA%/hermes/config.yaml",
+                "~/.hermes/config.yaml",
+            ),
         )
 
     def test_manifest_loader_preserves_unversioned_default_marker(self) -> None:
@@ -189,7 +302,7 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         with patch(
             "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
             return_value=_discovery("codex", installed=True, version="codex 0.123.0"),
-        ):
+        ), patch("defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections"):
             ok = _apply_hook_connector_setup(
                 self.app,
                 connector="codex",
@@ -209,7 +322,7 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         GuardrailConfig.Validate now rejects at load)."""
         with patch(
             "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-            return_value=_discovery("claudecode", installed=True, version="2.1.144"),
+            return_value=_discovery("claudecode", installed=True, version="2.1.152"),
         ):
             ok = _apply_hook_connector_setup(
                 self.app,
@@ -226,7 +339,7 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         with (
             patch(
                 "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-                return_value=_discovery("claudecode", installed=True, version="2.1.144"),
+                return_value=_discovery("claudecode", installed=True, version="2.1.152"),
             ),
             patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa") as sync_hilt,
         ):

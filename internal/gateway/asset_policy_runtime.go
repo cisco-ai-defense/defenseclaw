@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
@@ -47,17 +48,28 @@ type skillRuntimeProbe struct {
 	SourcePath string
 	// RawName preserves the unnormalized input the SkillName was
 	// derived from when path-stripping occurred (e.g. SkillName came
-	// from filepath.Base on a "/path/to/<name>/SKILL.md"). Empty when
-	// SkillName == raw input.
+	// from filepath.Base on a "/path/to/<name>/SKILL.md") or when a
+	// plugin slash command was reduced from "plugin-id:command-id" to
+	// "plugin-id" for policy lookup. Empty when SkillName == raw input.
 	RawName string
 	Surface string
 	Matched bool
+	// RuntimeDisableOnly limits an identity inferred from incomplete or
+	// ambiguous connector metadata to the exact durable runtime-disable
+	// lookup. It must not widen ordinary asset-policy matching or record a
+	// loaded asset when no disable record exists.
+	RuntimeDisableOnly bool
 }
 
 type runtimeAssetDecision struct {
 	targetType string
 	decision   config.AssetPolicyDecision
 }
+
+const (
+	runtimeProvenanceCodexPromptSelection = "codex_prompt_selection"
+	runtimeProvenanceClaudeExpansion      = "claudecode_prompt_expansion"
+)
 
 func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := mcpProbeFromFields(req.MCPServerName, req.ToolName, req.ToolInput)
@@ -80,6 +92,15 @@ func (a *APIServer) claudeCodePromptExpansionAssetDecisions(ctx context.Context,
 		return a.claudeCodeSlashCommandAssetDecisions(ctx, req)
 	case "mcp_prompt":
 		return a.claudeCodeMCPPromptAssetDecisions(ctx, req)
+	case "":
+		// command metadata is optional in the Claude hook contract. An exact
+		// leading slash token is sufficient for a runtime-disable-only lookup;
+		// the strict parser below keeps ordinary prompts and MCP/plugin-shaped
+		// names out of the standalone-skill namespace.
+		if claudeCodePromptSlashCommandName(req.Prompt) != "" {
+			return a.claudeCodeSlashCommandAssetDecisions(ctx, req)
+		}
+		return nil
 	default:
 		return nil
 	}
@@ -87,22 +108,72 @@ func (a *APIServer) claudeCodePromptExpansionAssetDecisions(ctx context.Context,
 
 func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, req claudeCodeHookRequest) []runtimeAssetDecision {
 	targetType := slashCommandAssetType(req.CommandSource)
-	if targetType == "" {
-		return nil
+	trustedAssetPolicySource := claudeCodeSlashSourceTrustsAssetPolicy(req.CommandSource)
+	commandName := strings.TrimSpace(req.CommandName)
+	promptName := claudeCodePromptSlashCommandName(req.Prompt)
+	commandIdentity, commandOK := claudeCodeSlashAssetIdentity(
+		targetType, commandName,
+	)
+	promptIdentity, promptOK := claudeCodeSlashAssetIdentity(
+		targetType, promptName,
+	)
+	promptPresent := strings.TrimSpace(req.Prompt) != ""
+	identityMalformed := trustedAssetPolicySource && (commandName == "" || !commandOK ||
+		(promptPresent && !promptOK) ||
+		(commandOK && promptOK && !commandIdentity.sameAsset(promptIdentity)))
+
+	identities := make([]claudeCodeSlashIdentity, 0, 2)
+	if commandOK {
+		identities = append(identities, commandIdentity)
 	}
-	name := normalizeSkillRuntimeName(req.CommandName)
-	if name == "" {
-		return nil
+	if promptOK && (!commandOK || !commandIdentity.sameAsset(promptIdentity)) {
+		identities = append(identities, promptIdentity)
 	}
-	probe := skillRuntimeProbe{
-		TargetType: targetType,
-		SkillName:  name,
-		ToolName:   strings.TrimSpace(req.CommandName),
-		SourcePath: strings.TrimSpace(req.CommandSource),
-		Surface:    "prompt_expansion",
-		Matched:    true,
+
+	// Only literal skill/plugin provenance with a non-conflicting identity
+	// retains the existing full asset-policy behavior. User/project/missing
+	// provenance is shared with custom commands, so it may correlate only to
+	// an exact runtime-disable record. On disagreement, probe both strict
+	// candidates the same way so a spoofed benign field cannot bypass a
+	// disabled identity; neither candidate is attributed when neither is
+	// disabled.
+	runtimeDisableOnly := !trustedAssetPolicySource || identityMalformed
+	for _, identity := range identities {
+		probe := skillRuntimeProbe{
+			TargetType:         identity.targetType,
+			SkillName:          identity.name,
+			ToolName:           identity.toolName,
+			RawName:            identity.rawName,
+			SourcePath:         canonicalClaudeCodeSlashSource(req.CommandSource),
+			Surface:            "prompt_expansion",
+			Matched:            true,
+			RuntimeDisableOnly: runtimeDisableOnly,
+		}
+		if decision, matched := a.evaluateNativeRuntimeSkillSelection(
+			ctx, "claudecode", req.SessionID, req.HookEventName,
+			runtimeProvenanceClaudeExpansion, probe,
+		); matched {
+			return []runtimeAssetDecision{{targetType: identity.targetType, decision: decision}}
+		}
 	}
-	if decision, matched := a.evaluateRuntimeSkillAssetPolicy(ctx, "claudecode", req.HookEventName, probe); matched {
+	if identityMalformed {
+		name := "unresolved"
+		if len(identities) > 0 {
+			name = identities[0].name
+		}
+		probe := skillRuntimeProbe{
+			TargetType: targetType,
+			SkillName:  name,
+			SourcePath: targetType,
+			Surface:    "prompt_expansion",
+			Matched:    true,
+		}
+		decision := a.runtimeAssetIdentityDecision(
+			targetType, name, "claudecode", "prompt_expansion",
+		)
+		a.emitRuntimeSkillAssetPolicyDecision(
+			ctx, decision, "claudecode", req.HookEventName, probe,
+		)
 		return []runtimeAssetDecision{{targetType: targetType, decision: decision}}
 	}
 	return nil
@@ -128,6 +199,19 @@ func (a *APIServer) claudeCodeMCPPromptAssetDecisions(ctx context.Context, req c
 func (a *APIServer) codexSkillAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
 	return a.evaluateRuntimeSkillAssetPolicy(ctx, "codex", req.HookEventName, probe)
+}
+
+func (a *APIServer) codexPromptSkillAssetDecision(
+	ctx context.Context, req codexHookRequest,
+) (config.AssetPolicyDecision, bool) {
+	probe := codexSkillProbeFromPrompt(req.Prompt)
+	if !probe.Matched {
+		return config.AssetPolicyDecision{}, false
+	}
+	return a.evaluateNativeRuntimeSkillSelection(
+		ctx, "codex", req.SessionID, req.HookEventName,
+		runtimeProvenanceCodexPromptSelection, probe,
+	)
 }
 
 func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
@@ -171,18 +255,6 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 	if !decision.Enabled || decision.RawAction != "block" {
 		return decision, false
 	}
-	if a.otel != nil {
-		a.otel.EmitPolicyDecision("asset-policy", decision.Action, decision.TargetName, "mcp", decision.Reason, map[string]string{
-			"source":              decision.Source,
-			"registry_status":     decision.RegistryStatus,
-			"registry_configured": fmt.Sprintf("%t", decision.RegistryConfigured),
-			"runtime_surface":     coalesceRuntimeSurface(probe.Surface, "hook"),
-			"hook_event_name":     hookEvent,
-			"tool_name":           probe.ToolName,
-			"mcp_server_name":     probe.ServerName,
-			"would_block":         fmt.Sprintf("%t", decision.WouldBlock),
-		})
-	}
 	evalCtx := a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", connector, hookEvent)
 	if a.logger != nil {
 		details := fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s would_block=%v reason=%s",
@@ -195,14 +267,33 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 }
 
 func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connector, hookEvent string, probe skillRuntimeProbe) (config.AssetPolicyDecision, bool) {
+	decision, matched := a.runtimeSkillAssetPolicyDecision(connector, probe)
+	if matched {
+		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
+	}
+	return decision, matched
+}
+
+func (a *APIServer) runtimeSkillAssetPolicyDecision(
+	connector string, probe skillRuntimeProbe,
+) (config.AssetPolicyDecision, bool) {
 	if !probe.Matched {
 		return config.AssetPolicyDecision{}, false
 	}
 	targetType := runtimeSkillAssetTargetType(probe)
 	runtimeSurface := coalesceRuntimeSurface(probe.Surface, "hook")
+	if probe.RuntimeDisableOnly && (a == nil || a.store == nil) {
+		return runtimeAssetDisableBlockDecision(
+			targetType, probe.SkillName, connector, runtimeSurface,
+			"runtime provenance store is unavailable - failing closed",
+			"runtime-provenance-error",
+		), true
+	}
 	if decision, disabled := a.runtimeAssetDisableDecision(targetType, probe.SkillName, connector, runtimeSurface); disabled {
-		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
 		return decision, true
+	}
+	if probe.RuntimeDisableOnly {
+		return config.AssetPolicyDecision{}, false
 	}
 	if a.scannerCfg == nil {
 		return config.AssetPolicyDecision{}, false
@@ -256,8 +347,61 @@ func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connect
 	if !decision.Enabled || decision.RawAction != "block" {
 		return decision, false
 	}
-	a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
 	return decision, true
+}
+
+func (a *APIServer) evaluateNativeRuntimeSkillSelection(
+	ctx context.Context,
+	connector, sessionID, hookEvent, provenance string,
+	probe skillRuntimeProbe,
+) (config.AssetPolicyDecision, bool) {
+	decision, matched := a.runtimeSkillAssetPolicyDecision(connector, probe)
+	if probe.RuntimeDisableOnly && !matched {
+		return decision, false
+	}
+	state := audit.RuntimeAssetSelected
+	// Claude's native expansion event is emitted only after the selected
+	// skill/command content has actually been expanded into the prompt. That
+	// is a proven load boundary. Codex UserPromptSubmit is earlier and remains
+	// a selection-only attestation.
+	if provenance == runtimeProvenanceClaudeExpansion {
+		state = audit.RuntimeAssetLoaded
+	}
+	if matched && decision.Action == "block" {
+		state = audit.RuntimeAssetBlocked
+	}
+	var persistenceErr error
+	if a == nil || a.store == nil {
+		persistenceErr = fmt.Errorf("runtime provenance store is unavailable")
+	} else {
+		persistenceErr = a.store.RecordRuntimeAssetState(ctx, audit.RuntimeAssetState{
+			Connector:      connector,
+			SessionID:      sessionID,
+			TargetType:     runtimeSkillAssetTargetType(probe),
+			TargetName:     probe.SkillName,
+			SourcePath:     probe.SourcePath,
+			RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
+			HookEvent:      hookEvent,
+			Provenance:     provenance,
+			State:          state,
+		})
+	}
+	if persistenceErr != nil && (!matched || decision.Action != "block") {
+		decision = runtimeAssetDisableBlockDecision(
+			runtimeSkillAssetTargetType(probe), probe.SkillName, connector,
+			coalesceRuntimeSurface(probe.Surface, "hook"),
+			fmt.Sprintf(
+				"%s %q runtime provenance write failed - failing closed: %v",
+				runtimeSkillAssetTargetType(probe), probe.SkillName, persistenceErr,
+			),
+			"runtime-provenance-error",
+		)
+		matched = true
+	}
+	if matched {
+		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
+	}
+	return decision, matched
 }
 
 func runtimeSkillAssetTargetType(probe skillRuntimeProbe) string {
@@ -310,40 +454,50 @@ func runtimeAssetDisableBlockDecision(targetType, name, connector, runtimeSurfac
 	}
 }
 
+func (a *APIServer) runtimeAssetIdentityDecision(targetType, name, connector, runtimeSurface string) config.AssetPolicyDecision {
+	mode := config.AssetPolicyModeObserve
+	if a != nil && a.scannerCfg != nil && assetRuntimeModeIsAction(
+		a.scannerCfg.EffectiveAssetPolicyModeForConnector(connector),
+	) {
+		mode = config.AssetPolicyModeAction
+	}
+	action := "allow"
+	wouldBlock := true
+	if mode == config.AssetPolicyModeAction {
+		action = "block"
+		wouldBlock = false
+	}
+	return config.AssetPolicyDecision{
+		Enabled:            true,
+		Mode:               mode,
+		Action:             action,
+		RawAction:          "block",
+		WouldBlock:         wouldBlock,
+		Reason:             "Claude Code slash-command asset identity is missing, malformed, or inconsistent - failing closed",
+		Source:             "runtime-identity-error",
+		RegistryStatus:     "invalid",
+		RegistryConfigured: false,
+		TargetType:         targetType,
+		TargetName:         name,
+		Connector:          connector,
+		RuntimeSurface:     runtimeSurface,
+	}
+}
+
 func (a *APIServer) emitRuntimeSkillAssetPolicyDecision(ctx context.Context, decision config.AssetPolicyDecision, connector, hookEvent string, probe skillRuntimeProbe) {
 	targetType := runtimeSkillAssetTargetType(probe)
-	if a.otel != nil {
-		attrs := map[string]string{
-			"source":              decision.Source,
-			"registry_status":     decision.RegistryStatus,
-			"registry_configured": fmt.Sprintf("%t", decision.RegistryConfigured),
-			"runtime_surface":     coalesceRuntimeSurface(probe.Surface, "hook"),
-			"hook_event_name":     hookEvent,
-			"tool_name":           probe.ToolName,
-			targetType + "_name":  probe.SkillName,
-			"would_block":         fmt.Sprintf("%t", decision.WouldBlock),
-		}
-		// Surface raw inputs whenever path-stripping or other
-		// normalization changed the agent's literal value into a
-		// different registry-matching name. This is the audit
-		// signal for "agent passed /tmp/x/<approved>/SKILL.md to
-		// match an approved name" attempts.
-		if probe.RawName != "" {
-			attrs[targetType+"_name_raw"] = probe.RawName
-		}
-		if probe.SourcePath != "" {
-			attrs[targetType+"_source_path"] = probe.SourcePath
-		}
-		a.otel.EmitPolicyDecision("asset-policy", decision.Action, decision.TargetName, targetType, decision.Reason, attrs)
-	}
 	evalCtx := a.emitAssetPolicyDecisionFindings(ctx, decision, targetType, connector, hookEvent)
 	if a.logger != nil {
-		details := fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s name_raw=%q source_path=%q would_block=%v reason=%s",
-			decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, probe.RawName, probe.SourcePath, decision.WouldBlock, decision.Reason)
+		details := runtimeSkillAssetPolicyAuditDetails(decision, connector, hookEvent, probe)
 		details = appendHookEvaluationDetails(details, evalCtx)
 		a.logAssetPolicyAudit(ctx, connector, targetType+":"+decision.TargetName, details)
 	}
 	a.dispatchAssetPolicyNotification(decision, targetType, connector, hookEvent, evalCtx)
+}
+
+func runtimeSkillAssetPolicyAuditDetails(decision config.AssetPolicyDecision, connector, hookEvent string, probe skillRuntimeProbe) string {
+	return fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s name_raw=%q source_path=%q would_block=%v reason=%s",
+		decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, probe.RawName, probe.SourcePath, decision.WouldBlock, decision.Reason)
 }
 
 func hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets string, assetDecisions []runtimeAssetDecision) bool {
@@ -459,11 +613,123 @@ func mcpProbeFromFields(serverName, toolName string, toolInput map[string]interf
 
 func slashCommandAssetType(commandSource string) string {
 	switch strings.ToLower(strings.TrimSpace(commandSource)) {
-	case "skill", "plugin":
-		return strings.ToLower(strings.TrimSpace(commandSource))
+	case "skill", "policysettings", "usersettings", "projectsettings", "bundled":
+		return "skill"
+	case "plugin":
+		return "plugin"
 	default:
 		return ""
 	}
+}
+
+func claudeCodeSlashSourceTrustsAssetPolicy(commandSource string) bool {
+	switch strings.ToLower(strings.TrimSpace(commandSource)) {
+	case "skill", "plugin":
+		return true
+	default:
+		return false
+	}
+}
+
+func canonicalClaudeCodeSlashSource(commandSource string) string {
+	switch strings.ToLower(strings.TrimSpace(commandSource)) {
+	case "skill":
+		return "skill"
+	case "plugin":
+		return "plugin"
+	case "policysettings":
+		return "policySettings"
+	case "usersettings":
+		return "userSettings"
+	case "projectsettings":
+		return "projectSettings"
+	case "bundled":
+		return "bundled"
+	default:
+		return ""
+	}
+}
+
+type claudeCodeSlashIdentity struct {
+	targetType string
+	name       string
+	rawName    string
+	toolName   string
+	selector   string
+}
+
+func (i claudeCodeSlashIdentity) sameAsset(other claudeCodeSlashIdentity) bool {
+	return i.targetType == other.targetType && i.name == other.name && i.selector == other.selector
+}
+
+func claudeCodePromptSlashCommandName(prompt string) string {
+	fields := strings.Fields(strings.TrimSpace(prompt))
+	if len(fields) == 0 || !strings.HasPrefix(fields[0], "/") {
+		return ""
+	}
+	return fields[0]
+}
+
+func claudeCodeSlashAssetIdentity(targetType, rawName string) (claudeCodeSlashIdentity, bool) {
+	resolvedType := targetType
+	if resolvedType == "" {
+		resolvedType = "skill"
+	}
+	name, canonicalRawName := claudeCodeSlashCommandAssetName(resolvedType, rawName)
+	if name == "" {
+		return claudeCodeSlashIdentity{}, false
+	}
+	selector := strings.TrimSpace(rawName)
+	selector = strings.TrimPrefix(selector, "/")
+	return claudeCodeSlashIdentity{
+		targetType: resolvedType,
+		name:       name,
+		rawName:    canonicalRawName,
+		toolName:   strings.TrimSpace(rawName),
+		selector:   selector,
+	}, true
+}
+
+// claudeCodeSlashCommandAssetName returns the asset identifier used for
+// runtime-disable and asset-policy lookup plus the original command name when
+// canonicalization changed it. Claude Code identifies plugin commands as
+// "plugin-id:command-id", while plugin policies are keyed by the bare plugin id.
+// Skill slash-command names retain their existing semantics.
+func claudeCodeSlashCommandAssetName(targetType, commandName string) (string, string) {
+	rawName := strings.TrimSpace(commandName)
+	if rawName == "" {
+		return "", ""
+	}
+	name := rawName
+	if strings.HasPrefix(name, "/") {
+		name = strings.TrimPrefix(name, "/")
+	}
+	if !strings.EqualFold(strings.TrimSpace(targetType), "plugin") {
+		if !validNativeSkillSelectionName(name) {
+			return "", ""
+		}
+		if name != rawName {
+			return name, rawName
+		}
+		return name, ""
+	}
+	pluginID, commandID, namespaced := strings.Cut(name, ":")
+	if namespaced {
+		if pluginID != strings.TrimSpace(pluginID) || commandID != strings.TrimSpace(commandID) {
+			return "", ""
+		}
+		if !validNativeSkillSelectionName(pluginID) || !validNativeSkillSelectionName(commandID) {
+			return "", ""
+		}
+		return pluginID, rawName
+	}
+	if !validNativeSkillSelectionName(name) {
+		return "", ""
+	}
+	if name != rawName {
+		return name, rawName
+	}
+	return name, ""
 }
 
 func mcpPromptServerName(commandSource, commandName string) string {
@@ -574,6 +840,49 @@ func skillProbeFromFields(toolName string, toolInput, payload map[string]interfa
 		}
 	}
 	return skillRuntimeProbe{ToolName: toolName}
+}
+
+// codexSkillProbeFromPrompt recognizes Codex's native fresh-session skill
+// selection shape: UserPromptSubmit carries the literal prompt and a selected
+// skill is the first token, written as "$<skill-name>". Codex does not emit a
+// Skill tool call or a synthetic skill_name field for this path.
+func codexSkillProbeFromPrompt(prompt string) skillRuntimeProbe {
+	fields := strings.Fields(strings.TrimSpace(prompt))
+	if len(fields) == 0 || !strings.HasPrefix(fields[0], "$") {
+		return skillRuntimeProbe{}
+	}
+	raw := fields[0]
+	name := strings.TrimPrefix(raw, "$")
+	if !validNativeSkillSelectionName(name) {
+		return skillRuntimeProbe{}
+	}
+	return skillRuntimeProbe{
+		TargetType: "skill",
+		SkillName:  name,
+		ToolName:   raw,
+		RawName:    raw,
+		Surface:    "prompt_selection",
+		Matched:    true,
+	}
+}
+
+func validNativeSkillSelectionName(name string) bool {
+	if name == "" || len(name) > 255 {
+		return false
+	}
+	for index, r := range name {
+		alphaNumeric := r >= 'a' && r <= 'z' ||
+			r >= 'A' && r <= 'Z' ||
+			r >= '0' && r <= '9'
+		if alphaNumeric {
+			continue
+		}
+		if index > 0 && (r == '-' || r == '_' || r == '.') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // skillFromMap returns (normalizedName, sourcePath, rawName).
@@ -819,9 +1128,9 @@ func firstMapString(values map[string]interface{}, keys ...string) string {
 //     existing verdict is returned unchanged with wouldBlock=false.
 //   - matched=true with a blocking decision always sets rawAction=block
 //     and severity>=HIGH, regardless of whether enforcement runs.
-//   - When the current hook event is enforceable (PreToolUse,
-//     PermissionRequest, UserPromptExpansion), action=block and the
-//     returned wouldBlock=false (because the action IS the block —
+//   - When the current hook event is enforceable (UserPromptSubmit,
+//     UserPromptExpansion, PreToolUse, PermissionRequest), action=block and
+//     the returned wouldBlock=false (because the action IS the block —
 //     "would" only makes sense in observe mode / non-enforceable events).
 //   - Otherwise the merge stays in advisory mode: action stays "allow"
 //     (or "block" if a prior asset already blocked), and wouldBlock=true
@@ -961,11 +1270,11 @@ func assetPolicyRegistryStatusForReason(status string) string {
 }
 
 func runtimeAssetCanEnforce(event string) bool {
-	// Claude Code / Codex use canonical PascalCase event names — keep
-	// these literal switches so the original behavior is byte-identical
-	// for those high-traffic hooks.
+	// Claude Code / Codex use canonical PascalCase event names. Prompt
+	// submission/expansion are native pre-load selection surfaces, while
+	// tool and permission events are native pre-execution surfaces.
 	switch event {
-	case "UserPromptExpansion", "PreToolUse", "PermissionRequest":
+	case "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest":
 		return true
 	}
 	// Generic hook-only connectors (hermes, cursor, windsurf, geminicli,

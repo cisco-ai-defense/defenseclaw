@@ -67,7 +67,8 @@ After syncing, review and restore these intentional differences:
 - Bundle identifier: `com.cisco.defenseclaw.macos`.
 - No personal Apple development team or signing identity in the project file.
 - App `MARKETING_VERSION` matches the repository `VERSION`.
-- `UpdateChecker` reads releases from `cisco-ai-defense/defenseclaw` and only selects `DefenseClawMac-*-macos-arm64*.zip` assets.
+- `UpdateChecker` reads releases from `cisco-ai-defense/defenseclaw`, selects only verified `DefenseClawMac-*-macos-arm64.zip` assets, and never offers `-unverified` artifacts through in-app self-update.
+- Before extraction, `UpdateChecker` rejects empty or malformed ZIP manifests, absolute and traversal paths, link entries, multiple app bundles, and content outside one top-level `.app` bundle.
 - `RuntimeInstaller` continues to understand `Contents/Resources/RuntimePayload`.
 - Release packaging remains in `scripts/build-macos-app-release.sh` and `.github/workflows/release.yaml`, producing a runtime-bearing DMG and app-only self-update zip.
 
@@ -103,11 +104,20 @@ make macos-app-release
 make macos-app-release-verify
 ```
 
-Mount the resulting DMG and confirm it contains `DefenseClawMac.app`, an `/Applications` symlink, the matching gateway and wheel under `Contents/Resources/RuntimePayload`, and `payload-manifest.json`. Confirm the zip contains the app without `RuntimePayload`, preserving the independent runtime update track. Verify both artifact names contain `-unverified` unless Developer ID signing and notarization were deliberately configured.
+Mount the resulting DMG and confirm it contains `DefenseClawMac.app`, an `/Applications` symlink, the matching gateway and wheel under `Contents/Resources/RuntimePayload`, and `payload-manifest.json`. Confirm the zip contains the app without `RuntimePayload`, preserving the independent runtime update track. Local development builds may produce clearly named `-unverified` artifacts, but the in-app self-updater ignores those assets.
+
+Confirm the app-only ZIP contains exactly one top-level `.app` bundle and no absolute paths, `..` components, symlinks, hardlinks, or unrelated top-level files. The updater performs this validation before `ditto` extraction, then requires bundle identity/version checks, code-signature validation, and Gatekeeper assessment before installation.
 
 The first-run runtime installer pins its fallback `uv` download by version and SHA-256 in `RuntimeInstaller.swift`. When updating that pin, use an immutable `astral-sh/uv` release, copy the Apple Silicon archive digest from the release asset, and verify the archive locally before changing both constants together.
 
-Until Apple credentials are available, releases intentionally publish the clearly named `-unverified` artifacts. When enabling verified distribution, configure all five release-environment secrets together (`MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`, `MACOS_NOTARY_KEY_BASE64`, `MACOS_NOTARY_KEY_ID`, and `MACOS_NOTARY_ISSUER_ID`), then set the release-environment variable `MACOS_REQUIRE_NOTARIZATION=true`. Partial credentials fail the build, and the variable prevents any future release from falling back to unverified artifacts.
+All five release-environment secrets
+(`MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`,
+`MACOS_NOTARY_KEY_BASE64`, `MACOS_NOTARY_KEY_ID`, and
+`MACOS_NOTARY_ISSUER_ID`) produce verified macOS app-update assets. Production
+and local builds may omit all five and produce ad-hoc-signed `-unverified`
+assets for manual download and installation; the in-app self-updater rejects
+them. Partial credentials, or any invalid configured credential, stop the
+workflow before publication.
 
 ## 5. Review before merging
 
@@ -115,6 +125,7 @@ Until Apple credentials are available, releases intentionally publish the clearl
 - Confirm no credentials, signing certificates, developer-team IDs, generated build products, or local user paths were imported.
 - Confirm every GitHub Action is pinned to an immutable commit SHA.
 - Confirm the release job downloads both the DMG and zip before regenerating `checksums.txt` and publishing the atomic GitHub release.
+- Confirm `test_update_checker_verification.sh` and `test_update_checker_safety.sh` pass, covering verified-only asset selection and pre-extraction archive rejection.
 - Confirm `python3 scripts/check-macos-upstream.py` succeeds online. The release preflight fails before signing if the pin is stale.
 - Confirm the scheduled `macOS Upstream Freshness` workflow is enabled. It opens one update issue when the latest stable standalone release advances.
 - Record exact commands and observed results in the pull request test plan.

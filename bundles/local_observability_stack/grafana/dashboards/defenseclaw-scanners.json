@@ -55,9 +55,9 @@
           "type": "prometheus",
           "uid": "defenseclaw-prometheus"
         },
-        "definition": "label_values(defenseclaw_gateway_events_emitted_total{event_type=\"scan\"}, scanner)",
+        "definition": "label_values(defenseclaw_scan_count_total, scanner)",
         "query": {
-          "query": "label_values(defenseclaw_gateway_events_emitted_total{event_type=\"scan\"}, scanner)",
+          "query": "label_values(defenseclaw_scan_count_total, scanner)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
@@ -92,9 +92,9 @@
           "type": "prometheus",
           "uid": "defenseclaw-prometheus"
         },
-        "definition": "label_values(defenseclaw_gateway_events_emitted_total{event_type=\"scan\"}, target_type)",
+        "definition": "label_values(defenseclaw_scan_count_total, target_type)",
         "query": {
-          "query": "label_values(defenseclaw_gateway_events_emitted_total{event_type=\"scan\"}, target_type)",
+          "query": "label_values(defenseclaw_scan_count_total, target_type)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,

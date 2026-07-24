@@ -5,19 +5,17 @@
 package gateway
 
 import (
-	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 func TestWebhookCircuitBreakerOpensAndRecovers(t *testing.T) {
@@ -42,11 +40,7 @@ func TestWebhookCircuitBreakerOpensAndRecovers(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	reader := sdkmetric.NewManualReader()
-	otelProv, err := telemetry.NewProviderForTest(reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
 
 	d := NewWebhookDispatcher([]config.WebhookConfig{
 		{URL: srv.URL, Type: "generic", Enabled: true, CooldownSeconds: intPtr(0)},
@@ -55,7 +49,7 @@ func TestWebhookCircuitBreakerOpensAndRecovers(t *testing.T) {
 		t.Fatal("dispatcher nil")
 		return
 	}
-	d.BindObservability(otelProv)
+	d.BindObservabilityV8(runtime)
 	d.retryBackoff = time.Millisecond
 
 	evt := testEvent()
@@ -83,34 +77,20 @@ func TestWebhookCircuitBreakerOpensAndRecovers(t *testing.T) {
 		t.Fatalf("expected recovery attempt after cooldown, attempts=%d", final)
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatal(err)
-	}
-	var cbOpen, cbClosed int64
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != "defenseclaw.webhook.circuit_breaker" {
-				continue
-			}
-			sum := m.Data.(metricdata.Sum[int64])
-			for _, dp := range sum.DataPoints {
-				for _, a := range dp.Attributes.ToSlice() {
-					if a.Key == "state" && a.Value.AsString() == "opened" {
-						cbOpen += dp.Value
-					}
-					if a.Key == "state" && a.Value.AsString() == "closed" {
-						cbClosed += dp.Value
-					}
-				}
-			}
+	transitions := generatedMetricByName(
+		capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawWebhookCircuitBreaker,
+	)
+	var opened, closed bool
+	for _, metric := range transitions {
+		switch metric.Attributes()["defenseclaw.webhook.circuit.state"] {
+		case "opened":
+			opened = true
+		case "closed":
+			closed = true
 		}
 	}
-	if cbOpen < 1 {
-		t.Fatalf("expected circuit opened metric, got %d", cbOpen)
-	}
-	if cbClosed < 1 {
-		t.Fatalf("expected circuit closed metric after success, got %d", cbClosed)
+	if !opened || !closed {
+		t.Fatalf("canonical circuit transitions opened=%t closed=%t metrics=%v", opened, closed, transitions)
 	}
 }
 
@@ -123,15 +103,11 @@ func TestWebhookCooldownEmitsMetric(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	reader := sdkmetric.NewManualReader()
-	otelProv, err := telemetry.NewProviderForTest(reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	d := NewWebhookDispatcher([]config.WebhookConfig{
 		{URL: srv.URL, Type: "generic", Enabled: true, CooldownSeconds: intPtr(300)},
 	})
-	d.BindObservability(otelProv)
+	d.BindObservabilityV8(runtime)
 	d.retryBackoff = 0
 
 	evt := testEvent()
@@ -144,24 +120,26 @@ func TestWebhookCooldownEmitsMetric(t *testing.T) {
 		t.Fatalf("expected 1 HTTP request, got %d", attempts)
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatal(err)
+	suppressed := generatedMetricByName(
+		capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawWebhookCooldownSuppressed,
+	)
+	if len(suppressed) != 1 {
+		t.Fatalf("expected one canonical cooldown metric, got %d", len(suppressed))
 	}
-	var suppressed int64
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != "defenseclaw.webhook.cooldown.suppressed" {
-				continue
-			}
-			sum := m.Data.(metricdata.Sum[int64])
-			for _, dp := range sum.DataPoints {
-				suppressed += dp.Value
-			}
+	if got := suppressed[0].Attributes()["defenseclaw.metric.webhook.kind"]; got != "generic" {
+		t.Fatalf("cooldown webhook kind=%v", got)
+	}
+	dispatches := generatedMetricByName(
+		capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawWebhookDispatches,
+	)
+	var sawSkipped bool
+	for _, metric := range dispatches {
+		if metric.Attributes()["defenseclaw.outcome"] == string(observability.OutcomeSkipped) {
+			sawSkipped = true
 		}
 	}
-	if suppressed < 1 {
-		t.Fatalf("expected cooldown suppressed counter, got %d", suppressed)
+	if !sawSkipped {
+		t.Fatalf("canonical cooldown dispatch outcome missing from %v", dispatches)
 	}
 }
 
@@ -172,49 +150,66 @@ func TestWebhookLatencyHistogramAttributes(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	reader := sdkmetric.NewManualReader()
-	otelProv, err := telemetry.NewProviderForTest(reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	d := NewWebhookDispatcher([]config.WebhookConfig{
 		{URL: srv.URL, Type: "slack", Enabled: true, CooldownSeconds: intPtr(0)},
 	})
-	d.BindObservability(otelProv)
+	d.BindObservabilityV8(runtime)
 	d.retryBackoff = 0
 
 	d.Dispatch(audit.Event{
 		ID: "e1", Timestamp: time.Now().UTC(), Action: "block", Target: "t1",
-		Actor: "a", Details: "d", Severity: "HIGH",
+		Actor: "a", Details: "d", Severity: "HIGH", RunID: "run-webhook",
+		TraceID: "00112233445566778899aabbccddeeff", SpanID: "0011223344556677",
+		RequestID: "request-webhook", SessionID: "session-webhook", TurnID: "turn-webhook",
+		AgentID: "agent-webhook", AgentInstanceID: "agent-instance-webhook",
+		PolicyID: "policy-webhook", ToolID: "tool-webhook", Connector: "codex",
 	})
 	d.Close()
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatal(err)
+	metrics := generatedMetricByName(
+		capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawWebhookLatency,
+	)
+	if len(metrics) != 1 {
+		t.Fatalf("canonical webhook latency metrics=%d", len(metrics))
 	}
-	var found bool
-outer:
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != "defenseclaw.webhook.latency" {
-				continue
-			}
-			hist, ok := m.Data.(metricdata.Histogram[float64])
-			if !ok {
-				continue
-			}
-			for _, dp := range hist.DataPoints {
-				for _, a := range dp.Attributes.ToSlice() {
-					if a.Key == "http.status_code" && a.Value.AsInt64() == 201 {
-						found = true
-						break outer
-					}
-				}
-			}
-		}
+	metric := metrics[0]
+	if attributes := metric.Attributes(); fmt.Sprint(attributes["http.response.status_code"]) != "201" ||
+		attributes["defenseclaw.metric.webhook.kind"] != "slack" {
+		t.Fatalf("webhook latency attributes=%v", attributes)
 	}
-	if !found {
-		t.Fatal("expected webhook latency histogram with http.status_code=201")
+	correlation := metric.CanonicalRecord().Correlation()
+	if correlation.TraceID != "00112233445566778899aabbccddeeff" ||
+		correlation.SpanID != "0011223344556677" || correlation.RequestID != "request-webhook" ||
+		correlation.SessionID != "session-webhook" || correlation.TurnID != "turn-webhook" ||
+		correlation.AgentID != "agent-webhook" || correlation.AgentInstanceID != "agent-instance-webhook" ||
+		correlation.PolicyID != "policy-webhook" || correlation.ToolInvocationID != "tool-webhook" ||
+		correlation.ConnectorID != "codex" {
+		t.Fatalf("webhook latency correlation=%+v", correlation)
+	}
+}
+
+func TestWebhookGeneratedMetricUsesCanonicalOutcomeAndKeyedTarget(t *testing.T) {
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	dispatcher := &WebhookDispatcher{}
+	dispatcher.BindObservabilityV8(runtime)
+	targetHash := "hmac-sha256:" + strings.Repeat("a", 64)
+
+	dispatcher.recordDeliveryV8(t.Context(), "generic", targetHash, "delivered", 204, 3, false)
+
+	dispatches := generatedMetricByName(
+		capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawWebhookDispatches,
+	)
+	latencies := generatedMetricByName(
+		capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawWebhookLatency,
+	)
+	if len(dispatches) != 1 || len(latencies) != 1 {
+		t.Fatalf("canonical webhook metrics dispatches=%d latencies=%d", len(dispatches), len(latencies))
+	}
+	if got := dispatches[0].Attributes()["defenseclaw.outcome"]; got != string(observability.OutcomeCompleted) {
+		t.Fatalf("canonical webhook outcome=%v", got)
+	}
+	if got := latencies[0].Attributes()["defenseclaw.metric.webhook.target_hash"]; got != targetHash {
+		t.Fatalf("canonical webhook target hash=%v", got)
 	}
 }

@@ -13,6 +13,8 @@ package audit
 import (
 	"context"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 )
 
 // TestEnvelopeFromContext_RoundTrip pins the happy path: an envelope
@@ -55,6 +57,7 @@ func TestEnvelopeFromContext_NilCtxReturnsZero(t *testing.T) {
 // row without each call site plumbing seven strings manually.
 func TestLogEventCtx_FillsFromEnvelope(t *testing.T) {
 	l := newTestLogger(t)
+	l.SetRuntimeV8Emitter(newTestRuntimeV8Emitter(t, l.store, router.AdmissionOrdinary))
 	env := CorrelationEnvelope{
 		RunID:           "run-ctx",
 		TraceID:         "trace-ctx",
@@ -80,7 +83,7 @@ func TestLogEventCtx_FillsFromEnvelope(t *testing.T) {
 	// the rest. This is the "handler wrote one line" ergonomic
 	// that the correlation middleware enables.
 	if err := l.LogEventCtx(ctx, Event{
-		Action: "test.ctx",
+		Action: string(ActionInstallClean),
 		Target: "unit",
 	}); err != nil {
 		t.Fatalf("LogEventCtx: %v", err)
@@ -138,12 +141,13 @@ func TestLogEventCtx_FillsFromEnvelope(t *testing.T) {
 // provenance stamping.
 func TestLogEventCtx_CallerOverridesEnvelope(t *testing.T) {
 	l := newTestLogger(t)
+	l.SetRuntimeV8Emitter(newTestRuntimeV8Emitter(t, l.store, router.AdmissionOrdinary))
 	ctx := ContextWithEnvelope(context.Background(), CorrelationEnvelope{
 		RunID:   "run-from-ctx",
 		AgentID: "agent-from-ctx",
 	})
 	if err := l.LogEventCtx(ctx, Event{
-		Action:  "test.pin",
+		Action:  string(ActionInstallClean),
 		Target:  "unit",
 		AgentID: "agent-pinned-by-caller",
 	}); err != nil {
