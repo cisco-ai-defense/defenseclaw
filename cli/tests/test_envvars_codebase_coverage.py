@@ -214,6 +214,7 @@ _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
             "internal/config/config.go",
             "internal/config/config_test.go",
             "cli/tests/test_upgrade_bridge_phase1_rollback.py",
+            "cli/tests/test_upgrade_staged_resolver.py",
             "scripts/upgrade.sh",
         }
     ),
