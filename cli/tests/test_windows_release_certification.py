@@ -17,6 +17,9 @@ RELEASE_PATH = ROOT / ".github" / "workflows" / "release.yaml"
 SMOKE_PATH = ROOT / ".github" / "workflows" / "pre-release-certification.yml"
 FRESH_INSTALL = (ROOT / "scripts" / "test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")
 DISPOSABLE_LAUNCHER = (ROOT / "scripts" / "invoke-windows-setup-standard-user-ci.ps1").read_text(encoding="utf-8")
+STANDARD_USER_PROCESS_LAUNCHER = (ROOT / "scripts" / "windows-disposable-standard-user-launcher.cs").read_text(
+    encoding="utf-8"
+)
 
 
 def _workflow(path: Path) -> dict[str, object]:
@@ -150,6 +153,15 @@ def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> 
     ):
         assert asset in DISPOSABLE_LAUNCHER
     assert "disposable-user bootstrap copy does not match the exact input" in DISPOSABLE_LAUNCHER
+    for compact_argument in (
+        r"..\workspace\scripts\invoke-windows-setup-standard-user-ci.ps1",
+        r"..\artifacts",
+        r"..\diagnostics",
+        r"..\results\result.json",
+    ):
+        assert compact_argument in DISPOSABLE_LAUNCHER
+    assert "commandLine.Length > 1024" in STANDARD_USER_PROCESS_LAUNCHER
+    assert "CreateProcessWithLogonW 1024-character limit" in STANDARD_USER_PROCESS_LAUNCHER
 
     assert "GetFolderPath([Environment+SpecialFolder]::UserProfile)" in FRESH_INSTALL
     assert "[Environment+SpecialFolder]::LocalApplicationData" in FRESH_INSTALL
@@ -168,6 +180,12 @@ def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> 
     assert "DELETEUSERDATA=1" in FRESH_INSTALL
     assert 'GetEnvironmentVariable("Path", "User")' in FRESH_INSTALL
     assert "uninstall did not restore the original user PATH exactly" in FRESH_INSTALL
+    assert FRESH_INSTALL.rindex("$installed = $false") > FRESH_INSTALL.index(
+        "uninstall did not restore the original user PATH exactly"
+    )
+    canonical_version = "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    assert canonical_version in FRESH_INSTALL
+    assert canonical_version in DISPOSABLE_LAUNCHER
 
     for obsolete in (
         "$env:USERPROFILE = $HomeRoot",

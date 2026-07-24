@@ -728,7 +728,7 @@ if (-not (Test-IsAdministrator)) {
     throw 'disposable Setup acceptance account provisioning requires the hosted runner administrator'
 }
 if ($Mode -eq 'bootstrap-acceptance' -and
-    $TargetVersion -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
+    $TargetVersion -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
     throw 'bootstrap acceptance requires a canonical TargetVersion'
 }
 
@@ -1077,12 +1077,12 @@ try {
     $pwsh = Join-Path $PSHOME 'pwsh.exe'
     $arguments = @(
         '-NoLogo', '-NoProfile', '-NonInteractive', '-File',
-        (Join-Path $scripts 'invoke-windows-setup-standard-user-ci.ps1'),
+        '..\workspace\scripts\invoke-windows-setup-standard-user-ci.ps1',
         '-Child', '-Mode', $Mode,
-        '-ArtifactRoot', $childArtifacts,
-        '-StateRoot', $childState,
-        '-DiagnosticsRoot', $childDiagnostics,
-        '-ResultPath', $result,
+        '-ArtifactRoot', '..\artifacts',
+        '-StateRoot', '.',
+        '-DiagnosticsRoot', '..\diagnostics',
+        '-ResultPath', '..\results\result.json',
         '-ExpectedChildSid', $accountSid
     )
     if ($Mode -eq 'contract') {

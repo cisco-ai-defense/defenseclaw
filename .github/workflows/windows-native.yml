@@ -371,13 +371,23 @@ jobs:
           $previousErrorActionPreference = $ErrorActionPreference
           try {
             $ErrorActionPreference = 'Continue'
-            $draft = gh release view $env:BOOTSTRAP_FIXTURE_VERSION `
-              --repo $env:GITHUB_REPOSITORY `
-              --json isDraft `
-              --jq '.isDraft' 2> $null
-            $published = $LASTEXITCODE -eq 0 -and $draft.Trim() -ceq 'false'
+            $lookup = (
+              gh release view $env:BOOTSTRAP_FIXTURE_VERSION `
+                --repo $env:GITHUB_REPOSITORY `
+                --json isDraft `
+                --jq '.isDraft' 2>&1 |
+                Out-String -Width 32768
+            ).Trim()
+            $lookupExit = $LASTEXITCODE
           } finally {
             $ErrorActionPreference = $previousErrorActionPreference
+          }
+          if ($lookupExit -eq 0) {
+            $published = $lookup -ceq 'false'
+          } elseif ($lookup -ceq 'release not found') {
+            $published = $false
+          } else {
+            throw "Could not resolve bootstrap fixture release: $lookup"
           }
           if ($published) {
             'source=release' >> $env:GITHUB_OUTPUT

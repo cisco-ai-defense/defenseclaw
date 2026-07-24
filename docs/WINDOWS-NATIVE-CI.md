@@ -25,9 +25,11 @@ The packaged test artifact is built once and reused by the disposable lifecycle
 jobs. The public-bootstrap shard uses the authenticated `0.8.7` release as its
 compatibility fixture; before that release exists, it replays the immutable
 sealed candidate from the failed release run that exposed the fake-profile
-harness defect. Failure diagnostics are bounded, secret-redacted, retained for
-five days, and followed by unconditional process, listener, account/profile,
-and temporary-state cleanup.
+harness defect. Its child launch uses sandbox-relative arguments to stay
+deterministically below `CreateProcessWithLogonW`'s 1,024-character command-line
+limit even when the parent state root is deeply nested. Failure diagnostics are
+bounded, secret-redacted, retained for five days, and followed by unconditional
+process, listener, account/profile, and temporary-state cleanup.
 
 ## Relationship to Release
 

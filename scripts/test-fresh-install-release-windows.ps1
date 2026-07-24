@@ -26,7 +26,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-if ($TargetVersion -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
+if ($TargetVersion -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
     throw "TargetVersion must be canonical X.Y.Z"
 }
 
@@ -323,7 +323,6 @@ try {
     if ($uninstall.ExitCode -ne 0) {
         throw "Native uninstall failed ($($uninstall.ExitCode)):`n$($uninstall.Output)"
     }
-    $installed = $false
     Wait-ForPathRemoval -Path $cacheRoot
     foreach ($path in @($installRoot, $dataRoot, $cacheRoot, $arpKey)) {
         if (Test-Path -LiteralPath $path) {
@@ -337,6 +336,7 @@ try {
         )) {
         throw "Public bootstrap uninstall did not restore the original user PATH exactly"
     }
+    $installed = $false
     Write-Host "Fresh Windows public bootstrap passed: $TargetVersion" -ForegroundColor Green
 } finally {
     if ($installed -or (Test-Path -LiteralPath $installRoot)) {

@@ -789,6 +789,8 @@ def test_windows_pr_ci_executes_public_bootstrap_against_authenticated_fixture()
     assert bootstrap["env"]["BOOTSTRAP_FIXTURE_ARTIFACT"] == ("release-candidate-30063491006-1")
     assert "sigstore/cosign-installer@" in rendered
     assert "gh release view" in rendered
+    assert "release not found" in rendered
+    assert "Could not resolve bootstrap fixture release" in rendered
     assert "$global:LASTEXITCODE = 0" in rendered
     assert "gh release download" in rendered
     assert "actions/download-artifact@" in rendered
