@@ -551,6 +551,15 @@ jobs:
             throw 'Release Windows Setup is not fully Authenticode signed.'
           }
 
+      - name: Validate the exact signed installer lifecycle
+        run: >-
+          ./scripts/invoke-windows-setup-standard-user-ci.ps1
+          -Mode setup-acceptance
+          -ArtifactRoot windows-installer-output
+          -StateRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-release-setup-acceptance')
+          -DiagnosticsRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-release-setup-diagnostics')
+          -TimeoutSeconds 2400
+
       - name: Upload exact Windows Setup metadata
         id: windows-installer-artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

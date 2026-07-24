@@ -55,10 +55,19 @@ def test_release_requires_authenticode_signed_setup_and_exact_four_sidecars() ->
     assert "Build native Setup with required Authenticode" in rendered
     assert "Release Windows Setup is not fully Authenticode signed" in rendered
 
-    assert "invoke-windows-setup-standard-user-ci.ps1" not in rendered
-    assert "-Mode setup-acceptance" not in rendered
+    assert "invoke-windows-setup-standard-user-ci.ps1" in rendered
+    assert "-Mode setup-acceptance" in rendered
+    assert "-AllowCurrentUserSetupAcceptance" not in rendered
+
+    acceptance = _step(windows, "Validate the exact signed installer lifecycle")
+    acceptance_run = acceptance["run"]
+    assert "-ArtifactRoot windows-installer-output" in acceptance_run
+    assert "-StateRoot (Join-Path $env:RUNNER_TEMP" in acceptance_run
+    assert "-DiagnosticsRoot (Join-Path $env:RUNNER_TEMP" in acceptance_run
+    assert "-TimeoutSeconds 2400" in acceptance_run
 
     upload = next(step for step in windows["steps"] if step.get("id") == "windows-installer-artifact")
+    assert windows["steps"].index(acceptance) < windows["steps"].index(upload)
     assert upload["with"]["path"] == (
         "windows-installer-output/DefenseClawSetup-x64.exe\n"
         "windows-installer-output/DefenseClawSetup-x64.exe.sha256\n"

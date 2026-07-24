@@ -643,8 +643,9 @@ def test_windows_release_requires_signed_setup_and_fresh_install_only() -> None:
     assert "WINDOWS_SIGNING_CERT_PASSWORD" in rendered
     assert "Both Windows Authenticode certificate and password are required" in rendered
     assert "Release Windows Setup is not fully Authenticode signed" in rendered
-    assert "invoke-windows-setup-standard-user-ci.ps1" not in rendered
-    assert "-Mode setup-acceptance" not in rendered
+    assert "invoke-windows-setup-standard-user-ci.ps1" in rendered
+    assert "-Mode setup-acceptance" in rendered
+    assert "-AllowCurrentUserSetupAcceptance" not in rendered
 
     upload = next(step for step in windows["steps"] if step.get("id") == "windows-installer-artifact")
     expected = (
