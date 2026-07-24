@@ -60,6 +60,8 @@ private final class CLIOutputReadControl: @unchecked Sendable {
     private let lock = NSLock()
     private var parentExited = false
 
+    deinit {}
+
     func markParentExited() {
         lock.lock()
         parentExited = true
@@ -70,6 +72,173 @@ private final class CLIOutputReadControl: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return parentExited
+    }
+}
+
+/// A directly spawned command that is also the leader of its own process
+/// group. Group isolation must be established by `posix_spawn`; trying to call
+/// `setpgid` after `Process.run()` races the child reaching `exec`.
+private final class CLIProcess: @unchecked Sendable {
+    let processIdentifier: pid_t
+    let processGroupIdentifier: pid_t
+
+    private init(processIdentifier: pid_t) {
+        self.processIdentifier = processIdentifier
+        self.processGroupIdentifier = processIdentifier
+    }
+
+    deinit {}
+
+    static func spawn(
+        executable: String,
+        arguments: [String],
+        environment: [String: String],
+        outputPipe: Pipe,
+        inputPipe: Pipe?
+    ) throws -> CLIProcess {
+        guard !executable.utf8.contains(0),
+              arguments.allSatisfy({ !$0.utf8.contains(0) }),
+              environment.allSatisfy({
+                  !$0.key.isEmpty
+                      && !$0.key.contains("=")
+                      && !$0.key.utf8.contains(0)
+                      && !$0.value.utf8.contains(0)
+              }) else {
+            throw posixError(EINVAL)
+        }
+
+        var fileActions: posix_spawn_file_actions_t?
+        try check(posix_spawn_file_actions_init(&fileActions))
+        defer { _ = posix_spawn_file_actions_destroy(&fileActions) }
+
+        let outputReadDescriptor = outputPipe.fileHandleForReading.fileDescriptor
+        let outputWriteDescriptor = outputPipe.fileHandleForWriting.fileDescriptor
+        try check(posix_spawn_file_actions_addclose(&fileActions, outputReadDescriptor))
+        try check(posix_spawn_file_actions_adddup2(
+            &fileActions,
+            outputWriteDescriptor,
+            STDOUT_FILENO
+        ))
+        try check(posix_spawn_file_actions_adddup2(
+            &fileActions,
+            outputWriteDescriptor,
+            STDERR_FILENO
+        ))
+        try check(posix_spawn_file_actions_addclose(&fileActions, outputWriteDescriptor))
+
+        if let inputPipe {
+            let inputReadDescriptor = inputPipe.fileHandleForReading.fileDescriptor
+            let inputWriteDescriptor = inputPipe.fileHandleForWriting.fileDescriptor
+            try check(posix_spawn_file_actions_adddup2(
+                &fileActions,
+                inputReadDescriptor,
+                STDIN_FILENO
+            ))
+            try check(posix_spawn_file_actions_addclose(&fileActions, inputReadDescriptor))
+            try check(posix_spawn_file_actions_addclose(&fileActions, inputWriteDescriptor))
+        }
+
+        var attributes: posix_spawnattr_t?
+        try check(posix_spawnattr_init(&attributes))
+        defer { _ = posix_spawnattr_destroy(&attributes) }
+
+        var defaultSignals = sigset_t()
+        sigemptyset(&defaultSignals)
+        sigaddset(&defaultSignals, SIGINT)
+        sigaddset(&defaultSignals, SIGTERM)
+        try check(posix_spawnattr_setsigdefault(&attributes, &defaultSignals))
+
+        var signalMask = sigset_t()
+        sigemptyset(&signalMask)
+        try check(posix_spawnattr_setsigmask(&attributes, &signalMask))
+
+        let flags = Int16(POSIX_SPAWN_SETPGROUP)
+            | Int16(POSIX_SPAWN_SETSIGDEF)
+            | Int16(POSIX_SPAWN_SETSIGMASK)
+            | Int16(POSIX_SPAWN_CLOEXEC_DEFAULT)
+        try check(posix_spawnattr_setflags(&attributes, flags))
+        // A zero pgroup value makes the child a process-group leader whose
+        // group identifier is its own PID.
+        try check(posix_spawnattr_setpgroup(&attributes, 0))
+
+        let argumentStrings = [executable] + arguments
+        let environmentStrings = environment
+            .map { "\($0.key)=\($0.value)" }
+            .sorted()
+        var childPID: pid_t = 0
+        let spawnStatus = try withCStringArray(argumentStrings) { argumentVector in
+            try withCStringArray(environmentStrings) { environmentVector in
+                executable.withCString { executablePointer in
+                    posix_spawn(
+                        &childPID,
+                        executablePointer,
+                        &fileActions,
+                        &attributes,
+                        argumentVector,
+                        environmentVector
+                    )
+                }
+            }
+        }
+        try check(spawnStatus)
+        return CLIProcess(processIdentifier: childPID)
+    }
+
+    var isProcessGroupRunning: Bool {
+        if Darwin.kill(-processGroupIdentifier, 0) == 0 { return true }
+        return errno == EPERM
+    }
+
+    @discardableResult
+    func signalProcessGroup(_ signal: Int32) -> Bool {
+        if Darwin.kill(-processGroupIdentifier, signal) == 0 { return true }
+        return errno == EPERM
+    }
+
+    func waitUntilExit() -> Int32 {
+        var status: Int32 = 0
+        var waitResult: pid_t
+        repeat {
+            waitResult = Darwin.waitpid(processIdentifier, &status, 0)
+        } while waitResult == -1 && errno == EINTR
+
+        guard waitResult == processIdentifier else { return 126 }
+        let terminationSignal = status & 0x7f
+        if terminationSignal == 0 {
+            return (status >> 8) & 0xff
+        }
+        if terminationSignal != 0x7f {
+            return terminationSignal
+        }
+        return 126
+    }
+
+    private static func check(_ status: Int32) throws {
+        guard status == 0 else { throw posixError(status) }
+    }
+
+    private static func posixError(_ code: Int32) -> NSError {
+        NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+    }
+
+    private static func withCStringArray<Result>(
+        _ strings: [String],
+        body: (UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) throws -> Result
+    ) throws -> Result {
+        var pointers: [UnsafeMutablePointer<CChar>?] = []
+        pointers.reserveCapacity(strings.count + 1)
+        for string in strings {
+            guard let pointer = strdup(string) else {
+                pointers.forEach { free($0) }
+                throw posixError(ENOMEM)
+            }
+            pointers.append(pointer)
+        }
+        pointers.append(nil)
+        defer { pointers.dropLast().forEach { free($0) } }
+        return try pointers.withUnsafeMutableBufferPointer { buffer in
+            try body(buffer.baseAddress!)
+        }
     }
 }
 
@@ -254,8 +423,9 @@ actor CLIRunner {
 
     private struct ActiveRun {
         let token: UUID
-        let process: Process
+        let process: CLIProcess
         var cancellationRequested: Bool
+        var cancellationTask: Task<Void, Never>?
     }
 
     private enum RunState {
@@ -275,7 +445,8 @@ actor CLIRunner {
         guard installationContext != context else { return }
         if installationContext.permitsMutation, !context.permitsMutation {
             let activeRuns = runStates.compactMap { executionID, state -> (UUID, ActiveRun)? in
-                guard case .running(let active) = state, active.process.isRunning else { return nil }
+                guard case .running(let active) = state,
+                      active.process.isProcessGroupRunning else { return nil }
                 return (executionID, active)
             }
             for (executionID, active) in activeRuns {
@@ -459,9 +630,6 @@ actor CLIRunner {
             let setting = binaryName == "defenseclaw" ? " Set its path in Settings ▸ Connection." : ""
             return CLIResult(exitCode: 127, output: "\(binaryName) binary not found.\(setting)")
         }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: binary)
-        proc.arguments = arguments
         var env = Self.subprocessEnvironment()
         env["NO_COLOR"] = "1"
         for (key, value) in environment where !key.isEmpty {
@@ -472,16 +640,21 @@ actor CLIRunner {
         for (key, value) in installationContext.protectedSubprocessEnvironment {
             env[key] = value
         }
-        proc.environment = env
 
         let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
         let inputPipe = standardInput == nil ? nil : Pipe()
-        proc.standardInput = inputPipe
 
+        let proc: CLIProcess
         do {
-            try proc.run()
+            proc = try CLIProcess.spawn(
+                executable: binary,
+                arguments: arguments,
+                environment: env,
+                outputPipe: pipe,
+                inputPipe: inputPipe
+            )
+            try? pipe.fileHandleForWriting.close()
+            try? inputPipe?.fileHandleForReading.close()
         } catch {
             return CLIResult(exitCode: 126, output: "Failed to launch \(binary): \(error.localizedDescription)")
         }
@@ -489,7 +662,8 @@ actor CLIRunner {
         runStates[executionID] = .running(ActiveRun(
             token: runToken,
             process: proc,
-            cancellationRequested: false
+            cancellationRequested: false,
+            cancellationTask: nil
         ))
 
         if let standardInput, let inputPipe {
@@ -503,9 +677,9 @@ actor CLIRunner {
         // command is alive. It also tells the reader when the direct process has
         // exited, even if a descendant still owns the pipe's write end.
         let terminationTask = Task.detached(priority: .utility) {
-            proc.waitUntilExit()
+            let exitCode = proc.waitUntilExit()
             readControl.markParentExited()
-            return proc.terminationStatus
+            return exitCode
         }
 
         // A detached reader keeps draining the pipe even if the calling Task is
@@ -617,11 +791,23 @@ actor CLIRunner {
         }
 
         let explicitlyCancelled: Bool
+        let cancellationTask: Task<Void, Never>?
         if case .running(let active) = runStates[executionID], active.token == runToken {
             explicitlyCancelled = active.cancellationRequested
-            runStates[executionID] = nil
+            cancellationTask = active.cancellationTask
         } else {
             explicitlyCancelled = false
+            cancellationTask = nil
+        }
+        // Keep the token-guarded state registered until an accepted
+        // cancellation finishes its bounded group escalation. Otherwise a
+        // direct parent that exits on SIGINT could let an ignoring descendant
+        // outlive both the run result and the later SIGTERM/SIGKILL steps.
+        if let cancellationTask {
+            await cancellationTask.value
+        }
+        if case .running(let active) = runStates[executionID], active.token == runToken {
+            runStates[executionID] = nil
         }
         let cancelled = Task.isCancelled || explicitlyCancelled
         return CLIResult(
@@ -653,38 +839,51 @@ actor CLIRunner {
         case .running(var active):
             if let expectedToken, active.token != expectedToken { return .notFound }
             guard !active.cancellationRequested else { return .alreadyRequested }
-            guard active.process.isRunning else { return .finishing }
+            guard active.process.isProcessGroupRunning else { return .finishing }
             active.cancellationRequested = true
             runStates[executionID] = .running(active)
-            active.process.interrupt()
-            scheduleCancellationEscalation(executionID: executionID, token: active.token)
+            guard active.process.signalProcessGroup(SIGINT) else {
+                active.cancellationRequested = false
+                runStates[executionID] = .running(active)
+                return .finishing
+            }
+            active.cancellationTask = scheduleCancellationEscalation(
+                executionID: executionID,
+                token: active.token
+            )
+            runStates[executionID] = .running(active)
             return .requested
         }
     }
 
-    private func scheduleCancellationEscalation(executionID: UUID, token: UUID) {
+    private func scheduleCancellationEscalation(
+        executionID: UUID,
+        token: UUID
+    ) -> Task<Void, Never> {
         Task.detached { [weak self] in
             try? await Task.sleep(for: .milliseconds(500))
-            await self?.terminateIfNeeded(executionID: executionID, token: token)
+            guard await self?.terminateIfNeeded(executionID: executionID, token: token) == true else {
+                return
+            }
             try? await Task.sleep(for: .seconds(1))
             await self?.killIfNeeded(executionID: executionID, token: token)
         }
     }
 
-    private func terminateIfNeeded(executionID: UUID, token: UUID) {
+    private func terminateIfNeeded(executionID: UUID, token: UUID) -> Bool {
         guard case .running(let active) = runStates[executionID],
               active.token == token,
               active.cancellationRequested,
-              active.process.isRunning else { return }
-        active.process.terminate()
+              active.process.isProcessGroupRunning else { return false }
+        return active.process.signalProcessGroup(SIGTERM)
     }
 
     private func killIfNeeded(executionID: UUID, token: UUID) {
         guard case .running(let active) = runStates[executionID],
               active.token == token,
               active.cancellationRequested,
-              active.process.isRunning else { return }
-        Darwin.kill(active.process.processIdentifier, SIGKILL)
+              active.process.isProcessGroupRunning else { return }
+        _ = active.process.signalProcessGroup(SIGKILL)
     }
 
     /// Lightweight doctor probe (TUI Shift+D) — parsed into check rows.

@@ -28,6 +28,8 @@ CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" xcrun swiftc \
   "$ROOT/DefenseClawMac/DataLayer/InstallationContext.swift" \
   "$ROOT/DefenseClawMac/DataLayer/ConfigStore.swift" \
   "$ROOT/DefenseClawMac/DataLayer/CLIRunner.swift" \
+  "$ROOT/DefenseClawMac/DataLayer/CommandRegistry.swift" \
+  "$ROOT/DefenseClawMac/DataLayer/CommandActivityStore.swift" \
   "$ROOT/DefenseClawMac/DataLayer/InventoryOutputParser.swift" \
   "$ROOT/Tests/OutputSafetyTests.swift" \
   -o "$BUILD_DIR/OutputSafetyTests"

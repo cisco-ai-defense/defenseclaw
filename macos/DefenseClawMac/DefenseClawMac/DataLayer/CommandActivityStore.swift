@@ -154,23 +154,21 @@ final class CommandActivityStore {
         entries[index].status = .cancelling
         Task {
             let disposition = await runner.cancel(runID: id)
-            guard let index = entries.firstIndex(where: { $0.id == id }),
-                  entries[index].status == .cancelling else { return }
-            switch disposition {
-            case .requested, .alreadyRequested:
-                break
-            case .finishing:
-                // The direct process already exited; preserve its actual result
-                // instead of claiming that the cancellation stopped it.
-                entries[index].status = .finishing
-            case .notFound:
-                entries[index].finishedAt = Date()
-                entries[index].status = .cancelled
-                if entries[index].output.isEmpty {
-                    entries[index].output = "Cancellation requested after the command process was no longer active.\n"
-                }
-                entries[index].suggestedNextAction = "Refresh the affected view to verify its final state."
-            }
+            applyCancellationDisposition(disposition, to: id)
+        }
+    }
+
+    func applyCancellationDisposition(_ disposition: CLICancellationDisposition, to id: UUID) {
+        guard let index = entries.firstIndex(where: { $0.id == id }),
+              entries[index].status == .cancelling else { return }
+        switch disposition {
+        case .requested, .alreadyRequested:
+            break
+        case .finishing, .notFound:
+            // `.notFound` can race the runner removing its state immediately
+            // before the actual result resumes here. Keep the row active so
+            // clearCompleted() cannot remove it before run() finalizes it.
+            entries[index].status = .finishing
         }
     }
 
