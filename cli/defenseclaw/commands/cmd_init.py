@@ -480,6 +480,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     try:
         finalize_first_run_config(cfg, was_config_absent=is_new_config)
     except FreshMigrationStateError as exc:
+        store.close()
         raise click.ClickException(
             f"config was saved but its fresh migration cursor was not published: {exc}; "
             "rerun 'defenseclaw init' to retry safely"

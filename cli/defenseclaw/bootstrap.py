@@ -213,8 +213,10 @@ def _read_bounded_regular_file(path: str, maximum: int, *, private: bool) -> byt
     descriptor = open_regular_file_no_follow(path)
     try:
         info = os.fstat(descriptor)
+        # CPython 3.12 reports st_nlink as zero on Windows; the secure opener
+        # already rejects reparse points and verifies the opened file identity.
         if (
-            info.st_nlink != 1
+            (os.name != "nt" and info.st_nlink != 1)
             or not 0 < info.st_size <= maximum
             or (
                 private

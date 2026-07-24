@@ -106,12 +106,16 @@ class TestInitCommand(unittest.TestCase):
         _mock_guardrail,
         _mock_which,
     ):
+        import sqlite3
+
         from defenseclaw import migration_state
         from defenseclaw.bootstrap import _fresh_migration_pending_path
+        from defenseclaw.db import Store
 
         mock_path.return_value = Path(self.tmp_dir)
         original_save_if_absent = migration_state.save_if_absent
         attempts = 0
+        stores = []
 
         def fail_once(data_dir, state):
             nonlocal attempts
@@ -120,19 +124,30 @@ class TestInitCommand(unittest.TestCase):
                 raise OSError("injected cursor publication failure")
             return original_save_if_absent(data_dir, state)
 
+        def track_store(path):
+            store = Store(path)
+            stores.append(store)
+            return store
+
         with (
             patch.object(migration_state, "save_if_absent", new=fail_once),
             patch("defenseclaw.logger.Logger.from_config", return_value=MagicMock()),
+            patch("defenseclaw.db.Store", side_effect=track_store),
         ):
             first = self.runner.invoke(init_cmd, ["--skip-install"], obj=AppContext())
             self.assertNotEqual(first.exit_code, 0)
             self.assertIn("rerun 'defenseclaw init' to retry safely", first.output)
+            with self.assertRaisesRegex(sqlite3.ProgrammingError, "closed"):
+                stores[0].db.execute("SELECT 1")
             self.assertFalse(os.path.lexists(migration_state.state_path(self.tmp_dir)))
             self.assertTrue(os.path.isfile(_fresh_migration_pending_path(self.tmp_dir)))
 
             second = self.runner.invoke(init_cmd, ["--skip-install"], obj=AppContext())
 
         self.assertEqual(second.exit_code, 0, second.output + (second.stderr or ""))
+        for store in stores:
+            with self.assertRaisesRegex(sqlite3.ProgrammingError, "closed"):
+                store.db.execute("SELECT 1")
         self.assertIn("recovered pending fresh cursor", second.output)
         self.assertIsNotNone(migration_state.load(self.tmp_dir))
         self.assertFalse(os.path.lexists(_fresh_migration_pending_path(self.tmp_dir)))

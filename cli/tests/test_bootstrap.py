@@ -97,6 +97,34 @@ class BootstrapEnvTests(unittest.TestCase):
         for expected in (cfg.data_dir, cfg.quarantine_dir, cfg.plugin_dir, cfg.policy_dir):
             self.assertIn(os.path.abspath(expected), created)
 
+    def test_windows_zero_link_count_accepts_regular_recovery_file(self):
+        from types import SimpleNamespace
+
+        from defenseclaw import bootstrap
+
+        with (
+            patch(
+                "defenseclaw.file_permissions.open_regular_file_no_follow",
+                return_value=17,
+            ),
+            patch.object(bootstrap.os, "name", "nt"),
+            patch.object(
+                bootstrap.os,
+                "fstat",
+                return_value=SimpleNamespace(st_nlink=0, st_size=6),
+            ),
+            patch.object(bootstrap.os, "read", side_effect=[b"config", b""]),
+            patch.object(bootstrap.os, "close") as close,
+        ):
+            raw = bootstrap._read_bounded_regular_file(
+                "config.yaml",
+                1024,
+                private=False,
+            )
+
+        self.assertEqual(raw, b"config")
+        close.assert_called_once_with(17)
+
     def test_creates_audit_db_file(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
         bootstrap_env(cfg)
