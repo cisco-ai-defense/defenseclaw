@@ -283,9 +283,7 @@ def test_windows_checksum_parser_rejects_modern_or_unknown_nested_rows(
 def test_windows_native_bootstrap_delegates_authenticated_install_lifecycle() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
     main = _main_body(source)
-    handoff = source[
-        source.index("function Invoke-NativeSetup") : source.index("function Main")
-    ]
+    handoff = source[source.index("function Invoke-NativeSetup") : source.index("function Main")]
 
     assert not LEGACY_INLINE_INSTALLER
     assert "function Ensure-Python {" not in source
@@ -297,9 +295,7 @@ def test_windows_native_bootstrap_delegates_authenticated_install_lifecycle() ->
     assert main.index("Stage-LocalBundle") < main.index("Invoke-NativeSetup")
     assert "Remove-PrivateStageRoot -Path $bundle.Root" in main
     assert handoff.index("Assert-Sha256") < handoff.index("Assert-SetupAuthenticode")
-    assert handoff.index("Assert-SetupAuthenticode") < handoff.index(
-        "Invoke-BoundedNativeProcess"
-    )
+    assert handoff.index("Assert-SetupAuthenticode") < handoff.index("Invoke-BoundedNativeProcess")
 
 
 @pytest.mark.skipif(
@@ -541,31 +537,6 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
     assert "[Parameter(DontShow = $true)][switch]$InjectFailureAfterFreshDirectoryMove" in source
     assert '[Parameter(DontShow = $true)][string]$NativePrivateDirectorySelfTestRoot = ""' in source
 
-    harness = (ROOT / "scripts/test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")
-    assert "-InjectFailureBeforeShim" in harness
-    assert "Invoke-FreshInstaller -InjectConcurrentShimBeforePublish" in harness
-    assert "InjectPolicyCleanupFailure" in harness
-    assert "InjectPolicyCustodyMoveBeforeCleanup" in harness
-    assert "Invoke-FreshInstaller -InjectFailureAfterFreshDirectoryMove" in harness
-    assert "Post-move fresh-directory cleanup was not exact" in harness
-    assert "Persistent User PATH was not modified" in harness
-    assert "Modern fresh install mutated the persistent user PATH" in harness
-    assert 'defenseclaw.cmd`" init' in harness
-    assert 'Join-Path $HomeRoot ".local\\bin"' in harness
-    assert 'Join-Path $HomeRoot ".local/bin"' not in harness
-    assert "Remove-MovedPolicyCustodyResidue" in harness
-    assert "Creation-bound policy custody was not preserved" in harness
-    assert "Remove-InjectedPolicyResidue" in harness
-    assert "Fresh Windows install did not survive policy cleanup failure" in harness
-    assert "Policy cleanup failure or residual retirement changed installed bytes" in harness
-    assert "powershell.exe" in harness
-    assert "Get-Command powershell.exe -CommandType Application -ErrorAction Stop" in harness
-    assert "WindowsPowerShellCommand" not in harness
-    assert "Windows PowerShell 5.1 could not parse/compile install.ps1" in harness
-    assert "-NativePrivateDirectorySelfTestRoot $legacyNativeRoot" in harness
-    assert "Windows PowerShell 5.1 native private lifecycle failed" in harness
-    assert "-NativePrivateDirectorySelfTestRoot $modernNativeRoot" in harness
-    assert "PowerShell 7 native private lifecycle failed" in harness
     assert "Native private directory lifecycle passed" in source
     assert "Native snapshotted-child move-out refusal passed" in source
     assert "Native fresh directory fault boundaries passed" in source
@@ -576,15 +547,63 @@ def test_windows_fresh_installer_rolls_back_exact_attempt_owned_payloads() -> No
     assert "Native namespace retirement wait passed" in source
     assert "Native post-move rollback topology passed" in source
     assert "Native private-directory self-test accepted a file as its parent" in source
-    assert "Fresh-install payload rollback completed; retry is safe" in harness
-    assert "Concurrent unclaimed shim disappeared during rollback" in harness
-    assert "Failed fresh install left installer-created binary directories behind" in harness
-    assert '-Phase "post-directory-publication injection" -Context $postMove.Output' in harness
-    assert '-Phase "post-venv policy-cleanup injection"' in harness
-    assert '-Phase "moved policy-custody injection"' in harness
-    assert '-Phase "concurrent shim collision"' in harness
-    assert "--- post-move installer output ---" in harness
-    assert "bounded residual path inventory (names and kinds only)" in harness
+
+
+def test_windows_release_bootstrap_smoke_tracks_native_setup_layout() -> None:
+    harness = (ROOT / "scripts/test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")
+    disposable = (ROOT / "scripts/invoke-windows-setup-standard-user-ci.ps1").read_text(encoding="utf-8")
+
+    # Both the release candidate and PR-native regression must enter through the
+    # same disposable real-user profile. Environment-variable fake homes cannot
+    # model Windows Known Folders or the native Setup registry surface.
+    assert "invoke-windows-setup-standard-user-ci.ps1" in harness
+    assert "-Mode bootstrap-acceptance" in harness
+    assert "-ArtifactRoot $ReleaseDir" in harness
+    assert "-TargetVersion $TargetVersion" in harness
+    assert "'bootstrap-acceptance'" in disposable
+    assert "test-fresh-install-release-windows.ps1" in disposable
+    assert "install.ps1" in disposable
+
+    for asset in (
+        "DefenseClawSetup-x64.exe",
+        "DefenseClawSetup-x64.exe.provenance.json",
+        "upgrade-manifest.json",
+        "checksums.txt",
+        "checksums.txt.sig",
+        "checksums.txt.pem",
+        "checksums.txt.bundle",
+        "cosign-windows-amd64.exe",
+    ):
+        assert asset in disposable
+
+    assert "GetFolderPath([Environment+SpecialFolder]::UserProfile)" in harness
+    assert "[Environment+SpecialFolder]::LocalApplicationData" in harness
+    assert "Programs\\DefenseClaw" in harness
+    assert "DefenseClaw\\InstallerCache" in harness
+    assert "Uninstall\\DefenseClaw" in harness
+    assert "Native DefenseClaw Setup completed successfully" in harness
+    assert "Assert-ExactVersion -Executable $launcher" in harness
+    assert "Assert-ExactVersion -Executable $gateway" in harness
+    assert "$first = Invoke-CapturedProcess" in harness
+    assert "$second = Invoke-CapturedProcess" in harness
+    assert "DELETEUSERDATA=1" in harness
+    assert 'GetEnvironmentVariable("Path", "User")' in harness
+    assert "uninstall did not restore the original user PATH exactly" in harness
+
+    for obsolete in (
+        "$env:USERPROFILE = $HomeRoot",
+        "$env:DEFENSECLAW_HOME = Join-Path $HomeRoot",
+        '".defenseclaw/.venv/Scripts/defenseclaw.exe"',
+        '".local\\bin\\defenseclaw-gateway.exe"',
+        "Persistent User PATH was not modified",
+        "Second fresh-installer invocation unexpectedly succeeded",
+        "InjectFailureBeforeShim",
+        "InjectConcurrentShimBeforePublish",
+        "InjectPolicyCleanupFailure",
+        "InjectPolicyCustodyMoveBeforeCleanup",
+        "InjectFailureAfterFreshDirectoryMove",
+    ):
+        assert obsolete not in harness
 
 
 @pytest.mark.skipif(
@@ -1415,16 +1434,17 @@ def test_windows_hard_cut_refusal_exercises_a_cold_cache_without_env_suppression
 
     cold_cache = refusal.index('Get-ChildItem -LiteralPath $packageRoot -Directory -Filter "__pycache__"')
     snapshot = refusal.index("Write-InstalledStateSnapshot -Case $Case -Output $before")
-    unsuppress = refusal.index(
-        '[Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $null, "Process")'
-    )
+    unsuppress = refusal.index('[Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $null, "Process")')
     invoke = refusal.index("Invoke-ExternalLogged", unsuppress)
     after_snapshot = refusal.index("Write-InstalledStateSnapshot -Case $Case -Output $after")
 
     assert cold_cache < snapshot < unsuppress < invoke < after_snapshot
-    assert refusal.count(
-        '[Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $bytecodeEnvironment, "Process")'
-    ) >= 2
+    assert (
+        refusal.count(
+            '[Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $bytecodeEnvironment, "Process")'
+        )
+        >= 2
+    )
 
 
 @pytest.mark.skipif(
@@ -1550,15 +1570,25 @@ def test_windows_release_harness_accepts_both_reviewed_config_map_topologies() -
         assert set(config_versions) == set(published)
         for version in published:
             major, minor, patch = (int(component) for component in version.split("."))
-            expected = 8 if (major, minor, patch) >= (0, 8, 5) else 7 if (
-                major,
-                minor,
-                patch,
-            ) >= (0, 8, 3) else 6 if (
-                major,
-                minor,
-                patch,
-            ) >= (0, 7, 1) else 5
+            expected = (
+                8
+                if (major, minor, patch) >= (0, 8, 5)
+                else 7
+                if (
+                    major,
+                    minor,
+                    patch,
+                )
+                >= (0, 8, 3)
+                else 6
+                if (
+                    major,
+                    minor,
+                    patch,
+                )
+                >= (0, 7, 1)
+                else 5
+            )
             assert config_versions[version] == expected
         if "0.8.4" in config_versions:
             assert config_versions["0.8.4"] == 7

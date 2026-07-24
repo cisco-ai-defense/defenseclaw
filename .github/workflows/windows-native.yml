@@ -340,6 +340,131 @@ jobs:
         if: ${{ always() }}
         run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
 
+  public-bootstrap-acceptance:
+    name: Windows public install.ps1 acceptance
+    runs-on: windows-latest
+    timeout-minutes: 50
+    permissions:
+      actions: read
+      contents: read
+    env:
+      BOOTSTRAP_FIXTURE_VERSION: 0.8.7
+      # Before 0.8.7 exists, replay the sealed candidate that exposed the
+      # fake-profile harness defect. Once published, the job automatically uses
+      # permanent release assets and this fallback remains fail-closed evidence.
+      BOOTSTRAP_FIXTURE_RUN_ID: "30063491006"
+      BOOTSTRAP_FIXTURE_ARTIFACT: release-candidate-30063491006-1
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf bootstrap -DiagnosticsLeaf windows-native-diagnostics-bootstrap -ArtifactLeaf windows-bootstrap-fixture
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
+      - name: Select permanent release or sealed candidate fixture
+        id: fixture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $previousErrorActionPreference = $ErrorActionPreference
+          try {
+            $ErrorActionPreference = 'Continue'
+            $lookup = (
+              gh release view $env:BOOTSTRAP_FIXTURE_VERSION `
+                --repo $env:GITHUB_REPOSITORY `
+                --json isDraft `
+                --jq '.isDraft' 2>&1 |
+                Out-String -Width 32768
+            ).Trim()
+            $lookupExit = $LASTEXITCODE
+          } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+          }
+          if ($lookupExit -eq 0) {
+            $published = $lookup -ceq 'false'
+          } elseif ($lookup -ceq 'release not found') {
+            $published = $false
+          } else {
+            throw "Could not resolve bootstrap fixture release: $lookup"
+          }
+          if ($published) {
+            'source=release' >> $env:GITHUB_OUTPUT
+          } else {
+            'source=candidate' >> $env:GITHUB_OUTPUT
+          }
+          # GitHub's pwsh wrapper exits with the last native exit code. A
+          # missing release is the expected pre-publication branch, not an
+          # error after its candidate fallback has been selected.
+          $global:LASTEXITCODE = 0
+      - name: Download authenticated public bootstrap fixture
+        if: ${{ steps.fixture.outputs.source == 'release' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $fixture = Join-Path $env:DC_ARTIFACT_ROOT 'release'
+          [IO.Directory]::CreateDirectory($fixture) | Out-Null
+          foreach ($asset in @(
+            'DefenseClawSetup-x64.exe',
+            'DefenseClawSetup-x64.exe.provenance.json',
+            'upgrade-manifest.json',
+            'checksums.txt',
+            'checksums.txt.sig',
+            'checksums.txt.pem',
+            'checksums.txt.bundle'
+          )) {
+            gh release download $env:BOOTSTRAP_FIXTURE_VERSION `
+              --repo $env:GITHUB_REPOSITORY `
+              --pattern $asset `
+              --dir $fixture
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not download authenticated bootstrap fixture asset: $asset"
+            }
+          }
+          "DC_BOOTSTRAP_RELEASE_DIR=$fixture" >> $env:GITHUB_ENV
+      - name: Download sealed pre-publication bootstrap fixture
+        if: ${{ steps.fixture.outputs.source == 'candidate' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ env.BOOTSTRAP_FIXTURE_ARTIFACT }}
+          path: ${{ env.DC_ARTIFACT_ROOT }}\candidate
+          repository: cisco-ai-defense/defenseclaw
+          run-id: ${{ env.BOOTSTRAP_FIXTURE_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Select sealed candidate distribution
+        if: ${{ steps.fixture.outputs.source == 'candidate' }}
+        run: |
+          $fixture = Join-Path $env:DC_ARTIFACT_ROOT 'candidate\dist'
+          if (-not (Test-Path -LiteralPath $fixture -PathType Container)) {
+            throw "Sealed bootstrap candidate distribution is missing: $fixture"
+          }
+          "DC_BOOTSTRAP_RELEASE_DIR=$fixture" >> $env:GITHUB_ENV
+      - name: Exercise current public bootstrap under a real disposable user
+        run: |
+          $bootstrapState = Join-Path $env:DC_STATE_ROOT (
+            'defenseclaw-bootstrap-acceptance-' + [guid]::NewGuid().ToString('N')
+          )
+          ./scripts/test-fresh-install-release-windows.ps1 `
+            -ReleaseDir $env:DC_BOOTSTRAP_RELEASE_DIR `
+            -TargetVersion $env:BOOTSTRAP_FIXTURE_VERSION `
+            -StateRoot $bootstrapState `
+            -DiagnosticsRoot $env:DC_DIAGNOSTICS
+      - name: Capture bounded diagnostics
+        if: ${{ failure() || cancelled() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
+      - name: Upload diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-bootstrap-diagnostics
+          path: ${{ env.DC_DIAGNOSTICS }}\**
+          if-no-files-found: ignore
+          retention-days: 5
+      - name: Always clean isolated processes, listeners, and temp state
+        if: ${{ always() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
+
   connector-contract:
     name: Windows x64 connector contract / ${{ matrix.connector }}
     needs: [powershell-static, package-artifact]
@@ -407,6 +532,7 @@ jobs:
       - powershell-static
       - package-artifact
       - packaged-acceptance
+      - public-bootstrap-acceptance
       - connector-contract
     runs-on: ubuntu-latest
     timeout-minutes: 5

@@ -16,6 +16,10 @@ PACKAGED_V8_VALIDATOR = (ROOT / "scripts" / "validate_packaged_v8_resources.py")
 RELEASE_PATH = ROOT / ".github" / "workflows" / "release.yaml"
 SMOKE_PATH = ROOT / ".github" / "workflows" / "pre-release-certification.yml"
 FRESH_INSTALL = (ROOT / "scripts" / "test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")
+DISPOSABLE_LAUNCHER = (ROOT / "scripts" / "invoke-windows-setup-standard-user-ci.ps1").read_text(encoding="utf-8")
+STANDARD_USER_PROCESS_LAUNCHER = (ROOT / "scripts" / "windows-disposable-standard-user-launcher.cs").read_text(
+    encoding="utf-8"
+)
 
 
 def _workflow(path: Path) -> dict[str, object]:
@@ -66,8 +70,14 @@ def test_release_accepts_signed_or_explicitly_unverified_setup_and_exact_four_si
     assert "-DiagnosticsRoot (Join-Path $env:RUNNER_TEMP" in acceptance_run
     assert "-TimeoutSeconds 2400" in acceptance_run
 
+    diagnostics = _step(windows, "Upload native Setup diagnostics on failure")
+    assert diagnostics["if"] == "${{ failure() || cancelled() }}"
+    assert diagnostics["with"]["path"] == ("${{ runner.temp }}/defenseclaw-release-setup-diagnostics/**")
+    assert diagnostics["with"]["if-no-files-found"] == "warn"
+
     upload = next(step for step in windows["steps"] if step.get("id") == "windows-installer-artifact")
-    assert windows["steps"].index(acceptance) < windows["steps"].index(upload)
+    assert windows["steps"].index(acceptance) < windows["steps"].index(diagnostics)
+    assert windows["steps"].index(diagnostics) < windows["steps"].index(upload)
     assert upload["with"]["path"] == (
         "windows-installer-output/DefenseClawSetup-x64.exe\n"
         "windows-installer-output/DefenseClawSetup-x64.exe.sha256\n"
@@ -107,11 +117,18 @@ def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> 
     rendered = str(job)
 
     assert job["runs-on"] == "windows-latest"
+    assert int(job["timeout-minutes"]) >= 45
     assert "inputs.candidate_artifact" in rendered
     assert "scripts/release_candidate.py verify" in rendered
     assert "scripts/verify-sigstore-blob.py" in rendered
     assert "scripts/test-fresh-install-release-windows.ps1" in rendered
-    assert "-SuccessPathOnly" in rendered
+    assert "-TargetVersion" in rendered
+    assert "-SuccessPathOnly" not in rendered
+    assert "defenseclaw-release-bootstrap-diagnostics" in rendered
+    diagnostics = _step(job, "Upload Windows bootstrap diagnostics on failure")
+    assert diagnostics["if"] == "${{ failure() || cancelled() }}"
+    assert diagnostics["with"]["path"] == ("${{ runner.temp }}/defenseclaw-release-bootstrap-diagnostics/**")
+    assert diagnostics["with"]["if-no-files-found"] == "warn"
 
     smoke_text = SMOKE_PATH.read_text(encoding="utf-8")
     for retired in (
@@ -125,17 +142,95 @@ def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> 
     ):
         assert retired not in smoke_text
 
-    assert '$Installer = Join-Path $Root "scripts\\install.ps1"' in FRESH_INSTALL
-    assert '"-Local", $ReleaseDir' in FRESH_INSTALL
-    assert '"-Version", $RequestedVersion' in FRESH_INSTALL
-    assert "[switch]$SuccessPathOnly" in FRESH_INSTALL
-    assert "$first = if ($SuccessPathOnly)" in FRESH_INSTALL
-    assert "Invoke-FreshInstaller\n    } else {" in FRESH_INSTALL
-    assert "DefenseClaw installed successfully" in FRESH_INSTALL
-    assert "Assert-ExactVersion -Command $cli" in FRESH_INSTALL
-    assert "Assert-ExactVersion -Command $gateway" in FRESH_INSTALL
-    assert "$second = Invoke-FreshInstaller" in FRESH_INSTALL
-    assert "Second fresh-installer invocation unexpectedly succeeded" in FRESH_INSTALL
+    assert "invoke-windows-setup-standard-user-ci.ps1" in FRESH_INSTALL
+    assert "-Mode bootstrap-acceptance" in FRESH_INSTALL
+    assert "-ArtifactRoot $ReleaseDir" in FRESH_INSTALL
+    assert "-TargetVersion $TargetVersion" in FRESH_INSTALL
+    assert "$env:RUNNER_TEMP" in FRESH_INSTALL
+    assert "$env:DC_WINDOWS_NATIVE_BASE_ROOT" in FRESH_INSTALL
+    assert "Refusing to clean unexpected bootstrap acceptance state" in FRESH_INSTALL
+    assert "'bootstrap-acceptance'" in DISPOSABLE_LAUNCHER
+    assert "test-fresh-install-release-windows.ps1" in DISPOSABLE_LAUNCHER
+    assert "install.ps1" in DISPOSABLE_LAUNCHER
+    for asset in (
+        "DefenseClawSetup-x64.exe",
+        "DefenseClawSetup-x64.exe.provenance.json",
+        "upgrade-manifest.json",
+        "checksums.txt",
+        "checksums.txt.sig",
+        "checksums.txt.pem",
+        "checksums.txt.bundle",
+        "cosign-windows-amd64.exe",
+    ):
+        assert asset in DISPOSABLE_LAUNCHER
+    assert "disposable-user bootstrap copy does not match the exact input" in DISPOSABLE_LAUNCHER
+    for compact_argument in (
+        r"..\workspace\scripts\invoke-windows-setup-standard-user-ci.ps1",
+        r"..\artifacts",
+        r"..\diagnostics",
+        r"..\results\result.json",
+    ):
+        assert compact_argument in DISPOSABLE_LAUNCHER
+    assert "commandLine.Length > 1024" in STANDARD_USER_PROCESS_LAUNCHER
+    assert "CreateProcessWithLogonW 1024-character limit" in STANDARD_USER_PROCESS_LAUNCHER
+
+    assert "GetFolderPath([Environment+SpecialFolder]::UserProfile)" in FRESH_INSTALL
+    assert "[Environment+SpecialFolder]::LocalApplicationData" in FRESH_INSTALL
+    assert "Programs\\DefenseClaw" in FRESH_INSTALL
+    assert "DefenseClaw\\InstallerCache" in FRESH_INSTALL
+    assert "Uninstall\\DefenseClaw" in FRESH_INSTALL
+    assert re.search(r"""['"]-Local['"]""", FRESH_INSTALL)
+    assert re.search(r"""['"]-Version['"]""", FRESH_INSTALL)
+    assert re.search(r"""['"]-CosignPath['"]""", FRESH_INSTALL)
+    assert "Native DefenseClaw Setup completed successfully" in FRESH_INSTALL
+    assert "Assert-ExactVersion -Executable $launcher" in FRESH_INSTALL
+    assert "Assert-ExactVersion -Executable $gateway" in FRESH_INSTALL
+    assert "$first = Invoke-CapturedProcess" in FRESH_INSTALL
+    assert "$second = Invoke-CapturedProcess" in FRESH_INSTALL
+    assert "Out-String -Width 32768" in FRESH_INSTALL
+    assert "DELETEUSERDATA=1" in FRESH_INSTALL
+    assert 'GetEnvironmentVariable("Path", "User")' in FRESH_INSTALL
+    assert "uninstall did not restore the original user PATH exactly" in FRESH_INSTALL
+    assert FRESH_INSTALL.rindex("$installed = $false") > FRESH_INSTALL.index(
+        "uninstall did not restore the original user PATH exactly"
+    )
+    canonical_version = "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    assert canonical_version in FRESH_INSTALL
+    assert canonical_version in DISPOSABLE_LAUNCHER
+
+    for obsolete in (
+        "$env:USERPROFILE = $HomeRoot",
+        "$env:DEFENSECLAW_HOME = Join-Path $HomeRoot",
+        '".defenseclaw/.venv/Scripts/defenseclaw.exe"',
+        '".local\\bin\\defenseclaw-gateway.exe"',
+        "Second fresh-installer invocation unexpectedly succeeded",
+        "InjectFailureBeforeShim",
+        "InjectPolicyCleanupFailure",
+    ):
+        assert obsolete not in FRESH_INSTALL
+
+
+def test_disposable_setup_failure_preserves_bounded_native_log_before_profile_cleanup() -> None:
+    fixed_source = r"DefenseClaw\InstallerState\setup.log"
+    fixed_destination = "native-setup.log"
+    capture = "Copy-DisposableNativeSetupLog"
+    generic_handoff = "Copy-BoundedDisposableDiagnostics"
+    profile_cleanup = "Remove-DisposableProfileAndAccount $accountName $accountSid"
+
+    assert fixed_source in DISPOSABLE_LAUNCHER
+    assert fixed_destination in DISPOSABLE_LAUNCHER
+    assert "[Environment+SpecialFolder]::LocalApplicationData" in DISPOSABLE_LAUNCHER
+    assert "DisposableFileGuard]::CopyBoundedRegularFile(" in DISPOSABLE_LAUNCHER
+    assert re.search(
+        r"(?s)CopyBoundedRegularFile\(\s*\$source,\s*\$destination,\s*65536\s*\)",
+        DISPOSABLE_LAUNCHER,
+    )
+    assert "-AllowedRoot $localAppData -RequireExists" in DISPOSABLE_LAUNCHER
+    assert "-AllowedRoot $SandboxRoot -RequireExists" in DISPOSABLE_LAUNCHER
+    assert "native Setup log preservation failed" in DISPOSABLE_LAUNCHER
+    assert DISPOSABLE_LAUNCHER.rindex(capture) < DISPOSABLE_LAUNCHER.rindex(generic_handoff)
+    assert DISPOSABLE_LAUNCHER.rindex(generic_handoff) < DISPOSABLE_LAUNCHER.index(profile_cleanup)
+    assert "Copy-Item" not in DISPOSABLE_LAUNCHER
 
 
 def test_publish_includes_windows_binaries_without_an_omission_mode() -> None:

@@ -17,11 +17,12 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('setup-acceptance', 'wizard-smoke', 'contract')]
+    [ValidateSet('setup-acceptance', 'bootstrap-acceptance', 'wizard-smoke', 'contract')]
     [string]$Mode,
     [ValidateSet('codex', 'claudecode')][string]$Connector = 'codex',
     [Parameter(Mandatory)][string]$ArtifactRoot,
     [Parameter(Mandatory)][string]$StateRoot,
+    [string]$TargetVersion = '',
     [string]$DiagnosticsRoot = '',
     [ValidateRange(60, 7200)][int]$TimeoutSeconds = 4500,
     [switch]$Child,
@@ -218,6 +219,41 @@ function Test-ActualChildFilesystemBoundary {
     }
 }
 
+function Copy-DisposableNativeSetupLog {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DiagnosticsRoot,
+        [Parameter(Mandatory)][string]$SandboxRoot
+    )
+
+    $localAppData = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::LocalApplicationData
+    )
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        throw 'disposable user has no LocalApplicationData known folder'
+    }
+    $source = Join-Path $localAppData 'DefenseClaw\InstallerState\setup.log'
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { return }
+
+    $source = Assert-DisposableNoReparseAncestors -Path $source `
+        -AllowedRoot $localAppData -RequireExists
+    $destinationRoot = Assert-DisposableNoReparseAncestors `
+        -Path $DiagnosticsRoot -AllowedRoot $SandboxRoot -RequireExists
+    $destinationRootItem = Get-Item -LiteralPath $destinationRoot `
+        -Force -ErrorAction Stop
+    if (-not $destinationRootItem.PSIsContainer) {
+        throw 'disposable native Setup diagnostic destination is not a directory'
+    }
+    $destination = Join-Path $destinationRoot 'native-setup.log'
+    $null = Assert-DisposableNoReparseAncestors -Path $destination `
+        -AllowedRoot $destinationRoot
+    [void][DefenseClaw.DisposableFileGuard]::CopyBoundedRegularFile(
+        $source,
+        $destination,
+        65536
+    )
+}
+
 function Invoke-ChildMode {
     $result = [IO.Path]::GetFullPath($ResultPath)
     $state = [IO.Path]::GetFullPath($StateRoot)
@@ -349,6 +385,12 @@ function Invoke-ChildMode {
                 -WorkspaceRoot (Split-Path -Parent $PSScriptRoot) `
                 -StateRoot $state -ArtifactRoot $artifacts `
                 -AllowCurrentUserSetupAcceptance
+        } elseif ($Mode -eq 'bootstrap-acceptance') {
+            & (Join-Path $PSScriptRoot 'test-fresh-install-release-windows.ps1') `
+                -ReleaseDir $artifacts `
+                -TargetVersion $TargetVersion `
+                -StateRoot $state `
+                -Child
         } elseif ($Mode -eq 'contract') {
             & $nativeHarness -Operation contract -Connector $Connector `
                 -WorkspaceRoot (Split-Path -Parent $PSScriptRoot) `
@@ -364,6 +406,21 @@ function Invoke-ChildMode {
         Write-ChildProgress $progress "${Mode}-failed"
         $failure = $_
         if (-not [string]::IsNullOrWhiteSpace($DiagnosticsRoot)) {
+            try {
+                Copy-DisposableNativeSetupLog `
+                    -DiagnosticsRoot ([IO.Path]::GetFullPath($DiagnosticsRoot)) `
+                    -SandboxRoot $sandboxRoot
+            } catch {
+                $failure = [Management.Automation.ErrorRecord]::new(
+                    [InvalidOperationException]::new(
+                        "$($failure.Exception.Message); native Setup log preservation failed: $($_.Exception.Message)",
+                        $failure.Exception
+                    ),
+                    'DisposableNativeSetupLogPreservationFailed',
+                    [Management.Automation.ErrorCategory]::OperationStopped,
+                    $state
+                )
+            }
             try {
                 & $nativeHarness -Operation capture -StateRoot $state `
                     -DiagnosticsRoot ([IO.Path]::GetFullPath($DiagnosticsRoot))
@@ -720,6 +777,10 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hoste
 if (-not (Test-IsAdministrator)) {
     throw 'disposable Setup acceptance account provisioning requires the hosted runner administrator'
 }
+if ($Mode -eq 'bootstrap-acceptance' -and
+    $TargetVersion -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+    throw 'bootstrap acceptance requires a canonical TargetVersion'
+}
 
 $stateBase = [IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
 $artifactSource = [IO.Path]::GetFullPath($ArtifactRoot).TrimEnd('\')
@@ -749,11 +810,15 @@ $setupSourceItem = Get-Item -LiteralPath $setupSource -Force -ErrorAction Stop
 if ($setupSourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
     throw 'native setup input must be a regular file, not a reparse point'
 }
-$resourceVerifierInputs = @(
-    'DefenseClawWindowsResourceVerifier-x64.exe',
-    'DefenseClawWindowsResourceIcon.png',
-    'DefenseClawWindowsResourceVersion.txt'
-)
+$resourceVerifierInputs = if ($Mode -eq 'bootstrap-acceptance') {
+    @()
+} else {
+    @(
+        'DefenseClawWindowsResourceVerifier-x64.exe',
+        'DefenseClawWindowsResourceIcon.png',
+        'DefenseClawWindowsResourceVersion.txt'
+    )
+}
 foreach ($resourceInputName in $resourceVerifierInputs) {
     $resourceInput = Join-Path $artifactSource $resourceInputName
     $null = Assert-DisposableNoReparseAncestors -Path $resourceInput `
@@ -764,6 +829,48 @@ foreach ($resourceInputName in $resourceVerifierInputs) {
         continue
     }
     throw "Windows resource verifier input must be a regular file: $resourceInput"
+}
+$bootstrapCandidateAssets = @()
+$bootstrapSourceHashes = @{}
+$bootstrapCosignSource = ''
+$bootstrapCosignSha256 = 'DD6C61E510DA627BCAED4CD9DB844EC11CACD09826D814D89F7F68D40FEB07BE'
+if ($Mode -eq 'bootstrap-acceptance') {
+    $bootstrapCandidateAssets = @(
+        'DefenseClawSetup-x64.exe.provenance.json',
+        'upgrade-manifest.json',
+        'checksums.txt',
+        'checksums.txt.sig',
+        'checksums.txt.pem',
+        'checksums.txt.bundle'
+    )
+    foreach ($assetName in $bootstrapCandidateAssets) {
+        $assetPath = Join-Path $artifactSource $assetName
+        $null = Assert-DisposableNoReparseAncestors -Path $assetPath `
+            -AllowedRoot $artifactSource -RequireExists
+        $assetItem = Get-Item -LiteralPath $assetPath -Force -ErrorAction Stop
+        if ($assetItem.PSIsContainer -or
+            ($assetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            $assetItem.Length -le 0) {
+            throw "bootstrap release input must be a non-empty regular file: $assetPath"
+        }
+        $bootstrapSourceHashes[$assetName] = (
+            Get-FileHash -LiteralPath $assetPath -Algorithm SHA256
+        ).Hash
+    }
+    $cosignCommand = Get-Command cosign.exe -CommandType Application `
+        -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $cosignCommand) {
+        throw 'bootstrap acceptance requires pinned Cosign v2.6.2 on PATH'
+    }
+    $bootstrapCosignSource = [IO.Path]::GetFullPath($cosignCommand.Source)
+    $cosignItem = Get-Item -LiteralPath $bootstrapCosignSource -Force -ErrorAction Stop
+    if ($cosignItem.PSIsContainer -or
+        ($cosignItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        $cosignItem.Length -le 0 -or
+        (Get-FileHash -LiteralPath $bootstrapCosignSource -Algorithm SHA256).Hash -cne
+        $bootstrapCosignSha256) {
+        throw 'bootstrap acceptance Cosign does not match the reviewed v2.6.2 Windows verifier'
+    }
 }
 $expectedSetupHash = [DefenseClaw.DisposableFileGuard]::ComputeSha256Hex(
     $setupSource,
@@ -892,6 +999,11 @@ try {
             "live-connector-e2e\golden\$Connector\pre_tool_block.json",
             "live-connector-e2e\golden\$Connector\session_start.json"
         )
+    } elseif ($Mode -eq 'bootstrap-acceptance') {
+        $harnessFiles += @(
+            'install.ps1',
+            'test-fresh-install-release-windows.ps1'
+        )
     }
     foreach ($file in $harnessFiles) {
         $source = Join-Path $PSScriptRoot $file
@@ -918,6 +1030,26 @@ try {
         ) -cne
         $expectedSetupHash) {
         throw 'disposable-user Setup copy does not match the exact input artifact'
+    }
+    if ($Mode -eq 'bootstrap-acceptance') {
+        foreach ($assetName in $bootstrapCandidateAssets) {
+            $childAsset = Join-Path $childArtifacts $assetName
+            [IO.File]::Copy(
+                (Join-Path $artifactSource $assetName),
+                $childAsset,
+                $false
+            )
+            if ((Get-FileHash -LiteralPath $childAsset -Algorithm SHA256).Hash -cne
+                [string]$bootstrapSourceHashes[$assetName]) {
+                throw "disposable-user bootstrap copy does not match the exact input: $assetName"
+            }
+        }
+        $childCosign = Join-Path $childArtifacts 'cosign-windows-amd64.exe'
+        [IO.File]::Copy($bootstrapCosignSource, $childCosign, $false)
+        if ((Get-FileHash -LiteralPath $childCosign -Algorithm SHA256).Hash -cne
+            $bootstrapCosignSha256) {
+            throw 'disposable-user Cosign copy does not match the reviewed v2.6.2 verifier'
+        }
     }
 
     Set-DisposableProtectedDirectoryAcl $workspace $sidObject `
@@ -995,16 +1127,19 @@ try {
     $pwsh = Join-Path $PSHOME 'pwsh.exe'
     $arguments = @(
         '-NoLogo', '-NoProfile', '-NonInteractive', '-File',
-        (Join-Path $scripts 'invoke-windows-setup-standard-user-ci.ps1'),
+        '..\workspace\scripts\invoke-windows-setup-standard-user-ci.ps1',
         '-Child', '-Mode', $Mode,
-        '-ArtifactRoot', $childArtifacts,
-        '-StateRoot', $childState,
-        '-DiagnosticsRoot', $childDiagnostics,
-        '-ResultPath', $result,
+        '-ArtifactRoot', '..\artifacts',
+        '-StateRoot', '.',
+        '-DiagnosticsRoot', '..\diagnostics',
+        '-ResultPath', '..\results\result.json',
         '-ExpectedChildSid', $accountSid
     )
     if ($Mode -eq 'contract') {
         $arguments += @('-Connector', $Connector)
+    }
+    if ($Mode -eq 'bootstrap-acceptance') {
+        $arguments += @('-TargetVersion', $TargetVersion)
     }
     if ($Mode -eq 'setup-acceptance') {
         $arguments += '-ExerciseWmiEscape'
@@ -1093,6 +1228,26 @@ try {
     if ($sourceHashAfter -cne $expectedSetupHash -or
         $childHashAfter -cne $expectedSetupHash) {
         throw 'exact Setup artifact hash changed during disposable-user lifecycle acceptance'
+    }
+    if ($Mode -eq 'bootstrap-acceptance') {
+        foreach ($assetName in $bootstrapCandidateAssets) {
+            $expectedHash = [string]$bootstrapSourceHashes[$assetName]
+            $sourcePath = Join-Path $artifactSource $assetName
+            $childPath = Join-Path $childArtifacts $assetName
+            if ((Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash -cne
+                $expectedHash -or
+                (Get-FileHash -LiteralPath $childPath -Algorithm SHA256).Hash -cne
+                $expectedHash) {
+                throw "exact bootstrap release input changed during acceptance: $assetName"
+            }
+        }
+        if ((Get-FileHash `
+                -LiteralPath (Join-Path $childArtifacts 'cosign-windows-amd64.exe') `
+                -Algorithm SHA256).Hash -cne $bootstrapCosignSha256 -or
+            (Get-FileHash -LiteralPath $bootstrapCosignSource -Algorithm SHA256).Hash -cne
+            $bootstrapCosignSha256) {
+            throw 'exact bootstrap Cosign verifier changed during acceptance'
+        }
     }
     if ($Mode -eq 'setup-acceptance') {
         $fixturePidText = Read-BoundedDisposableResult $wmiFixtureRecord $childResults 4096

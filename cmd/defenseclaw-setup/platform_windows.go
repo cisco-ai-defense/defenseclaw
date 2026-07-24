@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -65,6 +66,8 @@ type pidState struct {
 	StartIdentity string `json:"start_identity"`
 }
 
+const maxManagedPIDRecordBytes = 64 << 10
+
 func acquireSetupLock() (func() error, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
@@ -106,28 +109,12 @@ func managedProcessOwnedBy(gatewayPath, dataRoot, pidFile string) (bool, error) 
 
 func managedProcessProofFor(gatewayPath, dataRoot, pidFile string) (managedProcessProof, bool, error) {
 	pidPath := filepath.Join(dataRoot, pidFile)
-	info, err := os.Lstat(pidPath)
-	if errors.Is(err, os.ErrNotExist) {
+	state, exists, err := readManagedPIDRecord(pidPath)
+	if err != nil {
+		return managedProcessProof{}, false, err
+	}
+	if !exists {
 		return managedProcessProof{}, false, nil
-	}
-	if err != nil {
-		return managedProcessProof{}, false, err
-	}
-	if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return managedProcessProof{}, false, fmt.Errorf("managed gateway PID path is not a regular file: %s", pidPath)
-	}
-	if reparse, err := isReparsePoint(pidPath); err != nil {
-		return managedProcessProof{}, false, err
-	} else if reparse {
-		return managedProcessProof{}, false, fmt.Errorf("managed gateway PID path is a reparse point: %s", pidPath)
-	}
-	data, err := os.ReadFile(pidPath)
-	if err != nil {
-		return managedProcessProof{}, false, err
-	}
-	var state pidState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return managedProcessProof{}, false, fmt.Errorf("invalid managed gateway PID file %s: %w", pidPath, err)
 	}
 	if state.PID <= 0 || strings.TrimSpace(state.Executable) == "" {
 		return managedProcessProof{}, false, fmt.Errorf("managed gateway PID file lacks a complete process identity: %s", pidPath)
@@ -169,6 +156,94 @@ func managedProcessProofFor(gatewayPath, dataRoot, pidFile string) (managedProce
 		StartIdentity: identity,
 		ProcessHandle: uintptr(handle),
 	}, true, nil
+}
+
+func readManagedPIDRecord(pidPath string) (pidState, bool, error) {
+	file, exists, err := openManagedPIDRecord(pidPath)
+	if err != nil || !exists {
+		return pidState{}, exists, err
+	}
+	state, readErr := decodeManagedPIDRecord(file, pidPath)
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		return pidState{}, false, errors.Join(readErr, closeErr)
+	}
+	return state, true, nil
+}
+
+// openManagedPIDRecord binds validation and decoding to one Windows file
+// object. Gateway PID records are atomically replaced during startup, so
+// separate Lstat/GetFileAttributes/ReadFile lookups can observe three
+// different pathname states and leak a transient not-found error into Setup
+// convergence. Delete sharing lets the publisher proceed while this handle
+// keeps the verified object stable for the reader.
+func openManagedPIDRecord(pidPath string) (*os.File, bool, error) {
+	pathPtr, err := winpath.UTF16Ptr(pidPath)
+	if err != nil {
+		return nil, false, err
+	}
+	handle, err := windows.CreateFile(
+		pathPtr,
+		windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if isManagedPIDRecordAbsentError(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return nil, false, errors.Join(err, windows.CloseHandle(handle))
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		err := fmt.Errorf("managed gateway PID path is not a regular file: %s", pidPath)
+		return nil, false, errors.Join(err, windows.CloseHandle(handle))
+	}
+	// PID records are process-identity proofs, not user documents. Reject every
+	// reparse tag—not only name-surrogate links—so validation never depends on
+	// cloud hydration, compression, deduplication, or another filter driver's
+	// interpretation of the record.
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		err := fmt.Errorf("managed gateway PID path is a reparse point: %s", pidPath)
+		return nil, false, errors.Join(err, windows.CloseHandle(handle))
+	}
+	file := os.NewFile(uintptr(handle), pidPath)
+	if file == nil {
+		err := fmt.Errorf("wrap managed gateway PID file handle: %s", pidPath)
+		return nil, false, errors.Join(err, windows.CloseHandle(handle))
+	}
+	return file, true, nil
+}
+
+func isManagedPIDRecordAbsentError(err error) bool {
+	return errors.Is(err, windows.ERROR_FILE_NOT_FOUND) ||
+		errors.Is(err, windows.ERROR_PATH_NOT_FOUND) ||
+		errors.Is(err, windows.ERROR_DELETE_PENDING)
+}
+
+func decodeManagedPIDRecord(file *os.File, pidPath string) (pidState, error) {
+	data, err := io.ReadAll(io.LimitReader(file, maxManagedPIDRecordBytes+1))
+	if err != nil {
+		return pidState{}, fmt.Errorf("read managed gateway PID file %s: %w", pidPath, err)
+	}
+	if len(data) > maxManagedPIDRecordBytes {
+		return pidState{}, fmt.Errorf(
+			"managed gateway PID file exceeds %d bytes: %s",
+			maxManagedPIDRecordBytes,
+			pidPath,
+		)
+	}
+	var state pidState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return pidState{}, fmt.Errorf("invalid managed gateway PID file %s: %w", pidPath, err)
+	}
+	return state, nil
 }
 
 func closeManagedProcessProof(proof managedProcessProof) error {

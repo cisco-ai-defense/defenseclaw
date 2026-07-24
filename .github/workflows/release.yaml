@@ -616,6 +616,15 @@ jobs:
           -DiagnosticsRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-release-setup-diagnostics')
           -TimeoutSeconds 2400
 
+      - name: Upload native Setup diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-windows-setup-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/defenseclaw-release-setup-diagnostics/**
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Upload exact Windows Setup metadata
         id: windows-installer-artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
