@@ -536,6 +536,14 @@ def test_bridge_comment_restore_is_ordered_before_seal_and_uses_source_snapshot(
     cleanup_end = source.index("\n\ndef restore_state_before_artifacts()", cleanup_start)
     cleanup = source[cleanup_start:cleanup_end]
     assert "members = list(entries)" not in cleanup
+    assert "members.append((entry.name, entry.inode()))" in cleanup
+    assert "members.append(entry)" not in cleanup
+    assert "for name, observed_inode in members:" in cleanup
+    assert "os.lstat(name, dir_fd=descriptor)" in cleanup
+    assert "entry.stat(" not in cleanup
+    assert "entry.is_symlink()" not in cleanup
+    assert "info.st_dev != directory_device" in cleanup
+    assert "info.st_ino != observed_inode" in cleanup
     assert "if len(members) == 100000:" in cleanup
 
 
@@ -765,6 +773,68 @@ def test_resumed_cleanup_root_replacement_cannot_redirect_unlink(tmp_path: Path)
 
 
 @POSIX_UPGRADE_CUSTODY
+def test_resumed_cleanup_entry_replacement_before_inspection_is_rejected(
+    tmp_path: Path,
+) -> None:
+    tmp_path.chmod(0o700)
+    token = "a" * 32
+    data_home = tmp_path / "data"
+    openclaw_home = tmp_path / "openclaw"
+    config_parent = tmp_path / "config-root"
+    data_home.mkdir(mode=0o700)
+    openclaw_home.mkdir(mode=0o700)
+    config_parent.mkdir(mode=0o700)
+    config_path = config_parent / "active.yaml"
+    config_path.write_text("config_version: 7\n", encoding="utf-8")
+    temporary_name = f".active.yaml.upgrade-{token}.owned.tmp"
+    temporary = config_parent / temporary_name
+    temporary.write_text("enumerated-sensitive-bytes\n", encoding="utf-8")
+    enumerated = config_parent / f"{temporary_name}.enumerated"
+    program = _phase_one_recovery_cleanup_program()
+    needle = "        for name, observed_inode in members:\n"
+    assert program.count(needle) == 1
+    program = program.replace(
+        needle,
+        f"        if any(name == {temporary_name!r} for name, _inode in members):\n"
+        "            os.rename(\n"
+        f"                {temporary_name!r},\n"
+        f"                {temporary_name + '.enumerated'!r},\n"
+        "                src_dir_fd=descriptor,\n"
+        "                dst_dir_fd=descriptor,\n"
+        "            )\n"
+        "            replacement = os.open(\n"
+        f"                {temporary_name!r},\n"
+        "                os.O_WRONLY | os.O_CREAT | os.O_EXCL,\n"
+        "                0o600,\n"
+        "                dir_fd=descriptor,\n"
+        "            )\n"
+        "            try:\n"
+        "                os.write(replacement, b'replacement-must-survive\\n')\n"
+        "                os.fsync(replacement)\n"
+        "            finally:\n"
+        "                os.close(replacement)\n"
+        f"{needle}",
+        1,
+    )
+
+    completed = _run_phase_one_recovery_cleanup(
+        data_home,
+        openclaw_home,
+        config_path,
+        f"phase-one-{token}",
+        program=program,
+    )
+
+    assert completed.returncode != 0
+    assert "identity changed before inspection" in completed.stderr
+    assert enumerated.read_text(encoding="utf-8") == "enumerated-sensitive-bytes\n"
+    assert temporary.read_text(encoding="utf-8") == "replacement-must-survive\n"
+    assert not list(
+        config_parent.glob(f".defenseclaw-cleanup-{token}-*.quarantine")
+    )
+
+
+@POSIX_UPGRADE_CUSTODY
 def test_resumed_cleanup_entry_replacement_is_quarantined_not_deleted(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     token = "a" * 32
@@ -780,19 +850,22 @@ def test_resumed_cleanup_entry_replacement_is_quarantined_not_deleted(tmp_path: 
     temporary = config_parent / temporary_name
     temporary.write_text("inspected-sensitive-bytes\n", encoding="utf-8")
     program = _phase_one_recovery_cleanup_program()
-    needle = "            quarantine_name = quarantine_no_replace(descriptor, entry.name, info)"
+    needle = (
+        "            quarantine_name = quarantine_no_replace("
+        "descriptor, name, info)"
+    )
     assert program.count(needle) == 1
     program = program.replace(
         needle,
-        f"            if entry.name == {temporary_name!r}:\n"
+        f"            if name == {temporary_name!r}:\n"
         "                os.rename(\n"
-        "                    entry.name,\n"
-        "                    entry.name + '.inspected',\n"
+        "                    name,\n"
+        "                    name + '.inspected',\n"
         "                    src_dir_fd=descriptor,\n"
         "                    dst_dir_fd=descriptor,\n"
         "                )\n"
         "                replacement = os.open(\n"
-        "                    entry.name,\n"
+        "                    name,\n"
         "                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,\n"
         "                    0o600,\n"
         "                    dir_fd=descriptor,\n"
@@ -851,7 +924,10 @@ def test_resumed_cleanup_replays_matching_crash_left_quarantine(tmp_path: Path) 
     temporary = config_parent / temporary_name
     temporary.write_text("crash-left-sensitive-bytes\n", encoding="utf-8")
     program = _phase_one_recovery_cleanup_program()
-    needle = "            quarantine_name = quarantine_no_replace(descriptor, entry.name, info)"
+    needle = (
+        "            quarantine_name = quarantine_no_replace("
+        "descriptor, name, info)"
+    )
     assert program.count(needle) == 1
     program = program.replace(
         needle,

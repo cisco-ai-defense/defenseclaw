@@ -2785,6 +2785,7 @@ def cleanup_owned_temporaries() -> None:
         raise RuntimeError("phase-one temporary quarantine name allocation was exhausted")
 
     def cleanup_descriptor(descriptor: int) -> None:
+        directory_device = os.fstat(descriptor).st_dev
         with os.scandir(descriptor) as entries:
             members = []
             for entry in entries:
@@ -2792,19 +2793,26 @@ def cleanup_owned_temporaries() -> None:
                     raise RuntimeError(
                         "phase-one temporary cleanup exceeded its scan bound"
                     )
-                members.append(entry)
-        for entry in members:
-            quarantine_match = cleanup_quarantine.fullmatch(entry.name)
+                members.append((entry.name, entry.inode()))
+        for name, observed_inode in members:
+            quarantine_match = cleanup_quarantine.fullmatch(name)
             owned = (
-                entry.name.startswith(generic_prefix)
-                or (entry.name.startswith(cursor_prefix) and entry.name.endswith(".tmp"))
-                or tagged_writer.fullmatch(entry.name) is not None
+                name.startswith(generic_prefix)
+                or (name.startswith(cursor_prefix) and name.endswith(".tmp"))
+                or tagged_writer.fullmatch(name) is not None
                 or quarantine_match is not None
             )
             if not owned:
                 continue
-            info = entry.stat(follow_symlinks=False)
-            if entry.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
+            info = os.lstat(name, dir_fd=descriptor)
+            if (
+                info.st_dev != directory_device
+                or info.st_ino != observed_inode
+            ):
+                raise RuntimeError(
+                    "phase-one owned temporary identity changed before inspection"
+                )
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
                 raise RuntimeError("phase-one owned temporary has an unsafe identity")
             if quarantine_match is not None and (
                 info.st_dev != int(quarantine_match.group(1), 16)
@@ -2814,7 +2822,7 @@ def cleanup_owned_temporaries() -> None:
                 raise RuntimeError(
                     "phase-one cleanup quarantine identity changed before replay"
                 )
-            quarantine_name = quarantine_no_replace(descriptor, entry.name, info)
+            quarantine_name = quarantine_no_replace(descriptor, name, info)
             quarantined = os.stat(
                 quarantine_name,
                 dir_fd=descriptor,
