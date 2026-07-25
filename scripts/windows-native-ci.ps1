@@ -430,6 +430,135 @@ function Limit-WindowsNativeText([AllowNull()][string]$Text, [int]$MaxBytes = 10
     return $head + [Text.Encoding]::UTF8.GetString($markerBytes) + $tail
 }
 
+function Add-WindowsNativeDiagnosticTail(
+    [Collections.Generic.Queue[string]]$Queue,
+    [AllowNull()][string]$Text,
+    [int]$MaxLines
+) {
+    foreach ($line in [regex]::Split([string]$Text, '\r?\n')) {
+        if (-not $line) { continue }
+        $Queue.Enqueue($line)
+        while ($Queue.Count -gt $MaxLines) { $null = $Queue.Dequeue() }
+    }
+}
+
+function Get-WindowsNativeJsonString([object]$Object, [string]$Name) {
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return '' }
+    return [string]$property.Value
+}
+
+function Get-GoTestFailureSummary(
+    [AllowNull()][string]$Text,
+    [int]$MaxBytes = 262144
+) {
+    if (-not $Text) { return '' }
+
+    $failedTests = [Collections.Generic.List[object]]::new()
+    $failedTestKeys = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    $failedPackages = [Collections.Generic.List[object]]::new()
+    $failedPackageNames = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    $failedTestsOmitted = $false
+    $reader = [IO.StringReader]::new($Text)
+    try {
+        while ($null -ne ($line = $reader.ReadLine())) {
+            try {
+                $event = $line.TrimStart([char]0xFEFF) | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                continue
+            }
+            if ((Get-WindowsNativeJsonString $event 'Action') -ne 'fail') { continue }
+            $package = Get-WindowsNativeJsonString $event 'Package'
+            if (-not $package) { continue }
+            $test = Get-WindowsNativeJsonString $event 'Test'
+            if ($test) {
+                $key = "$($package.Length):$package$test"
+                if ($failedTestKeys.Contains($key)) { continue }
+                if ($failedTestKeys.Count -ge 128) {
+                    $failedTestsOmitted = $true
+                } elseif ($failedTestKeys.Add($key)) {
+                    $failedTests.Add([pscustomobject]@{
+                        Key = $key
+                        Package = $package
+                        Test = $test
+                        Elapsed = Get-WindowsNativeJsonString $event 'Elapsed'
+                    })
+                }
+            } elseif ($failedPackageNames.Add($package)) {
+                $failedPackages.Add([pscustomobject]@{
+                    Package = $package
+                    Elapsed = Get-WindowsNativeJsonString $event 'Elapsed'
+                })
+            }
+        }
+    } finally {
+        $reader.Dispose()
+    }
+    if ($failedTests.Count -eq 0 -and $failedPackages.Count -eq 0) { return '' }
+
+    $testOutput = @{}
+    foreach ($failure in $failedTests) {
+        $testOutput[$failure.Key] = [Collections.Generic.Queue[string]]::new()
+    }
+    $packageOutput = @{}
+    foreach ($failure in $failedPackages) {
+        $packageOutput[$failure.Package] = [Collections.Generic.Queue[string]]::new()
+    }
+
+    $reader = [IO.StringReader]::new($Text)
+    try {
+        while ($null -ne ($line = $reader.ReadLine())) {
+            try {
+                $event = $line.TrimStart([char]0xFEFF) | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                continue
+            }
+            if ((Get-WindowsNativeJsonString $event 'Action') -ne 'output') { continue }
+            $package = Get-WindowsNativeJsonString $event 'Package'
+            $test = Get-WindowsNativeJsonString $event 'Test'
+            $output = Get-WindowsNativeJsonString $event 'Output'
+            if ($packageOutput.ContainsKey($package)) {
+                Add-WindowsNativeDiagnosticTail $packageOutput[$package] $output 160
+            }
+            if ($test) {
+                $key = "$($package.Length):$package$test"
+                if ($testOutput.ContainsKey($key)) {
+                    Add-WindowsNativeDiagnosticTail $testOutput[$key] $output 120
+                }
+            }
+        }
+    } finally {
+        $reader.Dispose()
+    }
+
+    $summary = [Text.StringBuilder]::new()
+    [void]$summary.AppendLine('go test failure summary (bounded and redacted)')
+    foreach ($failure in $failedTests) {
+        $elapsed = if ($failure.Elapsed) { " [$($failure.Elapsed)s]" } else { '' }
+        [void]$summary.AppendLine("--- FAIL: $($failure.Test) ($($failure.Package))$elapsed")
+        foreach ($line in $testOutput[$failure.Key]) {
+            [void]$summary.AppendLine($line)
+        }
+    }
+    foreach ($failure in $failedPackages) {
+        $elapsed = if ($failure.Elapsed) { " [$($failure.Elapsed)s]" } else { '' }
+        [void]$summary.AppendLine("FAIL package $($failure.Package)$elapsed")
+        if (-not ($failedTests | Where-Object { $_.Package -eq $failure.Package })) {
+            foreach ($line in $packageOutput[$failure.Package]) {
+                [void]$summary.AppendLine($line)
+            }
+        }
+    }
+    if ($failedTestsOmitted) {
+        [void]$summary.AppendLine('[additional failed tests omitted]')
+    }
+    return Limit-WindowsNativeText ($summary.ToString()) $MaxBytes
+}
+
 function Write-BoundedText([string]$Path, [AllowNull()][string]$Text, [int]$MaxBytes = 1048576) {
     $safe = Limit-WindowsNativeText $Text $MaxBytes
     [IO.Directory]::CreateDirectory((Split-Path -Parent $Path)) | Out-Null
@@ -649,9 +778,13 @@ function Invoke-WindowsNativeProcess {
         [int[]]$AllowedExitCodes = @(0),
         [ValidateRange(1, 4200)][int]$TimeoutSeconds = 600,
         [string]$LogPath = '',
+        [string]$GoTestFailureSummaryPath = '',
         [string]$WorkingDirectory = '',
         [switch]$SuppressOutput
     )
+    if ($GoTestFailureSummaryPath -and $SuppressOutput) {
+        throw 'Go test failure summaries are prohibited for credential-bearing process output'
+    }
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $FilePath
     $start.UseShellExecute = $false
@@ -717,8 +850,18 @@ function Invoke-WindowsNativeProcess {
             if (-not $stdoutTask.IsCompleted) { $process.StandardOutput.Dispose() }
             if (-not $stderrTask.IsCompleted) { $process.StandardError.Dispose() }
         }
-        $stdout = Limit-WindowsNativeText (Read-WindowsNativeOutputTask $stdoutTask)
-        $stderr = Limit-WindowsNativeText (Read-WindowsNativeOutputTask $stderrTask)
+        $rawStdout = Read-WindowsNativeOutputTask $stdoutTask
+        $rawStderr = Read-WindowsNativeOutputTask $stderrTask
+        if ($GoTestFailureSummaryPath) {
+            $goTestFailureSummary = Get-GoTestFailureSummary $rawStdout
+            if ($goTestFailureSummary) {
+                Write-BoundedText -Path $GoTestFailureSummaryPath `
+                    -Text $goTestFailureSummary -MaxBytes 262144
+                Write-Host $goTestFailureSummary
+            }
+        }
+        $stdout = Limit-WindowsNativeText $rawStdout
+        $stderr = Limit-WindowsNativeText $rawStderr
         if ($timedOut) {
             $stderr = @($stderr, "[timeout descendants: $timeoutIdentitySummary]" | Where-Object { $_ }) -join [Environment]::NewLine
         }
@@ -4963,7 +5106,7 @@ function Get-WindowsNativeCaptureFiles([string]$Root) {
             Sort-Object @{
                 Expression = {
                     if ($_.Name -eq 'wizard-driver.log') { 0 }
-                    elseif ($_.Name -eq 'go-test.log') { 1 }
+                    elseif ($_.Name -in @('go-test-failure-summary.log', 'go-test.log')) { 1 }
                     else { 2 }
                 }
             }, FullName |
@@ -5096,12 +5239,76 @@ function Invoke-SelfTest {
             throw 'bounded native text lost truncation, redaction, or UTF-8 integrity guarantees'
         }
 
+        $goTestJson = @(
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/pkg'
+                Test = 'TestPassing'
+                Output = "passing output must not be retained`n"
+            },
+            [pscustomobject]@{
+                Action = 'pass'
+                Package = 'example.invalid/pkg'
+                Test = 'TestPassing'
+                Elapsed = 0.01
+            },
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/pkg'
+                Test = 'TestFailing'
+                Output = "Authorization: Bearer $headerSecret`n"
+            },
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/pkg'
+                Test = 'TestFailing'
+                Output = "fixture assertion failed`n"
+            },
+            [pscustomobject]@{
+                Action = 'fail'
+                Package = 'example.invalid/pkg'
+                Test = 'TestFailing'
+                Elapsed = 1.25
+            },
+            [pscustomobject]@{
+                Action = 'fail'
+                Package = 'example.invalid/pkg'
+                Elapsed = 1.30
+            },
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/crash'
+                Test = 'TestActiveWhenProcessStopped'
+                Output = "active test before package termination`n"
+            },
+            [pscustomobject]@{
+                Action = 'fail'
+                Package = 'example.invalid/crash'
+            }
+        ) | ForEach-Object { $_ | ConvertTo-Json -Compress }
+        $goTestSummary = Get-GoTestFailureSummary (
+            $goTestJson -join [Environment]::NewLine
+        ) 1024
+        if (-not $goTestSummary.Contains(
+            '--- FAIL: TestFailing (example.invalid/pkg) [1.25s]'
+        ) -or -not $goTestSummary.Contains('fixture assertion failed') -or
+            -not $goTestSummary.Contains('FAIL package example.invalid/crash') -or
+            -not $goTestSummary.Contains('active test before package termination') -or
+            $goTestSummary.Contains('passing output must not be retained') -or
+            $goTestSummary.Contains($headerSecret) -or
+            -not $goTestSummary.Contains('Authorization: ***REDACTED***') -or
+            [Text.Encoding]::UTF8.GetByteCount($goTestSummary) -gt 1024) {
+            throw 'structured Go test summary lost failure identity, focus, redaction, or bounds'
+        }
+
         [IO.Directory]::CreateDirectory($captureFixture) | Out-Null
         $boundedPath = Join-Path $captureFixture 'go-test.log'
         Write-BoundedText $boundedPath $boundedInput $boundedLimit
         if ([IO.FileInfo]::new($boundedPath).Length -gt $boundedLimit) {
             throw 'bounded diagnostic file is too large for native capture'
         }
+        $goTestSummaryPath = Join-Path $captureFixture 'go-test-failure-summary.log'
+        Write-BoundedText $goTestSummaryPath $goTestSummary 262144
         foreach ($index in 0..30) {
             Write-BoundedText (Join-Path $captureFixture ("00-before-go-test-{0:D2}.log" -f $index)) 'decoy'
         }
@@ -5119,6 +5326,11 @@ function Invoke-SelfTest {
             $_.FullName.Equals($boundedPath, [StringComparison]::OrdinalIgnoreCase)
         })) {
             throw 'bounded go-test.log was not prioritized into native capture'
+        }
+        if (-not ($captureFiles | Where-Object {
+            $_.FullName.Equals($goTestSummaryPath, [StringComparison]::OrdinalIgnoreCase)
+        })) {
+            throw 'bounded Go failure summary was not prioritized into native capture'
         }
         if ($captureFiles | Where-Object {
             $_.FullName.Equals($oversizedPath, [StringComparison]::OrdinalIgnoreCase)

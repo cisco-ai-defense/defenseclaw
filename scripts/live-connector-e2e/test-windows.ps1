@@ -859,6 +859,9 @@ private-secret-name = "DefenseClaw must remain redacted"
     Assert-True ($nativeWorkflowText -match '''test'', ''-v'', ''-count=1'', ''-run'', \$daclTestPattern, ''\./internal/safefile'', ''\./internal/managed'', ''\./internal/gateway/connector''') 'Go DACL regressions execute in every owning package without cache reuse'
     Assert-True ($nativeWorkflowText -match "'test'.*'\./\.\.\.'") 'full Go suite is required'
     Assert-True ($nativeWorkflowText -match '''-p=1''.*''-skip''.*\$windowsInapplicable') 'full Go suite serializes packages and excludes only declared Windows-inapplicable tests'
+    Assert-True ($nativeWorkflowText -match '''test'', ''-json'', ''-count=1''' -and
+        $nativeWorkflowText -match '-GoTestFailureSummaryPath.*go-test-failure-summary\.log') `
+        'full Go suite retains a bounded structured failure summary'
     Assert-True ($nativeWorkflowText -match 'Validate registered Windows Codex and Claude hook commands') 'native Windows workflow has a required Doctor hook-command step'
     Assert-True ($nativeWorkflowText -match "'pytest', 'cli/tests/test_cmd_doctor_windows_hooks\.py', '-q'") 'Doctor validates registered Windows hook commands explicitly'
     Assert-True ($nativeWorkflowText -match "Get-ChildItem cli/tests -Recurse -File -Filter 'test_\*\.py'") 'complete Python suite discovers every test file'
