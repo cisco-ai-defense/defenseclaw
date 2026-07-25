@@ -874,7 +874,8 @@ private-secret-name = "DefenseClaw must remain redacted"
         'full native Go suite shards the gateway process and separately selects every remaining package'
     Assert-True ($nativeWorkflowText -match '(?s)''-p=1''.*?''-skip''.*?\$windowsInapplicable') 'native Go suite serializes packages and excludes only declared Windows-inapplicable tests'
     Assert-True ($nativeWorkflowText -match '''test'', ''-json'', ''-count=1''' -and
-        $nativeWorkflowText -match '-GoTestFailureSummaryPath.*go-test-failure-summary\.log') `
+        $nativeWorkflowText -match '-GoTestFailureSummaryPath \$goFailureSummary' -and
+        $nativeWorkflowText -match 'go-test-failure-summary\.log') `
         'full Go suite retains a bounded structured failure summary'
     Assert-True ($nativeProcessFunction -match
         '(?s)\$exitCode = if \(\$timedOut\).*?if \(\$GoTestFailureSummaryPath -and.*?\$exitCode -notin \$AllowedExitCodes.*?Get-GoTestFailureSummary' -and
