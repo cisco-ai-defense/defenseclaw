@@ -248,11 +248,9 @@ func TestEnterpriseHookWatchEventRelevantIgnoresLockHousekeeping(t *testing.T) {
 }
 
 func TestEnterpriseHookWatchOwnedEventActionable(t *testing.T) {
-	const (
-		exclusivePath = "/home/alice/.defenseclaw/hooks/codex-hook.sh"
-		sharedPath    = "/home/alice/.codex/config.toml"
-		unownedPath   = "/home/alice/.codex/history.jsonl"
-	)
+	exclusivePath := filepath.FromSlash("/home/alice/.defenseclaw/hooks/codex-hook.sh")
+	sharedPath := filepath.FromSlash("/home/alice/.codex/config.toml")
+	unownedPath := filepath.FromSlash("/home/alice/.codex/history.jsonl")
 	exclusiveOwned := map[string]struct{}{exclusivePath: {}}
 	sharedOwned := map[string]struct{}{sharedPath: {}}
 
