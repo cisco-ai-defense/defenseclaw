@@ -224,6 +224,32 @@ t_install_default_missing_config_file_falls_back_to_default() {
   # US-prod default rather than fail-close — a dummy or absent file
   # from a broken AVC drop must not brick the install.
   #
+  # Use an isolated installer copy whose implicit default points at a
+  # guaranteed-absent fixture. Invoking the real installer directly
+  # would make this test depend on whether the host already has AVC's
+  # default env_config.json.
+  local case_dir; case_dir="$(mktest_tmp)"
+  local isolated_install="${case_dir}/install.sh"
+  local line
+  while IFS= read -r line; do
+    case "${line}" in
+      DEFAULT_CONFIG_FILE=*)
+        printf 'DEFAULT_CONFIG_FILE=%q\n' \
+          "${case_dir}/does-not-exist.json"
+        ;;
+      *)
+        printf '%s\n' "${line}"
+        ;;
+    esac
+  done <"${INSTALL_SH}" >"${isolated_install}"
+  chmod +x "${isolated_install}"
+  mkdir -p "${case_dir}/lib"
+  cp "${PKG_DIR}/lib/installer_lib.sh" "${case_dir}/lib/installer_lib.sh"
+  assert_file_exists "${isolated_install}"
+  assert_file_exists "${case_dir}/lib/installer_lib.sh"
+  [[ ! -e "${case_dir}/does-not-exist.json" ]] \
+    || _fail "isolated implicit config fixture must be absent"
+  #
   # We can't drive install.sh far enough to complete a real install
   # in this harness (it eventually needs root, a real binary, and
   # launchctl). What we CAN prove is that the resolver branch no
@@ -231,9 +257,11 @@ t_install_default_missing_config_file_falls_back_to_default() {
   # Grep for the warn substring plus the default endpoint URL; the
   # non-zero exit code comes from a downstream stage, not this branch.
   local out rc=0
-  out="$("${INSTALL_SH}" 2>&1)" || rc=$?
+  out="$("${isolated_install}" 2>&1)" || rc=$?
   assert_contains "${out}" "env_config.json not found at" \
     "installer names the missing env_config.json in the warn line"
+  assert_contains "${out}" "${case_dir}/does-not-exist.json" \
+    "installer uses the isolated implicit config path"
   assert_contains "${out}" "https://us.api.inspect.aidefense.security.cisco.com" \
     "installer falls through to the US-prod default endpoint"
   assert_contains "${out}" "Installing with default endpoint" \
