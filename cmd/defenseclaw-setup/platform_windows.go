@@ -46,6 +46,15 @@ func requireNativeWindowsX64() error {
 }
 
 func publishStableHookRuntime(source, gatewayPath, dataRoot, transactionID string) error {
+	// Setup disables stable-hook cold starts before entering the durable
+	// quiescing phase. Wait for any already-authorized image handle to drain
+	// before Publish applies the gateway DACL and hashes the exact file.
+	// probeExecutableRelease requests the same read/write/delete authority as
+	// ProtectFile, so this cannot turn a persistent foreign lock into a false
+	// success.
+	if err := waitForExecutableRelease(gatewayPath, setupExecutableReleaseTimeout); err != nil {
+		return fmt.Errorf("wait for installed gateway release before hook publication: %w", err)
+	}
 	if err := hookruntime.Publish(source, gatewayPath, dataRoot, transactionID); err != nil {
 		return err
 	}
@@ -58,6 +67,37 @@ func publishStableHookRuntime(source, gatewayPath, dataRoot, transactionID strin
 
 func disableStableHookRuntime(transactionID string) error {
 	return hookruntime.Disable(transactionID)
+}
+
+func stableHookRuntimeActive(gatewayPath, dataRoot string) (bool, error) {
+	paths, err := hookruntime.CurrentUserPaths()
+	if err != nil {
+		return false, err
+	}
+	return stableHookRuntimeActiveAt(paths, gatewayPath, dataRoot)
+}
+
+func stableHookRuntimeActiveAt(paths hookruntime.Paths, gatewayPath, dataRoot string) (bool, error) {
+	if _, err := os.Lstat(paths.Launcher); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	state, recognized, err := hookruntime.ReadSetupPostureAt(paths, paths.Launcher)
+	if err != nil {
+		return false, fmt.Errorf("snapshot stable hook runtime: %w", err)
+	}
+	if !recognized {
+		return false, errors.New("canonical stable hook runtime was not recognized")
+	}
+	if state.Active() && !pathidentity.Same(state.DataRoot, dataRoot) {
+		return false, errors.New("active stable hook runtime belongs to a different data root")
+	}
+	if state.Active() && state.SchemaVersion == hookruntime.SchemaVersion &&
+		!pathidentity.Same(state.GatewayPath, gatewayPath) {
+		return false, errors.New("active stable hook runtime belongs to a different installed gateway")
+	}
+	return state.Active(), nil
 }
 
 type pidState struct {

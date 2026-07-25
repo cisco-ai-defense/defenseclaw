@@ -17,11 +17,14 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -62,8 +65,10 @@ def _manifest(version: str) -> dict[str, object]:
     if version == "0.8.5":
         published_sources.insert(0, "0.8.4")
         windows_sources = []
-    elif version in {"0.8.7", "0.8.8"}:
-        post_cut_sources = ["0.8.6", "0.8.5", "0.8.4"]
+    elif version in {"0.8.6", "0.8.7", "0.8.8"}:
+        post_cut_sources = ["0.8.5", "0.8.4"]
+        if version in {"0.8.7", "0.8.8"}:
+            post_cut_sources.insert(0, "0.8.6")
         if version == "0.8.8":
             post_cut_sources.insert(0, "0.8.7")
         published_sources[0:0] = post_cut_sources
@@ -89,7 +94,7 @@ def _manifest(version: str) -> dict[str, object]:
         "tested_source_versions": published_sources,
         "platform_tested_source_versions": {"windows": windows_sources},
     }
-    if version in {"0.8.5", "0.8.7", "0.8.8"}:
+    if version in {"0.8.5", "0.8.6", "0.8.7", "0.8.8"}:
         payload.update(
             {
                 "min_upgrade_protocol": 2,
@@ -117,6 +122,66 @@ def _manifest(version: str) -> dict[str, object]:
             }
         )
     return payload
+
+
+def _protected(payload: bytes) -> bytes:
+    return b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n" + bytes(value ^ 0xA5 for value in payload)
+
+
+def _clean_086_package_files() -> dict[str, bytes]:
+    return {
+        "defenseclaw/__init__.py": b'__version__ = "0.8.6"\n',
+        "defenseclaw/config.py": (
+            b"import os\n"
+            b"from types import SimpleNamespace\n"
+            b"def load():\n"
+            b"    home = os.environ['DEFENSECLAW_HOME']\n"
+            b"    return SimpleNamespace(data_dir=home, claw=SimpleNamespace(home_dir=os.path.join(os.environ['HOME'], '.openclaw')))\n"
+        ),
+        "defenseclaw/observability/__init__.py": b"",
+        "defenseclaw/observability/v8_config.py": (
+            b"import copy, json\n"
+            b"class Validated:\n"
+            b"    def __init__(self, source): self._source = source\n"
+            b"    @property\n"
+            b"    def source(self): return copy.deepcopy(self._source)\n"
+            b"def load_validate_v8(data, *, source_name='config.yaml'):\n"
+            b"    if isinstance(data, bytes): data = data.decode('utf-8')\n"
+            b"    source = json.loads(data) if isinstance(data, str) else dict(data)\n"
+            b"    if type(source.get('config_version')) is not int or source['config_version'] != 8: raise ValueError('invalid v8 config')\n"
+            b"    return Validated(source)\n"
+        ),
+        "defenseclaw/_data/local_observability_stack/README.md": b"authenticated clean 0.8.6 stack\n",
+    }
+
+
+def _clean_086_wheel() -> bytes:
+    output = io.BytesIO()
+    package_files = _clean_086_package_files()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, payload in package_files.items():
+            archive.writestr(name, payload)
+        archive.writestr(
+            "defenseclaw-0.8.6.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: defenseclaw\nVersion: 0.8.6\n",
+        )
+        archive.writestr(
+            "defenseclaw-0.8.6.dist-info/WHEEL",
+            "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        )
+        archive.writestr("defenseclaw-0.8.6.dist-info/RECORD", "")
+    return output.getvalue()
+
+
+def _clean_086_gateway_archive() -> bytes:
+    payload = b"#!/usr/bin/env bash\nif [[ \"${1:-}\" == \"--version\" ]]; then echo 'DefenseClaw gateway 0.8.6'; exit 0; fi\nexit 0\n"
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz") as archive:
+        info = tarfile.TarInfo("defenseclaw")
+        info.mode = 0o755
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+    return output.getvalue()
 
 
 def _release_provenance(version: str, bridge_checksums_sha256: str) -> dict[str, object]:
@@ -154,7 +219,7 @@ def resolver_env(tmp_path: Path):
         home.mkdir(exist_ok=True)
 
         bridge_checksums_sha256 = ""
-        for version in ("0.8.4", "0.8.5", "0.8.7", "0.8.8"):
+        for version in ("0.8.4", "0.8.5", "0.8.6", "0.8.7", "0.8.8"):
             release_dir = fixtures / version
             release_dir.mkdir(exist_ok=True)
             manifest_payload = _manifest(version)
@@ -166,10 +231,8 @@ def resolver_env(tmp_path: Path):
             wheel_name = release_artifacts["wheel"]
             assert isinstance(wheel_name, str)
             wheel = release_dir / wheel_name
-            wheel.write_bytes(
-                b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
-                + bytes(value ^ 0xA5 for value in b"resolver target wheel fixture")
-            )
+            wheel_payload = _clean_086_wheel() if version == "0.8.6" else b"resolver target wheel fixture"
+            wheel.write_bytes(_protected(wheel_payload))
             checksum_rows.append(f"{hashlib.sha256(wheel.read_bytes()).hexdigest()}  {wheel.name}")
             gateways = release_artifacts["gateways"]
             assert isinstance(gateways, dict)
@@ -178,9 +241,14 @@ def resolver_env(tmp_path: Path):
                 for gateway_name in platform_gateways.values():
                     assert isinstance(gateway_name, str)
                     gateway = release_dir / gateway_name
-                    gateway.write_bytes(f"gateway fixture {gateway_name}\n".encode())
+                    gateway_payload = (
+                        _clean_086_gateway_archive()
+                        if version == "0.8.6"
+                        else f"gateway fixture {gateway_name}\n".encode()
+                    )
+                    gateway.write_bytes(_protected(gateway_payload) if version == "0.8.6" else gateway_payload)
                     checksum_rows.append(f"{hashlib.sha256(gateway.read_bytes()).hexdigest()}  {gateway.name}")
-            if version in {"0.8.5", "0.8.7", "0.8.8"}:
+            if version in {"0.8.5", "0.8.6", "0.8.7", "0.8.8"}:
                 provenance = (
                     json.dumps(
                         _release_provenance(version, bridge_checksums_sha256),
@@ -217,6 +285,26 @@ def resolver_env(tmp_path: Path):
         _write_executable(
             fake_bin / "cosign",
             '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "${COSIGN_LOG}"\nexit 0\n',
+        )
+        _write_executable(
+            fake_bin / "uv",
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'printf \'%s\\n\' "$*" >> "${UV_LOG}"\n'
+            'if [[ "$#" -eq 10'
+            ' && "$1" == "--no-config"'
+            ' && "$2" == "pip"'
+            ' && "$3" == "install"'
+            ' && "$4" == "--python"'
+            ' && "$5" == "${DEFENSECLAW_HOME}/.venv/bin/python"'
+            ' && "$6" == "--dry-run"'
+            ' && "$7" == "--quiet"'
+            ' && "$8" == "--only-binary"'
+            ' && "$9" == "litellm"'
+            ' && "${10}" == */authenticated-source-0.8.6/defenseclaw-0.8.6-2-py3-none-any.whl ]]; then\n'
+            "    exit 0\n"
+            "fi\n"
+            "exit 99\n",
         )
         _write_executable(
             fake_bin / "sha256sum",
@@ -280,6 +368,7 @@ version=''
 case "${url}" in
     */releases/download/0.8.4/*) version='0.8.4' ;;
     */releases/download/0.8.5/*) version='0.8.5' ;;
+    */releases/download/0.8.6/*) version='0.8.6' ;;
     */releases/download/0.8.7/*) version='0.8.7' ;;
     */releases/download/0.8.8/*) version='0.8.8' ;;
 esac
@@ -292,7 +381,15 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
         mutation_log = tmp_path / "mutations.log"
         curl_log = tmp_path / "curl.log"
         cosign_log = tmp_path / "cosign.log"
+        uv_log = tmp_path / "uv.log"
         env = os.environ.copy()
+        for name in tuple(env):
+            if name in {
+                "DEFENSECLAW_DISABLE_REDACTION",
+                "DEFENSECLAW_JSONL_DISABLE",
+                "DEFENSECLAW_PERSIST_JUDGE",
+            } or name.startswith(("OTEL_", "DEFENSECLAW_OTEL_", "OPENCLAW_OTEL_")):
+                env.pop(name)
         env.update(
             {
                 "PATH": f"{fake_bin}:{env['PATH']}",
@@ -302,12 +399,84 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
                 "MUTATION_LOG": str(mutation_log),
                 "CURL_LOG": str(curl_log),
                 "COSIGN_LOG": str(cosign_log),
+                "UV_LOG": str(uv_log),
                 "NO_COLOR": "1",
             }
         )
         return env, mutation_log, curl_log
 
     return build
+
+
+def test_resolver_env_excludes_ambient_observability_decisions(
+    resolver_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names = (
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "DEFENSECLAW_OTEL_TRACES_ENDPOINT",
+        "OPENCLAW_OTEL_TLS_INSECURE",
+        "DEFENSECLAW_DISABLE_REDACTION",
+    )
+    for name in names:
+        monkeypatch.setenv(name, "ambient")
+
+    env, _mutation_log, _curl_log = resolver_env("0.8.6")
+
+    assert all(name not in env for name in names)
+
+
+def _install_clean_086_state(env: dict[str, str]) -> tuple[Path, Path]:
+    data_home = Path(env["DEFENSECLAW_HOME"])
+    data_home.mkdir()
+    config_path = data_home / "config.yaml"
+    clean_config = {
+        "cisco_ai_defense": {"api_key_env": "CISCO_AI_DEFENSE_API_KEY"},
+        "claw": {"mode": "codex"},
+        "guardrail": {
+            "connector": "codex",
+            "enabled": True,
+            "scanner_mode": "local",
+        },
+        "llm": {"api_key_env": "DEFENSECLAW_LLM_KEY"},
+        "config_version": 8,
+        "observability": {},
+        "gateway": {"token_env": "DEFENSECLAW_GATEWAY_TOKEN"},
+    }
+    config_path.write_text(
+        json.dumps(clean_config, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    stack = data_home / "observability-stack"
+
+    site_packages = data_home / ".venv" / "lib" / "python3.12" / "site-packages"
+    package_root = site_packages / "defenseclaw"
+    package_root.mkdir(parents=True)
+    for name, payload in _clean_086_package_files().items():
+        relative = Path(name).relative_to("defenseclaw")
+        destination = package_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+    python_wrapper = data_home / ".venv" / "bin" / "python"
+    python_wrapper.parent.mkdir(parents=True)
+    _write_executable(
+        python_wrapper,
+        "#!/usr/bin/env bash\n"
+        f"export PYTHONPATH={str(site_packages)!r}\n"
+        "args=()\n"
+        "for arg in \"$@\"; do [[ \"${arg}\" == \"-I\" ]] || args+=(\"${arg}\"); done\n"
+        f"exec {str(sys.executable)!r} \"${{args[@]}}\"\n",
+    )
+
+    gateway_payload = (
+        b"#!/usr/bin/env bash\n"
+        b"if [[ \"${1:-}\" == \"--version\" ]]; then echo 'DefenseClaw gateway 0.8.6'; exit 0; fi\n"
+        b"exit 0\n"
+    )
+    gateway = Path(env["HOME"]) / ".local" / "bin" / "defenseclaw-gateway"
+    gateway.write_bytes(gateway_payload)
+    gateway.chmod(0o755)
+    return config_path, stack
 
 
 def _run(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
@@ -401,6 +570,7 @@ def test_explicit_final_target_still_resolves_verified_two_hop_plan(
     assert "No changes were made" in output
     assert not mutation_log.exists()
     assert not Path(env["DEFENSECLAW_HOME"]).exists()
+    assert not Path(env["UV_LOG"]).exists()
     downloads = curl_log.read_text(encoding="utf-8")
     assert "/releases/download/0.8.5/upgrade-manifest.json" in downloads
     assert "/releases/download/0.8.4/upgrade-manifest.json" in downloads
@@ -596,6 +766,142 @@ def test_manual_hard_cut_artifacts_over_v7_state_refuse_before_release_download(
     assert "No changes were made" in output
     assert not mutation_log.exists()
     assert not curl_log.exists()
+
+
+@pytest.mark.parametrize(
+    ("local_stack", "unrelated_change"),
+    ((False, False), (True, False), (False, True)),
+    ids=("retained-clean-no-stack", "exact-authenticated-stack", "valid-unrelated-llm-change"),
+)
+def test_clean_086_missing_cursor_authenticates_recovery_without_mutation(
+    resolver_env,
+    local_stack: bool,
+    unrelated_change: bool,
+) -> None:
+    env, mutation_log, curl_log = resolver_env("0.8.6")
+    config_path, stack = _install_clean_086_state(env)
+    if local_stack:
+        stack.mkdir()
+        (stack / "README.md").write_bytes(b"authenticated clean 0.8.6 stack\n")
+    if unrelated_change:
+        document = json.loads(config_path.read_text(encoding="utf-8"))
+        document["llm"]["model"] = "operator-selected-model"
+        config_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    before = config_path.read_bytes()
+
+    result = _run(env, "--version", "0.8.7", "--plan")
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "Authenticated the exact clean 0.8.6 missing-cursor compatibility state" in output
+    assert "0.8.6 → 0.8.7" in output
+    assert config_path.read_bytes() == before
+    assert not (Path(env["DEFENSECLAW_HOME"]) / ".migration_state.json").exists()
+    assert not mutation_log.exists()
+    uv_invocation = Path(env["UV_LOG"]).read_text(encoding="utf-8").split()
+    assert uv_invocation[:4] == ["--no-config", "pip", "install", "--python"]
+    assert uv_invocation[4] == f"{env['DEFENSECLAW_HOME']}/.venv/bin/python"
+    assert uv_invocation[5:9] == ["--dry-run", "--quiet", "--only-binary", "litellm"]
+    assert Path(uv_invocation[9]).name == "defenseclaw-0.8.6-2-py3-none-any.whl"
+    downloads = curl_log.read_text(encoding="utf-8")
+    assert "/releases/download/0.8.6/release-provenance.json" in downloads
+    assert "defenseclaw-0.8.6-2-py3-none-any.dcwheel" in downloads
+
+
+def test_same_version_086_cursor_bootstrap_preserves_unrelated_v8_config_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from defenseclaw.migrations import run_migrations
+
+    data_home = tmp_path / "data"
+    data_home.mkdir()
+    config_path = data_home / "config.yaml"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 8,
+                "llm": {
+                    "api_key_env": "DEFENSECLAW_LLM_KEY",
+                    "model": "operator-selected-model",
+                },
+                "observability": {},
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    before = config_path.read_bytes()
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+
+    count = run_migrations(
+        "0.8.6",
+        "0.8.6",
+        str(tmp_path / "openclaw"),
+        str(data_home),
+        upgrade_handles_local_bundle=True,
+    )
+
+    assert count == 0
+    assert config_path.read_bytes() == before
+    cursor = json.loads((data_home / ".migration_state.json").read_text(encoding="utf-8"))
+    assert "0.8.5" in cursor["applied"]
+
+
+@pytest.mark.parametrize(
+    "near_miss",
+    (
+        "cursor",
+        "legacy-root",
+        "observability",
+        "stack",
+        "migration-backup",
+        "pending-cursor-retry",
+        "receipt",
+    ),
+)
+def test_clean_086_missing_cursor_recovery_rejects_near_miss_state(
+    resolver_env,
+    near_miss: str,
+) -> None:
+    env, mutation_log, _curl_log = resolver_env("0.8.6")
+    config_path, stack = _install_clean_086_state(env)
+    if near_miss == "cursor":
+        (Path(env["DEFENSECLAW_HOME"]) / ".migration_state.json").write_text("{broken", encoding="utf-8")
+    elif near_miss == "legacy-root":
+        document = json.loads(config_path.read_text(encoding="utf-8"))
+        document["otel"] = {}
+        config_path.write_text(json.dumps(document), encoding="utf-8")
+    elif near_miss == "observability":
+        document = json.loads(config_path.read_text(encoding="utf-8"))
+        document["observability"] = {"destinations": [{"name": "custom"}]}
+        config_path.write_text(json.dumps(document), encoding="utf-8")
+    elif near_miss == "stack":
+        stack.mkdir()
+        (stack / "README.md").write_bytes(b"operator drift\n")
+    elif near_miss == "migration-backup":
+        Path(f"{config_path}.pre-observability-migration.bak").write_bytes(b"residue\n")
+    elif near_miss == "pending-cursor-retry":
+        (Path(env["DEFENSECLAW_HOME"]) / ".migration_state.fresh.pending.json").write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
+    else:
+        (Path(env["DEFENSECLAW_HOME"]) / ".upgrade-receipts").mkdir()
+    before = config_path.read_bytes()
+
+    result = _run(env, "--version", "0.8.7", "--plan")
+
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert (
+        "config-v8 migration state is absent or invalid" in output
+        if near_miss == "cursor"
+        else "not the exact clean missing-cursor shape" in output
+    )
+    assert config_path.read_bytes() == before
+    assert not mutation_log.exists()
 
 
 def test_bridge_source_refreshes_before_direct_hard_cut(resolver_env) -> None:
