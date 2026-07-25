@@ -467,14 +467,14 @@ function Get-GoTestFailureSummary(
     try {
         while ($null -ne ($line = $reader.ReadLine())) {
             try {
-                $event = $line.TrimStart([char]0xFEFF) | ConvertFrom-Json -ErrorAction Stop
+                $testEvent = $line.TrimStart([char]0xFEFF) | ConvertFrom-Json -ErrorAction Stop
             } catch {
                 continue
             }
-            if ((Get-WindowsNativeJsonString $event 'Action') -ne 'fail') { continue }
-            $package = Get-WindowsNativeJsonString $event 'Package'
+            if ((Get-WindowsNativeJsonString $testEvent 'Action') -ne 'fail') { continue }
+            $package = Get-WindowsNativeJsonString $testEvent 'Package'
             if (-not $package) { continue }
-            $test = Get-WindowsNativeJsonString $event 'Test'
+            $test = Get-WindowsNativeJsonString $testEvent 'Test'
             if ($test) {
                 $key = "$($package.Length):$package$test"
                 if ($failedTestKeys.Contains($key)) { continue }
@@ -485,13 +485,13 @@ function Get-GoTestFailureSummary(
                         Key = $key
                         Package = $package
                         Test = $test
-                        Elapsed = Get-WindowsNativeJsonString $event 'Elapsed'
+                        Elapsed = Get-WindowsNativeJsonString $testEvent 'Elapsed'
                     })
                 }
             } elseif ($failedPackageNames.Add($package)) {
                 $failedPackages.Add([pscustomobject]@{
                     Package = $package
-                    Elapsed = Get-WindowsNativeJsonString $event 'Elapsed'
+                    Elapsed = Get-WindowsNativeJsonString $testEvent 'Elapsed'
                 })
             }
         }
@@ -513,14 +513,14 @@ function Get-GoTestFailureSummary(
     try {
         while ($null -ne ($line = $reader.ReadLine())) {
             try {
-                $event = $line.TrimStart([char]0xFEFF) | ConvertFrom-Json -ErrorAction Stop
+                $testEvent = $line.TrimStart([char]0xFEFF) | ConvertFrom-Json -ErrorAction Stop
             } catch {
                 continue
             }
-            if ((Get-WindowsNativeJsonString $event 'Action') -ne 'output') { continue }
-            $package = Get-WindowsNativeJsonString $event 'Package'
-            $test = Get-WindowsNativeJsonString $event 'Test'
-            $output = Get-WindowsNativeJsonString $event 'Output'
+            if ((Get-WindowsNativeJsonString $testEvent 'Action') -ne 'output') { continue }
+            $package = Get-WindowsNativeJsonString $testEvent 'Package'
+            $test = Get-WindowsNativeJsonString $testEvent 'Test'
+            $output = Get-WindowsNativeJsonString $testEvent 'Output'
             if ($packageOutput.ContainsKey($package)) {
                 Add-WindowsNativeDiagnosticTail $packageOutput[$package] $output 160
             }
