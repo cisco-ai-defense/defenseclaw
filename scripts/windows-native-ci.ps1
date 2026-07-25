@@ -601,10 +601,10 @@ function Get-GoTestFailureSummary(
     foreach ($failure in $failedPackages) {
         $elapsed = if ($failure.Elapsed) { " [$($failure.Elapsed)s]" } else { '' }
         [void]$summary.AppendLine("FAIL package $($failure.Package)$elapsed")
+        foreach ($line in $packageCriticalOutput[$failure.Package]) {
+            [void]$summary.AppendLine($line)
+        }
         if (-not ($failedTests | Where-Object { $_.Package -eq $failure.Package })) {
-            foreach ($line in $packageCriticalOutput[$failure.Package]) {
-                [void]$summary.AppendLine($line)
-            }
             foreach ($line in $packageOutput[$failure.Package]) {
                 [void]$summary.AppendLine($line)
             }
@@ -5350,6 +5350,16 @@ function Invoke-SelfTest {
             },
             [pscustomobject]@{
                 Action = 'output'
+                Package = 'example.invalid/pkg'
+                Output = "panic: package stopped after the test failure`n"
+            },
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/pkg'
+                Output = "goroutine 1 [running]:`n"
+            },
+            [pscustomobject]@{
+                Action = 'output'
                 Package = 'example.invalid/crash'
                 Test = 'TestActiveWhenProcessStopped'
                 Output = "active test before package termination`n"
@@ -5365,6 +5375,8 @@ function Invoke-SelfTest {
         if (-not $goTestSummary.Contains(
             '--- FAIL: TestFailing (example.invalid/pkg) [1.25s]'
         ) -or -not $goTestSummary.Contains('fixture assertion failed') -or
+            -not $goTestSummary.Contains('panic: package stopped after the test failure') -or
+            -not $goTestSummary.Contains('goroutine 1 [running]') -or
             -not $goTestSummary.Contains('FAIL package example.invalid/crash') -or
             -not $goTestSummary.Contains('active test before package termination') -or
             $goTestSummary.Contains('passing output must not be retained') -or
