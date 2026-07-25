@@ -80,6 +80,12 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         summary = json.loads(result.output)
         self.assertEqual(summary["connector"], "codex")
         self.assertEqual(summary["profile"], "observe")
+        from defenseclaw import migration_state
+
+        state = migration_state.load(self.tmp_dir)
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertTrue(migration_state.is_applied(state, "0.8.5"))
 
     def test_openclaw_defaults_to_observe_profile(self):
         result = self._invoke([

@@ -507,7 +507,12 @@ def _run_phase_one_recovery_cleanup(
 
 def test_bridge_comment_restore_is_ordered_before_seal_and_uses_source_snapshot() -> None:
     source = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+    snapshot = source.index("    bridge_phase1_state_transaction snapshot")
     migration = source.index("# ── Run migrations")
+    mutation_armed = source.index("    mark_bridge_phase1_state_mutation_started", snapshot)
+    migration_run = source.index('section "Running Migrations"', mutation_armed)
+    incomplete = source.index('if [[ "${UPGRADE_INCOMPLETE}" -eq 1 ]]', migration)
+    repair = source.index("    repair_clean_081_observability_placeholder", incomplete)
     restore = source.index("    restore_bridge_config_comments\n", migration)
     cleanup = source.index("    bridge_phase1_cleanup_owned_temporaries", restore)
     seal = source.index("    bridge_phase1_state_transaction seal-active", cleanup)
@@ -516,7 +521,18 @@ def test_bridge_comment_restore_is_ordered_before_seal_and_uses_source_snapshot(
         source.index("restore_bridge_config_comments()") : source.index("bridge_phase1_state_transaction()")
     ]
 
-    assert migration < restore < cleanup < seal < start
+    assert (
+        snapshot
+        < migration
+        < mutation_armed
+        < migration_run
+        < incomplete
+        < repair
+        < restore
+        < cleanup
+        < seal
+        < start
+    )
     assert "bridge_phase1_state_transaction config-comment-source" in restore_function
     assert "${BACKUP_DIR}/config.yaml" not in restore_function
     assert "pre-bridge-config.yaml" not in source
