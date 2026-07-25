@@ -320,7 +320,16 @@ def _authenticate_release(
     # platform payloads intentionally omitted at publication (0.8.4's Windows
     # bytes are the precedent), so signed-but-unpublished entries do not widen
     # platform support and are not themselves an error.
-    authentication_assets = {"checksums.txt", "checksums.txt.pem", "checksums.txt.sig"}
+    # These files prove the checksum manifest rather than being payloads
+    # described by it. In particular, the transparency bundle is emitted by
+    # the act of signing checksums.txt, so requiring checksums.txt to cover the
+    # bundle would create an impossible self-reference.
+    authentication_assets = {
+        "checksums.txt",
+        "checksums.txt.bundle",
+        "checksums.txt.pem",
+        "checksums.txt.sig",
+    }
     for name, item in assets.items():
         if name in authentication_assets:
             continue
