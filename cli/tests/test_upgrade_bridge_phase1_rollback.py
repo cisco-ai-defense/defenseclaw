@@ -18,6 +18,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 UPGRADE_SCRIPT = ROOT / "scripts" / "upgrade.sh"
@@ -61,7 +62,7 @@ def _write_json_pid(path: Path, pid: int, executable: Path) -> None:
     path.chmod(0o600)
 
 
-def _compile_source_gateway(path: Path) -> None:
+def _compile_source_gateway(path: Path, *, version: str = "0.8.3") -> None:
     compiler = shutil.which("cc")
     if compiler is None:
         pytest.skip("a C compiler is required for phase-one PID-custody tests")
@@ -146,7 +147,7 @@ int main(int argc, char **argv) {
     }
     return 0;
 }
-''',
+'''.replace("DefenseClaw gateway 0.8.3", f"DefenseClaw gateway {version}"),
         encoding="utf-8",
     )
     subprocess.run(
@@ -264,6 +265,45 @@ def _protect_artifact(payload: bytes) -> bytes:
     )
 
 
+def _flat_081_config(data_home: Path) -> str:
+    return (
+        f"data_dir: {data_home}\n"
+        "otel:\n"
+        "  enabled: false\n"
+        "  protocol: grpc\n"
+        "  endpoint: ''\n"
+        "  headers: {}\n"
+        "  tls: {insecure: false, ca_cert: ''}\n"
+        "  traces: {enabled: true, sampler: always_on, sampler_arg: '1.0', endpoint: '', protocol: '', url_path: ''}\n"
+        "  logs: {enabled: true, emit_individual_findings: false, endpoint: '', protocol: '', url_path: ''}\n"
+        "  metrics: {enabled: true, export_interval_s: 60, endpoint: '', protocol: '', url_path: ''}\n"
+        "  batch: {max_export_batch_size: 512, scheduled_delay_ms: 5000, max_queue_size: 2048}\n"
+        "  resource: {attributes: {}}\n"
+    )
+
+
+def _named_081_config(data_home: Path) -> str:
+    return (
+        f"data_dir: {data_home}\n"
+        "otel:\n"
+        "  enabled: false\n"
+        "  traces: {sampler: always_on, sampler_arg: '1.0'}\n"
+        "  logs: {emit_individual_findings: false}\n"
+        "  resource: {attributes: {}}\n"
+        "  destinations:\n"
+        "    - name: generic-otlp\n"
+        "      preset: generic-otlp\n"
+        "      enabled: false\n"
+        "      endpoint: ''\n"
+        "      protocol: grpc\n"
+        "      tls: {ca_cert: '', insecure: false}\n"
+        "      batch: {max_queue_size: 2048, max_export_batch_size: 512, scheduled_delay_ms: 5000}\n"
+        "      traces: {enabled: true, endpoint: '', protocol: '', url_path: ''}\n"
+        "      logs: {enabled: true, endpoint: '', protocol: '', url_path: ''}\n"
+        "      metrics: {enabled: true, endpoint: '', protocol: '', url_path: '', export_interval_s: 60}\n"
+    )
+
+
 def _make_bridge_assets(root: Path, *, live_gateway: bool = False) -> None:
     version = "0.8.4"
     release = root / version
@@ -287,7 +327,7 @@ def _make_bridge_assets(root: Path, *, live_gateway: bool = False) -> None:
             "wheel": f"defenseclaw-{version}-2-py3-none-any.dcwheel",
             "gateways": gateways,
         },
-        "tested_source_versions": ["0.8.3", "0.4.0"],
+        "tested_source_versions": ["0.8.3", "0.8.1", "0.4.0"],
         "platform_tested_source_versions": {"windows": ["0.8.3"]},
     }
     (release / "upgrade-manifest.json").write_text(
@@ -397,6 +437,82 @@ esac
     (release / "checksums.txt.pem").write_text("test certificate\n", encoding="utf-8")
 
 
+def _make_hard_cut_contract_assets(root: Path) -> None:
+    version = "0.8.5"
+    release = root / version
+    release.mkdir(parents=True)
+    gateways = {
+        platform_name: {
+            arch: f"defenseclaw_{version}_protocol2_{platform_name}_{arch}.dcgateway"
+            for arch in ("amd64", "arm64")
+        }
+        for platform_name in ("darwin", "linux", "windows")
+    }
+    manifest = {
+        "schema_version": 2,
+        "release_version": version,
+        "controller_upgrade_protocol": 2,
+        "min_upgrade_protocol": 2,
+        "minimum_source_version": "0.8.4",
+        "required_bridge_version": "0.8.4",
+        "auto_bridge_from": ["0.8.1"],
+        "migration_failure_policy": "fail",
+        "required_cli_migrations": ["0.8.5"],
+        "runtime_config_version": 8,
+        "release_artifacts": {
+            "wheel": f"defenseclaw-{version}-2-py3-none-any.dcwheel",
+            "gateways": gateways,
+        },
+        "tested_source_versions": ["0.8.4", "0.8.1"],
+        "platform_tested_source_versions": {"windows": []},
+    }
+    manifest_path = release / "upgrade-manifest.json"
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    wheel = release / f"defenseclaw-{version}-2-py3-none-any.dcwheel"
+    wheel.write_bytes(_protect_artifact(b"unused hard-cut controller"))
+    gateway = release / _platform_asset_name(version)
+    gateway.write_bytes(_protect_artifact(b"unused hard-cut gateway"))
+    bridge_checksums = hashlib.sha256(
+        (root / "0.8.4" / "checksums.txt").read_bytes()
+    ).hexdigest()
+    provenance = {
+        "schema_version": 1,
+        "release_version": version,
+        "source_commit": "1" * 40,
+        "source_tree": "2" * 40,
+        "policy_commit": "3" * 40,
+        "policy_tree": "4" * 40,
+        "release_source_map_sha256": "5" * 64,
+        "source_install_identity": {
+            "schema_version": 1,
+            "source_release": version,
+            "source_install_compatibility_epoch": 2,
+            "runtime_config_version": 8,
+        },
+        "bridge": {
+            "version": "0.8.4",
+            "commit": "6" * 40,
+            "tree": "7" * 40,
+            "checksums_sha256": bridge_checksums,
+        },
+    }
+    provenance_path = release / "release-provenance.json"
+    provenance_path.write_text(
+        json.dumps(provenance, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    checksum_paths = (manifest_path, wheel, gateway, provenance_path)
+    (release / "checksums.txt").write_text(
+        "".join(
+            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
+            for path in checksum_paths
+        ),
+        encoding="utf-8",
+    )
+    (release / "checksums.txt.sig").write_text("test signature\n", encoding="utf-8")
+    (release / "checksums.txt.pem").write_text("test certificate\n", encoding="utf-8")
+
+
 @POSIX_UPGRADE_RUNTIME_ONLY
 @pytest.mark.parametrize(
     (
@@ -426,6 +542,7 @@ esac
         (None, True, False, False, False, False, False),
         (None, True, False, False, True, True, False),
         (None, True, False, False, True, False, True),
+        ("repair-081-after-placeholder", True, False, False, True, False, False),
     ],
     ids=[
         "caught-failure-running-source",
@@ -445,6 +562,7 @@ esac
         "absent-openclaw-home",
         "concurrent-state-divergence-preserved",
         "post-quarantine-write-preserved",
+        "clean-081-placeholder-repair-failure-restores-flat-source",
     ],
 )
 def test_bridge_start_failure_restores_source_artifacts_state_and_health(
@@ -457,6 +575,9 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
     concurrent_divergence: bool,
     post_quarantine_write: bool,
 ) -> None:
+    repair_081 = crash_point == "repair-081-after-placeholder"
+    source_version = "0.8.1" if repair_081 else "0.8.3"
+    target_version = "0.8.5" if repair_081 else "0.8.4"
     bridge_install_failure = (
         crash_point is None
         and source_running
@@ -479,6 +600,8 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
         fixtures,
         live_gateway=crash_point in {"migration-after-config", "after-bridge-health"},
     )
+    if repair_081:
+        _make_hard_cut_contract_assets(fixtures)
     fake_bin.mkdir()
     source_venv.joinpath("bin").mkdir(parents=True)
     data_home.mkdir()
@@ -498,7 +621,7 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
         "&& \"${PYTHONDONTWRITEBYTECODE:-}\" != '1' ]]; then\n"
         f"    printf '%s\\n' probe >> {str(source_venv / 'version-probe-cache')!r}\n"
         "  fi\n"
-        "  printf '%s\\n' 'DefenseClaw 0.8.3'\n"
+        f"  printf '%s\\n' 'DefenseClaw {source_version}'\n"
         "  exit 0\n"
         "fi\n"
         "exit 91\n",
@@ -507,13 +630,13 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
         source_venv / "bin" / "python",
         "#!/usr/bin/env bash\n"
         "if [[ \"$*\" == *\"from defenseclaw import __version__\"* ]]; then "
-        "printf '%s\\n' '0.8.3'; exit 0; fi\n"
+        f"printf '%s\\n' '{source_version}'; exit 0; fi\n"
         f"exec {sys.executable!r} \"$@\"\n",
     )
     (install_dir / "defenseclaw").symlink_to(source_cli)
 
     source_gateway = install_dir / "defenseclaw-gateway"
-    _compile_source_gateway(source_gateway)
+    _compile_source_gateway(source_gateway, version=source_version)
     source_gateway_bytes = source_gateway.read_bytes()
 
     original = {
@@ -522,7 +645,10 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
         "codex_env.sh": b"export SOURCE_ONLY=1\n",
     }
     config_path = controller_home / "config.yaml"
-    config_original = f"config_version: 7\ndata_dir: {data_home}\ncustom: keep\n".encode()
+    if repair_081:
+        config_original = _flat_081_config(data_home).encode()
+    else:
+        config_original = f"config_version: 7\ndata_dir: {data_home}\ncustom: keep\n".encode()
     config_path.write_bytes(config_original)
     for name, content in original.items():
         (data_home / name).write_bytes(content)
@@ -544,6 +670,11 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
 
     initial_process: subprocess.Popen[bytes] | None = None
 
+    post_bridge_081_config = tmp_path / "post-bridge-081.yaml"
+    post_bridge_081_config.write_text(
+        _named_081_config(data_home),
+        encoding="utf-8",
+    )
     target_python_template = tmp_path / "target-python"
     _write_executable(
         target_python_template,
@@ -558,7 +689,11 @@ if [[ "${1:-}" == '-I' && "${2:-}" == '-B' && "${3:-}" == '-' ]]; then
 fi
 if [[ -n "${MIGRATION_FROM_VERSION:-}" ]]; then
   chmod 700 "${MIGRATION_DEFENSECLAW_HOME}"
-  printf '%s\n' 'config_version: 7' 'bridge: mutated' > "${DEFENSECLAW_CONFIG}"
+  if [[ "${INJECT_081_NAMED_PLACEHOLDER:-0}" == '1' ]]; then
+    cp "${POST_BRIDGE_081_CONFIG}" "${DEFENSECLAW_CONFIG}"
+  else
+    printf '%s\n' 'config_version: 7' 'bridge: mutated' > "${DEFENSECLAW_CONFIG}"
+  fi
   printf '%s\n' 'target-backup' > "${DEFENSECLAW_CONFIG}.pre-observability-migration.bak"
   printf '%s\n' 'target-lock' > "${DEFENSECLAW_CONFIG}.lock"
   printf '%s\n' 'target-fixed-temp' > "${DEFENSECLAW_CONFIG}.tmp-f3395"
@@ -585,6 +720,9 @@ if [[ -n "${MIGRATION_FROM_VERSION:-}" ]]; then
   printf '%s\n' '{"bridge":"mutated"}' > "${MIGRATION_OPENCLAW_HOME}/openclaw.json"
   printf '%s\n' '0'
   exit 0
+fi
+if [[ "${1:-}" == '-' ]]; then
+  exec "${TARGET_RUNTIME_PYTHON:?}" "$@"
 fi
 if [[ -n "${MIGRATION_DEFENSECLAW_HOME:-}" ]]; then
   exit 0
@@ -687,7 +825,11 @@ PY
   exit 0
 fi
 if [[ "${is_head}" -eq 1 ]]; then printf '200'; exit 0; fi
-version='0.8.4'
+case "${url}" in
+  */releases/download/0.8.4/*) version='0.8.4' ;;
+  */releases/download/0.8.5/*) version='0.8.5' ;;
+  *) exit 96 ;;
+esac
 name="${url##*/}"
 cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
 """,
@@ -704,9 +846,13 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
             "TARGET_PYTHON_TEMPLATE": str(target_python_template),
             "TARGET_CLI_TEMPLATE": str(target_cli_template),
             "TARGET_RUNTIME_PYTHON": sys.executable,
+            "POST_BRIDGE_081_CONFIG": str(post_bridge_081_config),
             "UPGRADE_EVENT_LOG": str(event_log),
         }
     )
+    if repair_081:
+        env["INJECT_081_NAMED_PLACEHOLDER"] = "1"
+        env["DEFENSECLAW_TEST_FAIL_AFTER_081_PLACEHOLDER_REPAIR"] = "1"
     if orphan_health:
         env["FORCE_ORPHAN_HEALTH"] = "1"
     if concurrent_divergence:
@@ -736,7 +882,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
                 source_gateway,
             )
 
-        if crash_point is not None:
+        if crash_point is not None and not repair_081:
             if crash_point == "after-stop":
                 crash_variable = "INJECT_PHASE1_CRASH_AFTER_SOURCE_STOP"
                 env[crash_variable] = "1"
@@ -756,7 +902,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
                 crash_variable = "INJECT_PHASE1_CRASH_ON_TARGET_VERSION"
                 env[crash_variable] = "1"
             interrupted = subprocess.run(
-                ["bash", str(UPGRADE_SCRIPT), "--yes", "--version", "0.8.4"],
+                ["bash", str(UPGRADE_SCRIPT), "--yes", "--version", target_version],
                 cwd=ROOT,
                 env=env,
                 text=True,
@@ -795,7 +941,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
                 ).is_file()
             env.pop(crash_variable)
             blocked = subprocess.run(
-                ["bash", str(UPGRADE_SCRIPT), "--yes", "--version", "0.8.4"],
+                ["bash", str(UPGRADE_SCRIPT), "--yes", "--version", target_version],
                 cwd=ROOT,
                 env=env,
                 text=True,
@@ -831,7 +977,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
                 recovery_point = crash_point.removeprefix("recovery-")
                 env["DEFENSECLAW_TEST_PHASE1_RECOVERY_CRASH"] = recovery_point
                 recovery_crash = subprocess.run(
-                    ["bash", str(UPGRADE_SCRIPT), "--yes", "--version", "0.8.4"],
+                    ["bash", str(UPGRADE_SCRIPT), "--yes", "--version", target_version],
                     cwd=ROOT,
                     env=env,
                     text=True,
@@ -845,7 +991,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
 
         if result is None:
             result = subprocess.run(
-                ["bash", str(UPGRADE_SCRIPT), "--yes", "--version", "0.8.4"],
+                ["bash", str(UPGRADE_SCRIPT), "--yes", "--version", target_version],
                 cwd=ROOT,
                 env=env,
                 text=True,
@@ -938,6 +1084,19 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
     try:
         output = result.stdout + result.stderr
         assert result.returncode == 1, output
+        if repair_081:
+            assert "injected failure after 0.8.1 placeholder repair" in output
+            assert "Restoring Source After Bridge Failure" in output
+            assert "Source 0.8.1 artifacts and state restored" in output
+            assert config_path.read_bytes() == config_original
+            assert (install_dir / "defenseclaw-gateway").read_bytes() == source_gateway_bytes
+            assert subprocess.check_output(
+                [str(install_dir / "defenseclaw"), "--version"], text=True
+            ).strip().endswith("0.8.1")
+            assert not (
+                controller_home / ".upgrade-recovery" / "phase-one-active.json"
+            ).exists()
+            return
         if bridge_install_failure:
             assert "Failed to install the bridge CLI wheel" in output
             assert "Source 0.8.3 artifacts and state restored" in output
@@ -954,7 +1113,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
             assert restored_pid is not None
             os.kill(restored_pid, 0)
             return
-        if crash_point is not None:
+        if crash_point is not None and not repair_081:
             assert "Recovering Interrupted Bridge Upgrade" in output
             assert "before detecting installed versions" in output
             assert not (controller_home / ".upgrade-recovery" / "phase-one-active.json").exists()
@@ -978,7 +1137,9 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
         assert stat.S_IMODE(config_path.stat().st_mode) == 0o640
         assert stat.S_IMODE((data_home / ".env").stat().st_mode) == 0o644
         backup_directories = list((controller_home / "backups").glob("upgrade-*-*"))
-        assert len(backup_directories) == (2 if crash_point is not None else 1)
+        assert len(backup_directories) == (
+            2 if crash_point is not None and not repair_081 else 1
+        )
         for backup_directory in backup_directories:
             assert not backup_directory.is_symlink()
             assert stat.S_IMODE(backup_directory.stat().st_mode) == 0o700
@@ -1048,6 +1209,79 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
                 os.kill(restored_pid, 15)
             except ProcessLookupError:
                 pass
+
+
+@POSIX_UPGRADE_RUNTIME_ONLY
+@pytest.mark.parametrize("shape", ("post-bridge", "pre-bridge-flat", "named-near-miss"))
+def test_clean_081_placeholder_repair_matches_only_post_bridge_release_shape(
+    tmp_path: Path,
+    shape: str,
+) -> None:
+    data_home = tmp_path / "data"
+    data_home.mkdir()
+    config_path = tmp_path / "config.yaml"
+    if shape == "pre-bridge-flat":
+        source = _flat_081_config(data_home)
+    else:
+        source = _named_081_config(data_home)
+        if shape == "named-near-miss":
+            source = source.replace("      endpoint: ''\n", "      endpoint: https://collector.example\n", 1)
+    config_path.write_text(source, encoding="utf-8")
+
+    script = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+    start = script.index("repair_clean_081_observability_placeholder() {")
+    end = script.index("\ncomplete_bridge_phase1_recovery_journal() {", start)
+    harness = tmp_path / "repair-harness.sh"
+    _write_executable(
+        harness,
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        + script[start:end]
+        + "\nok() { :; }\n"
+        + "\nBRIDGE_PHASE1=1\n"
+        + "CURRENT_VERSION=0.8.1\n"
+        + "RELEASE_VERSION=0.8.4\n"
+        + "STAGED_FINAL_VERSION=0.8.5\n"
+        + "OBSERVABILITY_V8_HARD_CUT_VERSION=0.8.5\n"
+        + f"VENV_PYTHON={sys.executable!r}\n"
+        + f"CONFIG_PATH={str(config_path)!r}\n"
+        + f"DATA_DIR={str(data_home)!r}\n"
+        + "repair_clean_081_observability_placeholder\n",
+    )
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if not (
+            name.startswith(("OTEL_", "DEFENSECLAW_OTEL_", "OPENCLAW_OTEL_"))
+            or name
+            in {
+                "DEFENSECLAW_DISABLE_REDACTION",
+                "DEFENSECLAW_JSONL_DISABLE",
+                "DEFENSECLAW_PERSIST_JUDGE",
+                "OTEL_SERVICE_NAME",
+            }
+        )
+    }
+
+    result = subprocess.run(
+        ["bash", str(harness)],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    if shape == "post-bridge":
+        assert result.returncode == 0, result.stdout + result.stderr
+        repaired = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert "destinations" not in repaired["otel"]
+        assert set(repaired["otel"]) == {"enabled", "traces", "logs", "resource"}
+    else:
+        assert result.returncode != 0
+        assert "not the exact clean release shape" in result.stdout + result.stderr, (
+            result.stdout + result.stderr
+        )
+        assert config_path.read_text(encoding="utf-8") == source
 
 
 def test_bridge_rollback_health_is_version_bound_and_custody_is_collision_safe() -> None:

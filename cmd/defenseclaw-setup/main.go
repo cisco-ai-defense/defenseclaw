@@ -530,7 +530,16 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		return rollbackQuiescingSetup(transaction, cause)
 	}
 	gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
-	_, err = stopOwnedServicesContext(ctx, gatewayPath, dataRoot)
+	err = quiesceSetupRuntimeForMutation(
+		transaction,
+		gatewayPath,
+		dataRoot,
+		disableStableHookRuntime,
+		func(path, root string) (serviceState, error) {
+			return stopOwnedServicesContext(ctx, path, root)
+		},
+		verifyOwnedRuntimeReleased,
+	)
 	if err != nil {
 		return tryRestore(setupOperationError(ctx, err))
 	}
@@ -763,34 +772,46 @@ func runUninstallContext(ctx context.Context, opts options, installRoot, dataRoo
 		return rollbackUninstall(err)
 	}
 	gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
-	_, err = stopOwnedServicesContext(ctx, gatewayPath, dataRoot)
+	err = mutateUninstallTreeWithQuiescedRuntime(
+		*transaction,
+		gatewayPath,
+		dataRoot,
+		disableStableHookRuntime,
+		func(path, root string) (serviceState, error) {
+			return stopOwnedServicesContext(ctx, path, root)
+		},
+		verifyOwnedRuntimeReleased,
+		func() error {
+			if err := checkSetupContext(ctx); err != nil {
+				return err
+			}
+			if pathExists(installRoot) {
+				currentState, stateErr := loadExistingInstallState(installRoot)
+				if stateErr != nil {
+					return stateErr
+				}
+				if !installStateMatchesSnapshot(currentState, transaction.PreviousState) {
+					return errors.New("installed state changed after the uninstall transaction began")
+				}
+				pid, imagePath, processErr := liveProcessWithinInstallRoot(installRoot)
+				if processErr != nil {
+					return fmt.Errorf("inspect running DefenseClaw processes: %w", processErr)
+				}
+				if pid != 0 {
+					return fmt.Errorf("%w (PID %d, %s)", errInstalledProcessRunning, pid, imagePath)
+				}
+				if err := renameInstallTree(installRoot, transaction.TrashPath); err != nil {
+					if isTransientInstallTreeRenameError(err) {
+						return errors.New("product files are locked; close running DefenseClaw terminals and retry")
+					}
+					return err
+				}
+			}
+			return nil
+		},
+	)
 	if err != nil {
 		return rollbackUninstall(setupOperationError(ctx, err))
-	}
-	if err := checkSetupContext(ctx); err != nil {
-		return rollbackUninstall(err)
-	}
-	if pathExists(installRoot) {
-		currentState, stateErr := loadExistingInstallState(installRoot)
-		if stateErr != nil {
-			return rollbackUninstall(stateErr)
-		}
-		if !installStateMatchesSnapshot(currentState, transaction.PreviousState) {
-			return rollbackUninstall(errors.New("installed state changed after the uninstall transaction began"))
-		}
-		pid, imagePath, processErr := liveProcessWithinInstallRoot(installRoot)
-		if processErr != nil {
-			return rollbackUninstall(fmt.Errorf("inspect running DefenseClaw processes: %w", processErr))
-		}
-		if pid != 0 {
-			return rollbackUninstall(fmt.Errorf("%w (PID %d, %s)", errInstalledProcessRunning, pid, imagePath))
-		}
-		if err := renameInstallTree(installRoot, transaction.TrashPath); err != nil {
-			if isTransientInstallTreeRenameError(err) {
-				return rollbackUninstall(fmt.Errorf("product files are locked; close running DefenseClaw terminals and retry"))
-			}
-			return rollbackUninstall(err)
-		}
 	}
 	if err := checkSetupContext(ctx); err != nil {
 		return rollbackUninstall(err)

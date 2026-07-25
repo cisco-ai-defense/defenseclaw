@@ -35,6 +35,11 @@ const (
 	setupPhaseComplete              = "complete"
 )
 
+const (
+	stableHookSnapshotActive   = "active"
+	stableHookSnapshotInactive = "inactive"
+)
+
 var (
 	errTransactionCleanupDeferred      = errors.New("transaction cleanup is deferred until the setup process exits")
 	errSetupJournalDurabilityAmbiguous = errors.New("setup transaction journal durability is ambiguous")
@@ -43,6 +48,7 @@ var (
 type durableValueWriter func(string, any, bool) error
 type durableRenameFunc func(string, string) error
 type connectorLifecycleRunner func(string, string, string, string, []string) error
+type stableHookRuntimeSnapshotter func(string, string) (bool, error)
 
 type userPathSnapshot struct {
 	Existed   bool   `json:"existed"`
@@ -69,6 +75,8 @@ type setupTransaction struct {
 	PreviousPath                   userPathSnapshot         `json:"previous_path"`
 	PreviousAutoStart              gatewayAutoStartSnapshot `json:"previous_auto_start"`
 	PreviousServices               serviceState             `json:"previous_services"`
+	PreviousStableHookStatus       string                   `json:"previous_stable_hook_status,omitempty"`
+	UninstallHandoffHookStatus     string                   `json:"uninstall_handoff_hook_status,omitempty"`
 	PreviousConnectors             []string                 `json:"previous_connectors,omitempty"`
 	PreserveConnectorConfiguration bool                     `json:"preserve_connector_configuration,omitempty"`
 	TargetConnector                string                   `json:"target_connector"`
@@ -139,6 +147,7 @@ type uninstallRecoveryOps struct {
 	recoverUninstall        func(setupJournal) error
 	replaceWithHandoff      func(setupJournal, setupTransaction) error
 	afterHandoff            func() error
+	snapshotStableHook      stableHookRuntimeSnapshotter
 }
 
 type setupTransactionExpectations struct {
@@ -195,6 +204,16 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 	previousServices, err := inspectOwnedServices(gatewayPath, dataRoot)
 	if err != nil {
 		return setupTransaction{}, fmt.Errorf("snapshot managed services: %w", err)
+	}
+	previousStableHookStatus := stableHookSnapshotInactive
+	if oldState != nil {
+		active, snapshotErr := stableHookRuntimeActive(gatewayPath, dataRoot)
+		if snapshotErr != nil {
+			return setupTransaction{}, snapshotErr
+		}
+		if active {
+			previousStableHookStatus = stableHookSnapshotActive
+		}
 	}
 	staging, backup, trash, maintenanceNew, maintenanceBackup := transactionArtifactPaths(installRoot, maintenancePath, id)
 	var previousState *installState
@@ -310,6 +329,7 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 		PreviousPath:                   pathSnapshot,
 		PreviousAutoStart:              autoStartSnapshot,
 		PreviousServices:               previousServices,
+		PreviousStableHookStatus:       previousStableHookStatus,
 		PreviousConnectors:             previousConnectors,
 		PreserveConnectorConfiguration: preserveConnectorConfiguration,
 		TargetConnector:                targetConnector,
@@ -332,6 +352,9 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 func newUninstallHandoffTransaction(source setupTransaction, oldState *installState, opts options) (setupTransaction, error) {
 	if source.Action != "install" {
 		return setupTransaction{}, errors.New("uninstall handoff source is not an install transaction")
+	}
+	if source.UninstallHandoffHookStatus == "" {
+		return setupTransaction{}, errors.New("uninstall handoff source lacks a durable stable-hook posture snapshot")
 	}
 	id, err := newSetupTransactionID()
 	if err != nil {
@@ -402,6 +425,12 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 		copyState := *oldState
 		previousState = &copyState
 	}
+	previousStableHookStatus := source.UninstallHandoffHookStatus
+	if previousState == nil {
+		// With no validated install tree there is no gateway binding that a
+		// cancelled uninstall can safely reactivate.
+		previousStableHookStatus = stableHookSnapshotInactive
+	}
 	pathOwned, pathSeparatorReused, pathValueCreated := false, false, false
 	if oldState != nil && oldState.PathEntryOwned {
 		pathOwned = true
@@ -445,6 +474,7 @@ func newUninstallHandoffTransaction(source setupTransaction, oldState *installSt
 		MaintenanceExisted:           maintenanceExisted,
 		PreviousMaintenanceSHA256:    previousMaintenanceSHA256,
 		PreviousState:                previousState,
+		PreviousStableHookStatus:     previousStableHookStatus,
 		PreviousConnectors:           previousConnectors,
 		TargetConnector:              "none",
 		TargetMode:                   opts.Mode,
@@ -694,6 +724,24 @@ func validateSetupTransaction(transaction setupTransaction, expected setupTransa
 		); err != nil {
 			return fmt.Errorf("setup transaction previous state: %w", err)
 		}
+	}
+	switch transaction.PreviousStableHookStatus {
+	case "", stableHookSnapshotInactive:
+	case stableHookSnapshotActive:
+		if transaction.PreviousState == nil {
+			return errors.New("setup transaction has an active stable-hook snapshot without a previous installation")
+		}
+	default:
+		return errors.New("setup transaction has an invalid stable-hook snapshot")
+	}
+	switch transaction.UninstallHandoffHookStatus {
+	case "":
+	case stableHookSnapshotActive, stableHookSnapshotInactive:
+		if transaction.Action != "install" {
+			return errors.New("non-install transaction records an uninstall-handoff stable-hook snapshot")
+		}
+	default:
+		return errors.New("setup transaction has an invalid uninstall-handoff stable-hook snapshot")
 	}
 	if !validConnector(transaction.TargetConnector) || !validMode(transaction.TargetMode) {
 		return errors.New("setup transaction has an invalid target connector or mode")
@@ -1311,6 +1359,20 @@ func preparePendingSetupTransactionForUninstallAt(
 	if err := validateSetupTransaction(journal.Transaction, expected); err != nil {
 		return nil, fmt.Errorf("refusing unsafe setup transaction recovery: %w", err)
 	}
+	snapshotStableHook := ops.snapshotStableHook
+	if snapshotStableHook == nil {
+		snapshotStableHook = stableHookRuntimeActive
+	}
+	upgraded, err := persistLegacyStableHookSnapshotAt(path, *journal, snapshotStableHook)
+	if err != nil {
+		return nil, fmt.Errorf("persist stable-hook rollback posture before uninstall handoff: %w", err)
+	}
+	journal = &upgraded
+	upgraded, err = persistUninstallHandoffHookSnapshotAt(path, *journal, snapshotStableHook)
+	if err != nil {
+		return nil, fmt.Errorf("persist stable-hook posture for uninstall handoff: %w", err)
+	}
+	journal = &upgraded
 	if journal.Transaction.Action == "uninstall" {
 		if journal.Phase == setupPhaseIntent {
 			if err := ops.resumeUninstall(journal.Transaction); err != nil {
@@ -1414,7 +1476,110 @@ func recoverSetupTransactionAt(path string, expected setupTransactionExpectation
 	if err := validateSetupTransaction(journal.Transaction, expected); err != nil {
 		return fmt.Errorf("refusing unsafe setup transaction recovery: %w", err)
 	}
+	upgraded, err := persistLegacyStableHookSnapshotAt(path, *journal, stableHookRuntimeActive)
+	if err != nil {
+		return fmt.Errorf("persist stable-hook rollback posture before recovery: %w", err)
+	}
+	journal = &upgraded
 	return recoverSetupJournalPhase(*journal, ops)
+}
+
+func persistLegacyStableHookSnapshotAt(
+	path string,
+	journal setupJournal,
+	snapshot stableHookRuntimeSnapshotter,
+) (setupJournal, error) {
+	transaction := journal.Transaction
+	if transaction.PreviousStableHookStatus != "" ||
+		!setupTransactionNeedsStableHookRollbackSnapshot(journal) {
+		return journal, nil
+	}
+	current, err := readSetupJournal(path)
+	if err != nil {
+		return setupJournal{}, err
+	}
+	if current == nil || current.Phase != journal.Phase ||
+		!setupTransactionsEqual(current.Transaction, transaction) {
+		return setupJournal{}, errors.New("setup transaction changed before stable-hook posture migration")
+	}
+	active, err := snapshot(
+		filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe"),
+		transaction.DataRoot,
+	)
+	if err != nil {
+		return setupJournal{}, err
+	}
+	transaction.PreviousStableHookStatus = stableHookSnapshotInactive
+	if active && transaction.PreviousState != nil {
+		transaction.PreviousStableHookStatus = stableHookSnapshotActive
+	}
+	journal.Transaction = transaction
+	if err := writeDurableJournal(path, journal, true); err != nil {
+		return setupJournal{}, err
+	}
+	return journal, nil
+}
+
+func setupTransactionNeedsStableHookRollbackSnapshot(journal setupJournal) bool {
+	switch journal.Phase {
+	case setupPhaseIntent:
+		return journal.Transaction.Action == "uninstall" ||
+			journal.SchemaVersion == setupJournalLegacySchemaVersion
+	case setupPhaseQuiescing, setupPhasePublished:
+		return true
+	default:
+		return false
+	}
+}
+
+func persistUninstallHandoffHookSnapshotAt(
+	path string,
+	journal setupJournal,
+	snapshot stableHookRuntimeSnapshotter,
+) (setupJournal, error) {
+	transaction := journal.Transaction
+	if !setupTransactionNeedsUninstallHandoffSnapshot(journal) ||
+		transaction.UninstallHandoffHookStatus != "" {
+		return journal, nil
+	}
+	current, err := readSetupJournal(path)
+	if err != nil {
+		return setupJournal{}, err
+	}
+	if current == nil || current.Phase != journal.Phase ||
+		!setupTransactionsEqual(current.Transaction, transaction) {
+		return setupJournal{}, errors.New("setup transaction changed before uninstall-handoff posture snapshot")
+	}
+	active, err := snapshot(
+		filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe"),
+		transaction.DataRoot,
+	)
+	if err != nil {
+		return setupJournal{}, err
+	}
+	transaction.UninstallHandoffHookStatus = stableHookSnapshotInactive
+	if active {
+		transaction.UninstallHandoffHookStatus = stableHookSnapshotActive
+	}
+	journal.Transaction = transaction
+	if err := writeDurableJournal(path, journal, true); err != nil {
+		return setupJournal{}, err
+	}
+	return journal, nil
+}
+
+func setupTransactionNeedsUninstallHandoffSnapshot(journal setupJournal) bool {
+	if journal.Transaction.Action != "install" {
+		return false
+	}
+	switch journal.Phase {
+	case setupPhaseIntent:
+		return journal.SchemaVersion == setupJournalLegacySchemaVersion
+	case setupPhaseCommitted, setupPhaseConverged:
+		return true
+	default:
+		return false
+	}
 }
 
 func recoverSetupJournalPhase(journal setupJournal, ops setupRecoveryOps) error {
@@ -1559,18 +1724,75 @@ func abortPreparedSetupTransaction(transaction setupTransaction) error {
 }
 
 func rollbackSetupTransaction(transaction setupTransaction) error {
+	// A journal written by an older Setup may still have an active stable-hook
+	// generation. Revoke cold-start authority before stopping or replacing any
+	// fixed-path runtime during rollback.
+	if transaction.Action == "install" || transaction.Action == "uninstall" {
+		if transaction.PreviousStableHookStatus == "" {
+			return errors.New("setup rollback lacks a durable stable-hook posture snapshot")
+		}
+		if err := disableStableHookRuntime(transaction.ID); err != nil {
+			return fmt.Errorf("disable stable hook runtime before rollback: %w", err)
+		}
+	}
 	return rollbackSetupTransactionWithRuntime(
 		transaction,
 		stopOwnedServices,
 		verifyOwnedRuntimeReleased,
+		restorePreviousStableHookRuntime,
 		startMissingServices,
 	)
+}
+
+func quiesceSetupRuntimeForMutation(
+	transaction setupTransaction,
+	gatewayPath, dataRoot string,
+	disableStableHook func(string) error,
+	stopServices func(string, string) (serviceState, error),
+	verifyStopped func(string, string) error,
+) error {
+	// Disable first under the hookruntime gateway-start mutex. Once this
+	// returns, an invocation that was already authorized has finished its
+	// management launch, and every queued cached hook must re-read disabled
+	// state instead of cold-starting the fixed-path replacement.
+	if err := disableStableHook(transaction.ID); err != nil {
+		return fmt.Errorf("disable stable hook runtime before setup mutation: %w", err)
+	}
+	if _, err := stopServices(gatewayPath, dataRoot); err != nil {
+		return fmt.Errorf("stop owned gateway runtime before setup mutation: %w", err)
+	}
+	if err := verifyStopped(gatewayPath, dataRoot); err != nil {
+		return fmt.Errorf("verify gateway runtime release before setup mutation: %w", err)
+	}
+	return nil
+}
+
+func mutateUninstallTreeWithQuiescedRuntime(
+	transaction setupTransaction,
+	gatewayPath, dataRoot string,
+	disableStableHook func(string) error,
+	stopServices func(string, string) (serviceState, error),
+	verifyStopped func(string, string) error,
+	mutate func() error,
+) error {
+	if err := quiesceSetupRuntimeForMutation(
+		transaction,
+		gatewayPath,
+		dataRoot,
+		disableStableHook,
+		stopServices,
+		verifyStopped,
+	); err != nil {
+		return err
+	}
+	return mutate()
 }
 
 func rollbackSetupTransactionWithRuntime(
 	transaction setupTransaction,
 	stopServices func(string, string) (serviceState, error),
 	verifyStopped func(string, string) error,
+	restoreStableHook func(setupTransaction) error,
 	startServices func(string, string, serviceState) (serviceState, error),
 ) error {
 	restoreServices := transaction.PreviousServices
@@ -1617,15 +1839,45 @@ func rollbackSetupTransactionWithRuntime(
 	if err := rollbackMaintenancePublication(transaction); err != nil {
 		restoreErrors = append(restoreErrors, err)
 	}
+	// Restore the prior hook binding while the restored gateway is still
+	// quiescent. Publishing after service restart would race the executable
+	// image handle and could strand rollback in the same sharing failure.
+	if err := restoreStableHook(transaction); err != nil {
+		restoreErrors = append(restoreErrors, fmt.Errorf("restore stable hook runtime: %w", err))
+		return errors.Join(restoreErrors...)
+	}
 	if err := restoreRuntime(false); err != nil {
 		restoreErrors = append(restoreErrors, err)
 	}
 	return errors.Join(restoreErrors...)
 }
 
+func restorePreviousStableHookRuntime(transaction setupTransaction) error {
+	if transaction.PreviousStableHookStatus != stableHookSnapshotActive {
+		return nil
+	}
+	if transaction.PreviousState == nil {
+		return errors.New("active stable-hook snapshot has no previous install state")
+	}
+	transactionID := transaction.PreviousState.TransactionID
+	if !validSetupTransactionID(transactionID) {
+		// Pre-transaction native releases did not persist an install-state ID.
+		// The rollback transaction is durable and validated, so bind the restored
+		// generation to that identity rather than inventing one.
+		transactionID = transaction.ID
+	}
+	return publishStableHookRuntime(
+		filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-hook.exe"),
+		filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe"),
+		transaction.DataRoot,
+		transactionID,
+	)
+}
+
 func convergeRecoveredCommittedSetupTransaction(transaction setupTransaction) error {
 	return convergeRecoveredCommittedSetupTransactionWithRuntime(
 		transaction,
+		disableStableHookRuntime,
 		stopOwnedServices,
 		verifyOwnedRuntimeReleased,
 		convergeCommittedSetupTransaction,
@@ -1634,12 +1886,16 @@ func convergeRecoveredCommittedSetupTransaction(transaction setupTransaction) er
 
 func convergeRecoveredCommittedSetupTransactionWithRuntime(
 	transaction setupTransaction,
+	disableStableHook func(string) error,
 	stopServices func(string, string) (serviceState, error),
 	verifyStopped func(string, string) error,
 	converge func(setupTransaction) error,
 ) error {
 	if transaction.Action != "install" {
 		return converge(transaction)
+	}
+	if err := disableStableHook(transaction.ID); err != nil {
+		return fmt.Errorf("disable stable hook runtime before committed recovery: %w", err)
 	}
 	gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
 	if pathExists(gatewayPath) {
@@ -1727,6 +1983,9 @@ func rollbackInstallForUninstallHandoff(transaction setupTransaction) error {
 	if err := quiesceOwnedInstallRuntime(gatewayPath, transaction.DataRoot, nativeInstallRuntimeConvergenceOps()); err != nil {
 		return err
 	}
+	if err := verifyOwnedRuntimeReleased(gatewayPath, transaction.DataRoot); err != nil {
+		return fmt.Errorf("verify interrupted install runtime release before uninstall handoff: %w", err)
+	}
 	if err := rollbackTransactionFiles(transaction); err != nil {
 		return err
 	}
@@ -1750,7 +2009,7 @@ func resumeUninstallIntentWithoutActivation(transaction setupTransaction) error 
 		if _, err := stopOwnedServices(trashGateway, transaction.DataRoot); err != nil {
 			return err
 		}
-		if err := verifyOwnedServicesStopped(trashGateway, transaction.DataRoot); err != nil {
+		if err := verifyOwnedRuntimeReleased(trashGateway, transaction.DataRoot); err != nil {
 			return err
 		}
 	}
@@ -1915,6 +2174,9 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 			}
 			if _, err := stopOwnedServices(gatewayPath, transaction.DataRoot); err != nil {
 				return err
+			}
+			if err := verifyOwnedRuntimeReleased(gatewayPath, transaction.DataRoot); err != nil {
+				return fmt.Errorf("verify committed uninstall runtime release: %w", err)
 			}
 		}
 		// Connector lifecycle is always run by the manifest-verified gateway

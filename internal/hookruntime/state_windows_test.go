@@ -7,9 +7,14 @@ package hookruntime
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"golang.org/x/sys/windows"
 )
 
 const (
@@ -150,6 +155,102 @@ func TestStableRuntimeFailsClosedForTamperedLauncherAndState(t *testing.T) {
 	}
 }
 
+func TestSetupPostureRepairsMalformedAndProtectionDriftedFailClosedState(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		drift func(*testing.T, Paths)
+	}{
+		{
+			name: "malformed-state",
+			drift: func(t *testing.T, paths Paths) {
+				if err := os.WriteFile(paths.State, []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "state-dacl",
+			drift: func(t *testing.T, paths Paths) {
+				addDACLDrift(t, paths.State, windows.GENERIC_READ)
+				if err := safefile.ValidatePrivateFile(paths.State); err == nil {
+					t.Fatal("DACL drift remained trusted by the launcher reader")
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			paths := testRuntimePaths(t)
+			if err := publishAt(
+				paths,
+				writeRuntimeSource(t, "MZ-setup-posture-hook"),
+				writeRuntimeGateway(t, "MZ-setup-posture-gateway"),
+				filepath.Join(t.TempDir(), "data"),
+				stableRuntimeTransactionOne,
+			); err != nil {
+				t.Fatal(err)
+			}
+			test.drift(t, paths)
+
+			state, recognized, err := ReadSetupPostureAt(paths, paths.Launcher)
+			if err != nil || !recognized || state.Active() {
+				t.Fatalf("setup posture = %+v, recognized=%t, error=%v", state, recognized, err)
+			}
+			if err := disableAt(paths, stableRuntimeTransactionTwo); err != nil {
+				t.Fatalf("writer-side disable did not repair fail-closed state: %v", err)
+			}
+			disabled, recognized, err := readTrustedAt(paths, paths.Launcher)
+			if err != nil || !recognized || disabled.Active() ||
+				disabled.Status != StatusDisabled ||
+				disabled.TransactionID != stableRuntimeTransactionTwo {
+				t.Fatalf("repaired disabled state = %+v, recognized=%t, error=%v", disabled, recognized, err)
+			}
+		})
+	}
+}
+
+func TestSetupPostureRejectsUntrustedWriteDACL(t *testing.T) {
+	paths := testRuntimePaths(t)
+	if err := publishAt(
+		paths,
+		writeRuntimeSource(t, "MZ-untrusted-dacl-hook"),
+		writeRuntimeGateway(t, "MZ-untrusted-dacl-gateway"),
+		filepath.Join(t.TempDir(), "data"),
+		stableRuntimeTransactionOne,
+	); err != nil {
+		t.Fatal(err)
+	}
+	addDACLDrift(t, paths.State, windows.GENERIC_WRITE)
+	if _, recognized, err := ReadSetupPostureAt(paths, paths.Launcher); !recognized || err == nil {
+		t.Fatalf("untrusted-write posture recognized=%t, error=%v", recognized, err)
+	}
+}
+
+func TestSetupPostureRejectsReparseTopology(t *testing.T) {
+	paths := testRuntimePaths(t)
+	if err := publishAt(
+		paths,
+		writeRuntimeSource(t, "MZ-reparse-hook"),
+		writeRuntimeGateway(t, "MZ-reparse-gateway"),
+		filepath.Join(t.TempDir(), "data"),
+		stableRuntimeTransactionOne,
+	); err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := filepath.Join(t.TempDir(), "HookRuntime")
+	if output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", aliasRoot, paths.Root).CombinedOutput(); err != nil {
+		t.Skipf("junction creation unavailable: %v (%s)", err, output)
+	}
+	defer os.Remove(aliasRoot)
+	alias := Paths{
+		Root:     aliasRoot,
+		Launcher: filepath.Join(aliasRoot, LauncherName),
+		State:    filepath.Join(aliasRoot, StateName),
+	}
+	if _, recognized, err := ReadSetupPostureAt(alias, alias.Launcher); !recognized || err == nil {
+		t.Fatalf("reparse posture recognized=%t, error=%v", recognized, err)
+	}
+}
+
 func TestStableRuntimeMissingLauncherCannotReactivateDisabledState(t *testing.T) {
 	paths := testRuntimePaths(t)
 	if err := os.MkdirAll(paths.Root, 0o700); err != nil {
@@ -176,6 +277,61 @@ func TestStableRuntimeMissingLauncherCannotReactivateDisabledState(t *testing.T)
 	}
 	if state, recognized, err := readTrustedAt(paths, paths.Launcher); !recognized || err == nil || state.Active() {
 		t.Fatalf("later launcher inherited stale active state: state=%+v recognized=%v err=%v", state, recognized, err)
+	}
+}
+
+func addDACLDrift(t *testing.T, path string, driftMask windows.ACCESS_MASK) {
+	t.Helper()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := make([]windows.EXPLICIT_ACCESS, 0, 3)
+	for _, entry := range []struct {
+		sid  *windows.SID
+		mask windows.ACCESS_MASK
+	}{
+		{sid: user.User.Sid, mask: windows.GENERIC_ALL},
+		{sid: system, mask: windows.GENERIC_ALL},
+		{sid: users, mask: driftMask},
+	} {
+		entries = append(entries, windows.EXPLICIT_ACCESS{
+			AccessPermissions: entry.mask,
+			AccessMode:        windows.GRANT_ACCESS,
+			Inheritance:       windows.NO_INHERITANCE,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_USER,
+				TrusteeValue: windows.TrusteeValueFromSID(entry.sid),
+			},
+		})
+	}
+	acl, err := windows.ACLFromEntries(entries, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		extended,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		acl,
+		nil,
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 
