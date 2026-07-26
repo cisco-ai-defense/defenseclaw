@@ -114,6 +114,47 @@ def test_block_probe_forbids_model_retries() -> None:
     assert "Do not retry, rewrite, encode, split, or run an alternative command." in text
 
 
+def test_gateway_start_auth_failure_is_classified_as_credentials(tmp_path: Path) -> None:
+    auth_log = tmp_path / "auth.log"
+    infrastructure_log = tmp_path / "infrastructure.log"
+    auth_log.write_text(
+        "Your access token could not be refreshed because your refresh token was already used. "
+        "Please log out and sign in again.\n",
+        encoding="utf-8",
+    )
+    infrastructure_log.write_text(
+        "listen tcp 127.0.0.1:12345: bind: address already in use\n",
+        encoding="utf-8",
+    )
+
+    proc = _bash(
+        """
+        set -euo pipefail
+        . "${DRIVER_COMMON_PATH}"
+        dc_file_looks_like_auth_failure "${AUTH_LOG}"
+        if dc_file_looks_like_auth_failure "${INFRASTRUCTURE_LOG}"; then
+          exit 1
+        fi
+        """,
+        env={
+            "AUTH_LOG": str(auth_log),
+            "DRIVER_COMMON_PATH": str(DRIVER_COMMON),
+            "INFRASTRUCTURE_LOG": str(infrastructure_log),
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    harness_text = HARNESS.read_text(encoding="utf-8")
+    start = harness_text.index(
+        'baseline_gateway_start_log="${ARTIFACTS_DIR}/gateway/baseline-start.log"'
+    )
+    end = harness_text.index("GATEWAY_STARTED=1")
+    start_block = harness_text[start:end]
+    assert 'dc_file_looks_like_auth_failure "${baseline_gateway_start_log}"' in start_block
+    assert 'CLASSIFICATION="auth_failure"' in start_block
+    assert "HARNESS_EXIT_CODE=3" in start_block
+
+
 def test_harness_captures_quiescent_v8_canonical_evidence() -> None:
     text = HARNESS.read_text(encoding="utf-8")
     assert "for name in gateway.log audit.db judge_bodies.db watchdog.log" in text
