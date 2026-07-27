@@ -334,6 +334,22 @@ func TestGatewaySnapshotReadyRotationRejectsUnexpectedConnector(t *testing.T) {
 	}
 }
 
+func TestGatewaySnapshotReadyRetriesUnavailableTelemetryHealth(t *testing.T) {
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	snap.Telemetry = gateway.SubsystemHealth{
+		State:     gateway.StateError,
+		LastError: telemetrySnapshotUnavailable,
+	}
+
+	ready, err := gatewaySnapshotReady(snap, daemonReadinessRequirements{
+		guardrailEnabled: true,
+		telemetryEnabled: true,
+	})
+	if ready || err != nil {
+		t.Fatalf("unavailable telemetry readiness = %v, error = %v; want retryable not-ready", ready, err)
+	}
+}
+
 func testClaudeRotationProbes(baseURL, credential string) []connector.ClaudeCodeNativeOTLPProbe {
 	headers := make(http.Header)
 	headers.Set("Authorization", "Bearer "+credential)
@@ -670,6 +686,81 @@ func TestWaitForGatewayReadinessFailsWhenSlowLiveProcessMissesDeadline(t *testin
 	}
 	if snap.Guardrail.State != gateway.StateDisabled {
 		t.Fatalf("guardrail state = %q, want %q", snap.Guardrail.State, gateway.StateDisabled)
+	}
+}
+
+func TestWaitForGatewayReadinessRetriesTransientTelemetrySnapshotMiss(t *testing.T) {
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+		snap.Telemetry.State = gateway.StateRunning
+		if probes.Add(1) == 1 {
+			snap.Telemetry = gateway.SubsystemHealth{
+				State:     gateway.StateError,
+				LastError: telemetrySnapshotUnavailable,
+			}
+		}
+		_ = json.NewEncoder(w).Encode(snap)
+	}))
+	defer srv.Close()
+
+	snap, ready, err := waitForGatewayReadiness(
+		srv.Client(),
+		srv.URL,
+		time.Second,
+		5*time.Millisecond,
+		daemonReadinessRequirements{
+			guardrailEnabled: true,
+			telemetryEnabled: true,
+		},
+		func() bool { return true },
+	)
+	if err != nil || !ready {
+		t.Fatalf("transient telemetry snapshot readiness = %v, error = %v", ready, err)
+	}
+	if snap.Telemetry.State != gateway.StateRunning {
+		t.Fatalf("final telemetry state = %q, want %q", snap.Telemetry.State, gateway.StateRunning)
+	}
+	if got := probes.Load(); got != 2 {
+		t.Fatalf("health probes = %d, want 2", got)
+	}
+}
+
+func TestWaitForGatewayReadinessTimesOutOnPersistentTelemetrySnapshotMiss(t *testing.T) {
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		probes.Add(1)
+		snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+		snap.Telemetry = gateway.SubsystemHealth{
+			State:     gateway.StateError,
+			LastError: telemetrySnapshotUnavailable,
+		}
+		_ = json.NewEncoder(w).Encode(snap)
+	}))
+	defer srv.Close()
+
+	snap, ready, err := waitForGatewayReadiness(
+		srv.Client(),
+		srv.URL,
+		50*time.Millisecond,
+		5*time.Millisecond,
+		daemonReadinessRequirements{
+			guardrailEnabled: true,
+			telemetryEnabled: true,
+		},
+		func() bool { return true },
+	)
+	if err == nil || !strings.Contains(err.Error(), "remained STARTING") {
+		t.Fatalf("persistent telemetry snapshot error = %v, want readiness timeout", err)
+	}
+	if ready {
+		t.Fatal("persistent telemetry snapshot readiness = true, want false")
+	}
+	if snap.Telemetry.LastError != telemetrySnapshotUnavailable {
+		t.Fatalf("last telemetry error = %q, want %q", snap.Telemetry.LastError, telemetrySnapshotUnavailable)
+	}
+	if probes.Load() < 2 {
+		t.Fatalf("health probes = %d, want retries through deadline", probes.Load())
 	}
 }
 
@@ -1216,14 +1307,10 @@ func TestWaitForGatewayReadinessWaitsForConfiguredWatcher(t *testing.T) {
 	}
 }
 
-func TestWaitForGatewayReadinessAllowsRecoveringGatewayError(t *testing.T) {
-	var probes atomic.Int32
+func TestWaitForGatewayReadinessAcceptsExternalFleetReconnect(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		snap := readinessSnapshot(gateway.StateRunning, gateway.StateError)
+		snap := readinessSnapshot(gateway.StateRunning, gateway.StateReconnecting)
 		snap.Gateway.LastError = "upstream unavailable"
-		if probes.Add(1) >= 2 {
-			snap.Gateway = gateway.SubsystemHealth{State: gateway.StateRunning}
-		}
 		_ = json.NewEncoder(w).Encode(snap)
 	}))
 	defer srv.Close()
@@ -1234,10 +1321,49 @@ func TestWaitForGatewayReadinessAllowsRecoveringGatewayError(t *testing.T) {
 		func() bool { return true },
 	)
 	if err != nil || !ready {
-		t.Fatalf("recovering gateway readiness = %v, error = %v", ready, err)
+		t.Fatalf("external fleet reconnect readiness = %v, error = %v", ready, err)
 	}
-	if got := probes.Load(); got != 2 {
-		t.Fatalf("health probes = %d, want 2", got)
+}
+
+func TestWaitForGatewayReadinessAcceptsPersistentFleetErrorWhileLocalRuntimeStarts(t *testing.T) {
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		snap := readinessSnapshot(gateway.StateRunning, gateway.StateError)
+		snap.Gateway.LastError = "upstream unavailable"
+		snap.Watcher.State = gateway.StateStarting
+		if probes.Add(1) >= 3 {
+			snap.Watcher.State = gateway.StateRunning
+		}
+		_ = json.NewEncoder(w).Encode(snap)
+	}))
+	defer srv.Close()
+
+	_, ready, err := waitForGatewayReadiness(
+		srv.Client(), srv.URL, time.Second, 5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true, watcherEnabled: true},
+		func() bool { return true },
+	)
+	if err != nil || !ready {
+		t.Fatalf("persistent fleet error readiness = %v, error = %v", ready, err)
+	}
+	if got := probes.Load(); got != 3 {
+		t.Fatalf("health probes = %d, want 3", got)
+	}
+}
+
+func TestWaitForGatewayReadinessRejectsStoppedFleetRuntime(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(readinessSnapshot(gateway.StateRunning, gateway.StateStopped))
+	}))
+	defer srv.Close()
+
+	_, ready, err := waitForGatewayReadiness(
+		srv.Client(), srv.URL, time.Second, 5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true},
+		func() bool { return true },
+	)
+	if err == nil || !strings.Contains(err.Error(), "gateway gateway failed during startup: stopped") || ready {
+		t.Fatalf("stopped fleet runtime readiness = %v, error = %v", ready, err)
 	}
 }
 

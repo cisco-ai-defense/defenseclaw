@@ -10,8 +10,9 @@
     Folders. Environment-variable profile spoofing is intentionally unsupported.
     The parent mode therefore delegates to the repository's disposable
     standard-user launcher. Child mode runs with a real isolated profile and
-    HKCU hive, installs through scripts/install.ps1, repeats the authenticated
-    handoff, verifies the installed version, and proves complete uninstall.
+    HKCU hive, installs through the exact sealed install.ps1 release asset,
+    repeats the authenticated handoff, verifies the installed version, and
+    proves complete uninstall.
 #>
 
 [CmdletBinding()]
@@ -223,7 +224,7 @@ if ([string]::IsNullOrWhiteSpace($userProfile) -or
     throw "Disposable bootstrap child does not have a token-bound real user profile"
 }
 
-$installer = Join-Path $PSScriptRoot "install.ps1"
+$installer = Join-Path $ReleaseDir "install.ps1"
 $powerShell = Join-Path $PSHOME "pwsh.exe"
 $cosign = Join-Path $ReleaseDir "cosign-windows-amd64.exe"
 $setup = Join-Path $ReleaseDir "DefenseClawSetup-x64.exe"

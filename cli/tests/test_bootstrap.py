@@ -17,6 +17,7 @@ to catch any accidental re-seeding regressions.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -141,6 +142,7 @@ class BootstrapEnvTests(unittest.TestCase):
         # ``bootstrap_env`` returns; simulate that here so the
         # ``is_new_config`` flag on the second run reflects reality.
         from defenseclaw.config import config_path
+
         cfg_file = str(config_path())
         os.makedirs(os.path.dirname(cfg_file), exist_ok=True)
         with open(cfg_file, "w", encoding="utf-8") as fh:
@@ -174,10 +176,7 @@ class BootstrapEnvTests(unittest.TestCase):
         config_home = os.path.join(self._tmp.name, "omnigent-config")
         os.makedirs(config_home)
         with open(os.path.join(config_home, "config.yaml"), "w", encoding="utf-8") as fh:
-            fh.write(
-                "policy_modules: [defenseclaw_omnigent_policy]\n"
-                "policies: {defenseclaw_guardrail: {}}\n"
-            )
+            fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
         with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": config_home}):
             result = _connector_readiness(cfg, "omnigent")
 
@@ -214,6 +213,21 @@ class FreshMigrationCursorTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+
+    def _pending_config(self, label: str):
+        from defenseclaw.bootstrap import (
+            _record_fresh_migration_retry,
+            fresh_migration_pending_path,
+        )
+        from defenseclaw.config import default_config, prepare_fresh_v8_config
+
+        data_dir = os.path.join(self._tmp.name, label)
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            cfg = default_config()
+            prepare_fresh_v8_config(cfg)
+            cfg.save()
+            _record_fresh_migration_retry(cfg)
+        return cfg, fresh_migration_pending_path(data_dir)
 
     def _run_first_run(self, data_dir: str):
         from defenseclaw.bootstrap import (
@@ -258,9 +272,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         self.assertEqual(state.applied, expected)
         self.assertEqual(state.package_version, __version__)
         self.assertEqual(state.applied_at["0.8.5"], migration_state.BOOTSTRAP_SENTINEL)
-        self.assertTrue(
-            all(state.applied_at[version] == migration_state.BOOTSTRAP_SENTINEL for version in expected)
-        )
+        self.assertTrue(all(state.applied_at[version] == migration_state.BOOTSTRAP_SENTINEL for version in expected))
 
     def test_rerun_preserves_bootstrapped_cursor_byte_for_byte(self):
         from defenseclaw import migration_state
@@ -318,9 +330,22 @@ class FreshMigrationCursorTests(unittest.TestCase):
 
         self.assertTrue(os.path.isfile(os.path.join(data_dir, "config.yaml")))
         self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
-        self.assertTrue(
-            any(step.name == "Config Save" and step.status == "fail" for step in report.setup)
-        )
+        self.assertTrue(any(step.name == "Config Save" and step.status == "fail" for step in report.setup))
+
+    def test_unmarked_existing_v8_config_never_infers_a_fresh_cursor(self):
+        from defenseclaw import migration_state
+        from defenseclaw.config import default_config, prepare_fresh_v8_config
+
+        data_dir = os.path.join(self._tmp.name, "unmarked-existing")
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            cfg = default_config()
+            prepare_fresh_v8_config(cfg)
+            cfg.save()
+
+        report = self._run_first_run(data_dir)
+
+        self.assertNotEqual(report.status, "needs_attention")
+        self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
 
     def test_later_setup_exception_does_not_create_cursor(self):
         import sqlite3
@@ -357,13 +382,124 @@ class FreshMigrationCursorTests(unittest.TestCase):
                 )
             )
 
-        self.assertTrue(os.path.isfile(os.path.join(data_dir, "config.yaml")))
         self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
         no_runtime.return_value.close.assert_called_once_with()
         self.assertTrue(stores)
         for store in stores:
             with self.assertRaisesRegex(sqlite3.ProgrammingError, "closed"):
                 store.db.execute("SELECT 1")
+
+    def test_version_mismatched_pending_marker_refuses_inference(self):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import (
+            _record_fresh_migration_retry,
+            fresh_migration_pending_path,
+        )
+        from defenseclaw.config import default_config, prepare_fresh_v8_config
+
+        data_dir = os.path.join(self._tmp.name, "version-mismatch")
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            cfg = default_config()
+            prepare_fresh_v8_config(cfg)
+            cfg.save()
+            _record_fresh_migration_retry(cfg)
+        marker = fresh_migration_pending_path(data_dir)
+        with open(marker, encoding="utf-8") as stream:
+            payload = json.load(stream)
+        payload["package_version"] = "0.0.1"
+        with open(marker, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream)
+        os.chmod(marker, 0o600)
+
+        report = self._run_first_run(data_dir)
+
+        self.assertEqual(report.status, "needs_attention")
+        self.assertTrue(any("pending from DefenseClaw 0.0.1" in step.detail for step in report.setup))
+        self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
+        self.assertTrue(os.path.isfile(marker))
+
+    def test_pending_marker_readback_distinguishes_disappearance_from_change(self):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import (
+            FreshMigrationStateError,
+            _record_fresh_migration_retry,
+            fresh_migration_pending_path,
+        )
+        from defenseclaw.config import default_config, prepare_fresh_v8_config
+
+        for label, persisted, message in (
+            ("disappeared", None, "evidence disappeared during publication"),
+            ("changed", {}, "evidence changed during publication"),
+        ):
+            with self.subTest(label=label):
+                data_dir = os.path.join(self._tmp.name, f"marker-readback-{label}")
+                with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+                    cfg = default_config()
+                    prepare_fresh_v8_config(cfg)
+                    cfg.save()
+                    with (
+                        patch(
+                            "defenseclaw.bootstrap._load_fresh_migration_pending",
+                            return_value=persisted,
+                        ),
+                        self.assertRaisesRegex(FreshMigrationStateError, message),
+                    ):
+                        _record_fresh_migration_retry(cfg)
+
+                self.assertTrue(os.path.isfile(fresh_migration_pending_path(data_dir)))
+                self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
+
+    @unittest.skipIf(os.name == "nt", "POSIX marker mode and symlink checks")
+    def test_unsafe_pending_marker_is_never_retry_authority(self):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import fresh_migration_pending_path
+
+        for label in ("malformed", "public", "symlink"):
+            with self.subTest(label=label):
+                data_dir = os.path.join(self._tmp.name, f"unsafe-{label}")
+                os.makedirs(data_dir)
+                marker = fresh_migration_pending_path(data_dir)
+                if label == "symlink":
+                    target = os.path.join(self._tmp.name, "attacker-marker")
+                    with open(target, "w", encoding="utf-8") as stream:
+                        stream.write("{}\n")
+                    os.symlink(target, marker)
+                else:
+                    with open(marker, "w", encoding="utf-8") as stream:
+                        stream.write("{broken\n" if label == "malformed" else "{}\n")
+                    os.chmod(marker, 0o644 if label == "public" else 0o600)
+
+                report = self._run_first_run(data_dir)
+
+                self.assertEqual(report.status, "needs_attention")
+                self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
+                self.assertTrue(os.path.lexists(marker))
+
+    def test_pending_marker_never_overwrites_a_corrupt_cursor(self):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import (
+            _record_fresh_migration_retry,
+            fresh_migration_pending_path,
+        )
+        from defenseclaw.config import default_config, prepare_fresh_v8_config
+
+        data_dir = os.path.join(self._tmp.name, "corrupt-existing-cursor")
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            cfg = default_config()
+            prepare_fresh_v8_config(cfg)
+            cfg.save()
+            _record_fresh_migration_retry(cfg)
+        cursor = migration_state.state_path(data_dir)
+        with open(cursor, "wb") as stream:
+            stream.write(b'{"schema":')
+        os.chmod(cursor, 0o600)
+
+        report = self._run_first_run(data_dir)
+
+        self.assertEqual(report.status, "needs_attention")
+        with open(cursor, "rb") as stream:
+            self.assertEqual(stream.read(), b'{"schema":')
+        self.assertTrue(os.path.isfile(fresh_migration_pending_path(data_dir)))
 
     def test_cursor_publication_failure_is_repaired_on_rerun(self):
         from defenseclaw import migration_state
@@ -381,9 +517,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(_fresh_migration_pending_path(data_dir)))
         self.assertTrue(
             any(
-                step.name == "Migration State"
-                and step.status == "fail"
-                and step.next_command == "defenseclaw init"
+                step.name == "Migration State" and step.status == "fail" and step.next_command == "defenseclaw init"
                 for step in first_report.setup
             )
         )
@@ -400,6 +534,35 @@ class FreshMigrationCursorTests(unittest.TestCase):
                 for step in second_report.setup
             )
         )
+
+    def test_fresh_cursor_readback_failure_is_actionable_and_retains_marker(self):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import (
+            FreshMigrationStateError,
+            finalize_first_run_config,
+            fresh_migration_pending_path,
+        )
+        from defenseclaw.config import default_config, prepare_fresh_v8_config
+
+        data_dir = os.path.join(self._tmp.name, "cursor-readback-failure")
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            cfg = default_config()
+            prepare_fresh_v8_config(cfg)
+            with (
+                patch.object(
+                    migration_state,
+                    "load",
+                    side_effect=OSError("injected cursor readback failure"),
+                ),
+                self.assertRaisesRegex(
+                    FreshMigrationStateError,
+                    "published but could not be read back",
+                ),
+            ):
+                finalize_first_run_config(cfg, was_config_absent=True)
+
+        self.assertTrue(os.path.isfile(migration_state.state_path(data_dir)))
+        self.assertTrue(os.path.isfile(fresh_migration_pending_path(data_dir)))
 
     def test_cursor_retry_refuses_config_changed_after_failed_publication(self):
         from defenseclaw import migration_state
@@ -425,6 +588,120 @@ class FreshMigrationCursorTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
         self.assertTrue(os.path.isfile(_fresh_migration_pending_path(data_dir)))
 
+    def test_pending_cursor_repair_reports_missing_evidence_without_inference(self):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import (
+            FreshMigrationStateError,
+            repair_pending_first_run_config,
+        )
+
+        cfg, marker = self._pending_config("repair-missing-evidence")
+        with (
+            patch(
+                "defenseclaw.bootstrap._load_fresh_migration_pending",
+                return_value=None,
+            ),
+            self.assertRaisesRegex(
+                FreshMigrationStateError,
+                "evidence disappeared before cursor publication",
+            ),
+        ):
+            repair_pending_first_run_config(cfg)
+
+        self.assertTrue(os.path.isfile(marker))
+        self.assertFalse(os.path.lexists(migration_state.state_path(cfg.data_dir)))
+
+    def test_pending_cursor_repair_reports_save_failure_and_retains_marker(self):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import (
+            FreshMigrationStateError,
+            repair_pending_first_run_config,
+        )
+
+        cfg, marker = self._pending_config("repair-save-failure")
+        with (
+            patch.object(
+                migration_state,
+                "save_if_absent",
+                side_effect=OSError("injected cursor save failure"),
+            ),
+            self.assertRaisesRegex(
+                FreshMigrationStateError,
+                "could not publish the pending fresh migration cursor",
+            ),
+        ):
+            repair_pending_first_run_config(cfg)
+
+        self.assertTrue(os.path.isfile(marker))
+        self.assertFalse(os.path.lexists(migration_state.state_path(cfg.data_dir)))
+
+    def test_pending_cursor_repair_wraps_lock_failure_and_retains_marker(self):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import (
+            FreshMigrationStateError,
+            repair_pending_first_run_config,
+        )
+
+        cfg, marker = self._pending_config("repair-lock-failure")
+        with (
+            patch(
+                "defenseclaw.file_lock.locked_file_update",
+                side_effect=OSError("injected lock failure"),
+            ),
+            self.assertRaisesRegex(
+                FreshMigrationStateError,
+                "could not complete the pending fresh migration cursor",
+            ),
+        ):
+            repair_pending_first_run_config(cfg)
+
+        self.assertTrue(os.path.isfile(marker))
+        self.assertFalse(os.path.lexists(migration_state.state_path(cfg.data_dir)))
+
+    def test_pending_cursor_repair_reports_mismatch_and_retains_marker(self):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import (
+            FreshMigrationStateError,
+            repair_pending_first_run_config,
+        )
+
+        cfg, marker = self._pending_config("repair-mismatch")
+        with (
+            patch.object(migration_state, "save_if_absent", return_value=False),
+            patch.object(migration_state, "load", return_value=None),
+            self.assertRaisesRegex(
+                FreshMigrationStateError,
+                "cursor does not match the pending fresh installation",
+            ),
+        ):
+            repair_pending_first_run_config(cfg)
+
+        self.assertTrue(os.path.isfile(marker))
+        self.assertFalse(os.path.lexists(migration_state.state_path(cfg.data_dir)))
+
+    def test_pending_cursor_repair_reports_marker_cleanup_after_cursor_success(self):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import (
+            FreshMigrationStateError,
+            repair_pending_first_run_config,
+        )
+
+        cfg, marker = self._pending_config("repair-marker-cleanup")
+        with (
+            patch(
+                "defenseclaw.file_permissions.delete_file_durable",
+                side_effect=OSError("injected durable delete failure"),
+            ),
+            self.assertRaisesRegex(
+                FreshMigrationStateError,
+                "cursor is complete, but its retry marker could not be cleared",
+            ),
+        ):
+            repair_pending_first_run_config(cfg)
+
+        self.assertTrue(os.path.isfile(marker))
+        self.assertIsNotNone(migration_state.load(cfg.data_dir))
+
 
 # ---------------------------------------------------------------------------
 # _apply_first_run_choices: hook_fail_mode plumbing
@@ -447,9 +724,11 @@ class FreshMigrationCursorTests(unittest.TestCase):
 # and _normalize_hook_fail_mode in cli/defenseclaw/config.py.
 # ---------------------------------------------------------------------------
 
+
 class ApplyFirstRunChoicesHookFailModeTests(unittest.TestCase):
     def setUp(self):
         from defenseclaw.config import default_config
+
         self.cfg = default_config()
 
     def _apply(self, hook_fail_mode: str) -> None:
@@ -464,8 +743,11 @@ class ApplyFirstRunChoicesHookFailModeTests(unittest.TestCase):
     def test_empty_string_preserves_existing_choice(self):
         self.cfg.guardrail.hook_fail_mode = "closed"
         self._apply("")
-        self.assertEqual(self.cfg.guardrail.hook_fail_mode, "closed",
-                         "empty options.hook_fail_mode must NEVER overwrite an existing operator choice")
+        self.assertEqual(
+            self.cfg.guardrail.hook_fail_mode,
+            "closed",
+            "empty options.hook_fail_mode must NEVER overwrite an existing operator choice",
+        )
 
     def test_closed_persists(self):
         self._apply("closed")
@@ -478,14 +760,20 @@ class ApplyFirstRunChoicesHookFailModeTests(unittest.TestCase):
     def test_open_persists(self):
         self.cfg.guardrail.hook_fail_mode = "closed"  # seed with non-default
         self._apply("open")
-        self.assertEqual(self.cfg.guardrail.hook_fail_mode, "open",
-                         "explicit 'open' must be honored even when starting from 'closed'")
+        self.assertEqual(
+            self.cfg.guardrail.hook_fail_mode,
+            "open",
+            "explicit 'open' must be honored even when starting from 'closed'",
+        )
 
     def test_typo_normalizes_to_open(self):
         self.cfg.guardrail.hook_fail_mode = "closed"  # seed with non-default
         self._apply("klosed")
-        self.assertEqual(self.cfg.guardrail.hook_fail_mode, "open",
-                         "typo must NEVER silently put the agent in a stricter posture than the operator typed")
+        self.assertEqual(
+            self.cfg.guardrail.hook_fail_mode,
+            "open",
+            "typo must NEVER silently put the agent in a stricter posture than the operator typed",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +788,7 @@ class ApplyFirstRunChoicesHookFailModeTests(unittest.TestCase):
 class ApplyFirstRunChoicesJudgeTests(unittest.TestCase):
     def setUp(self):
         from defenseclaw.config import default_config
+
         self.cfg = default_config()
 
     def _apply(self, *, with_judge: bool) -> None:
@@ -566,6 +855,7 @@ class ApplyFirstRunChoicesJudgeTests(unittest.TestCase):
 class ApplyFirstRunChoicesHITLTests(unittest.TestCase):
     def setUp(self):
         from defenseclaw.config import default_config
+
         self.cfg = default_config()
 
     def _apply(
@@ -591,9 +881,10 @@ class ApplyFirstRunChoicesHITLTests(unittest.TestCase):
     def test_none_preserves_existing_enabled(self):
         self.cfg.guardrail.hilt.enabled = True
         self._apply(human_approval=None)
-        self.assertTrue(self.cfg.guardrail.hilt.enabled,
-                        "human_approval=None must NEVER silently flip an "
-                        "operator's prior 'enabled' choice")
+        self.assertTrue(
+            self.cfg.guardrail.hilt.enabled,
+            "human_approval=None must NEVER silently flip an operator's prior 'enabled' choice",
+        )
 
     def test_none_preserves_existing_disabled(self):
         self.cfg.guardrail.hilt.enabled = False
@@ -613,35 +904,47 @@ class ApplyFirstRunChoicesHITLTests(unittest.TestCase):
     def test_min_severity_empty_preserves(self):
         self.cfg.guardrail.hilt.min_severity = "MEDIUM"
         self._apply(hilt_min_severity="")
-        self.assertEqual(self.cfg.guardrail.hilt.min_severity, "MEDIUM",
-                         "empty hilt_min_severity must preserve the existing "
-                         "severity floor — used by callers who only want to "
-                         "flip the toggle without overriding the threshold")
+        self.assertEqual(
+            self.cfg.guardrail.hilt.min_severity,
+            "MEDIUM",
+            "empty hilt_min_severity must preserve the existing "
+            "severity floor — used by callers who only want to "
+            "flip the toggle without overriding the threshold",
+        )
 
     def test_min_severity_normalizes_uppercase(self):
         self._apply(hilt_min_severity="medium")
-        self.assertEqual(self.cfg.guardrail.hilt.min_severity, "MEDIUM",
-                         "lowercase severity must normalize so config stays "
-                         "consistent with the canonical HIGH/MEDIUM/LOW/"
-                         "CRITICAL set used by the gateway")
+        self.assertEqual(
+            self.cfg.guardrail.hilt.min_severity,
+            "MEDIUM",
+            "lowercase severity must normalize so config stays "
+            "consistent with the canonical HIGH/MEDIUM/LOW/"
+            "CRITICAL set used by the gateway",
+        )
 
     def test_min_severity_invalid_falls_back_to_high(self):
         self.cfg.guardrail.hilt.min_severity = "MEDIUM"  # seed non-default
         self._apply(hilt_min_severity="kritical")
-        self.assertEqual(self.cfg.guardrail.hilt.min_severity, "HIGH",
-                         "typo must fall back to the strictest practical "
-                         "floor (HIGH) — falling back to a permissive value "
-                         "would silently weaken the operator's intent")
+        self.assertEqual(
+            self.cfg.guardrail.hilt.min_severity,
+            "HIGH",
+            "typo must fall back to the strictest practical "
+            "floor (HIGH) — falling back to a permissive value "
+            "would silently weaken the operator's intent",
+        )
 
     def test_enable_with_empty_severity_backfills_high(self):
         self.cfg.guardrail.hilt.enabled = False
         self.cfg.guardrail.hilt.min_severity = ""  # simulate round-tripped older config
         self._apply(human_approval=True, hilt_min_severity="")
         self.assertTrue(self.cfg.guardrail.hilt.enabled)
-        self.assertEqual(self.cfg.guardrail.hilt.min_severity, "HIGH",
-                         "enabling HITL with no severity floor must backfill "
-                         "HIGH — an empty floor lets every finding skip the "
-                         "prompt, which would defeat the feature entirely")
+        self.assertEqual(
+            self.cfg.guardrail.hilt.min_severity,
+            "HIGH",
+            "enabling HITL with no severity floor must backfill "
+            "HIGH — an empty floor lets every finding skip the "
+            "prompt, which would defeat the feature entirely",
+        )
 
     def test_enable_with_explicit_severity_persists_both(self):
         self._apply(human_approval=True, hilt_min_severity="LOW")
@@ -661,12 +964,8 @@ class ApplyFirstRunChoicesHITLTests(unittest.TestCase):
 
     def test_explicit_choice_updates_selected_connector_hilt_override(self):
         self.cfg.guardrail.connectors = {
-            "codex": PerConnectorGuardrailConfig(
-                hilt=HILTConfig(enabled=True, min_severity="LOW")
-            ),
-            "hermes": PerConnectorGuardrailConfig(
-                hilt=HILTConfig(enabled=False, min_severity="HIGH")
-            ),
+            "codex": PerConnectorGuardrailConfig(hilt=HILTConfig(enabled=True, min_severity="LOW")),
+            "hermes": PerConnectorGuardrailConfig(hilt=HILTConfig(enabled=False, min_severity="HIGH")),
         }
         self.cfg.guardrail.hilt.enabled = False
 
@@ -681,9 +980,7 @@ class ApplyFirstRunChoicesHITLTests(unittest.TestCase):
 
     def test_explicit_false_updates_selected_connector_hilt_override(self):
         self.cfg.guardrail.connectors = {
-            "hermes": PerConnectorGuardrailConfig(
-                hilt=HILTConfig(enabled=True, min_severity="MEDIUM")
-            ),
+            "hermes": PerConnectorGuardrailConfig(hilt=HILTConfig(enabled=True, min_severity="MEDIUM")),
         }
 
         self._apply(connector="hermes", human_approval=False)
@@ -738,8 +1035,8 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
 
     def _write_active_connector(self, name: str) -> None:
         import json
-        with open(os.path.join(self.data_dir, "active_connector.json"),
-                  "w", encoding="utf-8") as fh:
+
+        with open(os.path.join(self.data_dir, "active_connector.json"), "w", encoding="utf-8") as fh:
             json.dump({"name": name}, fh)
 
     def _write_pid_file(self) -> None:
@@ -747,8 +1044,8 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
         # ``os.kill(pid, 0)`` so it must point at a real, owned-by-us
         # process. Using ``os.getpid()`` keeps the test hermetic.
         import json
-        with open(os.path.join(self.data_dir, "gateway.pid"),
-                  "w", encoding="utf-8") as fh:
+
+        with open(os.path.join(self.data_dir, "gateway.pid"), "w", encoding="utf-8") as fh:
             fh.write(json.dumps({"pid": os.getpid()}))
 
     def _patch_subprocess(self, recorder: list, returncode: int = 0):
@@ -783,10 +1080,12 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
         # match — stub the cmdline check to keep the test focused on
         # drift detection, not on the new spoof guard. The spoof
         # guard has its own dedicated tests.
-        stack.enter_context(patch(
-            "defenseclaw.bootstrap._pid_looks_like_gateway",
-            return_value=True,
-        ))
+        stack.enter_context(
+            patch(
+                "defenseclaw.bootstrap._pid_looks_like_gateway",
+                return_value=True,
+            )
+        )
         return stack
 
     def test_already_running_no_drift_does_not_restart(self):
@@ -802,9 +1101,9 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
 
         self.assertEqual(result.status, "pass")
         self.assertEqual(result.detail, "already running")
-        self.assertEqual(recorder, [],
-                         "no subprocess invocation expected when the live "
-                         "connector matches cfg.active_connector()")
+        self.assertEqual(
+            recorder, [], "no subprocess invocation expected when the live connector matches cfg.active_connector()"
+        )
 
     def test_drift_triggers_restart_with_descriptive_detail(self):
         from defenseclaw.bootstrap import _start_gateway_structured
@@ -825,10 +1124,8 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
         self.assertIn("restarted", result.detail)
         self.assertIn("codex", result.detail)
         self.assertIn("openclaw", result.detail)
-        self.assertEqual(len(recorder), 1,
-                         "exactly one subprocess invocation expected on drift")
-        self.assertEqual(recorder[0][1], "restart",
-                         "must call `defenseclaw-gateway restart`, not `start`")
+        self.assertEqual(len(recorder), 1, "exactly one subprocess invocation expected on drift")
+        self.assertEqual(recorder[0][1], "restart", "must call `defenseclaw-gateway restart`, not `start`")
 
     def test_drift_restart_failure_surfaces_warn_with_remediation(self):
         from defenseclaw.bootstrap import _start_gateway_structured
@@ -842,9 +1139,11 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
             result = _start_gateway_structured(self.cfg)
 
         self.assertEqual(result.status, "warn")
-        self.assertIn("drift detected", result.detail,
-                      "warn detail must call out drift so the operator "
-                      "knows the on-disk config doesn't match runtime")
+        self.assertIn(
+            "drift detected",
+            result.detail,
+            "warn detail must call out drift so the operator knows the on-disk config doesn't match runtime",
+        )
         self.assertEqual(result.next_command, "defenseclaw-gateway restart")
 
     def test_no_active_connector_file_keeps_legacy_already_running(self):
@@ -864,9 +1163,11 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
 
         self.assertEqual(result.status, "pass")
         self.assertEqual(result.detail, "already running")
-        self.assertEqual(recorder, [],
-                         "missing active_connector.json must NEVER trigger a "
-                         "restart; legacy 'already running' behavior wins")
+        self.assertEqual(
+            recorder,
+            [],
+            "missing active_connector.json must NEVER trigger a restart; legacy 'already running' behavior wins",
+        )
 
     def test_not_running_calls_start_not_restart(self):
         from defenseclaw.bootstrap import _start_gateway_structured
@@ -901,36 +1202,44 @@ class RunningConnectorFromStateFileTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
 
     def _write(self, contents: str) -> None:
-        with open(os.path.join(self._tmp.name, "active_connector.json"),
-                  "w", encoding="utf-8") as fh:
+        with open(os.path.join(self._tmp.name, "active_connector.json"), "w", encoding="utf-8") as fh:
             fh.write(contents)
 
     def test_missing_file_returns_none(self):
         from defenseclaw.bootstrap import _running_connector_from_state_file
+
         self.assertIsNone(_running_connector_from_state_file(self._tmp.name))
 
     def test_empty_name_returns_none(self):
         from defenseclaw.bootstrap import _running_connector_from_state_file
+
         self._write('{"name": ""}')
-        self.assertIsNone(_running_connector_from_state_file(self._tmp.name),
-                          "empty string must be treated as I-don't-know, not "
-                          "as a real connector name")
+        self.assertIsNone(
+            _running_connector_from_state_file(self._tmp.name),
+            "empty string must be treated as I-don't-know, not as a real connector name",
+        )
 
     def test_malformed_json_returns_none(self):
         from defenseclaw.bootstrap import _running_connector_from_state_file
+
         self._write("{not json}")
         self.assertIsNone(_running_connector_from_state_file(self._tmp.name))
 
     def test_normalizes_case_and_whitespace(self):
         from defenseclaw.bootstrap import _running_connector_from_state_file
+
         self._write('{"name": "  CODEX  "}')
-        self.assertEqual(_running_connector_from_state_file(self._tmp.name), "codex",
-                         "must match Config.active_connector() normalization "
-                         "rule (strip + lowercase) so drift detection isn't "
-                         "fooled by case differences")
+        self.assertEqual(
+            _running_connector_from_state_file(self._tmp.name),
+            "codex",
+            "must match Config.active_connector() normalization "
+            "rule (strip + lowercase) so drift detection isn't "
+            "fooled by case differences",
+        )
 
     def test_non_dict_payload_returns_none(self):
         from defenseclaw.bootstrap import _running_connector_from_state_file
+
         self._write('"openclaw"')
         self.assertIsNone(_running_connector_from_state_file(self._tmp.name))
 

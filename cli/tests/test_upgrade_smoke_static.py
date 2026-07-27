@@ -198,6 +198,7 @@ def test_future_release_smoke_builds_from_isolated_version_stamped_source() -> N
     assert '"${build_root}/scripts/release_candidate.py" prepare-runtime' in build
     assert '"${build_root}/scripts/release_candidate.py" verify-runtime' in build
     assert '"${build_root}/scripts/release_candidate.py" stage-resolvers' in build
+    assert '"${build_root}/scripts/release_candidate.py" stage-installers' in build
     assert "for fixture_os in darwin linux windows; do" in build
     assert 'GOOS="${fixture_os}" GOARCH="${fixture_arch}"' in build
     assert 'make -C "${ROOT}" dist-cli' not in build
@@ -306,6 +307,21 @@ def test_live_continuity_local_candidate_models_strict_sigstore_boundary_only() 
     assert "prepare_required_bridge_assets" in main
     assert main.index("prepare_required_bridge_assets") < main.index("prepare_local_candidate_provenance_fixture")
     assert "assert_local_candidate_provenance_verified" in main
+
+
+def test_upgrade_resolves_relative_audit_db_under_data_dir_before_canonicalization() -> None:
+    upgrade = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
+    start = upgrade.index("configured_audit_db = os.path.expanduser(")
+    end = upgrade.index("\nopenclaw_home = os.path.abspath(", start)
+    resolution = upgrade[start:end]
+
+    relative_path_guard = "if not os.path.isabs(configured_audit_db):"
+    relative_resolution = "configured_audit_db = os.path.join(data_dir, configured_audit_db)"
+    canonicalization = "audit_db = os.path.abspath(configured_audit_db)"
+    assert relative_path_guard in resolution
+    assert relative_resolution in resolution
+    assert resolution.index(relative_path_guard) < resolution.index(relative_resolution)
+    assert resolution.index(relative_resolution) < resolution.index(canonicalization)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="executes the POSIX release fixture")
@@ -601,11 +617,50 @@ def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
     assert "watcher:\n    enabled: false" in fixture
 
     resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
-    assert '"${GW_STATE}" == "running" || "${GW_STATE}" == "disabled"' in resolver
-    assert '"${GW_VERSION}" == "${RELEASE_VERSION}"' in resolver
-    assert "fleet uplink is disabled by configuration" in resolver
+    start_begin = resolver.index('step "Starting defenseclaw-gateway ..."')
+    start_section = resolver[
+        start_begin : resolver.index(
+            'step "Restarting OpenClaw gateway ..."',
+            start_begin,
+        )
+    ]
+    assert "DEFENSECLAW_UPGRADE_FRESH_PROCESS=1" not in start_section
+    readiness_begin = resolver.index('section "Verifying Gateway Health"')
+    readiness_section = resolver[
+        readiness_begin : resolver.index(
+            'if [[ -n "${UPGRADE_RECEIPT_PATH}" ]]',
+            readiness_begin,
+        )
+    ]
+    assert "DEFENSECLAW_UPGRADE_FRESH_PROCESS=1" in readiness_section
+    assert '"${INSTALL_DIR}/defenseclaw-gateway" upgrade-wait-ready' in readiness_section
+    assert "upgrade-wait-ready --help" not in readiness_section
+    assert '--expected-version "${RELEASE_VERSION}"' in readiness_section
+    assert 'version_lt "${RELEASE_VERSION}" "0.8.7"' in readiness_section
+    assert 'wait_for_legacy_gateway_readiness "${HEALTH_TIMEOUT}"' in readiness_section
+    assert "Gateway failed authenticated legacy target readiness" in readiness_section
+    assert "Gateway failed strict target readiness" in readiness_section
+    assert "legacy_gateway_status_ready()" in resolver
+    assert "REQUIRED_SUBSYSTEMS_BY_VERSION = {" in resolver
+    for legacy_version in ("0.8.4", "0.8.5", "0.8.6"):
+        assert (f'"{legacy_version}": ("api", "gateway", "watcher", "guardrail", "telemetry")') in resolver
+    assert "legacy readiness has no reviewed target contract" in resolver
+    assert (
+        'version_lt "${RELEASE_VERSION}" "0.8.4"' in resolver
+        and "predates the oldest reviewed gateway readiness contract" in resolver
+    )
+    assert 'READY_STATES = {"running", "disabled"}' in resolver
+    assert 'provenance.get("binary_version") != expected_version' in resolver
+    assert "urllib.request.ProxyHandler({})" in resolver
+    assert "MAX_STATUS_BYTES = 1024 * 1024" in resolver
+    assert readiness_section.index("wait_for_legacy_gateway_readiness") < readiness_section.index(
+        '"${INSTALL_DIR}/defenseclaw-gateway" upgrade-wait-ready'
+    )
+    assert "HEALTH_RESPONSE_FILE" not in readiness_section
     assert 'gateway_health.get("state") in {"running", "disabled"}' in resolver
     assert 'gateway.get("state") in {"running", "disabled"}' in resolver
+    assert 'api_health.get("state") == "running"' in resolver
+    assert 'api.get("state") == "running"' in resolver
     assert '"${health_state}" == "running" || "${health_state}" == "disabled"' in resolver
     assert '[[ "${health_state}" == "unreachable" ]]' in resolver
     assert "health_probe.returncode != 7" in resolver
@@ -619,6 +674,120 @@ def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
     assert "post_stop_state=\"${post_stop_health%%$'\\t'*}\"" in post_stop
     assert '[[ "${post_stop_state}" == "unreachable" ]]' in post_stop
     assert "remains live without PID custody after stop" in post_stop
+    assert "filesystem = os.statvfs(backup_dir)" in resolver
+    assert "insufficient free space for private audit integrity probe" in resolver
+
+
+def test_field_recovery_cases_are_bound_to_explicit_fixture_inputs() -> None:
+    protocol = (ROOT / "scripts" / "test-upgrade-protocol-release.sh").read_text(encoding="utf-8")
+    helper_start = protocol.index("run_candidate_updater_field_recovery_cases() (")
+    helper_end = protocol.index("\n)\n\nrun_protocol_case() {", helper_start)
+    helper = protocol[helper_start:helper_end]
+
+    assert 'if [[ "${baseline}" == "0.8.6" ]]; then' in protocol
+    assert 'local recovery_home="${3:-}"' in protocol
+    assert protocol.count("run_candidate_updater_field_recovery_cases \\") == 2
+    assert 'local installed_target_home="$2"' in helper
+    assert 'local saved_smoke_home="${SMOKE_HOME}"' in helper
+    assert 'local saved_from_version="${FROM_VERSION}"' in helper
+    assert "trap restore_field_recovery_harness_state EXIT" in helper
+    assert helper.index('if [[ "${UPGRADE_SMOKE_FIELD_RECOVERY_CASES:-0}" != "1" ]]') < helper.index(
+        "trap restore_field_recovery_harness_state EXIT"
+    )
+    assert 'SMOKE_HOME="${saved_smoke_home}"' in helper
+    assert 'FROM_VERSION="${saved_from_version}"' in helper
+    assert '"${TARGET_VERSION}" corrupt-audit-same-version "${installed_target_home}"' in helper
+    assert "same-version field recovery requires an explicit installed target fixture" in protocol
+    assert "corrupt-audit|corrupt-audit-same-version" not in protocol
+    assert protocol.count("corrupt-audit-same-version)") == 2
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Bash subshell/trap contract")
+@pytest.mark.parametrize(
+    (
+        "enabled",
+        "fail_recovery",
+        "expected_status",
+        "expected_calls",
+        "expected_cleanups",
+    ),
+    (
+        (False, False, 0, 0, 0),
+        (True, False, 0, 1, 1),
+        (True, True, 23, 1, 1),
+    ),
+)
+def test_field_recovery_helper_restores_globals_on_return_success_and_failure(
+    tmp_path: Path,
+    enabled: bool,
+    fail_recovery: bool,
+    expected_status: int,
+    expected_calls: int,
+    expected_cleanups: int,
+) -> None:
+    protocol = (ROOT / "scripts" / "test-upgrade-protocol-release.sh").read_text(encoding="utf-8")
+    helper_start = protocol.index("run_candidate_updater_field_recovery_cases() (")
+    helper_end = protocol.index("\n)\n\nrun_protocol_case() {", helper_start) + len("\n)")
+    helper = protocol[helper_start:helper_end]
+    trap_anchor = "        local status=$?\n        stop_smoke_gateway || true"
+    assert helper.count(trap_anchor) == 1
+    helper = helper.replace(
+        trap_anchor,
+        '        local status=$?\n        printf "restore\\n" >> "${RESTORE_LOG}"\n        stop_smoke_gateway || true',
+        1,
+    )
+    call_log = tmp_path / "field-recovery-calls"
+    stop_log = tmp_path / "field-recovery-stops"
+    restore_log = tmp_path / "field-recovery-restores"
+    harness = tmp_path / "field-recovery-state.sh"
+    harness.write_text(
+        (
+            "#!/usr/bin/env bash\n"
+            "set -uo pipefail\n"
+            "SMOKE_HOME=original-home\n"
+            "FROM_VERSION=original-version\n"
+            "TARGET_VERSION=0.8.8\n"
+            f"UPGRADE_SMOKE_FIELD_RECOVERY_CASES={int(enabled)}\n"
+            f"FAIL_RECOVERY={int(fail_recovery)}\n"
+            f"CALL_LOG={str(call_log)!r}\n"
+            f"STOP_LOG={str(stop_log)!r}\n"
+            f"RESTORE_LOG={str(restore_log)!r}\n"
+            "stop_smoke_gateway() { printf 'stop\\n' >> \"${STOP_LOG}\"; }\n"
+            "run_candidate_updater_field_recovery_success() {\n"
+            "  printf 'call\\n' >> \"${CALL_LOG}\"\n"
+            "  SMOKE_HOME=mutated-home\n"
+            "  FROM_VERSION=mutated-version\n"
+            '  if [[ "${FAIL_RECOVERY}" == 1 ]]; then exit 23; fi\n'
+            "}\n"
+            f"{helper}\n"
+            "set +e\n"
+            "run_candidate_updater_field_recovery_cases 0.8.7 installed-target-home\n"
+            "status=$?\n"
+            "set -e\n"
+            '[[ "${SMOKE_HOME}" == original-home ]]\n'
+            '[[ "${FROM_VERSION}" == original-version ]]\n'
+            "printf 'status=%s\\n' \"${status}\"\n"
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        ["bash", str(harness)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == f"status={expected_status}"
+    calls = call_log.read_text(encoding="utf-8").splitlines() if call_log.exists() else []
+    stops = stop_log.read_text(encoding="utf-8").splitlines() if stop_log.exists() else []
+    restores = restore_log.read_text(encoding="utf-8").splitlines() if restore_log.exists() else []
+    assert len(calls) == expected_calls
+    assert len(stops) == expected_cleanups
+    assert len(restores) == expected_cleanups
 
 
 def test_v8_historical_fixture_disables_fleet_and_preseeds_rollback_root() -> None:

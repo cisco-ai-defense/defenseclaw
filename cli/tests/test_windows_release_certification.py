@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 HARNESS = (ROOT / "scripts" / "windows-native-ci.ps1").read_text(encoding="utf-8")
 PACKAGED_V8_VALIDATOR = (ROOT / "scripts" / "validate_packaged_v8_resources.py").read_text(encoding="utf-8")
 RELEASE_PATH = ROOT / ".github" / "workflows" / "release.yaml"
-SMOKE_PATH = ROOT / ".github" / "workflows" / "pre-release-certification.yml"
+SMOKE_PATH = ROOT / ".github" / "workflows" / "release-candidate-smoke.yml"
 FRESH_INSTALL = (ROOT / "scripts" / "test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")
 DISPOSABLE_LAUNCHER = (ROOT / "scripts" / "invoke-windows-setup-standard-user-ci.ps1").read_text(encoding="utf-8")
 STANDARD_USER_PROCESS_LAUNCHER = (ROOT / "scripts" / "windows-disposable-standard-user-launcher.cs").read_text(

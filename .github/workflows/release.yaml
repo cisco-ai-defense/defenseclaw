@@ -23,13 +23,25 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
+      operation:
+        description: "Build a release, or repair only the signed stable pointer to an existing immutable release."
+        required: true
+        type: choice
+        options:
+          - release
+          - repair-channel
+        default: release
       version:
-        description: "Version to build, validate, and release (X.Y.Z)."
+        description: "Version to release or use as the authenticated repair target (X.Y.Z)."
+        required: true
+        type: string
+      expected_commit:
+        description: "Exact lowercase main commit printed by scripts/release-preflight.py operator."
         required: true
         type: string
       immutable_releases_confirmed:
-        description: "Confirm repository release immutability is enabled in Settings."
-        required: true
+        description: "Release only: confirm repository release immutability is enabled in Settings. Leave false for repair-channel."
+        required: false
         type: boolean
         default: false
 
@@ -44,6 +56,7 @@ concurrency:
 jobs:
   release-preflight:
     name: Validate release request
+    if: inputs.operation == 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: release
@@ -58,6 +71,22 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Validate release request and stable-channel protection
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION_INPUT: ${{ inputs.version }}
+          EXPECTED_RELEASE_COMMIT: ${{ inputs.expected_commit }}
+          IMMUTABLE_RELEASES_CONFIRMED: ${{ inputs.immutable_releases_confirmed }}
+        run: |
+          python3 scripts/release-preflight.py request \
+            --operation release \
+            --version "$RELEASE_VERSION_INPUT" \
+            --repository "$GITHUB_REPOSITORY" \
+            --ref "$GITHUB_REF" \
+            --commit "$GITHUB_SHA" \
+            --expected-commit "$EXPECTED_RELEASE_COMMIT" \
+            --immutable-releases-confirmed "$IMMUTABLE_RELEASES_CONFIRMED"
 
       - name: Validate optional platform signing credentials
         env:
@@ -137,10 +166,14 @@ jobs:
             exit 1
           fi
           if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
-            echo "::error title=Tag already exists::Tag '$TAG' already exists locally."
-            exit 1
+            TAG_COMMIT="$(git rev-list -n 1 "refs/tags/$TAG")"
+            if [[ "$TAG_COMMIT" != "$RELEASE_COMMIT" ]]; then
+              echo "::error title=Conflicting existing tag::Tag '$TAG' points to $TAG_COMMIT, not selected commit $RELEASE_COMMIT."
+              exit 1
+            fi
+            echo "::notice title=Tag-only recovery candidate::Tag '$TAG' already points to selected commit $RELEASE_COMMIT. Preflight will continue only if no release exists for that tag."
           fi
-          python3 scripts/release_api_retry.py require-absent \
+          python3 scripts/release_api_retry.py require-releasable \
             --repository "$GITHUB_REPOSITORY" \
             --tag "$TAG" \
             --commit "$RELEASE_COMMIT"
@@ -214,60 +247,10 @@ jobs:
           python3 scripts/resolve_upgrade_baselines.py \
             --target-version "$RELEASE_TAG" \
             --output effective-upgrade-baselines.json
-          python3 - effective-upgrade-baselines.json "$RELEASE_TAG" "$GITHUB_OUTPUT" <<'PY'
-          import json
-          from pathlib import Path
-          import sys
-
-          policy_path, target, output_path = sys.argv[1:]
-          document = json.loads(Path(policy_path).read_text(encoding="utf-8"))
-          baselines = document["published_baselines"]
-          key = lambda value: tuple(map(int, value.split(".")))
-          older = [item for item in baselines if key(item) < key(target)]
-          if not older:
-              raise SystemExit(f"no authenticated published baseline is older than target {target}")
-          required_families = ((0, 7), (0, 6), (0, 5))
-          upgrade_baselines = [max(older, key=key)]
-          # Exercise both sides of the v7 -> v8 handoff directly. Older
-          # families still prove the automatic 0.8.4 -> 0.8.5 staged route,
-          # while these lanes catch dependency or controller behavior unique
-          # to installations that already reached either boundary release.
-          for boundary in ("0.8.5", "0.8.4"):
-              if key(boundary) >= key(target):
-                  continue
-              if boundary not in older:
-                  raise SystemExit(
-                      f"authenticated published boundary baseline {boundary} is unavailable"
-                  )
-              if boundary not in upgrade_baselines:
-                  upgrade_baselines.append(boundary)
-          for family in required_families:
-              family_versions = [
-                  item for item in older if key(item)[:2] == family
-              ]
-              if not family_versions:
-                  raise SystemExit(
-                      "no authenticated published baseline exists for "
-                      f"{family[0]}.{family[1]}.x"
-                  )
-              selected = max(family_versions, key=key)
-              if selected not in upgrade_baselines:
-                  upgrade_baselines.append(selected)
-          # 0.8.7 is the first supported native Windows release. Keep all
-          # authenticated POSIX history in the signed policy, but make no
-          # Windows upgrade claim until a native Setup has been published.
-          document["platform_published_baselines"]["windows"] = []
-          Path(policy_path).write_text(
-              json.dumps(document, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          with open(output_path, "a", encoding="utf-8") as output:
-              output.write(
-                  "upgrade_baselines="
-                  + json.dumps(upgrade_baselines, separators=(",", ":"))
-                  + "\n"
-              )
-          PY
+          python3 scripts/release-preflight.py select-baselines \
+            --policy effective-upgrade-baselines.json \
+            --version "$RELEASE_TAG" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Preserve exact effective baseline snapshot
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
@@ -909,13 +892,21 @@ jobs:
           python3 scripts/release_candidate.py verify \
             --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
 
-      # Bind the assembled candidate to an immutable Actions artifact.
+      - name: Preserve candidate modes for Actions transport
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py pack-transport \
+            --source release-candidate \
+            --output release-candidate.tar
+
+      # Bind the deterministic mode-preserving transport to an immutable
+      # Actions artifact. upload-artifact normalizes directory entry modes.
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         id: upload
         with:
           name: ${{ steps.names.outputs.candidate }}
-          path: release-candidate/
+          path: release-candidate.tar
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
@@ -934,7 +925,7 @@ jobs:
   release-smoke:
     name: Test exact release candidate
     needs: [release-preflight, assemble-release-candidate]
-    uses: ./.github/workflows/pre-release-certification.yml
+    uses: ./.github/workflows/release-candidate-smoke.yml
     permissions:
       contents: read
       actions: read
@@ -945,7 +936,7 @@ jobs:
       baselines: ${{ needs.release-preflight.outputs.upgrade_baselines }}
 
   publish-release:
-    name: Publish tested release
+    name: Publish immutable release
     needs: [release-preflight, assemble-release-candidate, release-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -966,7 +957,14 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ needs.assemble-release-candidate.outputs.artifact_name }}
-          path: release-candidate
+          path: candidate-transport
+
+      - name: Restore exact candidate modes
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py unpack-transport \
+            --archive candidate-transport/release-candidate.tar \
+            --destination release-candidate
 
       - name: Verify the exact tested candidate
         env:
@@ -996,7 +994,8 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --tag "$RELEASE_TAG" \
             --commit "$RELEASE_COMMIT" \
-            --candidate-root release-candidate
+            --candidate-root release-candidate \
+            --check-main
           namespace_status=$?
           set -e
           case "$namespace_status" in
@@ -1052,7 +1051,8 @@ jobs:
               --repository "$GITHUB_REPOSITORY" \
               --tag "$RELEASE_TAG" \
               --commit "$RELEASE_COMMIT" \
-              --candidate-root release-candidate
+              --candidate-root release-candidate \
+              --check-main
             reconcile_status=$?
             set -e
             if [[ "$reconcile_status" == "0" ]]; then
@@ -1071,6 +1071,61 @@ jobs:
           done
           [[ "$published" == "1" ]]
 
+  # Keep the repairable pointer outside immutable publication. If GitHub's
+  # release-channel API has a transient failure after the tag/assets exist,
+  # "Re-run failed jobs" retries only this bounded post-release operation.
+  advance-stable-channel:
+    name: Advance authenticated stable channel
+    if: inputs.operation == 'release'
+    needs: [release-preflight, assemble-release-candidate, publish-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      # Advance the signed stable channel pointer on its dedicated branch.
+      contents: write
+      # Mint a keyless Fulcio identity for signing the channel pointer.
+      id-token: write
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Keep channel publication on the same patched Cosign release pinned by
+      # the rescue/bootstrap verifier instead of mixing verifier toolchains.
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.3"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.assemble-release-candidate.outputs.artifact_name }}
+          path: candidate-transport
+
+      - name: Restore exact candidate modes
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py unpack-transport \
+            --archive candidate-transport/release-candidate.tar \
+            --destination release-candidate
+
+      - name: Reverify the exact published candidate
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py verify \
+            --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
+          python3 scripts/verify-sigstore-blob.py \
+            --certificate release-candidate/dist/checksums.txt.pem \
+            --signature release-candidate/dist/checksums.txt.sig \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            release-candidate/dist/checksums.txt
+
       - name: Prove published asset custody
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1084,3 +1139,127 @@ jobs:
             --commit "$RELEASE_COMMIT" \
             --candidate-root release-candidate
           echo "Release $RELEASE_TAG published from tested commit $RELEASE_COMMIT"
+
+      # The tagged release remains immutable. Only after this separate job
+      # reverifies the tested artifact and its exact remote custody may the
+      # keyless-signed, fast-forward stable pointer advance to that tag.
+      - name: Sign and advance authenticated stable channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
+          RELEASE_CHECKSUMS: ${{ github.workspace }}/release-candidate/dist/checksums.txt
+        run: scripts/publish-release-channel.sh
+
+  # This is the expiry-independent recovery path for the only mutable release
+  # state. It does not rebuild, certify, or replace tagged assets. Instead it
+  # authenticates an existing immutable release directly, then invokes the
+  # same idempotent channel publisher under this workflow's Fulcio identity.
+  repair-stable-channel:
+    name: Repair authenticated stable channel
+    if: inputs.operation == 'repair-channel'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      # Repair the signed stable channel pointer on its dedicated branch.
+      contents: write
+      # Mint a keyless Fulcio identity for signing the repaired pointer.
+      id-token: write
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate repair request and stable-channel protection
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION_INPUT: ${{ inputs.version }}
+          EXPECTED_RELEASE_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          python3 scripts/release-preflight.py request \
+            --operation repair-channel \
+            --version "$RELEASE_VERSION_INPUT" \
+            --repository "$GITHUB_REPOSITORY" \
+            --ref "$GITHUB_REF" \
+            --commit "$GITHUB_SHA" \
+            --expected-commit "$EXPECTED_RELEASE_COMMIT"
+
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.3"
+
+      - name: Resolve immutable repair target
+        id: target
+        env:
+          RELEASE_VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error title=Untrusted repair ref::Run channel repair from protected main, not $GITHUB_REF."
+            exit 1
+          fi
+          TAG="$RELEASE_VERSION_INPUT"
+          if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error title=Invalid version input::version must be X.Y.Z with no v prefix (got: '$TAG')"
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          git fetch --force --no-tags origin "refs/tags/$TAG"
+          COMMIT="$(git rev-parse 'FETCH_HEAD^{commit}')"
+          TREE="$(git rev-parse "$COMMIT^{tree}")"
+          if ! git merge-base --is-ancestor "$COMMIT" origin/main; then
+            echo "::error title=Unreviewed repair target::$COMMIT is not reachable from protected main."
+            exit 1
+          fi
+          {
+            echo "tag=$TAG"
+            echo "commit=$COMMIT"
+            echo "tree=$TREE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download bounded release proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.target.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+            > published-release.json
+          python3 scripts/download_release_custody.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --release-json published-release.json \
+            --output-dir release-custody
+
+      - name: Authenticate immutable release custody
+        env:
+          RELEASE_TAG: ${{ steps.target.outputs.tag }}
+          RELEASE_COMMIT: ${{ steps.target.outputs.commit }}
+          RELEASE_TREE: ${{ steps.target.outputs.tree }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-sigstore-blob.py \
+            --certificate release-custody/checksums.txt.pem \
+            --signature release-custody/checksums.txt.sig \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            release-custody/checksums.txt
+          python3 scripts/verify-release-channel-target.py \
+            --release-json published-release.json \
+            --download-dir release-custody \
+            --version "$RELEASE_TAG" \
+            --commit "$RELEASE_COMMIT" \
+            --source-tree "$RELEASE_TREE"
+
+      - name: Re-sign and reconcile stable pointer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.target.outputs.tag }}
+          RELEASE_COMMIT: ${{ steps.target.outputs.commit }}
+          RELEASE_CHECKSUMS: ${{ github.workspace }}/release-custody/checksums.txt
+          RELEASE_CHANNEL_REPAIR: "1"
+        run: scripts/publish-release-channel.sh

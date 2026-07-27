@@ -21,6 +21,7 @@ import io
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -31,6 +32,11 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 UPGRADE_SCRIPT = ROOT / "scripts" / "upgrade.sh"
+_CLEAN_086_GATEWAY_PAYLOAD = (
+    b"#!/usr/bin/env bash\n"
+    b'if [[ "${1:-}" == "--version" ]]; then echo \'DefenseClaw gateway 0.8.6\'; exit 0; fi\n'
+    b"exit 0\n"
+)
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt",
@@ -174,13 +180,12 @@ def _clean_086_wheel() -> bytes:
 
 
 def _clean_086_gateway_archive() -> bytes:
-    payload = b"#!/usr/bin/env bash\nif [[ \"${1:-}\" == \"--version\" ]]; then echo 'DefenseClaw gateway 0.8.6'; exit 0; fi\nexit 0\n"
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:gz") as archive:
         info = tarfile.TarInfo("defenseclaw")
         info.mode = 0o755
-        info.size = len(payload)
-        archive.addfile(info, io.BytesIO(payload))
+        info.size = len(_CLEAN_086_GATEWAY_PAYLOAD)
+        archive.addfile(info, io.BytesIO(_CLEAN_086_GATEWAY_PAYLOAD))
     return output.getvalue()
 
 
@@ -464,17 +469,15 @@ def _install_clean_086_state(env: dict[str, str]) -> tuple[Path, Path]:
         "#!/usr/bin/env bash\n"
         f"export PYTHONPATH={str(site_packages)!r}\n"
         "args=()\n"
-        "for arg in \"$@\"; do [[ \"${arg}\" == \"-I\" ]] || args+=(\"${arg}\"); done\n"
-        f"exec {str(sys.executable)!r} \"${{args[@]}}\"\n",
+        # The fake 0.8.6 wheel is an unpacked fixture, not an installed
+        # interpreter environment. Drop -I only in this wrapper so the fixture
+        # package on PYTHONPATH models the published source controller.
+        'for arg in "$@"; do [[ "${arg}" == "-I" ]] || args+=("${arg}"); done\n'
+        f'exec {str(sys.executable)!r} "${{args[@]}}"\n',
     )
 
-    gateway_payload = (
-        b"#!/usr/bin/env bash\n"
-        b"if [[ \"${1:-}\" == \"--version\" ]]; then echo 'DefenseClaw gateway 0.8.6'; exit 0; fi\n"
-        b"exit 0\n"
-    )
     gateway = Path(env["HOME"]) / ".local" / "bin" / "defenseclaw-gateway"
-    gateway.write_bytes(gateway_payload)
+    gateway.write_bytes(_CLEAN_086_GATEWAY_PAYLOAD)
     gateway.chmod(0o755)
     return config_path, stack
 
@@ -683,6 +686,26 @@ def test_explicit_bridge_from_unpublished_source_fails_closed(resolver_env) -> N
     assert not mutation_log.exists()
 
 
+@pytest.mark.parametrize("target_version", ("0.7.2", "0.8.3"))
+def test_explicit_pre_bridge_target_fails_before_download_or_mutation(
+    resolver_env,
+    target_version: str,
+) -> None:
+    env, mutation_log, curl_log = resolver_env("0.5.0")
+
+    result = _run(env, "--version", target_version, "--plan")
+
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert (
+        f"Target release {target_version} predates the oldest reviewed final-target readiness contract (0.8.4)"
+    ) in output
+    assert "No changes were made" in output
+    assert not curl_log.exists()
+    assert not mutation_log.exists()
+    assert not Path(env["DEFENSECLAW_HOME"]).exists()
+
+
 @pytest.mark.parametrize(
     "current_version",
     ["0.7.0", "0.7.3"],
@@ -806,6 +829,50 @@ def test_clean_086_missing_cursor_authenticates_recovery_without_mutation(
     downloads = curl_log.read_text(encoding="utf-8")
     assert "/releases/download/0.8.6/release-provenance.json" in downloads
     assert "defenseclaw-0.8.6-2-py3-none-any.dcwheel" in downloads
+
+
+@pytest.mark.parametrize("path_kind", ("relative", "absolute"))
+def test_staged_runtime_resolves_configured_audit_path_like_source_controller(
+    resolver_env,
+    tmp_path: Path,
+    path_kind: str,
+) -> None:
+    env, mutation_log, _curl_log = resolver_env("0.8.6")
+    config_path, _stack = _install_clean_086_state(env)
+    data_home = Path(env["DEFENSECLAW_HOME"])
+    configured_audit_db = (
+        "audit-state/custom.sqlite"
+        if path_kind == "relative"
+        else str(tmp_path / "absolute-audit-state" / "custom.sqlite")
+    )
+    expected_audit_db = data_home / configured_audit_db if path_kind == "relative" else Path(configured_audit_db)
+    expected_audit_db.parent.mkdir(parents=True)
+    connection = sqlite3.connect(expected_audit_db)
+    try:
+        connection.execute("CREATE TABLE audit_path_fixture (value TEXT NOT NULL)")
+        connection.commit()
+    finally:
+        connection.close()
+
+    package_config = data_home / ".venv" / "lib" / "python3.12" / "site-packages" / "defenseclaw" / "config.py"
+    package_config.write_text(
+        "import os\n"
+        "from types import SimpleNamespace\n"
+        "def load():\n"
+        "    home = os.environ['DEFENSECLAW_HOME']\n"
+        f"    return SimpleNamespace(data_dir=home, audit_db={configured_audit_db!r}, "
+        "claw=SimpleNamespace(home_dir=os.path.join(os.environ['HOME'], '.openclaw')))\n",
+        encoding="utf-8",
+    )
+
+    result = _run(env, "--version", "0.8.7", "--plan")
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "0.8.6 → 0.8.7" in output
+    assert expected_audit_db.is_file()
+    assert config_path.is_file()
+    assert not mutation_log.exists()
 
 
 def test_same_version_086_cursor_bootstrap_preserves_unrelated_v8_config_bytes(

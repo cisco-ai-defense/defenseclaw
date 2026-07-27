@@ -43,7 +43,8 @@ INSTALL_SCRIPT = ROOT / "scripts" / "install.sh"
 UPGRADE_SCRIPT = ROOT / "scripts" / "upgrade.sh"
 MAKEFILE = ROOT / "Makefile"
 BASELINE_POLICY = ROOT / "release" / "upgrade-baselines.json"
-PRE_RELEASE_CERTIFICATION = ROOT / ".github" / "workflows" / "pre-release-certification.yml"
+RELEASE_CANDIDATE_SMOKE = ROOT / ".github" / "workflows" / "release-candidate-smoke.yml"
+RELEASE_VALIDATION_LANE = ROOT / "scripts" / "select-release-validation-lane.py"
 RECEIPT_CHECK = ROOT / "scripts" / "check_upgrade_receipt.py"
 POSIX_UPGRADE_CUSTODY = pytest.mark.skipif(
     os.name == "nt",
@@ -89,6 +90,7 @@ def _source_script(command: str, *arguments: str) -> subprocess.CompletedProcess
         text=True,
         capture_output=True,
         check=False,
+        timeout=120,
     )
 
 
@@ -145,6 +147,7 @@ def test_developer_activation_rejects_nonisolated_invocations_before_network(
         text=True,
         capture_output=True,
         check=False,
+        timeout=120,
     )
 
     assert completed.returncode != 0
@@ -172,6 +175,7 @@ def test_developer_activation_removes_ambient_runtime_overrides() -> None:
         text=True,
         capture_output=True,
         check=False,
+        timeout=120,
     )
 
     assert completed.returncode == 0, completed.stderr
@@ -259,10 +263,13 @@ def test_posix_resolver_owns_dynamic_receipt_and_bundle_phases() -> None:
     gateway_activation = source.index('mv -f "${BRIDGE_GATEWAY_INSTALL_TEMP}"', stop)
     target_activation = source.index('UPGRADE_RECEIPT_FAILURE_CODE="interrupted"', gateway_activation)
     launcher = source.index('ln -sf "${DEFENSECLAW_VENV}/bin/defenseclaw"', target_activation)
-    migration = source.index('kwargs = {"upgrade_handles_local_bundle": True}', stop)
+    # Cursor repair may invoke the installed release's migration runner before
+    # target activation. This assertion is about the target-owned migration
+    # phase, so select the invocation that follows launcher activation.
+    migration = source.index('kwargs = {"upgrade_handles_local_bundle": True}', launcher)
     required = source.index('if [[ "${UPGRADE_INCOMPLETE}" -eq 1 ]]', migration)
     start = source.index("# ── Start services", required)
-    health = source.index('if [[ "${HEALTH_OK}" -eq 0 ]]', start)
+    health = source.index('if version_lt "${RELEASE_VERSION}" "0.8.7"; then', start)
     suppress_failed_trap = source.index("UPGRADE_RECEIPT_TERMINAL=1", health)
     complete = source.index("finish_release_upgrade_receipt succeeded", suppress_failed_trap)
 
@@ -284,7 +291,7 @@ def test_posix_resolver_owns_dynamic_receipt_and_bundle_phases() -> None:
         'UPGRADE_RECEIPT_PATH="${receipt_path}"'
     )
     assert "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}" in receipt_function
-    migration_phase = source[stop:required]
+    migration_phase = source[launcher:required]
     assert "TARGET_PYTHON_STDIN_ARGS=(-)" in migration_phase
     assert "TARGET_PYTHON_STDIN_ARGS=(-I -B -)" in migration_phase
     assert '"${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" "${UPGRADE_RECEIPT_PATH}"' in migration_phase
@@ -292,7 +299,11 @@ def test_posix_resolver_owns_dynamic_receipt_and_bundle_phases() -> None:
     assert 'os.environ["MIGRATION_TO_VERSION"]' in migration_phase
     assert "record_upgrade_migrations(" in migration_phase
     assert '"${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" "${UPGRADE_MANIFEST_FILE}"' in source[migration:required]
-    assert '"${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" <<\'PY\'' in source[start:health]
+    health_phase = source[health:suppress_failed_trap]
+    assert 'wait_for_legacy_gateway_readiness "${HEALTH_TIMEOUT}"' in health_phase
+    assert '"${INSTALL_DIR}/defenseclaw-gateway" upgrade-wait-ready' in health_phase
+    assert "DEFENSECLAW_UPGRADE_FRESH_PROCESS=1" in health_phase
+    assert "HEALTH_OK" not in health_phase
 
     same_version = source.index('same_version_recovery="clean"')
     recovery = source.index('section "Recovering Incomplete Upgrade"', same_version)
@@ -322,6 +333,135 @@ def test_posix_resolver_owns_dynamic_receipt_and_bundle_phases() -> None:
     assert "latest_created_at = max(" in split_phase
     assert "if created_at == latest_created_at" in split_phase
     assert 'print("recover" if len(latest) == 1 else "invalid")' in split_phase
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_success", "expected_probes"),
+    (
+        ("startup-delay", True, 4),
+        ("changed-live-pid", False, 3),
+        ("invalid-custody", False, 1),
+        ("startup-timeout", False, 3),
+    ),
+)
+def test_legacy_readiness_retries_startup_but_rejects_invalid_or_changed_pid_custody(
+    tmp_path: Path,
+    scenario: str,
+    expected_success: bool,
+    expected_probes: int,
+) -> None:
+    source = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+    status_start = source.index("legacy_gateway_status_ready() {")
+    status_end = source.index("\n}\n\nwait_for_legacy_gateway_readiness()", status_start)
+    status_probe = source[status_start:status_end]
+    assert "cfg = load()" in status_probe
+    assert "cfg = load(data_dir=" not in status_probe
+    assert 'DEFENSECLAW_HOME="${DATA_DIR}"' in status_probe
+
+    start = source.index("wait_for_legacy_gateway_readiness() {")
+    end = source.index('\n}\n\nsection "Stopping Services"', start) + 2
+    readiness = source[start:end]
+    counter = tmp_path / "pid-probes"
+    counter.write_text("0", encoding="utf-8")
+    harness = tmp_path / "legacy-readiness.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -u\n"
+        + readiness
+        + "\n"
+        + "DATA_DIR=/fixture\n"
+        + "INSTALL_DIR=/fixture\n"
+        + f"COUNTER={shlex.quote(str(counter))}\n"
+        + f"SCENARIO={shlex.quote(scenario)}\n"
+        + "gateway_pid_status() {\n"
+        + "  local call\n"
+        + '  call="$(( $(cat "${COUNTER}") + 1 ))"\n'
+        + '  printf "%s" "${call}" > "${COUNTER}"\n'
+        + '  if [[ "${SCENARIO}" == "invalid-custody" ]]; then return 9; fi\n'
+        + '  if [[ "${SCENARIO}" == "startup-delay" ]]; then\n'
+        + '    case "${call}" in 1) printf "missing\\t0\\n";; 2) printf "dead\\t41\\n";; '
+        + '*) printf "live\\t42\\n";; esac\n'
+        + '  elif [[ "${SCENARIO}" == "changed-live-pid" ]]; then\n'
+        + '    case "${call}" in 1) printf "live\\t42\\n";; 2) printf "missing\\t0\\n";; '
+        + '*) printf "live\\t43\\n";; esac\n'
+        + "  else\n"
+        + '    printf "missing\\t0\\n"\n'
+        + "  fi\n"
+        + "}\n"
+        + 'legacy_gateway_status_ready() { [[ "${SCENARIO}" == "startup-delay" ]]; }\n'
+        # Bash's SECONDS keeps advancing with real wall time even when sleep is
+        # mocked. Use coarse synthetic ticks so a busy CI runner cannot skip
+        # the final expected probe at a one-second boundary.
+        + 'sleep() { SECONDS="$((SECONDS + 10))"; }\n'
+        + "SECONDS=0\n"
+        + "wait_for_legacy_gateway_readiness 30\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [_bash_executable(), str(harness)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+
+    assert (result.returncode == 0) is expected_success, result.stdout + result.stderr
+    assert int(counter.read_text(encoding="utf-8")) == expected_probes
+
+
+@pytest.mark.parametrize(
+    ("probe_state", "recover", "expected_success"),
+    (
+        ("", False, True),
+        ("unavailable", False, True),
+        ("", True, False),
+        ("unavailable", True, False),
+        ("invalid", False, False),
+        ("invalid", True, False),
+        ("invalid-marker", False, False),
+        ("invalid-marker", True, False),
+    ),
+)
+def test_inconclusive_audit_probe_is_not_a_corruption_verdict_without_explicit_recovery(
+    tmp_path: Path,
+    probe_state: str,
+    recover: bool,
+    expected_success: bool,
+) -> None:
+    source = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+    start = source.index("IFS=$'\\t' read -r audit_db_state AUDIT_DB_PREFLIGHT_IDENTITY")
+    end = source.index("\nesac", start) + len("\nesac")
+    decision = source[start:end]
+    harness = tmp_path / "audit-preflight-decision.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -u\n"
+        + f"audit_db_probe={shlex.quote(probe_state)}\n"
+        + f"RECOVER_CORRUPT_AUDIT={int(recover)}\n"
+        + "AUDIT_DB_RECOVERY_NEEDED=0\n"
+        + "AUDIT_DB_RECOVERY_USE_DATA_ROOT=0\n"
+        + "AUDIT_DB_RECOVERY_BACKUP_ROOT=''\n"
+        + "DATA_DIR=/fixture\n"
+        + "warn() { :; }\n"
+        + "die() { exit 73; }\n"
+        + decision
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [_bash_executable(), str(harness)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+
+    expected_returncode = 0 if expected_success else 73
+    assert result.returncode == expected_returncode, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(("baseline", "config_version"), [("0.8.3", 7), ("0.4.0", 5)])
@@ -402,13 +542,12 @@ def test_protected_release_test_artifact_rejects_checksum_mismatch_without_outpu
     assert not destination.exists()
 
 
-def test_upgrade_failure_guidance_does_not_restore_gateway_jsonl_ownership() -> None:
-    lines = [line for line in UPGRADE_SCRIPT.read_text(encoding="utf-8").splitlines() if "gateway.jsonl" in line]
-    assert lines
-    for line in lines:
-        normalized = line.lower()
-        assert "optional" in normalized, line
-        assert "destination" in normalized, line
+def test_upgrade_failure_guidance_never_mutates_gateway_jsonl_ownership() -> None:
+    source = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+    assert "gateway.jsonl" not in source, (
+        "the immutable upgrade resolver must not mutate gateway.jsonl ownership "
+        "or present ownership repair as upgrade-failure guidance"
+    )
 
 
 def _bridge_comment_restore_program() -> str:
@@ -512,7 +651,7 @@ def test_bridge_comment_restore_is_ordered_before_seal_and_uses_source_snapshot(
     mutation_armed = source.index("    mark_bridge_phase1_state_mutation_started", snapshot)
     migration_run = source.index('section "Running Migrations"', mutation_armed)
     incomplete = source.index('if [[ "${UPGRADE_INCOMPLETE}" -eq 1 ]]', migration)
-    repair = source.index("    repair_clean_081_observability_placeholder", incomplete)
+    repair = source.index("    if ! repair_clean_081_observability_placeholder", incomplete)
     restore = source.index("    restore_bridge_config_comments\n", migration)
     cleanup = source.index("    bridge_phase1_cleanup_owned_temporaries", restore)
     seal = source.index("    bridge_phase1_state_transaction seal-active", cleanup)
@@ -522,16 +661,7 @@ def test_bridge_comment_restore_is_ordered_before_seal_and_uses_source_snapshot(
     ]
 
     assert (
-        snapshot
-        < migration
-        < mutation_armed
-        < migration_run
-        < incomplete
-        < repair
-        < restore
-        < cleanup
-        < seal
-        < start
+        snapshot < migration < mutation_armed < migration_run < incomplete < repair < restore < cleanup < seal < start
     )
     assert "bridge_phase1_state_transaction config-comment-source" in restore_function
     assert "${BACKUP_DIR}/config.yaml" not in restore_function
@@ -845,9 +975,7 @@ def test_resumed_cleanup_entry_replacement_before_inspection_is_rejected(
     assert "identity changed before inspection" in completed.stderr
     assert enumerated.read_text(encoding="utf-8") == "enumerated-sensitive-bytes\n"
     assert temporary.read_text(encoding="utf-8") == "replacement-must-survive\n"
-    assert not list(
-        config_parent.glob(f".defenseclaw-cleanup-{token}-*.quarantine")
-    )
+    assert not list(config_parent.glob(f".defenseclaw-cleanup-{token}-*.quarantine"))
 
 
 @POSIX_UPGRADE_CUSTODY
@@ -866,10 +994,7 @@ def test_resumed_cleanup_entry_replacement_is_quarantined_not_deleted(tmp_path: 
     temporary = config_parent / temporary_name
     temporary.write_text("inspected-sensitive-bytes\n", encoding="utf-8")
     program = _phase_one_recovery_cleanup_program()
-    needle = (
-        "            quarantine_name = quarantine_no_replace("
-        "descriptor, name, info)"
-    )
+    needle = "            quarantine_name = quarantine_no_replace(descriptor, name, info)"
     assert program.count(needle) == 1
     program = program.replace(
         needle,
@@ -940,10 +1065,7 @@ def test_resumed_cleanup_replays_matching_crash_left_quarantine(tmp_path: Path) 
     temporary = config_parent / temporary_name
     temporary.write_text("crash-left-sensitive-bytes\n", encoding="utf-8")
     program = _phase_one_recovery_cleanup_program()
-    needle = (
-        "            quarantine_name = quarantine_no_replace("
-        "descriptor, name, info)"
-    )
+    needle = "            quarantine_name = quarantine_no_replace(descriptor, name, info)"
     assert program.count(needle) == 1
     program = program.replace(
         needle,
@@ -1402,7 +1524,7 @@ def test_bridge_harness_keeps_v8_source_contracts_strictly_target_gated() -> Non
 
 
 def test_historical_release_matrix_does_not_repeat_source_contract_suite() -> None:
-    workflow = PRE_RELEASE_CERTIFICATION.read_text(encoding="utf-8")
+    workflow = RELEASE_CANDIDATE_SMOKE.read_text(encoding="utf-8")
     posix = workflow[workflow.index("  posix-upgrade:") : workflow.index("  windows-fresh-install:")]
     assert posix.count('UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS: "1"') == 1
     job = yaml.load(workflow, Loader=yaml.BaseLoader)["jobs"]["posix-upgrade"]
@@ -1423,9 +1545,406 @@ def test_historical_release_matrix_does_not_repeat_source_contract_suite() -> No
     }
     assert "--success-path-only" in posix
     assert "baseline_dependencies=published" in posix
-    assert 'if [[ "$BASELINE" == "0.8.4" ]]' in posix
+    assert 'if [[ "$BASELINE" == "0.8.4" ]]' not in posix
+    assert "scripts/select-release-validation-lane.py" in posix
+    selector = RELEASE_VALIDATION_LANE.read_text(encoding="utf-8")
+    assert "required_bridge_version" in selector
+    assert "published_baseline_config_versions" in selector
+    assert "bridge-dependency-drift" in posix
     assert "baseline_dependencies=target" in posix
     assert '--baseline-dependencies "$baseline_dependencies"' in posix
+
+
+def test_release_validation_lanes_are_derived_from_authenticated_policy(
+    tmp_path: Path,
+) -> None:
+    workflow = yaml.load(
+        RELEASE_CANDIDATE_SMOKE.read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+    step = next(
+        item
+        for item in workflow["jobs"]["posix-upgrade"]["steps"]
+        if item.get("name") == "Exercise authenticated upgrade baseline"
+    )
+    run = step["run"]
+    assert "scripts/select-release-validation-lane.py" in run
+    assert '--policy "$UPGRADE_BASELINE_POLICY"' in run
+    assert "--manifest release-candidate/dist/upgrade-manifest.json" in run
+    assert '--selected-json "$SELECTED_BASELINES"' in run
+    assert '--baseline "$BASELINE"' in run
+    assert run.index("scripts/release_candidate.py verify") < run.index("scripts/verify-sigstore-blob.py")
+    assert run.index("scripts/verify-sigstore-blob.py") < run.index("scripts/select-release-validation-lane.py")
+    assert run.index("scripts/select-release-validation-lane.py") < run.index(
+        "scripts/test-upgrade-protocol-release.sh"
+    )
+    policy = tmp_path / "effective-upgrade-baselines.json"
+    policy.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "published_baselines": [
+                    "0.8.7",
+                    "0.8.6",
+                    "0.8.5",
+                    "0.8.4",
+                    "0.7.2",
+                    "0.6.6",
+                    "0.5.0",
+                ],
+                "published_baseline_config_versions": {
+                    "0.8.7": 8,
+                    "0.8.6": 8,
+                    "0.8.5": 8,
+                    "0.8.4": 7,
+                    "0.7.2": 6,
+                    "0.6.6": 5,
+                    "0.5.0": 5,
+                },
+                "platform_published_baselines": {"windows": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "upgrade-manifest.json"
+    manifest.write_text(
+        json.dumps({"release_version": "0.8.8", "required_bridge_version": "0.8.4"}),
+        encoding="utf-8",
+    )
+    required_matrix = ["0.8.7", "0.8.6", "0.8.5", "0.8.4", "0.7.2", "0.6.6", "0.5.0"]
+    selected = json.dumps(required_matrix)
+
+    for baseline, expected in (
+        ("0.8.4", "bridge-dependency-drift"),
+        ("0.8.6", "field-recovery"),
+        ("0.8.7", "published"),
+    ):
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(RELEASE_VALIDATION_LANE),
+                "--policy",
+                str(policy),
+                "--manifest",
+                str(manifest),
+                "--selected-json",
+                selected,
+                "--baseline",
+                baseline,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.strip() == expected
+
+    incomplete_matrices = [
+        required_matrix[:index] + required_matrix[index + 1 :] for index in range(len(required_matrix))
+    ]
+    for incomplete in incomplete_matrices:
+        rejected_matrix = subprocess.run(
+            [
+                sys.executable,
+                str(RELEASE_VALIDATION_LANE),
+                "--policy",
+                str(policy),
+                "--manifest",
+                str(manifest),
+                "--selected-json",
+                json.dumps(incomplete),
+                "--baseline",
+                "0.8.7",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )
+        assert rejected_matrix.returncode == 2
+        assert "must contain exactly 7 distinct releases" in rejected_matrix.stderr
+
+    reordered = [required_matrix[1], required_matrix[0], *required_matrix[2:]]
+    rejected_matrix = subprocess.run(
+        [
+            sys.executable,
+            str(RELEASE_VALIDATION_LANE),
+            "--policy",
+            str(policy),
+            "--manifest",
+            str(manifest),
+            "--selected-json",
+            json.dumps(reordered),
+            "--baseline",
+            "0.8.7",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    assert rejected_matrix.returncode == 2
+    assert "does not exactly match the authenticated seven-lane policy" in rejected_matrix.stderr
+
+    for malformed in ("{", "{}", '[["0.8.6"]]'):
+        rejected = subprocess.run(
+            [
+                sys.executable,
+                str(RELEASE_VALIDATION_LANE),
+                "--policy",
+                str(policy),
+                "--manifest",
+                str(manifest),
+                "--selected-json",
+                malformed,
+                "--baseline",
+                "0.8.6",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )
+        assert rejected.returncode == 2
+        assert "invalid authenticated release validation plan:" in rejected.stderr
+        assert "Traceback" not in rejected.stderr
+
+
+def test_release_validation_lane_accepts_only_the_authenticated_087_six_lane_shape(
+    tmp_path: Path,
+) -> None:
+    policy = tmp_path / "effective-upgrade-baselines.json"
+    policy.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "published_baselines": [
+                    "0.8.6",
+                    "0.8.5",
+                    "0.8.4",
+                    "0.7.2",
+                    "0.6.6",
+                    "0.5.0",
+                ],
+                "published_baseline_config_versions": {
+                    "0.8.6": 8,
+                    "0.8.5": 8,
+                    "0.8.4": 7,
+                    "0.7.2": 6,
+                    "0.6.6": 5,
+                    "0.5.0": 5,
+                },
+                "platform_published_baselines": {"windows": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "upgrade-manifest.json"
+    manifest.write_text(
+        json.dumps({"release_version": "0.8.7", "required_bridge_version": "0.8.4"}),
+        encoding="utf-8",
+    )
+    selected = ["0.8.6", "0.8.5", "0.8.4", "0.7.2", "0.6.6", "0.5.0"]
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(RELEASE_VALIDATION_LANE),
+            "--policy",
+            str(policy),
+            "--manifest",
+            str(manifest),
+            "--selected-json",
+            json.dumps(selected),
+            "--baseline",
+            "0.8.6",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "field-recovery"
+
+    manifest.write_text(
+        json.dumps({"release_version": "0.8.8", "required_bridge_version": "0.8.4"}),
+        encoding="utf-8",
+    )
+    rejected = subprocess.run(
+        [
+            sys.executable,
+            str(RELEASE_VALIDATION_LANE),
+            "--policy",
+            str(policy),
+            "--manifest",
+            str(manifest),
+            "--selected-json",
+            json.dumps(selected),
+            "--baseline",
+            "0.8.6",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    assert rejected.returncode == 2
+    assert "seven-lane baseline matrix is unavailable" in rejected.stderr
+
+
+@pytest.mark.parametrize(
+    "platforms",
+    [
+        [],
+        {},
+        {"windows": [], "linux": []},
+        {"windows": "0.8.6"},
+        {"windows": [["0.8.6"]]},
+        {"windows": ["0.8.6", "0.8.6"]},
+        {"windows": ["0.8.6", "0.8.7"]},
+        {"windows": ["9.9.9"]},
+    ],
+)
+def test_release_validation_lane_rejects_malformed_platform_policy(
+    tmp_path: Path,
+    platforms: object,
+) -> None:
+    policy = {
+        "schema_version": 2,
+        "published_baselines": ["0.8.7", "0.8.6", "0.8.5", "0.8.4"],
+        "published_baseline_config_versions": {
+            "0.8.7": 8,
+            "0.8.6": 8,
+            "0.8.5": 8,
+            "0.8.4": 7,
+        },
+        "platform_published_baselines": platforms,
+    }
+    policy_path = tmp_path / "effective-upgrade-baselines.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+    manifest = tmp_path / "upgrade-manifest.json"
+    manifest.write_text(
+        json.dumps({"release_version": "0.8.8", "required_bridge_version": "0.8.4"}),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(RELEASE_VALIDATION_LANE),
+            "--policy",
+            str(policy_path),
+            "--manifest",
+            str(manifest),
+            "--selected-json",
+            json.dumps(["0.8.7", "0.8.6", "0.8.5", "0.8.4"]),
+            "--baseline",
+            "0.8.6",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+
+    assert completed.returncode == 2
+    assert "invalid authenticated release validation plan:" in completed.stderr
+    assert "Traceback" not in completed.stderr
+
+
+def test_field_recovery_lane_reproduces_exact_clean_086_not_partial_cursor() -> None:
+    workflow = RELEASE_CANDIDATE_SMOKE.read_text(encoding="utf-8")
+    protocol = PROTOCOL_SCRIPT.read_text(encoding="utf-8")
+    recovery_start = protocol.index("run_candidate_updater_field_recovery_success() {")
+    recovery_end = protocol.index("\nrun_protocol_case() {", recovery_start)
+    recovery_function = protocol[recovery_start:recovery_end]
+
+    assert "matrix.baseline == '0.8.6'" not in workflow
+    selector = RELEASE_VALIDATION_LANE.read_text(encoding="utf-8")
+    assert 'field_recovery_anchor != "0.8.6"' in selector
+    assert "UPGRADE_SMOKE_FIELD_RECOVERY_CASES=1" in workflow
+    assert "clean-086-missing-cursor" in protocol
+    assert "prepare_fresh_v8_config(cfg)" in protocol
+    assert "published 0.8.6 unexpectedly created a migration cursor" in protocol
+    assert "Authenticated the exact clean 0.8.6 missing-cursor compatibility state" in protocol
+    assert 'document["applied"] = [' not in protocol
+    assert "Replayed every missing migration and repaired the cursor" not in protocol
+    assert "local SMOKE_HOME=" not in recovery_function
+    assert 'SMOKE_HOME="${WORKDIR}/field-recovery-${baseline}-${recovery_case}"' in recovery_function
+
+
+def test_local_candidate_checksums_exclude_all_signature_family_outputs() -> None:
+    harness = SCRIPT.read_text(encoding="utf-8")
+    checksum_start = harness.index('local checksum_tmp="${WORKDIR}/candidate-checksums.txt"')
+    checksum_end = harness.index("\n}", checksum_start)
+    checksum_generation = harness[checksum_start:checksum_end]
+
+    assert 'path.name == "checksums.txt"' in checksum_generation
+    assert 'path.name.startswith("checksums.txt.")' in checksum_generation
+    assert "stat.S_ISREG(path.lstat().st_mode)" in checksum_generation
+    assert "files.sort(key=lambda item: item[0])" in checksum_generation
+    assert 'relative.encode("utf-8")' in checksum_generation
+    assert 'newline="\\n"' in checksum_generation
+    assert "| xargs" not in checksum_generation
+    assert "sed -z" not in checksum_generation
+
+
+def test_local_candidate_checksum_program_handles_delimiter_sensitive_names(
+    tmp_path: Path,
+) -> None:
+    harness = SCRIPT.read_text(encoding="utf-8")
+    checksum_start = harness.index('local checksum_tmp="${WORKDIR}/candidate-checksums.txt"')
+    checksum_generation = harness[checksum_start : harness.index("\nPY", checksum_start)]
+    program = checksum_generation.split("<<'PY'\n", 1)[1]
+    assert 'if "\\n" in relative or "\\r" in relative:' in program
+    release = tmp_path / "release"
+    release.mkdir()
+    payloads = {
+        "z artifact.bin": b"z payload\n",
+        "a artifact.bin": b"a payload\n",
+        "checksums.txt.sig": b"excluded signature\n",
+    }
+    for name, payload in payloads.items():
+        (release / name).write_bytes(payload)
+    destination = tmp_path / "candidate-checksums.txt"
+
+    completed = subprocess.run(
+        [sys.executable, "-", str(release), str(destination)],
+        input=program,
+        text=True,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert destination.read_text(encoding="utf-8").splitlines() == [
+        f"{hashlib.sha256(payloads[name]).hexdigest()}  {name}" for name in ("a artifact.bin", "z artifact.bin")
+    ]
+
+    # Windows rejects newline-containing filenames before the checksum
+    # program can inspect them. Keep that representable attack case covered
+    # on POSIX while retaining the space-delimited Windows contract above.
+    if os.name != "nt":
+        (release / "unsafe\nartifact.bin").write_bytes(b"unsafe\n")
+        destination.unlink()
+        rejected = subprocess.run(
+            [sys.executable, "-", str(release), str(destination)],
+            input=program,
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=30,
+        )
+        assert rejected.returncode != 0
+        assert "artifact name is not checksum-safe" in rejected.stderr
+        assert not destination.exists()
 
 
 def test_success_receipt_verifier_uses_canonical_audit_and_queue_acknowledgement() -> None:

@@ -402,6 +402,10 @@ jobs:
       # permanent release assets and this fallback remains fail-closed evidence.
       BOOTSTRAP_FIXTURE_RUN_ID: "30063491006"
       BOOTSTRAP_FIXTURE_ARTIFACT: release-candidate-30063491006-1
+      # 0.8.7 predates immutable install.ps1 release assets. The compatibility
+      # fallback below is review-bound to these exact repository bytes and is
+      # refused for every other release/candidate identity.
+      BOOTSTRAP_LEGACY_INSTALLER_SHA256: bf9d266ccd3d7a6cd8a1e6dfb0bcb9c2aa258858da2152c4fb435fa26c99f51a
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -470,6 +474,37 @@ jobs:
               throw "Could not download authenticated bootstrap fixture asset: $asset"
             }
           }
+          $installerAssetCount = (
+            gh release view $env:BOOTSTRAP_FIXTURE_VERSION `
+              --repo $env:GITHUB_REPOSITORY `
+              --json assets `
+              --jq '[.assets[] | select(.name == "install.ps1")] | length'
+          )
+          if ($LASTEXITCODE -ne 0 -or $installerAssetCount -notmatch '^[0-9]+$') {
+            throw 'Could not resolve the immutable install.ps1 asset inventory'
+          }
+          if ([int]$installerAssetCount -gt 1) {
+            throw 'The immutable release contains duplicate install.ps1 assets'
+          }
+          if ([int]$installerAssetCount -eq 1) {
+            gh release download $env:BOOTSTRAP_FIXTURE_VERSION `
+              --repo $env:GITHUB_REPOSITORY `
+              --pattern install.ps1 `
+              --dir $fixture
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Could not download the immutable install.ps1 asset'
+            }
+          } elseif ($env:BOOTSTRAP_FIXTURE_VERSION -cne '0.8.7') {
+            throw (
+              'The authenticated release is missing its exact immutable ' +
+              'install.ps1 asset'
+            )
+          } else {
+            Write-Host (
+              'Pinned legacy 0.8.7 has no install.ps1 asset; the digest-bound ' +
+              'compatibility fixture will be staged later.'
+            )
+          }
           "DC_BOOTSTRAP_RELEASE_DIR=$fixture" >> $env:GITHUB_ENV
       - name: Download sealed pre-publication bootstrap fixture
         if: ${{ steps.fixture.outputs.source == 'candidate' }}
@@ -489,7 +524,54 @@ jobs:
           }
           "DC_BOOTSTRAP_RELEASE_DIR=$fixture" >> $env:GITHUB_ENV
       - name: Exercise current public bootstrap under a real disposable user
+        env:
+          BOOTSTRAP_FIXTURE_SOURCE: ${{ steps.fixture.outputs.source }}
         run: |
+          # The pinned 0.8.7 regression fixture predates immutable installer
+          # assets. Every current candidate/release must provide its exact
+          # downloaded install.ps1. The only fallback is this explicitly pinned
+          # legacy fixture, whose reviewed repository bytes are digest-bound
+          # before and after staging.
+          $fixtureInstaller = Join-Path $env:DC_BOOTSTRAP_RELEASE_DIR 'install.ps1'
+          if (-not (Test-Path -LiteralPath $fixtureInstaller -PathType Leaf)) {
+            $isPinnedLegacyFixture = (
+              $env:BOOTSTRAP_FIXTURE_VERSION -ceq '0.8.7' -and
+              (
+                $env:BOOTSTRAP_FIXTURE_SOURCE -ceq 'release' -or
+                (
+                  $env:BOOTSTRAP_FIXTURE_SOURCE -ceq 'candidate' -and
+                  $env:BOOTSTRAP_FIXTURE_RUN_ID -ceq '30063491006' -and
+                  $env:BOOTSTRAP_FIXTURE_ARTIFACT -ceq 'release-candidate-30063491006-1'
+                )
+              )
+            )
+            if (-not $isPinnedLegacyFixture) {
+              throw (
+                'The authenticated candidate/release is missing its exact ' +
+                'immutable install.ps1 asset'
+              )
+            }
+            $legacyInstaller = (
+              Resolve-Path -LiteralPath ./scripts/install.ps1 -ErrorAction Stop
+            ).Path
+            $legacyDigest = (
+              Get-FileHash -LiteralPath $legacyInstaller -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            if ($legacyDigest -cne $env:BOOTSTRAP_LEGACY_INSTALLER_SHA256) {
+              throw (
+                'The reviewed legacy 0.8.7 installer digest changed: ' +
+                "$legacyDigest"
+              )
+            }
+            Copy-Item -LiteralPath $legacyInstaller `
+              -Destination $fixtureInstaller -ErrorAction Stop
+            $stagedLegacyDigest = (
+              Get-FileHash -LiteralPath $fixtureInstaller -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            if ($stagedLegacyDigest -cne $env:BOOTSTRAP_LEGACY_INSTALLER_SHA256) {
+              throw 'The staged legacy 0.8.7 installer lost its digest binding'
+            }
+          }
           $bootstrapState = Join-Path $env:DC_STATE_ROOT (
             'defenseclaw-bootstrap-acceptance-' + [guid]::NewGuid().ToString('N')
           )

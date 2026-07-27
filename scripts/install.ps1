@@ -1029,3 +1029,4 @@ if ($MyInvocation.InvocationName -ne '.') {
         exit 1
     }
 }
+# DefenseClaw Windows installer complete v1

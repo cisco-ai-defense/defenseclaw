@@ -133,6 +133,20 @@
       "security_note": "Operator-supplied checksum pin for upgrade artifacts — defense-in-depth alongside the sidecar .sha256 file."
     },
     {
+      "name": "DEFENSECLAW_RESCUE_COSIGN_CANDIDATE",
+      "category": "upgrade_internal",
+      "purpose": "Carries the absolute Cosign path discovered by the POSIX rescue trampoline as inert positional data through an empty environment into the trusted system Bash payload. The payload copies the candidate into its private work directory and accepts it only when the copied bytes match the pinned platform digest; otherwise it downloads and verifies the pinned Cosign release.",
+      "default": "unset (the rescue payload downloads the pinned Cosign release)",
+      "accepted_values": ["absolute path discovered by command -v cosign", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "scripts/defenseclaw-rescue.sh", "description": "The POSIX trampoline passes the discovered path through the clean-environment handoff; the Bash payload unsets the variable and uses only a private digest-verified copy"}
+      ],
+      "since": "0.8.8",
+      "security_note": "Optimization hint only — the ambient executable is never run in place, and its copied bytes receive the same pinned-digest verification as a downloaded Cosign binary."
+    },
+    {
       "name": "DEFENSECLAW_UPGRADE_FRESH_PROCESS",
       "category": "upgrade_internal",
       "purpose": "Marks the isolated installed-CLI child used for an upgrade handoff so the child cannot recursively hand off again and a newly installed gateway can delegate its readiness wait to that supervising controller.",

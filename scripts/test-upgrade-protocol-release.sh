@@ -133,6 +133,17 @@ manifest_array_contains() {
     grep -Fxq "${expected}" <<<"${values}"
 }
 
+protocol_sha256_file() {
+    local path="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "${path}" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "${path}" | awk '{print $1}'
+    else
+        die "sha256sum or shasum is required for field-recovery custody checks"
+    fi
+}
+
 manifest_windows_sources_are_empty() {
     python3 - "${RELEASE_ROOT}/${TARGET_VERSION}/upgrade-manifest.json" <<'PY'
 import json
@@ -743,6 +754,295 @@ run_candidate_updater_direct_success() {
     ok "Release-owned resolver upgrade passed: ${baseline} -> ${TARGET_VERSION}"
 }
 
+run_candidate_updater_field_recovery_success() {
+    local baseline="$1"
+    local recovery_case="$2"
+    local recovery_home="${3:-}"
+    local -a resolver_args=(--yes)
+    local audit_db=""
+    local source_config_sha256=""
+    local source_environment_sha256=""
+    log "Proving release-owned resolver field recovery (${recovery_case}) ${baseline} -> ${TARGET_VERSION}"
+    if [[ "${recovery_case}" == "corrupt-audit-same-version" ]]; then
+        [[ -n "${recovery_home}" \
+            && "${recovery_home}" == "${WORKDIR}/"* \
+            && "${baseline}" == "${TARGET_VERSION}" \
+            && -x "${recovery_home}/.defenseclaw/.venv/bin/python" ]] \
+            || die "same-version field recovery requires an explicit installed target fixture"
+        SMOKE_HOME="${recovery_home}"
+        # install_baseline reads this global through the sourced release harness.
+        # shellcheck disable=SC2034
+        FROM_VERSION="${TARGET_VERSION}"
+    else
+        [[ "${recovery_case}" == "clean-086-missing-cursor" \
+            && "${baseline}" == "0.8.6" ]] \
+            || die "missing-cursor field recovery is bound to exact published 0.8.6"
+        # install_baseline reads this global through the sourced release harness.
+        # shellcheck disable=SC2034
+        FROM_VERSION="${baseline}"
+        SMOKE_HOME="${WORKDIR}/field-recovery-${baseline}-${recovery_case}"
+        rm -rf "${SMOKE_HOME}"
+        mkdir -p "${SMOKE_HOME}"
+        install_baseline
+        mkdir -p "${SMOKE_HOME}/.openclaw"
+        chmod 700 "${SMOKE_HOME}/.openclaw"
+
+        # Reproduce the actual published 0.8.6 first-run defect through that
+        # release's own config API: clean config v8 was published, while the
+        # migration cursor was never created. Do not manufacture a partial
+        # cursor; that is an ambiguous damaged state the resolver must reject.
+        HOME="${SMOKE_HOME}" \
+        DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+        DEFENSECLAW_CONFIG="${SMOKE_HOME}/.defenseclaw/config.yaml" \
+            "${SMOKE_HOME}/.defenseclaw/.venv/bin/python" -I -B - <<'PY' \
+            || die "published 0.8.6 could not reproduce its clean first-run config"
+import os
+from pathlib import Path
+import secrets
+
+from defenseclaw.config import default_config, prepare_fresh_v8_config
+
+data_dir = Path(os.environ["DEFENSECLAW_HOME"])
+cfg = default_config()
+prepare_fresh_v8_config(cfg)
+cfg.save()
+cursor = data_dir / ".migration_state.json"
+if cursor.exists() or cursor.is_symlink():
+    raise SystemExit("published 0.8.6 unexpectedly created a migration cursor")
+(data_dir / ".env").write_text(
+    "DEFENSECLAW_GATEWAY_TOKEN=" + secrets.token_hex(32) + "\n",
+    encoding="utf-8",
+)
+os.chmod(data_dir / ".env", 0o600)
+PY
+        source_config_sha256="$(protocol_sha256_file "${SMOKE_HOME}/.defenseclaw/config.yaml")"
+        source_environment_sha256="$(protocol_sha256_file "${SMOKE_HOME}/.defenseclaw/.env")"
+        prepare_isolated_docker_path
+        start_source_gateway_canary
+    fi
+
+    case "${recovery_case}" in
+        clean-086-missing-cursor) ;;
+        corrupt-audit-same-version)
+            stop_smoke_gateway
+            audit_db="$(
+                HOME="${SMOKE_HOME}" \
+                DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+                PYTHONDONTWRITEBYTECODE=1 \
+                    "${SMOKE_HOME}/.defenseclaw/.venv/bin/python" -I -B - <<'PY'
+from defenseclaw.config import load
+
+print(load().audit_db)
+PY
+            )" || die "field-recovery audit fixture path could not be resolved"
+            [[ -n "${audit_db}" && "${audit_db}" == "${SMOKE_HOME}/"* ]] \
+                || die "field-recovery audit fixture escaped its isolated home"
+            python3 - "${audit_db}" <<'PY' \
+                || die "field-recovery corrupt audit fixture could not be written"
+from pathlib import Path
+import os
+import stat
+import sys
+
+path = Path(sys.argv[1])
+path_info = path.lstat()
+if (
+    stat.S_ISLNK(path_info.st_mode)
+    or not stat.S_ISREG(path_info.st_mode)
+    or path_info.st_uid != os.geteuid()
+    or path_info.st_nlink != 1
+):
+    raise SystemExit("field-recovery audit fixture is unavailable")
+checked_sidecars = []
+for suffix in ("-wal", "-shm", "-journal"):
+    sidecar = Path(f"{path}{suffix}")
+    if not os.path.lexists(sidecar):
+        continue
+    info = sidecar.lstat()
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or info.st_nlink != 1
+    ):
+        raise SystemExit(f"field-recovery audit sidecar is unsafe: {sidecar}")
+    checked_sidecars.append((sidecar, info.st_dev, info.st_ino))
+for sidecar, expected_device, expected_inode in checked_sidecars:
+    current = sidecar.lstat()
+    if current.st_dev != expected_device or current.st_ino != expected_inode:
+        raise SystemExit(f"field-recovery audit sidecar changed during cleanup: {sidecar}")
+    sidecar.unlink()
+path.write_bytes(b"DefenseClaw corrupt audit fixture\n")
+path.chmod(0o600)
+PY
+            resolver_args+=(--recover-corrupt-audit)
+            ;;
+        *) die "unknown field-recovery case: ${recovery_case}" ;;
+    esac
+
+    local curl_shim="${SMOKE_HOME}/.upgrade-test-bin"
+    local real_curl
+    local log_file="${SMOKE_HOME}/upgrade.log"
+    real_curl="$(install_curl_rewrite_probe "${curl_shim}")"
+
+    if ! HOME="${SMOKE_HOME}" \
+        DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+        OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
+        PYTHONDONTWRITEBYTECODE=1 \
+        DOCKER_HOST="${UPGRADE_SMOKE_DOCKER_HOST:-unix://${SMOKE_HOME}/no-docker.sock}" \
+        DEFENSECLAW_UPGRADE_TEST_MODE=1 \
+        DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL="${RELEASE_URL}" \
+        UPGRADE_GATE_REAL_CURL="${real_curl}" \
+        UPGRADE_GATE_RELEASE_URL="${RELEASE_URL}" \
+        UPGRADE_GATE_TARGET_VERSION="${TARGET_VERSION}" \
+        PATH="${curl_shim}:${SMOKE_HOME}/.local/bin:${PATH}" \
+            bash "${RELEASE_ROOT}/${TARGET_VERSION}/defenseclaw-upgrade.sh" \
+            "${resolver_args[@]}" >"${log_file}" 2>&1; then
+        tail_v8_upgrade_log_secret_safe "${log_file}"
+        die "release-owned resolver field recovery failed (${recovery_case}): ${baseline} -> ${TARGET_VERSION}"
+    fi
+
+    case "${recovery_case}" in
+        clean-086-missing-cursor)
+            grep -Fq "Authenticated the exact clean 0.8.6 missing-cursor compatibility state" \
+                "${log_file}" \
+                || die "field recovery did not authenticate the exact clean 0.8.6 source"
+            python3 - \
+                "${SMOKE_HOME}/.defenseclaw" \
+                "${RELEASE_ROOT}/${TARGET_VERSION}/upgrade-manifest.json" \
+                "${source_config_sha256}" \
+                "${source_environment_sha256}" \
+                "${TARGET_VERSION}" <<'PY' \
+                || die "clean 0.8.6 field-recovery verification failed"
+import hashlib
+import json
+from pathlib import Path
+import sqlite3
+import sys
+
+data_dir = Path(sys.argv[1])
+manifest = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+source_config_sha256, source_environment_sha256, target_version = sys.argv[3:]
+cursor = json.loads((data_dir / ".migration_state.json").read_text(encoding="utf-8"))
+applied = set(cursor.get("applied", []))
+required = set(manifest.get("required_cli_migrations", []))
+if not required.issubset(applied):
+    raise SystemExit(f"field recovery omitted required migrations: {sorted(required - applied)}")
+if "0.8.5" not in applied:
+    raise SystemExit("field recovery did not reconstruct authenticated hard-cut history")
+if (data_dir / ".migration_state.fresh.pending.json").exists():
+    raise SystemExit("field recovery left a fresh-install retry marker behind")
+
+def digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+backups = [
+    path
+    for path in (data_dir / "backups").glob("upgrade-*")
+    if path.is_dir() and not path.is_symlink()
+]
+if not any(
+    (path / "config.yaml").is_file()
+    and (path / ".env").is_file()
+    and digest(path / "config.yaml") == source_config_sha256
+    and digest(path / ".env") == source_environment_sha256
+    for path in backups
+):
+    raise SystemExit("field recovery retained no byte-exact clean 0.8.6 backup")
+
+bundle_manifest = json.loads(
+    (data_dir / "observability-stack/.defenseclaw-bundle-manifest.json").read_text(
+        encoding="utf-8"
+    )
+)
+if bundle_manifest.get("bundle_version") != target_version:
+    raise SystemExit("field recovery did not refresh the managed bundle to target")
+
+database = data_dir / "audit.db"
+if database.exists():
+    with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+        if connection.execute("PRAGMA quick_check(1)").fetchone() != ("ok",):
+            raise SystemExit("field recovery target audit database failed quick_check")
+PY
+            local cli_version gateway_version
+            cli_version="$(HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+                PATH="${SMOKE_HOME}/.local/bin:${PATH}" defenseclaw --version)" \
+                || die "field-recovery defenseclaw --version failed"
+            assert_exact_reported_version "defenseclaw" "${TARGET_VERSION}" "${cli_version}"
+            gateway_version="$(HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+                PATH="${SMOKE_HOME}/.local/bin:${PATH}" defenseclaw-gateway --version)" \
+                || die "field-recovery gateway --version failed"
+            assert_exact_reported_version \
+                "defenseclaw-gateway" "${TARGET_VERSION}" "${gateway_version}"
+            HOME="${SMOKE_HOME}" DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+                PATH="${SMOKE_HOME}/.local/bin:${PATH}" defenseclaw-gateway status \
+                >"${SMOKE_HOME}/field-recovery-gateway-status.log" 2>&1 \
+                || die "field-recovery target gateway is not healthy"
+            ;;
+        corrupt-audit-same-version)
+            verify_upgrade
+            grep -Fq "Preserved corrupt audit SQLite set:" "${log_file}" \
+                || die "field recovery did not report corrupt audit custody"
+            python3 - "${SMOKE_HOME}/.defenseclaw" "${audit_db}" <<'PY' \
+                || die "field-recovery audit custody verification failed"
+from pathlib import Path
+import sqlite3
+import sys
+
+data_dir = Path(sys.argv[1])
+audit_db = Path(sys.argv[2])
+custody = list((data_dir / "backups").glob("upgrade-*/audit-corrupt/audit.db"))
+if len(custody) != 1:
+    raise SystemExit(f"expected one corrupt audit custody file, found {len(custody)}")
+if custody[0].read_bytes() != b"DefenseClaw corrupt audit fixture\n":
+    raise SystemExit("corrupt audit custody did not preserve exact source bytes")
+if (data_dir / ".audit-recovery.json").exists():
+    raise SystemExit("completed audit recovery retained its in-progress marker")
+if not audit_db.is_file() or audit_db.is_symlink():
+    raise SystemExit("fresh target audit database was not initialized")
+with sqlite3.connect(f"file:{audit_db}?mode=ro", uri=True) as connection:
+    if connection.execute("PRAGMA quick_check(1)").fetchone() != ("ok",):
+        raise SystemExit("fresh target audit database failed quick_check")
+PY
+            ;;
+    esac
+    stop_smoke_gateway
+    ok "Release-owned resolver field recovery passed (${recovery_case}): ${baseline} -> ${TARGET_VERSION}"
+}
+
+run_candidate_updater_field_recovery_cases() (
+    local baseline="$1"
+    local installed_target_home="$2"
+    local saved_smoke_home="${SMOKE_HOME}"
+    local saved_from_version="${FROM_VERSION}"
+
+    if [[ "${UPGRADE_SMOKE_FIELD_RECOVERY_CASES:-0}" != "1" ]]; then
+        return 0
+    fi
+
+    # Invoked indirectly by the EXIT trap for every subshell outcome.
+    # shellcheck disable=SC2329
+    restore_field_recovery_harness_state() {
+        local status=$?
+        stop_smoke_gateway || true
+        # Keep the restoration explicit even though the surrounding subshell
+        # also prevents these harness globals from escaping to the caller.
+        # shellcheck disable=SC2030
+        SMOKE_HOME="${saved_smoke_home}"
+        FROM_VERSION="${saved_from_version}"
+        trap - EXIT
+        return "${status}"
+    }
+    trap restore_field_recovery_harness_state EXIT
+
+    if [[ "${baseline}" == "0.8.6" ]]; then
+        run_candidate_updater_field_recovery_success \
+            "${baseline}" clean-086-missing-cursor
+    fi
+    run_candidate_updater_field_recovery_success \
+        "${TARGET_VERSION}" corrupt-audit-same-version "${installed_target_home}"
+)
+
 run_protocol_case() {
     local baseline="$1"
     if version_lte "${TARGET_VERSION}" "${baseline}"; then
@@ -835,6 +1135,10 @@ run_protocol_case() {
                 run_candidate_updater_staged_success "${baseline}"
             else
                 run_candidate_updater_direct_success "${baseline}"
+                # The field-recovery helper is an isolated subshell by design.
+                # shellcheck disable=SC2031
+                run_candidate_updater_field_recovery_cases \
+                    "${baseline}" "${SMOKE_HOME}"
             fi
             return
         fi
@@ -871,6 +1175,10 @@ run_protocol_case() {
             run_candidate_updater_staged_success "${baseline}" explicit
         else
             run_candidate_updater_direct_success "${baseline}"
+            # The field-recovery helper is an isolated subshell by design.
+            # shellcheck disable=SC2031
+            run_candidate_updater_field_recovery_cases \
+                "${baseline}" "${SMOKE_HOME}"
         fi
         return
     fi

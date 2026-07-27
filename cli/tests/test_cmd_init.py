@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from click.testing import CliRunner
 
 pytestmark = pytest.mark.supported_connector_host
+from defenseclaw.bootstrap import FreshMigrationStateError
 from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.config import PerConnectorGuardrailConfig
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
@@ -109,7 +110,7 @@ class TestInitCommand(unittest.TestCase):
         import sqlite3
 
         from defenseclaw import migration_state
-        from defenseclaw.bootstrap import _fresh_migration_pending_path
+        from defenseclaw.bootstrap import fresh_migration_pending_path
         from defenseclaw.db import Store
 
         mock_path.return_value = Path(self.tmp_dir)
@@ -140,7 +141,7 @@ class TestInitCommand(unittest.TestCase):
             with self.assertRaisesRegex(sqlite3.ProgrammingError, "closed"):
                 stores[0].db.execute("SELECT 1")
             self.assertFalse(os.path.lexists(migration_state.state_path(self.tmp_dir)))
-            self.assertTrue(os.path.isfile(_fresh_migration_pending_path(self.tmp_dir)))
+            self.assertTrue(Path(fresh_migration_pending_path(self.tmp_dir)).is_file())
 
             second = self.runner.invoke(init_cmd, ["--skip-install"], obj=AppContext())
 
@@ -150,7 +151,7 @@ class TestInitCommand(unittest.TestCase):
                 store.db.execute("SELECT 1")
         self.assertIn("recovered pending fresh cursor", second.output)
         self.assertIsNotNone(migration_state.load(self.tmp_dir))
-        self.assertFalse(os.path.lexists(_fresh_migration_pending_path(self.tmp_dir)))
+        self.assertFalse(os.path.lexists(fresh_migration_pending_path(self.tmp_dir)))
 
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_init._install_guardrail")
@@ -1659,6 +1660,30 @@ class TestInitStartsGateway(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, result.output)
             self.assertIn("not found", result.output)
             self.assertIn("make gateway-install", result.output)
+
+    @patch(
+        "defenseclaw.bootstrap.repair_pending_first_run_config",
+        side_effect=FreshMigrationStateError("fresh-install migration marker is unavailable"),
+    )
+    @patch("defenseclaw.commands.cmd_init._install_guardrail")
+    @patch("defenseclaw.commands.cmd_init._install_scanners")
+    @patch("defenseclaw.config.detect_environment", return_value="macos")
+    @patch("defenseclaw.config.default_data_path")
+    def test_pending_first_run_migration_error_is_actionable(
+        self,
+        mock_path,
+        _mock_env,
+        _mock_scanners,
+        _mock_guardrail,
+        _mock_repair,
+    ):
+        mock_path.return_value = Path(self.tmp_dir)
+
+        result = self.runner.invoke(init_cmd, ["--skip-install"], obj=AppContext())
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("fresh-install migration marker is unavailable", result.output)
+        self.assertIn("rerun 'defenseclaw init' after repair", result.output)
 
     @patch("defenseclaw.bootstrap.finalize_first_run_config")
     @patch("defenseclaw.commands.cmd_init._start_gateway", side_effect=RuntimeError("start failed"))

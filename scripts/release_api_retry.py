@@ -57,6 +57,8 @@ DEFAULT_RECONCILE_ATTEMPTS = 6
 DEFAULT_RECONCILE_DELAY_SECONDS = 5.0
 ABSENT_EXIT_CODE = 10
 _HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})(?:\s|$)")
+_FULL_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_CANONICAL_VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
 
 class ReleaseAPIError(RuntimeError):
@@ -205,14 +207,26 @@ class GitHubReleaseAPI:
     def _endpoint(self, suffix: str) -> str:
         return f"repos/{self.repository}/{suffix}"
 
-    def main_commit(self) -> str:
-        payload = self.get_json(self._endpoint("git/ref/heads/main"), absent_ok=False)
+    def compare_commit_to_main(self, expected_commit: str) -> str:
+        if _FULL_COMMIT_SHA_RE.fullmatch(expected_commit) is None:
+            raise ReleaseAPIError("release commit must be an exact 40-character lowercase hexadecimal SHA")
+        endpoint = self._endpoint(f"compare/{expected_commit}...main")
+        payload = self.get_json(endpoint, absent_ok=False)
         if payload is None:
-            raise ReleaseAPIError("GitHub main ref unexpectedly does not exist")
-        object_value = payload.get("object")
-        if not isinstance(object_value, dict) or not isinstance(object_value.get("sha"), str):
-            raise ReleaseAPIError("GitHub main ref response lacks object.sha")
-        return object_value["sha"]
+            raise ReleaseAPIError("GitHub main comparison unexpectedly does not exist")
+
+        status = payload.get("status")
+        base_commit = payload.get("base_commit")
+        merge_base_commit = payload.get("merge_base_commit")
+        if not isinstance(status, str) or status not in {"identical", "ahead", "behind", "diverged"}:
+            raise ReleaseAPIError("GitHub main comparison response has an invalid status")
+        if not isinstance(base_commit, dict) or base_commit.get("sha") != expected_commit:
+            raise ReleaseAPIError("GitHub main comparison response does not identify the requested base commit")
+        if not isinstance(merge_base_commit, dict) or not isinstance(merge_base_commit.get("sha"), str):
+            raise ReleaseAPIError("GitHub main comparison response lacks merge_base_commit.sha")
+        if status in {"identical", "ahead"} and merge_base_commit["sha"] != expected_commit:
+            raise ReleaseAPIError("GitHub main comparison response is inconsistent with the reported ancestry status")
+        return status
 
     def tag_ref(self, tag: str) -> dict[str, object] | None:
         encoded = quote(tag, safe="")
@@ -232,9 +246,47 @@ class GitHubReleaseAPI:
                     return item
             if len(releases) < 100:
                 return None
-        raise ReleaseAPIError(
-            f"GitHub release listing exceeded {MAX_RELEASE_LIST_PAGES} pages while probing {tag!r}"
-        )
+        raise ReleaseAPIError(f"GitHub release listing exceeded {MAX_RELEASE_LIST_PAGES} pages while probing {tag!r}")
+
+    def release_rows(self) -> list[dict[str, object]]:
+        """Return one bounded, authenticated snapshot of every release row."""
+
+        rows: list[dict[str, object]] = []
+        rows_by_id: dict[int, dict[str, object]] = {}
+        rows_by_tag: dict[str, dict[str, object]] = {}
+        for page in range(1, MAX_RELEASE_LIST_PAGES + 1):
+            endpoint = self._endpoint(f"releases?per_page=100&page={page}")
+            releases = self.get_json_list(endpoint)
+            for item in releases:
+                if not isinstance(item, dict):
+                    raise ReleaseAPIError(f"GitHub returned an invalid release row for {endpoint}")
+                release_id = item.get("id")
+                release_tag = item.get("tag_name")
+                if (
+                    not isinstance(release_id, int)
+                    or isinstance(release_id, bool)
+                    or release_id <= 0
+                    or not isinstance(release_tag, str)
+                    or not release_tag
+                ):
+                    raise ReleaseAPIError(f"GitHub returned release row without stable identity for {endpoint}")
+                prior_id = rows_by_id.get(release_id)
+                prior_tag = rows_by_tag.get(release_tag)
+                if prior_id is not None or prior_tag is not None:
+                    if prior_id == item and prior_tag == item:
+                        # Concurrent insertions can move one unchanged release
+                        # onto two adjacent pages. Treat that overlap as one row.
+                        continue
+                    # ID and tag are both custody identities here. Deduplicating
+                    # on only one axis could hide an ID retag, duplicate tag, or
+                    # pagination mutation, so every mismatch remains fatal.
+                    raise ReleaseAPIError(f"GitHub release listing changed while paginating {release_tag!r}")
+                rows_by_id[release_id] = item
+                rows_by_tag[release_tag] = item
+                rows.append(item)
+            if len(releases) < 100:
+                return rows
+        raise ReleaseAPIError(f"GitHub release listing exceeded {MAX_RELEASE_LIST_PAGES} pages while resolving latest")
 
     def resolve_tag_commit(self, payload: dict[str, object]) -> str:
         current = payload
@@ -266,8 +318,6 @@ def require_absent_namespace(
     tag: str,
     expected_main_commit: str | None = None,
 ) -> None:
-    if expected_main_commit is not None:
-        require_main_commit(api, expected_main_commit)
     tag_payload = api.tag_ref(tag)
     release_payload = api.release_by_tag(tag)
     if tag_payload is not None or release_payload is not None:
@@ -277,13 +327,108 @@ def require_absent_namespace(
         if release_payload is not None:
             occupied.append("release")
         raise ReleaseAPIError(f"remote release namespace {tag!r} is occupied by {', '.join(occupied)}")
+    if expected_main_commit is not None:
+        require_commit_on_main(api, expected_main_commit)
 
 
-def require_main_commit(api: GitHubReleaseAPI, expected_commit: str) -> None:
-    remote_main = api.main_commit()
-    if remote_main != expected_commit:
+def require_releasable_namespace(
+    api: GitHubReleaseAPI,
+    *,
+    tag: str,
+    expected_commit: str,
+) -> ReconcileState:
+    """Admit an absent namespace or a same-commit tag with no release.
+
+    A tag-only namespace can be left behind before immutable publication starts,
+    and ``gh release create`` can safely publish against that exact tag. Once a
+    release exists, rebuilding is forbidden: platform signatures and
+    notarization tickets are not reproducible custody identities.
+    """
+
+    tag_payload = api.tag_ref(tag)
+    release_payload = api.release_by_tag(tag)
+    if release_payload is not None:
         raise ReleaseAPIError(
-            f"main advanced during certification: expected {expected_commit}, found {remote_main}"
+            f"remote release namespace {tag!r} already contains a release; "
+            "operation=release never rebuilds existing release state. Use "
+            "operation=repair-channel only for an authenticated immutable "
+            "release, or investigate the unexpected release before retrying."
+        )
+    if tag_payload is None:
+        require_commit_on_main(api, expected_commit)
+        return ReconcileState.ABSENT
+
+    remote_commit = api.resolve_tag_commit(tag_payload)
+    if remote_commit != expected_commit:
+        raise ReleaseAPIError(f"remote tag {tag!r} points to {remote_commit}, expected {expected_commit}")
+    require_commit_on_main(api, expected_commit)
+    return ReconcileState.ABSENT
+
+
+def _version_key(value: str) -> tuple[int, int, int]:
+    if _CANONICAL_VERSION_RE.fullmatch(value) is None:
+        raise ReleaseAPIError(f"release version is not canonical X.Y.Z: {value!r}")
+    return tuple(map(int, value.split(".")))  # type: ignore[return-value]
+
+
+def require_latest_immutable_release(
+    api: GitHubReleaseAPI,
+    *,
+    tag: str,
+    expected_commit: str,
+) -> None:
+    """Prove a repair target is the newest immutable stable release.
+
+    Explicit channel repair may have to replace an invalid or absent channel
+    snapshot, where no authenticated pointer remains to compare. Binding repair
+    to the globally newest immutable stable release prevents that recovery path
+    from becoming a rollback primitive.
+    """
+
+    _version_key(tag)
+    stable: dict[str, dict[str, object]] = {}
+    for release in api.release_rows():
+        release_tag = release.get("tag_name")
+        if not isinstance(release_tag, str) or _CANONICAL_VERSION_RE.fullmatch(release_tag) is None:
+            continue
+        if (
+            release.get("draft") is not False
+            or release.get("prerelease") is not False
+            or release.get("immutable") is not True
+        ):
+            continue
+        if not isinstance(release.get("assets"), list):
+            raise ReleaseAPIError(f"immutable stable release {release_tag!r} lacks an assets list")
+        if release_tag in stable:
+            if stable[release_tag] == release:
+                continue
+            raise ReleaseAPIError(f"GitHub returned conflicting immutable stable release {release_tag!r}")
+        stable[release_tag] = release
+
+    if not stable:
+        raise ReleaseAPIError("repository has no immutable stable release")
+    latest = max(stable, key=_version_key)
+    if tag != latest:
+        raise ReleaseAPIError(
+            f"repair target {tag!r} is not the latest immutable stable release {latest!r}; refusing channel rollback"
+        )
+
+    tag_payload = api.tag_ref(tag)
+    if tag_payload is None:
+        raise ReleaseAPIError(f"latest immutable release {tag!r} has no tag ref")
+    remote_commit = api.resolve_tag_commit(tag_payload)
+    if remote_commit != expected_commit:
+        raise ReleaseAPIError(f"remote tag {tag!r} points to {remote_commit}, expected {expected_commit}")
+    require_commit_on_main(api, expected_commit)
+
+
+def require_commit_on_main(api: GitHubReleaseAPI, expected_commit: str) -> None:
+    if _FULL_COMMIT_SHA_RE.fullmatch(expected_commit) is None:
+        raise ReleaseAPIError("release commit must be an exact 40-character lowercase hexadecimal SHA")
+    relation = api.compare_commit_to_main(expected_commit)
+    if not isinstance(relation, str) or relation not in {"identical", "ahead"}:
+        raise ReleaseAPIError(
+            f"release commit {expected_commit} is not reachable from protected main (comparison status: {relation})"
         )
 
 
@@ -294,6 +439,7 @@ def _candidate_release_json(payload: dict[str, object]) -> dict[str, object]:
     return {
         "tagName": payload.get("tag_name"),
         "isDraft": payload.get("draft"),
+        "isPrerelease": payload.get("prerelease"),
         "isImmutable": payload.get("immutable"),
         "assets": [
             {"name": item.get("name"), "digest": item.get("digest")} if isinstance(item, dict) else item
@@ -350,21 +496,72 @@ def reconcile_create(
         raise ValueError("delay_seconds cannot be negative")
 
     observed_remote = False
+    consecutive_tag_only = 0
     last_mismatch = ""
     for attempt in range(1, attempts + 1):
         tag_payload = api.tag_ref(tag)
         release_payload = api.release_by_tag(tag)
         if tag_payload is None and release_payload is None:
+            was_tag_only = consecutive_tag_only > 0
+            consecutive_tag_only = 0
+            if observed_remote:
+                last_mismatch = (
+                    "same-commit tag-only state did not persist through reconciliation"
+                    if was_tag_only
+                    else "remote namespace disappeared after being observed"
+                )
+                break
             if attempt < attempts:
                 sleep(delay_seconds)
                 continue
-            if not observed_remote:
-                return ReconcileState.ABSENT
-            last_mismatch = "remote namespace disappeared after being observed"
-            break
+            return ReconcileState.ABSENT
 
         observed_remote = True
-        if tag_payload is None or release_payload is None:
+        if tag_payload is not None and release_payload is None:
+            remote_commit = api.resolve_tag_commit(tag_payload)
+            if remote_commit != expected_commit:
+                raise ReleaseAPIError(f"remote tag {tag!r} points to {remote_commit}, expected {expected_commit}")
+            consecutive_tag_only += 1
+            # A same-commit tag with no release is eventually a safe input to
+            # ``gh release create``. Do not conclude that from the first
+            # observation after an ambiguous create: the tag ref may become
+            # visible before the draft release listing. Observe the complete
+            # bounded convergence window, then require at least one delayed,
+            # consecutive tag-only re-observation. If the tag first appears
+            # on the final attempt (including attempts=1), one bounded
+            # confirmation probe extends the window rather than rejecting a
+            # safely recoverable tag-only namespace.
+            if attempt < attempts:
+                sleep(delay_seconds)
+                continue
+            if consecutive_tag_only >= 2:
+                return ReconcileState.ABSENT
+            sleep(delay_seconds)
+            confirmation_tag = api.tag_ref(tag)
+            confirmation_release = api.release_by_tag(tag)
+            if confirmation_tag is not None and confirmation_release is None:
+                remote_commit = api.resolve_tag_commit(confirmation_tag)
+                if remote_commit != expected_commit:
+                    raise ReleaseAPIError(f"remote tag {tag!r} points to {remote_commit}, expected {expected_commit}")
+                return ReconcileState.ABSENT
+            if confirmation_tag is not None and confirmation_release is not None:
+                _verify_exact_candidate(
+                    tag_payload=confirmation_tag,
+                    release_payload=confirmation_release,
+                    api=api,
+                    tag=tag,
+                    expected_commit=expected_commit,
+                    candidate_root=candidate_root,
+                    omit_windows_binaries=omit_windows_binaries,
+                )
+                return ReconcileState.EXACT
+            if confirmation_tag is None and confirmation_release is None:
+                last_mismatch = "remote namespace disappeared after being observed"
+            else:
+                last_mismatch = "remote tag/release namespace is only partially populated"
+            break
+        consecutive_tag_only = 0
+        if tag_payload is None:
             last_mismatch = "remote tag/release namespace is only partially populated"
         else:
             try:
@@ -392,7 +589,16 @@ def reconcile_create(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("require-absent", "reconcile-create", "prove-published"))
+    parser.add_argument(
+        "command",
+        choices=(
+            "require-absent",
+            "require-releasable",
+            "require-latest-immutable",
+            "reconcile-create",
+            "prove-published",
+        ),
+    )
     parser.add_argument("--repository", required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--commit", required=True)
@@ -414,6 +620,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(f"remote release namespace is absent: {args.tag}")
             return 0
+        if args.command == "require-releasable":
+            state = require_releasable_namespace(
+                api,
+                tag=args.tag,
+                expected_commit=args.commit,
+            )
+            if state is not ReconcileState.ABSENT:
+                raise ReleaseAPIError(
+                    f"release namespace precheck returned unsupported state {state!r}; refusing publication"
+                )
+            print(f"remote release namespace is available or contains only the exact same-commit tag: {args.tag}")
+            return 0
+        if args.command == "require-latest-immutable":
+            require_latest_immutable_release(
+                api,
+                tag=args.tag,
+                expected_commit=args.commit,
+            )
+            print(f"repair target is the latest immutable stable release: {args.tag}")
+            return 0
         if args.candidate_root is None:
             raise ReleaseAPIError(f"{args.command} requires --candidate-root")
         state = reconcile_create(
@@ -427,7 +653,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # reconciliation window is deliberately long enough for GitHub's
         # eventual consistency, so recheck main at the mutation boundary.
         if state is ReconcileState.ABSENT and args.check_main:
-            require_main_commit(api, args.commit)
+            require_commit_on_main(api, args.commit)
         if state is ReconcileState.EXACT:
             print(f"exact immutable release custody verified: {args.tag}")
             return 0

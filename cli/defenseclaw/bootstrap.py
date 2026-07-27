@@ -203,8 +203,15 @@ _MAX_FRESH_MIGRATION_PENDING_BYTES = 16 * 1024
 _MAX_FRESH_CONFIG_BYTES = 4 * 1024 * 1024
 
 
+def fresh_migration_pending_path(data_dir: str) -> str:
+    """Return the exact-config retry marker used by init and signed recovery."""
+    normalized = os.path.abspath(os.path.expanduser(data_dir))
+    return os.path.join(normalized, _FRESH_MIGRATION_PENDING_FILE)
+
+
 def _fresh_migration_pending_path(data_dir: str) -> str:
-    return os.path.join(data_dir, _FRESH_MIGRATION_PENDING_FILE)
+    """Compatibility alias for the private name introduced by PR #610."""
+    return fresh_migration_pending_path(data_dir)
 
 
 def _read_bounded_regular_file(path: str, maximum: int, *, private: bool) -> bytes:
@@ -218,11 +225,7 @@ def _read_bounded_regular_file(path: str, maximum: int, *, private: bool) -> byt
         if (
             (os.name != "nt" and info.st_nlink != 1)
             or not 0 < info.st_size <= maximum
-            or (
-                private
-                and os.name != "nt"
-                and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077)
-            )
+            or (private and os.name != "nt" and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077))
         ):
             raise OSError("fresh migration-state recovery evidence is not a bounded private file")
         raw = b""
@@ -258,24 +261,77 @@ def _fresh_migration_state():
     )
 
 
-def _record_fresh_migration_retry(cfg: Config) -> str:
+def _fresh_migration_pending_payload(cfg: Config) -> dict[str, object]:
     from defenseclaw import __version__
-    from defenseclaw.file_lock import locked_file_update
-    from defenseclaw.file_permissions import atomic_write_text_secure, make_private_directory
 
-    try:
-        config_path, config_sha256 = _fresh_config_identity(cfg)
-    except OSError as exc:
-        raise FreshMigrationStateError(
-            "fresh migration-state recovery config is unavailable"
-        ) from exc
-    marker_path = _fresh_migration_pending_path(cfg.data_dir)
-    payload = {
+    config_path, config_sha256 = _fresh_config_identity(cfg)
+    return {
         "schema": _FRESH_MIGRATION_PENDING_SCHEMA,
         "package_version": __version__,
         "config_path": config_path,
         "config_sha256": config_sha256,
     }
+
+
+def _load_fresh_migration_pending(cfg: Config) -> dict[str, object] | None:
+    """Load exact retry authority without trusting paths stored inside it."""
+    marker_path = fresh_migration_pending_path(cfg.data_dir)
+    if not os.path.lexists(marker_path):
+        return None
+
+    from defenseclaw import __version__
+
+    try:
+        payload = json.loads(
+            _read_bounded_regular_file(
+                marker_path,
+                _MAX_FRESH_MIGRATION_PENDING_BYTES,
+                private=True,
+            )
+        )
+    except (json.JSONDecodeError, UnicodeError, OSError, TypeError) as exc:
+        raise FreshMigrationStateError(
+            "fresh migration-state recovery evidence is unsafe or unreadable; "
+            "leave it in place and run the latest signed upgrade resolver"
+        ) from exc
+
+    expected_keys = {"schema", "package_version", "config_path", "config_sha256"}
+    if not isinstance(payload, dict) or set(payload) != expected_keys:
+        raise FreshMigrationStateError(
+            "fresh migration-state recovery evidence has an unknown shape; "
+            "leave it in place and run the latest signed upgrade resolver"
+        )
+    if payload.get("package_version") != __version__:
+        raise FreshMigrationStateError(
+            "fresh migration-state recovery is pending from DefenseClaw "
+            f"{payload.get('package_version', 'unknown')}; run the latest signed upgrade resolver "
+            "instead of inferring migration state with a different version"
+        )
+
+    try:
+        expected = _fresh_migration_pending_payload(cfg)
+    except OSError as exc:
+        raise FreshMigrationStateError(
+            "fresh migration-state recovery config is unavailable; "
+            "leave the marker in place and run the latest signed upgrade resolver"
+        ) from exc
+    if payload != expected or getattr(cfg, "_source_config_version", None) != 8:
+        raise FreshMigrationStateError(
+            "fresh migration-state recovery evidence does not match the current config; "
+            "leave it in place and run the latest signed upgrade resolver"
+        )
+    return payload
+
+
+def _record_fresh_migration_retry(cfg: Config) -> str:
+    from defenseclaw.file_lock import locked_file_update
+    from defenseclaw.file_permissions import atomic_write_text_secure, make_private_directory
+
+    try:
+        payload = _fresh_migration_pending_payload(cfg)
+    except OSError as exc:
+        raise FreshMigrationStateError("fresh migration-state recovery config is unavailable") from exc
+    marker_path = _fresh_migration_pending_path(cfg.data_dir)
 
     make_private_directory(cfg.data_dir)
     with locked_file_update(marker_path):
@@ -291,6 +347,11 @@ def _record_fresh_migration_retry(cfg: Config) -> str:
             write_marker,
             prefix=".migration_state.fresh.pending.",
         )
+        persisted = _load_fresh_migration_pending(cfg)
+        if persisted is None:
+            raise FreshMigrationStateError("fresh migration-state recovery evidence disappeared during publication")
+        if persisted != payload:
+            raise FreshMigrationStateError("fresh migration-state recovery evidence changed during publication")
     return marker_path
 
 
@@ -307,44 +368,50 @@ def repair_pending_first_run_config(cfg: Config) -> bool:
     if not os.path.lexists(marker_path):
         return False
 
-    from defenseclaw import __version__, migration_state
+    from defenseclaw import migration_state
     from defenseclaw.file_lock import locked_file_update
     from defenseclaw.file_permissions import delete_file_durable
 
     try:
-        raw = json.loads(
-            _read_bounded_regular_file(
-                marker_path,
-                _MAX_FRESH_MIGRATION_PENDING_BYTES,
-                private=True,
-            )
-        )
-    except (json.JSONDecodeError, UnicodeError, OSError) as exc:
-        raise FreshMigrationStateError("fresh migration-state recovery evidence is invalid") from exc
-
-    try:
-        config_path, config_sha256 = _fresh_config_identity(cfg)
-    except OSError as exc:
-        raise FreshMigrationStateError(
-            "fresh migration-state recovery config is unavailable"
-        ) from exc
-    expected = {
-        "schema": _FRESH_MIGRATION_PENDING_SCHEMA,
-        "package_version": __version__,
-        "config_path": config_path,
-        "config_sha256": config_sha256,
-    }
-    if raw != expected or getattr(cfg, "_source_config_version", None) != 8:
-        raise FreshMigrationStateError(
-            "fresh migration-state recovery evidence does not match the current config"
-        )
-
-    try:
         with locked_file_update(marker_path):
-            migration_state.save_if_absent(cfg.data_dir, _fresh_migration_state())
-            delete_file_durable(marker_path)
+            if _load_fresh_migration_pending(cfg) is None:
+                raise FreshMigrationStateError(
+                    "fresh migration-state recovery evidence disappeared before cursor publication; "
+                    "no migration cursor was inferred"
+                )
+            state = _fresh_migration_state()
+            try:
+                migration_state.save_if_absent(cfg.data_dir, state)
+            except OSError as exc:
+                raise FreshMigrationStateError(
+                    "could not publish the pending fresh migration cursor; "
+                    "the retry marker was retained for signed recovery"
+                ) from exc
+            try:
+                observed = migration_state.load(cfg.data_dir)
+            except OSError as exc:
+                raise FreshMigrationStateError(
+                    "the pending fresh migration cursor was published but could not be read back; "
+                    "the retry marker was retained for signed recovery"
+                ) from exc
+            if observed != state:
+                raise FreshMigrationStateError(
+                    "an existing migration cursor does not match the pending fresh installation; "
+                    "it was preserved and the retry marker remains for signed recovery"
+                )
+            try:
+                delete_file_durable(marker_path)
+            except OSError as exc:
+                raise FreshMigrationStateError(
+                    "the pending fresh migration cursor is complete, but its retry marker could not be cleared; "
+                    "rerun init with this version to finish cleanup"
+                ) from exc
+    except FreshMigrationStateError:
+        raise
     except OSError as exc:
-        raise FreshMigrationStateError(str(exc)) from exc
+        raise FreshMigrationStateError(
+            "could not complete the pending fresh migration cursor; the retry marker was retained for signed recovery"
+        ) from exc
     return True
 
 
@@ -376,11 +443,41 @@ def finalize_first_run_config(cfg: Config, *, was_config_absent: bool) -> bool:
 
     try:
         marker_path = _record_fresh_migration_retry(cfg)
-        created = migration_state.save_if_absent(cfg.data_dir, _fresh_migration_state())
-        delete_file_durable(marker_path)
-        return created
+    except (FreshMigrationStateError, OSError) as exc:
+        raise FreshMigrationStateError(
+            "config was saved, but retryable fresh migration state could not be registered; "
+            "run the latest signed upgrade resolver before continuing"
+        ) from exc
+
+    state = _fresh_migration_state()
+    try:
+        created = migration_state.save_if_absent(cfg.data_dir, state)
     except OSError as exc:
-        raise FreshMigrationStateError(str(exc)) from exc
+        raise FreshMigrationStateError(
+            "could not publish the fresh-install migration cursor; "
+            "the retry marker was retained, so rerunning init with this version is safe"
+        ) from exc
+
+    try:
+        observed = migration_state.load(cfg.data_dir)
+    except OSError as exc:
+        raise FreshMigrationStateError(
+            "the fresh-install migration cursor was published but could not be read back; "
+            "the retry marker was retained, so rerunning init with this version is safe"
+        ) from exc
+    if observed != state:
+        raise FreshMigrationStateError(
+            "an existing migration cursor does not match the pending fresh installation; "
+            "it was preserved and the retry marker remains for signed recovery"
+        )
+    try:
+        delete_file_durable(marker_path)
+    except OSError as exc:
+        raise FreshMigrationStateError(
+            "the fresh migration cursor is complete, but its retry marker could not be cleared; "
+            "rerun init with this version to finish cleanup"
+        ) from exc
+    return created
 
 
 def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:

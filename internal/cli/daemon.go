@@ -56,6 +56,7 @@ const (
 	upgradeFreshProcessEnv       = "DEFENSECLAW_UPGRADE_FRESH_PROCESS"
 	upgradeWaitReadyTimeoutFlag  = "timeout"
 	upgradeWaitReadyVersionFlag  = "expected-version"
+	telemetrySnapshotUnavailable = gateway.ObservabilityV8HealthSnapshotUnavailable
 )
 
 var startCmd = &cobra.Command{
@@ -1480,11 +1481,13 @@ func probeRotationConnectorOTLPAuthentication(
 	return nil
 }
 
-// waitForGatewayReadiness waits for every required startup subsystem to reach
-// its final state. The health endpoint and API can become reachable before
-// connector Setup finishes, so API=running alone is not readiness. In
+// waitForGatewayReadiness waits for every required local startup subsystem to
+// reach its final state. The health endpoint and API can become reachable
+// before connector Setup finishes, so API=running alone is not readiness. In
 // particular, an enabled guardrail's initial disabled state must transition to
-// running before start/restart prints OK.
+// running before start/restart prints OK. The OpenClaw fleet WebSocket is an
+// external dependency: its reconnecting or error state is reported as degraded
+// health but does not make a live local sidecar fail startup.
 func waitForGatewayReadiness(
 	client *http.Client,
 	healthURL string,
@@ -1620,9 +1623,11 @@ func gatewaySnapshotReady(
 			)
 		}
 	}
-	// The gateway uplink retries after StateError, so an error there is
-	// transitional until the readiness deadline. The other required startup
-	// components do not recover in-place from Error and can fail immediately.
+	// The external fleet uplink retries after StateError. It is deliberately
+	// excluded from this fatal-error list; local runtime health must not depend
+	// on whether OpenClaw happens to be reachable during a start or upgrade.
+	// The other required startup components do not recover in-place from Error
+	// and can fail immediately.
 	for _, subsystem := range []struct {
 		name   string
 		health gateway.SubsystemHealth
@@ -1633,6 +1638,16 @@ func gatewaySnapshotReady(
 		{name: "telemetry", health: snap.Telemetry},
 	} {
 		if subsystem.health.State != gateway.StateError {
+			continue
+		}
+		// The health endpoint bounds each observability snapshot read. A single
+		// timeout does not mean the telemetry runtime has stopped: the next
+		// readiness poll can observe the same live runtime after its snapshot
+		// lock is released. Keep this exact, stable health condition retryable
+		// until the existing startup deadline; every other telemetry error
+		// remains an immediate failure.
+		if subsystem.name == "telemetry" &&
+			strings.TrimSpace(subsystem.health.LastError) == telemetrySnapshotUnavailable {
 			continue
 		}
 		detail := strings.TrimSpace(subsystem.health.LastError)
@@ -1649,10 +1664,15 @@ func gatewaySnapshotReady(
 	if snap.API.State != gateway.StateRunning {
 		return false, nil
 	}
-	// The OpenClaw fleet uplink is intentionally disabled for native hook-only
-	// standalone installs, including Windows. That is a final ready state, not
-	// a failure. A reconnecting/starting uplink is still pending.
-	if snap.Gateway.State != gateway.StateRunning && snap.Gateway.State != gateway.StateDisabled {
+	// API/process identity and every configured local subsystem below are the
+	// startup contract. A reconnecting fleet uplink has a live retry loop but
+	// no external peer, so it is degraded rather than locally unready. The loop
+	// also retries immediately after StateError, so that transient state cannot
+	// block local startup. Starting still waits; StateStopped remains fatal in
+	// the check above because it means the uplink goroutine terminated.
+	switch snap.Gateway.State {
+	case gateway.StateRunning, gateway.StateDisabled, gateway.StateReconnecting, gateway.StateError:
+	default:
 		return false, nil
 	}
 	if !subsystemMatchesConfiguredState(snap.Watcher.State, requirements.watcherEnabled) {

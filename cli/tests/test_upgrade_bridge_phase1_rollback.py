@@ -3,15 +3,18 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
 import platform
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
+import sysconfig
 import tarfile
 import time
 import zipfile
@@ -34,6 +37,69 @@ def _write_executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
+@pytest.fixture(scope="module")
+def packaged_target_controller_python(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Build one isolated target-controller fixture with wheel-owned telemetry data."""
+
+    root = tmp_path_factory.mktemp("target-controller")
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(root)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    target_python = root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    purelib = Path(
+        subprocess.check_output(
+            [
+                str(target_python),
+                "-c",
+                "import sysconfig; print(sysconfig.get_path('purelib'))",
+            ],
+            text=True,
+            timeout=30,
+        ).strip()
+    )
+    shutil.copytree(
+        ROOT / "cli" / "defenseclaw",
+        purelib / "defenseclaw",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    (purelib / "test-dependencies.pth").write_text(
+        sysconfig.get_paths()["purelib"] + "\n",
+        encoding="utf-8",
+    )
+    telemetry = purelib / "defenseclaw" / "_data" / "telemetry" / "v8"
+    telemetry.mkdir(parents=True, exist_ok=True)
+    runtime = ROOT / "schemas" / "telemetry" / "runtime"
+    resources = {
+        "telemetry.schema.json": runtime / "telemetry.schema.json.gz",
+        "catalog.json": runtime / "catalog.json.gz",
+        "v7-exporter-selection.json": (runtime / "compatibility" / "v7-exporter-selection.json.gz"),
+        "galileo-rich-v2.json": runtime / "compatibility" / "galileo-rich-v2.json.gz",
+        "local-observability-v1.json": (runtime / "compatibility" / "local-observability-v1.json.gz"),
+        "openinference-v1.json": (runtime / "compatibility" / "openinference-v1.json.gz"),
+    }
+    for name, source in resources.items():
+        (telemetry / name).write_bytes(gzip.decompress(source.read_bytes()))
+    config_resources = purelib / "defenseclaw" / "_data" / "config" / "v8"
+    config_resources.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(
+        ROOT / "schemas" / "config" / "v8" / "defenseclaw-config.schema.json",
+        config_resources / "defenseclaw-config.schema.json",
+    )
+    shutil.copy2(
+        ROOT / "schemas" / "config" / "v8" / "reference" / "observability.yaml",
+        config_resources / "observability.yaml",
+    )
+    shutil.copy2(
+        ROOT / "schemas" / "config" / "v8" / "reference" / "observability.md",
+        config_resources / "observability.md",
+    )
+    return target_python
+
+
 def _process_start_identity(pid: int) -> str:
     if sys.platform.startswith("linux"):
         payload = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
@@ -42,6 +108,7 @@ def _process_start_identity(pid: int) -> str:
         return subprocess.check_output(
             ["/bin/ps", "-p", str(pid), "-o", "lstart="],
             text=True,
+            timeout=10,
         ).strip()
     return ""
 
@@ -68,7 +135,7 @@ def _compile_source_gateway(path: Path, *, version: str = "0.8.3") -> None:
         pytest.skip("a C compiler is required for phase-one PID-custody tests")
     source = path.with_suffix(".c")
     source.write_text(
-        r'''
+        r"""
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
@@ -147,7 +214,7 @@ int main(int argc, char **argv) {
     }
     return 0;
 }
-'''.replace("DefenseClaw gateway 0.8.3", f"DefenseClaw gateway {version}"),
+""".replace("DefenseClaw gateway 0.8.3", f"DefenseClaw gateway {version}"),
         encoding="utf-8",
     )
     subprocess.run(
@@ -155,6 +222,7 @@ int main(int argc, char **argv) {
         check=True,
         capture_output=True,
         text=True,
+        timeout=60,
     )
     path.chmod(0o755)
 
@@ -165,13 +233,19 @@ def _compile_live_bridge_gateway(path: Path) -> None:
         pytest.skip("a C compiler is required for phase-one PID-custody tests")
     source = path.with_suffix(".c")
     source.write_text(
-        r'''
+        r"""
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 static int read_pid(const char *path) {
@@ -198,9 +272,144 @@ static void append_event(const char *event) {
     fclose(stream);
 }
 
+static int set_io_timeouts(int descriptor) {
+    struct timeval timeout = {.tv_sec = 1, .tv_usec = 0};
+    if (setsockopt(
+            descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)
+        ) != 0) return -1;
+    if (setsockopt(
+            descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)
+        ) != 0) return -1;
+    return 0;
+}
+
+static void send_bounded(int descriptor, const char *payload, size_t length) {
+    size_t sent = 0;
+    while (sent < length) {
+        ssize_t count = send(descriptor, payload + sent, length - sent, 0);
+        if (count > 0) {
+            sent += (size_t)count;
+            continue;
+        }
+        if (count < 0 && errno == EINTR) continue;
+        /* A timeout or disconnected test client is not a server failure. */
+        break;
+    }
+}
+
+static int run_status_server(void) {
+    if (getenv("TARGET_GATEWAY_EXIT_AFTER_START")) {
+        struct timespec pause_for = {.tv_sec = 0, .tv_nsec = 100000000L};
+        nanosleep(&pause_for, NULL);
+        return 0;
+    }
+    unsigned short port = 18970;
+    const char *configured_port = getenv("TARGET_STATUS_PORT");
+    if (configured_port && configured_port[0] != '\0') {
+        char *end = NULL;
+        errno = 0;
+        long parsed = strtol(configured_port, &end, 10);
+        if (errno != 0 || end == configured_port || *end != '\0' ||
+            parsed < 1 || parsed > 65535) return 98;
+        port = (unsigned short)parsed;
+    }
+    int server = socket(AF_INET, SOCK_STREAM, 0);
+    if (server < 0) return 94;
+    int reuse = 1;
+    setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    if (set_io_timeouts(server) != 0) {
+        close(server);
+        return 94;
+    }
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    if (inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) != 1) {
+        close(server);
+        return 95;
+    }
+    if (bind(server, (struct sockaddr *)&address, sizeof(address)) != 0) {
+        close(server);
+        return 95;
+    }
+    if (listen(server, 8) != 0) {
+        close(server);
+        return 96;
+    }
+    signal(SIGPIPE, SIG_IGN);
+    for (;;) {
+        int client = accept(server, NULL, NULL);
+        if (client < 0) {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            close(server);
+            return 97;
+        }
+        if (set_io_timeouts(client) != 0) {
+            close(client);
+            continue;
+        }
+        char request[8193] = {0};
+        size_t used = 0;
+        while (used < sizeof(request) - 1) {
+            ssize_t count = recv(client, request + used, sizeof(request) - 1 - used, 0);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) break;
+            used += (size_t)count;
+            request[used] = '\0';
+            if (strstr(request, "\r\n\r\n")) break;
+        }
+        const char *token = getenv("DEFENSECLAW_GATEWAY_TOKEN");
+        char authorization[1024] = {0};
+        int authorization_length = -1;
+        if (token) {
+            authorization_length = snprintf(
+                authorization,
+                sizeof(authorization),
+                "\r\nAuthorization: Bearer %s\r\n",
+                token
+            );
+        }
+        int authorization_complete =
+            authorization_length > 0 &&
+            (size_t)authorization_length < sizeof(authorization);
+        int authorized =
+            strstr(request, "GET /status HTTP/1.1\r\n") == request &&
+            token && token[0] != '\0' &&
+            authorization_complete &&
+            strstr(request, authorization) != NULL;
+        const char *body =
+            "{\"health\":{\"api\":{\"state\":\"running\"},"
+            "\"gateway\":{\"state\":\"running\"},"
+            "\"watcher\":{\"state\":\"disabled\"},"
+            "\"guardrail\":{\"state\":\"disabled\"},"
+            "\"telemetry\":{\"state\":\"running\"}},"
+            "\"provenance\":{\"binary_version\":\"0.8.4\"}}";
+        char response[2048];
+        if (authorized) {
+            int length = snprintf(
+                response,
+                sizeof(response),
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                "Content-Length: %zu\r\nConnection: close\r\n\r\n%s",
+                strlen(body),
+                body
+            );
+            if (length > 0 && (size_t)length < sizeof(response)) {
+                send_bounded(client, response, (size_t)length);
+            }
+        } else {
+            const char *unauthorized =
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            send_bounded(client, unauthorized, strlen(unauthorized));
+        }
+        close(client);
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "__daemon") == 0) {
-        for (;;) pause();
+        return run_status_server();
     }
     if (argc > 1 && strcmp(argv[1], "--version") == 0) {
         puts("DefenseClaw gateway 0.8.4");
@@ -238,9 +447,9 @@ int main(int argc, char **argv) {
         chmod(pid_path, 0600);
         return 0;
     }
-    return 0;
+    return 64;
 }
-''',
+""",
         encoding="utf-8",
     )
     subprocess.run(
@@ -248,8 +457,92 @@ int main(int argc, char **argv) {
         check=True,
         capture_output=True,
         text=True,
+        timeout=60,
     )
     path.chmod(0o755)
+
+
+@POSIX_UPGRADE_RUNTIME_ONLY
+def test_live_bridge_status_fixture_honors_target_status_port(tmp_path: Path) -> None:
+    gateway = tmp_path / "defenseclaw-gateway"
+    _compile_live_bridge_gateway(gateway)
+    token = "phase-one-custom-port-token"
+    base_env = os.environ | {
+        "ALLOW_TARGET_GATEWAY_START": "1",
+        "DEFENSECLAW_GATEWAY_TOKEN": token,
+        "DEFENSECLAW_HOME": str(tmp_path),
+    }
+    gateway_process: subprocess.Popen[bytes] | None = None
+    port = 0
+    last_probe_error: OSError | None = None
+    try:
+        # Releasing a kernel-selected port before the fixture binds it has an
+        # unavoidable race. Retry with a fresh port if another process wins it.
+        for _port_attempt in range(5):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = int(probe.getsockname()[1])
+            candidate_env = base_env | {"TARGET_STATUS_PORT": str(port)}
+            candidate = subprocess.Popen(
+                [str(gateway), "__daemon"],
+                env=candidate_env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            # A client that connects but never sends a request must not pin the
+            # fixture forever and hide a resolver readiness result.
+            for _probe_attempt in range(50):
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                        time.sleep(1.2)
+                    gateway_process = candidate
+                    break
+                except OSError as exc:
+                    last_probe_error = exc
+                    if candidate.poll() is not None:
+                        break
+                    time.sleep(0.02)
+            if gateway_process is not None:
+                break
+            if candidate.poll() is None:
+                candidate.terminate()
+                candidate.wait(timeout=10)
+        else:
+            pytest.fail(f"status fixture could not bind any of 5 fresh ports; last probe error: {last_probe_error!r}")
+
+        response = b""
+        last_status_error: OSError | None = None
+        request = (
+            "GET /status HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            f"Authorization: Bearer {token}\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("ascii")
+        for _attempt in range(50):
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.5) as client:
+                    client.sendall(request)
+                    chunks = []
+                    while chunk := client.recv(4096):
+                        chunks.append(chunk)
+                    response = b"".join(chunks)
+                break
+            except OSError as exc:
+                last_status_error = exc
+                time.sleep(0.02)
+        else:
+            pytest.fail(
+                "status fixture did not answer the bounded authenticated probe; "
+                f"last socket error: {last_status_error!r}"
+            )
+
+        assert response.startswith(b"HTTP/1.1 200 OK\r\n"), response
+        assert b'"binary_version":"0.8.4"' in response
+    finally:
+        if gateway_process is not None:
+            gateway_process.terminate()
+            gateway_process.wait(timeout=10)
 
 
 def _platform_asset_name(version: str) -> str:
@@ -260,9 +553,7 @@ def _platform_asset_name(version: str) -> str:
 
 
 def _protect_artifact(payload: bytes) -> bytes:
-    return b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n" + bytes(
-        value ^ 0xA5 for value in payload
-    )
+    return b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n" + bytes(value ^ 0xA5 for value in payload)
 
 
 def _flat_081_config(data_home: Path) -> str:
@@ -310,8 +601,7 @@ def _make_bridge_assets(root: Path, *, live_gateway: bool = False) -> None:
     release.mkdir(parents=True)
     gateways = {
         platform_name: {
-            arch: f"defenseclaw_{version}_protocol2_{platform_name}_{arch}.dcgateway"
-            for arch in ("amd64", "arm64")
+            arch: f"defenseclaw_{version}_protocol2_{platform_name}_{arch}.dcgateway" for arch in ("amd64", "arm64")
         }
         for platform_name in ("darwin", "linux", "windows")
     }
@@ -414,6 +704,9 @@ PY
   __daemon)
     while true; do sleep 60; done
     ;;
+  *)
+    exit 64
+    ;;
 esac
 """,
     )
@@ -443,8 +736,7 @@ def _make_hard_cut_contract_assets(root: Path) -> None:
     release.mkdir(parents=True)
     gateways = {
         platform_name: {
-            arch: f"defenseclaw_{version}_protocol2_{platform_name}_{arch}.dcgateway"
-            for arch in ("amd64", "arm64")
+            arch: f"defenseclaw_{version}_protocol2_{platform_name}_{arch}.dcgateway" for arch in ("amd64", "arm64")
         }
         for platform_name in ("darwin", "linux", "windows")
     }
@@ -472,9 +764,7 @@ def _make_hard_cut_contract_assets(root: Path) -> None:
     wheel.write_bytes(_protect_artifact(b"unused hard-cut controller"))
     gateway = release / _platform_asset_name(version)
     gateway.write_bytes(_protect_artifact(b"unused hard-cut gateway"))
-    bridge_checksums = hashlib.sha256(
-        (root / "0.8.4" / "checksums.txt").read_bytes()
-    ).hexdigest()
+    bridge_checksums = hashlib.sha256((root / "0.8.4" / "checksums.txt").read_bytes()).hexdigest()
     provenance = {
         "schema_version": 1,
         "release_version": version,
@@ -503,10 +793,7 @@ def _make_hard_cut_contract_assets(root: Path) -> None:
     )
     checksum_paths = (manifest_path, wheel, gateway, provenance_path)
     (release / "checksums.txt").write_text(
-        "".join(
-            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
-            for path in checksum_paths
-        ),
+        "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in checksum_paths),
         encoding="utf-8",
     )
     (release / "checksums.txt.sig").write_text("test signature\n", encoding="utf-8")
@@ -534,6 +821,7 @@ def _make_hard_cut_contract_assets(root: Path) -> None:
         ("after-bridge-health", True, False, False, True, False, False),
         ("rollback-after-state-restore", True, False, False, True, False, False),
         ("rollback-after-state-restore", True, False, False, False, False, False),
+        ("target-exits-after-start", True, False, False, True, False, False),
         ("recovery-after-gateway-displace", True, False, False, True, False, False),
         ("recovery-after-gateway-publish", True, False, False, True, False, False),
         (None, False, False, False, True, False, False),
@@ -554,6 +842,7 @@ def _make_hard_cut_contract_assets(root: Path) -> None:
         "sigkill-after-live-bridge-health",
         "sigkill-after-state-restore",
         "sigkill-after-state-restore-absent-openclaw",
+        "legacy-target-exits-after-start",
         "sigkill-recovery-after-gateway-displace",
         "sigkill-recovery-after-gateway-publish",
         "caught-failure-stopped-source",
@@ -567,6 +856,7 @@ def _make_hard_cut_contract_assets(root: Path) -> None:
 )
 def test_bridge_start_failure_restores_source_artifacts_state_and_health(
     tmp_path: Path,
+    packaged_target_controller_python: Path,
     crash_point: str | None,
     source_running: bool,
     unrelated_pid: bool,
@@ -576,8 +866,19 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
     post_quarantine_write: bool,
 ) -> None:
     repair_081 = crash_point == "repair-081-after-placeholder"
+    target_exits_early = crash_point == "target-exits-after-start"
     source_version = "0.8.1" if repair_081 else "0.8.3"
     target_version = "0.8.5" if repair_081 else "0.8.4"
+    resolver_script = UPGRADE_SCRIPT
+    if target_exits_early:
+        resolver_source = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+        assert resolver_source.count("\nHEALTH_TIMEOUT=60\n") == 1
+        resolver_script = tmp_path / "upgrade-short-readiness-timeout.sh"
+        resolver_script.write_text(
+            resolver_source.replace("\nHEALTH_TIMEOUT=60\n", "\nHEALTH_TIMEOUT=2\n"),
+            encoding="utf-8",
+        )
+        resolver_script.chmod(0o755)
     bridge_install_failure = (
         crash_point is None
         and source_running
@@ -598,7 +899,12 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
     event_log = tmp_path / "events.log"
     _make_bridge_assets(
         fixtures,
-        live_gateway=crash_point in {"migration-after-config", "after-bridge-health"},
+        live_gateway=crash_point
+        in {
+            "migration-after-config",
+            "after-bridge-health",
+            "target-exits-after-start",
+        },
     )
     if repair_081:
         _make_hard_cut_contract_assets(fixtures)
@@ -616,7 +922,7 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
     _write_executable(
         source_cli,
         "#!/usr/bin/env bash\n"
-        "if [[ \"${1:-}\" == \"--version\" ]]; then\n"
+        'if [[ "${1:-}" == "--version" ]]; then\n'
         "  if [[ \"${MUTATE_SOURCE_CLI_ON_VERSION:-0}\" == '1' "
         "&& \"${PYTHONDONTWRITEBYTECODE:-}\" != '1' ]]; then\n"
         f"    printf '%s\\n' probe >> {str(source_venv / 'version-probe-cache')!r}\n"
@@ -629,9 +935,9 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
     _write_executable(
         source_venv / "bin" / "python",
         "#!/usr/bin/env bash\n"
-        "if [[ \"$*\" == *\"from defenseclaw import __version__\"* ]]; then "
+        'if [[ "$*" == *"from defenseclaw import __version__"* ]]; then '
         f"printf '%s\\n' '{source_version}'; exit 0; fi\n"
-        f"exec {sys.executable!r} \"$@\"\n",
+        f'exec {sys.executable!r} "$@"\n',
     )
     (install_dir / "defenseclaw").symlink_to(source_cli)
 
@@ -654,7 +960,7 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
         (data_home / name).write_bytes(content)
     config_path.chmod(0o640)
     (data_home / ".env").chmod(0o644)
-    data_home.chmod(0o755)
+    data_home.chmod(0o700 if repair_081 else 0o755)
     policies = data_home / "policies"
     policies.mkdir()
     (policies / "operator.rego").write_bytes(b"package operator\n")
@@ -683,6 +989,9 @@ set -euo pipefail
 if [[ "$*" == *"from defenseclaw import __version__"* ]]; then
   printf '%s\n' '0.8.4'
   exit 0
+fi
+if [[ "$*" == *"defenseclaw-legacy-readiness-v1"* ]]; then
+  exec "${TARGET_RUNTIME_VENV_PYTHON:?}" "$@"
 fi
 if [[ "${1:-}" == '-I' && "${2:-}" == '-B' && "${3:-}" == '-' ]]; then
   exec "${TARGET_RUNTIME_PYTHON:?}" "$@"
@@ -763,6 +1072,12 @@ if [[ -n "${venv}" ]]; then
   mkdir -p "${venv}/bin"
   cp "${TARGET_PYTHON_TEMPLATE}" "${venv}/bin/python"
   cp "${TARGET_CLI_TEMPLATE}" "${venv}/bin/defenseclaw"
+  if [[ "${venv}" == */target-controller-venv ]]; then
+    sed 's/0\\.8\\.4/0.8.5/g' "${venv}/bin/python" > "${venv}/bin/python.final"
+    sed 's/0\\.8\\.4/0.8.5/g' "${venv}/bin/defenseclaw" > "${venv}/bin/defenseclaw.final"
+    mv "${venv}/bin/python.final" "${venv}/bin/python"
+    mv "${venv}/bin/defenseclaw.final" "${venv}/bin/defenseclaw"
+  fi
   chmod 755 "${venv}/bin/python" "${venv}/bin/defenseclaw"
 fi
 exit 0
@@ -788,7 +1103,7 @@ for arg in "$@"; do
 done
 if [[ "${url}" == http://127.0.0.1:*/health ]]; then
   if [[ "${FORCE_ORPHAN_HEALTH:-0}" == '1' ]]; then
-    printf '%s\n' '{"gateway":{"state":"starting"},"provenance":{"binary_version":"0.8.3"}}' > "${out}"
+    printf '%s\n' '{"api":{"state":"running"},"gateway":{"state":"starting"},"provenance":{"binary_version":"0.8.3"}}' > "${out}"
     printf '200'
     exit 0
   fi
@@ -814,7 +1129,7 @@ PY
       printf '000'
       exit 7
     fi
-    printf '{"gateway":{"state":"running"},"provenance":{"binary_version":"%s"}}\n' \
+    printf '{"api":{"state":"running"},"gateway":{"state":"running"},"watcher":{"state":"disabled"},"guardrail":{"state":"disabled"},"telemetry":{"state":"running"},"provenance":{"binary_version":"%s"}}\n' \
       "${gateway_version}" > "${out}"
     printf '200'
   else
@@ -846,8 +1161,10 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
             "TARGET_PYTHON_TEMPLATE": str(target_python_template),
             "TARGET_CLI_TEMPLATE": str(target_cli_template),
             "TARGET_RUNTIME_PYTHON": sys.executable,
+            "TARGET_RUNTIME_VENV_PYTHON": str(packaged_target_controller_python),
             "POST_BRIDGE_081_CONFIG": str(post_bridge_081_config),
             "UPGRADE_EVENT_LOG": str(event_log),
+            "DEFENSECLAW_GATEWAY_TOKEN": "phase-one-readiness-token",
         }
     )
     if repair_081:
@@ -863,18 +1180,21 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
         env["FAIL_BRIDGE_WHEEL_INSTALL"] = "1"
         env["MUTATE_SOURCE_CLI_ON_VERSION"] = "1"
     if crash_point == "migration-after-config":
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            target_status_port = int(probe.getsockname()[1])
         env["ALLOW_TARGET_GATEWAY_START"] = "1"
-        env["TARGET_HEALTH_URL"] = "http://127.0.0.1:18971/health"
+        env["TARGET_STATUS_PORT"] = str(target_status_port)
+        env["TARGET_HEALTH_URL"] = f"http://127.0.0.1:{target_status_port}/health"
+    if target_exits_early:
+        env["ALLOW_TARGET_GATEWAY_START"] = "1"
+        env["TARGET_GATEWAY_EXIT_AFTER_START"] = "1"
 
     initial_was_alive_before_cleanup = False
     result: subprocess.CompletedProcess[str] | None = None
     try:
         if source_running:
-            command = (
-                ["sleep", "300"]
-                if unrelated_pid
-                else [str(source_gateway), "__daemon"]
-            )
+            command = ["sleep", "300"] if unrelated_pid else [str(source_gateway), "__daemon"]
             initial_process = subprocess.Popen(command)
             _write_json_pid(
                 data_home / "gateway.pid",
@@ -882,7 +1202,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
                 source_gateway,
             )
 
-        if crash_point is not None and not repair_081:
+        if crash_point is not None and not repair_081 and not target_exits_early:
             if crash_point == "after-stop":
                 crash_variable = "INJECT_PHASE1_CRASH_AFTER_SOURCE_STOP"
                 env[crash_variable] = "1"
@@ -901,8 +1221,16 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
             else:
                 crash_variable = "INJECT_PHASE1_CRASH_ON_TARGET_VERSION"
                 env[crash_variable] = "1"
+            if crash_point == "migration-after-config":
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                        probe.bind(("127.0.0.1", target_status_port))
+                except OSError as exc:
+                    pytest.fail(
+                        f"target status port {target_status_port} was claimed before the upgrade fixture started: {exc}"
+                    )
             interrupted = subprocess.run(
-                ["bash", str(UPGRADE_SCRIPT), "--yes", "--version", target_version],
+                ["bash", str(resolver_script), "--yes", "--version", target_version],
                 cwd=ROOT,
                 env=env,
                 text=True,
@@ -916,9 +1244,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
             assert stat.S_IMODE(journal.stat().st_mode) == 0o600
             journal_payload = json.loads(journal.read_text(encoding="utf-8"))
             assert journal_payload["source_health_url"] == "http://127.0.0.1:18970/health"
-            assert journal_payload["state_snapshot_ready"] is (
-                crash_point != "after-stop"
-            )
+            assert journal_payload["state_snapshot_ready"] is (crash_point != "after-stop")
             assert journal_payload["active_snapshot_ready"] is (
                 crash_point in {"after-bridge-health", "rollback-after-state-restore"}
             )
@@ -941,7 +1267,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
                 ).is_file()
             env.pop(crash_variable)
             blocked = subprocess.run(
-                ["bash", str(UPGRADE_SCRIPT), "--yes", "--version", target_version],
+                ["bash", str(resolver_script), "--yes", "--version", target_version],
                 cwd=ROOT,
                 env=env,
                 text=True,
@@ -977,7 +1303,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
                 recovery_point = crash_point.removeprefix("recovery-")
                 env["DEFENSECLAW_TEST_PHASE1_RECOVERY_CRASH"] = recovery_point
                 recovery_crash = subprocess.run(
-                    ["bash", str(UPGRADE_SCRIPT), "--yes", "--version", target_version],
+                    ["bash", str(resolver_script), "--yes", "--version", target_version],
                     cwd=ROOT,
                     env=env,
                     text=True,
@@ -991,7 +1317,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
 
         if result is None:
             result = subprocess.run(
-                ["bash", str(UPGRADE_SCRIPT), "--yes", "--version", target_version],
+                ["bash", str(resolver_script), "--yes", "--version", target_version],
                 cwd=ROOT,
                 env=env,
                 text=True,
@@ -1014,15 +1340,25 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
             assert "Recovering Interrupted Bridge Upgrade" in output
             assert "Recovered the interrupted phase-one release" in output
             assert config_path.read_bytes() == b"config_version: 7\nbridge: mutated\n"
-            assert not (
-                controller_home / ".upgrade-recovery" / "phase-one-active.json"
-            ).exists()
-            assert subprocess.check_output(
-                [str(install_dir / "defenseclaw-gateway"), "--version"], text=True
-            ).strip().endswith("0.8.4")
-            assert subprocess.check_output(
-                [str(install_dir / "defenseclaw"), "--version"], text=True
-            ).strip().endswith("0.8.4")
+            assert not (controller_home / ".upgrade-recovery" / "phase-one-active.json").exists()
+            assert (
+                subprocess.check_output(
+                    [str(install_dir / "defenseclaw-gateway"), "--version"],
+                    text=True,
+                    timeout=10,
+                )
+                .strip()
+                .endswith("0.8.4")
+            )
+            assert (
+                subprocess.check_output(
+                    [str(install_dir / "defenseclaw"), "--version"],
+                    text=True,
+                    timeout=10,
+                )
+                .strip()
+                .endswith("0.8.4")
+            )
         finally:
             cleanup_env = env | {
                 "DEFENSECLAW_HOME": str(data_home),
@@ -1034,6 +1370,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
                 env=cleanup_env,
                 capture_output=True,
                 check=False,
+                timeout=10,
             )
         return
 
@@ -1061,24 +1398,32 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
         assert result.returncode != 0, output
         assert "preserved without overwrite" in output
         assert config_path.read_bytes() == b"concurrent-user-config\n"
-        assert (data_home / "hooks" / "concurrent-user.txt").read_bytes() == (
-            b"concurrent-user-hook\n"
+        assert (data_home / "hooks" / "concurrent-user.txt").read_bytes() == (b"concurrent-user-hook\n")
+        assert (
+            subprocess.check_output(
+                [str(install_dir / "defenseclaw-gateway"), "--version"],
+                text=True,
+                timeout=10,
+            )
+            .strip()
+            .endswith("0.8.4")
         )
-        assert subprocess.check_output(
-            [str(install_dir / "defenseclaw-gateway"), "--version"], text=True
-        ).strip().endswith("0.8.4")
-        assert subprocess.check_output(
-            [str(install_dir / "defenseclaw"), "--version"], text=True
-        ).strip().endswith("0.8.4")
+        assert (
+            subprocess.check_output(
+                [str(install_dir / "defenseclaw"), "--version"],
+                text=True,
+                timeout=10,
+            )
+            .strip()
+            .endswith("0.8.4")
+        )
         assert (controller_home / ".upgrade-recovery" / "phase-one-active.json").is_file()
         return
 
     restored_pid: int | None = None
     try:
         if source_running:
-            restored_pid = int(
-                json.loads((data_home / "gateway.pid").read_text(encoding="utf-8"))["pid"]
-            )
+            restored_pid = int(json.loads((data_home / "gateway.pid").read_text(encoding="utf-8"))["pid"])
     except (OSError, ValueError):
         pass
     try:
@@ -1090,20 +1435,22 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
             assert "Source 0.8.1 artifacts and state restored" in output
             assert config_path.read_bytes() == config_original
             assert (install_dir / "defenseclaw-gateway").read_bytes() == source_gateway_bytes
-            assert subprocess.check_output(
-                [str(install_dir / "defenseclaw"), "--version"], text=True
-            ).strip().endswith("0.8.1")
-            assert not (
-                controller_home / ".upgrade-recovery" / "phase-one-active.json"
-            ).exists()
+            assert (
+                subprocess.check_output(
+                    [str(install_dir / "defenseclaw"), "--version"],
+                    text=True,
+                    timeout=10,
+                )
+                .strip()
+                .endswith("0.8.1")
+            )
+            assert not (controller_home / ".upgrade-recovery" / "phase-one-active.json").exists()
             return
         if bridge_install_failure:
             assert "Failed to install the bridge CLI wheel" in output
             assert "Source 0.8.3 artifacts and state restored" in output
             assert "restored source venv identity changed" not in output
-            assert not (
-                controller_home / ".upgrade-recovery" / "phase-one-active.json"
-            ).exists()
+            assert not (controller_home / ".upgrade-recovery" / "phase-one-active.json").exists()
             assert (install_dir / "defenseclaw-gateway").read_bytes() == source_gateway_bytes
             assert config_path.read_bytes() == config_original
             events = event_log.read_text(encoding="utf-8")
@@ -1113,17 +1460,26 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
             assert restored_pid is not None
             os.kill(restored_pid, 0)
             return
-        if crash_point is not None and not repair_081:
+        if crash_point is not None and not repair_081 and not target_exits_early:
             assert "Recovering Interrupted Bridge Upgrade" in output
             assert "before detecting installed versions" in output
             assert not (controller_home / ".upgrade-recovery" / "phase-one-active.json").exists()
-        assert "Could not start gateway" in output
+        if target_exits_early:
+            assert "Gateway failed authenticated legacy target readiness" in output
+        else:
+            assert "Could not start gateway" in output
         assert "Restoring Source After Bridge Failure" in output
         assert "Source 0.8.3 artifacts and state restored" in output
         assert (install_dir / "defenseclaw-gateway").read_bytes() == source_gateway_bytes
-        assert subprocess.check_output(
-            [str(install_dir / "defenseclaw"), "--version"], text=True
-        ).strip().endswith("0.8.3")
+        assert (
+            subprocess.check_output(
+                [str(install_dir / "defenseclaw"), "--version"],
+                text=True,
+                timeout=10,
+            )
+            .strip()
+            .endswith("0.8.3")
+        )
         for name, content in original.items():
             assert (data_home / name).read_bytes() == content
         assert config_path.read_bytes() == config_original
@@ -1138,26 +1494,19 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
         assert stat.S_IMODE((data_home / ".env").stat().st_mode) == 0o644
         backup_directories = list((controller_home / "backups").glob("upgrade-*-*"))
         assert len(backup_directories) == (
-            2 if crash_point is not None and not repair_081 else 1
+            2 if crash_point is not None and not repair_081 and not target_exits_early else 1
         )
         for backup_directory in backup_directories:
             assert not backup_directory.is_symlink()
             assert stat.S_IMODE(backup_directory.stat().st_mode) == 0o700
-        data_custody_roots = list(
-            data_home.glob(".defenseclaw-phase-one-custody-*")
-        )
+        data_custody_roots = list(data_home.glob(".defenseclaw-phase-one-custody-*"))
         assert data_custody_roots
         for custody_root in data_custody_roots:
             assert not custody_root.is_symlink()
             assert stat.S_IMODE(custody_root.stat().st_mode) == 0o700
-        assert any(
-            list(custody_root.glob("*-.env"))
-            for custody_root in data_custody_roots
-        )
+        assert any(list(custody_root.glob("*-.env")) for custody_root in data_custody_roots)
         if post_quarantine_write:
-            custody_roots = list(
-                config_path.parent.glob(".defenseclaw-phase-one-custody-*")
-            )
+            custody_roots = list(config_path.parent.glob(".defenseclaw-phase-one-custody-*"))
             assert len(custody_roots) == 1
             assert not custody_roots[0].is_symlink()
             assert stat.S_IMODE(custody_roots[0].stat().st_mode) == 0o700
@@ -1165,22 +1514,11 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
             assert len(retained_configs) == 1
             deadline = time.monotonic() + 5
             expected_retained = b"config_version: 7\nbridge: mutated\npost-quarantine-user-write\n"
-            while (
-                retained_configs[0].read_bytes() != expected_retained
-                and time.monotonic() < deadline
-            ):
+            while retained_configs[0].read_bytes() != expected_retained and time.monotonic() < deadline:
                 time.sleep(0.05)
-            assert retained_configs[0].read_bytes() == (
-                expected_retained
-            )
-            assert not list(
-                config_path.parent.glob(".config.yaml.phase-one-quarantine-*-0")
-            )
-            retained_index = (
-                backup_directories[0]
-                / "phase1-state"
-                / "retained-quarantines.json"
-            )
+            assert retained_configs[0].read_bytes() == (expected_retained)
+            assert not list(config_path.parent.glob(".config.yaml.phase-one-quarantine-*-0"))
+            retained_index = backup_directories[0] / "phase1-state" / "retained-quarantines.json"
             retained_payload = json.loads(retained_index.read_text(encoding="utf-8"))
             assert str(retained_configs[0]) in retained_payload["paths"]
         assert (policies / "operator.rego").read_bytes() == b"package operator\n"
@@ -1212,20 +1550,104 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
 
 
 @POSIX_UPGRADE_RUNTIME_ONLY
-@pytest.mark.parametrize("shape", ("post-bridge", "pre-bridge-flat", "named-near-miss"))
-def test_clean_081_placeholder_repair_matches_only_post_bridge_release_shape(
+@pytest.mark.parametrize(
+    ("shape", "accepted"),
+    (
+        ("historical-placeholder", True),
+        ("configured", True),
+        ("malformed", False),
+    ),
+)
+def test_clean_081_observability_preflight_rejects_malformed_state_before_mutation(
     tmp_path: Path,
+    packaged_target_controller_python: Path,
     shape: str,
+    accepted: bool,
 ) -> None:
     data_home = tmp_path / "data"
     data_home.mkdir()
     config_path = tmp_path / "config.yaml"
-    if shape == "pre-bridge-flat":
+    source = _flat_081_config(data_home)
+    if shape == "configured":
+        source = source.replace(
+            "  endpoint: ''\n",
+            "  endpoint: https://collector.example\n",
+            1,
+        )
+    elif shape == "malformed":
+        source = source.replace("  endpoint: ''\n", "  endpoint: 17\n", 1)
+    config_path.write_text(source, encoding="utf-8")
+
+    script = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+    start = script.index("preflight_081_observability_source() {")
+    end = script.index("\nrepair_clean_081_observability_placeholder() {", start)
+    call = script.index(
+        "\n        preflight_081_observability_source \\\n",
+        end,
+    )
+    mutation_lock = script.index("\nensure_upgrade_lock_before_mutation\n", call)
+    assert call < mutation_lock
+
+    harness = tmp_path / "preflight-harness.sh"
+    _write_executable(
+        harness,
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        + script[start:end]
+        + "\nok() { :; }\n"
+        + "\nCURRENT_VERSION=0.8.1\n"
+        + "RELEASE_VERSION=0.8.4\n"
+        + "STAGED_FINAL_VERSION=0.8.5\n"
+        + "OBSERVABILITY_V8_HARD_CUT_VERSION=0.8.5\n"
+        + f"TARGET_CONTROLLER_VENV={str(packaged_target_controller_python.parent.parent)!r}\n"
+        + f"CONFIG_PATH={str(config_path)!r}\n"
+        + f"DATA_DIR={str(data_home)!r}\n"
+        + "preflight_081_observability_source\n",
+    )
+    result = subprocess.run(
+        ["bash", str(harness)],
+        cwd=ROOT,
+        env={
+            name: value
+            for name, value in os.environ.items()
+            if not name.startswith(("OTEL_", "DEFENSECLAW_OTEL_", "OPENCLAW_OTEL_"))
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert (result.returncode == 0) is accepted, result.stdout + result.stderr
+    assert config_path.read_text(encoding="utf-8") == source
+
+
+@POSIX_UPGRADE_RUNTIME_ONLY
+@pytest.mark.parametrize(
+    ("shape", "expected"),
+    (
+        ("historical-placeholder", "repaired"),
+        ("configured", "preserved"),
+        ("malformed", "rejected"),
+        ("ambiguous-pre-bridge", "rejected"),
+    ),
+)
+def test_clean_081_observability_classifier_repairs_only_historical_placeholder(
+    tmp_path: Path,
+    packaged_target_controller_python: Path,
+    shape: str,
+    expected: str,
+) -> None:
+    data_home = tmp_path / "data"
+    data_home.mkdir()
+    config_path = tmp_path / "config.yaml"
+    if shape == "ambiguous-pre-bridge":
         source = _flat_081_config(data_home)
     else:
         source = _named_081_config(data_home)
-        if shape == "named-near-miss":
+        if shape == "configured":
             source = source.replace("      endpoint: ''\n", "      endpoint: https://collector.example\n", 1)
+        elif shape == "malformed":
+            source = source.replace("      endpoint: ''\n", "      endpoint: 17\n", 1)
     config_path.write_text(source, encoding="utf-8")
 
     script = UPGRADE_SCRIPT.read_text(encoding="utf-8")
@@ -1242,9 +1664,14 @@ def test_clean_081_placeholder_repair_matches_only_post_bridge_release_shape(
         + "RELEASE_VERSION=0.8.4\n"
         + "STAGED_FINAL_VERSION=0.8.5\n"
         + "OBSERVABILITY_V8_HARD_CUT_VERSION=0.8.5\n"
-        + f"VENV_PYTHON={sys.executable!r}\n"
+        + f"TARGET_CONTROLLER_VENV={str(packaged_target_controller_python.parent.parent)!r}\n"
         + f"CONFIG_PATH={str(config_path)!r}\n"
         + f"DATA_DIR={str(data_home)!r}\n"
+        + (
+            "OBSERVABILITY_081_SOURCE_CLASSIFICATION=historical-placeholder\n"
+            if shape == "historical-placeholder"
+            else "OBSERVABILITY_081_SOURCE_CLASSIFICATION=configured\n"
+        )
         + "repair_clean_081_observability_placeholder\n",
     )
     env = {
@@ -1269,27 +1696,26 @@ def test_clean_081_placeholder_repair_matches_only_post_bridge_release_shape(
         text=True,
         capture_output=True,
         check=False,
+        timeout=60,
     )
 
-    if shape == "post-bridge":
+    if expected == "repaired":
         assert result.returncode == 0, result.stdout + result.stderr
         repaired = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert "destinations" not in repaired["otel"]
         assert set(repaired["otel"]) == {"enabled", "traces", "logs", "resource"}
+    elif expected == "preserved":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert config_path.read_text(encoding="utf-8") == source
     else:
         assert result.returncode != 0
-        assert "not the exact clean release shape" in result.stdout + result.stderr, (
-            result.stdout + result.stderr
-        )
         assert config_path.read_text(encoding="utf-8") == source
 
 
 def test_bridge_rollback_health_is_version_bound_and_custody_is_collision_safe() -> None:
     script = UPGRADE_SCRIPT.read_text(encoding="utf-8")
     health_observation = script[
-        script.index("bridge_source_health_observation()") : script.index(
-            "prepare_bridge_phase1_custody()"
-        )
+        script.index("bridge_source_health_observation()") : script.index("prepare_bridge_phase1_custody()")
     ]
     rollback_health = script[
         script.index("bridge_source_health_check()") : script.index("bridge_phase1_gateway_quiesced()")
@@ -1305,18 +1731,13 @@ def test_bridge_rollback_health_is_version_bound_and_custody_is_collision_safe()
     assert "stat.S_ISLNK(root_stat.st_mode)" in backup_setup
     assert "root_stat.st_uid != os.geteuid()" in backup_setup
     interpreter_start = script.index('BRIDGE_PYTHON_INTERPRETER="$')
-    interpreter_setup = script[
-        interpreter_start : script.index('preflight_venv="${STAGING_DIR}', interpreter_start)
-    ]
+    interpreter_setup = script[interpreter_start : script.index('preflight_venv="${STAGING_DIR}', interpreter_start)]
     assert 'getattr(sys, "_base_executable", "")' in interpreter_setup
     assert "os.path.commonpath" in interpreter_setup
     extraction = script.index('tar -xzf "${STAGING_DIR}/${MATERIALIZED_TARBALL_NAME}"')
     codesign_start = script.index('if [[ "${OS}" == "darwin" ]]', extraction)
     codesign_block = script[codesign_start : script.index('ok "Gateway binary downloaded"', codesign_start)]
-    assert (
-        '/usr/bin/codesign -f -s - -i com.cisco.defenseclaw.gateway'
-        in codesign_block
-    )
+    assert "/usr/bin/codesign -f -s - -i com.cisco.defenseclaw.gateway" in codesign_block
     assert "no services changed" in codesign_block
     assert "|| true" not in codesign_block
     assert codesign_start < script.index('section "Stopping Services"', codesign_start)
@@ -1329,10 +1750,31 @@ def test_bridge_rollback_health_is_version_bound_and_custody_is_collision_safe()
     assert 'rm -rf "${DEFENSECLAW_VENV}"' not in script
     assert "phase1-bridge-wheel.whl" not in script
     assert 'f"defenseclaw-{bridge_version}-2-py3-none-any.whl"' in script
-    assert 'f"defenseclaw-{payload[\'bridge_version\']}-2-py3-none-any.whl"' in script
+    assert "f\"defenseclaw-{payload['bridge_version']}-2-py3-none-any.whl\"" in script
     assert 'BRIDGE_WHEEL_CUSTODY_PATH="${BACKUP_DIR}/${whl_name}"' in script
     assert 'PYTHONDONTWRITEBYTECODE=1 "${DEFENSECLAW_VENV}/bin/defenseclaw"' in script
     assert 'probe_environment["PYTHONDONTWRITEBYTECODE"] = "1"' in script
+
+
+@POSIX_UPGRADE_RUNTIME_ONLY
+@pytest.mark.parametrize("live_gateway", (False, True), ids=("shell", "compiled"))
+def test_legacy_bridge_fixture_rejects_unknown_gateway_commands(
+    tmp_path: Path,
+    live_gateway: bool,
+) -> None:
+    _make_bridge_assets(tmp_path, live_gateway=live_gateway)
+    gateway = tmp_path / "0.8.4" / "gateway"
+
+    result = subprocess.run(
+        [str(gateway), "upgrade-wait-ready", "--help"],
+        env=os.environ | {"DEFENSECLAW_HOME": str(tmp_path)},
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 64, result.stdout + result.stderr
 
 
 @POSIX_UPGRADE_RUNTIME_ONLY
@@ -1386,8 +1828,7 @@ def test_source_venv_identity_rejects_same_version_substitution(tmp_path: Path) 
     for root, marker in ((source, "source"), (substitute, "substitute")):
         _write_executable(
             root / "bin" / "defenseclaw",
-            "#!/usr/bin/env bash\nprintf '%s\\n' 'DefenseClaw 0.8.3'\n"
-            f"# {marker}\n",
+            f"#!/usr/bin/env bash\nprintf '%s\\n' 'DefenseClaw 0.8.3'\n# {marker}\n",
         )
         _write_executable(root / "bin" / "python", "#!/usr/bin/env bash\nexit 0\n")
 
@@ -1408,9 +1849,9 @@ def test_path_shadow_cli_is_refused_before_service_stop(tmp_path: Path) -> None:
     _write_executable(
         controller / ".venv" / "bin" / "python",
         "#!/usr/bin/env bash\n"
-        "if [[ \"$*\" == *\"from defenseclaw import __version__\"* ]]; then "
+        'if [[ "$*" == *"from defenseclaw import __version__"* ]]; then '
         "printf '%s\\n' '0.8.3'; exit 0; fi\n"
-        f"exec {sys.executable!r} \"$@\"\n",
+        f'exec {sys.executable!r} "$@"\n',
     )
     _write_executable(
         controller / ".venv" / "bin" / "defenseclaw",

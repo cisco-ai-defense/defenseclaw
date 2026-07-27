@@ -30,7 +30,14 @@ import (
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 )
 
-const observabilityV8HealthSnapshotTimeout = 100 * time.Millisecond
+const (
+	observabilityV8HealthSnapshotTimeout = 100 * time.Millisecond
+	// ObservabilityV8HealthSnapshotUnavailable is the stable, non-sensitive
+	// sentinel emitted when a bounded telemetry snapshot cannot be read.
+	// Startup readiness may retry this exact condition; other consumers still
+	// receive the fail-closed StateError health record.
+	ObservabilityV8HealthSnapshotUnavailable = "observability_v8_health_unavailable"
+)
 
 type observabilityV8HealthSource interface {
 	DestinationHealthSnapshot(context.Context) (observabilityruntime.DestinationHealthSnapshot, error)
@@ -731,6 +738,11 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 				snap.Telemetry.Since, live, failures,
 				retentionState, retentionFailure, retentionDays, eventHistoryFailure,
 			)
+		} else {
+			snap.Telemetry = renderObservabilityV8HealthUnavailable(
+				snap.Telemetry.Since,
+				retentionState, retentionFailure, retentionDays, eventHistoryFailure,
+			)
 		}
 	}
 
@@ -774,6 +786,35 @@ func readObservabilityV8HealthSnapshot(
 	}()
 	snapshot, err := source.DestinationHealthSnapshot(ctx)
 	return snapshot, err == nil
+}
+
+func renderObservabilityV8HealthUnavailable(
+	since time.Time,
+	retentionState string,
+	retentionFailure string,
+	retentionDays int64,
+	eventHistoryFailure string,
+) SubsystemHealth {
+	// The source error and recovered panic value may contain destination
+	// endpoints, credentials, or payload fragments. Expose only one stable
+	// code plus the bounded failure fields accepted by the health setters.
+	details := map[string]interface{}{"snapshot_state": "unavailable"}
+	if validObservabilityV8RetentionState(retentionState) {
+		details["retention_state"] = retentionState
+		details["retention_days"] = retentionDays
+		if retentionFailure != "" && validObservabilityV8RetentionFailure(retentionFailure) {
+			details["retention_failure"] = retentionFailure
+		}
+	}
+	if eventHistoryFailure != "" && validObservabilityV8EventHistoryFailure(eventHistoryFailure) {
+		details["event_history_failure"] = eventHistoryFailure
+	}
+	return SubsystemHealth{
+		State:     StateError,
+		Since:     since,
+		LastError: ObservabilityV8HealthSnapshotUnavailable,
+		Details:   details,
+	}
 }
 
 func renderObservabilityV8Health(
@@ -877,7 +918,7 @@ func renderObservabilityV8Health(
 	if validObservabilityV8RetentionState(retentionState) {
 		details["retention_state"] = retentionState
 		details["retention_days"] = retentionDays
-		if retentionFailure != "" {
+		if retentionFailure != "" && validObservabilityV8RetentionFailure(retentionFailure) {
 			details["retention_failure"] = retentionFailure
 		}
 		if retentionState == "degraded" {
@@ -885,8 +926,10 @@ func renderObservabilityV8Health(
 		}
 	}
 	if eventHistoryFailure != "" {
-		details["event_history_failure"] = eventHistoryFailure
 		aggregate = StateError
+		if validObservabilityV8EventHistoryFailure(eventHistoryFailure) {
+			details["event_history_failure"] = eventHistoryFailure
+		}
 	}
 	return SubsystemHealth{State: aggregate, Since: since, Details: details}
 }

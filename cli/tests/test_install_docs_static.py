@@ -27,9 +27,14 @@ from pathlib import Path
 import pytest
 from defenseclaw import install_publish
 
+from scripts import release_candidate
+
 ROOT = Path(__file__).resolve().parents[2]
 CURRENT_RELEASE = "0.8.6"
 STALE_RELEASES = ("0.8.0", "0.8.1", "0.8.2", "0.8.3", "0.8.4", "0.8.5")
+RELEASE_DOC_EXAMPLE_VERSION = ".".join(
+    str(component) for component in release_candidate.RELEASE_CHANNEL_BOOTSTRAP_START_VERSION
+)
 
 BASH_INSTALL_LINES = (
     f"VERSION={CURRENT_RELEASE}",
@@ -1818,9 +1823,13 @@ def test_release_docs_use_one_dispatch_and_never_precreate_tag() -> None:
         assert "-f version=" in text
         assert "-f immutable_releases_confirmed=true" in text
         assert "-f operation=certify" not in text
-        assert "-f operation=release" not in text
         assert "git tag 0.4.0" not in text
         assert "git push origin" not in text
+    assert "-f operation=release" in install
+    assert f"-f version={RELEASE_DOC_EXAMPLE_VERSION}" in install
+    assert "operation: release" in install
+    assert f"version: {RELEASE_DOC_EXAMPLE_VERSION}" in install
+    assert r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$" in install
     assert "Do not create or push the tag yourself" in install
     normalized = " ".join(install.split())
     assert "One dispatch from a reviewed `main` commit" in normalized
@@ -1865,22 +1874,39 @@ def test_upgrade_docs_use_resolver_only_crash_recovery_without_manual_rollback()
 
 
 def test_installed_user_upgrade_docs_require_authenticated_resolver_assets() -> None:
-    from defenseclaw.resolver_hint import authenticated_resolver_instructions
+    from defenseclaw.resolver_hint import (
+        WINDOWS_RESOLVER_BANNER,
+        authenticated_resolver_instructions,
+    )
 
     cli = (ROOT / "docs/CLI.md").read_text(encoding="utf-8")
+    channel = (ROOT / "docs/RELEASE_CHANNEL.md").read_text(encoding="utf-8")
+    install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
     quickstart = (ROOT / "docs/GUARDRAIL_QUICKSTART.md").read_text(encoding="utf-8")
     site = (ROOT / "docs-site/content/docs/get-started/upgrade.mdx").read_text(encoding="utf-8")
 
-    assert "defenseclaw-upgrade.sh" in cli
-    assert "verify-blob" in cli
-    assert "unset VERSION" in cli
-    latest_assets = "releases/latest/download/"
+    assert "defenseclaw upgrade --yes" in cli
+    assert "signed stable-channel record" in cli
+    assert "defenseclaw-rescue.sh" in cli
+    assert "/bin/sh ./defenseclaw-rescue.sh --yes" in cli
+    assert "bash defenseclaw-rescue.sh" not in cli
+    assert "--output ./defenseclaw-rescue.sh" in channel
+    assert "refuses stdin or pipe execution" in channel
+    assert "/bin/sh ./defenseclaw-rescue.sh --yes" in channel
+    assert "bash defenseclaw-rescue.sh" not in channel
+    assert "/bin/sh ./defenseclaw-rescue.sh --yes --recover-corrupt-audit" in install
+    assert "bash defenseclaw-rescue.sh" not in install
+    assert "bash defenseclaw-upgrade.sh --yes --recover-corrupt-audit" not in install
+    assert "mutable pointer to immutable code" in channel
+    assert "`release.yaml@main` Fulcio identity" in channel
+    latest_assets = "releases/latest/download"
     assert cli.count(latest_assets) == 1
     assert re.search(r"releases/download/\d+\.\d+\.\d+/", cli) is None
     assert f"releases/download/v{CURRENT_RELEASE}/" not in cli
-    assert "That URL is only a locator" in " ".join(cli.split())
+    assert "URL is only a locator" in " ".join(cli.split())
     generated = authenticated_resolver_instructions(CURRENT_RELEASE)
-    assert "Preflight refusal only" in generated
+    assert WINDOWS_RESOLVER_BANNER in generated
+    assert "Preflight refusal only" not in generated
     assert "unset VERSION" in generated
     assert "does not require a source checkout" in quickstart
     assert "does not require a source checkout" in site
@@ -1960,12 +1986,13 @@ def test_windows_bootstrap_binds_native_setup_to_authenticated_signed_outer_byte
     assert execute < main.index("} finally {") < cleanup
 
 
-def test_cli_docs_describe_authenticated_same_version_upgrade_as_noop() -> None:
+def test_cli_docs_describe_authenticated_same_version_upgrade_recovery_exception() -> None:
     cli = (ROOT / "docs/CLI.md").read_text(encoding="utf-8")
     normalized = " ".join(cli.split())
 
-    assert "An authenticated same-version request is a no-op" in normalized
-    assert "it does not reinstall artifacts or run migrations" in normalized
+    assert "An authenticated same-version request is normally a no-op" in normalized
+    assert "--recover-corrupt-audit" in normalized
+    assert "field-recovery cases below are the exceptions" in normalized
     assert "run automatically even during same-version upgrades" not in normalized
 
 

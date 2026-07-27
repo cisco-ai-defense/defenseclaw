@@ -43,6 +43,7 @@ import sys
 import tarfile
 import tempfile
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -72,6 +73,10 @@ VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 WINDOWS_NUMERIC_SHORT_NAME_RE = re.compile(r"^[a-z0-9]{1,6}~[0-9]+$")
+WINDOWS_RESERVED_PATH_PART_RE = re.compile(
+    r"^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)",
+    re.IGNORECASE,
+)
 MAX_GATEWAY_BINARY_BYTES = 512 * 1024 * 1024
 PROTECTED_ARTIFACT_MAGIC = b"DEFENSECLAW-PROTECTED-ARTIFACT-V1\n"
 PROTECTED_ARTIFACT_XOR_BYTE = 0xA5
@@ -127,11 +132,56 @@ UPGRADE_BASELINES_PATH = Path(
 HISTORICAL_ARTIFACT_DIGESTS_PATH = ROOT / "release" / "historical-artifact-digests.json"
 RUNTIME_CONFIG_PATH = ROOT / "internal" / "config" / "config.go"
 RESOLVER_COMPLETENESS_MARKER = b"# DefenseClaw upgrade resolver complete v1"
-RESOLVER_ASSET_SOURCES = {
-    "defenseclaw-upgrade.sh": ROOT / "scripts" / "upgrade.sh",
-    "defenseclaw-upgrade.ps1": ROOT / "scripts" / "upgrade.ps1",
+RESCUE_COMPLETENESS_MARKER = b"# DefenseClaw rescue bootstrap complete v1"
+WINDOWS_RESCUE_COMPLETENESS_MARKER = b"# DefenseClaw Windows rescue bootstrap complete v1"
+
+
+@dataclass(frozen=True)
+class ReviewedScriptAsset:
+    source: Path
+    completeness_marker: bytes
+
+
+@dataclass(frozen=True)
+class InstallerSnapshot:
+    """Immutable bytes and metadata captured from one reviewed installer."""
+
+    payload: bytes
+    sha256: str
+    mode: int
+
+
+RESOLVER_ASSETS = {
+    "defenseclaw-upgrade.sh": ReviewedScriptAsset(
+        ROOT / "scripts" / "upgrade.sh",
+        RESOLVER_COMPLETENESS_MARKER,
+    ),
+    "defenseclaw-upgrade.ps1": ReviewedScriptAsset(
+        ROOT / "scripts" / "upgrade.ps1",
+        RESOLVER_COMPLETENESS_MARKER,
+    ),
+    "defenseclaw-rescue.sh": ReviewedScriptAsset(
+        ROOT / "scripts" / "defenseclaw-rescue.sh",
+        RESCUE_COMPLETENESS_MARKER,
+    ),
+    "defenseclaw-rescue.ps1": ReviewedScriptAsset(
+        ROOT / "scripts" / "defenseclaw-rescue.ps1",
+        WINDOWS_RESCUE_COMPLETENESS_MARKER,
+    ),
 }
+RELEASE_CHANNEL_BOOTSTRAP_START_VERSION = (0, 8, 8)
 MAX_RESOLVER_BYTES = 4 * 1024 * 1024
+MAX_INSTALLER_BYTES = 4 * 1024 * 1024
+INSTALLER_ASSETS = {
+    "install.sh": ReviewedScriptAsset(
+        ROOT / "scripts" / "install.sh",
+        b"# DefenseClaw POSIX installer complete v1",
+    ),
+    "install.ps1": ReviewedScriptAsset(
+        ROOT / "scripts" / "install.ps1",
+        b"# DefenseClaw Windows installer complete v1",
+    ),
+}
 MAX_RELEASE_CERTIFICATE_BYTES = 64 * 1024
 MAX_EFFECTIVE_UPGRADE_BASELINES_BYTES = 1024 * 1024
 EFFECTIVE_UPGRADE_BASELINES_FILENAME = "effective-upgrade-baselines.json"
@@ -177,6 +227,10 @@ WINDOWS_COSIGN_SHA256 = "dd6c61e510da627bcaed4cd9db844ec11cacd09826d814d89f7f68d
 WINDOWS_RESOURCE_POLICY = "internal/windowsresources"
 WINDOWS_RESOURCE_ICON = "macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"
 WINDOWS_RESOURCE_ICON_SHA256 = "4425858688397762266ceb5304dcbca7afe330ec1c262dd2addcb7539b14b2bf"
+TRANSPORT_ARCHIVE_ROOT = "candidate"
+MAX_TRANSPORT_ARCHIVE_BYTES = 8 * 1024 * 1024 * 1024
+MAX_TRANSPORT_MEMBERS = 2048
+POSIX_TRANSPORT_CUSTODY = os.name == "posix"
 
 
 class CandidateError(RuntimeError):
@@ -200,7 +254,12 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _read_bounded_regular_file(path: Path, *, label: str, max_bytes: int) -> bytes:
+def _read_bounded_regular_file_with_info(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int,
+) -> tuple[bytes, os.stat_result]:
     """Read one stable bounded regular file without following a leaf symlink."""
 
     try:
@@ -239,9 +298,18 @@ def _read_bounded_regular_file(path: Path, *, label: str, max_bytes: int) -> byt
             or bytes_read != opened_after.st_size
         ):
             raise CandidateError(f"{label} changed while being read: {path}")
-        return b"".join(chunks)
+        return b"".join(chunks), named_after
     finally:
         os.close(descriptor)
+
+
+def _read_bounded_regular_file(path: Path, *, label: str, max_bytes: int) -> bytes:
+    payload, _info = _read_bounded_regular_file_with_info(
+        path,
+        label=label,
+        max_bytes=max_bytes,
+    )
+    return payload
 
 
 def _file_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -260,6 +328,395 @@ def _file_state(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
 
 def _directory_identity(info: os.stat_result) -> tuple[int, int, int]:
     return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode))
+
+
+def _require_transport_owner(info: os.stat_result, *, label: str) -> None:
+    if POSIX_TRANSPORT_CUSTODY and info.st_uid != os.geteuid():
+        raise CandidateError(f"{label} is not owned by the current user")
+
+
+def _validate_transport_mode(mode: int, *, is_directory: bool, label: str) -> int:
+    permissions = stat.S_IMODE(mode)
+    if permissions & 0o7022:
+        raise CandidateError(f"{label} has unsafe permissions")
+    required = 0o700 if is_directory else 0o400
+    if permissions & required != required:
+        kind = "directory" if is_directory else "file"
+        raise CandidateError(f"{label} {kind} lacks required owner permissions")
+    return permissions
+
+
+def _filesystem_transport_mode(mode: int, *, is_directory: bool, label: str) -> int:
+    """Validate POSIX custody or synthesize a safe portable archive mode."""
+
+    if POSIX_TRANSPORT_CUSTODY:
+        return _validate_transport_mode(
+            mode,
+            is_directory=is_directory,
+            label=label,
+        )
+    return 0o700 if is_directory else 0o600
+
+
+def _transport_member_name(relative: str) -> str:
+    if (
+        not relative
+        or relative.startswith("/")
+        or "\\" in relative
+        or any(ord(character) < 32 or ord(character) == 127 for character in relative)
+    ):
+        raise CandidateError(f"release candidate transport path is unsafe: {relative!r}")
+    parts = PurePosixPath(relative).parts
+    if not parts or any(
+        part in {"", ".", ".."}
+        or ":" in part
+        or any(character in '<>"|?*' for character in part)
+        or part.endswith((".", " "))
+        or WINDOWS_RESERVED_PATH_PART_RE.match(part)
+        for part in parts
+    ):
+        raise CandidateError(f"release candidate transport path is unsafe: {relative!r}")
+    canonical = PurePosixPath(*parts).as_posix()
+    if canonical != relative:
+        raise CandidateError(f"release candidate transport path is not canonical: {relative!r}")
+    return f"{TRANSPORT_ARCHIVE_ROOT}/{canonical}"
+
+
+def _transport_parent(path: Path, *, label: str) -> os.stat_result:
+    try:
+        parent = path.parent
+        parent_info = parent.lstat()
+    except OSError as exc:
+        raise CandidateError(f"{label} parent is unavailable: {path.parent}") from exc
+    if not stat.S_ISDIR(parent_info.st_mode):
+        raise CandidateError(f"{label} parent must be a real directory: {path.parent}")
+    _require_transport_owner(parent_info, label=f"{label} parent")
+    if POSIX_TRANSPORT_CUSTODY and stat.S_IMODE(parent_info.st_mode) & 0o022:
+        raise CandidateError(f"{label} parent must not be group/world writable")
+    return parent_info
+
+
+def _transport_tree(root: Path) -> list[tuple[str, Path, os.stat_result]]:
+    """Snapshot one owner-controlled tree without following links."""
+
+    try:
+        root_info = root.lstat()
+    except OSError as exc:
+        raise CandidateError(f"release candidate transport source is unavailable: {root}") from exc
+    if not stat.S_ISDIR(root_info.st_mode):
+        raise CandidateError("release candidate transport source must be a real directory")
+    _require_transport_owner(root_info, label="release candidate transport source")
+    _filesystem_transport_mode(
+        root_info.st_mode,
+        is_directory=True,
+        label="release candidate transport source",
+    )
+
+    entries: list[tuple[str, Path, os.stat_result]] = [(TRANSPORT_ARCHIVE_ROOT, root, root_info)]
+    for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+        current_path = Path(current)
+        directories.sort()
+        files.sort()
+        for name in (*directories, *files):
+            path = current_path / name
+            try:
+                info = path.lstat()
+            except OSError as exc:
+                raise CandidateError(f"release candidate transport entry is unavailable: {path}") from exc
+            relative = path.relative_to(root).as_posix()
+            member_name = _transport_member_name(relative)
+            is_directory = stat.S_ISDIR(info.st_mode)
+            if not is_directory and not stat.S_ISREG(info.st_mode):
+                raise CandidateError(f"release candidate transport rejects non-regular entry: {relative}")
+            if POSIX_TRANSPORT_CUSTODY and stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+                raise CandidateError(f"release candidate transport rejects linked file: {relative}")
+            _require_transport_owner(info, label=f"release candidate transport entry {relative!r}")
+            _filesystem_transport_mode(
+                info.st_mode,
+                is_directory=is_directory,
+                label=f"release candidate transport entry {relative!r}",
+            )
+            entries.append((member_name, path, info))
+        if len(entries) > MAX_TRANSPORT_MEMBERS:
+            raise CandidateError("release candidate transport exceeds its member bound")
+    entries.sort(key=lambda item: item[0])
+    names = [name for name, _path, _info in entries]
+    if len(names) != len({name.casefold() for name in names}):
+        raise CandidateError("release candidate transport paths collide on a case-insensitive filesystem")
+    return entries
+
+
+def _transport_tree_state(
+    entries: list[tuple[str, Path, os.stat_result]],
+) -> list[tuple[str, tuple[int, int, int, int, int, int], int, int, int]]:
+    return [
+        (
+            name,
+            _file_state(info),
+            stat.S_IMODE(info.st_mode),
+            info.st_uid,
+            info.st_nlink,
+        )
+        for name, _path, info in entries
+    ]
+
+
+def pack_transport(source: Path, output: Path) -> None:
+    """Pack a candidate tree into deterministic mode-preserving USTAR custody."""
+
+    if output.exists() or output.is_symlink():
+        raise CandidateError(f"release candidate transport output already exists: {output}")
+    _transport_parent(output, label="release candidate transport output")
+    entries = _transport_tree(source)
+    if len(entries) <= 1:
+        raise CandidateError("release candidate transport source must not be empty")
+    source_absolute = source.resolve()
+    try:
+        output_absolute = output.parent.resolve() / output.name
+        output_absolute.relative_to(source_absolute)
+    except ValueError:
+        pass
+    else:
+        raise CandidateError("release candidate transport output must be outside its source")
+
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    created = False
+    try:
+        descriptor = os.open(output, flags, 0o600)
+        created = True
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            if POSIX_TRANSPORT_CUSTODY:
+                os.fchmod(stream.fileno(), 0o600)
+            with tarfile.open(
+                fileobj=stream,
+                mode="w",
+                format=tarfile.USTAR_FORMAT,
+            ) as archive:
+                for member_name, path, expected in entries:
+                    is_directory = stat.S_ISDIR(expected.st_mode)
+                    info = tarfile.TarInfo(member_name)
+                    info.type = tarfile.DIRTYPE if is_directory else tarfile.REGTYPE
+                    info.mode = _filesystem_transport_mode(
+                        expected.st_mode,
+                        is_directory=is_directory,
+                        label=f"release candidate transport entry {member_name!r}",
+                    )
+                    info.uid = 0
+                    info.gid = 0
+                    info.uname = ""
+                    info.gname = ""
+                    info.mtime = 0
+                    if is_directory:
+                        current = path.lstat()
+                        if _file_state(current) != _file_state(expected):
+                            raise CandidateError(f"release candidate transport directory changed while packing: {path}")
+                        archive.addfile(info)
+                        continue
+
+                    flags = (
+                        os.O_RDONLY
+                        | getattr(os, "O_BINARY", 0)
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0)
+                    )
+                    file_descriptor = os.open(path, flags)
+                    with os.fdopen(file_descriptor, "rb", closefd=True) as payload:
+                        opened = os.fstat(payload.fileno())
+                        if _file_identity(opened) != _file_identity(expected) or (
+                            POSIX_TRANSPORT_CUSTODY and opened.st_nlink != 1
+                        ):
+                            raise CandidateError(f"release candidate transport file changed while opening: {path}")
+                        info.size = opened.st_size
+                        archive.addfile(info, payload)
+                        opened_after = os.fstat(payload.fileno())
+                    named_after = path.lstat()
+                    if (
+                        _file_state(opened_after) != _file_state(opened)
+                        or _file_state(named_after) != _file_state(expected)
+                        or _file_identity(named_after) != _file_identity(opened_after)
+                    ):
+                        raise CandidateError(f"release candidate transport file changed while packing: {path}")
+            stream.flush()
+            os.fsync(stream.fileno())
+            packed = os.fstat(stream.fileno())
+            if not 0 < packed.st_size <= MAX_TRANSPORT_ARCHIVE_BYTES:
+                raise CandidateError("release candidate transport archive exceeds its size bound")
+        final_entries = _transport_tree(source)
+        if _transport_tree_state(final_entries) != _transport_tree_state(entries):
+            raise CandidateError("release candidate transport source tree changed while packing")
+    except (OSError, tarfile.TarError, ValueError) as exc:
+        if created:
+            try:
+                output.unlink()
+            except OSError:
+                pass
+        raise CandidateError(f"could not pack release candidate transport: {exc}") from exc
+    except CandidateError:
+        if created:
+            try:
+                output.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def _validated_transport_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
+    try:
+        members: list[tarfile.TarInfo] = []
+        for member in archive:
+            members.append(member)
+            if len(members) > MAX_TRANSPORT_MEMBERS:
+                raise CandidateError("release candidate transport exceeds its member bound")
+    except (OSError, tarfile.TarError) as exc:
+        raise CandidateError(f"could not read release candidate transport: {exc}") from exc
+    if not 1 < len(members) <= MAX_TRANSPORT_MEMBERS:
+        raise CandidateError("release candidate transport has an invalid member count")
+    names = [member.name for member in members]
+    if (
+        names[0] != TRANSPORT_ARCHIVE_ROOT
+        or names != sorted(names)
+        or len(names) != len(set(names))
+        or len(names) != len({name.casefold() for name in names})
+    ):
+        raise CandidateError("release candidate transport members are not unique canonical order")
+    if not members[0].isdir():
+        raise CandidateError("release candidate transport root must be a directory")
+
+    directories: set[str] = set()
+    total_size = 0
+    for member in members:
+        name = member.name
+        if name != TRANSPORT_ARCHIVE_ROOT:
+            prefix = f"{TRANSPORT_ARCHIVE_ROOT}/"
+            if not name.startswith(prefix) or _transport_member_name(name.removeprefix(prefix)) != name:
+                raise CandidateError(f"release candidate transport member is unsafe: {name!r}")
+        if (
+            member.uid != 0
+            or member.gid != 0
+            or member.uname != ""
+            or member.gname != ""
+            or member.mtime != 0
+            or member.pax_headers
+        ):
+            raise CandidateError(f"release candidate transport metadata is not deterministic: {name!r}")
+        if member.type not in {tarfile.DIRTYPE, tarfile.REGTYPE}:
+            raise CandidateError(f"release candidate transport rejects non-regular member: {name!r}")
+        is_directory = member.type == tarfile.DIRTYPE
+        if getattr(member, "sparse", None):
+            raise CandidateError(f"release candidate transport rejects sparse member: {name!r}")
+        _validate_transport_mode(
+            member.mode,
+            is_directory=is_directory,
+            label=f"release candidate transport member {name!r}",
+        )
+        parent = PurePosixPath(name).parent.as_posix()
+        if name != TRANSPORT_ARCHIVE_ROOT and parent not in directories:
+            raise CandidateError(f"release candidate transport omits parent directory for {name!r}")
+        if is_directory:
+            directories.add(name)
+        else:
+            if member.size < 0:
+                raise CandidateError(f"release candidate transport member has invalid size: {name!r}")
+            total_size += member.size
+            if total_size > MAX_TRANSPORT_ARCHIVE_BYTES:
+                raise CandidateError("release candidate transport payload exceeds its size bound")
+    return members
+
+
+def unpack_transport(archive_path: Path, destination: Path) -> None:
+    """Safely restore a deterministic transport without trusting tar paths."""
+
+    if destination.exists() or destination.is_symlink():
+        raise CandidateError(f"release candidate transport destination already exists: {destination}")
+    _transport_parent(destination, label="release candidate transport destination")
+    _transport_parent(archive_path, label="release candidate transport archive")
+    try:
+        archive_info = archive_path.lstat()
+    except OSError as exc:
+        raise CandidateError(f"release candidate transport archive is unavailable: {archive_path}") from exc
+    if not stat.S_ISREG(archive_info.st_mode) or not 0 < archive_info.st_size <= MAX_TRANSPORT_ARCHIVE_BYTES:
+        raise CandidateError("release candidate transport archive must be a non-empty bounded regular file")
+    _require_transport_owner(archive_info, label="release candidate transport archive")
+    _filesystem_transport_mode(
+        archive_info.st_mode,
+        is_directory=False,
+        label="release candidate transport archive",
+    )
+    if POSIX_TRANSPORT_CUSTODY and archive_info.st_nlink != 1:
+        raise CandidateError("release candidate transport archive is not in exclusive owner custody")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    created = False
+    try:
+        descriptor = os.open(archive_path, flags)
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            opened = os.fstat(stream.fileno())
+            if _file_identity(opened) != _file_identity(archive_info):
+                raise CandidateError("release candidate transport archive changed while opening")
+            with tarfile.open(fileobj=stream, mode="r:") as archive:
+                members = _validated_transport_members(archive)
+                destination.mkdir(mode=0o700)
+                created = True
+                directory_members: list[tuple[Path, tarfile.TarInfo]] = [(destination, members[0])]
+                for member in members[1:]:
+                    relative = member.name.removeprefix(f"{TRANSPORT_ARCHIVE_ROOT}/")
+                    target = destination.joinpath(*PurePosixPath(relative).parts)
+                    if member.isdir():
+                        target.mkdir(mode=0o700)
+                        directory_members.append((target, member))
+                        continue
+                    target_flags = (
+                        os.O_WRONLY
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | getattr(os, "O_BINARY", 0)
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0)
+                    )
+                    target_descriptor = os.open(target, target_flags, 0o600)
+                    with os.fdopen(target_descriptor, "wb", closefd=True) as output:
+                        extracted = archive.extractfile(member)
+                        if extracted is None:
+                            raise CandidateError(f"release candidate transport member has no payload: {member.name!r}")
+                        copied = 0
+                        while copied < member.size:
+                            chunk = extracted.read(min(1024 * 1024, member.size - copied))
+                            if not chunk:
+                                break
+                            output.write(chunk)
+                            copied += len(chunk)
+                        if copied != member.size or extracted.read(1):
+                            raise CandidateError(f"release candidate transport member size changed: {member.name!r}")
+                        output.flush()
+                        os.fsync(output.fileno())
+                        if POSIX_TRANSPORT_CUSTODY:
+                            os.fchmod(output.fileno(), stat.S_IMODE(member.mode))
+                if POSIX_TRANSPORT_CUSTODY:
+                    for path, member in reversed(directory_members):
+                        path.chmod(stat.S_IMODE(member.mode))
+            opened_after = os.fstat(stream.fileno())
+        named_after = archive_path.lstat()
+        if (
+            _file_state(opened_after) != _file_state(opened)
+            or _file_state(named_after) != _file_state(archive_info)
+            or _file_identity(named_after) != _file_identity(opened_after)
+        ):
+            raise CandidateError("release candidate transport archive changed while extracting")
+    except (OSError, tarfile.TarError) as exc:
+        if created:
+            shutil.rmtree(destination, ignore_errors=True)
+        raise CandidateError(f"could not unpack release candidate transport: {exc}") from exc
+    except CandidateError:
+        if created:
+            shutil.rmtree(destination, ignore_errors=True)
+        raise
 
 
 def _read_release_certificate(
@@ -547,7 +1004,19 @@ def resolver_asset_names(version: str) -> tuple[str, ...]:
     _validate_version(version)
     if tuple(map(int, version.split("."))) < (0, 8, 4):
         return ()
-    return tuple(sorted(RESOLVER_ASSET_SOURCES))
+    names = {"defenseclaw-upgrade.sh", "defenseclaw-upgrade.ps1"}
+    if tuple(map(int, version.split("."))) >= RELEASE_CHANNEL_BOOTSTRAP_START_VERSION:
+        names.update({"defenseclaw-rescue.sh", "defenseclaw-rescue.ps1"})
+    return tuple(sorted(names))
+
+
+def installer_asset_names(version: str) -> tuple[str, ...]:
+    """Return reviewed public installers shipped as immutable 0.8.8+ assets."""
+
+    _validate_version(version)
+    if tuple(map(int, version.split("."))) < RELEASE_CHANNEL_BOOTSTRAP_START_VERSION:
+        return ()
+    return tuple(sorted(INSTALLER_ASSETS))
 
 
 def release_identity_asset_names(version: str) -> tuple[str, ...]:
@@ -591,6 +1060,7 @@ def payload_asset_names(
                 *runtime_asset_names(version),
                 *macos_asset_names(version, macos_verification_status),
                 *resolver_asset_names(version),
+                *installer_asset_names(version),
                 *release_identity_asset_names(version),
                 *windows_installer_asset_names(version),
             )
@@ -655,7 +1125,8 @@ def _strict_file_names(directory: Path, label: str) -> tuple[str, ...]:
 
 
 def _validated_resolver_source(name: str) -> Path:
-    source = RESOLVER_ASSET_SOURCES[name]
+    asset = RESOLVER_ASSETS[name]
+    source = asset.source
     try:
         info = source.lstat()
         payload = source.read_bytes()
@@ -665,7 +1136,7 @@ def _validated_resolver_source(name: str) -> Path:
         raise CandidateError(f"reviewed resolver source is not a regular file: {source}")
     if not payload or len(payload) > MAX_RESOLVER_BYTES or b"\0" in payload:
         raise CandidateError(f"reviewed resolver source has invalid content: {source}")
-    if payload.splitlines()[-1] != RESOLVER_COMPLETENESS_MARKER:
+    if payload.splitlines()[-1] != asset.completeness_marker:
         raise CandidateError(f"reviewed resolver source lacks its completeness marker: {source}")
     # Windows does not preserve Git's POSIX executable bit in os.stat().
     # Enforce the reviewed mode where the host exposes POSIX permissions;
@@ -694,6 +1165,115 @@ def _validate_resolver_assets(directory: Path, version: str) -> None:
             raise CandidateError(f"release resolver differs from reviewed source: {name}")
 
 
+def _validated_installer_source(name: str) -> InstallerSnapshot:
+    asset = INSTALLER_ASSETS.get(name)
+    if asset is None:
+        raise CandidateError(f"reviewed installer source is not defined: {name}")
+    source = asset.source
+    payload, source_info = _read_bounded_regular_file_with_info(
+        source,
+        label=f"reviewed installer source {name}",
+        max_bytes=MAX_INSTALLER_BYTES,
+    )
+    if b"\0" in payload:
+        raise CandidateError(f"reviewed installer source contains NUL bytes: {source}")
+    if payload.splitlines()[-1] != asset.completeness_marker:
+        raise CandidateError(f"reviewed installer source lacks its completeness marker: {source}")
+    if os.name == "posix" and name.endswith(".sh") and not source_info.st_mode & stat.S_IXUSR:
+        raise CandidateError(f"reviewed POSIX installer is not executable: {source}")
+    return InstallerSnapshot(
+        payload=payload,
+        sha256=hashlib.sha256(payload).hexdigest(),
+        mode=stat.S_IMODE(source_info.st_mode),
+    )
+
+
+def _write_installer_snapshot(
+    target: Path,
+    snapshot: InstallerSnapshot,
+    *,
+    name: str,
+) -> None:
+    descriptor: int | None = None
+    created = False
+    try:
+        descriptor = os.open(
+            target,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0),
+            snapshot.mode,
+        )
+        created = True
+        if os.name == "posix":
+            os.fchmod(descriptor, snapshot.mode)
+        view = memoryview(snapshot.payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("installer snapshot write stalled")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+    except OSError as exc:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if created:
+            try:
+                target.unlink()
+            except OSError:
+                pass
+        raise CandidateError(f"could not stage reviewed installer {name}: {exc}") from exc
+
+
+def _copy_installer_assets(
+    destination: Path,
+    version: str,
+) -> dict[str, InstallerSnapshot]:
+    snapshots: dict[str, InstallerSnapshot] = {}
+    for name in installer_asset_names(version):
+        snapshot = _validated_installer_source(name)
+        target = destination / name
+        if target.exists() or target.is_symlink():
+            raise CandidateError(f"installer asset destination already exists: {name}")
+        _write_installer_snapshot(target, snapshot, name=name)
+        snapshots[name] = snapshot
+    return snapshots
+
+
+def _validate_installer_assets(
+    directory: Path,
+    version: str,
+    *,
+    snapshots: dict[str, InstallerSnapshot] | None = None,
+) -> None:
+    expected_names = installer_asset_names(version)
+    if snapshots is None:
+        snapshots = {name: _validated_installer_source(name) for name in expected_names}
+    elif set(snapshots) != set(expected_names):
+        raise CandidateError("reviewed installer snapshots do not match the release asset set")
+    for name in installer_asset_names(version):
+        snapshot = snapshots[name]
+        candidate = directory / name
+        try:
+            candidate_info = candidate.lstat()
+        except OSError as exc:
+            raise CandidateError(f"release candidate is missing installer asset {name}") from exc
+        if not stat.S_ISREG(candidate_info.st_mode):
+            raise CandidateError(f"release candidate is missing installer asset {name}")
+        payload, stable_info = _read_bounded_regular_file_with_info(
+            candidate,
+            label=f"release installer {name}",
+            max_bytes=MAX_INSTALLER_BYTES,
+        )
+        if payload != snapshot.payload or hashlib.sha256(payload).hexdigest() != snapshot.sha256:
+            raise CandidateError(f"release installer differs from reviewed source: {name}")
+        if os.name == "posix" and stat.S_IMODE(stable_info.st_mode) != snapshot.mode:
+            raise CandidateError(f"release installer mode differs from reviewed source: {name}")
+
+
 def stage_resolvers(directory: Path, version: str) -> None:
     """Stage the exact reviewed resolver assets for a local release harness."""
 
@@ -702,6 +1282,16 @@ def stage_resolvers(directory: Path, version: str) -> None:
         raise CandidateError(f"resolver staging destination is not a regular directory: {directory}")
     _copy_resolver_assets(directory, version)
     _validate_resolver_assets(directory, version)
+
+
+def stage_installers(directory: Path, version: str) -> None:
+    """Stage the exact reviewed installer assets for a local release harness."""
+
+    _validate_version(version)
+    if directory.is_symlink() or not directory.is_dir():
+        raise CandidateError(f"installer staging destination is not a regular directory: {directory}")
+    snapshots = _copy_installer_assets(directory, version)
+    _validate_installer_assets(directory, version, snapshots=snapshots)
 
 
 def _load_upgrade_baseline_policy(
@@ -814,8 +1404,13 @@ def _validate_historical_artifact_digest_policy(configured: list[str]) -> None:
             raise CandidateError(f"historical digest exception for {version} must be one canonical wheel digest")
 
 
-def validate_release_progression(target: str, releases_json: Path) -> tuple[str, str]:
-    """Require a release target newer than reviewed and published stable state."""
+def validate_release_progression(
+    target: str,
+    releases_json: Path,
+    *,
+    allow_existing_target: bool = False,
+) -> tuple[str, str]:
+    """Require a new target, or admit one exact-version release rerun."""
 
     _validate_version(target)
     configured, _platforms = _load_upgrade_baseline_policy(target)
@@ -851,8 +1446,12 @@ def validate_release_progression(target: str, releases_json: Path) -> tuple[str,
 
     reviewed_max = max(configured, key=version_key)
     published_max = max(stable_versions, key=version_key) if stable_versions else reviewed_max
+    target_key = version_key(target)
+    reviewed_key = version_key(reviewed_max)
+    published_key = version_key(published_max)
     current_max = max((reviewed_max, published_max), key=version_key)
-    if version_key(target) <= version_key(current_max):
+    exact_published_rerun = allow_existing_target and target_key == published_key and target_key > reviewed_key
+    if target_key <= version_key(current_max) and not exact_published_rerun:
         raise CandidateError(
             f"release target {target} must be strictly newer than current stable {current_max} "
             f"(reviewed max {reviewed_max}, published max {published_max})"
@@ -4500,6 +5099,8 @@ def assemble(
         )
     _copy_resolver_assets(dist, version)
     _validate_resolver_assets(dist, version)
+    installer_snapshots = _copy_installer_assets(dist, version)
+    _validate_installer_assets(dist, version, snapshots=installer_snapshots)
     if source_map is not None and provenance is not None:
         (dist / RELEASE_SOURCE_MAP_FILENAME).write_bytes(
             _canonical_json(source_map).encode("utf-8"),
@@ -4664,6 +5265,7 @@ def seal(root: Path, version: str, commit: str) -> None:
         if actual != expected:
             raise CandidateError(f"checksum mismatch for {name}: got {actual}, want {expected}")
     _validate_resolver_assets(dist, version)
+    _validate_installer_assets(dist, version)
 
     assets = [{"name": name, "sha256": _sha256(dist / name)} for name in names]
     manifest: dict[str, Any] = {
@@ -4751,6 +5353,7 @@ def verify(root: Path, version: str, commit: str) -> None:
         if _sha256(dist / name) != expected:
             raise CandidateError(f"published checksum mismatch for {name}")
     _validate_resolver_assets(dist, version)
+    _validate_installer_assets(dist, version)
 
     _validate_upgrade_manifest(
         dist / "upgrade-manifest.json",
@@ -4778,8 +5381,12 @@ def verify_published_release(
 
     verify(root, version, commit)
     release = _read_json_object(release_json, "published release metadata")
-    if release.get("tagName") != version or release.get("isDraft") is not False:
-        raise CandidateError("GitHub release tag or draft status does not match the sealed candidate")
+    if (
+        release.get("tagName") != version
+        or release.get("isDraft") is not False
+        or release.get("isPrerelease") is not False
+    ):
+        raise CandidateError("GitHub release tag, draft, or prerelease status does not match the sealed candidate")
     if release.get("isImmutable") is not True:
         raise CandidateError("published GitHub release is not immutable")
     assets = release.get("assets")
@@ -4814,6 +5421,7 @@ def _parser() -> argparse.ArgumentParser:
     validate_version_parser = subparsers.add_parser("validate-version")
     validate_version_parser.add_argument("--target", required=True)
     validate_version_parser.add_argument("--releases-json", type=Path, required=True)
+    validate_version_parser.add_argument("--allow-existing-target", action="store_true")
 
     verify_runtime_parser = subparsers.add_parser("verify-runtime")
     verify_runtime_parser.add_argument("--release-dir", type=Path, required=True)
@@ -4831,6 +5439,10 @@ def _parser() -> argparse.ArgumentParser:
     stage_resolvers_parser = subparsers.add_parser("stage-resolvers")
     stage_resolvers_parser.add_argument("--release-dir", type=Path, required=True)
     stage_resolvers_parser.add_argument("--version", required=True)
+
+    stage_installers_parser = subparsers.add_parser("stage-installers")
+    stage_installers_parser.add_argument("--release-dir", type=Path, required=True)
+    stage_installers_parser.add_argument("--version", required=True)
 
     extract_parser = subparsers.add_parser("extract-gateway")
     extract_parser.add_argument("--release-dir", type=Path, required=True)
@@ -4890,6 +5502,14 @@ def _parser() -> argparse.ArgumentParser:
     published_parser.add_argument("--version", required=True)
     published_parser.add_argument("--commit", required=True)
     published_parser.add_argument("--omit-windows-binaries", action="store_true")
+
+    pack_transport_parser = subparsers.add_parser("pack-transport")
+    pack_transport_parser.add_argument("--source", type=Path, required=True)
+    pack_transport_parser.add_argument("--output", type=Path, required=True)
+
+    unpack_transport_parser = subparsers.add_parser("unpack-transport")
+    unpack_transport_parser.add_argument("--archive", type=Path, required=True)
+    unpack_transport_parser.add_argument("--destination", type=Path, required=True)
     return parser
 
 
@@ -4900,6 +5520,7 @@ def main(argv: list[str] | None = None) -> int:
             reviewed, published = validate_release_progression(
                 args.target,
                 args.releases_json,
+                allow_existing_target=args.allow_existing_target,
             )
             print(
                 f"release progression verified: target={args.target} reviewed_max={reviewed} published_max={published}"
@@ -4916,6 +5537,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "stage-resolvers":
             stage_resolvers(args.release_dir, args.version)
             print(f"release resolvers staged: {args.version}")
+        elif args.command == "stage-installers":
+            stage_installers(args.release_dir, args.version)
+            print(f"release installers staged: {args.version}")
         elif args.command == "extract-gateway":
             extract_gateway(args.release_dir, args.output, args.version, args.os, args.arch)
             print(f"candidate gateway extracted: {args.output}")
@@ -4973,6 +5597,12 @@ def main(argv: list[str] | None = None) -> int:
                 omit_windows_binaries=args.omit_windows_binaries,
             )
             print(f"published release verified: {args.version} at {args.commit}")
+        elif args.command == "pack-transport":
+            pack_transport(args.source, args.output)
+            print(f"release candidate transport packed: {args.output}")
+        elif args.command == "unpack-transport":
+            unpack_transport(args.archive, args.destination)
+            print(f"release candidate transport unpacked: {args.destination}")
         else:  # pragma: no cover - argparse enforces the subcommand set
             raise AssertionError(args.command)
     except CandidateError as exc:

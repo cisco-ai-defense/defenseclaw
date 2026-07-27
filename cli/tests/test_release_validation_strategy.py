@@ -14,7 +14,7 @@ from scripts import release_certification
 ROOT = Path(__file__).resolve().parents[2]
 CI_PATH = ROOT / ".github/workflows/ci.yml"
 RELEASE_PATH = ROOT / ".github/workflows/release.yaml"
-CERTIFICATION_PATH = ROOT / ".github/workflows/pre-release-certification.yml"
+CERTIFICATION_PATH = ROOT / ".github/workflows/release-candidate-smoke.yml"
 POLICY_PATH = ROOT / "release/certification-policy.json"
 
 
@@ -66,7 +66,7 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
     # A PR may exercise deterministic resolver models, but it may not construct,
     # sign, or run the expensive live certification candidate.
     assert "cosign sign-blob" not in text
-    assert "uses: ./.github/workflows/pre-release-certification.yml" not in text
+    assert "uses: ./.github/workflows/release-candidate-smoke.yml" not in text
     assert "scripts/test-observability-v8-upgrade-continuity.sh" not in text
     assert "historical-dependency-canary:" not in text
 
@@ -94,7 +94,12 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
         "extensions/defenseclaw/package-lock.json",
         "macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj",
         "scripts/resolve_upgrade_baselines.py",
+        "scripts/release-preflight.py",
+        "scripts/defenseclaw-rescue.sh",
+        "scripts/download_release_custody.py",
         "scripts/release_api_retry.py",
+        "scripts/select-release-validation-lane.py",
+        "scripts/verify-release-channel-target.py",
         "scripts/generate-upgrade-manifest.py",
         "scripts/test-historical-bootstrap-dependencies.sh",
         "scripts/verify-sigstore-blob.py",
@@ -118,6 +123,22 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
         list(sensitive),
     )
     assert release_certification._is_sensitive(
+        ["scripts/defenseclaw-rescue.sh"],
+        list(sensitive),
+    )
+    assert release_certification._is_sensitive(
+        ["scripts/download_release_custody.py"],
+        list(sensitive),
+    )
+    assert release_certification._is_sensitive(
+        ["scripts/select-release-validation-lane.py"],
+        list(sensitive),
+    )
+    assert release_certification._is_sensitive(
+        ["scripts/verify-release-channel-target.py"],
+        list(sensitive),
+    )
+    assert release_certification._is_sensitive(
         ["internal/daemon/daemon.go"],
         list(sensitive),
     )
@@ -129,11 +150,7 @@ def test_every_pr_authenticates_live_baselines_inside_a_required_gate() -> None:
 
     jobs = workflow["jobs"]
     plan = jobs["release-validation-plan"]
-    named_steps = {
-        step.get("name"): step
-        for step in plan["steps"]
-        if isinstance(step, dict) and step.get("name")
-    }
+    named_steps = {step.get("name"): step for step in plan["steps"] if isinstance(step, dict) and step.get("name")}
     for name in (
         "Resolve candidate against live stable state",
         "Resolve one authenticated effective baseline snapshot",
@@ -143,8 +160,7 @@ def test_every_pr_authenticates_live_baselines_inside_a_required_gate() -> None:
     cosign = next(
         step
         for step in plan["steps"]
-        if isinstance(step, dict)
-        and "sigstore/cosign-installer@" in str(step.get("uses", ""))
+        if isinstance(step, dict) and "sigstore/cosign-installer@" in str(step.get("uses", ""))
     )
     assert "if" not in cosign
 
@@ -175,7 +191,7 @@ def test_no_pull_request_workflow_can_run_full_or_signed_certification() -> None
 
     assert pull_request_workflows
     forbidden = (
-        "uses: ./.github/workflows/pre-release-certification.yml",
+        "uses: ./.github/workflows/release-candidate-smoke.yml",
         "--scope full",
         "scripts/test-observability-v8-upgrade-continuity.sh",
         "cosign sign-blob",
@@ -221,9 +237,12 @@ def test_release_builds_tests_and_publishes_in_one_dispatch() -> None:
 
     assert set(triggers) == {"workflow_dispatch"}
     assert set(triggers["workflow_dispatch"]["inputs"]) == {
+        "operation",
         "version",
+        "expected_commit",
         "immutable_releases_confirmed",
     }
+    assert triggers["workflow_dispatch"]["inputs"]["expected_commit"]["required"] == "true"
     assert workflow["concurrency"] == {
         "group": "release-${{ github.repository }}",
         "cancel-in-progress": "false",
@@ -236,7 +255,10 @@ def test_release_builds_tests_and_publishes_in_one_dispatch() -> None:
         "assemble-release-candidate",
         "release-smoke",
         "publish-release",
+        "advance-stable-channel",
+        "repair-stable-channel",
     }
+    assert jobs["release-preflight"]["if"] == "inputs.operation == 'release'"
 
     build = jobs["build-runtime-candidate"]
     assert build["needs"] == "release-preflight"
@@ -258,7 +280,7 @@ def test_release_builds_tests_and_publishes_in_one_dispatch() -> None:
         "release-preflight",
         "assemble-release-candidate",
     ]
-    assert smoke["uses"] == "./.github/workflows/pre-release-certification.yml"
+    assert smoke["uses"] == "./.github/workflows/release-candidate-smoke.yml"
     assert smoke["with"]["candidate_artifact"] == ("${{ needs.assemble-release-candidate.outputs.artifact_name }}")
 
     publish = jobs["publish-release"]
@@ -270,8 +292,33 @@ def test_release_builds_tests_and_publishes_in_one_dispatch() -> None:
     assert publish["permissions"] == {"contents": "write"}
     assert "scripts/release_candidate.py verify" in _render(publish)
     assert "scripts/release_candidate.py list-assets" in _render(publish)
+    assert "scripts/publish-release-channel.sh" not in _render(publish)
+
+    channel = jobs["advance-stable-channel"]
+    assert channel["needs"] == [
+        "release-preflight",
+        "assemble-release-candidate",
+        "publish-release",
+    ]
+    assert channel["if"] == "inputs.operation == 'release'"
+    assert channel["permissions"] == {
+        "contents": "write",
+        "id-token": "write",
+    }
+    assert "scripts/release_candidate.py verify" in _render(channel)
+    assert "scripts/release_api_retry.py prove-published" in _render(channel)
+    assert "scripts/publish-release-channel.sh" in _render(channel)
+    repair = jobs["repair-stable-channel"]
+    assert repair["if"] == "inputs.operation == 'repair-channel'"
+    assert repair["permissions"] == {
+        "contents": "write",
+        "id-token": "write",
+    }
+    assert "actions/download-artifact@" not in _render(repair)
+    assert "scripts/verify-release-channel-target.py" in _render(repair)
+    assert "scripts/publish-release-channel.sh" in _render(repair)
     for name, job in jobs.items():
-        if name != "publish-release":
+        if name not in {"publish-release", "advance-stable-channel", "repair-stable-channel"}:
             assert job.get("permissions") != {"contents": "write"}
 
     for retired in (
@@ -359,15 +406,15 @@ def test_effective_baselines_are_authenticated_once_and_bound_to_candidate() -> 
     script = resolve["run"]
 
     assert "scripts/resolve_upgrade_baselines.py" in script
-    assert "required_families = ((0, 7), (0, 6), (0, 5))" in script
-    assert "upgrade_baselines = [max(older, key=key)]" in script
-    assert "selected = max(family_versions, key=key)" in script
-    assert 'document["platform_published_baselines"]["windows"] = []' in script
-    assert "upgrade_baselines=" in script
+    assert "scripts/release-preflight.py select-baselines" in script
+    assert "--policy effective-upgrade-baselines.json" in script
+    assert '--github-output "$GITHUB_OUTPUT"' in script
+    assert "required_families = " not in script
 
     release = RELEASE_PATH.read_text(encoding="utf-8")
     assert "effective-upgrade-baselines.json" in release
     assert release.count("scripts/resolve_upgrade_baselines.py") == 1
+    assert release.count("scripts/release-preflight.py select-baselines") == 1
     assert (
         workflow["jobs"]["release-smoke"]["with"]["baselines"]
         == "${{ needs.release-preflight.outputs.upgrade_baselines }}"

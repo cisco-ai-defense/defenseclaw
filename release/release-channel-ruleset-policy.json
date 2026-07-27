@@ -1,0 +1,25 @@
+{
+  "schema_version": 2,
+  "source_type": "Organization",
+  "source": "cisco-ai-defense",
+  "target": "branch",
+  "target_ref": "refs/heads/release-channel",
+  "repository_condition": {
+    "include": [
+      "defenseclaw"
+    ],
+    "exclude": [],
+    "protected": true
+  },
+  "required_rules": [
+    "creation",
+    "update",
+    "deletion",
+    "non_fast_forward"
+  ],
+  "publisher_bypass": {
+    "actor_type": "Integration",
+    "actor_id": 15368,
+    "bypass_mode": "always"
+  }
+}

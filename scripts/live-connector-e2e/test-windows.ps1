@@ -619,6 +619,34 @@ private-secret-name = "DefenseClaw must remain redacted"
         DEFENSECLAW_HOME = $ownedRoot
     } -PassThru -WindowStyle Hidden
     try {
+        $argvOwnedReady = $false
+        $argvOwnedStopwatch = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            do {
+                $argvOwnedRows = @(Get-CimInstance Win32_Process `
+                    -Filter "ProcessId = $($argvOwnedDescendant.Id)" `
+                    -ErrorAction SilentlyContinue)
+                $argvOwnedCommandLine = if ($argvOwnedRows.Count -eq 1) {
+                    [string]$argvOwnedRows[0].CommandLine
+                } else {
+                    ''
+                }
+                $argvOwnedReady =
+                    -not [string]::IsNullOrWhiteSpace($argvOwnedCommandLine) -and
+                    $argvOwnedCommandLine.IndexOf(
+                        [IO.Path]::GetFullPath($StateRoot),
+                        [StringComparison]::OrdinalIgnoreCase
+                    ) -ge 0
+                if ($argvOwnedReady) { break }
+                Start-Sleep -Milliseconds 100
+            } while ($argvOwnedStopwatch.Elapsed -lt [TimeSpan]::FromSeconds(5))
+        } finally {
+            $argvOwnedStopwatch.Stop()
+        }
+        if (-not $argvOwnedReady) {
+            throw 'isolated cleanup fixture setup failed: exact argv-owned process and StateRoot were not queryable within 5 seconds'
+        }
+
         $expectedProductExecutable = Get-NormalizedExecutablePath $productExecutable
         $productStartIdentity = ''
         $productLiveExecutable = ''

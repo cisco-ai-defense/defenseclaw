@@ -686,10 +686,16 @@ jobs:
           root="$(sed -n 's/^OK: Prepared candidate release root: //p' prepare-candidate.log | tail -1)"
           test -d "$root"
           echo "root=$root" >> "$GITHUB_OUTPUT"
+      - name: Preserve candidate modes for Actions transport
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py pack-transport \
+            --source "${{ steps.prepare.outputs.root }}" \
+            --output unsigned-candidate.tar
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: ${{ steps.name.outputs.artifact_name }}
-          path: ${{ steps.prepare.outputs.root }}/
+          path: unsigned-candidate.tar
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
@@ -721,7 +727,13 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ needs.unsigned-upgrade-candidate.outputs.artifact_name }}
-          path: unsigned-candidate
+          path: unsigned-candidate-transport
+      - name: Restore exact candidate modes
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py unpack-transport \
+            --archive unsigned-candidate-transport/unsigned-candidate.tar \
+            --destination unsigned-candidate
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ needs.release-validation-plan.outputs.baseline_artifact }}
@@ -790,7 +802,13 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ needs.unsigned-upgrade-candidate.outputs.artifact_name }}
-          path: unsigned-candidate
+          path: unsigned-candidate-transport
+      - name: Restore exact candidate modes
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py unpack-transport \
+            --archive unsigned-candidate-transport/unsigned-candidate.tar \
+            --destination unsigned-candidate
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ needs.release-validation-plan.outputs.baseline_artifact }}

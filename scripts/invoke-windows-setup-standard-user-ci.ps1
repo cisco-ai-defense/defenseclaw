@@ -836,6 +836,7 @@ $bootstrapCosignSource = ''
 $bootstrapCosignSha256 = 'DD6C61E510DA627BCAED4CD9DB844EC11CACD09826D814D89F7F68D40FEB07BE'
 if ($Mode -eq 'bootstrap-acceptance') {
     $bootstrapCandidateAssets = @(
+        'install.ps1',
         'DefenseClawSetup-x64.exe.provenance.json',
         'upgrade-manifest.json',
         'checksums.txt',
@@ -1001,7 +1002,6 @@ try {
         )
     } elseif ($Mode -eq 'bootstrap-acceptance') {
         $harnessFiles += @(
-            'install.ps1',
             'test-fresh-install-release-windows.ps1'
         )
     }

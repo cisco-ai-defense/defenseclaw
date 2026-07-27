@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MODULE = runpy.run_path(str(ROOT / "scripts/verify-sigstore-blob.py"))
 VERIFY_WITH_RETRY = MODULE["verify_with_retry"]
 WORKFLOW = ROOT / ".github/workflows/release.yaml"
-CERTIFICATION_WORKFLOW = ROOT / ".github/workflows/pre-release-certification.yml"
+CERTIFICATION_WORKFLOW = ROOT / ".github/workflows/release-candidate-smoke.yml"
 
 
 def test_release_workflow_routes_every_sigstore_verification_through_retry() -> None:
@@ -23,6 +23,8 @@ def test_release_workflow_routes_every_sigstore_verification_through_retry() -> 
             ("assemble-release-candidate", "Resolve immutable published bridge provenance"),
             ("assemble-release-candidate", "Sign and authenticate public checksum manifest"),
             ("publish-release", "Verify the exact tested candidate"),
+            ("advance-stable-channel", "Reverify the exact published candidate"),
+            ("repair-stable-channel", "Authenticate immutable release custody"),
         },
         CERTIFICATION_WORKFLOW: {
             ("posix-fresh-install", "Verify and install exact signed bytes"),
