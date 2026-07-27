@@ -167,7 +167,7 @@ def test_posix_resolver_hint_clears_trust_overrides_before_network_access() -> N
     assert prefix_sweep in posix
     assert function_sweep in posix
     assert f"PATH='{POSIX_AUTHENTICATED_BOOTSTRAP_PATH}'" in posix
-    assert "/bin/bash --noprofile --norc -p <<'DEFENSECLAW_AUTHENTICATED_RESOLVER'" in posix
+    assert "/bin/bash --noprofile --norc -p <<'DC_AUTHENTICATED_RESOLVER'" in posix
     assert posix.index(removals) < posix.index("curl --fail")
     assert posix.index(prefix_sweep) < posix.index("curl --fail")
     assert posix.count('"$@" /bin/bash --noprofile --norc -p') == 2
@@ -180,7 +180,7 @@ def test_posix_resolver_hint_clears_trust_overrides_before_network_access() -> N
         "  fi\n"
         '  "$@"\n'
         ")\n"
-        "DEFENSECLAW_AUTHENTICATED_RESOLVER\n"
+        "DC_AUTHENTICATED_RESOLVER\n"
     )
     environment = os.environ.copy()
     environment.update(

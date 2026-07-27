@@ -66,9 +66,12 @@ class CliSmokeTests(unittest.TestCase):
                     journal.parent.mkdir(parents=True)
                     journal.write_text("{}\n", encoding="utf-8")
                     before = {path.relative_to(home) for path in home.rglob("*")}
-                    with patch.object(sys, "argv", argv), patch.dict(
-                        os.environ,
-                        {"DEFENSECLAW_HOME": str(home)},
+                    with (
+                        patch.object(sys, "argv", argv),
+                        patch.dict(
+                            os.environ,
+                            {"DEFENSECLAW_HOME": str(home)},
+                        ),
                     ):
                         result = runner.invoke(cli, argv[1:])
                     self.assertEqual(journal.read_text(encoding="utf-8"), "{}\n")
@@ -85,7 +88,10 @@ class CliSmokeTests(unittest.TestCase):
                 self.assertIn("releases/download/", result.output)
                 self.assertIn("defenseclaw-upgrade.sh", result.output)
                 self.assertIn("DefenseClaw upgrade resolver complete v1", result.output)
-                self.assertIn("bash -n \"$d/defenseclaw-upgrade.sh\"", result.output)
+                self.assertIn(
+                    '/bin/bash --noprofile --norc -p -n "$d/defenseclaw-upgrade.sh"',
+                    result.output,
+                )
                 self.assertNotIn("upgrade.sh | bash", result.output)
                 self.assertIn("[Guid]::NewGuid()", result.output)
                 self.assertIn("-ErrorAction Stop", result.output)
@@ -104,9 +110,12 @@ class CliSmokeTests(unittest.TestCase):
             journal.parent.mkdir(parents=True)
             journal.write_text("{}\n", encoding="utf-8")
             before = {path.relative_to(home) for path in home.rglob("*")}
-            with patch.object(sys, "argv", argv), patch.dict(
-                os.environ,
-                {"DEFENSECLAW_HOME": str(home)},
+            with (
+                patch.object(sys, "argv", argv),
+                patch.dict(
+                    os.environ,
+                    {"DEFENSECLAW_HOME": str(home)},
+                ),
             ):
                 result = runner.invoke(cli, argv[1:])
             self.assertEqual(journal.read_text(encoding="utf-8"), "{}\n")

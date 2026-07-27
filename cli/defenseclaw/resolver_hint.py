@@ -100,7 +100,7 @@ def authenticated_resolver_instructions(
     return (
         "POSIX:\n"
         "/usr/bin/env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS \\\n"
-        "  /bin/bash --noprofile --norc -p <<'DEFENSECLAW_AUTHENTICATED_RESOLVER'\n"
+        "  /bin/bash --noprofile --norc -p <<'DC_AUTHENTICATED_RESOLVER'\n"
         "(\n"
         "  set -eu\n"
         '  operator_path="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"\n'
@@ -181,7 +181,7 @@ def authenticated_resolver_instructions(
         '  PATH="$operator_path" "$@" /bin/bash --noprofile --norc -p '
         '"$d/defenseclaw-upgrade.sh" --yes\n'
         ")\n"
-        "DEFENSECLAW_AUTHENTICATED_RESOLVER\n"
+        "DC_AUTHENTICATED_RESOLVER\n"
         "Windows PowerShell:\n"
         f"{WINDOWS_RESOLVER_BANNER}\n"
         "& {\n"
