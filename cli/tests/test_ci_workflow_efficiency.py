@@ -37,7 +37,7 @@ def test_ci_shards_python_once_and_does_not_repeat_unified_corpus() -> None:
     assert "--dist=worksteal" in exhaustive
     assert "name: Python Lint" in workflow
     assert "name: Python Lint & Test" in workflow
-    assert "needs: [python-test, python-lint]" in workflow
+    assert "needs: [release-validation-plan, python-test, python-lint]" in workflow
     assert workflow.count("run: make py-lint") == 1
     assert "pattern: python-coverage-part-*" in workflow
     assert 'test "${#coverage_parts[@]}" -eq 4' in workflow

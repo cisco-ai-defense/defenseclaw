@@ -781,6 +781,14 @@ private-secret-name = "DefenseClaw must remain redacted"
     $nativePathHelpersText = [IO.File]::ReadAllText($nativePathHelpers)
     $nativePathInitializerText = [IO.File]::ReadAllText($nativePathInitializer)
     $installerText = [IO.File]::ReadAllText($installer)
+    $nativeProcessFunction = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Invoke-WindowsNativeProcess\b.*?(?=\r?\nfunction )'
+    ).Value
+    $diagnosticTailFunction = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Add-WindowsNativeDiagnosticTail\b.*?(?=\r?\nfunction )'
+    ).Value
     Assert-True ($nativeWorkflowText -match '(?s)connector-contract:.*?connector: \[codex, claudecode\].*?windows-native-required:') 'required Windows contract matrix contains Codex and Claude'
     Assert-True ($nativeWorkflowText -match '(?m)^\s+name: Windows Native Required\s*$') 'stable aggregate check name exists'
     foreach ($job in @('windows-go', 'windows-python', 'powershell-static', 'package-artifact', 'packaged-acceptance', 'connector-contract')) {
@@ -857,8 +865,25 @@ private-secret-name = "DefenseClaw must remain redacted"
         Assert-True ($nativeWorkflowText -match [regex]::Escape($testName)) "native Windows Go DACL step reaches $testName"
     }
     Assert-True ($nativeWorkflowText -match '''test'', ''-v'', ''-count=1'', ''-run'', \$daclTestPattern, ''\./internal/safefile'', ''\./internal/managed'', ''\./internal/gateway/connector''') 'Go DACL regressions execute in every owning package without cache reuse'
-    Assert-True ($nativeWorkflowText -match "'test'.*'\./\.\.\.'") 'full Go suite is required'
-    Assert-True ($nativeWorkflowText -match '''-p=1''.*''-skip''.*\$windowsInapplicable') 'full Go suite serializes packages and excludes only declared Windows-inapplicable tests'
+    Assert-True ($nativeWorkflowText -match
+        '''test'', ''-list'', ''\^\(Test\|Fuzz\|Example\)'', ''\./internal/gateway''' -and
+        $nativeWorkflowText -match '\(\$index % 4\) -eq \$shard' -and
+        $nativeWorkflowText -match '''-run'', \$shardPattern, ''\./internal/gateway''' -and
+        $nativeWorkflowText -match '\$_ -ne ''github\.com/defenseclaw/defenseclaw/internal/gateway''' -and
+        $nativeWorkflowText -match '\$remainingArguments = @\(') `
+        'full native Go suite shards the gateway process and separately selects every remaining package'
+    Assert-True ($nativeWorkflowText -match '(?s)''-p=1''.*?''-skip''.*?\$windowsInapplicable') 'native Go suite serializes packages and excludes only declared Windows-inapplicable tests'
+    Assert-True ($nativeWorkflowText -match '''test'', ''-json'', ''-count=1''' -and
+        $nativeWorkflowText -match '-GoTestFailureSummaryPath \$goFailureSummary' -and
+        $nativeWorkflowText -match 'go-test-failure-summary\.log') `
+        'full Go suite retains a bounded structured failure summary'
+    Assert-True ($nativeProcessFunction -match
+        '(?s)\$exitCode = if \(\$timedOut\).*?if \(\$GoTestFailureSummaryPath -and.*?\$exitCode -notin \$AllowedExitCodes.*?Get-GoTestFailureSummary' -and
+        $nativeProcessFunction -match
+        '(?s)\$failureOutput = if \(\$goTestFailureSummary\).*?throw "\$FilePath \$reason`n\$failureOutput"' -and
+        $diagnosticTailFunction -match
+        '(?s)function Add-WindowsNativeDiagnosticTail.*?\$boundedText = Limit-WindowsNativeText.*?\$retainedBytes -gt \$MaxBytes') `
+        'native process harness parses Go JSON only on failure, bounds collection, and reports the focused summary instead of the full JSON stream'
     Assert-True ($nativeWorkflowText -match 'Validate registered Windows Codex and Claude hook commands') 'native Windows workflow has a required Doctor hook-command step'
     Assert-True ($nativeWorkflowText -match "'pytest', 'cli/tests/test_cmd_doctor_windows_hooks\.py', '-q'") 'Doctor validates registered Windows hook commands explicitly'
     Assert-True ($nativeWorkflowText -match "Get-ChildItem cli/tests -Recurse -File -Filter 'test_\*\.py'") 'complete Python suite discovers every test file'
@@ -1208,8 +1233,13 @@ private-secret-name = "DefenseClaw must remain redacted"
         'interactive Setup acceptance owns and cleans built-in-root fixtures without environment trust authority'
     Assert-True ($setupAcceptanceFunction -match '\$cachedSetup' -and
         $setupAcceptanceFunction -match 'Join-Path \$cacheRoot ''DefenseClawSetup-x64\.exe''' -and
+        $setupAcceptanceFunction -match '\$deferredCleanupWaitAttempts\s*=\s*520' -and
+        [regex]::Matches(
+            $setupAcceptanceFunction,
+            '\$attempt -lt \$deferredCleanupWaitAttempts'
+        ).Count -ge 2 -and
         $setupAcceptanceFunction -match 'cached setup self-uninstall left installer cache behind') `
-        'native Setup acceptance executes the cached Apps & Features binary and proves deferred self-delete removes InstallerCache'
+        'native Setup acceptance executes the cached Apps & Features binary and waits through the bounded deferred self-delete before proving InstallerCache removal'
     Assert-True ($nativeHarnessText -match '-StateRoot \$contractProfileRoot -HomeRoot \$contractHome -NativeDataRoot \$dataRoot' -and
         $nativeHarnessText -match '-AllowNativeDataRoot' -and
         $harnessText -match 'NativeDataRoot is restricted to an explicitly authorized packaged contract run' -and

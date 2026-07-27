@@ -89,6 +89,17 @@ def _release(
                 "browser_download_url": url,
             }
         )
+    if tuple(map(int, version.split("."))) >= (0, 8, 6):
+        bundle = b'{"proof":"rekor transparency bundle"}\n'
+        assets.append(
+            {
+                "name": "checksums.txt.bundle",
+                "digest": f"sha256:{_digest(bundle)}",
+                "browser_download_url": (
+                    f"https://downloads.example/{version}/checksums.txt.bundle"
+                ),
+            }
+        )
     return (
         {
             "tag_name": version,
@@ -185,6 +196,20 @@ def test_087_discovers_all_newer_immutable_stables_without_a_policy_edit() -> No
         "0.8.3",
     ]
     assert policy["published_baseline_config_versions"]["0.8.6"] == 8
+
+
+def test_signature_bundle_is_release_proof_not_signed_payload() -> None:
+    release, downloads = _release("0.8.6")
+    asset_names = {asset["name"] for asset in release["assets"]}
+
+    assert "checksums.txt.bundle" in asset_names
+    assert b"checksums.txt.bundle" not in downloads[
+        "https://downloads.example/0.8.6/checksums.txt"
+    ]
+
+    policy = _resolve("0.8.7", [(release, downloads)])
+
+    assert policy["published_baselines"][0] == "0.8.6"
 
 
 def test_candidate_below_checked_head_discovers_release_above_eligible_floor(
