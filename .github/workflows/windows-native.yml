@@ -92,9 +92,57 @@ jobs:
             'TestAtomicWriteFile_PreservesSymlinkedDotfile',
             'TestOpenHandsHookScript_BlockExitsTwo'
           ) -join '|') + ')$'
-          # Keep package execution serial on the four-core hosted runner so
-          # bounded discovery tests are not starved by concurrent packages.
-          Invoke-WindowsNativeProcess $go @('test', '-count=1', '-timeout=20m', '-p=1', '-skip', $windowsInapplicable, './...') -TimeoutSeconds 2100 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-test.log') | Out-Null
+          # The gateway package is large enough that Linux CI already shards
+          # its top-level tests. Partition the native Windows test list in the
+          # same process-isolation shape so one package binary cannot retain
+          # the full suite's resources or bury its terminal panic in a huge
+          # dump. Shards remain sequential on this four-core hosted runner.
+          $gatewayList = Invoke-WindowsNativeProcess $go @(
+            'test', '-list', '^(Test|Fuzz|Example)', './internal/gateway'
+          ) -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-gateway-list.log')
+          $gatewayTests = @(
+            [regex]::Split([string]$gatewayList.StdOut, '\r?\n') |
+                Where-Object { $_ -match '^(Test|Fuzz|Example)\S*$' } |
+                Sort-Object -Unique
+          )
+          if ($gatewayTests.Count -lt 4) {
+            throw "native gateway sharding discovered only $($gatewayTests.Count) top-level tests"
+          }
+          $goTestLog = Join-Path $env:DC_STATE_ROOT 'go-test.log'
+          $goFailureSummary = Join-Path $env:DC_STATE_ROOT 'go-test-failure-summary.log'
+          foreach ($shard in 0..3) {
+            $shardTests = @(
+              for ($index = 0; $index -lt $gatewayTests.Count; $index++) {
+                if (($index % 4) -eq $shard) { [regex]::Escape($gatewayTests[$index]) }
+              }
+            )
+            $shardPattern = '^(' + ($shardTests -join '|') + ')$'
+            Invoke-WindowsNativeProcess $go @(
+              'test', '-json', '-count=1', '-timeout=20m', '-p=1',
+              '-skip', $windowsInapplicable, '-run', $shardPattern, './internal/gateway'
+            ) -TimeoutSeconds 1500 `
+              -LogPath (Join-Path $env:DC_STATE_ROOT ("go-gateway-shard-{0}.log" -f $shard)) `
+              -GoTestFailureSummaryPath $goFailureSummary | Out-Null
+          }
+          $packageList = Invoke-WindowsNativeProcess $go @(
+            'list', './...'
+          ) -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-package-list.log')
+          $remainingPackages = @(
+            [regex]::Split([string]$packageList.StdOut, '\r?\n') |
+              Where-Object {
+                $_ -match '^github\.com/defenseclaw/defenseclaw/' -and
+                $_ -ne 'github.com/defenseclaw/defenseclaw/internal/gateway'
+              }
+          )
+          if (-not $remainingPackages) {
+            throw 'native Go package discovery selected no non-gateway packages'
+          }
+          $remainingArguments = @(
+            'test', '-json', '-count=1', '-timeout=20m', '-p=1',
+            '-skip', $windowsInapplicable
+          ) + $remainingPackages
+          Invoke-WindowsNativeProcess $go $remainingArguments -TimeoutSeconds 2100 `
+            -LogPath $goTestLog -GoTestFailureSummaryPath $goFailureSummary | Out-Null
           Invoke-WindowsNativeProcess $go @('vet', './...') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-vet.log') | Out-Null
           $bin = Join-Path $env:DC_STATE_ROOT 'bin'
           New-Item -ItemType Directory -Force -Path $bin | Out-Null

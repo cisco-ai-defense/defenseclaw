@@ -125,7 +125,10 @@ function Get-UserPathEntryCount {
 function Wait-ForPathRemoval {
     param([Parameter(Mandatory = $true)][string]$Path)
 
-    for ($attempt = 0; $attempt -lt 80 -and (Test-Path -LiteralPath $Path); $attempt++) {
+    # Native Setup's transaction-bound helper may wait up to two minutes for
+    # its parent to exit. Keep release smoke aligned with that product bound
+    # plus scheduling margin while retaining the final fail-closed assertion.
+    for ($attempt = 0; $attempt -lt 520 -and (Test-Path -LiteralPath $Path); $attempt++) {
         Start-Sleep -Milliseconds 250
     }
 }

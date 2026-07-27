@@ -796,6 +796,7 @@ func TestAtomicTransformCleanupDoesNotDeleteReplacedIntentIdentity(t *testing.T)
 		t.Fatal(err)
 	}
 	var phaseState atomicTransformPhaseState
+	var displacedIntent string
 	restoreHook := setAtomicTransformPhaseHookForTest(path, func(
 		phase atomicTransformPhase,
 		state atomicTransformPhaseState,
@@ -808,7 +809,8 @@ func TestAtomicTransformCleanupDoesNotDeleteReplacedIntentIdentity(t *testing.T)
 		if err != nil {
 			return err
 		}
-		if err := os.Remove(state.IntentPath); err != nil {
+		displacedIntent = state.IntentPath + ".test-held-original"
+		if err := os.Rename(state.IntentPath, displacedIntent); err != nil {
 			return err
 		}
 		return os.WriteFile(state.IntentPath, data, 0o600)
@@ -817,6 +819,11 @@ func TestAtomicTransformCleanupDoesNotDeleteReplacedIntentIdentity(t *testing.T)
 		return atomicTransformResult{Data: []byte(`{"new":true}`)}, nil
 	})
 	restoreHook()
+	if displacedIntent != "" {
+		if removeErr := os.Remove(displacedIntent); removeErr != nil {
+			t.Fatalf("remove held original intent: %v", removeErr)
+		}
+	}
 	if err == nil {
 		t.Fatal("cleanup deleted a replacement intent with different file identity")
 	}
