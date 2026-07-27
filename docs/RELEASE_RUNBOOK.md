@@ -312,6 +312,7 @@ signed manifest, and only then execute the verified script:
 
 ```powershell
 $ReleaseVersion = "0.8.8" # Replace with the intended release.
+$ExpectUnsignedSetup = $true # Set false when the release job reports signed.
 $VerifyDir = Join-Path ([IO.Path]::GetTempPath()) (
   "defenseclaw-release-" + [guid]::NewGuid().ToString("N")
 )
@@ -359,9 +360,13 @@ if ($ActualInstallerSha256 -cne $ExpectedInstallerSha256) {
 if ($LASTEXITCODE -ne 0) { throw "Authenticated install.ps1 failed" }
 defenseclaw --version
 defenseclaw status
-Get-AuthenticodeSignature (
+$SetupSignature = Get-AuthenticodeSignature (
   Join-Path $VerifyDir "DefenseClawSetup-x64.exe"
 )
+$ExpectedSignatureStatus = if ($ExpectUnsignedSetup) { "NotSigned" } else { "Valid" }
+if ($SetupSignature.Status.ToString() -cne $ExpectedSignatureStatus) {
+  throw "Setup signature status was $($SetupSignature.Status), expected $ExpectedSignatureStatus"
+}
 ```
 
 The installed CLI and gateway must report the target version and the gateway

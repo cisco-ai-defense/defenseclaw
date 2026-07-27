@@ -155,9 +155,10 @@ must reopen the same saved bytes.
 The rescue bootstrap:
 
 1. Resolves the `release-channel` ref once to a canonical commit locator, then
-   downloads `stable.txt` and its Sigstore bundle through that same immutable
-   commit. This prevents independent branch-path caches from mixing old and
-   new proof generations during a channel rotation.
+   downloads `stable.txt`, `stable.txt.sig`, `stable.txt.pem`, and
+   `stable.txt.bundle` through that same immutable commit. This prevents
+   independent branch-path caches from mixing old and new proof generations
+   during a channel rotation.
 2. Treats an existing Cosign only as a byte source: it copies the binary into
    private custody and executes it only if it matches the platform's pinned
    Cosign `2.6.3` SHA-256. Otherwise it downloads and authenticates those same

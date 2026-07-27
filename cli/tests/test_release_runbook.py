@@ -112,6 +112,10 @@ def test_windows_public_install_authenticates_saved_script_before_execution() ->
     assert "release.yaml@refs/heads/main" in windows
     assert "^[0-9a-f]{64}  install\\.ps1$" in windows
     assert ".\\install.ps1 -Version" not in windows
+    assert "$ExpectUnsignedSetup" in windows
+    assert '"NotSigned"' in windows
+    assert '"Valid"' in windows
+    assert "$SetupSignature.Status.ToString()" in windows
 
 
 def test_release_docs_route_to_canonical_runbook_and_preflight() -> None:
