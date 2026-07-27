@@ -730,6 +730,15 @@ def test_operator_preflight_binds_every_github_call_to_authenticated_environment
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commit = "a" * 40
+    expected_baselines = [
+        "0.8.7",
+        "0.8.6",
+        "0.8.5",
+        "0.8.4",
+        "0.7.2",
+        "0.6.6",
+        "0.5.0",
+    ]
     for variable in release_preflight.GITHUB_CLI_UNTRUSTED_ENVIRONMENT:
         monkeypatch.setenv(variable, f"hostile-{variable.lower()}")
     discovery_environment = release_preflight._sanitized_github_cli_environment(os.environ)
@@ -786,6 +795,12 @@ def test_operator_preflight_binds_every_github_call_to_authenticated_environment
             self.runner(["gh", "api", "releases"], env={"GITHUB_TOKEN": "ambient"})
             return []
 
+    def fake_select_upgrade_baselines(*, policy_path: Path, target: str) -> list[str]:
+        assert policy_path.name == "effective-upgrade-baselines.json"
+        assert policy_path.is_file()
+        assert target == "0.8.8"
+        return expected_baselines
+
     monkeypatch.setattr(
         release_preflight,
         "_operator_git_state",
@@ -804,6 +819,11 @@ def test_operator_preflight_binds_every_github_call_to_authenticated_environment
         "validate_release_progression",
         lambda *_args, **_kwargs: None,
     )
+    monkeypatch.setattr(
+        release_preflight,
+        "select_upgrade_baselines",
+        fake_select_upgrade_baselines,
+    )
 
     plan = release_preflight.run_operator_preflight(
         operation="release",
@@ -812,15 +832,7 @@ def test_operator_preflight_binds_every_github_call_to_authenticated_environment
         runner=runner,
     )
 
-    assert plan["posix_upgrade_baselines"] == [
-        "0.8.7",
-        "0.8.6",
-        "0.8.5",
-        "0.8.4",
-        "0.7.2",
-        "0.6.6",
-        "0.5.0",
-    ]
+    assert plan["posix_upgrade_baselines"] == expected_baselines
     assert len(observed) == 5
     discovery_command, discovery_kwargs = observed[0]
     assert discovery_command == ["gh", "auth", "token", "--hostname", "github.com"]
