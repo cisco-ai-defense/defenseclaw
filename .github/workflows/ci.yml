@@ -81,9 +81,12 @@ jobs:
           else
             echo 'sensitive=false' >> "$GITHUB_OUTPUT"
           fi
+      # Resolve authenticated live state on every PR so a newly published
+      # immutable release cannot first break the unconditional main-push path
+      # after merge. Path sensitivity still controls the expensive candidate
+      # build and upgrade matrices below.
       - id: version
-        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
-        name: Resolve candidate against live stable state when needed
+        name: Resolve candidate against live stable state
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -98,12 +101,10 @@ jobs:
             --published-releases published-releases.json \
             --github-output "$GITHUB_OUTPUT" >/dev/null
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
-        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
       - id: baseline-name
         if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
         run: echo "name=ci-effective-upgrade-baselines-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
       - id: baselines
-        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
         name: Resolve one authenticated effective baseline snapshot
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -359,17 +360,20 @@ jobs:
 
   python-lint-test:
     # Preserve the existing required-check name while making it the single
-    # authority over lint, every isolated test partition, and combined coverage.
+    # authority over live release validation, lint, every isolated test
+    # partition, and combined coverage.
     name: Python Lint & Test
-    needs: [python-test, python-lint]
+    needs: [release-validation-plan, python-test, python-lint]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Require lint and every Python test partition
+      - name: Require release validation, lint, and every Python test partition
         env:
+          RELEASE_VALIDATION_RESULT: ${{ needs.release-validation-plan.result }}
           PYTHON_REGULAR_RESULT: ${{ needs.python-test.result }}
           PYTHON_LINT_RESULT: ${{ needs.python-lint.result }}
         run: |
+          test "$RELEASE_VALIDATION_RESULT" = success
           test "$PYTHON_REGULAR_RESULT" = success
           test "$PYTHON_LINT_RESULT" = success
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0

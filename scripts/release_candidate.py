@@ -1047,6 +1047,11 @@ def _validate_upgrade_manifest(
     if bridge in platform_configured["windows"]:
         if bridge not in platform_tested["windows"]:
             raise CandidateError(f"required bridge {bridge} is absent from the tested Windows baseline matrix")
+    elif any(tuple(map(int, item.split("."))) < (0, 8, 5) for item in platform_tested["windows"]):
+        raise CandidateError(
+            f"Windows bridge {bridge} is unpublished; the tested Windows baseline matrix "
+            "must contain only published post-hard-cut runtimes"
+        )
     bridge_key = tuple(map(int, bridge.split(".")))
     expected_automatic = [item for item in configured if tuple(map(int, item.split("."))) < bridge_key]
     if automatic != expected_automatic:
