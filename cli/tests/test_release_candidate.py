@@ -3454,6 +3454,48 @@ def test_followup_candidate_accepts_published_v8_baseline(
     )
 
 
+def test_followup_candidate_accepts_direct_windows_v8_baseline_without_unpublished_bridge(
+    tmp_path: Path,
+) -> None:
+    policy = json.loads((ROOT / "release" / "upgrade-baselines.json").read_text(encoding="utf-8"))
+    policy["published_baselines"].insert(0, "0.8.7")
+    policy["published_baseline_config_versions"]["0.8.7"] = 8
+    policy["platform_published_baselines"]["windows"].insert(0, "0.8.7")
+    policy_path = tmp_path / "effective-upgrade-baselines.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    manifest_path = tmp_path / "upgrade-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "runtime_config_version": 8,
+                "release_version": "0.8.8",
+                "min_upgrade_protocol": 2,
+                "controller_upgrade_protocol": 2,
+                "migration_failure_policy": "fail",
+                "minimum_source_version": "0.8.4",
+                "required_bridge_version": "0.8.4",
+                "auto_bridge_from": [
+                    item
+                    for item in policy["published_baselines"]
+                    if tuple(map(int, item.split("."))) < (0, 8, 4)
+                ],
+                "tested_source_versions": policy["published_baselines"],
+                "platform_tested_source_versions": {"windows": ["0.8.7"]},
+                "release_artifacts": release_candidate._expected_release_artifacts("0.8.8"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    release_candidate._validate_upgrade_manifest(
+        manifest_path,
+        "0.8.8",
+        baseline_policy_path=policy_path,
+    )
+
+
 def test_hard_cut_rejects_protocol_one_schema_two_manifest_without_bridge(
     tmp_path: Path,
 ) -> None:

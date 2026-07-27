@@ -67,7 +67,11 @@ def test_ordinary_ci_always_checks_real_registry_without_exhaustive_mutation_sui
         assert f"--exclude {test_file}" in regular
 
     aggregate = jobs["python-lint-test"]
-    assert set(aggregate["needs"]) == {"python-test", "python-lint"}
+    assert set(aggregate["needs"]) == {
+        "release-validation-plan",
+        "python-test",
+        "python-lint",
+    }
     rendered_aggregate = _render(aggregate)
     assert 'test "${#coverage_parts[@]}" -eq 4' in rendered_aggregate
     assert "PYTHON_TELEMETRY" not in rendered_aggregate

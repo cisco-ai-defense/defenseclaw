@@ -123,6 +123,37 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
     )
 
 
+def test_every_pr_authenticates_live_baselines_inside_a_required_gate() -> None:
+    workflow = _workflow(CI_PATH)
+    assert {"push", "pull_request"}.issubset(workflow["on"])
+
+    jobs = workflow["jobs"]
+    plan = jobs["release-validation-plan"]
+    named_steps = {
+        step.get("name"): step
+        for step in plan["steps"]
+        if isinstance(step, dict) and step.get("name")
+    }
+    for name in (
+        "Resolve candidate against live stable state",
+        "Resolve one authenticated effective baseline snapshot",
+    ):
+        assert "if" not in named_steps[name]
+
+    cosign = next(
+        step
+        for step in plan["steps"]
+        if isinstance(step, dict)
+        and "sigstore/cosign-installer@" in str(step.get("uses", ""))
+    )
+    assert "if" not in cosign
+
+    required = jobs["python-lint-test"]
+    assert required["name"] == "Python Lint & Test"
+    assert "release-validation-plan" in required["needs"]
+    assert "needs.release-validation-plan.result" in _render(required)
+
+
 def test_no_pull_request_workflow_can_run_full_or_signed_certification() -> None:
     pull_request_workflows: list[Path] = []
     for path in sorted((ROOT / ".github/workflows").glob("*.y*ml")):

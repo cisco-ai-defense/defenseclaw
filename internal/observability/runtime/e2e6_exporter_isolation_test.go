@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
@@ -21,6 +22,32 @@ type e2e6RuntimeBlockingAdapter struct {
 	started   chan struct{}
 	release   <-chan struct{}
 	startOnce sync.Once
+}
+
+// Keep the intentionally blocked export attempt alive while race/coverage
+// instrumentation projects and persists near-limit records. Runtime close
+// still cancels the attempt immediately if the test exits early.
+const e2e6RuntimeBlockingAttemptTimeoutMS = 120_000
+
+func e2e6RuntimeBlockingDestination(
+	name string,
+	queueItems int,
+	queueBytes int,
+) config.ObservabilityV8DestinationSource {
+	return config.ObservabilityV8DestinationSource{
+		Name: name, Kind: config.ObservabilityV8DestinationHTTPJSONL,
+		Endpoint:  "https://collector.example.test/events",
+		TimeoutMS: e2e6RuntimeBlockingAttemptTimeoutMS,
+		Send: &config.ObservabilityV8SendSource{
+			Signals:          []observability.Signal{observability.SignalLogs},
+			Buckets:          []observability.Bucket{"*"},
+			RedactionProfile: "none",
+		},
+		Batch: config.ObservabilityV8BatchSource{
+			MaxQueueSize: queueItems, MaxQueueBytes: queueBytes,
+			MaxExportBatchSize: 1, ScheduledDelayMS: 1,
+		},
+	}
 }
 
 func (*e2e6RuntimeBlockingAdapter) EncodedSize(sizes []int) (int, bool) {
@@ -71,10 +98,9 @@ func TestE2E6RuntimeQueuePressurePreservesSQLiteSiblingAndRecovery(t *testing.T)
 			dependencies := newRuntimeTestDependencies(t)
 			plan := runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90,
 				func(source *config.ObservabilityV8Source) {
-					blocked := runtimeConsoleDestination("blocked", "none", test.queueItems)
-					blocked.Batch.MaxQueueBytes = test.queueBytes
 					source.Destinations = []config.ObservabilityV8DestinationSource{
-						blocked, runtimeConsoleDestination("healthy", "none", len(test.contents)+1),
+						e2e6RuntimeBlockingDestination("blocked", test.queueItems, test.queueBytes),
+						runtimeConsoleDestination("healthy", "none", len(test.contents)+1),
 					}
 				},
 			)
