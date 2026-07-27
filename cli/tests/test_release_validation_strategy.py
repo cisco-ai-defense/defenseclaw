@@ -248,6 +248,7 @@ def test_release_builds_tests_and_publishes_in_one_dispatch() -> None:
         "cancel-in-progress": "false",
     }
     assert set(jobs) == {
+        "reject-non-main-repair",
         "release-preflight",
         "build-runtime-candidate",
         "macos-app",
@@ -309,7 +310,7 @@ def test_release_builds_tests_and_publishes_in_one_dispatch() -> None:
     assert "scripts/release_api_retry.py prove-published" in _render(channel)
     assert "scripts/publish-release-channel.sh" in _render(channel)
     repair = jobs["repair-stable-channel"]
-    assert repair["if"] == "inputs.operation == 'repair-channel'"
+    assert repair["if"] == "inputs.operation == 'repair-channel' && github.ref == 'refs/heads/main'"
     assert repair["permissions"] == {
         "contents": "write",
         "id-token": "write",

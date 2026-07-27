@@ -996,10 +996,20 @@ def test_private_downloader_enforces_size_mode_and_redirect_policy() -> None:
         headers={},
         iter_content=Mock(return_value=[b"bounded"]),
     )
+    session = Mock()
+    session.get.return_value = response
     with (
         TemporaryDirectory() as directory,
-        patch.dict(os.environ, {}, clear=True),
-        patch.object(upgrade_module.requests, "get", return_value=response),
+        patch.dict(
+            os.environ,
+            {
+                "HTTPS_PROXY": "https://poisoned.invalid:443",
+                "REQUESTS_CA_BUNDLE": "/poisoned/requests-ca.pem",
+                "CURL_CA_BUNDLE": "/poisoned/curl-ca.pem",
+            },
+            clear=True,
+        ),
+        patch.object(upgrade_module.requests, "Session", return_value=session),
     ):
         destination = str(Path(directory, "resolver"))
         upgrade_module._download_private_channel_resolver(
@@ -1010,16 +1020,36 @@ def test_private_downloader_enforces_size_mode_and_redirect_policy() -> None:
         info = os.lstat(destination)
         assert info.st_size == len(b"bounded")
         assert stat.S_IMODE(info.st_mode) == 0o600
+    assert session.trust_env is False
+    session.close.assert_called_once_with()
+    session.get.assert_called_once()
+    assert session.get.call_args.kwargs == {
+        "stream": True,
+        "timeout": (15, 120),
+        "allow_redirects": False,
+        "headers": {
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "User-Agent": "DefenseClaw-release-channel/1",
+        },
+        "proxies": {"https": "https://poisoned.invalid:443"},
+    }
 
     oversized = Mock(
         status_code=200,
         headers={},
         iter_content=Mock(return_value=[b"too-large"]),
     )
+    oversized_session = Mock()
+    oversized_session.get.return_value = oversized
     with (
         TemporaryDirectory() as directory,
         patch.dict(os.environ, {}, clear=True),
-        patch.object(upgrade_module.requests, "get", return_value=oversized),
+        patch.object(
+            upgrade_module.requests,
+            "Session",
+            return_value=oversized_session,
+        ),
         pytest.raises(OSError, match="size limit"),
     ):
         upgrade_module._download_private_channel_resolver(
@@ -1027,14 +1057,22 @@ def test_private_downloader_enforces_size_mode_and_redirect_policy() -> None:
             str(Path(directory, "oversized")),
             4,
         )
+    assert oversized_session.trust_env is False
+    oversized_session.close.assert_called_once_with()
 
     redirect = Mock(
         status_code=302,
         headers={"location": "https://untrusted.example/evidence"},
     )
+    redirect_session = Mock()
+    redirect_session.get.return_value = redirect
     with (
         patch.dict(os.environ, {}, clear=True),
-        patch.object(upgrade_module.requests, "get", return_value=redirect),
+        patch.object(
+            upgrade_module.requests,
+            "Session",
+            return_value=redirect_session,
+        ),
         pytest.raises(OSError, match="pinned HTTPS host set"),
     ):
         upgrade_module._download_private_channel_resolver(
@@ -1042,6 +1080,8 @@ def test_private_downloader_enforces_size_mode_and_redirect_policy() -> None:
             "/unused/evidence",
             16,
         )
+    assert redirect_session.trust_env is False
+    redirect_session.close.assert_called_once_with()
 
 
 @pytest.mark.parametrize(
@@ -1077,13 +1117,15 @@ def test_private_download_paths_share_one_bounded_redirect_budget(
         status_code=302,
         headers={"location": asset_url},
     )
+    private_session = Mock()
+    private_session.get.return_value = redirect
     with (
         patch.dict(os.environ, {}, clear=True),
         patch.object(
             upgrade_module.requests,
-            "get",
-            return_value=redirect,
-        ) as private_get,
+            "Session",
+            return_value=private_session,
+        ),
         pytest.raises(OSError, match="redirect limit"),
     ):
         upgrade_module._download_private_channel_resolver(
@@ -1091,7 +1133,9 @@ def test_private_download_paths_share_one_bounded_redirect_budget(
             str(tmp_path / "resolver"),
             16,
         )
-    assert private_get.call_count == upgrade_module._MAX_PRIVATE_REDIRECTS
+    assert private_session.trust_env is False
+    assert private_session.get.call_count == upgrade_module._MAX_PRIVATE_REDIRECTS
+    private_session.close.assert_called_once_with()
 
     cosign_url = (
         "https://github.com/sigstore/cosign/releases/download/"
@@ -1104,7 +1148,10 @@ def test_private_download_paths_share_one_bounded_redirect_budget(
     cosign_destination = tmp_path / "cosign"
     cosign_destination.mkdir()
     cosign_destination.chmod(0o700)
+    cosign_session = Mock()
+    cosign_session.get.return_value = cosign_redirect
     with (
+        patch.dict(os.environ, {}, clear=True),
         patch.object(
             upgrade_module,
             "_detect_platform",
@@ -1112,13 +1159,15 @@ def test_private_download_paths_share_one_bounded_redirect_budget(
         ),
         patch.object(
             upgrade_module.requests,
-            "get",
-            return_value=cosign_redirect,
-        ) as cosign_get,
+            "Session",
+            return_value=cosign_session,
+        ),
         pytest.raises(OSError, match="redirect limit"),
     ):
         upgrade_module._download_bootstrap_cosign(str(cosign_destination))
-    assert cosign_get.call_count == upgrade_module._MAX_PRIVATE_REDIRECTS
+    assert cosign_session.trust_env is False
+    assert cosign_session.get.call_count == upgrade_module._MAX_PRIVATE_REDIRECTS
+    cosign_session.close.assert_called_once_with()
 
 
 def test_no_shell_execution_in_public_bootstrap_source() -> None:

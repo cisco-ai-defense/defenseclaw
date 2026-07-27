@@ -105,11 +105,19 @@ def test_windows_public_install_authenticates_saved_script_before_execution() ->
     authenticate = windows.index("scripts/verify-sigstore-blob.py")
     bind_installer_digest = windows.index("Get-FileHash -LiteralPath $Installer")
     bind_setup_digest = windows.index("Get-FileHash -LiteralPath $Setup")
-    execute = windows.index("& $Installer")
     inspect_signature = windows.index("Get-AuthenticodeSignature $Setup")
+    inspect_publisher = windows.index("$SetupSignature.SignerCertificate.GetNameInfo")
+    execute = windows.index("& $Installer")
 
-    assert download < authenticate < bind_installer_digest < bind_setup_digest < execute
-    assert bind_setup_digest < inspect_signature
+    assert (
+        download
+        < authenticate
+        < bind_installer_digest
+        < bind_setup_digest
+        < inspect_signature
+        < inspect_publisher
+        < execute
+    )
     assert "checksums.txt.pem" in windows
     assert "checksums.txt.sig" in windows
     assert "release.yaml@refs/heads/main" in windows
@@ -119,6 +127,7 @@ def test_windows_public_install_authenticates_saved_script_before_execution() ->
     assert "$ExpectUnsignedSetup" in windows
     assert '"NotSigned"' in windows
     assert '"Valid"' in windows
+    assert '"Cisco Systems, Inc."' in windows
     assert "$SetupSignature.Status.ToString()" in windows
 
 

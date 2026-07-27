@@ -61,7 +61,47 @@ GITHUB_CLI_UNTRUSTED_ENVIRONMENT = frozenset(
         "GITHUB_ENTERPRISE_TOKEN",
         "GH_TOKEN",
         "GITHUB_TOKEN",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "GIT_SSL_CAINFO",
+        "GIT_SSL_CAPATH",
+        "GIT_SSL_NO_VERIFY",
+        "BASH_ENV",
+        "ENV",
+        "CDPATH",
+        "GLOBIGNORE",
+        "BASH_COMPAT",
+        "POSIXLY_CORRECT",
+        "PROMPT_COMMAND",
+        "BASH_XTRACEFD",
+        "IFS",
+        "GODEBUG",
+        "GOFLAGS",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONINSPECT",
+        "PYTHONSTARTUP",
+        "PYTHONUSERBASE",
+        "PYTHONWARNINGS",
+        "PYTHONBREAKPOINT",
+        "PERL5OPT",
+        "PERL5DB",
+        "PERL5LIB",
+        "PERLLIB",
+        "SSLKEYLOGFILE",
     }
+)
+GITHUB_CLI_UNTRUSTED_ENVIRONMENT_CASEFOLD = frozenset(
+    variable.casefold() for variable in GITHUB_CLI_UNTRUSTED_ENVIRONMENT
+)
+GITHUB_CLI_UNTRUSTED_ENVIRONMENT_PREFIXES_CASEFOLD = (
+    "cosign_",
+    "dyld_",
+    "ld_",
+    "sigstore_",
+    "tuf_",
 )
 EXPECTED_POLICY_FIELDS = {
     "schema_version",
@@ -563,11 +603,18 @@ def _gh_authenticated_environment(*, runner: Runner = subprocess.run) -> dict[st
 
 
 def _sanitized_github_cli_environment(environment: Mapping[str, str]) -> dict[str, str]:
-    """Remove ambient host, repository, and credential selection for GitHub CLI."""
+    """Remove ambient credential, interpreter, and trust selection."""
 
     sanitized = dict(environment)
-    for variable in GITHUB_CLI_UNTRUSTED_ENVIRONMENT:
-        sanitized.pop(variable, None)
+    for variable in tuple(sanitized):
+        folded = variable.casefold()
+        if folded in GITHUB_CLI_UNTRUSTED_ENVIRONMENT_CASEFOLD or folded.startswith(
+            GITHUB_CLI_UNTRUSTED_ENVIRONMENT_PREFIXES_CASEFOLD
+        ):
+            sanitized.pop(variable)
+    # Proxy routing remains supported for proxy-only operator networks. Private
+    # CA, TLS, GitHub-host, credential, and runtime overrides are removed, so
+    # the proxy cannot replace the authenticated GitHub.com trust root.
     return sanitized
 
 

@@ -454,7 +454,7 @@ def test_future_matrix_fails_closed_when_exact_field_recovery_anchor_is_missing(
 
     with pytest.raises(
         release_preflight.ReleasePreflightError,
-        match="field-recovery baseline 0.8.6 is unavailable",
+        match=r"field-recovery baseline 0\.8\.6 is unavailable",
     ):
         release_preflight.select_upgrade_baselines(
             policy_path=path,
@@ -676,8 +676,54 @@ def test_gh_auth_token_is_forwarded_only_in_the_explicit_child_environment(
     discovery_environment = kwargs["env"]
     assert isinstance(discovery_environment, dict)
     assert release_preflight.GITHUB_CLI_UNTRUSTED_ENVIRONMENT.isdisjoint(discovery_environment)
+    assert "operator-token" not in discovery_environment.values()
     assert child_environment["GH_TOKEN"] == "operator-token"
     assert (release_preflight.GITHUB_CLI_UNTRUSTED_ENVIRONMENT - {"GH_TOKEN"}).isdisjoint(child_environment)
+
+
+def test_authenticated_github_environment_preserves_proxy_but_removes_trust_overrides() -> None:
+    proxy_routing = {
+        "http_proxy": "http://attacker.invalid:8080",
+        "Https_Proxy": "http://attacker.invalid:8080",
+        "aLl_PrOxY": "socks5://attacker.invalid:1080",
+        "No_Proxy": "github.com",
+    }
+    hostile_runtime = {
+        "ssl_cert_file": "/attacker/ca.pem",
+        "Ssl_Cert_Dir": "/attacker/certs",
+        "requests_ca_bundle": "/attacker/requests-ca.pem",
+        "Curl_Ca_Bundle": "/attacker/curl-ca.pem",
+        "git_ssl_cainfo": "/attacker/git-ca.pem",
+        "Git_Ssl_Capath": "/attacker/git-certs",
+        "gIt_SsL_nO_vErIfY": "true",
+        "PythonPath": "/attacker/python",
+        "pYtHoNsTaRtUp": "/attacker/startup.py",
+        "gOdEbUg": "x509sha1=1",
+        "PerlLib": "/attacker/perl",
+        "sslkeylogfile": "/attacker/tls.keys",
+        "DyLd_InSeRt_LiBrArIeS": "/attacker/injected.dylib",
+        "ld_preload": "/attacker/injected.so",
+        "Cosign_Future_Trust_Override": "/attacker/cosign",
+        "Sigstore_Future_Trust_Override": "/attacker/sigstore",
+        "Tuf_Future_Trust_Override": "/attacker/tuf",
+    }
+    environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+        "DEFENSECLAW_SAFE_FIXTURE": "preserved",
+        **proxy_routing,
+        **hostile_runtime,
+    }
+
+    authenticated = release_preflight._github_com_environment_with_token(
+        "operator-token",
+        environment=environment,
+    )
+
+    assert set(hostile_runtime).isdisjoint(authenticated)
+    assert {name: authenticated[name] for name in proxy_routing} == proxy_routing
+    assert authenticated["DEFENSECLAW_SAFE_FIXTURE"] == "preserved"
+    assert authenticated["GH_TOKEN"] == "operator-token"
 
 
 def test_operator_preflight_binds_every_github_call_to_authenticated_environment(
@@ -686,9 +732,7 @@ def test_operator_preflight_binds_every_github_call_to_authenticated_environment
     commit = "a" * 40
     for variable in release_preflight.GITHUB_CLI_UNTRUSTED_ENVIRONMENT:
         monkeypatch.setenv(variable, f"hostile-{variable.lower()}")
-    discovery_environment = dict(os.environ)
-    for variable in release_preflight.GITHUB_CLI_UNTRUSTED_ENVIRONMENT:
-        discovery_environment.pop(variable, None)
+    discovery_environment = release_preflight._sanitized_github_cli_environment(os.environ)
     authenticated_environment = {
         **discovery_environment,
         "GH_TOKEN": "operator-token",
@@ -923,6 +967,8 @@ def test_workflow_uses_shared_request_and_baseline_preflight() -> None:
     assert "--operation repair-channel" in repair_request["run"]
     assert repair_request["env"]["EXPECTED_RELEASE_COMMIT"] == "${{ inputs.expected_commit }}"
     assert '--expected-commit "$EXPECTED_RELEASE_COMMIT"' in repair_request["run"]
+    assert repair_request["env"]["IMMUTABLE_RELEASES_CONFIRMED"] == ("${{ inputs.immutable_releases_confirmed }}")
+    assert '--immutable-releases-confirmed "$IMMUTABLE_RELEASES_CONFIRMED"' in repair_request["run"]
     assert "release-preflight.py select-baselines" in baseline["run"]
     assert "required_families = " not in baseline["run"]
 

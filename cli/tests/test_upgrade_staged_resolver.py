@@ -29,6 +29,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from defenseclaw import resolver_hint
 
 ROOT = Path(__file__).resolve().parents[2]
 UPGRADE_SCRIPT = ROOT / "scripts" / "upgrade.sh"
@@ -37,6 +38,12 @@ _CLEAN_086_GATEWAY_PAYLOAD = (
     b'if [[ "${1:-}" == "--version" ]]; then echo \'DefenseClaw gateway 0.8.6\'; exit 0; fi\n'
     b"exit 0\n"
 )
+_STAGED_COSIGN_SHA256_BY_ASSET = {
+    "cosign-darwin-amd64": resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "amd64")],
+    "cosign-darwin-arm64": resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "arm64")],
+    "cosign-linux-amd64": resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "amd64")],
+    "cosign-linux-arm64": resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "arm64")],
+}
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt",
@@ -316,10 +323,7 @@ def resolver_env(tmp_path: Path):
             """#!/usr/bin/env bash
 set -euo pipefail
 case "${1##*/}" in
-    cosign-darwin-amd64) sha='5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be' ;;
-    cosign-darwin-arm64) sha='ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e' ;;
-    cosign-linux-amd64) sha='7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4' ;;
-    cosign-linux-arm64) sha='b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917' ;;
+__COSIGN_DIGEST_CASES__
     *)
         sha="$(python3 - "$1" <<'PY'
 import hashlib
@@ -330,7 +334,12 @@ PY
         ;;
 esac
 printf '%s  %s\n' "${sha}" "$1"
-""",
+""".replace(
+                "__COSIGN_DIGEST_CASES__",
+                "\n".join(
+                    f"    {asset}) sha='{digest}' ;;" for asset, digest in _STAGED_COSIGN_SHA256_BY_ASSET.items()
+                ),
+            ),
         )
         _write_executable(
             fake_bin / "curl",

@@ -253,11 +253,103 @@ function Set-PrivateDirectoryProtection {
             [Security.AccessControl.DirectorySecurity]$security
         )
     }
+
+    $verified = if ($null -ne $item.PSObject.Methods["GetAccessControl"]) {
+        $item.GetAccessControl(
+            [Security.AccessControl.AccessControlSections]::Access -bor
+                [Security.AccessControl.AccessControlSections]::Owner
+        )
+    } else {
+        [IO.FileSystemAclExtensions]::GetAccessControl(
+            $item,
+            [Security.AccessControl.AccessControlSections]::Access -bor
+                [Security.AccessControl.AccessControlSections]::Owner
+        )
+    }
+    $verifiedOwner = $verified.GetOwner(
+        [Security.Principal.SecurityIdentifier]
+    )
+    if (-not $verified.AreAccessRulesProtected -or
+        -not $verifiedOwner.Equals($identity.User)) {
+        Die "rescue staging root owner or DACL protection did not persist"
+    }
+    $expectedSids = @{}
+    $expectedSids[$identity.User.Value] = $true
+    $expectedSids[$system.Value] = $true
+    $observedSids = @{}
+    foreach ($rule in $verified.GetAccessRules(
+            $true,
+            $true,
+            [Security.Principal.SecurityIdentifier]
+        )) {
+        $sid = [Security.Principal.SecurityIdentifier]$rule.IdentityReference
+        if ($rule.IsInherited -or
+            $rule.AccessControlType -ne
+                [Security.AccessControl.AccessControlType]::Allow -or
+            -not $expectedSids.ContainsKey($sid.Value) -or
+            $rule.FileSystemRights -ne
+                [Security.AccessControl.FileSystemRights]::FullControl) {
+            Die "rescue staging root retained an unexpected access rule"
+        }
+        $observedSids[$sid.Value] = $true
+    }
+    if ($observedSids.Count -ne $expectedSids.Count) {
+        Die "rescue staging root access rules are incomplete"
+    }
+    foreach ($sidValue in $expectedSids.Keys) {
+        if (-not $observedSids.ContainsKey($sidValue)) {
+            Die "rescue staging root access rules are incomplete"
+        }
+    }
+}
+
+function Get-FixedLocalStageAncestor {
+    $candidate = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::LocalApplicationData
+    )
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        Die "Windows did not provide a local application-data directory"
+    }
+    $full = [IO.Path]::GetFullPath($candidate).TrimEnd('\')
+    $volumeRoot = [IO.Path]::GetPathRoot($full)
+    if ($full.StartsWith("\\", [StringComparison]::Ordinal) -or
+        [string]::IsNullOrWhiteSpace($volumeRoot) -or
+        $volumeRoot.StartsWith("\\", [StringComparison]::Ordinal)) {
+        Die "rescue staging requires a local non-UNC path"
+    }
+    try {
+        $drive = [IO.DriveInfo]::new($volumeRoot)
+    } catch {
+        Die "rescue staging volume could not be identified"
+    }
+    if (-not $drive.IsReady -or
+        $drive.DriveType -ne [IO.DriveType]::Fixed) {
+        Die "rescue staging requires a ready fixed local volume"
+    }
+
+    $expectedRoot = [IO.Path]::GetFullPath($volumeRoot).TrimEnd('\')
+    $current = [IO.DirectoryInfo]::new($full)
+    while ($null -ne $current) {
+        $current.Refresh()
+        if (-not $current.Exists -or
+            ($current.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            Die "rescue staging ancestor must exist without reparse points"
+        }
+        if ($current.FullName.TrimEnd('\').Equals(
+                $expectedRoot,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            return $full
+        }
+        $current = $current.Parent
+    }
+    Die "rescue staging ancestor did not resolve to its fixed local volume"
 }
 
 function New-PrivateStageRoot {
+    $ancestor = Get-FixedLocalStageAncestor
     $root = [IO.Path]::Combine(
-        [IO.Path]::GetTempPath(),
+        $ancestor,
         ".defenseclaw-rescue-" + [guid]::NewGuid().ToString("N")
     )
     [IO.Directory]::CreateDirectory($root) | Out-Null
@@ -280,11 +372,11 @@ function Remove-PrivateStageRoot {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    $temp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
+    $ancestor = Get-FixedLocalStageAncestor
     $expectedParent = [IO.Path]::GetDirectoryName($full)
     $expectedName = [IO.Path]::GetFileName($full)
     if (-not $expectedParent.Equals(
-            $temp,
+            $ancestor,
             [StringComparison]::OrdinalIgnoreCase
         ) -or $expectedName -notmatch '^\.defenseclaw-rescue-[0-9a-f]{32}$') {
         Die "refusing to clean an unexpected rescue staging path: $full"
@@ -300,6 +392,60 @@ function Remove-PrivateStageRoot {
         return
     }
     [IO.Directory]::Delete($full, $true)
+}
+
+function Open-AuthenticatedFileLease {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [long]$MaximumBytes = 0,
+        [string]$ExpectedSha256 = ""
+    )
+
+    $full = [IO.Path]::GetFullPath($Path)
+    Assert-RegularFile `
+        -Path $full `
+        -Label $Label `
+        -MaximumBytes $MaximumBytes
+    $stream = [IO.File]::Open(
+        $full,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read
+    )
+    try {
+        if ($stream.Length -le 0 -or
+            ($MaximumBytes -gt 0 -and $stream.Length -gt $MaximumBytes)) {
+            Die "$Label changed outside its size bound before use"
+        }
+        if (-not [string]::IsNullOrEmpty($ExpectedSha256)) {
+            if ($ExpectedSha256 -notmatch '^[0-9a-f]{64}$') {
+                Die "authenticated SHA-256 for $Label is not canonical"
+            }
+            $sha256 = [Security.Cryptography.SHA256]::Create()
+            try {
+                $actual = ([BitConverter]::ToString(
+                    $sha256.ComputeHash($stream)
+                )).Replace("-", "").ToLowerInvariant()
+            } finally {
+                $sha256.Dispose()
+            }
+            $stream.Position = 0
+            if (-not $actual.Equals(
+                    $ExpectedSha256,
+                    [StringComparison]::Ordinal
+                )) {
+                Die "SHA-256 mismatch for $Label while acquiring its execution lease"
+            }
+        }
+        return [pscustomobject]@{
+            Path = $full
+            Stream = $stream
+        }
+    } catch {
+        $stream.Dispose()
+        throw
+    }
 }
 
 function Copy-RegularFile {
@@ -904,6 +1050,11 @@ if ($Help) {
 
 $stageRoot = ""
 $httpClient = $null
+$trustedPowerShellLease = $null
+$cosignLease = $null
+$channelLease = $null
+$channelBundleLease = $null
+$installerLease = $null
 $finalExitCode = 1
 try {
     Assert-NativeWindowsX64
@@ -928,9 +1079,17 @@ try {
         -Client $httpClient `
         -StageRoot $stageRoot `
         -Candidate $ambientCosign
+    $cosignLease = Open-AuthenticatedFileLease `
+        -Path $cosign `
+        -Label "Cosign $CosignVersion" `
+        -MaximumBytes $MaximumCosignBytes `
+        -ExpectedSha256 $CosignSha256
 
     $channelPath = ""
     for ($channelAttempt = 1; $channelAttempt -le 3; $channelAttempt++) {
+        $candidateChannelLease = $null
+        $candidateBundleLease = $null
+        $refLease = $null
         $attemptRoot = [IO.Path]::Combine(
             $stageRoot,
             "channel-attempt-$channelAttempt"
@@ -947,7 +1106,13 @@ try {
                 -Destination $refPath `
                 -Label "release-channel branch ref" `
                 -MaximumBytes $MaximumChannelRefBytes
-            $channelCommit = Get-ReleaseChannelCommit -Path $refPath
+            $refLease = Open-AuthenticatedFileLease `
+                -Path $refPath `
+                -Label "release-channel branch ref" `
+                -MaximumBytes $MaximumChannelRefBytes
+            $channelCommit = Get-ReleaseChannelCommit -Path $refLease.Path
+            $refLease.Stream.Dispose()
+            $refLease = $null
             $commitBase = "$ChannelRawBaseUrl/$channelCommit"
             if (($channelAttempt % 2) -eq 1) {
                 Invoke-BoundedDownload `
@@ -977,16 +1142,38 @@ try {
                     -MaximumBytes $MaximumChannelBytes
             }
 
+            $candidateChannelLease = Open-AuthenticatedFileLease `
+                -Path $candidatePath `
+                -Label "stable channel manifest" `
+                -MaximumBytes $MaximumChannelBytes
+            $candidateBundleLease = Open-AuthenticatedFileLease `
+                -Path $bundlePath `
+                -Label "stable channel Sigstore bundle" `
+                -MaximumBytes $MaximumChannelBundleBytes
             Invoke-CosignChannelVerification `
-                -Verifier $cosign `
-                -ChannelPath $candidatePath `
-                -BundlePath $bundlePath `
+                -Verifier $cosignLease.Path `
+                -ChannelPath $candidateChannelLease.Path `
+                -BundlePath $candidateBundleLease.Path `
                 -CosignHome $cosignHome
-            $channelPath = $candidatePath
+            $channelLease = $candidateChannelLease
+            $candidateChannelLease = $null
+            $channelBundleLease = $candidateBundleLease
+            $candidateBundleLease = $null
+            $channelPath = $channelLease.Path
             break
         } catch {
             if ($channelAttempt -eq 3) {
                 throw
+            }
+        } finally {
+            foreach ($attemptLease in @(
+                    $refLease,
+                    $candidateChannelLease,
+                    $candidateBundleLease
+                )) {
+                if ($null -ne $attemptLease) {
+                    $attemptLease.Stream.Dispose()
+                }
             }
         }
     }
@@ -1008,8 +1195,17 @@ try {
         -Path $installer `
         -Expected $channel.windows_installer_sha256 `
         -Label $WindowsInstallerName
-    Assert-PowerShellSyntax -Path $installer
+    $installerLease = Open-AuthenticatedFileLease `
+        -Path $installer `
+        -Label $WindowsInstallerName `
+        -MaximumBytes $MaximumInstallerBytes `
+        -ExpectedSha256 $channel.windows_installer_sha256
+    Assert-PowerShellSyntax -Path $installerLease.Path
     Assert-TrustedPowerShellStable -Identity $trustedPowerShell
+    $trustedPowerShellLease = Open-AuthenticatedFileLease `
+        -Path $trustedPowerShell.Path `
+        -Label "trusted PowerShell" `
+        -ExpectedSha256 $trustedPowerShell.Sha256
 
     $installerArguments = @(
         "-NoLogo",
@@ -1018,7 +1214,7 @@ try {
         "-ExecutionPolicy",
         "Bypass",
         "-File",
-        $installer,
+        $installerLease.Path,
         "-Version",
         $channel.target_version
     )
@@ -1044,7 +1240,7 @@ try {
         $channel.target_commit
     )
     Clear-UntrustedEnvironment
-    & $trustedPowerShell.Path @installerArguments
+    & $trustedPowerShellLease.Path @installerArguments
     $finalExitCode = ConvertTo-RescueExitCode -ExitCode $LASTEXITCODE
     if ($finalExitCode -ne 0) {
         [Console]::Error.WriteLine(
@@ -1055,6 +1251,17 @@ try {
     [Console]::Error.WriteLine($_.Exception.Message)
     $finalExitCode = 1
 } finally {
+    foreach ($lease in @(
+            $installerLease,
+            $channelBundleLease,
+            $channelLease,
+            $cosignLease,
+            $trustedPowerShellLease
+        )) {
+        if ($null -ne $lease) {
+            $lease.Stream.Dispose()
+        }
+    }
     if ($null -ne $httpClient) {
         $httpClient.Dispose()
     }

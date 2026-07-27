@@ -742,7 +742,7 @@ func TestWaitForGatewayReadinessTimesOutOnPersistentTelemetrySnapshotMiss(t *tes
 	snap, ready, err := waitForGatewayReadiness(
 		srv.Client(),
 		srv.URL,
-		50*time.Millisecond,
+		250*time.Millisecond,
 		5*time.Millisecond,
 		daemonReadinessRequirements{
 			guardrailEnabled: true,

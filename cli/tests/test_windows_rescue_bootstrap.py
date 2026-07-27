@@ -259,8 +259,8 @@ def test_windows_rescue_authenticates_before_parsing_or_downloading_installer() 
     bind = main.index("Assert-ChannelBindings -Record $channel")
     download = main.index("-Uri $channel.windows_installer_url")
     digest = main.index("-Expected $channel.windows_installer_sha256")
-    syntax = main.index("Assert-PowerShellSyntax -Path $installer")
-    execute = main.index("& $trustedPowerShell.Path @installerArguments")
+    syntax = main.index("Assert-PowerShellSyntax -Path $installerLease.Path")
+    execute = main.index("& $trustedPowerShellLease.Path @installerArguments")
 
     assert verify < parse < bind < download < digest < syntax < execute
     assert ('"https://github.com/$Repository/releases/download/$($Record.target_version)"') in source
@@ -590,6 +590,9 @@ def test_windows_rescue_uses_private_custody_and_a_fresh_trusted_shell() -> None
     source = _source()
 
     assert "$security.SetAccessRuleProtection($true, $false)" in source
+    assert "$verified.AreAccessRulesProtected" in source
+    assert "$verifiedOwner.Equals($identity.User)" in source
+    assert "$rule.IsInherited" in source
     assert '[Security.Principal.SecurityIdentifier]::new("S-1-5-18")' in source
     assert "[IO.FileAttributes]::ReparsePoint" in source
     assert "Assert-TrustedPowerShellStable -Identity $trustedPowerShell" in source
@@ -597,6 +600,81 @@ def test_windows_rescue_uses_private_custody_and_a_fresh_trusted_shell() -> None
     assert '"-NonInteractive",' in source
     assert '"-File",' in source
     assert "Remove-PrivateStageRoot -Path $stageRoot" in source
+
+
+def test_windows_rescue_stages_on_a_fixed_local_os_known_folder() -> None:
+    source = _source()
+    ancestor = source[
+        source.index("function Get-FixedLocalStageAncestor {") : source.index("\nfunction New-PrivateStageRoot {")
+    ]
+    create = source[
+        source.index("function New-PrivateStageRoot {") : source.index("\nfunction Remove-PrivateStageRoot {")
+    ]
+    cleanup = source[
+        source.index("function Remove-PrivateStageRoot {") : source.index("\nfunction Open-AuthenticatedFileLease {")
+    ]
+
+    assert "[Environment+SpecialFolder]::LocalApplicationData" in ancestor
+    assert "[IO.DriveType]::Fixed" in ancestor
+    assert "local non-UNC path" in ancestor
+    assert "[IO.FileAttributes]::ReparsePoint" in ancestor
+    assert "$current = $current.Parent" in ancestor
+    assert "[IO.Path]::GetTempPath()" not in source
+    assert "$ancestor = Get-FixedLocalStageAncestor" in create
+    assert "$ancestor = Get-FixedLocalStageAncestor" in cleanup
+    assert "[IO.Path]::Combine(\n        $ancestor," in create
+    assert "$expectedParent.Equals(\n            $ancestor," in cleanup
+
+
+def test_windows_rescue_holds_authenticated_file_leases_through_execution() -> None:
+    source = _source()
+    lease = source[
+        source.index("function Open-AuthenticatedFileLease {") : source.index("\nfunction Copy-RegularFile {")
+    ]
+    main = _main(source)
+
+    assert "[IO.FileShare]::Read" in lease
+    assert "$sha256.ComputeHash($stream)" in lease
+    assert "$stream.Position = 0" in lease
+    assert "return [pscustomobject]@{" in lease
+    assert "Stream = $stream" in lease
+
+    resolve_cosign = main.index("$cosign = Resolve-AuthenticatedCosign")
+    lease_cosign = main.index("$cosignLease = Open-AuthenticatedFileLease")
+    lease_ref = main.index("$refLease = Open-AuthenticatedFileLease")
+    read_ref = main.index("$channelCommit = Get-ReleaseChannelCommit -Path $refLease.Path")
+    lease_channel = main.index("$candidateChannelLease = Open-AuthenticatedFileLease")
+    lease_bundle = main.index("$candidateBundleLease = Open-AuthenticatedFileLease")
+    verify = main.index("Invoke-CosignChannelVerification")
+    channel_path = main.index("$channelPath = $channelLease.Path")
+    parse_channel = main.index("$channel = Read-CanonicalChannel -Path $channelPath")
+    installer_digest = main.index("-Expected $channel.windows_installer_sha256")
+    lease_installer = main.index("$installerLease = Open-AuthenticatedFileLease")
+    syntax = main.index("Assert-PowerShellSyntax -Path $installerLease.Path")
+    lease_shell = main.index("$trustedPowerShellLease = Open-AuthenticatedFileLease")
+    execute = main.index("& $trustedPowerShellLease.Path @installerArguments")
+
+    assert resolve_cosign < lease_cosign < lease_ref < read_ref
+    assert lease_channel < lease_bundle < verify < channel_path < parse_channel
+    assert installer_digest < lease_installer < syntax < lease_shell < execute
+    verification = main[verify:channel_path]
+    assert "-Verifier $cosignLease.Path" in verification
+    assert "-ChannelPath $candidateChannelLease.Path" in verification
+    assert "-BundlePath $candidateBundleLease.Path" in verification
+    assert "$installerLease.Path" in main[lease_installer:execute]
+
+    final_cleanup = main[main.rindex("} finally {") :]
+    dispose = final_cleanup.index("$lease.Stream.Dispose()")
+    remove = final_cleanup.index("Remove-PrivateStageRoot -Path $stageRoot")
+    assert dispose < remove
+    for name in (
+        "$installerLease",
+        "$channelBundleLease",
+        "$channelLease",
+        "$cosignLease",
+        "$trustedPowerShellLease",
+    ):
+        assert name in final_cleanup
 
 
 def test_windows_rescue_preserves_acl_hardening_failure_when_cleanup_fails() -> None:

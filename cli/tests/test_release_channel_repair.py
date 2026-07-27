@@ -435,10 +435,10 @@ def test_workflow_repair_is_expiry_independent_and_nonpublishing() -> None:
     repair = workflow["jobs"]["repair-stable-channel"]
     assert "concurrency" not in repair
     assert "needs" not in repair
-    assert repair["if"] == "inputs.operation == 'repair-channel'"
+    assert repair["if"] == "inputs.operation == 'repair-channel' && github.ref == 'refs/heads/main'"
     assert repair["permissions"] == {"contents": "write", "id-token": "write"}
     rendered = json.dumps(repair, sort_keys=True)
-    assert "immutable_releases_confirmed" not in rendered
+    assert "immutable_releases_confirmed" in rendered
     assert "actions/download-artifact@" not in rendered
     assert "scripts/download_release_custody.py" in rendered
     assert "scripts/verify-release-channel-target.py" in rendered

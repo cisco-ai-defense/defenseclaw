@@ -1827,6 +1827,9 @@ def test_release_docs_use_one_dispatch_and_never_precreate_tag() -> None:
         assert "git push origin" not in text
     assert "-f operation=release" in install
     assert f"-f version={RELEASE_DOC_EXAMPLE_VERSION}" in install
+    assert "operator preflight" in install
+    assert "expected_commit:" in install
+    assert '-f expected_commit="$RELEASE_COMMIT"' in install
     assert "operation: release" in install
     assert f"version: {RELEASE_DOC_EXAMPLE_VERSION}" in install
     assert r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$" in install
@@ -1889,7 +1892,13 @@ def test_installed_user_upgrade_docs_require_authenticated_resolver_assets() -> 
     assert "signed stable-channel record" in cli
     assert "defenseclaw-rescue.sh" in cli
     assert "/bin/sh ./defenseclaw-rescue.sh --yes" in cli
-    assert "bash defenseclaw-rescue.sh" not in cli
+    assert (
+        re.search(
+            r"(?m)^\s*(?:/usr/bin/env\s+)?(?:/bin/)?bash\b[^\n]*defenseclaw-rescue\.sh",
+            cli,
+        )
+        is None
+    )
     assert "--output ./defenseclaw-rescue.sh" in channel
     assert "refuses stdin or pipe execution" in channel
     assert "/bin/sh ./defenseclaw-rescue.sh --yes" in channel

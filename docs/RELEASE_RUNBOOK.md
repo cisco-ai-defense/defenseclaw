@@ -372,15 +372,29 @@ if ($ActualSetupSha256 -cne $ExpectedSetupSha256) {
   throw "Downloaded DefenseClawSetup-x64.exe does not match signed checksums"
 }
 
-& $Installer -Version $ReleaseVersion -Connector none -Yes
-if ($LASTEXITCODE -ne 0) { throw "Authenticated install.ps1 failed" }
-defenseclaw --version
-defenseclaw status
 $SetupSignature = Get-AuthenticodeSignature $Setup
 $ExpectedSignatureStatus = if ($ExpectUnsignedSetup) { "NotSigned" } else { "Valid" }
 if ($SetupSignature.Status.ToString() -cne $ExpectedSignatureStatus) {
   throw "Setup signature status was $($SetupSignature.Status), expected $ExpectedSignatureStatus"
 }
+if (-not $ExpectUnsignedSetup) {
+  $SetupPublisher = if ($null -ne $SetupSignature.SignerCertificate) {
+    $SetupSignature.SignerCertificate.GetNameInfo(
+      [Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+      $false
+    )
+  } else {
+    ""
+  }
+  if ($SetupPublisher -cne "Cisco Systems, Inc.") {
+    throw "Setup publisher was '$SetupPublisher', expected 'Cisco Systems, Inc.'"
+  }
+}
+
+& $Installer -Version $ReleaseVersion -Connector none -Yes
+if ($LASTEXITCODE -ne 0) { throw "Authenticated install.ps1 failed" }
+defenseclaw --version
+defenseclaw status
 ```
 
 The installed CLI and gateway must report the target version and the gateway

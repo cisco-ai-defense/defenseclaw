@@ -54,6 +54,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  reject-non-main-repair:
+    name: Reject channel repair outside protected main
+    if: inputs.operation == 'repair-channel' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Reject untrusted repair ref
+        env:
+          SELECTED_REF: ${{ github.ref }}
+        run: |
+          echo "::error title=Untrusted repair ref::Run channel repair from protected main, not $SELECTED_REF."
+          exit 1
+
   release-preflight:
     name: Validate release request
     if: inputs.operation == 'release'
@@ -1157,7 +1171,7 @@ jobs:
   # same idempotent channel publisher under this workflow's Fulcio identity.
   repair-stable-channel:
     name: Repair authenticated stable channel
-    if: inputs.operation == 'repair-channel'
+    if: inputs.operation == 'repair-channel' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: release
@@ -1169,6 +1183,8 @@ jobs:
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
+          # The job-level ref guard makes this immutable dispatch SHA a
+          # protected-main commit before the privileged checkout can run.
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
@@ -1178,6 +1194,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION_INPUT: ${{ inputs.version }}
           EXPECTED_RELEASE_COMMIT: ${{ inputs.expected_commit }}
+          IMMUTABLE_RELEASES_CONFIRMED: ${{ inputs.immutable_releases_confirmed }}
         run: |
           python3 scripts/release-preflight.py request \
             --operation repair-channel \
@@ -1185,7 +1202,8 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --ref "$GITHUB_REF" \
             --commit "$GITHUB_SHA" \
-            --expected-commit "$EXPECTED_RELEASE_COMMIT"
+            --expected-commit "$EXPECTED_RELEASE_COMMIT" \
+            --immutable-releases-confirmed "$IMMUTABLE_RELEASES_CONFIRMED"
 
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
         with:

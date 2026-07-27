@@ -5988,6 +5988,8 @@ class TestCosignBootstrap(unittest.TestCase):
         )
         response.iter_content.return_value = [payload]
         expected = hashlib.sha256(payload).hexdigest()
+        session = Mock()
+        session.get.return_value = response
 
         with (
             TemporaryDirectory() as root,
@@ -6000,10 +6002,11 @@ class TestCosignBootstrap(unittest.TestCase):
                 {("linux", "amd64"): expected},
                 clear=True,
             ),
+            patch.dict(os.environ, {}, clear=True),
             patch(
-                "defenseclaw.commands.cmd_upgrade.requests.get",
-                return_value=response,
-            ) as get_mock,
+                "defenseclaw.commands.cmd_upgrade.requests.Session",
+                return_value=session,
+            ),
         ):
             os.chmod(root, 0o700)
             real_chmod = os.chmod
@@ -6025,30 +6028,45 @@ class TestCosignBootstrap(unittest.TestCase):
             self.assertEqual(info.st_nlink, 1)
             self.assertEqual(chmod_mock.call_args.kwargs, {})
 
-        get_mock.assert_called_once()
-        self.assertFalse(get_mock.call_args.kwargs["allow_redirects"])
+        self.assertIs(session.trust_env, False)
+        session.close.assert_called_once_with()
+        session.get.assert_called_once()
+        self.assertEqual(
+            session.get.call_args.kwargs,
+            {
+                "stream": True,
+                "timeout": (15, 120),
+                "allow_redirects": False,
+                "proxies": {},
+            },
+        )
 
     def test_rejects_redirect_outside_pinned_github_host_set_before_following(self):
         response = Mock(
             status_code=302,
             headers={"location": "https://attacker.invalid/cosign"},
         )
+        session = Mock()
+        session.get.return_value = response
         with (
             TemporaryDirectory() as root,
             patch(
                 "defenseclaw.commands.cmd_upgrade._detect_platform",
                 return_value=("linux", "amd64"),
             ),
+            patch.dict(os.environ, {}, clear=True),
             patch(
-                "defenseclaw.commands.cmd_upgrade.requests.get",
-                return_value=response,
-            ) as get_mock,
+                "defenseclaw.commands.cmd_upgrade.requests.Session",
+                return_value=session,
+            ),
             self.assertRaisesRegex(OSError, "pinned HTTPS host set"),
         ):
             os.chmod(root, 0o700)
             _download_bootstrap_cosign(root)
 
-        get_mock.assert_called_once()
+        self.assertIs(session.trust_env, False)
+        session.close.assert_called_once_with()
+        session.get.assert_called_once()
 
 
 class TestChecksumVerification(unittest.TestCase):

@@ -37,6 +37,10 @@ AUTHENTICATED_CHILD_ENV_REMOVALS = (
     "PYTHONUSERBASE",
     "PYTHONWARNINGS",
     "PYTHONBREAKPOINT",
+    "PERL5OPT",
+    "PERL5DB",
+    "PERL5LIB",
+    "PERLLIB",
     "BASH_ENV",
     "ENV",
     "CDPATH",
@@ -159,9 +163,9 @@ def authenticated_resolver_instructions(
         '    --max-filesize 209715200 --output "$cosign_bin" \\\n'
         f"      'https://github.com/sigstore/cosign/releases/download/v{COSIGN_BOOTSTRAP_VERSION}/'$cosign_asset\n"
         "  if command -v sha256sum >/dev/null; then\n"
-        '    cosign_actual="$(sha256sum "$cosign_bin" | awk \'{print $1}\')"\n'
+        '    cosign_actual="$("$@" sha256sum "$cosign_bin" | "$@" awk \'{print $1}\')"\n'
         "  else\n"
-        '    cosign_actual="$(shasum -a 256 "$cosign_bin" | awk \'{print $1}\')"\n'
+        '    cosign_actual="$("$@" shasum -a 256 "$cosign_bin" | "$@" awk \'{print $1}\')"\n'
         "  fi\n"
         '  if [ "$cosign_actual" != "$cosign_sha" ]; then\n'
         "    echo 'Downloaded Cosign digest mismatch.' >&2\n"
@@ -185,9 +189,9 @@ def authenticated_resolver_instructions(
         "  [ \"$(printf '%s\\n' \"$line\" | wc -l | tr -d ' ')\" = 1 ]\n"
         '  expected="${line%% *}"\n'
         "  if command -v sha256sum >/dev/null; then\n"
-        '    actual="$(sha256sum "$d/defenseclaw-upgrade.sh" | awk \'{print $1}\')"\n'
+        '    actual="$("$@" sha256sum "$d/defenseclaw-upgrade.sh" | "$@" awk \'{print $1}\')"\n'
         "  else\n"
-        '    actual="$(shasum -a 256 "$d/defenseclaw-upgrade.sh" | awk \'{print $1}\')"\n'
+        '    actual="$("$@" shasum -a 256 "$d/defenseclaw-upgrade.sh" | "$@" awk \'{print $1}\')"\n'
         "  fi\n"
         '  [ "$actual" = "$expected" ]\n'
         f'  [ "$(tail -n 1 "$d/defenseclaw-upgrade.sh")" = \'{marker}\' ]\n'

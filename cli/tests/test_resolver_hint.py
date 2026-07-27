@@ -104,6 +104,9 @@ def test_authenticated_resolver_hint_is_copy_pasteable_and_fail_closed() -> None
     cosign_execute = posix.index('"$cosign_bin" verify-blob')
     assert cosign_fetch < cosign_digest < cosign_execute
     assert "Downloaded Cosign digest mismatch." in posix
+    assert posix.count('"$@" sha256sum') == 2
+    assert posix.count('"$@" shasum -a 256') == 2
+    assert posix.count('"$@" awk') == 4
     for bounded_option in (
         "--connect-timeout 30",
         "--max-time 300",
@@ -178,7 +181,9 @@ def test_posix_resolver_hint_clears_trust_overrides_before_network_access() -> N
     assert 'unset "$trust_name"' not in posix
     assert 'set -- "$@" -u "$trust_name"' in posix
 
-    preamble = posix.split("  umask 077\n", 1)[0]
+    sanitizer_boundary = "  umask 077\n"
+    assert posix.count(sanitizer_boundary) == 1
+    preamble = posix.split(sanitizer_boundary, 1)[0]
     probe = (
         f"{preamble}"
         "  if type resolver_hint_poison >/dev/null 2>&1; then\n"
@@ -197,6 +202,10 @@ def test_posix_resolver_hint_clears_trust_overrides_before_network_access() -> N
             "CURL_CA_BUNDLE": "/poisoned/curl-ca.pem",
             "BASH_ENV": "/poisoned/bash-env",
             "PYTHONPATH": "/poisoned/python",
+            "PERL5OPT": "-Mlib=/poisoned/perl",
+            "PERL5DB": "BEGIN { die 'poisoned' }",
+            "PERL5LIB": "/poisoned/perl",
+            "PERLLIB": "/poisoned/perl",
             "GODEBUG": "x509sha1=1",
             "GOFLAGS": "-mod=mod",
             "COSIGN_FUTURE_TRUST_OVERRIDE": "poisoned",
@@ -228,6 +237,10 @@ def test_posix_resolver_hint_clears_trust_overrides_before_network_access() -> N
         "CURL_CA_BUNDLE",
         "BASH_ENV",
         "PYTHONPATH",
+        "PERL5OPT",
+        "PERL5DB",
+        "PERL5LIB",
+        "PERLLIB",
         "GODEBUG",
         "GOFLAGS",
     }.isdisjoint(exported_names)

@@ -637,6 +637,10 @@ as a regular file, authenticate those saved bytes, and then run:
 /bin/sh ./defenseclaw-rescue.sh --yes
 ```
 
+That `/bin/sh` runs only the POSIX clean-environment trampoline; the
+trampoline explicitly enters the trusted system `/bin/bash` before parsing
+the embedded Bash payload.
+
 Authenticate that bootstrap once through the tagged release's signed
 `checksums.txt`; a `releases/latest/download` URL is only a locator and must
 never be streamed directly into a shell. The rescue then follows the same

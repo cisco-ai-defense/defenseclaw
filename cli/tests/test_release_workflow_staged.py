@@ -224,6 +224,7 @@ def test_release_is_one_manual_dispatch_from_reviewed_main() -> None:
 
     jobs = workflow["jobs"]
     assert set(jobs) == {
+        "reject-non-main-repair",
         "release-preflight",
         "build-runtime-candidate",
         "macos-app",
@@ -235,6 +236,10 @@ def test_release_is_one_manual_dispatch_from_reviewed_main() -> None:
         "repair-stable-channel",
     }
     assert jobs["release-preflight"]["if"] == "inputs.operation == 'release'"
+    reject_repair = jobs["reject-non-main-repair"]
+    assert reject_repair["if"] == ("inputs.operation == 'repair-channel' && github.ref != 'refs/heads/main'")
+    assert reject_repair["permissions"] == {}
+    assert all("uses" not in step for step in reject_repair["steps"])
     assert jobs["build-runtime-candidate"]["needs"] == "release-preflight"
     assert jobs["macos-app"]["needs"] == [
         "release-preflight",
@@ -265,7 +270,12 @@ def test_release_is_one_manual_dispatch_from_reviewed_main() -> None:
         "publish-release",
     ]
     assert jobs["advance-stable-channel"]["if"] == "inputs.operation == 'release'"
+    repair = jobs["repair-stable-channel"]
+    assert repair["if"] == "inputs.operation == 'repair-channel' && github.ref == 'refs/heads/main'"
+    repair_checkout = next(step for step in repair["steps"] if step.get("uses", "").startswith("actions/checkout@"))
+    assert repair_checkout["with"]["ref"] == "${{ github.sha }}"
     assert {name: job.get("timeout-minutes") for name, job in jobs.items() if name != "release-smoke"} == {
+        "reject-non-main-repair": "5",
         "release-preflight": "20",
         "build-runtime-candidate": "45",
         "macos-app": "60",
@@ -334,16 +344,14 @@ def test_cosign_version_split_is_documented_and_bound_to_offline_production_pins
 
     # These are the shipped rescue/install verifier identities, not a
     # network-dependent availability probe.
-    public_verifiers = "\n".join(
-        (ROOT / relative).read_text(encoding="utf-8")
-        for relative in (
-            "scripts/defenseclaw-rescue.sh",
-            "scripts/install.sh",
-            "scripts/upgrade.sh",
-        )
-    )
-    for digest in production_digests:
-        assert digest in public_verifiers
+    for relative in (
+        "scripts/defenseclaw-rescue.sh",
+        "scripts/install.sh",
+        "scripts/upgrade.sh",
+    ):
+        verifier = (ROOT / relative).read_text(encoding="utf-8")
+        for digest in production_digests:
+            assert digest in verifier, (relative, digest)
     windows_rescue = (ROOT / "scripts/defenseclaw-rescue.ps1").read_text(encoding="utf-8")
     assert resolver_hint.COSIGN_BOOTSTRAP_SHA256[("windows", "amd64")] in windows_rescue
     strategy = (ROOT / "docs/RELEASE_VALIDATION.md").read_text(encoding="utf-8")
@@ -715,9 +723,12 @@ def test_mode_preserving_transport_wraps_every_unsigned_ci_candidate_boundary() 
         if step.get("uses", "").startswith("actions/upload-artifact@")
     )
     assert prepare_index < pack_index < upload_index
-    pack = producer_steps[pack_index]["run"]
+    pack_step = producer_steps[pack_index]
+    pack = pack_step["run"]
     assert "release_candidate.py pack-transport" in pack
-    assert '--source "${{ steps.prepare.outputs.root }}"' in pack
+    assert pack_step["env"] == {"CANDIDATE_ROOT": "${{ steps.prepare.outputs.root }}"}
+    assert '--source "$CANDIDATE_ROOT"' in pack
+    assert "steps.prepare.outputs.root" not in pack
     assert "--output unsigned-candidate.tar" in pack
     assert producer_steps[upload_index]["with"]["path"] == "unsigned-candidate.tar"
 

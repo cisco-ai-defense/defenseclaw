@@ -146,6 +146,7 @@ sanitize_authenticated_environment() {
     unset GODEBUG GOFLAGS
     unset PYTHONPATH PYTHONHOME PYTHONINSPECT PYTHONSTARTUP PYTHONUSERBASE
     unset PYTHONWARNINGS PYTHONBREAKPOINT
+    unset PERL5OPT PERL5DB PERL5LIB PERLLIB
     unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT LD_DEBUG LD_DEBUG_OUTPUT
     unset LD_PROFILE LD_USE_LOAD_BIAS
     unset DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH
@@ -220,6 +221,31 @@ private_temp_root_identity() {
             return 1
             ;;
     esac
+}
+
+validate_private_workdir() {
+    local path="$1"
+    [[ -d "${path}" && ! -L "${path}" ]] \
+        || die "private rescue work directory is unavailable"
+
+    local identity device inode owner mode
+    identity="$(private_temp_root_identity "${path}")" \
+        || die "could not inspect private rescue work directory"
+    IFS=: read -r device inode owner mode <<< "${identity}"
+    [[ "${device}" =~ ^[0-9]+$ && "${inode}" =~ ^[0-9]+$ \
+        && "${owner}" == "${EUID}" && "${mode}" =~ ^[0-7]{3,4}$ ]] \
+        || die "private rescue work directory identity is invalid"
+    (( (8#${mode} & 8#7777) == 8#700 )) \
+        || die "private rescue work directory mode is not 0700"
+    printf '%s\n' "${identity}"
+}
+
+assert_trusted_execution_custody() {
+    local current_workdir_identity
+    current_workdir_identity="$(validate_private_workdir "${workdir}")"
+    [[ "${current_workdir_identity}" == "${workdir_identity}" ]] \
+        || die "private rescue work directory identity changed before execution"
+    assert_trusted_bash_stable
 }
 
 regular_file_size() {
@@ -377,8 +403,8 @@ if [[ "${temp_owner}" == "${EUID}" ]]; then
 else
     [[ "${temp_owner}" == "0" ]] \
         || die "temporary directory root has an unexpected owner"
-    (( (8#${temp_mode} & 8#1000) != 0 || (8#${temp_mode} & 8#002) == 0 )) \
-        || die "shared system temporary directory root is non-sticky and other-writable"
+    (( (8#${temp_mode} & 8#1000) != 0 || (8#${temp_mode} & 8#022) == 0 )) \
+        || die "shared system temporary directory root is non-sticky and group or other-writable"
 fi
 readonly temp_root temp_root_identity
 
@@ -395,11 +421,16 @@ trap cleanup EXIT
 [[ "$(private_temp_root_identity "${temp_root}")" == "${temp_root_identity}" ]] \
     || die "temporary directory root changed while creating rescue custody"
 chmod 700 "${workdir}"
+workdir_identity="$(validate_private_workdir "${workdir}")"
+readonly workdir_identity
 cosign_home="${workdir}/cosign-home"
 cosign_config="${workdir}/cosign-config"
 cosign_cache="${workdir}/cosign-cache"
-mkdir -m 700 "${cosign_home}" "${cosign_config}" "${cosign_cache}"
-readonly cosign_home cosign_config cosign_cache
+cosign_data="${workdir}/cosign-data"
+cosign_state="${workdir}/cosign-state"
+mkdir -m 700 "${cosign_home}" "${cosign_config}" "${cosign_cache}" \
+    "${cosign_data}" "${cosign_state}"
+readonly cosign_home cosign_config cosign_cache cosign_data cosign_state
 
 platform="$("${UNAME_BIN}" -s | tr '[:upper:]' '[:lower:]')/$("${UNAME_BIN}" -m)"
 case "${platform}" in
@@ -500,6 +531,8 @@ for channel_attempt in 1 2 3; do
         if HOME="${cosign_home}" \
             XDG_CONFIG_HOME="${cosign_config}" \
             XDG_CACHE_HOME="${cosign_cache}" \
+            XDG_DATA_HOME="${cosign_data}" \
+            XDG_STATE_HOME="${cosign_state}" \
             "${cosign_bin}" verify-blob \
                 --bundle "${channel_candidate}.bundle" \
                 --certificate-identity "${RELEASE_WORKFLOW_IDENTITY}" \
@@ -593,12 +626,12 @@ if [[ "${rescue_mode}" == "install" ]]; then
     [[ "$(sha256_file "${installer}")" == "${posix_installer_sha256}" ]] \
         || die "tagged POSIX installer digest does not match the authenticated channel"
     sanitize_authenticated_environment
-    assert_trusted_bash_stable
+    assert_trusted_execution_custody
     "${TRUSTED_BASH}" -n "${installer}" || die "tagged POSIX installer has invalid shell syntax"
     printf 'Authenticated stable POSIX installer %s (%s); starting fresh installation.\n' \
         "${target_version}" "${target_commit}"
     sanitize_authenticated_environment
-    assert_trusted_bash_stable
+    assert_trusted_execution_custody
     VERSION="${target_version}" \
         "${TRUSTED_BASH}" "${installer}" \
             "${operator_arguments[@]+"${operator_arguments[@]}"}"
@@ -610,13 +643,13 @@ else
     [[ "$(tail -n 1 "${resolver}")" == "${RESOLVER_COMPLETENESS_MARKER}" ]] \
         || die "tagged resolver is incomplete"
     sanitize_authenticated_environment
-    assert_trusted_bash_stable
+    assert_trusted_execution_custody
     "${TRUSTED_BASH}" -n "${resolver}" || die "tagged resolver has invalid shell syntax"
 
     printf 'Authenticated stable resolver %s (%s); starting recovery controller.\n' \
         "${target_version}" "${target_commit}"
     sanitize_authenticated_environment
-    assert_trusted_bash_stable
+    assert_trusted_execution_custody
     "${TRUSTED_BASH}" "${resolver}" --version "${target_version}" \
         "${operator_arguments[@]+"${operator_arguments[@]}"}"
 fi

@@ -687,10 +687,12 @@ jobs:
           test -d "$root"
           echo "root=$root" >> "$GITHUB_OUTPUT"
       - name: Preserve candidate modes for Actions transport
+        env:
+          CANDIDATE_ROOT: ${{ steps.prepare.outputs.root }}
         run: |
           set -euo pipefail
           python3 scripts/release_candidate.py pack-transport \
-            --source "${{ steps.prepare.outputs.root }}" \
+            --source "$CANDIDATE_ROOT" \
             --output unsigned-candidate.tar
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:

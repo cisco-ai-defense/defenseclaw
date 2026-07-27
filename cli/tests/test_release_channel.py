@@ -52,6 +52,10 @@ POISONED_AUTH_ENVIRONMENT = {
     "PYTHONUSERBASE": "/attacker/python-user",
     "PYTHONWARNINGS": "ignore",
     "PYTHONBREAKPOINT": "attacker.breakpoint",
+    "PERL5OPT": "-MDefenseClaw::Poison",
+    "PERL5DB": "BEGIN { die 'poisoned' }",
+    "PERL5LIB": "/attacker/perl",
+    "PERLLIB": "/attacker/perl",
     # Empty loader values remain observable in a child environment without
     # asking the host dynamic loader to open an invalid test object.
     "LD_PRELOAD": "",
@@ -872,6 +876,8 @@ exit {cosign_exit}
     env.update(POISONED_AUTH_ENVIRONMENT)
     env["XDG_CONFIG_HOME"] = str(tmp_path / "ambient-xdg-config")
     env["XDG_CACHE_HOME"] = str(tmp_path / "ambient-xdg-cache")
+    env["XDG_DATA_HOME"] = str(tmp_path / "ambient-xdg-data")
+    env["XDG_STATE_HOME"] = str(tmp_path / "ambient-xdg-state")
     env["HTTPS_PROXY"] = "http://127.0.0.1:65535"
     env["NO_PROXY"] = "localhost,127.0.0.1"
     bash_env_poison = tmp_path / "bash-env-poison.sh"
@@ -998,10 +1004,27 @@ def test_posix_rescue_cosign_pins_match_resolver_hint_and_test_fixtures() -> Non
     source = RESCUE.read_text(encoding="utf-8")
 
     assert _COSIGN_FIXTURES == expected
-    assert f'readonly COSIGN_VERSION="{resolver_hint.COSIGN_BOOTSTRAP_VERSION}"' in source
-    for asset, digest in set(expected.values()):
-        assert f'cosign_asset="{asset}"' in source
-        assert f'cosign_sha256="{digest}"' in source
+    assert re.findall(r'^readonly COSIGN_VERSION="([^"]+)"$', source, flags=re.MULTILINE) == [
+        resolver_hint.COSIGN_BOOTSTRAP_VERSION
+    ]
+    observed_pins = {
+        (platform_case, asset): digest
+        for platform_case, asset, digest in re.findall(
+            r"(?m)^    ([^\n)]*)\)\n"
+            r'        cosign_asset="([^"]+)"\n'
+            r'        cosign_sha256="([0-9a-f]{64})"$',
+            source,
+        )
+    }
+    assert observed_pins == {
+        ("darwin/x86_64", "cosign-darwin-amd64"): resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "amd64")],
+        ("darwin/arm64", "cosign-darwin-arm64"): resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "arm64")],
+        ("linux/x86_64 | linux/amd64", "cosign-linux-amd64"): resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "amd64")],
+        (
+            "linux/aarch64 | linux/arm64",
+            "cosign-linux-arm64",
+        ): resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "arm64")],
+    }
 
 
 def test_posix_rescue_downloads_have_finite_network_time_bounds() -> None:
@@ -1034,16 +1057,23 @@ def test_posix_rescue_clean_handoff_and_shared_temp_guards_are_fail_closed() -> 
     assert "exec /usr/bin/env -i /bin/sh -c" in source
     assert "exec /bin/bash /dev/fd/3" in source
     assert "3<<'# DefenseClaw rescue bootstrap complete v1'" in source
-    assert ("(( (8#${temp_mode} & 8#1000) != 0 || (8#${temp_mode} & 8#002) == 0 ))") in source
-    assert "shared system temporary directory root is non-sticky and other-writable" in source
+    assert ("(( (8#${temp_mode} & 8#1000) != 0 || (8#${temp_mode} & 8#022) == 0 ))") in source
+    assert "shared system temporary directory root is non-sticky and group or other-writable" in source
 
     # Sticky public roots and non-public root-owned roots are safe. A root-owned
-    # mode that is both non-sticky and other-writable must remain rejected.
+    # mode that is non-sticky and group- or other-writable must remain rejected.
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("Bash is required to exercise the POSIX mode predicate")
-    predicate = 'mode="$1"; (( (8#${mode} & 8#1000) != 0 || (8#${mode} & 8#002) == 0 ))'
-    for mode, expected in (("1777", 0), ("0755", 0), ("0777", 1)):
+    predicate = 'mode="$1"; (( (8#${mode} & 8#1000) != 0 || (8#${mode} & 8#022) == 0 ))'
+    for mode, expected in (
+        ("1777", 0),
+        ("1775", 0),
+        ("0755", 0),
+        ("0770", 1),
+        ("0775", 1),
+        ("0777", 1),
+    ):
         completed = subprocess.run(
             [bash, "-c", predicate, "temp-mode-contract", mode],
             capture_output=True,
@@ -1251,6 +1281,21 @@ def test_rescue_arms_private_workdir_cleanup_before_post_creation_checks() -> No
     assert create < cleanup < trap < validate < chmod < mkdir
 
 
+def test_rescue_revalidates_private_workdir_before_every_trusted_execution() -> None:
+    source = RESCUE.read_text(encoding="utf-8")
+    execution = source.split('if [[ "${rescue_mode}" == "install" ]]; then', 1)[1]
+
+    assert 'workdir_identity="$(validate_private_workdir "${workdir}")"' in source
+    assert 'current_workdir_identity="$(validate_private_workdir "${workdir}")"' in source
+    assert '[[ "${current_workdir_identity}" == "${workdir_identity}" ]]' in source
+    assert execution.count("assert_trusted_execution_custody") == 4
+    assert execution.count('"${TRUSTED_BASH}"') == 4
+    assert execution.count('assert_trusted_execution_custody\n    "${TRUSTED_BASH}"') == 3
+    assert (
+        'assert_trusted_execution_custody\n    VERSION="${target_version}" \\\n        "${TRUSTED_BASH}"'
+    ) in execution
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX rescue bootstrap")
 def test_rescue_authenticates_channel_then_executes_exact_tagged_resolver(
     tmp_path: Path,
@@ -1299,11 +1344,15 @@ def test_rescue_authenticates_channel_then_executes_exact_tagged_resolver(
     assert auth_environment["HOME"].endswith("/cosign-home")
     assert auth_environment["XDG_CONFIG_HOME"].endswith("/cosign-config")
     assert auth_environment["XDG_CACHE_HOME"].endswith("/cosign-cache")
+    assert auth_environment["XDG_DATA_HOME"].endswith("/cosign-data")
+    assert auth_environment["XDG_STATE_HOME"].endswith("/cosign-state")
     assert auth_environment["HTTPS_PROXY"] == env["HTTPS_PROXY"]
     assert auth_environment["NO_PROXY"] == env["NO_PROXY"]
     assert resolver_environment["HOME"] == env["HOME"]
     assert resolver_environment["XDG_CONFIG_HOME"] == env["XDG_CONFIG_HOME"]
     assert resolver_environment["XDG_CACHE_HOME"] == env["XDG_CACHE_HOME"]
+    assert resolver_environment["XDG_DATA_HOME"] == env["XDG_DATA_HOME"]
+    assert resolver_environment["XDG_STATE_HOME"] == env["XDG_STATE_HOME"]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX rescue bootstrap")

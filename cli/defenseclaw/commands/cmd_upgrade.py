@@ -2033,7 +2033,7 @@ def _authenticated_release_resolver(
                 if not cosign:
                     raise OSError("Cosign verifier is unavailable")
                 with _isolated_cosign_environment(trusted_environment) as cosign_environment:
-                    channel_path, channel_bundle_path = _download_authenticated_channel_pair(
+                    channel_path, _channel_bundle_path = _download_authenticated_channel_pair(
                         directory=directory,
                         cosign=cosign,
                         cosign_environment=cosign_environment,
@@ -2457,13 +2457,37 @@ def _validate_release_channel_url(
         raise OSError("release channel URL left the pinned HTTPS endpoint")
 
 
-def _download_private_url(
+@contextmanager
+def _authenticated_requests_session():
+    """Return a Requests session that ignores ambient CA settings."""
+
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+def _authenticated_request_proxies(url: str) -> dict[str, str]:
+    """Preserve explicit proxy routing without inheriting CA overrides."""
+
+    environment_proxies = requests.utils.get_environ_proxies(url)
+    scheme = urlsplit(url).scheme
+    proxy = environment_proxies.get(scheme) or environment_proxies.get("all")
+    if not isinstance(proxy, str) or not proxy:
+        return {}
+    return {scheme: proxy}
+
+
+def _download_private_url_with_session(
     url: str,
     label: str,
     destination: str,
     maximum: int,
     *,
     validate_url: Callable[[str], None],
+    session: requests.Session,
 ) -> None:
     """Stream one authenticated-input dependency into private custody."""
 
@@ -2471,7 +2495,7 @@ def _download_private_url(
     for _redirect in range(_MAX_PRIVATE_REDIRECTS):
         validate_url(url)
         try:
-            response = requests.get(
+            response = session.get(
                 url,
                 stream=True,
                 timeout=(15, 120),
@@ -2481,6 +2505,7 @@ def _download_private_url(
                     "Pragma": "no-cache",
                     "User-Agent": "DefenseClaw-release-channel/1",
                 },
+                proxies=_authenticated_request_proxies(url),
             )
         except requests.RequestException as exc:
             raise OSError(f"could not download {label}") from exc
@@ -2539,6 +2564,27 @@ def _download_private_url(
             os.close(descriptor)
     if size == 0:
         raise OSError(f"{label} is empty")
+
+
+def _download_private_url(
+    url: str,
+    label: str,
+    destination: str,
+    maximum: int,
+    *,
+    validate_url: Callable[[str], None],
+) -> None:
+    """Download one authenticated input without ambient Requests settings."""
+
+    with _authenticated_requests_session() as session:
+        _download_private_url_with_session(
+            url,
+            label,
+            destination,
+            maximum,
+            validate_url=validate_url,
+            session=session,
+        )
 
 
 def _download_private_channel_asset(
@@ -3810,7 +3856,11 @@ def _validate_cosign_bootstrap_url(url: str) -> None:
         raise OSError("Cosign bootstrap redirect left the pinned HTTPS host set")
 
 
-def _download_bootstrap_cosign(destination_dir: str) -> str:
+def _download_bootstrap_cosign_with_session(
+    destination_dir: str,
+    *,
+    session: requests.Session,
+) -> str:
     """Download and authenticate the pinned POSIX Cosign verifier.
 
     This deliberately does not install anything system-wide. The verifier is
@@ -3841,11 +3891,12 @@ def _download_bootstrap_cosign(destination_dir: str) -> str:
         _validate_cosign_bootstrap_url(url)
         for attempt in range(1, 4):
             try:
-                response = requests.get(
+                response = session.get(
                     url,
                     stream=True,
                     timeout=(15, 120),
                     allow_redirects=False,
+                    proxies=_authenticated_request_proxies(url),
                 )
             except requests.RequestException as exc:
                 if attempt < 3:
@@ -3935,6 +3986,16 @@ def _download_bootstrap_cosign(destination_dir: str) -> str:
     if _sha256_file(destination) != expected:
         raise OSError("authenticated Cosign verifier changed before execution")
     return destination
+
+
+def _download_bootstrap_cosign(destination_dir: str) -> str:
+    """Download pinned Cosign without ambient Requests CA settings."""
+
+    with _authenticated_requests_session() as session:
+        return _download_bootstrap_cosign_with_session(
+            destination_dir,
+            session=session,
+        )
 
 
 def _copy_authenticated_cosign(source: str, destination_dir: str) -> str:
