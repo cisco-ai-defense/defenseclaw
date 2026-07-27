@@ -4062,6 +4062,96 @@ class TestUpgradeSameVersionRepair(unittest.TestCase):
             self.assertTrue(start.call_args.kwargs["strict_local_observability"])
             self.assertEqual(start.call_args.kwargs["expected_version"], "9.9.9")
 
+    def test_interrupted_same_version_cleanup_failure_still_finalizes_verified_receipt(self):
+        app = AppContext()
+        app.cfg = Config()
+
+        with TemporaryDirectory() as data_dir, ExitStack() as stack:
+            app.cfg.data_dir = data_dir
+            app.cfg.claw.home_dir = data_dir
+            receipt_path = begin_upgrade_receipt(
+                data_dir,
+                from_version="9.9.8",
+                target_version="9.9.9",
+                artifacts_verified=True,
+            )
+            cmd_upgrade_module.record_upgrade_migrations(
+                receipt_path,
+                migration_count=1,
+                degraded=False,
+            )
+            stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._create_backup",
+                    return_value=os.path.join(data_dir, "backup"),
+                )
+            )
+            stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._assert_required_cli_migrations"))
+            start = stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._start_and_verify_services"))
+            supersede = stack.enter_context(
+                patch(
+                    "defenseclaw.commands.cmd_upgrade.supersede_prior_upgrade_receipts",
+                    side_effect=ValueError("receipt metadata changed"),
+                )
+            )
+            warning = stack.enter_context(patch("defenseclaw.commands.cmd_upgrade.ux.warn"))
+
+            cmd_upgrade_module._recover_interrupted_same_version_upgrade(
+                app,
+                receipt_path=receipt_path,
+                data_dir=data_dir,
+                target_version="9.9.9",
+                os_name="linux",
+                health_timeout=60,
+                config_path=os.path.join(data_dir, "config.yaml"),
+                recovery_home=data_dir,
+                upgrade_manifest={"required_cli_migrations": ["9.9.9"]},
+            )
+
+            receipt = load_upgrade_receipt(receipt_path)
+            self.assertEqual(receipt.status, "succeeded")
+            self.assertEqual(receipt.failure_code, "")
+            start.assert_called_once()
+            supersede.assert_called_once_with(receipt_path)
+            self.assertIn(
+                "old upgrade receipt cleanup was deferred",
+                warning.call_args.args[0],
+            )
+
+    def test_interrupted_same_version_rejects_unverified_receipt_before_cleanup(self):
+        app = AppContext()
+        app.cfg = Config()
+
+        with TemporaryDirectory() as data_dir:
+            app.cfg.data_dir = data_dir
+            app.cfg.claw.home_dir = data_dir
+            receipt_path = begin_upgrade_receipt(
+                data_dir,
+                from_version="9.9.8",
+                target_version="9.9.9",
+                artifacts_verified=False,
+            )
+            with (
+                patch("defenseclaw.commands.cmd_upgrade._create_backup") as backup,
+                patch("defenseclaw.commands.cmd_upgrade.supersede_prior_upgrade_receipts") as supersede,
+                self.assertRaises(SystemExit),
+            ):
+                cmd_upgrade_module._recover_interrupted_same_version_upgrade(
+                    app,
+                    receipt_path=receipt_path,
+                    data_dir=data_dir,
+                    target_version="9.9.9",
+                    os_name="linux",
+                    health_timeout=60,
+                    config_path=os.path.join(data_dir, "config.yaml"),
+                    recovery_home=data_dir,
+                    upgrade_manifest={"required_cli_migrations": ["9.9.9"]},
+                )
+
+            backup.assert_not_called()
+            supersede.assert_not_called()
+            self.assertEqual(load_upgrade_receipt(receipt_path).status, "pending")
+
     def test_terminal_restart_custody_is_superseded_before_replacement_success(self):
         app = AppContext()
         app.cfg = Config()
@@ -4578,6 +4668,7 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         controller_home_override: bool = False,
         installed_local_bundle: bool = False,
         bundle_refresh_side_effect=None,
+        supersede_side_effect=None,
     ):
         runner = CliRunner()
         app = AppContext()
@@ -4728,6 +4819,13 @@ class TestUpgradeServiceVerification(unittest.TestCase):
                     side_effect=bundle_refresh_side_effect,
                 )
             )
+            if supersede_side_effect is not None:
+                stack.enter_context(
+                    patch(
+                        "defenseclaw.commands.cmd_upgrade.supersede_prior_upgrade_receipts",
+                        side_effect=supersede_side_effect,
+                    )
+                )
             stack.enter_context(patch("defenseclaw.commands.cmd_upgrade._check_post_upgrade_drift"))
             self.prepare_rollback = stack.enter_context(
                 patch(
@@ -4823,6 +4921,28 @@ class TestUpgradeServiceVerification(unittest.TestCase):
         self.assertEqual(receipt.status, "succeeded")
         self.assertEqual(receipt.failure_code, "")
         self.assertIn("Upgrade Complete", result.output)
+        poll_health.assert_called_once()
+
+    def test_supersession_cleanup_failure_does_not_block_success_receipt(self):
+        result, receipt, poll_health = self._invoke_upgrade(
+            supersede_side_effect=OSError("receipt queue changed"),
+        )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(receipt.status, "succeeded")
+        self.assertEqual(receipt.failure_code, "")
+        self.assertIn("old upgrade receipt cleanup was deferred", result.output)
+        poll_health.assert_called_once()
+
+    def test_unexpected_supersession_failure_is_not_masked(self):
+        result, receipt, poll_health = self._invoke_upgrade(
+            supersede_side_effect=RuntimeError("unexpected cleanup invariant"),
+        )
+
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIsInstance(result.exception, RuntimeError)
+        self.assertEqual(receipt.status, "pending")
+        self.assertEqual(receipt.failure_code, "")
         poll_health.assert_called_once()
 
     def test_verified_receipt_precedes_target_migrations_and_bundle_refresh(self):
