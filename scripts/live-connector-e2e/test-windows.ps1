@@ -1354,7 +1354,55 @@ private-secret-name = "DefenseClaw must remain redacted"
     Assert-True ($doctorContract -match "(?s)Write-Result 'doctor:windows-hook-recovery'.*?try\s*\{.*?DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT = '1'.*?defenseclaw-gateway' @\('start'\).*?\}\s*finally\s*\{.*?Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT.*?\}.*?Wait-Gateway") `
         'unversioned fixture override is scoped to the post-Doctor gateway restart'
     Assert-True ($harnessText -match 'obsolete shell-hook guidance for native Windows') 'Doctor connector contract rejects obsolete shell guidance'
-    Assert-True ($harnessText -match 'function Wait-Gateway\(\[int\]\$Timeout = 90\)' -and $harnessText -match '\$probeTimeout = \[Math\]::Min\(15, \$remaining\)') 'gateway readiness uses bounded Windows-native status probes'
+    $gatewayWait = [regex]::Match($harnessText, '(?s)function Wait-Gateway\b.*?\n\}').Value
+    $gatewayHookReadiness = [regex]::Match(
+        $harnessText,
+        '(?s)function Wait-GatewayHookReady\b.*?\n\}'
+    ).Value
+    Assert-True ($gatewayWait -match "Invoke-Tool 'defenseclaw-gateway' @\('status'\)" -and
+        $gatewayWait -match '\$probeTimeout = \[Math\]::Min\(15, \$remaining\)' -and
+        $gatewayWait -match 'Wait-GatewayHookReady -Timeout \$remaining') `
+        'gateway readiness requires bounded status and native hook API probes'
+    $readinessSession = $gatewayHookReadiness.IndexOf(
+        "-ArgumentList @('hook', '--connector', `$Connector, '--event', 'SessionStart')",
+        [StringComparison]::Ordinal
+    )
+    $readinessTool = $gatewayHookReadiness.IndexOf(
+        "-ArgumentList @('hook', '--connector', `$Connector, '--event', 'PreToolUse')",
+        [StringComparison]::Ordinal
+    )
+    $readinessSessionDecision = $gatewayHookReadiness.IndexOf(
+        '$beforeSession $decisionDeadline $probeID ''SessionStart''',
+        [StringComparison]::Ordinal
+    )
+    $readinessToolDecision = $gatewayHookReadiness.IndexOf(
+        '$beforeTool $decisionDeadline $probeID ''PreToolUse''',
+        [StringComparison]::Ordinal
+    )
+    Assert-True ($gatewayHookReadiness -match 'Get-StableHookRuntimeExecutable' -and
+        $readinessSession -ge 0 -and $readinessTool -gt $readinessSession -and
+        $readinessSessionDecision -gt $readinessSession -and
+        $readinessToolDecision -gt $readinessTool) `
+        'gateway restart readiness exercises the stable native SessionStart to PreToolUse path'
+    Assert-True ($gatewayHookReadiness -match '\$sessionDecision\.action -cne ''allow''' -and
+        $gatewayHookReadiness -match '\$sessionDecision\.raw_action -cne ''allow''' -and
+        $gatewayHookReadiness -match '\$sessionDecision\.would_block' -and
+        $gatewayHookReadiness -match '\$toolDecision\.action -cne ''allow''' -and
+        $gatewayHookReadiness -match '\$toolDecision\.raw_action -cne ''allow''' -and
+        $gatewayHookReadiness -match '\$toolDecision\.would_block') `
+        'gateway restart readiness requires canonical non-blocking allow decisions'
+    $latestHookDecision = [regex]::Match(
+        $harnessText,
+        '(?s)function Get-LatestHookDecision\b.*?\n\}'
+    ).Value
+    $hookDecisionWait = [regex]::Match(
+        $harnessText,
+        '(?s)function Wait-HookDecisionAfter\b.*?\n\}'
+    ).Value
+    Assert-True ($latestHookDecision -match 'Get-JsonPropertyValue \$correlation ''session_id''' -and
+        $latestHookDecision -match 'Get-JsonPropertyValue \$body ''defenseclaw\.hook\.event''' -and
+        $hookDecisionWait -match '\$SessionID \$HookEvent') `
+        'gateway hook readiness accepts only the current probe session and event decision'
     $isolatedCleanup = [regex]::Match($harnessText, '(?s)function Stop-IsolatedProcessTree\b.*?\n\}').Value
     Assert-True ($isolatedCleanup -match 'HashSet\[int\]' -and
         $isolatedCleanup -match '\$ancestor\[0\]\.ParentProcessId' -and
