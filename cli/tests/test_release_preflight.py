@@ -710,7 +710,7 @@ def test_authenticated_github_environment_preserves_proxy_but_removes_trust_over
     environment = {
         "PATH": os.environ.get("PATH", ""),
         "HOME": os.environ.get("HOME", ""),
-        "DEFENSECLAW_SAFE_FIXTURE": "preserved",
+        "UNRELATED_SAFE_ENV": "preserved",
         **proxy_routing,
         **hostile_runtime,
     }
@@ -722,7 +722,7 @@ def test_authenticated_github_environment_preserves_proxy_but_removes_trust_over
 
     assert set(hostile_runtime).isdisjoint(authenticated)
     assert {name: authenticated[name] for name in proxy_routing} == proxy_routing
-    assert authenticated["DEFENSECLAW_SAFE_FIXTURE"] == "preserved"
+    assert authenticated["UNRELATED_SAFE_ENV"] == "preserved"
     assert authenticated["GH_TOKEN"] == "operator-token"
 
 

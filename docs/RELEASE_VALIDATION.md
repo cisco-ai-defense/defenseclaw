@@ -77,6 +77,7 @@ This is the complete release acceptance scope. The first native Windows release
 has no older native Windows baseline, and all Windows acceptance through
 `0.8.8` is explicitly fresh-install-only. Preflight blocks any later target
 until native Windows upgrade certification exists.
+This is a fresh-install only gate, not evidence of a native upgrade path.
 
 The POSIX upgrade sources are resolved from authenticated published release
 metadata: the latest supported version older than the target, the exact
