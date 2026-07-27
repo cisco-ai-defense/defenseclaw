@@ -148,12 +148,14 @@ def test_windows_resolver_hint_pins_builtin_modules_and_qualified_cmdlets() -> N
         ("Remove-Item", "Microsoft.PowerShell.Management"),
         ("Get-Acl", "Microsoft.PowerShell.Security"),
         ("Set-Acl", "Microsoft.PowerShell.Security"),
-        ("Where-Object", "Microsoft.PowerShell.Utility"),
+        ("Where-Object", "Microsoft.PowerShell.Core"),
         ("Select-Object", "Microsoft.PowerShell.Utility"),
     ):
         assert f"{module}\\{command}" in windows
         assert re.search(rf"(?m)^\s*{re.escape(command)}(?:\s|$)", windows) is None
 
+    assert windows.count("Microsoft.PowerShell.Core\\Where-Object") == 2
+    assert "Microsoft.PowerShell.Utility\\Where-Object" not in windows
     assert "Join-Path" not in windows
     assert "New-Object" not in windows
     assert windows.count("-MaximumRedirection 5") == 2
