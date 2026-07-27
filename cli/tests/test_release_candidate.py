@@ -320,6 +320,7 @@ def test_candidate_transport_keeps_tar_modes_strict_on_windows(
     assert not destination.exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX custody simulation of the Windows branch")
 def test_candidate_transport_windows_does_not_apply_posix_archive_custody(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

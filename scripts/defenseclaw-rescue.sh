@@ -143,6 +143,7 @@ sanitize_authenticated_environment() {
     unset BASH_ENV ENV CDPATH GLOBIGNORE BASH_COMPAT POSIXLY_CORRECT
     unset PROMPT_COMMAND
     unset VERSION DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED
+    unset GODEBUG GOFLAGS
     unset PYTHONPATH PYTHONHOME PYTHONINSPECT PYTHONSTARTUP PYTHONUSERBASE
     unset PYTHONWARNINGS PYTHONBREAKPOINT
     unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT LD_DEBUG LD_DEBUG_OUTPUT
@@ -214,6 +215,21 @@ private_temp_root_identity() {
             ;;
         Linux)
             "${STAT_BIN}" -c '%d:%i:%u:%a' "${path}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+regular_file_size() {
+    local path="$1"
+    case "$("${UNAME_BIN}" -s)" in
+        Darwin)
+            "${STAT_BIN}" -f '%z' "${path}"
+            ;;
+        Linux)
+            "${STAT_BIN}" -c '%s' "${path}"
             ;;
         *)
             return 1
@@ -412,12 +428,19 @@ readonly cosign_asset cosign_sha256
 cosign_bin="${workdir}/${cosign_asset}"
 cosign_candidate_copy="${workdir}/.${cosign_asset}.candidate"
 if [[ "${cosign_candidate}" == /* && -f "${cosign_candidate}" && ! -L "${cosign_candidate}" ]]; then
-    cp "${cosign_candidate}" "${cosign_candidate_copy}"
-    chmod 600 "${cosign_candidate_copy}"
-    if [[ "$(sha256_file "${cosign_candidate_copy}")" == "${cosign_sha256}" ]]; then
-        mv "${cosign_candidate_copy}" "${cosign_bin}"
-    else
-        rm -f -- "${cosign_candidate_copy}"
+    cosign_candidate_size="$(regular_file_size "${cosign_candidate}" 2>/dev/null || true)"
+    if [[ "${cosign_candidate_size}" =~ ^[0-9]+$ \
+        && "${cosign_candidate_size}" -gt 0 \
+        && "${cosign_candidate_size}" -le "${MAX_COSIGN_BYTES}" ]]; then
+        cp "${cosign_candidate}" "${cosign_candidate_copy}"
+        chmod 600 "${cosign_candidate_copy}"
+        cosign_candidate_copy_size="$(regular_file_size "${cosign_candidate_copy}" 2>/dev/null || true)"
+        if [[ "${cosign_candidate_copy_size}" == "${cosign_candidate_size}" \
+            && "$(sha256_file "${cosign_candidate_copy}")" == "${cosign_sha256}" ]]; then
+            mv "${cosign_candidate_copy}" "${cosign_bin}"
+        else
+            rm -f -- "${cosign_candidate_copy}"
+        fi
     fi
 fi
 

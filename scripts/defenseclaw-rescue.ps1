@@ -1066,9 +1066,6 @@ try {
                 "Could not remove private rescue staging directory: " +
                 $_.Exception.Message
             )
-            if ($finalExitCode -eq 0) {
-                $finalExitCode = 1
-            }
         }
     }
 }

@@ -224,8 +224,12 @@ def validate_release_channel_rulesets(
         ruleset_id = rule.get("ruleset_id")
         if not isinstance(ruleset_id, int) or isinstance(ruleset_id, bool) or ruleset_id <= 0:
             raise ReleasePreflightError("GitHub effective-rule inventory contains an invalid ruleset ID")
-        if ruleset_id in active_branch_ruleset_ids:
-            effective_branch_rules.append(rule)
+        if ruleset_id not in active_branch_ruleset_ids:
+            raise ReleasePreflightError(
+                "GitHub effective-rule inventory references a ruleset "
+                "absent from the observed active branch-ruleset inventory"
+            )
+        effective_branch_rules.append(rule)
     effective_ids = {rule["ruleset_id"] for rule in effective_branch_rules}
     effective_types = {
         rule.get("type")

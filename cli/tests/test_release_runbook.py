@@ -103,14 +103,18 @@ def test_windows_public_install_authenticates_saved_script_before_execution() ->
 
     download = windows.index("gh release download")
     authenticate = windows.index("scripts/verify-sigstore-blob.py")
-    bind_digest = windows.index("Get-FileHash -LiteralPath $Installer")
+    bind_installer_digest = windows.index("Get-FileHash -LiteralPath $Installer")
+    bind_setup_digest = windows.index("Get-FileHash -LiteralPath $Setup")
     execute = windows.index("& $Installer")
+    inspect_signature = windows.index("Get-AuthenticodeSignature $Setup")
 
-    assert download < authenticate < bind_digest < execute
+    assert download < authenticate < bind_installer_digest < bind_setup_digest < execute
+    assert bind_setup_digest < inspect_signature
     assert "checksums.txt.pem" in windows
     assert "checksums.txt.sig" in windows
     assert "release.yaml@refs/heads/main" in windows
     assert "^[0-9a-f]{64}  install\\.ps1$" in windows
+    assert "^[0-9a-f]{64}  DefenseClawSetup-x64\\.exe$" in windows
     assert ".\\install.ps1 -Version" not in windows
     assert "$ExpectUnsignedSetup" in windows
     assert '"NotSigned"' in windows

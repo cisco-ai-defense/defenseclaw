@@ -115,7 +115,7 @@ def _read_regular(
     # every read must remain bound to the one directory snapshot captured
     # before verification, and the Windows fallback must reject reparse points.
     nofollow = getattr(os, "O_NOFOLLOW", 0)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | nofollow
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0) | nofollow
     named_before: stat_result | None = None
     if not nofollow:
         # Windows does not expose O_NOFOLLOW. Bind the opened descriptor to a

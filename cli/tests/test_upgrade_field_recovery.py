@@ -180,10 +180,20 @@ def _identity(path: Path) -> dict[str, int]:
 
 def _protocol_corrupt_audit_fixture_program() -> str:
     source = PROTOCOL_RESOLVER.read_text(encoding="utf-8")
-    case_start = source.index("corrupt-audit-same-version)")
-    command = source.index("python3 - \"${audit_db}\" <<'PY'", case_start)
-    body = source.index("\nfrom pathlib import Path\n", command) + 1
-    end = source.index("\nPY\n", body)
+    command_anchor = "python3 - \"${audit_db}\" <<'PY'"
+    assert source.count(command_anchor) == 1, "ambiguous corrupt-audit fixture command anchor"
+    command = source.index(command_anchor)
+    case_anchor = "corrupt-audit-same-version)"
+    assert source.count(case_anchor, 0, command) == 1, "ambiguous corrupt-audit fixture case anchor"
+    case_start = source.rindex(case_anchor, 0, command)
+    case_end = source.index("\n            ;;\n", command)
+    body_anchor = "\nfrom pathlib import Path\n"
+    assert source.count(body_anchor, command, case_end) == 1, "ambiguous corrupt-audit fixture body anchor"
+    body = source.index(body_anchor, command, case_end) + 1
+    end_anchor = "\nPY\n"
+    assert source.count(end_anchor, body, case_end) == 1, "ambiguous corrupt-audit fixture terminator"
+    end = source.index(end_anchor, body, case_end)
+    assert case_start < command < body < end < case_end
     return source[body:end] + "\n"
 
 

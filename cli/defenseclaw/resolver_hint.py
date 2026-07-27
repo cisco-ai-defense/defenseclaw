@@ -20,8 +20,16 @@ COSIGN_BOOTSTRAP_SHA256 = {
 WINDOWS_RESOLVER_BANNER = (
     "# Authenticated resolver bootstrap; requires Windows resolver assets in the selected release."
 )
-POSIX_AUTHENTICATED_CHILD_ENV_REMOVALS = (
+AUTHENTICATED_CA_OVERRIDE_ENV = (
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+)
+AUTHENTICATED_CHILD_ENV_REMOVALS = (
     "VERSION",
+    "GODEBUG",
+    "GOFLAGS",
     "PYTHONHOME",
     "PYTHONPATH",
     "PYTHONINSPECT",
@@ -39,10 +47,7 @@ POSIX_AUTHENTICATED_CHILD_ENV_REMOVALS = (
     "BASH_XTRACEFD",
     "IFS",
     "DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED",
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-    "REQUESTS_CA_BUNDLE",
-    "CURL_CA_BUNDLE",
+    *AUTHENTICATED_CA_OVERRIDE_ENV,
     "SIGSTORE_ROOT_FILE",
     "SIGSTORE_REKOR_PUBLIC_KEY",
     "SIGSTORE_CT_LOG_PUBLIC_KEY_FILE",
@@ -73,8 +78,18 @@ POSIX_AUTHENTICATED_CHILD_ENV_REMOVALS = (
     "DYLD_PRINT_SEGMENTS",
     "DYLD_PRINT_STATISTICS",
 )
-POSIX_AUTHENTICATED_CHILD_ENV_PREFIX_PATTERN = "COSIGN_|DYLD_|LD_|SIGSTORE_|TUF_"
-POSIX_AUTHENTICATED_CHILD_FUNCTION_ENV_PATTERN = "BASH_FUNC_[A-Za-z_][A-Za-z0-9_]*%%"
+AUTHENTICATED_CHILD_READONLY_ENV_REMOVALS = ("SHELLOPTS", "BASHOPTS")
+AUTHENTICATED_CHILD_ENV_PREFIX_REMOVALS = (
+    "COSIGN_",
+    "DYLD_",
+    "LD_",
+    "SIGSTORE_",
+    "TUF_",
+)
+AUTHENTICATED_CHILD_FUNCTION_ENV_PREFIX = "BASH_FUNC_"
+POSIX_AUTHENTICATED_CHILD_ENV_REMOVALS = AUTHENTICATED_CHILD_ENV_REMOVALS
+POSIX_AUTHENTICATED_CHILD_ENV_PREFIX_PATTERN = "|".join(AUTHENTICATED_CHILD_ENV_PREFIX_REMOVALS)
+POSIX_AUTHENTICATED_CHILD_FUNCTION_ENV_PATTERN = f"{AUTHENTICATED_CHILD_FUNCTION_ENV_PREFIX}[A-Za-z_][A-Za-z0-9_]*%%"
 POSIX_AUTHENTICATED_BOOTSTRAP_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 _VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -107,16 +122,16 @@ def authenticated_resolver_instructions(
         f"  PATH='{POSIX_AUTHENTICATED_BOOTSTRAP_PATH}'\n"
         "  export PATH\n"
         f"  unset {' '.join(POSIX_AUTHENTICATED_CHILD_ENV_REMOVALS)}\n"
+        "  set -- /usr/bin/env -u SHELLOPTS -u BASHOPTS\n"
         '  trust_names="$(/usr/bin/env | /usr/bin/sed -E -n \\\n'
         f"    's/^(({POSIX_AUTHENTICATED_CHILD_ENV_PREFIX_PATTERN})"
         "[A-Za-z0-9_%]*)=.*/\\1/p')\"\n"
         "  for trust_name in $trust_names; do\n"
-        '    unset "$trust_name"\n'
+        '    set -- "$@" -u "$trust_name"\n'
         "  done\n"
         "  unset trust_name trust_names\n"
         '  function_env_names="$(/usr/bin/env | /usr/bin/sed -E -n \\\n'
         f"    's/^({POSIX_AUTHENTICATED_CHILD_FUNCTION_ENV_PATTERN})=.*/\\1/p')\"\n"
-        "  set -- /usr/bin/env -u SHELLOPTS -u BASHOPTS\n"
         "  for function_env_name in $function_env_names; do\n"
         '    set -- "$@" -u "$function_env_name"\n'
         "  done\n"
@@ -161,7 +176,7 @@ def authenticated_resolver_instructions(
         f"--speed-limit 1024 --speed-time 60 --max-filesize 4194304 "
         f"--output \"$d/$name\" '{asset_base}/'$name\n"
         "  done\n"
-        '  "$cosign_bin" verify-blob --certificate "$d/checksums.txt.pem" '
+        '  "$@" "$cosign_bin" verify-blob --certificate "$d/checksums.txt.pem" '
         '--signature "$d/checksums.txt.sig" \\\n'
         f"    --certificate-identity '{identity}' \\\n"
         f"    --certificate-oidc-issuer '{issuer}' \"$d/checksums.txt\"\n"
@@ -177,9 +192,9 @@ def authenticated_resolver_instructions(
         '  [ "$actual" = "$expected" ]\n'
         f'  [ "$(tail -n 1 "$d/defenseclaw-upgrade.sh")" = \'{marker}\' ]\n'
         '  PATH="$operator_path" "$@" /bin/bash --noprofile --norc -p '
-        '-n "$d/defenseclaw-upgrade.sh"\n'
+        '-n "$d/defenseclaw-upgrade.sh" < /dev/null\n'
         '  PATH="$operator_path" "$@" /bin/bash --noprofile --norc -p '
-        '"$d/defenseclaw-upgrade.sh" --yes\n'
+        '"$d/defenseclaw-upgrade.sh" --yes < /dev/null\n'
         ")\n"
         "DC_AUTHENTICATED_RESOLVER\n"
         "Windows PowerShell:\n"
@@ -266,9 +281,15 @@ def authenticated_resolver_instructions(
         "        )\n"
         "      }\n"
         "    }\n"
-        "    [Environment]::SetEnvironmentVariable(\n"
-        "      'VERSION', $null, [EnvironmentVariableTarget]::Process\n"
-        "    )\n"
+        "    foreach ($exactTrustName in @('VERSION', 'GODEBUG', 'GOFLAGS')) {\n"
+        "      [Environment]::SetEnvironmentVariable(\n"
+        "        $exactTrustName, $null, [EnvironmentVariableTarget]::Process\n"
+        "      )\n"
+        "    }\n"
+        "    if ($PSVersionTable.PSEdition -eq 'Desktop') {\n"
+        "      [Net.ServicePointManager]::SecurityProtocol = "
+        "[Net.SecurityProtocolType]::Tls12\n"
+        "    }\n"
         "    $cosign = [IO.Path]::Combine($d, $cosignAsset)\n"
         "    Microsoft.PowerShell.Utility\\Invoke-WebRequest "
         "-Uri $cosignUrl -OutFile $cosign -UseBasicParsing "

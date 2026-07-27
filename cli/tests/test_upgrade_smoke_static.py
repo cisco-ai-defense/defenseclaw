@@ -764,8 +764,8 @@ def test_field_recovery_helper_restores_globals_on_return_success_and_failure(
             "run_candidate_updater_field_recovery_cases 0.8.7 installed-target-home\n"
             "status=$?\n"
             "set -e\n"
-            '[[ "${SMOKE_HOME}" == original-home ]]\n'
-            '[[ "${FROM_VERSION}" == original-version ]]\n'
+            '[[ "${SMOKE_HOME}" == original-home ]] || exit 91\n'
+            '[[ "${FROM_VERSION}" == original-version ]] || exit 92\n'
             "printf 'status=%s\\n' \"${status}\"\n"
         ),
         encoding="utf-8",

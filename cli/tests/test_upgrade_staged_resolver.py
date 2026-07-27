@@ -849,28 +849,32 @@ def test_staged_runtime_resolves_configured_audit_path_like_source_controller(
     expected_audit_db.parent.mkdir(parents=True)
     connection = sqlite3.connect(expected_audit_db)
     try:
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        connection.execute("PRAGMA wal_autocheckpoint=0")
         connection.execute("CREATE TABLE audit_path_fixture (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO audit_path_fixture VALUES ('configured-path-probe')")
         connection.commit()
+        package_config = data_home / ".venv" / "lib" / "python3.12" / "site-packages" / "defenseclaw" / "config.py"
+        package_config.write_text(
+            "import os\n"
+            "from types import SimpleNamespace\n"
+            "def load():\n"
+            "    home = os.environ['DEFENSECLAW_HOME']\n"
+            f"    return SimpleNamespace(data_dir=home, audit_db={configured_audit_db!r}, "
+            "claw=SimpleNamespace(home_dir=os.path.join(os.environ['HOME'], '.openclaw')))\n",
+            encoding="utf-8",
+        )
+
+        result = _run(env, "--version", "0.8.7", "--plan")
+        output = result.stdout + result.stderr
     finally:
         connection.close()
 
-    package_config = data_home / ".venv" / "lib" / "python3.12" / "site-packages" / "defenseclaw" / "config.py"
-    package_config.write_text(
-        "import os\n"
-        "from types import SimpleNamespace\n"
-        "def load():\n"
-        "    home = os.environ['DEFENSECLAW_HOME']\n"
-        f"    return SimpleNamespace(data_dir=home, audit_db={configured_audit_db!r}, "
-        "claw=SimpleNamespace(home_dir=os.path.join(os.environ['HOME'], '.openclaw')))\n",
-        encoding="utf-8",
-    )
-
-    result = _run(env, "--version", "0.8.7", "--plan")
-
-    output = result.stdout + result.stderr
     assert result.returncode == 0, output
     assert "0.8.6 → 0.8.7" in output
+    assert "active audit database has a WAL" in output
     assert expected_audit_db.is_file()
+    assert not (data_home / "audit.db").exists()
     assert config_path.is_file()
     assert not mutation_log.exists()
 

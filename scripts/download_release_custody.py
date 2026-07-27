@@ -181,7 +181,7 @@ def download_release_custody(
         entries = list(iterator)
     required = set(REQUIRED_PROOF_ASSETS)
     if {entry.name for entry in entries} != required or len(entries) != len(required):
-        raise ReleaseCustodyError("downloaded release custody is not the exact seven-file set")
+        raise ReleaseCustodyError(f"downloaded release custody is not the exact {len(required)}-file set")
     _require_safe_directory(output_dir)
     for name in REQUIRED_PROOF_ASSETS:
         _require_safe_asset(output_dir / name, name)

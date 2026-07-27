@@ -326,6 +326,27 @@ def test_read_regular_rejects_oversize_before_reading(
         MODULE._read_regular(proof, label="proof", maximum=16)
 
 
+def test_read_regular_uses_binary_mode_when_platform_exposes_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proof = tmp_path / "proof"
+    proof.write_bytes(b"proof\n")
+    synthetic_binary = 1 << 29
+    real_open = MODULE.os.open
+    opened_flags: list[int] = []
+
+    def binary_aware_open(path: Path, flags: int) -> int:
+        opened_flags.append(flags)
+        return real_open(path, flags & ~synthetic_binary)
+
+    monkeypatch.setattr(MODULE.os, "O_BINARY", synthetic_binary, raising=False)
+    monkeypatch.setattr(MODULE.os, "open", binary_aware_open)
+
+    assert MODULE._read_regular(proof, label="proof", maximum=1024) == b"proof\n"
+    assert opened_flags and opened_flags[0] & synthetic_binary
+
+
 @pytest.mark.skipif(os.name == "nt", reason="atomic replacement of an open file is POSIX-specific")
 def test_repair_rejects_proof_swapped_after_directory_snapshot(
     tmp_path: Path,

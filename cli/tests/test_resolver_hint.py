@@ -71,8 +71,10 @@ def test_authenticated_resolver_hint_is_copy_pasteable_and_fail_closed() -> None
     protect = windows.index("$directoryAcl.SetAccessRuleProtection($true, $false)")
     apply_acl = windows.index("Set-Acl -LiteralPath $d")
     validate_acl = windows.index("Resolver temporary directory owner/DACL validation failed before download")
+    tls_floor = windows.index("[Net.ServicePointManager]::SecurityProtocol")
     fetch = windows.index("Microsoft.PowerShell.Utility\\Invoke-WebRequest")
-    assert create < protect < apply_acl < validate_acl < fetch
+    assert create < protect < apply_acl < validate_acl < tls_floor < fetch
+    assert "[Net.SecurityProtocolType]::Tls12" in windows
     assert "[Security.Principal.WindowsIdentity]::GetCurrent().User" in windows
     assert "S-1-5-18" in windows
     assert "$verifiedAcl.AreAccessRulesProtected" in windows
@@ -92,6 +94,7 @@ def test_authenticated_resolver_hint_is_copy_pasteable_and_fail_closed() -> None
     assert "Downloaded Cosign digest mismatch." in windows
     assert "[Environment]::GetEnvironmentVariables().Keys" in windows
     assert "'^(COSIGN|SIGSTORE|TUF)_'" in windows
+    assert "@('VERSION', 'GODEBUG', 'GOFLAGS')" in windows
 
     posix = output.split("POSIX:\n", 1)[1].split("\nWindows PowerShell:", 1)[0]
     assert "command -v cosign" not in posix
@@ -171,6 +174,9 @@ def test_posix_resolver_hint_clears_trust_overrides_before_network_access() -> N
     assert posix.index(removals) < posix.index("curl --fail")
     assert posix.index(prefix_sweep) < posix.index("curl --fail")
     assert posix.count('"$@" /bin/bash --noprofile --norc -p') == 2
+    assert posix.count("< /dev/null") == 2
+    assert 'unset "$trust_name"' not in posix
+    assert 'set -- "$@" -u "$trust_name"' in posix
 
     preamble = posix.split("  umask 077\n", 1)[0]
     probe = (
@@ -191,7 +197,10 @@ def test_posix_resolver_hint_clears_trust_overrides_before_network_access() -> N
             "CURL_CA_BUNDLE": "/poisoned/curl-ca.pem",
             "BASH_ENV": "/poisoned/bash-env",
             "PYTHONPATH": "/poisoned/python",
+            "GODEBUG": "x509sha1=1",
+            "GOFLAGS": "-mod=mod",
             "COSIGN_FUTURE_TRUST_OVERRIDE": "poisoned",
+            "COSIGN_FUTURE%TRUST_OVERRIDE": "poisoned",
             "DYLD_FUTURE_LOADER_OVERRIDE": "poisoned",
             "LD_FUTURE_LOADER_OVERRIDE": "poisoned",
             "SIGSTORE_FUTURE_TRUST_OVERRIDE": "poisoned",
@@ -219,6 +228,8 @@ def test_posix_resolver_hint_clears_trust_overrides_before_network_access() -> N
         "CURL_CA_BUNDLE",
         "BASH_ENV",
         "PYTHONPATH",
+        "GODEBUG",
+        "GOFLAGS",
     }.isdisjoint(exported_names)
     assert not any(
         name.startswith(("BASH_FUNC_", "COSIGN_", "DYLD_", "LD_", "SIGSTORE_", "TUF_")) for name in exported_names

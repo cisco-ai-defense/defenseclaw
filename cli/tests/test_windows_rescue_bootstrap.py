@@ -76,6 +76,15 @@ def test_windows_rescue_normalizes_a_missing_installer_exit_code() -> None:
     assert "$finalExitCode = ConvertTo-RescueExitCode -ExitCode $LASTEXITCODE" in main
 
 
+def test_windows_rescue_cleanup_failure_preserves_authoritative_exit_code() -> None:
+    main = _main(_source())
+    cleanup = main[main.rindex("} finally {") :]
+
+    assert "Remove-PrivateStageRoot -Path $stageRoot" in cleanup
+    assert "Could not remove private rescue staging directory" in cleanup
+    assert re.search(r"(?m)^\s*\$finalExitCode\s*=", cleanup) is None
+
+
 @pytest.mark.skipif(
     POWERSHELL is None,
     reason="PowerShell 7 is unavailable on this host",

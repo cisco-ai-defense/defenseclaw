@@ -1207,8 +1207,9 @@ jobs:
             exit 1
           fi
           git fetch --no-tags origin main
-          git fetch --force --no-tags origin "refs/tags/$TAG"
-          COMMIT="$(git rev-parse 'FETCH_HEAD^{commit}')"
+          TARGET_REF="refs/defenseclaw/repair-target/$TAG"
+          git fetch --no-tags origin "refs/tags/$TAG:$TARGET_REF"
+          COMMIT="$(git rev-parse "$TARGET_REF^{commit}")"
           TREE="$(git rev-parse "$COMMIT^{tree}")"
           if ! git merge-base --is-ancestor "$COMMIT" origin/main; then
             echo "::error title=Unreviewed repair target::$COMMIT is not reachable from protected main."

@@ -30,6 +30,9 @@ PUBLISHER = ROOT / "scripts/publish-release-channel.sh"
 WORKFLOW = ROOT / ".github/workflows/release.yaml"
 DOC = ROOT / "docs/RELEASE_CHANNEL.md"
 SCRIPT_TIMEOUT_SECONDS = 30
+COSIGN_RELEASE_BASE_URL = (
+    f"https://github.com/sigstore/cosign/releases/download/v{resolver_hint.COSIGN_BOOTSTRAP_VERSION}"
+)
 POISONED_AUTH_ENVIRONMENT = {
     "BASH_ENV": "poisoned-bash-env",
     "ENV": "poisoned-shell-env",
@@ -40,6 +43,8 @@ POISONED_AUTH_ENVIRONMENT = {
     "PROMPT_COMMAND": "exit 88",
     "VERSION": "66.66.66",
     "DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED": "1",
+    "GODEBUG": "http2client=0,x509sha1=1",
+    "GOFLAGS": "-mod=mod",
     "PYTHONPATH": "/attacker/python",
     "PYTHONHOME": "/attacker/python-home",
     "PYTHONINSPECT": "1",
@@ -1132,6 +1137,59 @@ def test_rescue_copies_digest_authenticated_path_cosign_before_execution(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX rescue bootstrap")
+def test_rescue_skips_oversized_ambient_cosign_before_copy(
+    tmp_path: Path,
+) -> None:
+    env, rescue = _rescue_fixture(tmp_path)
+    source = RESCUE.read_text(encoding="utf-8")
+    match = re.search(r"(?m)^readonly MAX_COSIGN_BYTES=([0-9]+)$", source)
+    assert match is not None
+    max_cosign_bytes = int(match.group(1))
+    ambient_cosign = tmp_path / "bin" / "cosign"
+    with ambient_cosign.open("r+b") as stream:
+        stream.truncate(max_cosign_bytes + 1)
+    ambient_cosign.chmod(0o111)
+
+    completed = subprocess.run(
+        [str(rescue), "--yes"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=SCRIPT_TIMEOUT_SECONDS,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert not (tmp_path / "path-cosign.log").exists()
+    curl_log = (tmp_path / "curl.log").read_text(encoding="utf-8").splitlines()
+    assert curl_log[0].startswith(f"{COSIGN_RELEASE_BASE_URL}/cosign-")
+
+
+def test_rescue_bounds_ambient_cosign_before_private_copy() -> None:
+    source = RESCUE.read_text(encoding="utf-8")
+    candidate_block = source.split(
+        'if [[ "${cosign_candidate}" == /*',
+        1,
+    )[1].split('if [[ ! -f "${cosign_bin}" ]]', 1)[0]
+
+    size = candidate_block.index('cosign_candidate_size="$(regular_file_size "${cosign_candidate}"')
+    bound = candidate_block.index('"${cosign_candidate_size}" -le "${MAX_COSIGN_BYTES}"')
+    copy = candidate_block.index('cp "${cosign_candidate}" "${cosign_candidate_copy}"')
+    assert size < bound < copy
+
+
+def test_rescue_authenticated_environment_clears_go_runtime_overrides() -> None:
+    source = RESCUE.read_text(encoding="utf-8")
+    sanitizer = source.split("sanitize_authenticated_environment() {", 1)[1].split(
+        "\n}",
+        1,
+    )[0]
+
+    assert "unset GODEBUG GOFLAGS" in sanitizer
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX rescue bootstrap")
 def test_rescue_rejects_downloaded_cosign_that_does_not_match_platform_pin(
     tmp_path: Path,
 ) -> None:
@@ -1153,7 +1211,7 @@ def test_rescue_rejects_downloaded_cosign_that_does_not_match_platform_pin(
     assert not (tmp_path / "path-cosign.log").exists()
     curl_log = (tmp_path / "curl.log").read_text(encoding="utf-8").splitlines()
     assert len(curl_log) == 1
-    assert "/sigstore/cosign/releases/download/v2.6.3/cosign-" in curl_log[0]
+    assert f"{COSIGN_RELEASE_BASE_URL}/cosign-" in curl_log[0]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX rescue bootstrap")
@@ -1213,7 +1271,7 @@ def test_rescue_authenticates_channel_then_executes_exact_tagged_resolver(
     assert f"Authenticated stable resolver {VERSION} ({COMMIT})" in completed.stdout
     assert (f"resolver-args: <--version> <{VERSION}> <--yes> <--recover-corrupt-audit>") in completed.stdout
     curl_log = (tmp_path / "curl.log").read_text(encoding="utf-8").splitlines()
-    assert curl_log[0].startswith("https://github.com/sigstore/cosign/releases/download/v2.6.3/cosign-")
+    assert curl_log[0].startswith(f"{COSIGN_RELEASE_BASE_URL}/cosign-")
     assert curl_log[1:3] == [
         f"https://api.github.com/repos/{REPOSITORY}/git/ref/heads/release-channel",
         f"https://raw.githubusercontent.com/{REPOSITORY}/{CHANNEL_BRANCH_COMMIT}/stable.txt",
@@ -1427,7 +1485,7 @@ def test_rescue_rejects_signed_but_redirected_channel_before_resolver_download(
     assert "resolver URL is not derived" in completed.stderr
     curl_log = (tmp_path / "curl.log").read_text(encoding="utf-8").splitlines()
     assert len(curl_log) == 4
-    assert curl_log[0].startswith("https://github.com/sigstore/cosign/releases/download/v2.6.3/cosign-")
+    assert curl_log[0].startswith(f"{COSIGN_RELEASE_BASE_URL}/cosign-")
     assert all("attacker.invalid" not in line for line in curl_log)
 
 
@@ -1457,7 +1515,7 @@ def test_rescue_signature_failure_stops_before_channel_parse_or_resolver_downloa
     cosign_asset = _COSIGN_FIXTURES[(platform.system(), platform.machine())][0]
     curl_log = (tmp_path / "curl.log").read_text(encoding="utf-8").splitlines()
     assert curl_log == [
-        f"https://github.com/sigstore/cosign/releases/download/v2.6.3/{cosign_asset}",
+        f"{COSIGN_RELEASE_BASE_URL}/{cosign_asset}",
         f"https://api.github.com/repos/{REPOSITORY}/git/ref/heads/release-channel",
         f"https://raw.githubusercontent.com/{REPOSITORY}/{CHANNEL_BRANCH_COMMIT}/stable.txt",
         f"https://raw.githubusercontent.com/{REPOSITORY}/{CHANNEL_BRANCH_COMMIT}/stable.txt.bundle",

@@ -69,6 +69,11 @@ from defenseclaw.release_channel import (
     parse_channel,
 )
 from defenseclaw.resolver_hint import (
+    AUTHENTICATED_CA_OVERRIDE_ENV,
+    AUTHENTICATED_CHILD_ENV_PREFIX_REMOVALS,
+    AUTHENTICATED_CHILD_ENV_REMOVALS,
+    AUTHENTICATED_CHILD_FUNCTION_ENV_PREFIX,
+    AUTHENTICATED_CHILD_READONLY_ENV_REMOVALS,
     COSIGN_BOOTSTRAP_SHA256,
     COSIGN_BOOTSTRAP_VERSION,
     RESOLVER_COMPLETENESS_MARKER,
@@ -161,53 +166,16 @@ _RELEASE_CHANNEL_RETRY_DELAYS = tuple(
     0.25 * (3**attempt) for attempt in range(max(_RELEASE_CHANNEL_AUTH_ATTEMPTS - 1, 0))
 )
 _MAX_PRIVATE_REDIRECTS = 6
-_COSIGN_TRUST_OVERRIDE_ENV = (
-    "SIGSTORE_ROOT_FILE",
-    "SIGSTORE_REKOR_PUBLIC_KEY",
-    "SIGSTORE_CT_LOG_PUBLIC_KEY_FILE",
-    "SIGSTORE_TSA_CERTIFICATE_FILE",
-    "TUF_ROOT",
-    "TUF_MIRROR",
-    "TUF_ROOT_JSON",
-)
-_AUTHENTICATED_CA_OVERRIDE_ENV = (
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-    "REQUESTS_CA_BUNDLE",
-    "CURL_CA_BUNDLE",
-)
+_AUTHENTICATED_CA_OVERRIDE_ENV = AUTHENTICATED_CA_OVERRIDE_ENV
 _AUTHENTICATED_CHILD_ENV_REMOVALS = (
-    "VERSION",
-    "PYTHONHOME",
-    "PYTHONPATH",
-    "PYTHONINSPECT",
-    "PYTHONSTARTUP",
-    "PYTHONUSERBASE",
-    "PYTHONWARNINGS",
-    "PYTHONBREAKPOINT",
-    "BASH_ENV",
-    "ENV",
-    "CDPATH",
-    "GLOBIGNORE",
-    "BASH_COMPAT",
-    "POSIXLY_CORRECT",
-    "PROMPT_COMMAND",
-    "SHELLOPTS",
-    "BASHOPTS",
-    "BASH_XTRACEFD",
-    "IFS",
-    "DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED",
-    *_AUTHENTICATED_CA_OVERRIDE_ENV,
-    *_COSIGN_TRUST_OVERRIDE_ENV,
+    *AUTHENTICATED_CHILD_ENV_REMOVALS,
+    *AUTHENTICATED_CHILD_READONLY_ENV_REMOVALS,
 )
 _AUTHENTICATED_CHILD_ENV_PREFIX_REMOVALS = (
-    "BASH_FUNC_",
-    "COSIGN_",
-    "DYLD_",
-    "LD_",
-    "SIGSTORE_",
-    "TUF_",
+    AUTHENTICATED_CHILD_FUNCTION_ENV_PREFIX,
+    *AUTHENTICATED_CHILD_ENV_PREFIX_REMOVALS,
 )
+_COSIGN_ENVIRONMENT_CONTEXT_KEY = "defenseclaw.authenticated-cosign-environment-v1"
 _TARGET_CONFIG_VERSION = 8
 _WINDOWS_SETUP_ASSET = "DefenseClawSetup-x64.exe"
 _WINDOWS_SETUP_PROVENANCE_ASSET = f"{_WINDOWS_SETUP_ASSET}.provenance.json"
@@ -2281,25 +2249,64 @@ def _sanitize_authenticated_environment(
 
 
 @contextmanager
+def _cosign_environment_roots():
+    """Yield private roots, reusing them only within one Click command."""
+
+    command_context = click.get_current_context(silent=True)
+    if command_context is None:
+        with tempfile.TemporaryDirectory(prefix="defenseclaw-sigstore-home-") as root:
+            yield _create_cosign_environment_roots(root)
+        return
+
+    state = command_context.meta.get(_COSIGN_ENVIRONMENT_CONTEXT_KEY)
+    if state is None:
+        temporary = tempfile.TemporaryDirectory(prefix="defenseclaw-sigstore-home-")
+        try:
+            roots = _create_cosign_environment_roots(temporary.name)
+        except BaseException:
+            temporary.cleanup()
+            raise
+        state = (temporary, roots)
+        command_context.meta[_COSIGN_ENVIRONMENT_CONTEXT_KEY] = state
+
+        def cleanup_command_roots() -> None:
+            try:
+                temporary.cleanup()
+            finally:
+                if command_context.meta.get(_COSIGN_ENVIRONMENT_CONTEXT_KEY) is state:
+                    command_context.meta.pop(_COSIGN_ENVIRONMENT_CONTEXT_KEY, None)
+
+        command_context.call_on_close(cleanup_command_roots)
+    _temporary, roots = state
+    yield roots
+
+
+def _create_cosign_environment_roots(root: str) -> dict[str, str]:
+    """Create one owner-private HOME/XDG root set for authenticated Cosign."""
+
+    os.chmod(root, 0o700)
+    roots = {
+        "HOME": os.path.join(root, "home"),
+        "XDG_CONFIG_HOME": os.path.join(root, "config"),
+        "XDG_CACHE_HOME": os.path.join(root, "cache"),
+        "XDG_DATA_HOME": os.path.join(root, "data"),
+        "XDG_STATE_HOME": os.path.join(root, "state"),
+    }
+    for path in roots.values():
+        os.mkdir(path, 0o700)
+    return roots
+
+
+@contextmanager
 def _isolated_cosign_environment(
     environment: Mapping[str, str] | None = None,
 ):
-    """Give Cosign private config/cache roots without removing network access."""
+    """Give Cosign command-private config/cache roots and sanitized network access."""
 
     source_environment = os.environ if environment is None else environment
     _warn_ignored_ca_overrides(source_environment)
     trusted_environment = _sanitize_authenticated_environment(source_environment)
-    with tempfile.TemporaryDirectory(prefix="defenseclaw-sigstore-home-") as root:
-        os.chmod(root, 0o700)
-        roots = {
-            "HOME": os.path.join(root, "home"),
-            "XDG_CONFIG_HOME": os.path.join(root, "config"),
-            "XDG_CACHE_HOME": os.path.join(root, "cache"),
-            "XDG_DATA_HOME": os.path.join(root, "data"),
-            "XDG_STATE_HOME": os.path.join(root, "state"),
-        }
-        for path in roots.values():
-            os.mkdir(path, 0o700)
+    with _cosign_environment_roots() as roots:
         trusted_environment.update(roots)
         yield trusted_environment
 

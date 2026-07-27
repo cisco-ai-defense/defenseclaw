@@ -520,13 +520,13 @@ def pack_transport(source: Path, output: Path) -> None:
                         archive.addfile(info)
                         continue
 
-                    flags = (
+                    member_flags = (
                         os.O_RDONLY
                         | getattr(os, "O_BINARY", 0)
                         | getattr(os, "O_CLOEXEC", 0)
                         | getattr(os, "O_NOFOLLOW", 0)
                     )
-                    file_descriptor = os.open(path, flags)
+                    file_descriptor = os.open(path, member_flags)
                     with os.fdopen(file_descriptor, "rb", closefd=True) as payload:
                         opened = os.fstat(payload.fileno())
                         if _file_identity(opened) != _file_identity(expected) or (

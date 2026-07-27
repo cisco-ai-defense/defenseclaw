@@ -20,7 +20,13 @@ import defenseclaw.main as main_module
 import pytest
 from click.testing import CliRunner
 from defenseclaw.release_channel import build_channel, render_channel
-from defenseclaw.resolver_hint import RESOLVER_COMPLETENESS_MARKER
+from defenseclaw.resolver_hint import (
+    AUTHENTICATED_CHILD_ENV_PREFIX_REMOVALS,
+    AUTHENTICATED_CHILD_ENV_REMOVALS,
+    AUTHENTICATED_CHILD_FUNCTION_ENV_PREFIX,
+    AUTHENTICATED_CHILD_READONLY_ENV_REMOVALS,
+    RESOLVER_COMPLETENESS_MARKER,
+)
 
 _POSIX_ONLY = pytest.mark.skipif(
     os.name != "posix",
@@ -113,6 +119,8 @@ def _channel_downloaders(
 def _poisoned_environment() -> dict[str, str]:
     return {
         "VERSION": "poisoned",
+        "GODEBUG": "x509sha1=1",
+        "GOFLAGS": "-mod=mod",
         "PYTHONHOME": "/poisoned/home",
         "PYTHONPATH": "/poisoned/path",
         "BASH_ENV": "/poisoned/bash-env",
@@ -178,6 +186,18 @@ def test_authenticated_environment_clears_complete_shell_interpreter_loader_poli
     assert sanitized == {
         "HTTPS_PROXY": "http://corporate-proxy.invalid:8080",
     }
+
+
+def test_authenticated_environment_policy_is_shared_with_resolver_bootstrap() -> None:
+    assert upgrade_module._AUTHENTICATED_CHILD_ENV_REMOVALS == (
+        *AUTHENTICATED_CHILD_ENV_REMOVALS,
+        *AUTHENTICATED_CHILD_READONLY_ENV_REMOVALS,
+    )
+    assert upgrade_module._AUTHENTICATED_CHILD_ENV_PREFIX_REMOVALS == (
+        AUTHENTICATED_CHILD_FUNCTION_ENV_PREFIX,
+        *AUTHENTICATED_CHILD_ENV_PREFIX_REMOVALS,
+    )
+    assert {"GODEBUG", "GOFLAGS"}.issubset(upgrade_module._AUTHENTICATED_CHILD_ENV_REMOVALS)
 
 
 def test_main_delegates_before_click_config_or_cursor_gates() -> None:

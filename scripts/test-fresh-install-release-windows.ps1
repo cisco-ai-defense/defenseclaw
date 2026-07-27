@@ -31,7 +31,32 @@ if ($TargetVersion -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)
     throw "TargetVersion must be canonical X.Y.Z"
 }
 
-$ReleaseDir = (Resolve-Path -LiteralPath $ReleaseDir -ErrorAction Stop).Path
+function Resolve-RegularReleaseDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $full = [IO.Path]::GetFullPath($Path)
+    $item = [IO.DirectoryInfo]::new($full)
+    $item.Refresh()
+    if (-not $item.Exists -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Bootstrap acceptance release input must be a regular directory: $full"
+    }
+    return $full
+}
+
+function Assert-RegularReleaseFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $full = [IO.Path]::GetFullPath($Path)
+    $item = [IO.FileInfo]::new($full)
+    $item.Refresh()
+    if (-not $item.Exists -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Bootstrap acceptance release input must be a regular file: $full"
+    }
+}
+
+$ReleaseDir = Resolve-RegularReleaseDirectory -Path $ReleaseDir
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
 function Invoke-CapturedProcess {
@@ -247,10 +272,11 @@ foreach ($path in @(
         throw "Bootstrap acceptance refuses pre-existing product state: $path"
     }
 }
-foreach ($path in @($installer, $powerShell, $cosign, $setup)) {
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        throw "Bootstrap acceptance input is missing: $path"
-    }
+if (-not (Test-Path -LiteralPath $powerShell -PathType Leaf)) {
+    throw "Bootstrap acceptance input is missing: $powerShell"
+}
+foreach ($path in @($installer, $cosign, $setup)) {
+    Assert-RegularReleaseFile -Path $path
 }
 
 # The supported public path has no custom home override. Setup and the

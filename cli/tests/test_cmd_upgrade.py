@@ -6194,6 +6194,8 @@ class TestChecksumVerification(unittest.TestCase):
                     {
                         "HOME": "/poisoned/home",
                         "REQUESTS_CA_BUNDLE": "/poisoned/private-ca.pem",
+                        "GODEBUG": "x509sha1=1",
+                        "GOFLAGS": "-mod=mod",
                         "COSIGN_REKOR_URL": "https://attacker.invalid",
                         "SIGSTORE_ROOT_FILE": "/poisoned/sigstore-root",
                         "TUF_ROOT": "/poisoned/tuf-root",
@@ -6227,6 +6229,8 @@ class TestChecksumVerification(unittest.TestCase):
         self.assertNotIn("SIGSTORE_ROOT_FILE", verification_environment)
         self.assertNotIn("TUF_ROOT", verification_environment)
         self.assertNotIn("REQUESTS_CA_BUNDLE", verification_environment)
+        self.assertNotIn("GODEBUG", verification_environment)
+        self.assertNotIn("GOFLAGS", verification_environment)
         warning.assert_called_once()
         self.assertIn("REQUESTS_CA_BUNDLE", warning.call_args.args[0])
         self.assertNotIn("--certificate-identity-regexp", cmd)
@@ -6247,6 +6251,7 @@ class TestChecksumVerification(unittest.TestCase):
                 {
                     "SSL_CERT_FILE": "/poisoned/private-ca.pem",
                 },
+                clear=True,
             ),
             patch("defenseclaw.commands.cmd_upgrade.ux.warn") as warning,
         ):
@@ -6256,6 +6261,35 @@ class TestChecksumVerification(unittest.TestCase):
 
         warning.assert_called_once()
         self.assertIn("SSL_CERT_FILE", warning.call_args.args[0])
+
+    def test_cosign_environment_reuses_private_roots_only_within_click_command(self):
+        command_context = click.Context(click.Command("cosign-session-test"))
+        with command_context:
+            with cmd_upgrade_module._isolated_cosign_environment({}) as first:
+                first_roots = {
+                    name: first[name]
+                    for name in (
+                        "HOME",
+                        "XDG_CONFIG_HOME",
+                        "XDG_CACHE_HOME",
+                        "XDG_DATA_HOME",
+                        "XDG_STATE_HOME",
+                    )
+                }
+                root = os.path.dirname(first["HOME"])
+                self.assertTrue(os.path.isdir(root))
+            with cmd_upgrade_module._isolated_cosign_environment({}) as second:
+                self.assertEqual(
+                    first_roots,
+                    {name: second[name] for name in first_roots},
+                )
+                self.assertTrue(os.path.isdir(root))
+
+        self.assertFalse(os.path.exists(root))
+        self.assertNotIn(
+            cmd_upgrade_module._COSIGN_ENVIRONMENT_CONTEXT_KEY,
+            command_context.meta,
+        )
 
     def test_checksums_sigstore_hard_fails_when_cosign_rejects_signature(self):
         with TemporaryDirectory() as tmp:

@@ -356,13 +356,27 @@ if ($ActualInstallerSha256 -cne $ExpectedInstallerSha256) {
   throw "Downloaded install.ps1 does not match signed checksums"
 }
 
+$Setup = Join-Path $VerifyDir "DefenseClawSetup-x64.exe"
+$SetupLines = @(
+  Get-Content -LiteralPath (Join-Path $VerifyDir "checksums.txt") |
+    Where-Object { $_ -cmatch "^[0-9a-f]{64}  DefenseClawSetup-x64\.exe$" }
+)
+if ($SetupLines.Count -ne 1) {
+  throw "Signed checksums do not contain exactly one DefenseClawSetup-x64.exe entry"
+}
+$ExpectedSetupSha256 = $SetupLines[0].Substring(0, 64)
+$ActualSetupSha256 = (
+  Get-FileHash -LiteralPath $Setup -Algorithm SHA256
+).Hash.ToLowerInvariant()
+if ($ActualSetupSha256 -cne $ExpectedSetupSha256) {
+  throw "Downloaded DefenseClawSetup-x64.exe does not match signed checksums"
+}
+
 & $Installer -Version $ReleaseVersion -Connector none -Yes
 if ($LASTEXITCODE -ne 0) { throw "Authenticated install.ps1 failed" }
 defenseclaw --version
 defenseclaw status
-$SetupSignature = Get-AuthenticodeSignature (
-  Join-Path $VerifyDir "DefenseClawSetup-x64.exe"
-)
+$SetupSignature = Get-AuthenticodeSignature $Setup
 $ExpectedSignatureStatus = if ($ExpectUnsignedSetup) { "NotSigned" } else { "Valid" }
 if ($SetupSignature.Status.ToString() -cne $ExpectedSignatureStatus) {
   throw "Setup signature status was $($SetupSignature.Status), expected $ExpectedSignatureStatus"

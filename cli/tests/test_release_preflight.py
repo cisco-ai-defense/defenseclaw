@@ -134,7 +134,9 @@ def _baseline_policy() -> dict[str, object]:
     return {
         "schema_version": 2,
         "published_baselines": versions,
-        "published_baseline_config_versions": {version: 8 if version >= "0.8.5" else 7 for version in versions},
+        "published_baseline_config_versions": {
+            version: 8 if tuple(int(part) for part in version.split(".")) >= (0, 8, 5) else 7 for version in versions
+        },
         "platform_published_baselines": {"windows": ["0.8.7"]},
     }
 
@@ -221,6 +223,21 @@ def test_live_ruleset_contract_rejects_overlapping_effective_branch_rules() -> N
     ):
         release_preflight.validate_release_channel_rulesets(
             [_ruleset(), parent],
+            effective_rules=[
+                *_effective_rules(),
+                {"type": "pull_request", "ruleset_id": 77},
+            ],
+            policy=_policy(),
+        )
+
+
+def test_live_ruleset_contract_rejects_unobserved_effective_ruleset_authority() -> None:
+    with pytest.raises(
+        release_preflight.ReleasePreflightError,
+        match="absent from the observed active branch-ruleset inventory",
+    ):
+        release_preflight.validate_release_channel_rulesets(
+            [_ruleset()],
             effective_rules=[
                 *_effective_rules(),
                 {"type": "pull_request", "ruleset_id": 77},

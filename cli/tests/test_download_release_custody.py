@@ -346,7 +346,11 @@ def test_rejects_any_extra_file_in_final_custody_set(tmp_path: Path) -> None:
             (output / "unexpected").write_bytes(b"unexpected")
         return subprocess.CompletedProcess(command, 0, stdout=None, stderr=b"")
 
-    with pytest.raises(download_release_custody.ReleaseCustodyError, match="exact seven-file set"):
+    expected_count = len(download_release_custody.REQUIRED_PROOF_ASSETS)
+    with pytest.raises(
+        download_release_custody.ReleaseCustodyError,
+        match=rf"exact {expected_count}-file set",
+    ):
         download_release_custody.download_release_custody(
             repository=download_release_custody.EXPECTED_REPOSITORY,
             release_json=release_json,

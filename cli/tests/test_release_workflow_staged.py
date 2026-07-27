@@ -1082,6 +1082,31 @@ def test_windows_install_ps1_smoke_uses_disposable_native_profile_and_layout() -
     assert "Second fresh-installer invocation unexpectedly succeeded" not in smoke
 
 
+def test_windows_fresh_install_refuses_reparse_release_inputs_before_bootstrap() -> None:
+    smoke = (ROOT / "scripts/test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")
+    directory_guard = smoke[
+        smoke.index("function Resolve-RegularReleaseDirectory {") : smoke.index(
+            "\nfunction Assert-RegularReleaseFile {"
+        )
+    ]
+    file_guard = smoke[
+        smoke.index("function Assert-RegularReleaseFile {") : smoke.index(
+            "\n$ReleaseDir = Resolve-RegularReleaseDirectory"
+        )
+    ]
+
+    assert "[IO.DirectoryInfo]::new($full)" in directory_guard
+    assert "[IO.FileAttributes]::ReparsePoint" in directory_guard
+    assert "[IO.FileInfo]::new($full)" in file_guard
+    assert "[IO.FileAttributes]::ReparsePoint" in file_guard
+
+    directory_check = smoke.index("$ReleaseDir = Resolve-RegularReleaseDirectory -Path $ReleaseDir")
+    release_file_check = smoke.index("foreach ($path in @($installer, $cosign, $setup))")
+    execute = smoke.index("$first = Invoke-CapturedProcess")
+    assert directory_check < release_file_check < execute
+    assert "Assert-RegularReleaseFile -Path $path" in smoke[release_file_check:execute]
+
+
 def test_windows_pr_ci_executes_public_bootstrap_against_authenticated_fixture() -> None:
     jobs = _windows_ci_workflow()["jobs"]
     bootstrap = jobs["public-bootstrap-acceptance"]
@@ -1198,8 +1223,13 @@ def test_publish_uses_all_assets_from_the_exact_tested_candidate() -> None:
 
 def test_channel_repair_uses_the_bounded_exact_custody_downloader() -> None:
     repair = _workflow()["jobs"]["repair-stable-channel"]
+    target = _step(repair, "Resolve immutable repair target")["run"]
     download = _step(repair, "Download bounded release proof")["run"]
 
+    assert 'TARGET_REF="refs/defenseclaw/repair-target/$TAG"' in target
+    assert '"refs/tags/$TAG:$TARGET_REF"' in target
+    assert 'git rev-parse "$TARGET_REF^{commit}"' in target
+    assert "FETCH_HEAD" not in target
     assert "gh release download" not in download
     assert "--pattern" not in download
     assert "python3 scripts/download_release_custody.py" in download
