@@ -347,6 +347,75 @@ def test_read_regular_uses_binary_mode_when_platform_exposes_it(
     assert opened_flags and opened_flags[0] & synthetic_binary
 
 
+def test_windows_named_and_opened_timestamp_views_do_not_false_positive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proof = tmp_path / "proof"
+    payload = b"authenticated proof\n"
+    proof.write_bytes(payload)
+    real_lstat = Path.lstat
+    lstat_calls: list[Path] = []
+
+    def timestamp_skewed_lstat(candidate: Path):
+        lstat_calls.append(candidate)
+        info = real_lstat(candidate)
+
+        class _TimestampSkewedStat:
+            st_ctime_ns = info.st_ctime_ns + 1
+
+            def __getattr__(self, name: str):
+                return getattr(info, name)
+
+        return _TimestampSkewedStat()
+
+    monkeypatch.setattr(MODULE.os, "O_NOFOLLOW", 0, raising=False)
+    monkeypatch.setattr(Path, "lstat", timestamp_skewed_lstat)
+    expected_state = MODULE._file_state(proof.lstat())
+
+    assert (
+        MODULE._read_regular(
+            proof,
+            label="proof",
+            maximum=1024,
+            expected_identity=expected_state,
+        )
+        == payload
+    )
+    assert lstat_calls == [proof, proof, proof]
+
+
+def test_read_regular_retains_descriptor_ctime_mutation_detection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proof = tmp_path / "proof"
+    proof.write_bytes(b"authenticated proof\n")
+    real_fstat = MODULE.os.fstat
+    fstat_calls = 0
+
+    def ctime_changed_after_read(descriptor: int):
+        nonlocal fstat_calls
+        fstat_calls += 1
+        info = real_fstat(descriptor)
+        if fstat_calls == 1:
+            return info
+
+        class _CtimeChangedStat:
+            st_ctime_ns = info.st_ctime_ns + 1
+
+            def __getattr__(self, name: str):
+                return getattr(info, name)
+
+        return _CtimeChangedStat()
+
+    monkeypatch.setattr(MODULE.os, "fstat", ctime_changed_after_read)
+
+    with pytest.raises(RepairTargetError, match="changed while it was read"):
+        MODULE._read_regular(proof, label="proof", maximum=1024)
+    assert fstat_calls == 2
+
+
 @pytest.mark.skipif(os.name == "nt", reason="atomic replacement of an open file is POSIX-specific")
 def test_repair_rejects_proof_swapped_after_directory_snapshot(
     tmp_path: Path,

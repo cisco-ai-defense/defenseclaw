@@ -89,19 +89,21 @@ def _is_link_or_reparse(value: stat_result) -> bool:
     return stat.S_ISLNK(value.st_mode) or bool(reparse_flag and file_attributes & reparse_flag)
 
 
-def _path_identity(value: stat_result) -> tuple[int, int, int, int, int, int]:
+def _file_identity(value: stat_result) -> tuple[int, int, int, int, int]:
     return (
         value.st_dev,
         value.st_ino,
         stat.S_IFMT(value.st_mode),
         value.st_size,
         value.st_mtime_ns,
-        value.st_ctime_ns,
     )
 
 
-_file_identity = _path_identity
-_directory_identity = _path_identity
+def _file_state(value: stat_result) -> tuple[int, int, int, int, int, int]:
+    return (*_file_identity(value), value.st_ctime_ns)
+
+
+_directory_identity = _file_state
 
 
 def _read_regular(
@@ -136,12 +138,20 @@ def _read_regular(
     try:
         before = os.fstat(descriptor)
         before_identity = _file_identity(before)
+        before_state = _file_state(before)
         if _is_link_or_reparse(before) or not stat.S_ISREG(before.st_mode):
             raise RepairTargetError(f"{label} must be a regular nonsymlink file")
-        if expected_identity is not None and before_identity != expected_identity:
-            raise RepairTargetError(f"{label} changed before it was read")
-        if named_before is not None and before_identity != _file_identity(named_before):
-            raise RepairTargetError(f"{label} changed while it was opened")
+        if expected_identity is not None:
+            observed_state = _file_state(named_before) if named_before is not None else before_state
+            if observed_state != expected_identity:
+                raise RepairTargetError(f"{label} changed before it was read")
+        if named_before is not None:
+            # CPython on Windows exposes creation time as pathname st_ctime,
+            # but NTFS change time as descriptor st_ctime. Bind the pathname
+            # to the descriptor without comparing those incompatible fields,
+            # then retain ctime in each same-API mutation check.
+            if before_identity != _file_identity(named_before):
+                raise RepairTargetError(f"{label} changed while it was opened")
         if not 0 < before.st_size <= maximum:
             raise RepairTargetError(f"{label} has invalid size: {before.st_size}")
 
@@ -158,14 +168,19 @@ def _read_regular(
 
     if len(payload) > maximum:
         raise RepairTargetError(f"{label} has invalid size: greater than {maximum}")
-    if len(payload) != before.st_size or before_identity != _file_identity(after):
+    if len(payload) != before.st_size or before_state != _file_state(after):
         raise RepairTargetError(f"{label} changed while it was read")
     if named_before is not None:
         try:
             named_after = path.lstat()
         except OSError as exc:
             raise RepairTargetError(f"could not re-inspect {label}: {exc}") from exc
-        if _is_link_or_reparse(named_after) or _file_identity(named_after) != before_identity:
+        if (
+            _is_link_or_reparse(named_after)
+            or not stat.S_ISREG(named_after.st_mode)
+            or _file_state(named_before) != _file_state(named_after)
+            or _file_identity(named_after) != _file_identity(after)
+        ):
             raise RepairTargetError(f"{label} changed while it was read")
     return bytes(payload)
 
@@ -193,7 +208,7 @@ def _download_snapshot(
     for entry, metadata in entry_rows:
         if entry.name in snapshot or _is_link_or_reparse(metadata) or not stat.S_ISREG(metadata.st_mode):
             raise RepairTargetError("repair custody directory does not contain the exact bounded proof set")
-        snapshot[entry.name] = (entry, _file_identity(metadata))
+        snapshot[entry.name] = (entry, _file_state(metadata))
     if set(snapshot) != DOWNLOADED_ASSET_NAMES:
         raise RepairTargetError("repair custody directory does not contain the exact bounded proof set")
     return snapshot, directory_identity
