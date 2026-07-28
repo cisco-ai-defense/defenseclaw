@@ -187,6 +187,7 @@ def test_087_historical_shape_collapses_only_the_duplicate_086_lane(
     policy["platform_published_baselines"]["windows"] = []
     path = tmp_path / "effective.json"
     path.write_text(json.dumps(policy), encoding="utf-8")
+    path.chmod(0o600)
 
     selected = release_preflight.select_upgrade_baselines(
         policy_path=path,

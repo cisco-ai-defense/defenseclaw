@@ -487,6 +487,7 @@ def test_release_selects_authenticated_posix_and_field_recovery_baselines(
         ),
         encoding="utf-8",
     )
+    policy.chmod(0o600)
     output = tmp_path / "github-output"
     completed = subprocess.run(
         [
