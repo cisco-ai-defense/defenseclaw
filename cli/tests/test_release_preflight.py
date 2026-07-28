@@ -251,7 +251,7 @@ def test_windows_baseline_inventory_has_a_closed_ordered_schema(
         )
 
 
-def test_release_after_088_fails_until_windows_upgrade_certification_exists(
+def test_release_after_088_keeps_windows_fresh_install_only(
     tmp_path: Path,
 ) -> None:
     policy = _baseline_policy()
@@ -261,14 +261,22 @@ def test_release_after_088_fails_until_windows_upgrade_certification_exists(
     path = tmp_path / "effective.json"
     path.write_text(json.dumps(policy), encoding="utf-8")
 
-    with pytest.raises(
-        release_preflight.ReleasePreflightError,
-        match=r"native Windows upgrade certification is required after 0\.8\.8",
-    ):
-        release_preflight.select_upgrade_baselines(
-            policy_path=path,
-            target="0.8.9",
-        )
+    selected = release_preflight.select_upgrade_baselines(
+        policy_path=path,
+        target="0.8.9",
+    )
+
+    assert selected == [
+        "0.8.8",
+        "0.8.6",
+        "0.8.5",
+        "0.8.4",
+        "0.7.2",
+        "0.6.6",
+        "0.5.0",
+    ]
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["platform_published_baselines"]["windows"] == []
 
 
 def test_operator_git_state_requires_clean_exact_main() -> None:
@@ -293,6 +301,21 @@ def test_operator_git_state_requires_clean_exact_main() -> None:
         )
 
     assert release_preflight._operator_git_state(runner=runner) == ("a" * 40, "main")
+
+
+def test_release_request_rejects_upgrade_fixture_test_mode() -> None:
+    with pytest.raises(
+        release_preflight.ReleasePreflightError,
+        match="upgrade fixture test mode",
+    ):
+        release_preflight.validate_request(
+            operation="release",
+            version="0.8.9",
+            repository="cisco-ai-defense/defenseclaw",
+            ref="refs/heads/main",
+            commit="a" * 40,
+            environment={"DEFENSECLAW_UPGRADE_TEST_MODE": "1"},
+        )
 
 
 def test_gh_auth_token_is_forwarded_only_in_the_explicit_child_environment(

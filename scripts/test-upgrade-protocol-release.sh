@@ -762,6 +762,7 @@ run_candidate_updater_field_recovery_success() {
     local audit_db=""
     local source_config_sha256=""
     local source_environment_sha256=""
+    local resolver_path=""
     log "Proving release-owned resolver field recovery (${recovery_case}) ${baseline} -> ${TARGET_VERSION}"
     if [[ "${recovery_case}" == "corrupt-audit-same-version" ]]; then
         [[ -n "${recovery_home}" \
@@ -774,9 +775,9 @@ run_candidate_updater_field_recovery_success() {
         # shellcheck disable=SC2034
         FROM_VERSION="${TARGET_VERSION}"
     else
-        [[ "${recovery_case}" == "clean-086-missing-cursor" \
-            && "${baseline}" == "0.8.6" ]] \
-            || die "missing-cursor field recovery is bound to exact published 0.8.6"
+        [[ "${recovery_case}" == "published-missing-cursor" \
+            && "${baseline}" =~ ^0[.]8[.][67]$ ]] \
+            || die "missing-cursor field recovery is bound to exact published 0.8.6 or 0.8.7"
         # install_baseline reads this global through the sourced release harness.
         # shellcheck disable=SC2034
         FROM_VERSION="${baseline}"
@@ -787,42 +788,89 @@ run_candidate_updater_field_recovery_success() {
         mkdir -p "${SMOKE_HOME}/.openclaw"
         chmod 700 "${SMOKE_HOME}/.openclaw"
 
-        # Reproduce the actual published 0.8.6 first-run defect through that
-        # release's own config API: clean config v8 was published, while the
-        # migration cursor was never created. Do not manufacture a partial
-        # cursor; that is an ambiguous damaged state the resolver must reject.
-        HOME="${SMOKE_HOME}" \
-        DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
-        DEFENSECLAW_CONFIG="${SMOKE_HOME}/.defenseclaw/config.yaml" \
-            "${SMOKE_HOME}/.defenseclaw/.venv/bin/python" -I -B - <<'PY' \
-            || die "published 0.8.6 could not reproduce its clean first-run config"
+        # Reproduce the real field state through the exact authenticated
+        # published source controller. Both 0.8.6 and 0.8.7 can complete
+        # ordinary first-run setup with healthy release-owned components but
+        # without writing the 0.8.5 migration cursor. Never manufacture a
+        # cursor in the acceptance fixture.
+        if ! HOME="${SMOKE_HOME}" \
+            DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
+            DEFENSECLAW_CONFIG="${SMOKE_HOME}/.defenseclaw/config.yaml" \
+            OPENCLAW_HOME="${SMOKE_HOME}/.openclaw" \
+            PATH="${SMOKE_HOME}/.local/bin:${PATH}" \
+                "${SMOKE_HOME}/.defenseclaw/.venv/bin/defenseclaw" init \
+                    --non-interactive \
+                    --yes \
+                    --connector codex \
+                    --profile observe \
+                    --scanner-mode local \
+                    --no-judge \
+                    --skip-install \
+                    --no-start-gateway \
+                    --no-verify \
+                    --json-summary \
+                    >"${SMOKE_HOME}/published-first-run.json" \
+                    2>"${SMOKE_HOME}/published-first-run.stderr"; then
+            tail_log "${SMOKE_HOME}/published-first-run.stderr"
+            die "published ${baseline} could not complete its real first-run path"
+        fi
+        python3 - "${SMOKE_HOME}/.defenseclaw" "${baseline}" <<'PY' \
+            || die "published ${baseline} did not reproduce its release-owned missing-cursor state"
+import json
 import os
 from pathlib import Path
-import secrets
+import stat
+import sys
 
-from defenseclaw.config import default_config, prepare_fresh_v8_config
+import yaml
 
-data_dir = Path(os.environ["DEFENSECLAW_HOME"])
-cfg = default_config()
-prepare_fresh_v8_config(cfg)
-cfg.save()
+
+def assert_owned_regular_file(path: Path, source_version: str) -> None:
+    info = path.lstat()
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) & 0o077
+    ):
+        raise SystemExit(
+            f"published {source_version} first-run custody is unsafe: {path.name}"
+        )
+
+
+data_dir = Path(sys.argv[1])
+source_version = sys.argv[2]
 cursor = data_dir / ".migration_state.json"
 if cursor.exists() or cursor.is_symlink():
-    raise SystemExit("published 0.8.6 unexpectedly created a migration cursor")
-(data_dir / ".env").write_text(
-    "DEFENSECLAW_GATEWAY_TOKEN=" + secrets.token_hex(32) + "\n",
-    encoding="utf-8",
-)
-os.chmod(data_dir / ".env", 0o600)
+    raise SystemExit(f"published {source_version} unexpectedly created a migration cursor")
+config_path = data_dir / "config.yaml"
+environment_path = data_dir / ".env"
+assert_owned_regular_file(config_path, source_version)
+if environment_path.exists() or environment_path.is_symlink():
+    assert_owned_regular_file(environment_path, source_version)
+config = json.loads(json.dumps(yaml.safe_load(config_path.read_text(encoding="utf-8"))))
+if (
+    not isinstance(config, dict)
+    or config.get("config_version") != 8
+    or config.get("observability") != {}
+):
+    raise SystemExit(f"published {source_version} first-run config is not clean v8")
 PY
         source_config_sha256="$(protocol_sha256_file "${SMOKE_HOME}/.defenseclaw/config.yaml")"
-        source_environment_sha256="$(protocol_sha256_file "${SMOKE_HOME}/.defenseclaw/.env")"
+        if [[ -f "${SMOKE_HOME}/.defenseclaw/.env" \
+              && ! -L "${SMOKE_HOME}/.defenseclaw/.env" ]]; then
+            source_environment_sha256="$(
+                protocol_sha256_file "${SMOKE_HOME}/.defenseclaw/.env"
+            )"
+        else
+            source_environment_sha256="absent"
+        fi
         prepare_isolated_docker_path
         start_source_gateway_canary
     fi
 
     case "${recovery_case}" in
-        clean-086-missing-cursor) ;;
+        published-missing-cursor) ;;
         corrupt-audit-same-version)
             stop_smoke_gateway
             audit_db="$(
@@ -884,6 +932,14 @@ PY
     local real_curl
     local log_file="${SMOKE_HOME}/upgrade.log"
     real_curl="$(install_curl_rewrite_probe "${curl_shim}")"
+    resolver_path="${curl_shim}:${SMOKE_HOME}/.local/bin:${PATH}"
+    if [[ "${recovery_case}" == "published-missing-cursor" ]]; then
+        # The immutable 0.8.8 rescue bootstrap deliberately hands the target
+        # resolver this minimal PATH. Keep release acceptance on the exact
+        # field boundary so an ambient developer/runner uv cannot mask a
+        # broken explicit discovery or authenticated bootstrap path.
+        resolver_path="${curl_shim}:/usr/bin:/bin:/usr/sbin:/sbin"
+    fi
 
     if ! HOME="${SMOKE_HOME}" \
         DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
@@ -895,7 +951,7 @@ PY
         UPGRADE_GATE_REAL_CURL="${real_curl}" \
         UPGRADE_GATE_RELEASE_URL="${RELEASE_URL}" \
         UPGRADE_GATE_TARGET_VERSION="${TARGET_VERSION}" \
-        PATH="${curl_shim}:${SMOKE_HOME}/.local/bin:${PATH}" \
+        PATH="${resolver_path}" \
             bash "${RELEASE_ROOT}/${TARGET_VERSION}/defenseclaw-upgrade.sh" \
             "${resolver_args[@]}" >"${log_file}" 2>&1; then
         tail_v8_upgrade_log_secret_safe "${log_file}"
@@ -903,17 +959,18 @@ PY
     fi
 
     case "${recovery_case}" in
-        clean-086-missing-cursor)
-            grep -Fq "Authenticated the exact clean 0.8.6 missing-cursor compatibility state" \
+        published-missing-cursor)
+            grep -Fq "Authenticated the exact published ${baseline} missing-cursor compatibility state" \
                 "${log_file}" \
-                || die "field recovery did not authenticate the exact clean 0.8.6 source"
+                || die "field recovery did not authenticate the exact published ${baseline} source"
             python3 - \
                 "${SMOKE_HOME}/.defenseclaw" \
                 "${RELEASE_ROOT}/${TARGET_VERSION}/upgrade-manifest.json" \
                 "${source_config_sha256}" \
                 "${source_environment_sha256}" \
-                "${TARGET_VERSION}" <<'PY' \
-                || die "clean 0.8.6 field-recovery verification failed"
+                "${TARGET_VERSION}" \
+                "${baseline}" <<'PY' \
+                || die "published ${baseline} field-recovery verification failed"
 import hashlib
 import json
 from pathlib import Path
@@ -922,7 +979,7 @@ import sys
 
 data_dir = Path(sys.argv[1])
 manifest = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-source_config_sha256, source_environment_sha256, target_version = sys.argv[3:]
+source_config_sha256, source_environment_sha256, target_version, source_version = sys.argv[3:]
 cursor = json.loads((data_dir / ".migration_state.json").read_text(encoding="utf-8"))
 applied = set(cursor.get("applied", []))
 required = set(manifest.get("required_cli_migrations", []))
@@ -936,6 +993,18 @@ if (data_dir / ".migration_state.fresh.pending.json").exists():
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
+
+def environment_matches(path: Path) -> bool:
+    environment = path / ".env"
+    if source_environment_sha256 == "absent":
+        return not environment.exists() and not environment.is_symlink()
+    return (
+        environment.is_file()
+        and not environment.is_symlink()
+        and digest(environment) == source_environment_sha256
+    )
+
+
 backups = [
     path
     for path in (data_dir / "backups").glob("upgrade-*")
@@ -943,12 +1012,11 @@ backups = [
 ]
 if not any(
     (path / "config.yaml").is_file()
-    and (path / ".env").is_file()
     and digest(path / "config.yaml") == source_config_sha256
-    and digest(path / ".env") == source_environment_sha256
+    and environment_matches(path)
     for path in backups
 ):
-    raise SystemExit("field recovery retained no byte-exact clean 0.8.6 backup")
+    raise SystemExit(f"field recovery retained no byte-exact published {source_version} backup")
 
 stack = data_dir / "observability-stack"
 if stack.is_symlink() or (stack.exists() and not stack.is_dir()):
@@ -1039,8 +1107,11 @@ run_candidate_updater_field_recovery_cases() (
     trap restore_field_recovery_harness_state EXIT
 
     if [[ "${baseline}" == "0.8.6" ]]; then
-        run_candidate_updater_field_recovery_success \
-            "${baseline}" clean-086-missing-cursor
+        local source_version
+        for source_version in 0.8.6 0.8.7; do
+            run_candidate_updater_field_recovery_success \
+                "${source_version}" published-missing-cursor
+        done
     fi
     run_candidate_updater_field_recovery_success \
         "${TARGET_VERSION}" corrupt-audit-same-version "${installed_target_home}"

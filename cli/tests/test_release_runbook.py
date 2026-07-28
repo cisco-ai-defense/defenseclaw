@@ -136,7 +136,7 @@ def test_release_docs_route_to_canonical_runbook_and_preflight() -> None:
     assert "expected_commit" not in validation
     assert "immutable_releases_confirmed" not in validation
     assert "scripts/release-preflight.py operator" not in validation
-    assert "first native Windows release" in validation
-    assert "through `0.8.8` is explicitly fresh-install-only" in validation
+    assert "Windows acceptance is explicitly fresh-install-only" in validation
+    assert "no historical Windows baseline is inferred or required" in validation
     assert "RELEASE_RUNBOOK.md" in channel
     assert "no copied commit SHA, repository-setting confirmation, or local preflight is required" in channel

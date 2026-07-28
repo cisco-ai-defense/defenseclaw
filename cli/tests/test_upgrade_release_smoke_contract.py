@@ -1854,7 +1854,7 @@ def test_release_validation_lane_rejects_malformed_platform_policy(
     assert "Traceback" not in completed.stderr
 
 
-def test_field_recovery_lane_reproduces_exact_clean_086_not_partial_cursor() -> None:
+def test_field_recovery_lane_reproduces_exact_published_086_and_087_first_run() -> None:
     workflow = RELEASE_CANDIDATE_SMOKE.read_text(encoding="utf-8")
     protocol = PROTOCOL_SCRIPT.read_text(encoding="utf-8")
     recovery_start = protocol.index("run_candidate_updater_field_recovery_success() {")
@@ -1865,10 +1865,14 @@ def test_field_recovery_lane_reproduces_exact_clean_086_not_partial_cursor() -> 
     selector = RELEASE_VALIDATION_LANE.read_text(encoding="utf-8")
     assert 'field_recovery_anchor != "0.8.6"' in selector
     assert "UPGRADE_SMOKE_FIELD_RECOVERY_CASES=1" in workflow
-    assert "clean-086-missing-cursor" in protocol
-    assert "prepare_fresh_v8_config(cfg)" in protocol
-    assert "published 0.8.6 unexpectedly created a migration cursor" in protocol
-    assert "Authenticated the exact clean 0.8.6 missing-cursor compatibility state" in protocol
+    assert "published-missing-cursor" in protocol
+    assert "prepare_fresh_v8_config(cfg)" not in protocol
+    assert '"${SMOKE_HOME}/.defenseclaw/.venv/bin/defenseclaw" init' in protocol
+    assert "published {source_version} unexpectedly created a migration cursor" in protocol
+    assert "Authenticated the exact published ${baseline} missing-cursor compatibility state" in protocol
+    assert "for source_version in 0.8.6 0.8.7" in protocol
+    assert 'resolver_path="${curl_shim}:/usr/bin:/bin:/usr/sbin:/sbin"' in recovery_function
+    assert 'PATH="${resolver_path}"' in recovery_function
     assert 'document["applied"] = [' not in protocol
     assert "Replayed every missing migration and repaired the cursor" not in protocol
     assert "local SMOKE_HOME=" not in recovery_function
@@ -1890,33 +1894,42 @@ def test_field_recovery_lane_reproduces_exact_clean_086_not_partial_cursor() -> 
 
 
 @pytest.mark.skipif(os.name == "nt", reason="executes the POSIX release harness")
-def test_field_recovery_serves_only_authenticated_086_source_contract(
+def test_field_recovery_serves_authenticated_086_and_087_source_contracts(
     tmp_path: Path,
 ) -> None:
-    version = "0.8.6"
     os_name = "linux"
     arch = "amd64"
-    wheel = f"defenseclaw-{version}-2-py3-none-any.dcwheel"
-    gateway = f"defenseclaw_{version}_protocol2_{os_name}_{arch}.dcgateway"
-    authenticated_payloads = {
-        wheel: b"protected source wheel\n",
-        gateway: b"protected source gateway\n",
-        "upgrade-manifest.json": b'{"release_version":"0.8.6"}\n',
-        "release-provenance.json": b'{"release_version":"0.8.6"}\n',
-    }
     published = tmp_path / "published"
     published.mkdir()
-    for name, payload in authenticated_payloads.items():
-        (published / name).write_bytes(payload)
-    (published / "checksums.txt").write_text(
-        "".join(f"{hashlib.sha256(payload).hexdigest()}  {name}\n" for name, payload in authenticated_payloads.items()),
-        encoding="utf-8",
-    )
-    (published / "checksums.txt.sig").write_text("fixture signature\n", encoding="utf-8")
-    (published / "checksums.txt.pem").write_text(
-        "-----BEGIN CERTIFICATE-----\nZmFrZS1jZXJ0aWZpY2F0ZQ==\n-----END CERTIFICATE-----\n",
-        encoding="utf-8",
-    )
+    payloads_by_version: dict[str, dict[str, bytes]] = {}
+    for version in ("0.8.6", "0.8.7"):
+        wheel = f"defenseclaw-{version}-2-py3-none-any.dcwheel"
+        gateway = f"defenseclaw_{version}_protocol2_{os_name}_{arch}.dcgateway"
+        authenticated_payloads = {
+            wheel: f"protected source wheel {version}\n".encode(),
+            gateway: f"protected source gateway {version}\n".encode(),
+            "upgrade-manifest.json": f'{{"release_version":"{version}"}}\n'.encode(),
+            "release-provenance.json": f'{{"release_version":"{version}"}}\n'.encode(),
+        }
+        payloads_by_version[version] = authenticated_payloads
+        release = published / version
+        release.mkdir()
+        for name, payload in authenticated_payloads.items():
+            (release / name).write_bytes(payload)
+        (release / "checksums.txt").write_text(
+            "".join(
+                f"{hashlib.sha256(payload).hexdigest()}  {name}\n" for name, payload in authenticated_payloads.items()
+            ),
+            encoding="utf-8",
+        )
+        (release / "checksums.txt.sig").write_text(
+            "fixture signature\n",
+            encoding="utf-8",
+        )
+        (release / "checksums.txt.pem").write_text(
+            "-----BEGIN CERTIFICATE-----\nZmFrZS1jZXJ0aWZpY2F0ZQ==\n-----END CERTIFICATE-----\n",
+            encoding="utf-8",
+        )
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -1942,8 +1955,7 @@ download_old_asset() {
     local name="$1"
     local destination="$2"
     local version="$3"
-    [[ "${version}" == "0.8.6" ]] || return 1
-    cp "${fixture}/${name}" "${destination}"
+    cp "${fixture}/${version}/${name}" "${destination}"
 }
 PATH="$5:${PATH}"
 prepare_field_recovery_source_assets
@@ -1955,15 +1967,16 @@ prepare_field_recovery_source_assets
     )
 
     assert completed.returncode == 0, completed.stderr
-    served = release_root / version
-    assert {path.name for path in served.iterdir()} == {
-        *authenticated_payloads,
-        "checksums.txt",
-        "checksums.txt.sig",
-        "checksums.txt.pem",
-    }
-    for name, payload in authenticated_payloads.items():
-        assert (served / name).read_bytes() == payload
+    for version, authenticated_payloads in payloads_by_version.items():
+        served = release_root / version
+        assert {path.name for path in served.iterdir()} == {
+            *authenticated_payloads,
+            "checksums.txt",
+            "checksums.txt.sig",
+            "checksums.txt.pem",
+        }
+        for name, payload in authenticated_payloads.items():
+            assert (served / name).read_bytes() == payload
 
 
 def test_field_recovery_source_authentication_precedes_local_server_start() -> None:
@@ -1994,7 +2007,7 @@ def test_field_recovery_verifier_accepts_absent_optional_bundle_but_rejects_unsa
     expected_success: bool,
 ) -> None:
     protocol = PROTOCOL_SCRIPT.read_text(encoding="utf-8")
-    failure = '|| die "clean 0.8.6 field-recovery verification failed"'
+    failure = '|| die "published ${baseline} field-recovery verification failed"'
     failure_offset = protocol.index(failure)
     body = protocol.index("\n", failure_offset) + 1
     end = protocol.index("\nPY\n", body)
@@ -2047,6 +2060,7 @@ def test_field_recovery_verifier_accepts_absent_optional_bundle_but_rejects_unsa
             hashlib.sha256(source_config).hexdigest(),
             hashlib.sha256(source_environment).hexdigest(),
             "0.8.8",
+            "0.8.6",
         ],
         input=verifier,
         text=True,

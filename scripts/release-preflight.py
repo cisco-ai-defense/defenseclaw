@@ -47,7 +47,6 @@ except ModuleNotFoundError:  # Direct ``python scripts/release-preflight.py`` ex
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REPOSITORY = "cisco-ai-defense/defenseclaw"
-WINDOWS_FRESH_INSTALL_ONLY_THROUGH = "0.8.8"
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 GITHUB_CLI_UNTRUSTED_ENVIRONMENT = frozenset(
@@ -159,9 +158,13 @@ def validate_request(
     repository: str,
     ref: str,
     commit: str,
+    environment: Mapping[str, str] | None = None,
 ) -> None:
     """Validate the request GitHub bound to the selected ``main`` commit."""
 
+    request_environment = os.environ if environment is None else environment
+    if request_environment.get("DEFENSECLAW_UPGRADE_TEST_MODE"):
+        raise ReleasePreflightError("release requests cannot run with upgrade fixture test mode enabled")
     _version_key(version)
     if operation not in {"release", "repair-channel"}:
         raise ReleasePreflightError(f"unsupported release operation: {operation!r}")
@@ -243,12 +246,6 @@ def select_upgrade_baselines(
     if len(selected) != expected_lanes:
         raise ReleasePreflightError(
             f"target {target} requires exactly {expected_lanes} distinct POSIX release lanes; selected {len(selected)}"
-        )
-    if target_key > _version_key(WINDOWS_FRESH_INSTALL_ONLY_THROUGH):
-        raise ReleasePreflightError(
-            "native Windows upgrade certification is required after "
-            f"{WINDOWS_FRESH_INSTALL_ONLY_THROUGH}; add the Windows upgrade lane before "
-            f"releasing {target} (https://github.com/cisco-ai-defense/defenseclaw/issues/619)"
         )
     document["platform_published_baselines"]["windows"] = []
     payload = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")

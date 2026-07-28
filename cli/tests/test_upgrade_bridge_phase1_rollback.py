@@ -1013,6 +1013,12 @@ if [[ -n "${MIGRATION_FROM_VERSION:-}" ]]; then
     kill -KILL "${command_subshell_pid}" 2>/dev/null || true
     kill -KILL "$$"
   fi
+  if [[ -n "${TARGET_STATUS_PORT:-}" ]]; then
+    printf '%s\n' \
+      'gateway:' \
+      '  api_bind: 127.0.0.1' \
+      "  api_port: ${TARGET_STATUS_PORT}" >> "${DEFENSECLAW_CONFIG}"
+  fi
   config_dir="${DEFENSECLAW_CONFIG%/*}"
   config_base="${DEFENSECLAW_CONFIG##*/}"
   mkdir -p "${MIGRATION_OPENCLAW_HOME}"
@@ -1051,6 +1057,10 @@ printf '%s\n' "${TARGET_HEALTH_URL:-http://127.0.0.1:18970/health}"
         fake_bin / "uv",
         """#!/usr/bin/env bash
 set -euo pipefail
+if [[ "$#" -eq 1 && "$1" == "--version" ]]; then
+  printf '%s\n' 'uv 0.11.28'
+  exit 0
+fi
 venv=''
 previous=''
 for arg in "$@"; do
@@ -1179,13 +1189,14 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
     if bridge_install_failure:
         env["FAIL_BRIDGE_WHEEL_INSTALL"] = "1"
         env["MUTATE_SOURCE_CLI_ON_VERSION"] = "1"
-    if crash_point == "migration-after-config":
+    if crash_point in {"migration-after-config", "after-bridge-health"}:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             probe.bind(("127.0.0.1", 0))
             target_status_port = int(probe.getsockname()[1])
-        env["ALLOW_TARGET_GATEWAY_START"] = "1"
         env["TARGET_STATUS_PORT"] = str(target_status_port)
         env["TARGET_HEALTH_URL"] = f"http://127.0.0.1:{target_status_port}/health"
+    if crash_point == "migration-after-config":
+        env["ALLOW_TARGET_GATEWAY_START"] = "1"
     if target_exits_early:
         env["ALLOW_TARGET_GATEWAY_START"] = "1"
         env["TARGET_GATEWAY_EXIT_AFTER_START"] = "1"
@@ -1221,14 +1232,20 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
             else:
                 crash_variable = "INJECT_PHASE1_CRASH_ON_TARGET_VERSION"
                 env[crash_variable] = "1"
-            if crash_point == "migration-after-config":
-                try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-                        probe.bind(("127.0.0.1", target_status_port))
-                except OSError as exc:
-                    pytest.fail(
-                        f"target status port {target_status_port} was claimed before the upgrade fixture started: {exc}"
-                    )
+            if crash_point in {"migration-after-config", "after-bridge-health"}:
+                for _attempt in range(10):
+                    try:
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                            probe.bind(("127.0.0.1", target_status_port))
+                        break
+                    except OSError:
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                            probe.bind(("127.0.0.1", 0))
+                            target_status_port = int(probe.getsockname()[1])
+                        env["TARGET_STATUS_PORT"] = str(target_status_port)
+                        env["TARGET_HEALTH_URL"] = f"http://127.0.0.1:{target_status_port}/health"
+                else:
+                    pytest.fail("could not allocate an isolated target status port")
             interrupted = subprocess.run(
                 ["bash", str(resolver_script), "--yes", "--version", target_version],
                 cwd=ROOT,

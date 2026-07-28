@@ -51,7 +51,7 @@ fresh-install target.
 
 The downloaded `install.ps1` continues to own native Setup authentication,
 fresh installation, repair, and same-version servicing behavior. Windows
-release acceptance is fresh-install-only through `0.8.8`; this rescue path
+release acceptance is fresh-install-only; this rescue path
 does not create or claim a certified native Windows upgrade lane. A
 `repair-channel` workflow operation repairs only the signed discovery pointer,
 while native Setup repair services an installation already on the selected

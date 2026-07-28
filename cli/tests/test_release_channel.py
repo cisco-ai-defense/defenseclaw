@@ -25,11 +25,14 @@ VERSION = "0.8.8"
 COMMIT = "a" * 40
 CHANNEL_BRANCH_COMMIT = "f" * 40
 RESCUE = ROOT / "scripts/defenseclaw-rescue.sh"
+UPGRADE_RESOLVER = ROOT / "scripts/upgrade.sh"
 WINDOWS_RESCUE = ROOT / "scripts/defenseclaw-rescue.ps1"
 PUBLISHER = ROOT / "scripts/publish-release-channel.sh"
 WORKFLOW = ROOT / ".github/workflows/release.yaml"
 DOC = ROOT / "docs/RELEASE_CHANNEL.md"
 SCRIPT_TIMEOUT_SECONDS = 30
+IMMUTABLE_088_RESCUE_SHA256 = "0c98aa9aa7d56e88f04768e0fe70681f2de777fc22021f9af4ccc06be1d8099b"
+IMMUTABLE_088_RESCUE_SIZE = 28_419
 COSIGN_RELEASE_BASE_URL = (
     f"https://github.com/sigstore/cosign/releases/download/v{resolver_hint.COSIGN_BOOTSTRAP_VERSION}"
 )
@@ -1374,6 +1377,78 @@ def test_rescue_without_operator_arguments_executes_exact_tagged_resolver(
     assert completed.returncode == 0, completed.stderr
     assert f"Authenticated stable resolver {VERSION} ({COMMIT})" in completed.stdout
     assert completed.stdout.endswith(f"resolver-args: <--version> <{VERSION}>\n")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX rescue bootstrap")
+def test_immutable_088_rescue_hands_clean_path_to_new_resolver_uv_custody(
+    tmp_path: Path,
+) -> None:
+    rescue_bytes = RESCUE.read_bytes()
+    assert len(rescue_bytes) == IMMUTABLE_088_RESCUE_SIZE
+    assert hashlib.sha256(rescue_bytes).hexdigest() == IMMUTABLE_088_RESCUE_SHA256
+
+    upgrade_source = UPGRADE_RESOLVER.read_text(encoding="utf-8")
+    pin = re.search(r'readonly UV_BOOTSTRAP_VERSION="([^"]+)"', upgrade_source)
+    maximum = re.search(r'readonly UV_BOOTSTRAP_MAX_BYTES="([^"]+)"', upgrade_source)
+    assert pin is not None and maximum is not None, "uv bootstrap constants moved"
+    function_start = upgrade_source.find("resolve_upgrade_uv() {")
+    assert function_start >= 0, "resolve_upgrade_uv() was renamed or removed"
+    function_end = upgrade_source.find(
+        "\n\n# Keep one bounded, fail-closed parser",
+        function_start,
+    )
+    assert function_end > function_start, "resolve_upgrade_uv() end anchor moved"
+    resolver_function = upgrade_source[function_start:function_end]
+    resolver_payload = (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "umask 077\n"
+        f'readonly UV_BOOTSTRAP_VERSION="{pin.group(1)}"\n'
+        f'readonly UV_BOOTSTRAP_MAX_BYTES="{maximum.group(1)}"\n'
+        'UV_BIN=""\n'
+        'die() { printf "die: %s\\n" "$*" >&2; exit 1; }\n'
+        'ok() { printf "ok: %s\\n" "$*"; }\n'
+        'warn() { printf "warn: %s\\n" "$*" >&2; }\n'
+        'info() { printf "info: %s\\n" "$*"; }\n'
+        'STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/resolver-uv.XXXXXX")"\n'
+        + resolver_function
+        + "\n"
+        + "resolve_upgrade_uv\n"
+        + '"${UV_BIN}" --version\n'
+        + '/usr/bin/env > "$TMPDIR/resolver-env.log"\n'
+        + 'printf "resolver-clean-path=%s\\n" "${PATH}"\n'
+        + "# DefenseClaw upgrade resolver complete v1\n"
+    ).encode()
+    env, rescue = _rescue_fixture(tmp_path, resolver_payload=resolver_payload)
+    home = tmp_path / "home"
+    known_bin = home / ".local" / "bin"
+    known_bin.mkdir(parents=True)
+    marker = tmp_path / "known-uv-executed"
+    _write_executable(
+        known_bin / "uv",
+        f"#!/usr/bin/env bash\nprintf executed > {str(marker)!r}\n"
+        f"printf 'uv {pin.group(1)} (fixture 2026-07-27)\\n'\n",
+    )
+    env["HOME"] = str(home)
+
+    completed = subprocess.run(
+        [str(rescue), "--yes"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=SCRIPT_TIMEOUT_SECONDS,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Copied uv into private upgrade custody" in completed.stdout
+    assert f"uv {pin.group(1)} (fixture 2026-07-27)" in completed.stdout
+    assert "resolver-clean-path=/usr/bin:/bin:/usr/sbin:/sbin" in completed.stdout
+    assert marker.read_text(encoding="utf-8") == "executed"
+    resolver_environment = _environment(tmp_path / "resolver-env.log")
+    assert resolver_environment["HOME"] == str(home)
+    assert resolver_environment["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX rescue bootstrap")

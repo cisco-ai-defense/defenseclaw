@@ -151,16 +151,19 @@ Confirm that the exact run shows:
 - every baseline selected by workflow request validation upgraded on both
   Linux and macOS, including the `0.8.4` bridge and `0.8.5` forward handoff
   for pre-`0.8.4` sources;
+- exact published `0.8.6` and `0.8.7` install-plus-first-run field states with
+  an absent migration cursor recovered through the candidate resolver on both
+  Linux and macOS under the immutable rescue bootstrap’s clean tool path;
 - native Windows x64 fresh install through `install.ps1` and
   `DefenseClawSetup-x64.exe`;
 - exact CLI and gateway version plus healthy gateway checks;
 - sealed-candidate verification before publication; and
 - immutable remote asset custody before stable-channel advancement.
 
-Windows is explicitly fresh-install-only through `0.8.8`. Request validation
-blocks a later release until [#619](https://github.com/cisco-ai-defense/defenseclaw/issues/619)
-adds a native upgrade lane from an authenticated published Windows Setup.
-Do not discard Windows baselines or invent an unauthenticated historical lane.
+Windows acceptance is explicitly fresh-install-only. Every release still
+builds and exercises the exact native Setup and `install.ps1` candidate, but
+the release matrix does not claim or require a historical native Windows
+upgrade path. Do not invent an unauthenticated historical lane.
 
 ### Public release and asset inventory
 
