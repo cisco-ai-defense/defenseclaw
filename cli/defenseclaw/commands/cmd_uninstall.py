@@ -58,6 +58,7 @@ import click
 
 from defenseclaw import config as config_module
 from defenseclaw import ux
+from defenseclaw.commands import windows_native_uninstall
 
 # Connectors whose teardown the Python CLI knows how to perform locally
 # without going through ``defenseclaw-gateway connector teardown``. This
@@ -169,6 +170,13 @@ def uninstall_cmd(
     yes: bool,
 ) -> None:
     """Uninstall DefenseClaw (reversibly by default)."""
+    if _dispatch_native_windows_uninstall(
+        wipe_data=wipe_data,
+        dry_run=dry_run,
+        yes=yes,
+    ):
+        return
+
     plan = _build_plan(
         wipe_data=wipe_data,
         binaries=binaries,
@@ -187,6 +195,58 @@ def uninstall_cmd(
         raise SystemExit(1)
 
     _execute_plan(plan)
+
+
+def _dispatch_native_windows_uninstall(
+    *,
+    wipe_data: bool,
+    dry_run: bool,
+    yes: bool,
+    platform_name: str | None = None,
+) -> bool:
+    """Prefer authenticated native Setup before consulting generic markers."""
+
+    try:
+        request = windows_native_uninstall.prepare_native_windows_uninstall(
+            wipe_data=wipe_data,
+            platform_name=platform_name,
+        )
+    except windows_native_uninstall.NativeWindowsUninstallRefusal as exc:
+        raise click.ClickException(str(exc)) from exc
+    if request is None:
+        return False
+
+    ux.banner("DefenseClaw Uninstall")
+    click.echo(f"  {ux.dim('→')} authenticated native Windows installation")
+    click.echo(f"  {ux.dim('→')} Setup: {request.setup_path}")
+    if wipe_data:
+        click.echo(f"  {ux.dim('→')} user data will be deleted")
+    else:
+        click.echo(f"  {ux.dim('→')} user data will be preserved")
+    click.echo(f"  {ux.dim('→')} a restart may be required to finish exact cleanup")
+
+    if dry_run:
+        ux.subhead("(dry-run — nothing modified)")
+        return True
+    if not yes and not click.confirm("  Proceed?", default=False):
+        ux.subhead("Cancelled.")
+        raise SystemExit(1)
+
+    try:
+        outcome = windows_native_uninstall.execute_native_windows_uninstall(request)
+    except windows_native_uninstall.NativeWindowsUninstallRefusal as exc:
+        raise click.ClickException(str(exc)) from exc
+    if outcome.returncode == 0:
+        ux.ok("Native Windows uninstall completed.")
+        return True
+    if outcome.restart_required:
+        ux.ok("Native Windows uninstall is armed; restart required (Windows exit code 3010).")
+        raise SystemExit(outcome.returncode)
+    if outcome.refused:
+        ux.err("Authenticated native Setup refused the uninstall (Windows exit code 1603).")
+        raise SystemExit(outcome.returncode)
+    ux.err(f"Authenticated native Setup exited with Windows code {outcome.returncode}.")
+    raise SystemExit(outcome.returncode)
 
 
 # ---------------------------------------------------------------------------
