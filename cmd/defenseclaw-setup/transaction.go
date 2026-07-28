@@ -2221,6 +2221,14 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 	childEnv := transactionChildEnv(transaction)
 	previousChildEnv := transactionPreviousChildEnv(transaction)
 	gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
+	if err := initializeCanonicalReleaseState(
+		transaction,
+		childEnv,
+		runCanonicalInitializationWithEnv,
+		validateCanonicalReleaseStateWithEnv,
+	); err != nil {
+		return err
+	}
 	// Publish the signed no-console launcher outside both InstallRoot and
 	// DataRoot before connector configuration writes absolute commands. The
 	// publishing/active handshake makes this step idempotent under committed
@@ -2363,6 +2371,26 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		transaction.TargetServices,
 		nativeInstallRuntimeConvergenceOps(),
 	)
+}
+
+func initializeCanonicalReleaseState(
+	transaction setupTransaction,
+	env []string,
+	initialize func(string, string, []string) error,
+	validate func(string, string, string, []string) error,
+) error {
+	if err := initialize(transaction.InstallRoot, transaction.DataRoot, env); err != nil {
+		return fmt.Errorf("initialize canonical release state: %w", err)
+	}
+	if err := validate(
+		transaction.InstallRoot,
+		transaction.DataRoot,
+		transaction.TargetVersion,
+		env,
+	); err != nil {
+		return fmt.Errorf("validate canonical release state before runtime activation: %w", err)
+	}
+	return nil
 }
 
 func uninstallPathOwnership(transaction setupTransaction) (owned, reusedSeparator, valueCreated bool) {

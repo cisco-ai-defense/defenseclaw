@@ -1580,20 +1580,35 @@ func validateMachineVersion(output []byte, expectedName, expectedVersion, expect
 }
 
 func runInitialConfigurationWithEnv(root, dataRoot string, opts options, env []string) error {
-	if opts.Connector == "none" {
-		return nil
+	args := initialConfigurationArgs(opts)
+	output, err := runCapturedSetupCommand(
+		setupConfigurationTimeout,
+		env,
+		filepath.Join(root, "bin", "defenseclaw.exe"),
+		args...,
+	)
+	if err != nil {
+		return fmt.Errorf("connector configuration failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	args := []string{
+	return nil
+}
+
+func initialConfigurationArgs(opts options) []string {
+	return []string{
 		"init", "--skip-install", "--non-interactive", "--yes",
 		"--connector", opts.Connector,
 		"--profile", opts.Mode,
 		"--no-start-gateway", "--no-verify",
 	}
-	output, err := runCapturedSetupCommand(setupConfigurationTimeout, env, filepath.Join(root, "bin", "defenseclaw.exe"), args...)
-	if err != nil {
-		return fmt.Errorf("connector configuration failed: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
+}
+
+func runCanonicalInitializationWithEnv(root, dataRoot string, env []string) error {
+	return runInitialConfigurationWithEnv(
+		root,
+		dataRoot,
+		options{Connector: "none", Mode: "observe", Quiet: true},
+		env,
+	)
 }
 
 const packagedMigrationScript = `import inspect, json, sys
@@ -1640,6 +1655,33 @@ if missing:
     raise SystemExit("required migrations are missing: " + ", ".join(missing))
 print(count)`
 
+const packagedCanonicalStateValidationScript = `import json, sys
+from defenseclaw import migration_state
+from defenseclaw.config import load, require_v8_config
+data_root, target_version, manifest_path = sys.argv[1:]
+with open(manifest_path, encoding="utf-8") as stream:
+    manifest = json.load(stream)
+if manifest.get("release_version") != target_version:
+    raise SystemExit("upgrade manifest version mismatch")
+require_v8_config()
+load()
+state = migration_state.load(data_root)
+if state is None:
+    raise SystemExit("migration cursor is missing")
+if state.package_version != target_version:
+    raise SystemExit(
+        "migration cursor package version mismatch: "
+        + str(state.package_version)
+        + " != "
+        + target_version
+    )
+required = tuple(manifest.get("required_cli_migrations", ()))
+applied = set(state.applied)
+missing = [value for value in required if value not in applied]
+if missing:
+    raise SystemExit("required migrations are missing: " + ", ".join(missing))
+print("ok")`
+
 const packagedMigrationPreflightScript = `import json, sys
 from defenseclaw.migrations import preflight_required_migrations
 from_version, to_version, openclaw_home, data_root, manifest_path, scratch_dir = sys.argv[1:]
@@ -1679,6 +1721,48 @@ func runPackagedMigrationsWithEnv(root, dataRoot, fromVersion, toVersion string,
 		return fmt.Errorf("run packaged migrations: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func validateCanonicalReleaseStateWithEnv(root, dataRoot, targetVersion string, env []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), setupMigrationTimeout)
+	defer cancel()
+	cmd := newCanonicalStateValidationCommand(ctx, root, dataRoot, targetVersion)
+	cmd.Env = packagedTargetRuntimeEnv(env, root, dataRoot)
+	output, err := processutil.CombinedOutputTree(cmd, false)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf(
+			"validate canonical release state timed out after %s: %w: %s",
+			setupMigrationTimeout,
+			ctxErr,
+			strings.TrimSpace(string(output)),
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("validate canonical release state: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func newCanonicalStateValidationCommand(
+	ctx context.Context,
+	root, dataRoot, targetVersion string,
+) *exec.Cmd {
+	python := filepath.Join(root, "runtime", "python", "python.exe")
+	manifest := filepath.Join(root, "installer", "upgrade-manifest.json")
+	cmd := newCapturedSetupCommand(
+		ctx,
+		python,
+		"-I",
+		"-X",
+		"utf8",
+		"-c",
+		packagedCanonicalStateValidationScript,
+		dataRoot,
+		targetVersion,
+		manifest,
+	)
+	cmd.Dir = root
+	return cmd
 }
 
 func runPackagedMigrationPreflightWithEnv(
