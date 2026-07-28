@@ -3151,7 +3151,8 @@ function Invoke-WizardConfigureLaterAcceptance(
     Assert-NoGatewayAutoStart
 
     Invoke-WindowsSetupStandardUserProcess $Setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
-        -TimeoutSeconds 600 -LogPath (Join-Path $Logs 'wizard-configure-later-uninstall.log') | Out-Null
+        -AllowedExitCodes @(3010) -TimeoutSeconds 600 `
+        -LogPath (Join-Path $Logs 'wizard-configure-later-uninstall.log') | Out-Null
     if (Test-Path -LiteralPath $InstallRoot) {
         throw "Configure later uninstall left install root behind: $InstallRoot"
     }
@@ -3257,7 +3258,8 @@ function Invoke-WizardConnectorAcceptance(
     # The setup uninstaller must stop services and clean connector wiring
     # itself. Pre-teardown here previously hid dangling hooks in production.
     Invoke-WindowsSetupStandardUserProcess $Setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
-        -TimeoutSeconds 600 -LogPath (Join-Path $Logs "wizard-$ConnectorName-uninstall.log") | Out-Null
+        -AllowedExitCodes @(3010) -TimeoutSeconds 600 `
+        -LogPath (Join-Path $Logs "wizard-$ConnectorName-uninstall.log") | Out-Null
     if (Test-Path -LiteralPath $InstallRoot) {
         throw "wizard $ConnectorName uninstall left install root behind: $InstallRoot"
     }
@@ -3310,10 +3312,9 @@ function Invoke-SetupAcceptance {
     $installRoot = Join-Path $localAppData 'Programs\DefenseClaw'
     $dataRoot = Join-Path $userProfile '.defenseclaw'
     $cacheRoot = Join-Path $localAppData 'DefenseClaw\InstallerCache'
-    # The transaction-bound helper may spend up to two minutes waiting for
-    # Setup to exit. Allow that contract plus scheduling margin before judging
-    # the fail-closed self-delete assertion.
-    $deferredCleanupWaitAttempts = 520
+    $installerStateRoot = Join-Path $localAppData 'DefenseClaw\InstallerState'
+    $cleanupRecordPath = Join-Path $installerStateRoot 'uninstall-cleanup.json'
+    $transactionJournalPath = Join-Path $installerStateRoot 'setup-transaction.json'
     $arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw'
     $connectorConfigPaths = @(
         (Join-Path $userProfile '.codex\config.toml'),
@@ -3783,7 +3784,8 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
 
         Assert-NativeConnectorCleanupAuthorityPresent $dataRoot $repairedRoster
         Invoke-WindowsSetupStandardUserProcess $setup @('/uninstall', '/quiet') `
-            -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-uninstall-preserve.log') | Out-Null
+            -AllowedExitCodes @(3010) -TimeoutSeconds 600 `
+            -LogPath (Join-Path $logs 'setup-uninstall-preserve.log') | Out-Null
         if (Test-Path -LiteralPath $installRoot) { throw "setup uninstall left install root behind: $installRoot" }
         if (-not (Test-Path -LiteralPath $preserved -PathType Leaf)) { throw 'setup uninstall did not preserve user data' }
         if (Test-Path -LiteralPath $arpKey) { throw 'setup uninstall left Installed Apps registration behind' }
@@ -3801,18 +3803,36 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
         if (-not (Test-Path -LiteralPath $cachedSetup -PathType Leaf)) {
             throw "reinstall did not publish the self-servicing setup executable: $cachedSetup"
         }
-        # Exercise the exact Apps & Features self-delete path. The cached
-        # executable cannot remove its own directory until its process exits,
-        # so the transaction-bound deferred helper must finish the deletion.
+        # Exercise the exact Apps & Features path. Full uninstall deliberately
+        # retains authenticated cleanup authority until a distinct boot.
         Invoke-WindowsSetupStandardUserProcess $cachedSetup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
-            -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-uninstall-delete.log') | Out-Null
+            -AllowedExitCodes @(3010) -TimeoutSeconds 600 `
+            -LogPath (Join-Path $logs 'setup-uninstall-delete.log') | Out-Null
         if (Test-Path -LiteralPath $installRoot) { throw "setup uninstall left install root behind: $installRoot" }
         if (Test-Path -LiteralPath $dataRoot) { throw "setup uninstall with DELETEUSERDATA=1 left user data behind: $dataRoot" }
-        for ($attempt = 0; $attempt -lt $deferredCleanupWaitAttempts -and (Test-Path -LiteralPath $cacheRoot); $attempt++) {
-            Start-Sleep -Milliseconds 250
+        foreach ($requiredResidue in @(
+            $cachedSetup,
+            (Get-StableHookRuntimeExecutable),
+            (Join-Path (Split-Path -Parent (Get-StableHookRuntimeExecutable)) 'hook-runtime-state.json'),
+            $cleanupRecordPath,
+            $transactionJournalPath
+        )) {
+            if (-not (Test-Path -LiteralPath $requiredResidue -PathType Leaf)) {
+                throw "same-boot uninstall did not retain authenticated cleanup authority: $requiredResidue"
+            }
         }
-        if (Test-Path -LiteralPath $cacheRoot) {
-            throw "cached setup self-uninstall left installer cache behind: $cacheRoot"
+        $cleanupRecord = Get-Content -LiteralPath $cleanupRecordPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $transactionJournal = Get-Content -LiteralPath $transactionJournalPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([int]$cleanupRecord.schema_version -ne 1 -or
+            [string]$cleanupRecord.status -cne 'pending-reboot' -or
+            [string]$cleanupRecord.transaction_id -cnotmatch '^[0-9a-f]{32}$') {
+            throw 'same-boot uninstall did not retain the exact pending cleanup record'
+        }
+        if ([int]$transactionJournal.schema_version -ne 2 -or
+            [string]$transactionJournal.phase -cne 'converged' -or
+            [string]$transactionJournal.transaction.action -cne 'uninstall' -or
+            [string]$transactionJournal.transaction.id -cne [string]$cleanupRecord.transaction_id) {
+            throw 'same-boot uninstall did not retain the exact converged uninstall journal'
         }
         Assert-NoGatewayAutoStart
     } catch {
@@ -3838,17 +3858,12 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
         if (Test-Path -LiteralPath $installRoot) {
             try {
                 Invoke-WindowsSetupStandardUserProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
-                    -AllowedExitCodes @(0, 1603) -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-final-cleanup.log') | Out-Null
+                    -AllowedExitCodes @(3010, 1603) -TimeoutSeconds 600 `
+                    -LogPath (Join-Path $logs 'setup-final-cleanup.log') | Out-Null
             } catch { Write-Warning "setup acceptance cleanup failed: $($_.Exception.Message)" }
         }
         Remove-WizardAgentFixtures $agentFixtures
-        for ($attempt = 0; $attempt -lt $deferredCleanupWaitAttempts -and (Test-Path -LiteralPath $cacheRoot); $attempt++) {
-            Start-Sleep -Milliseconds 250
-        }
         $finalValidationFailures = [Collections.Generic.List[string]]::new()
-        if (Test-Path -LiteralPath $cacheRoot) {
-            $finalValidationFailures.Add("setup uninstall left installer cache behind: $cacheRoot")
-        }
         if ($disposableGithubRunner) {
             try {
                 Assert-NoDefenseClawRegistration $connectorConfigPaths
@@ -5211,7 +5226,8 @@ function Invoke-Contract {
         try {
             if ($installed -or (Test-Path -LiteralPath $installRoot)) {
                 Invoke-WindowsSetupStandardUserProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
-                    -TimeoutSeconds 600 -LogPath (Join-Path $root 'setup-contract-uninstall.log') | Out-Null
+                    -AllowedExitCodes @(3010) -TimeoutSeconds 600 `
+                    -LogPath (Join-Path $root 'setup-contract-uninstall.log') | Out-Null
             }
         } catch {
             $cleanupErrors.Add($_)

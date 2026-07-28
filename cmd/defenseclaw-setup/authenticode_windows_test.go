@@ -42,6 +42,26 @@ func TestStableHookVerificationHandleDeniesWriteAndReplacement(t *testing.T) {
 	}
 }
 
+func TestStableHookSourceVerificationHandleAllowsInstalledACLAndDeniesMutation(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "defenseclaw-hook-launcher.exe")
+	if err := os.WriteFile(filePath, unsignedTestPE(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	locked, err := openStableHookSourceVerificationFile(filePath)
+	if err != nil {
+		t.Fatalf("openStableHookSourceVerificationFile: %v", err)
+	}
+	defer locked.Close()
+
+	if writable, err := os.OpenFile(filePath, os.O_WRONLY, 0); err == nil {
+		_ = writable.Close()
+		t.Fatal("installed source verification handle allowed a concurrent writer")
+	}
+	if err := os.Rename(filePath, filePath+".replaced"); err == nil {
+		t.Fatal("installed source verification handle allowed path replacement")
+	}
+}
+
 func TestWindowsAuthenticodeTrustAcceptsSignedPEAndRejectsTamper(t *testing.T) {
 	output, err := exec.Command(
 		"pwsh.exe", "-NoProfile", "-NonInteractive", "-Command", "(Get-Process -Id $PID).Path",

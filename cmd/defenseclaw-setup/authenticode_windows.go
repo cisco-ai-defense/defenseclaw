@@ -62,7 +62,7 @@ func verifyEmbeddedAuthenticodeTrust(filePath string) error {
 }
 
 func verifyPublishedStableHookRuntime(source, published string) error {
-	sourceFile, err := openStableHookVerificationFile(source)
+	sourceFile, err := openStableHookSourceVerificationFile(source)
 	if err != nil {
 		return fmt.Errorf("lock installed hook launcher source: %w", err)
 	}
@@ -92,7 +92,20 @@ func verifyPublishedStableHookRuntime(source, published string) error {
 	return nil
 }
 
+// The installed source is already bound to the authenticated transaction and
+// payload inventory, but legitimately inherits the install tree's read ACL.
+// Keep the same non-write/non-delete handle custody used for the private
+// published launcher without imposing the published launcher's private-DACL
+// contract on the source.
+func openStableHookSourceVerificationFile(filePath string) (*os.File, error) {
+	return openStableHookVerificationFileWithACL(filePath, false)
+}
+
 func openStableHookVerificationFile(filePath string) (*os.File, error) {
+	return openStableHookVerificationFileWithACL(filePath, true)
+}
+
+func openStableHookVerificationFileWithACL(filePath string, requirePrivateACL bool) (*os.File, error) {
 	if err := winpath.RejectReparseChain(filePath); err != nil {
 		return nil, err
 	}
@@ -139,8 +152,10 @@ func openStableHookVerificationFile(filePath string) (*os.File, error) {
 			filePath,
 		))
 	}
-	if err := safefile.ValidatePrivateHandle(handle); err != nil {
-		return fail(err)
+	if requirePrivateACL {
+		if err := safefile.ValidatePrivateHandle(handle); err != nil {
+			return fail(err)
+		}
 	}
 	return file, nil
 }

@@ -1261,13 +1261,14 @@ private-secret-name = "DefenseClaw must remain redacted"
         'interactive Setup acceptance owns and cleans built-in-root fixtures without environment trust authority'
     Assert-True ($setupAcceptanceFunction -match '\$cachedSetup' -and
         $setupAcceptanceFunction -match 'Join-Path \$cacheRoot ''DefenseClawSetup-x64\.exe''' -and
-        $setupAcceptanceFunction -match '\$deferredCleanupWaitAttempts\s*=\s*520' -and
-        [regex]::Matches(
-            $setupAcceptanceFunction,
-            '\$attempt -lt \$deferredCleanupWaitAttempts'
-        ).Count -ge 2 -and
-        $setupAcceptanceFunction -match 'cached setup self-uninstall left installer cache behind') `
-        'native Setup acceptance executes the cached Apps & Features binary and waits through the bounded deferred self-delete before proving InstallerCache removal'
+        $setupAcceptanceFunction -match '-AllowedExitCodes @\(3010\)' -and
+        $setupAcceptanceFunction -match 'uninstall-cleanup\.json' -and
+        $setupAcceptanceFunction -match '''pending-reboot''' -and
+        $setupAcceptanceFunction -match '''converged''') `
+        'native Setup acceptance proves exact 3010 and authenticated same-boot pending cleanup custody'
+    Assert-True ($contractFunction -match
+        '(?s)/uninstall.*?-AllowedExitCodes @\(3010\).*?setup-contract-uninstall\.log') `
+        'packaged connector contract accepts only restart-required full-uninstall success'
     Assert-True ($nativeHarnessText -match '-StateRoot \$contractProfileRoot -HomeRoot \$contractHome -NativeDataRoot \$dataRoot' -and
         $nativeHarnessText -match '-AllowNativeDataRoot' -and
         $harnessText -match 'NativeDataRoot is restricted to an explicitly authorized packaged contract run' -and
