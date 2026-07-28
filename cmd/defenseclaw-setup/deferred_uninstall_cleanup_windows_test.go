@@ -94,6 +94,53 @@ func TestAuthenticatedUninstallMaintenanceDigestRejectsMissingSnapshot(t *testin
 	}
 }
 
+func TestDeferredCleanupMaintenanceFileAllowsAuthenticatedReinstallSupersession(t *testing.T) {
+	root := t.TempDir()
+	if err := safefile.ProtectDirectory(root); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maintenance := filepath.Join(root, setupArtifactName)
+	if err := os.WriteFile(maintenance, data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.ProtectFile(maintenance); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := fileSHA256(maintenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := deferredUninstallCleanupRecord{
+		MaintenancePath:       maintenance,
+		MaintenanceSHA256:     digest,
+		UnsignedLocalArtifact: true,
+	}
+
+	if err := validateDeferredCleanupMaintenanceFile(record); err != nil {
+		t.Fatalf("authenticated maintenance file rejected for supersession: %v", err)
+	}
+	if err := validateDeferredCleanupMaintenanceCaller(record); err == nil ||
+		!strings.Contains(err.Error(), "transaction-owned maintenance executable") {
+		t.Fatalf("non-cleanup caller validation error = %v", err)
+	}
+	data[len(data)/2] ^= 0xff
+	if err := os.WriteFile(maintenance, data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDeferredCleanupMaintenanceFile(record); err == nil ||
+		!strings.Contains(err.Error(), "digest changed") {
+		t.Fatalf("tampered maintenance validation error = %v", err)
+	}
+}
+
 func TestDeferredCleanupTransactionRootExpectationFailsClosed(t *testing.T) {
 	transaction := setupTransaction{
 		InstallRoot:     filepath.Join(t.TempDir(), "Programs", "DefenseClaw"),

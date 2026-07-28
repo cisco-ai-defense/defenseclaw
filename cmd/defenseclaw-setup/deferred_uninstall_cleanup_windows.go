@@ -623,6 +623,9 @@ func validateConvergedDeferredCleanup(
 	if err := validateConvergedDeferredCleanupJournal(record, paths, journal); err != nil {
 		return nil, err
 	}
+	if err := validateDeferredCleanupMaintenanceCaller(record); err != nil {
+		return nil, err
+	}
 	return &journal, nil
 }
 
@@ -689,7 +692,7 @@ func validateConvergedDeferredCleanupJournal(
 	if reconciliation != nil {
 		return errors.New("connector reconciliation state is not empty")
 	}
-	if err := validateDeferredCleanupMaintenance(record); err != nil {
+	if err := validateDeferredCleanupMaintenanceFile(record); err != nil {
 		return err
 	}
 	if !samePath(record.RuntimeRoot, paths.Root) {
@@ -698,7 +701,7 @@ func validateConvergedDeferredCleanupJournal(
 	return nil
 }
 
-func validateDeferredCleanupMaintenance(record deferredUninstallCleanupRecord) error {
+func validateDeferredCleanupMaintenanceCaller(record deferredUninstallCleanupRecord) error {
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -706,6 +709,10 @@ func validateDeferredCleanupMaintenance(record deferredUninstallCleanupRecord) e
 	if !samePath(self, record.MaintenancePath) {
 		return errors.New("deferred cleanup must run from the transaction-owned maintenance executable")
 	}
+	return nil
+}
+
+func validateDeferredCleanupMaintenanceFile(record deferredUninstallCleanupRecord) error {
 	if err := validatePrivateTransactionPath(filepath.Dir(record.MaintenancePath), true); err != nil {
 		return err
 	}
@@ -723,6 +730,13 @@ func validateDeferredCleanupMaintenance(record deferredUninstallCleanupRecord) e
 		return fmt.Errorf("verify deferred cleanup maintenance executable policy: %w", err)
 	}
 	return nil
+}
+
+func validateDeferredCleanupMaintenance(record deferredUninstallCleanupRecord) error {
+	if err := validateDeferredCleanupMaintenanceCaller(record); err != nil {
+		return err
+	}
+	return validateDeferredCleanupMaintenanceFile(record)
 }
 
 func supersedeDeferredUninstallCleanup() error {
