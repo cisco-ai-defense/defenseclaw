@@ -619,7 +619,27 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             )
     try:
         cfg = cfg_mod.load()
-    except Exception:
+    except Exception as exc:
+        if connector == "none" and not was_config_absent:
+            cfg = cfg_mod.default_config()
+            setup.append(
+                StepResult(
+                    "Config",
+                    "fail",
+                    f"existing configuration could not be loaded and was preserved: {exc}",
+                    "defenseclaw config validate",
+                )
+            )
+            return FirstRunReport(
+                status="needs_attention",
+                config_file=str(cfg_mod.config_path()),
+                data_dir=cfg.data_dir,
+                connector=connector,
+                profile=profile,
+                setup=setup,
+                next_commands=["defenseclaw config validate"],
+                connector_mode_warnings=connector_mode_warnings,
+            )
         cfg = cfg_mod.default_config()
         cfg_mod.prepare_fresh_v8_config(cfg)
         new_config = True
@@ -649,13 +669,14 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         setup.append(StepResult("Migration State", "pass", "recovered pending fresh cursor"))
 
     cfg.environment = cfg_mod.detect_environment()
-    if profile == "action":
+    if connector != "none" and profile == "action":
         mode_warning = _first_run_action_mode_warning(connector, getattr(cfg, "data_dir", ""))
         if mode_warning:
             connector_mode_warnings.append(mode_warning)
             profile = "observe"
 
-    _apply_first_run_choices(cfg, options, connector, profile, scanner_mode)
+    if connector != "none":
+        _apply_first_run_choices(cfg, options, connector, profile, scanner_mode)
 
     try:
         cfg.save()
@@ -704,7 +725,10 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         app.store = store
         app.logger = logger
 
-        setup.append(_quiet_guardrail_setup(app, connector, verbose=options.verbose))
+        if connector == "none":
+            setup.append(StepResult("Guardrail", "skip", "no connector requested"))
+        else:
+            setup.append(_quiet_guardrail_setup(app, connector, verbose=options.verbose))
         setup.extend(_connector_mode_warning_steps(connector_mode_warnings))
 
         if options.sandbox:
@@ -852,7 +876,9 @@ def _normalize_connector(raw: str | None) -> str:
     value = (raw or "").strip().lower()
     if value in {"claude", "claude-code", "claude_code"}:
         value = "claudecode"
-    if value in {"none", ""}:
+    if value == "none":
+        return "none"
+    if value == "":
         value = "codex"
     try:
         return connector_paths.normalize(value)
@@ -1374,6 +1400,8 @@ def _pid_looks_like_gateway(pid: int) -> bool:
 
 
 def _connector_readiness(cfg: Config, connector: str) -> StepResult:
+    if connector == "none":
+        return StepResult("Connector", "skip", "no connector requested")
     if connector == "openclaw":
         path = os.path.expanduser(cfg.claw.config_file)
         if os.path.isfile(path):

@@ -304,6 +304,178 @@ func TestConfiguredConnectorRequiresPersistentGateway(t *testing.T) {
 	}
 }
 
+func TestCanonicalInitializationUsesExplicitNoConnectorAuthority(t *testing.T) {
+	args := initialConfigurationArgs(options{Connector: "none", Mode: "observe"})
+	want := []string{
+		"init", "--skip-install", "--non-interactive", "--yes",
+		"--connector", "none",
+		"--profile", "observe",
+		"--no-start-gateway", "--no-verify",
+	}
+	if !slices.Equal(args, want) {
+		t.Fatalf("canonical initialization args = %v, want %v", args, want)
+	}
+}
+
+func TestCanonicalStateValidationUsesPackagedRuntimeAndManifest(t *testing.T) {
+	root := t.TempDir()
+	dataRoot := filepath.Join(root, "profile", ".defenseclaw")
+	cmd := newCanonicalStateValidationCommand(context.Background(), root, dataRoot, "0.8.9")
+	want := []string{
+		filepath.Join(root, "runtime", "python", "python.exe"),
+		"-I",
+		"-X",
+		"utf8",
+		"-c",
+		packagedCanonicalStateValidationScript,
+		dataRoot,
+		"0.8.9",
+		filepath.Join(root, "installer", "upgrade-manifest.json"),
+	}
+	if !slices.Equal(cmd.Args, want) {
+		t.Fatalf("canonical validation args = %v, want %v", cmd.Args, want)
+	}
+	if cmd.Dir != root {
+		t.Fatalf("canonical validation directory = %q, want %q", cmd.Dir, root)
+	}
+}
+
+func TestPackagedCanonicalStateValidationFailsClosed(t *testing.T) {
+	tests := []struct {
+		name           string
+		stateSource    string
+		required       []string
+		wantErr        bool
+		wantDiagnostic string
+	}{
+		{
+			name: "valid",
+			stateSource: `class State:
+    applied = ("0.8.5",)
+    package_version = "0.8.9"
+
+def load(data_root):
+    return State()
+`,
+			required: []string{"0.8.5"},
+		},
+		{
+			name: "missing-cursor",
+			stateSource: `def load(data_root):
+    return None
+`,
+			wantErr:        true,
+			wantDiagnostic: "migration cursor is missing",
+		},
+		{
+			name: "missing-required-migration",
+			stateSource: `class State:
+    applied = ()
+    package_version = "0.8.9"
+
+def load(data_root):
+    return State()
+`,
+			required:       []string{"0.8.5"},
+			wantErr:        true,
+			wantDiagnostic: "required migrations are missing: 0.8.5",
+		},
+		{
+			name: "wrong-package-version",
+			stateSource: `class State:
+    applied = ("0.8.5",)
+    package_version = "0.8.8"
+
+def load(data_root):
+    return State()
+`,
+			required:       []string{"0.8.5"},
+			wantErr:        true,
+			wantDiagnostic: "migration cursor package version mismatch: 0.8.8 != 0.8.9",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			output, err := runPackagedCanonicalStateValidationFixture(
+				t,
+				test.stateSource,
+				test.required,
+			)
+			if test.wantErr != (err != nil) {
+				t.Fatalf("validation error = %v, output = %s", err, strings.TrimSpace(string(output)))
+			}
+			if test.wantDiagnostic != "" && !strings.Contains(string(output), test.wantDiagnostic) {
+				t.Fatalf("validation output = %q, want %q", strings.TrimSpace(string(output)), test.wantDiagnostic)
+			}
+		})
+	}
+}
+
+func runPackagedCanonicalStateValidationFixture(
+	t *testing.T,
+	migrationStateSource string,
+	required []string,
+) ([]byte, error) {
+	t.Helper()
+	var python string
+	for _, name := range []string{"python", "python3"} {
+		if path, err := exec.LookPath(name); err == nil {
+			python = path
+			break
+		}
+	}
+	if python == "" {
+		t.Skip("python is unavailable")
+	}
+	root := t.TempDir()
+	packageRoot := filepath.Join(root, "defenseclaw")
+	if err := os.MkdirAll(packageRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"__init__.py":        "",
+		"config.py":          "def require_v8_config():\n    return None\n\ndef load():\n    return object()\n",
+		"migration_state.py": migrationStateSource,
+	} {
+		if err := os.WriteFile(filepath.Join(packageRoot, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest, err := json.Marshal(map[string]interface{}{
+		"release_version":         "0.8.9",
+		"required_cli_migrations": required,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(root, "upgrade-manifest.json")
+	if err := os.WriteFile(manifestPath, manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := filepath.Join(root, "data")
+	if err := os.Mkdir(dataRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fixtureScript := "import sys\nsys.path.insert(0, sys.argv.pop(1))\n" +
+		packagedCanonicalStateValidationScript
+	cmd := exec.Command(
+		python,
+		"-I",
+		"-X",
+		"utf8",
+		"-c",
+		fixtureScript,
+		root,
+		dataRoot,
+		"0.8.9",
+		manifestPath,
+	)
+	cmd.Dir = root
+	cmd.Env = sanitizePythonEnv(os.Environ())
+	return cmd.CombinedOutput()
+}
+
 func TestOrdinaryInstallOfNewerPackageRunsMigrations(t *testing.T) {
 	state := &installState{Version: "0.8.3"}
 	if got := migrationSource(state, "0.8.4", ""); got != "0.8.3" {

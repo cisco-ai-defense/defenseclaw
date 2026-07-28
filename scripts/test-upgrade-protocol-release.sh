@@ -13,6 +13,7 @@ umask 077
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly FIRST_SCHEMA2_RELEASE="0.8.4"
 readonly OBSERVABILITY_V8_HARD_CUT_VERSION="0.8.5"
+readonly RESOLVER_SYSTEM_TOOL_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 REFUSAL_CONTRACT_ONLY=0
 
 # shellcheck source=scripts/test-upgrade-release.sh
@@ -131,6 +132,15 @@ manifest_array_contains() {
     local values
     values="$(manifest_array_values "${key}")" || return 1
     grep -Fxq "${expected}" <<<"${values}"
+}
+
+assert_resolver_path_has_no_uv() {
+    local resolver_path="$1"
+    # Use a fresh shell so a uv path cached while constructing the historical
+    # fixture cannot make the clean resolver PATH look polluted.
+    if PATH="${resolver_path}" /bin/sh -c 'command -v uv' >/dev/null 2>&1; then
+        die "release resolver test PATH unexpectedly exposes ambient uv"
+    fi
 }
 
 protocol_sha256_file() {
@@ -625,6 +635,8 @@ run_candidate_updater_refusal() {
     local before="${WORKDIR}/${baseline}-candidate-updater.before.json"
     local after="${WORKDIR}/${baseline}-candidate-updater.after.json"
     local log_file="${WORKDIR}/${baseline}-candidate-updater-refusal.log"
+    local resolver_path="${curl_shim}:${RESOLVER_SYSTEM_TOOL_PATH}"
+    assert_resolver_path_has_no_uv "${resolver_path}"
     snapshot_state "${before}"
 
     set +e
@@ -636,7 +648,7 @@ run_candidate_updater_refusal() {
     UPGRADE_GATE_REAL_GATEWAY="${REFUSAL_REAL_GATEWAY}" \
     UPGRADE_GATE_REAL_CURL="${real_curl}" \
     UPGRADE_GATE_RELEASE_URL="${RELEASE_URL}" \
-    PATH="${curl_shim}:${SMOKE_HOME}/.local/bin:${PATH}" \
+    PATH="${resolver_path}" \
         bash "${RELEASE_ROOT}/${TARGET_VERSION}/defenseclaw-upgrade.sh" \
         --yes --version "${TARGET_VERSION}" \
         >"${log_file}" 2>&1
@@ -672,6 +684,8 @@ run_candidate_updater_staged_success() {
     local real_curl
     local log_file="${SMOKE_HOME}/upgrade.log"
     real_curl="$(install_curl_rewrite_probe "${curl_shim}")"
+    local resolver_path="${curl_shim}:${RESOLVER_SYSTEM_TOOL_PATH}"
+    assert_resolver_path_has_no_uv "${resolver_path}"
 
     if ! HOME="${SMOKE_HOME}" \
         DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
@@ -683,7 +697,7 @@ run_candidate_updater_staged_success() {
         UPGRADE_GATE_REAL_CURL="${real_curl}" \
         UPGRADE_GATE_RELEASE_URL="${RELEASE_URL}" \
         UPGRADE_GATE_TARGET_VERSION="${TARGET_VERSION}" \
-        PATH="${curl_shim}:${SMOKE_HOME}/.local/bin:${PATH}" \
+        PATH="${resolver_path}" \
             bash "${RELEASE_ROOT}/${TARGET_VERSION}/defenseclaw-upgrade.sh" \
             "${resolver_args[@]}" >"${log_file}" 2>&1; then
         tail_v8_upgrade_log_secret_safe "${log_file}"
@@ -723,6 +737,8 @@ run_candidate_updater_direct_success() {
     local real_curl
     local log_file="${SMOKE_HOME}/upgrade.log"
     real_curl="$(install_curl_rewrite_probe "${curl_shim}")"
+    local resolver_path="${curl_shim}:${RESOLVER_SYSTEM_TOOL_PATH}"
+    assert_resolver_path_has_no_uv "${resolver_path}"
 
     if ! HOME="${SMOKE_HOME}" \
         DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \
@@ -734,7 +750,7 @@ run_candidate_updater_direct_success() {
         UPGRADE_GATE_REAL_CURL="${real_curl}" \
         UPGRADE_GATE_RELEASE_URL="${RELEASE_URL}" \
         UPGRADE_GATE_TARGET_VERSION="${TARGET_VERSION}" \
-        PATH="${curl_shim}:${SMOKE_HOME}/.local/bin:${PATH}" \
+        PATH="${resolver_path}" \
             bash "${RELEASE_ROOT}/${TARGET_VERSION}/defenseclaw-upgrade.sh" \
             --yes >"${log_file}" 2>&1; then
         tail_v8_upgrade_log_secret_safe "${log_file}"
@@ -933,14 +949,11 @@ PY
     local real_curl
     local log_file="${SMOKE_HOME}/upgrade.log"
     real_curl="$(install_curl_rewrite_probe "${curl_shim}")"
-    resolver_path="${curl_shim}:${SMOKE_HOME}/.local/bin:${PATH}"
-    if [[ "${recovery_case}" == "published-missing-cursor" ]]; then
-        # The immutable 0.8.8 rescue bootstrap deliberately hands the target
-        # resolver this minimal PATH. Keep release acceptance on the exact
-        # field boundary so an ambient developer/runner uv cannot mask a
-        # broken explicit discovery or authenticated bootstrap path.
-        resolver_path="${curl_shim}:/usr/bin:/bin:/usr/sbin:/sbin"
-    fi
+    # The immutable rescue bootstrap deliberately hands the target resolver a
+    # minimal PATH. Keep every positive resolver proof on that exact boundary
+    # so an ambient developer/runner uv cannot mask a broken private bootstrap.
+    resolver_path="${curl_shim}:${RESOLVER_SYSTEM_TOOL_PATH}"
+    assert_resolver_path_has_no_uv "${resolver_path}"
 
     if ! HOME="${SMOKE_HOME}" \
         DEFENSECLAW_HOME="${SMOKE_HOME}/.defenseclaw" \

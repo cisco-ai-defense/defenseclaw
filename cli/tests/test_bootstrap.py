@@ -274,6 +274,90 @@ class FreshMigrationCursorTests(unittest.TestCase):
         self.assertEqual(state.applied_at["0.8.5"], migration_state.BOOTSTRAP_SENTINEL)
         self.assertTrue(all(state.applied_at[version] == migration_state.BOOTSTRAP_SENTINEL for version in expected))
 
+    def test_no_connector_first_run_creates_canonical_config_and_cursor_without_connector_setup(self):
+        from defenseclaw import migration_state
+        from defenseclaw.bootstrap import FirstRunOptions, run_first_run
+
+        data_dir = os.path.join(self._tmp.name, "none")
+        with (
+            patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
+            patch("defenseclaw.bootstrap._quiet_guardrail_setup") as connector_setup,
+        ):
+            report = run_first_run(
+                FirstRunOptions(
+                    connector="none",
+                    profile="observe",
+                    skip_install=True,
+                    start_gateway=False,
+                    verify=False,
+                )
+            )
+
+        self.assertNotEqual(report.status, "needs_attention")
+        self.assertTrue(os.path.isfile(os.path.join(data_dir, "config.yaml")))
+        self.assertIsNotNone(migration_state.load(data_dir))
+        connector_setup.assert_not_called()
+        self.assertTrue(
+            any(step.name == "Guardrail" and step.status == "skip" for step in report.setup)
+        )
+
+    def test_no_connector_first_run_preserves_existing_connector_selection(self):
+        from defenseclaw.bootstrap import FirstRunOptions, run_first_run
+        from defenseclaw.config import default_config, load, prepare_fresh_v8_config
+
+        data_dir = os.path.join(self._tmp.name, "none-existing")
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            cfg = default_config()
+            prepare_fresh_v8_config(cfg)
+            cfg.claw.mode = "claudecode"
+            cfg.guardrail.connector = "claudecode"
+            cfg.guardrail.mode = "action"
+            cfg.save()
+
+            report = run_first_run(
+                FirstRunOptions(
+                    connector="none",
+                    profile="observe",
+                    skip_install=True,
+                    start_gateway=False,
+                    verify=False,
+                )
+            )
+            preserved = load()
+
+        self.assertNotEqual(report.status, "needs_attention")
+        self.assertEqual(preserved.claw.mode, "claudecode")
+        self.assertEqual(preserved.guardrail.connector, "claudecode")
+        self.assertEqual(preserved.guardrail.mode, "action")
+
+    def test_no_connector_first_run_preserves_unloadable_existing_config(self):
+        from defenseclaw.bootstrap import FirstRunOptions, run_first_run
+
+        data_dir = os.path.join(self._tmp.name, "none-unloadable")
+        config_path = os.path.join(data_dir, "config.yaml")
+        os.makedirs(data_dir)
+        original = b"config_version: 8\noperator_extension: preserve-me\n"
+        with open(config_path, "wb") as stream:
+            stream.write(original)
+
+        with (
+            patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
+            patch("defenseclaw.config.load", side_effect=OSError("injected load failure")),
+        ):
+            report = run_first_run(
+                FirstRunOptions(
+                    connector="none",
+                    profile="observe",
+                    skip_install=True,
+                    start_gateway=False,
+                    verify=False,
+                )
+            )
+
+        self.assertEqual(report.status, "needs_attention")
+        with open(config_path, "rb") as stream:
+            self.assertEqual(stream.read(), original)
+
     def test_rerun_preserves_bootstrapped_cursor_byte_for_byte(self):
         from defenseclaw import migration_state
 

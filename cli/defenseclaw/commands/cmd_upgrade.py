@@ -522,6 +522,10 @@ def upgrade(
     recovery_home = _upgrade_recovery_home()
     data_dir = _resolved_upgrade_data_dir(app.cfg, recovery_home=recovery_home)
     active_config_path = _active_upgrade_config_path(recovery_home)
+    native_windows_state = _native_windows_install_state(
+        os_name,
+        expected_version=current_version,
+    )
     if current_version != controller_version:
         _preflight_staged_target_controller_source(
             source_version=current_version,
@@ -529,12 +533,21 @@ def upgrade(
             target_version=target_version,
             recovery_home=recovery_home,
         )
-    _preflight_installed_source_coherence(
-        current_version,
-        os_name,
-        data_dir,
-        config_path=active_config_path,
-    )
+    if native_windows_state is None:
+        _preflight_installed_source_coherence(
+            current_version,
+            os_name,
+            data_dir,
+            config_path=active_config_path,
+        )
+    else:
+        _preflight_installed_source_coherence(
+            current_version,
+            os_name,
+            data_dir,
+            config_path=active_config_path,
+            native_windows_state=native_windows_state,
+        )
 
     # ── Pre-flight: verify artifacts exist ───────────────────────────────────
 
@@ -563,7 +576,6 @@ def upgrade(
         # predate goreleaser's checksum publication; in that case we proceed
         # with a clear warning rather than hard-failing operators on a
         # version they could otherwise install.
-        native_windows_state = _native_windows_install_state(os_name)
         if native_windows_state is not None and allow_unverified:
             ux.err(
                 "--allow-unverified is not permitted for native Windows setup handoff.",
@@ -2734,7 +2746,11 @@ def _detect_platform() -> tuple[str, str]:
     return system, arch
 
 
-def _native_windows_install_state(os_name: str) -> dict[str, object] | None:
+def _native_windows_install_state(
+    os_name: str,
+    *,
+    expected_version: str | None = None,
+) -> dict[str, object] | None:
     """Return installer state for native Windows EXE installs, if present."""
     if os_name != "windows":
         return None
@@ -2748,52 +2764,106 @@ def _native_windows_install_state(os_name: str) -> dict[str, object] | None:
     install_root = _trusted_child_path(local_appdata, "Programs", "DefenseClaw")
     state_path = os.path.join(install_root, "installer", _WINDOWS_INSTALL_STATE)
     try:
+        state_info = os.lstat(state_path)
+        if stat.S_ISLNK(state_info.st_mode) or not stat.S_ISREG(state_info.st_mode):
+            raise OSError("installer state is not a regular file")
+        from defenseclaw import windows_acl
+
+        state_security = windows_acl.capture_path(state_path)
+        windows_acl.assert_trusted_owner(state_security)
+        windows_acl.assert_not_broadly_writable(state_security)
         with open(state_path, encoding="utf-8") as stream:
             state = json.load(stream)
+        state_after = os.lstat(state_path)
+        if (
+            stat.S_ISLNK(state_after.st_mode)
+            or not stat.S_ISREG(state_after.st_mode)
+            or (state_info.st_dev, state_info.st_ino) != (state_after.st_dev, state_after.st_ino)
+            or windows_acl.capture_path(state_path) != state_security
+        ):
+            raise OSError("installer state changed during validation")
     except FileNotFoundError:
         return None
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         ux.err(f"Native installer state could not be read safely: {exc}", indent="  ")
         raise SystemExit(1) from exc
     if not isinstance(state, dict):
         ux.err("Native installer state must be a JSON object.", indent="  ")
         raise SystemExit(1)
-    if state.get("install_kind") != "native-windows-exe":
-        ux.err("Native installer state has an unexpected install kind.", indent="  ")
+    if (
+        state.get("schema_version") != 1
+        or state.get("install_kind") != "native-windows-exe"
+        or state.get("install_scope") != "user"
+        or not isinstance(state.get("version"), str)
+        or _CANONICAL_VERSION_RE.fullmatch(state["version"]) is None
+        or state.get("connector") not in {"none", "codex", "claudecode"}
+        or state.get("mode") not in {"observe", "action"}
+    ):
+        ux.err("Native installer state is not a supported native Windows install.", indent="  ")
+        raise SystemExit(1)
+    if expected_version is not None and state["version"] != expected_version:
+        ux.err(
+            f"Native installer state version {state['version']} does not match the installed CLI {expected_version}.",
+            indent="  ",
+        )
+        raise SystemExit(1)
+    source_commit = state.get("source_commit")
+    if source_commit not in (None, "") and (
+        not isinstance(source_commit, str) or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None
+    ):
+        ux.err("Native installer state has an invalid source build identity.", indent="  ")
+        raise SystemExit(1)
+    if state.get("path_value_created") is True and state.get("path_entry_owned") is not True:
+        ux.err("Native installer state has inconsistent PATH ownership.", indent="  ")
+        raise SystemExit(1)
+    if state.get("path_value_created") is True and state.get("path_separator_reused") is True:
+        ux.err("Native installer state has inconsistent PATH separator ownership.", indent="  ")
         raise SystemExit(1)
 
     root = _trusted_child_path(install_root)
     command_dir = _trusted_child_path(root, "bin")
     expected_root = _trusted_child_path(local_appdata, "Programs", "DefenseClaw")
-    if os.path.normcase(root) != os.path.normcase(expected_root):
-        ux.err(f"Native installer state has an unexpected install root: {root}", indent="  ")
-        raise SystemExit(1)
+    try:
+        from defenseclaw import windows_acl
+
+        for managed_directory in (
+            root,
+            command_dir,
+            _trusted_child_path(root, "installer"),
+        ):
+            managed_security = windows_acl.capture_path(managed_directory, directory=True)
+            windows_acl.assert_trusted_owner(managed_security)
+            windows_acl.assert_not_broadly_writable(managed_security)
+    except (OSError, windows_acl.WindowsAclError) as exc:
+        ux.err(f"Native installer directory custody could not be verified: {exc}", indent="  ")
+        raise SystemExit(1) from exc
     setup = _trusted_child_path(
         local_appdata,
         "DefenseClaw",
         "InstallerCache",
         _WINDOWS_SETUP_ASSET,
     )
-    recorded_setup = state.get("maintenance_path")
-    if recorded_setup and (
-        not isinstance(recorded_setup, str)
-        or os.path.normcase(os.path.realpath(recorded_setup)) != os.path.normcase(setup)
-    ):
-        ux.err("Native installer state has an unexpected maintenance path.", indent="  ")
-        raise SystemExit(1)
-    data_root = state.get("data_root")
     expected_data_root = _trusted_child_path(profile, ".defenseclaw")
-    if data_root and (
-        not isinstance(data_root, str)
-        or os.path.normcase(os.path.realpath(data_root)) != os.path.normcase(expected_data_root)
-    ):
-        ux.err("Native installer state has an unexpected data root.", indent="  ")
-        raise SystemExit(1)
+    expected_paths = {
+        "install root": (state.get("install_root"), expected_root),
+        "command directory": (state.get("command_dir"), command_dir),
+        "data root": (state.get("data_root"), expected_data_root),
+        "runtime": (state.get("runtime"), _trusted_child_path(root, "runtime", "python")),
+        "maintenance path": (state.get("maintenance_path"), setup),
+    }
+    for label, (recorded, expected) in expected_paths.items():
+        if (
+            not isinstance(recorded, str)
+            or os.path.normcase(os.path.realpath(recorded)) != os.path.normcase(expected)
+        ):
+            ux.err(f"Native installer state has an unexpected {label}.", indent="  ")
+            raise SystemExit(1)
+    gateway_path = _trusted_child_path(command_dir, _installed_gateway_filename(os_name))
     state["install_root"] = root
     state["command_dir"] = command_dir
+    state["gateway_path"] = gateway_path
     state["setup_path"] = setup
     state["maintenance_path"] = setup
-    state["install_scope"] = state.get("install_scope", "user")
     state["data_root"] = expected_data_root
     return state
 
@@ -3108,13 +3178,31 @@ def _preflight_installed_source_coherence(
     data_dir: str,
     *,
     config_path: str | None = None,
+    native_windows_state: dict[str, object] | None = None,
 ) -> None:
     """Reject manual/partial release overwrites before target I/O or mutation."""
 
     if _version_key(current_version) < _version_key(_STRICT_SIGSTORE_RELEASE_VERSION):
         return
 
-    gateway_path = os.path.expanduser(os.path.join("~/.local/bin", _installed_gateway_filename(os_name)))
+    native_gateway = native_windows_state is not None
+    if native_gateway:
+        gateway_path = native_windows_state.get("gateway_path")
+        if not isinstance(gateway_path, str) or not gateway_path:
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} native installer state has no canonical gateway."
+            )
+        legacy_gateway = os.path.expanduser(
+            os.path.join("~/.local/bin", _installed_gateway_filename(os_name))
+        )
+        if os.path.lexists(legacy_gateway):
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} has a shadow gateway outside native installer custody."
+            )
+    else:
+        gateway_path = os.path.expanduser(
+            os.path.join("~/.local/bin", _installed_gateway_filename(os_name))
+        )
     try:
         gateway_stat = os.lstat(gateway_path)
     except OSError:
@@ -3125,9 +3213,20 @@ def _preflight_installed_source_coherence(
         _fail_installed_source_coherence(
             f"Installed DefenseClaw {current_version} gateway is not a regular release-managed file."
         )
+    if native_gateway:
+        try:
+            from defenseclaw import windows_acl
+
+            gateway_security = windows_acl.capture_path(gateway_path)
+            windows_acl.assert_trusted_owner(gateway_security)
+            windows_acl.assert_not_broadly_writable(gateway_security)
+        except (OSError, windows_acl.WindowsAclError):
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} gateway is not owned by the native installer."
+            )
     try:
         result = subprocess.run(
-            [gateway_path, "--version"],
+            [gateway_path, "--version-json" if native_gateway else "--version"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -3138,10 +3237,61 @@ def _preflight_installed_source_coherence(
             f"Installed DefenseClaw {current_version} gateway version could not be verified."
         )
     output = (result.stdout or "") + (result.stderr or "")
-    reported = _VERSION_TOKEN_RE.findall(output)
-    if result.returncode != 0 or reported != [current_version]:
-        actual = reported[0] if len(reported) == 1 else "unverifiable"
-        _fail_installed_source_coherence(f"Installed component version drift: CLI={current_version}, gateway={actual}.")
+    if native_gateway:
+        try:
+            identity = json.loads(output)
+        except (TypeError, json.JSONDecodeError):
+            identity = None
+        expected_commit = native_windows_state.get("source_commit")
+        if (
+            result.returncode != 0
+            or not isinstance(identity, dict)
+            or identity.get("schema_version") != 1
+            or identity.get("name") != "defenseclaw-gateway"
+            or identity.get("version") != current_version
+        ):
+            actual = identity.get("version", "unverifiable") if isinstance(identity, dict) else "unverifiable"
+            _fail_installed_source_coherence(
+                f"Installed component version drift: CLI={current_version}, gateway={actual}."
+            )
+        if expected_commit not in (None, "") and identity.get("commit") != expected_commit:
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} gateway build identity does not match installer state."
+            )
+        try:
+            gateway_after = os.lstat(gateway_path)
+        except OSError:
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} gateway changed during validation."
+            )
+        if (
+            stat.S_ISLNK(gateway_after.st_mode)
+            or not stat.S_ISREG(gateway_after.st_mode)
+            or (gateway_stat.st_dev, gateway_stat.st_ino)
+            != (gateway_after.st_dev, gateway_after.st_ino)
+        ):
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} gateway changed during validation."
+            )
+        try:
+            gateway_security_after = windows_acl.capture_path(gateway_path)
+            windows_acl.assert_trusted_owner(gateway_security_after)
+            windows_acl.assert_not_broadly_writable(gateway_security_after)
+        except (OSError, windows_acl.WindowsAclError):
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} gateway ownership changed during validation."
+            )
+        if gateway_security_after != gateway_security:
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} gateway ownership changed during validation."
+            )
+    else:
+        reported = _VERSION_TOKEN_RE.findall(output)
+        if result.returncode != 0 or reported != [current_version]:
+            actual = reported[0] if len(reported) == 1 else "unverifiable"
+            _fail_installed_source_coherence(
+                f"Installed component version drift: CLI={current_version}, gateway={actual}."
+            )
 
     if _version_key(current_version) < _version_key(_OBSERVABILITY_V8_MIGRATION_VERSION):
         return

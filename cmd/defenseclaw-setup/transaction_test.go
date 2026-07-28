@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -1936,6 +1937,133 @@ func TestConvergeInstallRuntimeActivatesOnlyAfterReconciliation(t *testing.T) {
 	}
 	if got := strings.Join(calls, ","); got != "autostart,start,verify" {
 		t.Fatalf("runtime convergence calls = %q", got)
+	}
+}
+
+func TestCanonicalReleaseStateInitializesBeforeValidation(t *testing.T) {
+	t.Parallel()
+	transaction := setupTransaction{
+		InstallRoot:   "install",
+		DataRoot:      "data",
+		TargetVersion: "0.8.9",
+	}
+	var calls []string
+	err := initializeCanonicalReleaseState(
+		transaction,
+		[]string{"MANAGED=1"},
+		func(root, dataRoot string, env []string) error {
+			if root != transaction.InstallRoot || dataRoot != transaction.DataRoot ||
+				!slices.Equal(env, []string{"MANAGED=1"}) {
+				t.Fatalf("initialize arguments = %q, %q, %v", root, dataRoot, env)
+			}
+			calls = append(calls, "canonical-base+migration-cursor")
+			return nil
+		},
+		func(root, dataRoot, targetVersion string, env []string) error {
+			if root != transaction.InstallRoot || dataRoot != transaction.DataRoot ||
+				targetVersion != transaction.TargetVersion ||
+				!slices.Equal(env, []string{"MANAGED=1"}) {
+				t.Fatalf("validate arguments = %q, %q, %q, %v", root, dataRoot, targetVersion, env)
+			}
+			calls = append(calls, "validate-config+cursor")
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(calls, ","); got != "canonical-base+migration-cursor,validate-config+cursor" {
+		t.Fatalf("canonical state ordering = %q", got)
+	}
+}
+
+func TestCommittedRecoveryRetriesCanonicalReleaseStateIdempotently(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name               string
+		failInitialization bool
+	}{
+		{name: "before-initialization", failInitialization: true},
+		{name: "after-initialization"},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			phase := setupPhaseCommitted
+			transaction := setupTransaction{
+				Action:          "install",
+				InstallRoot:     "install",
+				DataRoot:        "data",
+				TargetVersion:   "0.8.9",
+				TargetConnector: "none",
+				TargetServices:  serviceState{Gateway: true},
+			}
+			journal := setupJournal{
+				SchemaVersion: setupJournalSchemaVersion,
+				Phase:         setupPhaseCommitted,
+				Transaction:   transaction,
+			}
+			injectedErr := errors.New("injected canonical-state failure")
+			initializeCalls := 0
+			validateCalls := 0
+			converge := func(setupTransaction) error {
+				return initializeCanonicalReleaseState(
+					transaction,
+					nil,
+					func(string, string, []string) error {
+						initializeCalls++
+						if test.failInitialization && initializeCalls == 1 {
+							return injectedErr
+						}
+						return nil
+					},
+					func(string, string, string, []string) error {
+						validateCalls++
+						if !test.failInitialization && validateCalls == 1 {
+							return injectedErr
+						}
+						return nil
+					},
+				)
+			}
+			recoverOnce := func() error {
+				return recoverSetupJournalPhase(journal, setupRecoveryOps{
+					Converge: converge,
+					Cleanup:  func(setupTransaction) error { return nil },
+					Transition: func(_ setupTransaction, from, to string) error {
+						if phase != from {
+							return fmt.Errorf("transition from %s while phase is %s", from, phase)
+						}
+						phase = to
+						journal.Phase = to
+						return nil
+					},
+				})
+			}
+			if err := recoverOnce(); !errors.Is(err, injectedErr) {
+				t.Fatalf("first recovery error = %v, want injected failure", err)
+			}
+			if phase != setupPhaseCommitted {
+				t.Fatalf("failed recovery advanced journal to %q", phase)
+			}
+			if err := recoverOnce(); err != nil {
+				t.Fatalf("second recovery: %v", err)
+			}
+			if phase != setupPhaseComplete || initializeCalls != 2 {
+				t.Fatalf("recovery phase=%s initialize=%d validate=%d", phase, initializeCalls, validateCalls)
+			}
+			completedInitializeCalls, completedValidateCalls := initializeCalls, validateCalls
+			if err := recoverOnce(); err != nil {
+				t.Fatalf("completed recovery replay: %v", err)
+			}
+			if initializeCalls != completedInitializeCalls || validateCalls != completedValidateCalls {
+				t.Fatalf(
+					"completed rescue replayed initialization: initialize=%d validate=%d",
+					initializeCalls,
+					validateCalls,
+				)
+			}
+		})
 	}
 }
 

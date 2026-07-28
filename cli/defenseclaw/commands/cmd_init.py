@@ -79,6 +79,7 @@ _render_checkbox_menu = terminal_checkbox.render_checkbox_menu
             "antigravity",
             "opencode",
             "omnigent",
+            "none",
         ],
         case_sensitive=False,
     ),
@@ -226,6 +227,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         requested_connectors.append(_normalize_connector_arg(connector))
     requested_connectors.extend(_parse_connector_list(action_connectors))
     for requested in requested_connectors:
+        if requested == "none":
+            continue
         support = platform_support.connector_platform_support(requested)
         if not support.available:
             raise click.ClickException(
@@ -766,7 +769,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         _render_first_run_report(report, CLIRenderer())
         raise SystemExit(1)
 
-    activated = [primary["connector"]]
+    activated = [] if primary["connector"] == "none" else [primary["connector"]]
     if extras:
         activated, sidecar_step = _activate_additional_connectors(
             primary,

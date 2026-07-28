@@ -62,6 +62,28 @@ class TestInitCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Initialize DefenseClaw environment", result.output)
 
+    @patch("defenseclaw.commands.cmd_init._run_first_run_cmd")
+    def test_explicit_no_connector_uses_canonical_first_run_backend(self, run_first_run):
+        result = self.runner.invoke(
+            init_cmd,
+            [
+                "--skip-install",
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "none",
+                "--profile",
+                "observe",
+                "--no-start-gateway",
+                "--no-verify",
+            ],
+            obj=AppContext(),
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        run_first_run.assert_called_once()
+        self.assertEqual(run_first_run.call_args.kwargs["connector"], "none")
+
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_init._install_guardrail")
     @patch("defenseclaw.commands.cmd_init._install_scanners")

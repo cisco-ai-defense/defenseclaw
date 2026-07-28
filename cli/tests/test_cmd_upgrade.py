@@ -14,7 +14,7 @@ import time
 import types
 import unittest
 import zipfile
-from contextlib import ExitStack, nullcontext
+from contextlib import AbstractContextManager, ExitStack, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -6706,6 +6706,67 @@ class TestUpgradeManifest(unittest.TestCase):
     policy even when the local upgrade script is older than the release."""
 
     @staticmethod
+    def _native_windows_acl_fixture() -> AbstractContextManager[object]:
+        """Use real ACLs on Windows and stable custody evidence elsewhere."""
+        if os.name == "nt":
+            return nullcontext()
+        stack = ExitStack()
+        security = Mock(name="native-windows-security")
+        stack.enter_context(
+            patch("defenseclaw.windows_acl.capture_path", return_value=security)
+        )
+        stack.enter_context(patch("defenseclaw.windows_acl.assert_trusted_owner"))
+        stack.enter_context(
+            patch("defenseclaw.windows_acl.assert_not_broadly_writable")
+        )
+        return stack
+
+    @staticmethod
+    def _native_install_state_fixture(
+        temp: str,
+        *,
+        version: str = "0.8.7",
+        source_commit: str = "a" * 40,
+        recorded_install_root: str | None = None,
+    ) -> tuple[str, str, dict[str, object]]:
+        local_appdata = os.path.join(temp, "LocalAppData")
+        profile = os.path.join(temp, "Profile")
+        install_root = os.path.join(local_appdata, "Programs", "DefenseClaw")
+        command_dir = os.path.join(install_root, "bin")
+        maintenance = os.path.join(
+            local_appdata,
+            "DefenseClaw",
+            "InstallerCache",
+            "DefenseClawSetup-x64.exe",
+        )
+        os.makedirs(os.path.join(install_root, "installer"))
+        os.makedirs(command_dir)
+        os.makedirs(profile)
+        state: dict[str, object] = {
+            "schema_version": 1,
+            "version": version,
+            "source_commit": source_commit,
+            "distribution_flavor": "release",
+            "install_kind": "native-windows-exe",
+            "install_scope": "user",
+            "install_root": recorded_install_root or install_root,
+            "command_dir": command_dir,
+            "data_root": os.path.join(profile, ".defenseclaw"),
+            "runtime": os.path.join(install_root, "runtime", "python"),
+            "maintenance_path": maintenance,
+            "path_entry_owned": True,
+            "connector": "codex",
+            "mode": "action",
+        }
+        with open(
+            os.path.join(install_root, "installer", "install-state.json"),
+            "w",
+            encoding="utf-8",
+        ) as stream:
+            json.dump(state, stream)
+        return local_appdata, profile, state
+
+    @staticmethod
     def _hard_cut_manifest(**overrides):
         payload = {
             "schema_version": 2,
@@ -7519,30 +7580,21 @@ class TestUpgradeManifest(unittest.TestCase):
 
     def test_native_windows_install_state_reads_marker_and_normalizes_paths(self):
         with TemporaryDirectory() as temp:
-            local_appdata = os.path.join(temp, "LocalAppData")
-            profile = os.path.join(temp, "Profile")
-            os.makedirs(local_appdata)
-            os.makedirs(profile)
-            root = os.path.join(local_appdata, "Programs", "DefenseClaw")
-            installer = os.path.join(root, "installer")
-            os.makedirs(installer)
-            state = {
-                "install_kind": "native-windows-exe",
-                "connector": "codex",
-                "mode": "action",
-                "data_root": os.path.join(profile, ".defenseclaw"),
-            }
-            with open(os.path.join(installer, "install-state.json"), "w", encoding="utf-8") as stream:
-                json.dump(state, stream)
+            local_appdata, profile, _state = self._native_install_state_fixture(temp)
 
             with patch(
                 "defenseclaw.commands.cmd_upgrade._windows_known_folder",
                 side_effect=[local_appdata, profile],
-            ):
-                loaded = _native_windows_install_state("windows")
+            ), self._native_windows_acl_fixture():
+                loaded = _native_windows_install_state("windows", expected_version="0.8.7")
 
         self.assertIsNotNone(loaded)
         self.assertEqual(loaded["connector"], "codex")
+        self.assertTrue(
+            loaded["gateway_path"].endswith(
+                os.path.join("DefenseClaw", "bin", "defenseclaw-gateway.exe"),
+            ),
+        )
         self.assertTrue(
             loaded["setup_path"].endswith(
                 os.path.join("DefenseClaw", "InstallerCache", "DefenseClawSetup-x64.exe"),
@@ -7551,13 +7603,7 @@ class TestUpgradeManifest(unittest.TestCase):
 
     def test_native_windows_install_state_ignores_environment_install_root(self):
         with TemporaryDirectory() as temp:
-            local_appdata = os.path.join(temp, "LocalAppData")
-            profile = os.path.join(temp, "Profile")
-            installer = os.path.join(local_appdata, "Programs", "DefenseClaw", "installer")
-            os.makedirs(installer)
-            os.makedirs(profile)
-            with open(os.path.join(installer, "install-state.json"), "w", encoding="utf-8") as stream:
-                json.dump({"install_kind": "native-windows-exe"}, stream)
+            local_appdata, profile, _state = self._native_install_state_fixture(temp)
 
             with (
                 patch.dict(os.environ, {"DEFENSECLAW_INSTALL_ROOT": os.path.join(temp, "Untrusted")}),
@@ -7565,10 +7611,29 @@ class TestUpgradeManifest(unittest.TestCase):
                     "defenseclaw.commands.cmd_upgrade._windows_known_folder",
                     side_effect=[local_appdata, profile],
                 ),
+                self._native_windows_acl_fixture(),
             ):
                 loaded = _native_windows_install_state("windows")
 
         self.assertTrue(loaded["install_root"].startswith(os.path.realpath(local_appdata)))
+
+    def test_native_windows_install_state_rejects_foreign_recorded_root(self):
+        with TemporaryDirectory() as temp:
+            local_appdata, profile, _state = self._native_install_state_fixture(
+                temp,
+                recorded_install_root=os.path.join(temp, "Foreign"),
+            )
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._windows_known_folder",
+                    side_effect=[local_appdata, profile],
+                ),
+                self._native_windows_acl_fixture(),
+                self.assertRaises(SystemExit) as ctx,
+            ):
+                _native_windows_install_state("windows", expected_version="0.8.7")
+
+        self.assertEqual(ctx.exception.code, 1)
 
     def test_native_windows_install_state_rejects_corrupt_marker(self):
         with TemporaryDirectory() as temp:
@@ -7585,11 +7650,203 @@ class TestUpgradeManifest(unittest.TestCase):
                     "defenseclaw.commands.cmd_upgrade._windows_known_folder",
                     side_effect=[local_appdata, profile],
                 ),
+                self._native_windows_acl_fixture(),
                 self.assertRaises(SystemExit) as ctx,
             ):
                 _native_windows_install_state("windows")
 
         self.assertEqual(ctx.exception.code, 1)
+
+    def test_native_gateway_only_in_known_folder_passes_installed_source_coherence(self):
+        from defenseclaw import migration_state
+
+        with TemporaryDirectory() as temp:
+            local_appdata, profile, _state = self._native_install_state_fixture(temp)
+            data_dir = os.path.join(profile, ".defenseclaw")
+            os.makedirs(data_dir)
+            config_path = os.path.join(data_dir, "config.yaml")
+            Path(config_path).write_text("config_version: 8\n", encoding="utf-8")
+            migration_state.save(
+                data_dir,
+                migration_state.MigrationState(
+                    package_version="0.8.7",
+                    applied=["0.8.5"],
+                    applied_at={"0.8.5": "2026-07-28T00:00:00Z"},
+                ),
+            )
+            gateway = os.path.join(
+                local_appdata,
+                "Programs",
+                "DefenseClaw",
+                "bin",
+                "defenseclaw-gateway.exe",
+            )
+            Path(gateway).write_bytes(b"native gateway fixture")
+            legacy = os.path.join(profile, ".local", "bin", "defenseclaw-gateway.exe")
+            with (
+                patch.dict(os.environ, {"HOME": profile, "USERPROFILE": profile}),
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._windows_known_folder",
+                    side_effect=[local_appdata, profile],
+                ),
+                self._native_windows_acl_fixture(),
+            ):
+                state = _native_windows_install_state("windows", expected_version="0.8.7")
+                with patch(
+                    "defenseclaw.commands.cmd_upgrade.subprocess.run",
+                    return_value=Mock(
+                        returncode=0,
+                        stdout=json.dumps(
+                            {
+                                "schema_version": 1,
+                                "name": "defenseclaw-gateway",
+                                "version": "0.8.7",
+                                "commit": "a" * 40,
+                                "built": "2026-07-28T00:00:00Z",
+                            }
+                        ),
+                        stderr="",
+                    ),
+                ) as run:
+                    _preflight_installed_source_coherence(
+                        "0.8.7",
+                        "windows",
+                        data_dir,
+                        config_path=config_path,
+                        native_windows_state=state,
+                    )
+
+            self.assertFalse(os.path.lexists(legacy))
+            self.assertEqual(run.call_args.args[0], [gateway, "--version-json"])
+
+    def test_native_gateway_coherence_rejects_unsafe_and_mismatched_sources_without_changes(self):
+        from defenseclaw import migration_state, windows_acl
+
+        cases = ("missing", "replaced", "version", "build", "non-regular", "unowned", "shadow")
+        for case in cases:
+            with self.subTest(case=case), TemporaryDirectory() as temp:
+                local_appdata, profile, _state = self._native_install_state_fixture(temp)
+                data_dir = os.path.join(profile, ".defenseclaw")
+                os.makedirs(data_dir)
+                config_path = os.path.join(data_dir, "config.yaml")
+                Path(config_path).write_text("config_version: 8\noperator: preserve\n", encoding="utf-8")
+                migration_state.save(
+                    data_dir,
+                    migration_state.MigrationState(
+                        package_version="0.8.7",
+                        applied=["0.8.5"],
+                        applied_at={"0.8.5": "2026-07-28T00:00:00Z"},
+                    ),
+                )
+                gateway = os.path.join(
+                    local_appdata,
+                    "Programs",
+                    "DefenseClaw",
+                    "bin",
+                    "defenseclaw-gateway.exe",
+                )
+                if case != "missing":
+                    if case == "non-regular":
+                        os.makedirs(gateway)
+                    else:
+                        Path(gateway).write_bytes(b"native gateway fixture")
+                if case == "shadow":
+                    shadow = os.path.join(profile, ".local", "bin", "defenseclaw-gateway.exe")
+                    os.makedirs(os.path.dirname(shadow))
+                    Path(shadow).write_bytes(b"shadow")
+                before = {
+                    config_path: Path(config_path).read_bytes(),
+                    os.path.join(data_dir, ".migration_state.json"): Path(
+                        os.path.join(data_dir, ".migration_state.json")
+                    ).read_bytes(),
+                }
+                identity = {
+                    "schema_version": 1,
+                    "name": "defenseclaw-gateway",
+                    "version": "0.8.7",
+                    "commit": "a" * 40,
+                }
+                if case == "replaced":
+                    identity["name"] = "unmanaged-gateway"
+                elif case == "version":
+                    identity["version"] = "0.8.6"
+                elif case == "build":
+                    identity["commit"] = "b" * 40
+                with (
+                    patch.dict(os.environ, {"HOME": profile, "USERPROFILE": profile}),
+                    patch(
+                        "defenseclaw.commands.cmd_upgrade._windows_known_folder",
+                        side_effect=[local_appdata, profile],
+                    ),
+                    self._native_windows_acl_fixture(),
+                ):
+                    state = _native_windows_install_state("windows", expected_version="0.8.7")
+                    ownership = (
+                        patch(
+                            "defenseclaw.windows_acl.assert_trusted_owner",
+                            side_effect=windows_acl.WindowsAclError("foreign owner"),
+                        )
+                        if case == "unowned"
+                        else nullcontext()
+                    )
+                    with (
+                        ownership,
+                        patch(
+                            "defenseclaw.commands.cmd_upgrade.subprocess.run",
+                            return_value=Mock(returncode=0, stdout=json.dumps(identity), stderr=""),
+                        ),
+                        self.assertRaises(SystemExit) as ctx,
+                    ):
+                        _preflight_installed_source_coherence(
+                            "0.8.7",
+                            "windows",
+                            data_dir,
+                            config_path=config_path,
+                            native_windows_state=state,
+                        )
+                self.assertEqual(ctx.exception.code, 1)
+                for path, payload in before.items():
+                    self.assertEqual(Path(path).read_bytes(), payload)
+
+    def test_upgrade_resolves_native_state_before_installed_source_coherence(self):
+        runner = CliRunner()
+        app = AppContext()
+        app.cfg = Config()
+        state = {"gateway_path": r"C:\trusted\defenseclaw-gateway.exe"}
+        order: list[str] = []
+
+        def resolve(_os_name, *, expected_version=None):
+            order.append(f"state:{expected_version}")
+            return state
+
+        def coherence(*_args, **kwargs):
+            order.append("coherence")
+            self.assertIs(kwargs["native_windows_state"], state)
+            raise SystemExit(1)
+
+        with (
+            patch("defenseclaw.__version__", "0.8.7"),
+            patch(
+                "defenseclaw.commands.cmd_upgrade._detect_platform",
+                return_value=("windows", "amd64"),
+            ),
+            patch(
+                "defenseclaw.commands.cmd_upgrade._native_windows_install_state",
+                side_effect=resolve,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_upgrade._preflight_installed_source_coherence",
+                side_effect=coherence,
+            ),
+        ):
+            result = runner.invoke(
+                upgrade,
+                ["--yes", "--version", "0.8.8"],
+                obj=app,
+            )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(order, ["state:0.8.7", "coherence"])
 
     def _download_windows_setup_fixture(
         self,
@@ -7793,16 +8050,27 @@ class TestUpgradeManifest(unittest.TestCase):
         with TemporaryDirectory() as temp:
             source = os.path.join(temp, "download", "DefenseClawSetup-x64.exe")
             cache = os.path.join(temp, "cache", "DefenseClawSetup-x64.exe")
+            data_root = os.path.join(temp, "data")
             os.makedirs(os.path.dirname(source))
+            os.makedirs(data_root)
             with open(source, "wb") as stream:
                 stream.write(b"verified setup")
+            preserved = {
+                os.path.join(data_root, "config.yaml"): b"config_version: 8\noperator: preserve\n",
+                os.path.join(data_root, ".migration_state.json"): b'{"applied":["0.8.5"]}\n',
+                os.path.join(data_root, "connector-state.json"): b'{"connector":"claudecode"}\n',
+            }
+            for path, payload in preserved.items():
+                Path(path).write_bytes(payload)
             state = {
+                "version": "0.8.7",
                 "connector": "claudecode",
                 "mode": "action",
+                "data_root": data_root,
                 "maintenance_path": cache,
             }
             with patch("defenseclaw.commands.cmd_upgrade.subprocess.Popen") as popen_mock:
-                with runner.isolation():
+                with runner.isolation() as (out, _err, _):
                     _handoff_windows_setup_upgrade(
                         source,
                         "DefenseClawSetup-x64.exe",
@@ -7811,6 +8079,9 @@ class TestUpgradeManifest(unittest.TestCase):
                         manifest,
                         yes=True,
                     )
+                    output = out.getvalue().decode()
+            for path, payload in preserved.items():
+                self.assertEqual(Path(path).read_bytes(), payload)
 
         args = popen_mock.call_args.args[0]
         self.assertEqual(args[0], cache)
@@ -7820,7 +8091,9 @@ class TestUpgradeManifest(unittest.TestCase):
         self.assertIn("INSTALLSCOPE=user", args)
         self.assertIn("CONNECTOR=claudecode", args)
         self.assertIn("MODE=action", args)
+        self.assertIn("FROMVERSION=0.8.7", args)
         self.assertTrue(any(arg.startswith("WAITPID=") for arg in args))
+        self.assertIn("DefenseClaw 9.9.9", output)
 
     def test_machine_install_self_update_is_rejected(self):
         with self.assertRaises(SystemExit) as ctx:

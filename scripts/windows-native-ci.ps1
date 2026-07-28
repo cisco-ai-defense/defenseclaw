@@ -3127,8 +3127,11 @@ function Invoke-WizardConfigureLaterAcceptance(
     Invoke-WizardInstall $Setup $Root 'none' 'observe' $false `
         (Join-Path $Logs 'wizard-configure-later.json')
     Assert-SetupInstallState $InstallRoot 'none' 'observe'
-    if (Test-Path -LiteralPath (Join-Path $DataRoot 'config.yaml')) {
-        throw 'Configure later unexpectedly wrote a DefenseClaw connector configuration'
+    if (-not (Test-Path -LiteralPath (Join-Path $DataRoot 'config.yaml') -PathType Leaf)) {
+        throw 'Configure later did not create the canonical DefenseClaw configuration'
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $DataRoot '.migration_state.json') -PathType Leaf)) {
+        throw 'Configure later did not create the release-bound migration cursor'
     }
     $hookDir = Join-Path $DataRoot 'hooks'
     if (Test-Path -LiteralPath $hookDir) {
@@ -3516,6 +3519,7 @@ function Invoke-SetupAcceptance {
         $installedState.version = '0.8.0'
         $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
         $configPath = Join-Path $dataRoot 'config.yaml'
+        [IO.Directory]::CreateDirectory((Join-Path $dataRoot 'state')) | Out-Null
         $yamlDataRoot = $dataRoot.Replace("'", "''")
         $v7Fixture = @"
 # native Setup 0.8.0 observability migration acceptance fixture

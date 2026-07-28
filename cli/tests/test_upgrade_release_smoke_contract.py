@@ -1569,6 +1569,10 @@ def test_historical_release_matrix_does_not_repeat_source_contract_suite() -> No
     assert "bridge-dependency-drift" in posix
     assert "baseline_dependencies=target" in posix
     assert '--baseline-dependencies "$baseline_dependencies"' in posix
+    assert 'smoke_baselines="$BASELINE"' in posix
+    assert 'if [[ "$BASELINE" == "0.8.5" ]]' in posix
+    assert 'smoke_baselines="${BASELINE},0.8.1"' in posix
+    assert '--from-versions "$smoke_baselines"' in posix
 
 
 def test_release_validation_lanes_are_derived_from_authenticated_policy(
@@ -1887,7 +1891,8 @@ def test_field_recovery_lane_reproduces_exact_published_086_and_087_first_run() 
     assert "published {source_version} unexpectedly created a migration cursor" in protocol
     assert "Accepted exact public ${baseline} cursorless first-run state" in protocol
     assert "for source_version in 0.8.6 0.8.7" in protocol
-    assert 'resolver_path="${curl_shim}:/usr/bin:/bin:/usr/sbin:/sbin"' in recovery_function
+    assert 'resolver_path="${curl_shim}:${RESOLVER_SYSTEM_TOOL_PATH}"' in recovery_function
+    assert 'assert_resolver_path_has_no_uv "${resolver_path}"' in recovery_function
     assert 'PATH="${resolver_path}"' in recovery_function
     assert 'document["applied"] = [' not in protocol
     assert "Replayed every missing migration and repaired the cursor" not in protocol
@@ -1907,6 +1912,26 @@ def test_field_recovery_lane_reproduces_exact_published_086_and_087_first_run() 
     assert "preserved|recovered" in verification
     assert "corrupt audit recovery retained the discarded legacy fixture" in verification
     assert "corrupt_audit_recovery=fresh_mode_0600" in verification
+
+
+def test_candidate_resolver_paths_do_not_inherit_runner_uv() -> None:
+    protocol = PROTOCOL_SCRIPT.read_text(encoding="utf-8")
+    assert 'readonly RESOLVER_SYSTEM_TOOL_PATH="/usr/bin:/bin:/usr/sbin:/sbin"' in protocol
+    assert 'PATH="${resolver_path}" /bin/sh -c \'command -v uv\'' in protocol
+    assert 'PATH="${resolver_path}" command -v uv' not in protocol
+
+    for function_name, following_name in (
+        ("run_candidate_updater_refusal", "run_candidate_updater_staged_success"),
+        ("run_candidate_updater_staged_success", "run_candidate_updater_direct_success"),
+        ("run_candidate_updater_direct_success", "run_candidate_updater_field_recovery_success"),
+        ("run_candidate_updater_field_recovery_success", "run_protocol_case"),
+    ):
+        start = protocol.index(f"{function_name}() {{")
+        end = protocol.index(f"\n{following_name}() {{", start)
+        function = protocol[start:end]
+        assert 'resolver_path="${curl_shim}:${RESOLVER_SYSTEM_TOOL_PATH}"' in function
+        assert 'assert_resolver_path_has_no_uv "${resolver_path}"' in function
+        assert 'PATH="${resolver_path}"' in function
 
 
 @pytest.mark.skipif(os.name == "nt", reason="executes the POSIX field-recovery verifier")
