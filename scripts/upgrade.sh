@@ -6756,6 +6756,7 @@ PY
     HARD_CUT_CURSOR_RECOVERY=1
     RELEASE_VERSION="${requested_version}"
     configure_release
+    prepare_release_contract
     ok "Authenticated the exact published ${source_version} missing-cursor compatibility state"
 }
 
@@ -8137,7 +8138,9 @@ if not os.path.islink(launcher) or os.path.realpath(launcher) != os.path.realpat
     )
 PY
 
-    BRIDGE_PYTHON_INTERPRETER="$("${DEFENSECLAW_VENV}/bin/python" -I -B -c 'import os,sys; print(os.path.realpath(getattr(sys, "_base_executable", "") or sys.executable))')" \
+    BRIDGE_PYTHON_INTERPRETER="$("${DEFENSECLAW_VENV}/bin/python" \
+        -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B -c \
+        'import os,sys; print(os.path.realpath(getattr(sys, "_base_executable", "") or sys.executable))')" \
         || die "Could not resolve the source Python interpreter; no services changed."
     [[ -x "${BRIDGE_PYTHON_INTERPRETER}" ]] \
         || die "The source Python interpreter is unavailable; no services changed."
@@ -8271,7 +8274,8 @@ PY
 
     BRIDGE_SOURCE_HEALTH_URL="$(DEFENSECLAW_HOME="${DATA_DIR}" \
         DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
-        "${DEFENSECLAW_VENV}/bin/python" -I -B - <<'PY' 2>/dev/null || true
+        "${DEFENSECLAW_VENV}/bin/python" \
+            -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B - <<'PY' 2>/dev/null || true
 from defenseclaw.config import load
 
 cfg = load()
@@ -8983,8 +8987,9 @@ validate_tarball_members() {
 
 if [[ -n "${HARD_CUT_CURSOR_RECOVERY_SOURCE_VERSION}" ]]; then
     authenticate_release_owned_missing_cursor_source
+else
+    prepare_release_contract
 fi
-prepare_release_contract
 FINAL_RELEASE_PROVENANCE_BRIDGE_CHECKSUMS_SHA256="${RELEASE_PROVENANCE_BRIDGE_CHECKSUMS_SHA256}"
 resolve_staged_upgrade
 if version_lt "${RELEASE_VERSION}" "0.8.4"; then

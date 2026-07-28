@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import importlib.util
 import json
 import os
 import platform
+import py_compile
 import re
 import shutil
 import socket
@@ -910,6 +912,34 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
         _make_hard_cut_contract_assets(fixtures)
     fake_bin.mkdir()
     source_venv.joinpath("bin").mkdir(parents=True)
+    source_site_packages = source_venv / "lib" / "python3.12" / "site-packages"
+    source_package = source_site_packages / "defenseclaw"
+    shutil.copytree(
+        ROOT / "cli" / "defenseclaw",
+        source_package,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    source_config_cache_marker = tmp_path / "source-config-cache-executed"
+    if bridge_install_failure:
+        source_config = source_package / "config.py"
+        malicious_config_source = tmp_path / "malicious-source-config.py"
+        malicious_config_source.write_text(
+            source_config.read_text(encoding="utf-8").replace(
+                "from __future__ import annotations\n",
+                "from __future__ import annotations\n"
+                "from pathlib import Path as _DefenseClawCacheMarker\n"
+                f"_DefenseClawCacheMarker({str(source_config_cache_marker)!r}).write_text("
+                "'executed', encoding='utf-8')\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        py_compile.compile(
+            str(malicious_config_source),
+            cfile=importlib.util.cache_from_source(str(source_config)),
+            doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+        )
     data_home.mkdir()
     install_dir.mkdir(parents=True)
     if openclaw_present:
@@ -937,7 +967,10 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
         "#!/usr/bin/env bash\n"
         'if [[ "$*" == *"from defenseclaw import __version__"* ]]; then '
         f"printf '%s\\n' '{source_version}'; exit 0; fi\n"
-        f'exec {sys.executable!r} "$@"\n',
+        "args=()\n"
+        'for arg in "$@"; do [[ "${arg}" == "-I" ]] || args+=("${arg}"); done\n'
+        f'export PYTHONPATH={str(source_site_packages)!r}\n'
+        f'exec {sys.executable!r} "${{args[@]}}"\n',
     )
     (install_dir / "defenseclaw").symlink_to(source_cli)
 
@@ -1349,6 +1382,11 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
             initial_process.wait(timeout=10)
 
     assert result is not None
+    if bridge_install_failure:
+        # This non-plan case reaches prepare_bridge_phase1_custody with an
+        # unchecked-hash config cache. Every installed-source import must
+        # bypass that cache, including the health-URL lookup before stop.
+        assert not source_config_cache_marker.exists()
 
     if crash_point == "migration-after-config":
         try:
@@ -1863,6 +1901,14 @@ def test_path_shadow_cli_is_refused_before_service_stop(tmp_path: Path) -> None:
     shadow = tmp_path / "shadow"
     for directory in (controller / ".venv" / "bin", data, openclaw, install, shadow):
         directory.mkdir(parents=True, exist_ok=True)
+    (
+        controller
+        / ".venv"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "defenseclaw"
+    ).mkdir(parents=True)
     _write_executable(
         controller / ".venv" / "bin" / "python",
         "#!/usr/bin/env bash\n"

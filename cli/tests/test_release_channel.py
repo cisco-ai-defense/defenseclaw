@@ -1390,7 +1390,8 @@ def test_immutable_088_rescue_hands_clean_path_to_new_resolver_uv_custody(
     upgrade_source = UPGRADE_RESOLVER.read_text(encoding="utf-8")
     pin = re.search(r'readonly UV_BOOTSTRAP_VERSION="([^"]+)"', upgrade_source)
     maximum = re.search(r'readonly UV_BOOTSTRAP_MAX_BYTES="([^"]+)"', upgrade_source)
-    assert pin is not None and maximum is not None, "uv bootstrap constants moved"
+    assert pin is not None, "uv bootstrap version constant moved"
+    assert maximum is not None, "uv bootstrap size constant moved"
     function_start = upgrade_source.find("resolve_upgrade_uv() {")
     assert function_start >= 0, "resolve_upgrade_uv() was renamed or removed"
     function_end = upgrade_source.find(
@@ -1415,6 +1416,7 @@ def test_immutable_088_rescue_hands_clean_path_to_new_resolver_uv_custody(
         + "\n"
         + "resolve_upgrade_uv\n"
         + '"${UV_BIN}" --version\n'
+        + 'printf "resolver-private-uv=%s\\n" "${UV_BIN}"\n'
         + '/usr/bin/env > "$TMPDIR/resolver-env.log"\n'
         + 'printf "resolver-clean-path=%s\\n" "${PATH}"\n'
         + "# DefenseClaw upgrade resolver complete v1\n"
@@ -1442,10 +1444,30 @@ def test_immutable_088_rescue_hands_clean_path_to_new_resolver_uv_custody(
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "Copied uv into private upgrade custody" in completed.stdout
-    assert f"uv {pin.group(1)} (fixture 2026-07-27)" in completed.stdout
+    # A clean PATH may still expose a safe known-location uv or require the
+    # authenticated pinned bootstrap. Both paths must execute only the private
+    # staging copy selected by the new resolver.
+    copied_known_uv = "Copied uv into private upgrade custody" in completed.stdout
+    authenticated_bootstrap = (
+        f"Pinned uv {pin.group(1)} authenticated in private upgrade custody"
+        in completed.stdout
+    )
+    assert copied_known_uv or authenticated_bootstrap
+    assert f"uv {pin.group(1)}" in completed.stdout
     assert "resolver-clean-path=/usr/bin:/bin:/usr/sbin:/sbin" in completed.stdout
-    assert marker.read_text(encoding="utf-8") == "executed"
+    if copied_known_uv:
+        assert marker.read_text(encoding="utf-8") == "executed"
+    else:
+        assert not marker.exists()
+    private_uv_line = next(
+        line
+        for line in completed.stdout.splitlines()
+        if line.startswith("resolver-private-uv=")
+    )
+    private_uv = Path(private_uv_line.removeprefix("resolver-private-uv="))
+    assert private_uv.name == "uv"
+    assert private_uv.parent.name == "upgrade-tools"
+    assert private_uv.parents[2] == Path(env["TMPDIR"])
     resolver_environment = _environment(tmp_path / "resolver-env.log")
     assert resolver_environment["HOME"] == str(home)
     assert resolver_environment["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"

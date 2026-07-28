@@ -1036,6 +1036,44 @@ def test_posix_resolver_bootstraps_recovery_under_fixed_mutator_lease() -> None:
     assert "_recover_interrupted_hard_cut" in text
 
 
+def test_missing_cursor_authenticator_restores_requested_contract_before_return() -> None:
+    resolver = (ROOT / "scripts/upgrade.sh").read_text(encoding="utf-8")
+    function_start = resolver.index(
+        "authenticate_release_owned_missing_cursor_source() {"
+    )
+    function_end = resolver.index(
+        "\n}\n\n\ncapture_hard_cut_target_controller_contract() {",
+        function_start,
+    )
+    authenticator = resolver[function_start:function_end]
+
+    restore = authenticator.index('RELEASE_VERSION="${requested_version}"')
+    configure = authenticator.index("configure_release", restore)
+    prepare = authenticator.index("prepare_release_contract", configure)
+    success = authenticator.index(
+        'ok "Authenticated the exact published ${source_version}',
+        prepare,
+    )
+    assert restore < configure < prepare < success
+    assert authenticator.count("prepare_release_contract") == 2
+
+    caller_start = resolver.rindex(
+        'if [[ -n "${HARD_CUT_CURSOR_RECOVERY_SOURCE_VERSION}" ]]; then'
+    )
+    caller_end = resolver.index(
+        'FINAL_RELEASE_PROVENANCE_BRIDGE_CHECKSUMS_SHA256="',
+        caller_start,
+    )
+    caller = resolver[caller_start:caller_end]
+    assert (
+        "then\n"
+        "    authenticate_release_owned_missing_cursor_source\n"
+        "else\n"
+        "    prepare_release_contract\n"
+        "fi\n"
+    ) in caller
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX phase-two recovery")
 def test_interrupted_phase_two_bootstraps_private_uv_under_clean_path(
     tmp_path: Path,
@@ -1049,7 +1087,8 @@ def test_interrupted_phase_two_bootstraps_private_uv_under_clean_path(
         r'readonly UV_BOOTSTRAP_MAX_BYTES="([^"]+)"',
         resolver,
     )
-    assert version_match is not None and maximum_match is not None
+    assert version_match is not None
+    assert maximum_match is not None
 
     staging_start = resolver.index("prepare_upgrade_staging() {")
     resolve_start = resolver.index("resolve_upgrade_uv() {", staging_start)
