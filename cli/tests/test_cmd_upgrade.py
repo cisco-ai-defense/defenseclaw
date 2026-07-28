@@ -14,7 +14,7 @@ import time
 import types
 import unittest
 import zipfile
-from contextlib import ExitStack, nullcontext
+from contextlib import AbstractContextManager, ExitStack, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -6706,7 +6706,7 @@ class TestUpgradeManifest(unittest.TestCase):
     policy even when the local upgrade script is older than the release."""
 
     @staticmethod
-    def _native_windows_acl_fixture():
+    def _native_windows_acl_fixture() -> AbstractContextManager[object]:
         """Use real ACLs on Windows and stable custody evidence elsewhere."""
         if os.name == "nt":
             return nullcontext()
