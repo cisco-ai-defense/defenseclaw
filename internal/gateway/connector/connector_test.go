@@ -1270,34 +1270,45 @@ func stubInsightClawInstall(t *testing.T, ocHome string) {
 	t.Helper()
 	origLookPath := execLookPath
 	execLookPath = func(file string) (string, error) {
-		if file == "openclaw" {
-			return "/usr/bin/openclaw", nil
+		switch file {
+		case "npm", "tar":
+			return "/usr/bin/" + file, nil
 		}
 		return "", exec.ErrNotFound
 	}
-	orig := execOpenClawPluginInstall
-	execOpenClawPluginInstall = func(_ context.Context, pluginName string, _ []string) ([]byte, error) {
-		if pluginName != insightClawNPMSource {
-			return nil, fmt.Errorf("unexpected plugin install: %s", pluginName)
+	orig := execInsightClawInstall
+	execInsightClawInstall = func(_ context.Context, packageSpec, installDir string, _ []string) ([]byte, error) {
+		if packageSpec != insightClawNPMSource {
+			return nil, fmt.Errorf("unexpected package spec: %s", packageSpec)
 		}
-		dir := filepath.Join(ocHome, "extensions", insightClawOpenClawPluginID)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, err
-		}
-		pkg := []byte(`{"name":"@outshift-open/insightclaw","version":"0.1.3"}`)
-		if err := os.WriteFile(filepath.Join(dir, "package.json"), pkg, 0o644); err != nil {
-			return nil, err
-		}
-		manifest := []byte(`{"id":"insightclaw"}`)
-		if err := os.WriteFile(filepath.Join(dir, "openclaw.plugin.json"), manifest, 0o644); err != nil {
+		if err := writeInsightClawFixture(installDir); err != nil {
 			return nil, err
 		}
 		return []byte("installed insightclaw"), nil
 	}
 	t.Cleanup(func() {
 		execLookPath = origLookPath
-		execOpenClawPluginInstall = orig
+		execInsightClawInstall = orig
 	})
+}
+
+// writeInsightClawFixture mirrors the on-disk shape that `npm pack` +
+// `tar -xzf` produces for @outshift-open/insightclaw@0.1.3: a
+// package.json with the pinned name+version and an `openclaw.extensions`
+// entry, plus the resolved entry-point file (dist/index.js) that
+// validateInsightClawPluginDir now stats.
+func writeInsightClawFixture(dir string) error {
+	if err := os.MkdirAll(filepath.Join(dir, "dist"), 0o755); err != nil {
+		return err
+	}
+	pkg := []byte(`{"name":"@outshift-open/insightclaw","version":"0.1.3","openclaw":{"extensions":["./dist/index.js"]}}`)
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), pkg, 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "dist", "index.js"), []byte("// insightclaw entry stub\n"), 0o644); err != nil {
+		return err
+	}
+	return nil
 }
 
 func TestInstallInsightClawNPMPlugin_EnvUsesHomeParentWithoutOpenClawHome(t *testing.T) {
@@ -1312,34 +1323,27 @@ func TestInstallInsightClawNPMPlugin_EnvUsesHomeParentWithoutOpenClawHome(t *tes
 
 	origLookPath := execLookPath
 	execLookPath = func(file string) (string, error) {
-		if file == "openclaw" {
-			return "/usr/bin/openclaw", nil
+		switch file {
+		case "npm", "tar":
+			return "/usr/bin/" + file, nil
 		}
 		return "", exec.ErrNotFound
 	}
 	defer func() { execLookPath = origLookPath }()
 
 	var capturedEnv []string
-	origInstall := execOpenClawPluginInstall
-	execOpenClawPluginInstall = func(_ context.Context, pluginName string, env []string) ([]byte, error) {
-		if pluginName != insightClawNPMSource {
-			return nil, fmt.Errorf("unexpected plugin install: %s", pluginName)
+	origInstall := execInsightClawInstall
+	execInsightClawInstall = func(_ context.Context, packageSpec, installDir string, env []string) ([]byte, error) {
+		if packageSpec != insightClawNPMSource {
+			return nil, fmt.Errorf("unexpected package spec: %s", packageSpec)
 		}
 		capturedEnv = append([]string(nil), env...)
-
-		installDir := filepath.Join(ocHome, "extensions", insightClawOpenClawPluginID)
-		if err := os.MkdirAll(installDir, 0o755); err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(filepath.Join(installDir, "package.json"), []byte(`{"name":"@outshift-open/insightclaw","version":"0.1.3"}`), 0o644); err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(filepath.Join(installDir, "openclaw.plugin.json"), []byte(`{"id":"insightclaw"}`), 0o644); err != nil {
+		if err := writeInsightClawFixture(installDir); err != nil {
 			return nil, err
 		}
 		return []byte("ok"), nil
 	}
-	defer func() { execOpenClawPluginInstall = origInstall }()
+	defer func() { execInsightClawInstall = origInstall }()
 
 	if err := installInsightClawNPMPlugin(context.Background(), ocHome); err != nil {
 		t.Fatalf("installInsightClawNPMPlugin failed: %v", err)
@@ -1386,37 +1390,32 @@ func TestInstallInsightClawNPMPlugin_ReplacesUntrustedPrecreatedDir(t *testing.T
 
 	origLookPath := execLookPath
 	execLookPath = func(file string) (string, error) {
-		if file == "openclaw" {
-			return "/usr/bin/openclaw", nil
+		switch file {
+		case "npm", "tar":
+			return "/usr/bin/" + file, nil
 		}
 		return "", exec.ErrNotFound
 	}
 	defer func() { execLookPath = origLookPath }()
 
 	called := false
-	origInstall := execOpenClawPluginInstall
-	execOpenClawPluginInstall = func(_ context.Context, pluginName string, _ []string) ([]byte, error) {
-		if pluginName != insightClawNPMSource {
-			return nil, fmt.Errorf("unexpected plugin install: %s", pluginName)
+	origInstall := execInsightClawInstall
+	execInsightClawInstall = func(_ context.Context, packageSpec, dir string, _ []string) ([]byte, error) {
+		if packageSpec != insightClawNPMSource {
+			return nil, fmt.Errorf("unexpected package spec: %s", packageSpec)
 		}
 		called = true
 
-		if _, err := os.Stat(filepath.Join(installDir, "index.js")); !os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(dir, "index.js")); !os.IsNotExist(err) {
 			return nil, fmt.Errorf("attacker precreated file still present before install: %v", err)
 		}
 
-		if err := os.MkdirAll(installDir, 0o755); err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(filepath.Join(installDir, "package.json"), []byte(`{"name":"@outshift-open/insightclaw","version":"0.1.3"}`), 0o644); err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(filepath.Join(installDir, "openclaw.plugin.json"), []byte(`{"id":"insightclaw"}`), 0o644); err != nil {
+		if err := writeInsightClawFixture(dir); err != nil {
 			return nil, err
 		}
 		return []byte("ok"), nil
 	}
-	defer func() { execOpenClawPluginInstall = origInstall }()
+	defer func() { execInsightClawInstall = origInstall }()
 
 	if err := installInsightClawNPMPlugin(context.Background(), ocHome); err != nil {
 		t.Fatalf("installInsightClawNPMPlugin failed: %v", err)
@@ -1427,6 +1426,74 @@ func TestInstallInsightClawNPMPlugin_ReplacesUntrustedPrecreatedDir(t *testing.T
 
 	if _, err := os.Stat(filepath.Join(installDir, "index.js")); !os.IsNotExist(err) {
 		t.Fatalf("attacker precreated file survived install: %v", err)
+	}
+}
+
+// TestValidateInsightClawPluginDir_RejectsMissingRuntimeDeps locks in the
+// gate that caught the real-world "Cannot find module '@opentelemetry/api'"
+// crash loop we saw on the VM: a tarball extracted cleanly but
+// `npm install --omit=dev` never populated node_modules/, and the previous
+// validation only inspected JSON metadata so it accepted the broken install.
+func TestValidateInsightClawPluginDir_RejectsMissingRuntimeDeps(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "dist"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pkg := []byte(`{
+	  "name": "@outshift-open/insightclaw",
+	  "version": "0.1.3",
+	  "openclaw": {"extensions": ["./dist/index.js"]},
+	  "dependencies": {"@opentelemetry/api": "^1.9.0", "js-yaml": "^4.1.0"}
+	}`)
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), pkg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "dist", "index.js"), []byte("// stub\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Case 1: no node_modules/ at all. This is the exact failure mode we
+	// hit on the VM when `npm install --omit=dev` never ran.
+	err := validateInsightClawPluginDir(dir)
+	if err == nil {
+		t.Fatalf("validation accepted a plugin dir with no node_modules/; expected an error")
+	}
+	if !strings.Contains(err.Error(), "node_modules") {
+		t.Fatalf("expected error to mention node_modules/; got: %v", err)
+	}
+
+	// Case 2: node_modules/ exists but a scoped dep is still missing.
+	// This catches the "install ran but was interrupted" partial-tree
+	// failure mode. Materialize the non-scoped dep first so the loop
+	// gets past it and reports the scoped one as missing.
+	if err := os.MkdirAll(filepath.Join(dir, "node_modules", "js-yaml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "node_modules", "js-yaml", "package.json"), []byte(`{"name":"js-yaml","version":"4.1.0"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = validateInsightClawPluginDir(dir)
+	if err == nil {
+		t.Fatalf("validation accepted a plugin dir missing @opentelemetry/api; expected an error")
+	}
+	if !strings.Contains(err.Error(), "@opentelemetry/api") {
+		t.Fatalf("expected error to name the missing @opentelemetry/api dep; got: %v", err)
+	}
+	if strings.Contains(err.Error(), "js-yaml") {
+		t.Fatalf("validation should not name deps that are already materialized; got: %v", err)
+	}
+
+	// Case 3: every declared dep is materialized. Scoped packages live at
+	// node_modules/@scope/name/package.json.
+	if err := os.MkdirAll(filepath.Join(dir, "node_modules", "@opentelemetry", "api"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "node_modules", "@opentelemetry", "api", "package.json"), []byte(`{"name":"@opentelemetry/api","version":"1.9.0"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateInsightClawPluginDir(dir); err != nil {
+		t.Fatalf("validation should accept a plugin dir with all deps materialized: %v", err)
 	}
 }
 

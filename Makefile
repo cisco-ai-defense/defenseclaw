@@ -317,7 +317,18 @@ proto: proto-tools
 		secureclient.proto
 	@echo "Regenerated proto/defenseclaw/secureclient/v1/*.pb.go"
 
-gateway: sync-openclaw-extension
+# When CONNECTOR=openclaw, build the TypeScript plugin *before*
+# sync-openclaw-extension so the Go //go:embed picks up the real
+# dist/ tree instead of the placeholder. Without this the ordering
+# is: gateway-install → gateway → sync (drops placeholder because
+# extensions/defenseclaw/dist/ is missing) → go build (embeds
+# placeholder) → later plugin-install → plugin (dist/ built, but
+# too late — the gateway binary already has the placeholder), and
+# the sidecar refuses OpenClaw setup at first start with "openclaw
+# extension bundle is incomplete (missing dist/index.js)". Other
+# connectors never load this embed, so the extra npm step is only
+# paid when the operator has opted into OpenClaw.
+gateway: $(if $(filter openclaw,$(CONNECTOR)),plugin) sync-openclaw-extension
 	go build $(GOFLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
 	@echo "Built $(GATEWAY)$(EXE)"
 	@echo "  Run with: ./$(GATEWAY)$(EXE)"

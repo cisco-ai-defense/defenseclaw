@@ -295,20 +295,98 @@ func installOpenClawExtension(ctx context.Context, ocHome string, enablePluginAp
 	return nil
 }
 
-// openClawPluginInstallTimeout is the maximum time allowed for
-// `openclaw plugins install` to complete. NPM installs can be slow on
-// first run but should never need more than two minutes on a healthy
-// network; cap it so a hung registry does not stall gateway setup
-// indefinitely.
+// openClawPluginInstallTimeout is the maximum time allowed for the
+// insightclaw NPM install pipeline (`npm pack` + `tar -xzf` + `npm
+// install --omit=dev`) to complete. NPM installs can be slow on first
+// run but should never need more than two minutes on a healthy network;
+// cap it so a hung registry does not stall gateway setup indefinitely.
 const openClawPluginInstallTimeout = 2 * time.Minute
 
-var execOpenClawPluginInstall = func(ctx context.Context, pluginName string, env []string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "openclaw", "plugins", "install", pluginName)
-	cmd.Env = env
-	return cmd.CombinedOutput()
+// insightClawCacheDirName is the dedicated cache directory (a sibling of
+// the install dir under <ocHome>/extensions/) where `npm pack` writes
+// the downloaded tarball. Using a controlled path here — rather than
+// letting the OpenClaw CLI drop the ClawHub artifact under /tmp/ — sidesteps
+// the observed "ENOENT: /tmp/openclaw-clawhub-package-XXX/@outshift-open/insightclaw.zip"
+// failure mode where the ClawHub extractor never produced the ZIP.
+const insightClawCacheDirName = ".insightclaw-cache"
+
+// execInsightClawInstall is the extension point tests override to plant
+// files at installDir without actually shelling out to npm. The default
+// implementation runs the reviewed NPM pipeline: download the pinned
+// tarball with `npm pack`, extract it into installDir with
+// `tar -xzf --strip-components=1`, and install runtime dependencies with
+// `npm install --omit=dev`.
+var execInsightClawInstall = func(ctx context.Context, packageSpec, installDir string, env []string) ([]byte, error) {
+	parentDir := filepath.Dir(installDir)
+	cacheDir := filepath.Join(parentDir, insightClawCacheDirName)
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create npm pack cache dir: %w", err)
+	}
+	defer os.RemoveAll(cacheDir)
+
+	var combined []byte
+
+	packCmd := exec.CommandContext(ctx, "npm", "pack", packageSpec, "--pack-destination", cacheDir, "--silent")
+	packCmd.Env = env
+	packOut, err := packCmd.CombinedOutput()
+	combined = append(combined, packOut...)
+	if err != nil {
+		return combined, fmt.Errorf("npm pack %s: %w", packageSpec, err)
+	}
+
+	tarball, err := findTarballIn(cacheDir)
+	if err != nil {
+		return combined, err
+	}
+
+	if err := os.MkdirAll(installDir, 0o755); err != nil {
+		return combined, fmt.Errorf("create insightclaw install dir: %w", err)
+	}
+
+	tarCmd := exec.CommandContext(ctx, "tar", "-xzf", tarball, "-C", installDir, "--strip-components=1")
+	tarOut, err := tarCmd.CombinedOutput()
+	combined = append(combined, tarOut...)
+	if err != nil {
+		return combined, fmt.Errorf("tar -xzf %s -> %s: %w", tarball, installDir, err)
+	}
+
+	depsCmd := exec.CommandContext(ctx, "npm", "install", "--omit=dev", "--no-audit", "--no-fund")
+	depsCmd.Dir = installDir
+	depsCmd.Env = env
+	depsOut, err := depsCmd.CombinedOutput()
+	combined = append(combined, depsOut...)
+	if err != nil {
+		return combined, fmt.Errorf("npm install --omit=dev in %s: %w", installDir, err)
+	}
+
+	return combined, nil
 }
 
 var execLookPath = exec.LookPath
+
+func findTarballIn(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("read npm pack cache dir %s: %w", dir, err)
+	}
+	var candidates []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), ".tgz") || strings.HasSuffix(e.Name(), ".tar.gz") {
+			candidates = append(candidates, filepath.Join(dir, e.Name()))
+		}
+	}
+	switch len(candidates) {
+	case 0:
+		return "", fmt.Errorf("npm pack produced no .tgz in %s", dir)
+	case 1:
+		return candidates[0], nil
+	default:
+		return "", fmt.Errorf("npm pack produced multiple tarballs in %s: %v", dir, candidates)
+	}
+}
 
 func installInsightClawNPMPlugin(ctx context.Context, ocHome string) error {
 	installDir := filepath.Join(ocHome, "extensions", insightClawOpenClawPluginID)
@@ -317,27 +395,36 @@ func installInsightClawNPMPlugin(ctx context.Context, ocHome string) error {
 	}
 
 	extensionsDir := filepath.Join(ocHome, "extensions")
+	if err := os.MkdirAll(extensionsDir, 0o755); err != nil {
+		return fmt.Errorf("create extensions dir: %w", err)
+	}
 	if _, err := os.Stat(installDir); err == nil {
 		if err := safeRemoveAll(installDir, extensionsDir); err != nil {
 			return fmt.Errorf("remove stale insightclaw extension dir: %w", err)
 		}
 	}
 
-	// Give a clear error when the CLI is not on PATH rather than
-	// letting the exec fail with a cryptic "file not found" message.
-	if _, err := execLookPath("openclaw"); err != nil {
-		return fmt.Errorf("openclaw CLI not found on PATH — install OpenClaw before running setup: %w", err)
+	// Give a clear error when npm is not on PATH rather than letting the
+	// exec fail with a cryptic "file not found" message. We deliberately
+	// do not require the `openclaw` CLI: the ClawHub-based install path
+	// silently fails to materialise the tarball under /tmp/ on some hosts,
+	// so DefenseClaw drives the install through npm directly and only
+	// asks OpenClaw to load the plugin via openclaw.json load paths.
+	if _, err := execLookPath("npm"); err != nil {
+		return fmt.Errorf("npm not found on PATH — install Node.js/npm before running setup: %w", err)
+	}
+	if _, err := execLookPath("tar"); err != nil {
+		return fmt.Errorf("tar not found on PATH — required to extract the insightclaw NPM tarball: %w", err)
 	}
 
-	// Build the child environment for the OpenClaw CLI.
+	// Build the child environment for the npm invocation.
 	//
-	// Do not inject OPENCLAW_HOME: some OpenClaw builds treat it as a base
-	// home directory and append "/.openclaw" internally, which would produce
-	// a duplicated path like ~/.openclaw/.openclaw/extensions. Instead force
-	// HOME to the parent of ocHome and let the CLI resolve ~/.openclaw from
-	// that canonical root.
+	// Force HOME to the parent of ocHome so npm resolves its per-user
+	// config (~/.npmrc) from a canonical location and OpenClaw resolves
+	// ~/.openclaw from the same root. Strip OPENCLAW_HOME to avoid the
+	// same OpenClaw-CLI base-vs-home confusion that would otherwise
+	// produce a duplicated path like ~/.openclaw/.openclaw/extensions.
 	env := os.Environ()
-	// Remove existing OPENCLAW_HOME/HOME entries, then append our HOME.
 	filtered := env[:0]
 	for _, e := range env {
 		if !strings.HasPrefix(e, "OPENCLAW_HOME=") && !strings.HasPrefix(e, "HOME=") {
@@ -350,41 +437,53 @@ func installInsightClawNPMPlugin(ctx context.Context, ocHome string) error {
 	installCtx, cancel := context.WithTimeout(ctx, openClawPluginInstallTimeout)
 	defer cancel()
 
-	out, err := execOpenClawPluginInstall(installCtx, insightClawNPMSource, env)
+	out, err := execInsightClawInstall(installCtx, insightClawNPMSource, installDir, env)
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
-		if validateInsightClawPluginDir(installDir) == nil && isLikelyNonFatalOpenClawInstallError(msg) {
-			return nil
-		}
 		if msg != "" {
-			return fmt.Errorf("openclaw plugins install %s: %w: %s", insightClawNPMSource, err, msg)
+			return fmt.Errorf("npm install %s: %w: %s", insightClawNPMSource, err, msg)
 		}
-		return fmt.Errorf("openclaw plugins install %s: %w", insightClawNPMSource, err)
+		return fmt.Errorf("npm install %s: %w", insightClawNPMSource, err)
 	}
 	if err := validateInsightClawPluginDir(installDir); err != nil {
-		return fmt.Errorf("openclaw plugins install %s completed but %s failed validation: %w", insightClawNPMSource, installDir, err)
+		return fmt.Errorf("npm install %s completed but %s failed validation: %w", insightClawNPMSource, installDir, err)
 	}
 	return nil
 }
 
-func isLikelyNonFatalOpenClawInstallError(msg string) bool {
-	if msg == "" {
-		return false
-	}
-	return strings.Contains(msg, "ENOTEMPTY") ||
-		strings.Contains(msg, "package.json missing openclaw.hooks") ||
-		strings.Contains(msg, "not a valid hook pack")
-}
-
+// validateInsightClawPluginDir performs a precise post-install check on
+// the extracted insightclaw plugin directory. It fails unless every one
+// of the following holds:
+//
+//  1. package.json exists, is valid JSON, has name = @outshift-open/insightclaw
+//     (or the bare id "insightclaw" for local dev builds), and version =
+//     the pinned insightClawNPMVersion.
+//  2. The plugin declares an OpenClaw entry point via either an
+//     openclaw.plugin.json manifest OR the `openclaw.extensions` field
+//     inside package.json (used by @outshift-open/insightclaw@0.1.x on NPM).
+//  3. The resolved entry-point file exists on disk under dir/.
+//  4. The plugin identity matches the expected id "insightclaw".
+//  5. Every runtime dependency declared in package.json.dependencies
+//     has a materialized node_modules/<name>/package.json entry (so a
+//     half-installed tree missing `@opentelemetry/api` is caught here
+//     and triggers a reinstall on the next Setup).
+//
+// Checking that the entry-point *file* and its runtime dependencies are
+// materialised is what makes this validation "precise": the previous
+// version only inspected JSON metadata, so a partially extracted archive
+// (e.g. tarball extracted but `npm install --omit=dev` never ran) would
+// pass and boot the plugin into a `Cannot find module` crash loop.
 func validateInsightClawPluginDir(dir string) error {
 	pkgPath := filepath.Join(dir, "package.json")
 	pkg := map[string]interface{}{}
-	if data, err := os.ReadFile(pkgPath); err != nil {
+	data, err := os.ReadFile(pkgPath)
+	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("missing package.json")
+			return fmt.Errorf("missing package.json at %s", pkgPath)
 		}
 		return fmt.Errorf("read package.json: %w", err)
-	} else if err := json.Unmarshal(data, &pkg); err != nil {
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
 		return fmt.Errorf("parse package.json: %w", err)
 	}
 
@@ -398,34 +497,141 @@ func validateInsightClawPluginDir(dir string) error {
 		return fmt.Errorf("package.json version %q does not match expected %q", pkgVersion, insightClawNPMVersion)
 	}
 
-	manifestPath := filepath.Join(dir, "openclaw.plugin.json")
-	manifest := map[string]interface{}{}
-	if data, err := os.ReadFile(manifestPath); err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("missing openclaw.plugin.json")
-		}
-		return fmt.Errorf("read openclaw.plugin.json: %w", err)
-	} else if err := json.Unmarshal(data, &manifest); err != nil {
-		return fmt.Errorf("parse openclaw.plugin.json: %w", err)
+	entryRel, pluginID, err := resolveInsightClawPluginMetadata(dir, pkg)
+	if err != nil {
+		return err
+	}
+	if pluginID != insightClawOpenClawPluginID {
+		return fmt.Errorf("insightclaw plugin identity %q does not match expected %q", pluginID, insightClawOpenClawPluginID)
 	}
 
-	id := ""
-	if v, ok := manifest["id"].(string); ok {
-		id = v
-	} else if v, ok := manifest["name"].(string); ok {
-		id = v
-	} else if plugin, ok := manifest["plugin"].(map[string]interface{}); ok {
-		if v, ok := plugin["id"].(string); ok {
-			id = v
-		} else if v, ok := plugin["name"].(string); ok {
-			id = v
+	entryClean := strings.TrimPrefix(strings.TrimPrefix(entryRel, "./"), "/")
+	entryPath := filepath.Join(dir, filepath.FromSlash(entryClean))
+	// Contain the resolved entry path within dir/ so a manifest that
+	// tries to escape via "../" is rejected before we accept the plugin.
+	absDir, absErr := filepath.Abs(dir)
+	absEntry, entryAbsErr := filepath.Abs(entryPath)
+	if absErr == nil && entryAbsErr == nil {
+		if !strings.HasPrefix(absEntry, absDir+string(filepath.Separator)) && absEntry != absDir {
+			return fmt.Errorf("plugin entry point %q escapes plugin directory %s", entryRel, dir)
 		}
 	}
-	if id != insightClawOpenClawPluginID {
-		return fmt.Errorf("openclaw.plugin.json identity %q does not match expected %q", id, insightClawOpenClawPluginID)
+	info, err := os.Stat(entryPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("plugin entry point missing: %s", entryPath)
+		}
+		return fmt.Errorf("stat plugin entry point %s: %w", entryPath, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("plugin entry point %s is a directory, expected a file", entryPath)
+	}
+
+	if err := validateInsightClawRuntimeDeps(dir, pkg); err != nil {
+		return err
 	}
 
 	return nil
+}
+
+// validateInsightClawRuntimeDeps checks that every runtime dependency
+// declared under package.json.dependencies is materialized on disk
+// under <dir>/node_modules/<name>/package.json. Empty dependency
+// blocks (a plugin with no runtime deps) short-circuit to success.
+func validateInsightClawRuntimeDeps(dir string, pkg map[string]interface{}) error {
+	deps, ok := pkg["dependencies"].(map[string]interface{})
+	if !ok || len(deps) == 0 {
+		return nil
+	}
+	nodeModules := filepath.Join(dir, "node_modules")
+	if info, err := os.Stat(nodeModules); err != nil || !info.IsDir() {
+		return fmt.Errorf("missing node_modules/ under %s — run `npm install --omit=dev` inside the plugin dir", dir)
+	}
+	missing := make([]string, 0, len(deps))
+	for name := range deps {
+		// Scoped packages (e.g. @opentelemetry/api) live at
+		// node_modules/@opentelemetry/api/package.json, which
+		// filepath.Join handles directly with the slash preserved.
+		depPkg := filepath.Join(nodeModules, filepath.FromSlash(name), "package.json")
+		if _, err := os.Stat(depPkg); err != nil {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("insightclaw runtime dependencies missing under %s/node_modules: %s — run `npm install --omit=dev` inside the plugin dir", dir, strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// resolveInsightClawPluginMetadata returns the plugin entry point (a
+// path relative to dir) and the plugin identity, preferring an
+// openclaw.plugin.json manifest when present and falling back to the
+// `openclaw` field inside package.json (which is what
+// @outshift-open/insightclaw@0.1.x ships on NPM).
+func resolveInsightClawPluginMetadata(dir string, pkg map[string]interface{}) (entryRel string, pluginID string, err error) {
+	manifestPath := filepath.Join(dir, "openclaw.plugin.json")
+	if data, mErr := os.ReadFile(manifestPath); mErr == nil {
+		manifest := map[string]interface{}{}
+		if uErr := json.Unmarshal(data, &manifest); uErr != nil {
+			return "", "", fmt.Errorf("parse openclaw.plugin.json: %w", uErr)
+		}
+		entryRel = firstOpenClawExtension(manifest)
+		pluginID = openClawManifestIdentity(manifest)
+		if entryRel == "" {
+			// Manifest exists but has no extensions entry — fall back to
+			// the package.json openclaw field before giving up.
+			if ocField, ok := pkg["openclaw"].(map[string]interface{}); ok {
+				entryRel = firstOpenClawExtension(ocField)
+			}
+		}
+		if entryRel == "" {
+			return "", "", fmt.Errorf("openclaw.plugin.json has no extensions entry and package.json openclaw.extensions is empty")
+		}
+		if pluginID == "" {
+			pluginID = insightClawOpenClawPluginID
+		}
+		return entryRel, pluginID, nil
+	} else if !os.IsNotExist(mErr) {
+		return "", "", fmt.Errorf("read openclaw.plugin.json: %w", mErr)
+	}
+
+	ocField, ok := pkg["openclaw"].(map[string]interface{})
+	if !ok {
+		return "", "", fmt.Errorf("missing openclaw.plugin.json and package.json has no `openclaw` field")
+	}
+	entryRel = firstOpenClawExtension(ocField)
+	if entryRel == "" {
+		return "", "", fmt.Errorf("package.json openclaw.extensions is empty")
+	}
+	return entryRel, insightClawOpenClawPluginID, nil
+}
+
+func firstOpenClawExtension(m map[string]interface{}) string {
+	exts, _ := m["extensions"].([]interface{})
+	for _, v := range exts {
+		if s, ok := v.(string); ok && s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func openClawManifestIdentity(manifest map[string]interface{}) string {
+	if v, ok := manifest["id"].(string); ok && v != "" {
+		return v
+	}
+	if v, ok := manifest["name"].(string); ok && v != "" {
+		return v
+	}
+	if plugin, ok := manifest["plugin"].(map[string]interface{}); ok {
+		if v, ok := plugin["id"].(string); ok && v != "" {
+			return v
+		}
+		if v, ok := plugin["name"].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // safeRemoveAll removes target only if it resolves to a path under parent.
@@ -644,7 +850,7 @@ func uninstallOpenClawExtension(ocHome string) error {
 			plugins["entries"] = entries
 		}
 		if load, ok := plugins["load"].(map[string]interface{}); ok {
-      load["paths"] = removeDefenseClawLoadPaths(load["paths"])
+			load["paths"] = removeDefenseClawLoadPaths(load["paths"])
 			load["paths"] = removeString(load["paths"], insightExtDir)
 			plugins["load"] = load
 		}
