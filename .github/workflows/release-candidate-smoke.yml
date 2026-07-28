@@ -166,8 +166,14 @@ jobs:
             *) echo "invalid release validation lane: $lane_role" >&2; exit 1 ;;
           esac
           export UPGRADE_SMOKE_FIELD_RECOVERY_CASES
+          smoke_baselines="$BASELINE"
+          if [[ "$BASELINE" == "0.8.5" ]]; then
+            # Keep the selected seven-lane policy compact while proving the
+            # exact public source that exercises the longest supported bridge.
+            smoke_baselines="${BASELINE},0.8.1"
+          fi
           bash scripts/test-upgrade-protocol-release.sh \
-            --from-version "$BASELINE" \
+            --from-versions "$smoke_baselines" \
             --target-version "$RELEASE_TAG" \
             --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
             --baseline-mode seed \
