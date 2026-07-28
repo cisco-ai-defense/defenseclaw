@@ -572,8 +572,8 @@ func validatePrivateTransactionPath(path string, wantDirectory bool) error {
 	if err != nil || user == nil || user.User.Sid == nil {
 		return fmt.Errorf("resolve installer transaction owner: %w", err)
 	}
-	if owner == nil || !owner.Equals(user.User.Sid) {
-		return fmt.Errorf("installer transaction path is not owned by the current user: %s", path)
+	if err := validatePrivateTransactionOwner(path, owner, user.User.Sid); err != nil {
+		return err
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil || dacl == nil {
@@ -616,6 +616,13 @@ func validatePrivateTransactionPath(path string, wantDirectory bool) error {
 		if ace.Mask&writeLike != 0 {
 			return fmt.Errorf("untrusted principal has write access to installer transaction path: %s", path)
 		}
+	}
+	return nil
+}
+
+func validatePrivateTransactionOwner(path string, owner, currentUser *windows.SID) error {
+	if owner == nil || currentUser == nil || !owner.Equals(currentUser) {
+		return fmt.Errorf("installer transaction path is not owned by the current user: %s", path)
 	}
 	return nil
 }

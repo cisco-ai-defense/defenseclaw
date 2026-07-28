@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -106,6 +107,21 @@ type setupJournal struct {
 	SchemaVersion int              `json:"schema_version"`
 	Phase         string           `json:"phase"`
 	Transaction   setupTransaction `json:"transaction"`
+}
+
+// terminalSetupJournal is the frozen cross-version completion envelope. It
+// intentionally contains no evolving transaction body: schema-2 Setup builds
+// released before later transaction fields were added can decode it strictly,
+// observe that no recovery work remains, and continue to their normal policy
+// checks.
+type terminalSetupJournal struct {
+	SchemaVersion int    `json:"schema_version"`
+	Phase         string `json:"phase"`
+}
+
+type setupJournalDocument struct {
+	Journal  setupJournal
+	Terminal bool
 }
 
 type setupRecoveryOps struct {
@@ -1055,6 +1071,22 @@ func transitionSetupJournal(transaction setupTransaction, fromPhase, toPhase str
 		return err
 	}
 	path := journalPaths(root).Journal
+	if toPhase == setupPhaseComplete {
+		expected, err := transactionExpectationsFromKnownFolders(
+			transaction.InstallRoot,
+			transaction.DataRoot,
+		)
+		if err != nil {
+			return err
+		}
+		return transitionSetupJournalToTerminalAtWithWriter(
+			path,
+			transaction,
+			fromPhase,
+			expected,
+			writeDurableValue,
+		)
+	}
 	return transitionSetupJournalAt(path, transaction, fromPhase, toPhase)
 }
 
@@ -1080,6 +1112,42 @@ func transitionSetupJournalAtWithWriter(
 	}
 	journal.Phase = toPhase
 	return write(path, *journal, true)
+}
+
+func transitionSetupJournalToTerminalAtWithWriter(
+	path string,
+	transaction setupTransaction,
+	fromPhase string,
+	expected setupTransactionExpectations,
+	write durableValueWriter,
+) error {
+	switch fromPhase {
+	case setupPhaseIntent, setupPhaseQuiescing, setupPhasePublished, setupPhaseConverged:
+	default:
+		return fmt.Errorf("refusing terminal setup transaction transition from phase %q", fromPhase)
+	}
+	document, err := readSetupJournalDocument(path)
+	if err != nil {
+		return err
+	}
+	if document == nil {
+		return errors.New("setup transaction journal is missing")
+	}
+	if document.Terminal || document.Journal.Phase != fromPhase ||
+		!setupTransactionsEqual(document.Journal.Transaction, transaction) {
+		return fmt.Errorf("setup transaction journal is not in the expected %s phase", fromPhase)
+	}
+	if err := validateSetupTransaction(document.Journal.Transaction, expected); err != nil {
+		return fmt.Errorf("refusing unsafe terminal setup transaction: %w", err)
+	}
+	return write(path, frozenTerminalSetupJournal(), true)
+}
+
+func frozenTerminalSetupJournal() terminalSetupJournal {
+	return terminalSetupJournal{
+		SchemaVersion: setupJournalSchemaVersion,
+		Phase:         setupPhaseComplete,
+	}
 }
 
 func writeDurableTransaction(path string, transaction setupTransaction) error {
@@ -1199,6 +1267,15 @@ func readSetupTransaction(path string) (*setupTransaction, error) {
 }
 
 func readSetupJournal(path string) (*setupJournal, error) {
+	document, err := readSetupJournalDocument(path)
+	if err != nil || document == nil {
+		return nil, err
+	}
+	journal := document.Journal
+	return &journal, nil
+}
+
+func readSetupJournalDocument(path string) (*setupJournalDocument, error) {
 	root := filepath.Dir(path)
 	if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -1227,23 +1304,71 @@ func readSetupJournal(path string) (*setupJournal, error) {
 	if err := validatePrivateTransactionPath(path, false); err != nil {
 		return nil, err
 	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var terminal terminalSetupJournal
+	if err := decodeSetupJournalJSON(data, &terminal); err == nil &&
+		terminal == frozenTerminalSetupJournal() {
+		return &setupJournalDocument{
+			Journal: setupJournal{
+				SchemaVersion: terminal.SchemaVersion,
+				Phase:         terminal.Phase,
+			},
+			Terminal: true,
+		}, nil
+	}
 	var journal setupJournal
-	if err := readJSON(path, &journal); err != nil {
-		return nil, fmt.Errorf("read setup transaction journal %s: %w", path, err)
+	if err := decodeSetupJournalJSON(data, &journal); err != nil {
+		return nil, incompatibleSetupJournalError(path, err)
 	}
 	if journal.SchemaVersion != setupJournalLegacySchemaVersion && journal.SchemaVersion != setupJournalSchemaVersion {
-		return nil, fmt.Errorf("unsupported setup transaction journal schema %d", journal.SchemaVersion)
+		return nil, incompatibleSetupJournalError(
+			path,
+			fmt.Errorf("unsupported setup transaction journal schema %d", journal.SchemaVersion),
+		)
 	}
 	switch journal.Phase {
 	case setupPhaseIntent, setupPhasePublished, setupPhaseCommitted, setupPhaseConverged, setupPhaseComplete:
 	case setupPhaseQuiescing:
 		if journal.SchemaVersion == setupJournalLegacySchemaVersion {
-			return nil, fmt.Errorf("invalid setup transaction journal phase %q", journal.Phase)
+			return nil, incompatibleSetupJournalError(
+				path,
+				fmt.Errorf("invalid setup transaction journal phase %q", journal.Phase),
+			)
 		}
 	default:
-		return nil, fmt.Errorf("invalid setup transaction journal phase %q", journal.Phase)
+		return nil, incompatibleSetupJournalError(
+			path,
+			fmt.Errorf("invalid setup transaction journal phase %q", journal.Phase),
+		)
 	}
-	return &journal, nil
+	return &setupJournalDocument{Journal: journal}, nil
+}
+
+func decodeSetupJournalJSON(data []byte, value any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("JSON contains trailing content")
+		}
+		return err
+	}
+	return nil
+}
+
+func incompatibleSetupJournalError(path string, cause error) error {
+	return fmt.Errorf(
+		"read setup transaction journal %s: %w; journal remains unchanged; run the current authenticated Windows rescue or a newer DefenseClaw Setup",
+		path,
+		cause,
+	)
 }
 
 func cleanupSetupJournalTemps(root, prefix string) error {
@@ -1352,6 +1477,9 @@ func preparePendingSetupTransactionForUninstallAt(
 	expected setupTransactionExpectations,
 	ops uninstallRecoveryOps,
 ) (*setupTransaction, error) {
+	if _, err := normalizeCompletedSetupJournalAt(path, expected); err != nil {
+		return nil, err
+	}
 	journal, err := readSetupJournal(path)
 	if err != nil || journal == nil || journal.Phase == setupPhaseComplete {
 		return nil, err
@@ -1466,6 +1594,9 @@ func replaceSetupJournalWithUninstallIntentAtWithWriter(
 }
 
 func recoverSetupTransactionAt(path string, expected setupTransactionExpectations, ops setupRecoveryOps) error {
+	if _, err := normalizeCompletedSetupJournalAt(path, expected); err != nil {
+		return err
+	}
 	journal, err := readSetupJournal(path)
 	if err != nil {
 		return err
@@ -1482,6 +1613,61 @@ func recoverSetupTransactionAt(path string, expected setupTransactionExpectation
 	}
 	journal = &upgraded
 	return recoverSetupJournalPhase(*journal, ops)
+}
+
+func normalizeCompletedSetupJournalAt(
+	path string,
+	expected setupTransactionExpectations,
+) (bool, error) {
+	document, err := readSetupJournalDocument(path)
+	if err != nil || document == nil {
+		return false, err
+	}
+	if document.Terminal || document.Journal.Phase != setupPhaseComplete ||
+		document.Journal.SchemaVersion != setupJournalSchemaVersion {
+		return false, nil
+	}
+	if err := validateSetupTransaction(document.Journal.Transaction, expected); err != nil {
+		return false, fmt.Errorf("refusing unsafe completed setup transaction normalization: %w", err)
+	}
+	return replaceCompletedSetupJournalWithTerminalAt(
+		path,
+		document.Journal,
+		expected,
+		writeDurableValue,
+	)
+}
+
+func replaceCompletedSetupJournalWithTerminalAt(
+	path string,
+	source setupJournal,
+	expected setupTransactionExpectations,
+	write durableValueWriter,
+) (bool, error) {
+	current, err := readSetupJournalDocument(path)
+	if err != nil {
+		return false, err
+	}
+	if current == nil {
+		return false, errors.New("completed setup transaction disappeared before normalization")
+	}
+	if current.Terminal {
+		return false, nil
+	}
+	if current.Journal.SchemaVersion != setupJournalSchemaVersion ||
+		current.Journal.Phase != setupPhaseComplete ||
+		source.SchemaVersion != setupJournalSchemaVersion ||
+		source.Phase != setupPhaseComplete ||
+		!setupTransactionsEqual(current.Journal.Transaction, source.Transaction) {
+		return false, errors.New("completed setup transaction changed before normalization")
+	}
+	if err := validateSetupTransaction(current.Journal.Transaction, expected); err != nil {
+		return false, fmt.Errorf("refusing unsafe completed setup transaction normalization: %w", err)
+	}
+	if err := write(path, frozenTerminalSetupJournal(), true); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func persistLegacyStableHookSnapshotAt(
