@@ -198,6 +198,53 @@ cleanup_upgrade_staging() {
     UV_BIN=""
 }
 
+reject_managed_sourceless_bytecode() {
+    local managed_venv="$1"
+    [[ -d "${managed_venv}/lib" && ! -L "${managed_venv}/lib" ]] \
+        || die "Installed source package has executable bytecode outside __pycache__. No changes were made."
+    python3 - "${managed_venv}" <<'PY' \
+        || die "Installed source package has executable bytecode outside __pycache__. No changes were made."
+import os
+import re
+import stat
+import sys
+
+venv = os.path.abspath(sys.argv[1])
+lib_root = os.path.join(venv, "lib")
+found_package = False
+for runtime in os.scandir(lib_root):
+    if re.fullmatch(r"python[0-9]+(?:[.][0-9]+)*", runtime.name) is None:
+        continue
+    if not runtime.is_dir(follow_symlinks=False):
+        raise SystemExit(1)
+    package_root = os.path.join(runtime.path, "site-packages", "defenseclaw")
+    if not os.path.lexists(package_root):
+        continue
+    found_package = True
+    root_info = os.lstat(package_root)
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+        raise SystemExit(1)
+    for current, names, files in os.walk(
+        package_root,
+        topdown=True,
+        followlinks=False,
+    ):
+        retained = []
+        for name in names:
+            if name == "__pycache__":
+                continue
+            child = os.lstat(os.path.join(current, name))
+            if stat.S_ISLNK(child.st_mode) or not stat.S_ISDIR(child.st_mode):
+                raise SystemExit(1)
+            retained.append(name)
+        names[:] = retained
+        if any(name.endswith(".pyc") for name in files):
+            raise SystemExit(1)
+if not found_package:
+    raise SystemExit(1)
+PY
+}
+
 resolve_upgrade_uv() {
     [[ -n "${UV_BIN}" && -x "${UV_BIN}" ]] && return 0
     [[ -n "${STAGING_DIR:-}" && -d "${STAGING_DIR}" && ! -L "${STAGING_DIR}" ]] \
@@ -867,6 +914,9 @@ recover_interrupted_phase_two() {
     [[ -e "${journal}" || -L "${journal}" ]] || return 0
     [[ "${PLAN_ONLY}" -eq 0 ]] \
         || die "An interrupted hard-cut recovery is active. Re-run without --plan so the authenticated 0.8.4 bridge can be restored first."
+    if [[ -x "${DEFENSECLAW_VENV}/bin/python" ]]; then
+        reject_managed_sourceless_bytecode "${DEFENSECLAW_VENV}"
+    fi
 
     section "Recovering Interrupted Hard-Cut Upgrade"
     local recovery_fields wheel expected_digest receipt_status recorded_config_path uv_bin venv_python
@@ -1137,7 +1187,15 @@ if status in {"succeeded", "rolled_back"}:
     if gateway_version.returncode != 0 or reported_versions != [expected_version]:
         raise SystemExit("terminal phase-two gateway version is not proven")
     cli_version = subprocess.run(
-        [str(venv_python), "-I", "-B", "-c", "from defenseclaw import __version__; print(__version__)"],
+        [
+            str(venv_python),
+            "-X",
+            "pycache_prefix=/dev/null",
+            "-I",
+            "-B",
+            "-c",
+            "from defenseclaw import __version__; print(__version__)",
+        ],
         capture_output=True,
         text=True,
         timeout=10,
@@ -1237,8 +1295,9 @@ try:
 finally:
     os.close(descriptor)
 PY
+    reject_managed_sourceless_bytecode "${DEFENSECLAW_VENV}"
     DEFENSECLAW_HOME="${CONTROLLER_HOME}" DEFENSECLAW_CONFIG="${recorded_config_path}" \
-        "${venv_python}" -I -B -c \
+        "${venv_python}" -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B -c \
         'from defenseclaw.commands.cmd_upgrade import _recover_interrupted_hard_cut; raise SystemExit(0 if _recover_interrupted_hard_cut() else 1)' \
         || die "The retained 0.8.4 controller could not complete interrupted hard-cut recovery."
     ok "Interrupted phase two rolled back to a healthy authenticated bridge"
@@ -4394,6 +4453,7 @@ ensure_upgrade_lock_before_mutation() {
     recover_interrupted_phase_two
     recover_interrupted_bridge_phase1
     if [[ -x "${DEFENSECLAW_VENV}/bin/python" ]]; then
+        reject_managed_sourceless_bytecode "${DEFENSECLAW_VENV}"
         observed_version="$("${DEFENSECLAW_VENV}/bin/python" \
             -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B -c \
             'from defenseclaw import __version__; print(__version__)' 2>/dev/null \
@@ -4550,6 +4610,7 @@ HARD_CUT_CURSOR_RECOVERY_SOURCE_VERSION=""
 
 CURRENT_VERSION="unknown"
 if [[ -x "${DEFENSECLAW_VENV}/bin/python" ]]; then
+    reject_managed_sourceless_bytecode "${DEFENSECLAW_VENV}"
     CURRENT_VERSION="$("${DEFENSECLAW_VENV}/bin/python" \
         -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B -c \
         'from defenseclaw import __version__; print(__version__)' 2>/dev/null \
@@ -6567,8 +6628,12 @@ for current, names, files in os.walk(package_root, topdown=True, followlinks=Fal
     for name in files:
         path = os.path.join(current, name)
         relative = os.path.relpath(path, package_root).replace(os.sep, "/")
-        if "__pycache__" in PurePosixPath(relative).parts or relative.endswith(".pyc"):
+        if "__pycache__" in PurePosixPath(relative).parts:
             continue
+        if relative.endswith(".pyc"):
+            raise RuntimeError(
+                "installed source package has executable bytecode outside __pycache__"
+            )
         if len(actual_package) >= 8192:
             raise RuntimeError("installed source package exceeds its file bound")
         actual_package[relative] = hashlib.sha256(

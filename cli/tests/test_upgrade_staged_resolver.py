@@ -1019,6 +1019,66 @@ def test_missing_cursor_recovery_never_executes_local_package_bytecode(
     assert not mutation_log.exists()
 
 
+@pytest.mark.parametrize(
+    "shadow_custody",
+    ("directory", "symlink", "linked-lib", "linked-runtime"),
+)
+def test_missing_cursor_recovery_rejects_sourceless_package_shadow_bytecode(
+    resolver_env,
+    tmp_path: Path,
+    shadow_custody: str,
+) -> None:
+    env, mutation_log, _curl_log = resolver_env("0.8.7")
+    _install_release_owned_missing_cursor_state(env, "0.8.7")
+    package_root = (
+        Path(env["DEFENSECLAW_HOME"])
+        / ".venv"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "defenseclaw"
+    )
+    package_shadow = package_root / "config"
+    if shadow_custody != "symlink":
+        package_shadow.mkdir()
+        bytecode_root = package_shadow
+    else:
+        bytecode_root = tmp_path / "sourceless-package-shadow"
+        bytecode_root.mkdir()
+        package_shadow.symlink_to(bytecode_root, target_is_directory=True)
+    marker = tmp_path / "sourceless-package-shadow-executed"
+    malicious_source = tmp_path / "malicious-config-package.py"
+    malicious_source.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    py_compile.compile(
+        str(malicious_source),
+        cfile=str(bytecode_root / "__init__.pyc"),
+        doraise=True,
+        invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+    )
+    if shadow_custody == "linked-lib":
+        lib_root = package_root.parents[2]
+        linked_root = tmp_path / "linked-lib"
+        lib_root.rename(linked_root)
+        lib_root.symlink_to(linked_root, target_is_directory=True)
+    elif shadow_custody == "linked-runtime":
+        runtime_root = package_root.parents[1]
+        linked_root = tmp_path / "linked-runtime"
+        runtime_root.rename(linked_root)
+        runtime_root.symlink_to(linked_root, target_is_directory=True)
+
+    result = _run(env, "--version", "0.8.8", "--plan")
+
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert "executable bytecode outside __pycache__" in output
+    assert not marker.exists()
+    assert not mutation_log.exists()
+
+
 @pytest.mark.skipif(platform.system() != "Darwin", reason="macOS gateway format gate")
 @pytest.mark.parametrize("missing_gate", ("fixture-marker", "test-mode"))
 def test_non_macho_gateway_fixture_requires_test_mode_and_private_marker(

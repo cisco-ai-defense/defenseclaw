@@ -1087,6 +1087,14 @@ def test_interrupted_phase_two_bootstraps_private_uv_under_clean_path(
     recovery.mkdir(parents=True)
     recovery.chmod(0o700)
     venv_python.parent.mkdir(parents=True)
+    (
+        controller_home
+        / ".venv"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "defenseclaw"
+    ).mkdir(parents=True)
     known_uv.parent.mkdir(parents=True)
     journal = recovery / "phase-two-active.json"
     journal.write_text("{}\n", encoding="utf-8")
@@ -1132,6 +1140,7 @@ def test_interrupted_phase_two_bootstraps_private_uv_under_clean_path(
         "UV_BIN=\"\"\n"
         f'UV_BOOTSTRAP_VERSION="{version_match.group(1)}"\n'
         f'UV_BOOTSTRAP_MAX_BYTES="{maximum_match.group(1)}"\n'
+        'MANAGED_PYTHON_NO_LOCAL_BYTECODE="pycache_prefix=/dev/null"\n'
         "RED=\"\"; GREEN=\"\"; YELLOW=\"\"; BLUE=\"\"; CYAN=\"\"; BOLD=\"\"; DIM=\"\"; NC=\"\"\n"
         'die() { printf "die: %s\\n" "$*" >&2; exit 1; }\n'
         'ok() { printf "ok: %s\\n" "$*"; }\n'
