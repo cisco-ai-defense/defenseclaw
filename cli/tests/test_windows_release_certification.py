@@ -263,9 +263,13 @@ def test_release_documentation_matches_the_fresh_only_gate() -> None:
     assert ".certification.json" not in installer
     assert "A merge to `main` is the review-and-CI boundary" in ci
     assert "does not poll or replay `Windows Native CI`" in ci
-    assert "first native Windows release" in release
-    assert "has no older native Windows baseline" in release
-    assert "fresh-install only" in release
+    assert "Windows acceptance is" in release
+    assert "fresh-install-only" in release
+    assert re.search(
+        r"no historical Windows baseline is inferred or\s+required",
+        release,
+    )
+    assert "first native Windows release" not in release
 
 
 def test_native_wheel_stages_and_verifies_v8_runtime_assets() -> None:

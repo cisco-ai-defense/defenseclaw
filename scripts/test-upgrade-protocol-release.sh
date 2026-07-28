@@ -814,7 +814,8 @@ run_candidate_updater_field_recovery_success() {
             tail_log "${SMOKE_HOME}/published-first-run.stderr"
             die "published ${baseline} could not complete its real first-run path"
         fi
-        python3 - "${SMOKE_HOME}/.defenseclaw" "${baseline}" <<'PY' \
+        "${SMOKE_HOME}/.defenseclaw/.venv/bin/python" -I -B - \
+            "${SMOKE_HOME}/.defenseclaw" "${baseline}" <<'PY' \
             || die "published ${baseline} did not reproduce its release-owned missing-cursor state"
 import json
 import os

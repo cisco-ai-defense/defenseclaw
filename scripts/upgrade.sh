@@ -93,6 +93,7 @@ readonly COSIGN_BOOTSTRAP_VERSION="2.6.3"
 readonly COSIGN_BOOTSTRAP_MAX_BYTES="209715200"
 readonly UV_BOOTSTRAP_VERSION="0.11.28"
 readonly UV_BOOTSTRAP_MAX_BYTES="209715200"
+readonly MANAGED_PYTHON_NO_LOCAL_BYTECODE="pycache_prefix=/dev/null"
 readonly UPGRADE_MANIFEST_NAME="upgrade-manifest.json"
 readonly RELEASE_PROVENANCE_NAME="release-provenance.json"
 readonly HISTORICAL_BOOTSTRAP_MCP_SCANNER_CONSTRAINT='cisco-ai-mcp-scanner @ https://files.pythonhosted.org/packages/5d/74/6e72cbd496c0d33dfab1b4aee62792620236e63cccf278a8c896c6feb740/cisco_ai_mcp_scanner-4.7.2-py3-none-any.whl#sha256=6ed0b8ced168886f572aec30a971c7b0e2e1de7eea489d3821627184fd271ac8'
@@ -119,6 +120,7 @@ UPGRADE_ADVISORY_LOCK_INODE=""
 BRIDGE_PHASE1_RECOVERY_TERMINAL_CONTROLLER=""
 BRIDGE_PHASE1_RECOVERY_TERMINAL_VERSION=""
 UV_BIN=""
+STAGING_DIR=""
 
 # ── Terminal Formatting ───────────────────────────────────────────────────────
 
@@ -163,6 +165,37 @@ PY
 
 version_gte() {
     ! version_lt "$1" "$2"
+}
+
+prepare_upgrade_staging() {
+    if [[ -z "${STAGING_DIR}" ]]; then
+        STAGING_DIR="$(mktemp -d)" \
+            || die "Could not create private upgrade staging. No changes were made."
+        chmod 700 "${STAGING_DIR}" \
+            || die "Could not protect private upgrade staging. No changes were made."
+    fi
+    python3 - "${STAGING_DIR}" <<'PY' \
+        || die "Private upgrade staging is unsafe. No changes were made."
+import os
+import stat
+import sys
+
+path = os.path.abspath(sys.argv[1])
+info = os.lstat(path)
+if (
+    stat.S_ISLNK(info.st_mode)
+    or not stat.S_ISDIR(info.st_mode)
+    or info.st_uid != os.geteuid()
+    or stat.S_IMODE(info.st_mode) != 0o700
+):
+    raise SystemExit(1)
+PY
+}
+
+cleanup_upgrade_staging() {
+    [[ -z "${STAGING_DIR:-}" ]] || rm -rf -- "${STAGING_DIR}"
+    STAGING_DIR=""
+    UV_BIN=""
 }
 
 resolve_upgrade_uv() {
@@ -768,7 +801,8 @@ begin_release_upgrade_receipt() {
 
     local receipt_path receipt_name
     receipt_path="$(
-        DEFENSECLAW_HOME="${DATA_DIR}" "${source_python}" -I -B - \
+        DEFENSECLAW_HOME="${DATA_DIR}" "${source_python}" \
+            -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B - \
             "${DATA_DIR}" "${CURRENT_VERSION}" "${RELEASE_VERSION}" <<'PY'
 import os
 import sys
@@ -1152,9 +1186,9 @@ PY
        && -n "${recorded_config_path}" ]] \
         || die "Interrupted phase-two recovery journal did not yield a pending bridge plan."
 
-    uv_bin="$(command -v uv 2>/dev/null || true)"
-    [[ -n "${uv_bin}" ]] \
-        || die "uv is required to bootstrap the retained 0.8.4 recovery controller."
+    prepare_upgrade_staging
+    resolve_upgrade_uv
+    uv_bin="${UV_BIN}"
     venv_python="${DEFENSECLAW_VENV}/bin/python"
     python3 - "${journal_root}/phase-two-mutator.lease" "${uv_bin}" \
         "${DEFENSECLAW_VENV}" "${venv_python}" "${wheel}" "${expected_digest}" <<'PY' \
@@ -4360,7 +4394,8 @@ ensure_upgrade_lock_before_mutation() {
     recover_interrupted_phase_two
     recover_interrupted_bridge_phase1
     if [[ -x "${DEFENSECLAW_VENV}/bin/python" ]]; then
-        observed_version="$("${DEFENSECLAW_VENV}/bin/python" -I -B -c \
+        observed_version="$("${DEFENSECLAW_VENV}/bin/python" \
+            -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B -c \
             'from defenseclaw import __version__; print(__version__)' 2>/dev/null \
             | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
     elif has defenseclaw; then
@@ -4378,6 +4413,14 @@ ensure_upgrade_lock_before_mutation() {
           || "${observed_gateway_version}" != "${CURRENT_GATEWAY_VERSION}" ]]; then
         die "Installed components changed while the upgrade was being prepared (CLI ${CURRENT_VERSION} → ${observed_version}; gateway ${CURRENT_GATEWAY_VERSION} → ${observed_gateway_version}). No services were stopped; re-run the release-owned resolver."
     fi
+}
+
+early_recovery_exit_trap() {
+    local status=$?
+    trap - EXIT
+    cleanup_upgrade_staging
+    release_upgrade_lock
+    exit "${status}"
 }
 
 # ── Argument Parsing ──────────────────────────────────────────────────────────
@@ -4436,7 +4479,7 @@ if [[ -e "${UPGRADE_RECOVERY_ROOT}/phase-one-active.json" \
       || -e "${UPGRADE_RECOVERY_ROOT}/phase-two-active.json" \
       || -L "${UPGRADE_RECOVERY_ROOT}/phase-two-active.json" ]]; then
     acquire_upgrade_lock
-    trap release_upgrade_lock EXIT
+    trap early_recovery_exit_trap EXIT
     recover_interrupted_phase_two
     recover_interrupted_bridge_phase1
     if [[ "${BRIDGE_PHASE1_RECOVERY_TERMINAL_CONTROLLER}" == "bridge" \
@@ -4444,6 +4487,7 @@ if [[ -e "${UPGRADE_RECOVERY_ROOT}/phase-one-active.json" \
           && "${RELEASE_VERSION#v}" == "${BRIDGE_PHASE1_RECOVERY_TERMINAL_VERSION}" ]]; then
         section "Upgrade Complete"
         ok "Recovered and verified DefenseClaw ${BRIDGE_PHASE1_RECOVERY_TERMINAL_VERSION}"
+        cleanup_upgrade_staging
         release_upgrade_lock
         trap - EXIT
         exit 0
@@ -4506,7 +4550,8 @@ HARD_CUT_CURSOR_RECOVERY_SOURCE_VERSION=""
 
 CURRENT_VERSION="unknown"
 if [[ -x "${DEFENSECLAW_VENV}/bin/python" ]]; then
-    CURRENT_VERSION="$("${DEFENSECLAW_VENV}/bin/python" -I -B -c \
+    CURRENT_VERSION="$("${DEFENSECLAW_VENV}/bin/python" \
+        -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B -c \
         'from defenseclaw import __version__; print(__version__)' 2>/dev/null \
         | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
 elif has defenseclaw; then
@@ -4568,7 +4613,8 @@ if [[ "${CURRENT_VERSION}" != "unknown" && -x "${DEFENSECLAW_VENV}/bin/python" ]
     runtime_paths="$(
         DEFENSECLAW_HOME="${CONTROLLER_HOME}" \
         DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
-        "${DEFENSECLAW_VENV}/bin/python" -I -B - \
+        "${DEFENSECLAW_VENV}/bin/python" \
+            -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B - \
             "${CONTROLLER_HOME}" \
             "${CONFIG_PATH}" \
             "${OPENCLAW_HOME_EXPLICIT}" \
@@ -4686,7 +4732,8 @@ if [[ "${COMPONENT_VERSION_SPLIT}" -eq 1 ]]; then
           && -x "${DEFENSECLAW_VENV}/bin/python" ]] \
         && version_lt "${CURRENT_VERSION}" "${CURRENT_GATEWAY_VERSION}"; then
         split_recovery="$(
-            DEFENSECLAW_HOME="${DATA_DIR}" "${DEFENSECLAW_VENV}/bin/python" -I -B - \
+            DEFENSECLAW_HOME="${DATA_DIR}" "${DEFENSECLAW_VENV}/bin/python" \
+                -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B - \
                 "${DATA_DIR}" "${CURRENT_VERSION}" "${RELEASE_VERSION}" <<'PY'
 from datetime import datetime
 import os
@@ -4781,7 +4828,8 @@ AUDIT_DB_RECOVERY_CUSTODY=""
 AUDIT_DB_PREFLIGHT_IDENTITY=""
 
 if [[ "${CURRENT_VERSION}" != "unknown" ]] && version_gte "${CURRENT_VERSION}" "0.8.5"; then
-    hard_cut_state="$("${DEFENSECLAW_VENV}/bin/python" -I -B - "${CONFIG_PATH}" \
+    hard_cut_state="$("${DEFENSECLAW_VENV}/bin/python" \
+        -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B - "${CONFIG_PATH}" \
         "${DATA_DIR}/.migration_state.json" "${CURRENT_VERSION}" <<'PY' 2>/dev/null || true
 import json
 import os
@@ -5287,7 +5335,7 @@ configure_release
 
 section "Downloading Artifacts"
 
-STAGING_DIR="$(mktemp -d)"
+prepare_upgrade_staging
 BRIDGE_PHASE1=0
 BRIDGE_ROLLBACK_ARMED=0
 BRIDGE_ROLLBACK_RUNNING=0
@@ -5323,7 +5371,7 @@ upgrade_exit_trap() {
     fi
     [[ -z "${BRIDGE_GATEWAY_INSTALL_TEMP:-}" ]] || rm -f "${BRIDGE_GATEWAY_INSTALL_TEMP}"
     [[ -z "${BRIDGE_CANDIDATE_VENV:-}" ]] || rm -rf "${BRIDGE_CANDIDATE_VENV}"
-    [[ -z "${STAGING_DIR:-}" ]] || rm -rf "${STAGING_DIR}"
+    cleanup_upgrade_staging
     release_upgrade_lock
     if [[ "${rollback_status}" -ne 0 ]]; then
         err "Automatic source rollback was incomplete. Recovery evidence was preserved at ${BACKUP_DIR:-unknown}."
@@ -6335,7 +6383,8 @@ PY
     preflight_python_wheel "${source_wheel}"
 
     DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
-        "${DEFENSECLAW_VENV}/bin/python" -I -B - \
+        "${DEFENSECLAW_VENV}/bin/python" \
+            -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B - \
         "${source_wheel}" "${source_gateway}" "${CONFIG_PATH}" "${DATA_DIR}" \
         "${BACKUP_ROOT}" "${DEFENSECLAW_VENV}" \
         "${installed_gateway_comparison}" "${source_version}" <<'PY' \
@@ -8825,8 +8874,7 @@ continue_post_hard_cut_upgrade() {
     unset DEFENSECLAW_STAGED_BRIDGE_VERSION
     unset DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR
     unset DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION
-    [[ -z "${STAGING_DIR:-}" ]] || rm -rf "${STAGING_DIR}"
-    STAGING_DIR=""
+    cleanup_upgrade_staging
     # The immutable 0.8.5 controller gives child commands 30 seconds but owns
     # a separate 60-second, version-aware gateway health poll. Current gateway
     # binaries consume this process-scoped handoff marker after safe launch so

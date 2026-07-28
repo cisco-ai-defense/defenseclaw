@@ -1325,6 +1325,22 @@ def test_future_candidate_fails_closed_for_unreviewed_source_config_family(
     assert "no reviewed upgrade fixture exists for config-v9 baseline 0.8.6" in completed.stderr
 
 
+def test_missing_cursor_first_run_verifier_uses_published_source_python() -> None:
+    script = PROTOCOL_SCRIPT.read_text(encoding="utf-8")
+    start = script.index(
+        "# Reproduce the real field state through the exact authenticated"
+    )
+    end = script.index("source_config_sha256=", start)
+    verifier = script[start:end]
+
+    assert (
+        '"${SMOKE_HOME}/.defenseclaw/.venv/bin/python" -I -B - \\\n'
+        '            "${SMOKE_HOME}/.defenseclaw" "${baseline}"'
+    ) in verifier
+    assert "\n        python3 -" not in verifier
+    assert "import yaml" in verifier
+
+
 @POSIX_UPGRADE_CUSTODY
 def test_native_v8_fixture_is_strict_and_later_migration_preserves_it(
     tmp_path: Path,

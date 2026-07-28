@@ -1030,7 +1030,150 @@ def test_posix_resolver_bootstraps_recovery_under_fixed_mutator_lease() -> None:
     assert 'for name in ("UV_CONSTRAINT", "UV_OVERRIDE", "UV_EXCLUDE_NEWER")' in recovery
     assert "uv_environment.pop(name, None)" in recovery
     assert "env=uv_environment" in recovery
+    assert "command -v uv" not in recovery
+    assert recovery.index("prepare_upgrade_staging") < recovery.index("resolve_upgrade_uv")
+    assert 'uv_bin="${UV_BIN}"' in recovery
     assert "_recover_interrupted_hard_cut" in text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX phase-two recovery")
+def test_interrupted_phase_two_bootstraps_private_uv_under_clean_path(
+    tmp_path: Path,
+) -> None:
+    resolver = (ROOT / "scripts/upgrade.sh").read_text(encoding="utf-8")
+    version_match = re.search(
+        r'readonly UV_BOOTSTRAP_VERSION="([^"]+)"',
+        resolver,
+    )
+    maximum_match = re.search(
+        r'readonly UV_BOOTSTRAP_MAX_BYTES="([^"]+)"',
+        resolver,
+    )
+    assert version_match is not None and maximum_match is not None
+
+    staging_start = resolver.index("prepare_upgrade_staging() {")
+    resolve_start = resolver.index("resolve_upgrade_uv() {", staging_start)
+    staging_functions = resolver[staging_start:resolve_start]
+    resolve_end = resolver.index(
+        "\n\n# Keep one bounded, fail-closed parser",
+        resolve_start,
+    )
+    resolve_function = resolver[resolve_start:resolve_end]
+    recovery_start = resolver.index("recover_interrupted_phase_two() {")
+    recovery_end = resolver.index(
+        "\n}\n\nacquire_upgrade_lock() {",
+        recovery_start,
+    ) + len("\n}\n")
+    recovery_function = resolver[recovery_start:recovery_end]
+    parser_start = recovery_function.index(
+        '    recovery_fields="$(python3 - "${journal}" "${DEFENSECLAW_HOME}"'
+    )
+    parser_end = recovery_function.index(
+        '    wheel="$(printf',
+        parser_start,
+    )
+    recovery_function = (
+        recovery_function[:parser_start]
+        + "    recovery_fields=\"$(printf '%s\\n' "
+        + '"${TEST_WHEEL}" "${TEST_WHEEL_SHA256}" pending "${TEST_CONFIG}")"\n'
+        + recovery_function[parser_end:]
+    )
+
+    home = tmp_path / "home"
+    controller_home = home / ".defenseclaw"
+    recovery = controller_home / ".upgrade-recovery"
+    venv_python = controller_home / ".venv" / "bin" / "python"
+    known_uv = home / ".local" / "bin" / "uv"
+    recovery.mkdir(parents=True)
+    recovery.chmod(0o700)
+    venv_python.parent.mkdir(parents=True)
+    known_uv.parent.mkdir(parents=True)
+    journal = recovery / "phase-two-active.json"
+    journal.write_text("{}\n", encoding="utf-8")
+    journal.chmod(0o600)
+    lease = recovery / "phase-two-mutator.lease"
+    lease.write_text("", encoding="utf-8")
+    lease.chmod(0o600)
+    wheel = tmp_path / "retained-bridge.whl"
+    wheel.write_bytes(b"authenticated retained bridge")
+    wheel_sha256 = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    config = controller_home / "config.yaml"
+    config.write_text("config_version: 8\n", encoding="utf-8")
+    uv_log = tmp_path / "uv.log"
+    recovery_log = tmp_path / "recovery-python.log"
+    known_uv.write_text(
+        "#!/bin/sh\n"
+        'if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then\n'
+        f"  printf '%s\\n' 'uv {version_match.group(1)}'\n"
+        "  exit 0\n"
+        "fi\n"
+        'printf \'%s|%s\\n\' "$0" "$*" >> "${UV_LOG:?}"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    known_uv.chmod(0o755)
+    venv_python.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$*" >> "${RECOVERY_PYTHON_LOG:?}"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    venv_python.chmod(0o755)
+
+    harness = (
+        "set -euo pipefail\n"
+        "umask 077\n"
+        'HOME="${TEST_HOME}"\n'
+        'DEFENSECLAW_HOME="${TEST_CONTROLLER_HOME}"\n'
+        'CONTROLLER_HOME="${DEFENSECLAW_HOME}"\n'
+        'DEFENSECLAW_VENV="${DEFENSECLAW_HOME}/.venv"\n'
+        "PLAN_ONLY=0\n"
+        "STAGING_DIR=\"\"\n"
+        "UV_BIN=\"\"\n"
+        f'UV_BOOTSTRAP_VERSION="{version_match.group(1)}"\n'
+        f'UV_BOOTSTRAP_MAX_BYTES="{maximum_match.group(1)}"\n'
+        "RED=\"\"; GREEN=\"\"; YELLOW=\"\"; BLUE=\"\"; CYAN=\"\"; BOLD=\"\"; DIM=\"\"; NC=\"\"\n"
+        'die() { printf "die: %s\\n" "$*" >&2; exit 1; }\n'
+        'ok() { printf "ok: %s\\n" "$*"; }\n'
+        'warn() { printf "warn: %s\\n" "$*" >&2; }\n'
+        'info() { printf "info: %s\\n" "$*"; }\n'
+        'section() { printf "section: %s\\n" "$*"; }\n'
+        + staging_functions
+        + resolve_function
+        + "\n"
+        + recovery_function
+        + "\nrecover_interrupted_phase_two\n"
+        + 'case "${UV_BIN}" in "${STAGING_DIR}/upgrade-tools/uv") ;; *) exit 97 ;; esac\n'
+        + 'grep -F -- "--offline --no-deps --reinstall" "${UV_LOG}" >/dev/null\n'
+        + 'grep -F -- "_recover_interrupted_hard_cut" "${RECOVERY_PYTHON_LOG}" >/dev/null\n'
+        + 'printf "private-uv=%s\\n" "${UV_BIN}"\n'
+        + "cleanup_upgrade_staging\n"
+    )
+    environment = {
+        **os.environ,
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "TEST_HOME": str(home),
+        "TEST_CONTROLLER_HOME": str(controller_home),
+        "TEST_WHEEL": str(wheel),
+        "TEST_WHEEL_SHA256": wheel_sha256,
+        "TEST_CONFIG": str(config),
+        "UV_LOG": str(uv_log),
+        "RECOVERY_PYTHON_LOG": str(recovery_log),
+    }
+    completed = subprocess.run(
+        ["/bin/bash", "-c", harness],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "private-uv=" in completed.stdout
+    assert "/upgrade-tools/uv" in completed.stdout
+    assert str(known_uv) not in uv_log.read_text(encoding="utf-8")
 
 
 def test_release_resolver_isolated_python_never_writes_bytecode() -> None:
@@ -1267,7 +1410,7 @@ def test_posix_resolver_normalizes_every_bridge_through_one_authenticated_handof
     continuation_start = resolver.index("continue_post_hard_cut_upgrade() {")
     continuation_end = resolver.index("\n}\n\nvalidate_tarball_members() {", continuation_start)
     continuation = resolver[continuation_start:continuation_end]
-    remove_staging = continuation.index('rm -rf "${STAGING_DIR}"')
+    remove_staging = continuation.index("cleanup_upgrade_staging")
     final_upgrade = continuation.index(
         '"${DEFENSECLAW_VENV}/bin/defenseclaw" upgrade --yes --version "${final_version}"',
         remove_staging,

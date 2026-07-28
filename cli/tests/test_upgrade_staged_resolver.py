@@ -17,10 +17,12 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import io
 import json
 import os
 import platform
+import py_compile
 import re
 import shutil
 import sqlite3
@@ -963,6 +965,57 @@ def test_release_owned_missing_cursor_uses_known_uv_outside_clean_path(
     assert "Pinned uv" not in output
     assert "Authenticated the exact published 0.8.7 missing-cursor compatibility state" in output
     assert config_path.is_file()
+    assert not mutation_log.exists()
+
+
+@pytest.mark.parametrize("cache_custody", ("directory", "symlink"))
+def test_missing_cursor_recovery_never_executes_local_package_bytecode(
+    resolver_env,
+    tmp_path: Path,
+    cache_custody: str,
+) -> None:
+    env, mutation_log, _curl_log = resolver_env("0.8.7")
+    _install_release_owned_missing_cursor_state(env, "0.8.7")
+    package_root = (
+        Path(env["DEFENSECLAW_HOME"])
+        / ".venv"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "defenseclaw"
+    )
+    local_cache = package_root / "__pycache__"
+    if cache_custody == "directory":
+        local_cache.mkdir()
+        bytecode_root = local_cache
+    else:
+        bytecode_root = tmp_path / "attacker-bytecode"
+        bytecode_root.mkdir()
+        local_cache.symlink_to(bytecode_root, target_is_directory=True)
+    marker = tmp_path / "malicious-bytecode-executed"
+    malicious_source = tmp_path / "malicious-init.py"
+    malicious_source.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n"
+        "__version__ = '0.8.7'\n",
+        encoding="utf-8",
+    )
+    cache_name = Path(
+        importlib.util.cache_from_source(str(package_root / "__init__.py"))
+    ).name
+    py_compile.compile(
+        str(malicious_source),
+        cfile=str(bytecode_root / cache_name),
+        doraise=True,
+        invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+    )
+
+    result = _run(env, "--version", "0.8.8", "--plan")
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "Authenticated the exact published 0.8.7 missing-cursor compatibility state" in output
+    assert not marker.exists()
     assert not mutation_log.exists()
 
 
