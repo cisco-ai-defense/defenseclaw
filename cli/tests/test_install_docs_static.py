@@ -1820,21 +1820,23 @@ def test_release_docs_use_one_dispatch_and_never_precreate_tag() -> None:
 
     for text in (makefile, install):
         assert "gh workflow run release.yaml --ref main" in text
+        assert "-f operation=release" in text
         assert "-f version=" in text
-        assert "-f immutable_releases_confirmed=true" in text
+        assert "expected_commit" not in text
+        assert "immutable_releases_confirmed" not in text
         assert "-f operation=certify" not in text
         assert "git tag 0.4.0" not in text
         assert "git push origin" not in text
     assert "-f operation=release" in install
     assert f"-f version={RELEASE_DOC_EXAMPLE_VERSION}" in install
-    assert "operator preflight" in install
-    assert "expected_commit:" in install
-    assert '-f expected_commit="$RELEASE_COMMIT"' in install
     assert "operation: release" in install
     assert f"version: {RELEASE_DOC_EXAMPLE_VERSION}" in install
+    assert "Selecting **main**, the operation, and the version is the whole release" in install
+    assert "automatically freezes the run's exact `github.sha`" in install
+    normalized = " ".join(install.split())
+    assert "operators do not copy a commit SHA or confirm repository settings" in normalized
     assert r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$" in install
     assert "Do not create or push the tag yourself" in install
-    normalized = " ".join(install.split())
     assert "One dispatch from a reviewed `main` commit" in normalized
     assert "tests those exact candidate bytes, and publishes them" in normalized
     assert "A merge to `main` is the review-and-CI boundary" in normalized

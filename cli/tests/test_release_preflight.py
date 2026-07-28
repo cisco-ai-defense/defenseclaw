@@ -25,102 +25,6 @@ POSIX_POLICY_PERSISTENCE = pytest.mark.skipif(
 )
 
 
-def _policy() -> dict[str, object]:
-    return {
-        "schema_version": 2,
-        "source_type": "Organization",
-        "source": "cisco-ai-defense",
-        "target": "branch",
-        "target_ref": "refs/heads/release-channel",
-        "repository_condition": {
-            "include": ["defenseclaw"],
-            "exclude": [],
-            "protected": True,
-        },
-        "required_rules": [
-            "creation",
-            "update",
-            "deletion",
-            "non_fast_forward",
-        ],
-        "publisher_bypass": {
-            "actor_type": "Integration",
-            "actor_id": 15368,
-            "bypass_mode": "always",
-        },
-    }
-
-
-def _ruleset(
-    *,
-    identifier: int = 42,
-    include: list[str] | None = None,
-    rules: list[str] | None = None,
-    bypass: bool = True,
-) -> dict[str, object]:
-    return {
-        "id": identifier,
-        "name": "release-channel protection",
-        "source_type": "Organization",
-        "source": "cisco-ai-defense",
-        "target": "branch",
-        "enforcement": "active",
-        "conditions": {
-            "repository_name": {
-                "include": ["defenseclaw"],
-                "exclude": [],
-                "protected": True,
-            },
-            "ref_name": {
-                "include": include or ["refs/heads/release-channel"],
-                "exclude": [],
-            },
-        },
-        "rules": [
-            {"type": item}
-            for item in (
-                rules
-                or [
-                    "creation",
-                    "update",
-                    "deletion",
-                    "non_fast_forward",
-                ]
-            )
-        ],
-        "bypass_actors": (
-            [
-                {
-                    "actor_type": "Integration",
-                    "actor_id": 15368,
-                    "bypass_mode": "always",
-                }
-            ]
-            if bypass
-            else []
-        ),
-    }
-
-
-def _effective_rules(
-    *,
-    identifier: int = 42,
-    rules: list[str] | None = None,
-) -> list[dict[str, object]]:
-    return [
-        {"type": item, "ruleset_id": identifier}
-        for item in (
-            rules
-            or [
-                "creation",
-                "update",
-                "deletion",
-                "non_fast_forward",
-            ]
-        )
-    ]
-
-
 def _baseline_policy() -> dict[str, object]:
     versions = [
         "0.8.7",
@@ -141,165 +45,35 @@ def _baseline_policy() -> dict[str, object]:
     }
 
 
-def test_live_ruleset_contract_is_closed_and_accepts_exact_protection() -> None:
-    policy = release_preflight.load_ruleset_policy()
-    assert policy == _policy()
-    assert release_preflight.validate_release_channel_rulesets(
-        [_ruleset()],
-        effective_rules=_effective_rules(),
-        policy=policy,
-    ) == (42, "release-channel protection")
-
-
-@pytest.mark.parametrize(
-    "ruleset",
-    [
-        _ruleset(include=["refs/heads/*"]),
-        _ruleset(rules=["creation", "deletion", "non_fast_forward"]),
-        _ruleset(bypass=False),
-        {**_ruleset(), "enforcement": "evaluate"},
-    ],
-)
-def test_live_ruleset_contract_rejects_broad_or_incomplete_protection(
-    ruleset: dict[str, object],
-) -> None:
-    with pytest.raises(release_preflight.ReleasePreflightError):
-        release_preflight.validate_release_channel_rulesets(
-            [ruleset],
-            effective_rules=_effective_rules(),
-            policy=_policy(),
-        )
-
-
-def test_live_ruleset_contract_rejects_ambiguous_duplicate_publishers() -> None:
-    with pytest.raises(release_preflight.ReleasePreflightError, match="found 2"):
-        release_preflight.validate_release_channel_rulesets(
-            [_ruleset(identifier=1), _ruleset(identifier=2)],
-            effective_rules=[
-                *_effective_rules(identifier=1),
-                *_effective_rules(identifier=2),
-            ],
-            policy=_policy(),
-        )
-
-
-def test_live_ruleset_contract_rejects_extra_rule_or_bypass_actor() -> None:
-    extra_rule = _ruleset(
-        rules=[
-            "creation",
-            "update",
-            "deletion",
-            "non_fast_forward",
-            "pull_request",
-        ]
-    )
-    extra_bypass = _ruleset()
-    extra_bypass["bypass_actors"].append(
-        {
-            "actor_type": "RepositoryRole",
-            "actor_id": 5,
-            "bypass_mode": "always",
-        }
-    )
-
-    for ruleset in (extra_rule, extra_bypass):
-        with pytest.raises(release_preflight.ReleasePreflightError):
-            release_preflight.validate_release_channel_rulesets(
-                [ruleset],
-                effective_rules=_effective_rules(),
-                policy=_policy(),
-            )
-
-
-def test_live_ruleset_contract_rejects_overlapping_effective_branch_rules() -> None:
-    parent = {
-        **_ruleset(identifier=77, include=["refs/heads/*"]),
-        "name": "organization branch protection",
-    }
-
-    with pytest.raises(
-        release_preflight.ReleasePreflightError,
-        match="overlapping or incomplete effective branch rules",
-    ):
-        release_preflight.validate_release_channel_rulesets(
-            [_ruleset(), parent],
-            effective_rules=[
-                *_effective_rules(),
-                {"type": "pull_request", "ruleset_id": 77},
-            ],
-            policy=_policy(),
-        )
-
-
-def test_live_ruleset_contract_rejects_unobserved_effective_ruleset_authority() -> None:
-    with pytest.raises(
-        release_preflight.ReleasePreflightError,
-        match="absent from the observed active branch-ruleset inventory",
-    ):
-        release_preflight.validate_release_channel_rulesets(
-            [_ruleset()],
-            effective_rules=[
-                *_effective_rules(),
-                {"type": "pull_request", "ruleset_id": 77},
-            ],
-            policy=_policy(),
-        )
-
-
-def test_workflow_ruleset_view_accepts_hidden_bypass_but_operator_does_not() -> None:
-    workflow_view = _ruleset()
-    workflow_view.pop("bypass_actors")
-
-    assert release_preflight.validate_release_channel_rulesets(
-        [workflow_view],
-        effective_rules=_effective_rules(),
-        policy=_policy(),
-        require_publisher_bypass=False,
-    ) == (42, "release-channel protection")
-    with pytest.raises(
-        release_preflight.ReleasePreflightError,
-        match="publisher bypass",
-    ):
-        release_preflight.validate_release_channel_rulesets(
-            [workflow_view],
-            effective_rules=_effective_rules(),
-            policy=_policy(),
-        )
-
-
-def test_release_and_repair_requests_require_their_exact_authority() -> None:
+def test_release_and_repair_requests_bind_to_reviewed_main_without_human_attestations() -> None:
     commit = "a" * 40
-    assert release_preflight.validate_request(
-        operation="release",
-        version="0.8.8",
-        repository="cisco-ai-defense/defenseclaw",
-        ref="refs/heads/main",
-        commit=commit,
-        expected_commit=commit,
-        immutable_releases_confirmed=True,
-        rulesets=[_ruleset()],
-        effective_rules=_effective_rules(),
-    ) == (42, "release-channel protection")
-    assert release_preflight.validate_request(
-        operation="repair-channel",
-        version="0.8.8",
-        repository="cisco-ai-defense/defenseclaw",
-        ref="refs/heads/main",
-        commit=commit,
-        expected_commit=commit,
-        immutable_releases_confirmed=False,
-        rulesets=[_ruleset()],
-        effective_rules=_effective_rules(),
-    ) == (42, "release-channel protection")
+    assert (
+        release_preflight.validate_request(
+            operation="release",
+            version="0.8.8",
+            repository="cisco-ai-defense/defenseclaw",
+            ref="refs/heads/main",
+            commit=commit,
+        )
+        is None
+    )
+    assert (
+        release_preflight.validate_request(
+            operation="repair-channel",
+            version="0.8.8",
+            repository="cisco-ai-defense/defenseclaw",
+            ref="refs/heads/main",
+            commit=commit,
+        )
+        is None
+    )
 
     invalid = (
-        {"operation": "release", "immutable_releases_confirmed": False},
-        {"operation": "repair-channel", "immutable_releases_confirmed": True},
+        {"operation": "certify"},
         {"version": "v0.8.8"},
         {"repository": "attacker/defenseclaw"},
         {"ref": "refs/heads/feature"},
         {"commit": "A" * 40},
-        {"expected_commit": "b" * 40},
     )
     base = {
         "operation": "release",
@@ -307,24 +81,10 @@ def test_release_and_repair_requests_require_their_exact_authority() -> None:
         "repository": "cisco-ai-defense/defenseclaw",
         "ref": "refs/heads/main",
         "commit": commit,
-        "expected_commit": commit,
-        "immutable_releases_confirmed": True,
-        "rulesets": [_ruleset()],
-        "effective_rules": _effective_rules(),
     }
     for changes in invalid:
         with pytest.raises(release_preflight.ReleasePreflightError):
             release_preflight.validate_request(**{**base, **changes})
-
-    workflow_view = _ruleset()
-    workflow_view.pop("bypass_actors")
-    assert release_preflight.validate_request(
-        **{
-            **base,
-            "rulesets": [workflow_view],
-            "require_publisher_bypass": False,
-        }
-    ) == (42, "release-channel protection")
 
 
 @POSIX_POLICY_PERSISTENCE
@@ -510,121 +270,6 @@ def test_release_after_088_fails_until_windows_upgrade_certification_exists(
         )
 
 
-def test_ruleset_fetch_binds_list_ids_to_complete_detail() -> None:
-    responses = [
-        subprocess.CompletedProcess(
-            args=["gh", "api"],
-            returncode=0,
-            stdout=json.dumps([{"id": 42}]),
-            stderr="",
-        ),
-        subprocess.CompletedProcess(
-            args=["gh", "api"],
-            returncode=0,
-            stdout=json.dumps(_ruleset()),
-            stderr="",
-        ),
-    ]
-    observed: list[list[str]] = []
-
-    def runner(
-        command: list[str],
-        **_kwargs: object,
-    ) -> subprocess.CompletedProcess[str]:
-        observed.append(command)
-        return responses.pop(0)
-
-    assert release_preflight.fetch_release_channel_rulesets(
-        "cisco-ai-defense/defenseclaw",
-        runner=runner,
-    ) == [_ruleset()]
-    assert observed[0][-1].endswith("rulesets?includes_parents=true&per_page=100&page=1")
-    assert observed[1][-1].endswith("rulesets/42")
-    assert not responses
-
-
-def test_effective_rules_fetch_is_bound_to_exact_release_channel_branch() -> None:
-    observed: list[list[str]] = []
-
-    def runner(
-        command: list[str],
-        **_kwargs: object,
-    ) -> subprocess.CompletedProcess[str]:
-        observed.append(command)
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout=json.dumps(_effective_rules()),
-            stderr="",
-        )
-
-    assert (
-        release_preflight.fetch_effective_release_channel_rules(
-            "cisco-ai-defense/defenseclaw",
-            runner=runner,
-        )
-        == _effective_rules()
-    )
-    assert observed[0][-1] == ("repos/cisco-ai-defense/defenseclaw/rules/branches/release-channel?per_page=100&page=1")
-
-
-def test_effective_rules_fetches_every_page_and_refuses_an_unbounded_inventory() -> None:
-    first_page = [{"type": "update", "ruleset_id": index + 1} for index in range(100)]
-    second_page = [{"type": "creation", "ruleset_id": 101}]
-    responses = [first_page, second_page]
-    observed: list[list[str]] = []
-
-    def paginated_runner(
-        command: list[str],
-        **_kwargs: object,
-    ) -> subprocess.CompletedProcess[str]:
-        observed.append(command)
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout=json.dumps(responses.pop(0)),
-            stderr="",
-        )
-
-    assert (
-        len(
-            release_preflight.fetch_effective_release_channel_rules(
-                "cisco-ai-defense/defenseclaw",
-                runner=paginated_runner,
-            )
-        )
-        == 101
-    )
-    assert observed[0][-1].endswith("per_page=100&page=1")
-    assert observed[1][-1].endswith("per_page=100&page=2")
-    assert not responses
-
-    unbounded_calls = 0
-
-    def unbounded_runner(
-        command: list[str],
-        **_kwargs: object,
-    ) -> subprocess.CompletedProcess[str]:
-        nonlocal unbounded_calls
-        unbounded_calls += 1
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout=json.dumps(first_page),
-            stderr="",
-        )
-
-    with pytest.raises(
-        release_preflight.ReleasePreflightError,
-        match="exceeds the 1000-row safety bound",
-    ):
-        release_preflight.fetch_effective_release_channel_rules(
-            "cisco-ai-defense/defenseclaw",
-            runner=unbounded_runner,
-        )
-    assert unbounded_calls == 11
-
-
 def test_operator_git_state_requires_clean_exact_main() -> None:
     outputs = {
         ("git", "status", "--porcelain=v1", "--untracked-files=all"): "",
@@ -765,22 +410,6 @@ def test_operator_preflight_binds_every_github_call_to_authenticated_environment
             stderr="",
         )
 
-    def fake_rulesets(
-        _repository: str,
-        *,
-        runner: release_preflight.Runner,
-    ) -> list[dict[str, object]]:
-        runner(["gh", "api", "rulesets"], env={"GITHUB_TOKEN": "ambient"})
-        return [_ruleset()]
-
-    def fake_effective_rules(
-        _repository: str,
-        *,
-        runner: release_preflight.Runner,
-    ) -> list[dict[str, object]]:
-        runner(["gh", "api", "effective-rules"])
-        return _effective_rules()
-
     class FakeReleaseAPI:
         def __init__(
             self,
@@ -806,8 +435,6 @@ def test_operator_preflight_binds_every_github_call_to_authenticated_environment
         "_operator_git_state",
         lambda **_kwargs: (commit, "main"),
     )
-    monkeypatch.setattr(release_preflight, "fetch_release_channel_rulesets", fake_rulesets)
-    monkeypatch.setattr(release_preflight, "fetch_effective_release_channel_rules", fake_effective_rules)
     monkeypatch.setattr(release_preflight.release_api_retry, "GitHubReleaseAPI", FakeReleaseAPI)
     monkeypatch.setattr(
         release_preflight.release_api_retry,
@@ -828,12 +455,18 @@ def test_operator_preflight_binds_every_github_call_to_authenticated_environment
     plan = release_preflight.run_operator_preflight(
         operation="release",
         version="0.8.8",
-        immutable_releases_confirmed=True,
         runner=runner,
     )
 
     assert plan["posix_upgrade_baselines"] == expected_baselines
-    assert len(observed) == 5
+    assert "release_channel_ruleset" not in plan
+    assert plan["workflow_commit"] == commit
+    assert plan["dispatch_command"].splitlines() == [
+        "gh workflow run release.yaml --repo cisco-ai-defense/defenseclaw --ref main \\",
+        "  -f operation=release \\",
+        "  -f version=0.8.8",
+    ]
+    assert len(observed) == 3
     discovery_command, discovery_kwargs = observed[0]
     assert discovery_command == ["gh", "auth", "token", "--hostname", "github.com"]
     assert discovery_kwargs["env"] == discovery_environment
@@ -843,43 +476,20 @@ def test_operator_preflight_binds_every_github_call_to_authenticated_environment
         assert (release_preflight.GITHUB_CLI_UNTRUSTED_ENVIRONMENT - {"GH_TOKEN"}).isdisjoint(kwargs["env"])
 
 
-def test_workflow_request_uses_explicit_github_com_token_and_sanitized_runner(
+def test_workflow_request_is_local_validation_without_github_or_ruleset_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commit = "a" * 40
-    for variable in release_preflight.GITHUB_CLI_UNTRUSTED_ENVIRONMENT:
-        monkeypatch.setenv(variable, f"hostile-{variable.lower()}")
-    monkeypatch.setenv("GH_TOKEN", "workflow-token")
-    observed: list[dict[str, str]] = []
+    observed: list[list[str]] = []
 
     def subprocess_runner(
         command: list[str],
-        **kwargs: object,
+        **_kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
-        environment = kwargs["env"]
-        assert isinstance(environment, dict)
-        observed.append(environment)
+        observed.append(command)
         return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
 
-    def fake_rulesets(
-        _repository: str,
-        *,
-        runner: release_preflight.Runner,
-    ) -> list[dict[str, object]]:
-        runner(["gh", "api", "rulesets"], env={"GH_HOST": "attacker.invalid"})
-        return [_ruleset()]
-
-    def fake_effective_rules(
-        _repository: str,
-        *,
-        runner: release_preflight.Runner,
-    ) -> list[dict[str, object]]:
-        runner(["gh", "api", "effective-rules"], env={"GH_REPO": "attacker/repository"})
-        return _effective_rules()
-
     monkeypatch.setattr(release_preflight.subprocess, "run", subprocess_runner)
-    monkeypatch.setattr(release_preflight, "fetch_release_channel_rulesets", fake_rulesets)
-    monkeypatch.setattr(release_preflight, "fetch_effective_release_channel_rules", fake_effective_rules)
 
     assert (
         release_preflight.main(
@@ -895,65 +505,11 @@ def test_workflow_request_uses_explicit_github_com_token_and_sanitized_runner(
                 "refs/heads/main",
                 "--commit",
                 commit,
-                "--expected-commit",
-                commit,
-                "--immutable-releases-confirmed",
-                "true",
             ]
         )
         == 0
     )
-
-    assert len(observed) == 2
-    for environment in observed:
-        assert environment["GH_TOKEN"] == "workflow-token"
-        assert (release_preflight.GITHUB_CLI_UNTRUSTED_ENVIRONMENT - {"GH_TOKEN"}).isdisjoint(environment)
-
-
-def test_ruleset_admin_audit_discovers_and_binds_github_com_token(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    for variable in release_preflight.GITHUB_CLI_UNTRUSTED_ENVIRONMENT:
-        monkeypatch.setenv(variable, f"hostile-{variable.lower()}")
-    observed: list[tuple[list[str], dict[str, str]]] = []
-
-    def subprocess_runner(
-        command: list[str],
-        **kwargs: object,
-    ) -> subprocess.CompletedProcess[str]:
-        environment = kwargs["env"]
-        assert isinstance(environment, dict)
-        observed.append((command, environment))
-        stdout = "admin-token\n" if command == ["gh", "auth", "token", "--hostname", "github.com"] else ""
-        return subprocess.CompletedProcess(args=command, returncode=0, stdout=stdout, stderr="")
-
-    def fake_rulesets(
-        _repository: str,
-        *,
-        runner: release_preflight.Runner,
-    ) -> list[dict[str, object]]:
-        runner(["gh", "api", "rulesets"])
-        return [_ruleset()]
-
-    def fake_effective_rules(
-        _repository: str,
-        *,
-        runner: release_preflight.Runner,
-    ) -> list[dict[str, object]]:
-        runner(["gh", "api", "effective-rules"])
-        return _effective_rules()
-
-    monkeypatch.setattr(release_preflight.subprocess, "run", subprocess_runner)
-    monkeypatch.setattr(release_preflight, "fetch_release_channel_rulesets", fake_rulesets)
-    monkeypatch.setattr(release_preflight, "fetch_effective_release_channel_rules", fake_effective_rules)
-
-    assert release_preflight.main(["ruleset-admin-audit"]) == 0
-    assert observed[0][0] == ["gh", "auth", "token", "--hostname", "github.com"]
-    assert release_preflight.GITHUB_CLI_UNTRUSTED_ENVIRONMENT.isdisjoint(observed[0][1])
-    assert len(observed) == 3
-    for _command, environment in observed[1:]:
-        assert environment["GH_TOKEN"] == "admin-token"
-        assert (release_preflight.GITHUB_CLI_UNTRUSTED_ENVIRONMENT - {"GH_TOKEN"}).isdisjoint(environment)
+    assert observed == []
 
 
 def test_workflow_uses_shared_request_and_baseline_preflight() -> None:
@@ -961,51 +517,45 @@ def test_workflow_uses_shared_request_and_baseline_preflight() -> None:
     workflow = yaml.load(workflow_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
     release_steps = workflow["jobs"]["release-preflight"]["steps"]
     repair_steps = workflow["jobs"]["repair-stable-channel"]["steps"]
-    release_request = next(
-        step for step in release_steps if step.get("name") == "Validate release request and stable-channel protection"
-    )
-    repair_request = next(
-        step for step in repair_steps if step.get("name") == "Validate repair request and stable-channel protection"
-    )
+    release_request = next(step for step in release_steps if step.get("name") == "Validate release request")
+    repair_request = next(step for step in repair_steps if step.get("name") == "Validate repair request")
     baseline = next(
         step for step in release_steps if step.get("name") == "Resolve authenticated POSIX upgrade baselines"
     )
 
     assert "release-preflight.py request" in release_request["run"]
     assert "--operation release" in release_request["run"]
-    assert release_request["env"]["EXPECTED_RELEASE_COMMIT"] == "${{ inputs.expected_commit }}"
-    assert '--expected-commit "$EXPECTED_RELEASE_COMMIT"' in release_request["run"]
+    assert release_request["env"]["RELEASE_VERSION_INPUT"] == "${{ inputs.version }}"
+    assert "EXPECTED_RELEASE_COMMIT" not in release_request["env"]
+    assert "--expected-commit" not in release_request["run"]
     assert "release-preflight.py request" in repair_request["run"]
     assert "--operation repair-channel" in repair_request["run"]
-    assert repair_request["env"]["EXPECTED_RELEASE_COMMIT"] == "${{ inputs.expected_commit }}"
-    assert '--expected-commit "$EXPECTED_RELEASE_COMMIT"' in repair_request["run"]
-    assert repair_request["env"]["IMMUTABLE_RELEASES_CONFIRMED"] == ("${{ inputs.immutable_releases_confirmed }}")
-    assert '--immutable-releases-confirmed "$IMMUTABLE_RELEASES_CONFIRMED"' in repair_request["run"]
+    assert repair_request["env"]["RELEASE_VERSION_INPUT"] == "${{ inputs.version }}"
+    assert "EXPECTED_RELEASE_COMMIT" not in repair_request["env"]
+    assert "IMMUTABLE_RELEASES_CONFIRMED" not in repair_request["env"]
+    assert "--expected-commit" not in repair_request["run"]
+    assert "--immutable-releases-confirmed" not in repair_request["run"]
     assert "release-preflight.py select-baselines" in baseline["run"]
     assert "required_families = " not in baseline["run"]
 
 
 def test_dispatch_plan_never_mutates_release_state() -> None:
-    commit = "a" * 40
     release = release_preflight._dispatch_command(
         "release",
         "0.8.8",
         repository="cisco-ai-defense/defenseclaw",
-        expected_commit=commit,
     )
     repair = release_preflight._dispatch_command(
         "repair-channel",
         "0.8.8",
         repository="cisco-ai-defense/defenseclaw",
-        expected_commit=commit,
     )
 
     assert "gh workflow run release.yaml --repo cisco-ai-defense/defenseclaw --ref main" in release
-    assert f"-f expected_commit={commit}" in release
-    assert f"-f expected_commit={commit}" in repair
     assert "-f operation=release" in release
-    assert "-f immutable_releases_confirmed=true" in release
     assert "-f operation=repair-channel" in repair
+    assert "expected_commit" not in release + repair
     assert "immutable_releases_confirmed" not in repair
+    assert "immutable_releases_confirmed" not in release
     assert "gh release create" not in release + repair
     assert "git tag" not in release + repair

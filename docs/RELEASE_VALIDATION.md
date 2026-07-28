@@ -5,34 +5,23 @@ publish a release from a reviewed `main` commit. A merge to `main` is the
 review-and-CI boundary. Release trusts that boundary and validates the
 publishable artifacts.
 
-For the operator procedure, live repository preflight, post-publication
+For the operator procedure, workflow request validation, post-publication
 verification, and failure handling, follow the canonical
 [DefenseClaw Release Runbook](RELEASE_RUNBOOK.md). This document defines the
 release gates; the runbook defines how to operate them.
 
 ## One-dispatch contract
 
-Run the `Release` workflow from `main` with:
+Run the `Release` workflow from `main` with only:
 
-- a required bare `X.Y.Z` version;
-- the exact `expected_commit` printed by operator preflight; and
-- `immutable_releases_confirmed=true` after checking the repository setting.
+- `operation=release`; and
+- a required bare `X.Y.Z` version.
 
-Before dispatch, run the non-mutating operator preflight from a clean macOS or
-Linux `main` that exactly matches `origin/main`. The baseline snapshot uses
-POSIX no-follow descriptor custody; Windows deliverables are validated by the
-hosted release jobs.
-
-```bash
-python3 scripts/release-preflight.py operator \
-  --operation release \
-  --version 0.8.8 \
-  --immutable-releases-confirmed true
-```
-
-It validates the live stable-channel ruleset, release namespace, version
-progression, and authenticated upgrade baseline matrix, then prints the exact
-manual dispatch command. It never dispatches or publishes anything.
+A manual dispatch from `main` is release authorization: anything merged there
+has already crossed the source-certification boundary. GitHub automatically
+freezes the event's exact `github.sha`, so operators do not copy a commit SHA
+or attest to repository settings. The first workflow job validates the release
+namespace, version progression, and authenticated upgrade baseline matrix.
 
 The workflow rejects a non-`main` dispatch, a commit that is not reachable from
 reviewed `main`, an invalid version, and any conflicting or partially populated
@@ -42,20 +31,15 @@ namespace is an exact same-commit tag with no release object, which can be left
 before immutable publication begins. Once an immutable `0.8.8+` release exists,
 use `operation=repair-channel` to repair only the authenticated stable pointer.
 The workflow stamps the requested version into an isolated checkout; a
-version-bump commit is not required. A later merge to `main` does not invalidate
-the already-selected reviewed commit while its release is running.
+version-bump commit is not required. A later merge to `main` does not
+invalidate the `github.sha` already selected for the running release.
 
 ```bash
-# Replace this quoted placeholder with the exact workflow_commit from preflight.
-RELEASE_COMMIT="replace-with-exact-40-character-workflow-commit"
-
 gh workflow run release.yaml \
   --repo cisco-ai-defense/defenseclaw \
   --ref main \
   -f operation=release \
-  -f version=0.8.8 \
-  -f expected_commit="$RELEASE_COMMIT" \
-  -f immutable_releases_confirmed=true
+  -f version=0.8.8
 ```
 
 Do not create or push the tag and do not run `gh release create` manually. The
@@ -75,8 +59,8 @@ publication:
 
 This is the complete release acceptance scope. The first native Windows release
 has no older native Windows baseline, and all Windows acceptance through
-`0.8.8` is explicitly fresh-install-only. Preflight blocks any later target
-until native Windows upgrade certification exists.
+`0.8.8` is explicitly fresh-install-only. Request validation blocks any later
+target until native Windows upgrade certification exists.
 This is a fresh-install only gate, not evidence of a native upgrade path.
 
 The POSIX upgrade sources are resolved from authenticated published release

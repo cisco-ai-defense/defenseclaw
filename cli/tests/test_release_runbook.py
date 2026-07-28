@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -35,42 +34,33 @@ def test_release_runbook_covers_both_operator_flows() -> None:
     runbook = _words(RUNBOOK)
     raw_runbook = _text(RUNBOOK)
 
-    assert "scripts/release-preflight.py operator" in runbook
-    assert "--operation release" in runbook
-    assert "--operation repair-channel" in runbook
-    assert "immutable-releases-confirmed true" in runbook
-    assert "immutable-releases-confirmed false" not in runbook
+    assert "-f operation=release" in runbook
+    assert "-f operation=repair-channel" in runbook
     assert "gh workflow run release.yaml" in runbook
     assert "--repo cisco-ai-defense/defenseclaw" in runbook
     assert "--ref main" in runbook
-    assert '-f expected_commit="$RELEASE_COMMIT"' in runbook
-    assert "The preflight does not dispatch or publish anything." in runbook
-    assert "From a macOS or Linux checkout" in runbook
-    assert "POSIX `O_NOFOLLOW` descriptor custody" in runbook
+    assert '-f version="$RELEASE_VERSION"' in runbook
+    assert "GitHub automatically freezes the dispatch's exact `github.sha`" in runbook
+    assert "Operators do not copy a commit SHA or attest to repository settings." in runbook
     assert "Repair never builds, edits, uploads, or replaces a tagged asset." in runbook
-    assert raw_runbook.count('RELEASE_COMMIT="replace-with-exact-40-character-workflow-commit"') == 2
-    assert "RELEASE_COMMIT=<" not in raw_runbook
+    assert "expected_commit" not in raw_runbook
+    assert "immutable_releases_confirmed" not in raw_runbook
+    assert "release-preflight.py operator" not in raw_runbook
 
 
-def test_release_runbook_preserves_channel_and_immutability_contracts() -> None:
+def test_release_runbook_preserves_signed_channel_and_immutability_contracts() -> None:
     runbook = _words(RUNBOOK)
-    policy = json.loads(_text(ROOT / "release" / "release-channel-ruleset-policy.json"))
-
-    assert "release/release-channel-ruleset-policy.json" in runbook
-    assert policy["target_ref"] in runbook
-    for rule in policy["required_rules"]:
-        assert f"`{rule}`" in runbook
-    bypass = policy["publisher_bypass"]
-    assert f"Organization `{policy['source']}`" in runbook
-    assert "`defenseclaw`" in runbook
-    assert f"`{bypass['actor_type']}` actor `{bypass['actor_id']}`" in runbook
-    assert f"mode `{bypass['bypass_mode']}`" in runbook
 
     assert "Immutable tagged releases." in runbook
     assert "A mutable, signed stable channel." in runbook
+    assert "A ruleset on `release-channel` is optional repository hardening" in runbook
+    assert "not a release prerequisite or part of client trust" in runbook
+    assert "Sigstore authenticates the channel" in runbook
+    assert "its digests bind the immutable versioned assets" in runbook
     assert "Never manually create, push, move, or delete a release tag." in runbook
-    assert "Never edit, delete, or force-push `release-channel`" in runbook
     assert "publish a new patch version" in runbook
+    assert "release-channel-ruleset-policy.json" not in runbook
+    assert "ruleset-admin-audit" not in runbook
 
 
 def test_release_runbook_preserves_install_upgrade_and_unsigned_scope() -> None:
@@ -137,12 +127,14 @@ def test_release_docs_route_to_canonical_runbook_and_preflight() -> None:
     channel = _words(ROOT / "docs" / "RELEASE_CHANNEL.md")
 
     assert "RELEASE_RUNBOOK.md" in validation
-    assert "scripts/release-preflight.py operator" in validation
-    assert "expected_commit" in validation
     assert "--repo cisco-ai-defense/defenseclaw" in validation
-    assert 'RELEASE_COMMIT="replace-with-exact-40-character-workflow-commit"' in validation
-    assert "RELEASE_COMMIT=<" not in _text(validation_path)
+    assert "-f operation=release" in validation
+    assert "-f version=0.8.8" in validation
+    assert "exact `github.sha`" in validation
+    assert "expected_commit" not in validation
+    assert "immutable_releases_confirmed" not in validation
+    assert "scripts/release-preflight.py operator" not in validation
     assert "first native Windows release" in validation
     assert "through `0.8.8` is explicitly fresh-install-only" in validation
     assert "RELEASE_RUNBOOK.md" in channel
-    assert "scripts/release-preflight.py operator" in channel
+    assert "no copied commit SHA, repository-setting confirmation, or local preflight is required" in channel

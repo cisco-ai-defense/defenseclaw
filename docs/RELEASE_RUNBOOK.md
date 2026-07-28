@@ -36,148 +36,73 @@ The updater is therefore repairable without making an old updater mutable. A
 future patch release can publish a fixed immutable resolver and advance the
 signed channel to it. Nothing rewrites assets attached to an older tag.
 
-## One-time repository controls
+## Persistent repository controls
 
-An administrator must establish these controls before the first production
-dispatch. Recheck them after any repository, organization, or GitHub App
-policy change.
+These are repository settings, not fields that an operator must attest to for
+each release.
 
-### Immutable releases and protected environment
+### Immutable releases and scoped secrets
 
 1. Enable GitHub Immutable Releases for the repository.
-2. Keep the `release` environment protected and limit its secrets and
-   approvals to the release workflow.
+2. Scope `release` environment secrets to the release workflow. A per-release
+   environment approval is optional, not part of the dispatch contract.
 3. Configure Apple and Windows signing secrets only as complete groups. See
    [Unsigned platform builds](#unsigned-platform-builds) for the supported
    no-credential mode.
 4. Keep the required PR and `main` checks in branch policy. Merge remains the
    source-certification boundary.
 
-### Protect the stable channel
-
-The live ruleset must match
-[`release/release-channel-ruleset-policy.json`](../release/release-channel-ruleset-policy.json):
-
-| Setting | Required value |
-| --- | --- |
-| Source | Organization `cisco-ai-defense` |
-| Repository include | Exactly `defenseclaw`; protected repositories enabled |
-| Target | Branch |
-| Include | Exactly `refs/heads/release-channel` |
-| Exclude | Empty |
-| Enforcement | Active |
-| Restrictions | `creation`, `update`, `deletion`, `non_fast_forward` |
-| Publisher bypass | GitHub Actions `Integration` actor `15368`, mode `always` |
-
-Create this as an organization ruleset. GitHub does not accept its own Actions
-integration as a bypass actor on a repository-sourced ruleset. The configuring
-operator therefore needs organization-ruleset authority; this is one-time
-administrative setup, not a release credential. Track the initial live setup
-in [#620](https://github.com/cisco-ai-defense/defenseclaw/issues/620); no
-production dispatch is ready until that issue's audit succeeds.
-
-Do not add a human publisher bypass. Avoid an overlapping rule that prevents
-the reviewed GitHub Actions publisher from creating or fast-forwarding the
-branch. The release workflow's keyless Sigstore identity authenticates channel
-content; the ruleset limits who can publish and preserves the Git audit trail.
-
-After creating or changing the organization ruleset, authenticate `gh` with
-organization-ruleset administration authority and run:
-
-```bash
-python3 scripts/release-preflight.py ruleset-admin-audit
-```
-
-That one-time audit requires the sole exact publisher bypass. GitHub hides
-bypass actors from routine release operators and the workflow's restricted
-token, so every operator preflight and first workflow job validate the exact
-visible source, repository/ref targets, restrictions, and aggregate effective
-rules instead. The later channel push is the live proof that the Actions
-publisher retains bypass. A missing, broad, disabled, duplicated, overlapping,
-or observably incomplete ruleset stops the release before an expensive build.
-Bypass-only drift is detectable by the administrator audit or the final channel
-push, so rerun the administrator audit after every ruleset change.
+GitHub verifies the immutable release after publication, so there is no
+per-release confirmation checkbox. You do not need to create a ruleset to cut
+a release. A ruleset on `release-channel` is optional repository hardening,
+not a release prerequisite or part of client trust.
+Without one, a repository writer or administrator can delete the pointer or
+replay an older valid signed pointer, affecting availability or freshness.
+They still cannot make clients accept an unsigned channel document, altered
+resolver, or altered release payload: Sigstore authenticates the channel and
+its digests bind the immutable versioned assets.
 
 ## Cut a release
 
-### 1. Prepare reviewed `main`
+### 1. Dispatch from reviewed `main`
 
-Merge every release change and wait for the required `main` checks. Do not make
-a version-bump commit; the workflow input stamps an isolated build checkout.
+Merge every release change and wait for the required `main` checks. Anything
+merged into `main` is source-certified. Do not make a version-bump commit; the
+workflow input stamps an isolated build checkout.
 
-From a macOS or Linux checkout, update a clean local `main`. Baseline-policy
-persistence deliberately requires POSIX `O_NOFOLLOW` descriptor custody; the
-hosted workflow still builds and validates the Windows deliverables.
-
-```bash
-git switch main
-git pull --ff-only origin main
-git status --porcelain
-gh auth status
-```
-
-`git status --porcelain` must print nothing. Choose a bare canonical version,
-without a `v` prefix. The examples below use `0.8.8`; replace it with the
-intended version.
+In GitHub, open **Actions → Release → Run workflow**, select **main**, choose
+`operation=release`, and enter a bare canonical version without a `v` prefix.
+The examples below use `0.8.8`; replace it with the intended version.
 
 ```bash
 RELEASE_VERSION=0.8.8
 ```
 
-Confirm in GitHub Settings that Immutable Releases is still enabled. Do not
-infer this from an older run.
-
-### 2. Run the non-mutating operator preflight
-
 ```bash
-python3 scripts/release-preflight.py operator \
-  --operation release \
-  --version "$RELEASE_VERSION" \
-  --immutable-releases-confirmed true
-```
-
-The preflight does not dispatch or publish anything. It fails closed unless:
-
-- local `main` is clean and exactly equals fetched `origin/main`;
-- GitHub CLI authentication works;
-- the stable-channel ruleset matches the checked-in policy;
-- the tag/release namespace is safe and the version progresses forward; and
-- every authenticated POSIX baseline can be resolved.
-
-Read the complete plan. Record the workflow commit, target commit, ruleset ID,
-and selected macOS/Linux upgrade baselines with the release evidence. For a
-target newer than `0.8.7`, there must be seven distinct lanes: latest older,
-exact `0.8.6`, exact `0.8.5`, exact `0.8.4`, and the newest authenticated
-`0.7.x`, `0.6.x`, and `0.5.x` releases. `0.8.7` is the one six-lane exception
-because latest older and `0.8.6` are the same release.
-
-Do not dispatch if the plan is surprising. Fix the repository policy or
-release state and rerun preflight instead of overriding it.
-
-### 3. Dispatch exactly once
-
-Use the command printed by the successful preflight. Its release form is:
-
-```bash
-# Replace this quoted placeholder with the exact workflow_commit from preflight.
-RELEASE_COMMIT="replace-with-exact-40-character-workflow-commit"
-
 gh workflow run release.yaml \
   --repo cisco-ai-defense/defenseclaw \
   --ref main \
   -f operation=release \
-  -f version="$RELEASE_VERSION" \
-  -f expected_commit="$RELEASE_COMMIT" \
-  -f immutable_releases_confirmed=true
+  -f version="$RELEASE_VERSION"
 ```
 
-The expected commit makes the dispatch fail if `main` advances between preflight
-and dispatch. After dispatch, the event remains intentionally bound to that
-exact SHA. Rerun preflight instead of changing the field. Do not create or push
-the tag first. Do not run `gh release create`. The workflow owns the version
-namespace until the tested candidate is published.
+Clicking **Run workflow** (or running the command above) is the release
+authorization. GitHub automatically freezes the dispatch's exact `github.sha`,
+so the run stays on that reviewed `main` commit even if another merge lands
+later. Operators do not copy a commit SHA or attest to repository settings.
 
-### 4. Monitor the exact run
+The first job validates the version, selected commit, tag/release namespace,
+version progression, and authenticated POSIX upgrade baselines before the
+expensive build begins. For a target newer than `0.8.7`, it must select seven
+distinct lanes: latest older, exact `0.8.6`, exact `0.8.5`, exact `0.8.4`, and
+the newest authenticated `0.7.x`, `0.6.x`, and `0.5.x` releases. `0.8.7` is
+the one six-lane exception because latest older and `0.8.6` are the same
+release.
+
+Do not create or push the tag first. Do not run `gh release create`. The
+workflow owns the version namespace until the tested candidate is published.
+
+### 2. Monitor the exact run
 
 Find the run created by that dispatch, record its ID and URL, then watch that
 ID:
@@ -190,8 +115,7 @@ gh run view <run-id> --log-failed
 
 The expected release path is:
 
-1. validate the request, live channel rules, credentials, namespace, and
-   authenticated baselines;
+1. validate the request, credentials, namespace, and authenticated baselines;
 2. build the runtime once and build the macOS app and native Windows Setup;
 3. seal one checksummed candidate;
 4. run fresh-install and target-specific upgrade gates against those exact
@@ -219,17 +143,17 @@ dispatch.
 Confirm that the exact run shows:
 
 - Linux and macOS fresh install through `install.sh`;
-- every baseline printed by operator preflight upgraded on both Linux and
-  macOS, including the `0.8.4` bridge and `0.8.5` forward handoff for
-  pre-`0.8.4` sources;
+- every baseline selected by workflow request validation upgraded on both
+  Linux and macOS, including the `0.8.4` bridge and `0.8.5` forward handoff
+  for pre-`0.8.4` sources;
 - native Windows x64 fresh install through `install.ps1` and
   `DefenseClawSetup-x64.exe`;
 - exact CLI and gateway version plus healthy gateway checks;
 - sealed-candidate verification before publication; and
 - immutable remote asset custody before stable-channel advancement.
 
-Windows is explicitly fresh-install-only through `0.8.8`. Preflight blocks a
-later release until [#619](https://github.com/cisco-ai-defense/defenseclaw/issues/619)
+Windows is explicitly fresh-install-only through `0.8.8`. Request validation
+blocks a later release until [#619](https://github.com/cisco-ai-defense/defenseclaw/issues/619)
 adds a native upgrade lane from an authenticated published Windows Setup.
 Do not discard Windows baselines or invent an unauthenticated historical lane.
 
@@ -420,7 +344,7 @@ Require the target version and healthy gateway. If the release changes
 migrations, bridge selection, or recovery, also repeat the relevant public
 smoke from the affected historical fixture. Regardless, the pre-publication
 run must already show every authenticated `0.8.6`, `0.8.5`, `0.8.4`,
-`0.7.x`, `0.6.x`, and `0.5.x` lane selected by preflight.
+`0.7.x`, `0.6.x`, and `0.5.x` lane selected by the workflow.
 
 ### Stable channel
 
@@ -462,32 +386,22 @@ the separate channel job cannot be rerun successfully. The target must be the
 newest immutable stable release. Repair never builds, edits, uploads, or
 replaces a tagged asset.
 
-From clean, current `main`, set the published target and run:
+In GitHub, open **Actions → Release → Run workflow**, select **main**, choose
+`operation=repair-channel`, and enter the published target:
 
 ```bash
 RELEASE_VERSION=0.8.8
-
-python3 scripts/release-preflight.py operator \
-  --operation repair-channel \
-  --version "$RELEASE_VERSION"
-```
-
-Inspect the resolved tag commit, ruleset, and latest-immutable proof. Then use
-the command printed by preflight:
-
-```bash
-# Replace this quoted placeholder with the exact workflow_commit from preflight.
-RELEASE_COMMIT="replace-with-exact-40-character-workflow-commit"
 
 gh workflow run release.yaml \
   --repo cisco-ai-defense/defenseclaw \
   --ref main \
   -f operation=repair-channel \
-  -f version="$RELEASE_VERSION" \
-  -f expected_commit="$RELEASE_COMMIT"
+  -f version="$RELEASE_VERSION"
 ```
 
-Watch the exact run ID. The repair job re-authenticates the published checksum
+As with a normal release, GitHub binds the dispatch to its own `github.sha`;
+no human-supplied commit or confirmation is required. Watch the exact run ID.
+The repair job re-authenticates the newest immutable target, published checksum
 proof, provenance, source tree, and GitHub asset digests. It then signs a new
 channel document and publishes a non-forced fast-forward child. An invalid old
 tip remains in history; same-version rebinding and rollback remain forbidden.
@@ -497,10 +411,10 @@ Repeat the stable-channel and disposable signed-discovery checks after repair.
 
 | Observed state | Action |
 | --- | --- |
-| A build, installer, or upgrade gate failed and no release exists | Fix the cause, merge it to `main`, rerun operator preflight, and dispatch the still-unused version from the new reviewed commit. A transient failure may use GitHub's **Re-run failed jobs** while its candidate artifacts remain available. |
+| A build, installer, or upgrade gate failed and no release exists | Fix the cause, merge it to `main`, and dispatch the still-unused version from the new reviewed commit. A transient failure may use GitHub's **Re-run failed jobs** while its candidate artifacts remain available. |
 | Only an exact same-commit tag exists and no release exists | Let the workflow's namespace reconciliation decide whether the original run or a same-commit redispatch can resume. Do not delete, move, or recreate the tag manually. |
 | Publication returned an ambiguous API error | Inspect the workflow reconciliation and remote namespace. Never retry `gh release create` manually. Escalate any state that is neither absent nor the exact immutable candidate. |
-| The immutable release is green, but `Advance authenticated stable channel` failed | Prefer **Re-run failed jobs** on the original run. If that is unavailable or the channel tip needs authenticated repair, run the repair preflight and dispatch `operation=repair-channel` for the newest immutable release. |
+| The immutable release is green, but `Advance authenticated stable channel` failed | Prefer **Re-run failed jobs** on the original run. If that is unavailable or the channel tip needs authenticated repair, dispatch `operation=repair-channel` for the newest immutable release. |
 | Asset digest, Sigstore, provenance, or remote-custody proof failed | Stop. Investigate the immutable release and evidence. Do not advance or repair the channel merely to hide a custody failure. |
 | A field defect exists in an immutable installer or resolver | Fix it on `main`, publish a new patch version, and advance the signed channel to that new immutable resolver. Never replace the old tagged asset. |
 | Installed CLI discovery is broken | Obtain a rescue bootstrap from an authenticated `0.8.8+` tagged release, verify the saved bytes, and use the external rescue path in `RELEASE_CHANNEL.md`; never pipe an unauthenticated response into a shell. |
@@ -508,8 +422,7 @@ Repeat the stable-channel and disposable signed-discovery checks after repair.
 
 ## Never do these
 
-- Never dispatch from a PR branch, dirty worktree, stale `main`, or a commit
-  that does not exactly match `origin/main`.
+- Never dispatch the release workflow from a branch other than `main`.
 - Never manually create, push, move, or delete a release tag.
 - Never manually create a GitHub release or upload, edit, or replace an asset
   attached to an existing tag.
@@ -530,8 +443,7 @@ Repeat the stable-channel and disposable signed-discovery checks after repair.
 Retain these facts with the release:
 
 - target version, workflow run ID/URL, workflow commit, and target commit;
-- successful operator-preflight output and live channel ruleset ID;
-- the exact authenticated Linux/macOS baseline list;
+- the exact authenticated Linux/macOS baseline list selected by the workflow;
 - macOS and Windows verification status;
 - immutable release URL and complete public asset inventory;
 - signed checksum verification and digest-check results;

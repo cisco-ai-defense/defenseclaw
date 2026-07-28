@@ -239,10 +239,9 @@ def test_release_builds_tests_and_publishes_in_one_dispatch() -> None:
     assert set(triggers["workflow_dispatch"]["inputs"]) == {
         "operation",
         "version",
-        "expected_commit",
-        "immutable_releases_confirmed",
     }
-    assert triggers["workflow_dispatch"]["inputs"]["expected_commit"]["required"] == "true"
+    assert "inputs.expected_commit" not in text
+    assert "inputs.immutable_releases_confirmed" not in text
     assert workflow["concurrency"] == {
         "group": "release-${{ github.repository }}",
         "cancel-in-progress": "false",

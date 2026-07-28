@@ -35,15 +35,6 @@ on:
         description: "Version to release or use as the authenticated repair target (X.Y.Z)."
         required: true
         type: string
-      expected_commit:
-        description: "Exact lowercase main commit printed by scripts/release-preflight.py operator."
-        required: true
-        type: string
-      immutable_releases_confirmed:
-        description: "Release only: confirm repository release immutability is enabled in Settings. Leave false for repair-channel."
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -86,21 +77,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate release request and stable-channel protection
+      - name: Validate release request
         env:
-          GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION_INPUT: ${{ inputs.version }}
-          EXPECTED_RELEASE_COMMIT: ${{ inputs.expected_commit }}
-          IMMUTABLE_RELEASES_CONFIRMED: ${{ inputs.immutable_releases_confirmed }}
         run: |
           python3 scripts/release-preflight.py request \
             --operation release \
             --version "$RELEASE_VERSION_INPUT" \
             --repository "$GITHUB_REPOSITORY" \
             --ref "$GITHUB_REF" \
-            --commit "$GITHUB_SHA" \
-            --expected-commit "$EXPECTED_RELEASE_COMMIT" \
-            --immutable-releases-confirmed "$IMMUTABLE_RELEASES_CONFIRMED"
+            --commit "$GITHUB_SHA"
 
       - name: Validate optional platform signing credentials
         env:
@@ -151,20 +137,6 @@ jobs:
         # independently by macos-upstream.yml and must not make an unrelated
         # product release fail after its PR checks have already passed.
         run: python3 scripts/check-macos-upstream.py --offline
-
-      - name: Require immutable GitHub releases
-        env:
-          IMMUTABLE_RELEASES_CONFIRMED: ${{ inputs.immutable_releases_confirmed }}
-        run: |
-          set -euo pipefail
-          # GitHub's immutable-release settings endpoint requires repository
-          # Administration: read, which is not available to GITHUB_TOKEN. Keep
-          # this preflight fail-closed without introducing an administrator PAT;
-          # the publish job separately proves the resulting release is immutable.
-          if [[ "$IMMUTABLE_RELEASES_CONFIRMED" != "true" ]]; then
-            echo "::error title=Immutable Releases confirmation required::Verify repository release immutability in Settings, then confirm it when dispatching the workflow."
-            exit 1
-          fi
 
       - name: Resolve and validate target version
         id: tag
@@ -1189,21 +1161,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate repair request and stable-channel protection
+      - name: Validate repair request
         env:
-          GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION_INPUT: ${{ inputs.version }}
-          EXPECTED_RELEASE_COMMIT: ${{ inputs.expected_commit }}
-          IMMUTABLE_RELEASES_CONFIRMED: ${{ inputs.immutable_releases_confirmed }}
         run: |
           python3 scripts/release-preflight.py request \
             --operation repair-channel \
             --version "$RELEASE_VERSION_INPUT" \
             --repository "$GITHUB_REPOSITORY" \
             --ref "$GITHUB_REF" \
-            --commit "$GITHUB_SHA" \
-            --expected-commit "$EXPECTED_RELEASE_COMMIT" \
-            --immutable-releases-confirmed "$IMMUTABLE_RELEASES_CONFIRMED"
+            --commit "$GITHUB_SHA"
 
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
         with:

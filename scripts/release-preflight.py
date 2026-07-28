@@ -15,13 +15,14 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fail-closed operator and workflow preflight for DefenseClaw releases.
+"""Validate workflow requests and optionally preview DefenseClaw releases.
 
-The release workflow remains the publication authority. This command verifies
-that an operator is on the exact reviewed ``main`` commit, that the remote
-namespace and authenticated upgrade baselines are usable, and that the signed
-stable-channel ref has its required live repository rules. It prints the exact
-manual dispatch command but never dispatches a workflow or mutates a release.
+The release workflow remains the publication authority. A manual dispatch from
+``main`` is automatically bound to GitHub's immutable ``github.sha``; operators
+do not copy commit IDs or attest to repository settings. The optional operator
+command previews the remote namespace and authenticated upgrade baselines, then
+prints the same simple dispatch command. It never dispatches or mutates a
+release.
 """
 
 from __future__ import annotations
@@ -46,11 +47,7 @@ except ModuleNotFoundError:  # Direct ``python scripts/release-preflight.py`` ex
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REPOSITORY = "cisco-ai-defense/defenseclaw"
-RULESET_POLICY_PATH = ROOT / "release" / "release-channel-ruleset-policy.json"
-RELEASE_CHANNEL_BRANCH = "release-channel"
 WINDOWS_FRESH_INSTALL_ONLY_THROUGH = "0.8.8"
-GITHUB_API_PAGE_SIZE = 100
-MAX_GITHUB_API_ROWS = 1000
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 GITHUB_CLI_UNTRUSTED_ENVIRONMENT = frozenset(
@@ -103,17 +100,6 @@ GITHUB_CLI_UNTRUSTED_ENVIRONMENT_PREFIXES_CASEFOLD = (
     "sigstore_",
     "tuf_",
 )
-EXPECTED_POLICY_FIELDS = {
-    "schema_version",
-    "source_type",
-    "source",
-    "target",
-    "target_ref",
-    "repository_condition",
-    "required_rules",
-    "publisher_bypass",
-}
-EXPECTED_BYPASS_FIELDS = {"actor_type", "actor_id", "bypass_mode"}
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
@@ -127,14 +113,6 @@ def _version_key(value: object) -> tuple[int, int, int]:
     return tuple(int(part) for part in value.split("."))  # type: ignore[return-value]
 
 
-def _boolean(value: str) -> bool:
-    if value == "true":
-        return True
-    if value == "false":
-        return False
-    raise argparse.ArgumentTypeError("expected exactly true or false")
-
-
 def _load_json_object(path: Path, label: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -143,145 +121,6 @@ def _load_json_object(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ReleasePreflightError(f"{label} must contain a JSON object")
     return value
-
-
-def load_ruleset_policy(path: Path = RULESET_POLICY_PATH) -> dict[str, Any]:
-    """Load the closed live-ruleset contract tracked with release source."""
-
-    policy = _load_json_object(path, "release-channel ruleset policy")
-    bypass = policy.get("publisher_bypass")
-    rules = policy.get("required_rules")
-    repository_condition = policy.get("repository_condition")
-    if (
-        set(policy) != EXPECTED_POLICY_FIELDS
-        or policy.get("schema_version") != 2
-        or policy.get("source_type") != "Organization"
-        or policy.get("source") != "cisco-ai-defense"
-        or policy.get("target") != "branch"
-        or policy.get("target_ref") != "refs/heads/release-channel"
-        or repository_condition
-        != {
-            "include": ["defenseclaw"],
-            "exclude": [],
-            "protected": True,
-        }
-        or not isinstance(rules, list)
-        or len(rules) != len(set(rules))
-        or set(rules) != {"creation", "update", "deletion", "non_fast_forward"}
-        or not isinstance(bypass, dict)
-        or set(bypass) != EXPECTED_BYPASS_FIELDS
-        or bypass.get("actor_type") != "Integration"
-        or not isinstance(bypass.get("actor_id"), int)
-        or isinstance(bypass.get("actor_id"), bool)
-        or bypass["actor_id"] <= 0
-        or bypass.get("bypass_mode") != "always"
-    ):
-        raise ReleasePreflightError("release-channel ruleset policy is malformed")
-    return policy
-
-
-def validate_release_channel_rulesets(
-    rulesets: object,
-    *,
-    effective_rules: object,
-    policy: Mapping[str, Any] | None = None,
-    require_publisher_bypass: bool = True,
-) -> tuple[int, str]:
-    """Require one active exact channel ruleset, plus publisher custody when visible.
-
-    GitHub omits ``bypass_actors`` from repository-ruleset responses unless the
-    caller can write the ruleset. Routine operator and workflow preflight verify
-    the exact active channel ruleset and observable protections. The explicit
-    administrator audit requires the complete publisher binding, and the later
-    channel publish proves that the workflow integration still has bypass.
-    """
-
-    expected = dict(policy or load_ruleset_policy())
-    if not isinstance(rulesets, list) or any(not isinstance(item, dict) for item in rulesets):
-        raise ReleasePreflightError("GitHub ruleset inventory must be an object array")
-    if not isinstance(effective_rules, list) or any(not isinstance(item, dict) for item in effective_rules):
-        raise ReleasePreflightError("GitHub effective-rule inventory must be an object array")
-    required_rules = set(expected["required_rules"])
-    required_bypass = expected["publisher_bypass"]
-    matching: list[tuple[int, str]] = []
-    active_branch_ruleset_ids: set[int] = set()
-    for ruleset in rulesets:
-        conditions = ruleset.get("conditions")
-        ref_name = conditions.get("ref_name") if isinstance(conditions, dict) else None
-        repository_name = conditions.get("repository_name") if isinstance(conditions, dict) else None
-        rules = ruleset.get("rules")
-        bypasses = ruleset.get("bypass_actors")
-        identifier = ruleset.get("id")
-        name = ruleset.get("name")
-        if (
-            ruleset.get("target") == "branch"
-            and ruleset.get("enforcement") == "active"
-            and isinstance(identifier, int)
-            and not isinstance(identifier, bool)
-            and identifier > 0
-        ):
-            active_branch_ruleset_ids.add(identifier)
-        if (
-            ruleset.get("target") != expected["target"]
-            or ruleset.get("source_type") != expected["source_type"]
-            or ruleset.get("source") != expected["source"]
-            or ruleset.get("enforcement") != "active"
-            or not isinstance(ref_name, dict)
-            or ref_name.get("include") != [expected["target_ref"]]
-            or ref_name.get("exclude") != []
-            or repository_name != expected["repository_condition"]
-            or not isinstance(rules, list)
-            or any(not isinstance(rule, dict) for rule in rules)
-            or not isinstance(identifier, int)
-            or isinstance(identifier, bool)
-            or not isinstance(name, str)
-            or not name
-        ):
-            continue
-        observed_rules = {rule.get("type") for rule in rules if isinstance(rule.get("type"), str)}
-        if len(rules) != len(required_rules) or observed_rules != required_rules:
-            continue
-        if require_publisher_bypass:
-            if not isinstance(bypasses, list) or len(bypasses) != 1:
-                continue
-            actor = bypasses[0]
-            if (
-                not isinstance(actor, dict)
-                or {key: actor.get(key) for key in EXPECTED_BYPASS_FIELDS} != required_bypass
-            ):
-                continue
-        matching.append((identifier, name))
-    if len(matching) != 1:
-        publisher_requirement = " plus the reviewed GitHub Actions publisher bypass" if require_publisher_bypass else ""
-        raise ReleasePreflightError(
-            "GitHub must expose exactly one active ruleset targeting only "
-            "refs/heads/release-channel with creation, update, deletion, and "
-            f"non-fast-forward restrictions{publisher_requirement}; found {len(matching)}"
-        )
-    identifier, name = matching[0]
-    effective_branch_rules: list[dict[str, Any]] = []
-    for rule in effective_rules:
-        ruleset_id = rule.get("ruleset_id")
-        if not isinstance(ruleset_id, int) or isinstance(ruleset_id, bool) or ruleset_id <= 0:
-            raise ReleasePreflightError("GitHub effective-rule inventory contains an invalid ruleset ID")
-        if ruleset_id not in active_branch_ruleset_ids:
-            raise ReleasePreflightError(
-                "GitHub effective-rule inventory references a ruleset "
-                "absent from the observed active branch-ruleset inventory"
-            )
-        effective_branch_rules.append(rule)
-    effective_ids = {rule["ruleset_id"] for rule in effective_branch_rules}
-    effective_types = {
-        rule.get("type")
-        for rule in effective_branch_rules
-        if rule["ruleset_id"] == identifier and isinstance(rule.get("type"), str)
-    }
-    if effective_ids != {identifier} or effective_types != required_rules:
-        raise ReleasePreflightError(
-            "release-channel has overlapping or incomplete effective branch rules; "
-            "the exact reviewed ruleset must be its only active branch-ruleset authority"
-        )
-    return identifier, name
 
 
 def _run(
@@ -313,99 +152,6 @@ def _run(
     return completed.stdout
 
 
-def _fetch_paginated_github_array(
-    endpoint: str,
-    *,
-    label: str,
-    runner: Runner,
-) -> list[dict[str, Any]]:
-    """Fetch every object page from one GitHub endpoint under a closed bound."""
-
-    rows: list[dict[str, Any]] = []
-    page_separator = "&" if "?" in endpoint else "?"
-    maximum_pages = MAX_GITHUB_API_ROWS // GITHUB_API_PAGE_SIZE
-    for page in range(1, maximum_pages + 2):
-        raw = _run(
-            [
-                "gh",
-                "api",
-                "-H",
-                "Accept: application/vnd.github+json",
-                (f"{endpoint}{page_separator}per_page={GITHUB_API_PAGE_SIZE}&page={page}"),
-            ],
-            runner=runner,
-        )
-        try:
-            page_rows = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ReleasePreflightError(f"GitHub {label} page {page} is invalid JSON: {exc}") from exc
-        if (
-            not isinstance(page_rows, list)
-            or len(page_rows) > GITHUB_API_PAGE_SIZE
-            or any(not isinstance(row, dict) for row in page_rows)
-        ):
-            raise ReleasePreflightError(f"GitHub {label} page {page} is not a bounded object array")
-        if page > maximum_pages:
-            if page_rows:
-                raise ReleasePreflightError(f"GitHub {label} exceeds the {MAX_GITHUB_API_ROWS}-row safety bound")
-            break
-        rows.extend(page_rows)
-        if len(page_rows) < GITHUB_API_PAGE_SIZE:
-            break
-    return rows
-
-
-def fetch_release_channel_rulesets(
-    repository: str,
-    *,
-    runner: Runner = subprocess.run,
-) -> list[dict[str, Any]]:
-    """Fetch complete repository rulesets through bounded authenticated calls."""
-
-    rows = _fetch_paginated_github_array(
-        f"repos/{repository}/rulesets?includes_parents=true",
-        label="ruleset listing",
-        runner=runner,
-    )
-    details: list[dict[str, Any]] = []
-    for row in rows:
-        identifier = row.get("id")
-        if not isinstance(identifier, int) or isinstance(identifier, bool) or identifier <= 0:
-            raise ReleasePreflightError("GitHub ruleset listing contains an invalid ID")
-        detail_raw = _run(
-            [
-                "gh",
-                "api",
-                "-H",
-                "Accept: application/vnd.github+json",
-                f"repos/{repository}/rulesets/{identifier}",
-            ],
-            runner=runner,
-        )
-        try:
-            detail = json.loads(detail_raw)
-        except json.JSONDecodeError as exc:
-            raise ReleasePreflightError(f"GitHub ruleset {identifier} is invalid JSON: {exc}") from exc
-        if not isinstance(detail, dict) or detail.get("id") != identifier:
-            raise ReleasePreflightError(f"GitHub ruleset {identifier} detail is inconsistent")
-        details.append(detail)
-    return details
-
-
-def fetch_effective_release_channel_rules(
-    repository: str,
-    *,
-    runner: Runner = subprocess.run,
-) -> list[dict[str, Any]]:
-    """Fetch the aggregate rules GitHub applies to the stable-channel branch."""
-
-    return _fetch_paginated_github_array(
-        f"repos/{repository}/rules/branches/{RELEASE_CHANNEL_BRANCH}",
-        label="effective release-channel rules",
-        runner=runner,
-    )
-
-
 def validate_request(
     *,
     operation: str,
@@ -413,13 +159,8 @@ def validate_request(
     repository: str,
     ref: str,
     commit: str,
-    immutable_releases_confirmed: bool,
-    rulesets: object,
-    effective_rules: object,
-    expected_commit: str,
-    require_publisher_bypass: bool = True,
-) -> tuple[int, str]:
-    """Validate immutable request inputs and the live channel protection."""
+) -> None:
+    """Validate the request GitHub bound to the selected ``main`` commit."""
 
     _version_key(version)
     if operation not in {"release", "repair-channel"}:
@@ -430,17 +171,6 @@ def validate_request(
         raise ReleasePreflightError(f"release operations must run from refs/heads/main, got {ref!r}")
     if COMMIT_RE.fullmatch(commit) is None:
         raise ReleasePreflightError("release commit must be an exact lowercase 40-character SHA")
-    if COMMIT_RE.fullmatch(expected_commit) is None or expected_commit != commit:
-        raise ReleasePreflightError("expected release commit must be the exact workflow commit selected by main")
-    if operation == "release" and not immutable_releases_confirmed:
-        raise ReleasePreflightError("release immutability must be confirmed before a release dispatch")
-    if operation == "repair-channel" and immutable_releases_confirmed:
-        raise ReleasePreflightError("repair-channel must not carry the release-only immutability confirmation")
-    return validate_release_channel_rulesets(
-        rulesets,
-        effective_rules=effective_rules,
-        require_publisher_bypass=require_publisher_bypass,
-    )
 
 
 def select_upgrade_baselines(
@@ -656,16 +386,12 @@ def _dispatch_command(
     version: str,
     *,
     repository: str,
-    expected_commit: str,
 ) -> str:
     parts = [
         f"gh workflow run release.yaml --repo {repository} --ref main",
         f"  -f operation={operation}",
         f"  -f version={version}",
-        f"  -f expected_commit={expected_commit}",
     ]
-    if operation == "release":
-        parts.append("  -f immutable_releases_confirmed=true")
     return " \\\n".join(parts)
 
 
@@ -673,32 +399,24 @@ def run_operator_preflight(
     *,
     operation: str,
     version: str,
-    immutable_releases_confirmed: bool,
     repository: str = DEFAULT_REPOSITORY,
     runner: Runner = subprocess.run,
 ) -> dict[str, Any]:
-    """Run the non-mutating operator checks and return a dispatch plan."""
+    """Optionally preview the non-mutating remote checks and dispatch command."""
 
     _version_key(version)
     head, _branch = _operator_git_state(runner=runner)
-    authenticated_environment = _gh_authenticated_environment(runner=runner)
-    authenticated_runner = _environment_bound_runner(
-        runner=runner,
-        environment=authenticated_environment,
-    )
-    rulesets = fetch_release_channel_rulesets(repository, runner=authenticated_runner)
-    effective_rules = fetch_effective_release_channel_rules(repository, runner=authenticated_runner)
-    ruleset_id, ruleset_name = validate_request(
+    validate_request(
         operation=operation,
         version=version,
         repository=repository,
         ref="refs/heads/main",
         commit=head,
-        expected_commit=head,
-        immutable_releases_confirmed=immutable_releases_confirmed,
-        rulesets=rulesets,
-        effective_rules=effective_rules,
-        require_publisher_bypass=False,
+    )
+    authenticated_environment = _gh_authenticated_environment(runner=runner)
+    authenticated_runner = _environment_bound_runner(
+        runner=runner,
+        environment=authenticated_environment,
     )
     api = release_api_retry.GitHubReleaseAPI(repository=repository, runner=authenticated_runner)
     baselines: list[str] = []
@@ -748,16 +466,11 @@ def run_operator_preflight(
         "version": version,
         "workflow_commit": head,
         "target_commit": target_commit,
-        "release_channel_ruleset": {
-            "id": ruleset_id,
-            "name": ruleset_name,
-        },
         "posix_upgrade_baselines": baselines,
         "dispatch_command": _dispatch_command(
             operation,
             version,
             repository=repository,
-            expected_commit=head,
         ),
     }
 
@@ -766,29 +479,17 @@ def _common_request_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--operation", choices=("release", "repair-channel"), default="release")
     parser.add_argument("--version", required=True)
     parser.add_argument("--repository", default=DEFAULT_REPOSITORY)
-    parser.add_argument(
-        "--immutable-releases-confirmed",
-        type=_boolean,
-        choices=(True, False),
-        default=False,
-    )
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    request = commands.add_parser("request", help="validate workflow request and live channel rules")
+    request = commands.add_parser("request", help="validate the workflow request")
     _common_request_arguments(request)
     request.add_argument("--ref", required=True)
     request.add_argument("--commit", required=True)
-    request.add_argument("--expected-commit", required=True)
-    operator = commands.add_parser("operator", help="run full local operator preflight")
+    operator = commands.add_parser("operator", help="optionally preview a release dispatch")
     _common_request_arguments(operator)
-    ruleset_admin = commands.add_parser(
-        "ruleset-admin-audit",
-        help="require the complete organization ruleset and sole publisher bypass",
-    )
-    ruleset_admin.add_argument("--repository", default=DEFAULT_REPOSITORY)
     select = commands.add_parser("select-baselines", help="select the authenticated POSIX matrix")
     select.add_argument("--policy", type=Path, required=True)
     select.add_argument("--version", required=True)
@@ -800,29 +501,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "request":
-            request_environment = _github_com_environment_with_token(
-                os.environ.get("GH_TOKEN", ""),
-                environment=os.environ,
-            )
-            request_runner = _environment_bound_runner(
-                runner=subprocess.run,
-                environment=request_environment,
-            )
-            rulesets = fetch_release_channel_rulesets(args.repository, runner=request_runner)
-            effective_rules = fetch_effective_release_channel_rules(args.repository, runner=request_runner)
-            identifier, name = validate_request(
+            validate_request(
                 operation=args.operation,
                 version=args.version,
                 repository=args.repository,
                 ref=args.ref,
                 commit=args.commit,
-                expected_commit=args.expected_commit,
-                immutable_releases_confirmed=args.immutable_releases_confirmed,
-                rulesets=rulesets,
-                effective_rules=effective_rules,
-                require_publisher_bypass=False,
             )
-            print(f"release request and release-channel ruleset are valid: {name} ({identifier})")
+            print(f"release request is valid: {args.operation} {args.version} at {args.commit}")
             return 0
         if args.command == "select-baselines":
             selected = select_upgrade_baselines(policy_path=args.policy, target=args.version)
@@ -832,24 +518,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     output.write(f"upgrade_baselines={compact}\n")
             print(compact)
             return 0
-        if args.command == "ruleset-admin-audit":
-            admin_environment = _gh_authenticated_environment(runner=subprocess.run)
-            admin_runner = _environment_bound_runner(
-                runner=subprocess.run,
-                environment=admin_environment,
-            )
-            rulesets = fetch_release_channel_rulesets(args.repository, runner=admin_runner)
-            effective_rules = fetch_effective_release_channel_rules(args.repository, runner=admin_runner)
-            identifier, name = validate_release_channel_rulesets(
-                rulesets,
-                effective_rules=effective_rules,
-            )
-            print(f"release-channel ruleset is fully valid: {name} ({identifier})")
-            return 0
         plan = run_operator_preflight(
             operation=args.operation,
             version=args.version,
-            immutable_releases_confirmed=args.immutable_releases_confirmed,
             repository=args.repository,
         )
         print(json.dumps(plan, indent=2, sort_keys=True))

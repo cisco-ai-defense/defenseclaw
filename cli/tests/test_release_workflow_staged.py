@@ -203,8 +203,6 @@ def test_release_is_one_manual_dispatch_from_reviewed_main() -> None:
     assert set(inputs) == {
         "operation",
         "version",
-        "expected_commit",
-        "immutable_releases_confirmed",
     }
     assert inputs["operation"]["required"] == "true"
     assert inputs["operation"]["type"] == "choice"
@@ -212,10 +210,6 @@ def test_release_is_one_manual_dispatch_from_reviewed_main() -> None:
     assert inputs["operation"]["default"] == "release"
     assert inputs["version"]["required"] == "true"
     assert inputs["version"]["type"] == "string"
-    assert inputs["expected_commit"]["required"] == "true"
-    assert inputs["expected_commit"]["type"] == "string"
-    assert inputs["immutable_releases_confirmed"]["required"] == "false"
-    assert inputs["immutable_releases_confirmed"]["default"] == "false"
     assert workflow["permissions"] == {"contents": "read", "actions": "read"}
     assert workflow["concurrency"] == {
         "group": "release-${{ github.repository }}",
@@ -361,13 +355,14 @@ def test_cosign_version_split_is_documented_and_bound_to_offline_production_pins
     assert "flaky network probe" in strategy
 
 
-def test_release_immutability_preflight_uses_operator_confirmation_without_admin_token() -> None:
+def test_release_proves_published_immutability_without_operator_attestation() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
 
     assert "repos/$GITHUB_REPOSITORY/immutable-releases" not in text
-    assert "IMMUTABLE_RELEASES_CONFIRMED" in text
-    assert "inputs.immutable_releases_confirmed" in text
-    assert "Immutable Releases confirmation required" in text
+    assert "IMMUTABLE_RELEASES_CONFIRMED" not in text
+    assert "inputs.immutable_releases_confirmed" not in text
+    assert "inputs.expected_commit" not in text
+    assert "Immutable Releases confirmation required" not in text
     assert "scripts/release_api_retry.py prove-published" in text
     helper = (ROOT / "scripts/release_api_retry.py").read_text(encoding="utf-8")
     assert '"isImmutable": payload.get("immutable")' in helper

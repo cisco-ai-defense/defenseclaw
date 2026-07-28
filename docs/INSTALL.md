@@ -389,31 +389,25 @@ commit and is not an installer input. When the requested release differs from
 the checked-in development default, the workflow emits a warning; the signed,
 checksummed release assets still carry the requested version everywhere.
 
-First run the non-mutating operator preflight described in
-[Release Validation](RELEASE_VALIDATION.md#one-dispatch-contract). It prints
-the exact `workflow_commit` required by either dispatch path.
-
 Preferred — from the Actions UI:
 
 ```text
 Actions -> Release -> Run workflow -> operation: release
   -> version: 0.8.8
-  -> expected_commit: <exact 40-character workflow_commit from operator preflight>
-  -> immutable_releases_confirmed: true
 ```
 
 Or dispatch it with GitHub CLI:
 
 ```bash
-# Replace this placeholder with the exact workflow_commit from operator preflight.
-RELEASE_COMMIT="replace-with-exact-40-character-workflow-commit"
-
 gh workflow run release.yaml --ref main \
   -f operation=release \
-  -f version=0.8.8 \
-  -f expected_commit="$RELEASE_COMMIT" \
-  -f immutable_releases_confirmed=true
+  -f version=0.8.8
 ```
+
+Selecting **main**, the operation, and the version is the whole release
+request. Anything merged to `main` is source-certified, and GitHub
+automatically freezes the run's exact `github.sha`; operators do not copy a
+commit SHA or confirm repository settings.
 
 Do not create or push the tag yourself. The workflow must retain exclusive
 ownership of that namespace until its tested candidate is approved and
