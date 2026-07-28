@@ -49,6 +49,7 @@ from typing import BinaryIO
 
 ZIP_EPOCH = 315532800  # 1980-01-01, the earliest timestamp ZIP can encode.
 BUFFER_SIZE = 1024 * 1024
+HOOK_LAUNCHER_PAYLOAD_NAME = "defenseclaw-hook-launcher.exe"
 
 
 class ArtifactError(RuntimeError):
@@ -537,6 +538,7 @@ def _attach_authenticode_evidence(document: SpdxDocument, inventory_path: Path, 
         raise ArtifactError("Release and payload Authenticode evidence differ")
 
     grouped: dict[str, list[dict]] = defaultdict(list)
+    installed_paths: dict[str, str] = {}
     for installed_path, evidence in sorted(files.items()):
         installed_identity = PurePosixPath(installed_path) if isinstance(installed_path, str) else None
         if (
@@ -550,6 +552,12 @@ def _attach_authenticode_evidence(document: SpdxDocument, inventory_path: Path, 
             or any(part in {"", ".", ".."} for part in installed_identity.parts)
         ):
             raise ArtifactError(f"Invalid Authenticode installed path {installed_path!r}")
+        folded_installed_path = installed_path.casefold()
+        if previous := installed_paths.get(folded_installed_path):
+            raise ArtifactError(
+                f"Case-colliding Authenticode installed paths: {previous!r}, {installed_path!r}"
+            )
+        installed_paths[folded_installed_path] = installed_path
         if not isinstance(evidence, dict) or evidence.get("schema_version") != 1:
             raise ArtifactError(f"Invalid Authenticode evidence for {installed_path!r}")
         if evidence.get("installed_path") != installed_path:
@@ -647,11 +655,37 @@ def _payload_contract(
     files = manifest.get("files")
     if not isinstance(files, dict) or not files:
         raise ArtifactError("Payload manifest has no digest map")
+    manifest_names: dict[str, str] = {}
+    for name in files:
+        if (
+            not isinstance(name, str)
+            or not name
+            or not name.isascii()
+            or "\\" in name
+            or ":" in name
+            or PurePosixPath(name).name != name
+        ):
+            raise ArtifactError(f"Payload manifest has invalid file name: {name!r}")
+        folded = name.casefold()
+        if previous := manifest_names.get(folded):
+            raise ArtifactError(f"Payload manifest has case-colliding file names: {previous!r}, {name!r}")
+        manifest_names[folded] = name
     children = list(payload_root.iterdir())
     unexpected = sorted(path.name for path in children if not path.is_file())
     if unexpected:
         raise ArtifactError(f"Payload root contains non-file entries: {unexpected}")
-    actual = {path.name: path for path in children if path.name != "manifest.json"}
+    actual: dict[str, Path] = {}
+    actual_names: dict[str, str] = {}
+    for candidate in children:
+        if candidate.name == "manifest.json":
+            continue
+        folded = candidate.name.casefold()
+        if previous := actual_names.get(folded):
+            raise ArtifactError(
+                f"Payload root has case-colliding file names: {previous!r}, {candidate.name!r}"
+            )
+        actual_names[folded] = candidate.name
+        actual[candidate.name] = candidate
     if set(actual) != set(files):
         missing = sorted(set(files) - set(actual))
         extra = sorted(set(actual) - set(files))
@@ -707,6 +741,7 @@ def _required_payload_names(manifest: dict) -> dict[str, str]:
         if not isinstance(value, str) or not value or Path(value).name != value:
             raise ArtifactError(f"Payload manifest has invalid {prop}")
         result[prop] = value
+    result["hook_launcher"] = HOOK_LAUNCHER_PAYLOAD_NAME
     return result
 
 
@@ -944,6 +979,7 @@ def build_sbom(args: argparse.Namespace) -> dict:
         required["yara_compat_wheel"]: ("DefenseClaw YARA Python compatibility wheel", "LIBRARY", None),
         required["site_packages"]: ("DefenseClaw embedded Python site-packages", "LIBRARY", args.version),
         required["launcher"]: ("DefenseClaw native CLI launcher", "APPLICATION", args.version),
+        required["hook_launcher"]: ("DefenseClaw stable HookRuntime launcher", "APPLICATION", args.version),
         required["startup_launcher"]: ("DefenseClaw native startup launcher", "APPLICATION", args.version),
         required["cosign_verifier"]: ("Sigstore Cosign verifier", "APPLICATION", args.cosign_version),
         required["upgrade_manifest"]: ("DefenseClaw upgrade manifest", "FILE", args.version),
@@ -960,6 +996,7 @@ def build_sbom(args: argparse.Namespace) -> dict:
         required["yara_compat_wheel"]: "pkg:pypi/yara-python@4.5.4.post1",
         required["site_packages"]: defenseclaw_purl,
         required["launcher"]: defenseclaw_purl,
+        required["hook_launcher"]: defenseclaw_purl,
         required["startup_launcher"]: defenseclaw_purl,
         required["cosign_verifier"]: (
             f"pkg:github/sigstore/cosign@v{urllib.parse.quote(args.cosign_version, safe='-._~')}"
@@ -991,6 +1028,7 @@ def build_sbom(args: argparse.Namespace) -> dict:
     go_component_packages = {
         "setup": setup_id,
         "launcher": component_packages[required["launcher"]],
+        "hook-launcher": component_packages[required["hook_launcher"]],
         "startup-launcher": component_packages[required["startup_launcher"]],
         "cosign": component_packages[required["cosign_verifier"]],
     }

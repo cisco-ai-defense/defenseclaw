@@ -50,6 +50,8 @@ $WindowsArtifactHelper = Join-Path $PSScriptRoot 'windows_installer_artifacts.py
 $WindowsAuthenticodeHelper = Join-Path $PSScriptRoot 'windows-authenticode.ps1'
 $WindowsBinaryIdentityHelper = Join-Path $PSScriptRoot 'windows-binary-identity.ps1'
 $PackagedV8ResourceValidator = Join-Path $PSScriptRoot 'validate_packaged_v8_resources.py'
+$HookLauncherName = 'defenseclaw-hook-launcher.exe'
+$HookLauncherMaxUnsignedBytes = 8MB
 
 function Resolve-FullPath([string]$Path) {
     return [IO.Path]::GetFullPath($Path)
@@ -226,6 +228,8 @@ function Build-VerifiedGoBinary(
     $verification = Join-Path $VerificationRoot "$(Split-Path -Leaf $Output).verify.exe"
     $go = (Get-Command 'go.exe' -ErrorAction Stop).Source
     $savedCgo = [Environment]::GetEnvironmentVariable('CGO_ENABLED')
+    $savedGoos = [Environment]::GetEnvironmentVariable('GOOS')
+    $savedGoarch = [Environment]::GetEnvironmentVariable('GOARCH')
     try {
         [Environment]::SetEnvironmentVariable('CGO_ENABLED', '0')
         $hashes = @()
@@ -233,10 +237,17 @@ function Build-VerifiedGoBinary(
         # each immediately so endpoint scanners cannot turn a successful,
         # byte-identical build into a misleading comparison race.
         foreach ($target in @($verification, $Output)) {
-            Invoke-CheckedProcess $go @(
-                'build', '-trimpath', '-buildvcs=false', '-ldflags', $LdFlags,
-                '-o', $target, $Package
-            )
+            [Environment]::SetEnvironmentVariable('GOOS', 'windows')
+            [Environment]::SetEnvironmentVariable('GOARCH', 'amd64')
+            try {
+                Invoke-CheckedProcess $go @(
+                    'build', '-trimpath', '-buildvcs=false', '-ldflags', $LdFlags,
+                    '-o', $target, $Package
+                )
+            } finally {
+                [Environment]::SetEnvironmentVariable('GOOS', $savedGoos)
+                [Environment]::SetEnvironmentVariable('GOARCH', $savedGoarch)
+            }
             if (-not [string]::IsNullOrWhiteSpace($ResourceComponent)) {
                 Set-WindowsExecutableResource $target $ResourceComponent
             }
@@ -249,8 +260,22 @@ function Build-VerifiedGoBinary(
         }
     } finally {
         [Environment]::SetEnvironmentVariable('CGO_ENABLED', $savedCgo)
+        [Environment]::SetEnvironmentVariable('GOOS', $savedGoos)
+        [Environment]::SetEnvironmentVariable('GOARCH', $savedGoarch)
         Remove-Item -LiteralPath $verification -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Assert-HookLauncherArtifact([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -and
+        [IO.Path]::GetFileName($item.FullName) -ceq $HookLauncherName -and
+        -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+        $item.Length -gt 0 -and
+        $item.Length -le $HookLauncherMaxUnsignedBytes) {
+        return
+    }
+    throw "HookRuntime launcher must be a regular canonical $HookLauncherName no larger than $HookLauncherMaxUnsignedBytes bytes before signing: $Path"
 }
 
 function Get-FileHashHex([string]$Path) {
@@ -982,6 +1007,15 @@ $launcher = Join-Path $payload "defenseclaw-launcher.exe"
 Build-VerifiedGoBinary $launcher './cmd/defenseclaw-launcher' "-s -w -buildid=defenseclaw-launcher-$sourceCommit" $reproducibilityRoot 'launcher'
 $startupLauncher = Join-Path $payload "defenseclaw-startup.exe"
 Build-VerifiedGoBinary $startupLauncher './cmd/defenseclaw-startup' "-s -w -buildid=defenseclaw-startup-$sourceCommit -H=windowsgui" $reproducibilityRoot 'startup'
+$hookLauncherPackage = Join-Path $repoRoot 'cmd\defenseclaw-hook-launcher'
+if (-not (Test-Path -LiteralPath $hookLauncherPackage -PathType Container)) {
+    throw "A1 HookRuntime launcher source integration is missing: $hookLauncherPackage"
+}
+$hookLauncher = Join-Path $payload $HookLauncherName
+Build-VerifiedGoBinary $hookLauncher './cmd/defenseclaw-hook-launcher' `
+    "-s -w -buildid=defenseclaw-hook-launcher-$sourceCommit -H=windowsgui" `
+    $reproducibilityRoot 'hook'
+Assert-HookLauncherArtifact $hookLauncher
 
 $gatewayPayloadDir = Join-Path $build 'gateway-payload'
 Remove-SafeTree $gatewayPayloadDir $build
@@ -998,12 +1032,15 @@ Assert-DefenseClawBinaryIdentity `
 Assert-DefenseClawBinaryIdentity `
     -Path $hookBinary -ExpectedName 'defenseclaw-hook' `
     -ExpectedVersion $Version -ExpectedCommit $sourceCommit | Out-Null
-$payloadSigned = Set-FileSignaturesIfConfigured @($launcher, $startupLauncher, $gatewayBinary, $hookBinary) $build
+$payloadSigned = Set-FileSignaturesIfConfigured @(
+    $launcher, $startupLauncher, $gatewayBinary, $hookBinary, $hookLauncher
+) $build
 foreach ($resourceContract in @(
     [pscustomobject]@{ Path = $launcher; Component = 'launcher' },
     [pscustomobject]@{ Path = $startupLauncher; Component = 'startup' },
     [pscustomobject]@{ Path = $gatewayBinary; Component = 'gateway' },
-    [pscustomobject]@{ Path = $hookBinary; Component = 'hook' }
+    [pscustomobject]@{ Path = $hookBinary; Component = 'hook' },
+    [pscustomobject]@{ Path = $hookLauncher; Component = 'hook' }
 )) {
     Set-WindowsExecutableResource $resourceContract.Path $resourceContract.Component -VerifyOnly
 }
@@ -1046,7 +1083,8 @@ foreach ($mapping in @(
     [pscustomobject]@{ Installed = 'bin/defenseclaw-observability.exe'; Source = $launcher; Sbom = './payload/defenseclaw-launcher.exe' },
     [pscustomobject]@{ Installed = 'bin/defenseclaw-startup.exe'; Source = $startupLauncher; Sbom = './payload/defenseclaw-startup.exe' },
     [pscustomobject]@{ Installed = 'bin/defenseclaw-gateway.exe'; Source = $gatewayBinary; Sbom = './expanded/gateway/defenseclaw.exe' },
-    [pscustomobject]@{ Installed = 'bin/defenseclaw-hook.exe'; Source = $hookBinary; Sbom = './expanded/gateway/defenseclaw-hook.exe' }
+    [pscustomobject]@{ Installed = 'bin/defenseclaw-hook.exe'; Source = $hookBinary; Sbom = './expanded/gateway/defenseclaw-hook.exe' },
+    [pscustomobject]@{ Installed = 'bin/defenseclaw-hook-launcher.exe'; Source = $hookLauncher; Sbom = './payload/defenseclaw-hook-launcher.exe' }
 )) {
     Add-PayloadAuthenticodeEvidence $mapping.Installed $mapping.Source $mapping.Sbom -DefenseClawProduct
 }
@@ -1180,6 +1218,7 @@ try {
         '--component', "setup=$setupPath",
         '--component', "gateway=$gatewayBinary",
         '--component', "hook=$hookBinary",
+        '--component', "hook-launcher=$hookLauncher",
         '--component', "launcher=$launcher",
         '--component', "startup-launcher=$startupLauncher",
         '--component', "cosign=$(Join-Path $payload 'cosign.exe')"
@@ -1222,6 +1261,7 @@ try {
             gateway_archive_sha256 = Get-FileHashHex $gatewayZip
             embedded_gateway_archive_sha256 = Get-FileHashHex $embeddedGatewayZip
             embedded_payload_sha256 = Get-FileHashHex $embeddedPayload
+            hook_launcher_sha256 = Get-FileHashHex $hookLauncher
             product_executables_authenticode_signed = $payloadSigned
             wheel = (Split-Path -Leaf $wheel)
             wheel_sha256 = Get-FileHashHex $wheel

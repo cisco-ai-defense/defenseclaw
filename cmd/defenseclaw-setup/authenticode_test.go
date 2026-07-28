@@ -21,6 +21,7 @@ func unsignedTestPE() []byte {
 	binary.LittleEndian.PutUint16(data[0:2], 0x5a4d)
 	binary.LittleEndian.PutUint32(data[0x3c:0x40], 0x80)
 	binary.LittleEndian.PutUint32(data[0x80:0x84], 0x00004550)
+	binary.LittleEndian.PutUint16(data[0x84:0x86], imageFileMachineAMD64)
 	// IMAGE_FILE_HEADER.SizeOfOptionalHeader
 	binary.LittleEndian.PutUint16(data[0x80+20:0x80+22], 240)
 	optional := 0x80 + 24
@@ -163,6 +164,7 @@ func unsignedManifestFixture(t *testing.T) (string, payloadManifest) {
 			"site-packages.zip":     strings.Repeat("6", 64),
 			"launcher.exe":          digest,
 			"startup.exe":           digest,
+			hookLauncherPayloadName: digest,
 			"cosign.exe":            digest,
 		},
 		Authenticode: authenticodeInventory{
@@ -206,7 +208,9 @@ func TestVerifyPayloadManifestAcceptsSchemaTwoAuthenticodeAndYaraContract(t *tes
 		t.Fatal(err)
 	}
 	pe := unsignedTestPE()
-	for _, name := range []string{manifest.Launcher, manifest.StartupLauncher, manifest.CosignVerifier} {
+	for _, name := range []string{
+		manifest.Launcher, manifest.StartupLauncher, hookLauncherPayloadName, manifest.CosignVerifier,
+	} {
 		if err := os.WriteFile(filepath.Join(payloadRoot, name), pe, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -262,6 +266,9 @@ func TestValidateAuthenticodeManifestRejectsPolicyAndPathDowngrades(t *testing.T
 		"direct hash mismatch": func(manifest *payloadManifest) {
 			manifest.Files[manifest.Launcher] = strings.Repeat("f", 64)
 		},
+		"hook launcher direct hash mismatch": func(manifest *payloadManifest) {
+			manifest.Files[hookLauncherPayloadName] = strings.Repeat("f", 64)
+		},
 		"missing python": func(manifest *payloadManifest) {
 			delete(manifest.Authenticode.Files, "runtime/python/python.exe")
 		},
@@ -312,6 +319,17 @@ func TestVerifyInstalledPEInventoryRejectsTamperMissingAndExtraPEs(t *testing.T)
 			evidence.SHA256 = digestBytes(data)
 			manifest.Authenticode.Files[name] = evidence
 		},
+		"wrong architecture": func(t *testing.T, root string, _ *payloadManifest) {
+			filePath := filepath.Join(root, filepath.FromSlash(hookLauncherInstalledPath))
+			data, err := os.ReadFile(filePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			binary.LittleEndian.PutUint16(data[0x84:0x86], 0xaa64)
+			if err := os.WriteFile(filePath, data, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		},
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -321,6 +339,69 @@ func TestVerifyInstalledPEInventoryRejectsTamperMissingAndExtraPEs(t *testing.T)
 				t.Fatal("verifyInstalledPEInventory accepted a mutated install tree")
 			}
 		})
+	}
+}
+
+func TestValidateAuthenticodeManifestRejectsInconsistentHookLauncherSigner(t *testing.T) {
+	_, manifest := unsignedManifestFixture(t)
+	manifest.Unsigned = false
+	for _, installedPath := range requiredProductPEPaths {
+		evidence := manifest.Authenticode.Files[installedPath]
+		evidence.Expected.Status = "Valid"
+		evidence.Expected.SignatureType = "Authenticode"
+		evidence.Expected.Publisher = defaultPublisher
+		evidence.Expected.TimestampRequired = true
+		evidence.Expected.SignerThumbprintSHA256 = strings.Repeat("a", 64)
+		evidence.Expected.TimestampSignerThumbprintSHA256 = strings.Repeat("b", 64)
+		evidence.Expected.TimestampTokenSHA256 = strings.Repeat("c", 64)
+		manifest.Authenticode.Files[installedPath] = evidence
+	}
+	evidence := manifest.Authenticode.Files[hookLauncherInstalledPath]
+	evidence.Expected.SignerThumbprintSHA256 = strings.Repeat("d", 64)
+	manifest.Authenticode.Files[hookLauncherInstalledPath] = evidence
+	if err := validateAuthenticodeManifest(manifest); err == nil ||
+		!strings.Contains(err.Error(), "inconsistent signer identities") {
+		t.Fatalf("validateAuthenticodeManifest wrong-signer error = %v", err)
+	}
+}
+
+func TestVerifyPublishedStableHookRuntimeIdentityRequiresExactAMD64Copy(t *testing.T) {
+	source := filepath.Join(t.TempDir(), hookLauncherPayloadName)
+	published := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+	data := unsignedTestPE()
+	for _, filePath := range []string{source, published} {
+		if err := os.WriteFile(filePath, data, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	signed, err := verifyPublishedStableHookRuntimeIdentity(source, published)
+	if err != nil {
+		t.Fatalf("verify exact unsigned launcher copy: %v", err)
+	}
+	if signed {
+		t.Fatal("unsigned launcher copy was reported as signed")
+	}
+
+	tampered := append([]byte(nil), data...)
+	tampered[len(tampered)-1] ^= 0xff
+	if err := os.WriteFile(published, tampered, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifyPublishedStableHookRuntimeIdentity(source, published); err == nil ||
+		!strings.Contains(err.Error(), "digest differs") {
+		t.Fatalf("verify substituted launcher error = %v", err)
+	}
+
+	wrongArchitecture := append([]byte(nil), data...)
+	binary.LittleEndian.PutUint16(wrongArchitecture[0x84:0x86], 0xaa64)
+	for _, filePath := range []string{source, published} {
+		if err := os.WriteFile(filePath, wrongArchitecture, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := verifyPublishedStableHookRuntimeIdentity(source, published); err == nil ||
+		!strings.Contains(err.Error(), "not Windows x64") {
+		t.Fatalf("verify wrong-architecture launcher error = %v", err)
 	}
 }
 

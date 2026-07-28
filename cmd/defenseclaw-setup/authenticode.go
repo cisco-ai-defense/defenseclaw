@@ -26,7 +26,10 @@ const (
 	productAuthenticodePolicy          = "defenseclaw-product-publisher"
 	pinnedInputAuthenticodePolicy      = "pinned-input-observation"
 	digestOnlyAuthenticodePolicy       = "digest-only-upstream"
+	hookLauncherPayloadName            = "defenseclaw-hook-launcher.exe"
+	hookLauncherInstalledPath          = "bin/" + hookLauncherPayloadName
 	maxEmbeddedCertificateTableSize    = 16 << 20
+	imageFileMachineAMD64              = 0x8664
 )
 
 var (
@@ -41,6 +44,7 @@ var (
 		"bin/defenseclaw-startup.exe",
 		"bin/defenseclaw-gateway.exe",
 		"bin/defenseclaw-hook.exe",
+		hookLauncherInstalledPath,
 	}
 )
 
@@ -194,6 +198,7 @@ func validateAuthenticodeManifest(manifest payloadManifest) error {
 		"bin/mcp-scanner.exe":               manifest.Files[manifest.Launcher],
 		"bin/defenseclaw-observability.exe": manifest.Files[manifest.Launcher],
 		"bin/defenseclaw-startup.exe":       manifest.Files[manifest.StartupLauncher],
+		hookLauncherInstalledPath:           manifest.Files[hookLauncherPayloadName],
 		"runtime/tools/cosign.exe":          manifest.Files[manifest.CosignVerifier],
 	}
 	for installedPath, digest := range directDigests {
@@ -205,28 +210,36 @@ func validateAuthenticodeManifest(manifest payloadManifest) error {
 	return nil
 }
 
-func isPortableExecutableFile(filePath string) (bool, error) {
+func portableExecutableMachine(filePath string) (uint16, bool, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return false, err
+		return 0, false, err
 	}
 	defer file.Close()
 	header := make([]byte, 64)
 	if _, err := file.ReadAt(header, 0); err != nil {
-		return false, nil
+		return 0, false, nil
 	}
 	if binary.LittleEndian.Uint16(header[:2]) != 0x5a4d {
-		return false, nil
+		return 0, false, nil
 	}
 	peOffset := int64(int32(binary.LittleEndian.Uint32(header[0x3c:0x40])))
 	if peOffset < 0 {
-		return false, nil
+		return 0, false, nil
 	}
-	signature := make([]byte, 4)
-	if _, err := file.ReadAt(signature, peOffset); err != nil {
-		return false, nil
+	signatureAndMachine := make([]byte, 6)
+	if _, err := file.ReadAt(signatureAndMachine, peOffset); err != nil {
+		return 0, false, nil
 	}
-	return binary.LittleEndian.Uint32(signature) == 0x00004550, nil
+	if binary.LittleEndian.Uint32(signatureAndMachine[:4]) != 0x00004550 {
+		return 0, false, nil
+	}
+	return binary.LittleEndian.Uint16(signatureAndMachine[4:6]), true, nil
+}
+
+func isPortableExecutableFile(filePath string) (bool, error) {
+	_, present, err := portableExecutableMachine(filePath)
+	return present, err
 }
 
 func verifyInstalledPEInventory(root string, manifest payloadManifest) error {
@@ -251,9 +264,12 @@ func verifyInstalledPEInventoryWith(
 		if err != nil || !info.Mode().IsRegular() {
 			return fmt.Errorf("inventoried portable executable is missing or invalid: %s", name)
 		}
-		isPE, err := isPortableExecutableFile(full)
+		machine, isPE, err := portableExecutableMachine(full)
 		if err != nil || !isPE {
 			return fmt.Errorf("inventoried file is not a portable executable: %s", name)
+		}
+		if machine != imageFileMachineAMD64 {
+			return fmt.Errorf("inventoried portable executable is not Windows x64: %s", name)
 		}
 		digest, err := fileSHA256(full)
 		if err != nil {
@@ -309,6 +325,44 @@ type embeddedAuthenticodeMetadata struct {
 	SignerThumbprintSHA256  string
 	RFC3161TimestampPresent bool
 	NestedSignaturePresent  bool
+}
+
+func verifyPublishedStableHookRuntimeIdentity(source, published string) (bool, error) {
+	sourceDigest, err := fileSHA256(source)
+	if err != nil {
+		return false, fmt.Errorf("hash installed hook launcher source: %w", err)
+	}
+	publishedDigest, err := fileSHA256(published)
+	if err != nil {
+		return false, fmt.Errorf("hash published stable hook launcher: %w", err)
+	}
+	if sourceDigest != publishedDigest {
+		return false, errors.New("stable hook runtime digest differs from installed launcher source")
+	}
+	for label, filePath := range map[string]string{
+		"installed hook launcher source": source,
+		"published stable hook launcher": published,
+	} {
+		machine, present, err := portableExecutableMachine(filePath)
+		if err != nil || !present {
+			return false, fmt.Errorf("%s is not a portable executable", label)
+		}
+		if machine != imageFileMachineAMD64 {
+			return false, fmt.Errorf("%s is not Windows x64", label)
+		}
+	}
+	sourceMetadata, err := inspectEmbeddedAuthenticode(source)
+	if err != nil {
+		return false, err
+	}
+	publishedMetadata, err := inspectEmbeddedAuthenticode(published)
+	if err != nil {
+		return false, err
+	}
+	if sourceMetadata != publishedMetadata {
+		return false, errors.New("stable hook runtime Authenticode identity differs from installed launcher source")
+	}
+	return sourceMetadata.Present, nil
 }
 
 type cmsIssuerAndSerial struct {

@@ -6,7 +6,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"unsafe"
 
@@ -60,20 +59,11 @@ func verifyEmbeddedAuthenticodeTrust(filePath string) error {
 }
 
 func verifyPublishedStableHookRuntime(source, published string) error {
-	sourceMetadata, err := inspectEmbeddedAuthenticode(source)
+	signed, err := verifyPublishedStableHookRuntimeIdentity(source, published)
 	if err != nil {
 		return err
 	}
-	publishedMetadata, err := inspectEmbeddedAuthenticode(published)
-	if err != nil {
-		return err
-	}
-	if sourceMetadata.Present != publishedMetadata.Present ||
-		sourceMetadata.SignerThumbprintSHA256 != publishedMetadata.SignerThumbprintSHA256 ||
-		sourceMetadata.RFC3161TimestampPresent != publishedMetadata.RFC3161TimestampPresent {
-		return errors.New("stable hook runtime Authenticode identity differs from installed source")
-	}
-	if sourceMetadata.Present {
+	if signed {
 		if err := verifyEmbeddedAuthenticodeTrust(published); err != nil {
 			return fmt.Errorf("verify stable hook runtime Authenticode: %w", err)
 		}

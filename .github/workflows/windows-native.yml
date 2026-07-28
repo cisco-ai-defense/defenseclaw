@@ -147,11 +147,22 @@ jobs:
           $bin = Join-Path $env:DC_STATE_ROOT 'bin'
           New-Item -ItemType Directory -Force -Path $bin | Out-Null
           $env:CGO_ENABLED = '0'
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
           Invoke-WindowsNativeProcess $go @('build', '-o', (Join-Path $bin 'defenseclaw-gateway.exe'), './cmd/defenseclaw') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-gateway.log') | Out-Null
           Invoke-WindowsNativeProcess $go @('build', '-ldflags', '-H=windowsgui', '-o', (Join-Path $bin 'defenseclaw-hook.exe'), './cmd/defenseclaw-hook') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-hook.log') | Out-Null
+          $hookLauncher = Join-Path $bin 'defenseclaw-hook-launcher.exe'
+          Invoke-WindowsNativeProcess $go @(
+            'build', '-trimpath', '-buildvcs=false', '-ldflags', '-s -w -H=windowsgui',
+            '-o', $hookLauncher, './cmd/defenseclaw-hook-launcher'
+          ) -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-hook-launcher.log') | Out-Null
           $packageVersion = Get-WorkspacePackageVersion
           Assert-WindowsExecutableResource -Path (Join-Path $bin 'defenseclaw-gateway.exe') -Component 'gateway' -Version $packageVersion -Apply
           Assert-WindowsExecutableResource -Path (Join-Path $bin 'defenseclaw-hook.exe') -Component 'hook' -Version $packageVersion -Apply
+          Assert-WindowsExecutableResource -Path $hookLauncher -Component 'hook' -Version $packageVersion -Apply
+          if ((Get-Item -LiteralPath $hookLauncher -Force).Length -gt 8MB) {
+            throw 'HookRuntime launcher exceeds the unsigned 8 MiB size ceiling'
+          }
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS

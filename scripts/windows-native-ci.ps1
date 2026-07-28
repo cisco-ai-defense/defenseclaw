@@ -30,6 +30,8 @@ $ErrorActionPreference = 'Stop'
 $windowsResourceVerifierName = 'DefenseClawWindowsResourceVerifier-x64.exe'
 $windowsResourceIconName = 'DefenseClawWindowsResourceIcon.png'
 $windowsResourceVersionName = 'DefenseClawWindowsResourceVersion.txt'
+$hookLauncherInstalledName = 'defenseclaw-hook-launcher.exe'
+$stableHookLauncherName = 'defenseclaw-hook.exe'
 
 $setupStandardUserLauncherSource = Join-Path $PSScriptRoot 'windows-setup-standard-user-launcher.cs'
 if (-not ('DefenseClaw.SetupStandardUserLauncher' -as [type])) {
@@ -179,6 +181,42 @@ function Assert-CiscoAuthenticodeSignature([string]$Path) {
     $state = Get-CiscoAuthenticodeState $Path
     if ($state.Status -ne 'Valid' -or $state.Publisher -ne 'Cisco Systems, Inc.') {
         throw "Cisco Authenticode validation failed for ${Path}: status=$($state.Status), publisher=$($state.Publisher)"
+    }
+}
+
+function Assert-StableHookLauncherPublication(
+    [string]$Source,
+    [string]$Published,
+    [string]$Version,
+    [bool]$RequireSigned
+) {
+    if ([IO.Path]::GetFileName($Source) -cne $hookLauncherInstalledName -or
+        [IO.Path]::GetFileName($Published) -cne $stableHookLauncherName) {
+        throw 'HookRuntime launcher publication does not use canonical source and destination names'
+    }
+    foreach ($path in @($Source, $Published)) {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "HookRuntime launcher publication is not a regular file: $path"
+        }
+        Assert-WindowsExecutableResource -Path $path -Component 'hook' -Version $Version
+    }
+    $sourceHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash.ToLowerInvariant()
+    $publishedHash = (Get-FileHash -LiteralPath $Published -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($sourceHash -cne $publishedHash) {
+        throw 'stable HookRuntime launcher digest differs from the installed source artifact'
+    }
+    $sourceAuthenticode = Get-CiscoAuthenticodeState $Source
+    $publishedAuthenticode = Get-CiscoAuthenticodeState $Published
+    if ($sourceAuthenticode.Status -cne $publishedAuthenticode.Status -or
+        $sourceAuthenticode.Publisher -cne $publishedAuthenticode.Publisher) {
+        throw 'stable HookRuntime launcher Authenticode identity differs from the installed source artifact'
+    }
+    if ($RequireSigned) {
+        Assert-CiscoAuthenticodeSignature $Source
+        Assert-CiscoAuthenticodeSignature $Published
+    } elseif ($sourceAuthenticode.Status -cne 'NotSigned') {
+        throw "unsigned HookRuntime launcher has unexpected Authenticode status: $($sourceAuthenticode.Status)"
     }
 }
 
@@ -3288,6 +3326,7 @@ function Invoke-SetupAcceptance {
     $startup = Join-Path $installRoot 'bin\defenseclaw-startup.exe'
     $gateway = Join-Path $installRoot 'bin\defenseclaw-gateway.exe'
     $hook = Join-Path $installRoot 'bin\defenseclaw-hook.exe'
+    $hookLauncherSource = Join-Path $installRoot "bin\$hookLauncherInstalledName"
     $python = Join-Path $installRoot 'runtime\python\python.exe'
     $cosign = Join-Path $installRoot 'runtime\tools\cosign.exe'
     $disposableGithubRunner = $env:GITHUB_ACTIONS -eq 'true' -and
@@ -3351,7 +3390,7 @@ function Invoke-SetupAcceptance {
         }
 
         foreach ($required in @(
-            $launcher, $startup, $gateway, $hook, $python, $cosign,
+            $launcher, $startup, $gateway, $hook, $hookLauncherSource, $python, $cosign,
             (Join-Path $installRoot 'bin\skill-scanner.exe'),
             (Join-Path $installRoot 'bin\mcp-scanner.exe'),
             (Join-Path $installRoot 'bin\defenseclaw-observability.exe')
@@ -3382,6 +3421,11 @@ function Invoke-SetupAcceptance {
                 Assert-CiscoAuthenticodeSignature $productExecutable
             }
         }
+        Assert-StableHookLauncherPublication `
+            -Source $hookLauncherSource `
+            -Published (Get-StableHookRuntimeExecutable) `
+            -Version $packageVersion `
+            -RequireSigned $requireSignedProduct
         $env:DEFENSECLAW_HOME = $dataRoot
         $env:PATH = "$(Join-Path $installRoot 'bin');$env:SystemRoot\System32;$env:SystemRoot"
         $resolved = @(Get-Command defenseclaw -CommandType Application -ErrorAction Stop)[0].Source
@@ -3944,7 +3988,8 @@ function Assert-WindowsReleaseSbom(
     [string]$Path,
     [string]$SetupHash,
     [string]$Version,
-    [string]$SourceCommit
+    [string]$SourceCommit,
+    [string]$HookLauncherHash
 ) {
     $sbom = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
     if ([string]$sbom.spdxVersion -cne 'SPDX-2.3' -or
@@ -4019,6 +4064,50 @@ function Assert-WindowsReleaseSbom(
     })
     if ($describesRelationships.Count -ne 1 -or $containsRelationships.Count -ne 1) {
         throw 'release setup SBOM relationships do not bind the document, package, and Setup file'
+    }
+
+    $hookLauncherPackages = @($sbom.packages | Where-Object {
+        [string]$_.name -ceq 'DefenseClaw stable HookRuntime launcher'
+    })
+    if ($hookLauncherPackages.Count -ne 1) {
+        throw 'release setup SBOM must contain exactly one stable HookRuntime launcher package'
+    }
+    $hookLauncherPackage = $hookLauncherPackages[0]
+    if ([string]$hookLauncherPackage.versionInfo -cne $Version -or
+        [string]$hookLauncherPackage.packageFileName -cne 'defenseclaw-hook-launcher.exe') {
+        throw 'release setup SBOM HookRuntime launcher package identity is invalid'
+    }
+    $hookLauncherPackageHashes = @($hookLauncherPackage.checksums | Where-Object {
+        [string]$_.algorithm -ceq 'SHA256' -and
+        [string]$_.checksumValue -ceq $HookLauncherHash
+    })
+    if ($hookLauncherPackageHashes.Count -ne 1) {
+        throw 'release setup SBOM HookRuntime launcher package digest differs from provenance'
+    }
+    $hookLauncherFiles = @($sbom.files | Where-Object {
+        [string]$_.fileName -ceq './payload/defenseclaw-hook-launcher.exe'
+    })
+    if ($hookLauncherFiles.Count -ne 1) {
+        throw 'release setup SBOM must contain exactly one canonical HookRuntime launcher file'
+    }
+    $hookLauncherFile = $hookLauncherFiles[0]
+    $hookLauncherFileHashes = @($hookLauncherFile.checksums | Where-Object {
+        [string]$_.algorithm -ceq 'SHA256' -and
+        [string]$_.checksumValue -ceq $HookLauncherHash
+    })
+    if ($hookLauncherFileHashes.Count -ne 1 -or
+        -not ([string]$hookLauncherFile.comment).Contains(
+            '"installed_path":"bin/defenseclaw-hook-launcher.exe"'
+        )) {
+        throw 'release setup SBOM HookRuntime launcher file lacks exact digest or Authenticode inventory binding'
+    }
+    $hookLauncherRelationships = @($sbom.relationships | Where-Object {
+        [string]$_.spdxElementId -ceq [string]$hookLauncherPackage.SPDXID -and
+        [string]$_.relationshipType -ceq 'CONTAINS' -and
+        [string]$_.relatedSpdxElement -ceq [string]$hookLauncherFile.SPDXID
+    })
+    if ($hookLauncherRelationships.Count -ne 1) {
+        throw 'release setup SBOM does not bind the HookRuntime launcher package to its exact file'
     }
 }
 
@@ -4207,8 +4296,12 @@ function Invoke-WindowsReleaseCertification {
     if ([string]$provenance.version -cne $releaseVersion) {
         throw "release setup provenance version does not match the resolved release: $($provenance.version) != $releaseVersion"
     }
+    $expectedHookLauncherHash = [string]$provenance.inputs.hook_launcher_sha256
+    if ($expectedHookLauncherHash -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'release setup provenance lacks the canonical HookRuntime launcher SHA-256'
+    }
     Assert-WindowsReleaseSbom `
-        $sbomPath $setupHash $releaseVersion ([string]$env:GITHUB_SHA)
+        $sbomPath $setupHash $releaseVersion ([string]$env:GITHUB_SHA) $expectedHookLauncherHash
     $releaseMetadataHashes = @{}
     foreach ($metadataPath in @($sidecarPath, $provenancePath, $sbomPath)) {
         $releaseMetadataHashes[$metadataPath] = `
@@ -4308,13 +4401,25 @@ function Invoke-WindowsReleaseCertification {
         $launcher = Join-Path $bin 'defenseclaw.exe'
         $gateway = Join-Path $bin 'defenseclaw-gateway.exe'
         $hook = Join-Path $bin 'defenseclaw-hook.exe'
+        $hookLauncherSource = Join-Path $bin $hookLauncherInstalledName
         $python = Join-Path $installRoot 'runtime\python\python.exe'
-        foreach ($product in @($launcher, $gateway, $hook)) {
+        foreach ($product in @($launcher, $gateway, $hook, $hookLauncherSource)) {
             if (-not (Test-Path -LiteralPath $product -PathType Leaf)) {
                 throw "exact signed Setup did not install required product executable: $product"
             }
             Assert-CiscoAuthenticodeSignature $product
         }
+        $installedHookLauncherHash = (
+            Get-FileHash -LiteralPath $hookLauncherSource -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($installedHookLauncherHash -cne $expectedHookLauncherHash) {
+            throw 'installed HookRuntime launcher source digest differs from release provenance'
+        }
+        Assert-StableHookLauncherPublication `
+            -Source $hookLauncherSource `
+            -Published (Get-StableHookRuntimeExecutable) `
+            -Version $releaseVersion `
+            -RequireSigned $true
         $installedStatePath = Join-Path $installRoot 'installer\install-state.json'
         $installedPayloadPath = Join-Path $installRoot 'installer\payload-manifest.json'
         foreach ($identityPath in @($installedStatePath, $installedPayloadPath)) {
@@ -4328,6 +4433,17 @@ function Invoke-WindowsReleaseCertification {
             if ([string]$installedIdentity.version -cne $releaseVersion) {
                 throw "installed version does not match resolved release in ${identityPath}: $($installedIdentity.version) != $releaseVersion"
             }
+        }
+        $installedPayloadManifest = Get-Content -LiteralPath $installedPayloadPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+        $installedHookLauncherEvidence = $installedPayloadManifest.authenticode.files.
+            'bin/defenseclaw-hook-launcher.exe'
+        if ([string]$installedPayloadManifest.files.'defenseclaw-hook-launcher.exe' -cne
+                $expectedHookLauncherHash -or
+            [string]$installedHookLauncherEvidence.installed_path -cne
+                'bin/defenseclaw-hook-launcher.exe' -or
+            [string]$installedHookLauncherEvidence.sha256 -cne $expectedHookLauncherHash) {
+            throw 'installed payload manifest does not bind the HookRuntime launcher source digest and inventory path'
         }
         Assert-WindowsReleasePersistentPath $launcher $logs
         Assert-PackagedV8ResourceContract $python (Join-Path $installRoot 'runtime\python')
