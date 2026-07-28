@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import io
 import json
 import os
+import platform
 import re
 import stat
 import subprocess
 import sys
+import tarfile
 import time
 from pathlib import Path
 
@@ -1036,26 +1039,25 @@ def test_posix_resolver_bootstraps_recovery_under_fixed_mutator_lease() -> None:
     assert "_recover_interrupted_hard_cut" in text
 
 
-def test_missing_cursor_authenticator_restores_requested_contract_before_return() -> None:
-    resolver = (ROOT / "scripts/upgrade.sh").read_text(encoding="utf-8")
-    function_start = resolver.index(
-        "authenticate_release_owned_missing_cursor_source() {"
-    )
+def test_cursorless_field_gate_keeps_the_requested_target_contract() -> None:
+    resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
+    function_start = resolver.index("authorize_cursorless_field_recovery() {")
     function_end = resolver.index(
         "\n}\n\n\ncapture_hard_cut_target_controller_contract() {",
         function_start,
     )
-    authenticator = resolver[function_start:function_end]
+    field_gate = resolver[function_start:function_end]
 
-    restore = authenticator.index('RELEASE_VERSION="${requested_version}"')
-    configure = authenticator.index("configure_release", restore)
-    prepare = authenticator.index("prepare_release_contract", configure)
-    success = authenticator.index(
-        'ok "Authenticated the exact published ${source_version}',
-        prepare,
-    )
-    assert restore < configure < prepare < success
-    assert authenticator.count("prepare_release_contract") == 2
+    assert 'CURRENT_VERSION}" == "${source_version}' in field_gate
+    assert 'CURRENT_GATEWAY_VERSION}" == "${source_version}' in field_gate
+    assert 'config["config_version"] != 8' in field_gate
+    assert "migration cursor must be wholly absent" in field_gate
+    assert "phase-one-active.json" in field_gate
+    assert "phase-two-active.json" in field_gate
+    assert field_gate.count("prepare_release_contract") == 1
+    assert 'RELEASE_VERSION="' not in field_gate
+    assert "configure_release" not in field_gate
+    assert "authenticated-source-" not in field_gate
 
     caller_start = resolver.rindex(
         'if [[ -n "${HARD_CUT_CURSOR_RECOVERY_SOURCE_VERSION}" ]]; then'
@@ -1067,7 +1069,7 @@ def test_missing_cursor_authenticator_restores_requested_contract_before_return(
     caller = resolver[caller_start:caller_end]
     assert (
         "then\n"
-        "    authenticate_release_owned_missing_cursor_source\n"
+        "    authorize_cursorless_field_recovery\n"
         "else\n"
         "    prepare_release_contract\n"
         "fi\n"
@@ -1075,7 +1077,7 @@ def test_missing_cursor_authenticator_restores_requested_contract_before_return(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX phase-two recovery")
-def test_interrupted_phase_two_bootstraps_private_uv_under_clean_path(
+def test_interrupted_phase_two_downloads_pinned_uv_under_clean_path(
     tmp_path: Path,
 ) -> None:
     resolver = (ROOT / "scripts/upgrade.sh").read_text(encoding="utf-8")
@@ -1098,6 +1100,62 @@ def test_interrupted_phase_two_bootstraps_private_uv_under_clean_path(
         resolve_start,
     )
     resolve_function = resolver[resolve_start:resolve_end]
+    uv_assets = {
+        ("Darwin", "x86_64"): (
+            "uv-x86_64-apple-darwin.tar.gz",
+            "uv-x86_64-apple-darwin/uv",
+            "2ad79983127ffca7d77b77ce6a24278d7e4f7b817a1acf72fea5f8124b4aac5e",
+        ),
+        ("Darwin", "arm64"): (
+            "uv-aarch64-apple-darwin.tar.gz",
+            "uv-aarch64-apple-darwin/uv",
+            "33540eb7c883ab857eff79bd5ac2aa31fe27b595abecb4a9c003a2c998447232",
+        ),
+        ("Linux", "x86_64"): (
+            "uv-x86_64-unknown-linux-gnu.tar.gz",
+            "uv-x86_64-unknown-linux-gnu/uv",
+            "e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224",
+        ),
+        ("Linux", "aarch64"): (
+            "uv-aarch64-unknown-linux-gnu.tar.gz",
+            "uv-aarch64-unknown-linux-gnu/uv",
+            "03e9fe0a81b0718d0bc84625de3885df6cc3f89a8b6af6121d6b9f6113fb6533",
+        ),
+        ("Linux", "arm64"): (
+            "uv-aarch64-unknown-linux-gnu.tar.gz",
+            "uv-aarch64-unknown-linux-gnu/uv",
+            "03e9fe0a81b0718d0bc84625de3885df6cc3f89a8b6af6121d6b9f6113fb6533",
+        ),
+    }
+    uv_platform = (platform.system(), platform.machine())
+    if uv_platform not in uv_assets:
+        pytest.skip(f"unsupported uv bootstrap fixture platform: {uv_platform}")
+    uv_asset, uv_member, production_uv_digest = uv_assets[uv_platform]
+    pinned_marker = tmp_path / "pinned-uv-executed"
+    uv_payload = (
+        "#!/bin/sh\n"
+        f"printf executed > {str(pinned_marker)!r}\n"
+        f"if [ \"$#\" -eq 1 ] && [ \"$1\" = \"--version\" ]; then "
+        f"printf 'uv {version_match.group(1)}\\n'; exit 0; fi\n"
+        'printf \'%s|%s\\n\' "$0" "$*" >> "${UV_LOG:?}"\n'
+        "exit 0\n"
+    ).encode()
+    uv_archive = tmp_path / uv_asset
+    with tarfile.open(uv_archive, mode="w:gz") as archive:
+        directory = tarfile.TarInfo(str(Path(uv_member).parent))
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o755
+        archive.addfile(directory)
+        executable = tarfile.TarInfo(uv_member)
+        executable.mode = 0o755
+        executable.size = len(uv_payload)
+        archive.addfile(executable, io.BytesIO(uv_payload))
+    fixture_uv_digest = hashlib.sha256(uv_archive.read_bytes()).hexdigest()
+    assert resolve_function.count(production_uv_digest) == 1
+    resolve_function = resolve_function.replace(
+        production_uv_digest,
+        fixture_uv_digest,
+    )
     recovery_start = resolver.index("recover_interrupted_phase_two() {")
     recovery_end = resolver.index(
         "\n}\n\nacquire_upgrade_lock() {",
@@ -1148,14 +1206,11 @@ def test_interrupted_phase_two_bootstraps_private_uv_under_clean_path(
     config.write_text("config_version: 8\n", encoding="utf-8")
     uv_log = tmp_path / "uv.log"
     recovery_log = tmp_path / "recovery-python.log"
+    known_marker = tmp_path / "known-uv-executed"
     known_uv.write_text(
         "#!/bin/sh\n"
-        'if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then\n'
-        f"  printf '%s\\n' 'uv {version_match.group(1)}'\n"
-        "  exit 0\n"
-        "fi\n"
-        'printf \'%s|%s\\n\' "$0" "$*" >> "${UV_LOG:?}"\n'
-        "exit 0\n",
+        f"printf executed > {str(known_marker)!r}\n"
+        f"printf '%s\\n' 'uv {version_match.group(1)}'\n",
         encoding="utf-8",
     )
     known_uv.chmod(0o755)
@@ -1179,13 +1234,21 @@ def test_interrupted_phase_two_bootstraps_private_uv_under_clean_path(
         "UV_BIN=\"\"\n"
         f'UV_BOOTSTRAP_VERSION="{version_match.group(1)}"\n'
         f'UV_BOOTSTRAP_MAX_BYTES="{maximum_match.group(1)}"\n'
-        'MANAGED_PYTHON_NO_LOCAL_BYTECODE="pycache_prefix=/dev/null"\n'
         "RED=\"\"; GREEN=\"\"; YELLOW=\"\"; BLUE=\"\"; CYAN=\"\"; BOLD=\"\"; DIM=\"\"; NC=\"\"\n"
         'die() { printf "die: %s\\n" "$*" >&2; exit 1; }\n'
         'ok() { printf "ok: %s\\n" "$*"; }\n'
         'warn() { printf "warn: %s\\n" "$*" >&2; }\n'
         'info() { printf "info: %s\\n" "$*"; }\n'
         'section() { printf "section: %s\\n" "$*"; }\n'
+        "curl() {\n"
+        "  local output='' previous=''\n"
+        '  for arg in "$@"; do\n'
+        '    if [[ "${previous}" == "--output" ]]; then output="${arg}"; break; fi\n'
+        '    previous="${arg}"\n'
+        "  done\n"
+        '  [[ -n "${output}" ]] || return 94\n'
+        f"  cp {str(uv_archive)!r} \"${{output}}\"\n"
+        "}\n"
         + staging_functions
         + resolve_function
         + "\n"
@@ -1221,6 +1284,8 @@ def test_interrupted_phase_two_bootstraps_private_uv_under_clean_path(
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "private-uv=" in completed.stdout
     assert "/upgrade-tools/uv" in completed.stdout
+    assert not known_marker.exists()
+    assert pinned_marker.read_text(encoding="utf-8") == "executed"
     assert str(known_uv) not in uv_log.read_text(encoding="utf-8")
 
 

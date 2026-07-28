@@ -5,11 +5,9 @@ from __future__ import annotations
 
 import gzip
 import hashlib
-import importlib.util
 import json
 import os
 import platform
-import py_compile
 import re
 import shutil
 import socket
@@ -37,6 +35,61 @@ def _write_executable(path: Path, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
     path.chmod(0o755)
+
+
+def _resolver_with_fixture_uv(
+    source: Path,
+    destination: Path,
+    uv_binary: Path,
+    archive_root: Path,
+) -> tuple[Path, Path]:
+    uv_assets = {
+        ("Darwin", "x86_64"): (
+            "uv-x86_64-apple-darwin.tar.gz",
+            "uv-x86_64-apple-darwin/uv",
+        ),
+        ("Darwin", "arm64"): (
+            "uv-aarch64-apple-darwin.tar.gz",
+            "uv-aarch64-apple-darwin/uv",
+        ),
+        ("Linux", "x86_64"): (
+            "uv-x86_64-unknown-linux-gnu.tar.gz",
+            "uv-x86_64-unknown-linux-gnu/uv",
+        ),
+        ("Linux", "amd64"): (
+            "uv-x86_64-unknown-linux-gnu.tar.gz",
+            "uv-x86_64-unknown-linux-gnu/uv",
+        ),
+        ("Linux", "aarch64"): (
+            "uv-aarch64-unknown-linux-gnu.tar.gz",
+            "uv-aarch64-unknown-linux-gnu/uv",
+        ),
+        ("Linux", "arm64"): (
+            "uv-aarch64-unknown-linux-gnu.tar.gz",
+            "uv-aarch64-unknown-linux-gnu/uv",
+        ),
+    }
+    uv_platform = (platform.system(), platform.machine())
+    if uv_platform not in uv_assets:
+        pytest.skip(f"unsupported uv bootstrap fixture platform: {uv_platform}")
+    asset, member = uv_assets[uv_platform]
+    archive = archive_root / asset
+    with tarfile.open(archive, mode="w:gz") as stream:
+        stream.add(uv_binary, arcname=member, recursive=False)
+
+    source_text = source.read_text(encoding="utf-8")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    pattern = re.compile(
+        rf'(asset="{re.escape(asset)}"\n\s+expected=")[0-9a-f]{{64}}(")',
+    )
+    source_text, replacements = pattern.subn(
+        lambda match: f"{match.group(1)}{digest}{match.group(2)}",
+        source_text,
+    )
+    assert replacements == 1, f"could not patch fixture digest for {asset}"
+    destination.write_text(source_text, encoding="utf-8")
+    destination.chmod(0o755)
+    return destination, archive
 
 
 @pytest.fixture(scope="module")
@@ -919,27 +972,6 @@ def test_bridge_start_failure_restores_source_artifacts_state_and_health(
         source_package,
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
-    source_config_cache_marker = tmp_path / "source-config-cache-executed"
-    if bridge_install_failure:
-        source_config = source_package / "config.py"
-        malicious_config_source = tmp_path / "malicious-source-config.py"
-        malicious_config_source.write_text(
-            source_config.read_text(encoding="utf-8").replace(
-                "from __future__ import annotations\n",
-                "from __future__ import annotations\n"
-                "from pathlib import Path as _DefenseClawCacheMarker\n"
-                f"_DefenseClawCacheMarker({str(source_config_cache_marker)!r}).write_text("
-                "'executed', encoding='utf-8')\n",
-                1,
-            ),
-            encoding="utf-8",
-        )
-        py_compile.compile(
-            str(malicious_config_source),
-            cfile=importlib.util.cache_from_source(str(source_config)),
-            doraise=True,
-            invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
-        )
     data_home.mkdir()
     install_dir.mkdir(parents=True)
     if openclaw_present:
@@ -1126,6 +1158,12 @@ fi
 exit 0
 """,
     )
+    resolver_script, fixture_uv_archive = _resolver_with_fixture_uv(
+        resolver_script,
+        tmp_path / "upgrade-fixture-uv.sh",
+        fake_bin / "uv",
+        tmp_path,
+    )
     _write_executable(fake_bin / "cosign", "#!/usr/bin/env bash\nexit 0\n")
     _write_executable(fake_bin / "openclaw", "#!/usr/bin/env bash\nexit 0\n")
     _write_executable(
@@ -1139,11 +1177,15 @@ is_head=0
 for arg in "$@"; do
   if [[ "${want_out}" -eq 1 ]]; then out="${arg}"; want_out=0; continue; fi
   case "${arg}" in
-    -o) want_out=1 ;;
+    -o|--output) want_out=1 ;;
     --head) is_head=1 ;;
     http*) url="${arg}" ;;
   esac
 done
+if [[ "${url}" == https://github.com/astral-sh/uv/releases/download/* ]]; then
+  cp "${FIXTURE_UV_ARCHIVE}" "${out}"
+  exit 0
+fi
 if [[ "${url}" == http://127.0.0.1:*/health ]]; then
   if [[ "${FORCE_ORPHAN_HEALTH:-0}" == '1' ]]; then
     printf '%s\n' '{"api":{"state":"running"},"gateway":{"state":"starting"},"provenance":{"binary_version":"0.8.3"}}' > "${out}"
@@ -1201,6 +1243,7 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
             "DEFENSECLAW_HOME": str(controller_home),
             "OPENCLAW_HOME": str(openclaw_home),
             "FIXTURE_ROOT": str(fixtures),
+            "FIXTURE_UV_ARCHIVE": str(fixture_uv_archive),
             "TARGET_PYTHON_TEMPLATE": str(target_python_template),
             "TARGET_CLI_TEMPLATE": str(target_cli_template),
             "TARGET_RUNTIME_PYTHON": sys.executable,
@@ -1382,11 +1425,6 @@ cp "${FIXTURE_ROOT}/${version}/${name}" "${out}"
             initial_process.wait(timeout=10)
 
     assert result is not None
-    if bridge_install_failure:
-        # This non-plan case reaches prepare_bridge_phase1_custody with an
-        # unchecked-hash config cache. Every installed-source import must
-        # bypass that cache, including the health-URL lookup before stop.
-        assert not source_config_cache_marker.exists()
 
     if crash_point == "migration-after-config":
         try:

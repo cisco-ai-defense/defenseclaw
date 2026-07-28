@@ -12,6 +12,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_post_hard_cut_continuation_scopes_fresh_process_marker_to_frozen_controller() -> None:
     resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
+    cleanup_start = resolver.index("cleanup_upgrade_staging() {")
+    cleanup_end = resolver.index("\n}", cleanup_start)
+    cleanup = resolver[cleanup_start:cleanup_end]
     start = resolver.index("continue_post_hard_cut_upgrade() {")
     end = resolver.index("\nvalidate_tarball_members() {", start)
     continuation = resolver[start:end]
@@ -28,7 +31,9 @@ def test_post_hard_cut_continuation_scopes_fresh_process_marker_to_frozen_contro
         "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION",
     ):
         assert continuation.index(f"unset {staged_name}") < continuation.index(marker)
-    assert continuation.index('STAGING_DIR=""') < continuation.index(marker)
+    assert continuation.index("cleanup_upgrade_staging") < continuation.index(marker)
+    assert 'STAGING_DIR=""' in cleanup
+    assert 'UV_BIN=""' in cleanup
     assert continuation.index(marker) < continuation.index(controller)
     assert (
         f"env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \\\n        {marker} \\\n        {controller}"

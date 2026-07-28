@@ -970,22 +970,6 @@ prepare_required_bridge_assets() {
     fi
 }
 
-prepare_field_recovery_source_assets() {
-    [[ "${UPGRADE_SMOKE_FIELD_RECOVERY_CASES:-0}" == "1" ]] || return 0
-
-    # The missing-cursor resolver re-authenticates the exact published 0.8.6
-    # or 0.8.7 source contract before accepting the field state produced by
-    # that release's own installer and first-run command. Stage both bounded
-    # source views before the local server starts. The shared helper
-    # authenticates the checksum proof first, then every served wheel, gateway,
-    # manifest, and provenance payload.
-    local source_version
-    for source_version in 0.8.6 0.8.7; do
-        prepare_authenticated_upgrade_release_assets \
-            "${source_version}" "field-recovery source" 1
-    done
-}
-
 tail_log() {
     local file="$1"
     if [[ -f "${file}" ]]; then

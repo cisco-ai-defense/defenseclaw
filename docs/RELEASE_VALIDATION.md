@@ -80,9 +80,9 @@ omitting an unavailable lane.
 
 Field-recovery acceptance additionally installs and runs first setup through
 the authenticated published `0.8.6` and `0.8.7` controllers without
-manufacturing a cursor. The candidate resolver must authenticate the installed
-source bytes and recover both real cursorless field states on Linux and macOS
-while running with the immutable rescue bootstrap’s minimal
+manufacturing a cursor. The candidate resolver must recognize only those two
+real public cursorless field states and recover them on Linux and macOS while
+running with the immutable rescue bootstrap’s minimal
 `/usr/bin:/bin:/usr/sbin:/sbin` tool path. This keeps the seven-lane matrix
 compact while retaining the exact `0.8.7` regression after it stops being the
 latest-older lane.

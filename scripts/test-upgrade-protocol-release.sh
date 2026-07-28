@@ -961,9 +961,9 @@ PY
 
     case "${recovery_case}" in
         published-missing-cursor)
-            grep -Fq "Authenticated the exact published ${baseline} missing-cursor compatibility state" \
+            grep -Fq "Accepted exact public ${baseline} cursorless first-run state" \
                 "${log_file}" \
-                || die "field recovery did not authenticate the exact published ${baseline} source"
+                || die "field recovery did not accept the exact public ${baseline} cursorless state"
             python3 - \
                 "${SMOKE_HOME}/.defenseclaw" \
                 "${RELEASE_ROOT}/${TARGET_VERSION}/upgrade-manifest.json" \
@@ -1338,7 +1338,6 @@ main_protocol_gate() {
         assert_reviewed_resolver_asset_contract
     else
         prepare_required_bridge_assets
-        prepare_field_recovery_source_assets
     fi
     start_release_server
     if [[ "${REFUSAL_CONTRACT_ONLY}" != "1" ]]; then

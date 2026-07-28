@@ -93,7 +93,6 @@ readonly COSIGN_BOOTSTRAP_VERSION="2.6.3"
 readonly COSIGN_BOOTSTRAP_MAX_BYTES="209715200"
 readonly UV_BOOTSTRAP_VERSION="0.11.28"
 readonly UV_BOOTSTRAP_MAX_BYTES="209715200"
-readonly MANAGED_PYTHON_NO_LOCAL_BYTECODE="pycache_prefix=/dev/null"
 readonly UPGRADE_MANIFEST_NAME="upgrade-manifest.json"
 readonly RELEASE_PROVENANCE_NAME="release-provenance.json"
 readonly HISTORICAL_BOOTSTRAP_MCP_SCANNER_CONSTRAINT='cisco-ai-mcp-scanner @ https://files.pythonhosted.org/packages/5d/74/6e72cbd496c0d33dfab1b4aee62792620236e63cccf278a8c896c6feb740/cisco_ai_mcp_scanner-4.7.2-py3-none-any.whl#sha256=6ed0b8ced168886f572aec30a971c7b0e2e1de7eea489d3821627184fd271ac8'
@@ -198,61 +197,12 @@ cleanup_upgrade_staging() {
     UV_BIN=""
 }
 
-reject_managed_sourceless_bytecode() {
-    local managed_venv="$1"
-    [[ -d "${managed_venv}/lib" && ! -L "${managed_venv}/lib" ]] \
-        || die "Installed source package has executable bytecode outside __pycache__. No changes were made."
-    python3 - "${managed_venv}" <<'PY' \
-        || die "Installed source package has executable bytecode outside __pycache__. No changes were made."
-import os
-import re
-import stat
-import sys
-
-venv = os.path.abspath(sys.argv[1])
-lib_root = os.path.join(venv, "lib")
-found_package = False
-for runtime in os.scandir(lib_root):
-    if re.fullmatch(r"python[0-9]+(?:[.][0-9]+)*", runtime.name) is None:
-        continue
-    if not runtime.is_dir(follow_symlinks=False):
-        raise SystemExit(1)
-    package_root = os.path.join(runtime.path, "site-packages", "defenseclaw")
-    if not os.path.lexists(package_root):
-        continue
-    found_package = True
-    root_info = os.lstat(package_root)
-    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
-        raise SystemExit(1)
-    for current, names, files in os.walk(
-        package_root,
-        topdown=True,
-        followlinks=False,
-    ):
-        retained = []
-        for name in names:
-            if name == "__pycache__":
-                continue
-            child = os.lstat(os.path.join(current, name))
-            if stat.S_ISLNK(child.st_mode) or not stat.S_ISDIR(child.st_mode):
-                raise SystemExit(1)
-            retained.append(name)
-        names[:] = retained
-        if any(name.endswith(".pyc") for name in files):
-            raise SystemExit(1)
-if not found_package:
-    raise SystemExit(1)
-PY
-}
-
 resolve_upgrade_uv() {
     [[ -n "${UV_BIN}" && -x "${UV_BIN}" ]] && return 0
     [[ -n "${STAGING_DIR:-}" && -d "${STAGING_DIR}" && ! -L "${STAGING_DIR}" ]] \
         || die "Private staging is unavailable for Python tool custody. No changes were made."
 
     local tool_root="${STAGING_DIR}/upgrade-tools"
-    local candidate=""
-    local discovered=""
     local archive=""
     local asset=""
     local expected=""
@@ -261,201 +211,6 @@ resolve_upgrade_uv() {
         || die "Could not create private Python tool custody. No changes were made."
     chmod 700 "${tool_root}" \
         || die "Could not protect private Python tool custody. No changes were made."
-
-    discovered="$(type -P uv 2>/dev/null || true)"
-    if [[ -n "${discovered}" ]]; then
-        candidate="${discovered}"
-    else
-        local known
-        for known in \
-            "${HOME}/.local/bin/uv" \
-            "${HOME}/.cargo/bin/uv" \
-            "/opt/homebrew/bin/uv" \
-            "/usr/local/bin/uv"; do
-            if [[ -e "${known}" || -L "${known}" ]]; then
-                candidate="${known}"
-                break
-            fi
-        done
-    fi
-
-    if [[ -n "${candidate}" ]]; then
-        if python3 - "${candidate}" "${tool_root}/uv" "${UV_BOOTSTRAP_MAX_BYTES}" <<'PY' 2>/dev/null
-import hashlib
-import os
-import stat
-import sys
-
-source_name, destination, maximum_raw = sys.argv[1:]
-maximum = int(maximum_raw)
-uid = os.geteuid()
-source = os.path.realpath(os.path.abspath(os.path.expanduser(source_name)))
-parent = os.path.dirname(destination)
-
-parent_info = os.lstat(parent)
-if (
-    stat.S_ISLNK(parent_info.st_mode)
-    or not stat.S_ISDIR(parent_info.st_mode)
-    or parent_info.st_uid != uid
-    or stat.S_IMODE(parent_info.st_mode) & 0o077
-):
-    raise RuntimeError("private uv custody directory is unsafe")
-
-source_info = os.lstat(source)
-source_fd = os.open(
-    source,
-    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
-)
-created = False
-try:
-    opened = os.fstat(source_fd)
-    if (
-        not stat.S_ISREG(opened.st_mode)
-        or not os.path.samestat(source_info, opened)
-        or opened.st_uid not in {0, uid}
-        or stat.S_IMODE(opened.st_mode) & 0o022
-        or stat.S_IMODE(opened.st_mode) & 0o111 == 0
-        or not 0 < opened.st_size <= maximum
-    ):
-        raise RuntimeError("discovered uv is not a bounded trusted-owner executable")
-    source_identity = (
-        opened.st_dev,
-        opened.st_ino,
-        opened.st_uid,
-        opened.st_mode,
-        opened.st_size,
-        opened.st_mtime_ns,
-        opened.st_ctime_ns,
-    )
-    destination_fd = os.open(
-        destination,
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
-        0o700,
-    )
-    created = True
-    copied = hashlib.sha256()
-    try:
-        while True:
-            chunk = os.read(source_fd, 1024 * 1024)
-            if not chunk:
-                break
-            copied.update(chunk)
-            view = memoryview(chunk)
-            while view:
-                written = os.write(destination_fd, view)
-                if written <= 0:
-                    raise RuntimeError("uv custody copy made no progress")
-                view = view[written:]
-        os.fchmod(destination_fd, 0o700)
-        os.fsync(destination_fd)
-    finally:
-        os.close(destination_fd)
-
-    os.lseek(source_fd, 0, os.SEEK_SET)
-    reread = hashlib.sha256()
-    while True:
-        chunk = os.read(source_fd, 1024 * 1024)
-        if not chunk:
-            break
-        reread.update(chunk)
-    final_opened = os.fstat(source_fd)
-    final_named = os.lstat(source)
-    final_identity = (
-        final_opened.st_dev,
-        final_opened.st_ino,
-        final_opened.st_uid,
-        final_opened.st_mode,
-        final_opened.st_size,
-        final_opened.st_mtime_ns,
-        final_opened.st_ctime_ns,
-    )
-    if (
-        final_identity != source_identity
-        or not os.path.samestat(final_opened, final_named)
-        or copied.digest() != reread.digest()
-    ):
-        raise RuntimeError("discovered uv changed while entering private custody")
-    destination_info = os.lstat(destination)
-    if (
-        stat.S_ISLNK(destination_info.st_mode)
-        or not stat.S_ISREG(destination_info.st_mode)
-        or destination_info.st_uid != uid
-        or stat.S_IMODE(destination_info.st_mode) != 0o700
-        or destination_info.st_size != source_identity[4]
-    ):
-        raise RuntimeError("private uv custody is invalid")
-    with open(destination, "rb") as stream:
-        if hashlib.sha256(stream.read()).digest() != copied.digest():
-            raise RuntimeError("private uv custody changed after publication")
-    directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
-except BaseException:
-    if created:
-        try:
-            os.unlink(destination)
-        except FileNotFoundError:
-            pass
-    raise
-finally:
-    os.close(source_fd)
-PY
-        then
-            if python3 - "${tool_root}/uv" "${UV_BOOTSTRAP_VERSION}" <<'PY' 2>/dev/null
-import os
-import re
-import subprocess
-import sys
-
-executable, expected_version = sys.argv[1:]
-environment = {
-    "HOME": os.environ.get("HOME", "/"),
-    "LANG": "C",
-    "LC_ALL": "C",
-    "PATH": "/usr/bin:/bin",
-}
-try:
-    completed = subprocess.run(
-        [executable, "--version"],
-        check=False,
-        env=environment,
-        stderr=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        timeout=10,
-    )
-except (OSError, subprocess.TimeoutExpired):
-    raise SystemExit(1)
-if completed.returncode != 0:
-    raise SystemExit(1)
-try:
-    reported = completed.stdout.decode("ascii").strip()
-except UnicodeDecodeError:
-    raise SystemExit(1)
-if len(reported) > 256:
-    raise SystemExit(1)
-match = re.fullmatch(
-    r"uv ([0-9]+\.[0-9]+\.[0-9]+)(?: \([ -~]{1,200}\))?",
-    reported,
-)
-raise SystemExit(0 if match is not None and match.group(1) == expected_version else 1)
-PY
-            then
-                UV_BIN="${tool_root}/uv"
-                ok "Copied uv into private upgrade custody (${UV_BOOTSTRAP_VERSION})"
-                return 0
-            fi
-            rm -f -- "${tool_root}/uv"
-            warn "Ignoring a non-${UV_BOOTSTRAP_VERSION} uv candidate at ${candidate}; using the pinned bootstrap instead"
-        else
-            warn "Ignoring an unsafe or unstable uv candidate at ${candidate}; using the pinned bootstrap instead"
-        fi
-    fi
 
     case "$(uname -s)/$(uname -m)" in
         Darwin/x86_64)
@@ -483,98 +238,48 @@ PY
             ;;
     esac
     archive="${tool_root}/${asset}"
-    info "uv was not available in trusted custody; authenticating temporary uv ${UV_BOOTSTRAP_VERSION}..."
+    info "Authenticating temporary pinned uv ${UV_BOOTSTRAP_VERSION}..."
     curl --fail --silent --show-error --location \
         --proto '=https' --proto-redir '=https' --tlsv1.2 \
         --max-filesize "${UV_BOOTSTRAP_MAX_BYTES}" \
         --output "${archive}" \
         "https://github.com/astral-sh/uv/releases/download/${UV_BOOTSTRAP_VERSION}/${asset}" \
         || die "Could not download the pinned uv bootstrap. No changes were made."
-    python3 - \
-        "${archive}" "${expected}" "${member}" "${tool_root}/uv" \
-        "${UV_BOOTSTRAP_MAX_BYTES}" <<'PY' \
+    python3 - "${archive}" "${expected}" "${UV_BOOTSTRAP_MAX_BYTES}" <<'PY' \
         || die "Pinned uv bootstrap authentication failed. No changes were made."
 import hashlib
 import os
-from pathlib import PurePosixPath
 import stat
 import sys
-import tarfile
 
-archive_name, expected, expected_member, destination, maximum_raw = sys.argv[1:]
+path, expected, maximum_raw = sys.argv[1:]
 maximum = int(maximum_raw)
-uid = os.geteuid()
-archive_info = os.lstat(archive_name)
+info = os.lstat(path)
 if (
-    stat.S_ISLNK(archive_info.st_mode)
-    or not stat.S_ISREG(archive_info.st_mode)
-    or archive_info.st_uid != uid
-    or not 0 < archive_info.st_size <= maximum
+    stat.S_ISLNK(info.st_mode)
+    or not stat.S_ISREG(info.st_mode)
+    or info.st_uid != os.geteuid()
+    or not 0 < info.st_size <= maximum
 ):
-    raise RuntimeError("downloaded uv archive is outside private bounded custody")
-
-archive_digest = hashlib.sha256()
-with open(archive_name, "rb") as stream:
-    while chunk := stream.read(1024 * 1024):
-        archive_digest.update(chunk)
-if archive_digest.hexdigest() != expected:
-    raise RuntimeError("downloaded uv archive digest mismatch")
-
-with tarfile.open(archive_name, mode="r:gz") as archive:
-    members = archive.getmembers()
-    if not members or len(members) > 16 or len({item.name for item in members}) != len(members):
-        raise RuntimeError("uv archive member inventory is invalid")
-    selected = None
-    for item in members:
-        path = PurePosixPath(item.name)
-        if path.is_absolute() or ".." in path.parts or item.issym() or item.islnk():
-            raise RuntimeError("uv archive contains an unsafe member")
-        if not (item.isdir() or item.isreg()):
-            raise RuntimeError("uv archive contains an unsupported member")
-        if item.name == expected_member:
-            selected = item
-    if selected is None or not selected.isreg() or not 0 < selected.size <= maximum:
-        raise RuntimeError("uv archive lacks the bounded expected executable")
-    source = archive.extractfile(selected)
-    if source is None:
-        raise RuntimeError("uv archive executable could not be opened")
-    descriptor = os.open(
-        destination,
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
-        0o700,
-    )
-    written = 0
-    try:
-        while True:
-            chunk = source.read(1024 * 1024)
-            if not chunk:
-                break
-            written += len(chunk)
-            if written > selected.size:
-                raise RuntimeError("uv archive executable exceeded its declared size")
-            view = memoryview(chunk)
-            while view:
-                count = os.write(descriptor, view)
-                if count <= 0:
-                    raise RuntimeError("uv bootstrap extraction made no progress")
-                view = view[count:]
-        if written != selected.size:
-            raise RuntimeError("uv archive executable was truncated")
-        os.fchmod(descriptor, 0o700)
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-        source.close()
-directory_fd = os.open(os.path.dirname(destination), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-try:
-    os.fsync(directory_fd)
-finally:
-    os.close(directory_fd)
+    raise SystemExit(1)
+digest = hashlib.sha256()
+with open(path, "rb") as stream:
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
+raise SystemExit(0 if digest.hexdigest() == expected else 1)
 PY
+    tar -xOzf "${archive}" "${member}" > "${tool_root}/uv" \
+        || die "Could not extract the pinned uv executable. No changes were made."
+    [[ -s "${tool_root}/uv" \
+       && "$(wc -c < "${tool_root}/uv" | tr -d ' ')" -le "${UV_BOOTSTRAP_MAX_BYTES}" ]] \
+        || die "Pinned uv executable is empty or oversized. No changes were made."
+    chmod 700 "${tool_root}/uv" \
+        || die "Could not protect pinned uv private custody. No changes were made."
+    local uv_reported
+    uv_reported="$(env -i HOME="${HOME}" LANG=C LC_ALL=C PATH=/usr/bin:/bin \
+        "${tool_root}/uv" --version 2>/dev/null || true)"
+    [[ "${uv_reported}" == "uv ${UV_BOOTSTRAP_VERSION}"* ]] \
+        || die "Pinned uv executable reported an unexpected version. No changes were made."
     UV_BIN="${tool_root}/uv"
     ok "Pinned uv ${UV_BOOTSTRAP_VERSION} authenticated in private upgrade custody"
 }
@@ -848,8 +553,7 @@ begin_release_upgrade_receipt() {
 
     local receipt_path receipt_name
     receipt_path="$(
-        DEFENSECLAW_HOME="${DATA_DIR}" "${source_python}" \
-            -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B - \
+        DEFENSECLAW_HOME="${DATA_DIR}" "${source_python}" -I -B - \
             "${DATA_DIR}" "${CURRENT_VERSION}" "${RELEASE_VERSION}" <<'PY'
 import os
 import sys
@@ -914,10 +618,6 @@ recover_interrupted_phase_two() {
     [[ -e "${journal}" || -L "${journal}" ]] || return 0
     [[ "${PLAN_ONLY}" -eq 0 ]] \
         || die "An interrupted hard-cut recovery is active. Re-run without --plan so the authenticated 0.8.4 bridge can be restored first."
-    if [[ -x "${DEFENSECLAW_VENV}/bin/python" ]]; then
-        reject_managed_sourceless_bytecode "${DEFENSECLAW_VENV}"
-    fi
-
     section "Recovering Interrupted Hard-Cut Upgrade"
     local recovery_fields wheel expected_digest receipt_status recorded_config_path uv_bin venv_python
     recovery_fields="$(python3 - "${journal}" "${DEFENSECLAW_HOME}" <<'PY'
@@ -1295,9 +995,8 @@ try:
 finally:
     os.close(descriptor)
 PY
-    reject_managed_sourceless_bytecode "${DEFENSECLAW_VENV}"
     DEFENSECLAW_HOME="${CONTROLLER_HOME}" DEFENSECLAW_CONFIG="${recorded_config_path}" \
-        "${venv_python}" -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B -c \
+        "${venv_python}" -I -B -c \
         'from defenseclaw.commands.cmd_upgrade import _recover_interrupted_hard_cut; raise SystemExit(0 if _recover_interrupted_hard_cut() else 1)' \
         || die "The retained 0.8.4 controller could not complete interrupted hard-cut recovery."
     ok "Interrupted phase two rolled back to a healthy authenticated bridge"
@@ -4453,9 +4152,7 @@ ensure_upgrade_lock_before_mutation() {
     recover_interrupted_phase_two
     recover_interrupted_bridge_phase1
     if [[ -x "${DEFENSECLAW_VENV}/bin/python" ]]; then
-        reject_managed_sourceless_bytecode "${DEFENSECLAW_VENV}"
-        observed_version="$("${DEFENSECLAW_VENV}/bin/python" \
-            -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B -c \
+        observed_version="$("${DEFENSECLAW_VENV}/bin/python" -I -B -c \
             'from defenseclaw import __version__; print(__version__)' 2>/dev/null \
             | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
     elif has defenseclaw; then
@@ -4610,9 +4307,7 @@ HARD_CUT_CURSOR_RECOVERY_SOURCE_VERSION=""
 
 CURRENT_VERSION="unknown"
 if [[ -x "${DEFENSECLAW_VENV}/bin/python" ]]; then
-    reject_managed_sourceless_bytecode "${DEFENSECLAW_VENV}"
-    CURRENT_VERSION="$("${DEFENSECLAW_VENV}/bin/python" \
-        -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B -c \
+    CURRENT_VERSION="$("${DEFENSECLAW_VENV}/bin/python" -I -B -c \
         'from defenseclaw import __version__; print(__version__)' 2>/dev/null \
         | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
 elif has defenseclaw; then
@@ -4674,8 +4369,7 @@ if [[ "${CURRENT_VERSION}" != "unknown" && -x "${DEFENSECLAW_VENV}/bin/python" ]
     runtime_paths="$(
         DEFENSECLAW_HOME="${CONTROLLER_HOME}" \
         DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
-        "${DEFENSECLAW_VENV}/bin/python" \
-            -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B - \
+        "${DEFENSECLAW_VENV}/bin/python" -I -B - \
             "${CONTROLLER_HOME}" \
             "${CONFIG_PATH}" \
             "${OPENCLAW_HOME_EXPLICIT}" \
@@ -4793,8 +4487,7 @@ if [[ "${COMPONENT_VERSION_SPLIT}" -eq 1 ]]; then
           && -x "${DEFENSECLAW_VENV}/bin/python" ]] \
         && version_lt "${CURRENT_VERSION}" "${CURRENT_GATEWAY_VERSION}"; then
         split_recovery="$(
-            DEFENSECLAW_HOME="${DATA_DIR}" "${DEFENSECLAW_VENV}/bin/python" \
-                -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B - \
+            DEFENSECLAW_HOME="${DATA_DIR}" "${DEFENSECLAW_VENV}/bin/python" -I -B - \
                 "${DATA_DIR}" "${CURRENT_VERSION}" "${RELEASE_VERSION}" <<'PY'
 from datetime import datetime
 import os
@@ -4889,8 +4582,7 @@ AUDIT_DB_RECOVERY_CUSTODY=""
 AUDIT_DB_PREFLIGHT_IDENTITY=""
 
 if [[ "${CURRENT_VERSION}" != "unknown" ]] && version_gte "${CURRENT_VERSION}" "0.8.5"; then
-    hard_cut_state="$("${DEFENSECLAW_VENV}/bin/python" \
-        -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B - "${CONFIG_PATH}" \
+    hard_cut_state="$("${DEFENSECLAW_VENV}/bin/python" -I -B - "${CONFIG_PATH}" \
         "${DATA_DIR}/.migration_state.json" "${CURRENT_VERSION}" <<'PY' 2>/dev/null || true
 import json
 import os
@@ -6147,617 +5839,73 @@ prepare_release_contract() {
     preflight_release_artifacts
 }
 
-authenticate_release_owned_missing_cursor_source() {
+authorize_cursorless_field_recovery() {
     local source_version="${HARD_CUT_CURSOR_RECOVERY_SOURCE_VERSION}"
-    local requested_version="${RELEASE_VERSION}"
-    local source_root="${STAGING_DIR}/authenticated-source-${source_version}"
-    local source_wheel source_gateway_archive source_gateway
-    local installed_gateway_comparison="${INSTALL_DIR}/defenseclaw-gateway"
-    local gateway_comparison_kind=""
-    local source_wheel_sha256 source_gateway_sha256
     [[ "${source_version}" =~ ^0[.]8[.][67]$ \
-       && "${CURRENT_VERSION}" == "${source_version}" ]] \
-        || die "Missing-cursor recovery is restricted to exact published 0.8.6 or 0.8.7 source state. No changes were made."
-    mkdir -p "${source_root}"
+       && "${CURRENT_VERSION}" == "${source_version}" \
+       && "${CURRENT_GATEWAY_VERSION}" == "${source_version}" ]] \
+        || die "Cursorless field recovery is restricted to matching 0.8.6 or 0.8.7 CLI and gateway versions. No changes were made."
 
-    RELEASE_VERSION="${source_version}"
-    configure_release
-    section "Authenticating Published ${source_version} Source"
-    prepare_release_contract
-    python3 - \
-        "${RELEASE_PROVENANCE_FILE}" "${UPGRADE_MANIFEST_FILE}" "${source_version}" <<'PY' \
-        || die "Published ${source_version} lacks the exact source-install identity required for missing-cursor recovery. No changes were made."
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as stream:
-    provenance = json.load(stream)
-with open(sys.argv[2], encoding="utf-8") as stream:
-    manifest = json.load(stream)
-source_version = sys.argv[3]
-if source_version not in {"0.8.6", "0.8.7"}:
-    raise SystemExit("unsupported missing-cursor source")
-identity = provenance.get("source_install_identity")
-if not (
-    provenance.get("release_version") == source_version
-    and isinstance(identity, dict)
-    and identity.get("schema_version") == 1
-    and identity.get("source_release") == source_version
-    and type(identity.get("source_install_compatibility_epoch")) is int
-    and identity["source_install_compatibility_epoch"] == 2
-    and type(identity.get("runtime_config_version")) is int
-    and identity["runtime_config_version"] == 8
-    and manifest.get("schema_version") == 2
-    and manifest.get("release_version") == source_version
-    and type(manifest.get("runtime_config_version")) is int
-    and manifest["runtime_config_version"] == 8
-    and manifest.get("required_bridge_version") == "0.8.4"
-    and "0.8.5" in manifest.get("required_cli_migrations", [])
-):
-    raise SystemExit(f"{source_version} source-install identity differs")
-PY
-
-    fetch_artifact "${WHL_URL}" "${source_root}/${WHL_NAME}"
-    verify_checksum "${source_root}/${WHL_NAME}" "${WHL_NAME}"
-    source_wheel_sha256="${VERIFIED_CHECKSUM}"
-    source_wheel="${source_root}/${MATERIALIZED_WHL_NAME}"
-    materialize_protected_artifact \
-        "${source_root}/${WHL_NAME}" "${source_wheel}" "${source_wheel_sha256}" \
-        || die "Could not materialize the authenticated ${source_version} source wheel. No changes were made."
-
-    fetch_artifact "${TARBALL_URL}" "${source_root}/${TARBALL_NAME}"
-    verify_checksum "${source_root}/${TARBALL_NAME}" "${TARBALL_NAME}"
-    source_gateway_sha256="${VERIFIED_CHECKSUM}"
-    source_gateway_archive="${source_root}/${MATERIALIZED_TARBALL_NAME}"
-    materialize_protected_artifact \
-        "${source_root}/${TARBALL_NAME}" \
-        "${source_gateway_archive}" \
-        "${source_gateway_sha256}" \
-        || die "Could not materialize the authenticated ${source_version} source gateway. No changes were made."
-    validate_tarball_members "${source_gateway_archive}"
-    mkdir "${source_root}/gateway"
-    tar -xzf "${source_gateway_archive}" -C "${source_root}/gateway" \
-        || die "Could not extract the authenticated ${source_version} source gateway. No changes were made."
-    source_gateway="${source_root}/gateway/defenseclaw"
-    [[ -f "${source_gateway}" && ! -L "${source_gateway}" ]] \
-        || die "Authenticated ${source_version} source gateway archive has no canonical executable. No changes were made."
-    if [[ "${OS}" == "darwin" ]]; then
-        # Fresh installs and upgrades deterministically replace the linker
-        # signature with this release-owned ad-hoc identity before publishing.
-        # First bind the installed bytes into private custody, validate the
-        # installer-owned signature there, then apply the current host's exact
-        # transform to both private copies. This tolerates a codesign-format
-        # change after an OS upgrade without ever modifying the live gateway.
-        installed_gateway_comparison="${source_root}/gateway/installed-normalized"
-        python3 - \
-            "${INSTALL_DIR}/defenseclaw-gateway" \
-            "${installed_gateway_comparison}" \
-            "536870912" <<'PY' \
-            || die "Could not bind the installed macOS gateway into private comparison custody. No changes were made."
-import hashlib
+    "${DEFENSECLAW_VENV}/bin/python" -I -B - \
+        "${CONFIG_PATH}" "${DATA_DIR}" "${UPGRADE_RECOVERY_ROOT}" \
+        "${source_version}" <<'PY' \
+        || die "Installed ${source_version} state is not the supported public cursorless first-run shape. No changes were made."
 import os
 import stat
 import sys
 
-source = os.path.abspath(sys.argv[1])
-destination = os.path.abspath(sys.argv[2])
-limit_raw = sys.argv[3]
-limit = int(limit_raw)
-uid = os.geteuid()
-parent = os.path.dirname(destination)
+import yaml
 
-
-def identity(value):
-    return (
-        value.st_dev,
-        value.st_ino,
-        value.st_uid,
-        value.st_gid,
-        value.st_mode,
-        value.st_size,
-        value.st_mtime_ns,
-        value.st_ctime_ns,
-    )
-
-
-parent_info = os.lstat(parent)
-if (
-    stat.S_ISLNK(parent_info.st_mode)
-    or not stat.S_ISDIR(parent_info.st_mode)
-    or parent_info.st_uid != uid
-    or stat.S_IMODE(parent_info.st_mode) & 0o077
-):
-    raise RuntimeError("private gateway comparison custody is unsafe")
-named = os.lstat(source)
-if (
-    stat.S_ISLNK(named.st_mode)
-    or not stat.S_ISREG(named.st_mode)
-    or named.st_uid != uid
-    or stat.S_IMODE(named.st_mode) & 0o022
-    or stat.S_IMODE(named.st_mode) & 0o111 == 0
-    or not 0 < named.st_size <= limit
-):
-    raise RuntimeError("installed gateway is not a bounded current-user executable")
-expected_identity = identity(named)
-source_fd = os.open(
-    source,
-    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
-)
-destination_fd = None
-created = False
-try:
-    opened = os.fstat(source_fd)
-    if identity(opened) != expected_identity:
-        raise RuntimeError("installed gateway changed while opening")
-    destination_fd = os.open(
-        destination,
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
-        0o700,
-    )
-    created = True
-    copied = hashlib.sha256()
-    total = 0
-    while True:
-        chunk = os.read(source_fd, 1024 * 1024)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > named.st_size:
-            raise RuntimeError("installed gateway changed while copying")
-        copied.update(chunk)
-        view = memoryview(chunk)
-        while view:
-            written = os.write(destination_fd, view)
-            if written <= 0:
-                raise RuntimeError("installed gateway custody copy made no progress")
-            view = view[written:]
-    if total != named.st_size:
-        raise RuntimeError("installed gateway changed while copying")
-    os.fchmod(destination_fd, 0o700)
-    os.fsync(destination_fd)
-    os.close(destination_fd)
-    destination_fd = None
-
-    os.lseek(source_fd, 0, os.SEEK_SET)
-    reread = hashlib.sha256()
-    while True:
-        chunk = os.read(source_fd, 1024 * 1024)
-        if not chunk:
-            break
-        reread.update(chunk)
-    if copied.digest() != reread.digest():
-        raise RuntimeError("installed gateway changed while entering custody")
-    if (
-        identity(os.fstat(source_fd)) != expected_identity
-        or identity(os.lstat(source)) != expected_identity
-    ):
-        raise RuntimeError("installed gateway changed after entering custody")
-    destination_info = os.lstat(destination)
-    if (
-        stat.S_ISLNK(destination_info.st_mode)
-        or not stat.S_ISREG(destination_info.st_mode)
-        or destination_info.st_uid != uid
-        or stat.S_IMODE(destination_info.st_mode) != 0o700
-        or destination_info.st_size != named.st_size
-    ):
-        raise RuntimeError("private installed-gateway custody is invalid")
-    destination_digest = hashlib.sha256()
-    with open(destination, "rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            destination_digest.update(chunk)
-    if destination_digest.digest() != copied.digest():
-        raise RuntimeError("private installed-gateway custody changed after publication")
-    directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
-except BaseException:
-    if destination_fd is not None:
-        os.close(destination_fd)
-    if created:
-        try:
-            os.unlink(destination)
-        except FileNotFoundError:
-            pass
-    raise
-finally:
-    os.close(source_fd)
-PY
-        local gateway_fixture_marker="${source_root}/.defenseclaw-gateway-fixture-v1"
-        gateway_comparison_kind="$(python3 - \
-            "${source_gateway}" \
-            "${installed_gateway_comparison}" \
-            "${gateway_fixture_marker}" \
-            "${STAGING_DIR}" \
-            "${DEFENSECLAW_UPGRADE_TEST_MODE:-0}" <<'PY'
-import os
-from pathlib import Path
-import stat
-import sys
-
-source_path, installed_path, marker_path, staging_path = map(Path, sys.argv[1:5])
-test_mode = sys.argv[5]
-with source_path.open("rb") as stream:
-    source_magic = stream.read(4)
-with installed_path.open("rb") as stream:
-    installed_magic = stream.read(4)
-macho64_little = b"\xcf\xfa\xed\xfe"
-if source_magic == macho64_little and installed_magic == macho64_little:
-    print("macho")
-elif source_magic != macho64_little and source_magic == installed_magic:
-    if test_mode != "1":
-        raise SystemExit("non-Mach-O gateway fixtures require explicit test mode")
-    expected_marker = b"defenseclaw-gateway-fixture-v1\n"
-    staging = Path(os.path.realpath(staging_path))
-    source_parent = Path(os.path.realpath(source_path.parent))
-    marker_parent = Path(os.path.realpath(marker_path.parent))
-    if (
-        marker_path.name != ".defenseclaw-gateway-fixture-v1"
-        or marker_parent != source_parent.parent
-        or (staging != marker_parent and staging not in marker_parent.parents)
-    ):
-        raise SystemExit("macOS gateway fixture marker escaped private staging")
-    try:
-        marker_info = marker_path.lstat()
-    except OSError:
-        raise SystemExit("macOS gateway fixture marker is unavailable") from None
-    if (
-        stat.S_ISLNK(marker_info.st_mode)
-        or not stat.S_ISREG(marker_info.st_mode)
-        or marker_info.st_uid != os.geteuid()
-        or stat.S_IMODE(marker_info.st_mode) != 0o600
-        or marker_info.st_size != len(expected_marker)
-    ):
-        raise SystemExit("macOS gateway fixture marker custody is unsafe")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(marker_path, flags)
-    try:
-        opened = os.fstat(descriptor)
-        payload = os.read(descriptor, len(expected_marker) + 1)
-    finally:
-        os.close(descriptor)
-    if not os.path.samestat(marker_info, opened) or payload != expected_marker:
-        raise SystemExit("macOS gateway fixture marker changed")
-    print("fixture")
-else:
-    raise SystemExit("authenticated and installed macOS gateway formats differ")
-PY
-        )" || die "Installed macOS gateway format differs from its authenticated source. No changes were made."
-        if [[ "${gateway_comparison_kind}" == "macho" ]]; then
-            /usr/bin/codesign --verify --strict \
-                -R '=identifier "com.cisco.defenseclaw.gateway"' \
-                "${installed_gateway_comparison}" 2>/dev/null \
-                || die "Installed macOS gateway lacks the release-owned installer signature. No changes were made."
-        fi
-        /usr/bin/codesign -f -s - -i com.cisco.defenseclaw.gateway \
-            "${source_gateway}" 2>/dev/null \
-            || die "Could not normalize the authenticated ${source_version} macOS source gateway. No changes were made."
-        /usr/bin/codesign -f -s - -i com.cisco.defenseclaw.gateway \
-            "${installed_gateway_comparison}" 2>/dev/null \
-            || die "Could not normalize the private installed macOS gateway comparison copy. No changes were made."
-    fi
-    preflight_python_wheel "${source_wheel}"
-
-    DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
-        "${DEFENSECLAW_VENV}/bin/python" \
-            -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B - \
-        "${source_wheel}" "${source_gateway}" "${CONFIG_PATH}" "${DATA_DIR}" \
-        "${BACKUP_ROOT}" "${DEFENSECLAW_VENV}" \
-        "${installed_gateway_comparison}" "${source_version}" <<'PY' \
-        || die "Installed ${source_version} state is not the exact release-owned missing-cursor shape. No changes were made."
-import hashlib
-import importlib.util
-import os
-from pathlib import Path, PurePosixPath
-import stat
-import sys
-import zipfile
-
-(
-    wheel_path,
-    source_gateway,
-    config_path,
-    data_dir,
-    backup_root,
-    venv,
-    installed_gateway,
-) = map(os.path.abspath, sys.argv[1:8])
-source_version = sys.argv[8]
+config_path, data_dir, recovery_root = map(os.path.abspath, sys.argv[1:4])
+source_version = sys.argv[4]
 uid = os.geteuid()
 if source_version not in {"0.8.6", "0.8.7"}:
-    raise RuntimeError("unsupported missing-cursor source")
+    raise RuntimeError("unsupported cursorless source version")
 
 
-def read_regular(path, limit, *, executable=False, allow_empty=False):
+def read_regular(path, limit):
     info = os.lstat(path)
     if (
         stat.S_ISLNK(info.st_mode)
         or not stat.S_ISREG(info.st_mode)
         or info.st_uid != uid
         or stat.S_IMODE(info.st_mode) & 0o022
-        or (executable and stat.S_IMODE(info.st_mode) & 0o111 == 0)
-        or info.st_size < 0
-        or info.st_size > limit
-        or (not allow_empty and info.st_size == 0)
-    ):
-        raise RuntimeError(f"unsafe release-owned source file: {path}")
-    descriptor = os.open(
-        path,
-        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
-    )
-    try:
-        opened = os.fstat(descriptor)
-        if not os.path.samestat(info, opened):
-            raise RuntimeError("release-owned source file changed while opening")
-        raw = b""
-        while len(raw) <= info.st_size:
-            chunk = os.read(descriptor, info.st_size + 1 - len(raw))
-            if not chunk:
-                break
-            raw += chunk
-        if len(raw) != info.st_size:
-            raise RuntimeError("release-owned source file changed while reading")
-        final = os.fstat(descriptor)
-        named = os.lstat(path)
-        if not os.path.samestat(opened, final) or not os.path.samestat(final, named):
-            raise RuntimeError("release-owned source file changed after reading")
-        return raw
-    finally:
-        os.close(descriptor)
-
-
-def digest_regular(path, limit, *, executable=False):
-    info = os.lstat(path)
-    if (
-        stat.S_ISLNK(info.st_mode)
-        or not stat.S_ISREG(info.st_mode)
-        or info.st_uid != uid
-        or stat.S_IMODE(info.st_mode) & 0o022
-        or (executable and stat.S_IMODE(info.st_mode) & 0o111 == 0)
         or not 0 < info.st_size <= limit
     ):
-        raise RuntimeError(f"unsafe release-owned source file: {path}")
-
-    def identity(value):
-        return (
-            value.st_dev,
-            value.st_ino,
-            value.st_uid,
-            value.st_gid,
-            value.st_mode,
-            value.st_size,
-            value.st_mtime_ns,
-            value.st_ctime_ns,
-        )
-
-    expected_identity = identity(info)
-    descriptor = os.open(
-        path,
-        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
-    )
-    try:
-        opened = os.fstat(descriptor)
-        if identity(opened) != expected_identity:
-            raise RuntimeError("release-owned source file changed while opening")
-        digest = hashlib.sha256()
-        total = 0
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > info.st_size:
-                raise RuntimeError("release-owned source file changed while reading")
-            digest.update(chunk)
-        if total != info.st_size:
-            raise RuntimeError("release-owned source file changed while reading")
-        final = os.fstat(descriptor)
-        named = os.lstat(path)
-        if identity(final) != expected_identity or identity(named) != expected_identity:
-            raise RuntimeError("release-owned source file changed after reading")
-        return digest.digest()
-    finally:
-        os.close(descriptor)
+        raise RuntimeError(f"unsafe cursorless field-state file: {path}")
+    with open(path, "rb") as stream:
+        raw = stream.read(limit + 1)
+    if len(raw) != info.st_size:
+        raise RuntimeError("cursorless field-state file changed while reading")
+    return raw
 
 
-source_gateway_digest = digest_regular(
-    source_gateway,
-    512 * 1024 * 1024,
-    executable=True,
-)
-installed_gateway_digest = digest_regular(
-    installed_gateway,
-    512 * 1024 * 1024,
-    executable=True,
-)
-if source_gateway_digest != installed_gateway_digest:
-    raise RuntimeError("installed gateway differs from the authenticated source release")
-
-expected_package = {}
-with zipfile.ZipFile(wheel_path) as archive:
-    infos = archive.infolist()
-    if len(infos) > 8192 or len({info.filename for info in infos}) != len(infos):
-        raise RuntimeError("authenticated source wheel has an unsafe inventory")
-    for info in infos:
-        path = PurePosixPath(info.filename)
-        if path.is_absolute() or ".." in path.parts:
-            raise RuntimeError("authenticated source wheel has an unsafe path")
-        encoded_mode = (info.external_attr >> 16) & 0xFFFF
-        kind = stat.S_IFMT(encoded_mode)
-        if kind not in {0, stat.S_IFREG, stat.S_IFDIR}:
-            raise RuntimeError("authenticated source wheel has a non-regular package member")
-        if info.is_dir() or not path.parts or path.parts[0] != "defenseclaw":
-            continue
-        if info.file_size > 64 * 1024 * 1024:
-            raise RuntimeError("authenticated source package member exceeds its bound")
-        relative = "/".join(path.parts[1:])
-        expected_package[relative] = hashlib.sha256(archive.read(info)).hexdigest()
-if not expected_package:
-    raise RuntimeError("authenticated source wheel lacks the DefenseClaw package")
-
-venv = os.path.realpath(venv)
-package_spec = importlib.util.find_spec("defenseclaw")
-if package_spec is None or not isinstance(package_spec.origin, str):
-    raise RuntimeError("installed source package cannot be resolved")
-package_root = os.path.realpath(os.path.dirname(package_spec.origin))
+config = yaml.safe_load(read_regular(config_path, 4 * 1024 * 1024))
 if (
-    os.path.basename(package_root) != "defenseclaw"
-    or os.path.commonpath((package_root, venv)) != venv
+    not isinstance(config, dict)
+    or type(config.get("config_version")) is not int
+    or config["config_version"] != 8
 ):
-    raise RuntimeError("installed source package escaped the managed venv")
-actual_package = {}
-for current, names, files in os.walk(package_root, topdown=True, followlinks=False):
-    current_info = os.lstat(current)
-    if (
-        stat.S_ISLNK(current_info.st_mode)
-        or not stat.S_ISDIR(current_info.st_mode)
-        or current_info.st_uid != uid
-        or stat.S_IMODE(current_info.st_mode) & 0o022
-    ):
-        raise RuntimeError("installed source package has unsafe directory custody")
-    names[:] = [name for name in names if name != "__pycache__"]
-    for name in names:
-        child = os.lstat(os.path.join(current, name))
-        if stat.S_ISLNK(child.st_mode) or not stat.S_ISDIR(child.st_mode):
-            raise RuntimeError("installed source package has an unsafe child")
-    for name in files:
-        path = os.path.join(current, name)
-        relative = os.path.relpath(path, package_root).replace(os.sep, "/")
-        if "__pycache__" in PurePosixPath(relative).parts:
-            continue
-        if relative.endswith(".pyc"):
-            raise RuntimeError(
-                "installed source package has executable bytecode outside __pycache__"
-            )
-        if len(actual_package) >= 8192:
-            raise RuntimeError("installed source package exceeds its file bound")
-        actual_package[relative] = hashlib.sha256(
-            read_regular(path, 64 * 1024 * 1024, allow_empty=True)
-        ).hexdigest()
-if actual_package != expected_package:
-    raise RuntimeError("installed CLI package differs from the authenticated source release")
+    raise RuntimeError("config does not declare integer config_version 8")
 
-sys.path.insert(0, wheel_path)
-from defenseclaw.observability.v8_config import load_validate_v8  # noqa: E402
-
-if os.path.lexists(os.path.join(data_dir, ".migration_state.json")):
-    raise RuntimeError("release-owned recovery requires a completely absent migration cursor")
-source = load_validate_v8(
-    read_regular(config_path, 4 * 1024 * 1024),
-    source_name="config.yaml",
-).source
-legacy_roots = {"audit_db", "audit_sinks", "judge_bodies_db", "otel", "splunk"}
-if (
-    type(source.get("config_version")) is not int
-    or source["config_version"] != 8
-    or "observability" not in source
-    or source["observability"] != {}
-    or any(name in source for name in legacy_roots)
-):
-    raise RuntimeError("release-owned source config has migration or observability residue")
-
-
-def decision_name(name):
-    return (
-        name in {
-            "DEFENSECLAW_DISABLE_REDACTION",
-            "DEFENSECLAW_JSONL_DISABLE",
-            "DEFENSECLAW_PERSIST_JUDGE",
-            "OTEL_SERVICE_NAME",
-        }
-        or name.startswith(("OTEL_", "DEFENSECLAW_OTEL_", "OPENCLAW_OTEL_"))
-    )
-
-
-if any(decision_name(name) for name in os.environ):
-    raise RuntimeError("release-owned recovery refuses ambient observability decisions")
-environment_path = os.path.join(data_dir, ".env")
-if os.path.lexists(environment_path):
-    environment = read_regular(environment_path, 1024 * 1024).decode("utf-8")
-    for raw_line in environment.splitlines():
-        line = raw_line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            name = line.removeprefix("export ").split("=", 1)[0].strip()
-            if decision_name(name):
-                raise RuntimeError("release-owned environment has observability decisions")
+cursor_path = os.path.join(data_dir, ".migration_state.json")
+if os.path.lexists(cursor_path):
+    raise RuntimeError("migration cursor must be wholly absent")
 
 for residue in (
     config_path + ".pre-observability-migration.bak",
     os.path.join(data_dir, ".migration_state.fresh.pending.json"),
     os.path.join(data_dir, ".upgrade-receipts"),
-    os.path.join(data_dir, ".upgrade-recovery"),
+    os.path.join(recovery_root, "phase-one-active.json"),
+    os.path.join(recovery_root, "phase-two-active.json"),
 ):
     if os.path.lexists(residue):
-        raise RuntimeError("release-owned state has upgrade or migration residue")
-if os.path.lexists(backup_root):
-    backup_info = os.lstat(backup_root)
-    if (
-        stat.S_ISLNK(backup_info.st_mode)
-        or not stat.S_ISDIR(backup_info.st_mode)
-        or backup_info.st_uid != uid
-        or any(Path(backup_root).iterdir())
-    ):
-        raise RuntimeError("release-owned state has prior or unsafe upgrade backups")
-
-expected = {}
-with zipfile.ZipFile(wheel_path) as archive:
-    infos = archive.infolist()
-    if len(infos) > 8192 or len({info.filename for info in infos}) != len(infos):
-        raise RuntimeError(f"authenticated {source_version} wheel has unsafe members")
-    for info in infos:
-        path = PurePosixPath(info.filename)
-        prefix = ("defenseclaw", "_data", "local_observability_stack")
-        if path.is_absolute() or ".." in path.parts:
-            raise RuntimeError(f"authenticated {source_version} wheel has an unsafe path")
-        if info.is_dir() or path.parts[:3] != prefix or len(path.parts) <= 3:
-            continue
-        if info.file_size > 64 * 1024 * 1024:
-            raise RuntimeError(
-                f"authenticated {source_version} stack member exceeds its bound"
-            )
-        expected["/".join(path.parts[3:])] = hashlib.sha256(archive.read(info)).hexdigest()
-if not expected:
-    raise RuntimeError(f"authenticated {source_version} wheel lacks its local stack")
-
-stack_root = os.path.join(data_dir, "observability-stack")
-if not os.path.lexists(stack_root):
-    raise SystemExit(0)
-stack_info = os.lstat(stack_root)
-if (
-    stat.S_ISLNK(stack_info.st_mode)
-    or not stat.S_ISDIR(stack_info.st_mode)
-    or stack_info.st_uid != uid
-):
-    raise RuntimeError("release-owned local stack is missing or unsafe")
-actual = {}
-for current, names, files in os.walk(stack_root, topdown=True, followlinks=False):
-    current_info = os.lstat(current)
-    if stat.S_ISLNK(current_info.st_mode) or not stat.S_ISDIR(current_info.st_mode):
-        raise RuntimeError("release-owned local stack has an unsafe directory")
-    for name in names:
-        child = os.lstat(os.path.join(current, name))
-        if stat.S_ISLNK(child.st_mode) or not stat.S_ISDIR(child.st_mode):
-            raise RuntimeError("release-owned local stack has an unsafe child")
-    for name in files:
-        path = os.path.join(current, name)
-        relative = os.path.relpath(path, stack_root).replace(os.sep, "/")
-        if len(actual) >= 4096:
-            raise RuntimeError("release-owned local stack exceeds its file bound")
-        actual[relative] = hashlib.sha256(read_regular(path, 64 * 1024 * 1024)).hexdigest()
-if actual != expected:
-    raise RuntimeError("release-owned local stack differs from the authenticated release")
+        raise RuntimeError("active or incomplete upgrade state is present")
 PY
 
     HARD_CUT_CURSOR_RECOVERY=1
-    RELEASE_VERSION="${requested_version}"
-    configure_release
     prepare_release_contract
-    ok "Authenticated the exact published ${source_version} missing-cursor compatibility state"
+    ok "Accepted exact public ${source_version} cursorless first-run state"
 }
 
 
@@ -8138,8 +7286,7 @@ if not os.path.islink(launcher) or os.path.realpath(launcher) != os.path.realpat
     )
 PY
 
-    BRIDGE_PYTHON_INTERPRETER="$("${DEFENSECLAW_VENV}/bin/python" \
-        -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B -c \
+    BRIDGE_PYTHON_INTERPRETER="$("${DEFENSECLAW_VENV}/bin/python" -I -B -c \
         'import os,sys; print(os.path.realpath(getattr(sys, "_base_executable", "") or sys.executable))')" \
         || die "Could not resolve the source Python interpreter; no services changed."
     [[ -x "${BRIDGE_PYTHON_INTERPRETER}" ]] \
@@ -8274,8 +7421,7 @@ PY
 
     BRIDGE_SOURCE_HEALTH_URL="$(DEFENSECLAW_HOME="${DATA_DIR}" \
         DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
-        "${DEFENSECLAW_VENV}/bin/python" \
-            -X "${MANAGED_PYTHON_NO_LOCAL_BYTECODE}" -I -B - <<'PY' 2>/dev/null || true
+        "${DEFENSECLAW_VENV}/bin/python" -I -B - <<'PY' 2>/dev/null || true
 from defenseclaw.config import load
 
 cfg = load()
@@ -8986,7 +8132,7 @@ validate_tarball_members() {
 }
 
 if [[ -n "${HARD_CUT_CURSOR_RECOVERY_SOURCE_VERSION}" ]]; then
-    authenticate_release_owned_missing_cursor_source
+    authorize_cursorless_field_recovery
 else
     prepare_release_contract
 fi

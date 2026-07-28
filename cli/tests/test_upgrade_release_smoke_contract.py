@@ -1885,7 +1885,7 @@ def test_field_recovery_lane_reproduces_exact_published_086_and_087_first_run() 
     assert "prepare_fresh_v8_config(cfg)" not in protocol
     assert '"${SMOKE_HOME}/.defenseclaw/.venv/bin/defenseclaw" init' in protocol
     assert "published {source_version} unexpectedly created a migration cursor" in protocol
-    assert "Authenticated the exact published ${baseline} missing-cursor compatibility state" in protocol
+    assert "Accepted exact public ${baseline} cursorless first-run state" in protocol
     assert "for source_version in 0.8.6 0.8.7" in protocol
     assert 'resolver_path="${curl_shim}:/usr/bin:/bin:/usr/sbin:/sbin"' in recovery_function
     assert 'PATH="${resolver_path}"' in recovery_function
@@ -1907,103 +1907,6 @@ def test_field_recovery_lane_reproduces_exact_published_086_and_087_first_run() 
     assert "preserved|recovered" in verification
     assert "corrupt audit recovery retained the discarded legacy fixture" in verification
     assert "corrupt_audit_recovery=fresh_mode_0600" in verification
-
-
-@pytest.mark.skipif(os.name == "nt", reason="executes the POSIX release harness")
-def test_field_recovery_serves_authenticated_086_and_087_source_contracts(
-    tmp_path: Path,
-) -> None:
-    os_name = "linux"
-    arch = "amd64"
-    published = tmp_path / "published"
-    published.mkdir()
-    payloads_by_version: dict[str, dict[str, bytes]] = {}
-    for version in ("0.8.6", "0.8.7"):
-        wheel = f"defenseclaw-{version}-2-py3-none-any.dcwheel"
-        gateway = f"defenseclaw_{version}_protocol2_{os_name}_{arch}.dcgateway"
-        authenticated_payloads = {
-            wheel: f"protected source wheel {version}\n".encode(),
-            gateway: f"protected source gateway {version}\n".encode(),
-            "upgrade-manifest.json": f'{{"release_version":"{version}"}}\n'.encode(),
-            "release-provenance.json": f'{{"release_version":"{version}"}}\n'.encode(),
-        }
-        payloads_by_version[version] = authenticated_payloads
-        release = published / version
-        release.mkdir()
-        for name, payload in authenticated_payloads.items():
-            (release / name).write_bytes(payload)
-        (release / "checksums.txt").write_text(
-            "".join(
-                f"{hashlib.sha256(payload).hexdigest()}  {name}\n" for name, payload in authenticated_payloads.items()
-            ),
-            encoding="utf-8",
-        )
-        (release / "checksums.txt.sig").write_text(
-            "fixture signature\n",
-            encoding="utf-8",
-        )
-        (release / "checksums.txt.pem").write_text(
-            "-----BEGIN CERTIFICATE-----\nZmFrZS1jZXJ0aWZpY2F0ZQ==\n-----END CERTIFICATE-----\n",
-            encoding="utf-8",
-        )
-
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    cosign = fake_bin / "cosign"
-    cosign.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    cosign.chmod(0o700)
-    workdir = tmp_path / "work"
-    release_root = workdir / "release-root"
-    workdir.mkdir()
-    release_root.mkdir()
-
-    completed = _source_script(
-        """
-trap - EXIT
-WORKDIR="$2"
-RELEASE_ROOT="$3"
-TARGET_VERSION=0.8.8
-OS_NAME=linux
-ARCH_NAME=amd64
-UPGRADE_SMOKE_FIELD_RECOVERY_CASES=1
-fixture="$4"
-download_old_asset() {
-    local name="$1"
-    local destination="$2"
-    local version="$3"
-    cp "${fixture}/${version}/${name}" "${destination}"
-}
-PATH="$5:${PATH}"
-prepare_field_recovery_source_assets
-""",
-        str(workdir),
-        str(release_root),
-        str(published),
-        str(fake_bin),
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    for version, authenticated_payloads in payloads_by_version.items():
-        served = release_root / version
-        assert {path.name for path in served.iterdir()} == {
-            *authenticated_payloads,
-            "checksums.txt",
-            "checksums.txt.sig",
-            "checksums.txt.pem",
-        }
-        for name, payload in authenticated_payloads.items():
-            assert (served / name).read_bytes() == payload
-
-
-def test_field_recovery_source_authentication_precedes_local_server_start() -> None:
-    protocol = PROTOCOL_SCRIPT.read_text(encoding="utf-8")
-    main = protocol[protocol.index("main_protocol_gate() {") :]
-
-    bridge = main.index("prepare_required_bridge_assets")
-    source = main.index("prepare_field_recovery_source_assets")
-    server = main.index("start_release_server")
-
-    assert bridge < source < server
 
 
 @pytest.mark.skipif(os.name == "nt", reason="executes the POSIX field-recovery verifier")

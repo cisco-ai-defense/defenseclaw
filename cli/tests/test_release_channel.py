@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import platform
 import re
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -1400,6 +1402,59 @@ def test_immutable_088_rescue_hands_clean_path_to_new_resolver_uv_custody(
     )
     assert function_end > function_start, "resolve_upgrade_uv() end anchor moved"
     resolver_function = upgrade_source[function_start:function_end]
+    uv_assets = {
+        ("Darwin", "x86_64"): (
+            "uv-x86_64-apple-darwin.tar.gz",
+            "uv-x86_64-apple-darwin/uv",
+            "2ad79983127ffca7d77b77ce6a24278d7e4f7b817a1acf72fea5f8124b4aac5e",
+        ),
+        ("Darwin", "arm64"): (
+            "uv-aarch64-apple-darwin.tar.gz",
+            "uv-aarch64-apple-darwin/uv",
+            "33540eb7c883ab857eff79bd5ac2aa31fe27b595abecb4a9c003a2c998447232",
+        ),
+        ("Linux", "x86_64"): (
+            "uv-x86_64-unknown-linux-gnu.tar.gz",
+            "uv-x86_64-unknown-linux-gnu/uv",
+            "e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224",
+        ),
+        ("Linux", "aarch64"): (
+            "uv-aarch64-unknown-linux-gnu.tar.gz",
+            "uv-aarch64-unknown-linux-gnu/uv",
+            "03e9fe0a81b0718d0bc84625de3885df6cc3f89a8b6af6121d6b9f6113fb6533",
+        ),
+        ("Linux", "arm64"): (
+            "uv-aarch64-unknown-linux-gnu.tar.gz",
+            "uv-aarch64-unknown-linux-gnu/uv",
+            "03e9fe0a81b0718d0bc84625de3885df6cc3f89a8b6af6121d6b9f6113fb6533",
+        ),
+    }
+    uv_platform = (platform.system(), platform.machine())
+    if uv_platform not in uv_assets:
+        pytest.skip(f"unsupported uv bootstrap fixture platform: {uv_platform}")
+    uv_asset, uv_member, production_uv_digest = uv_assets[uv_platform]
+    pinned_marker = tmp_path / "pinned-uv-executed"
+    uv_payload = (
+        "#!/bin/sh\n"
+        f"printf executed > {str(pinned_marker)!r}\n"
+        f"printf 'uv {pin.group(1)} (pinned fixture)\\n'\n"
+    ).encode()
+    uv_archive = tmp_path / uv_asset
+    with tarfile.open(uv_archive, mode="w:gz") as archive:
+        directory = tarfile.TarInfo(str(Path(uv_member).parent))
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o755
+        archive.addfile(directory)
+        executable = tarfile.TarInfo(uv_member)
+        executable.mode = 0o755
+        executable.size = len(uv_payload)
+        archive.addfile(executable, io.BytesIO(uv_payload))
+    fixture_uv_digest = hashlib.sha256(uv_archive.read_bytes()).hexdigest()
+    assert resolver_function.count(production_uv_digest) == 1
+    resolver_function = resolver_function.replace(
+        production_uv_digest,
+        fixture_uv_digest,
+    )
     resolver_payload = (
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
@@ -1411,6 +1466,15 @@ def test_immutable_088_rescue_hands_clean_path_to_new_resolver_uv_custody(
         'ok() { printf "ok: %s\\n" "$*"; }\n'
         'warn() { printf "warn: %s\\n" "$*" >&2; }\n'
         'info() { printf "info: %s\\n" "$*"; }\n'
+        "curl() {\n"
+        "  local output='' previous=''\n"
+        '  for arg in "$@"; do\n'
+        '    if [[ "${previous}" == "--output" ]]; then output="${arg}"; break; fi\n'
+        '    previous="${arg}"\n'
+        "  done\n"
+        '  [[ -n "${output}" ]] || return 94\n'
+        f"  cp {str(uv_archive)!r} \"${{output}}\"\n"
+        "}\n"
         'STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/resolver-uv.XXXXXX")"\n'
         + resolver_function
         + "\n"
@@ -1444,21 +1508,14 @@ def test_immutable_088_rescue_hands_clean_path_to_new_resolver_uv_custody(
     )
 
     assert completed.returncode == 0, completed.stderr
-    # A clean PATH may still expose a safe known-location uv or require the
-    # authenticated pinned bootstrap. Both paths must execute only the private
-    # staging copy selected by the new resolver.
-    copied_known_uv = "Copied uv into private upgrade custody" in completed.stdout
-    authenticated_bootstrap = (
+    assert (
         f"Pinned uv {pin.group(1)} authenticated in private upgrade custody"
         in completed.stdout
     )
-    assert copied_known_uv or authenticated_bootstrap
     assert f"uv {pin.group(1)}" in completed.stdout
     assert "resolver-clean-path=/usr/bin:/bin:/usr/sbin:/sbin" in completed.stdout
-    if copied_known_uv:
-        assert marker.read_text(encoding="utf-8") == "executed"
-    else:
-        assert not marker.exists()
+    assert not marker.exists()
+    assert pinned_marker.read_text(encoding="utf-8") == "executed"
     private_uv_line = next(
         line
         for line in completed.stdout.splitlines()

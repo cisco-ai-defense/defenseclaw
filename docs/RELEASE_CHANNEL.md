@@ -166,24 +166,29 @@ The rescue bootstrap:
    installer's `VERSION`, then passes only compatible operator arguments.
 
 The authenticated target resolver keeps that clean `PATH` boundary. When it
-needs `uv`, it copies a stable trusted-owner executable from an explicit known
-location into private upgrade custody; if none is safe, it downloads the
-platform archive for pinned `uv` `0.11.28`, verifies its reviewed SHA-256, and
-safely extracts only the executable into the same custody. It never restores
-the ambient interactive `PATH`, never executes an unsafe discovered candidate,
-and never streams an upstream installer.
+needs `uv`, it always downloads the platform archive for pinned `uv` `0.11.28`,
+verifies its reviewed SHA-256, and extracts only the explicit platform
+executable into private upgrade custody. It never discovers, copies,
+version-probes, or executes a `uv` from `PATH` or a local known location, and it
+never streams an upstream installer. The private extracted binary is cached
+only for that resolver process.
+
+Interrupted phase-two recovery uses the same authenticated uv bootstrap before
+it can reinstall the retained bridge wheel. That recovery therefore requires
+network access to the pinned upstream archive; a coincidentally cached local
+`uv` no longer creates an undocumented offline recovery path.
 
 The target resolver also owns the narrow field compatibility rule for
-cursorless `0.8.6` and `0.8.7` installations. It accepts that state only after
-authenticating the exact published source release and proving that the
-installed CLI package and gateway match it, the config is clean config-v8
-state, and no migration or upgrade residue exists. On macOS, the resolver
-verifies the installed release-owned signature, copies both gateways into
-private custody, applies the installer’s deterministic ad-hoc signature
-normalization to those copies, and then compares their bytes; it never rewrites
-the live gateway during source authentication. A partial cursor, mixed/copied
-component, or modified observability state still fails before service or
-installed-state mutation.
+cursorless `0.8.6` and `0.8.7` installations. This is deliberately a
+same-user repair rule, not an attempt to authenticate every byte of the
+installed source. It requires matching CLI and gateway versions, the known
+public integer config-v8 boundary, a wholly absent migration cursor, and no
+active or incomplete upgrade transaction. A partial cursor, mixed component
+version, invalid config-version boundary, or upgrade residue still fails before
+service or installed-state mutation. The resolver then relies on its existing
+backup and rollback transaction while authenticating every downloaded target
+artifact through the signed release contract and requiring final
+version-bound health.
 
 The bootstrap rejects an operator-supplied `--version` and
 `--allow-unverified`; neither command-line nor ambient legacy overrides may
@@ -192,7 +197,7 @@ replace the signed stable target or bypass its authentication.
 For the two field-recovery cases:
 
 ```bash
-# Recover an authenticated 0.8.6 or 0.8.7 installation whose cursor is absent.
+# Recover a supported 0.8.6 or 0.8.7 public first-run state whose cursor is absent.
 /bin/sh ./defenseclaw-rescue.sh --yes
 
 # Preserve a proven-corrupt audit SQLite tuple and activate a fresh store.
