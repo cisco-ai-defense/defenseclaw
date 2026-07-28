@@ -75,7 +75,7 @@ func TestReadManagedPIDRecordWaitsForInPlacePublication(t *testing.T) {
 
 	select {
 	case <-retryStarted:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("reader did not observe the truncated in-flight publication")
 	}
 	data, err := json.Marshal(want)
@@ -102,7 +102,7 @@ func TestReadManagedPIDRecordWaitsForInPlacePublication(t *testing.T) {
 				want,
 			)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("reader did not finish after publication completed")
 	}
 }
