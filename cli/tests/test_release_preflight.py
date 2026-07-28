@@ -251,6 +251,7 @@ def test_windows_baseline_inventory_has_a_closed_ordered_schema(
         )
 
 
+@POSIX_POLICY_PERSISTENCE
 def test_release_after_088_keeps_windows_fresh_install_only(
     tmp_path: Path,
 ) -> None:
