@@ -20,7 +20,7 @@ import (
 
 func TestReadManagedPIDRecordTreatsMissingPathAsAbsent(t *testing.T) {
 	pidPath := filepath.Join(t.TempDir(), "watchdog.pid")
-	state, exists, err := readManagedPIDRecord(pidPath)
+	state, exists, err := readManagedPIDRecord(pidPath, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestReadManagedPIDRecordReturnsDecodedState(t *testing.T) {
 	}
 	writeManagedPIDRecordTestFixture(t, pidPath, want)
 
-	got, exists, err := readManagedPIDRecord(pidPath)
+	got, exists, err := readManagedPIDRecord(pidPath, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestReadManagedPIDRecordWaitsForInPlacePublication(t *testing.T) {
 	}
 	resultCh := make(chan result, 1)
 	go func() {
-		state, exists, err := readManagedPIDRecordWithRetry(pidPath, 2, func() {
+		state, exists, err := readManagedPIDRecordWithPolicy(pidPath, true, 2, func() {
 			close(retryStarted)
 			<-publicationComplete
 		})
@@ -113,7 +113,7 @@ func TestReadManagedPIDRecordRejectsPersistentMalformedRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	retries := 0
-	_, exists, err := readManagedPIDRecordWithRetry(pidPath, 3, func() {
+	_, exists, err := readManagedPIDRecordWithPolicy(pidPath, true, 3, func() {
 		retries++
 	})
 	if exists {
@@ -133,7 +133,7 @@ func TestReadManagedPIDRecordDoesNotRetrySemanticCorruption(t *testing.T) {
 		t.Fatal(err)
 	}
 	retries := 0
-	_, exists, err := readManagedPIDRecordWithRetry(pidPath, 3, func() {
+	_, exists, err := readManagedPIDRecordWithPolicy(pidPath, true, 3, func() {
 		retries++
 	})
 	if exists {
@@ -145,6 +145,36 @@ func TestReadManagedPIDRecordDoesNotRetrySemanticCorruption(t *testing.T) {
 	}
 	if retries != 0 {
 		t.Fatalf("semantic corruption retries = %d, want 0", retries)
+	}
+}
+
+func TestReadManagedGatewayPIDRecordDoesNotRetrySyntaxError(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "gateway.pid")
+	if err := os.WriteFile(pidPath, []byte(`{"pid":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	retries := 0
+	_, exists, err := readManagedPIDRecordWithPolicy(pidPath, false, 3, func() {
+		retries++
+	})
+	if exists {
+		t.Fatal("malformed gateway PID record was reported as usable")
+	}
+	if err == nil || !strings.Contains(err.Error(), "unexpected end of JSON input") {
+		t.Fatalf("gateway syntax error = %v", err)
+	}
+	if retries != 0 {
+		t.Fatalf("gateway syntax retries = %d, want 0", retries)
+	}
+}
+
+func TestManagedPIDRecordPublicationDoesNotRetryCloseFailure(t *testing.T) {
+	syntaxErr := &json.SyntaxError{Offset: 1}
+	if managedPIDRecordPublicationInFlight(syntaxErr, errors.New("close failed")) {
+		t.Fatal("JSON syntax error joined with close failure was treated as retryable")
+	}
+	if !managedPIDRecordPublicationInFlight(syntaxErr, nil) {
+		t.Fatal("isolated JSON syntax error was not treated as retryable")
 	}
 }
 
@@ -260,7 +290,7 @@ func TestReadManagedPIDRecordRejectsOversizeRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, exists, err := readManagedPIDRecord(pidPath)
+	_, exists, err := readManagedPIDRecord(pidPath, false)
 	if exists {
 		t.Fatal("oversize PID record was reported as usable")
 	}

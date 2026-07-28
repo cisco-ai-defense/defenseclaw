@@ -154,7 +154,7 @@ func managedProcessOwnedBy(gatewayPath, dataRoot, pidFile string) (bool, error) 
 
 func managedProcessProofFor(gatewayPath, dataRoot, pidFile string) (managedProcessProof, bool, error) {
 	pidPath := filepath.Join(dataRoot, pidFile)
-	state, exists, err := readManagedPIDRecord(pidPath)
+	state, exists, err := readManagedPIDRecord(pidPath, pidFile == "watchdog.pid")
 	if err != nil {
 		return managedProcessProof{}, false, err
 	}
@@ -203,16 +203,18 @@ func managedProcessProofFor(gatewayPath, dataRoot, pidFile string) (managedProce
 	}, true, nil
 }
 
-func readManagedPIDRecord(pidPath string) (pidState, bool, error) {
-	return readManagedPIDRecordWithRetry(
+func readManagedPIDRecord(pidPath string, retryInPlacePublication bool) (pidState, bool, error) {
+	return readManagedPIDRecordWithPolicy(
 		pidPath,
+		retryInPlacePublication,
 		managedPIDRecordReadAttempts,
 		func() { time.Sleep(managedPIDRecordReadInterval) },
 	)
 }
 
-func readManagedPIDRecordWithRetry(
+func readManagedPIDRecordWithPolicy(
 	pidPath string,
+	retryInPlacePublication bool,
 	attempts int,
 	wait func(),
 ) (pidState, bool, error) {
@@ -223,30 +225,34 @@ func readManagedPIDRecordWithRetry(
 		wait = func() {}
 	}
 	for attempt := 0; ; attempt++ {
-		state, exists, err := readManagedPIDRecordOnce(pidPath)
-		if err == nil || attempt+1 >= attempts || !managedPIDRecordPublicationInFlight(err) {
+		state, exists, retryable, err := readManagedPIDRecordAttempt(pidPath)
+		if err == nil || !retryInPlacePublication || attempt+1 >= attempts || !retryable {
 			return state, exists, err
 		}
 		wait()
 	}
 }
 
-func readManagedPIDRecordOnce(pidPath string) (pidState, bool, error) {
+func readManagedPIDRecordAttempt(pidPath string) (pidState, bool, bool, error) {
 	file, exists, err := openManagedPIDRecord(pidPath)
 	if err != nil || !exists {
-		return pidState{}, exists, err
+		return pidState{}, exists, false, err
 	}
 	state, readErr := decodeManagedPIDRecord(file, pidPath)
 	closeErr := file.Close()
 	if readErr != nil || closeErr != nil {
-		return pidState{}, false, errors.Join(readErr, closeErr)
+		return pidState{}, false, managedPIDRecordPublicationInFlight(readErr, closeErr),
+			errors.Join(readErr, closeErr)
 	}
-	return state, true, nil
+	return state, true, false, nil
 }
 
-func managedPIDRecordPublicationInFlight(err error) bool {
+func managedPIDRecordPublicationInFlight(readErr, closeErr error) bool {
+	if closeErr != nil {
+		return false
+	}
 	var syntaxErr *json.SyntaxError
-	return errors.As(err, &syntaxErr)
+	return errors.As(readErr, &syntaxErr)
 }
 
 // openManagedPIDRecord binds validation and decoding to one Windows file
@@ -256,8 +262,8 @@ func managedPIDRecordPublicationInFlight(err error) bool {
 // convergence. Delete sharing lets the publisher proceed while this handle
 // keeps the verified object stable for the reader. watchdog.pid predates the
 // atomic publisher and is rewritten in place while retaining its lifetime
-// ownership lock, so readManagedPIDRecord retries only JSON syntax errors for
-// a bounded interval. A persistently malformed identity remains fail-closed.
+// ownership lock, so its caller enables bounded JSON-syntax retries. Gateway
+// reads and every persistently malformed identity remain fail-closed.
 func openManagedPIDRecord(pidPath string) (*os.File, bool, error) {
 	pathPtr, err := winpath.UTF16Ptr(pidPath)
 	if err != nil {
