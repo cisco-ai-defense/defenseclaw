@@ -1418,6 +1418,11 @@ def test_immutable_088_rescue_hands_clean_path_to_new_resolver_uv_custody(
             "uv-x86_64-unknown-linux-gnu/uv",
             "e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224",
         ),
+        ("Linux", "amd64"): (
+            "uv-x86_64-unknown-linux-gnu.tar.gz",
+            "uv-x86_64-unknown-linux-gnu/uv",
+            "e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224",
+        ),
         ("Linux", "aarch64"): (
             "uv-aarch64-unknown-linux-gnu.tar.gz",
             "uv-aarch64-unknown-linux-gnu/uv",
