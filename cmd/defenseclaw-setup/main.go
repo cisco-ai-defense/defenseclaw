@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -1397,6 +1398,9 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 	); err != nil {
 		return fmt.Errorf("install startup launcher: %w", err)
 	}
+	if err := stageHookLauncher(payload, staging); err != nil {
+		return err
+	}
 	if err := copyFile(
 		filepath.Join(payload.Root, payload.Manifest.CosignVerifier),
 		filepath.Join(staging, "runtime", "tools", "cosign.exe"),
@@ -1445,6 +1449,19 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 	}
 	if err := writeJSON(filepath.Join(staging, "installer", "install-state.json"), state); err != nil {
 		return err
+	}
+	return nil
+}
+
+func stageHookLauncher(payload loadedPayload, staging string) error {
+	if !hasHookLauncherPayload(payload.Manifest) {
+		return nil
+	}
+	if err := copyFile(
+		filepath.Join(payload.Root, hookruntime.HookLauncherName),
+		filepath.Join(staging, "bin", hookruntime.HookLauncherName),
+	); err != nil {
+		return fmt.Errorf("install stable hook trampoline: %w", err)
 	}
 	return nil
 }
@@ -1998,18 +2015,7 @@ func verifyPayloadManifest(root string, manifest payloadManifest) error {
 			manifest.DistributionFlavor,
 		)
 	}
-	required := []string{
-		manifest.GatewayArchive,
-		manifest.Wheel,
-		manifest.PythonEmbed,
-		manifest.YaraCompatWheel,
-		manifest.SitePackages,
-		manifest.Launcher,
-		manifest.StartupLauncher,
-		manifest.CosignVerifier,
-		manifest.UpgradeManifest,
-	}
-	for _, name := range required {
+	for _, name := range requiredPayloadFiles(manifest) {
 		if strings.TrimSpace(name) == "" {
 			return errors.New("payload manifest is missing a required file name")
 		}
@@ -2037,6 +2043,29 @@ func verifyPayloadManifest(root string, manifest payloadManifest) error {
 		}
 	}
 	return validateAuthenticodeManifest(manifest)
+}
+
+func requiredPayloadFiles(manifest payloadManifest) []string {
+	required := []string{
+		manifest.GatewayArchive,
+		manifest.Wheel,
+		manifest.PythonEmbed,
+		manifest.YaraCompatWheel,
+		manifest.SitePackages,
+		manifest.Launcher,
+		manifest.StartupLauncher,
+		manifest.CosignVerifier,
+		manifest.UpgradeManifest,
+	}
+	if hasHookLauncherPayload(manifest) {
+		required = append(required, hookruntime.HookLauncherName)
+	}
+	return required
+}
+
+func hasHookLauncherPayload(manifest payloadManifest) bool {
+	_, ok := manifest.Files[hookruntime.HookLauncherName]
+	return ok
 }
 
 func validSourceCommit(value string) bool {

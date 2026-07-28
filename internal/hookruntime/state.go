@@ -29,8 +29,11 @@ const (
 	LegacySchemaVersion = 1
 	SchemaVersion       = 2
 	LauncherName        = "defenseclaw-hook.exe"
+	HookLauncherName    = "defenseclaw-hook-launcher.exe"
 	GatewayName         = "defenseclaw-gateway.exe"
 	StateName           = "hook-runtime-state.json"
+
+	LauncherKindTrampoline = "trampoline"
 
 	StatusPublishing = "publishing"
 	StatusActive     = "active"
@@ -38,6 +41,7 @@ const (
 
 	maxStateBytes            = 64 << 10
 	stateMutationLockTimeout = 2 * time.Minute
+	MaxHookLauncherBytes     = 8 << 20
 )
 
 // Paths are derived from the current user's LocalAppData Known Folder on
@@ -57,6 +61,9 @@ type State struct {
 	RuntimeRoot    string `json:"runtime_root"`
 	LauncherPath   string `json:"launcher_path"`
 	LauncherSHA256 string `json:"launcher_sha256"`
+	LauncherKind   string `json:"launcher_kind,omitempty"`
+	HookPath       string `json:"hook_path,omitempty"`
+	HookSHA256     string `json:"hook_sha256,omitempty"`
 	DataRoot       string `json:"data_root,omitempty"`
 	GatewayPath    string `json:"gateway_path,omitempty"`
 	GatewaySHA256  string `json:"gateway_sha256,omitempty"`
@@ -64,6 +71,27 @@ type State struct {
 }
 
 func (state State) Active() bool { return state.Status == StatusActive }
+
+// DelegationCapable reports whether state binds a small stable launcher to one
+// exact installed full hook. The fields are additive to schema 2 so previously
+// released full launchers can continue to read and ignore them.
+func (state State) DelegationCapable() bool {
+	if state.SchemaVersion != SchemaVersion || state.LauncherKind != LauncherKindTrampoline ||
+		!filepath.IsAbs(state.HookPath) || filepath.Clean(state.HookPath) != state.HookPath ||
+		!strings.EqualFold(filepath.Base(state.HookPath), LauncherName) || len(state.HookSHA256) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(state.HookSHA256)
+	return err == nil
+}
+
+// DelegatesTo reports whether this generation names executable as its exact
+// installed full-hook target. Disabled generations intentionally retain this
+// identity so a child created immediately before Setup disabled the runtime
+// still fails closed instead of falling back to project environment.
+func (state State) DelegatesTo(executable string) bool {
+	return state.DelegationCapable() && samePath(state.HookPath, executable)
+}
 
 // ColdStartCapable distinguishes version-2 installer state, which binds an
 // exact gateway executable, from legacy active state. Legacy state remains a
@@ -85,7 +113,7 @@ func (state State) ColdStartCapable() bool {
 // before the executable changes, so a hook process can observe either a fully
 // verified old generation, an intentional no-op, or the fully verified new
 // generation -- never a new executable paired with stale activation data.
-func Publish(source, gatewayPath, dataRoot, transactionID string) error {
+func Publish(source, hookPath, gatewayPath, dataRoot, transactionID string) error {
 	paths, err := CurrentUserPaths()
 	if err != nil {
 		return err
@@ -93,7 +121,7 @@ func Publish(source, gatewayPath, dataRoot, transactionID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), stateMutationLockTimeout)
 	defer cancel()
 	return WithGatewayStartLock(ctx, func() error {
-		return publishAt(paths, source, gatewayPath, dataRoot, transactionID)
+		return publishAt(paths, source, hookPath, gatewayPath, dataRoot, transactionID)
 	})
 }
 
@@ -146,10 +174,23 @@ func (state State) Validate(paths Paths) error {
 		}
 	}
 	if state.SchemaVersion == LegacySchemaVersion {
-		if state.GatewayPath != "" || state.GatewaySHA256 != "" {
-			return errors.New("legacy hook runtime state unexpectedly records a gateway identity")
+		if state.LauncherKind != "" || state.HookPath != "" || state.HookSHA256 != "" ||
+			state.GatewayPath != "" || state.GatewaySHA256 != "" {
+			return errors.New("legacy hook runtime state unexpectedly records a delegated executable identity")
 		}
 		return nil
+	}
+	switch state.LauncherKind {
+	case "":
+		if state.HookPath != "" || state.HookSHA256 != "" {
+			return errors.New("full hook runtime state unexpectedly records a delegation target")
+		}
+	case LauncherKindTrampoline:
+		if !state.DelegationCapable() || samePath(state.HookPath, paths.Launcher) {
+			return errors.New("hook runtime state has an invalid delegation target")
+		}
+	default:
+		return fmt.Errorf("invalid stable hook launcher kind %q", state.LauncherKind)
 	}
 	if state.Status == StatusDisabled {
 		if state.DataRoot != "" || state.GatewayPath != "" || state.GatewaySHA256 != "" {
@@ -170,16 +211,37 @@ func (state State) Validate(paths Paths) error {
 	return nil
 }
 
-// ReadTrustedForExecutable identifies the canonical stable launcher and, only
-// for that path, reads its private activation state. recognized remains true
-// when state is absent or unsafe so the caller can fail closed to a no-op
-// instead of falling back to project-controlled environment.
+// ReadTrustedForExecutable identifies either the canonical stable launcher or
+// the exact installed full hook named by its trusted delegation state.
+// recognized remains true for an unsafe canonical launcher, or for a named
+// target that becomes unsafe, so the caller fails closed to a no-op instead of
+// falling back to project-controlled environment.
 func ReadTrustedForExecutable(executable string) (state State, recognized bool, err error) {
 	paths, err := CurrentUserPaths()
 	if err != nil || strings.TrimSpace(paths.Launcher) == "" {
 		return State{}, false, err
 	}
-	return readTrustedAt(paths, executable)
+	return readTrustedForExecutableAt(paths, executable)
+}
+
+func readTrustedForExecutableAt(paths Paths, executable string) (state State, recognized bool, err error) {
+	if samePath(executable, paths.Launcher) {
+		return readTrustedAt(paths, executable)
+	}
+	state, _, err = readTrustedAt(paths, paths.Launcher)
+	if err != nil || !state.DelegatesTo(executable) {
+		// An ordinary installed hook remains directly runnable. Only an exact
+		// target named by trusted stable state is recognized here.
+		return State{}, false, err
+	}
+	locked, err := LockVerifiedHook(state)
+	if err != nil {
+		return State{}, true, err
+	}
+	if err := locked.Close(); err != nil {
+		return State{}, true, err
+	}
+	return state, true, nil
 }
 
 func readTrustedAt(paths Paths, executable string) (state State, recognized bool, err error) {
@@ -233,7 +295,7 @@ func readTrustedAt(paths Paths, executable string) (state State, recognized bool
 	return state, true, nil
 }
 
-func publishAt(paths Paths, source, gatewayPath, dataRoot, transactionID string) error {
+func publishAt(paths Paths, source, hookPath, gatewayPath, dataRoot, transactionID string) error {
 	if err := validatePaths(paths); err != nil {
 		return err
 	}
@@ -244,6 +306,13 @@ func publishAt(paths Paths, source, gatewayPath, dataRoot, transactionID string)
 	if !filepath.IsAbs(dataRoot) {
 		return errors.New("stable hook runtime requires an absolute data root")
 	}
+	source = filepath.Clean(source)
+	hookPath = filepath.Clean(hookPath)
+	if !filepath.IsAbs(source) || !filepath.IsAbs(hookPath) ||
+		!strings.EqualFold(filepath.Base(hookPath), LauncherName) {
+		return errors.New("stable hook runtime requires absolute launcher and installed hook paths")
+	}
+	delegating := !samePath(source, hookPath)
 	gatewayPath = filepath.Clean(gatewayPath)
 	if !filepath.IsAbs(gatewayPath) || !strings.EqualFold(filepath.Base(gatewayPath), GatewayName) {
 		return errors.New("stable hook runtime requires an absolute installed gateway path")
@@ -270,6 +339,26 @@ func publishAt(paths Paths, source, gatewayPath, dataRoot, transactionID string)
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("packaged hook launcher is not a regular file: %s", source)
 	}
+	if delegating && info.Size() > MaxHookLauncherBytes {
+		return fmt.Errorf(
+			"packaged stable hook launcher is %d bytes; maximum is %d",
+			info.Size(),
+			MaxHookLauncherBytes,
+		)
+	}
+	var hookDigest string
+	if delegating {
+		if err := safefile.ProtectFile(hookPath); err != nil {
+			return fmt.Errorf("protect installed full hook for delegation: %w", err)
+		}
+		if err := safefile.ValidatePrivateFile(hookPath); err != nil {
+			return fmt.Errorf("validate installed full hook for delegation: %w", err)
+		}
+		hookDigest, err = fileSHA256(hookPath)
+		if err != nil {
+			return fmt.Errorf("hash installed full hook for delegation: %w", err)
+		}
+	}
 	if err := safefile.ProtectDirectory(paths.Root); err != nil {
 		return fmt.Errorf("protect stable hook runtime directory: %w", err)
 	}
@@ -294,6 +383,11 @@ func publishAt(paths Paths, source, gatewayPath, dataRoot, transactionID string)
 		GatewaySHA256:  gatewayDigest,
 		TransactionID:  transactionID,
 	}
+	if delegating {
+		state.LauncherKind = LauncherKindTrampoline
+		state.HookPath = hookPath
+		state.HookSHA256 = hookDigest
+	}
 	if err := writeState(paths, state); err != nil {
 		return fmt.Errorf("publish stable hook runtime barrier: %w", err)
 	}
@@ -317,7 +411,8 @@ func publishAt(paths Paths, source, gatewayPath, dataRoot, transactionID string)
 	verified, recognized, err := readTrustedAt(paths, paths.Launcher)
 	if err != nil || !recognized || !verified.Active() || verified.TransactionID != transactionID ||
 		!samePath(verified.DataRoot, dataRoot) || !samePath(verified.GatewayPath, gatewayPath) ||
-		!strings.EqualFold(verified.GatewaySHA256, gatewayDigest) {
+		!strings.EqualFold(verified.GatewaySHA256, gatewayDigest) ||
+		(delegating && (!verified.DelegatesTo(hookPath) || !strings.EqualFold(verified.HookSHA256, hookDigest))) {
 		if err == nil {
 			err = errors.New("active state did not round-trip")
 		}
@@ -348,6 +443,7 @@ func disableAt(paths Paths, transactionID string) error {
 	if err := safefile.ValidatePrivateDirectory(paths.Root); err != nil {
 		return fmt.Errorf("validate stable hook runtime directory: %w", err)
 	}
+	previous, _, _ := readTrustedAt(paths, paths.Launcher)
 	if _, err := os.Lstat(paths.Launcher); err == nil {
 		if err := safefile.ProtectFile(paths.Launcher); err != nil {
 			return fmt.Errorf("protect stable hook launcher before disable: %w", err)
@@ -366,6 +462,9 @@ func disableAt(paths Paths, transactionID string) error {
 				RuntimeRoot:    filepath.Clean(paths.Root),
 				LauncherPath:   filepath.Clean(paths.Launcher),
 				LauncherSHA256: strings.Repeat("0", 64),
+				LauncherKind:   previous.LauncherKind,
+				HookPath:       previous.HookPath,
+				HookSHA256:     previous.HookSHA256,
 				TransactionID:  transactionID,
 			})
 		}
@@ -381,6 +480,9 @@ func disableAt(paths Paths, transactionID string) error {
 		RuntimeRoot:    filepath.Clean(paths.Root),
 		LauncherPath:   filepath.Clean(paths.Launcher),
 		LauncherSHA256: digest,
+		LauncherKind:   previous.LauncherKind,
+		HookPath:       previous.HookPath,
+		HookSHA256:     previous.HookSHA256,
 		TransactionID:  transactionID,
 	}
 	if err := writeState(paths, state); err != nil {

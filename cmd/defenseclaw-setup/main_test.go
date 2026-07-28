@@ -18,7 +18,49 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 )
+
+func TestHookLauncherPayloadInterfaceIsCanonicalAndAdditive(t *testing.T) {
+	manifest := payloadManifest{Files: map[string]string{}}
+	if hasHookLauncherPayload(manifest) ||
+		slices.Contains(requiredPayloadFiles(manifest), hookruntime.HookLauncherName) {
+		t.Fatal("legacy payload unexpectedly declares the stable hook trampoline")
+	}
+	manifest.Files[hookruntime.HookLauncherName] = strings.Repeat("a", 64)
+	if !hasHookLauncherPayload(manifest) ||
+		!slices.Contains(requiredPayloadFiles(manifest), hookruntime.HookLauncherName) {
+		t.Fatal("canonical stable hook trampoline payload was not selected")
+	}
+}
+
+func TestStageHookLauncherCopiesCanonicalPayloadToInstalledSource(t *testing.T) {
+	payloadRoot := t.TempDir()
+	staging := t.TempDir()
+	source := filepath.Join(payloadRoot, hookruntime.HookLauncherName)
+	want := []byte("MZ-stable-hook-trampoline")
+	if err := os.WriteFile(source, want, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	payload := loadedPayload{
+		Root: payloadRoot,
+		Manifest: payloadManifest{Files: map[string]string{
+			hookruntime.HookLauncherName: strings.Repeat("a", 64),
+		}},
+	}
+	if err := stageHookLauncher(payload, staging); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(staging, "bin", hookruntime.HookLauncherName)
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("installed stable hook source = %q, want %q", got, want)
+	}
+}
 
 func TestRenameInstallTreeRetriesTransientErrors(t *testing.T) {
 	for _, errno := range []syscall.Errno{5, 32, 33} {

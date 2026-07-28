@@ -34,7 +34,7 @@ func testRuntimePaths(t *testing.T) Paths {
 
 func writeRuntimeSource(t *testing.T, body string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "packaged-defenseclaw-hook.exe")
+	path := filepath.Join(t.TempDir(), LauncherName)
 	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestStableRuntimePublishDisableAndReinstall(t *testing.T) {
 	firstSource := writeRuntimeSource(t, "MZ-first-stable-hook")
 	firstGateway := writeRuntimeGateway(t, "MZ-first-gateway")
 	firstDataRoot := filepath.Join(t.TempDir(), "first-data")
-	if err := publishAt(paths, firstSource, firstGateway, firstDataRoot, stableRuntimeTransactionOne); err != nil {
+	if err := publishAt(paths, firstSource, firstSource, firstGateway, firstDataRoot, stableRuntimeTransactionOne); err != nil {
 		t.Fatalf("first publish: %v", err)
 	}
 
@@ -103,7 +103,7 @@ func TestStableRuntimePublishDisableAndReinstall(t *testing.T) {
 	secondSource := writeRuntimeSource(t, "MZ-second-stable-hook")
 	secondGateway := writeRuntimeGateway(t, "MZ-second-gateway")
 	secondDataRoot := filepath.Join(t.TempDir(), "second-data")
-	if err := publishAt(paths, secondSource, secondGateway, secondDataRoot, stableRuntimeTransactionOne); err != nil {
+	if err := publishAt(paths, secondSource, secondSource, secondGateway, secondDataRoot, stableRuntimeTransactionOne); err != nil {
 		t.Fatalf("reinstall publish: %v", err)
 	}
 	reinstalled, recognized, err := readTrustedAt(paths, paths.Launcher)
@@ -124,7 +124,8 @@ func TestStableRuntimeFailsClosedForTamperedLauncherAndState(t *testing.T) {
 	paths := testRuntimePaths(t)
 	dataRoot := filepath.Join(t.TempDir(), "data")
 	gateway := writeRuntimeGateway(t, "MZ-trusted-gateway")
-	if err := publishAt(paths, writeRuntimeSource(t, "MZ-trusted"), gateway, dataRoot, stableRuntimeTransactionOne); err != nil {
+	source := writeRuntimeSource(t, "MZ-trusted")
+	if err := publishAt(paths, source, source, gateway, dataRoot, stableRuntimeTransactionOne); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(paths.Launcher, []byte("MZ-tampered"), 0o600); err != nil {
@@ -134,7 +135,8 @@ func TestStableRuntimeFailsClosedForTamperedLauncherAndState(t *testing.T) {
 		t.Fatalf("tampered launcher was accepted: state=%+v recognized=%v err=%v", state, recognized, err)
 	}
 
-	if err := publishAt(paths, writeRuntimeSource(t, "MZ-restored"), gateway, dataRoot, stableRuntimeTransactionTwo); err != nil {
+	source = writeRuntimeSource(t, "MZ-restored")
+	if err := publishAt(paths, source, source, gateway, dataRoot, stableRuntimeTransactionTwo); err != nil {
 		t.Fatal(err)
 	}
 	body, err := os.ReadFile(paths.State)
@@ -180,9 +182,11 @@ func TestSetupPostureRepairsMalformedAndProtectionDriftedFailClosedState(t *test
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			paths := testRuntimePaths(t)
+			source := writeRuntimeSource(t, "MZ-setup-posture-hook")
 			if err := publishAt(
 				paths,
-				writeRuntimeSource(t, "MZ-setup-posture-hook"),
+				source,
+				source,
 				writeRuntimeGateway(t, "MZ-setup-posture-gateway"),
 				filepath.Join(t.TempDir(), "data"),
 				stableRuntimeTransactionOne,
@@ -210,9 +214,11 @@ func TestSetupPostureRepairsMalformedAndProtectionDriftedFailClosedState(t *test
 
 func TestSetupPostureRejectsUntrustedWriteDACL(t *testing.T) {
 	paths := testRuntimePaths(t)
+	source := writeRuntimeSource(t, "MZ-untrusted-dacl-hook")
 	if err := publishAt(
 		paths,
-		writeRuntimeSource(t, "MZ-untrusted-dacl-hook"),
+		source,
+		source,
 		writeRuntimeGateway(t, "MZ-untrusted-dacl-gateway"),
 		filepath.Join(t.TempDir(), "data"),
 		stableRuntimeTransactionOne,
@@ -227,9 +233,11 @@ func TestSetupPostureRejectsUntrustedWriteDACL(t *testing.T) {
 
 func TestSetupPostureRejectsReparseTopology(t *testing.T) {
 	paths := testRuntimePaths(t)
+	source := writeRuntimeSource(t, "MZ-reparse-hook")
 	if err := publishAt(
 		paths,
-		writeRuntimeSource(t, "MZ-reparse-hook"),
+		source,
+		source,
 		writeRuntimeGateway(t, "MZ-reparse-gateway"),
 		filepath.Join(t.TempDir(), "data"),
 		stableRuntimeTransactionOne,
@@ -257,9 +265,11 @@ func TestStableRuntimeMissingLauncherCannotReactivateDisabledState(t *testing.T)
 		t.Fatal(err)
 	}
 	// Establish the same private directory contract the installer uses.
+	source := writeRuntimeSource(t, "MZ-old")
 	if err := publishAt(
 		paths,
-		writeRuntimeSource(t, "MZ-old"),
+		source,
+		source,
 		writeRuntimeGateway(t, "MZ-gateway"),
 		filepath.Join(t.TempDir(), "data"),
 		stableRuntimeTransactionOne,
@@ -357,9 +367,11 @@ func TestStableRuntimeLegacyActiveStateRemainsReadableWithoutColdStartAuthority(
 func TestLockVerifiedGatewayPinsDigestAndReplacement(t *testing.T) {
 	paths := testRuntimePaths(t)
 	gateway := writeRuntimeGateway(t, "MZ-pinned-gateway")
+	source := writeRuntimeSource(t, "MZ-hook")
 	if err := publishAt(
 		paths,
-		writeRuntimeSource(t, "MZ-hook"),
+		source,
+		source,
 		gateway,
 		filepath.Join(t.TempDir(), "data"),
 		stableRuntimeTransactionOne,

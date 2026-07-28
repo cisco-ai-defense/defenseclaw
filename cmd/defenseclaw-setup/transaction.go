@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -2052,12 +2053,35 @@ func restorePreviousStableHookRuntime(transaction setupTransaction) error {
 		// generation to that identity rather than inventing one.
 		transactionID = transaction.ID
 	}
+	launcherSource, hookPath, err := stableHookRuntimePublicationPaths(transaction.InstallRoot)
+	if err != nil {
+		return err
+	}
 	return publishStableHookRuntime(
-		filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-hook.exe"),
+		launcherSource,
+		hookPath,
 		filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe"),
 		transaction.DataRoot,
 		transactionID,
 	)
+}
+
+func stableHookRuntimePublicationPaths(installRoot string) (launcherSource, hookPath string, err error) {
+	hookPath = filepath.Join(installRoot, "bin", hookruntime.LauncherName)
+	trampoline := filepath.Join(installRoot, "bin", hookruntime.HookLauncherName)
+	info, err := os.Lstat(trampoline)
+	if errors.Is(err, os.ErrNotExist) {
+		// A legacy install tree contains only the full hook. Publishing it at
+		// the canonical path preserves rollback to pre-trampoline releases.
+		return hookPath, hookPath, nil
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("inspect installed stable hook trampoline: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return "", "", errors.New("installed stable hook trampoline is not a regular file")
+	}
+	return trampoline, hookPath, nil
 }
 
 func convergeRecoveredCommittedSetupTransaction(transaction setupTransaction) error {
@@ -2407,13 +2431,18 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 	childEnv := transactionChildEnv(transaction)
 	previousChildEnv := transactionPreviousChildEnv(transaction)
 	gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
+	launcherSource, hookPath, err := stableHookRuntimePublicationPaths(transaction.InstallRoot)
+	if err != nil {
+		return err
+	}
 	// Publish the signed no-console launcher outside both InstallRoot and
 	// DataRoot before connector configuration writes absolute commands. The
 	// publishing/active handshake makes this step idempotent under committed
 	// transaction recovery and re-enables a data-preserving reinstall.
 	if err := publishStableHookRuntime(
-		filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-hook.exe"),
-		filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe"),
+		launcherSource,
+		hookPath,
+		gatewayPath,
 		transaction.DataRoot,
 		transaction.ID,
 	); err != nil {

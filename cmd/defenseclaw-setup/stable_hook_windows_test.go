@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
@@ -71,6 +72,64 @@ func TestSetupStableHookSnapshotRejectsValidForeignActiveBinding(t *testing.T) {
 		dataRoot,
 	); err == nil || !strings.Contains(err.Error(), "different installed gateway") {
 		t.Fatalf("foreign gateway error = %v", err)
+	}
+}
+
+func TestSetupStableHookSnapshotRejectsForeignDelegatedFullHook(t *testing.T) {
+	paths, gatewayPath, dataRoot := writeSetupHookStateFixture(t)
+	body, err := os.ReadFile(paths.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state hookruntime.State
+	if err := json.Unmarshal(body, &state); err != nil {
+		t.Fatal(err)
+	}
+	foreignHook := filepath.Join(t.TempDir(), hookruntime.LauncherName)
+	if err := os.WriteFile(foreignHook, []byte("MZ-foreign-full-hook"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state.LauncherKind = hookruntime.LauncherKindTrampoline
+	state.HookPath = foreignHook
+	state.HookSHA256, err = fileSHA256(foreignHook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.WritePrivate(paths.State, encoded); err != nil {
+		t.Fatal(err)
+	}
+	active, err := stableHookRuntimeActiveAt(paths, gatewayPath, dataRoot)
+	if err == nil || active || !strings.Contains(err.Error(), "different installed full hook") {
+		t.Fatalf("foreign delegated hook posture = active=%t, error=%v", active, err)
+	}
+}
+
+func TestStableHookPublicationPathsSupportLegacyFullAndTrampoline(t *testing.T) {
+	installRoot := t.TempDir()
+	bin := filepath.Join(installRoot, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fullHook := filepath.Join(bin, hookruntime.LauncherName)
+	if err := os.WriteFile(fullHook, []byte("MZ-legacy-full-hook"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source, target, err := stableHookRuntimePublicationPaths(installRoot)
+	if err != nil || !pathidentity.Same(source, fullHook) || !pathidentity.Same(target, fullHook) {
+		t.Fatalf("legacy publication paths = source %q target %q error %v", source, target, err)
+	}
+
+	trampoline := filepath.Join(bin, hookruntime.HookLauncherName)
+	if err := os.WriteFile(trampoline, []byte("MZ-small-trampoline"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source, target, err = stableHookRuntimePublicationPaths(installRoot)
+	if err != nil || !pathidentity.Same(source, trampoline) || !pathidentity.Same(target, fullHook) {
+		t.Fatalf("trampoline publication paths = source %q target %q error %v", source, target, err)
 	}
 }
 

@@ -45,7 +45,7 @@ func requireNativeWindowsX64() error {
 	return nil
 }
 
-func publishStableHookRuntime(source, gatewayPath, dataRoot, transactionID string) error {
+func publishStableHookRuntime(source, hookPath, gatewayPath, dataRoot, transactionID string) error {
 	// Setup disables stable-hook cold starts before entering the durable
 	// quiescing phase. Wait for any already-authorized image handle to drain
 	// before Publish applies the gateway DACL and hashes the exact file.
@@ -55,7 +55,12 @@ func publishStableHookRuntime(source, gatewayPath, dataRoot, transactionID strin
 	if err := waitForExecutableRelease(gatewayPath, setupExecutableReleaseTimeout); err != nil {
 		return fmt.Errorf("wait for installed gateway release before hook publication: %w", err)
 	}
-	if err := hookruntime.Publish(source, gatewayPath, dataRoot, transactionID); err != nil {
+	if !pathidentity.Same(source, hookPath) {
+		if err := waitForExecutableRelease(hookPath, setupExecutableReleaseTimeout); err != nil {
+			return fmt.Errorf("wait for installed full hook release before trampoline publication: %w", err)
+		}
+	}
+	if err := hookruntime.Publish(source, hookPath, gatewayPath, dataRoot, transactionID); err != nil {
 		return err
 	}
 	paths, err := hookruntime.CurrentUserPaths()
@@ -96,6 +101,10 @@ func stableHookRuntimeActiveAt(paths hookruntime.Paths, gatewayPath, dataRoot st
 	if state.Active() && state.SchemaVersion == hookruntime.SchemaVersion &&
 		!pathidentity.Same(state.GatewayPath, gatewayPath) {
 		return false, errors.New("active stable hook runtime belongs to a different installed gateway")
+	}
+	expectedHookPath := filepath.Join(filepath.Dir(gatewayPath), hookruntime.LauncherName)
+	if state.Active() && state.DelegationCapable() && !pathidentity.Same(state.HookPath, expectedHookPath) {
+		return false, errors.New("active stable hook runtime belongs to a different installed full hook")
 	}
 	return state.Active(), nil
 }
