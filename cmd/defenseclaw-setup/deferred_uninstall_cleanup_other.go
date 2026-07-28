@@ -7,6 +7,10 @@ package main
 
 import "errors"
 
+var deferredCleanupTransactionRootExpectation = func(setupTransaction) (bool, error) {
+	return false, nil
+}
+
 func armDeferredUninstallCleanup(setupTransaction) error {
 	return nil
 }

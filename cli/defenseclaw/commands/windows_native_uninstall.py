@@ -28,6 +28,7 @@ import stat
 import struct
 import subprocess
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import BinaryIO
 
@@ -405,7 +406,7 @@ def _validate_install_state(
     schema = state.get("schema_version")
     version = state.get("version")
     source_commit = state.get("source_commit")
-    transaction_id = state.get("transaction_id", "")
+    transaction_id = state.get("transaction_id")
     if schema != 1 or isinstance(schema, bool):
         raise NativeWindowsUninstallRefusal("Native installer state schema is unsupported.")
     if not isinstance(version, str) or len(version) > 192 or _VERSION.fullmatch(version) is None:
@@ -414,7 +415,7 @@ def _validate_install_state(
         raise NativeWindowsUninstallRefusal(
             "Native installer state source commit is invalid."
         )
-    if transaction_id and (
+    if transaction_id is not None and (
         not isinstance(transaction_id, str)
         or _TRANSACTION_ID.fullmatch(transaction_id) is None
     ):
@@ -476,7 +477,7 @@ def _validate_payload_manifest(
 
 
 @contextlib.contextmanager
-def _open_locked_setup(path: str) -> BinaryIO:
+def _open_locked_setup(path: str) -> Iterator[BinaryIO]:
     if os.name != "nt":
         raise NativeWindowsUninstallRefusal(
             "Native Windows Setup custody is unavailable on this platform."
@@ -670,12 +671,13 @@ def _verify_setup_authenticode(path: str, *, expected_version: str) -> None:
             "System Windows PowerShell is required to verify cached native Setup."
         )
     script = (
-        "$sig=Get-AuthenticodeSignature -LiteralPath $args[0];"
+        "$path=[Console]::In.ReadToEnd();"
+        "$sig=Get-AuthenticodeSignature -LiteralPath $path;"
         "$publisher='';"
         "if($sig.SignerCertificate){"
         "$publisher=$sig.SignerCertificate.GetNameInfo("
         "[Security.Cryptography.X509Certificates.X509NameType]::SimpleName,$false)};"
-        "$version=[Diagnostics.FileVersionInfo]::GetVersionInfo($args[0]).ProductVersion;"
+        "$version=[Diagnostics.FileVersionInfo]::GetVersionInfo($path).ProductVersion;"
         "[pscustomobject]@{"
         "Status=[string]$sig.Status;"
         "Publisher=$publisher;"
@@ -685,7 +687,8 @@ def _verify_setup_authenticode(path: str, *, expected_version: str) -> None:
     )
     try:
         completed = subprocess.run(
-            [powershell, "-NoProfile", "-NonInteractive", "-Command", script, path],
+            [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
+            input=path,
             capture_output=True,
             text=True,
             encoding="utf-8",

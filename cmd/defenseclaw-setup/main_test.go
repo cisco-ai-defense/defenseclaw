@@ -22,16 +22,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 )
 
-func TestHookLauncherPayloadInterfaceIsCanonicalAndAdditive(t *testing.T) {
+func TestHookLauncherPayloadInterfaceIsCanonicalAndRequired(t *testing.T) {
 	manifest := payloadManifest{Files: map[string]string{}}
-	if hasHookLauncherPayload(manifest) ||
-		slices.Contains(requiredPayloadFiles(manifest), hookruntime.HookLauncherName) {
-		t.Fatal("legacy payload unexpectedly declares the stable hook trampoline")
+	if !slices.Contains(requiredPayloadFiles(manifest), hookruntime.HookLauncherName) {
+		t.Fatal("canonical stable hook trampoline payload is not required")
 	}
-	manifest.Files[hookruntime.HookLauncherName] = strings.Repeat("a", 64)
-	if !hasHookLauncherPayload(manifest) ||
-		!slices.Contains(requiredPayloadFiles(manifest), hookruntime.HookLauncherName) {
-		t.Fatal("canonical stable hook trampoline payload was not selected")
+	_, complete := unsignedManifestFixture(t)
+	delete(complete.Files, hookruntime.HookLauncherName)
+	if err := verifyPayloadManifest(t.TempDir(), complete); err == nil ||
+		!strings.Contains(err.Error(), hookruntime.HookLauncherName) {
+		t.Fatalf("verifyPayloadManifest missing-launcher error = %v", err)
 	}
 }
 

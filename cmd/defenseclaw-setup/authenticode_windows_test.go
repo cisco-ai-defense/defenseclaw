@@ -11,7 +11,36 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
+
+func TestStableHookVerificationHandleDeniesWriteAndReplacement(t *testing.T) {
+	root := t.TempDir()
+	if err := safefile.ProtectDirectory(root); err != nil {
+		t.Fatal(err)
+	}
+	filePath := filepath.Join(root, "defenseclaw-hook.exe")
+	if err := os.WriteFile(filePath, unsignedTestPE(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.ProtectFile(filePath); err != nil {
+		t.Fatal(err)
+	}
+	locked, err := openStableHookVerificationFile(filePath)
+	if err != nil {
+		t.Fatalf("openStableHookVerificationFile: %v", err)
+	}
+	defer locked.Close()
+
+	if writable, err := os.OpenFile(filePath, os.O_WRONLY, 0); err == nil {
+		_ = writable.Close()
+		t.Fatal("stable hook verification handle allowed a concurrent writer")
+	}
+	if err := os.Rename(filePath, filePath+".replaced"); err == nil {
+		t.Fatal("stable hook verification handle allowed path replacement")
+	}
+}
 
 func TestWindowsAuthenticodeTrustAcceptsSignedPEAndRejectsTamper(t *testing.T) {
 	output, err := exec.Command(

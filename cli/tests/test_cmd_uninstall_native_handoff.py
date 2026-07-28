@@ -233,6 +233,33 @@ def test_prepare_refuses_unsupported_marker_identity(tmp_path: Path) -> None:
         _prepare_from_tree(local_app_data, profile)
 
 
+@pytest.mark.parametrize("transaction_id", [False, 0, "", [], {}])
+def test_prepare_refuses_non_string_or_empty_transaction_identity(
+    tmp_path: Path,
+    transaction_id: object,
+) -> None:
+    local_app_data, profile = _native_tree(tmp_path)
+    state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
+    state = _install_state(local_app_data, profile)
+    state["transaction_id"] = transaction_id
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    with pytest.raises(native.NativeWindowsUninstallRefusal, match="transaction identity"):
+        _prepare_from_tree(local_app_data, profile)
+
+
+def test_prepare_accepts_explicitly_absent_legacy_transaction_identity(
+    tmp_path: Path,
+) -> None:
+    local_app_data, profile = _native_tree(tmp_path)
+    state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
+    state = _install_state(local_app_data, profile)
+    del state["transaction_id"]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    assert _prepare_from_tree(local_app_data, profile) is not None
+
+
 @pytest.mark.parametrize(
     ("acl_problem", "message"),
     [
@@ -394,8 +421,22 @@ def test_authenticode_refuses_wrong_signer_or_version_and_checks_fixed_argv(
         "-NonInteractive",
         "-Command",
     ]
-    assert argv[-1] == r"C:\cache\DefenseClawSetup-x64.exe"
+    assert len(argv) == 5
+    assert run.call_args.kwargs["input"] == r"C:\cache\DefenseClawSetup-x64.exe"
     assert run.call_args.kwargs["shell"] is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires system Windows PowerShell")
+def test_authenticode_verifier_passes_target_to_real_powershell_over_stdin(
+    tmp_path: Path,
+) -> None:
+    fixture_root = tmp_path / "Unicode Setup Ω"
+    fixture_root.mkdir()
+    setup = fixture_root / "DefenseClaw Setup x64.exe"
+    _write_pe(setup)
+
+    with pytest.raises(native.NativeWindowsUninstallRefusal, match="not trusted"):
+        native._verify_setup_authenticode(str(setup), expected_version=_VERSION)
 
 
 @pytest.mark.parametrize(

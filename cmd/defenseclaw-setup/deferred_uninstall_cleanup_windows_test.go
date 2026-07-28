@@ -31,6 +31,18 @@ type deferredCleanupFixture struct {
 	maintenance string
 }
 
+func TestDeferredCleanupTransactionRootExpectationFailsClosed(t *testing.T) {
+	transaction := setupTransaction{
+		InstallRoot:     filepath.Join(t.TempDir(), "Programs", "DefenseClaw"),
+		DataRoot:        filepath.Join(t.TempDir(), ".defenseclaw"),
+		MaintenancePath: filepath.Join(t.TempDir(), setupArtifactName),
+	}
+	arm, err := defaultDeferredCleanupTransactionRootExpectation(transaction)
+	if err == nil || arm || !strings.Contains(err.Error(), "do not match") {
+		t.Fatalf("root expectation = arm %t, error %v", arm, err)
+	}
+}
+
 func newDeferredCleanupFixture(t *testing.T) deferredCleanupFixture {
 	t.Helper()
 	productRoot := filepath.Join(t.TempDir(), "DefenseClaw")

@@ -22,7 +22,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from click.testing import CliRunner
+from click.testing import CliRunner, Result
 from defenseclaw.bootstrap import StepResult
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
@@ -241,7 +241,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertEqual(_normalize_hook_fail_mode(raw), "closed")
 
     def test_requested_gateway_start_failure_is_nonzero_in_human_and_json(self):
-        def invoke(args):
+        def invoke(args: list[str]) -> Result:
             failed_start = StepResult(
                 "Sidecar",
                 "warn",

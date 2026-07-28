@@ -16,6 +16,12 @@ import (
 	"testing"
 )
 
+type readerAtFunc func([]byte, int64) (int, error)
+
+func (read readerAtFunc) ReadAt(buffer []byte, offset int64) (int, error) {
+	return read(buffer, offset)
+}
+
 func unsignedTestPE() []byte {
 	data := make([]byte, 512)
 	binary.LittleEndian.PutUint16(data[0:2], 0x5a4d)
@@ -78,6 +84,23 @@ func TestReadEmbeddedPKCS7RejectsOversizedCertificateTable(t *testing.T) {
 
 	if _, _, err := readEmbeddedPKCS7(path); err == nil || !strings.Contains(err.Error(), "too large") {
 		t.Fatalf("readEmbeddedPKCS7 oversized table error = %v", err)
+	}
+}
+
+func TestPortableExecutableMachinePropagatesGenuineReadFailure(t *testing.T) {
+	injectedErr := errors.New("injected read failure")
+	if _, present, err := portableExecutableMachineFromReader(
+		readerAtFunc(func([]byte, int64) (int, error) {
+			return 0, injectedErr
+		}),
+	); !errors.Is(err, injectedErr) || present {
+		t.Fatalf("portableExecutableMachineFromReader error = %v, present = %t", err, present)
+	}
+}
+
+func TestPortableExecutableMachineTreatsShortFileAsNonPE(t *testing.T) {
+	if _, present, err := portableExecutableMachineFromReader(bytes.NewReader([]byte("short"))); err != nil || present {
+		t.Fatalf("portableExecutableMachineFromReader error = %v, present = %t", err, present)
 	}
 }
 

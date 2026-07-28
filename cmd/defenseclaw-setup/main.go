@@ -1472,9 +1472,6 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 }
 
 func stageHookLauncher(payload loadedPayload, staging string) error {
-	if !hasHookLauncherPayload(payload.Manifest) {
-		return nil
-	}
 	if err := copyFile(
 		filepath.Join(payload.Root, hookruntime.HookLauncherName),
 		filepath.Join(staging, "bin", hookruntime.HookLauncherName),
@@ -2156,18 +2153,11 @@ func requiredPayloadFiles(manifest payloadManifest) []string {
 		manifest.SitePackages,
 		manifest.Launcher,
 		manifest.StartupLauncher,
+		hookruntime.HookLauncherName,
 		manifest.CosignVerifier,
 		manifest.UpgradeManifest,
 	}
-	if hasHookLauncherPayload(manifest) {
-		required = append(required, hookruntime.HookLauncherName)
-	}
 	return required
-}
-
-func hasHookLauncherPayload(manifest payloadManifest) bool {
-	_, ok := manifest.Files[hookruntime.HookLauncherName]
-	return ok
 }
 
 func validSourceCommit(value string) bool {

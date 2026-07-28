@@ -29,6 +29,17 @@ func testTransactionRoots(t *testing.T) (string, string, string) {
 		filepath.Join(root, "DefenseClaw", "InstallerCache", setupArtifactName)
 }
 
+func bypassDeferredUninstallCleanupForTest(t *testing.T) {
+	t.Helper()
+	original := deferredCleanupTransactionRootExpectation
+	deferredCleanupTransactionRootExpectation = func(setupTransaction) (bool, error) {
+		return false, nil
+	}
+	t.Cleanup(func() {
+		deferredCleanupTransactionRootExpectation = original
+	})
+}
+
 func testInstallState(installRoot, dataRoot, maintenancePath, transactionID, version string) installState {
 	return installState{
 		SchemaVersion:          1,
@@ -300,6 +311,7 @@ func TestCommittedUninstallCleanupConvergesAfterRename(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows delayed maintenance-cache cleanup")
 	}
+	bypassDeferredUninstallCleanupForTest(t)
 	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
 	previous := testInstallState(installRoot, dataRoot, maintenancePath, testPreviousTransactionID, "1.0.0")
 	transaction := testSetupTransactionForRoots("uninstall", installRoot, dataRoot, maintenancePath, &previous)
@@ -332,6 +344,7 @@ func TestCommittedUninstallCleanupConvergesAfterRename(t *testing.T) {
 }
 
 func TestCommittedUninstallCleanupPreservesDataForPendingConnectorReconciliation(t *testing.T) {
+	bypassDeferredUninstallCleanupForTest(t)
 	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
 	transaction := testSetupTransactionForRoots("uninstall", installRoot, dataRoot, maintenancePath, nil)
 	transaction.DeleteUserData = true
@@ -363,6 +376,7 @@ func TestCommittedUninstallCleanupPreservesDataForPendingConnectorReconciliation
 }
 
 func TestCommittedUninstallCleanupFinishesPartiallyDeletedTrash(t *testing.T) {
+	bypassDeferredUninstallCleanupForTest(t)
 	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
 	previous := testInstallState(installRoot, dataRoot, maintenancePath, testPreviousTransactionID, "1.0.0")
 	transaction := testSetupTransactionForRoots("uninstall", installRoot, dataRoot, maintenancePath, &previous)

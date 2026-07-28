@@ -195,6 +195,7 @@ function Assert-StableHookLauncherPublication(
         throw 'HookRuntime launcher publication does not use canonical source and destination names'
     }
     foreach ($path in @($Source, $Published)) {
+        Assert-NoReparseAncestors $path
         $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
         if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw "HookRuntime launcher publication is not a regular file: $path"
@@ -4305,7 +4306,11 @@ function Invoke-WindowsReleaseCertification {
         throw 'release setup provenance lacks the canonical HookRuntime launcher SHA-256'
     }
     Assert-WindowsReleaseSbom `
-        $sbomPath $setupHash $releaseVersion ([string]$env:GITHUB_SHA) $expectedHookLauncherHash
+        -Path $sbomPath `
+        -SetupHash $setupHash `
+        -Version $releaseVersion `
+        -SourceCommit ([string]$env:GITHUB_SHA) `
+        -HookLauncherHash $expectedHookLauncherHash
     $releaseMetadataHashes = @{}
     foreach ($metadataPath in @($sidecarPath, $provenancePath, $sbomPath)) {
         $releaseMetadataHashes[$metadataPath] = `

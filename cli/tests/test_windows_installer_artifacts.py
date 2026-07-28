@@ -744,6 +744,7 @@ def test_hook_launcher_size_gate_rejects_oversized_artifact(tmp_path: Path) -> N
         text=True,
         env=env,
         timeout=30,
+        check=False,
     )
     assert accepted.returncode == 0, accepted.stdout + accepted.stderr
 
@@ -755,6 +756,7 @@ def test_hook_launcher_size_gate_rejects_oversized_artifact(tmp_path: Path) -> N
         text=True,
         env=env,
         timeout=30,
+        check=False,
     )
     assert rejected.returncode != 0
     assert "no larger than 8388608 bytes before" in rejected.stderr

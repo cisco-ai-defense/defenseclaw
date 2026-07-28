@@ -146,19 +146,35 @@ func removeDeferredCleanupRunValue(command string) error {
 	return flushRegistryKey(key)
 }
 
-func armDeferredUninstallCleanup(transaction setupTransaction) error {
+var deferredCleanupTransactionRootExpectation = defaultDeferredCleanupTransactionRootExpectation
+
+func defaultDeferredCleanupTransactionRootExpectation(
+	transaction setupTransaction,
+) (bool, error) {
 	expectedInstallRoot, installErr := defaultInstallRoot()
 	expectedDataRoot, dataErr := defaultDataRoot()
 	expectedMaintenancePath, maintenanceErr := defaultMaintenancePath()
 	if err := errors.Join(installErr, dataErr, maintenanceErr); err != nil {
-		return err
+		return false, err
 	}
 	if !samePath(transaction.InstallRoot, expectedInstallRoot) ||
 		!samePath(transaction.DataRoot, expectedDataRoot) ||
 		!samePath(transaction.MaintenancePath, expectedMaintenancePath) {
-		// Direct transaction unit tests intentionally use isolated roots.
-		// Production transactions are validated against Known Folders before
-		// they can reach committed cleanup.
+		return false, errors.New(
+			"deferred uninstall cleanup transaction roots do not match current-user Known Folders",
+		)
+	}
+	return true, nil
+}
+
+func armDeferredUninstallCleanup(transaction setupTransaction) error {
+	arm, err := deferredCleanupTransactionRootExpectation(transaction)
+	if err != nil {
+		return err
+	}
+	if !arm {
+		// The production expectation above never skips: this branch exists only
+		// as an explicit seam for isolated transaction unit tests.
 		return nil
 	}
 	paths, err := hookruntime.CurrentUserPaths()
