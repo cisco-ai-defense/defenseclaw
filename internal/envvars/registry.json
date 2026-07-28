@@ -2019,6 +2019,19 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_CLEANUP_ACK",
+      "category": "hook_internal",
+      "purpose": "Canonical InstallerCache cleanup acknowledgement path used by the bounded post-exit finalizer.",
+      "default": "unset (set and overwritten by native Setup)",
+      "accepted_values": ["absolute installer-cache acknowledgement path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/deferred_uninstall_cleanup_windows.go", "description": "Post-exit finalizer locks and validates the exact cleanup acknowledgement before removing authenticated installer residue"}
+      ],
+      "since": "0.8.8"
+    },
+    {
       "name": "DEFENSECLAW_CLEANUP_PARENT_PID",
       "category": "hook_internal",
       "purpose": "Parent process identifier awaited by the bounded delayed InstallerCache cleanup helper.",
@@ -2427,6 +2440,32 @@
       "surface_in_doctor": false,
       "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock hard-exit fixture"}],
       "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_DELEGATION_TEST_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the isolated stable-hook delegation helper subprocess.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/hookruntime/delegation_windows_test.go", "description": "Native Windows hook-delegation test fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.8"
+    },
+    {
+      "name": "DEFENSECLAW_DELEGATION_ENV_SENTINEL",
+      "category": "test_fixture",
+      "purpose": "Carries an inherited environment sentinel through the isolated stable-hook delegation fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined value", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/hookruntime/delegation_windows_test.go", "description": "Native Windows hook-delegation test fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.8"
     },
     {
       "name": "DEFENSECLAW_LONG_PATH_HELPER",
