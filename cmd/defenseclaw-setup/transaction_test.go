@@ -1875,7 +1875,7 @@ func TestConvergeInstallRuntimeActivatesOnlyAfterReconciliation(t *testing.T) {
 	}
 }
 
-func TestCanonicalReleaseStatePrecedesConnectorAndRuntimeConvergence(t *testing.T) {
+func TestCanonicalReleaseStateInitializesBeforeValidation(t *testing.T) {
 	t.Parallel()
 	transaction := setupTransaction{
 		InstallRoot:   "install",
@@ -1907,9 +1907,8 @@ func TestCanonicalReleaseStatePrecedesConnectorAndRuntimeConvergence(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	calls = append(calls, "optional-connector", "gateway-start", "authenticated-readiness")
-	if got := strings.Join(calls, ","); got != "canonical-base+migration-cursor,validate-config+cursor,optional-connector,gateway-start,authenticated-readiness" {
-		t.Fatalf("fresh install ordering = %q", got)
+	if got := strings.Join(calls, ","); got != "canonical-base+migration-cursor,validate-config+cursor" {
+		t.Fatalf("canonical state ordering = %q", got)
 	}
 }
 

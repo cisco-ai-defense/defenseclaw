@@ -6706,6 +6706,22 @@ class TestUpgradeManifest(unittest.TestCase):
     policy even when the local upgrade script is older than the release."""
 
     @staticmethod
+    def _native_windows_acl_fixture():
+        """Use real ACLs on Windows and stable custody evidence elsewhere."""
+        if os.name == "nt":
+            return nullcontext()
+        stack = ExitStack()
+        security = Mock(name="native-windows-security")
+        stack.enter_context(
+            patch("defenseclaw.windows_acl.capture_path", return_value=security)
+        )
+        stack.enter_context(patch("defenseclaw.windows_acl.assert_trusted_owner"))
+        stack.enter_context(
+            patch("defenseclaw.windows_acl.assert_not_broadly_writable")
+        )
+        return stack
+
+    @staticmethod
     def _native_install_state_fixture(
         temp: str,
         *,
@@ -7569,7 +7585,7 @@ class TestUpgradeManifest(unittest.TestCase):
             with patch(
                 "defenseclaw.commands.cmd_upgrade._windows_known_folder",
                 side_effect=[local_appdata, profile],
-            ):
+            ), self._native_windows_acl_fixture():
                 loaded = _native_windows_install_state("windows", expected_version="0.8.7")
 
         self.assertIsNotNone(loaded)
@@ -7595,6 +7611,7 @@ class TestUpgradeManifest(unittest.TestCase):
                     "defenseclaw.commands.cmd_upgrade._windows_known_folder",
                     side_effect=[local_appdata, profile],
                 ),
+                self._native_windows_acl_fixture(),
             ):
                 loaded = _native_windows_install_state("windows")
 
@@ -7611,6 +7628,7 @@ class TestUpgradeManifest(unittest.TestCase):
                     "defenseclaw.commands.cmd_upgrade._windows_known_folder",
                     side_effect=[local_appdata, profile],
                 ),
+                self._native_windows_acl_fixture(),
                 self.assertRaises(SystemExit) as ctx,
             ):
                 _native_windows_install_state("windows", expected_version="0.8.7")
@@ -7632,6 +7650,7 @@ class TestUpgradeManifest(unittest.TestCase):
                     "defenseclaw.commands.cmd_upgrade._windows_known_folder",
                     side_effect=[local_appdata, profile],
                 ),
+                self._native_windows_acl_fixture(),
                 self.assertRaises(SystemExit) as ctx,
             ):
                 _native_windows_install_state("windows")
@@ -7670,6 +7689,7 @@ class TestUpgradeManifest(unittest.TestCase):
                     "defenseclaw.commands.cmd_upgrade._windows_known_folder",
                     side_effect=[local_appdata, profile],
                 ),
+                self._native_windows_acl_fixture(),
             ):
                 state = _native_windows_install_state("windows", expected_version="0.8.7")
                 with patch(
@@ -7758,6 +7778,7 @@ class TestUpgradeManifest(unittest.TestCase):
                         "defenseclaw.commands.cmd_upgrade._windows_known_folder",
                         side_effect=[local_appdata, profile],
                     ),
+                    self._native_windows_acl_fixture(),
                 ):
                     state = _native_windows_install_state("windows", expected_version="0.8.7")
                     ownership = (

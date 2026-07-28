@@ -349,9 +349,15 @@ func runPackagedCanonicalStateValidationFixture(
 	required []string,
 ) ([]byte, error) {
 	t.Helper()
-	python, err := exec.LookPath("python")
-	if err != nil {
-		t.Skipf("python is unavailable: %v", err)
+	var python string
+	for _, name := range []string{"python", "python3"} {
+		if path, err := exec.LookPath(name); err == nil {
+			python = path
+			break
+		}
+	}
+	if python == "" {
+		t.Skip("python is unavailable")
 	}
 	root := t.TempDir()
 	packageRoot := filepath.Join(root, "defenseclaw")
@@ -382,12 +388,16 @@ func runPackagedCanonicalStateValidationFixture(
 	if err := os.Mkdir(dataRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	fixtureScript := "import sys\nsys.path.insert(0, sys.argv.pop(1))\n" +
+		packagedCanonicalStateValidationScript
 	cmd := exec.Command(
 		python,
+		"-I",
 		"-X",
 		"utf8",
 		"-c",
-		packagedCanonicalStateValidationScript,
+		fixtureScript,
+		root,
 		dataRoot,
 		"0.8.9",
 		manifestPath,
