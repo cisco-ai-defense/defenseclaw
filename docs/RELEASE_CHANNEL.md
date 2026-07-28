@@ -170,8 +170,11 @@ needs `uv`, it always downloads the platform archive for pinned `uv` `0.11.28`,
 verifies its reviewed SHA-256, and extracts only the explicit platform
 executable into private upgrade custody. It never discovers, copies,
 version-probes, or executes a `uv` from `PATH` or a local known location, and it
-never streams an upstream installer. The private extracted binary is cached
-only for that resolver process.
+never streams an upstream installer. The resolver places that authenticated
+binary and the already verified installed gateway directory first on `PATH`
+only for the immutable `0.8.5` controller children that still discover those
+tools by name. It retains only the private `uv` between the hard-cut and final
+child, then the existing resolver exit cleanup removes it.
 
 Interrupted phase-two recovery uses the same authenticated uv bootstrap before
 it can reinstall the retained bridge wheel. That recovery therefore requires

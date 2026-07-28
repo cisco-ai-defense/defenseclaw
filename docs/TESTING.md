@@ -148,6 +148,9 @@ One manual release dispatch builds and seals one candidate, then runs
 lanes above on Linux and macOS. This includes the exact `0.8.6`
 missing-cursor recovery fixture, not merely a normal `0.8.6` install. Five
 ordinary seeded sources resolve their published wheel dependency graph.
+The exact `0.8.5` lane additionally runs exact public `0.8.1` through the full
+bridge route. Every candidate resolver invocation excludes ambient `uv` from
+`PATH`, requiring the resolver's authenticated private tool handoff to work.
 The `0.8.4` boundary instead starts with deliberate dependency drift and must
 prove the authenticated rollback-safe bridge refresh before the `0.8.5`
 handoff. It also runs the public POSIX installer on Linux

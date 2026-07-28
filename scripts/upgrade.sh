@@ -284,6 +284,43 @@ PY
     ok "Pinned uv ${UV_BOOTSTRAP_VERSION} authenticated in private upgrade custody"
 }
 
+require_authenticated_upgrade_uv_handoff() {
+    [[ -n "${UV_BIN:-}" \
+       && "${UV_BIN}" == "${STAGING_DIR}/upgrade-tools/uv" \
+       && -f "${UV_BIN}" \
+       && -x "${UV_BIN}" \
+       && ! -L "${UV_BIN}" \
+       && "${UV_BIN%/*}" != *:* \
+       && -f "${INSTALL_DIR}/defenseclaw-gateway" \
+       && -x "${INSTALL_DIR}/defenseclaw-gateway" \
+       && ! -L "${INSTALL_DIR}/defenseclaw-gateway" \
+       && "${INSTALL_DIR}" != *:* ]] \
+        || die "Authenticated private uv or installed gateway is unavailable for the historical controller handoff."
+}
+
+retain_authenticated_upgrade_uv_staging() {
+    require_authenticated_upgrade_uv_handoff
+    local previous_staging="${STAGING_DIR}"
+    local retained_staging=""
+    retained_staging="$(mktemp -d "${STAGING_DIR%/*}/defenseclaw-upgrade-uv.XXXXXX")" \
+        || die "Could not retain authenticated uv for the historical controller handoff."
+    if ! chmod 700 "${retained_staging}" \
+        || ! mkdir "${retained_staging}/upgrade-tools" \
+        || ! chmod 700 "${retained_staging}/upgrade-tools"; then
+        rm -rf -- "${retained_staging}"
+        die "Could not protect retained authenticated uv custody."
+    fi
+    if ! mv -- "${UV_BIN}" "${retained_staging}/upgrade-tools/uv"; then
+        rm -rf -- "${retained_staging}"
+        die "Could not retain authenticated uv for the historical controller handoff."
+    fi
+    STAGING_DIR="${retained_staging}"
+    UV_BIN="${STAGING_DIR}/upgrade-tools/uv"
+    rm -rf -- "${previous_staging}" \
+        || die "Could not retire completed hard-cut staging."
+    require_authenticated_upgrade_uv_handoff
+}
+
 # Keep one bounded, fail-closed parser for every phase-one gateway.pid
 # decision, including crash recovery. Published gateways write a JSON pidInfo
 # object; legacy integer files remain supported for older/manual installs.
@@ -8081,20 +8118,22 @@ continue_post_hard_cut_upgrade() {
     ok "${OBSERVABILITY_V8_HARD_CUT_VERSION} is healthy; continuing to ${final_version}"
 
     # The authenticated bootstrap controller is now installed outside the
-    # private target staging directory.  Drop the completed hard-cut handoff
-    # custody, but keep this resolver's cross-process lock until the ordinary
-    # post-cut child and any inherited mutators have exited.  The completed
-    # 0.8.4 hard-cut rollback is not re-armed for this later transaction.
+    # private target staging directory. Keep the authenticated private uv
+    # available to its frozen final-hop controller; the existing exit trap
+    # removes staging after that child and any inherited mutators have exited.
+    # The completed 0.8.4 hard-cut rollback is not re-armed for this later
+    # transaction.
     unset DEFENSECLAW_STAGED_UPGRADE
     unset DEFENSECLAW_STAGED_BRIDGE_VERSION
     unset DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR
     unset DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION
-    cleanup_upgrade_staging
+    retain_authenticated_upgrade_uv_staging
     # The immutable 0.8.5 controller gives child commands 30 seconds but owns
     # a separate 60-second, version-aware gateway health poll. Current gateway
     # binaries consume this process-scoped handoff marker after safe launch so
     # that the controller, rather than both layers, owns the readiness wait.
     env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \
+        PATH="${UV_BIN%/*}:${INSTALL_DIR}:${PATH}" \
         DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 \
         "${DEFENSECLAW_VENV}/bin/defenseclaw" upgrade --yes --version "${final_version}" \
         || final_status=$?
@@ -9461,9 +9500,11 @@ if [[ -n "${STAGED_FINAL_VERSION}" ]]; then
     export DEFENSECLAW_CONFIG="${CONFIG_PATH}"
     export OPENCLAW_HOME="${OPENCLAW_HOME}"
     target_status=0
+    require_authenticated_upgrade_uv_handoff
     env -u UV_OVERRIDE \
         UV_CONSTRAINT="${HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE}" \
         UV_EXCLUDE_NEWER="${HISTORICAL_BOOTSTRAP_EXCLUDE_NEWER}" \
+        PATH="${UV_BIN%/*}:${INSTALL_DIR}:${PATH}" \
         "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}" \
         || target_status=$?
     if [[ "${target_status}" -eq 0 ]]; then

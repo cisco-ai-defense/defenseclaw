@@ -145,10 +145,15 @@ def function(name: str, following: str) -> str:
 post_cut = function("continue_post_hard_cut_upgrade", "validate_tarball_members")
 if not (
     "env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \\\n"
+    '        PATH="${UV_BIN%/*}:${INSTALL_DIR}:${PATH}" \\\n'
     "        DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 \\\n"
     '        "${DEFENSECLAW_VENV}/bin/defenseclaw" upgrade'
 ) in post_cut:
-    raise SystemExit("post-hard-cut final hop does not clear historical resolver constraints")
+    raise SystemExit("post-hard-cut final hop does not receive authenticated uv with clean constraints")
+if "cleanup_upgrade_staging" in post_cut:
+    raise SystemExit("post-hard-cut final hop drops authenticated uv staging before the frozen controller exits")
+if "retain_authenticated_upgrade_uv_staging" not in post_cut:
+    raise SystemExit("post-hard-cut final hop does not retain only authenticated uv custody")
 
 install_start = source.index("# ── Install from staging (fast, no network)")
 install_end = source.index("# ── Run migrations", install_start)
@@ -163,6 +168,7 @@ historical_handoff = (
     'env -u UV_OVERRIDE \\\n'
     '        UV_CONSTRAINT="${HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE}" \\\n'
     '        UV_EXCLUDE_NEWER="${HISTORICAL_BOOTSTRAP_EXCLUDE_NEWER}" \\\n'
+    '        PATH="${UV_BIN%/*}:${INSTALL_DIR}:${PATH}" \\\n'
     '        "${TARGET_CONTROLLER_CLI}" upgrade'
 )
 if source.count(historical_handoff) != 1:

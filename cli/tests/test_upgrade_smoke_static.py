@@ -1494,6 +1494,18 @@ def test_bridge_controller_hard_cut_establishes_rollback_custody_before_mutation
 def test_posix_resolver_normalizes_every_bridge_through_one_authenticated_handoff() -> None:
     resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
 
+    guard_start = resolver.index("require_authenticated_upgrade_uv_handoff() {")
+    guard_end = resolver.index("\n}\n\nretain_authenticated_upgrade_uv_staging() {", guard_start)
+    guard = resolver[guard_start:guard_end]
+    assert '"${UV_BIN}" == "${STAGING_DIR}/upgrade-tools/uv"' in guard
+    assert '-f "${UV_BIN}"' in guard
+    assert '! -L "${UV_BIN}"' in guard
+    assert '"${UV_BIN%/*}" != *:*' in guard
+    assert '-f "${INSTALL_DIR}/defenseclaw-gateway"' in guard
+    assert '-x "${INSTALL_DIR}/defenseclaw-gateway"' in guard
+    assert '! -L "${INSTALL_DIR}/defenseclaw-gateway"' in guard
+    assert '"${INSTALL_DIR}" != *:*' in guard
+
     resolve_start = resolver.index("resolve_staged_upgrade() {")
     resolve_end = resolver.index("\n}\n\npreflight_bridge_rollback_capability() {", resolve_start)
     resolve = resolver[resolve_start:resolve_end]
@@ -1514,6 +1526,7 @@ def test_posix_resolver_normalizes_every_bridge_through_one_authenticated_handof
         "env -u UV_OVERRIDE \\\n"
         '        UV_CONSTRAINT="${HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE}" \\\n'
         '        UV_EXCLUDE_NEWER="${HISTORICAL_BOOTSTRAP_EXCLUDE_NEWER}" \\\n'
+        '        PATH="${UV_BIN%/*}:${INSTALL_DIR}:${PATH}" \\\n'
         f"        {target_command}"
     )
     assert resolver.count(scoped_target_command) == 1
@@ -1528,18 +1541,22 @@ def test_posix_resolver_normalizes_every_bridge_through_one_authenticated_handof
     continuation_start = resolver.index("continue_post_hard_cut_upgrade() {")
     continuation_end = resolver.index("\n}\n\nvalidate_tarball_members() {", continuation_start)
     continuation = resolver[continuation_start:continuation_end]
-    remove_staging = continuation.index("cleanup_upgrade_staging")
+    uv_guard = continuation.index("retain_authenticated_upgrade_uv_staging")
     final_upgrade = continuation.index(
         '"${DEFENSECLAW_VENV}/bin/defenseclaw" upgrade --yes --version "${final_version}"',
-        remove_staging,
+        uv_guard,
     )
     final_exit = continuation.index('exit "${final_status}"', final_upgrade)
-    assert remove_staging < final_upgrade < final_exit
-    assert continuation.index("unset DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION") < remove_staging
+    assert uv_guard < final_upgrade < final_exit
+    assert continuation.index("unset DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION") < uv_guard
+    assert "cleanup_upgrade_staging" not in continuation
     assert "release_upgrade_lock" not in continuation
     assert "trap - EXIT" not in continuation
     assert "HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE" not in continuation
     assert "env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER" in continuation
+    assert 'PATH="${UV_BIN%/*}:${INSTALL_DIR}:${PATH}"' in continuation
+    assert resolver.count("require_authenticated_upgrade_uv_handoff") == 4
+    assert resolver.count("retain_authenticated_upgrade_uv_staging") == 2
     assert "UV_CONSTRAINT=''" not in resolver
     assert "UV_OVERRIDE=''" not in resolver
     assert "UV_EXCLUDE_NEWER=''" not in resolver

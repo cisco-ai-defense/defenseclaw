@@ -151,9 +151,14 @@ Confirm that the exact run shows:
 - every baseline selected by workflow request validation upgraded on both
   Linux and macOS, including the `0.8.4` bridge and `0.8.5` forward handoff
   for pre-`0.8.4` sources;
+- exact public `0.8.1` upgraded through the full `0.8.4` and `0.8.5` bridge
+  route on both Linux and macOS as a companion case in the selected `0.8.5`
+  lane;
 - exact published `0.8.6` and `0.8.7` install-plus-first-run field states with
   an absent migration cursor recovered through the candidate resolver on both
   Linux and macOS under the immutable rescue bootstrap’s clean tool path;
+- every candidate resolver success case ran without a runner-installed `uv`
+  on `PATH`, proving the authenticated private bootstrap and handoffs;
 - native Windows x64 fresh install through `install.ps1` and
   `DefenseClawSetup-x64.exe`;
 - exact CLI and gateway version plus healthy gateway checks;

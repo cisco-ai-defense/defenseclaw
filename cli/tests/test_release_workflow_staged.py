@@ -879,7 +879,10 @@ def test_exact_posix_fresh_install_and_twelve_upgrade_cells_gate_publication() -
     assert "scripts/release_candidate.py verify" in upgrade
     assert "scripts/verify-sigstore-blob.py" in upgrade
     assert "bash scripts/test-upgrade-protocol-release.sh" in upgrade
-    assert '--from-version "$BASELINE"' in upgrade
+    assert '--from-versions "$smoke_baselines"' in upgrade
+    assert 'smoke_baselines="$BASELINE"' in upgrade
+    assert 'if [[ "$BASELINE" == "0.8.5" ]]' in upgrade
+    assert 'smoke_baselines="${BASELINE},0.8.1"' in upgrade
     assert "--success-path-only" in upgrade
     assert "--baseline-mode seed" in upgrade
     assert "baseline_dependencies=published" in upgrade
