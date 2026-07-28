@@ -286,6 +286,15 @@ func requireDeferredCleanupHookRuntime(path string) error {
 	return nil
 }
 
+func authenticatedUninstallMaintenanceDigest(transaction setupTransaction) (string, error) {
+	if transaction.Action != "uninstall" ||
+		!transaction.MaintenanceExisted ||
+		!validLowerSHA256(transaction.PreviousMaintenanceSHA256) {
+		return "", errors.New("uninstall transaction lacks an authenticated maintenance executable snapshot")
+	}
+	return transaction.PreviousMaintenanceSHA256, nil
+}
+
 func buildDeferredUninstallCleanupRecord(
 	transaction setupTransaction,
 	paths hookruntime.Paths,
@@ -361,7 +370,11 @@ func buildDeferredUninstallCleanupRecord(
 	if err != nil {
 		return deferredUninstallCleanupRecord{}, fmt.Errorf("hash deferred cleanup executable: %w", err)
 	}
-	if !strings.EqualFold(maintenanceDigest, transaction.MaintenanceSHA256) {
+	expectedMaintenanceDigest, err := authenticatedUninstallMaintenanceDigest(transaction)
+	if err != nil {
+		return deferredUninstallCleanupRecord{}, err
+	}
+	if !strings.EqualFold(maintenanceDigest, expectedMaintenanceDigest) {
 		return deferredUninstallCleanupRecord{}, errors.New("deferred cleanup executable differs from the uninstall transaction")
 	}
 	if err := verifySetupExecutablePolicyAt(transaction.MaintenancePath, unsignedLocal); err != nil {
@@ -634,8 +647,12 @@ func validateConvergedDeferredCleanupJournal(
 	if err := validateSetupTransaction(journal.Transaction, expected); err != nil {
 		return fmt.Errorf("validate converged uninstall transaction: %w", err)
 	}
+	journalMaintenanceDigest, err := authenticatedUninstallMaintenanceDigest(journal.Transaction)
+	if err != nil {
+		return err
+	}
 	if !samePath(journal.Transaction.MaintenancePath, record.MaintenancePath) ||
-		!strings.EqualFold(journal.Transaction.MaintenanceSHA256, record.MaintenanceSHA256) {
+		!strings.EqualFold(journalMaintenanceDigest, record.MaintenanceSHA256) {
 		return errors.New("converged uninstall journal does not match deferred cleanup maintenance identity")
 	}
 	expectedHookPath := filepath.Join(

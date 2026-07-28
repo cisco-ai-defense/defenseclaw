@@ -65,6 +65,35 @@ func TestWindowsBootIdentifierReturnsCanonicalValue(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedUninstallMaintenanceDigestUsesPreUninstallSnapshot(t *testing.T) {
+	expected := strings.Repeat("a", 64)
+	transaction := setupTransaction{
+		Action:                    "uninstall",
+		MaintenanceExisted:        true,
+		PreviousMaintenanceSHA256: expected,
+	}
+
+	got, err := authenticatedUninstallMaintenanceDigest(transaction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != expected {
+		t.Fatalf("maintenance digest = %q, want %q", got, expected)
+	}
+}
+
+func TestAuthenticatedUninstallMaintenanceDigestRejectsMissingSnapshot(t *testing.T) {
+	for _, transaction := range []setupTransaction{
+		{Action: "install", MaintenanceExisted: true, PreviousMaintenanceSHA256: strings.Repeat("a", 64)},
+		{Action: "uninstall", PreviousMaintenanceSHA256: strings.Repeat("a", 64)},
+		{Action: "uninstall", MaintenanceExisted: true},
+	} {
+		if got, err := authenticatedUninstallMaintenanceDigest(transaction); err == nil || got != "" {
+			t.Fatalf("maintenance digest = %q, error %v", got, err)
+		}
+	}
+}
+
 func TestDeferredCleanupTransactionRootExpectationFailsClosed(t *testing.T) {
 	transaction := setupTransaction{
 		InstallRoot:     filepath.Join(t.TempDir(), "Programs", "DefenseClaw"),
