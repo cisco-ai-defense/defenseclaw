@@ -56,11 +56,16 @@ GitHub verifies the immutable release after publication, so there is no
 per-release confirmation checkbox. You do not need to create a ruleset to cut
 a release. A ruleset on `release-channel` is optional repository hardening,
 not a release prerequisite or part of client trust.
-Without one, a repository writer or administrator can delete the pointer or
-replay an older valid signed pointer, affecting availability or freshness.
-They still cannot make clients accept an unsigned channel document, altered
-resolver, or altered release payload: Sigstore authenticates the channel and
-its digests bind the immutable versioned assets.
+This relies on protected `main`, required checks, and the reviewed release
+workflow and signing identity remaining protected from administrator-level
+bypass; a channel ruleset alone cannot defend against an administrator who can
+rewrite those publishing authorities.
+
+With those authorities intact, someone limited to editing the channel can
+delete the pointer or replay an older valid signed pointer, affecting
+availability or freshness. They still cannot make clients accept an unsigned
+channel document, altered resolver, or altered release payload: Sigstore
+authenticates the channel and its digests bind the immutable versioned assets.
 
 ## Cut a release
 

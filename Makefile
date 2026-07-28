@@ -1013,7 +1013,7 @@ dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-upgrade-manifest dist-
 	@echo "  The protected release workflow wraps, signs, seals, and tests these inputs."
 	@echo ""
 	@echo "Cut a release from a reviewed main commit (one dispatch):"
-	@echo "  gh workflow run release.yaml --ref main -f operation=release -f version=X.Y.Z"
+	@echo "  gh workflow run release.yaml --repo cisco-ai-defense/defenseclaw --ref main -f operation=release -f version=X.Y.Z"
 	@echo ""
 	@echo "  NOTE: version must be bare X.Y.Z, no 'v' prefix — the release"
 	@echo "  workflow + scripts/install.sh + 'defenseclaw upgrade' all"

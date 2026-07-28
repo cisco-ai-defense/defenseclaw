@@ -399,7 +399,9 @@ Actions -> Release -> Run workflow -> operation: release
 Or dispatch it with GitHub CLI:
 
 ```bash
-gh workflow run release.yaml --ref main \
+gh workflow run release.yaml \
+  --repo cisco-ai-defense/defenseclaw \
+  --ref main \
   -f operation=release \
   -f version=0.8.8
 ```

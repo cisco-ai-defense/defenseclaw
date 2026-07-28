@@ -1819,7 +1819,9 @@ def test_release_docs_use_one_dispatch_and_never_precreate_tag() -> None:
     install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
 
     for text in (makefile, install):
-        assert "gh workflow run release.yaml --ref main" in text
+        assert "gh workflow run release.yaml" in text
+        assert "--repo cisco-ai-defense/defenseclaw" in text
+        assert "--ref main" in text
         assert "-f operation=release" in text
         assert "-f version=" in text
         assert "expected_commit" not in text

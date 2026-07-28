@@ -110,12 +110,17 @@ confirmation, or local preflight is required.
 A `release-channel` branch ruleset is optional hardening. It can reduce
 accidental deletion or rewrites and improve the Git audit trail, but it is not
 a release prerequisite or client trust boundary; an operator does not need to
-create one before release. Without a ruleset, someone with repository write or
-administrator authority can delete the pointer or replay an older valid signed
-document, causing availability or freshness problems. They cannot make clients
-accept an unsigned or modified document: clients require the release
-workflow's Sigstore identity, then require its SHA-256 bindings to immutable
-versioned resolver, installer, and payload assets.
+create one before release. This relies on protected `main`, its required checks,
+and the reviewed release workflow and signing identity remaining protected from
+administrator-level bypass. A channel ruleset alone cannot defend against an
+administrator who can rewrite those publishing authorities.
+
+With those authorities intact, someone limited to editing the channel can
+delete the pointer or replay an older valid signed document, causing
+availability or freshness problems. They cannot make clients accept an
+unsigned or modified document: clients require the release workflow's Sigstore
+identity, then require its SHA-256 bindings to immutable versioned resolver,
+installer, and payload assets.
 
 ## Rescue behavior
 
@@ -214,10 +219,13 @@ installation remains owned by the authenticated target installer.
 - An unsigned channel edit, arbitrary URL, changed resolver or installer name,
   tag/ref mismatch, same-version digest change, or rollback publication is
   rejected.
-- A repository writer or administrator could delete the channel or replay an
-  older, previously valid signed document. That is a freshness/availability
-  risk, not authority to execute modified bytes: the resolver is still an
-  immutable signed release asset, and normal upgrade policy refuses
-  downgrades.
+- While protected `main`, required checks, and the release workflow/signing
+  identity remain intact, someone limited to editing the channel could delete
+  it or replay an older, previously valid signed document. That is a
+  freshness/availability risk, not authority to execute modified bytes: the
+  resolver is still an immutable signed release asset, and normal upgrade
+  policy refuses downgrades. An administrator able to bypass or rewrite those
+  publishing authorities can change the trusted publisher regardless of a
+  channel ruleset.
 - Windows rescue delegates to native Setup and its signed release contract;
   it supports native Windows x64 only. macOS and Linux use the POSIX rescue.

@@ -55,6 +55,8 @@ def test_release_runbook_preserves_signed_channel_and_immutability_contracts() -
     assert "A mutable, signed stable channel." in runbook
     assert "A ruleset on `release-channel` is optional repository hardening" in runbook
     assert "not a release prerequisite or part of client trust" in runbook
+    assert "protected `main`, required checks" in runbook
+    assert "a channel ruleset alone cannot defend against an administrator" in runbook
     assert "Sigstore authenticates the channel" in runbook
     assert "its digests bind the immutable versioned assets" in runbook
     assert "Never manually create, push, move, or delete a release tag." in runbook
