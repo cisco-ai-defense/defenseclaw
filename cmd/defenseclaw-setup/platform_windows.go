@@ -108,6 +108,11 @@ type pidState struct {
 
 const maxManagedPIDRecordBytes = 64 << 10
 
+const (
+	managedPIDRecordReadAttempts = 50
+	managedPIDRecordReadInterval = 10 * time.Millisecond
+)
+
 func acquireSetupLock() (func() error, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
@@ -199,6 +204,34 @@ func managedProcessProofFor(gatewayPath, dataRoot, pidFile string) (managedProce
 }
 
 func readManagedPIDRecord(pidPath string) (pidState, bool, error) {
+	return readManagedPIDRecordWithRetry(
+		pidPath,
+		managedPIDRecordReadAttempts,
+		func() { time.Sleep(managedPIDRecordReadInterval) },
+	)
+}
+
+func readManagedPIDRecordWithRetry(
+	pidPath string,
+	attempts int,
+	wait func(),
+) (pidState, bool, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	if wait == nil {
+		wait = func() {}
+	}
+	for attempt := 0; ; attempt++ {
+		state, exists, err := readManagedPIDRecordOnce(pidPath)
+		if err == nil || attempt+1 >= attempts || !managedPIDRecordPublicationInFlight(err) {
+			return state, exists, err
+		}
+		wait()
+	}
+}
+
+func readManagedPIDRecordOnce(pidPath string) (pidState, bool, error) {
 	file, exists, err := openManagedPIDRecord(pidPath)
 	if err != nil || !exists {
 		return pidState{}, exists, err
@@ -211,12 +244,20 @@ func readManagedPIDRecord(pidPath string) (pidState, bool, error) {
 	return state, true, nil
 }
 
+func managedPIDRecordPublicationInFlight(err error) bool {
+	var syntaxErr *json.SyntaxError
+	return errors.As(err, &syntaxErr)
+}
+
 // openManagedPIDRecord binds validation and decoding to one Windows file
 // object. Gateway PID records are atomically replaced during startup, so
 // separate Lstat/GetFileAttributes/ReadFile lookups can observe three
 // different pathname states and leak a transient not-found error into Setup
 // convergence. Delete sharing lets the publisher proceed while this handle
-// keeps the verified object stable for the reader.
+// keeps the verified object stable for the reader. watchdog.pid predates the
+// atomic publisher and is rewritten in place while retaining its lifetime
+// ownership lock, so readManagedPIDRecord retries only JSON syntax errors for
+// a bounded interval. A persistently malformed identity remains fail-closed.
 func openManagedPIDRecord(pidPath string) (*os.File, bool, error) {
 	pathPtr, err := winpath.UTF16Ptr(pidPath)
 	if err != nil {

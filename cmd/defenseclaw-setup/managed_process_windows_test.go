@@ -7,11 +7,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -42,6 +44,107 @@ func TestReadManagedPIDRecordReturnsDecodedState(t *testing.T) {
 	}
 	if !exists || got != want {
 		t.Fatalf("valid PID record returned state=%+v exists=%t; want state=%+v exists=true", got, exists, want)
+	}
+}
+
+func TestReadManagedPIDRecordWaitsForInPlacePublication(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "watchdog.pid")
+	if err := os.WriteFile(pidPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := pidState{
+		PID:           4242,
+		Executable:    `C:\DefenseClaw\gateway.exe`,
+		StartIdentity: "start-identity",
+	}
+	retryStarted := make(chan struct{})
+	publicationComplete := make(chan struct{})
+	type result struct {
+		state  pidState
+		exists bool
+		err    error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		state, exists, err := readManagedPIDRecordWithRetry(pidPath, 2, func() {
+			close(retryStarted)
+			<-publicationComplete
+		})
+		resultCh <- result{state: state, exists: exists, err: err}
+	}()
+
+	select {
+	case <-retryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not observe the truncated in-flight publication")
+	}
+	data, err := json.Marshal(want)
+	if err != nil {
+		close(publicationComplete)
+		t.Fatal(err)
+	}
+	err = os.WriteFile(pidPath, data, 0o600)
+	close(publicationComplete)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-resultCh:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if !got.exists || got.state != want {
+			t.Fatalf(
+				"published PID record returned state=%+v exists=%t; want state=%+v exists=true",
+				got.state,
+				got.exists,
+				want,
+			)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reader did not finish after publication completed")
+	}
+}
+
+func TestReadManagedPIDRecordRejectsPersistentMalformedRecord(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "watchdog.pid")
+	if err := os.WriteFile(pidPath, []byte(`{"pid":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	retries := 0
+	_, exists, err := readManagedPIDRecordWithRetry(pidPath, 3, func() {
+		retries++
+	})
+	if exists {
+		t.Fatal("malformed PID record was reported as usable")
+	}
+	if err == nil || !strings.Contains(err.Error(), "unexpected end of JSON input") {
+		t.Fatalf("persistent malformed PID record error = %v", err)
+	}
+	if retries != 2 {
+		t.Fatalf("publication retries = %d, want 2", retries)
+	}
+}
+
+func TestReadManagedPIDRecordDoesNotRetrySemanticCorruption(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "watchdog.pid")
+	if err := os.WriteFile(pidPath, []byte(`{"pid":"bad"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	retries := 0
+	_, exists, err := readManagedPIDRecordWithRetry(pidPath, 3, func() {
+		retries++
+	})
+	if exists {
+		t.Fatal("semantically invalid PID record was reported as usable")
+	}
+	var typeErr *json.UnmarshalTypeError
+	if !errors.As(err, &typeErr) {
+		t.Fatalf("semantic corruption error = %T %v, want *json.UnmarshalTypeError", err, err)
+	}
+	if retries != 0 {
+		t.Fatalf("semantic corruption retries = %d, want 0", retries)
 	}
 }
 
