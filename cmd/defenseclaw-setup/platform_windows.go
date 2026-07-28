@@ -702,7 +702,7 @@ function Test-CleanupOwnership([object]$marker) {
     } catch {
         return $false
     }
-    return $marker.phase -ceq 'converged' -and
+    return $marker.phase -ceq 'complete' -and
         $marker.transaction.action -ceq 'uninstall' -and
         $marker.transaction.id -ceq $expectedID -and
         [string]::Equals($markerTarget, $expectedTarget, [StringComparison]::OrdinalIgnoreCase)
@@ -730,8 +730,8 @@ try {
 }
 
 # Re-read under a handle that denies write/delete sharing. Keeping that handle
-# open through Remove-Item prevents a new setup transaction from replacing the
-# ownership marker between the final identity check and deletion.
+# open through exact deletion prevents a new setup transaction from replacing
+# the ownership marker between the final identity check and deletion.
 $markerLock=$null
 $reader=$null
 try {
@@ -745,7 +745,25 @@ try {
     $marker=($reader.ReadToEnd() | ConvertFrom-Json)
     if (-not (Test-CleanupOwnership $marker)) { exit 0 }
     if (Test-Path -LiteralPath $target -PathType Container) {
-        Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
+        $targetInfo=[IO.DirectoryInfo]::new([IO.Path]::GetFullPath($target))
+        if (($targetInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { exit 0 }
+        $maintenancePath=[IO.Path]::GetFullPath([string]$marker.transaction.maintenance_path)
+        $maintenanceInfo=[IO.FileInfo]::new($maintenancePath)
+        if (-not $maintenanceInfo.Exists -or
+            ($maintenanceInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            exit 0
+        }
+        $entries=@([IO.Directory]::EnumerateFileSystemEntries($targetInfo.FullName))
+        if ($entries.Count -ne 1 -or
+            -not [string]::Equals(
+                [IO.Path]::GetFullPath([string]$entries[0]),
+                $maintenancePath,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            exit 0
+        }
+        [IO.File]::Delete($maintenancePath)
+        [IO.Directory]::Delete($targetInfo.FullName, $false)
     }
 } catch {
     exit 0

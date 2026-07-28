@@ -93,6 +93,37 @@ func TestPrivateDACLRejectsExtendedAndUnknownACETypes(t *testing.T) {
 	}
 }
 
+func TestPrivateSecurityDescriptorRejectsForeignOwner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "owned.json")
+	if err := WritePrivate(path, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absolute, err := sd.ToAbsolute()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignOwner, err := windows.CreateWellKnownSid(windows.WinLocalServiceSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := absolute.SetOwner(foreignOwner, false); err != nil {
+		t.Fatal(err)
+	}
+	if safe, err := privateSecurityDescriptorIsSafe(absolute); err != nil {
+		t.Fatal(err)
+	} else if safe {
+		t.Fatal("private security descriptor accepted a foreign owner")
+	}
+}
+
 func ownWindowsTestPath(t *testing.T, path string) {
 	t.Helper()
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()

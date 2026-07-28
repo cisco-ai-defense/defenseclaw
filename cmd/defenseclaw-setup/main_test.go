@@ -190,6 +190,33 @@ func TestParseArgsVerifyAction(t *testing.T) {
 	}
 }
 
+func TestParseArgsDeferredCleanupQuietRestartContract(t *testing.T) {
+	transactionID := "0123456789abcdef0123456789abcdef"
+	opts, err := parseArgs([]string{
+		"/cleanup",
+		"/quiet",
+		"CLEANUPTRANSACTION=" + transactionID,
+	})
+	if err != nil {
+		t.Fatalf("parseArgs returned error: %v", err)
+	}
+	if opts.Action != "cleanup" || !opts.Quiet || opts.CleanupTransaction != transactionID {
+		t.Fatalf("deferred cleanup options parsed incorrectly: %+v", opts)
+	}
+	if restartRequiredCode != 3010 {
+		t.Fatalf("restart-required exit code = %d, want Windows 3010", restartRequiredCode)
+	}
+	for _, args := range [][]string{
+		{"/cleanup", "/quiet"},
+		{"/cleanup", "CLEANUPTRANSACTION=invalid"},
+		{"/uninstall", "CLEANUPTRANSACTION=" + transactionID},
+	} {
+		if _, err := parseArgs(args); err == nil {
+			t.Fatalf("parseArgs accepted invalid cleanup invocation: %v", args)
+		}
+	}
+}
+
 func TestParseArgsQuietPropertyMatrix(t *testing.T) {
 	for _, connector := range []string{"none", "codex", "claudecode"} {
 		for _, mode := range []string{"observe", "action"} {

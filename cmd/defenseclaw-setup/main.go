@@ -44,6 +44,7 @@ const (
 	defaultPublisher             = "Cisco Systems, Inc."
 	userExitCode                 = 1602
 	installAlreadyRunningCode    = 1618
+	restartRequiredCode          = 3010
 	installTreeRenameMaxAttempts = 40
 	installTreeRenameRetryDelay  = 100 * time.Millisecond
 	// 1603 is the standard fatal-install result. Never use 3010 here: Windows
@@ -158,21 +159,22 @@ func validateRunCommand(command string) error {
 }
 
 type options struct {
-	Action          string
-	Quiet           bool
-	NoRestart       bool // Standard installer property; setup never initiates an OS reboot.
-	InstallScope    string
-	Connector       string
-	Mode            string
-	StartGateway    bool
-	DeleteUserData  bool
-	ConnectorSet    bool
-	ModeSet         bool
-	StartGatewaySet bool
-	WaitPID         uint32
-	FromVersion     string
-	CodexHome       string
-	ClaudeConfigDir string
+	Action             string
+	Quiet              bool
+	NoRestart          bool // Standard installer property; setup never initiates an OS reboot.
+	InstallScope       string
+	Connector          string
+	Mode               string
+	StartGateway       bool
+	DeleteUserData     bool
+	ConnectorSet       bool
+	ModeSet            bool
+	StartGatewaySet    bool
+	WaitPID            uint32
+	FromVersion        string
+	CleanupTransaction string
+	CodexHome          string
+	ClaudeConfigDir    string
 	// PreserveConnectorConfiguration is internal transaction intent, never a
 	// command-line property. Servicing an existing install without an explicit
 	// connector or mode selection must refresh its owned registrations in place
@@ -339,6 +341,9 @@ func run(opts options) (int, error) {
 	if err := validateManagedRoot(installRoot); err != nil {
 		return 1, err
 	}
+	if opts.Action == "cleanup" {
+		return runDeferredUninstallCleanup(opts)
+	}
 	if err := preflightInstalledClients(installRoot); err != nil {
 		if errors.Is(err, errInstalledProcessRunning) {
 			return retryRequiredCode, err
@@ -375,6 +380,9 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	hadInstall := pathExists(installRoot)
 	if err := recoverPendingSetupTransaction(installRoot, dataRoot); err != nil {
 		return retryRequiredCode, err
+	}
+	if err := supersedeDeferredUninstallCleanup(); err != nil {
+		return retryRequiredCode, fmt.Errorf("supersede deferred uninstall cleanup before install: %w", err)
 	}
 	if err := checkSetupContext(ctx); err != nil {
 		return userExitCode, err
@@ -823,15 +831,15 @@ func runUninstallContext(ctx context.Context, opts options, installRoot, dataRoo
 		}
 		return rollbackUninstall(fmt.Errorf("commit uninstall transaction: %w", err))
 	}
-	deferred, err := finishCommittedSetupTransaction(*transaction)
+	restartRequired, err := finishCommittedSetupTransaction(*transaction)
 	if err != nil {
 		return retryRequiredCode, fmt.Errorf("uninstall committed but convergence is pending: %w", err)
 	}
 	if err := connectorReconciliationPendingError("uninstall"); err != nil {
 		return retryRequiredCode, err
 	}
-	if deferred && !opts.Quiet {
-		fmt.Println("DefenseClaw cleanup will finish after this installer exits.")
+	if restartRequired && !opts.Quiet {
+		fmt.Println("A Windows restart is required to remove the disabled hook launcher and final installer state.")
 	}
 	if !opts.Quiet {
 		if opts.DeleteUserData {
@@ -839,6 +847,9 @@ func runUninstallContext(ctx context.Context, opts options, installRoot, dataRoo
 		} else {
 			fmt.Printf("DefenseClaw application files removed. User data preserved at %s\n", dataRoot)
 		}
+	}
+	if restartRequired {
+		return restartRequiredCode, nil
 	}
 	return 0, nil
 }
@@ -2260,6 +2271,8 @@ func parseArgs(args []string) (options, error) {
 			opts.Action = "help"
 		case "/verify", "-verify", "--verify":
 			opts.Action = "verify"
+		case "/cleanup", "-cleanup", "--cleanup":
+			opts.Action = "cleanup"
 		case "/quiet", "-quiet", "--quiet", "/qn":
 			opts.Quiet = true
 		case "/norestart":
@@ -2310,6 +2323,11 @@ func parseArgs(args []string) (options, error) {
 					return opts, fmt.Errorf("invalid FROMVERSION %q", value)
 				}
 				opts.FromVersion = value
+			case "CLEANUPTRANSACTION":
+				if !validSetupTransactionID(value) {
+					return opts, fmt.Errorf("invalid CLEANUPTRANSACTION %q", value)
+				}
+				opts.CleanupTransaction = value
 			default:
 				return opts, fmt.Errorf("unrecognized setup property %q", key)
 			}
@@ -2323,6 +2341,12 @@ func parseArgs(args []string) (options, error) {
 	}
 	if opts.Mode != "observe" && opts.Mode != "action" {
 		return opts, fmt.Errorf("invalid MODE %q; expected observe or action", opts.Mode)
+	}
+	if opts.Action == "cleanup" && opts.CleanupTransaction == "" {
+		return opts, errors.New("CLEANUPTRANSACTION is required with /cleanup")
+	}
+	if opts.Action != "cleanup" && opts.CleanupTransaction != "" {
+		return opts, errors.New("CLEANUPTRANSACTION is accepted only with /cleanup")
 	}
 	return opts, nil
 }

@@ -44,6 +44,7 @@ const (
 
 var (
 	errTransactionCleanupDeferred      = errors.New("transaction cleanup is deferred until the setup process exits")
+	errUninstallCleanupRequiresRestart = errors.New("uninstall cleanup is deferred until Windows restarts")
 	errSetupJournalDurabilityAmbiguous = errors.New("setup transaction journal durability is ambiguous")
 )
 
@@ -1820,11 +1821,11 @@ func recoverSetupJournalPhase(journal setupJournal, ops setupRecoveryOps) error 
 		}
 		fallthrough
 	case setupPhaseConverged:
-		if err := ops.Cleanup(transaction); err != nil {
-			if errors.Is(err, errTransactionCleanupDeferred) {
-				return err
-			}
-			return fmt.Errorf("clean committed setup transaction: %w", err)
+		cleanupErr := ops.Cleanup(transaction)
+		if cleanupErr != nil &&
+			!errors.Is(cleanupErr, errTransactionCleanupDeferred) &&
+			!errors.Is(cleanupErr, errUninstallCleanupRequiresRestart) {
+			return fmt.Errorf("clean committed setup transaction: %w", cleanupErr)
 		}
 		return ops.Transition(transaction, setupPhaseConverged, setupPhaseComplete)
 	default:
@@ -1839,16 +1840,17 @@ func finishCommittedSetupTransaction(transaction setupTransaction) (bool, error)
 	if err := markSetupTransactionConverged(transaction); err != nil {
 		return false, err
 	}
-	if err := cleanupCommittedSetupTransaction(transaction); err != nil {
-		if errors.Is(err, errTransactionCleanupDeferred) {
-			return true, nil
-		}
-		return false, err
+	cleanupErr := cleanupCommittedSetupTransaction(transaction)
+	restartRequired := errors.Is(cleanupErr, errUninstallCleanupRequiresRestart)
+	if cleanupErr != nil &&
+		!errors.Is(cleanupErr, errTransactionCleanupDeferred) &&
+		!restartRequired {
+		return false, cleanupErr
 	}
 	if err := markSetupTransactionComplete(transaction, setupPhaseConverged); err != nil {
 		return false, err
 	}
-	return false, nil
+	return restartRequired, nil
 }
 
 func abortPreparedSetupTransaction(transaction setupTransaction) error {
@@ -3199,6 +3201,9 @@ func cleanupCommittedSetupTransactionWithReconciliationReader(
 		}
 	}
 	maintenanceRoot := filepath.Dir(transaction.MaintenancePath)
+	if err := armDeferredUninstallCleanup(transaction); err != nil {
+		return err
+	}
 	self, err := os.Executable()
 	if err != nil {
 		return err

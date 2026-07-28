@@ -971,24 +971,34 @@ func TestRecoverSetupJournalPhaseRetainsCommittedOnConvergenceFailure(t *testing
 	}
 }
 
-func TestRecoverSetupJournalPhaseLeavesConvergedDuringDeferredCleanup(t *testing.T) {
+func TestRecoverSetupJournalPhaseTerminalizesOnlyArmedDeferredCleanup(t *testing.T) {
 	transaction := testSetupTransactionForRoots("uninstall", "root", "data", "maintenance", nil)
-	transitioned := false
-	err := recoverSetupJournalPhase(setupJournal{
-		SchemaVersion: setupJournalSchemaVersion,
-		Phase:         setupPhaseConverged,
-		Transaction:   transaction,
-	}, setupRecoveryOps{
-		Rollback: func(setupTransaction) error { return nil },
-		Converge: func(setupTransaction) error { return nil },
-		Cleanup:  func(setupTransaction) error { return errTransactionCleanupDeferred },
-		Transition: func(setupTransaction, string, string) error {
-			transitioned = true
-			return nil
-		},
-	})
-	if !errors.Is(err, errTransactionCleanupDeferred) || transitioned {
-		t.Fatalf("recovery error = %v, transitioned = %v", err, transitioned)
+	for _, deferred := range []error{
+		errTransactionCleanupDeferred,
+		errUninstallCleanupRequiresRestart,
+	} {
+		t.Run(deferred.Error(), func(t *testing.T) {
+			transitioned := false
+			err := recoverSetupJournalPhase(setupJournal{
+				SchemaVersion: setupJournalSchemaVersion,
+				Phase:         setupPhaseConverged,
+				Transaction:   transaction,
+			}, setupRecoveryOps{
+				Rollback: func(setupTransaction) error { return nil },
+				Converge: func(setupTransaction) error { return nil },
+				Cleanup:  func(setupTransaction) error { return deferred },
+				Transition: func(_ setupTransaction, from, to string) error {
+					if from != setupPhaseConverged || to != setupPhaseComplete {
+						t.Fatalf("transition = %s -> %s", from, to)
+					}
+					transitioned = true
+					return nil
+				},
+			})
+			if err != nil || !transitioned {
+				t.Fatalf("recovery error = %v, transitioned = %v", err, transitioned)
+			}
+		})
 	}
 }
 

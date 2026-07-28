@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"os"
 	"path"
@@ -216,6 +217,10 @@ func portableExecutableMachine(filePath string) (uint16, bool, error) {
 		return 0, false, err
 	}
 	defer file.Close()
+	return portableExecutableMachineFromReader(file)
+}
+
+func portableExecutableMachineFromReader(file io.ReaderAt) (uint16, bool, error) {
 	header := make([]byte, 64)
 	if _, err := file.ReadAt(header, 0); err != nil {
 		return 0, false, nil
@@ -390,6 +395,10 @@ func readEmbeddedPKCS7(filePath string) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	defer file.Close()
+	return readEmbeddedPKCS7FromFile(file)
+}
+
+func readEmbeddedPKCS7FromFile(file *os.File) ([]byte, bool, error) {
 	info, err := file.Stat()
 	if err != nil {
 		return nil, false, err
@@ -515,6 +524,19 @@ func countAttributeValues(values asn1.RawValue) (int, error) {
 
 func inspectEmbeddedAuthenticode(filePath string) (embeddedAuthenticodeMetadata, error) {
 	pkcs7, present, err := readEmbeddedPKCS7(filePath)
+	return inspectEmbeddedAuthenticodePayload(pkcs7, present, err)
+}
+
+func inspectEmbeddedAuthenticodeFromFile(file *os.File) (embeddedAuthenticodeMetadata, error) {
+	pkcs7, present, err := readEmbeddedPKCS7FromFile(file)
+	return inspectEmbeddedAuthenticodePayload(pkcs7, present, err)
+}
+
+func inspectEmbeddedAuthenticodePayload(
+	pkcs7 []byte,
+	present bool,
+	err error,
+) (embeddedAuthenticodeMetadata, error) {
 	if err != nil || !present {
 		return embeddedAuthenticodeMetadata{Present: present}, err
 	}

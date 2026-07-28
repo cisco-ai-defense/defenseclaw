@@ -82,6 +82,30 @@ func ValidatePrivateFileOwnership(path string) error {
 	return validatePrivateOwnership(path, false)
 }
 
+// ValidatePrivateHandle verifies that handle names an object owned by the
+// current user with the same fail-closed private DACL required by
+// ValidatePrivateDirectory and ValidatePrivateFile. Callers that already hold
+// a non-reparse handle can use this to keep security validation bound to the
+// object that they subsequently operate on.
+func ValidatePrivateHandle(handle windows.Handle) error {
+	sd, err := windows.GetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return err
+	}
+	safe, err := privateSecurityDescriptorIsSafe(sd)
+	if err != nil {
+		return err
+	}
+	if !safe {
+		return fmt.Errorf("safefile: private handle has an unsafe owner or DACL")
+	}
+	return nil
+}
+
 func validatePrivateOwnership(path string, wantDirectory bool) error {
 	if err := rejectReparseChain(path); err != nil {
 		return err
@@ -393,6 +417,13 @@ func privateDACLIsSafe(path string) (bool, error) {
 	)
 	if err != nil {
 		return false, err
+	}
+	return privateSecurityDescriptorIsSafe(sd)
+}
+
+func privateSecurityDescriptorIsSafe(sd *windows.SECURITY_DESCRIPTOR) (bool, error) {
+	if sd == nil {
+		return false, nil
 	}
 	owner, _, err := sd.Owner()
 	if err != nil {
