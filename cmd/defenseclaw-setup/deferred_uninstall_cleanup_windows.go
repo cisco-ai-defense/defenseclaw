@@ -165,9 +165,7 @@ func armDeferredUninstallCleanup(transaction setupTransaction) error {
 	if err != nil {
 		return err
 	}
-	if _, err := os.Lstat(paths.Root); errors.Is(err, os.ErrNotExist) {
-		return nil
-	} else if err != nil {
+	if err := requireDeferredCleanupHookRuntime(paths.Root); err != nil {
 		return err
 	}
 	transactionRoot, err := defaultTransactionRoot()
@@ -230,12 +228,18 @@ func armDeferredUninstallCleanup(transaction setupTransaction) error {
 		); err != nil {
 			return err
 		}
-		if current.TransactionID != transaction.ID || current.Status != deferredCleanupStatusPending {
+		if current.TransactionID != transaction.ID ||
+			(current.Status != deferredCleanupStatusPending &&
+				current.Status != deferredCleanupStatusSuperseded) {
 			return errors.New("a different deferred uninstall cleanup must be completed or superseded first")
 		}
 		record.UninstallBootIdentifier = current.UninstallBootIdentifier
+		record.Status = current.Status
 		if !reflect.DeepEqual(*current, record) {
 			return errors.New("existing deferred uninstall cleanup identity differs from the current transaction")
+		}
+		if current.Status == deferredCleanupStatusSuperseded {
+			return errUninstallCleanupRequiresRestart
 		}
 	} else if err := writeDurableValue(recordPath, record, false); err != nil {
 		return fmt.Errorf("persist deferred uninstall cleanup record: %w", err)
@@ -244,6 +248,19 @@ func armDeferredUninstallCleanup(transaction setupTransaction) error {
 		return fmt.Errorf("arm deferred uninstall cleanup startup: %w", err)
 	}
 	return errUninstallCleanupRequiresRestart
+}
+
+func requireDeferredCleanupHookRuntime(path string) error {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		// Every supported native installation publishes either the legacy full
+		// launcher or the schema-2 trampoline under HookRuntime. Without that
+		// authenticated residue there is no safe post-process authority after
+		// the completed-journal tombstone discards its transaction body.
+		return errors.New("disabled stable HookRuntime is missing; refusing unsupported legacy cache cleanup")
+	} else if err != nil {
+		return err
+	}
+	return nil
 }
 
 func buildDeferredUninstallCleanupRecord(
@@ -495,14 +512,14 @@ func runDeferredUninstallCleanup(opts options) (int, error) {
 		return retryRequiredCode, err
 	}
 
-	var terminal *setupJournal
+	var authorized *setupJournal
 	if record.Status == deferredCleanupStatusPending ||
 		(record.Status == deferredCleanupStatusRuntimeRetired && runtimePresent) {
-		terminal, err = validateTerminalDeferredCleanup(*record, paths)
+		authorized, err = validateConvergedDeferredCleanup(*record, paths)
 		if err != nil {
 			return retryRequiredCode, err
 		}
-		if err := verifyDeferredCleanupConnectors(terminal.Transaction); err != nil {
+		if err := verifyDeferredCleanupConnectors(authorized.Transaction); err != nil {
 			return retryRequiredCode, err
 		}
 
@@ -522,9 +539,9 @@ func runDeferredUninstallCleanup(opts options) (int, error) {
 				return err
 			}
 			defer journalLock.Close()
-			if lockedJournal.Phase != setupPhaseComplete ||
-				!setupTransactionsEqual(lockedJournal.Transaction, terminal.Transaction) {
-				return errors.New("terminal uninstall journal changed before HookRuntime retirement")
+			if lockedJournal.Phase != setupPhaseConverged ||
+				!setupTransactionsEqual(lockedJournal.Transaction, authorized.Transaction) {
+				return errors.New("converged uninstall journal changed before HookRuntime retirement")
 			}
 			if err := recordLock.Close(); err != nil {
 				return err
@@ -558,7 +575,7 @@ func validateDeferredCleanupBootTransition(
 	return nil
 }
 
-func validateTerminalDeferredCleanup(
+func validateConvergedDeferredCleanup(
 	record deferredUninstallCleanupRecord,
 	paths hookruntime.Paths,
 ) (*setupJournal, error) {
@@ -567,25 +584,36 @@ func validateTerminalDeferredCleanup(
 		return nil, err
 	}
 	defer lock.Close()
+	if err := validateConvergedDeferredCleanupJournal(record, paths, journal); err != nil {
+		return nil, err
+	}
+	return &journal, nil
+}
+
+func validateConvergedDeferredCleanupJournal(
+	record deferredUninstallCleanupRecord,
+	paths hookruntime.Paths,
+	journal setupJournal,
+) error {
 	if journal.SchemaVersion != setupJournalSchemaVersion ||
-		journal.Phase != setupPhaseComplete ||
+		journal.Phase != setupPhaseConverged ||
 		journal.Transaction.Action != "uninstall" ||
 		journal.Transaction.ID != record.TransactionID {
-		return nil, errors.New("deferred cleanup requires a completed terminal uninstall journal")
+		return errors.New("deferred cleanup requires the exact converged uninstall journal")
 	}
 	expected, err := transactionExpectationsFromKnownFolders(
 		journal.Transaction.InstallRoot,
 		journal.Transaction.DataRoot,
 	)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if err := validateSetupTransaction(journal.Transaction, expected); err != nil {
-		return nil, fmt.Errorf("validate terminal uninstall transaction: %w", err)
+		return fmt.Errorf("validate converged uninstall transaction: %w", err)
 	}
 	if !samePath(journal.Transaction.MaintenancePath, record.MaintenancePath) ||
 		!strings.EqualFold(journal.Transaction.MaintenanceSHA256, record.MaintenanceSHA256) {
-		return nil, errors.New("terminal uninstall journal does not match deferred cleanup maintenance identity")
+		return errors.New("converged uninstall journal does not match deferred cleanup maintenance identity")
 	}
 	expectedHookPath := filepath.Join(
 		journal.Transaction.InstallRoot,
@@ -593,12 +621,12 @@ func validateTerminalDeferredCleanup(
 		hookruntime.LauncherName,
 	)
 	if !samePath(record.HookPath, expectedHookPath) {
-		return nil, errors.New("terminal uninstall journal does not match deferred cleanup hook identity")
+		return errors.New("converged uninstall journal does not match deferred cleanup hook identity")
 	}
 	connectors := append([]string(nil), journal.Transaction.PreviousConnectors...)
 	slices.Sort(connectors)
 	if !slices.Equal(connectors, record.VerifiedConnectors) {
-		return nil, errors.New("terminal uninstall connector set does not match deferred cleanup")
+		return errors.New("converged uninstall connector set does not match deferred cleanup")
 	}
 	for _, path := range []string{
 		journal.Transaction.InstallRoot,
@@ -609,25 +637,25 @@ func validateTerminalDeferredCleanup(
 		journal.Transaction.MaintenanceBackup,
 	} {
 		if _, err := os.Lstat(path); err == nil {
-			return nil, fmt.Errorf("terminal uninstall still retains transaction artifact: %s", path)
+			return fmt.Errorf("converged uninstall still retains transaction artifact: %s", path)
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
+			return err
 		}
 	}
 	reconciliation, err := readConnectorReconciliation()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if reconciliation != nil {
-		return nil, errors.New("connector reconciliation state is not empty")
+		return errors.New("connector reconciliation state is not empty")
 	}
 	if err := validateDeferredCleanupMaintenance(record); err != nil {
-		return nil, err
+		return err
 	}
 	if !samePath(record.RuntimeRoot, paths.Root) {
-		return nil, errors.New("terminal uninstall cleanup names a non-canonical HookRuntime")
+		return errors.New("converged uninstall cleanup names a non-canonical HookRuntime")
 	}
-	return &journal, nil
+	return nil
 }
 
 func validateDeferredCleanupMaintenance(record deferredUninstallCleanupRecord) error {
@@ -721,23 +749,141 @@ func supersedeDeferredUninstallCleanup() error {
 	); err != nil {
 		return err
 	}
-	journal, lock, err := readLockedSetupJournal(record.JournalPath)
+	return supersedeDeferredUninstallCleanupRecord(
+		record,
+		paths,
+		deferredCleanupSupersessionOps{
+			validateJournal: validateConvergedDeferredCleanupJournal,
+			terminalize: func(transaction setupTransaction) error {
+				return transitionSetupJournal(
+					transaction,
+					setupPhaseConverged,
+					setupPhaseComplete,
+				)
+			},
+			remove: func(record *deferredUninstallCleanupRecord) error {
+				return removeSupersededDeferredCleanupRecord(
+					record,
+					removeDeferredCleanupRunValue,
+				)
+			},
+		},
+		nil,
+		nil,
+	)
+}
+
+type deferredCleanupSupersessionOps struct {
+	validateJournal func(
+		deferredUninstallCleanupRecord,
+		hookruntime.Paths,
+		setupJournal,
+	) error
+	terminalize func(setupTransaction) error
+	remove      func(*deferredUninstallCleanupRecord) error
+}
+
+func supersedeDeferredUninstallCleanupRecord(
+	record *deferredUninstallCleanupRecord,
+	paths hookruntime.Paths,
+	ops deferredCleanupSupersessionOps,
+	afterSuperseded func() error,
+	afterTerminal func() error,
+) error {
+	if record == nil {
+		return errors.New("deferred uninstall cleanup record is unavailable")
+	}
+	if record.Status != deferredCleanupStatusPending &&
+		record.Status != deferredCleanupStatusSuperseded {
+		return errors.New("only a pending deferred cleanup can be superseded")
+	}
+
+	lockedRecord, recordLock, err := readLockedCleanupRecord(record.RecordPath)
 	if err != nil {
 		return err
 	}
-	if journal.Phase != setupPhaseComplete ||
-		journal.Transaction.Action != "uninstall" ||
-		journal.Transaction.ID != record.TransactionID {
-		_ = lock.Close()
-		return errors.New("refusing to supersede cleanup without the exact completed uninstall journal")
+	defer recordLock.Close()
+	if !reflect.DeepEqual(*record, lockedRecord) {
+		return errors.New("deferred uninstall cleanup record changed before supersession")
 	}
-	if err := lock.Close(); err != nil {
+
+	document, journalLock, err := readLockedSetupJournalDocument(record.JournalPath)
+	if err != nil {
 		return err
 	}
-	return retireSupersededDeferredCleanupRecord(record, removeDeferredCleanupRunValue)
+	defer journalLock.Close()
+
+	if document.Terminal {
+		if lockedRecord.Status != deferredCleanupStatusSuperseded {
+			return errors.New("terminal setup journal lacks a durable superseded cleanup record")
+		}
+	} else {
+		if document.Journal.SchemaVersion != setupJournalSchemaVersion ||
+			document.Journal.Phase != setupPhaseConverged ||
+			document.Journal.Transaction.Action != "uninstall" ||
+			document.Journal.Transaction.ID != lockedRecord.TransactionID {
+			return errors.New("refusing to supersede cleanup without the exact converged uninstall journal")
+		}
+		if ops.validateJournal == nil {
+			return errors.New("deferred cleanup supersession journal validator is unavailable")
+		}
+		if err := ops.validateJournal(lockedRecord, paths, document.Journal); err != nil {
+			return fmt.Errorf("refusing to supersede unauthenticated deferred cleanup: %w", err)
+		}
+	}
+	if err := recordLock.Close(); err != nil {
+		return err
+	}
+	if err := journalLock.Close(); err != nil {
+		return err
+	}
+
+	if !document.Terminal {
+		if err := markDeferredCleanupSuperseded(record); err != nil {
+			return err
+		}
+		if afterSuperseded != nil {
+			if err := afterSuperseded(); err != nil {
+				return err
+			}
+		}
+		if ops.terminalize == nil {
+			return errors.New("deferred cleanup supersession terminalizer is unavailable")
+		}
+		if err := ops.terminalize(document.Journal.Transaction); err != nil {
+			return fmt.Errorf("terminalize superseded uninstall transaction: %w", err)
+		}
+		if afterTerminal != nil {
+			if err := afterTerminal(); err != nil {
+				return err
+			}
+		}
+	}
+	if ops.remove == nil {
+		return errors.New("deferred cleanup supersession remover is unavailable")
+	}
+	return ops.remove(record)
 }
 
-func retireSupersededDeferredCleanupRecord(
+func markDeferredCleanupSuperseded(record *deferredUninstallCleanupRecord) error {
+	if record == nil {
+		return errors.New("deferred uninstall cleanup record is unavailable")
+	}
+	if record.Status == deferredCleanupStatusSuperseded {
+		return nil
+	}
+	if record.Status != deferredCleanupStatusPending {
+		return errors.New("only a pending deferred cleanup can be marked superseded")
+	}
+	record.Status = deferredCleanupStatusSuperseded
+	record.CleanupBootIdentifier = ""
+	if err := writeDurableValue(record.RecordPath, *record, true); err != nil {
+		return fmt.Errorf("durably supersede deferred uninstall cleanup: %w", err)
+	}
+	return nil
+}
+
+func removeSupersededDeferredCleanupRecord(
 	record *deferredUninstallCleanupRecord,
 	removeRun func(string) error,
 ) error {
@@ -745,11 +891,7 @@ func retireSupersededDeferredCleanupRecord(
 		return errors.New("deferred uninstall cleanup record is unavailable")
 	}
 	if record.Status != deferredCleanupStatusSuperseded {
-		record.Status = deferredCleanupStatusSuperseded
-		record.CleanupBootIdentifier = ""
-		if err := writeDurableValue(record.RecordPath, *record, true); err != nil {
-			return fmt.Errorf("durably supersede deferred uninstall cleanup: %w", err)
-		}
+		return errors.New("refusing to remove a cleanup record before durable supersession")
 	}
 	if err := removeRun(record.RunCommand); err != nil {
 		return err
@@ -984,24 +1126,70 @@ func readLockedCleanupRecord(path string) (
 }
 
 func readLockedSetupJournal(path string) (setupJournal, *lockedCleanupPath, error) {
-	var journal setupJournal
-	locked, err := readLockedJSON(path, deferredCleanupFileLimit, &journal)
+	document, locked, err := readLockedSetupJournalDocument(path)
 	if err != nil {
 		return setupJournal{}, nil, err
 	}
+	return document.Journal, locked, nil
+}
+
+func readLockedSetupJournalDocument(
+	path string,
+) (setupJournalDocument, *lockedCleanupPath, error) {
+	locked, err := openLockedCleanupPath(path, false)
+	if err != nil {
+		return setupJournalDocument{}, nil, err
+	}
+	fail := func(cause error) (setupJournalDocument, *lockedCleanupPath, error) {
+		_ = locked.Close()
+		return setupJournalDocument{}, nil, cause
+	}
+	if locked.info.Size() < 0 || locked.info.Size() > deferredCleanupFileLimit {
+		return fail(fmt.Errorf(
+			"locked setup journal exceeds the %d-byte limit",
+			deferredCleanupFileLimit,
+		))
+	}
+	body, err := io.ReadAll(io.LimitReader(locked.file, deferredCleanupFileLimit+1))
+	if err != nil {
+		return fail(err)
+	}
+	if int64(len(body)) > deferredCleanupFileLimit {
+		return fail(fmt.Errorf(
+			"locked setup journal exceeds the %d-byte limit",
+			deferredCleanupFileLimit,
+		))
+	}
+	if _, err := locked.file.Seek(0, io.SeekStart); err != nil {
+		return fail(err)
+	}
+
+	var terminal terminalSetupJournal
+	if err := decodeSetupJournalJSON(body, &terminal); err == nil &&
+		terminal == frozenTerminalSetupJournal() {
+		return setupJournalDocument{
+			Journal: setupJournal{
+				SchemaVersion: terminal.SchemaVersion,
+				Phase:         terminal.Phase,
+			},
+			Terminal: true,
+		}, locked, nil
+	}
+	var journal setupJournal
+	if err := decodeSetupJournalJSON(body, &journal); err != nil {
+		return fail(err)
+	}
 	if journal.SchemaVersion != setupJournalLegacySchemaVersion &&
 		journal.SchemaVersion != setupJournalSchemaVersion {
-		_ = locked.Close()
-		return setupJournal{}, nil, errors.New("locked setup journal has an unsupported schema")
+		return fail(errors.New("locked setup journal has an unsupported schema"))
 	}
 	switch journal.Phase {
 	case setupPhaseIntent, setupPhaseQuiescing, setupPhasePublished,
 		setupPhaseCommitted, setupPhaseConverged, setupPhaseComplete:
 	default:
-		_ = locked.Close()
-		return setupJournal{}, nil, errors.New("locked setup journal has an unsupported phase")
+		return fail(errors.New("locked setup journal has an unsupported phase"))
 	}
-	return journal, locked, nil
+	return setupJournalDocument{Journal: journal}, locked, nil
 }
 
 func hashLockedCleanupFile(locked *lockedCleanupPath) (string, error) {
@@ -1475,11 +1663,11 @@ func finishDeferredInstallerStateCleanupWith(
 		if err != nil {
 			return err
 		}
-		if journal.Phase != setupPhaseComplete ||
+		if journal.Phase != setupPhaseConverged ||
 			journal.Transaction.Action != "uninstall" ||
 			journal.Transaction.ID != record.TransactionID {
 			_ = lock.Close()
-			return errors.New("installer-state retirement found a non-terminal journal")
+			return errors.New("installer-state retirement found a non-converged uninstall journal")
 		}
 		if err := deleteLockedCleanupPath(lock); err != nil {
 			return err

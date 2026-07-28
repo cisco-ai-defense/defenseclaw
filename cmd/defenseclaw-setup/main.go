@@ -378,7 +378,8 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		return 1, err
 	}
 	hadInstall := pathExists(installRoot)
-	if err := recoverPendingSetupTransaction(installRoot, dataRoot); err != nil {
+	if err := recoverPendingSetupTransaction(installRoot, dataRoot); err != nil &&
+		!errors.Is(err, errUninstallCleanupRequiresRestart) {
 		return retryRequiredCode, err
 	}
 	if err := supersedeDeferredUninstallCleanup(); err != nil {
@@ -745,6 +746,12 @@ func runUninstallContext(ctx context.Context, opts options, installRoot, dataRoo
 		return 1, err
 	}
 	transaction, err := preparePendingSetupTransactionForUninstall(opts, installRoot, dataRoot)
+	if errors.Is(err, errUninstallCleanupRequiresRestart) {
+		if !opts.Quiet {
+			fmt.Println("A Windows restart is still required to finish DefenseClaw cleanup.")
+		}
+		return restartRequiredCode, nil
+	}
 	if err != nil {
 		return retryRequiredCode, err
 	}

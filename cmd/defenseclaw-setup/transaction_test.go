@@ -971,34 +971,89 @@ func TestRecoverSetupJournalPhaseRetainsCommittedOnConvergenceFailure(t *testing
 	}
 }
 
-func TestRecoverSetupJournalPhaseTerminalizesOnlyArmedDeferredCleanup(t *testing.T) {
+func TestRecoverSetupJournalPhaseRetainsConvergedUninstallWhileRestartIsRequired(t *testing.T) {
 	transaction := testSetupTransactionForRoots("uninstall", "root", "data", "maintenance", nil)
-	for _, deferred := range []error{
-		errTransactionCleanupDeferred,
-		errUninstallCleanupRequiresRestart,
-	} {
-		t.Run(deferred.Error(), func(t *testing.T) {
-			transitioned := false
-			err := recoverSetupJournalPhase(setupJournal{
-				SchemaVersion: setupJournalSchemaVersion,
-				Phase:         setupPhaseConverged,
-				Transaction:   transaction,
-			}, setupRecoveryOps{
-				Rollback: func(setupTransaction) error { return nil },
-				Converge: func(setupTransaction) error { return nil },
-				Cleanup:  func(setupTransaction) error { return deferred },
-				Transition: func(_ setupTransaction, from, to string) error {
-					if from != setupPhaseConverged || to != setupPhaseComplete {
-						t.Fatalf("transition = %s -> %s", from, to)
-					}
-					transitioned = true
-					return nil
-				},
-			})
-			if err != nil || !transitioned {
-				t.Fatalf("recovery error = %v, transitioned = %v", err, transitioned)
+	cleanupCalls := 0
+	transitioned := false
+	ops := setupRecoveryOps{
+		Rollback: func(setupTransaction) error { return nil },
+		Converge: func(setupTransaction) error { return nil },
+		Cleanup: func(setupTransaction) error {
+			cleanupCalls++
+			return errUninstallCleanupRequiresRestart
+		},
+		Transition: func(setupTransaction, string, string) error {
+			transitioned = true
+			return nil
+		},
+	}
+	journal := setupJournal{
+		SchemaVersion: setupJournalSchemaVersion,
+		Phase:         setupPhaseConverged,
+		Transaction:   transaction,
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		err := recoverSetupJournalPhase(journal, ops)
+		if !errors.Is(err, errUninstallCleanupRequiresRestart) || transitioned {
+			t.Fatalf("attempt %d recovery error = %v, transitioned = %v", attempt, err, transitioned)
+		}
+	}
+	if cleanupCalls != 2 {
+		t.Fatalf("same-boot recovery cleanup calls = %d, want 2", cleanupCalls)
+	}
+}
+
+func TestRecoverSetupJournalPhaseCompletesPostExitCleanup(t *testing.T) {
+	transaction := testSetupTransactionForRoots("uninstall", "root", "data", "maintenance", nil)
+	transitioned := false
+	err := recoverSetupJournalPhase(setupJournal{
+		SchemaVersion: setupJournalSchemaVersion,
+		Phase:         setupPhaseConverged,
+		Transaction:   transaction,
+	}, setupRecoveryOps{
+		Rollback: func(setupTransaction) error { return nil },
+		Converge: func(setupTransaction) error { return nil },
+		Cleanup:  func(setupTransaction) error { return errTransactionCleanupDeferred },
+		Transition: func(_ setupTransaction, from, to string) error {
+			if from != setupPhaseConverged || to != setupPhaseComplete {
+				t.Fatalf("transition = %s -> %s", from, to)
 			}
-		})
+			transitioned = true
+			return nil
+		},
+	})
+	if err != nil || !transitioned {
+		t.Fatalf("recovery error = %v, transitioned = %v", err, transitioned)
+	}
+}
+
+func TestFinishCommittedSetupTransactionReturns3010WithoutTerminalizing(t *testing.T) {
+	transaction := testSetupTransactionForRoots("uninstall", "root", "data", "maintenance", nil)
+	var calls []string
+	restartRequired, err := finishCommittedSetupTransactionWith(
+		transaction,
+		func(setupTransaction) error {
+			calls = append(calls, "converge")
+			return nil
+		},
+		func(setupTransaction) error {
+			calls = append(calls, "mark-converged")
+			return nil
+		},
+		func(setupTransaction) error {
+			calls = append(calls, "arm-cleanup")
+			return errUninstallCleanupRequiresRestart
+		},
+		func(setupTransaction) error {
+			calls = append(calls, "mark-complete")
+			return nil
+		},
+	)
+	if err != nil || !restartRequired {
+		t.Fatalf("finish result = restart %v, error %v", restartRequired, err)
+	}
+	if got, want := strings.Join(calls, ","), "converge,mark-converged,arm-cleanup"; got != want {
+		t.Fatalf("finish calls = %q, want %q", got, want)
 	}
 }
 

@@ -1822,9 +1822,13 @@ func recoverSetupJournalPhase(journal setupJournal, ops setupRecoveryOps) error 
 		fallthrough
 	case setupPhaseConverged:
 		cleanupErr := ops.Cleanup(transaction)
+		if errors.Is(cleanupErr, errUninstallCleanupRequiresRestart) {
+			// An armed uninstall is intentionally not terminal: the exact
+			// transaction body remains the post-reboot cleanup authority.
+			return cleanupErr
+		}
 		if cleanupErr != nil &&
-			!errors.Is(cleanupErr, errTransactionCleanupDeferred) &&
-			!errors.Is(cleanupErr, errUninstallCleanupRequiresRestart) {
+			!errors.Is(cleanupErr, errTransactionCleanupDeferred) {
 			return fmt.Errorf("clean committed setup transaction: %w", cleanupErr)
 		}
 		return ops.Transition(transaction, setupPhaseConverged, setupPhaseComplete)
@@ -1834,23 +1838,44 @@ func recoverSetupJournalPhase(journal setupJournal, ops setupRecoveryOps) error 
 }
 
 func finishCommittedSetupTransaction(transaction setupTransaction) (bool, error) {
-	if err := convergeCommittedSetupTransaction(transaction); err != nil {
+	return finishCommittedSetupTransactionWith(
+		transaction,
+		convergeCommittedSetupTransaction,
+		markSetupTransactionConverged,
+		cleanupCommittedSetupTransaction,
+		func(transaction setupTransaction) error {
+			return markSetupTransactionComplete(transaction, setupPhaseConverged)
+		},
+	)
+}
+
+func finishCommittedSetupTransactionWith(
+	transaction setupTransaction,
+	converge func(setupTransaction) error,
+	markConverged func(setupTransaction) error,
+	cleanup func(setupTransaction) error,
+	markComplete func(setupTransaction) error,
+) (bool, error) {
+	if err := converge(transaction); err != nil {
 		return false, err
 	}
-	if err := markSetupTransactionConverged(transaction); err != nil {
+	if err := markConverged(transaction); err != nil {
 		return false, err
 	}
-	cleanupErr := cleanupCommittedSetupTransaction(transaction)
+	cleanupErr := cleanup(transaction)
 	restartRequired := errors.Is(cleanupErr, errUninstallCleanupRequiresRestart)
 	if cleanupErr != nil &&
 		!errors.Is(cleanupErr, errTransactionCleanupDeferred) &&
 		!restartRequired {
 		return false, cleanupErr
 	}
-	if err := markSetupTransactionComplete(transaction, setupPhaseConverged); err != nil {
+	if restartRequired {
+		return true, nil
+	}
+	if err := markComplete(transaction); err != nil {
 		return false, err
 	}
-	return restartRequired, nil
+	return false, nil
 }
 
 func abortPreparedSetupTransaction(transaction setupTransaction) error {

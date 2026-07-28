@@ -119,7 +119,7 @@ func newDeferredCleanupFixture(t *testing.T) deferredCleanupFixture {
 	}
 	journal := setupJournal{
 		SchemaVersion: setupJournalSchemaVersion,
-		Phase:         setupPhaseComplete,
+		Phase:         setupPhaseConverged,
 		Transaction: setupTransaction{
 			SchemaVersion:   setupTransactionSchemaVersion,
 			ID:              transactionID,
@@ -168,6 +168,14 @@ func TestDeferredCleanupBootTransitionRejectsSameBootAndHibernateResume(t *testi
 	}
 	if err := validateDeferredCleanupBootTransition(record, deferredCleanupBootTwo); err != nil {
 		t.Fatalf("genuine boot transition rejected: %v", err)
+	}
+}
+
+func TestDeferredCleanupRejectsMissingHookRuntimeBeforeLegacyPostExitPath(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "HookRuntime")
+	err := requireDeferredCleanupHookRuntime(missing)
+	if err == nil || !strings.Contains(err.Error(), "unsupported legacy cache cleanup") {
+		t.Fatalf("missing HookRuntime error = %v", err)
 	}
 }
 
@@ -434,7 +442,7 @@ func TestFinishDeferredInstallerStateCleanupPreservesPendingFailedAndUnknownResi
 		{
 			name: "pending-journal",
 			drift: func(t *testing.T, fixture *deferredCleanupFixture) {
-				fixture.journal.Phase = setupPhaseConverged
+				fixture.journal.Phase = setupPhaseIntent
 				if err := writeDurableValue(fixture.record.JournalPath, fixture.journal, true); err != nil {
 					t.Fatal(err)
 				}
@@ -485,7 +493,10 @@ func TestFinishDeferredInstallerStateCleanupPreservesPendingFailedAndUnknownResi
 func TestReinstallSupersedesCleanupWithoutDeletingNewRuntimeState(t *testing.T) {
 	fixture := newDeferredCleanupFixture(t)
 	removedCommand := ""
-	if err := retireSupersededDeferredCleanupRecord(
+	if err := markDeferredCleanupSuperseded(&fixture.record); err != nil {
+		t.Fatalf("mark deferred cleanup superseded: %v", err)
+	}
+	if err := removeSupersededDeferredCleanupRecord(
 		&fixture.record,
 		func(command string) error {
 			removedCommand = command
@@ -505,6 +516,200 @@ func TestReinstallSupersedesCleanupWithoutDeletingNewRuntimeState(t *testing.T) 
 	}
 	if _, err := os.Lstat(fixture.record.RecordPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("superseded cleanup record survived: %v", err)
+	}
+}
+
+func TestReinstallSupersessionResumesAcrossDurableCrashBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		afterSuperseded bool
+	}{
+		{name: "after superseded record", afterSuperseded: true},
+		{name: "after terminal tombstone"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newDeferredCleanupFixture(t)
+			terminalizations := 0
+			removals := 0
+			ops := deferredCleanupSupersessionOps{
+				validateJournal: func(
+					deferredUninstallCleanupRecord,
+					hookruntime.Paths,
+					setupJournal,
+				) error {
+					return nil
+				},
+				terminalize: func(transaction setupTransaction) error {
+					if transaction.ID != fixture.record.TransactionID {
+						t.Fatalf("terminalized transaction = %q", transaction.ID)
+					}
+					terminalizations++
+					return writeDurableValue(
+						fixture.record.JournalPath,
+						frozenTerminalSetupJournal(),
+						true,
+					)
+				},
+				remove: func(record *deferredUninstallCleanupRecord) error {
+					removals++
+					return removeSupersededDeferredCleanupRecord(
+						record,
+						func(string) error { return nil },
+					)
+				},
+			}
+			injected := errors.New("injected supersession crash")
+			var afterRecord func() error
+			var afterTerminal func() error
+			if test.afterSuperseded {
+				afterRecord = func() error { return injected }
+			} else {
+				afterTerminal = func() error { return injected }
+			}
+			err := supersedeDeferredUninstallCleanupRecord(
+				&fixture.record,
+				hookruntime.Paths{},
+				ops,
+				afterRecord,
+				afterTerminal,
+			)
+			if !errors.Is(err, injected) {
+				t.Fatalf("supersession error = %v, want injected crash", err)
+			}
+			stored, readErr := readDeferredUninstallCleanupRecord(fixture.record.RecordPath)
+			if readErr != nil || stored == nil ||
+				stored.Status != deferredCleanupStatusSuperseded {
+				t.Fatalf("durable superseded record = %+v, error %v", stored, readErr)
+			}
+			document, documentErr := readSetupJournalDocument(fixture.record.JournalPath)
+			if documentErr != nil || document == nil {
+				t.Fatalf("read supersession journal: %+v, %v", document, documentErr)
+			}
+			if test.afterSuperseded && document.Terminal {
+				t.Fatal("journal terminalized before the injected post-record crash")
+			}
+			if !test.afterSuperseded && !document.Terminal {
+				t.Fatal("terminal tombstone was not durable before the injected crash")
+			}
+
+			if err := supersedeDeferredUninstallCleanupRecord(
+				stored,
+				hookruntime.Paths{},
+				ops,
+				nil,
+				nil,
+			); err != nil {
+				t.Fatalf("resume supersession: %v", err)
+			}
+			if terminalizations != 1 {
+				t.Fatalf("terminalizations = %d, want 1", terminalizations)
+			}
+			if removals != 1 {
+				t.Fatalf("removals = %d, want 1", removals)
+			}
+			if _, err := os.Lstat(fixture.record.RecordPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("superseded record survived completed resume: %v", err)
+			}
+			document, documentErr = readSetupJournalDocument(fixture.record.JournalPath)
+			if documentErr != nil || document == nil || !document.Terminal {
+				t.Fatalf("resumed journal = %+v, error %v", document, documentErr)
+			}
+		})
+	}
+}
+
+func TestReinstallSupersessionRejectsLockedJournalAndRecordDrift(t *testing.T) {
+	tests := []struct {
+		name  string
+		drift func(*testing.T, *deferredCleanupFixture)
+	}{
+		{
+			name: "wrong phase",
+			drift: func(t *testing.T, fixture *deferredCleanupFixture) {
+				fixture.journal.Phase = setupPhaseIntent
+				if err := writeDurableValue(
+					fixture.record.JournalPath,
+					fixture.journal,
+					true,
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "wrong transaction",
+			drift: func(t *testing.T, fixture *deferredCleanupFixture) {
+				fixture.journal.Transaction.ID = strings.Repeat("f", 32)
+				if err := writeDurableValue(
+					fixture.record.JournalPath,
+					fixture.journal,
+					true,
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "record replacement",
+			drift: func(t *testing.T, fixture *deferredCleanupFixture) {
+				changed := fixture.record
+				changed.RunCommand += " changed"
+				replaceDeferredCleanupRecord(t, changed)
+			},
+		},
+		{
+			name: "terminal without superseded record",
+			drift: func(t *testing.T, fixture *deferredCleanupFixture) {
+				if err := writeDurableValue(
+					fixture.record.JournalPath,
+					frozenTerminalSetupJournal(),
+					true,
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newDeferredCleanupFixture(t)
+			test.drift(t, &fixture)
+			called := false
+			ops := deferredCleanupSupersessionOps{
+				validateJournal: func(
+					deferredUninstallCleanupRecord,
+					hookruntime.Paths,
+					setupJournal,
+				) error {
+					return nil
+				},
+				terminalize: func(setupTransaction) error {
+					called = true
+					return nil
+				},
+				remove: func(*deferredUninstallCleanupRecord) error {
+					called = true
+					return nil
+				},
+			}
+			if err := supersedeDeferredUninstallCleanupRecord(
+				&fixture.record,
+				hookruntime.Paths{},
+				ops,
+				nil,
+				nil,
+			); err == nil {
+				t.Fatal("unsafe supersession succeeded")
+			}
+			if called {
+				t.Fatal("unsafe supersession reached terminalization or removal")
+			}
+			stored, err := readDeferredUninstallCleanupRecord(fixture.record.RecordPath)
+			if err != nil || stored == nil ||
+				stored.Status != deferredCleanupStatusPending {
+				t.Fatalf("refused supersession changed record = %+v, %v", stored, err)
+			}
+		})
 	}
 }
 
