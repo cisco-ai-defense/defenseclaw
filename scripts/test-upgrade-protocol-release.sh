@@ -950,13 +950,16 @@ if not any(
 ):
     raise SystemExit("field recovery retained no byte-exact clean 0.8.6 backup")
 
-bundle_manifest = json.loads(
-    (data_dir / "observability-stack/.defenseclaw-bundle-manifest.json").read_text(
-        encoding="utf-8"
-    )
-)
-if bundle_manifest.get("bundle_version") != target_version:
-    raise SystemExit("field recovery did not refresh the managed bundle to target")
+stack = data_dir / "observability-stack"
+if stack.is_symlink() or (stack.exists() and not stack.is_dir()):
+    raise SystemExit("field recovery left an unsafe local observability bundle")
+if stack.exists():
+    manifest_path = stack / ".defenseclaw-bundle-manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise SystemExit("field recovery left an unversioned local observability bundle")
+    bundle_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if bundle_manifest.get("bundle_version") != target_version:
+        raise SystemExit("field recovery did not refresh the managed bundle to target")
 
 database = data_dir / "audit.db"
 if database.exists():
@@ -980,7 +983,7 @@ PY
                 || die "field-recovery target gateway is not healthy"
             ;;
         corrupt-audit-same-version)
-            verify_upgrade
+            verify_upgrade recovered
             grep -Fq "Preserved corrupt audit SQLite set:" "${log_file}" \
                 || die "field recovery did not report corrupt audit custody"
             python3 - "${SMOKE_HOME}/.defenseclaw" "${audit_db}" <<'PY' \
@@ -1263,6 +1266,7 @@ main_protocol_gate() {
         assert_reviewed_resolver_asset_contract
     else
         prepare_required_bridge_assets
+        prepare_field_recovery_source_assets
     fi
     start_release_server
     if [[ "${REFUSAL_CONTRACT_ONLY}" != "1" ]]; then

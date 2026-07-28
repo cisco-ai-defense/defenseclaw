@@ -970,6 +970,19 @@ prepare_required_bridge_assets() {
     fi
 }
 
+prepare_field_recovery_source_assets() {
+    [[ "${UPGRADE_SMOKE_FIELD_RECOVERY_CASES:-0}" == "1" ]] || return 0
+
+    # The clean missing-cursor resolver re-authenticates the exact published
+    # 0.8.6 source contract before it accepts that compatibility state. The
+    # smoke curl shim points versioned GitHub release URLs at RELEASE_ROOT, so
+    # stage this bounded source view before the local server starts. Reuse the
+    # same helper as bridge staging: it authenticates the checksum proof first,
+    # then every served wheel, gateway, manifest, and provenance payload.
+    prepare_authenticated_upgrade_release_assets \
+        "0.8.6" "field-recovery source" 1
+}
+
 tail_log() {
     local file="$1"
     if [[ -f "${file}" ]]; then
@@ -1994,6 +2007,11 @@ verify_upgrade() {
     local venv_python="${SMOKE_HOME}/.defenseclaw/.venv/bin/python"
     local release_dir="${RELEASE_ROOT}/${TARGET_VERSION}"
     local require_v8=0
+    local audit_expectation="${1:-preserved}"
+    case "${audit_expectation}" in
+        preserved|recovered) ;;
+        *) die "invalid upgrade audit verification mode: ${audit_expectation}" ;;
+    esac
     if target_uses_observability_v8; then
         require_v8=1
     fi
@@ -2681,13 +2699,15 @@ print("local_bundle_manifest=target_exact_custom_preserved")
 PY
         fi
 
-        "${venv_python}" -I -B - "${SMOKE_HOME}/.defenseclaw" <<'PY'
+        "${venv_python}" -I -B - \
+            "${SMOKE_HOME}/.defenseclaw" "${audit_expectation}" <<'PY'
 from pathlib import Path
 import sqlite3
 import stat
 import sys
 
 database = Path(sys.argv[1]) / "state/audit-custom.db"
+expectation = sys.argv[2]
 info = database.lstat()
 if (
     database.is_symlink()
@@ -2696,12 +2716,29 @@ if (
 ):
     raise SystemExit("legacy-readable audit fixture was not tightened to mode 0600")
 with sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=1.0) as connection:
-    row = connection.execute(
-        "SELECT value FROM release_upgrade_legacy_mode_fixture"
+    if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
+        raise SystemExit("target audit fixture failed quick_check")
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'release_upgrade_legacy_mode_fixture'"
     ).fetchone()
-if row != ("preserved",):
-    raise SystemExit("legacy-readable audit fixture did not survive the upgrade")
-print("legacy_audit_mode_0644=tightened_to_0600")
+    if expectation == "preserved":
+        if table != (1,):
+            raise SystemExit("legacy-readable audit fixture table did not survive the upgrade")
+        row = connection.execute(
+            "SELECT value FROM release_upgrade_legacy_mode_fixture"
+        ).fetchone()
+        if row != ("preserved",):
+            raise SystemExit("legacy-readable audit fixture did not survive the upgrade")
+    elif expectation == "recovered":
+        if table is not None:
+            raise SystemExit("corrupt audit recovery retained the discarded legacy fixture")
+    else:
+        raise SystemExit("invalid audit verification expectation")
+if expectation == "preserved":
+    print("legacy_audit_mode_0644=tightened_to_0600")
+else:
+    print("corrupt_audit_recovery=fresh_mode_0600")
 PY
 
         local receipt_from

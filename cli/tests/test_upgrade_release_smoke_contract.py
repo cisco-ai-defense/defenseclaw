@@ -1873,6 +1873,189 @@ def test_field_recovery_lane_reproduces_exact_clean_086_not_partial_cursor() -> 
     assert "Replayed every missing migration and repaired the cursor" not in protocol
     assert "local SMOKE_HOME=" not in recovery_function
     assert 'SMOKE_HOME="${WORKDIR}/field-recovery-${baseline}-${recovery_case}"' in recovery_function
+    assert 'stack = data_dir / "observability-stack"' in recovery_function
+    assert "if stack.is_symlink() or (stack.exists() and not stack.is_dir()):" in recovery_function
+    assert "if stack.exists():" in recovery_function
+    assert "field recovery left an unversioned local observability bundle" in recovery_function
+    assert "verify_upgrade recovered" in recovery_function
+
+    smoke = SCRIPT.read_text(encoding="utf-8")
+    verify_start = smoke.index("verify_upgrade() {")
+    verify_end = smoke.index("\n}\n\nrun_one_upgrade_smoke()", verify_start)
+    verification = smoke[verify_start:verify_end]
+    assert 'local audit_expectation="${1:-preserved}"' in verification
+    assert "preserved|recovered" in verification
+    assert "corrupt audit recovery retained the discarded legacy fixture" in verification
+    assert "corrupt_audit_recovery=fresh_mode_0600" in verification
+
+
+@pytest.mark.skipif(os.name == "nt", reason="executes the POSIX release harness")
+def test_field_recovery_serves_only_authenticated_086_source_contract(
+    tmp_path: Path,
+) -> None:
+    version = "0.8.6"
+    os_name = "linux"
+    arch = "amd64"
+    wheel = f"defenseclaw-{version}-2-py3-none-any.dcwheel"
+    gateway = f"defenseclaw_{version}_protocol2_{os_name}_{arch}.dcgateway"
+    authenticated_payloads = {
+        wheel: b"protected source wheel\n",
+        gateway: b"protected source gateway\n",
+        "upgrade-manifest.json": b'{"release_version":"0.8.6"}\n',
+        "release-provenance.json": b'{"release_version":"0.8.6"}\n',
+    }
+    published = tmp_path / "published"
+    published.mkdir()
+    for name, payload in authenticated_payloads.items():
+        (published / name).write_bytes(payload)
+    (published / "checksums.txt").write_text(
+        "".join(f"{hashlib.sha256(payload).hexdigest()}  {name}\n" for name, payload in authenticated_payloads.items()),
+        encoding="utf-8",
+    )
+    (published / "checksums.txt.sig").write_text("fixture signature\n", encoding="utf-8")
+    (published / "checksums.txt.pem").write_text(
+        "-----BEGIN CERTIFICATE-----\nZmFrZS1jZXJ0aWZpY2F0ZQ==\n-----END CERTIFICATE-----\n",
+        encoding="utf-8",
+    )
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    cosign = fake_bin / "cosign"
+    cosign.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    cosign.chmod(0o700)
+    workdir = tmp_path / "work"
+    release_root = workdir / "release-root"
+    workdir.mkdir()
+    release_root.mkdir()
+
+    completed = _source_script(
+        """
+trap - EXIT
+WORKDIR="$2"
+RELEASE_ROOT="$3"
+TARGET_VERSION=0.8.8
+OS_NAME=linux
+ARCH_NAME=amd64
+UPGRADE_SMOKE_FIELD_RECOVERY_CASES=1
+fixture="$4"
+download_old_asset() {
+    local name="$1"
+    local destination="$2"
+    local version="$3"
+    [[ "${version}" == "0.8.6" ]] || return 1
+    cp "${fixture}/${name}" "${destination}"
+}
+PATH="$5:${PATH}"
+prepare_field_recovery_source_assets
+""",
+        str(workdir),
+        str(release_root),
+        str(published),
+        str(fake_bin),
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    served = release_root / version
+    assert {path.name for path in served.iterdir()} == {
+        *authenticated_payloads,
+        "checksums.txt",
+        "checksums.txt.sig",
+        "checksums.txt.pem",
+    }
+    for name, payload in authenticated_payloads.items():
+        assert (served / name).read_bytes() == payload
+
+
+def test_field_recovery_source_authentication_precedes_local_server_start() -> None:
+    protocol = PROTOCOL_SCRIPT.read_text(encoding="utf-8")
+    main = protocol[protocol.index("main_protocol_gate() {") :]
+
+    bridge = main.index("prepare_required_bridge_assets")
+    source = main.index("prepare_field_recovery_source_assets")
+    server = main.index("start_release_server")
+
+    assert bridge < source < server
+
+
+@pytest.mark.skipif(os.name == "nt", reason="executes the POSIX field-recovery verifier")
+@pytest.mark.parametrize(
+    ("stack_state", "expected_success"),
+    (
+        ("absent", True),
+        ("target-version", True),
+        ("dangling-symlink", False),
+        ("unversioned", False),
+        ("wrong-version", False),
+    ),
+)
+def test_field_recovery_verifier_accepts_absent_optional_bundle_but_rejects_unsafe_state(
+    tmp_path: Path,
+    stack_state: str,
+    expected_success: bool,
+) -> None:
+    protocol = PROTOCOL_SCRIPT.read_text(encoding="utf-8")
+    failure = '|| die "clean 0.8.6 field-recovery verification failed"'
+    failure_offset = protocol.index(failure)
+    body = protocol.index("\n", failure_offset) + 1
+    end = protocol.index("\nPY\n", body)
+    verifier = protocol[body:end] + "\n"
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    manifest = tmp_path / "upgrade-manifest.json"
+    manifest.write_text(
+        json.dumps({"required_cli_migrations": ["0.8.5"]}),
+        encoding="utf-8",
+    )
+    (data_dir / ".migration_state.json").write_text(
+        json.dumps({"applied": ["0.8.5"]}),
+        encoding="utf-8",
+    )
+    source_config = b"config_version: 8\n"
+    source_environment = b"DEFENSECLAW_GATEWAY_TOKEN=fixture\n"
+    backup = data_dir / "backups/upgrade-fixture"
+    backup.mkdir(parents=True)
+    (backup / "config.yaml").write_bytes(source_config)
+    (backup / ".env").write_bytes(source_environment)
+
+    stack = data_dir / "observability-stack"
+    if stack_state == "target-version":
+        stack.mkdir()
+        (stack / ".defenseclaw-bundle-manifest.json").write_text(
+            json.dumps({"bundle_version": "0.8.8"}),
+            encoding="utf-8",
+        )
+    elif stack_state == "dangling-symlink":
+        stack.symlink_to(data_dir / "missing-stack")
+    elif stack_state == "unversioned":
+        stack.mkdir()
+    elif stack_state == "wrong-version":
+        stack.mkdir()
+        (stack / ".defenseclaw-bundle-manifest.json").write_text(
+            json.dumps({"bundle_version": "0.8.7"}),
+            encoding="utf-8",
+        )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-",
+            str(data_dir),
+            str(manifest),
+            hashlib.sha256(source_config).hexdigest(),
+            hashlib.sha256(source_environment).hexdigest(),
+            "0.8.8",
+        ],
+        input=verifier,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert (completed.returncode == 0) is expected_success, completed.stderr
 
 
 def test_local_candidate_checksums_exclude_all_signature_family_outputs() -> None:
