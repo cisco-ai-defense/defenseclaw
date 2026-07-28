@@ -17,6 +17,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"golang.org/x/sys/windows"
 )
 
 const (
@@ -29,6 +30,39 @@ type deferredCleanupFixture struct {
 	state       hookruntime.State
 	journal     setupJournal
 	maintenance string
+}
+
+func TestCanonicalWindowsBootIdentifierAcceptsWindowsGUIDString(t *testing.T) {
+	apiIdentifier := windows.GUID{
+		Data1: 0x00112233,
+		Data2: 0x4455,
+		Data3: 0x6677,
+		Data4: [8]byte{0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff},
+	}.String()
+
+	got, err := canonicalWindowsBootIdentifier(apiIdentifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != deferredCleanupBootOne {
+		t.Fatalf("boot identifier = %q, want %q", got, deferredCleanupBootOne)
+	}
+}
+
+func TestCanonicalWindowsBootIdentifierRejectsInvalidValue(t *testing.T) {
+	if got, err := canonicalWindowsBootIdentifier("{not-a-guid}"); err == nil || got != "" {
+		t.Fatalf("boot identifier = %q, error %v", got, err)
+	}
+}
+
+func TestWindowsBootIdentifierReturnsCanonicalValue(t *testing.T) {
+	got, err := windowsBootIdentifier()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !validBootIdentifier(got) {
+		t.Fatalf("boot identifier = %q", got)
+	}
 }
 
 func TestDeferredCleanupTransactionRootExpectationFailsClosed(t *testing.T) {

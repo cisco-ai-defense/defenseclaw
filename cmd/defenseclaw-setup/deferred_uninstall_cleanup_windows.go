@@ -63,7 +63,14 @@ func windowsBootIdentifier() (string, error) {
 	if returned != 0 && returned < uint32(unsafe.Sizeof(info)) {
 		return "", errors.New("Windows boot identifier response was truncated")
 	}
-	identifier := strings.ToLower(info.BootIdentifier.String())
+	return canonicalWindowsBootIdentifier(info.BootIdentifier.String())
+}
+
+func canonicalWindowsBootIdentifier(value string) (string, error) {
+	identifier := strings.ToLower(value)
+	if len(identifier) == 38 && identifier[0] == '{' && identifier[len(identifier)-1] == '}' {
+		identifier = identifier[1 : len(identifier)-1]
+	}
 	if !validBootIdentifier(identifier) {
 		return "", errors.New("Windows returned an invalid boot identifier")
 	}
