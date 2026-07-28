@@ -3475,6 +3475,7 @@ function Invoke-SetupAcceptance {
         $installedState.version = '0.8.0'
         $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
         $configPath = Join-Path $dataRoot 'config.yaml'
+        [IO.Directory]::CreateDirectory((Join-Path $dataRoot 'state')) | Out-Null
         $yamlDataRoot = $dataRoot.Replace("'", "''")
         $v7Fixture = @"
 # native Setup 0.8.0 observability migration acceptance fixture
