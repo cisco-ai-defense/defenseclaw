@@ -29,6 +29,15 @@ import (
 var fakeBusyErr = errors.New("database is locked (synthetic)")
 var fakeOtherErr = errors.New("constraint failed: NOT NULL")
 
+type sqliteBusyObserverCapture struct {
+	operations []string
+}
+
+func (capture *sqliteBusyObserverCapture) RecordSQLiteBusyMetric(_ context.Context, operation string) error {
+	capture.operations = append(capture.operations, operation)
+	return nil
+}
+
 // TestRetryBusy_RetriesOnBusy: the wrapper must keep retrying while
 // the underlying op returns a BUSY error, and stop the moment the
 // op succeeds. We count the calls to fn() so we can assert the
@@ -53,6 +62,24 @@ func TestRetryBusy_RetriesOnBusy(t *testing.T) {
 	}
 	if calls != 3 {
 		t.Fatalf("expected fn called 3 times, got %d", calls)
+	}
+}
+
+func TestRetryBusyObservedUsesCanonicalObserverForEveryRetry(t *testing.T) {
+	capture := &sqliteBusyObserverCapture{}
+	var calls int
+	err := retryBusyObserved(t.Context(), "audit_insert", capture, func() error {
+		calls++
+		if calls < 3 {
+			return fakeBusyErr
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(capture.operations) != "[audit_insert audit_insert]" {
+		t.Fatalf("observed operations = %v", capture.operations)
 	}
 }
 

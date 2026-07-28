@@ -42,7 +42,7 @@ type openaiChatAdapter struct{}
 // Name implements FormatAdapter.
 func (openaiChatAdapter) Name() string { return "openai-chat" }
 
-// InjectionSite returns the stable label written to gateway.jsonl so
+// InjectionSite returns the stable canonical observability label so
 // downstream dashboards (and TestInjectNotificationForPassthrough_Dispatch)
 // don't break when we refactor adapter internals.
 func (openaiChatAdapter) InjectionSite() string { return "chat-completions/messages" }

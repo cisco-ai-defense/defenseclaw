@@ -114,8 +114,6 @@ def test_textual_command_parser_accepts_go_palette_aliases() -> None:
     [
         "scan skill",
         "defenseclaw skill scan",
-        "setup redaction",
-        "defenseclaw setup redaction",
         "setup observability enable",
         "policy activate",
     ],
@@ -146,7 +144,7 @@ def test_textual_command_parser_previews_go_mutation_risk_classes(text: str, ris
 @pytest.mark.parametrize(
     "text",
     [
-        "setup redaction status",
+        "setup observability list",
         "defenseclaw setup local-observability status",
         "defenseclaw keys check",
         "policy validate",
@@ -206,4 +204,3 @@ def test_textual_command_parser_accepts_go_gateway_registry_commands() -> None:
     assert _argv(parsed) == ["defenseclaw-gateway", "status"]
     assert parsed.category == "daemon"
     assert parsed.needs_preview is False
-

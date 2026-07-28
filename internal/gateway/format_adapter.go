@@ -40,8 +40,8 @@ type FormatAdapter interface {
 	// Name is a short stable identifier (e.g. "openai-chat"). Used in
 	// log lines, error strings, and the "unknown adapter" fallback.
 	Name() string
-	// InjectionSite is the stable, human-readable label written to
-	// gateway.jsonl when InjectSystem succeeds (e.g.
+	// InjectionSite is the stable, human-readable observability label used when
+	// InjectSystem succeeds (e.g.
 	// "chat-completions/messages", "responses-api/instructions",
 	// "anthropic/system"). Kept separate from Name so we can evolve
 	// internal adapter names without breaking downstream log consumers

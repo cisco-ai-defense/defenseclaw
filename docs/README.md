@@ -8,7 +8,8 @@ DefenseClaw is the governance layer for OpenClaw and agentic AI runtimes. It sca
 
 | Guide | Description |
 |-------|-------------|
-| [Install](INSTALL.md) | DGX Spark, macOS, Linux, existing OpenClaw installs, and source builds |
+| [Install](INSTALL.md) | Windows, DGX Spark, macOS, Linux, existing OpenClaw installs, and source builds |
+| [Native Windows](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/) | PowerShell install, native connector setup, verification, and troubleshooting |
 | [Quick Start](QUICKSTART.md) | First successful setup, scan, guardrail, and dashboard flow |
 | [Architecture](ARCHITECTURE.md) | System diagram, data flow, and component responsibilities |
 | [CLI Reference](CLI.md) | Python CLI commands and flags |
@@ -33,13 +34,23 @@ DefenseClaw is the governance layer for OpenClaw and agentic AI runtimes. It sca
 
 | Guide | Description |
 |-------|-------------|
-| [Observability](OBSERVABILITY.md) | Audit sinks, OTLP, Splunk, Grafana, and webhooks |
-| [Observability Contract](OBSERVABILITY-CONTRACT.md) | Stable telemetry and runbook contract |
-| [OpenTelemetry](OTEL.md) | OTEL signal specification and Splunk mapping |
-| [OTEL Implementation Status](OTEL-IMPLEMENTATION-STATUS.md) | Implementation tracking notes |
+| [Observability v8](OBSERVABILITY.md) | Current bucket, routing, redaction, destination, local-history, dashboard, and runbook guide |
+| [Observability v8 design index](design/observability-v8/README.md) | Normative architecture, schema, migration, and acceptance contracts |
 | [Splunk App](SPLUNK_APP.md) | Local Splunk app purpose, dashboards, signals, and investigation flow |
 | [TUI](TUI.md) | Dashboard usage, keybindings, and navigation |
 | [E2E](E2E.md) | End-to-end test harnesses and local validation |
+
+### Historical observability references
+
+These documents describe the retired v7 topology and are retained for migration,
+compatibility, and archaeology. They are not configuration or schema authority for
+a v8 runtime.
+
+| Historical guide | Use |
+|---|---|
+| [Observability Contract (v7)](OBSERVABILITY-CONTRACT.md) | Legacy JSONL/audit/OTel envelope and correlation behavior |
+| [OpenTelemetry Specification (v7)](OTEL.md) | Legacy direct-provider signals and Splunk mapping |
+| [OTEL Implementation Status (v7)](OTEL-IMPLEMENTATION-STATUS.md) | v7 closeout snapshot and known limitations |
 
 ## Development
 
@@ -62,5 +73,6 @@ DefenseClaw is the governance layer for OpenClaw and agentic AI runtimes. It sca
 | [Sandbox Scanning](design/sandbox-scanning.md) | Sandbox scanner integration notes |
 | [Sandbox Security Analysis](design/sandbox-security-analysis.md) | Security analysis notes |
 | [Standalone Sandbox Issues](design/standalone-sandbox-issues.md) | Known issue tracking notes |
+| [Observability v8 Specification](design/observability-v8/README.md) | Unified logging, audit, OTel, routing, redaction, migration, rich trace, and dashboard compatibility contracts |
 | [Local Observability Stack Moved Notice](archive/LOCAL_OBSERVABILITY_STACK_MOVED.md) | Archived pointer from the old deploy path to the bundled stack |
 | [Webhook Notifications PR Description](archive/WEBHOOK_NOTIFICATIONS_PR_DESCRIPTION.md) | Archived PR description retained for implementation context |

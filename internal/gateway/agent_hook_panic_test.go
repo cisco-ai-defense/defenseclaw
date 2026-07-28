@@ -14,7 +14,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -40,7 +40,9 @@ func (s *stubPanicLogger) entries() []map[string]interface{} {
 // response with would_block=true and a stable Reason so SIEM dashboards
 // can find it.
 func TestSafeEvaluateHook_RecoversAndReturnsFailOpen(t *testing.T) {
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	api := &APIServer{}
+	api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
 
 	req := agentHookRequest{HookEventName: "PreToolUse"}
 	evalResp, panicked := api.safeEvaluateHook(context.Background(), "codex", req, nil, nil, hookProfileRuntime{
@@ -72,10 +74,12 @@ func TestSafeEvaluateHook_RecoversAndReturnsFailOpen(t *testing.T) {
 		t.Errorf("panic AdditionalContext = %q, want connector + event names", resp.AdditionalContext)
 	}
 
-	// handleHookPanic is a no-op when api.otel is nil; just verify
-	// that calling it on a nil-otel APIServer doesn't blow up
-	// (defensive: panic recovery must itself be panic-safe).
-	api.handleHookPanic(context.Background(), "codex", "PreToolUse", "stack trace")
+	panicMetrics := generatedMetricByName(
+		capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawPanicsTotal,
+	)
+	if len(panicMetrics) != 1 {
+		t.Fatalf("generated panic metrics=%d; recovered hook must not require a legacy Provider", len(panicMetrics))
+	}
 }
 
 // TestHandleAgentHookSynthetic_PropagatesConnector proves the
@@ -308,57 +312,6 @@ func TestNormalizeHookEventLabel_BoundsCardinality(t *testing.T) {
 		if got := normalizeHookEventLabel(tc.event); got != tc.want {
 			t.Errorf("normalizeHookEventLabel(%q) = %q, want %q", tc.event, got, tc.want)
 		}
-	}
-}
-
-// TestAttachRawPayload_TruncatesAndAnnotates is the M3 regression
-// test: when redaction is disabled (operator override) and the body
-// exceeds hookPanicRawPayloadCap, RawPayload must be truncated to
-// the cap, env.Extra must carry the truncation flag, the full byte
-// count, and a SHA-256 short digest so SIEM rules can deduplicate
-// replays without ingesting the full body.
-func TestAttachRawPayload_TruncatesAndAnnotates(t *testing.T) {
-	redaction.SetDisableAll(true)
-	defer redaction.SetDisableAll(false)
-
-	// Body well over the cap. We pick exactly cap+128 so the
-	// boundary math is verifiable.
-	body := bytes.Repeat([]byte("A"), hookPanicRawPayloadCap+128)
-
-	var env HookAuditEnvelope
-	attachRawPayload(&env, body)
-
-	if len(env.RawPayload) != hookPanicRawPayloadCap {
-		t.Errorf("RawPayload length = %d, want %d (truncation cap)", len(env.RawPayload), hookPanicRawPayloadCap)
-	}
-	if env.Extra == nil {
-		t.Fatal("Extra is nil; truncation markers missing")
-	}
-	if env.Extra["raw_payload_truncated"] != "true" {
-		t.Errorf("Extra[raw_payload_truncated] = %q, want \"true\"", env.Extra["raw_payload_truncated"])
-	}
-	wantFull := hookPanicRawPayloadCap + 128
-	if env.Extra["raw_payload_full_bytes"] != itoa(wantFull) {
-		t.Errorf("Extra[raw_payload_full_bytes] = %q, want %d", env.Extra["raw_payload_full_bytes"], wantFull)
-	}
-	if len(env.Extra["raw_payload_sha256"]) != 16 {
-		t.Errorf("Extra[raw_payload_sha256] length = %d, want 16 (8-byte prefix hex)", len(env.Extra["raw_payload_sha256"]))
-	}
-}
-
-// TestAttachRawPayload_NoOpWhenRedactionEnabled verifies that the raw
-// body never reaches the envelope when redaction is on (the default).
-// Forgetting this guard would silently exfiltrate sensitive content
-// to every audit sink.
-func TestAttachRawPayload_NoOpWhenRedactionEnabled(t *testing.T) {
-	redaction.SetDisableAll(false)
-	var env HookAuditEnvelope
-	attachRawPayload(&env, []byte("hello"))
-	if env.RawPayload != "" {
-		t.Errorf("RawPayload = %q, want empty (redaction enabled by default)", env.RawPayload)
-	}
-	if env.Extra != nil {
-		t.Errorf("Extra = %v, want nil (no truncation markers when no payload attached)", env.Extra)
 	}
 }
 

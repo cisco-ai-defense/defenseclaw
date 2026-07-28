@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from defenseclaw.models import ActionEntry, Event
-from defenseclaw.tui.services.gateway_events import parse_timestamp, timestamp_label
+from defenseclaw.tui.services.event_models import parse_timestamp, timestamp_label
 
 AuditIntentKind = Literal["export"]
 AuditCommonFilter = Literal["", "risk", "blocks", "scans", "credentials"]
@@ -360,10 +360,9 @@ class AuditPanelModel:
                 self.items = list(self.store.list_events(500))  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001 - store failures are panel error state.
             self.error_message = f"Audit refresh failed: {exc}"
-            self.items = []
-            self.filtered = []
-            self.cursor = 0
-            self._clear_detail_cache()
+            # Preserve the last good rows/cursor through transient locks. The
+            # visible error explains that freshness is delayed, while the next
+            # successful background generation replaces the cached data.
             return
         self.error_message = ""
         self.apply_filter()

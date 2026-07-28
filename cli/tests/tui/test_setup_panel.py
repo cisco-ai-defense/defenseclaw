@@ -12,10 +12,17 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+from defenseclaw.observability.v8_status import (
+    V8BucketStatus,
+    V8DestinationStatus,
+    V8OperatorStatus,
+)
 from defenseclaw.tui.panels.setup import (
     CONNECTORS,
     WIZARD_DESCRIPTIONS,
@@ -26,6 +33,7 @@ from defenseclaw.tui.panels.setup import (
     WizardGoal,
     _custom_providers_fields_for,
     _filter_fields_for_goal,
+    _guardrail_actions_wizard_fields,
     _guardrail_wizard_fields_for,
     _llm_wizard_fields_for,
     action_matrix_fields,
@@ -40,9 +48,6 @@ from defenseclaw.tui.panels.setup import (
     notifications_desired_action,
     notifications_toggle_intent,
     observability_wizard_fields,
-    redaction_consequence_copy,
-    redaction_desired_action,
-    redaction_toggle_intent,
     render_wizard_value,
     uninstall_args_for_option,
     uninstall_intent,
@@ -53,6 +58,7 @@ from defenseclaw.tui.panels.setup import (
     wizard_state_summary,
 )
 from defenseclaw.tui.screens.model_picker import filter_models, picker_rows
+from defenseclaw.tui.services.cli_choices import supported_connector_choices
 from defenseclaw.tui.services.setup_state import (
     ConfigDiffEntry,
     ConfigField,
@@ -92,7 +98,6 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
     assert names == (
         "General",
         "Agent",
-        "Privacy",
         "Notifications",
         "Claw",
         "Agent Hooks",
@@ -104,9 +109,8 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
         "AI Discovery",
         "Gateway Watcher",
         "Gateway Watchdog",
-        "Audit Sinks",
+        "Observability",
         "Webhooks",
-        "OTel",
         "Skill Actions",
         "MCP Actions",
         "Plugin Actions",
@@ -117,6 +121,68 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
         "Firewall",
         "Trusted Paths",
     )
+
+
+def test_exact_v8_setup_replaces_legacy_observability_editors_with_effective_plan() -> None:
+    model = SetupPanelModel({"config_version": 8, "privacy": {"disable_redaction": True}})
+    names = tuple(section.name for section in model.sections)
+
+    assert "Privacy" not in names
+    assert "Audit Sinks" not in names
+    assert "OTel" not in names
+    assert "Observability" in names
+
+    status = V8OperatorStatus(
+        source="config.yaml",
+        data_dir="/tmp/dc",
+        plan_digest="a" * 64,
+        bucket_catalog_version=1,
+        retention_days=30,
+        local_path="/tmp/dc/audit.db",
+        judge_bodies_path="/tmp/dc/judge.db",
+        destinations=(
+            V8DestinationStatus(
+                name="collector",
+                kind="otlp",
+                enabled=True,
+                generated=False,
+                capabilities=("logs", "traces", "metrics"),
+                selected_signals=("logs", "traces", "metrics"),
+                policy_form="capability_default",
+                endpoint="https://collector.example/v1/traces",
+                route_count=1,
+                buckets=("guardrail.evaluation",),
+                redaction_profiles=("none",),
+            ),
+        ),
+        buckets=(V8BucketStatus("guardrail.evaluation", ("logs", "traces"), "none"),),
+        warnings=(),
+    )
+    model.set_observability_status(status)
+    section = _section(model.sections, "Observability")
+    values = {field.label: field.value for field in section.fields}
+
+    assert values["Retention"] == "30 days"
+    assert "signals=logs,traces,metrics" in values["collector"]
+    assert "redaction=unredacted (none)" in values["collector"]
+    assert values["guardrail.evaluation"] == "collect=logs,traces · local_redaction=none"
+    model.mode = "config"
+    model.active_section = names.index("Observability")
+    assert model.focused_row_action().action == "open_observability_editor"
+
+    assert "Disable Redaction" not in {field.label for field in guardrail_wizard_fields({"config_version": 8})}
+    otlp_fields = observability_wizard_fields("otlp", {"config_version": 8})
+    assert "Connector" not in {field.label for field in otlp_fields}
+    assert "Target" not in {field.label for field in otlp_fields}
+
+
+def test_local_observability_wizard_has_no_retired_audit_sink_flag() -> None:
+    fields = wizard_form_defs(SetupWizard.LOCAL_OBSERVABILITY)
+    assert "Audit Sink" not in {field.label for field in fields}
+
+    up_fields = _with_field(fields, "Action", "up")
+    argv = build_wizard_args(SetupWizard.LOCAL_OBSERVABILITY, up_fields)
+    assert "--no-audit-sink" not in argv
 
 
 def test_notifications_fields_preserve_config_editor_catalog() -> None:
@@ -137,6 +203,19 @@ def test_notifications_fields_preserve_config_editor_catalog() -> None:
     assert fields["notifications.enabled"].kind == "bool"
     assert fields["notifications.dedup_window"].hint
     assert fields["notifications.max_per_minute"].kind == "int"
+
+
+def test_windows_notifications_enabled_field_is_native_and_editable() -> None:
+    section = _section(
+        build_setup_sections({"notifications": {"enabled": True}}, os_name="windows"),
+        "Notifications",
+    )
+    fields = {field.key: field for field in section.fields if field.key}
+    enabled = fields["notifications.enabled"]
+    assert enabled.interactive is True
+    assert enabled.kind == "bool"
+    assert "unsupported" not in enabled.label.lower()
+    assert "desktop toasts" in section.summary.lower()
 
 
 def test_action_matrix_has_header_and_severity_triplets() -> None:
@@ -536,7 +615,9 @@ def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
     fields = wizard_form_defs(SetupWizard.GUARDRAIL_ACTIONS)
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, fields) == ("guardrail", "status")
 
-    scoped_status = _with_field(fields, "Connector", "codex")
+    scoped_status = _guardrail_actions_wizard_fields(
+        {"@Scope": "selected-connector", "--connector": "codex"}
+    )
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, scoped_status) == (
         "guardrail",
         "status",
@@ -555,8 +636,10 @@ def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
         "--no-restart",
     )
 
-    fail_mode = _with_field(fields, "Action", "fail-mode")
-    fail_mode = _with_field(fail_mode, "Connector", "hermes")
+    fail_mode = _guardrail_actions_wizard_fields(
+        {"@Scope": "selected-connector", "--connector": "hermes"}
+    )
+    fail_mode = _with_field(fail_mode, "Action", "fail-mode")
     fail_mode = _with_field(fail_mode, "Fail Mode", "closed")
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, fail_mode) == (
         "guardrail",
@@ -581,10 +664,12 @@ def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
         "--no-restart",
     )
 
-    block = _with_field(fields, "Action", "block-message")
+    block = _guardrail_actions_wizard_fields(
+        {"@Scope": "selected-connector", "--connector": "antigravity"}
+    )
+    block = _with_field(block, "Action", "block-message")
     assert missing_required_fields(SetupWizard.GUARDRAIL_ACTIONS, block) == ("Block Message or Clear Message",)
     block = _with_field(block, "Block Message", "Blocked by policy.")
-    block = _with_field(block, "Connector", "antigravity")
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, block) == (
         "guardrail",
         "block-message",
@@ -722,9 +807,8 @@ def test_observability_and_webhook_wizards_pass_positionals_and_defaults() -> No
         "--token",
         "token-123",
     )
-    obs = _with_field(obs, "Connector", "codex")
     obs_argv = build_wizard_args(SetupWizard.OBSERVABILITY, obs)
-    assert _pair_after(obs_argv, "--connector") == "codex"
+    assert "--connector" not in obs_argv
 
     webhook = webhook_wizard_fields("pagerduty")
     assert missing_required_fields(SetupWizard.WEBHOOKS, webhook) == ("URL",)
@@ -752,32 +836,26 @@ def test_observability_and_webhook_wizards_pass_positionals_and_defaults() -> No
     assert _pair_after(webhook_argv, "--connector") == "hermes"
 
 
-def test_observability_and_webhook_wizards_manage_connector_scoped_entries() -> None:
+def test_observability_is_process_wide_while_webhooks_remain_connector_scoped() -> None:
     obs = observability_wizard_fields("splunk-hec")
     obs_list = _with_field(obs, "Action", "list")
-    obs_list = _with_field(obs_list, "Connector", "codex")
     obs_list = _with_field(obs_list, "JSON Output", "yes")
     assert missing_required_fields(SetupWizard.OBSERVABILITY, obs_list) == ()
     assert build_wizard_args(SetupWizard.OBSERVABILITY, obs_list) == (
         "setup",
         "observability",
         "list",
-        "--connector",
-        "codex",
         "--json",
     )
 
     obs_remove = _with_field(obs, "Action", "remove")
     assert missing_required_fields(SetupWizard.OBSERVABILITY, obs_remove) == ("Name",)
     obs_remove = _with_field(obs_remove, "Name", "codex-hec")
-    obs_remove = _with_field(obs_remove, "Connector", "codex")
     assert build_wizard_args(SetupWizard.OBSERVABILITY, obs_remove) == (
         "setup",
         "observability",
         "remove",
         "codex-hec",
-        "--connector",
-        "codex",
         "--yes",
     )
 
@@ -806,13 +884,11 @@ def test_observability_and_webhook_wizards_manage_connector_scoped_entries() -> 
 
 
 def test_modal_toggle_and_uninstall_state_match_go_args_and_copy() -> None:
-    assert redaction_desired_action(currently_disabled=True) == "on"
-    assert redaction_toggle_intent(currently_disabled=True).args == ("setup", "redaction", "on", "--yes")
-    assert "RAW content" in redaction_consequence_copy(currently_disabled=False)[0]
-
     assert notifications_desired_action(currently_enabled=True) == "off"
     assert notifications_toggle_intent(currently_enabled=False).args == ("setup", "notifications", "on", "--yes")
-    assert "Audit DB" in notifications_consequence_copy(currently_enabled=True)[1]
+    consequence = notifications_consequence_copy(currently_enabled=True)[1]
+    assert "Event history" in consequence
+    assert "telemetry destinations" in consequence
 
     modal = UninstallModalState()
     modal.show()
@@ -880,7 +956,7 @@ def test_config_field_catalog_preserves_secret_kind_and_choice_options() -> None
 
     assert _field_by_key(sections, "llm.api_key").kind == "password"
     assert _field_by_key(sections, "openshell.auto_pair").options == ("", "true", "false")
-    assert _field_by_key(sections, "claw.mode").options == CONNECTORS
+    assert _field_by_key(sections, "claw.mode").options == supported_connector_choices()
 
 
 def test_setup_wizard_info_and_form_field_hints_are_complete() -> None:
@@ -918,9 +994,9 @@ def test_setup_section_and_focused_row_metadata_exposes_actions_and_restart_hint
             "Notification controls.",
         ),
         ConfigSection(
-            "Audit Sinks",
-            (ConfigField("Status", "audit_sinks.summary", "header", "no sinks configured", "no sinks configured"),),
-            "Read-only audit sink summary.",
+            "Observability",
+            (ConfigField("Status", "observability.summary", "header", "canonical v8", "canonical v8"),),
+            "Read-only canonical destination summary.",
         ),
     )
     model.active_section = 0
@@ -970,13 +1046,13 @@ def test_setup_section_and_focused_row_metadata_exposes_actions_and_restart_hint
     assert "Restart pending: config saved from Textual TUI" in hints.restart_hint
 
     for index, section in enumerate(model.sections):
-        if section.name == "Audit Sinks":
+        if section.name == "Observability":
             model.active_section = index
             model.active_line = 0
             break
     focused = model.focused_row_metadata()
     assert focused.action is not None
-    assert focused.action.action == "open_audit_sinks_editor"
+    assert focused.action.action == "open_observability_editor"
     assert focused.action.hotkey == "E"
 
 
@@ -1737,13 +1813,13 @@ def test_guardrail_wizard_regional_judge_families_and_llm_role() -> None:
     assert _pair_after(argv, "--judge-model") == "bedrock/us.anthropic.claude-sonnet-4-6"
 
 
-def test_guardrail_wizard_omits_action_only_block_message_and_scopes_bedrock_auth_rows() -> None:
+def test_guardrail_wizard_exposes_block_message_and_scopes_bedrock_auth_rows() -> None:
     fields = _guardrail_wizard_fields_for({"--detection-strategy": "regex_judge", "@Provider": "bedrock"}, None)
     labels = {f.label for f in fields}
     flags = {f.flag for f in fields}
 
-    assert "Block Message" not in labels
-    assert "--block-message" not in flags
+    assert "Block Message" in labels
+    assert "--block-message" in flags
     assert "--judge-bedrock-auth-mode" in flags
     assert "--judge-bedrock-secret-key-env" not in flags
     assert "--judge-bedrock-profile-name" not in flags
@@ -2238,7 +2314,15 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     # codex pins its own overrides — the editor shows the *effective* value.
     assert fields["guardrail.connectors.codex.enabled"].value == "false"
     assert fields["guardrail.connectors.codex.enabled"].kind == "bool"
-    assert fields["guardrail.connectors.codex.hook_fail_mode"].value == "closed"
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value.startswith(
+        "closed (provenance: config; status:"
+    )
+    policy_status = fields["guardrail.connectors.codex.hook_fail_mode"].value
+    if os.name == "nt":
+        assert "policy-unverified" in policy_status
+    else:
+        assert "policy-unverified" not in policy_status
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].kind == "header"
     assert fields["guardrail.connectors.codex.block_message"].value == "codex blocked"
     assert fields["guardrail.connectors.codex.hilt.enabled"].value == "true"
     assert fields["guardrail.connectors.codex.hilt.min_severity"].value == "LOW"
@@ -2302,6 +2386,44 @@ def test_per_connector_hook_fail_mode_normalizes() -> None:
     # Anything that is not "closed" normalizes to "open".
     apply_config_field(cfg, "guardrail.connectors.hermes.hook_fail_mode", "open")
     assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "open"
+
+
+def test_guardrail_editor_uses_runtime_fail_mode_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _multi_connector_cfg()
+    cfg.data_dir = "runtime-state"
+    report = {"effective": "open", "provenance": "process-env", "drift": []}
+    calls: list[dict[str, object]] = []
+
+    def resolve(*_args, **kwargs):
+        calls.append(kwargs)
+        return report
+
+    monkeypatch.setattr("defenseclaw.fail_mode.connector_fail_mode_report", resolve)
+
+    fields = {f.key: f for f in _section(build_setup_sections(cfg), "Guardrail").fields}
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value == (
+        "open (provenance: process-env)"
+    )
+    assert calls and all(call == {"inspect_effective_policy": False} for call in calls)
+
+
+def test_guardrail_editor_surfaces_passive_policy_uncertainty(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _multi_connector_cfg()
+    cfg.data_dir = "runtime-state"
+    monkeypatch.setattr(
+        "defenseclaw.fail_mode.connector_fail_mode_report",
+        lambda *_args, **_kwargs: {
+            "effective": "closed",
+            "provenance": "windows-sidecar",
+            "drift": ["policy-unverified"],
+        },
+    )
+
+    fields = {f.key: f for f in _section(build_setup_sections(cfg), "Guardrail").fields}
+
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value == (
+        "closed (provenance: windows-sidecar; status: policy-unverified)"
+    )
 
 
 def test_per_connector_block_message_writes_string() -> None:

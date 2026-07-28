@@ -1,0 +1,113 @@
+{
+  "format_version": 2,
+  "format": "defenseclaw-selected-semconv-v1",
+  "dependency_id": "openinference",
+  "repository": "https://github.com/Arize-ai/openinference",
+  "revision": "789d41974c08a9a13147977f28ef4142a07e2106",
+  "source_archive": {
+    "url": "https://github.com/Arize-ai/openinference/archive/789d41974c08a9a13147977f28ef4142a07e2106.tar.gz",
+    "sha256": "3f5e60cab454dbe05bfccd506d609909cec1cb45a0ac5ee7ed709181319c898b"
+  },
+  "source_tree_sha256": "95cdf51595d1e9ee81dae89b1ba1110a180f027bf5e2816fa408399d52527222",
+  "full_normalized_inventory_sha256": "f6fb0f437ad1d771676aa02f339413f356cbb351502a782e5469e2b6bbfbc89f",
+  "selection": {
+    "policy": "runtime-profile-vocabulary-v1",
+    "attribute_ids_sha256": "949c638bc1a0471de158b481bc277496ec3b219ea83c8d7b0515895a229742a7"
+  },
+  "source_files": [
+    {
+      "path": "python/openinference-semantic-conventions/src/openinference/semconv/resource/__init__.py",
+      "sha256": "c621ec26148c3a182d24e88aa33fb1f9c14c2257f6868f4bca8c50386cfc8c0c"
+    },
+    {
+      "path": "spec/semantic_conventions.md",
+      "sha256": "7dc950b0c3b37e2c3eed31fda02209e8339c2fee3d29e4f13e0a7b8ab6079a79"
+    }
+  ],
+  "attributes": [
+    {
+      "id": "input.mime_type",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "released_package_policy",
+      "source_pointer": "spec/semantic_conventions.md#L43",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "input.value",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "released_package_policy",
+      "source_pointer": "spec/semantic_conventions.md#L44",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "metadata",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "released_package_policy",
+      "source_pointer": "spec/semantic_conventions.md#L93",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "openinference.project.name",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "released_package_policy",
+      "source_pointer": "python/openinference-semantic-conventions/src/openinference/semconv/resource/__init__.py#L2",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "openinference.span.kind",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "released_package_policy",
+      "source_pointer": "spec/semantic_conventions.md#L94",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "output.mime_type",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "released_package_policy",
+      "source_pointer": "spec/semantic_conventions.md#L95",
+      "enum": [],
+      "deprecated": false
+    },
+    {
+      "id": "output.value",
+      "allowed_types": [
+        "string"
+      ],
+      "shape": "attribute",
+      "stability": "stable",
+      "stability_source": "released_package_policy",
+      "source_pointer": "spec/semantic_conventions.md#L96",
+      "enum": [],
+      "deprecated": false
+    }
+  ]
+}

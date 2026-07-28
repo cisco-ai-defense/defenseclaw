@@ -1,0 +1,76 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: Telemetry Registry Exhaustive
+
+on:
+  pull_request:
+    paths:
+      - "schemas/telemetry/**"
+      - "scripts/generate_telemetry_registry.py"
+      - "scripts/update_telemetry_registry_upstream.py"
+      - "scripts/render_telemetry_*.py"
+      - "scripts/telemetry_*.py"
+      - "cli/tests/conftest.py"
+      - "cli/tests/test_telemetry_ci_strategy.py"
+      - "cli/tests/test_telemetry_registry_*.py"
+      - "cli/tests/support/telemetry_registry_manifest_driver.py"
+      - "docs/design/observability-v8/current-state-inventory.yaml"
+      - "internal/observability/zz_generated_telemetry_*.go"
+      - "Makefile"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/telemetry-registry.yml"
+  schedule:
+    - cron: "47 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telemetry-registry-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  exhaustive:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Registry generator mutation suite
+            test_file: cli/tests/test_telemetry_registry_generator.py
+          - name: Candidate renderer mutation suite
+            test_file: cli/tests/test_telemetry_registry_candidate_renderer.py
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - run: uv sync
+      - run: make _bundle-data
+      - name: Run exhaustive telemetry registry suite
+        env:
+          PYTHON_TELEMETRY_TEST_FILE: ${{ matrix.test_file }}
+        run: |
+          set -euo pipefail
+          .venv/bin/python -m pytest "$PYTHON_TELEMETRY_TEST_FILE" \
+            -q --tb=short \
+            --durations=25 \
+            --numprocesses=4 \
+            --dist=worksteal
+
+  complete:
+    name: Telemetry Registry Exhaustive
+    needs: exhaustive
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every exhaustive suite
+        env:
+          EXHAUSTIVE_RESULT: ${{ needs.exhaustive.result }}
+        run: test "$EXHAUSTIVE_RESULT" = success

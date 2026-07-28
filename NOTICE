@@ -32,3 +32,10 @@ each dependency's source repository. Key dependencies include:
   - UUID (github.com/google/uuid) — BSD-3-Clause
   - fsnotify (github.com/fsnotify/fsnotify) — BSD-3-Clause
   - gorilla/websocket (github.com/gorilla/websocket) — BSD-2-Clause
+  - Unicode Character Database 13.0 DerivedAge data — Unicode-DFS-2016
+
+The generated observability redaction repertoire includes data derived from the
+Unicode Character Database 13.0 `DerivedAge.txt` file.
+Copyright © 1991-2020 Unicode, Inc. All rights reserved.
+Distributed under the Unicode Data Files and Software License; see
+https://www.unicode.org/copyright.html.

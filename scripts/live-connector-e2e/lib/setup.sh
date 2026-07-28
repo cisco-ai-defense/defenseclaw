@@ -83,5 +83,11 @@ dc_teardown_connector() {
   dc_log "tearing down ${connector}"
   defenseclaw-gateway connector teardown --connector "${connector}" || \
     dc_warn "teardown command returned non-zero for ${connector}"
+  # The in-process hook guard debounces filesystem changes for 500ms. Wait
+  # beyond that window before verification so a teardown/guardian race cannot
+  # pass in the transient clean interval and reinstall managed config after the
+  # test exits. The low-level teardown marks the connector explicitly inactive;
+  # this delay proves the running guard honors that ownership revocation.
+  sleep "${DC_E2E_TEARDOWN_SETTLE_SECONDS:-1.25}"
   defenseclaw-gateway connector verify --connector "${connector}"
 }

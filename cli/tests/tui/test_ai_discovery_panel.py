@@ -70,6 +70,13 @@ def test_ai_discovery_no_snapshot_and_disabled_states() -> None:
     assert "agent discovery enable" in panel.empty_state()
 
 
+def test_ai_discovery_scan_uses_the_usage_scan_command() -> None:
+    panel = AIDiscoveryPanelModel()
+    intent = panel.scan_intent()
+    assert intent.label == "agent discovery scan"
+    assert intent.args == ("agent", "discovery", "scan")
+
+
 def test_ai_discovery_dedups_signals_by_component_and_renders_confidence() -> None:
     panel = AIDiscoveryPanelModel()
     panel.set_snapshot(_snapshot_with_component(3))

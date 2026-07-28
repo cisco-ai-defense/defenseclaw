@@ -17,8 +17,8 @@ Source: `internal/gateway/api.go`, `internal/gateway/inspect.go`
 | `/status` | GET | Full sidecar status + gateway hello | TS plugin (`DaemonClient.status()` in `client.ts`), Python CLI (`OrchestratorClient.status()` in `gateway.py`) — no CLI command calls it directly |
 | `/api/v1/inspect/tool` | POST | **Inspect tool call before execution** | OpenClaw plugin `before_tool_call` hook (`index.ts`) |
 | `/api/v1/scan/code` | POST | **Run CodeGuard scanner on a file/directory** | TS plugin `runCodeScan()` (`enforcer.ts`), CodeGuard skill (`main.py`) |
-| `/v1/guardrail/event` | POST | Receive verdict telemetry from guardrail proxy | Optional HTTP path; built-in proxy logs via `recordTelemetry()` in `proxy.go` |
-| `/v1/guardrail/evaluate` | POST | OPA policy evaluation for guardrail verdicts | Optional HTTP path; built-in proxy uses in-process OPA in `guardrail.go` |
+| `/v1/guardrail/event` | POST | Receive a correlated terminal guardrail verdict | Optional HTTP path; built-in proxy emits the same v8 family in-process |
+| `/v1/guardrail/evaluate` | POST | Run a correlated OPA policy evaluation | Optional HTTP path; built-in proxy uses in-process OPA in `guardrail.go` |
 | `/v1/guardrail/config` | GET/PATCH | Read/update guardrail mode at runtime | No production callers |
 | `/enforce/block` | POST/DELETE | Add/remove block list entries | TS plugin `/block` command (`index.ts`, `enforcer.ts`, `client.ts`) |
 | `/enforce/allow` | POST | Add allow list entries | TS plugin `/allow` command (`index.ts`, `enforcer.ts`, `client.ts`) |
@@ -205,9 +205,11 @@ send `X-DefenseClaw-Reveal-PII: 1`. The handler audit-logs an
 the unmasked evidence. The header is strict: any value other than the
 literal string `"1"` is ignored and evidence stays redacted.
 
-The reveal flag is scoped to the HTTP response only. Persistent sinks
-(SQLite audit, webhooks, OpenTelemetry logs, Splunk HEC) always use the
-redacted copy regardless of the header.
+The reveal flag is scoped to the HTTP response only. It never changes the v8
+observability route graph. Each persistent destination receives the projection
+selected by its configured field-class redaction profile; fresh-v8 profile
+`none` is unredacted, while `sensitive`, `content`, `strict`, and custom profiles
+transform or remove governed fields independently.
 
 Source: `internal/gateway/inspect.go`
 
@@ -217,16 +219,23 @@ Source: `internal/gateway/inspect.go`
 
 These endpoints support guardrail telemetry and OPA evaluation. The **built-in**
 Go guardrail proxy (`internal/gateway/proxy.go`, `internal/gateway/guardrail.go`)
-writes inspection results to the audit store and OTel **in-process** via
-`recordTelemetry()`; it does not require HTTP calls to these routes for normal
+writes inspection results through the generated observability-v8 runtime
+**in-process**; it does not require HTTP calls to these routes for normal
 operation. `POST /v1/guardrail/event` remains available for external or
-programmatic callers that want the same logging path.
+programmatic callers that already have a stable evaluation identifier.
 
 ### POST /v1/guardrail/event
 
-Receives verdict telemetry after each LLM prompt or completion inspection (same
-fields the built-in proxy records directly). Logs to audit store and records OTel
-metrics.
+Receives one terminal verdict after an LLM prompt or completion inspection. It
+emits one canonical `guardrail.evaluation.completed` log plus generated
+guardrail latency/evaluation metrics. Token metrics are emitted only when the
+caller reports token counts. The log and metrics share the caller's
+`evaluation_id` and any request-scoped W3C trace, request, session, turn, agent,
+policy, tool, and connector correlation already attached by the gateway.
+
+The canonical log preserves the reported reason and model. Redaction is applied
+later by the central per-destination routing policy; the endpoint does not
+pre-redact canonical telemetry. The local stderr diagnostic remains redacted.
 
 **Callers:**
 - **Built-in path:** `GuardrailProxy.recordTelemetry()` in `internal/gateway/proxy.go`
@@ -239,8 +248,9 @@ metrics.
 LLM request/response flows through GuardrailProxy (proxy.go)
   → GuardrailInspector.Inspect() (guardrail.go): local / Cisco / judge / OPA
   → recordTelemetry() (proxy.go)
-    → audit store: LogEvent() + LogAction()
-    → OTel: RecordGuardrailEvaluation() + RecordGuardrailLatency()
+    → generated guardrail.evaluation log
+    → generated guardrail and GenAI metrics
+    → central routing/redaction/export
 ```
 
 **Code flow (HTTP caller):**
@@ -248,27 +258,38 @@ LLM request/response flows through GuardrailProxy (proxy.go)
 ```
 POST /v1/guardrail/event
   → api.go handleGuardrailEvent()
-    → audit store + OTel (same as above)
+    → validate source-backed terminal facts
+    → generated guardrail.evaluation.completed log + metrics
+    → central routing/redaction/export
 ```
 
 **Request:**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
+| `evaluation_id` | string | yes | Stable caller-generated join key for this evaluation; must match `[A-Za-z0-9][A-Za-z0-9._:/-]*` and be at most 256 bytes |
 | `direction` | string | yes | `"prompt"` or `"completion"` |
 | `model` | string | no | Model name (e.g. `claude-opus-4-5`) |
 | `action` | string | yes | `"allow"`, `"alert"`, or `"block"` |
-| `severity` | string | yes | `"NONE"`, `"MEDIUM"`, `"HIGH"`, etc. |
-| `reason` | string | no | Human-readable explanation |
-| `findings` | string[] | no | Matched pattern names |
-| `elapsed_ms` | number | no | Inspection duration |
-| `tokens_in` | number | no | Input token count |
-| `tokens_out` | number | no | Output token count |
+| `severity` | string | yes | `"NONE"`, `"INFO"`, `"LOW"`, `"MEDIUM"`, `"HIGH"`, or `"CRITICAL"` |
+| `reason` | string | no | Human-readable explanation; centrally redacted according to the selected destination route |
+| `findings` | string[] | no | Matched findings; canonical rule IDs are derived for the log |
+| `elapsed_ms` | number | no | Finite, non-negative end-to-end inspection duration in milliseconds |
+| `cisco_elapsed_ms` | number | no | Finite, non-negative Cisco AI Defense inspection duration in milliseconds |
+| `tokens_in` | integer | no | Non-negative input token count |
+| `tokens_out` | integer | no | Non-negative output token count |
+
+The endpoint does not infer enforcement state or create an evaluation ID. A
+caller that cannot supply a real evaluation ID must not use this terminal-event
+API.
 
 ### POST /v1/guardrail/evaluate
 
-Evaluates guardrail scan results against the OPA policy engine (or
-built-in fallback). Returns the final action/severity decision.
+Evaluates guardrail scan results against the OPA policy engine (or built-in
+fallback). Returns the final action/severity decision and emits one canonical
+`guardrail.evaluation.completed` log, one evaluation metric, one latency metric,
+and a sampled `span.guardrail.apply` policy-operation span. All signals share the
+caller-provided `evaluation_id` and the gateway's W3C/request/agent correlation.
 
 **Callers:**
 - **Built-in path:** `GuardrailInspector.finalize()` in `internal/gateway/guardrail.go`
@@ -289,10 +310,11 @@ GuardrailInspector.Inspect() / finalize() (guardrail.go)
 ```
 POST /v1/guardrail/evaluate
   → api.go handleGuardrailEvaluate()
+    → validate evaluation identity and source facts
     → policy.New(policyDir).EvaluateGuardrail() (OPA)
     → fallback: built-in severity ranking if OPA unavailable
-    → audit store: LogEvent() + LogAction()
-    → OTel: RecordGuardrailEvaluation()
+    → generated guardrail.evaluation.completed log + metrics + policy span
+    → central routing/redaction/export
   → returns GuardrailOutput JSON
 ```
 
@@ -300,14 +322,21 @@ POST /v1/guardrail/evaluate
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
+| `evaluation_id` | string | yes | Stable caller-generated join key for this actual evaluation |
 | `direction` | string | yes | `"prompt"` or `"completion"` |
 | `model` | string | no | Model name |
 | `mode` | string | yes | `"observe"` or `"action"` |
 | `scanner_mode` | string | no | `"local"`, `"remote"`, `"both"` |
 | `local_result` | object | no | `{ severity, action, findings }` |
 | `cisco_result` | object | no | `{ severity, action, findings }` |
-| `content_length` | number | no | Content length in chars |
-| `elapsed_ms` | number | no | Inspection duration |
+| `content_length` | integer | no | Non-negative content length in characters |
+| `elapsed_ms` | number | no | Finite, non-negative caller-observed inspection duration in milliseconds |
+
+The durable log retains up to eight unique detector/scanner source identifiers,
+up to eight canonical rule IDs derived from the submitted findings, model,
+mode, action, severity, finding count, and the unredacted policy reason. Central
+destination routing owns any configured redaction. The endpoint does not claim
+that the returned decision was enforced; enforcement occurs at the caller.
 
 **Response:**
 
@@ -315,7 +344,7 @@ POST /v1/guardrail/evaluate
 {
   "action": "alert",
   "severity": "MEDIUM",
-  "reason": "built-in fallback (OPA unavailable)",
+  "reason": "built-in fallback (no policy configured)",
   "scanner_sources": ["scanner"]
 }
 ```

@@ -12,11 +12,13 @@ import (
 	"testing"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestHookAPITokenWindowsRejectsUntrustedDirectoryACL(t *testing.T) {
 	assertHookAPITokenRejectedByEnsureAndLoad(t, "untrusted Windows principal", func(t *testing.T) string {
-		dataDir := t.TempDir()
+		dataDir := testenv.PrivateTempDir(t)
 		if _, err := EnsureHookAPIToken(dataDir, "codex"); err != nil {
 			t.Fatalf("seed token: %v", err)
 		}
@@ -187,26 +189,64 @@ func TestHookAPITokenWindowsAllowsCreateChildOnSharedAncestor(t *testing.T) {
 	}
 }
 
-func TestHookAPITokenWindowsAllowsGenericWriteOnSharedAncestor(t *testing.T) {
-	authenticatedUsers, err := windows.CreateWellKnownSid(windows.WinAuthenticatedUserSid)
+func TestHookAPITokenWindowsRejectsOrdinaryWriteOnSharedAncestor(t *testing.T) {
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
 	if err != nil {
-		t.Fatalf("Authenticated Users SID: %v", err)
+		t.Fatalf("Everyone SID: %v", err)
 	}
-	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
-		AccessPermissions: windows.GENERIC_READ | windows.GENERIC_WRITE | windows.GENERIC_EXECUTE | windows.SYNCHRONIZE,
-		AccessMode:        windows.GRANT_ACCESS,
-		Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
-		Trustee: windows.TRUSTEE{
-			TrusteeForm:  windows.TRUSTEE_IS_SID,
-			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
-			TrusteeValue: windows.TrusteeValueFromSID(authenticatedUsers),
-		},
-	}}, nil)
-	if err != nil {
-		t.Fatalf("build DACL: %v", err)
+
+	for _, tc := range []struct {
+		name string
+		mask windows.ACCESS_MASK
+	}{
+		{name: "generic_write", mask: windows.GENERIC_WRITE},
+		{name: "write_extended_attributes", mask: windows.FILE_WRITE_EA},
+		{name: "write_attributes", mask: windows.FILE_WRITE_ATTRIBUTES},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+				AccessPermissions: tc.mask,
+				AccessMode:        windows.GRANT_ACCESS,
+				Trustee: windows.TRUSTEE{
+					TrusteeForm:  windows.TRUSTEE_IS_SID,
+					TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+					TrusteeValue: windows.TrusteeValueFromSID(everyone),
+				},
+			}}, nil)
+			if err != nil {
+				t.Fatalf("build DACL: %v", err)
+			}
+			if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false); err == nil {
+				t.Fatalf("shared ancestor accepted untrusted %s access", tc.name)
+			}
+		})
 	}
-	if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false); err != nil {
-		t.Fatalf("shared ancestor generic write permission was rejected: %v", err)
+}
+
+func TestHookAPITokenWindowsRejectsWritableAncestorThroughPublicOperations(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mask windows.ACCESS_MASK
+	}{
+		{name: "generic_write", mask: windows.GENERIC_WRITE},
+		{name: "write_extended_attributes", mask: windows.FILE_WRITE_EA},
+		{name: "write_attributes", mask: windows.FILE_WRITE_ATTRIBUTES},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertHookAPITokenRejectedByEnsureAndLoad(t, "untrusted Windows principal", func(t *testing.T) string {
+				root := testenv.PrivateTempDir(t)
+				ancestor := filepath.Join(root, "ancestor")
+				dataDir := filepath.Join(ancestor, "data")
+				if err := os.MkdirAll(dataDir, 0o700); err != nil {
+					t.Fatalf("create token data path: %v", err)
+				}
+				if _, err := EnsureHookAPIToken(dataDir, "codex"); err != nil {
+					t.Fatalf("seed token: %v", err)
+				}
+				setHookAPITokenWindowsUntrustedDACL(t, ancestor, tc.mask)
+				return dataDir
+			})
+		})
 	}
 }
 
@@ -264,14 +304,59 @@ func TestHookAPITokenWindowsRejectsDeleteChildOnSharedAncestor(t *testing.T) {
 
 func TestHookAPITokenWindowsRejectsReparsePointDirectory(t *testing.T) {
 	assertHookAPITokenRejectedByEnsureAndLoadAny(t, []string{"reparse points are not allowed", "escapes hooks dir"}, func(t *testing.T) string {
-		dataDir := t.TempDir()
-		targetDataDir := t.TempDir()
+		dataDir := testenv.PrivateTempDir(t)
+		targetDataDir := testenv.PrivateTempDir(t)
 		if _, err := EnsureHookAPIToken(targetDataDir, "codex"); err != nil {
 			t.Fatalf("seed target token: %v", err)
 		}
-		if err := os.Symlink(filepath.Join(targetDataDir, "hooks"), filepath.Join(dataDir, "hooks")); err != nil {
-			t.Skipf("Windows symlink privilege unavailable: %v", err)
-		}
+		createTestDirectoryRedirect(t, filepath.Join(dataDir, "hooks"), filepath.Join(targetDataDir, "hooks"))
 		return dataDir
 	})
+}
+
+func setHookAPITokenWindowsUntrustedDACL(t *testing.T, path string, mask windows.ACCESS_MASK) {
+	t.Helper()
+	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatalf("Everyone SID: %v", err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		{
+			AccessPermissions: windows.GENERIC_ALL,
+			AccessMode:        windows.GRANT_ACCESS,
+			Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_USER,
+				TrusteeValue: windows.TrusteeValueFromSID(currentUser.User.Sid),
+			},
+		},
+		{
+			AccessPermissions: mask,
+			AccessMode:        windows.GRANT_ACCESS,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+				TrusteeValue: windows.TrusteeValueFromSID(everyone),
+			},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("build DACL: %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		acl,
+		nil,
+	); err != nil {
+		t.Fatalf("set untrusted ancestor DACL: %v", err)
+	}
 }

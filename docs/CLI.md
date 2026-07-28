@@ -42,7 +42,8 @@ Use `<binary> --help` for any command.
 | `setup geminicli` / `setup copilot` | Configure observability aliases with native OTel where supported |
 | `setup splunk` | Configure Splunk O11y, local Splunk bridge, or remote Splunk Enterprise HEC |
 | `setup galileo [status\|test\|enable\|disable\|remove]` | Configure real-time Galileo Cloud/self-hosted OTLP traces; test uses the live gateway path by default |
-| `setup observability add\|list\|enable\|disable\|remove\|test\|migrate-otel` | Manage named OTLP and audit-sink destinations; preview or repair the automatic flat-OTel upgrade migration |
+| `setup observability add\|list\|enable\|disable\|remove\|test` | Manage config-v8 OTLP, Galileo, Splunk HEC, JSONL, HTTP JSONL, console, and Prometheus destinations |
+| `observability plan` | Show the masked effective v8 collection, local SQLite, destination capability/routes, redaction, retention, and warning plan |
 | `setup local-observability up\|down\|status` | Manage the bundled OTel Collector + Grafana stack |
 
 Observability destination names are identities: a new `--name` appends a route;
@@ -90,15 +91,15 @@ set the global default. `guardrail status` is read-only and takes no
 | `agent usage [--refresh] [--json] [--detail] [--state STATE] [--category CAT] [--product NAME] [--component NAME] [--show-gone] [--by-detector] [--limit N]` | Show continuous AI visibility inventory from the sidecar. The default view groups repeated observations of the same product, SDK/component, or local model and rolls their categories/detectors into compact list columns. Local-model rows display model ID, installed/loaded status, and format when available. `--detail` falls back to per-signal rows; `--state`/`--category`/`--product` filter the table; `--component` also matches local model IDs by case-insensitive substring; `gone` signals are hidden unless `--show-gone` (or `--state gone`) is passed; `--by-detector` restores detector-level rows; `--json` is the unfiltered raw payload for tooling. |
 | `agent processes [--refresh] [--json] [--limit N]` | List AI processes the sidecar currently observes (PID, PPID, user, uptime, comm, vendor/product). Sourced from the `runtime` block on each process-detector signal. |
 | `agent components [--refresh] [--json] [--ecosystem ECO] [--name NEEDLE] [--min-identity 0..1] [--min-presence 0..1] [--limit N]` | Show the deduped AI components/SDK rollup (one row per `(ecosystem, name)`) with versions, install counts, two-axis confidence (identity + presence) and the detector set. `--min-identity`/`--min-presence` filter on the Bayesian engine output for fast triage. |
-| `agent components show NAME [--ecosystem ECO] [--json]` | Print every per-install location for one component: detector, state, workspace hash, basename, evidence quality, match kind, last-seen. Raw paths only surface when both `privacy.disable_redaction=true` and `ai_discovery.store_raw_local_paths=true`. |
+| `agent components show NAME [--ecosystem ECO] [--json]` | Print every per-install location for one component: detector, state, workspace hash, basename, evidence quality, match kind, last-seen. Exported raw paths depend on the v8 field-class/redaction profile selected for that destination. |
 | `agent components history NAME [--ecosystem ECO] [--limit N] [--json]` | Print the confidence trend (most-recent-first) for one component, sourced from the SQLite `ai_confidence_snapshots` history. |
 | `agent confidence explain NAME [--ecosystem ECO] [--json]` | Print the per-evidence factor breakdown the engine used to compute identity + presence: detector, evidence id, match kind, quality, specificity/recency, likelihood ratio, log-odds delta, and the percentage-point shift each factor contributed. |
 | `agent confidence policy show [--source merged\|default] [--json]` | Print the active confidence policy YAML. `merged` (default) is what the engine actually loaded; `default` is the embedded baseline so you can diff against your override. |
 | `agent confidence policy default [--json]` | Print the embedded default policy — typically piped to `~/.defenseclaw/confidence_policy.yaml` as a starting point for an override. |
 | `agent confidence policy validate PATH [--json]` | Dry-run a candidate policy file against the sidecar's loader + validator. Exits non-zero on failure with the same diagnostic the loader would print at boot. |
-| `agent discovery enable [--mode] [--scan-roots] [--scan-interval-min N] [--process-interval-s N] [--max-files-per-scan N] [--max-file-bytes N] [--include-shell-history/--no-include-shell-history] [--include-package-manifests/--no-...] [--include-env-var-names/--no-...] [--include-network-domains/--no-...] [--emit-otel/--no-emit-otel] [--allow-workspace-signatures/--no-...] [--store-raw-local-paths/--no-...] [--restart/--no-restart] [--scan/--no-scan] [--yes]` | Flip `ai_discovery.enabled=true`, save config, bounce the gateway, and trigger a first scan in one step. Re-running on an already-enabled install with new tuning flags applies the diff and bounces the sidecar (audit logs as `ai_discovery-update`). |
+| `agent discovery enable [--mode] [--scan-roots] [--scan-interval-min N] [--process-interval-s N] [--max-files-per-scan N] [--max-file-bytes N] [--include-shell-history/--no-include-shell-history] [--include-package-manifests/--no-...] [--include-env-var-names/--no-...] [--include-network-domains/--no-...] [--allow-workspace-signatures/--no-...] [--store-raw-local-paths/--no-...] [--restart/--no-restart] [--scan/--no-scan] [--yes]` | Flip `ai_discovery.enabled=true`, save config, bounce the gateway, and trigger a first scan in one step. Re-running on an already-enabled install with new tuning flags applies the diff and bounces the sidecar (recorded as `ai_discovery-update` in canonical local history). |
 | `agent discovery disable [--restart/--no-restart] [--yes]` | Flip `ai_discovery.enabled=false`, save config, and bounce the gateway so the service stops |
-| `agent discovery setup [--restart/--no-restart] [--scan/--no-scan] [--yes]` | Walk an interactive wizard for every `ai_discovery.*` knob (mode, scan/process intervals, scan roots, file caps, detection sources, OTel, signature/path privacy). Each prompt defaults to the current config value so pressing Enter on every step is a no-op. |
+| `agent discovery setup [--restart/--no-restart] [--scan/--no-scan] [--yes]` | Walk an interactive wizard for every current `ai_discovery.*` knob (mode, scan/process intervals, scan roots, file caps, detection sources, and signature/path privacy). Destination routing is owned separately by observability v8. Each prompt defaults to the current config value so pressing Enter on every step is a no-op. |
 | `agent discovery status [--json]` | Show on-disk + live AI discovery state and warn on drift between the two |
 | `agent discovery scan [--json]` | Trigger one immediate AI discovery scan via the sidecar (`POST /api/v1/ai-usage/scan`) and render a one-line summary. Returns an actionable error when the sidecar is disabled (HTTP 503) pointing at `agent discovery enable`. |
 | `agent signatures list \| validate \| install \| disable \| enable` | Manage AI discovery signature packs |
@@ -124,10 +125,12 @@ model-binary contents; small Ollama manifest JSON is the bounded exception.
 Inference and model-control API routes are never called.
 
 The local usage API retains model IDs for operator display and filtering.
-Outbound gateway events, OTel logs, and webhooks apply the normal redaction
-policy: extended model metadata is omitted unless
-`privacy.disable_redaction=true`, and raw paths additionally require
-`ai_discovery.store_raw_local_paths=true`. Authenticated Lemonade discovery uses
+Outbound canonical records follow each v8 destination's field-class redaction
+profile. Normal discovery sanitization omits extended model metadata, model
+basenames, and path hashes while retaining an installation-scoped HMAC lifecycle
+pseudonym. Raw paths additionally require
+`ai_discovery.store_raw_local_paths=true` and a selected v8 projection that
+preserves the `path` field class. Authenticated Lemonade discovery uses
 only `LEMONADE_API_KEY` after the configured origin passes a credential-free
 `/live` check; it never sends `LEMONADE_ADMIN_API_KEY`, and credentials are never
 printed or emitted. The API pass
@@ -192,7 +195,7 @@ External skill / MCP catalog ingestion. See
 | `registry entries <id> [--approved\|--rejected]` | Show cached entries (after sync); operator-override filters |
 | `registry approve <id> <name> --type {skill\|mcp}` | Manually approve an entry |
 | `registry reject <id> <name> --type {skill\|mcp}` | Manually reject an entry (sets status to `blocked`) |
-| `registry require --type <t> --enabled/--disabled` | Toggle `asset_policy.<t>.registry_required` |
+| `registry require --type <t> --enabled/--disabled [--connector <name>]` | Scope to one connector, or update the global default and reconcile all active connectors |
 | `registry wizard` | Interactive add+sync convenience flow |
 | `setup registry` | Wrapper for `registry wizard` so it shows up in `setup --help` |
 
@@ -496,8 +499,7 @@ is required.
 6. Report success only after version-bound health checks pass; otherwise restore and verify the exact source state.
 
 Crossing the observability-v8 hard cut requires the `0.8.4` bridge. The
-release-owned shell and PowerShell resolvers perform the supported one-command
-path when invoked without an explicit target:
+release-owned POSIX shell resolver performs the supported one-command path:
 
 ```text
 reviewed 0.8.3-or-older source
@@ -510,9 +512,11 @@ An already-published `0.8.3`-or-older built-in CLI cannot be taught this
 two-process orchestration retroactively. Its protocol check therefore refuses
 a hard-cut latest release before stopping services. Some frozen releases print
 an obsolete raw-network shell hint after that safe refusal; it must not be
-executed. Use the authenticated resolver-asset bootstrap below instead.
-Likewise, an explicit request for `0.8.5` from a pre-bridge source
-refuses before mutation; explicit targets never hide an intermediate release.
+executed. Use the authenticated resolver-asset bootstrap below instead. A
+current resolver treats `--version` as the selected final release and still
+inserts every manifest-required bridge; the option never authorizes a direct
+hard-cut install. The immutable `0.8.5` resolver predates that repair and must
+be invoked without `--version` and with no exported `VERSION` value.
 
 POSIX rollback retains any plan-owned inode that might still receive a late
 open-descriptor write. The payload is placed in a plan-scoped, mode-0700
@@ -520,151 +524,140 @@ same-filesystem custody directory; the timestamped backup records its path in
 `phase1-state/retained-quarantines.json`. Do not remove either one until the
 restored release and any retained evidence have been inspected.
 
+A first-hop bridge failure similarly restores the exact old gateway, whole
+managed CLI environment, migration-touched state, prior running state, and
+version-bound health before the resolver returns nonzero. A hard-cut failure
+restores and health-checks the retained `0.8.4` CLI, gateway, config,
+environment, cursor, and managed bundle before reporting rollback.
+
 **Version-specific migrations** are defined in `cli/defenseclaw/migrations.py`
 and run while an authenticated upgrade advances across the release boundary
-that owns them. An authenticated same-version request is a no-op: it does not
-reinstall artifacts or run migrations. Each migration is keyed to the release
-it ships with. For example, the v0.3.0 migration removes
+that owns them. An authenticated same-version request is normally a no-op.
+The two explicit field-recovery cases below are the exceptions: the resolver
+can authenticate the exact clean published `0.8.6` state whose cursor is
+entirely absent, and `--recover-corrupt-audit` can replace an explicitly
+proven-corrupt active store only after preserving its exact durable database
+and WAL bytes. It never guesses from a damaged or partial cursor. A WAL-aware
+read-only probe may rebuild SQLite's disposable shared-memory index before the
+tuple enters custody. Each migration is keyed to the release it ships with.
+For example, the v0.3.0 migration removes
 legacy `models.providers.defenseclaw`, `models.providers.litellm`, and
 `agents.defaults.model.primary` prefixed entries from `openclaw.json` (written
 by 0.2.0's guardrail setup) while preserving plugin registration.
 
-The upgrade runner also applies configuration schema v7 independently of the
-release cursor: a legacy flat OTel exporter becomes one named
-`otel.destinations[]` route beside any routes already configured. This
-shape-based pass also covers hosts whose published 0.8.x migration cursor was
-already marked. It preserves transport, TLS, batching, signals, and process-wide
-sampling/log policy, and writes a one-time pre-migration backup. The gateway has
-a write-free in-memory fallback so an interrupted migration can still start.
+The upgrade runner applies the required configuration-v8 observability migration
+through the same release cursor. It converts supported v7 `otel`, `audit_sinks`,
+SQLite/JSONL/console, Galileo, and global redaction settings into one validated
+`observability` graph, preserving narrower effective collection/routing/privacy
+behavior and local Agent360 compatibility. It backs up and atomically replaces
+the source, promotes inline observability secrets to locked environment
+references, refreshes owned local dashboard assets without resetting volumes,
+and then checks health. No separate plan/apply step is required. The v8 gateway
+does not rewrite v7 configuration at startup or run both formats in parallel;
+a required migration failure restores the source and does not start v8 against
+the v7 file.
 
 **Flags:**
 - `--yes`, `-y` — skip confirmation prompts
-- `--version VERSION` — upgrade to a specific release (default: latest)
-- `--allow-unverified` — unsafe override for releases whose checksum manifest
-  is missing, unsigned, incomplete, or otherwise unverifiable; applies only to
-  legacy releases older than `0.8.4`
+- `--version VERSION` — select a specific final release; required bridges are
+  still staged (default: latest)
+- `--recover-corrupt-audit` — the installed public command forwards this
+  opt-in only during authenticated POSIX release-resolver delegation. It exits
+  with status 2 if that delegation is bypassed, and the native Windows path
+  also rejects it. Live immutable SQLite preflight can only flag suspected
+  corruption. After the gateway stops, the resolver copies the exact database
+  set into a private probe directory and requires that bounded probe to confirm
+  corruption before preserving the source database and its present WAL/SHM
+  sidecars in crash-resumable upgrade-backup custody and activating a fresh
+  local store. This separate opt-in is required even with `--yes`.
+- `--allow-unverified` — legacy-only unsafe override. It cannot bypass the
+  signed manifest, checksum, bridge, or migration requirements for `0.8.4+`.
 
-Release `0.8.4` and later require `cosign` and the protected release-workflow
-identity. `--allow-unverified` cannot bypass that requirement.
+`0.8.4+` upgrades require Cosign and the exact release-workflow identity. The
+current POSIX resolver and the `0.8.5+` built-in controller prefer an existing
+`cosign`; if it is missing, they download pinned Cosign `2.6.3` into an
+owner-only temporary directory, verify its hard-coded platform SHA-256 before
+execution, use it once, and remove it. They do not install it globally or alter
+`PATH`. Any verifier download, digest, or signature failure occurs before
+service stop or installed mutation. The immutable `0.8.4` built-in controller
+also cannot parse the truthful hard-cut manifest because its Windows bridge
+matrix is empty. Use the current target-release POSIX resolver on every
+`0.8.4` host, regardless of whether Cosign is already installed.
 
 **Known recovery paths:**
 
 | Installed version | Recommendation |
 | --- | --- |
-| `0.8.4` | Run `defenseclaw upgrade --yes`. A coherent bridge controller authenticates and privately acquires its exact `0.8.4` rollback artifacts before backup, service stop, or target mutation. |
-| A source listed for its platform in `release/upgrade-baselines.json` | Install `cosign`, then run the current release-owned shell or PowerShell resolver without `--version`. It performs `source → 0.8.4 → fresh controller → latest` as one command. |
-| `0.8.0` or `0.8.1` | Install `cosign` before invoking the resolver. Do not use `--allow-unverified`; strict bridge provenance cannot be bypassed. |
-| Windows older than `0.8.0` | The native Windows published-baseline matrix currently covers `0.8.0`–`0.8.3` only. The resolver fails closed before stopping services and prints those exact supported Windows sources. |
+| `0.8.4` | Run the current target-release POSIX resolver without `--version`; it authenticates a temporary pinned Cosign when needed and privately acquires exact `0.8.4` rollback artifacts before backup, service stop, or target mutation. The frozen built-in command cannot parse the truthful hard-cut manifest with `platform_tested_source_versions.windows: []`, even when Cosign is already on `PATH`. |
+| A POSIX source listed for its platform in `release/upgrade-baselines.json` | Run the current release-owned shell resolver without `--version`. It authenticates a temporary verifier if needed and performs `source → 0.8.4 → fresh controller → latest` as one command. |
+| `0.8.0` or `0.8.1` | Use the current release-owned POSIX resolver without `--version`; no system-wide Cosign installation is required. Do not use `--allow-unverified`; strict bridge provenance cannot be bypassed. |
+| Any Windows source | The `0.8.4` release contains no Windows gateway/rollback binary, so no Windows hard-cut path is published. The PowerShell resolver fails closed before stopping services. Keep the current installation unchanged. |
 | A source outside the published matrix, including assetless `0.7.0`, `0.2.x`, or historical `0.3.x` releases | No tested in-place path is inferred. Remain on the current version and contact support for a source-specific, state-aware recovery plan. Do not uninstall, overwrite state, or force an intermediate hop. |
+| Direct installer from `0.8.3 → 0.8.5` | Refused before service stop or installed mutation. Manual artifact copying is unsupported because it bypasses bridge selection and rollback. Use the release-owned resolver; selecting a final version there does not bypass the bridge. |
+
+If an exact clean published `0.8.6` installation has no migration-cursor file,
+use the authenticated current target-release resolver. Before authorizing that
+compatibility path, it authenticates the published `0.8.6` wheel and release
+identity and rejects migration residue, manual artifact copies, partial or
+damaged cursors, and ambiguous observability state. It then backs up the source
+and lets the target migration engine reconstruct the release-owned cursor.
+Frozen installed CLIs cannot gain this repair retroactively.
+
+If gateway startup reports SQLite corruption in the configured local audit
+store, rerun that same authenticated resolver with
+`--recover-corrupt-audit`. The resolver never treats a timeout, lock, generic
+I/O error, or unsafe path as proof of corruption. A successful recovery moves
+the exact main database and present SQLite sidecars into
+`backups/upgrade-*/audit-corrupt/`, retains them for offline forensics, and
+health-checks a newly initialized active store. Historical records in that
+custody file are not automatically imported into the fresh active database.
 
 **Examples:**
 
-The bootstrap intentionally uses `releases/latest/download` to locate the
-current resolver rather than the `0.8.4` bridge's older resolver. That URL is
-only a locator: the signed checksum identity, exact resolver digest,
-completeness marker, and syntax check authenticate the bytes before execution.
+Starting with `0.8.8`, the installed command is a small authenticated
+bootstrap. It verifies the signed stable-channel record, downloads the exact
+immutable tagged resolver bound by that record, checks its SHA-256,
+completeness marker, and Bash syntax, then hands the operation to that fresh
+resolver process:
 
 ```bash
-# POSIX: one-command staged resolver (do not add --version)
-(
-  set -eu
-  umask 077
-  d="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-upgrade.XXXXXX")"
-  trap 'rm -rf "$d"' EXIT
-  command -v cosign >/dev/null
-  for name in defenseclaw-upgrade.sh checksums.txt checksums.txt.sig checksums.txt.pem; do
-    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-      --output "$d/$name" \
-      "https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/$name"
-  done
-  cosign verify-blob \
-    --certificate "$d/checksums.txt.pem" \
-    --signature "$d/checksums.txt.sig" \
-    --certificate-identity \
-      'https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main' \
-    --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-    "$d/checksums.txt"
-  line="$(grep -E '^[0-9a-f]{64}  defenseclaw-upgrade[.]sh$' "$d/checksums.txt")"
-  [ "$(printf '%s\n' "$line" | wc -l | tr -d ' ')" = 1 ]
-  expected="${line%% *}"
-  if command -v sha256sum >/dev/null; then
-    actual="$(sha256sum "$d/defenseclaw-upgrade.sh" | awk '{print $1}')"
-  else
-    actual="$(shasum -a 256 "$d/defenseclaw-upgrade.sh" | awk '{print $1}')"
-  fi
-  [ "$actual" = "$expected" ]
-  [ "$(tail -n 1 "$d/defenseclaw-upgrade.sh")" = \
-    '# DefenseClaw upgrade resolver complete v1' ]
-  bash -n "$d/defenseclaw-upgrade.sh"
-  bash "$d/defenseclaw-upgrade.sh" --yes
-)
+# Normal POSIX path: signed-channel discovery and fresh resolver handoff.
+defenseclaw upgrade --yes
+
+# Explicit final target; the current signed resolver still inserts every
+# required bridge and refuses downgrades or unsupported source states.
+defenseclaw upgrade --version 0.8.8 --yes
 ```
 
-```powershell
-# PowerShell: download the current resolver, then run latest mode
-& {
-  $ErrorActionPreference = 'Stop'
-  $d = Join-Path ([IO.Path]::GetTempPath()) ('defenseclaw-upgrade-' + [Guid]::NewGuid().ToString('N'))
-  [void](New-Item -ItemType Directory -Path $d)
-  try {
-    $current = [Security.Principal.WindowsIdentity]::GetCurrent().User
-    $system = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
-    $directoryAcl = New-Object Security.AccessControl.DirectorySecurity
-    $directoryAcl.SetOwner($current)
-    $directoryAcl.SetAccessRuleProtection($true, $false)
-    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
-      [Security.AccessControl.InheritanceFlags]::ObjectInherit
-    foreach ($sid in @($current, $system)) {
-      $rule = New-Object Security.AccessControl.FileSystemAccessRule(
-        $sid,
-        [Security.AccessControl.FileSystemRights]::FullControl,
-        $inheritance,
-        [Security.AccessControl.PropagationFlags]::None,
-        [Security.AccessControl.AccessControlType]::Allow
-      )
-      [void]$directoryAcl.AddAccessRule($rule)
-    }
-    Set-Acl -LiteralPath $d -AclObject $directoryAcl -ErrorAction Stop
-    $directoryItem = Get-Item -LiteralPath $d -Force -ErrorAction Stop
-    $verifiedAcl = Get-Acl -LiteralPath $d -ErrorAction Stop
-    $accessSection = [Security.AccessControl.AccessControlSections]::Access
-    if (-not $directoryItem.PSIsContainer -or `
-        ($directoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or `
-        -not $verifiedAcl.AreAccessRulesProtected -or `
-        $verifiedAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $current.Value -or `
-        $verifiedAcl.GetSecurityDescriptorSddlForm($accessSection) -cne `
-          $directoryAcl.GetSecurityDescriptorSddlForm($accessSection)) {
-      throw 'Resolver temporary directory owner/DACL validation failed before download.'
-    }
-    [void](Get-Command cosign -ErrorAction Stop)
-    foreach ($name in @('defenseclaw-upgrade.ps1', 'checksums.txt', 'checksums.txt.sig', 'checksums.txt.pem')) {
-      Invoke-WebRequest -Uri ('https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/' + $name) -OutFile (Join-Path $d $name) -UseBasicParsing -ErrorAction Stop
-    }
-    & cosign verify-blob --certificate (Join-Path $d 'checksums.txt.pem') --signature (Join-Path $d 'checksums.txt.sig') `
-      --certificate-identity 'https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main' `
-      --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' (Join-Path $d 'checksums.txt')
-    if ($LASTEXITCODE -ne 0) { throw 'Resolver checksum signature is invalid.' }
-    $checksumRows = @(Get-Content -LiteralPath (Join-Path $d 'checksums.txt') | Where-Object { $_ -match '^[0-9a-f]{64}  defenseclaw-upgrade[.]ps1$' })
-    if ($checksumRows.Count -ne 1) { throw 'Resolver checksum entry is missing or duplicated.' }
-    $expected = ($checksumRows[0] -split '\s+', 2)[0]
-    $r = Join-Path $d 'defenseclaw-upgrade.ps1'
-    $actual = (Get-FileHash -LiteralPath $r -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actual -ne $expected) { throw 'Resolver checksum does not match.' }
-    if ((Get-Content -LiteralPath $r -Tail 1) -ne '# DefenseClaw upgrade resolver complete v1') {
-      throw 'Downloaded DefenseClaw resolver is incomplete.'
-    }
-    [void][scriptblock]::Create((Get-Content -LiteralPath $r -Raw))
-    & $r -Yes
-  } finally {
-    Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
-  }
-}
+If the installed Python command itself is broken, obtain
+`defenseclaw-rescue.sh` from an authenticated `0.8.8` or later release. Save it
+as a regular file, authenticate those saved bytes, and then run:
+
+```bash
+/bin/sh ./defenseclaw-rescue.sh --yes
 ```
+
+That `/bin/sh` runs only the POSIX clean-environment trampoline; the
+trampoline explicitly enters the trusted system `/bin/bash` before parsing
+the embedded Bash payload.
+
+Authenticate that bootstrap once through the tagged release's signed
+`checksums.txt`; a `releases/latest/download` URL is only a locator and must
+never be streamed directly into a shell. The rescue then follows the same
+signed mutable channel as the normal command. See
+[Authenticated release channel and rescue bootstrap](RELEASE_CHANNEL.md).
+
+> **Windows hard-cut unavailable:** `0.8.4` intentionally published no
+> Windows gateway or rollback binary, so there is no authenticated Windows
+> bridge into `0.8.5`. The signed PowerShell resolver is a fail-closed refusal
+> surface only. Keep the existing Windows installation unchanged until a
+> future release publishes and tests an explicit supported path.
 
 From a checkout of the current release, invoke the resolver in latest mode:
 
 ```bash
 ./scripts/upgrade.sh --yes
+./scripts/upgrade.sh --plan
 ```
 
 The release wheel, gateway archive, and local installers are not independent

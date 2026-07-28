@@ -181,11 +181,19 @@ cp packaging/macos/install.sh                       "${BUNDLE_DIR}/install.sh"
 cp packaging/macos/uninstall.sh                     "${BUNDLE_DIR}/uninstall.sh"
 cp packaging/macos/lib/installer_lib.sh             "${BUNDLE_DIR}/lib/installer_lib.sh"
 cp packaging/macos/lib/scrub_agent_configs.py       "${BUNDLE_DIR}/lib/scrub_agent_configs.py"
+cp packaging/macos/lib/render-targets.sh            "${BUNDLE_DIR}/lib/render-targets.sh"
 cp packaging/launchd/com.cisco.secureclient.defenseclaw.plist \
     "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.plist"
+cp packaging/launchd/com.cisco.secureclient.defenseclaw.hook-guardian.plist \
+    "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
+cp packaging/launchd/com.cisco.secureclient.defenseclaw.hook-enumerator.plist \
+    "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
 chmod 0755 "${BUNDLE_DIR}/install.sh" "${BUNDLE_DIR}/uninstall.sh"
 chmod 0755 "${BUNDLE_DIR}/lib/installer_lib.sh" "${BUNDLE_DIR}/lib/scrub_agent_configs.py"
+chmod 0755 "${BUNDLE_DIR}/lib/render-targets.sh"
 chmod 0644 "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.plist"
+chmod 0644 "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
+chmod 0644 "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
 
 # ---- README -------------------------------------------------------------
 

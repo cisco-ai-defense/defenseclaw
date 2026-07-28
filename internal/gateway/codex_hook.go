@@ -85,7 +85,8 @@ type codexHookResponse struct {
 	// redaction directive back through the unified dispatch so
 	// finalizeAgentHook can honor it on the hook_decision event +
 	// audit row. Never serialized on the hook response wire.
-	RedactionEnabled *bool `json:"-"`
+	RedactionEnabled *bool  `json:"-"`
+	SourceReason     string `json:"-"`
 }
 
 // handleCodexHook + enrichCodexHookContext were deleted in the
@@ -97,7 +98,7 @@ type codexHookResponse struct {
 // callback immediately before evaluateCodexHook runs.
 //
 // The unified pipeline owns shared concerns (audit envelope refresh,
-// dispatch metric, dedup, trace propagation, OTel emissions) in
+// dispatch metric, dedup, trace propagation, v8 observability emissions) in
 // exactly one place now. See agent_hook.go and hook_profile_runtime.go
 // for the registry and shared-pipeline rationale. The evaluator
 // stamps the unified-pipeline correlation keys (resp.EvaluationID /
@@ -170,8 +171,14 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			Direction: "prompt",
 			Connector: "codex",
 		})
+		if decision, matched := a.codexPromptSkillAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{
+				targetType: "skill",
+				decision:   decision,
+			})
+		}
 	case "PreToolUse", "PermissionRequest":
-		verdict = a.inspectToolPolicy(&ToolInspectRequest{
+		verdict = a.inspectToolPolicyCtx(ctx, &ToolInspectRequest{
 			Tool:          codexToolName(req),
 			Args:          codexToolArgs(req),
 			Direction:     "tool_call",
@@ -239,7 +246,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	// Emit per-rule findings FIRST so the notification + audit
 	// rows produced below can carry the resulting evaluation_id
 	// and top rule_ids — keeping the SIEM pivot key identical
-	// across audit log, gateway.jsonl, OS notification, and the
+	// across canonical logs, OS notification, and the
 	// HTTP response body.
 	evalCtx := a.emitHookRuleFindings(ctx, "codex", req.HookEventName, verdict,
 		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
@@ -311,7 +318,8 @@ func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, 
 // explicit codex.enabled flag still wins for operators running codex
 // alongside a different selected connector.
 func (a *APIServer) codexEnabled() bool {
-	if a.scannerCfg == nil {
+	cfg := a.runtimeConfigSnapshot()
+	if cfg == nil {
 		return false
 	}
 	// Per-connector explicit disable wins over every enable signal below:
@@ -323,30 +331,30 @@ func (a *APIServer) codexEnabled() bool {
 	// still calls in. EffectiveEnabled defaults to true, so this is a
 	// no-op for single-connector installs and any connector never
 	// explicitly disabled.
-	if a.scannerCfg.ManualConnectorConfigured("codex") && !a.scannerCfg.Guardrail.EffectiveEnabled("codex") {
+	if cfg.ManualConnectorConfigured("codex") && !cfg.Guardrail.EffectiveEnabled("codex") {
 		return false
 	}
-	if a.scannerCfg.ConnectorHookConfig("codex").Enabled {
+	if cfg.ConnectorHookConfig("codex").Enabled {
 		return true
 	}
-	if a.health != nil && a.health.HasConnectorSource("codex", "automatic") && a.scannerCfg.ApplicationProtection.EffectiveEnabled("codex") {
+	if a.health != nil && a.health.HasConnectorSource("codex", "automatic") && cfg.ApplicationProtection.EffectiveEnabled("codex") {
 		return true
 	}
 	// Multi-connector: membership in guardrail.connectors opts codex in
 	// even when it is not the singular primary (no-op for single).
-	if a.scannerCfg.Guardrail.HasConnector("codex") {
+	if cfg.Guardrail.HasConnector("codex") {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(a.scannerCfg.Guardrail.Connector), "codex")
+	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "codex")
 }
 
 func (a *APIServer) codexMode() string {
 	mode := "observe"
-	if a.scannerCfg != nil {
-		mode = strings.TrimSpace(a.scannerCfg.ConnectorHookConfig("codex").Mode)
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+		mode = strings.TrimSpace(cfg.ConnectorHookConfig("codex").Mode)
 		if mode == "" || mode == "inherit" {
 			// Per-connector guardrail override wins over global mode.
-			mode = strings.TrimSpace(a.scannerCfg.EffectiveGuardrailModeForConnector("codex"))
+			mode = strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector("codex"))
 		}
 	}
 	return normalizeAgentHookMode(mode)
@@ -373,6 +381,7 @@ func codexResponseFor(event, action, rawAction, severity, reason string, finding
 		Mode:              mode,
 		WouldBlock:        wouldBlock,
 		AdditionalContext: additional,
+		SourceReason:      reason,
 	}
 	resp.CodexOutput = codexOutput(event, action, rawAction, safeReason, additional)
 	return resp

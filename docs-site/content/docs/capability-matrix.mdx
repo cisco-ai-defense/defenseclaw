@@ -11,6 +11,14 @@ keywords:
 
 This page is the single source of truth for "can this connector do X?". Every row is hand-derived from the Go connector files in `internal/gateway/connector/` and re-verified on every change. Use it to pick the connector that fits your safety posture, or to find the gaps you need to compensate for.
 
+<Callout title="Connector capability is not platform certification">
+This matrix describes each connector's product-level hook or proxy contract.
+Native Windows currently certifies only Codex and Claude Code, both as
+hook-only connectors; the Windows package does not provide a subprocess
+sandbox. See the [native Windows connector matrix](/docs/get-started/windows/connectors-enforcement)
+before applying these rows to Windows.
+</Callout>
+
 <CapabilityMatrix />
 
 ## Reading the matrix

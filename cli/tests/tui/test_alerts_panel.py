@@ -14,9 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from defenseclaw.tui.panels import alerts as alerts_module
 from defenseclaw.tui.panels.alerts import AlertEvent, AlertFinding, AlertsPanelModel, humanize_alert_details
-from defenseclaw.tui.services.gateway_events import count_recent_silent_bypass, load_gateway_egress
 
 
 def test_humanize_alert_details_fast_paths_and_host_port() -> None:
@@ -59,6 +57,59 @@ def test_alerts_filter_selection_and_counts() -> None:
     assert action.filter_change.panel == "alerts"
     assert action.filter_change.filter_type == "severity"
     assert action.filter_change.new == "CRITICAL"
+
+
+def test_alert_mutation_intents_always_send_actual_ids() -> None:
+    model = AlertsPanelModel()
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
+    model.set_events(
+        [
+            AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one", timestamp=now),
+            AlertEvent(
+                id="a2",
+                severity="LOW",
+                action="proxy",
+                target="gateway",
+                timestamp=now - timedelta(seconds=1),
+            ),
+        ]
+    )
+
+    dismissed = model.handle_key("d")
+    assert dismissed.intent is not None
+    assert dismissed.intent.args == ("alerts", "dismiss", "--id", "a1")
+
+    model.set_severity_filter_exact("")
+    model.select_all()
+    acknowledged = model.handle_key("x")
+    assert acknowledged.intent is not None
+    assert acknowledged.intent.args == (
+        "alerts",
+        "acknowledge",
+        "--id",
+        "a1",
+        "--id",
+        "a2",
+        "--yes",
+    )
+
+    model.set_severity_filter_exact("HIGH")
+    filtered = model.handle_key("c")
+    assert filtered.intent is not None
+    assert filtered.intent.args == ("alerts", "dismiss", "--id", "a1")
+
+    all_loaded = model.handle_key("C")
+    assert all_loaded.intent is not None
+    assert all_loaded.intent.args == (
+        "alerts",
+        "dismiss",
+        "--id",
+        "a1",
+        "--id",
+        "a2",
+        "--yes",
+    )
+    assert "--severity" not in all_loaded.intent.args
 
 
 def test_alerts_set_events_owns_the_input_list() -> None:
@@ -217,160 +268,16 @@ def test_alerts_connector_token_filters_by_connector() -> None:
     assert model.filtered == []
 
 
-def test_alerts_refresh_ingests_scan_finding_from_gateway_jsonl(tmp_path) -> None:
-    (tmp_path / "gateway.jsonl").write_text(
-        (
-            '{"ts":"2026-04-20T12:00:00Z","event_type":"scan_finding","severity":"HIGH",'
-            '"scan_finding":{"scan_id":"sid1","scanner":"skill-scanner","target":"t.py",'
-            '"rule_id":"R9","line_number":3,"title":"x"}}\n'
-        ),
-        encoding="utf-8",
-    )
-    model = AlertsPanelModel(tmp_path)
-    model.show_all_severities = True
-    model.refresh_gateway_scans()
-    model.expanded.add("sid1")
-    model.apply_filter()
-
-    assert any(row.kind == "scan_finding" and row.event.action == "scan-finding" for row in model.filtered)
-    finding = next(row for row in model.filtered if row.kind == "scan_finding")
-    assert "R9" in finding.event.details
-    assert "line=3" in finding.event.details
 
 
-def test_alerts_refresh_clears_gateway_rows_when_data_dir_is_removed(tmp_path) -> None:
-    (tmp_path / "gateway.jsonl").write_text(
-        (
-            '{"ts":"2026-04-20T12:00:00Z","event_type":"scan","severity":"HIGH",'
-            '"scan":{"scan_id":"sid1","scanner":"skill-scanner","target":"t.py",'
-            '"verdict":"warn","severity_max":"HIGH"}}\n'
-        ),
-        encoding="utf-8",
-    )
-    model = AlertsPanelModel(tmp_path)
-    model.show_all_severities = True
-    model.set_events([AlertEvent(id="audit-1", severity="HIGH", action="proxy", target="gateway")])
-    model.refresh()
-    assert model.scan_blocks
-
-    model.set_data_dir(None)
-    model.refresh()
-
-    assert model.scan_blocks == []
-    assert model.egress_events == []
-    assert model.filtered
-    assert all(row.kind == "audit" for row in model.filtered)
 
 
-def test_alerts_refresh_keeps_gateway_rows_after_transient_read_failure(tmp_path, monkeypatch) -> None:
-    (tmp_path / "gateway.jsonl").write_text(
-        (
-            '{"ts":"2026-04-20T12:00:00Z","event_type":"scan","severity":"HIGH",'
-            '"scan":{"scan_id":"sid1","scanner":"skill-scanner","target":"t.py"}}\n'
-        ),
-        encoding="utf-8",
-    )
-    model = AlertsPanelModel(tmp_path)
-    model.show_all_severities = True
-    model.refresh_gateway_scans()
-    previous = tuple(model.scan_blocks)
-
-    def fail_load(*_args, **_kwargs):
-        raise OSError("transient gateway read")
-
-    monkeypatch.setattr(alerts_module, "load_gateway_scan_blocks", fail_load)
-    model.refresh_gateway_scans()
-
-    assert tuple(model.scan_blocks) == previous
-    assert any(row.kind == "scan" for row in model.filtered)
 
 
-def test_alerts_refresh_ingests_gateway_egress_and_filters_warning_as_medium(tmp_path) -> None:
-    now = datetime.now(timezone.utc)
-    old = now - timedelta(minutes=10)
-    (tmp_path / "gateway.jsonl").write_text(
-        (
-            '{"ts":"'
-            + now.isoformat().replace("+00:00", "Z")
-            + '","event_type":"egress","egress":{"target_host":"api.x.test",'
-            '"target_path":"/v1/messages","body_shape":"messages","looks_like_llm":true,'
-            '"branch":"shape","decision":"allow","reason":"shape-match","source":"ts"}}\n'
-            '{"ts":"'
-            + old.isoformat().replace("+00:00", "Z")
-            + '","event_type":"egress","egress":{"target_host":"api.known.test",'
-            '"target_path":"/v1/messages","body_shape":"messages","looks_like_llm":true,'
-            '"branch":"known","decision":"allow","source":"ts"}}\n'
-        ),
-        encoding="utf-8",
-    )
-    model = AlertsPanelModel(tmp_path)
-    model.show_all_severities = True
-    model.refresh_gateway_scans()
-
-    egress_rows = [row for row in model.filtered if row.kind == "egress"]
-    assert len(egress_rows) == 2
-    warning = next(row for row in egress_rows if row.event.target == "api.x.test")
-    assert warning.event.severity == "WARNING"
-    assert warning.event.action == "egress"
-    assert "looks_like_llm=true" in warning.event.details
-    assert model.severity_counts()["MEDIUM"] == 1
-
-    model.set_severity_filter_exact("MEDIUM")
-    assert [row.event.target for row in model.filtered] == ["api.x.test"]
-    table_row = model.data_table_row_models()[0]
-    assert table_row.selectable is False
-    assert table_row.opens_detail is True
-    assert table_row.key.startswith("egress:gw:egress:")
-
-    egress = load_gateway_egress(tmp_path / "gateway.jsonl")
-    assert count_recent_silent_bypass(egress, window_seconds=300) == 1
 
 
-def test_alerts_enter_expands_scan_parent_and_toggles_detail_for_child(tmp_path) -> None:
-    (tmp_path / "gateway.jsonl").write_text(
-        (
-            '{"ts":"2026-04-20T12:00:00Z","event_type":"scan","severity":"HIGH",'
-            '"scan":{"scan_id":"sid1","scanner":"skill-scanner","target":"t.py",'
-            '"verdict":"warn","duration_ms":42,"severity_max":"HIGH"}}\n'
-            '{"ts":"2026-04-20T12:00:01Z","event_type":"scan_finding","severity":"HIGH",'
-            '"scan_finding":{"scan_id":"sid1","scanner":"skill-scanner","target":"t.py",'
-            '"rule_id":"R9","line_number":3,"title":"x"}}\n'
-        ),
-        encoding="utf-8",
-    )
-    model = AlertsPanelModel(tmp_path)
-    model.refresh_gateway_scans()
-    model.toggle_expand_or_detail()
-    assert "sid1" in model.expanded
-
-    child_index = next(index for index, row in enumerate(model.filtered) if row.kind == "scan_finding")
-    model.set_cursor(child_index)
-    model.toggle_expand_or_detail()
-    assert model.detail_open is True
 
 
-def test_alerts_expanded_findings_stay_under_scan_parent(tmp_path) -> None:
-    (tmp_path / "gateway.jsonl").write_text(
-        (
-            '{"ts":"2026-04-20T12:00:00Z","event_type":"scan","severity":"HIGH",'
-            '"scan":{"scan_id":"sid1","scanner":"skill-scanner","target":"old.py",'
-            '"verdict":"warn","duration_ms":42,"severity_max":"HIGH"}}\n'
-            '{"ts":"2026-04-20T12:00:05Z","event_type":"scan_finding","severity":"HIGH",'
-            '"scan_finding":{"scan_id":"sid1","scanner":"skill-scanner","target":"old.py",'
-            '"rule_id":"R9","line_number":3,"title":"x"}}\n'
-        ),
-        encoding="utf-8",
-    )
-    model = AlertsPanelModel(tmp_path)
-    model.set_events([AlertEvent(id="newer", severity="LOW", action="proxy", target="gateway")])
-    model.refresh_gateway_scans()
-    model.expanded.add("sid1")
-    model.apply_filter()
-
-    rows = [(row.kind, row.scan_id or row.event.id) for row in model.filtered]
-    assert ("scan", "sid1") in rows
-    parent_index = rows.index(("scan", "sid1"))
-    assert rows[parent_index + 1] == ("scan_finding", "sid1")
 
 
 def test_alerts_detail_pairs_copy_text_and_store_enrichment() -> None:
@@ -430,34 +337,6 @@ def test_alerts_detail_pairs_copy_text_and_store_enrichment() -> None:
     assert "Request ID: req-1" in copied.copy_text
 
 
-def test_alerts_table_metadata_marks_scan_rows_non_selectable(tmp_path) -> None:
-    (tmp_path / "gateway.jsonl").write_text(
-        (
-            '{"ts":"2026-04-20T12:00:00Z","event_type":"scan","severity":"HIGH",'
-            '"scan":{"scan_id":"sid1","scanner":"skill-scanner","target":"t.py",'
-            '"verdict":"warn","duration_ms":42,"severity_max":"HIGH",'
-            '"total_count":2,"counts":{"HIGH":1,"LOW":1}}}\n'
-        ),
-        encoding="utf-8",
-    )
-    model = AlertsPanelModel(tmp_path)
-    model.show_all_severities = True
-    model.set_events([AlertEvent(id="a1", severity="LOW", action="proxy", target="gateway")])
-    model.refresh_gateway_scans()
-
-    table_rows = model.data_table_row_models()
-    audit_row = next(row for row in table_rows if row.kind == "audit")
-    scan_row = next(row for row in table_rows if row.kind == "scan")
-
-    assert audit_row.key == "audit:a1"
-    assert audit_row.selectable is True
-    assert audit_row.opens_detail is True
-    assert scan_row.key == "scan:sid1"
-    assert scan_row.selectable is False
-    assert scan_row.expands is True
-    scan_details = next(row.event.details for row in model.filtered if row.kind == "scan")
-    assert "total=2" in scan_details
-    assert "counts=HIGH=1,LOW=1" in scan_details
 
 
 def test_alerts_connector_hook_row_surfaces_connector_and_decision() -> None:

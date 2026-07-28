@@ -48,9 +48,11 @@ Each alias pre-fills `setup guardrail --connector <name>` and inherits every gua
   <Card title="setup omnigent" href="/docs/setup/guardrail/aliases" description="Adds or reconfigures OmniGent with --connector omnigent and installs its custom Python policy bridge." />
 </Cards>
 
-## Auxiliary setup verbs
+## Auxiliary configuration commands
 
-The non-guardrail verbs each own a focused slice of the configuration surface. Every one of them runs interactively at a TTY and supports `--non-interactive` for CI.
+These commands each own a focused slice of the configuration surface. Some are
+top-level command groups rather than `setup` subcommands; the matrix below shows
+which ones are interactive and which ones are designed for scripts.
 
 <Cards>
   <Card
@@ -88,21 +90,30 @@ The non-guardrail verbs each own a focused slice of the configuration surface. E
     href="/docs/setup/mcp-scanner"
     description="Wire the cisco-ai-mcp-scanner SDK into admission. Behavioral introspection of MCP servers before they're added."
   />
+</Cards>
+
+## Deployment and policy references
+
+These pages explain operator policy and deployment architecture; they are not
+additional `defenseclaw setup` verbs.
+
+<Cards>
   <Card
     title="Enterprise hardening"
     href="/docs/setup/enterprise-deployment"
     description="Provision the managed OS service, guardian, trust boundaries, scoped credentials, and tamper-repair controls."
   />
   <Card
-    title="setup redaction"
+    title="Redaction profiles"
     href="/docs/reference/redaction"
-    description="Toggle privacy.disable_redaction on/off and inspect status. The right way to manage the redaction kill-switch."
+    description="Configure and inspect global, bucket, destination, and route-specific v8 redaction profiles."
   />
 </Cards>
 
 ## Interactive vs non-interactive — global matrix
 
-Every verb in the setup family exposes both a fully-interactive walkthrough and a `--non-interactive` flag for CI. The table below is the canonical mapping.
+The operator-facing commands do not all share one interaction model. The table
+below is the canonical mapping for their interactive and scripted forms.
 
 | Verb | Interactive | Non-interactive | Notes |
 | --- | --- | --- | --- |
@@ -116,22 +127,31 @@ Every verb in the setup family exposes both a fully-interactive walkthrough and 
 | `setup splunk` | yes | `--non-interactive` + flags | HEC token comes from `--hec-token <value>` or, if omitted, the `DEFENSECLAW_SPLUNK_HEC_TOKEN` env var. |
 | `setup local-observability` | yes | flags + `--non-interactive` | One-shot bring-up; `--down` tears the stack back down. |
 | `setup skill-scanner` / `setup mcp-scanner` | yes | `--non-interactive` + flags | Per-feature toggles; the underlying `cisco-ai-skill-scanner` / `cisco-ai-mcp-scanner` SDKs ship as hard dependencies of `defenseclaw`. |
-| `setup redaction on` / `off` / `status` | n/a | flags only | Idempotent; status exits 0/1 for CI. |
+
+<Callout title="Redaction is configured directly as v8 policy">
+There is no `setup` toggle for redaction. Edit
+`observability.destinations[].routes[].selector.buckets` and
+`observability.redaction_profiles`, then run `defenseclaw config validate`,
+`defenseclaw config show --effective --section observability`, and
+`defenseclaw observability plan`. Apply the reviewed policy with
+`defenseclaw-gateway restart`.
+</Callout>
 
 <Callout title="See it for yourself">
-The interactive flow for the central command is replayed end-to-end on the [Setup guardrail](/docs/setup/guardrail) page. Every other verb follows the same prompt-or-flag rhythm.
+The interactive flow for the central command is replayed end-to-end on the [Setup guardrail](/docs/setup/guardrail) page. Interactive auxiliary commands follow the same prompt-or-flag rhythm; use the matrix above for script-only commands.
 </Callout>
 
 ## What gets written where
 
-Every setup verb writes to `~/.defenseclaw/`:
+Setup and auxiliary configuration commands can write these paths under
+`~/.defenseclaw/`, depending on the feature being configured:
 
 ```
 ~/.defenseclaw/
   config.yaml          # the canonical configuration (every verb edits this)
   .env                 # secret values — never committed, never logged
   audit.db             # SQLite audit store (configuration changes land here too)
-  gateway.jsonl        # rolling decision/event JSONL
+  gateway.jsonl        # optional only when an explicit kind: jsonl destination uses this path
   registries/<id>/     # cached manifest + scanner verdicts for each registry source
 ```
 

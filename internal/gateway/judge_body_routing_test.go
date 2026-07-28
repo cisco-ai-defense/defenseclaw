@@ -48,9 +48,9 @@ func TestSidecar_WiresJudgeBodyStore(t *testing.T) {
 		t.Fatalf("audit.Init: %v", err)
 	}
 
-	bodyStore, err := audit.NewJudgeBodyStore(bodiesPath)
+	bodyStore, err := openAuthoritativeJudgeBodyStore(t.Context(), bodiesPath, auditStore)
 	if err != nil {
-		t.Fatalf("audit.NewJudgeBodyStore: %v", err)
+		t.Fatalf("openAuthoritativeJudgeBodyStore: %v", err)
 	}
 	t.Cleanup(func() { _ = bodyStore.Close() })
 
@@ -113,5 +113,56 @@ func TestSidecar_WiresJudgeBodyStore(t *testing.T) {
 	}
 	if len(auditBodies) != 0 {
 		t.Fatalf("audit.db judge_responses must remain empty after Phase 4 split; got %d rows", len(auditBodies))
+	}
+}
+
+func TestOpenAuthoritativeJudgeBodyStore_CutoverFailureNeverFallsBack(t *testing.T) {
+	dir := t.TempDir()
+	legacy, err := audit.NewStore(filepath.Join(dir, "audit.db"))
+	if err != nil {
+		t.Fatalf("audit.NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = legacy.Close() })
+	if err := legacy.Init(); err != nil {
+		t.Fatalf("audit.Init: %v", err)
+	}
+	legacyRow := audit.JudgeResponse{
+		ID: "stable-id", Timestamp: time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC),
+		Kind: "pii", Raw: "legacy body",
+	}
+	if err := legacy.InsertJudgeResponse(legacyRow); err != nil {
+		t.Fatalf("seed legacy: %v", err)
+	}
+
+	targetPath := filepath.Join(dir, "judge_bodies.db")
+	seed, err := audit.NewJudgeBodyStore(targetPath)
+	if err != nil {
+		t.Fatalf("audit.NewJudgeBodyStore(seed): %v", err)
+	}
+	conflict := legacyRow
+	conflict.Raw = "conflicting target body"
+	if err := seed.InsertJudgeResponse(conflict); err != nil {
+		t.Fatalf("seed target conflict: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seed target: %v", err)
+	}
+
+	store, err := openAuthoritativeJudgeBodyStore(t.Context(), targetPath, legacy)
+	if err == nil {
+		if store != nil {
+			_ = store.Close()
+		}
+		t.Fatal("openAuthoritativeJudgeBodyStore conflict = nil, want startup failure")
+	}
+	if store != nil {
+		t.Fatal("failed cutover returned a writable store")
+	}
+	// A failed cutover leaves the pre-upgrade writer active; critically, the
+	// gateway helper does not construct an audit.Store-backed JudgeStore.
+	if err := legacy.InsertJudgeResponse(audit.JudgeResponse{
+		ID: "pre-cutover", Kind: "pii", Raw: "still legacy",
+	}); err != nil {
+		t.Fatalf("legacy writer after failed cutover: %v", err)
 	}
 }

@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -43,8 +44,15 @@ LEGACY_UPGRADE_PROTOCOL_VERSION = 1
 HARD_CUT_UPGRADE_PROTOCOL_VERSION = 2
 OBSERVABILITY_V8_BRIDGE_VERSION = "0.8.4"
 OBSERVABILITY_V8_HARD_CUT_VERSION = "0.8.5"
-UPGRADE_BASELINES_PATH = ROOT / "release" / "upgrade-baselines.json"
+WINDOWS_INSTALLER_START_VERSION = "0.8.6"
+UPGRADE_BASELINES_PATH = Path(
+    os.environ.get(
+        "UPGRADE_BASELINE_POLICY",
+        str(ROOT / "release" / "upgrade-baselines.json"),
+    )
+)
 RUNTIME_CONFIG_PATH = ROOT / "internal" / "config" / "config.go"
+OBSERVABILITY_V8_CONFIG_PATH = ROOT / "internal" / "config" / "observability_v8_types.go"
 
 
 def _ver_tuple(value: str) -> tuple[int, int, int]:
@@ -156,8 +164,7 @@ def controller_upgrade_protocol() -> int:
     for node in tree.body:
         value: ast.AST | None = None
         if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == "_UPGRADE_PROTOCOL_VERSION"
-            for target in node.targets
+            isinstance(target, ast.Name) and target.id == "_UPGRADE_PROTOCOL_VERSION" for target in node.targets
         ):
             value = node.value
         elif (
@@ -179,23 +186,46 @@ def controller_upgrade_protocol() -> int:
     raise RuntimeError("_UPGRADE_PROTOCOL_VERSION not found")
 
 
-def runtime_config_version() -> int:
-    """Read the gateway runtime schema from its one Go literal declaration."""
+def _go_config_version_literal(path: Path, name: str) -> int:
+    """Read one positive Go configuration-version literal."""
 
-    text = RUNTIME_CONFIG_PATH.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
     matches = re.findall(
-        r"^const[ \t]+CurrentConfigVersion[ \t]*=[ \t]*([0-9]+)[ \t]*$",
+        rf"^\s*(?:const[ \t]+)?{re.escape(name)}[ \t]*=[ \t]*([0-9]+)[ \t]*$",
         text,
         re.MULTILINE,
     )
     if len(matches) != 1:
-        raise RuntimeError(
-            "internal/config/config.go must declare exactly one literal CurrentConfigVersion"
-        )
+        raise RuntimeError(f"{path} must declare exactly one literal {name}")
     value = int(matches[0])
     if value < 1:
-        raise RuntimeError("CurrentConfigVersion must be a positive integer literal")
+        raise RuntimeError(f"{name} must be a positive integer literal")
     return value
+
+
+def compatibility_config_version() -> int:
+    """Read the legacy compatibility-decoder ceiling."""
+
+    return _go_config_version_literal(RUNTIME_CONFIG_PATH, "CurrentConfigVersion")
+
+
+def observability_v8_config_version() -> int:
+    """Read the strict observability-v8 runtime schema."""
+
+    return _go_config_version_literal(
+        OBSERVABILITY_V8_CONFIG_PATH,
+        "ObservabilityV8ConfigVersion",
+    )
+
+
+def runtime_config_version(version: str | None = None) -> int:
+    """Select the literal that attests the requested release runtime."""
+
+    if version is None:
+        version = current_version()
+    if _ver_tuple(version) >= _ver_tuple(OBSERVABILITY_V8_HARD_CUT_VERSION):
+        return observability_v8_config_version()
+    return compatibility_config_version()
 
 
 def expected_runtime_config_version(version: str) -> int:
@@ -214,8 +244,7 @@ def protected_release_artifacts(version: str) -> dict[str, Any]:
     gateways: dict[str, dict[str, str]] = {}
     for os_name in ("darwin", "linux", "windows"):
         gateways[os_name] = {
-            arch: f"defenseclaw_{version}_protocol2_{os_name}_{arch}.dcgateway"
-            for arch in ("amd64", "arm64")
+            arch: f"defenseclaw_{version}_protocol2_{os_name}_{arch}.dcgateway" for arch in ("amd64", "arm64")
         }
     return {
         "wheel": f"defenseclaw-{version}-2-py3-none-any.dcwheel",
@@ -223,7 +252,7 @@ def protected_release_artifacts(version: str) -> dict[str, Any]:
     }
 
 
-def published_upgrade_baselines() -> list[str]:
+def published_upgrade_baselines(candidate_version: str | None = None) -> list[str]:
     """Load the single release-gate/source-support matrix."""
     try:
         payload = json.loads(UPGRADE_BASELINES_PATH.read_text(encoding="utf-8"))
@@ -235,11 +264,7 @@ def published_upgrade_baselines() -> list[str]:
         "published_baseline_config_versions",
         "platform_published_baselines",
     }
-    if (
-        not isinstance(payload, dict)
-        or set(payload) != expected_keys
-        or payload.get("schema_version") != 2
-    ):
+    if not isinstance(payload, dict) or set(payload) != expected_keys or payload.get("schema_version") != 2:
         raise RuntimeError("upgrade baseline policy must be a schema_version 2 object")
     baselines = payload.get("published_baselines")
     if not isinstance(baselines, list) or not baselines:
@@ -248,30 +273,29 @@ def published_upgrade_baselines() -> list[str]:
         raise RuntimeError("published_baselines must contain canonical X.Y.Z versions")
     expected = sorted(baselines, key=_ver_tuple, reverse=True)
     if baselines != expected:
-        raise RuntimeError(
-            f"published_baselines must be strictly descending: got {baselines}, want {expected}"
-        )
+        raise RuntimeError(f"published_baselines must be strictly descending: got {baselines}, want {expected}")
     if len(baselines) != len(set(baselines)):
         raise RuntimeError(f"published_baselines contains duplicates: {baselines}")
     config_versions = payload.get("published_baseline_config_versions")
     if not isinstance(config_versions, dict) or set(config_versions) != set(baselines):
-        raise RuntimeError(
-            "published_baseline_config_versions keys must exactly match published_baselines"
-        )
+        raise RuntimeError("published_baseline_config_versions keys must exactly match published_baselines")
+    candidate_version = candidate_version or current_version()
+    runtime_ceiling = expected_runtime_config_version(candidate_version)
     if any(
-        not isinstance(value, int) or isinstance(value, bool) or value not in {5, 6, 7}
+        not isinstance(value, int) or isinstance(value, bool) or value < 1 or value > runtime_ceiling
         for value in config_versions.values()
     ):
-        raise RuntimeError("published baseline config versions must be integers in {5, 6, 7}")
-    if (
-        OBSERVABILITY_V8_BRIDGE_VERSION in config_versions
-        and config_versions.get(OBSERVABILITY_V8_BRIDGE_VERSION) != 7
-    ):
+        raise RuntimeError(
+            "published baseline config versions must be positive integers no newer than the candidate runtime"
+        )
+    if OBSERVABILITY_V8_BRIDGE_VERSION in config_versions and config_versions.get(OBSERVABILITY_V8_BRIDGE_VERSION) != 7:
         raise RuntimeError("the observability-v8 bridge baseline must use config version 7")
     return baselines
 
 
-def platform_published_upgrade_baselines() -> dict[str, list[str]]:
+def platform_published_upgrade_baselines(
+    candidate_version: str | None = None,
+) -> dict[str, list[str]]:
     """Load reviewed platform subsets without widening the global matrix."""
 
     try:
@@ -281,17 +305,16 @@ def platform_published_upgrade_baselines() -> dict[str, list[str]]:
     platforms = payload.get("platform_published_baselines")
     if not isinstance(platforms, dict) or set(platforms) != {"windows"}:
         raise RuntimeError("platform_published_baselines must contain exactly the windows matrix")
-    global_baselines = published_upgrade_baselines()
+    global_baselines = published_upgrade_baselines(candidate_version)
     windows = platforms["windows"]
-    if not isinstance(windows, list) or not windows:
-        raise RuntimeError("platform_published_baselines.windows must be a non-empty list")
+    if not isinstance(windows, list):
+        raise RuntimeError("platform_published_baselines.windows must be a list")
     if not all(isinstance(value, str) and SEMVER_RE.fullmatch(value) for value in windows):
         raise RuntimeError("platform_published_baselines.windows must contain canonical X.Y.Z versions")
     expected = sorted(windows, key=_ver_tuple, reverse=True)
     if windows != expected:
         raise RuntimeError(
-            "platform_published_baselines.windows must be strictly descending: "
-            f"got {windows}, want {expected}"
+            f"platform_published_baselines.windows must be strictly descending: got {windows}, want {expected}"
         )
     if len(windows) != len(set(windows)):
         raise RuntimeError(f"platform_published_baselines.windows contains duplicates: {windows}")
@@ -307,14 +330,12 @@ def release_upgrade_policy(version: str) -> dict[str, Any]:
     if version_t < bridge_t:
         return {"min_upgrade_protocol": LEGACY_UPGRADE_PROTOCOL_VERSION}
 
-    tested_sources = [
-        baseline for baseline in published_upgrade_baselines() if _ver_tuple(baseline) < version_t
-    ]
+    tested_sources = [baseline for baseline in published_upgrade_baselines(version) if _ver_tuple(baseline) < version_t]
     platform_tested_sources = {
         platform: [baseline for baseline in baselines if _ver_tuple(baseline) < version_t]
-        for platform, baselines in platform_published_upgrade_baselines().items()
+        for platform, baselines in platform_published_upgrade_baselines(version).items()
     }
-    if not tested_sources or any(not values for values in platform_tested_sources.values()):
+    if not tested_sources:
         raise RuntimeError(f"release {version} has an empty tested-source matrix")
     policy: dict[str, Any] = {
         "min_upgrade_protocol": LEGACY_UPGRADE_PROTOCOL_VERSION,
@@ -325,23 +346,23 @@ def release_upgrade_policy(version: str) -> dict[str, Any]:
         return policy
 
     auto_bridge_from = [
-        baseline
-        for baseline in published_upgrade_baselines()
-        if _ver_tuple(baseline) < bridge_t
+        baseline for baseline in published_upgrade_baselines(version) if _ver_tuple(baseline) < bridge_t
     ]
     if not auto_bridge_from:
         raise RuntimeError("hard-cut policy has no tested pre-bridge source versions")
     if OBSERVABILITY_V8_BRIDGE_VERSION not in tested_sources:
         raise RuntimeError(
-            f"required bridge {OBSERVABILITY_V8_BRIDGE_VERSION} is absent from the "
-            "global tested-source matrix"
+            f"required bridge {OBSERVABILITY_V8_BRIDGE_VERSION} is absent from the global tested-source matrix"
         )
-    for platform, sources in platform_tested_sources.items():
+    for platform, sources in tuple(platform_tested_sources.items()):
         if OBSERVABILITY_V8_BRIDGE_VERSION not in sources:
-            raise RuntimeError(
-                f"required bridge {OBSERVABILITY_V8_BRIDGE_VERSION} is absent from the "
-                f"{platform} tested-source matrix"
-            )
+            # A platform cannot traverse the hard cut when the immutable
+            # bridge was not published for it. Exclude pre-hard-cut sources,
+            # but retain any actually published post-hard-cut runtimes that can
+            # drive a direct protocol-2 upgrade without that bridge.
+            platform_tested_sources[platform] = [
+                source for source in sources if _ver_tuple(source) >= _ver_tuple(OBSERVABILITY_V8_HARD_CUT_VERSION)
+            ]
     policy.update(
         {
             "min_upgrade_protocol": HARD_CUT_UPGRADE_PROTOCOL_VERSION,
@@ -365,23 +386,51 @@ def build_manifest() -> dict[str, Any]:
     # reaches that row.
     required = [migration for migration in migrations if _ver_tuple(migration) <= current_t]
     manifest = {
-        "schema_version": (
-            2 if current_t >= _ver_tuple(OBSERVABILITY_V8_BRIDGE_VERSION) else 1
-        ),
+        "schema_version": (2 if current_t >= _ver_tuple(OBSERVABILITY_V8_BRIDGE_VERSION) else 1),
         "release_version": version,
         "controller_upgrade_protocol": controller_upgrade_protocol(),
         "migration_failure_policy": "fail" if required else "warn",
         "required_cli_migrations": required,
         "generated_by": "scripts/generate-upgrade-manifest.py",
     }
+    if current_t >= _ver_tuple(WINDOWS_INSTALLER_START_VERSION):
+        manifest["windows_installer"] = {
+            "asset": "DefenseClawSetup-x64.exe",
+            "architectures": ["amd64"],
+            "handoff_args": [
+                "/upgrade",
+                "/quiet",
+                "/norestart",
+                "INSTALLSCOPE=user",
+            ],
+            "authenticode": {
+                # The protected release workflow's Sigstore identity and
+                # checksum manifest authenticate Setup in every release.
+                # Authenticode adds the Windows publisher identity whenever
+                # the complete credential pair is available.
+                "required": False,
+                "publisher": "Cisco Systems, Inc.",
+            },
+            "managed_policy": "respect",
+        }
     manifest.update(release_upgrade_policy(version))
     if manifest["schema_version"] == 2:
-        runtime_version = runtime_config_version()
+        compatibility_version = compatibility_config_version()
+        if compatibility_version != 7:
+            raise RuntimeError(
+                "schema-2 source must retain CurrentConfigVersion=7 as its "
+                f"compatibility ceiling, got {compatibility_version}"
+            )
+        runtime_version = runtime_config_version(version)
         expected_runtime_version = expected_runtime_config_version(version)
         if runtime_version != expected_runtime_version:
+            literal = (
+                "ObservabilityV8ConfigVersion"
+                if current_t >= _ver_tuple(OBSERVABILITY_V8_HARD_CUT_VERSION)
+                else "CurrentConfigVersion"
+            )
             raise RuntimeError(
-                f"release {version} requires CurrentConfigVersion={expected_runtime_version}, "
-                f"got {runtime_version}"
+                f"release {version} requires {literal}={expected_runtime_version}, got {runtime_version}"
             )
         manifest["runtime_config_version"] = runtime_version
         manifest["release_artifacts"] = protected_release_artifacts(version)

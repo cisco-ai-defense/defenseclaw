@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 from datetime import datetime, timezone
+from enum import Enum
 
 from defenseclaw.scanner.plugin_scanner.rules import (
     BINARY_EXTENSIONS,
@@ -135,13 +137,58 @@ def downgrade(severity: str) -> str:
 # malicious shipped JavaScript can hide there while the source
 # analyzer sees nothing. We no longer skip `dist/` so source rules
 # apply to runtime entrypoints.
-_SKIP_DIRS: frozenset[str] = frozenset({
-    "node_modules", "coverage",
-    ".git", ".svn", ".hg",
-    ".vscode", ".idea",
-    ".tox", "__pycache__", ".mypy_cache",
-    "venv", ".venv", "env",
-})
+_SKIP_DIRS: frozenset[str] = frozenset(
+    {
+        "node_modules",
+        "coverage",
+        ".git",
+        ".svn",
+        ".hg",
+        ".vscode",
+        ".idea",
+        ".tox",
+        "__pycache__",
+        ".mypy_cache",
+        "venv",
+        ".venv",
+        "env",
+    }
+)
+
+# Standard connector manifest directories.  These names are security
+# sensitive: callers may special-case only exact, top-level entries and must
+# still require a real directory rather than a symlink or Windows reparse
+# point.
+STANDARD_MANIFEST_DIRS: frozenset[str] = frozenset(
+    {
+        ".claude-plugin",
+        ".codex-plugin",
+    }
+)
+
+
+class PathLinkStatus(Enum):
+    """Result of inspecting one directory entry without following it."""
+
+    PLAIN = "plain"
+    LINK_OR_REPARSE = "link_or_reparse"
+    ERROR = "error"
+
+
+def inspect_path_link(
+    path: str | os.PathLike[str],
+) -> tuple[PathLinkStatus, os.stat_result | None]:
+    """Classify an entry, distinguishing inspection failure from a plain path."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return PathLinkStatus.ERROR, None
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    attributes = getattr(info, "st_file_attributes", 0)
+    if stat.S_ISLNK(info.st_mode) or bool(attributes & reparse_flag):
+        return PathLinkStatus.LINK_OR_REPARSE, info
+    return PathLinkStatus.PLAIN, info
+
 
 # Safety cap — high enough for any real plugin tree, low enough to bound cost.
 _MAX_DEPTH = 20
@@ -201,18 +248,30 @@ def collect_files(
         full_path = os.path.join(directory, entry)
         try:
             # --- Symlink containment ---
-            # NOTE: There is a theoretical TOCTOU race between os.path.islink()
+            # NOTE: There is a theoretical TOCTOU race between the link check
             # and os.path.realpath(): the symlink target could change between
             # the two calls. Acceptable for static plugin scanning where the
             # directory is not modified concurrently.
-            if os.path.islink(full_path):
+            link_status, entry_info = inspect_path_link(full_path)
+            if link_status is PathLinkStatus.ERROR:
+                continue
+            if link_status is PathLinkStatus.LINK_OR_REPARSE and _depth == 0 and entry in STANDARD_MANIFEST_DIRS:
+                # A standard manifest directory must never be represented by
+                # a link, even when its target remains inside the scan root.
+                continue
+            if link_status is PathLinkStatus.LINK_OR_REPARSE:
                 real = os.path.realpath(full_path)
                 # Block symlinks that escape the scan root
                 if not real.startswith(_scan_root + os.sep) and real != _scan_root:
                     _symlink_escapes.append(full_path)
                     continue
 
-            if os.path.isdir(full_path):
+            is_directory = (
+                stat.S_ISDIR(entry_info.st_mode)
+                if link_status is PathLinkStatus.PLAIN and entry_info is not None
+                else os.path.isdir(full_path)
+            )
+            if is_directory:
                 try:
                     st_dir = os.stat(full_path)
                     dir_key = (st_dir.st_dev, st_dir.st_ino)
@@ -303,9 +362,10 @@ def audit_skipped_dirs_for_native(
     for entry in entries:
         full_path = os.path.join(directory, entry)
         try:
-            if os.path.islink(full_path):
+            link_status, entry_info = inspect_path_link(full_path)
+            if link_status is not PathLinkStatus.PLAIN or entry_info is None:
                 continue
-            if os.path.isdir(full_path):
+            if stat.S_ISDIR(entry_info.st_mode):
                 # Descend once we are inside (or entering) a skipped dir;
                 # outside skipped dirs we only recurse looking for the next
                 # skipped dir so we don't re-walk the entire source tree.

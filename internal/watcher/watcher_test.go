@@ -20,16 +20,15 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 func setupTestEnv(t *testing.T) (cfg *config.Config, store *audit.Store, logger *audit.Logger, skillDir string) {
@@ -52,6 +51,7 @@ func setupTestEnv(t *testing.T) (cfg *config.Config, store *audit.Store, logger 
 	t.Cleanup(func() { store.Close() })
 
 	logger = audit.NewLogger(store)
+	logger.SetRuntimeV8Emitter(&watcherTestRuntime{})
 
 	cfg = &config.Config{
 		DataDir:       tmpDir,
@@ -76,10 +76,47 @@ func setupTestEnv(t *testing.T) (cfg *config.Config, store *audit.Store, logger 
 	return cfg, store, logger, skillDir
 }
 
+func setupQuarantineProvenanceTestEnv(
+	t *testing.T,
+) (cfg *config.Config, store *audit.Store, logger *audit.Logger, skillDir string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	skillDir = filepath.Join(tmpDir, "skills")
+	if err := os.MkdirAll(skillDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	store, err = audit.NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	logger = audit.NewLogger(store)
+	logger.SetRuntimeV8Emitter(&watcherTestRuntime{})
+	cfg = &config.Config{
+		DataDir: tmpDir, AuditDB: ":memory:",
+		QuarantineDir: filepath.Join(tmpDir, "quarantine"),
+		PolicyDir:     filepath.Join(tmpDir, "policies"),
+		Scanners: config.ScannersConfig{
+			SkillScanner: config.SkillScannerConfig{Binary: "skill-scanner"},
+			MCPScanner:   config.MCPScannerConfig{Binary: "mcp-scanner"},
+		},
+		OpenShell: config.OpenShellConfig{
+			Binary: "openshell", PolicyDir: filepath.Join(tmpDir, "openshell-policies"),
+		},
+		Watch:        config.WatchConfig{DebounceMs: 100, AutoBlock: true},
+		SkillActions: config.DefaultSkillActions(),
+	}
+	return cfg, store, logger, skillDir
+}
+
 func TestClassifyEvent_SkillDir(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	evt := w.classifyEvent(filepath.Join(skillDir, "my-skill"))
 	if evt.Type != InstallSkill {
@@ -98,7 +135,7 @@ func TestAdmission_BlockedSkill(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	skillPath := filepath.Join(skillDir, "evil-skill")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {
@@ -121,7 +158,7 @@ func TestAdmission_AllowedSkill(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	skillPath := filepath.Join(skillDir, "trusted-skill")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {
@@ -139,7 +176,7 @@ func TestAdmission_AllowedSkill(t *testing.T) {
 func TestAdmission_ScanError_NoScanner(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	skillPath := filepath.Join(skillDir, "unknown-skill")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {
@@ -165,7 +202,7 @@ func TestWatcher_DetectsNewDirectory(t *testing.T) {
 	var mu sync.Mutex
 	var results []AdmissionResult
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, func(r AdmissionResult) {
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, func(r AdmissionResult) {
 		mu.Lock()
 		results = append(results, r)
 		mu.Unlock()
@@ -232,7 +269,7 @@ func TestAdmission_GatePrecedence_BlockBeatsAllow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	skillPath := filepath.Join(skillDir, "conflict-skill")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {
@@ -296,7 +333,7 @@ func TestFullQuarantineFlow_Skill(t *testing.T) {
 	}
 
 	var result AdmissionResult
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, func(r AdmissionResult) {
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, func(r AdmissionResult) {
 		result = r
 	})
 
@@ -363,7 +400,7 @@ func TestFullQuarantineFlow_Plugin(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, []string{pluginDir}, store, logger, shell, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, []string{pluginDir}, store, logger, shell, nil, nil)
 
 	evt := InstallEvent{Type: InstallPlugin, Name: "malicious-plugin", Path: pluginPath, Timestamp: time.Now()}
 	result := w.runAdmission(context.Background(), evt)
@@ -416,7 +453,7 @@ func TestFullQuarantineFlow_SQLiteState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	evt := InstallEvent{Type: InstallSkill, Name: "tracked-skill", Path: skillPath, Timestamp: time.Now()}
 	result := w.runAdmission(context.Background(), evt)
@@ -451,6 +488,215 @@ func TestFullQuarantineFlow_SQLiteState(t *testing.T) {
 	}
 }
 
+func TestWatcherQuarantineRecordsConnectorHashAndRestoresWithoutRequarantine(t *testing.T) {
+	cfg, store, logger, skillDir := setupQuarantineProvenanceTestEnv(t)
+	cfg.Guardrail.Connector = "codex"
+	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
+	skillPath := filepath.Join(skillDir, "review-pr")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillPath, "SKILL.md"), []byte("review safely\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetActionField("skill", "review-pr", "install", "block", "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetActionField("skill", "review-pr", "file", "quarantine", "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetActionField("skill", "review-pr", "runtime", "disable", "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
+	evt := InstallEvent{
+		Type: InstallSkill, Name: "review-pr", Path: skillPath,
+		Connector: "codex", Timestamp: time.Now().UTC(),
+	}
+	if result := w.runAdmission(context.Background(), evt); result.Verdict != VerdictBlocked {
+		t.Fatalf("quarantine verdict = %q", result.Verdict)
+	}
+
+	records, err := store.ListQuarantineRecordsForConnector(
+		context.Background(), "skill", "review-pr", "codex",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("quarantine records = %#v", records)
+	}
+	record := records[0]
+	wantQuarantine := filepath.Join(cfg.QuarantineDir, "skills", "codex", "review-pr")
+	if record.OriginalPath != filepath.Clean(skillPath) ||
+		record.QuarantinePath != wantQuarantine || record.ContentHash == "" ||
+		record.State != audit.QuarantineStateActive || record.OwnershipJSON == "{}" {
+		t.Fatalf("quarantine record = %#v", record)
+	}
+	if len(record.Connectors) != 2 || record.Connectors[0] != "" || record.Connectors[1] != "codex" {
+		t.Fatalf("quarantine connectors = %#v", record.Connectors)
+	}
+	if matches, err := enforce.AssetContentHashMatches(wantQuarantine, record.ContentHash); err != nil || !matches {
+		t.Fatalf("quarantine hash match=%t err=%v", matches, err)
+	}
+
+	if err := w.RestoreQuarantined(
+		context.Background(), "skill", "review-pr", "codex", "",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if matches, err := enforce.AssetContentHashMatches(skillPath, record.ContentHash); err != nil || !matches {
+		t.Fatalf("restore hash match=%t err=%v", matches, err)
+	}
+	entry, err := store.GetAction("skill", "review-pr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry == nil || entry.Actions.Install != "block" ||
+		entry.Actions.Runtime != "disable" || entry.Actions.File != "" ||
+		entry.SourcePath != filepath.Clean(skillPath) {
+		t.Fatalf("restored action = %#v", entry)
+	}
+
+	// The watcher still returns a blocked admission verdict, but the exact
+	// restored path is retained because restore cleared only the file action.
+	if result := w.runAdmission(context.Background(), evt); result.Verdict != VerdictBlocked {
+		t.Fatalf("post-restore verdict = %q", result.Verdict)
+	}
+	if _, err := os.Stat(skillPath); err != nil {
+		t.Fatalf("restored blocked skill was re-quarantined: %v", err)
+	}
+	if _, err := os.Lstat(wantQuarantine); !os.IsNotExist(err) {
+		t.Fatalf("post-restore quarantine path exists: %v", err)
+	}
+	if records, err := store.ListQuarantineRecordsForConnector(
+		context.Background(), "skill", "review-pr", "codex",
+	); err != nil || len(records) != 0 {
+		t.Fatalf("retired records = %#v err=%v", records, err)
+	}
+}
+
+func newWatcherQuarantineRetryFixture(
+	t *testing.T,
+) (*InstallWatcher, *audit.Store, audit.QuarantineRecord, string) {
+	t.Helper()
+	cfg, store, logger, skillDir := setupQuarantineProvenanceTestEnv(t)
+	cfg.Guardrail.Connector = "codex"
+	skillPath := filepath.Join(skillDir, "review-pr")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(skillPath, "SKILL.md"), []byte("review safely\n"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for field, value := range map[string]string{
+		"install": "block", "file": "quarantine", "runtime": "disable",
+	} {
+		if err := store.SetActionField("skill", "review-pr", field, value, "fixture"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
+	if result := w.runAdmission(context.Background(), InstallEvent{
+		Type: InstallSkill, Name: "review-pr", Path: skillPath,
+		Connector: "codex", Timestamp: time.Now().UTC(),
+	}); result.Verdict != VerdictBlocked {
+		t.Fatalf("quarantine verdict = %q", result.Verdict)
+	}
+	records, err := store.ListQuarantineRecordsForConnector(
+		context.Background(), "skill", "review-pr", "codex",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("quarantine records = %#v", records)
+	}
+	return w, store, records[0], skillDir
+}
+
+func TestWatcherRestoreRetryUsesDurablyBoundAlternatePath(t *testing.T) {
+	w, store, record, skillDir := newWatcherQuarantineRetryFixture(t)
+	alternatePath := filepath.Join(skillDir, "alternate", "review-pr")
+	if err := store.UpdateQuarantineRecordState(
+		context.Background(), record.ID, audit.QuarantineStateRestoring, alternatePath,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := enforce.ExecuteAssetRestore(enforce.AssetRestorePlan{
+		RecordID: record.ID, TargetType: record.TargetType, TargetName: record.TargetName,
+		QuarantineRoot: w.cfg.QuarantineDir, QuarantinePath: record.QuarantinePath,
+		RestorePath: alternatePath, AllowedRoots: []string{skillDir},
+		ContentHash: record.ContentHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate failure after the filesystem transaction but before
+	// CompleteQuarantineRestore commits. An empty-path retry must honor the
+	// already-bound restoring destination rather than reverting to OriginalPath.
+	if err := w.RestoreQuarantined(
+		context.Background(), "skill", "review-pr", "codex", "",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if matches, err := enforce.AssetContentHashMatches(
+		alternatePath, record.ContentHash,
+	); err != nil || !matches {
+		t.Fatalf("alternate restore hash match=%t err=%v", matches, err)
+	}
+	if records, err := store.ListQuarantineRecordsForConnector(
+		context.Background(), "skill", "review-pr", "codex",
+	); err != nil || len(records) != 0 {
+		t.Fatalf("retired retry records = %#v err=%v", records, err)
+	}
+	entry, err := store.GetAction("skill", "review-pr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry == nil || entry.SourcePath != filepath.Clean(alternatePath) ||
+		entry.Actions.File != "" || entry.Actions.Install != "block" ||
+		entry.Actions.Runtime != "disable" {
+		t.Fatalf("alternate retry action = %#v", entry)
+	}
+}
+
+func TestWatcherRestoreRetryRejectsExplicitPathMismatch(t *testing.T) {
+	w, store, record, skillDir := newWatcherQuarantineRetryFixture(t)
+	boundPath := filepath.Join(skillDir, "alternate", "review-pr")
+	if err := store.UpdateQuarantineRecordState(
+		context.Background(), record.ID, audit.QuarantineStateRestoring, boundPath,
+	); err != nil {
+		t.Fatal(err)
+	}
+	mismatchPath := filepath.Join(skillDir, "different", "review-pr")
+	err := w.RestoreQuarantined(
+		context.Background(), "skill", "review-pr", "codex", mismatchPath,
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("explicit mismatch error = %v", err)
+	}
+	current, err := store.GetQuarantineRecord(context.Background(), record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current == nil || current.State != audit.QuarantineStateRestoring ||
+		!sameWatcherPath(current.RestorePath, boundPath) {
+		t.Fatalf("restore journal changed after mismatch = %#v", current)
+	}
+	if matches, err := enforce.AssetContentHashMatches(
+		record.QuarantinePath, record.ContentHash,
+	); err != nil || !matches {
+		t.Fatalf("quarantine after mismatch match=%t err=%v", matches, err)
+	}
+	if _, err := os.Lstat(mismatchPath); !os.IsNotExist(err) {
+		t.Fatalf("mismatch restore path was created: %v", err)
+	}
+}
+
 func TestAdmission_AllowedSkip_NoQuarantine(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
@@ -468,7 +714,7 @@ func TestAdmission_AllowedSkip_NoQuarantine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	evt := InstallEvent{Type: InstallSkill, Name: "safe-skill", Path: skillPath, Timestamp: time.Now()}
 	result := w.runAdmission(context.Background(), evt)
@@ -512,7 +758,7 @@ func TestActionState_InstallOverwrite(t *testing.T) {
 	}
 }
 
-func TestAdmission_OTelMetrics_BlockedVerdict(t *testing.T) {
+func TestAdmission_BlockedVerdict(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
 
@@ -520,14 +766,7 @@ func TestAdmission_OTelMetrics_BlockedVerdict(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reader := sdkmetric.NewManualReader()
-	otelProvider, err := telemetry.NewProviderForTest(reader)
-	if err != nil {
-		t.Fatalf("NewProviderForTest: %v", err)
-	}
-	defer otelProvider.Shutdown(context.Background())
-
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, otelProvider, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	skillPath := filepath.Join(skillDir, "evil-skill")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {
@@ -541,11 +780,9 @@ func TestAdmission_OTelMetrics_BlockedVerdict(t *testing.T) {
 		t.Fatalf("expected verdict %q, got %q", VerdictBlocked, result.Verdict)
 	}
 
-	// The built-in Go fallback path doesn't call otel (only OPA path does).
-	// Verify that the watcher doesn't panic with otel wired in.
 }
 
-func TestAdmission_OTelMetrics_AllowedVerdict(t *testing.T) {
+func TestAdmission_AllowedVerdict(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
 
@@ -553,14 +790,7 @@ func TestAdmission_OTelMetrics_AllowedVerdict(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reader := sdkmetric.NewManualReader()
-	otelProvider, err := telemetry.NewProviderForTest(reader)
-	if err != nil {
-		t.Fatalf("NewProviderForTest: %v", err)
-	}
-	defer otelProvider.Shutdown(context.Background())
-
-	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, otelProvider, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, shell, nil, nil)
 
 	skillPath := filepath.Join(skillDir, "trusted-skill")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {

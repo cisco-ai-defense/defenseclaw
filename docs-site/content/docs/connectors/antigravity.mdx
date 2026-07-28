@@ -13,7 +13,7 @@ The Antigravity connector wires DefenseClaw into Google's [Antigravity CLI](http
 
 <Video
   src="antigravity"
-  caption="Three scenarios end-to-end against the same agy session: (1) benign `echo` flows through with action=allow / severity=NONE; (2) `cat ~/.ssh/known_hosts` lands on PATH-SSH-DIR HIGH → DefenseClaw returns decision=ask → agy surfaces its native approval prompt and the operator declines; (3) writing a Stripe secret to `.env` matches SEC-STRIPE + PATH-ENV-FILE CRITICAL → DefenseClaw returns decision=deny → agy refuses without prompting. Each verdict appears live in the Splunk pane on the left, including the unmasked `sk_live_…` value because privacy.disable_redaction=true for the demo."
+  caption="Three scenarios end-to-end against the same agy session: (1) a benign command flows through with action=allow / severity=NONE; (2) a sensitive-file read lands on a HIGH finding → DefenseClaw returns decision=ask → agy surfaces its native approval prompt and the operator declines; (3) writing a synthetic secret to an environment file matches a CRITICAL finding → DefenseClaw returns decision=deny → agy refuses without prompting. Each verdict appears live in the Splunk pane on the left. This historical demo used an unredacted destination projection; current v8 deployments select an explicit redaction profile per destination or route."
 />
 
 <Callout type="info">
@@ -146,7 +146,7 @@ The response shaper contains the spec-conformant Stop `{"decision":"block"}` for
   </Folder>
 </Files>
 
-Antigravity now publishes MCP, skills, rules, and plugin customization surfaces in addition to hooks. DefenseClaw writes hooks only to the global `~/.gemini/config/hooks.json` path, reads and writes MCP servers from `~/.gemini/config/mcp_config.json` and `<workspace>/.agents/mcp_config.json`, and supports the AgentSkills folder form under `skills/<skill>/SKILL.md`. CLI direct-markdown skills, rules, plugins, and plugin-contained agents are treated as discovery/scan surfaces until Google publishes enough install and lifecycle semantics for DefenseClaw to mutate them safely.
+Antigravity publishes MCP, skills, rules, and plugin customization surfaces in addition to hooks. DefenseClaw writes hooks only to the global `~/.gemini/config/hooks.json` path, reads and writes MCP servers from `~/.gemini/config/mcp_config.json` and `<workspace>/.agents/mcp_config.json`, supports the AgentSkills folder form under `skills/<skill>/SKILL.md`, and installs plugins with a root `plugin.json` into `~/.gemini/config/plugins/<plugin>/` or the selected workspace's `.agents/plugins/<plugin>/`. The CLI-managed `~/.gemini/antigravity-cli/plugins/` path is also discovered. CLI direct-markdown skills, rules, and plugin-contained agents remain discovery/scan surfaces.
 
 `claw.workspace_dir` is intentionally not honored by Antigravity hook setup. Antigravity merges discovered `hooks.json` files from the global, project, and legacy locations, so layering DefenseClaw hooks across multiple files would cause duplicate hook firings. Workspace MCP and asset discovery still use the workspace paths above when a workspace is explicitly selected.
 

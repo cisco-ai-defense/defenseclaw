@@ -1,5 +1,13 @@
 # DefenseClaw OpenTelemetry — Implementation Status
 
+> [!WARNING]
+> **Historical v7 closeout.** The implementation paths, toggles, limitations, and
+> status assertions below do not describe observability v8. Use
+> [DefenseClaw Observability v8](OBSERVABILITY.md), the
+> [v8 design index](design/observability-v8/README.md), and `spec.md` for current
+> runtime and acceptance status. Keep this file only for upgrade/compatibility
+> archaeology.
+
 > Audit of `OTEL.md` spec vs actual implementation as of **2026-04-21** (v7 closeout).
 
 ---
@@ -130,8 +138,11 @@ exec.approval/{id}        from exec.approval.requested WS events
 | `defenseclaw.alert.count` | Counter | `RecordAlert()` ← `EmitRuntimeAlert()` |
 | `defenseclaw.guardrail.evaluations` | Counter | `RecordGuardrailEvaluation()` |
 | `defenseclaw.guardrail.latency` | Histogram | `RecordGuardrailLatency()` |
-| `defenseclaw.policy.evaluations` | Counter | `RecordPolicyEvaluation()` ← `EndPolicySpan()` |
-| `defenseclaw.policy.latency` | Histogram | `RecordPolicyLatency()` ← `EndPolicySpan()` |
+| `defenseclaw.admission.decisions` | Counter | Generated v8 `api_policy_observability_v8.go` admission evaluation |
+| `defenseclaw.policy.evaluations` | Counter | Generated v8 `api_policy_observability_v8.go` policy evaluation |
+| `defenseclaw.policy.latency` | Histogram | Generated v8 `api_policy_observability_v8.go` measured policy evaluation |
+| `defenseclaw.policy.reloads` | Counter | Generated v8 `api_policy_observability_v8.go` reload result |
+| `defenseclaw.slo.block.latency` | Histogram | Generated v8 `api_policy_observability_v8.go` admission SLO observation |
 
 ---
 

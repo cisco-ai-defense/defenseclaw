@@ -56,10 +56,9 @@ defenseclaw_harden_resources
 defenseclaw_harden_env
 
 # FAIL_MODE set BEFORE the missing-token check so the helper has a
-# stable FAIL_MODE to log against. Response-layer failures (4xx, bad
-# JSON, missing action) respect FAIL_MODE; transport-layer failures
-# (gateway unreachable / 5xx) always allow unless
-# DEFENSECLAW_STRICT_AVAILABILITY=1.
+# stable FAIL_MODE to log against. Response-layer and transport-layer
+# failures respect FAIL_MODE; DEFENSECLAW_STRICT_AVAILABILITY=1 remains
+# a force-closed override.
 FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
 
 # Bail early on missing token via the shared helper so the bypass is

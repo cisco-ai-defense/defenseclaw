@@ -135,7 +135,11 @@ struct AlertsView: View {
                 } label: {
                     Label("Acknowledge Selection", systemImage: "checkmark.circle")
                 }
-                .disabled(selectedRows.isEmpty)
+                .disabled(
+                    selectedRows.isEmpty
+                        || (!selectedAuditSeverities.isEmpty
+                            && !appState.installationMutationsAllowed)
+                )
                 Button {
                     Task { await appState.refreshAlerts() }
                 } label: {
@@ -144,7 +148,10 @@ struct AlertsView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .dcRefreshPanel)) { _ in
-            Task { await appState.refreshAlerts() }
+            Task {
+                await appState.refreshAlerts()
+                loadSelectedDetail()
+            }
         }
         .task { applyPendingPanelRequest() }
         .onChange(of: appState.alertPanelRequest) { _, _ in applyPendingPanelRequest() }
@@ -162,6 +169,10 @@ struct AlertsView: View {
                     selection = []
                 }
             }
+            .disabled(
+                !selectedAuditSeverities.isEmpty
+                    && !appState.installationMutationsAllowed
+            )
         } message: {
             Text(acknowledgmentMessage)
         }
@@ -260,14 +271,17 @@ struct AlertsView: View {
         }
         let selectedID = row.id
         Task {
+            let installationGeneration = appState.installationGeneration
             let details = await appState.audit.scanFindings(
                 runID: row.runID.nonEmpty,
                 target: row.target.nonEmpty,
                 limit: 20
             )
+            guard installationGeneration == appState.installationGeneration else { return }
             let history = await appState.audit.relatedEvents(target: row.target, limit: 10)
                 .filter { $0.id != row.id }
-            guard selectedRow?.id == selectedID else { return }
+            guard installationGeneration == appState.installationGeneration,
+                  selectedRow?.id == selectedID else { return }
             findingDetails = details
             findingHistory = history
         }

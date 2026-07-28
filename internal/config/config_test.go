@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -185,6 +186,26 @@ func TestLoadFromFile_ConfigOverrideKeepsRuntimeDataInDefenseClawHome(t *testing
 	}
 	if cfg.DataDir != dataDir {
 		t.Fatalf("DataDir = %q, want DEFENSECLAW_HOME %q", cfg.DataDir, dataDir)
+	}
+}
+
+func TestLoadLegacySplunkPointsToReleaseUpgrade(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	configPath := filepath.Join(DefaultDataPath(), DefaultConfigName)
+	if err := os.WriteFile(configPath, []byte("config_version: 3\nsplunk:\n  enabled: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error=nil, want legacy Splunk migration guidance")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "defenseclaw upgrade --yes") || !strings.Contains(message, "config v8") {
+		t.Fatalf("Load() error=%q, want release-upgrade config-v8 guidance", message)
+	}
+	if strings.Contains(message, "migrate-splunk") || strings.Contains(message, "--apply") {
+		t.Fatalf("Load() error=%q still advertises the removed migration command", message)
 	}
 }
 
@@ -701,15 +722,16 @@ func TestParseMCPServersJSON_Empty(t *testing.T) {
 }
 
 func TestSkillDirsForOpenClaw_NoOpenclawJSON(t *testing.T) {
-	dirs := SkillDirsForOpenClaw("/tmp/nonexistent-home")
+	home := filepath.Join(t.TempDir(), "nonexistent-home")
+	dirs := SkillDirsForOpenClaw(home)
 	if len(dirs) < 2 {
 		t.Fatalf("expected workspace and global skill dirs, got %v", dirs)
 	}
-	if dirs[0] != "/tmp/nonexistent-home/workspace/skills" {
-		t.Errorf("first dir = %q, want /tmp/nonexistent-home/workspace/skills", dirs[0])
+	if want := filepath.Join(home, "workspace", "skills"); dirs[0] != want {
+		t.Errorf("first dir = %q, want %q", dirs[0], want)
 	}
-	if dirs[len(dirs)-1] != "/tmp/nonexistent-home/skills" {
-		t.Errorf("last dir = %q, want /tmp/nonexistent-home/skills", dirs[len(dirs)-1])
+	if want := filepath.Join(home, "skills"); dirs[len(dirs)-1] != want {
+		t.Errorf("last dir = %q, want %q", dirs[len(dirs)-1], want)
 	}
 }
 
@@ -800,7 +822,7 @@ func TestConfig_InstalledSkillCandidates(t *testing.T) {
 func TestConfig_WorkspaceScopedOpenHandsPathsUsePinnedWorkspace(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	workspace := filepath.Join(root, "repo")
 	cfg := &Config{
 		Claw: ClawConfig{
@@ -915,14 +937,15 @@ func TestDefaultConfigPluginActions(t *testing.T) {
 }
 
 func TestConfig_PluginDirs(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "test-oc-home")
 	cfg := &Config{
-		Claw: ClawConfig{HomeDir: "/tmp/test-oc-home"},
+		Claw: ClawConfig{HomeDir: home},
 	}
 	dirs := cfg.PluginDirs()
 	if len(dirs) != 1 {
 		t.Fatalf("expected 1 plugin dir, got %d", len(dirs))
 	}
-	want := "/tmp/test-oc-home/extensions"
+	want := filepath.Join(home, "extensions")
 	if dirs[0] != want {
 		t.Errorf("PluginDirs()[0] = %q, want %q", dirs[0], want)
 	}

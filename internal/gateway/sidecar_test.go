@@ -16,12 +16,59 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
+
+func TestRunAIDiscoveryClosesStoreAfterWorkerStops(t *testing.T) {
+	dataDir := t.TempDir()
+	homeDir := t.TempDir()
+	service := inventory.NewContinuousDiscoveryServiceWithOptions(
+		inventory.AIDiscoveryOptions{
+			Enabled:         true,
+			DataDir:         dataDir,
+			HomeDir:         homeDir,
+			ScanRoots:       []string{homeDir},
+			ScanInterval:    time.Hour,
+			ProcessInterval: time.Hour,
+		},
+		nil,
+		nil,
+		nil,
+	)
+	t.Cleanup(func() { _ = service.Close() })
+	if service.InventoryStore() == nil {
+		t.Fatal("test requires an inventory store")
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.DataDir = dataDir
+	cfg.AIDiscovery.Enabled = true
+	sidecar := &Sidecar{cfg: cfg, health: NewSidecarHealth(), aiDiscovery: service}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- sidecar.runAIDiscovery(ctx) }()
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("AI discovery worker did not stop")
+	}
+	if err := service.InventoryStore().RecordScan(
+		context.Background(),
+		inventory.AIDiscoveryReport{},
+		service.ConfidenceParams(),
+	); err == nil {
+		t.Fatal("inventory store remained open after AI discovery worker stopped")
+	}
+}
 
 // TestResolveActiveConnector_EmptyDefaultsToOpenClaw verifies the
 // "operator did not pick anything" branch of S1.4: an empty
@@ -46,7 +93,7 @@ func TestResolveActiveConnector_EmptyDefaultsToOpenClaw(t *testing.T) {
 }
 
 func TestTeardownPreviousConnector_CleansCodexTrustedHookState(t *testing.T) {
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	configPath := filepath.Join(dir, "codex", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		t.Fatalf("mkdir codex config dir: %v", err)
@@ -65,6 +112,7 @@ func TestTeardownPreviousConnector_CleansCodexTrustedHookState(t *testing.T) {
 		APIAddr:   "127.0.0.1:18970",
 		APIToken:  "tok-test",
 	}
+	prepareCodexSetupPolicyFixture(t, dir, &opts)
 	codex := connector.NewCodexConnector()
 	if err := codex.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("codex setup: %v", err)
@@ -214,9 +262,9 @@ func TestResolveActiveConnector_UnknownNameReturnsError(t *testing.T) {
 
 func TestHILTApprovalManagerSharedSidecarBroker(t *testing.T) {
 	t.Parallel()
-	hilt := NewHILTApprovalManager(nil, nil, nil)
+	hilt := NewHILTApprovalManager(nil)
 
-	router := NewEventRouter(nil, nil, nil, false, nil)
+	router := NewEventRouter(nil, nil, nil, false)
 	router.SetHILTApprovalManager(hilt)
 	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, &config.Config{})
 	api.SetHILTApprovalManager(hilt)

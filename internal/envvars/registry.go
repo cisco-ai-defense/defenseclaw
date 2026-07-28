@@ -84,12 +84,6 @@ var truthyValues = map[string]struct{}{
 	"on":   {},
 }
 
-// disableByOff is the inverse-pattern set: setting any non-empty value
-// other than "on" activates the bypass. Mirrors the Python side.
-var disableByOff = map[string]struct{}{
-	"DEFENSECLAW_SCHEMA_VALIDATION": {},
-}
-
 // Consumer is a single file:line location that references the var.
 type Consumer struct {
 	Location    string `json:"location"`
@@ -110,6 +104,7 @@ type EnvVar struct {
 	SecurityNote    string     `json:"security_note,omitempty"`
 	ReplacementHint string     `json:"replacement_hint,omitempty"`
 	Deprecated      bool       `json:"deprecated,omitempty"`
+	MigrationOnly   bool       `json:"migration_only,omitempty"`
 }
 
 // IsActive returns true when the var is set to a value that activates
@@ -123,9 +118,6 @@ func (e EnvVar) isActiveWithGetter(get func(string) string) bool {
 	v := strings.ToLower(strings.TrimSpace(get(e.Name)))
 	if v == "" {
 		return false
-	}
-	if _, ok := disableByOff[e.Name]; ok {
-		return v != "on"
 	}
 	_, truthy := truthyValues[v]
 	return truthy
@@ -298,6 +290,19 @@ func validateEntry(idx int, e EnvVar) error {
 	}
 	if e.Since == "" {
 		return fmt.Errorf("registry.json: entry %q: since is required", e.Name)
+	}
+	if e.MigrationOnly && !e.Deprecated {
+		return fmt.Errorf("registry.json: entry %q: migration_only requires deprecated=true", e.Name)
+	}
+	if e.MigrationOnly && e.SurfaceInDoctor {
+		return fmt.Errorf("registry.json: entry %q: migration-only inputs cannot surface in doctor", e.Name)
+	}
+	if e.Deprecated && e.Category == CategorySecurityOptOut && e.SecurityImpact == ImpactHigh &&
+		!e.SurfaceInDoctor && !e.MigrationOnly {
+		return fmt.Errorf(
+			"registry.json: entry %q: deprecated high-impact opt-out must surface in doctor or be migration_only",
+			e.Name,
+		)
 	}
 	for _, c := range e.Consumers {
 		if c.Location == "" || c.Description == "" {

@@ -93,7 +93,7 @@ struct ActivityView: View {
                     } label: {
                         Label("Clear Completed", systemImage: "trash")
                     }
-                    .disabled(!appState.activity.entries.contains { $0.status != .running })
+                    .disabled(!appState.activity.entries.contains { !$0.status.isActive })
                 } else {
                     Button { Task { await loadMutations() } } label: {
                         Label("Refresh", systemImage: "arrow.clockwise")
@@ -208,6 +208,18 @@ struct ActivityView: View {
                         Label("Cancel", systemImage: "stop.fill")
                     }
                     .controlSize(.small)
+                } else if entry.status == .cancelling {
+                    Button(role: .destructive) {} label: {
+                        Label("Cancelling…", systemImage: "stop.fill")
+                    }
+                    .controlSize(.small)
+                    .disabled(true)
+                } else if entry.status == .finishing {
+                    Button {} label: {
+                        Label("Finishing…", systemImage: "hourglass")
+                    }
+                    .controlSize(.small)
+                    .disabled(true)
                 }
                 Button { appState.activity.selectedID = nil } label: { Image(systemName: "xmark.circle.fill") }
                     .buttonStyle(.borderless)
@@ -237,7 +249,7 @@ struct ActivityView: View {
                 .accessibilityLabel("Copy command output")
             }
             ScrollView {
-                Text(entry.output.isEmpty ? (entry.status == .running ? "Waiting for output..." : "No output") : entry.output)
+                Text(entry.output.isEmpty ? emptyOutputLabel(entry.status) : entry.output)
                     .font(.system(.caption, design: .monospaced))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -271,8 +283,10 @@ struct ActivityView: View {
     private func loadMutations() async {
         mutationLoadGeneration += 1
         let generation = mutationLoadGeneration
+        let installationGeneration = appState.installationGeneration
         let fromDB = await appState.audit.activityEvents(limit: 500)
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled,
+              installationGeneration == appState.installationGeneration else { return }
         let fromStream = await appState.stream.activity
         var seen = Set<String>()
         var merged: [ActivityMutation] = []
@@ -280,13 +294,17 @@ struct ActivityView: View {
             let key = "\(mutation.timestamp.timeIntervalSince1970)-\(mutation.action)-\(mutation.targetID)"
             if seen.insert(key).inserted { merged.append(mutation) }
         }
-        guard !Task.isCancelled, generation == mutationLoadGeneration else { return }
+        guard !Task.isCancelled,
+              generation == mutationLoadGeneration,
+              installationGeneration == appState.installationGeneration else { return }
         if merged.map(\.id) != mutations.map(\.id) { mutations = merged }
     }
 
     private func statusIcon(_ status: CommandActivityStatus) -> String {
         switch status {
         case .running: "hourglass"
+        case .cancelling: "stop.circle"
+        case .finishing: "hourglass.circle"
         case .succeeded: "checkmark.circle.fill"
         case .failed: "xmark.circle.fill"
         case .cancelled: "stop.circle.fill"
@@ -296,9 +314,20 @@ struct ActivityView: View {
     private func statusColor(_ status: CommandActivityStatus) -> Color {
         switch status {
         case .running: Cisco.blue
+        case .cancelling: Cisco.orange
+        case .finishing: .secondary
         case .succeeded: Cisco.green
         case .failed: Cisco.red
         case .cancelled: .secondary
+        }
+    }
+
+    private func emptyOutputLabel(_ status: CommandActivityStatus) -> String {
+        switch status {
+        case .running: "Waiting for output..."
+        case .cancelling: "Stopping command..."
+        case .finishing: "Finalizing output..."
+        case .succeeded, .failed, .cancelled: "No output"
         }
     }
 

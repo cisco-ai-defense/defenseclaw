@@ -24,6 +24,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from defenseclaw.tui.app import DefenseClawTUI
+from defenseclaw.tui.windows_clipboard import ClipboardError
 
 
 @dataclass
@@ -103,7 +104,7 @@ def test_clipboard_copy_falls_back_to_file_when_no_tool(tmp_path: Path) -> None:
 
     app = _make_app(tmp_path)
     with patch("defenseclaw.tui.app.shutil.which", return_value=None):
-        ok, transport = app._clipboard_copy("hello world")
+        ok, transport = app._clipboard_copy("hello world", platform="posix")
     assert ok is True
     assert transport.startswith("file:")
     fallback_path = Path(transport.removeprefix("file:"))
@@ -125,10 +126,13 @@ def test_clipboard_copy_uses_pbcopy_when_present(tmp_path: Path) -> None:
         returncode = 0
 
     with (
-        patch("defenseclaw.tui.app.shutil.which", side_effect=lambda name: "/usr/bin/" + name if name == "pbcopy" else None),
+        patch(
+            "defenseclaw.tui.app.shutil.which",
+            side_effect=lambda name: "/usr/bin/" + name if name == "pbcopy" else None,
+        ),
         patch("defenseclaw.tui.app.subprocess.run", return_value=_FakeProc()) as mock_run,
     ):
-        ok, transport = app._clipboard_copy("hello")
+        ok, transport = app._clipboard_copy("hello", platform="posix")
     assert ok is True
     assert transport == "pbcopy"
     # Confirm the argv we built actually pipes stdin to pbcopy.
@@ -165,21 +169,20 @@ def test_clipboard_copy_skips_failing_tool_and_keeps_trying(tmp_path: Path) -> N
         patch("defenseclaw.tui.app.shutil.which", side_effect=_which),
         patch("defenseclaw.tui.app.subprocess.run", side_effect=_run),
     ):
-        ok, transport = app._clipboard_copy("payload")
+        ok, transport = app._clipboard_copy("payload", platform="posix")
     assert ok is True
     assert transport == "wl-copy"
     assert calls[:2] == ["pbcopy", "wl-copy"]
 
 
-def test_clipboard_copy_empty_text_returns_false(tmp_path: Path) -> None:
-    """Empty payload shouldn't pollute the clipboard or write zero-
-    byte fallback files. The handler interprets this as "nothing to
-    copy"."""
+def test_clipboard_copy_empty_text_is_preserved_in_fallback(tmp_path: Path) -> None:
+    """Empty text is a valid clipboard payload and must not be corrupted."""
 
     app = _make_app(tmp_path)
-    ok, transport = app._clipboard_copy("")
-    assert ok is False
-    assert transport == ""
+    with patch("defenseclaw.tui.app.shutil.which", return_value=None):
+        ok, transport = app._clipboard_copy("", platform="posix")
+    assert ok is True
+    assert Path(transport.removeprefix("file:")).read_bytes() == b""
 
 
 # ---------------------------------------------------------------------------
@@ -268,20 +271,69 @@ def test_action_yank_output_success_path(tmp_path: Path) -> None:
     app = _make_app(tmp_path)
     _seed_entry(app, ("the-result",))
 
-    class _Ok:
-        returncode = 0
-
     captured: list[tuple[str, str]] = []
     app.notify_toast = lambda level, msg: captured.append((level, msg))  # type: ignore[assignment]
+    app._clipboard_copy = lambda _text: (True, "Windows")  # type: ignore[method-assign]
 
-    with (
-        patch("defenseclaw.tui.app.shutil.which", side_effect=lambda name: "/usr/bin/" + name if name == "pbcopy" else None),
-        patch("defenseclaw.tui.app.subprocess.run", return_value=_Ok()),
-    ):
-        app.action_yank_output()
+    app.action_yank_output()
 
     assert captured and captured[-1][0] == "success"
-    assert "pbcopy" in captured[-1][1]
+    assert "Windows" in captured[-1][1]
+
+
+def test_action_yank_output_truthfully_reports_fallback_file(tmp_path: Path) -> None:
+    app = _make_app(tmp_path)
+    _seed_entry(app, ("the-result",))
+    fallback = tmp_path / "last-copy.txt"
+    captured: list[tuple[str, str]] = []
+    app.notify_toast = lambda level, msg: captured.append((level, msg))  # type: ignore[assignment]
+    app._clipboard_copy = lambda _text: (True, f"file:{fallback}")  # type: ignore[method-assign]
+
+    app.action_yank_output()
+
+    assert captured == [("info", f"Clipboard unavailable · wrote output to fallback file {fallback}")]
+    assert "Copied" not in captured[0][1]
+
+
+def test_windows_clipboard_dispatches_to_native_api(tmp_path: Path) -> None:
+    app = _make_app(tmp_path)
+
+    with patch("defenseclaw.tui.app.copy_windows_clipboard") as native_copy:
+        ok, transport = app._clipboard_copy("café\nsecond line", platform="nt")
+
+    native_copy.assert_called_once_with("café\nsecond line")
+    assert (ok, transport) == (True, "Windows")
+
+
+def test_windows_native_failure_uses_protected_fallback_with_spaces(tmp_path: Path) -> None:
+    data_dir = tmp_path / "DefenseClaw data with spaces"
+    app = _make_app(data_dir)
+
+    with patch(
+        "defenseclaw.tui.app.copy_windows_clipboard",
+        side_effect=ClipboardError("clipboard unavailable"),
+    ):
+        ok, transport = app._clipboard_copy("sensitive output", platform="nt")
+
+    fallback = Path(transport.removeprefix("file:"))
+    assert ok is True
+    assert fallback == data_dir / "last-copy.txt"
+    assert fallback.read_text(encoding="utf-8") == "sensitive output"
+    if os.name == "posix":
+        assert fallback.stat().st_mode & 0o777 == 0o600
+
+
+def test_windows_failure_and_fallback_failure_are_concise(tmp_path: Path) -> None:
+    app = _make_app(tmp_path)
+
+    with (
+        patch(
+            "defenseclaw.tui.app.copy_windows_clipboard",
+            side_effect=ClipboardError("clipboard unavailable"),
+        ),
+        patch("defenseclaw.tui.app._write_owner_only_text", side_effect=OSError("denied")),
+    ):
+        assert app._clipboard_copy("payload", platform="nt") == (False, "")
 
 
 def test_clipboard_copy_keeps_trying_after_timeout(tmp_path: Path) -> None:
@@ -316,7 +368,7 @@ def test_clipboard_copy_keeps_trying_after_timeout(tmp_path: Path) -> None:
         patch("defenseclaw.tui.app.shutil.which", side_effect=_which),
         patch("defenseclaw.tui.app.subprocess.run", side_effect=_run),
     ):
-        ok, transport = app._clipboard_copy("payload")
+        ok, transport = app._clipboard_copy("payload", platform="posix")
 
     assert ok is True
     assert transport == "xclip"
@@ -335,7 +387,10 @@ def test_action_save_last_run_log_surfaces_oserror(tmp_path: Path) -> None:
     captured: list[tuple[str, str]] = []
     app.notify_toast = lambda level, msg: captured.append((level, msg))  # type: ignore[assignment]
 
-    with patch.object(Path, "write_text", side_effect=OSError("read-only fs")):
+    with patch(
+        "defenseclaw.tui.app._write_owner_only_text",
+        side_effect=OSError("read-only fs"),
+    ):
         app.action_save_last_run_log()
 
     assert captured, "expected an error toast"
@@ -359,9 +414,11 @@ def test_alert_copy_text_routes_through_clipboard(tmp_path: Path) -> None:
     app.notify_toast = lambda level, msg: captured_toasts.append((level, msg))  # type: ignore[assignment]
 
     captured_copies: list[str] = []
+
     def _fake_copy(text: str) -> tuple[bool, str]:
         captured_copies.append(text)
         return True, "pbcopy"
+
     app._clipboard_copy = _fake_copy  # type: ignore[method-assign]
 
     # The render_chrome + status-bar paths query the DOM; stub them
@@ -375,4 +432,42 @@ def test_alert_copy_text_routes_through_clipboard(tmp_path: Path) -> None:
     assert handled is True
     assert captured_copies == ["severity=HIGH"]
     assert captured_toasts, "clipboard wiring must emit a toast"
-    assert captured_toasts[0] == ("success", "Copied alert detail (pbcopy).")
+    assert captured_toasts[0] == ("success", "Copied alert detail to clipboard (pbcopy).")
+
+
+def test_alert_copy_fallback_overrides_inaccurate_copied_hint(tmp_path: Path) -> None:
+    from defenseclaw.tui.panels.alerts import AlertPanelAction
+
+    app = _make_app(tmp_path)
+    fallback = tmp_path / "last-copy.txt"
+    toasts: list[tuple[str, str]] = []
+    statuses: list[str] = []
+    app.notify_toast = lambda level, msg: toasts.append((level, msg))  # type: ignore[assignment]
+    app._clipboard_copy = lambda _text: (True, f"file:{fallback}")  # type: ignore[method-assign]
+    app._render_chrome = lambda: None  # type: ignore[method-assign]
+    app._set_status = statuses.append  # type: ignore[method-assign]
+
+    app._apply_alert_action(AlertPanelAction(handled=True, hint="Alert detail copied.", copy_text="severity=HIGH"))
+
+    message = f"Wrote alert detail to fallback file {fallback}."
+    assert toasts == [("info", message)]
+    assert statuses == [message]
+    assert "copied" not in message.lower()
+
+
+def test_alert_copy_total_failure_is_concise_and_non_crashing(tmp_path: Path) -> None:
+    from defenseclaw.tui.panels.alerts import AlertPanelAction
+
+    app = _make_app(tmp_path)
+    toasts: list[tuple[str, str]] = []
+    statuses: list[str] = []
+    app.notify_toast = lambda level, msg: toasts.append((level, msg))  # type: ignore[assignment]
+    app._clipboard_copy = lambda _text: (False, "")  # type: ignore[method-assign]
+    app._render_chrome = lambda: None  # type: ignore[method-assign]
+    app._set_status = statuses.append  # type: ignore[method-assign]
+
+    app._apply_alert_action(AlertPanelAction(handled=True, copy_text="severity=HIGH"))
+
+    message = "Clipboard unavailable and fallback write failed."
+    assert toasts == [("error", message)]
+    assert statuses == [message]

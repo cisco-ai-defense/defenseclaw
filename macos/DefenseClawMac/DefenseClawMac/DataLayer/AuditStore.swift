@@ -27,13 +27,21 @@ actor AuditStore {
     private var db: OpaquePointer?
     private let path: String
 
-    init(url: URL = ConfigStore.auditDBURL) {
+    init(url: URL) {
         self.path = url.path
     }
 
     var isAvailable: Bool {
         ensureOpen()
         return db != nil
+    }
+
+    /// Release the path-bound SQLite handle before AppState swaps to another
+    /// installation. Actor serialization waits for any in-flight query first.
+    func close() {
+        guard let db else { return }
+        sqlite3_close_v2(db)
+        self.db = nil
     }
 
     private func ensureOpen() {

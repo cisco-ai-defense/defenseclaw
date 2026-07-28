@@ -18,17 +18,62 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
+
+type recordingWatchdogRecovery struct {
+	attempts atomic.Int64
+	recorded atomic.Int64
+	failures atomic.Int64
+}
+
+func (recorder *recordingWatchdogRecovery) RecordWatchdogRecovery(context.Context) error {
+	recorder.attempts.Add(1)
+	for {
+		remaining := recorder.failures.Load()
+		if remaining <= 0 {
+			recorder.recorded.Add(1)
+			return nil
+		}
+		if recorder.failures.CompareAndSwap(remaining, remaining-1) {
+			return errors.New("injected recovery failure")
+		}
+	}
+}
+
+func TestWatchdogAPIRecoveryRecorderUsesAuthenticatedCSRFProtectedPost(t *testing.T) {
+	const token = "watchdog-test-token"
+	called := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/watchdog/recovery" ||
+			r.Header.Get("Authorization") != "Bearer "+token ||
+			r.Header.Get("X-DefenseClaw-Client") != "watchdog" ||
+			r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("recovery request method/path/headers=%s %s %v", r.Method, r.URL.Path, r.Header)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		called <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	recorder := &watchdogAPIRecoveryRecorder{
+		client: server.Client(), url: server.URL + "/api/v1/watchdog/recovery", token: token,
+	}
+	if err := recorder.RecordWatchdogRecovery(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-called:
+	default:
+		t.Fatal("recovery endpoint was not called")
+	}
+}
 
 // TestWatchdogRecordsWatcherRestart pins the Track-7 contract for Issue #96:
 // on a real down→healthy transition the watchdog MUST bump
@@ -53,12 +98,8 @@ import (
 func TestWatchdogRecordsWatcherRestart(t *testing.T) {
 	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
 
-	reader := sdkmetric.NewManualReader()
-	prov, err := telemetry.NewProviderForTest(reader)
-	if err != nil {
-		t.Fatalf("NewProviderForTest: %v", err)
-	}
-	defer func() { _ = prov.Shutdown(context.Background()) }()
+	recorder := &recordingWatchdogRecovery{}
+	recorder.failures.Store(2)
 
 	var (
 		healthy atomic.Bool
@@ -103,29 +144,29 @@ func TestWatchdogRecordsWatcherRestart(t *testing.T) {
 
 	loopDone := make(chan struct{})
 	go func() {
-		runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, debounce, nil, prov)
+		runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, debounce, watchdogHealthRequirements{requireFleet: true}, nil, recorder)
 		close(loopDone)
 	}()
 
-	// Poll the counter rather than wait for runWatchdogLoop to return —
+	// Poll the canonical-sidecar acknowledgement rather than wait for
+	// runWatchdogLoop to return —
 	// the loop only exits on ctx cancellation, but our assertion needs
 	// just one observed recovery.
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		var rm metricdata.ResourceMetrics
-		if err := reader.Collect(context.Background(), &rm); err != nil {
-			t.Fatalf("Collect: %v", err)
-		}
-		if got := counterValue(t, rm, "defenseclaw.watcher.restarts"); got >= 1 {
+		if recorder.recorded.Load() >= 1 {
 			cancel()
 			<-loopDone
+			if recorder.attempts.Load() < 3 {
+				t.Fatalf("recovery notification was not retried: attempts=%d", recorder.attempts.Load())
+			}
 			return
 		}
 		if time.Now().After(deadline) {
 			cancel()
 			<-loopDone
-			t.Fatalf("expected defenseclaw.watcher.restarts ≥ 1 after recovery, got 0 "+
-				"(probes=%d, healthy=%v)", probes.Load(), healthy.Load())
+			t.Fatalf("expected canonical watcher recovery acknowledgement after transition "+
+				"(attempts=%d probes=%d healthy=%v)", recorder.attempts.Load(), probes.Load(), healthy.Load())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -137,12 +178,7 @@ func TestWatchdogRecordsWatcherRestart(t *testing.T) {
 func TestWatchdogDoesNotRecordRestartOnSteadyHealthy(t *testing.T) {
 	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
 
-	reader := sdkmetric.NewManualReader()
-	prov, err := telemetry.NewProviderForTest(reader)
-	if err != nil {
-		t.Fatalf("NewProviderForTest: %v", err)
-	}
-	defer func() { _ = prov.Shutdown(context.Background()) }()
+	recorder := &recordingWatchdogRecovery{}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -154,35 +190,9 @@ func TestWatchdogDoesNotRecordRestartOnSteadyHealthy(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 	defer cancel()
 
-	runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, 2, nil, prov)
+	runWatchdogLoop(ctx, srv.URL+"/health", 10*time.Millisecond, 2, watchdogHealthRequirements{requireFleet: true}, nil, recorder)
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("Collect: %v", err)
+	if got := recorder.attempts.Load(); got != 0 {
+		t.Fatalf("expected 0 recovery notifications during steady healthy window, got %d", got)
 	}
-
-	if got := counterValue(t, rm, "defenseclaw.watcher.restarts"); got != 0 {
-		t.Fatalf("expected 0 restarts during steady healthy window, got %d", got)
-	}
-}
-
-func counterValue(t *testing.T, rm metricdata.ResourceMetrics, name string) int64 {
-	t.Helper()
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != name {
-				continue
-			}
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			if !ok {
-				t.Fatalf("metric %s: expected Sum[int64], got %T", name, m.Data)
-			}
-			var total int64
-			for _, dp := range sum.DataPoints {
-				total += dp.Value
-			}
-			return total
-		}
-	}
-	return 0
 }

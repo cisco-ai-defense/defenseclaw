@@ -81,7 +81,19 @@ struct FirstRunView: View {
         return appState.activity.entries.first { $0.id == runID }
     }
 
-    private var isRunning: Bool { runningEntry?.status == .running }
+    private var isRunning: Bool { runningEntry?.status.isActive == true }
+    private var isCancelling: Bool { runningEntry?.status == .cancelling }
+    private var isFinishing: Bool { runningEntry?.status == .finishing }
+
+    private var runtimeInstallIsCancelling: Bool {
+        guard let id = appState.runtimeInstallRunID else { return false }
+        return appState.activity.entries.first(where: { $0.id == id })?.status == .cancelling
+    }
+
+    private var runtimeInstallIsFinishing: Bool {
+        guard let id = appState.runtimeInstallRunID else { return false }
+        return appState.activity.entries.first(where: { $0.id == id })?.status == .finishing
+    }
 
     private var registeredSelection: [String] {
         detectedConnectors.filter { registeredConnectors.contains($0) }
@@ -114,6 +126,12 @@ struct FirstRunView: View {
                 checkRow("Gateway", ok: appState.gatewayReachable)
             }
 
+            if let reason = appState.installationReadOnlyReason {
+                Label(reason, systemImage: "lock.shield")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             if cliFound { setupForm } else { installer }
 
             if let entry = runningEntry {
@@ -132,14 +150,24 @@ struct FirstRunView: View {
                     Button(role: .destructive) {
                         if let id = appState.runtimeInstallRunID { appState.activity.cancel(id) }
                     } label: {
-                        Label("Cancel Install", systemImage: "stop.fill")
+                        Label(
+                            runtimeInstallIsCancelling
+                                ? "Cancelling…"
+                                : (runtimeInstallIsFinishing ? "Finishing…" : "Cancel Install"),
+                            systemImage: runtimeInstallIsFinishing ? "hourglass" : "stop.fill"
+                        )
                     }
+                    .disabled(runtimeInstallIsCancelling || runtimeInstallIsFinishing)
                 } else if isRunning {
                     Button(role: .destructive) {
                         if let runID { appState.activity.cancel(runID) }
                     } label: {
-                        Label("Cancel", systemImage: "stop.fill")
+                        Label(
+                            isCancelling ? "Cancelling…" : (isFinishing ? "Finishing…" : "Cancel"),
+                            systemImage: isFinishing ? "hourglass" : "stop.fill"
+                        )
                     }
+                    .disabled(isCancelling || isFinishing)
                 } else if cliFound {
                     if detectedConnectors.isEmpty, !detectedProxyConnectors.isEmpty {
                         Button {
@@ -158,7 +186,7 @@ struct FirstRunView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .keyboardShortcut(.defaultAction)
-                        .disabled(setupInvalid)
+                        .disabled(setupInvalid || !appState.installationMutationsAllowed)
                     }
                 }
             }
@@ -253,6 +281,7 @@ struct FirstRunView: View {
                             Label(discoveryRequested ? "Detect Again" : "Detect Installed Agents",
                                   systemImage: "magnifyingglass")
                         }
+                        .disabled(!appState.installationMutationsAllowed)
                         Text("Runs `defenseclaw agent discover`, which executes each detected agent CLI's --version to identify it.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -305,7 +334,7 @@ struct FirstRunView: View {
             VStack(alignment: .leading, spacing: 10) {
                 GroupBox("Install the Bundled DefenseClaw Runtime") {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("This app includes DefenseClaw \(payload.version), verified against the upstream release at build time. Installing lays it into ~/.defenseclaw and ~/.local/bin — no remote script runs. Network is used to fetch the CLI's Python dependencies from PyPI, plus uv and Python 3.12 only if this Mac doesn't have them.")
+                        Text("This app includes DefenseClaw \(payload.version), verified against the upstream release at build time. Installing lays it into \(appState.installationContext.homeRoot.path) and ~/.local/bin — no remote script runs. Network is used to fetch the CLI's Python dependencies from PyPI, plus uv and Python 3.12 only if this Mac doesn't have them.")
                             .font(.callout).foregroundStyle(.secondary)
                         installStateRow
                         HStack {
@@ -318,7 +347,10 @@ struct FirstRunView: View {
                                 Label("Install DefenseClaw Runtime v\(payload.version)", systemImage: "arrow.down.circle.fill")
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(appState.runtimeInstallState.isRunning)
+                            .disabled(
+                                appState.runtimeInstallState.isRunning
+                                    || !appState.installationMutationsAllowed
+                            )
                             Button("Open Activity") {
                                 appState.selectedPanel = .activity
                                 dismiss()
@@ -377,7 +409,7 @@ struct FirstRunView: View {
         GroupBox("Setup Output") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    if entry.status == .running { ProgressView().controlSize(.small) }
+                    if entry.status.isActive { ProgressView().controlSize(.small) }
                     Image(systemName: statusIcon(entry.status))
                         .foregroundStyle(entry.status == .failed ? Cisco.red : (entry.status == .succeeded ? Cisco.green : .secondary))
                     Text(entry.statusLabel).font(.callout.weight(.semibold))
@@ -461,12 +493,20 @@ struct FirstRunView: View {
     }
 
     private func discoverConnectors() async {
+        guard appState.installationMutationsAllowed else {
+            connectorDiscoveryError = appState.installationReadOnlyReason
+                ?? "This installation is read only."
+            return
+        }
         connectorDiscoveryInProgress = true
         connectorDiscoveryError = nil
         // --refresh: every call here follows an explicit user action, and the
         // runtime's discovery cache lives 24h — a stale hit would hide an
         // agent installed since the last scan.
-        let result = await appState.cli.run(arguments: ["agent", "discover", "--json", "--no-emit-otel", "--refresh"])
+        let result = await appState.cli.run(
+            arguments: ["agent", "discover", "--json", "--no-emit-otel", "--refresh"],
+            mutation: true
+        )
         let allDetected = result.succeeded
             ? ConnectorOnboarding.installedConnectors(from: result.output, supportedOrder: Self.connectors)
             : []
@@ -536,6 +576,8 @@ struct FirstRunView: View {
     private func statusIcon(_ status: CommandActivityStatus) -> String {
         switch status {
         case .running: "hourglass"
+        case .cancelling: "stop.circle"
+        case .finishing: "hourglass.circle"
         case .succeeded: "checkmark.circle.fill"
         case .failed: "xmark.circle.fill"
         case .cancelled: "stop.circle.fill"

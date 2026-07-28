@@ -26,6 +26,7 @@ from click.testing import CliRunner
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands.cmd_agent import agent
+from defenseclaw.config import PerConnectorGuardrailConfig
 from defenseclaw.context import AppContext
 from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
 
@@ -78,6 +79,65 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         self.assertTrue(payload["cache_hit"])
         self.assertTrue(payload["agents"]["codex"]["installed"])
         self.assertEqual(payload["otel"], {"attempted": False, "emitted": False, "error": ""})
+
+    def test_json_separates_installed_configured_active_and_mode(self):
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.guardrail.connectors = {
+            "hermes": PerConnectorGuardrailConfig(mode="observe"),
+            "windsurf": PerConnectorGuardrailConfig(mode="observe"),
+        }
+        disc = _discovery()
+        disc.agents["hermes"] = AgentSignal(
+            name="hermes",
+            installed=False,
+            config_path="C:/Users/alice/.hermes/config.yaml",
+            binary_path="",
+            version="",
+            error="",
+            configured=True,
+        )
+        disc.agents["windsurf"] = AgentSignal(
+            name="windsurf",
+            installed=False,
+            config_path="C:/Users/alice/.codeium/windsurf/hooks.json",
+            binary_path="",
+            version="",
+            error="",
+            configured=True,
+        )
+        disc.agents["cursor"] = AgentSignal(
+            name="cursor",
+            installed=True,
+            config_path="",
+            binary_path="C:/Program Files/Cursor/cursor.exe",
+            version="3.9.16",
+            error="",
+        )
+
+        try:
+            with patch(
+                "defenseclaw.commands.cmd_agent.agent_discovery.discover_agents",
+                return_value=disc,
+            ):
+                result = self.runner.invoke(
+                    agent,
+                    ["discover", "--json", "--no-emit-otel"],
+                    obj=app,
+                    catch_exceptions=False,
+                )
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)["agents"]
+        for name in ("hermes", "windsurf"):
+            self.assertFalse(payload[name]["installed"])
+            self.assertTrue(payload[name]["configured"])
+            self.assertTrue(payload[name]["active"])
+            self.assertEqual(payload[name]["mode"], "observe")
+        self.assertTrue(payload["cursor"]["installed"])
+        self.assertFalse(payload["cursor"]["active"])
+        self.assertEqual(payload["cursor"]["mode"], "")
 
     def test_default_emits_sanitized_report(self):
         app, tmp_dir, db_path = make_app_context()

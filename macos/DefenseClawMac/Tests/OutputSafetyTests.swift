@@ -14,6 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+import Darwin
 import Foundation
 
 // Minimal standalone-test dependency for CLIRunner.doctor(). The production
@@ -36,28 +37,51 @@ actor StreamedLineRecorder {
 struct OutputSafetyTests {
     static func main() async {
         await capturesNormalOutput()
+        await capturesStandardInput()
         await truncatesANewlineLessLine()
         await capsTotalOutputAndReportsFailure()
         await taskCancellationInterruptsChildAndDrainsPipe()
+        await explicitRunIDCancellationInterruptsChild()
+        await pendingCancellationIsHonoredAndConsumed()
+        await ignoredSignalsEscalateToForcedTermination()
+        await groupCancellationStopsLongLivedDescendant()
+        await closedOutputDoesNotBlockCancellation()
+        await inheritedPipeDoesNotHoldRunOpen()
+        await continuouslyWritingDescendantDoesNotHoldRunOpen()
+        await notFoundCancellationStaysActiveForResult()
+        cancelledResultIsNotSuccessful()
         parsesBoundedInventoryDocuments()
         rejectsOversizedAndAdversarialInventoryOutput()
         print("CLI output and inventory parser safety tests passed")
     }
 
     private static func capturesNormalOutput() async {
-        let result = await CLIRunner().run(
+        let result = await makeTestRunner().run(
             binary: "/usr/bin/python3",
             arguments: ["-c", "import sys; sys.stdout.write('alpha\\nbeta')"]
         )
-        expect(result.succeeded, "normal command succeeds")
+        expect(
+            result.succeeded,
+            "normal command succeeds (exit \(result.exitCode), output: \(result.output))"
+        )
         expect(!result.outputTruncated, "normal command is not truncated")
         expect(result.output == "alpha\nbeta\n", "normal output is preserved")
+    }
+
+    private static func capturesStandardInput() async {
+        let result = await makeTestRunner().run(
+            binary: "/usr/bin/python3",
+            arguments: ["-c", "import sys; print(sys.stdin.readline().strip())"],
+            standardInput: "stdin-preserved"
+        )
+        expect(result.succeeded, "standard-input command succeeds")
+        expect(result.output == "stdin-preserved\n", "standard input reaches the isolated process")
     }
 
     private static func truncatesANewlineLessLine() async {
         let count = CLIOutputLimits.maximumLineBytes + 4_096
         let recorder = StreamedLineRecorder()
-        let result = await CLIRunner().run(
+        let result = await makeTestRunner().run(
             binary: "/usr/bin/python3",
             arguments: ["-c", "import sys; sys.stdout.write('x' * \(count))"]
         ) { line in
@@ -85,7 +109,7 @@ struct OutputSafetyTests {
 
     private static func capsTotalOutputAndReportsFailure() async {
         let count = CLIOutputLimits.maximumOutputBytes + 1_024 * 1_024
-        let result = await CLIRunner().run(
+        let result = await makeTestRunner().run(
             binary: "/usr/bin/python3",
             arguments: [
                 "-c",
@@ -103,7 +127,7 @@ struct OutputSafetyTests {
     }
 
     private static func taskCancellationInterruptsChildAndDrainsPipe() async {
-        let runner = CLIRunner()
+        let runner = makeTestRunner()
         let recorder = StreamedLineRecorder()
         let interruptionSentinel = "sigint-handler-output-drained"
         let childProgram = """
@@ -116,6 +140,7 @@ struct OutputSafetyTests {
             sys.exit(130)
 
         signal.signal(signal.SIGINT, handle_interrupt)
+        signal.alarm(8)
         print("ready", flush=True)
         time.sleep(30)
         """
@@ -127,14 +152,7 @@ struct OutputSafetyTests {
                 await recorder.append(line)
             }
         }
-        var childStarted = false
-        for _ in 0..<100 {
-            if (await recorder.snapshot()).contains("ready") {
-                childStarted = true
-                break
-            }
-            try? await Task.sleep(nanoseconds: 30_000_000)
-        }
+        let childStarted = await waitForLine("ready", in: recorder)
         expect(childStarted, "child starts before the cancellation check")
         task.cancel()
         let result = await task.value
@@ -144,6 +162,361 @@ struct OutputSafetyTests {
             result.output.contains(interruptionSentinel),
             "output produced by the SIGINT handler is drained before return"
         )
+    }
+
+    private static func explicitRunIDCancellationInterruptsChild() async {
+        let runner = makeTestRunner()
+        let recorder = StreamedLineRecorder()
+        let runID = UUID()
+        let interruptionSentinel = "explicit-run-id-sigint-drained"
+        let childProgram = """
+        import signal
+        import sys
+        import time
+
+        def handle_interrupt(_signal, _frame):
+            print("\(interruptionSentinel)", flush=True)
+            sys.exit(130)
+
+        signal.signal(signal.SIGINT, handle_interrupt)
+        signal.alarm(8)
+        print("ready", flush=True)
+        time.sleep(30)
+        """
+        let task = Task {
+            await runner.run(
+                binary: "/usr/bin/python3",
+                arguments: ["-c", childProgram],
+                runID: runID
+            ) { line in
+                await recorder.append(line)
+            }
+        }
+        let childStarted = await waitForLine("ready", in: recorder)
+        expect(childStarted, "explicit run-ID child starts before cancellation")
+        let disposition = await runner.cancel(runID: runID)
+        expect(disposition == .requested, "explicit run-ID cancellation is accepted")
+        let result = await task.value
+        expect(result.cancelled, "explicit run-ID cancellation is reflected in the result")
+        expect(!result.succeeded, "an explicitly cancelled command is not successful")
+        expect(
+            result.output.contains(interruptionSentinel),
+            "explicit cancellation drains output from the SIGINT handler"
+        )
+    }
+
+    private static func pendingCancellationIsHonoredAndConsumed() async {
+        let runner = makeTestRunner()
+        let runID = UUID()
+        let reserved = await runner.reserve(runID: runID)
+        expect(reserved, "Activity run ID can be reserved before publication")
+        let disposition = await runner.cancel(runID: runID)
+        expect(disposition == .requested, "cancellation against a reservation is retained")
+
+        let cancelled = await runner.run(
+            binary: "/usr/bin/python3",
+            arguments: ["-c", "print('must-not-launch')"],
+            runID: runID
+        )
+        expect(cancelled.cancelled, "reserved cancellation prevents process launch")
+        expect(!cancelled.output.contains("must-not-launch"), "cancelled reservation does not execute the child")
+
+        let reused = await runner.run(
+            binary: "/usr/bin/python3",
+            arguments: ["-c", "print('run-id-reused')"],
+            runID: runID
+        )
+        expect(reused.succeeded, "pre-launch cancellation is consumed after one run")
+        expect(reused.output.contains("run-id-reused"), "a consumed run ID can be reused safely")
+    }
+
+    private static func ignoredSignalsEscalateToForcedTermination() async {
+        let runner = makeTestRunner()
+        let recorder = StreamedLineRecorder()
+        let runID = UUID()
+        let childProgram = """
+        import signal
+        import time
+
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.alarm(8)
+        print("ready", flush=True)
+        time.sleep(30)
+        """
+        let task = Task {
+            await runner.run(
+                binary: "/usr/bin/python3",
+                arguments: ["-c", childProgram],
+                runID: runID
+            ) { line in
+                await recorder.append(line)
+            }
+        }
+        let childStarted = await waitForLine("ready", in: recorder)
+        expect(childStarted, "signal-ignoring child starts before cancellation")
+        let started = ContinuousClock.now
+        let disposition = await runner.cancel(runID: runID)
+        expect(disposition == .requested, "signal-ignoring child accepts cancellation")
+        let result = await task.value
+        let elapsed = ContinuousClock.now - started
+        expect(result.cancelled, "forced termination remains a cancelled result")
+        expect(elapsed < .seconds(4), "ignored signals escalate to forced termination promptly")
+    }
+
+    private static func groupCancellationStopsLongLivedDescendant() async {
+        let runner = makeTestRunner()
+        let recorder = StreamedLineRecorder()
+        let runID = UUID()
+        let marker = FileManager.default.temporaryDirectory
+            .appendingPathComponent("defenseclaw-descendant-pid-\(UUID().uuidString)")
+        var descendantPID: pid_t = 0
+        defer {
+            if descendantPID > 0 {
+                _ = Darwin.kill(descendantPID, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: marker)
+        }
+
+        let descendantProgram = """
+        import signal
+        import time
+
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.alarm(8)
+        print("descendant-ready", flush=True)
+        time.sleep(30)
+        """
+        let parentProgram = """
+        import signal
+        import subprocess
+        import sys
+        import time
+
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.alarm(8)
+        descendant = subprocess.Popen(
+            [sys.executable, "-c", sys.argv[2]],
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+        with open(sys.argv[1], "w", encoding="utf-8") as marker:
+            marker.write(str(descendant.pid))
+        print("parent-ready", flush=True)
+        time.sleep(30)
+        """
+        let task = Task {
+            await runner.run(
+                binary: "/usr/bin/python3",
+                arguments: ["-c", parentProgram, marker.path, descendantProgram],
+                runID: runID
+            ) { line in
+                await recorder.append(line)
+            }
+        }
+        let parentStarted = await waitForLine("parent-ready", in: recorder)
+        let descendantStarted = await waitForLine("descendant-ready", in: recorder)
+        let markerWritten = await waitForFile(marker)
+        expect(parentStarted, "process-group parent starts before cancellation")
+        expect(descendantStarted, "long-lived descendant starts before cancellation")
+        expect(markerWritten, "long-lived descendant publishes its PID")
+        if let pidText = try? String(contentsOf: marker, encoding: .utf8),
+           let parsedPID = pid_t(pidText.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            descendantPID = parsedPID
+        }
+        expect(descendantPID > 0, "long-lived descendant PID is readable")
+
+        let disposition = await runner.cancel(runID: runID)
+        expect(disposition == .requested, "process-group cancellation is accepted")
+        let result = await task.value
+        let descendantStopped = await waitForProcessExit(descendantPID)
+        expect(result.cancelled, "process-group cancellation marks the result cancelled")
+        expect(
+            descendantStopped,
+            "SIGINT/SIGTERM/SIGKILL escalation stops the long-lived descendant"
+        )
+    }
+
+    private static func closedOutputDoesNotBlockCancellation() async {
+        let runner = makeTestRunner()
+        let runID = UUID()
+        let marker = FileManager.default.temporaryDirectory
+            .appendingPathComponent("defenseclaw-closed-output-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let childProgram = """
+        import os
+        import signal
+        import sys
+        import time
+
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.alarm(8)
+        print("ready", flush=True)
+        os.close(1)
+        os.close(2)
+        with open(sys.argv[1], "w", encoding="utf-8") as marker:
+            marker.write("output-closed")
+        time.sleep(30)
+        """
+        let task = Task {
+            await runner.run(
+                binary: "/usr/bin/python3",
+                arguments: ["-c", childProgram, marker.path],
+                runID: runID
+            )
+        }
+        let outputClosed = await waitForFile(marker)
+        expect(outputClosed, "child closes output before cancellation is requested")
+        let started = ContinuousClock.now
+        let disposition = await runner.cancel(runID: runID)
+        expect(disposition == .requested, "runner actor remains available after output closes")
+        let result = await task.value
+        let elapsed = ContinuousClock.now - started
+        expect(result.cancelled, "closed-output child is cancelled")
+        expect(elapsed < .seconds(4), "closed output cannot block cancellation on waitUntilExit")
+    }
+
+    private static func inheritedPipeDoesNotHoldRunOpen() async {
+        let runner = makeTestRunner()
+        let childProgram = """
+        import subprocess
+        import sys
+
+        subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(3)"],
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+        print("direct-parent-exited", flush=True)
+        """
+        let started = ContinuousClock.now
+        let result = await runner.run(
+            binary: "/usr/bin/python3",
+            arguments: ["-c", childProgram]
+        )
+        let elapsed = ContinuousClock.now - started
+        expect(result.succeeded, "direct parent exit remains successful")
+        expect(result.output.contains("direct-parent-exited"), "direct parent output is drained")
+        expect(elapsed < .seconds(2), "descendant-held pipe does not hold the direct run open")
+    }
+
+    private static func continuouslyWritingDescendantDoesNotHoldRunOpen() async {
+        let runner = makeTestRunner()
+        let childProgram = """
+        import subprocess
+        import sys
+
+        writer = (
+            "import time\\n"
+            "end = time.monotonic() + 3\\n"
+            "while time.monotonic() < end:\\n"
+            " print('descendant-output', flush=True)\\n"
+            " time.sleep(0.005)"
+        )
+        subprocess.Popen(
+            [sys.executable, "-c", writer],
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+        print("continuous-parent-exited", flush=True)
+        """
+        let started = ContinuousClock.now
+        let result = await runner.run(
+            binary: "/usr/bin/python3",
+            arguments: ["-c", childProgram]
+        )
+        let elapsed = ContinuousClock.now - started
+        expect(result.succeeded, "continuously writing descendant does not change the parent result")
+        expect(result.output.contains("continuous-parent-exited"), "direct parent output survives bounded drain")
+        expect(elapsed < .seconds(2), "post-exit drain has a hard ceiling under continuous output")
+    }
+
+    private static func notFoundCancellationStaysActiveForResult() async {
+        await MainActor.run {
+            let runID = UUID()
+            let store = CommandActivityStore(runner: makeTestRunner())
+            store.entries = [
+                CommandActivityEntry(
+                    id: runID,
+                    title: "Race",
+                    command: "true",
+                    category: "test",
+                    origin: "OutputSafetyTests",
+                    startedAt: Date(),
+                    status: .cancelling,
+                    output: "",
+                    sideEffects: [],
+                    suggestedNextAction: ""
+                ),
+            ]
+
+            store.applyCancellationDisposition(.notFound, to: runID)
+            expect(
+                store.entries.first?.status == .finishing,
+                "a cancellation notFound race waits for the actual result"
+            )
+            store.clearCompleted()
+            expect(
+                store.entries.first?.id == runID,
+                "a cancellation notFound race cannot be cleared before finalization"
+            )
+
+            // The real run continuation remains the sole owner of terminal
+            // status. Once it applies that result, normal clearing resumes.
+            store.entries[0].status = .succeeded
+            store.clearCompleted()
+            expect(store.entries.isEmpty, "the actual terminal result is clearable")
+        }
+    }
+
+    private static func cancelledResultIsNotSuccessful() {
+        let result = CLIResult(exitCode: 0, output: "", cancelled: true)
+        expect(!result.succeeded, "exit zero cannot override a cancelled result")
+    }
+
+    private static func makeTestRunner() -> CLIRunner {
+        let testHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("defenseclaw-output-test-\(UUID().uuidString)", isDirectory: true)
+        let context = InstallationContext.resolve(
+            environment: [:],
+            appConfigOverride: nil,
+            userHome: testHome,
+            fileExists: { _ in false },
+            readText: { _ in nil }
+        )
+        return CLIRunner(context: context)
+    }
+
+    private static func waitForLine(
+        _ expected: String,
+        in recorder: StreamedLineRecorder,
+        attempts: Int = 100
+    ) async -> Bool {
+        for _ in 0..<attempts {
+            if (await recorder.snapshot()).contains(expected) { return true }
+            try? await Task.sleep(nanoseconds: 30_000_000)
+        }
+        return false
+    }
+
+    private static func waitForFile(_ url: URL, attempts: Int = 100) async -> Bool {
+        for _ in 0..<attempts {
+            if FileManager.default.fileExists(atPath: url.path) { return true }
+            try? await Task.sleep(nanoseconds: 30_000_000)
+        }
+        return false
+    }
+
+    private static func waitForProcessExit(_ pid: pid_t, attempts: Int = 100) async -> Bool {
+        guard pid > 0 else { return false }
+        for _ in 0..<attempts {
+            if Darwin.kill(pid, 0) == -1, errno == ESRCH { return true }
+            try? await Task.sleep(nanoseconds: 30_000_000)
+        }
+        return false
     }
 
     private static func parsesBoundedInventoryDocuments() {

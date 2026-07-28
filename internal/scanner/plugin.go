@@ -25,6 +25,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
 type PluginScanner struct {
@@ -67,16 +69,12 @@ func (s *PluginScanner) pluginScanCommand(target string) (string, []string) {
 
 func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
 	start := time.Now()
-	ctx, sp := BeginScanSpan(ctx, s.Name(), target, InferTargetType(s.Name()), AgentIdentity{})
 	exitCode := 0
 	var scanErr error
 	var result *ScanResult
-	defer func() {
-		FinishScanSpan(sp, result, exitCode, scanErr)
-	}()
 
 	binaryPath, args := s.pluginScanCommand(target)
-	cmd := exec.CommandContext(ctx, binaryPath, args...)
+	cmd := processutil.CommandContext(ctx, binaryPath, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -102,11 +100,8 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 			scanErr = fmt.Errorf("scanner: %s not found at %q — install with: pip install defenseclaw", s.Name(), s.BinaryPath)
 			return nil, scanErr
 		}
-		if exitCode != 0 {
-			EmitSubprocessExitFromContext(ctx, binaryPath, exitCode, stderrStr)
-		}
 		if stdout.Len() == 0 {
-			scanErr = fmt.Errorf("scanner: %s failed: %s", s.Name(), stderrStr)
+			scanErr = fmt.Errorf("scanner: %s exited %d: %s", s.Name(), exitCode, stderrStr)
 			return nil, scanErr
 		}
 	}

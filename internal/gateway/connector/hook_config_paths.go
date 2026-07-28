@@ -38,6 +38,48 @@ func HookConfigPathsForConnector(conn Connector, opts SetupOpts) []string {
 	return uniqueNonEmptyStrings(ResolvedConnectorLocations(opts, conn).HookConfigPaths)
 }
 
+// HookPolicyWatchPathsForConnector returns every locally inspectable file that
+// can change the effective hook decision. Setup/teardown still own only
+// HookConfigPathsForConnector; this wider set exists solely so the runtime
+// guardian re-evaluates policy when Claude's higher-precedence sources change.
+func HookPolicyWatchPathsForConnector(conn Connector, opts SetupOpts) []string {
+	paths := HookConfigPathsForConnector(conn, opts)
+	if conn == nil || conn.Name() != "claudecode" {
+		return paths
+	}
+	paths = append(paths, claudeCodeRemoteSettingsPath())
+	if workspace := strings.TrimSpace(opts.WorkspaceDir); workspace != "" {
+		workspace = filepath.Clean(workspace)
+		projectDir := filepath.Join(workspace, ".claude")
+		// The directory itself lets a watcher on workspace observe first-time
+		// creation; the two files cover subsequent scalar policy edits.
+		paths = append(paths,
+			projectDir,
+			filepath.Join(projectDir, "settings.json"),
+			filepath.Join(projectDir, "settings.local.json"),
+		)
+	}
+	if managedRoot, err := claudeCodeManagedSettingsRoot(); err == nil {
+		paths = append(paths, filepath.Join(managedRoot, "managed-settings.json"))
+		dropin := filepath.Join(managedRoot, "managed-settings.d")
+		paths = append(paths, dropin)
+		if entries, err := os.ReadDir(dropin); err == nil {
+			for _, entry := range entries {
+				name := entry.Name()
+				if !entry.IsDir() && !strings.HasPrefix(name, ".") && strings.HasSuffix(strings.ToLower(name), ".json") {
+					paths = append(paths, filepath.Join(dropin, name))
+				}
+			}
+		}
+	}
+	if raw := strings.TrimSpace(opts.ClaudeSettingsOverride); raw != "" && !strings.HasPrefix(raw, "{") {
+		if source, err := readClaudeCodeCLISettings(raw, strings.TrimSpace(opts.WorkspaceDir)); err == nil && source != nil {
+			paths = append(paths, source.path)
+		}
+	}
+	return uniqueNonEmptyStrings(paths)
+}
+
 // ownedHookCommandNeedles returns escaping-invariant marker string(s) that the
 // connector writes into its agent config, used for a raw-bytes substring match
 // against the live config file. See ownedHookCommandNeedlesFor for the
@@ -61,13 +103,14 @@ func ownedHookCommandNeedles(opts SetupOpts, conn Connector) []string {
 //     absolute script path under <DataDir>/hooks/. Forward-slash paths contain
 //     no characters JSON/TOML/YAML escape, so the path appears verbatim.
 //
-//   - Windows: the config stores the native invocation
-//     (`"C:\...\defenseclaw-gateway.exe" hook --connector <name>`). The
-//     absolute exe path's backslashes and the surrounding quotes ARE escaped on
-//     serialization (`\"C:\\...\\..exe\"`), so the full command would never
-//     match the raw bytes. We therefore key on `hook --connector <name>` — the
-//     same distinctive marker isNativeHookCommand recognizes — which contains
-//     no escaped characters and survives verbatim across JSON/TOML/YAML.
+//   - Windows: most connectors store the native invocation
+//     (`"C:\...\defenseclaw-hook.exe" hook --connector <name>`). The absolute
+//     exe path's backslashes and surrounding quotes are escaped during config
+//     serialization, so their stable marker is `hook --connector <name>`.
+//     Cursor is matched exactly because its native transport requires the
+//     generated cursor-hook.ps1 adapter. Antigravity is also matched exactly
+//     because its direct-exec tokenizer requires a PowerShell encoded-command
+//     wrapper rather than a visibly quoted absolute executable path.
 func ownedHookCommandNeedlesFor(goos string, opts SetupOpts, conn Connector) []string {
 	if owner, ok := conn.(HookConfigReferenceOwner); ok {
 		return uniqueNonEmptyStrings(owner.HookConfigReferenceNeedles(opts))
@@ -77,6 +120,10 @@ func ownedHookCommandNeedlesFor(goos string, opts SetupOpts, conn Connector) []s
 		return nil
 	}
 	if goos == "windows" {
+		if conn.Name() == "cursor" {
+			unixCommand := filepath.Join(opts.DataDir, "hooks", "cursor-hook.sh")
+			return []string{hookInvocationCommandFor("windows", conn.Name(), unixCommand)}
+		}
 		return []string{nativeHookFlag + conn.Name()}
 	}
 	hookDir := filepath.Join(opts.DataDir, "hooks")
@@ -96,7 +143,14 @@ func ownedHookCommandNeedlesFor(goos string, opts SetupOpts, conn Connector) []s
 //
 // Connectors with no hook config paths or no owned hook command (proxy/plugin
 // connectors) are reported as present so the guard never tries to heal them.
+type ownedHookContractInspector interface {
+	ownedHookContractPresent(SetupOpts) (bool, error)
+}
+
 func OwnedHooksPresent(conn Connector, opts SetupOpts) (bool, error) {
+	if inspector, ok := conn.(ownedHookContractInspector); ok {
+		return inspector.ownedHookContractPresent(opts)
+	}
 	paths := HookConfigPathsForConnector(conn, opts)
 	if len(paths) == 0 {
 		return true, nil
@@ -162,6 +216,9 @@ func structuredHookCommandReferences(raw interface{}, needles []string) bool {
 			}
 		}
 	case map[string]interface{}:
+		if structuredNativeExecHookReferences(value, needles) {
+			return true
+		}
 		for key, item := range value {
 			if key == "command" || key == "bash" || key == "handler" {
 				command := strings.TrimSpace(stringValue(item))
@@ -175,6 +232,38 @@ func structuredHookCommandReferences(raw interface{}, needles []string) bool {
 			if structuredHookCommandReferences(item, needles) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func structuredNativeExecHookReferences(entry map[string]interface{}, needles []string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	command := strings.TrimSpace(stringValue(entry["command"]))
+	if command == "" || !isDefenseClawManagedHookExecutable(command) {
+		return false
+	}
+	rawArgs, ok := entry["args"].([]interface{})
+	if !ok || len(rawArgs) != 3 {
+		return false
+	}
+	args := make([]string, len(rawArgs))
+	for i, raw := range rawArgs {
+		arg, ok := raw.(string)
+		if !ok {
+			return false
+		}
+		args[i] = arg
+	}
+	if args[0] != "hook" || args[1] != "--connector" || strings.TrimSpace(args[2]) == "" {
+		return false
+	}
+	marker := nativeHookFlag + args[2]
+	for _, needle := range needles {
+		if strings.Contains(strings.TrimSpace(needle), marker) {
+			return true
 		}
 	}
 	return false

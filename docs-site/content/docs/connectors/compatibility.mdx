@@ -11,6 +11,13 @@ keywords:
 
 DefenseClaw tracks hook connector compatibility with a packaged JSON manifest at `cli/defenseclaw/inventory/hook_contracts.json`. The manifest maps each connector version range to the hook contract DefenseClaw knows how to install, parse, evaluate, and respond to.
 
+<Callout type="warning" title="Version compatibility is not platform certification">
+A connector can have a valid hook contract and still be unsupported or not
+certified on native Windows. The Windows release currently certifies only
+Codex and Claude Code; see the
+[native Windows connector matrix](/docs/get-started/windows#certified-connector-scope).
+</Callout>
+
 ## Current contracts
 
 | Connector | Gate | Supported connector versions | Contract / hook script | AID surfaces |
@@ -18,7 +25,7 @@ DefenseClaw tracks hook connector compatibility with a packaged JSON manifest at
 | <ConnectorLabel id="openclaw" /> | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response |
 | <ConnectorLabel id="zeptoclaw" /> | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response |
 | <ConnectorLabel id="codex" /> | hook contract | `>=0.124.0` | `codex-hooks-v1` / `v6` | prompt, tool_call, tool_result |
-| <ConnectorLabel id="claudecode" /> | hook contract | `>=2.1.144` | `claudecode-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+| <ConnectorLabel id="claudecode" /> | hook contract | `>=2.1.152` | `claudecode-hooks-v1` / `v7` | prompt, tool_call, tool_result, event_content |
 | <ConnectorLabel id="hermes" /> | hook contract | `>=0.11.0` | `hermes-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
 | <ConnectorLabel id="cursor" /> | hook contract | `>=1.7.0` | `cursor-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | <ConnectorLabel id="windsurf" /> | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v6` | prompt, tool_call, tool_result |
@@ -31,7 +38,7 @@ DefenseClaw tracks hook connector compatibility with a packaged JSON manifest at
 
 DefenseClaw leaves `max_exclusive` empty until an upstream release publishes a breaking hook change. Future versions are tracked through `hook_contract_lock.json` and doctor drift checks rather than a guessed major-version cap.
 
-The floors come from upstream release notes or current vendor docs: Codex `0.124.0` is the stable-hooks release, Gemini CLI `0.26.0` enabled hooks by default, Cursor `1.7.0` introduced beta hooks, Hermes `0.11.0` added shell hooks (`hermes-hooks-v1` covers the full seven-event lifecycle — `pre_llm_call`, `pre_tool_call`, `post_tool_call`, `post_llm_call`, session start/end, `subagent_stop`), Windsurf `1.12.41` added user prompt hooks to the Cascade pre-hook set, and Copilot CLI `1.0.18` is the first release containing every event in the current DefenseClaw Copilot contract. OpenCode loads JS plugins through a stable plugin API rather than a versioned hook config, so it is accepted as unversioned (validated with `opencode 1.16.2`). OmniGent uses its documented six-phase custom policy API and is accepted as unversioned until upstream publishes a policy-contract floor. OpenHands uses the current documented `.openhands/hooks.json` contract, installs globally through `~/.openhands/hooks.json` by default, has been validated with `OpenHands CLI 1.16.0`, and is accepted as unversioned until upstream publishes a hook-version floor. Antigravity (`agy`) is pinned at `>=1.0.0` (the version `agy --version` returns today); the upper bound stays open because agy auto-updates and DefenseClaw tracks compatibility through `hook_contract_lock.json` plus doctor drift checks. Claude Code is pinned to the current documented hook surface captured at `2.1.144`; older Claude Code versions exposed smaller event sets.
+The floors come from upstream release notes or current vendor docs: Codex `0.124.0` is the stable-hooks release, Gemini CLI `0.26.0` enabled hooks by default, Cursor `1.7.0` introduced beta hooks, Hermes `0.11.0` added shell hooks (`hermes-hooks-v1` covers the full seven-event lifecycle — `pre_llm_call`, `pre_tool_call`, `post_tool_call`, `post_llm_call`, session start/end, `subagent_stop`), Windsurf `1.12.41` added user prompt hooks to the Cascade pre-hook set, and Copilot CLI `1.0.18` is the first release containing every event in the current DefenseClaw Copilot contract. OpenCode loads JS plugins through a stable plugin API rather than a versioned hook config, so it is accepted as unversioned (validated with `opencode 1.16.2`). OmniGent uses its documented six-phase custom policy API and is accepted as unversioned until upstream publishes a policy-contract floor. OpenHands uses the current documented `.openhands/hooks.json` contract, installs globally through `~/.openhands/hooks.json` by default, has been validated with `OpenHands CLI 1.16.0`, and is accepted as unversioned until upstream publishes a hook-version floor. Antigravity (`agy`) is pinned at `>=1.0.0` (the version `agy --version` returns today); the upper bound stays open because agy auto-updates and DefenseClaw tracks compatibility through `hook_contract_lock.json` plus doctor drift checks. Claude Code is pinned to the current documented hook surface captured at `2.1.152`; older Claude Code versions exposed smaller event sets.
 
 ## Setup-time checks
 

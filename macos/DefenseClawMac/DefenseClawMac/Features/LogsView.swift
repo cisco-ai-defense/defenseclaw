@@ -165,6 +165,7 @@ struct LogsView: View {
                 }
                 Button("Redaction…") { showRedactionToggle = true }
                     .controlSize(.small)
+                    .disabled(!appState.installationMutationsAllowed)
                     .help("Toggle the redaction kill-switch (runs defenseclaw setup redaction on|off)")
                 ConnectorFilterChip(names: appState.activeConnectorNames, selection: $state.connectorFilter)
             }
@@ -265,11 +266,11 @@ struct LogsView: View {
     private func sourceFilename(for stream: LogStream) -> String {
         switch stream {
         case .gateway:
-            ConfigStore.gatewayLogURL.lastPathComponent
+            appState.installationContext.gatewayLogURL.lastPathComponent
         case .watchdog:
-            ConfigStore.watchdogLogURL.lastPathComponent
+            appState.installationContext.watchdogLogURL.lastPathComponent
         case .verdicts, .otel:
-            ConfigStore.gatewayJSONLURL.lastPathComponent
+            appState.installationContext.gatewayJSONLURL.lastPathComponent
         }
     }
 
@@ -369,7 +370,9 @@ struct LogsView: View {
     /// Refreshes from the stream buffer, but only publishes when the tail
     /// actually advanced — pulse ticks with no new lines are free.
     private func load(force: Bool = false) async {
+        let installationGeneration = appState.installationGeneration
         let fresh = await appState.stream.logBuffers[stream] ?? []
+        guard installationGeneration == appState.installationGeneration else { return }
         guard force || fresh.count != rows.count || fresh.last?.id != rows.last?.id else { return }
         rows = fresh
         applyFilter()
@@ -377,7 +380,9 @@ struct LogsView: View {
 
     private func reload() {
         Task {
+            let installationGeneration = appState.installationGeneration
             _ = await appState.stream.reload()
+            guard installationGeneration == appState.installationGeneration else { return }
             await load(force: true)
         }
     }
@@ -467,7 +472,7 @@ struct RedactionToggleSheet: View {
                 Button(running ? "Running…" : "Confirm") { confirm() }
                     .buttonStyle(.borderedProminent)
                     .tint(dangerous ? Cisco.red : Cisco.green)
-                    .disabled(running)
+                    .disabled(running || !appState.installationMutationsAllowed)
             }
         }
         .padding(16)

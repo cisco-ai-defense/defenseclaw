@@ -25,10 +25,43 @@ concurrent holders into the critical section simultaneously.
 
 from __future__ import annotations
 
+import ast
 import threading
 import time
+from pathlib import Path
 
+import pytest
 from defenseclaw.config import locked_config_yaml
+from defenseclaw.file_lock import FileLockTimeoutError, _lock_file_exclusive, _unlock_file
+
+
+def test_private_lock_call_sites_bind_timeout_policy() -> None:
+    package_root = Path(__file__).resolve().parents[1] / "defenseclaw"
+    missing: list[str] = []
+    for path in package_root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            function = node.func
+            name = function.attr if isinstance(function, ast.Attribute) else getattr(function, "id", None)
+            if name != "_lock_file_exclusive":
+                continue
+            if not any(keyword.arg == "timeout_seconds" for keyword in node.keywords):
+                missing.append(f"{path.relative_to(package_root)}:{node.lineno}")
+
+    assert missing == []
+
+
+def test_private_lock_helper_timeout_remains_fail_closed(tmp_path) -> None:
+    lock_path = tmp_path / "contended-writer.lock"
+    with lock_path.open("w+") as holder, lock_path.open("r+") as contender:
+        _lock_file_exclusive(holder, timeout_seconds=None)
+        try:
+            with pytest.raises(FileLockTimeoutError, match="file update lock is busy"):
+                _lock_file_exclusive(contender, timeout_seconds=0.02)
+        finally:
+            _unlock_file(holder)
 
 
 def test_locked_config_yaml_serializes_concurrent_holders(tmp_path) -> None:

@@ -17,8 +17,8 @@
 
 """DefenseClaw E2E test runner.
 
-Tests every CLI command, sidecar API endpoint, Splunk signal pipeline,
-and gateway log verification. Designed to be re-run after any change.
+Tests every CLI command, sidecar API endpoint, canonical v8 destination path,
+and gateway process-log diagnostics. Designed to be re-run after any change.
 
 Usage:
     python scripts/test-e2e-cli.py              # full run
@@ -38,18 +38,13 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from pathlib import Path
 
 API_BASE = "http://127.0.0.1:18970"
 CSRF_HEADER = "X-DefenseClaw-Client"
-# gateway.log keeps the pretty human-readable sidecar output (stderr
-# mirror). gateway.jsonl is the new structured stream written by
-# internal/gatewaylog.Writer and is the source of truth for
-# dashboards + the TUI Verdicts tab. E2E probes should consult both
-# when asserting behavior — legacy tests that only read gateway.log
-# still work, but new assertions should prefer gateway.jsonl.
+# gateway.log is diagnostic process output only. Structured assertions use the
+# canonical v8 SQLite/event APIs exercised by the focused observability tests;
+# this broad CLI smoke runner never treats a side-channel JSONL file as truth.
 GATEWAY_LOG = os.path.expanduser("~/.defenseclaw/gateway.log")
-GATEWAY_JSONL = os.path.expanduser("~/.defenseclaw/gateway.jsonl")
 SPLUNK_BRIDGE_DIR = os.path.expanduser("~/.defenseclaw/splunk-bridge")
 
 
@@ -175,65 +170,6 @@ class TestRunner:
                 return sum(1 for _ in f)
         except Exception:
             return 0
-
-    def jsonl_event_contains(
-        self,
-        name: str,
-        event_type: str,
-        field_path: str,
-        expected: str,
-    ) -> bool:
-        """Scan gateway.jsonl for at least one event whose event_type
-        matches and whose `<payload-key>.<field>` equals (or contains)
-        `expected`. field_path is a dotted path like "verdict.action"
-        or "lifecycle.transition" — matches the JSON shape emitted by
-        internal/gatewaylog."""
-        try:
-            with open(GATEWAY_JSONL) as f:
-                raw_lines = f.readlines()
-        except FileNotFoundError:
-            self._record(name, False, "", f"{GATEWAY_JSONL} not found")
-            return False
-        except OSError as e:
-            self._record(name, False, "", f"read gateway.jsonl: {e}")
-            return False
-
-        parts = field_path.split(".")
-        if not parts:
-            self._record(name, False, "", "field_path must not be empty")
-            return False
-
-        import json as _json
-
-        total = 0
-        for raw in raw_lines:
-            raw = raw.strip()
-            if not raw or not raw.startswith("{"):
-                continue
-            total += 1
-            try:
-                obj = _json.loads(raw)
-            except _json.JSONDecodeError:
-                continue
-            if obj.get("event_type") != event_type:
-                continue
-            cursor = obj
-            ok = True
-            for part in parts:
-                if not isinstance(cursor, dict) or part not in cursor:
-                    ok = False
-                    break
-                cursor = cursor[part]
-            if ok and expected.lower() in str(cursor).lower():
-                self._record(name, True, f"matched {event_type}.{field_path}={cursor!r}")
-                return True
-
-        self._record(
-            name, False, "",
-            f"no {event_type} event with {field_path} containing {expected!r} "
-            f"(searched {total} events in {GATEWAY_JSONL})",
-        )
-        return False
 
     def _record(self, name: str, passed: bool, output: str, error: str = ""):
         tag = "\033[92mPASS\033[0m" if passed else "\033[91mFAIL\033[0m"
@@ -388,12 +324,21 @@ def test_api_guardrail(t: TestRunner):
     t.api(
         "POST /v1/guardrail/evaluate",
         "POST", "/v1/guardrail/evaluate",
-        body={"direction": "pre_call", "mode": "action", "severity": "HIGH", "local_severity": "medium"},
+        body={"evaluation_id": "e2e-api-guardrail-evaluate", "direction": "prompt", "mode": "action",
+              "scanner_mode": "local", "local_result": {
+                  "action": "alert", "severity": "MEDIUM", "findings": [], "reason": "e2e test",
+              }},
     )
     t.api(
         "POST /v1/guardrail/event",
         "POST", "/v1/guardrail/event",
-        body={"direction": "pre_call", "action": "blocked", "severity": "HIGH", "scanner": "policy-rules", "reason": "e2e test"},
+        body={
+            "evaluation_id": "e2e-api-guardrail",
+            "direction": "prompt",
+            "action": "block",
+            "severity": "HIGH",
+            "reason": "e2e test",
+        },
     )
     t.api("GET /v1/guardrail/config", "GET", "/v1/guardrail/config")
 
@@ -729,7 +674,7 @@ def test_lifecycle_policy_change(t: TestRunner):
     t.api("lifecycle:policy: reload after default",
           "POST", "/policy/reload", expect_in="reloaded")
 
-    default_result = t.api(
+    t.api(
         "lifecycle:policy: skill-actions HIGH (default)",
         "POST", "/policy/evaluate/skill-actions",
         body={"severity": "high"})
@@ -766,7 +711,10 @@ def test_lifecycle_policy_change(t: TestRunner):
     # 5. Guardrail evaluate under current policy
     t.api("lifecycle:policy: guardrail eval",
           "POST", "/v1/guardrail/evaluate",
-          body={"direction": "pre_call", "mode": "action", "severity": "HIGH", "local_severity": "high"})
+          body={"evaluation_id": "e2e-lifecycle-guardrail-evaluate", "direction": "prompt", "mode": "action",
+                "scanner_mode": "local", "local_result": {
+                    "action": "block", "severity": "HIGH", "findings": [], "reason": "lifecycle test",
+                }})
 
     # 6. Revert to default
     t.check("lifecycle:policy: revert to default",
@@ -775,60 +723,48 @@ def test_lifecycle_policy_change(t: TestRunner):
           "POST", "/policy/reload", expect_in="reloaded")
 
 
-def test_lifecycle_otel_signals(t: TestRunner, log_start: int):
-    """Verify OTel signals were emitted during lifecycle tests."""
-    print("\n--- Lifecycle: OTel Signal Verification ---")
+def test_lifecycle_observability_signals(t: TestRunner, log_start: int):
+    """Verify lifecycle activity reaches canonical producers and APIs."""
+    print("\n--- Lifecycle: Canonical Signal Verification ---")
 
     time.sleep(3)
 
     # Admission decisions should have been logged from block/allow API calls
-    t.log_contains("lifecycle:otel: block/allow logged",
+    t.log_contains("lifecycle:observability: block/allow logged",
                    "block", since_line=log_start)
 
     # OPA policy engine was loaded at startup
-    t.log_contains("lifecycle:otel: OPA engine loaded",
+    t.log_contains("lifecycle:observability: OPA engine loaded",
                    "OPA", since_line=0)
 
     # Guardrail was exercised via API
-    t.log_contains("lifecycle:otel: guardrail logged",
+    t.log_contains("lifecycle:observability: guardrail logged",
                    "guardrail", since_line=0)
 
     # Inspect was exercised earlier in Phase 2
-    t.log_contains("lifecycle:otel: inspect evaluations logged",
+    t.log_contains("lifecycle:observability: inspect evaluations logged",
                    "inspect", since_line=0)
 
     # Emit a guardrail event and verify it's accepted (produces metric)
-    t.api("lifecycle:otel: guardrail event (metric trigger)",
+    t.api("lifecycle:observability: guardrail event accepted",
           "POST", "/v1/guardrail/event",
-          body={"direction": "post_call", "action": "allowed", "severity": "LOW",
-                "scanner": "e2e-lifecycle", "reason": "lifecycle signal test"})
+          body={
+              "evaluation_id": "e2e-lifecycle-guardrail",
+              "direction": "completion",
+              "action": "allow",
+              "severity": "LOW",
+              "scanner": "e2e-lifecycle",
+              "reason": "lifecycle signal test",
+          })
 
     # Submit an audit event and verify it's accepted
-    t.api("lifecycle:otel: audit event (metric trigger)",
+    t.api("lifecycle:observability: audit event accepted",
           "POST", "/audit/event",
           body={"action": "e2e-lifecycle-signal", "target": "lifecycle-target",
                 "details": "signal verification"})
 
-    # Verify HEC accepts events (if Splunk container running)
-    if _is_splunk_container_running():
-        try:
-            hec_url = "http://127.0.0.1:8088/services/collector/event"
-            hec_token = "00000000-0000-0000-0000-000000000001"
-            payload = json.dumps({
-                "event": {"action": "e2e-lifecycle-hec", "source": "test-e2e-cli", "phase": "lifecycle"},
-                "index": "defenseclaw_local",
-            }).encode()
-            req = urllib.request.Request(hec_url, data=payload, method="POST")
-            req.add_header("Authorization", f"Splunk {hec_token}")
-            req.add_header("Content-Type", "application/json")
-            resp = urllib.request.urlopen(req, timeout=5)
-            t._record("lifecycle:otel: HEC lifecycle event accepted", resp.status == 200, "")
-        except Exception as e:
-            t._record("lifecycle:otel: HEC lifecycle event accepted", False, "", str(e))
-
-
 # -----------------------------------------------------------------------
-# Phase 4: Splunk Docker + OTel verification
+# Phase 4: Splunk Docker + canonical destination verification
 # -----------------------------------------------------------------------
 
 def _is_splunk_container_running() -> bool:
@@ -906,36 +842,52 @@ def test_splunk_docker(t: TestRunner):
         t._record("splunk web reachable", False, "", "Splunk Web not responding after 90s")
 
 
-def test_splunk_otel_signals(t: TestRunner):
-    print("\n--- Splunk OTel Signal Verification ---")
+def test_splunk_destination_signals(t: TestRunner):
+    print("\n--- Splunk Canonical Destination Verification ---")
     t.check("gateway status shows telemetry", "./defenseclaw-gateway status", expect_in="telemetry")
-    t.check("gateway status shows splunk", "./defenseclaw-gateway status", expect_in="splunk")
-    t.check("gateway status shows traces", "./defenseclaw-gateway status", expect_in="traces")
-    t.check("gateway status shows metrics", "./defenseclaw-gateway status", expect_in="metrics")
 
-    # Check gateway.log for OTel provider initialization
-    t.log_contains("otel: provider initialized", "otel")
-
-    # Verify HEC events landed (if Splunk is running)
     if _is_splunk_container_running():
-        try:
-            hec_url = "http://127.0.0.1:8088/services/collector/event"
-            hec_token = "00000000-0000-0000-0000-000000000001"
-            data = json.dumps({"event": {"action": "e2e-otel-test", "source": "test-e2e-cli"}, "index": "defenseclaw_local"}).encode()
-            req = urllib.request.Request(hec_url, data=data, method="POST")
-            req.add_header("Authorization", f"Splunk {hec_token}")
-            req.add_header("Content-Type", "application/json")
-            resp = urllib.request.urlopen(req, timeout=5)
-            t._record("HEC event accepted", resp.status == 200, f"status={resp.status}")
-        except Exception as e:
-            t._record("HEC event accepted", False, "", str(e))
+        configure = (
+            "defenseclaw setup observability add splunk-hec "
+            "--name e2e-splunk --non-interactive --signals logs "
+            "--endpoint http://127.0.0.1:8088/services/collector/event "
+            "--index defenseclaw_local --source defenseclaw-e2e "
+            "--sourcetype defenseclaw:e2e "
+            "--token '00000000-0000-0000-0000-000000000001'"
+        )
+        t.check("configure canonical Splunk destination", configure, expect_in="Splunk HEC")
+        t.check("validate canonical v8 config", "defenseclaw config validate", expect_in="valid")
+        t.check(
+            "compiled log plan includes Splunk destination",
+            "defenseclaw observability plan --signal logs --format json",
+            expect_in="e2e-splunk",
+        )
+        t.check(
+            "canonical Splunk write probe accepted",
+            "defenseclaw observability destination test e2e-splunk --write-probe",
+            expect_in="write probe: accepted",
+        )
+        t.api(
+            "canonical audit event submitted for Splunk export",
+            "POST",
+            "/audit/event",
+            body={
+                "action": "e2e-splunk-export",
+                "target": "canonical-v8-destination",
+                "details": "Splunk destination verification",
+            },
+        )
+        time.sleep(5)
 
         # Search Splunk for events via REST API (port 8089, HTTPS with self-signed cert)
         try:
             import ssl
             search_url = "https://127.0.0.1:8089/services/search/jobs/export"
             data = urllib.parse.urlencode({
-                "search": "search index=defenseclaw_local | head 1",
+                "search": (
+                    "search index=defenseclaw_local source=defenseclaw-e2e "
+                    "sourcetype=defenseclaw:e2e | head 5"
+                ),
                 "output_mode": "json",
             }).encode()
             req = urllib.request.Request(search_url, data=data, method="POST")
@@ -1011,12 +963,12 @@ def main():
         test_lifecycle_plugin(t)
         test_lifecycle_mcp(t)
         test_lifecycle_policy_change(t)
-        test_lifecycle_otel_signals(t, log_start)
+        test_lifecycle_observability_signals(t, log_start)
 
     if not args.skip_splunk:
-        # Phase 6: Splunk Docker + OTel signals
+        # Phase 6: Splunk Docker + canonical destination signals
         test_splunk_docker(t)
-        test_splunk_otel_signals(t)
+        test_splunk_destination_signals(t)
 
     sys.exit(t.summary())
 

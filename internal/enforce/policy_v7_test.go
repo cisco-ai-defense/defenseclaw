@@ -5,7 +5,6 @@
 package enforce
 
 import (
-	"context"
 	"testing"
 )
 
@@ -18,16 +17,4 @@ func TestPolicyStableID_Deterministic(t *testing.T) {
 	if PolicyStableID("") != "none" {
 		t.Fatal("empty dir should be none")
 	}
-}
-
-func TestAdmissionDecideSpan_EndToEnd(t *testing.T) {
-	ctx := context.Background()
-	_, span := StartAdmissionDecideSpan(ctx, "skill", "my-skill", "pol-1")
-	if span == nil {
-		t.Fatal("expected span")
-	}
-	EndAdmissionDecideSpan(span, "blocked", "unit test", "pol-1", nil)
-
-	// Accept nil span (OTel disabled / noop):
-	EndAdmissionDecideSpan(nil, "clean", "", "", nil)
 }

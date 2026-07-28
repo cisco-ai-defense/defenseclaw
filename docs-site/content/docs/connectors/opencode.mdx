@@ -16,7 +16,7 @@ The OpenCode connector wires DefenseClaw into [opencode](https://opencode.ai). U
 />
 
 <Callout type="info">
-**No `opencode.json` edit, no shell shim.** Local plugins under `~/.config/opencode/plugins/` are loaded automatically, so installing the connector is just writing one file. The bridge uses the runtime's global `fetch`, so it needs no npm dependencies (and never triggers a `bun install`). Because the mechanism is a JavaScript plugin rather than a shell script, OpenCode is cross-platform — including Windows — without the native `defenseclaw-gateway hook` entrypoint used by the other hook connectors on Windows.
+**No `opencode.json` edit, no shell shim.** Local plugins under `~/.config/opencode/plugins/` are loaded automatically, so installing the connector is just writing one file. The bridge uses the runtime's global `fetch`, so it needs no npm dependencies (and never triggers a `bun install`). The JavaScript plugin is supported on macOS and Linux. The DefenseClaw OpenCode integration is not certified on Windows.
 </Callout>
 
 ## Setup

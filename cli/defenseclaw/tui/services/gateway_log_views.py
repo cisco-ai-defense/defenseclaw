@@ -8,17 +8,16 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Gateway JSONL read models for the Textual Logs and Audit-adjacent panels."""
+"""Canonical event-history read models for Logs and Audit-adjacent panels."""
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
-from defenseclaw.tui.services.gateway_events import parse_timestamp
+from defenseclaw.tui.services.v8_event_history import V8EventHistoryRow, load_v8_event_history, payload_text
 
 GatewayLogEventType = Literal[
     "verdict",
@@ -86,7 +85,7 @@ class JudgeFinding:
 
 @dataclass(frozen=True)
 class GatewayLogRow:
-    """Typed projection of one gateway.jsonl event for Logs-panel views."""
+    """Typed projection of one canonical event-history row."""
 
     raw: str
     timestamp: datetime | None = None
@@ -100,6 +99,8 @@ class GatewayLogRow:
     kind: str = ""
     request_id: str = ""
     run_id: str = ""
+    trace_id: str = ""
+    span_id: str = ""
     session_id: str = ""
     provider: str = ""
     agent_id: str = ""
@@ -134,7 +135,7 @@ class GatewayLogRow:
 
 @dataclass(frozen=True)
 class GatewayLogViews:
-    """Split gateway.jsonl into operator-facing Verdicts and OTEL streams."""
+    """Split canonical history into operator-facing verdict and telemetry views."""
 
     verdict_rows: tuple[GatewayLogRow, ...] = ()
     verdict_lines: tuple[str, ...] = ()
@@ -143,76 +144,51 @@ class GatewayLogViews:
     error: str = ""
 
 
-def parse_gateway_log_row(line: str) -> GatewayLogRow | None:
-    """Parse one gateway.jsonl line into the Go TUI's structured row shape."""
-
-    stripped = line.strip()
-    if not stripped or not stripped.startswith("{"):
-        return None
-    try:
-        payload = json.loads(stripped)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-
-    raw_ts = payload.get("ts")
-    timestamp = parse_timestamp(raw_ts)
-    if isinstance(raw_ts, str) and raw_ts and timestamp is None:
-        return None
-
-    row = GatewayLogRow(
-        raw=stripped,
-        timestamp=timestamp,
-        event_type=_string(payload.get("event_type")),
-        severity=_string(payload.get("severity")),
-        model=_string(payload.get("model")),
-        direction=_string(payload.get("direction")),
-        request_id=_string(payload.get("request_id")),
-        run_id=_string(payload.get("run_id")),
-        session_id=_string(payload.get("session_id")),
-        provider=_string(payload.get("provider")),
-        agent_id=_string(payload.get("agent_id")),
-    )
-    row = _with_verdict(row, _mapping(payload.get("verdict")))
-    row = _with_judge(row, _mapping(payload.get("judge")))
-    row = _with_lifecycle(row, _mapping(payload.get("lifecycle")))
-    row = _with_error(row, _mapping(payload.get("error")))
-    row = _with_diagnostic(row, _mapping(payload.get("diagnostic")))
-    row = _with_scan(row, _mapping(payload.get("scan")))
-    row = _with_scan_finding(row, _mapping(payload.get("scan_finding")))
-    return _with_activity(row, _mapping(payload.get("activity")))
-
-
-def load_gateway_log_views(
-    path: Path,
+def load_v8_log_views(
+    store: object | None,
     *,
     action_filter: str = "",
     event_type_filter: str = "",
     severity_filter: str = "",
-    max_bytes: int = 512 * 1024,
-    max_lines: int = 2000,
+    limit: int = 1000,
 ) -> GatewayLogViews:
-    """Load and split the gateway event tail, applying Verdicts chip filters."""
+    """Project canonical SQLite logs into the existing structured TUI view."""
 
-    try:
-        raw_lines = _tail_lines(path, max_bytes=max_bytes, max_lines=max_lines)
-    except OSError as exc:
-        return GatewayLogViews(error=f"Cannot open: {exc}")
+    rows = load_v8_event_history(store, limit=limit)
+    return project_v8_log_views(
+        rows,
+        action_filter=action_filter,
+        event_type_filter=event_type_filter,
+        severity_filter=severity_filter,
+    )
+
+
+def project_v8_log_views(
+    rows: tuple[V8EventHistoryRow, ...],
+    *,
+    action_filter: str = "",
+    event_type_filter: str = "",
+    severity_filter: str = "",
+) -> GatewayLogViews:
+    """Project an already-loaded canonical history snapshot into log views.
+
+    Keeping this transformation independent from SQLite lets the TUI load the
+    canonical window once in a background worker and share it with Logs,
+    Alerts, Activity, and Overview.  ``load_v8_log_views`` remains as the
+    compatibility wrapper for callers that own a store directly.
+    """
 
     verdict_rows: list[GatewayLogRow] = []
     verdict_lines: list[str] = []
     otel_rows: list[GatewayLogRow] = []
     otel_lines: list[str] = []
-    for line in raw_lines:
-        row = parse_gateway_log_row(line)
-        if row is None:
+    for history in reversed(rows):
+        row = _v8_gateway_log_row(history)
+        otel_rows.append(row)
+        otel_lines.append(_render_v8_event_line(history, row))
+        if row.event_type not in {"verdict", "judge", "scan", "scan_finding", "error"}:
             continue
-        if is_otel_log_row(row):
-            otel_rows.append(row)
-            otel_lines.append(render_otel_line(row))
-            continue
-        if not _matches_structured_filters(
+        if not matches_structured_filters(
             row,
             action_filter=action_filter,
             event_type_filter=event_type_filter,
@@ -221,13 +197,150 @@ def load_gateway_log_views(
             continue
         verdict_rows.append(row)
         verdict_lines.append(render_gateway_log_line(row))
-
     return GatewayLogViews(
         verdict_rows=tuple(verdict_rows),
         verdict_lines=tuple(verdict_lines),
         otel_rows=tuple(otel_rows),
         otel_lines=tuple(otel_lines),
     )
+
+
+def matches_structured_filters(
+    row: GatewayLogRow,
+    *,
+    action_filter: str = "",
+    event_type_filter: str = "",
+    severity_filter: str = "",
+) -> bool:
+    """Public pure predicate used by cached TUI log snapshots."""
+
+    return _matches_structured_filters(
+        row,
+        action_filter=action_filter,
+        event_type_filter=event_type_filter,
+        severity_filter=severity_filter,
+    )
+
+
+def _v8_gateway_log_row(history: V8EventHistoryRow) -> GatewayLogRow:
+    payload = history.payload
+    event_type = _v8_event_type(history)
+    severity = history.severity or payload_text(payload, "defenseclaw.security.severity") or "INFO"
+    action = payload_text(
+        payload,
+        "defenseclaw.guardrail.decision",
+        "defenseclaw.judge.action",
+        "defenseclaw.guardrail.effective_action",
+        "defenseclaw.hook.result",
+        "defenseclaw.enforcement.effective_action",
+        "defenseclaw.approval.result",
+    ) or history.outcome or history.action
+    reason = payload_text(
+        payload,
+        "defenseclaw.guardrail.reason",
+        "defenseclaw.guardrail.evidence_summary",
+        "defenseclaw.finding.description",
+        "defenseclaw.judge.error_summary",
+        "defenseclaw.error.summary",
+    ) or history.details
+    details = {
+        "event_name": history.event_name,
+        "source": history.source,
+        "connector": history.connector,
+        "redaction": history.redaction_profile,
+    }
+    for key, value in payload.items():
+        if len(details) >= 12 or not isinstance(value, (str, int, float, bool)):
+            continue
+        details[key.rsplit(".", 1)[-1]] = str(value)[:256]
+    raw = json.dumps(
+        {
+            "event_name": history.event_name,
+            "bucket": history.bucket,
+            "source": history.source,
+            "severity": severity,
+            "redaction_profile": history.redaction_profile,
+            "body": payload,
+            "payload_truncated": history.payload_truncated,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    categories = payload.get("defenseclaw.guardrail.rule_ids")
+    return GatewayLogRow(
+        raw=raw,
+        timestamp=history.timestamp,
+        event_type=event_type,
+        severity=severity,
+        action=action,
+        stage=history.event_name.rsplit(".", 1)[-1],
+        direction=payload_text(payload, "gen_ai.operation.name", "defenseclaw.hook.event"),
+        model=payload_text(payload, "gen_ai.request.model", "gen_ai.response.model"),
+        reason=reason,
+        kind=payload_text(payload, "defenseclaw.judge.kind"),
+        request_id=history.request_id,
+        run_id=history.run_id,
+        trace_id=history.trace_id,
+        span_id=history.span_id,
+        session_id=history.session_id,
+        provider=history.source,
+        agent_id=payload_text(payload, "defenseclaw.agent.id"),
+        categories=tuple(str(item) for item in categories) if isinstance(categories, list) else (),
+        latency_ms=_int(payload.get("defenseclaw.guardrail.latency_ms")),
+        judge_input_bytes=_int(payload.get("defenseclaw.judge.input_bytes")),
+        judge_severity=severity,
+        judge_parse_error=payload_text(payload, "defenseclaw.judge.parse_error"),
+        lifecycle_subsystem=history.bucket,
+        lifecycle_transition=history.event_name,
+        lifecycle_details=details,
+        error_subsystem=history.source,
+        error_code=payload_text(payload, "defenseclaw.error.code", "defenseclaw.telemetry.rejection_reason"),
+        error_message=reason,
+        diagnostic_component=history.source,
+        diagnostic_message=reason,
+        scan_scanner=payload_text(payload, "defenseclaw.scan.scanner"),
+        scan_target=payload_text(payload, "defenseclaw.scan.target_ref", "defenseclaw.finding.target_ref"),
+        scan_id=payload_text(payload, "defenseclaw.scan.id") or history.scan_id,
+        scan_verdict=action,
+        finding_rule_id=payload_text(payload, "defenseclaw.finding.rule_id"),
+        finding_line=_int(payload.get("defenseclaw.finding.line_number")),
+        activity_actor=history.actor,
+        activity_action=history.action or history.event_name,
+        activity_target=payload_text(
+            payload,
+            "defenseclaw.config.path",
+            "defenseclaw.finding.target_ref",
+            "defenseclaw.enforcement.target_ref",
+        ),
+    )
+
+
+def _v8_event_type(history: V8EventHistoryRow) -> str:
+    if history.event_name.startswith("guardrail.judge."):
+        return "judge"
+    if history.bucket in {"guardrail.evaluation", "enforcement.action"}:
+        return "verdict"
+    if history.bucket == "security.finding":
+        return "scan_finding"
+    if history.bucket == "asset.scan":
+        return "scan"
+    if history.bucket == "compliance.activity":
+        return "activity"
+    if history.bucket in {"platform.health", "diagnostic", "telemetry.ingest"}:
+        return "error" if history.severity.upper() in {"CRITICAL", "HIGH", "ERROR"} else "diagnostic"
+    return "lifecycle"
+
+
+def _render_v8_event_line(history: V8EventHistoryRow, row: GatewayLogRow) -> str:
+    target = row.scan_target or row.activity_target or "-"
+    suffix = f" action={row.action}" if row.action else ""
+    if row.reason:
+        suffix += " -- " + truncate_text(row.reason, 100)
+    return (
+        f"{timestamp_millis(row.timestamp)} V8 {_upper_or(row.severity, 'info'):<8} "
+        f"{history.bucket:<20} {history.event_name} target={truncate_text(target, 36)}{suffix}"
+    ).rstrip()
 
 
 def render_gateway_log_line(row: GatewayLogRow) -> str:
@@ -304,9 +417,9 @@ def render_gateway_log_line(row: GatewayLogRow) -> str:
 
 
 def render_otel_line(row: GatewayLogRow) -> str:
-    """Render connector telemetry and Codex notification rows.
+    """Render canonical connector telemetry and Codex notification rows.
 
-    Connector-hook lifecycle events ship with ``lifecycle.details`` of
+    Connector-hook history projections carry ``lifecycle_details`` of
     the form ``{action, actor, audit_id, target, details}`` where the
     inner ``details`` is itself a kv-encoded string (``connector=…
     action=allow severity=NONE mode=observe …``). Dumping all of that
@@ -318,12 +431,16 @@ def render_otel_line(row: GatewayLogRow) -> str:
     For HOOK rows we instead promote the high-signal fields
     (connector, hook phase, decision, severity if elevated, elapsed)
     into a compact one-liner and drop the audit_id/actor noise. Other
-    OTEL/CODEX rows keep the legacy rendering.
+    telemetry rows keep the standard rendering.
     """
 
     ts = timestamp_millis(row.timestamp)
-    action = row.activity_action or row.lifecycle_details.get("action", "")
-    target = row.activity_target or row.lifecycle_details.get("target", "")
+    if row.event_type == "lifecycle":
+        action = row.lifecycle_details.get("action", "")
+        target = row.lifecycle_details.get("target", "")
+    else:
+        action = row.activity_action
+        target = row.activity_target
     stream = "OTEL"
     lowered = action.lower()
     if lowered.startswith("codex.notify"):
@@ -397,7 +514,7 @@ def _prettify_log_kv_value(key: str, value: str) -> str:
     Mirrors the audit-panel prettifier so ``raw_payload=<redacted
     len=8 sha=84ed0c96>`` becomes ``redacted · 8 bytes · sha:…`` and
     booleans become yes/no. Kept local so logs and audit can evolve
-    independently if the JSONL schema diverges.
+    independently as the canonical event projection evolves.
     """
 
     if value.startswith("<") and value.endswith(">"):
@@ -498,6 +615,8 @@ def detail_pairs(row: GatewayLogRow) -> tuple[tuple[str, str], ...]:
         ("Provider", row.provider),
         ("Request ID", row.request_id),
         ("Run ID", row.run_id),
+        ("Trace ID", row.trace_id),
+        ("Span ID", row.span_id),
         ("Session ID", row.session_id),
     ):
         if value:
@@ -676,183 +795,6 @@ def _matches_structured_filters(
     return True
 
 
-def _tail_lines(path: Path, *, max_bytes: int, max_lines: int) -> tuple[str, ...]:
-    with path.open("rb") as file:
-        file.seek(0, 2)
-        size = file.tell()
-        read_size = min(size, max_bytes)
-        file.seek(size - read_size)
-        data = file.read(read_size)
-    if size > read_size:
-        _, _, data = data.partition(b"\n")
-    lines = data.decode("utf-8", errors="replace").splitlines()
-    if len(lines) > max_lines:
-        lines = lines[-max_lines:]
-    return tuple(lines)
-
-
-def _with_verdict(row: GatewayLogRow, verdict: dict[str, Any]) -> GatewayLogRow:
-    if not verdict:
-        return row
-    return GatewayLogRow(
-        **{
-            **row.__dict__,
-            "stage": _string(verdict.get("stage")),
-            "action": _string(verdict.get("action")),
-            "reason": _string(verdict.get("reason")),
-            "categories": tuple(_string(item) for item in _sequence(verdict.get("categories"))),
-            "latency_ms": _int(verdict.get("latency_ms")),
-        }
-    )
-
-
-def _with_judge(row: GatewayLogRow, judge: dict[str, Any]) -> GatewayLogRow:
-    if not judge:
-        return row
-    action = row.action or _string(judge.get("action"))
-    latency = row.latency_ms or _int(judge.get("latency_ms"))
-    return GatewayLogRow(
-        **{
-            **row.__dict__,
-            "kind": _string(judge.get("kind")),
-            "action": action,
-            "judge_severity": _string(judge.get("severity")),
-            "judge_input_bytes": _int(judge.get("input_bytes")),
-            "latency_ms": latency,
-            "judge_findings": tuple(_judge_finding(item) for item in _sequence(judge.get("findings"))),
-            "judge_raw": _string(judge.get("raw_response")),
-            "judge_parse_error": _string(judge.get("parse_error")),
-        }
-    )
-
-
-def _with_lifecycle(row: GatewayLogRow, lifecycle: dict[str, Any]) -> GatewayLogRow:
-    if not lifecycle:
-        return row
-    return GatewayLogRow(
-        **{
-            **row.__dict__,
-            "lifecycle_subsystem": _string(lifecycle.get("subsystem")),
-            "lifecycle_transition": _string(lifecycle.get("transition")),
-            "lifecycle_details": _string_mapping(lifecycle.get("details")),
-        }
-    )
-
-
-def _with_error(row: GatewayLogRow, error: dict[str, Any]) -> GatewayLogRow:
-    if not error:
-        return row
-    return GatewayLogRow(
-        **{
-            **row.__dict__,
-            "error_subsystem": _string(error.get("subsystem")),
-            "error_code": _string(error.get("code")),
-            "error_message": _string(error.get("message")),
-            "error_cause": _string(error.get("cause")),
-        }
-    )
-
-
-def _with_diagnostic(row: GatewayLogRow, diagnostic: dict[str, Any]) -> GatewayLogRow:
-    if not diagnostic:
-        return row
-    return GatewayLogRow(
-        **{
-            **row.__dict__,
-            "diagnostic_component": _string(diagnostic.get("component")),
-            "diagnostic_message": _string(diagnostic.get("message")),
-        }
-    )
-
-
-def _with_scan(row: GatewayLogRow, scan: dict[str, Any]) -> GatewayLogRow:
-    if not scan:
-        return row
-    latency = row.latency_ms or _int(scan.get("duration_ms"))
-    return GatewayLogRow(
-        **{
-            **row.__dict__,
-            "scan_id": _string(scan.get("scan_id")),
-            "scan_scanner": _string(scan.get("scanner")),
-            "scan_target": _string(scan.get("target")),
-            "scan_verdict": _string(scan.get("verdict")),
-            "action": "scan",
-            "latency_ms": latency,
-        }
-    )
-
-
-def _with_scan_finding(row: GatewayLogRow, finding: dict[str, Any]) -> GatewayLogRow:
-    if not finding:
-        return row
-    severity = _string(finding.get("severity")) or row.severity
-    return GatewayLogRow(
-        **{
-            **row.__dict__,
-            "scan_id": _string(finding.get("scan_id")),
-            "scan_scanner": _string(finding.get("scanner")),
-            "scan_target": _string(finding.get("target")),
-            "finding_rule_id": _string(finding.get("rule_id")),
-            "finding_line": _int(finding.get("line_number")),
-            "severity": severity,
-            "action": "finding",
-        }
-    )
-
-
-def _with_activity(row: GatewayLogRow, activity: dict[str, Any]) -> GatewayLogRow:
-    if not activity:
-        return row
-    target_type = _string(activity.get("target_type"))
-    target_id = _string(activity.get("target_id"))
-    target = f"{target_type}:{target_id}" if target_type else target_id
-    action = _string(activity.get("action"))
-    return GatewayLogRow(
-        **{
-            **row.__dict__,
-            "activity_actor": _string(activity.get("actor")),
-            "activity_action": action,
-            "activity_target": target,
-            "version_from": _string(activity.get("version_from")),
-            "version_to": _string(activity.get("version_to")),
-            "action": action,
-        }
-    )
-
-
-def _judge_finding(raw: object) -> JudgeFinding:
-    item = _mapping(raw)
-    return JudgeFinding(
-        category=_string(item.get("category")),
-        severity=_string(item.get("severity")),
-        rule=_string(item.get("rule")),
-        source=_string(item.get("source")),
-        confidence=_float(item.get("confidence")),
-    )
-
-
-def _mapping(raw: object) -> dict[str, Any]:
-    return raw if isinstance(raw, dict) else {}
-
-
-def _string_mapping(raw: object) -> dict[str, str]:
-    if not isinstance(raw, dict):
-        return {}
-    return {str(key): _string(value) for key, value in raw.items()}
-
-
-def _sequence(raw: object) -> tuple[object, ...]:
-    if isinstance(raw, list | tuple):
-        return tuple(raw)
-    return ()
-
-
-def _string(raw: object) -> str:
-    if raw is None:
-        return ""
-    return str(raw)
-
-
 def _int(raw: object) -> int:
     if isinstance(raw, bool):
         return int(raw)
@@ -866,17 +808,6 @@ def _int(raw: object) -> int:
         except ValueError:
             return 0
     return 0
-
-
-def _float(raw: object) -> float:
-    if isinstance(raw, int | float):
-        return float(raw)
-    if isinstance(raw, str):
-        try:
-            return float(raw)
-        except ValueError:
-            return 0.0
-    return 0.0
 
 
 def _non_empty(value: str, fallback: str) -> str:

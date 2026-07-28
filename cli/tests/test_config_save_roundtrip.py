@@ -14,27 +14,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests for ``Config.save()`` round-trip persistence.
-through the existing on-disk YAML so that operator-configured but
-Python-dataclass-UNmodelled keys (``audit_sinks:``,
-``otel.resource.attributes:``) survive every ``defenseclaw setup
-<connector>`` invocation.
+"""Regression tests for exact-v8 ``Config.save()`` persistence.
 
-Before this fix, a typical operator workflow silently broke their SIEM
-forwarding:
-
-    1. ``defenseclaw setup splunk --logs``  → adds ``audit_sinks: [...]``
-    2. ``defenseclaw setup codex``          → calls ``cfg.save()`` →
-                                              dataclass-only serializer
-                                              dropped the whole block
-    3. Splunk dashboards go dark; nothing logs the rewrite.
-
-The fix in ``config.py::Config.save`` reads the existing file, deep-merges
-the dataclass output over it, and atomically replaces the file. These
-tests assert each behaviour the merge contract promises, including the
-"dataclass-still-owns-its-keys" invariant so the byte-stability strips
-in ``_config_to_dict`` (legacy ``splunk:`` v4 drop, ``notifications:``
-at-defaults drop, etc.) keep working.
+The Python CLI applies modeled deltas over the latest on-disk document so the
+canonical observability graph and future Go-owned fields survive ordinary
+setup commands. Writes remain schema-validated, permission-safe, and atomic.
 """
 
 import logging
@@ -42,6 +26,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -50,12 +35,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from defenseclaw import config as config_module  # noqa: E402
 from defenseclaw.config import (  # noqa: E402
     Config,
-    GatewayConfig,
-    NotificationsConfig,
-    _deep_merge_nested,
+    ConfigVersionError,
     _load_existing_config_yaml,
-    _merge_preserving_unmodeled,
-    _owned_top_level_keys,
+    default_config,
+    load,
+    prepare_fresh_v8_config,
 )
 
 
@@ -71,241 +55,19 @@ class TestConfigVersionPreflight(unittest.TestCase):
 
 def _make_cfg(tmpdir: str, **overrides) -> Config:
     """Build a Config with the minimum required path fields for tests."""
-    base: dict = {
-        "data_dir": tmpdir,
-        "audit_db": os.path.join(tmpdir, "audit.db"),
-        "quarantine_dir": os.path.join(tmpdir, "quarantine"),
-        "plugin_dir": os.path.join(tmpdir, "plugins"),
-        "policy_dir": os.path.join(tmpdir, "policies"),
-        "environment": "macos",
-    }
-    base.update(overrides)
-    return Config(**base)
+    cfg = prepare_fresh_v8_config(default_config())
+    cfg.data_dir = tmpdir
+    cfg.audit_db = os.path.join(tmpdir, "audit.db")
+    cfg.quarantine_dir = os.path.join(tmpdir, "quarantine")
+    cfg.plugin_dir = os.path.join(tmpdir, "plugins")
+    cfg.policy_dir = os.path.join(tmpdir, "policies")
+    cfg.environment = "macos"
+    for name, value in overrides.items():
+        setattr(cfg, name, value)
+    return cfg
 
 
-class TestConfigSaveRoundtripPreservesAuditSinks(unittest.TestCase):
-    """``audit_sinks:`` must survive ``cfg.save()``.
-
-    Reproduces the operator workflow that previously caused silent
-    data loss on every connector switch.
-    """
-
-    def test_audit_sinks_block_survives_dataclass_save(self):
-        """Pre-existing ``audit_sinks:`` block stays intact after ``cfg.save()``."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg_path = os.path.join(tmpdir, "config.yaml")
-            # Simulate `defenseclaw setup splunk --logs` having written
-            # the file: dataclass fields + an unmodeled audit_sinks list.
-            seeded = {
-                "data_dir": tmpdir,
-                "environment": "macos",
-                "audit_sinks": [
-                    {
-                        "name": "splunk-hec-localhost",
-                        "kind": "splunk_hec",
-                        "enabled": True,
-                        "splunk_hec": {
-                            "endpoint": "http://127.0.0.1:8088/services/collector/event",
-                            "token_env": "SPLUNK_HEC_TOKEN",
-                            "index": "defenseclaw",
-                            "source": "defenseclaw",
-                            "sourcetype": "_json",
-                            "verify_tls": False,
-                        },
-                    },
-                ],
-            }
-            with open(cfg_path, "w") as f:
-                yaml.safe_dump(seeded, f, sort_keys=False)
-
-            # Now mimic `defenseclaw setup codex` changing a modeled
-            # field (claw mode) and calling cfg.save().
-            cfg = _make_cfg(tmpdir)
-            cfg.claw.mode = "codex"
-            cfg.save()
-
-            with open(cfg_path) as f:
-                after = yaml.safe_load(f)
-
-        self.assertIn(
-            "audit_sinks", after,
-            msg=(
-                "audit_sinks block was stripped by Config.save() — this is "
-                "the regression that broke Splunk forwarding on every "
-                "connector switch."
-            ),
-        )
-        self.assertEqual(len(after["audit_sinks"]), 1)
-        sink = after["audit_sinks"][0]
-        self.assertEqual(sink["name"], "splunk-hec-localhost")
-        self.assertEqual(sink["kind"], "splunk_hec")
-        self.assertTrue(sink["enabled"])
-        self.assertEqual(
-            sink["splunk_hec"]["endpoint"],
-            "http://127.0.0.1:8088/services/collector/event",
-        )
-        self.assertEqual(after["claw"]["mode"], "codex")
-
-    def test_multiple_audit_sinks_all_preserved(self):
-        """Multi-sink configs (Splunk + remote HEC + webhook) survive intact."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg_path = os.path.join(tmpdir, "config.yaml")
-            seeded = {
-                "data_dir": tmpdir,
-                "audit_sinks": [
-                    {"name": "splunk-hec-localhost", "kind": "splunk_hec",
-                     "enabled": True, "splunk_hec": {"endpoint": "http://h:8088"}},
-                    {"name": "splunk-enterprise-corp", "kind": "splunk_hec",
-                     "enabled": False, "splunk_hec": {"endpoint": "https://corp:8088"}},
-                    {"name": "webhook-soc", "kind": "http_jsonl",
-                     "enabled": True, "http_jsonl": {"url": "https://soc.example.com/ingest"}},
-                ],
-            }
-            with open(cfg_path, "w") as f:
-                yaml.safe_dump(seeded, f, sort_keys=False)
-
-            cfg = _make_cfg(tmpdir)
-            cfg.save()
-
-            with open(cfg_path) as f:
-                after = yaml.safe_load(f)
-
-        names = [s["name"] for s in after["audit_sinks"]]
-        self.assertEqual(
-            names,
-            ["splunk-hec-localhost", "splunk-enterprise-corp", "webhook-soc"],
-            msg="audit_sinks order or content was disturbed",
-        )
-
-
-class TestConfigSaveRoundtripPreservesNestedKeys(unittest.TestCase):
-    """The deep-merge rescues operator-added unmodelled subkeys (e.g. a
-    custom ``otel.exporter.foo``) without disturbing dataclass-owned
-    siblings. Modelled dict-typed leaves like
-    ``otel.resource.attributes`` are NOT in this preserve set —
-    they're dataclass-authoritative on save (see
-    :class:`TestConfigSaveAuthoritativeNestedDicts`)."""
-
-    def test_otel_round_trip_preserves_attributes_when_dataclass_loads_them(self):
-        """A load → save with no edits preserves operator-set
-        otel.resource.attributes. The dataclass loader (_merge_otel)
-        copies attributes from the YAML, so the dataclass
-        round-trip output already contains them; the new
-        authoritative-path replace happens with the same content,
-        leaving the file functionally unchanged. This test guards
-        the load+save no-op path (the operator-friendly case)."""
-        from defenseclaw.config import (
-            OTelConfig,
-            OTelResourceConfig,
-        )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg_path = os.path.join(tmpdir, "config.yaml")
-            with open(cfg_path, "w") as f:
-                yaml.safe_dump({"data_dir": tmpdir, "environment": "macos"}, f)
-
-            # Construct the Config with otel populated as if the
-            # loader had read the YAML — we deliberately bypass the
-            # module-level `load()` so the test is hermetic and
-            # independent of $HOME / $DEFENSECLAW_HOME.
-            cfg = _make_cfg(
-                tmpdir,
-                otel=OTelConfig(
-                    enabled=True,
-                    resource=OTelResourceConfig(
-                        attributes={
-                            "defenseclaw.preset": "splunk-o11y",
-                            "defenseclaw.preset_name": "Splunk Observability Cloud",
-                            "service.name": "defenseclaw-gateway",
-                        },
-                    ),
-                ),
-            )
-            cfg.save()
-
-            with open(cfg_path) as f:
-                after = yaml.safe_load(f)
-
-        self.assertIn("resource", after["otel"])
-        self.assertIn("attributes", after["otel"]["resource"])
-        attrs = after["otel"]["resource"]["attributes"]
-        self.assertEqual(attrs["defenseclaw.preset"], "splunk-o11y")
-        self.assertEqual(attrs["service.name"], "defenseclaw-gateway")
-
-    def test_unmodelled_otel_subkeys_survive(self):
-        """Operator-added subkeys that the dataclass does NOT model —
-        e.g. a forward-compat ``otel.exporter.foo`` block — survive a
-        save where the dataclass leaves the parent ``otel`` block
-        otherwise default. The recursion still preserves unmodelled
-        keys at non-authoritative paths; only the explicit
-        ``otel.resource.attributes`` path is
-        replace-on-save."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg_path = os.path.join(tmpdir, "config.yaml")
-            seeded = {
-                "data_dir": tmpdir,
-                "otel": {
-                    "exporter": {"foo": {"enabled": True, "extra": "bar"}},
-                },
-            }
-            with open(cfg_path, "w") as f:
-                yaml.safe_dump(seeded, f, sort_keys=False)
-
-            cfg = _make_cfg(tmpdir)
-            cfg.save()
-
-            with open(cfg_path) as f:
-                after = yaml.safe_load(f)
-
-        self.assertIn("exporter", after.get("otel", {}))
-        self.assertEqual(after["otel"]["exporter"]["foo"]["extra"], "bar")
-
-
-class TestConfigSaveAuthoritativeNestedDicts(unittest.TestCase):
-    """Clearing modeled process resource attributes must persist to disk."""
-
-    def test_otel_resource_attributes_clear_drops_service_name(self):
-        from defenseclaw.config import (
-            OTelConfig,
-            OTelResourceConfig,
-        )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg_path = os.path.join(tmpdir, "config.yaml")
-            seeded = {
-                "data_dir": tmpdir,
-                "otel": {
-                    "enabled": True,
-                    "resource": {
-                        "attributes": {
-                            "service.name": "tenant-old",
-                            "deployment.environment": "prod-east",
-                        },
-                    },
-                },
-            }
-            with open(cfg_path, "w") as f:
-                yaml.safe_dump(seeded, f, sort_keys=False)
-
-            cfg = _make_cfg(
-                tmpdir,
-                otel=OTelConfig(
-                    enabled=True,
-                    resource=OTelResourceConfig(attributes={}),
-                ),
-            )
-            cfg.save()
-
-            with open(cfg_path) as f:
-                after = yaml.safe_load(f)
-
-        attrs = after.get("otel", {}).get("resource", {}).get("attributes", {})
-        self.assertNotIn(
-            "service.name", attrs,
-            msg=("stale service.name attribute survived an explicit "
-                 "attributes={} save — tenant identifier leak"),
-        )
-        self.assertEqual(attrs, {})
-
-
+@unittest.skipIf(os.name == "nt", "POSIX mode preservation; native Windows DACL preservation has dedicated coverage")
 class TestConfigSavePreservesFileMode(unittest.TestCase):
     """P1 security regression: ``Config.save()`` must NOT widen the
     file mode of an existing config.yaml. The pre-fix path opened
@@ -401,101 +163,6 @@ class TestConfigSavePreservesFileMode(unittest.TestCase):
         )
 
 
-class TestConfigSaveDataclassStillWins(unittest.TestCase):
-    """The merge must NOT silently keep stale modeled values. When the
-    dataclass intentionally omits a key (default-strip in
-    ``_config_to_dict`` or legacy-drop of ``splunk:``), the on-disk file
-    must reflect that omission."""
-
-    def test_legacy_splunk_block_is_dropped_on_save(self):
-        """v4 migration: top-level ``splunk:`` is rejected by the Go gateway.
-
-        If the operator's file still has it (e.g. upgrading from a very
-        old v4 install), ``Config.save`` must strip it on the next save
-        even though the file has more content than the dataclass output.
-        """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg_path = os.path.join(tmpdir, "config.yaml")
-            seeded = {
-                "data_dir": tmpdir,
-                "splunk": {  # legacy v4 — must NOT survive a save
-                    "enabled": True,
-                    "hec_url": "https://old.example.com/services/collector",
-                    "hec_token": "stale",
-                },
-            }
-            with open(cfg_path, "w") as f:
-                yaml.safe_dump(seeded, f, sort_keys=False)
-
-            cfg = _make_cfg(tmpdir)
-            cfg.save()
-
-            with open(cfg_path) as f:
-                after = yaml.safe_load(f)
-
-        self.assertNotIn(
-            "splunk", after,
-            msg=(
-                "Legacy splunk: key survived save — the Go gateway will "
-                "refuse to start with a v4 migration error. See "
-                "internal/config/config.go::detectLegacySplunk."
-            ),
-        )
-
-    def test_default_notifications_block_does_not_resurrect(self):
-        """``_config_to_dict`` strips ``notifications:`` when it equals
-        defaults. If the file had a non-default block but the operator
-        explicitly reset it (``cfg.notifications = NotificationsConfig()``),
-        the on-disk file must show the reset, not the old non-default
-        block resurrected from the file."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg_path = os.path.join(tmpdir, "config.yaml")
-            seeded = {
-                "data_dir": tmpdir,
-                "notifications": {
-                    "enabled": True,
-                    "categories": {"policy": False},
-                },
-            }
-            with open(cfg_path, "w") as f:
-                yaml.safe_dump(seeded, f, sort_keys=False)
-
-            cfg = _make_cfg(tmpdir)
-            cfg.notifications = NotificationsConfig()  # explicit reset
-            cfg.save()
-
-            with open(cfg_path) as f:
-                after = yaml.safe_load(f)
-
-        self.assertNotIn(
-            "notifications", after,
-            msg=(
-                "Operator-reset of a modeled key was overridden by the "
-                "file — round-trip merge incorrectly preserved a "
-                "dataclass-owned key. This would silently revert "
-                "`setup notifications off`."
-            ),
-        )
-
-    def test_modeled_field_change_overrides_file(self):
-        """Modeled fields explicitly set by the dataclass override the file."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg_path = os.path.join(tmpdir, "config.yaml")
-            with open(cfg_path, "w") as f:
-                yaml.safe_dump({
-                    "data_dir": tmpdir,
-                    "gateway": {"api_bind": "0.0.0.0"},
-                }, f, sort_keys=False)
-
-            cfg = _make_cfg(tmpdir, gateway=GatewayConfig(api_bind="127.0.0.1"))
-            cfg.save()
-
-            with open(cfg_path) as f:
-                after = yaml.safe_load(f)
-
-        self.assertEqual(after["gateway"]["api_bind"], "127.0.0.1")
-
-
 class TestConfigSaveResilience(unittest.TestCase):
     """``cfg.save()`` must succeed on a fresh install, a missing file,
     and a partially-corrupt existing file."""
@@ -512,8 +179,152 @@ class TestConfigSaveResilience(unittest.TestCase):
             with open(cfg_path) as f:
                 after = yaml.safe_load(f)
             self.assertEqual(after["data_dir"], tmpdir)
-            self.assertEqual(after["environment"], "macos")
             self.assertNotIn("audit_sinks", after)  # nothing to preserve
+
+
+class TestConfigSaveV8HardCutover(unittest.TestCase):
+    def test_fresh_programmatic_config_creates_v8_without_legacy_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
+                cfg = default_config()
+                cfg.data_dir = tmpdir
+                cfg.guardrail.mode = "action"
+                cfg.save()
+
+            with open(os.path.join(tmpdir, "config.yaml"), encoding="utf-8") as stream:
+                persisted = yaml.safe_load(stream)
+
+            self.assertEqual(persisted["config_version"], 8)
+            self.assertEqual(persisted["guardrail"]["mode"], "action")
+            self.assertEqual(persisted["observability"], {})
+            for removed in ("audit_sinks", "otel", "privacy", "splunk"):
+                self.assertNotIn(removed, persisted)
+
+    def test_unversioned_programmatic_config_cannot_overwrite_existing_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "config.yaml")
+            with open(config_path, "w", encoding="utf-8") as stream:
+                stream.write("guardrail:\n  mode: observe\n")
+            with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
+                cfg = default_config()
+                cfg.data_dir = tmpdir
+                with self.assertRaisesRegex(ConfigVersionError, "schema v8"):
+                    cfg.save()
+
+    def test_fresh_v8_save_emits_only_canonical_observability(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
+                cfg = prepare_fresh_v8_config(default_config())
+                cfg.data_dir = tmpdir
+                cfg.save()
+
+            with open(os.path.join(tmpdir, "config.yaml"), encoding="utf-8") as stream:
+                persisted = yaml.safe_load(stream)
+
+            self.assertEqual(persisted["config_version"], 8)
+            self.assertEqual(persisted["observability"], {})
+            for removed in ("audit_sinks", "otel", "privacy", "splunk"):
+                self.assertNotIn(removed, persisted)
+            self.assertNotIn("emit_otel", persisted.get("ai_discovery", {}))
+
+    def test_fresh_v8_preparation_rejects_loaded_configs(self):
+        cfg = default_config()
+        cfg._source_config_version = 7
+        with self.assertRaisesRegex(ValueError, "unversioned default"):
+            prepare_fresh_v8_config(cfg)
+
+    def test_loaded_v8_can_enable_ai_discovery_without_restoring_v7_routing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "config.yaml")
+            with open(config_path, "w", encoding="utf-8") as stream:
+                yaml.safe_dump(
+                    {
+                        "config_version": 8,
+                        "observability": {},
+                        "gateway": {"token_env": "DEFENSECLAW_GATEWAY_TOKEN"},
+                    },
+                    stream,
+                    sort_keys=False,
+                )
+            with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
+                cfg = load()
+                cfg.ai_discovery.enabled = True
+                cfg.ai_discovery.mode = cfg.ai_discovery.mode or "enhanced"
+                cfg.ai_discovery.include_shell_history = True
+                cfg.ai_discovery.include_package_manifests = True
+                cfg.ai_discovery.include_env_var_names = True
+                cfg.ai_discovery.include_network_domains = True
+                cfg.save()
+
+            with open(config_path, encoding="utf-8") as stream:
+                persisted = yaml.safe_load(stream)
+
+            self.assertTrue(persisted["ai_discovery"]["enabled"])
+            self.assertNotIn("emit_otel", persisted["ai_discovery"])
+
+    def test_loaded_v8_save_preserves_graph_and_uses_local_database(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = os.path.join(tmpdir, "config.yaml")
+            observability = {
+                "local": {"path": "history/custom.db", "retention_days": 45},
+                "destinations": [
+                    {
+                        "name": "collector",
+                        "kind": "otlp",
+                        "protocol": "http/protobuf",
+                        "endpoint": "https://collector.example.test",
+                    },
+                ],
+            }
+            with open(cfg_path, "w", encoding="utf-8") as stream:
+                yaml.safe_dump(
+                    {
+                        "config_version": 8,
+                        "data_dir": tmpdir,
+                        "observability": observability,
+                    },
+                    stream,
+                    sort_keys=False,
+                )
+            with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
+                cfg = load()
+                self.assertEqual(cfg.audit_db, os.path.join(tmpdir, "history", "custom.db"))
+                cfg.claw.mode = "codex"
+                cfg.save()
+
+            with open(cfg_path, encoding="utf-8") as stream:
+                after = yaml.safe_load(stream)
+            self.assertEqual(after["config_version"], 8)
+            self.assertEqual(after["observability"], observability)
+            self.assertEqual(after["claw"], {"mode": "codex"})
+            for removed in ("audit_db", "audit_sinks", "otel", "privacy", "splunk"):
+                self.assertNotIn(removed, after)
+
+    def test_v8_save_preserves_concurrent_observability_edit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = os.path.join(tmpdir, "config.yaml")
+            original = {"config_version": 8, "data_dir": tmpdir, "observability": {}}
+            with open(cfg_path, "w", encoding="utf-8") as stream:
+                yaml.safe_dump(original, stream, sort_keys=False)
+            with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
+                cfg = load()
+                concurrent = {
+                    "destinations": [
+                        {"name": "console", "kind": "console"},
+                    ],
+                }
+                with open(cfg_path, "w", encoding="utf-8") as stream:
+                    yaml.safe_dump({**original, "observability": concurrent}, stream, sort_keys=False)
+                cfg.claw.mode = "codex"
+                cfg.save()
+
+            with open(cfg_path, encoding="utf-8") as stream:
+                after = yaml.safe_load(stream)
+            self.assertEqual(after["observability"], concurrent)
+            self.assertEqual(after["claw"], {"mode": "codex"})
+
+
+class TestConfigSaveResilienceContinued(unittest.TestCase):
 
     def test_corrupt_yaml_falls_back_to_dataclass_only(self):
         """Operator with a half-edited YAML must still be able to recover
@@ -522,7 +333,7 @@ class TestConfigSaveResilience(unittest.TestCase):
             cfg_path = os.path.join(tmpdir, "config.yaml")
             # Write something yaml.safe_load can't parse.
             with open(cfg_path, "w") as f:
-                f.write("data_dir: [unclosed_list\n  audit_sinks:\n - {bad: yaml")
+                f.write("config_version: 8\nobservability: [unclosed_list\n - {bad: yaml")
 
             cfg = _make_cfg(tmpdir)
             with self.assertLogs("defenseclaw.config", level="WARNING") as logs:
@@ -532,10 +343,8 @@ class TestConfigSaveResilience(unittest.TestCase):
                 msg=f"expected parse-failure warning, got {logs.output!r}",
             )
 
-            # After the fallback the file is rewritten as the
-            # dataclass-only view — operator's audit_sinks was lost
-            # (it was unrecoverable anyway), but the file is now
-            # well-formed and `defenseclaw setup splunk` can rewrite it.
+            # The malformed source is unrecoverable, but the fallback produces
+            # a well-formed, schema-v8 document that setup can repair further.
             with open(cfg_path) as f:
                 after = yaml.safe_load(f)
             self.assertEqual(after["data_dir"], tmpdir)
@@ -573,7 +382,7 @@ class TestConfigSaveAtomicity(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg_path = os.path.join(tmpdir, "config.yaml")
             with open(cfg_path, "w") as f:
-                f.write("audit_sinks: []\n")
+                f.write("config_version: 8\nobservability: {}\n")
             inode_before = os.stat(cfg_path).st_ino
 
             cfg = _make_cfg(tmpdir)
@@ -591,63 +400,7 @@ class TestConfigSaveAtomicity(unittest.TestCase):
 
 
 class TestMergeHelpers(unittest.TestCase):
-    """Unit tests for the merge primitives so failures pinpoint the layer."""
-
-    def test_owned_top_level_keys_includes_known_modeled_fields(self):
-        cfg = _make_cfg("/tmp/dc-test")
-        owned = _owned_top_level_keys(cfg)
-        for k in ("data_dir", "gateway", "claw", "guardrail", "notifications",
-                  "privacy", "splunk", "webhooks"):
-            self.assertIn(k, owned, msg=f"expected modeled field {k!r}")
-        # Documented unmodeled keys must NOT be in the owned set.
-        self.assertNotIn("audit_sinks", owned)
-
-    def test_merge_preserves_unmodeled_top_level_key(self):
-        merged = _merge_preserving_unmodeled(
-            existing={"audit_sinks": [{"name": "s"}], "data_dir": "/old"},
-            new={"data_dir": "/new"},
-            owned_top_level=frozenset({"data_dir", "splunk"}),
-        )
-        self.assertEqual(merged["audit_sinks"], [{"name": "s"}])
-        self.assertEqual(merged["data_dir"], "/new")
-
-    def test_merge_drops_owned_key_when_dataclass_omits_it(self):
-        merged = _merge_preserving_unmodeled(
-            existing={"splunk": {"hec_url": "stale"}, "data_dir": "/d"},
-            new={"data_dir": "/d"},
-            owned_top_level=frozenset({"data_dir", "splunk"}),
-        )
-        self.assertNotIn("splunk", merged)
-
-    def test_merge_recurses_into_nested_dicts(self):
-        merged = _merge_preserving_unmodeled(
-            existing={"otel": {"resource": {"attributes": {"a": 1}}, "enabled": False}},
-            new={"otel": {"enabled": True}},
-            owned_top_level=frozenset({"otel"}),
-        )
-        self.assertTrue(merged["otel"]["enabled"])  # dataclass wins
-        self.assertEqual(merged["otel"]["resource"]["attributes"]["a"], 1)  # rescued
-
-    def test_merge_lists_are_atomic(self):
-        """Lists from the dataclass replace lists from the file. Partial
-        list merges would mis-handle operator deletions of modeled list
-        elements."""
-        merged = _merge_preserving_unmodeled(
-            existing={"webhooks": [{"name": "old"}], "data_dir": "/d"},
-            new={"webhooks": [{"name": "new"}], "data_dir": "/d"},
-            owned_top_level=frozenset({"data_dir", "webhooks"}),
-        )
-        self.assertEqual(merged["webhooks"], [{"name": "new"}])
-
-    def test_deep_merge_nested_preserves_unknown_subkeys(self):
-        out = _deep_merge_nested(
-            existing={"a": 1, "b": {"x": 10, "y": 20}, "preserved": True},
-            new={"a": 2, "b": {"x": 99}},
-        )
-        self.assertEqual(out["a"], 2)
-        self.assertEqual(out["b"]["x"], 99)
-        self.assertEqual(out["b"]["y"], 20)  # preserved nested
-        self.assertTrue(out["preserved"])    # preserved top-of-recurse
+    """Unit tests for the live v8 save primitives."""
 
     def test_load_existing_returns_empty_on_missing_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -664,60 +417,6 @@ class TestMergeHelpers(unittest.TestCase):
             with self.assertLogs("defenseclaw.config", level="WARNING") as logs:
                 self.assertEqual(_load_existing_config_yaml(path), {})
             self.assertTrue(any("failed to parse" in m for m in logs.output))
-
-
-class TestRealWorldOperatorWorkflow(unittest.TestCase):
-    """End-to-end repro of the operator workflow where setup commands
-    must preserve audit_sinks across separate writes."""
-
-    def test_setup_splunk_then_setup_codex_keeps_audit_sinks(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg_path = os.path.join(tmpdir, "config.yaml")
-
-            # Step 1: `defenseclaw setup splunk --logs` writes audit_sinks
-            # via observability/writer.py (not Config.save). Simulate
-            # that with a raw YAML write.
-            initial = {
-                "data_dir": tmpdir,
-                "audit_db": os.path.join(tmpdir, "audit.db"),
-                "environment": "macos",
-                "claw": {"mode": "off"},
-                "audit_sinks": [{
-                    "name": "splunk-hec-localhost",
-                    "kind": "splunk_hec",
-                    "enabled": True,
-                    "splunk_hec": {
-                        "endpoint": "http://127.0.0.1:8088/services/collector/event",
-                        "token_env": "SPLUNK_HEC_TOKEN",
-                        "index": "defenseclaw",
-                        "source": "defenseclaw",
-                        "sourcetype": "_json",
-                        "verify_tls": False,
-                    },
-                }],
-            }
-            with open(cfg_path, "w") as f:
-                yaml.safe_dump(initial, f, sort_keys=False)
-
-            # Step 2: `defenseclaw setup codex` reads the config and
-            # eventually calls cfg.save() via execute_guardrail_setup
-            # (cmd_setup.py:3716). Simulate the operator-visible
-            # behaviour: load via Config(), flip the claw mode, save.
-            cfg = _make_cfg(tmpdir)
-            cfg.claw.mode = "codex"
-            cfg.save()
-
-            # Step 3: gateway reloads — must still see audit_sinks.
-            with open(cfg_path) as f:
-                final = yaml.safe_load(f)
-
-        self.assertEqual(final["claw"]["mode"], "codex")
-        self.assertIn("audit_sinks", final)
-        self.assertEqual(len(final["audit_sinks"]), 1)
-        self.assertEqual(
-            final["audit_sinks"][0]["splunk_hec"]["endpoint"],
-            "http://127.0.0.1:8088/services/collector/event",
-        )
 
 
 if __name__ == "__main__":

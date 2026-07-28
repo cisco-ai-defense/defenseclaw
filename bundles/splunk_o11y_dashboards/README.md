@@ -15,7 +15,7 @@ dashboards:
 | `Connector and OTel Ingest` | OTLP ingest health, connector hook telemetry, Codex notify, normalized LLM events, GenAI tokens, and LLM operation duration. |
 | `DefenseClaw AI Agents Token Economics` | GenAI token usage, estimated model cost, per-agent token breakdowns, and agent token inventory. |
 | `Security and Policy` | Gateway verdicts, policy decisions, findings, egress decisions, alerts, judge latency/errors, cache behavior, and external security integration latency. |
-| `Runtime and Reliability` | Gateway errors, schema violations, HTTP traffic, streams, audit sinks, webhooks, runtime gauges, SLO latency, SQLite health, exporter health, and queues. |
+| `Runtime and Reliability` | Gateway errors, schema violations, HTTP traffic, streams, v8 destinations, webhooks, runtime gauges, SLO latency, SQLite health, exporter health, and queues. |
 | `Scanners and Findings` | Scanner throughput, scanner latency, scan errors, findings by severity/rule/scanner, quarantine actions, and scanner queue depth. |
 
 ## Detectors
@@ -38,7 +38,7 @@ The detector set covers:
 
 - correctness: schema violations, gateway error spikes, recovered panics
 - SLOs: block latency and TUI refresh latency
-- telemetry pipeline: exporter silence/errors, audit sink failures, sink circuit state, sink drop ratio
+- telemetry pipeline: destination/exporter silence and errors, circuit state, queue pressure, and drop ratio
 - security: block-rate spike, judge error rate, webhook failure rate
 - traffic: HTTP 5xx ratio, auth failures, rate-limit breaches
 - runtime: goroutine leak, SQLite busy retries, config load errors

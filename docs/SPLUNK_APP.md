@@ -35,13 +35,16 @@ defenseclaw setup splunk --logs --accept-splunk-license --non-interactive
 `DefenseClaw` starts the bundled local Splunk runtime and installs the local
 Splunk app automatically.
 
-The setup creates a restricted Splunk user:
+The bundled runtime starts in Splunk Free mode, where Web authentication and
+role-based access control are disabled. Setup therefore prints the local URL
+but does not advertise a meaningless username/password login. The container
+still requires an administrator secret during bootstrap; DefenseClaw generates
+and protects that runtime-only value along with the HEC token. Neither secret
+is printed during normal setup, Doctor, logs, or failures. Use
+`defenseclaw setup splunk --show-credentials` for the explicit reveal workflow.
 
-- username: `defenseclaw_local_user`
-- default app: `defenseclaw_local_mode`
-- default index scope: `defenseclaw_local`
-
-The setup command prints the local Splunk URL and credentials after bootstrap.
+The default app is `defenseclaw_local_mode` and the default index scope is
+`defenseclaw_local`.
 
 ## What Data The App Uses
 

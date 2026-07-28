@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
@@ -291,6 +292,106 @@ func TestEvaluateClaudeCodeHook_BlocksUnregisteredSkillUserPromptExpansion(t *te
 	}
 }
 
+func TestEvaluateClaudeCodeHook_NamespacedPluginUserPromptExpansionPolicy(t *testing.T) {
+	tests := []struct {
+		name        string
+		commandName string
+		configure   func(*config.Config)
+		wantAction  string
+		wantSource  string
+		wantTarget  string
+	}{
+		{
+			name:        "admin allow uses bare plugin id",
+			commandName: "release-tools:deploy",
+			configure: func(cfg *config.Config) {
+				cfg.AssetPolicy.Plugin.Default = "deny"
+				cfg.AssetPolicy.Plugin.Allowed = []config.AssetPolicyRule{{Name: "release-tools"}}
+			},
+			wantAction: "allow",
+		},
+		{
+			name:        "admin deny uses bare plugin id",
+			commandName: "release-tools:deploy",
+			configure: func(cfg *config.Config) {
+				cfg.AssetPolicy.Plugin.Denied = []config.AssetPolicyRule{{Name: "release-tools"}}
+			},
+			wantAction: "block",
+			wantSource: "admin-deny",
+			wantTarget: "release-tools",
+		},
+		{
+			name:        "registered bare plugin id is allowed",
+			commandName: "release-tools:deploy",
+			configure: func(cfg *config.Config) {
+				cfg.AssetPolicy.Plugin.RegistryRequired = true
+				cfg.AssetPolicy.Plugin.Registry = []config.AssetPolicyRule{{Name: "release-tools", Reason: "registry:internal"}}
+			},
+			wantAction: "allow",
+		},
+		{
+			name:        "unregistered bare plugin id is blocked",
+			commandName: "rogue-tools:deploy",
+			configure: func(cfg *config.Config) {
+				cfg.AssetPolicy.Plugin.RegistryRequired = true
+				cfg.AssetPolicy.Plugin.Registry = []config.AssetPolicyRule{{Name: "release-tools", Reason: "registry:internal"}}
+			},
+			wantAction: "block",
+			wantSource: "registry-required",
+			wantTarget: "rogue-tools",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "claudecode"
+			cfg.AssetPolicy.Enabled = true
+			cfg.AssetPolicy.Mode = "action"
+			enablePluginRuntimeDetection(cfg)
+			tc.configure(cfg)
+			store, logger := newNativeSkillRuntimeTestStore(t)
+			api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+
+			resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+				HookEventName: "UserPromptExpansion",
+				ExpansionType: "slash_command",
+				CommandName:   tc.commandName,
+				CommandArgs:   "staging",
+				CommandSource: "plugin",
+				Prompt:        "/" + tc.commandName + " staging",
+			})
+
+			if resp.Action != tc.wantAction || resp.RawAction != tc.wantAction {
+				t.Fatalf("action=%q raw=%q, want %s/%s", resp.Action, resp.RawAction, tc.wantAction, tc.wantAction)
+			}
+			if tc.wantAction == "allow" {
+				if containsString(resp.Findings, "ASSET-POLICY-PLUGIN") {
+					t.Fatalf("findings=%v, did not expect plugin policy block", resp.Findings)
+				}
+				return
+			}
+			if !containsString(resp.Findings, "ASSET-POLICY-PLUGIN") {
+				t.Fatalf("findings=%v, want ASSET-POLICY-PLUGIN", resp.Findings)
+			}
+			if resp.ClaudeCodeOutput["decision"] != "block" {
+				t.Fatalf("claude output=%+v, want decision=block", resp.ClaudeCodeOutput)
+			}
+			for _, want := range []string{
+				"asset_type=plugin",
+				"asset_name=" + tc.wantTarget,
+				"source=" + tc.wantSource,
+				"surface=prompt_expansion",
+			} {
+				if !strings.Contains(resp.Reason, want) {
+					t.Fatalf("reason %q missing %q", resp.Reason, want)
+				}
+			}
+		})
+	}
+}
+
 func TestEvaluateClaudeCodeHook_BlocksUnregisteredMCPPromptExpansion(t *testing.T) {
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	cfg.Guardrail.Mode = "action"
@@ -436,10 +537,12 @@ func TestEvaluateClaudeCodeHook_UserPromptExpansionRegistryRequiredEmptyAllowOpt
 	cfg.AssetPolicy.Skill.RegistryEmptyAction = "allow"
 	enableSkillRuntimeDetection(cfg)
 
-	api := &APIServer{scannerCfg: cfg}
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
 
 	req := claudeCodeHookRequest{
 		HookEventName: "UserPromptExpansion",
+		SessionID:     "empty-registry-allow-session",
 		ExpansionType: "slash_command",
 		CommandName:   "rogue-skill",
 		CommandSource: "skill",
@@ -452,6 +555,16 @@ func TestEvaluateClaudeCodeHook_UserPromptExpansionRegistryRequiredEmptyAllowOpt
 	}
 	if containsString(resp.Findings, "ASSET-POLICY-SKILL") {
 		t.Fatalf("findings=%v, did not expect ASSET-POLICY-SKILL", resp.Findings)
+	}
+	state, err := store.GetRuntimeAssetState(
+		context.Background(), "claudecode", req.SessionID, "skill", req.CommandName,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.State != audit.RuntimeAssetLoaded ||
+		state.Provenance != runtimeProvenanceClaudeExpansion {
+		t.Fatalf("runtime state = %#v, want durable loaded expansion attestation", state)
 	}
 }
 
@@ -581,6 +694,73 @@ func TestEvaluateClaudeCodeHook_AssetPolicyPostToolUseWouldBlock(t *testing.T) {
 	}
 	if !resp.WouldBlock {
 		t.Fatal("PostToolUse asset policy match should be reported as would_block")
+	}
+}
+
+func TestEvaluateClaudeCodeHook_PostToolUseRuleFindingIsNotReportedAsEnforced(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+
+	api := &APIServer{scannerCfg: cfg}
+	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+		HookEventName: "PostToolUse",
+		ToolResponse:  map[string]interface{}{"stdout": "jailbreak ai"},
+	})
+
+	if resp.Action != "allow" || resp.RawAction != "block" || !resp.WouldBlock {
+		t.Fatalf("action=%q raw=%q would_block=%v, want allow/block/true", resp.Action, resp.RawAction, resp.WouldBlock)
+	}
+	if decision, ok := resp.ClaudeCodeOutput["decision"]; ok && decision == "block" {
+		t.Fatalf("claude output = %+v, PostToolUse cannot undo an already-executed tool", resp.ClaudeCodeOutput)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_PostToolBatchFindingStopsNextModelCall(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+
+	api := &APIServer{scannerCfg: cfg}
+	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+		HookEventName: "PostToolBatch",
+		ToolCalls:     "jailbreak ai",
+	})
+
+	if resp.Action != "block" || resp.RawAction != "block" || resp.WouldBlock {
+		t.Fatalf("action=%q raw=%q would_block=%v, want block/block/false", resp.Action, resp.RawAction, resp.WouldBlock)
+	}
+	if decision, ok := resp.ClaudeCodeOutput["decision"]; !ok || decision != "block" {
+		t.Fatalf("claude output = %+v, PostToolBatch must stop before the next model call", resp.ClaudeCodeOutput)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_ConfigChangeEnforcementDependsOnSource(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{scannerCfg: cfg}
+
+	tests := []struct {
+		name           string
+		source         string
+		wantAction     string
+		wantWouldBlock bool
+	}{
+		{name: "policy settings cannot be blocked", source: "policy_settings", wantAction: "allow", wantWouldBlock: true},
+		{name: "user settings remain blockable", source: "user_settings", wantAction: "block", wantWouldBlock: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+				HookEventName: "ConfigChange",
+				Source:        tc.source,
+				Message:       "jailbreak ai",
+			})
+			if resp.Action != tc.wantAction || resp.RawAction != "block" || resp.WouldBlock != tc.wantWouldBlock {
+				t.Fatalf("action=%q raw=%q would_block=%v, want %s/block/%v", resp.Action, resp.RawAction, resp.WouldBlock, tc.wantAction, tc.wantWouldBlock)
+			}
+		})
 	}
 }
 

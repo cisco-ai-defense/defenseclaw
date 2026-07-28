@@ -86,10 +86,7 @@ guardrail:
     enabled: false                    # opt in via --human-approval
     min_severity: HIGH
 
-privacy:
-  disable_redaction: false
-
-audit_sinks: []                        # no external audit sink; local SQLite + JSONL still write
+observability: {}                       # all signals collected; local SQLite logs unredacted
 webhooks: []                           # add via `defenseclaw setup webhook add ...`
 
 claude_code:
@@ -102,7 +99,8 @@ Three things to notice that contradict folklore:
 
 - **The LLM judge is OFF by default.** It only flips on if you pass `--judge-model` to `setup guardrail` or answer "yes" to the interactive judge prompt. The schema default is `guardrail.judge.enabled = false` in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go). Keeping it off keeps cost predictable; flip it on once you have a `DEFENSECLAW_LLM_KEY` configured.
 - **HILT is OFF by default.** The shipped severity floor is `HIGH`, but `enabled: false` means it never prompts. `--human-approval` flips it on; `--hilt-min-severity` adjusts the floor.
-- **The built-in local stores still write.** `audit_sinks: []` means no external audit-event destination. SQLite `audit_events` powers `defenseclaw alerts`, the TUI, and audit export; `~/.defenseclaw/gateway.jsonl` remains the live structured runtime log. Wire external sinks via [`setup splunk`](/docs/observability/splunk) or [`setup local-observability`](/docs/observability/local-observability).
+- **The built-in local store still writes.** `observability: {}` means no optional destination, not no telemetry. V8 collects every registered signal and mandatory SQLite stores every collected log unredacted. Add a `kind: jsonl` destination if a file stream is required; add remote destinations via [`setup splunk`](/docs/observability/splunk) or [`setup local-observability`](/docs/observability/local-observability).
+- **Fresh v8 telemetry is unredacted.** An enabled destination with omitted policy sends every capability and bucket under profile `none`. Configure `sensitive`, `content`, `strict`, or a custom profile before exporting into a less-trusted boundary.
 
 ## Tuning by risk tolerance
 
@@ -120,7 +118,7 @@ defenseclaw setup guardrail \
   --non-interactive
 ```
 
-Observe mode prevents enforcement even though the permissive policy's action-mode block threshold remains CRITICAL. Everything still flows to the audit log and JSONL so you can review what *would* have happened. Recommended first week of any rollout.
+Observe mode prevents enforcement even though the permissive policy's action-mode block threshold remains CRITICAL. Everything still flows to mandatory SQLite and any matching configured destinations so you can review what *would* have happened. Recommended first week of any rollout.
 
 ### "Move fast, stop only the obvious harm"
 
@@ -179,7 +177,7 @@ A few defaults are intentionally fixed unless you edit `~/.defenseclaw/config.ya
 
 | Knob | Default | Why fixed |
 | --- | --- | --- |
-| `~/.defenseclaw/gateway.jsonl` (JSONL fallback path) | always written | Reliability fallback — the gateway must always have a writable place to log when external sinks fail |
+| `observability.local` SQLite history | always present | Mandatory local durability for collected logs and the compliance floor |
 | `guardrail.hook_fail_mode` | `closed` on new installs | Malformed/unauthorized hook responses fail closed; upgrades from the pre-change default are migrated to `open` for compatibility |
 | `guardrail.judge.timeout` | `30s` | Hot-path latency budget for the judge |
 | `guardrail.judge.adjudication_timeout` | `5s` | Per-prompt adjudication budget |

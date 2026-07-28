@@ -19,6 +19,7 @@ from defenseclaw.tui.screens.mode_picker import (
     choice_for_hotkey,
     choice_for_wire,
     preview_for_switch,
+    visible_mode_picker_choices,
 )
 from textual.app import App, ComposeResult
 from textual.widgets import Static
@@ -81,7 +82,10 @@ async def test_mode_picker_mouse_click_returns_connector() -> None:
     app = ModePickerHarness("openclaw")
 
     async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.click("#action-menu-row-3")
+        screen = app.screen
+        assert isinstance(screen, ModePickerScreen)
+        codex_row = next(index for index, choice in enumerate(screen.choices) if choice.wire == "codex")
+        await pilot.click(f"#action-menu-row-{codex_row}")
         await pilot.pause()
 
         assert app.result == "codex"

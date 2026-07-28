@@ -17,7 +17,6 @@
 package connector
 
 import (
-	"strconv"
 	"strings"
 )
 
@@ -86,16 +85,14 @@ func antigravityProfileDecode(payload map[string]interface{}) HookProfileRequest
 	}
 
 	// Common metadata extracted from every event payload. agy uses
-	// `conversationId` as the stable session identifier and `stepIdx`
-	// as the per-call sequence number; both fields appear regardless
-	// of which lifecycle event is firing.
+	// `conversationId` as the stable session identifier. `stepIdx` is
+	// a trajectory step, not a prompt/response turn, so it remains in
+	// the preserved payload and is never projected onto TurnID.
 	req.SessionID = hookFirstString(payload,
 		"conversationId", "conversation_id",
 		"session_id", "sessionId",
 	)
-	if turn := antigravityTurnIDFromStepIdx(payload); turn != "" {
-		req.TurnID = turn
-	}
+	req.TurnID = hookFirstString(payload, "turn_id", "turnId", "turnID")
 
 	// Resolve the event name. Prefer agy's explicit hookEventName /
 	// hook_event_name field per the 2.0 spec; fall back to structural
@@ -390,37 +387,6 @@ func antigravityFirstWorkspacePath(payload map[string]interface{}) string {
 					return trimmed
 				}
 			}
-		}
-	}
-	return ""
-}
-
-// antigravityTurnIDFromStepIdx projects agy's numeric stepIdx onto
-// the canonical (string) TurnID slot. encoding/json decodes JSON
-// numbers as float64 by default; we accept both float64 and the
-// (rare but supported) json.Number for robustness across decoder
-// configurations.
-func antigravityTurnIDFromStepIdx(payload map[string]interface{}) string {
-	for _, key := range []string{"stepIdx", "step_idx", "turn_id", "turnId", "tool_call_id", "toolCallId"} {
-		v, ok := payload[key]
-		if !ok || v == nil {
-			continue
-		}
-		switch x := v.(type) {
-		case string:
-			if s := strings.TrimSpace(x); s != "" {
-				return s
-			}
-		case float64:
-			// Negative or fractional stepIdx is not a known
-			// agy shape — emit as-is for forensics rather than
-			// silently drop; the unified collector treats the
-			// field as opaque.
-			return strconv.FormatFloat(x, 'f', -1, 64)
-		case int:
-			return strconv.Itoa(x)
-		case int64:
-			return strconv.FormatInt(x, 10)
 		}
 	}
 	return ""

@@ -11,194 +11,267 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"go.opentelemetry.io/otel/trace"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
-func TestEmitCiscoErrorIncrementsCounter(t *testing.T) {
-	r := sdkmetric.NewManualReader()
-	p, err := telemetry.NewProviderForTest(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	EmitCiscoError(context.Background(), p, gatewaylog.ErrCodeInvalidResponse, "test detail")
+func ciscoCorrelatedContext(t *testing.T) (context.Context, trace.SpanContext) {
+	t.Helper()
+	spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		SpanID:  trace.SpanID{17, 18, 19, 20, 21, 22, 23, 24},
+	})
+	ctx := audit.ContextWithEnvelope(t.Context(), audit.CorrelationEnvelope{
+		RequestID: "request-cisco", SessionID: "session-cisco", TurnID: "turn-cisco",
+		AgentID: "agent-cisco", Connector: "codex",
+	})
+	return trace.ContextWithSpanContext(ctx, spanContext), spanContext
+}
 
-	var rm metricdata.ResourceMetrics
-	if err := r.Collect(context.Background(), &rm); err != nil {
-		t.Fatal(err)
-	}
-	var n int64
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != "defenseclaw.cisco.errors" {
-				continue
-			}
-			sum := m.Data.(metricdata.Sum[int64])
-			for _, dp := range sum.DataPoints {
-				n += dp.Value
-			}
+func ciscoMetricMap(metrics []telemetry.V8ProjectedMetric) map[string][]telemetry.V8ProjectedMetric {
+	result := make(map[string][]telemetry.V8ProjectedMetric)
+	for _, metric := range metrics {
+		name := metric.Descriptor().Name
+		if name == observability.TelemetryInstrumentDefenseClawCiscoErrors ||
+			name == observability.TelemetryInstrumentDefenseClawCiscoInspectLatency {
+			result[name] = append(result[name], metric)
 		}
 	}
-	if n < 1 {
-		t.Fatalf("expected cisco errors counter, got %d", n)
+	return result
+}
+
+func TestRecordCiscoInspectV8PreservesCorrelationAndCanonicalDimensions(t *testing.T) {
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	ctx, spanContext := ciscoCorrelatedContext(t)
+	recordCiscoInspectV8(
+		ctx, runtime, 1500*time.Microsecond, observability.OutcomeFailed,
+		gatewaylog.ErrCodeInvalidResponse,
+	)
+
+	metrics := ciscoMetricMap(capture.metricSnapshot())
+	if len(metrics[observability.TelemetryInstrumentDefenseClawCiscoInspectLatency]) != 1 ||
+		len(metrics[observability.TelemetryInstrumentDefenseClawCiscoErrors]) != 1 {
+		t.Fatalf("Cisco generated metric families=%v", metrics)
+	}
+	latency := metrics[observability.TelemetryInstrumentDefenseClawCiscoInspectLatency][0]
+	if latency.Attributes()["defenseclaw.outcome"] != string(observability.OutcomeFailed) {
+		t.Fatalf("latency attributes=%v", latency.Attributes())
+	}
+	errorMetric := metrics[observability.TelemetryInstrumentDefenseClawCiscoErrors][0]
+	if errorMetric.Attributes()["defenseclaw.metric.code"] != string(gatewaylog.ErrCodeInvalidResponse) {
+		t.Fatalf("error attributes=%v", errorMetric.Attributes())
+	}
+	for _, metric := range []telemetry.V8ProjectedMetric{latency, errorMetric} {
+		correlation := metric.CanonicalRecord().Correlation()
+		if correlation.TraceID != spanContext.TraceID().String() ||
+			correlation.SpanID != spanContext.SpanID().String() ||
+			correlation.RequestID != "request-cisco" || correlation.TurnID != "turn-cisco" ||
+			metric.CanonicalRecord().Connector() != "codex" {
+			t.Fatalf("metric %s correlation=%+v connector=%q", metric.Descriptor().Name, correlation, metric.CanonicalRecord().Connector())
+		}
 	}
 }
 
-func TestCiscoInspectClient_HTTPErrorEmitsInvalidResponse(t *testing.T) {
+func TestCiscoInspectClientHTTPErrorEmitsGeneratedFailureMetrics(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(502)
+		w.WriteHeader(http.StatusBadGateway)
 		_, _ = io.WriteString(w, `{"detail":"bad"}`)
 	}))
 	t.Cleanup(srv.Close)
 
-	r := sdkmetric.NewManualReader()
-	tel, err := telemetry.NewProviderForTest(r)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	client := newCiscoInspectTestClient(t, srv.URL, "TEST_CISCO_HTTP_ERROR")
+	client.client = srv.Client()
+	client.bindObservabilityV8(runtime)
 
-	cfg := &config.CiscoAIDefenseConfig{
-		Endpoint:  srv.URL,
-		TimeoutMs: 5000,
-		APIKeyEnv: "TEST_CISCO_KEY",
+	ctx, _ := ciscoCorrelatedContext(t)
+	if verdict := client.Inspect(ctx, []ChatMessage{{Role: "user", Content: "hi"}}); verdict != nil {
+		t.Fatalf("HTTP error verdict=%+v, want nil", verdict)
 	}
-	t.Setenv("TEST_CISCO_KEY", "k-test")
-	c := NewCiscoInspectClient(cfg, "")
-	if c == nil {
-		t.Fatal("expected client")
-	}
-	c.SetTelemetry(tel)
-
-	prev := EventWriter()
-	gw, err := gatewaylog.New(gatewaylog.Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	SetEventWriter(gw)
-	t.Cleanup(func() { SetEventWriter(prev) })
-
-	v := c.Inspect([]ChatMessage{{Role: "user", Content: "hi"}})
-	if v != nil {
-		t.Fatal("expected nil verdict on HTTP error")
+	metrics := ciscoMetricMap(capture.metricSnapshot())
+	if len(metrics[observability.TelemetryInstrumentDefenseClawCiscoInspectLatency]) != 1 ||
+		len(metrics[observability.TelemetryInstrumentDefenseClawCiscoErrors]) != 1 ||
+		metrics[observability.TelemetryInstrumentDefenseClawCiscoInspectLatency][0].Attributes()["defenseclaw.outcome"] != string(observability.OutcomeFailed) {
+		t.Fatalf("HTTP error generated metrics=%v", metrics)
 	}
 }
 
-func TestCiscoInspectClient_InvalidJSONEmitsError(t *testing.T) {
+func TestCiscoInspectClientInvalidJSONEmitsGeneratedFailureMetrics(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
 		_, _ = io.WriteString(w, `not-json`)
 	}))
 	t.Cleanup(srv.Close)
 
-	r := sdkmetric.NewManualReader()
-	tel, err := telemetry.NewProviderForTest(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.CiscoAIDefenseConfig{
-		Endpoint:  srv.URL,
-		TimeoutMs: 5000,
-		APIKeyEnv: "TEST_CISCO_KEY2",
-	}
-	t.Setenv("TEST_CISCO_KEY2", "k2")
-	c := NewCiscoInspectClient(cfg, "")
-	c.SetTelemetry(tel)
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	client := newCiscoInspectTestClient(t, srv.URL, "TEST_CISCO_INVALID_JSON")
+	client.client = srv.Client()
+	client.bindObservabilityV8(runtime)
 
-	prev := EventWriter()
-	gw, err := gatewaylog.New(gatewaylog.Config{})
-	if err != nil {
-		t.Fatal(err)
+	ctx, _ := ciscoCorrelatedContext(t)
+	if verdict := client.Inspect(ctx, []ChatMessage{{Role: "user", Content: "x"}}); verdict != nil {
+		t.Fatalf("invalid JSON verdict=%+v, want nil", verdict)
 	}
-	SetEventWriter(gw)
-	t.Cleanup(func() { SetEventWriter(prev) })
-
-	_ = c.Inspect([]ChatMessage{{Role: "user", Content: "x"}})
-
-	var rm metricdata.ResourceMetrics
-	if err := r.Collect(context.Background(), &rm); err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name == "defenseclaw.cisco.errors" {
-				found = true
-			}
-			if m.Name == "defenseclaw.cisco_inspect.latency" {
-				h, ok := m.Data.(metricdata.Histogram[float64])
-				if ok && len(h.DataPoints) > 0 {
-					found = true
-				}
-			}
-		}
-	}
-	if !found {
-		t.Fatal("expected cisco metrics")
+	metrics := ciscoMetricMap(capture.metricSnapshot())
+	if len(metrics[observability.TelemetryInstrumentDefenseClawCiscoInspectLatency]) != 1 ||
+		len(metrics[observability.TelemetryInstrumentDefenseClawCiscoErrors]) != 1 {
+		t.Fatalf("invalid JSON generated metrics=%v", metrics)
 	}
 }
 
-func TestCiscoInspectClient_NetworkErrorUsesUpstreamCode(t *testing.T) {
-	cfg := &config.CiscoAIDefenseConfig{
-		Endpoint:  "http://127.0.0.1:1",
-		TimeoutMs: 200,
-		APIKeyEnv: "TEST_CISCO_KEY3",
+func TestCiscoInspectClientNetworkErrorUsesGeneratedUpstreamCode(t *testing.T) {
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	client := newCiscoInspectTestClient(t, "http://127.0.0.1:1", "TEST_CISCO_NETWORK_ERROR")
+	client.client = &http.Client{Timeout: 200 * time.Millisecond}
+	client.bindObservabilityV8(runtime)
+
+	ctx, _ := ciscoCorrelatedContext(t)
+	if verdict := client.Inspect(ctx, []ChatMessage{{Role: "user", Content: "x"}}); verdict != nil {
+		t.Fatalf("network error verdict=%+v, want nil", verdict)
 	}
-	t.Setenv("TEST_CISCO_KEY3", "k3")
-	c := NewCiscoInspectClient(cfg, "")
-	c.SetTelemetry(nil)
-	v := c.Inspect([]ChatMessage{{Role: "user", Content: "x"}})
-	if v != nil {
-		t.Fatal("expected nil")
+	metrics := ciscoMetricMap(capture.metricSnapshot())
+	if len(metrics[observability.TelemetryInstrumentDefenseClawCiscoErrors]) != 1 ||
+		metrics[observability.TelemetryInstrumentDefenseClawCiscoErrors][0].Attributes()["defenseclaw.metric.code"] != string(gatewaylog.ErrCodeUpstreamError) {
+		t.Fatalf("network error generated metrics=%v", metrics)
 	}
 }
 
-func TestCiscoInspectClient_SuccessRecordsLatency(t *testing.T) {
+func TestCiscoInspectClientSuccessRecordsCanonicalLatencyOnly(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"is_safe":true,"action":"allow"}`)
 	}))
 	t.Cleanup(srv.Close)
 
-	r := sdkmetric.NewManualReader()
-	tel, err := telemetry.NewProviderForTest(r)
-	if err != nil {
-		t.Fatal(err)
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	client := newCiscoInspectTestClient(t, srv.URL, "TEST_CISCO_SUCCESS")
+	client.client = srv.Client()
+	client.bindObservabilityV8(runtime)
+
+	ctx, _ := ciscoCorrelatedContext(t)
+	verdict := client.Inspect(ctx, []ChatMessage{{Role: "user", Content: "ok"}})
+	if verdict == nil || !strings.Contains(verdict.Scanner, "ai-defense") {
+		t.Fatalf("success verdict=%+v", verdict)
 	}
-	cfg := &config.CiscoAIDefenseConfig{
-		Endpoint:  srv.URL,
-		TimeoutMs: 5000,
-		APIKeyEnv: "TEST_CISCO_KEY4",
+	metrics := ciscoMetricMap(capture.metricSnapshot())
+	latencies := metrics[observability.TelemetryInstrumentDefenseClawCiscoInspectLatency]
+	if len(latencies) != 1 || len(metrics[observability.TelemetryInstrumentDefenseClawCiscoErrors]) != 0 ||
+		latencies[0].Attributes()["defenseclaw.outcome"] != string(observability.OutcomeCompleted) {
+		t.Fatalf("success generated metrics=%v", metrics)
 	}
-	t.Setenv("TEST_CISCO_KEY4", "k4")
-	c := NewCiscoInspectClient(cfg, "")
-	c.SetTelemetry(tel)
-	v := c.Inspect([]ChatMessage{{Role: "user", Content: "ok"}})
-	if v == nil || !strings.Contains(v.Scanner, "ai-defense") {
-		t.Fatalf("unexpected verdict: %+v", v)
+	if spans := capture.snapshot(); len(spans) != 0 {
+		t.Fatalf("Cisco client fabricated %d standalone spans; phase owner must construct the span", len(spans))
 	}
-	var rm metricdata.ResourceMetrics
-	if err := r.Collect(context.Background(), &rm); err != nil {
-		t.Fatal(err)
+}
+
+func TestCiscoInspectGeneratedLatencyJoinsExactAIDPhaseSpan(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"allow"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	client := newCiscoInspectTestClient(t, srv.URL, "TEST_CISCO_PHASE_JOIN")
+	client.client = srv.Client()
+	inspector := NewGuardrailInspector("remote", client, nil, "")
+	configureGuardrailInspectorObservabilityV8(inspector, runtime, func() string { return "codex" })
+
+	ctx, _ := ciscoCorrelatedContext(t)
+	verdict := inspector.Inspect(
+		ctx, "prompt", "ordinary prompt",
+		[]ChatMessage{{Role: "user", Content: "ordinary prompt"}}, "gpt-4", "action",
+	)
+	if verdict == nil {
+		t.Fatal("generated Cisco inspection returned nil verdict")
 	}
-	var latPoints int
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != "defenseclaw.cisco_inspect.latency" {
-				continue
-			}
-			h := m.Data.(metricdata.Histogram[float64])
-			latPoints += len(h.DataPoints)
+
+	var phase telemetry.V8CanonicalEndedSpan
+	for _, span := range capture.snapshot() {
+		attributes := proxyCanonicalAttributes(t, span.Record())
+		if attributes["defenseclaw.guardrail.phase"] == "ai_defense" {
+			phase = span
+		}
+		if span.Name() == "cisco.inspect.chat" {
+			t.Fatal("legacy standalone Cisco span was emitted")
 		}
 	}
-	if latPoints < 1 {
-		t.Fatal("expected latency histogram point")
+	if phase.Name() == "" {
+		t.Fatalf("generated spans missing ai_defense phase: %v", capture.snapshot())
 	}
+	metrics := ciscoMetricMap(capture.metricSnapshot())
+	latencies := metrics[observability.TelemetryInstrumentDefenseClawCiscoInspectLatency]
+	if len(latencies) != 1 {
+		t.Fatalf("generated Cisco latency metrics=%v", metrics)
+	}
+	correlation := latencies[0].CanonicalRecord().Correlation()
+	if correlation.TraceID != phase.TraceID().String() || correlation.SpanID != phase.SpanID().String() {
+		t.Fatalf(
+			"Cisco latency correlation=%s/%s want phase=%s/%s",
+			correlation.TraceID, correlation.SpanID, phase.TraceID(), phase.SpanID(),
+		)
+	}
+}
+
+func TestCiscoInspectClientRequestContextCancelsUpstream(t *testing.T) {
+	requestStarted := make(chan struct{}, 1)
+	requestCancelled := make(chan struct{}, 1)
+	client := newCiscoInspectTestClient(t, "https://inspect.example.test", "TEST_CISCO_CANCEL")
+	client.client = &http.Client{Transport: ciscoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requestStarted <- struct{}{}
+		<-request.Context().Done()
+		requestCancelled <- struct{}{}
+		return nil, request.Context().Err()
+	})}
+	ctx, cancel := context.WithCancel(t.Context())
+	result := make(chan *ScanVerdict, 1)
+	go func() {
+		result <- client.Inspect(ctx, []ChatMessage{{Role: "user", Content: "cancel"}})
+	}()
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Cisco request did not reach the test server")
+	}
+	cancel()
+	select {
+	case <-requestCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("Cisco upstream request did not observe caller cancellation")
+	}
+	select {
+	case verdict := <-result:
+		if verdict != nil {
+			t.Fatalf("cancelled request verdict=%+v, want nil", verdict)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Cisco inspection did not return after caller cancellation")
+	}
+}
+
+type ciscoRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (roundTrip ciscoRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTrip(request)
+}
+
+func newCiscoInspectTestClient(t *testing.T, endpoint, environment string) *CiscoInspectClient {
+	t.Helper()
+	t.Setenv(environment, "test-key")
+	client := NewCiscoInspectClient(&config.CiscoAIDefenseConfig{
+		Endpoint: endpoint, TimeoutMs: 5000, APIKeyEnv: environment,
+	}, "")
+	if client == nil {
+		t.Fatal("expected Cisco AI Defense client")
+	}
+	return client
 }
 
 // TestCiscoInspectClient_WireParity is the G2 golden-request test. It
@@ -244,7 +317,7 @@ func TestCiscoInspectClient_WireParity(t *testing.T) {
 		t.Fatal("expected non-nil client with APIKey set")
 	}
 
-	verdict := c.Inspect([]ChatMessage{
+	verdict := c.Inspect(t.Context(), []ChatMessage{
 		{Role: "system", Content: "You are a helpful assistant."},
 		{Role: "user", Content: "hello"},
 	})

@@ -27,7 +27,7 @@ import (
 func TestHookAIDInspect_GateBehavior(t *testing.T) {
 	t.Run("nil_inspector_returns_nil", func(t *testing.T) {
 		a := &APIServer{scannerCfg: &config.Config{}}
-		if v := a.hookAIDInspect("mcp__jira__createJiraIssue", "summary=test"); v != nil {
+		if v := a.hookAIDInspect(t.Context(), "mcp__jira__createJiraIssue", "summary=test"); v != nil {
 			t.Fatalf("expected nil when inspector unset, got %+v", v)
 		}
 	})
@@ -43,7 +43,7 @@ func TestHookAIDInspect_GateBehavior(t *testing.T) {
 			scannerCfg:     cfg,
 			ciscoInspector: &CiscoInspectClient{apiKey: "any"}, // wired but disabled
 		}
-		if v := a.hookAIDInspect("mcp__jira__createJiraIssue", "x"); v != nil {
+		if v := a.hookAIDInspect(t.Context(), "mcp__jira__createJiraIssue", "x"); v != nil {
 			t.Fatalf("expected nil when ScanHookSurface=false, got %+v", v)
 		}
 	})
@@ -53,7 +53,7 @@ func TestHookAIDInspect_GateBehavior(t *testing.T) {
 			scannerCfg:     &config.Config{},
 			ciscoInspector: &CiscoInspectClient{apiKey: "any"},
 		}
-		if v := a.hookAIDInspect("mcp__jira__createJiraIssue", ""); v != nil {
+		if v := a.hookAIDInspect(t.Context(), "mcp__jira__createJiraIssue", ""); v != nil {
 			t.Fatalf("expected nil for empty content, got %+v", v)
 		}
 	})
@@ -179,7 +179,7 @@ func TestHookAIDInspect_PrependsToolName(t *testing.T) {
 		scannerCfg:     &config.Config{},
 		ciscoInspector: cisco,
 	}
-	_ = a.hookAIDInspect("mcp__jira__createJiraIssue", `{"summary":"test"}`)
+	_ = a.hookAIDInspect(t.Context(), "mcp__jira__createJiraIssue", `{"summary":"test"}`)
 
 	msgs, _ := captured["messages"].([]interface{})
 	if len(msgs) == 0 {

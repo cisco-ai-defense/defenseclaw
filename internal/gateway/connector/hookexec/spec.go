@@ -63,6 +63,7 @@ type spec struct {
 
 	defaultBlockReason string // used when action=block but reason is empty
 
+	openAllow         failResult // connector-native allow for empty/fail-open paths
 	oversizedClosed   failResult // oversized payload + FAIL_MODE=closed
 	unreachableStrict failResult // transport failure + STRICT_AVAILABILITY=1
 	responseClosed    failResult // response-layer failure + FAIL_MODE=closed
@@ -98,6 +99,7 @@ var specs = map[string]spec{
 		connector: "cursor", hookName: "cursor-hook", errLabel: "cursor",
 		subject: "cursor tool", endpoint: "/api/v1/cursor/hook",
 		outputField: "hook_output", style: styleHookEcho,
+		openAllow:         failResult{body: cursorAllow(), exit: 0},
 		oversizedClosed:   failResult{body: cursorDeny(tooLarge), exit: blockExit},
 		unreachableStrict: failResult{body: cursorDeny(failedClosed), exit: blockExit},
 		responseClosed:    failResult{body: cursorDeny(failedClosed), exit: 0},
@@ -159,7 +161,11 @@ var specs = map[string]spec{
 }
 
 func cursorDeny(msg string) string {
-	return `{"continue":true,"permission":"deny","user_message":"` + msg + `","agent_message":"` + msg + `"}`
+	return `{"continue":false,"permission":"deny","user_message":"` + msg + `","agent_message":"` + msg + `"}`
+}
+
+func cursorAllow() string {
+	return `{"continue":true}`
 }
 
 func specFor(connector string) (spec, bool) {

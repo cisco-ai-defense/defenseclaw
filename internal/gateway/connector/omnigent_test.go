@@ -26,6 +26,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func requireOmnigentHost(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("OmniGent has no supported native Windows policy bridge; platform rejection coverage remains active")
+	}
+}
+
 func withOmnigentPathOverrides(t *testing.T, configPath, sitePackages string) {
 	t.Helper()
 	previousConfig := OmnigentConfigPathOverride
@@ -299,6 +306,7 @@ func TestOmnigentSetupRefreshesBackupsWhenTargetsMove(t *testing.T) {
 }
 
 func TestOmnigentRawPolicyTemplateImportsFailOpen(t *testing.T) {
+	requireOmnigentHost(t)
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 is required for the raw-template import test")
@@ -332,6 +340,7 @@ print(json.dumps(module.defenseclaw_policy({"type": "request", "data": "hello"})
 }
 
 func TestOmnigentPolicyPayloadRejectsNonFiniteNumbers(t *testing.T) {
+	requireOmnigentHost(t)
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 is required for the policy payload test")
@@ -369,6 +378,7 @@ print(json.dumps(payload, allow_nan=False))
 }
 
 func TestOmnigentPolicyBridgeMapsBlockToDeny(t *testing.T) {
+	requireOmnigentHost(t)
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 is required for the policy bridge integration test")
@@ -454,6 +464,7 @@ print(json.dumps(module.defenseclaw_policy({
 }
 
 func TestOmnigentPolicyBridgeFailMode(t *testing.T) {
+	requireOmnigentHost(t)
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 is required for the policy bridge fail-mode test")
@@ -515,6 +526,7 @@ func TestOmnigentConfirmIsNativeOnlyBeforeActions(t *testing.T) {
 }
 
 func TestOmnigentPolicyBridgeVerdictMappingAndEmptyToken(t *testing.T) {
+	requireOmnigentHost(t)
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 is required for the policy bridge integration test")
@@ -571,6 +583,7 @@ for name in ("deny-case", "ask-case", "allow-case"):
 }
 
 func TestOmnigentPolicyEventFixture(t *testing.T) {
+	requireOmnigentHost(t)
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 is required for the policy event fixture test")

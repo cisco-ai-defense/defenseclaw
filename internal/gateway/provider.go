@@ -25,21 +25,23 @@ import (
 // representation throughout the proxy. Content can be a plain string or an
 // array of content blocks ([{"type":"text","text":"..."}]).
 type ChatMessage struct {
-	Role       string          `json:"role"`
-	Content    string          `json:"-"`
-	RawContent json.RawMessage `json:"content,omitempty"`
-	ToolCalls  json.RawMessage `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
-	Name       string          `json:"name,omitempty"`
+	Role         string          `json:"role"`
+	Content      string          `json:"-"`
+	RawContent   json.RawMessage `json:"content,omitempty"`
+	ToolCalls    json.RawMessage `json:"tool_calls,omitempty"`
+	ToolCallID   string          `json:"tool_call_id,omitempty"`
+	Name         string          `json:"name,omitempty"`
+	ExtraContent json.RawMessage `json:"extra_content,omitempty"`
 }
 
 func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 	type plain struct {
-		Role       string          `json:"role"`
-		Content    json.RawMessage `json:"content,omitempty"`
-		ToolCalls  json.RawMessage `json:"tool_calls,omitempty"`
-		ToolCallID string          `json:"tool_call_id,omitempty"`
-		Name       string          `json:"name,omitempty"`
+		Role         string          `json:"role"`
+		Content      json.RawMessage `json:"content,omitempty"`
+		ToolCalls    json.RawMessage `json:"tool_calls,omitempty"`
+		ToolCallID   string          `json:"tool_call_id,omitempty"`
+		Name         string          `json:"name,omitempty"`
+		ExtraContent json.RawMessage `json:"extra_content,omitempty"`
 	}
 	var p plain
 	if err := json.Unmarshal(data, &p); err != nil {
@@ -50,6 +52,7 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 	m.ToolCalls = p.ToolCalls
 	m.ToolCallID = p.ToolCallID
 	m.Name = p.Name
+	m.ExtraContent = p.ExtraContent
 
 	if len(p.Content) == 0 {
 		return nil
@@ -91,17 +94,19 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 
 func (m ChatMessage) MarshalJSON() ([]byte, error) {
 	type alias struct {
-		Role       string          `json:"role,omitempty"`
-		Content    json.RawMessage `json:"content,omitempty"`
-		ToolCalls  json.RawMessage `json:"tool_calls,omitempty"`
-		ToolCallID string          `json:"tool_call_id,omitempty"`
-		Name       string          `json:"name,omitempty"`
+		Role         string          `json:"role,omitempty"`
+		Content      json.RawMessage `json:"content,omitempty"`
+		ToolCalls    json.RawMessage `json:"tool_calls,omitempty"`
+		ToolCallID   string          `json:"tool_call_id,omitempty"`
+		Name         string          `json:"name,omitempty"`
+		ExtraContent json.RawMessage `json:"extra_content,omitempty"`
 	}
 	a := alias{
-		Role:       m.Role,
-		ToolCalls:  m.ToolCalls,
-		ToolCallID: m.ToolCallID,
-		Name:       m.Name,
+		Role:         m.Role,
+		ToolCalls:    m.ToolCalls,
+		ToolCallID:   m.ToolCallID,
+		Name:         m.Name,
+		ExtraContent: m.ExtraContent,
 	}
 	if m.RawContent != nil {
 		a.Content = m.RawContent
@@ -574,24 +579,32 @@ func (o *privateUpstreamPeerObserver) allowedPrivatePeers() []string {
 	return peers
 }
 
+// providerEgressEmitter is the narrow audit boundary provider transport needs.
+// The owning proxy supplies its bound emitter so authoritative v8 routing is
+// preserved; provider transport must not select a process-global telemetry
+// path on its own.
+type providerEgressEmitter func(context.Context, gatewaylog.EgressPayload)
+
 // doProviderRequest executes a provider request and emits one audit event for
 // each allowlisted private address actually used by net/http. GotConn runs for
 // both fresh and pooled connections, so the event describes the dial path that
 // carried traffic rather than an earlier DNS guess.
-func doProviderRequest(req *http.Request) (*http.Response, error) {
+func doProviderRequest(req *http.Request, emit providerEgressEmitter) (*http.Response, error) {
 	observedReq, observer := observePrivateUpstreamPeers(req)
 	resp, err := providerHTTPClient.Do(observedReq)
 	for _, peer := range observer.allowedPrivatePeers() {
-		emitEgress(req.Context(), gatewaylog.EgressPayload{
-			TargetHost:   req.URL.Hostname(),
-			ResolvedIP:   peer,
-			TargetPath:   req.URL.Path,
-			LooksLikeLLM: true,
-			Branch:       "private-upstream",
-			Decision:     "allow",
-			Reason:       "private-ip-allowed",
-			Source:       "go",
-		})
+		if emit != nil {
+			emit(req.Context(), gatewaylog.EgressPayload{
+				TargetHost:   req.URL.Hostname(),
+				ResolvedIP:   peer,
+				TargetPath:   req.URL.Path,
+				LooksLikeLLM: true,
+				Branch:       "private-upstream",
+				Decision:     "allow",
+				Reason:       "private-ip-allowed",
+				Source:       "go",
+			})
+		}
 		fmt.Fprintf(os.Stderr, "[guardrail] ALLOWED upstream connection: host=%s peer=%s (operator allowlist)\n", req.URL.Hostname(), peer)
 	}
 	return resp, err

@@ -164,6 +164,12 @@ extension AppState {
     /// `defenseclaw init`.
     func installBundledRuntime() async {
         guard !runtimeInstallState.isRunning else { return }
+        guard installationMutationsAllowed else {
+            runtimeInstallState = .failed(
+                installationReadOnlyReason ?? "This installation is read only."
+            )
+            return
+        }
         // `defenseclaw upgrade` mutates the same venv and gateway binary —
         // never run both at once.
         switch runtimeUpgradeState {
@@ -175,7 +181,8 @@ extension AppState {
         }
         defer { runtimeInstallRunID = nil }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let dataHome = home + "/.defenseclaw"
+        let dataHome = installationContext.homeRoot.path
+        let venvDir = installationContext.venvURL.path
         let binDir = home + "/.local/bin"
         let activationJournal = dataHome + "/.fresh-install-activation-journal.json"
 
@@ -195,7 +202,8 @@ extension AppState {
             let preserved = try RuntimeInstallFilesystem.recoverFreshInstallActivation(
                 journalPath: activationJournal,
                 dataHome: dataHome,
-                binDir: binDir
+                binDir: binDir,
+                venvDir: venvDir
             )
             guard preserved.isEmpty else {
                 runtimeInstallState = .failed(
@@ -219,6 +227,13 @@ extension AppState {
         // process stops, or any filesystem mutation.
         let dataHomeExistedBeforeInstall = RuntimeInstallFilesystem.lexicalPathExists(dataHome)
         if let marker = RuntimeInstallFilesystem.existingManagedRuntimeMarker(home: home) {
+            runtimeInstallState = .failed(Self.existingRuntimeRefusal(marker: marker, payload: payload))
+            return
+        }
+        if let marker = RuntimeInstallFilesystem.existingSelectedRuntimeMarker(
+            dataHome: dataHome,
+            venvDir: venvDir
+        ) {
             runtimeInstallState = .failed(Self.existingRuntimeRefusal(marker: marker, payload: payload))
             return
         }
@@ -257,7 +272,7 @@ extension AppState {
             )
             return
         }
-        let venvCLI = dataHome + "/.venv/bin/defenseclaw"
+        let venvCLI = installationContext.runtimeCLIURL.path
 
         // ── uv ────────────────────────────────────────────────────────────
         runtimeInstallState = .running("Locating uv")
@@ -274,7 +289,7 @@ extension AppState {
         runtimeInstallState = .running("Ensuring Python 3.12")
         // Expected to miss on Macs without 3.12 (install.sh probes silently
         // too) — a miss is not a failure, so it stays out of Activity.
-        let find = await cli.run(binary: uv, arguments: ["python", "find", "3.12"])
+        let find = await cli.run(binary: uv, arguments: ["python", "find", "3.12"], mutation: false)
         if !find.succeeded {
             runtimeInstallState = .running("Downloading Python 3.12 (network)")
             let install = await installerStep(
@@ -292,21 +307,29 @@ extension AppState {
         // ── venv + wheel, staged (mirrors install.sh install_python_cli,
         // but never destroys a working venv before the network-dependent
         // dependency resolution has succeeded) ────────────────────────────
-        let venvDir = dataHome + "/.venv"
         let stagingDir = venvDir + ".staging-" + UUID().uuidString
         let dataHomeIdentity: RuntimeInstallFilesystem.PathIdentity
         do {
-            let reservations = try RuntimeInstallFilesystem.ensureRealDirectoryTree(
-                root: home,
-                components: [".defenseclaw"]
-            )
-            guard let reservation = reservations.last else {
-                throw RuntimeInstallFilesystem.ActivationError.parentChanged(dataHome)
+            if dataHome == home + "/.defenseclaw" {
+                let reservations = try RuntimeInstallFilesystem.ensureRealDirectoryTree(
+                    root: home,
+                    components: [".defenseclaw"]
+                )
+                guard let reservation = reservations.last else {
+                    throw RuntimeInstallFilesystem.ActivationError.parentChanged(dataHome)
+                }
+                dataHomeIdentity = reservation.identity
+            } else {
+                dataHomeIdentity = try RuntimeInstallFilesystem.ensureRealDirectoryPath(dataHome)
             }
-            dataHomeIdentity = reservation.identity
+            let venvParent = URL(fileURLWithPath: venvDir)
+                .deletingLastPathComponent().path
+            if venvParent != dataHome {
+                _ = try RuntimeInstallFilesystem.ensureRealDirectoryPath(venvParent)
+            }
         } catch {
             runtimeInstallState = .failed(
-                "Fresh runtime installation refused an unsafe ~/.defenseclaw ancestor: \(error.localizedDescription). No existing state was changed."
+                "Fresh runtime installation refused an unsafe selected home or virtual-environment ancestor: \(error.localizedDescription). No existing state was changed."
             )
             return
         }
@@ -891,6 +914,7 @@ extension AppState {
         return """
         (
           set -eu
+          unset VERSION
           umask 077
           command -v cosign >/dev/null
           checksums="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 '\(assetBase)/checksums.txt')"

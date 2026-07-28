@@ -61,7 +61,7 @@ func TestResolveSocketPath(t *testing.T) {
 				DeploymentMode: managed.DeploymentModeManagedEnterprise,
 			},
 			env:  "/tmp/attacker.sock",
-			want: "/opt/dc/ipc/" + SocketFileName,
+			want: filepath.Join("/opt/dc", "ipc", SocketFileName),
 		},
 		{
 			name: "managed_enterprise falls back to dirname(data_dir)/ipc/… (macOS installer layout)",
@@ -73,7 +73,7 @@ func TestResolveSocketPath(t *testing.T) {
 				DataDir:        "/opt/cisco/secureclient/defenseclaw/runtime",
 				DeploymentMode: managed.DeploymentModeManagedEnterprise,
 			},
-			want: "/opt/cisco/secureclient/defenseclaw/ipc/" + SocketFileName,
+			want: filepath.Join("/opt/cisco/secureclient/defenseclaw", "ipc", SocketFileName),
 		},
 		{
 			name: "unmanaged falls back to data_dir/ipc/…",

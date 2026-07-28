@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Per-connector deep-dive driven by the $connector variable. Open from the Connectors overview by clicking any connector name. Panels use source / connector / gen_ai_agent_name labels depending on the underlying metric.",
+  "description": "Per-connector deep-dive driven by the $connector variable. Open from the Connectors overview by clicking any connector name. Panels use the canonical source or connector identity carried by each signal.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -163,8 +163,8 @@
     },
     {
       "type": "stat",
-      "title": "Tokens / min",
-      "description": "OTel GenAI token rate (gen_ai.client.token.usage). Populated only when the connector proxies LLM calls through DefenseClaw (claudecode-bridge, codex-notify, openclaw). Hook-only connectors (cursor, hermes, copilot, geminicli, windsurf) do not see LLM bodies and will read 0 — that is by design.",
+      "title": "Reported tokens / min",
+      "description": "Connector-attributed token rate reported upstream. This is a five-minute window-average rate: established series use counter delta divided by the window; a series first published inside the window uses its latest cumulative completion value divided by the window. It is not an instantaneous rate. Hook-only connectors may not report token usage; no series is an explicit unavailable state, not a measured zero.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -177,7 +177,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(gen_ai_client_token_usage_sum{gen_ai_agent_name=\"$connector\"}[5m])) * 60 or vector(0)",
+          "expr": "sum((((increase(defenseclaw_agent_token_usage_total{connector=\"$connector\"}[5m]) or (last_over_time(defenseclaw_agent_token_usage_total{connector=\"$connector\"}[5m]) * 0)) and defenseclaw_agent_token_usage_total{connector=\"$connector\"} offset 5m) or (last_over_time(defenseclaw_agent_token_usage_total{connector=\"$connector\"}[5m]) unless defenseclaw_agent_token_usage_total{connector=\"$connector\"} offset 5m))) / 300 * 60",
           "refId": "A",
           "instant": true
         }
@@ -190,6 +190,12 @@
         },
         "colorMode": "value",
         "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "Not reported",
+          "unit": "suffix: tokens/min"
+        }
       }
     },
     {
@@ -283,7 +289,7 @@
     {
       "type": "stat",
       "title": "Evaluations / min",
-      "description": "Guardrail evaluations / min for this connector (defenseclaw_inspect_evaluations_total filtered by tool=^$connector:). Replaced the prior 'OTLP requests / min' panel which was always zero for hook-only connectors. Native-OTLP-push counts are still visible in the OTLP ingest row below.",
+      "description": "Guardrail evaluations / min for this connector, filtered by the first-class connector label on defenseclaw_inspect_evaluations_total. Native-OTLP-push counts remain visible in the OTLP ingest row below.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -296,7 +302,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{connector=~\"$connector\"}[5m])) * 60 or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -453,6 +459,7 @@
     {
       "type": "timeseries",
       "title": "Tokens / sec by direction x model",
+      "description": "Window-average reported token rate by model and direction. Established series use counter delta divided by the window; a series first published inside the window uses its latest cumulative completion value divided by the window. It is not an instantaneous rate; absent series mean token usage was not reported.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -465,20 +472,22 @@
       },
       "targets": [
         {
-          "expr": "sum by (gen_ai_token_type, gen_ai_request_model) (rate(gen_ai_client_token_usage_sum{gen_ai_agent_name=\"$connector\"}[$__rate_interval]))",
-          "legendFormat": "{{gen_ai_request_model}} / {{gen_ai_token_type}}",
+          "expr": "sum by (kind, gen_ai_request_model) ((((increase(defenseclaw_agent_token_usage_total{connector=\"$connector\"}[$__rate_interval]) or (last_over_time(defenseclaw_agent_token_usage_total{connector=\"$connector\"}[$__rate_interval]) * 0)) and defenseclaw_agent_token_usage_total{connector=\"$connector\"} offset $__rate_interval) or (last_over_time(defenseclaw_agent_token_usage_total{connector=\"$connector\"}[$__rate_interval]) unless defenseclaw_agent_token_usage_total{connector=\"$connector\"} offset $__rate_interval))) / ($__rate_interval_ms / 1000)",
+          "legendFormat": "{{gen_ai_request_model}} / {{kind}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "ops"
+          "noValue": "Not reported",
+          "unit": "suffix: tokens/sec"
         }
       }
     },
     {
       "type": "timeseries",
-      "title": "LLM duration p50/p95/p99 (s)",
+      "title": "LLM span duration p50/p95/p99 (ms)",
+      "description": "Duration of connector-attributed model operation spans. No series means the connector did not emit eligible operation spans.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -491,24 +500,25 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(gen_ai_client_operation_duration_seconds_bucket{gen_ai_agent_name=\"$connector\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(defenseclaw_agent_span_duration_milliseconds_bucket{connector=\"$connector\",gen_ai_operation_name=~\"chat|generate_content|text_completion\"}[$__rate_interval])))",
           "legendFormat": "p50",
           "refId": "p50"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(gen_ai_client_operation_duration_seconds_bucket{gen_ai_agent_name=\"$connector\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(defenseclaw_agent_span_duration_milliseconds_bucket{connector=\"$connector\",gen_ai_operation_name=~\"chat|generate_content|text_completion\"}[$__rate_interval])))",
           "legendFormat": "p95",
           "refId": "p95"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(gen_ai_client_operation_duration_seconds_bucket{gen_ai_agent_name=\"$connector\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(defenseclaw_agent_span_duration_milliseconds_bucket{connector=\"$connector\",gen_ai_operation_name=~\"chat|generate_content|text_completion\"}[$__rate_interval])))",
           "legendFormat": "p99",
           "refId": "p99"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
+          "noValue": "Not reported",
+          "unit": "ms"
         }
       }
     },
@@ -539,7 +549,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[$__rate_interval]))",
+          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{connector=~\"$connector\"}[$__rate_interval]))",
           "legendFormat": "{{action}}",
           "refId": "A"
         }
@@ -572,7 +582,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (tool) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[$__rate_interval]))",
+          "expr": "sum by (tool) (rate(defenseclaw_inspect_evaluations_total{connector=~\"$connector\"}[$__rate_interval]))",
           "legendFormat": "{{tool}}",
           "refId": "A"
         }
@@ -605,7 +615,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (severity) (rate(defenseclaw_connector_hook_outcome_total{connector=\"$connector\", would_block=\"true\", severity!=\"NONE\"}[$__rate_interval])) * 60 or on() vector(0)",
+          "expr": "sum by (severity) (rate(defenseclaw_connector_hook_outcome_total{connector=\"$connector\", would_block=\"true\"}[$__rate_interval])) * 60 or on() vector(0)",
           "legendFormat": "{{severity}}",
           "refId": "A"
         }
@@ -648,7 +658,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action!~\"allow|none\", tool=~\"$connector:.*\"}[$__range])) or vector(0)",
+          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{action!~\"allow|none\", connector=~\"$connector\"}[$__range])) or vector(0)",
           "legendFormat": "non-allow",
           "refId": "A"
         }
@@ -699,7 +709,7 @@
     {
       "type": "table",
       "title": "Top tools (1h)",
-      "description": "Most-invoked tools in the last hour from gateway tool_invocation events.",
+      "description": "Most-invoked tools in the last hour from canonical tool.invocation.completed records.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -712,7 +722,7 @@
       },
       "targets": [
         {
-          "expr": "topk(15, sum by (defenseclaw_tool_name) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"tool_invocation\" | gen_ai_agent_name=~\"$connector\" [1h])))",
+          "expr": "topk(15, sum by (tool_name) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=\"$connector\" | event_name=\"tool.invocation.completed\" | label_format tool_name=\"{{.body_gen_ai_tool_name}}\" [1h])))",
           "instant": true,
           "format": "table",
           "refId": "A",
@@ -794,8 +804,8 @@
     },
     {
       "type": "logs",
-      "title": "$connector — gateway events",
-      "description": "All gateway log events associated with this connector via gen_ai_agent_name or defenseclaw_claw_mode labels.",
+      "title": "$connector — canonical events",
+      "description": "All canonical gateway log events carrying this connector in the v8 envelope.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -809,7 +819,7 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | gen_ai_agent_name=\"$connector\" | line_format \"[{{.defenseclaw_gateway_event_type}}] {{__line__}}\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=\"$connector\" | line_format \"[{{.event_name}}] {{__line__}}\"",
           "refId": "A",
           "datasource": {
             "type": "loki",

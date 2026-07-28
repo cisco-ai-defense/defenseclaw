@@ -17,7 +17,7 @@
 #   2. Feeds every golden stdin payload under golden/<connector>/ into the
 #      *installed* hook entrypoint:
 #        - unix:    ~/.defenseclaw/hooks/<connector>-hook.sh
-#        - windows: defenseclaw-gateway hook --connector <name> --event <ev>
+#        - windows: defenseclaw-hook hook --connector <name> --event <ev>
 #   3. Asserts the gateway received the event (fires) and that the entrypoint
 #      shaped the verdict correctly (allow -> exit 0; block -> exit 2 or a
 #      decision JSON carrying block/deny).
@@ -65,7 +65,24 @@ fi
 dc_section "contract smoke: ${DC_E2E_CONNECTOR} ($(dc_detect_os))"
 
 dc_init_defenseclaw
-dc_setup_connector "${DC_E2E_CONNECTOR}" action
+
+# Capture the exact pre-setup agent config. Teardown is correct when it
+# restores these bytes (or restores absence), not when the resulting file
+# happens to contain no generic "defenseclaw" substring. The latter falsely
+# rejects legitimate pre-existing user content and does not prove restoration.
+cfg="$(dc_connector_config_file "${DC_E2E_CONNECTOR}")"
+cfg_baseline="${TMPDIR:-/tmp}/dc-e2e-${DC_E2E_CONNECTOR}-config-$$.baseline"
+cfg_baseline_state="missing"
+if [ -f "${cfg}" ]; then
+  cp "${cfg}" "${cfg_baseline}"
+  cfg_baseline_state="present"
+else
+  rm -f "${cfg_baseline}"
+fi
+if ! dc_setup_connector "${DC_E2E_CONNECTOR}" action; then
+  rm -f "${cfg_baseline}"
+  exit 1
+fi
 
 overall_rc=0
 
@@ -73,21 +90,22 @@ overall_rc=0
 drive_event() {
   local label="$1" payload="$2" expect="$3"
   local before after out code
-  before="$(dc_gateway_jsonl_count)"
+  before="$(dc_event_cursor)"
   out="$(dc_invoke_hook "${DC_E2E_CONNECTOR}" "${label}" "${payload}")"
   # Portable BRE: BSD sed (macOS) treats \+ as a literal '+', so use
   # [0-9][0-9]* for "one or more digits" — otherwise the exit code parses
   # empty on macOS and every allow assertion (which requires exit 0) fails.
   code="$(printf '%s\n' "${out}" | sed -n 's/^exit:\([0-9][0-9]*\)$/\1/p' | tail -1)"
-  # Give the gateway a beat to flush the JSONL line.
-  sleep 1
-  after="$(dc_gateway_jsonl_count)"
+  # Hook response and canonical persistence are deliberately decoupled. Wait
+  # for this probe's connector row instead of assuming a fixed flush delay.
+  dc_wait_for_connector_event "${DC_E2E_CONNECTOR}" "${before}" || true
+  after="$(dc_event_cursor)"
 
   # Fires: gateway received an event attributed to this connector.
   if dc_assert_fired "${DC_E2E_CONNECTOR}" "${before}"; then
-    dc_record_result "${label}:fires" pass "jsonl ${before}->${after}"
+    dc_record_result "${label}:fires" pass "sqlite ${before}->${after}"
   else
-    dc_record_result "${label}:fires" fail "jsonl ${before}->${after} exit=${code}"
+    dc_record_result "${label}:fires" fail "sqlite ${before}->${after} exit=${code}"
     overall_rc=1
   fi
 
@@ -129,14 +147,13 @@ drive_event() {
 if dc_assert_schema 1; then
   dc_record_result "schema" pass ""
 else
-  dc_record_result "schema" fail "gateway.jsonl schema validation failed"
+  dc_record_result "schema" fail "canonical SQLite history validation failed"
   overall_rc=1
 fi
 
-# Teardown + clean-state assertion.
-cfg="$(dc_connector_config_file "${DC_E2E_CONNECTOR}")"
+# Teardown + exact pre-setup state assertion.
 if dc_teardown_connector "${DC_E2E_CONNECTOR}"; then
-  if dc_assert_teardown "${DC_E2E_CONNECTOR}" "${cfg}"; then
+  if dc_assert_teardown "${DC_E2E_CONNECTOR}" "${cfg}" "${cfg_baseline}" "${cfg_baseline_state}"; then
     dc_record_result "teardown" pass ""
   else
     dc_record_result "teardown" fail "config not restored: ${cfg}"
@@ -146,5 +163,7 @@ else
   dc_record_result "teardown" fail "connector verify reported residual state"
   overall_rc=1
 fi
+
+rm -f "${cfg_baseline}"
 
 exit "${overall_rc}"

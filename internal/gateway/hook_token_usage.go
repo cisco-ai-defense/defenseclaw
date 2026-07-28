@@ -24,7 +24,7 @@ import (
 
 // hookTokenUsage is the result of inspecting a hook payload for
 // LLM token-count fields. The struct is zero-valued when no usable
-// counts were found; RecordHookTokenUsage already short-circuits on
+// counts were found; the generated metric producer short-circuits on
 // non-positive counts so callers can pass the zero struct as-is.
 type hookTokenUsage struct {
 	Model            string
@@ -116,7 +116,7 @@ func valueAtPath(payload map[string]interface{}, key string) (interface{}, bool)
 // extractHookPayloadTokenUsage walks an agent-hook payload looking
 // for common LLM token-count fields. Agents do not include token
 // usage on every hook event; the extractor returns zero values for
-// payloads that carry none, which the downstream RecordHookTokenUsage
+// payloads that carry none, which the downstream generated metric producer
 // silently ignores.
 //
 // The field-name list intentionally mirrors extractOTLPLogTokenUsage
@@ -131,8 +131,8 @@ func valueAtPath(payload map[string]interface{}, key string) (interface{}, bool)
 //
 // The function also resolves the model name from the same priority
 // chain extractOTLPLogTokenUsage uses (gen_ai.response.model →
-// gen_ai.request.model → model). When all model fields are absent
-// the caller's "unknown" fallback in RecordHookTokenUsage applies.
+// gen_ai.request.model → model). When all model fields are absent,
+// the generated metric producer applies the canonical "unknown" label.
 func extractHookPayloadTokenUsage(payload map[string]interface{}) hookTokenUsage {
 	if len(payload) == 0 {
 		return hookTokenUsage{}

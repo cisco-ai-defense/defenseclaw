@@ -252,14 +252,18 @@ Writes happen at the **end** of `classifyAndPersist`, in a single transaction, a
 
 ## Privacy contract
 
-The engine and rollup respect two existing flags:
+The local discovery engine and config-v8 export projection use separate controls:
 
 | Flag | Default | Effect on confidence surface |
 |---|---|---|
 | `ai_discovery.store_raw_local_paths` | `false` | When `false`, raw paths are never persisted to `aiStateFile.json` or `inventory.db`. Locations always include path hashes + workspace hashes; the raw path is simply absent. |
-| `privacy.disable_redaction` | `false` | When `false`, raw paths and full evidence records are stripped from outbound payloads (gateway events, OTel logs, webhooks) regardless of what was captured to disk. |
+| v8 destination redaction profile | `none` for fresh v8 | The selected route profile decides whether path/evidence field classes are preserved, detected, whole-redacted, hashed, or removed. |
 
-**Raw paths only ever surface (in the CLI, in the API, on the wire) when both flags are `true`.** This matches how `disable_redaction` already behaves for the audit DB, OTel logs, and webhook sinks.
+Raw paths can surface only when local capture permits them and the selected output
+projection preserves the `path` field class. A destination with `path: hash` or
+`remove` cannot recover the raw value from another destination or producer object.
+The v7 `privacy.disable_redaction` flag is converted during `defenseclaw upgrade`
+and is not a v8 runtime policy knob.
 
 ---
 
@@ -297,9 +301,14 @@ The component-level log is gated to lifecycle changes only so a steady-state mon
 
 ### Gateway events / webhook sinks
 
-When `privacy.disable_redaction=true`, every per-signal `AIDiscoveryPayload` on the gateway events bus is enriched with the component's identity / presence scores, bands, factor breakdowns, and detector list. All signals in the same `(ecosystem, name)` group ship the same scores so receivers can dedupe on those keys without re-running the engine.
+When the selected v8 family and destination projection preserve these registered
+fields, every per-signal `AIDiscoveryPayload` is enriched with the component's
+identity/presence scores, bands, factor breakdowns, and detector list. All signals
+in the same `(ecosystem, name)` group ship the same scores so receivers can dedupe
+on those keys without re-running the engine.
 
-When `disable_redaction=false` (the shipping default) the payload omits every confidence field — receivers can rely on the absence of `identity_score` to mean "redaction is on".
+When the field-class projection removes those fields, receivers can rely on their
+absence rather than interpreting a fabricated zero.
 
 `raw_paths` and per-evidence `raw_path` additionally require `ai_discovery.store_raw_local_paths=true`, matching the existing privacy-flag composition.
 
@@ -307,7 +316,8 @@ When `disable_redaction=false` (the shipping default) the payload omits every co
 
 Both the OTel histogram samples (`defenseclaw.ai.confidence.{identity,presence}_score`) and the per-signal gateway payload (`payload.identity_score`, `payload.presence_score`) come from a single `componentRollupSnapshot` computed once per scan. The snapshot pins the engine's `now` value so the recency-decayed presence factor produces byte-identical numbers across both paths — operators reconciling a Prometheus query with a Splunk lookup of the gateway events bus see no drift.
 
-In default-config installs (no OTel, redaction enabled) the snapshot is skipped entirely so we don't pay for confidence math whose result both consumers would discard.
+When no collected family or matching destination can consume the snapshot, the
+snapshot is skipped so unused confidence math does not add runtime cost.
 
 ---
 
@@ -373,4 +383,4 @@ defenseclaw agent confidence policy show
 - **State file** — the v2 `aiStateFile.json` schema is unchanged; the engine just reads richer fields out of it. v1 files are still loaded in degraded mode (no per-evidence quality, no specificity).
 - **Catalog** — legacy signatures with only the flat `confidence` field are auto-upgraded: `curator_confidence` defaults to that value, `specificity` defaults to 0.7. No catalog edits are required to ship the engine; tighten signatures opportunistically.
 - **Rollup payload** — the gateway's `componentRollup` JSON keeps every existing field. New fields (`identity_score`, `identity_band`, `presence_score`, `presence_band`, `identity_factors`, `presence_factors`, `locations`, `detectors`) are all `omitempty`. Older sidecars therefore round-trip cleanly through new clients; the new CLI hides the confidence columns when the payload doesn't carry them.
-- **Wire payloads** — `AIDiscoveryPayload` extensions (Phase 7) are gated by `privacy.disable_redaction`. Default-config installs see the same JSON they always saw on the gateway-events bus and OTel logs.
+- **Wire payloads** — `AIDiscoveryPayload` extensions are governed by the generated family schema plus each v8 route's field-class redaction profile. Fresh-v8 `none` preserves registered fields; narrower profiles transform or remove them.

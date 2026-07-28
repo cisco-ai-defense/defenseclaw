@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from defenseclaw.tui.panels.first_run import (
     CONNECTOR_CHOICES,
+    FirstRunField,
     FirstRunPanelModel,
     decide_first_run_prompt,
     first_run_prompt_text,
@@ -120,6 +121,17 @@ def test_first_run_passes_hitl_flags_only_in_action_profile() -> None:
     assert "observe" in args
     assert "--human-approval" not in args
     assert "--no-human-approval" not in args
+
+
+def test_connector_preview_badge_uses_stable_kind_not_label(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "defenseclaw.tui.panels.first_run.connector_preview_on_os",
+        lambda _value: True,
+    )
+
+    field = FirstRunField("Renamed display label", "connector", "hermes")
+
+    assert field.display_value == "hermes (preview)"
 
 
 def test_first_run_fail_mode_cycles_to_closed() -> None:

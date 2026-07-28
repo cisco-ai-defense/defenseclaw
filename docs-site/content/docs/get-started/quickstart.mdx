@@ -11,6 +11,13 @@ keywords:
 
 After the [install](/docs/get-started/install), DefenseClaw is on disk but not yet configured. You then run **one** first-run command. There are two of them — they do the same work, with different UX.
 
+<Callout>
+On native Windows, first review the [Windows connector matrix and setup
+notes](/docs/get-started/windows). Windows uses native agent hooks, excludes WSL
+agents and proxy-only connectors, and otherwise uses the same `init` and
+`quickstart` backend described here.
+</Callout>
+
 <Cards>
   <Card title="defenseclaw init" description="Interactive wizard. Asks about connector, profile, scanner mode, judge, HITL. Recommended the first time." />
   <Card title="defenseclaw quickstart" description="Zero-prompt equivalent with safe defaults. Recommended for CI, scripts, and demos." />
@@ -72,7 +79,14 @@ The scripted equivalent. Same backend, no prompts ever, safe defaults baked in: 
 defenseclaw quickstart --connector claudecode
 ```
 
-Replace `claudecode` with `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openhands`, `antigravity`, `opencode`, `omnigent`, `openclaw`, or `zeptoclaw` to target the agent you actually use. `quickstart` configures **one** connector. If you skip `--connector`, it uses the single configured or detected connector; if more than one connector is configured/detected, or the installer hint disagrees with the detected connector, it exits and asks you to rerun with `--connector <name>`.
+Replace `claudecode` with the setup name for the agent you use. On native
+Windows, choose Codex CLI or Claude Code from the [Native Windows
+guide](/docs/get-started/windows); they are the only certified connectors. Other platforms also offer proxy and
+additional hook connectors. `quickstart` configures **one** connector. If you
+skip `--connector`, it uses the single configured or detected connector; if
+more than one connector is configured/detected, or the installer hint disagrees
+with the detected connector, it exits and asks you to rerun with `--connector
+<name>`.
 
 </Step>
 
@@ -109,11 +123,15 @@ Open Claude Code (or whichever connector you picked). Every prompt and tool call
 defenseclaw tui
 ```
 
-Or tail the JSONL fan-out from a script:
+Or take a scriptable snapshot from mandatory SQLite event history:
 
 ```bash
-tail -f ~/.defenseclaw/gateway.jsonl | jq .
+defenseclaw-gateway audit export --limit 200 --output - | jq .
 ```
+
+JSONL is no longer an implicit mirror. If you need a continuous external file,
+configure an explicit v8 `kind: jsonl` destination with the buckets, signals,
+and redaction profile that file is allowed to receive.
 
 </Step>
 

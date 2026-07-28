@@ -47,6 +47,35 @@ t_dispatch_via_helper() {
   assert_file_exists "${home}/.claude/settings.json"
 }
 
+t_descriptor_anchored_ownership() {
+  local home uid gid
+  home="$(mktest_tmp)"
+  uid="$(id -u)"
+  gid="$(id -g)"
+  prepare_userspace_for codex "${home}" "${uid}" "${gid}"
+  assert_file_exists "${home}/.codex/config.toml"
+  local dir_owner file_owner
+  dir_owner="$(stat -f '%u:%g' "${home}/.codex" 2>/dev/null || stat -c '%u:%g' "${home}/.codex")"
+  file_owner="$(stat -f '%u:%g' "${home}/.codex/config.toml" 2>/dev/null || stat -c '%u:%g' "${home}/.codex/config.toml")"
+  assert_eq "${dir_owner}" "${uid}:${gid}" "descriptor-anchored directory ownership"
+  assert_eq "${file_owner}" "${uid}:${gid}" "descriptor-anchored config ownership"
+}
+
+t_descriptor_ownership_rejects_hardlinked_config() {
+  local home source status uid gid
+  home="$(mktest_tmp)"
+  source="$(mktest_tmp)/source"
+  uid="$(id -u)"
+  gid="$(id -g)"
+  mkdir -p "${home}/.codex"
+  printf 'preserve-me\n' > "${source}"
+  ln "${source}" "${home}/.codex/config.toml"
+  status=0
+  prepare_userspace_for codex "${home}" "${uid}" "${gid}" >/dev/null 2>&1 || status=$?
+  assert_status "${status}" 1 "hardlinked config rejected before privileged ownership change"
+  assert_eq "$(cat "${source}")" "preserve-me" "hardlink source remains unchanged"
+}
+
 # Symlink-rejection matrix: for each connector, we exercise both
 # the directory-symlink and file-symlink attack surfaces, and after
 # rejection we verify the symlink target was never written to.
@@ -95,13 +124,54 @@ t_claudecode_rejects_symlink_file(){ _assert_symlink_file_rejected prepare_claud
 t_cursor_rejects_symlink_dir()     { _assert_symlink_dir_rejected  prepare_cursor_userspace     .cursor  hooks.json; }
 t_cursor_rejects_symlink_file()    { _assert_symlink_file_rejected prepare_cursor_userspace     .cursor  hooks.json    '{"user":"canary"}'; }
 
+t_atomic_creator_rejects_post_check_dangling_symlink() {
+  local home target status
+  home="$(mktest_tmp)"
+  target="$(mktest_tmp)/root-write-canary"
+  mkdir -p "${home}/.codex"
+  # Simulate a user planting a dangling link after the shell precheck but
+  # before the privileged creator opens the final component.
+  ln -s "${target}" "${home}/.codex/config.toml"
+  status=0
+  printf 'attacker-chosen-write\n' \
+    | create_userspace_config_if_missing "${home}/.codex" "config.toml" \
+    >/dev/null 2>&1 || status=$?
+  assert_status "${status}" 1 "post-check dangling symlink rejected"
+  if [[ -e "${target}" || -L "${target}" ]]; then
+    _fail "atomic creator followed dangling symlink to ${target}"
+  fi
+}
+
+t_atomic_creator_rejects_post_check_directory_swap() {
+  local home original attacker status
+  home="$(mktest_tmp)"
+  original="${home}/.cursor"
+  attacker="$(mktest_tmp)"
+  mkdir -p "${original}"
+  # Simulate replacement of the checked directory before the anchored open.
+  rmdir "${original}"
+  ln -s "${attacker}" "${original}"
+  status=0
+  printf '{"version":1}\n' \
+    | create_userspace_config_if_missing "${original}" "hooks.json" \
+    >/dev/null 2>&1 || status=$?
+  assert_status "${status}" 1 "post-check directory symlink rejected"
+  if [[ -e "${attacker}/hooks.json" ]]; then
+    _fail "atomic creator followed replaced parent to ${attacker}/hooks.json"
+  fi
+}
+
 run_case "codex userspace pre-create + idempotent" t_codex_creates
 run_case "claudecode userspace pre-create"         t_claudecode_creates
 run_case "cursor userspace pre-create"             t_cursor_creates
 run_case "prepare_userspace_for dispatch"          t_dispatch_via_helper
+run_case "descriptor-anchored ownership"           t_descriptor_anchored_ownership
+run_case "descriptor ownership rejects hardlink"  t_descriptor_ownership_rejects_hardlinked_config
 run_case "codex rejects symlinked .codex dir"      t_codex_rejects_symlink_dir
 run_case "codex rejects symlinked config.toml"     t_codex_rejects_symlink_file
 run_case "claudecode rejects symlinked .claude dir" t_claudecode_rejects_symlink_dir
 run_case "claudecode rejects symlinked settings.json" t_claudecode_rejects_symlink_file
 run_case "cursor rejects symlinked .cursor dir"    t_cursor_rejects_symlink_dir
 run_case "cursor rejects symlinked hooks.json"     t_cursor_rejects_symlink_file
+run_case "atomic creator rejects post-check dangling symlink" t_atomic_creator_rejects_post_check_dangling_symlink
+run_case "atomic creator rejects post-check directory swap" t_atomic_creator_rejects_post_check_directory_swap

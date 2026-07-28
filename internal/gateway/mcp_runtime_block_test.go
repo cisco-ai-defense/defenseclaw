@@ -117,7 +117,7 @@ func TestHandleToolCall_GlobalMCPBlock(t *testing.T) {
 		t.Fatalf("Block mcp: %v", err)
 	}
 
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 	payload, _ := json.Marshal(ToolCallPayload{Tool: "mcp__jira__createIssue", Args: json.RawMessage(`{}`), Status: "running"})
 	r.Route(EventFrame{Type: "event", Event: "tool_call", Payload: payload})
 	if !hasAction(t, store, "gateway-tool-call-blocked") {
@@ -131,7 +131,7 @@ func TestHandleToolCall_ConnectorScopedMCPBlock(t *testing.T) {
 	if err := enforce.NewPolicyEngine(storeA).BlockForConnector("mcp", "jira", "codex", "scoped"); err != nil {
 		t.Fatalf("BlockForConnector mcp: %v", err)
 	}
-	rCodex := NewEventRouter(nil, storeA, loggerA, false, nil)
+	rCodex := NewEventRouter(nil, storeA, loggerA, false)
 	rCodex.SetGuardrailConfig(&config.GuardrailConfig{Connector: "codex"})
 	payload, _ := json.Marshal(ToolCallPayload{Tool: "mcp__jira__createIssue", Args: json.RawMessage(`{}`), Status: "running"})
 	rCodex.Route(EventFrame{Type: "event", Event: "tool_call", Payload: payload})
@@ -144,7 +144,7 @@ func TestHandleToolCall_ConnectorScopedMCPBlock(t *testing.T) {
 	if err := enforce.NewPolicyEngine(storeB).BlockForConnector("mcp", "jira", "codex", "scoped"); err != nil {
 		t.Fatalf("BlockForConnector mcp: %v", err)
 	}
-	rOther := NewEventRouter(nil, storeB, loggerB, false, nil)
+	rOther := NewEventRouter(nil, storeB, loggerB, false)
 	rOther.SetGuardrailConfig(&config.GuardrailConfig{Connector: "claudecode"})
 	rOther.Route(EventFrame{Type: "event", Event: "tool_call", Payload: payload})
 	if hasAction(t, storeB, "gateway-tool-call-blocked") {

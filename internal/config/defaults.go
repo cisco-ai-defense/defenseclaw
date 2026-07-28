@@ -66,6 +66,7 @@ const (
 	// internal/audit/judge_body_store.go.
 	DefaultJudgeBodiesDBName = "judge_bodies.db"
 	DefaultConfigName        = "config.yaml"
+	DefaultGatewayAPIPort    = 18970
 )
 
 func DefaultDataPath() string {
@@ -228,7 +229,7 @@ func DefaultConfig() *Config {
 			ReconnectMs:     800,
 			MaxReconnectMs:  15000,
 			ApprovalTimeout: 30,
-			APIPort:         18970,
+			APIPort:         DefaultGatewayAPIPort,
 			ConfigReload: GatewayConfigReloadConfig{
 				Mode: "hot",
 			},

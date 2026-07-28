@@ -1,0 +1,74 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": { "stringValue": "codex_cli_rs" }
+          },
+          {
+            "key": "service.version",
+            "value": { "stringValue": "source-fixture" }
+          }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": { "name": "codex_otel" },
+          "logRecords": [
+            {
+              "timeUnixNano": "1783987200000000000",
+              "observedTimeUnixNano": "1783987200000000001",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "body": { "stringValue": "codex.tool_result" },
+              "attributes": [
+                {
+                  "key": "event.name",
+                  "value": { "stringValue": "codex.tool_result" }
+                },
+                {
+                  "key": "conversation.id",
+                  "value": { "stringValue": "conversation-native-tool-1" }
+                },
+                {
+                  "key": "model",
+                  "value": { "stringValue": "gpt-test" }
+                },
+                {
+                  "key": "tool_name",
+                  "value": { "stringValue": "shell" }
+                },
+                {
+                  "key": "call_id",
+                  "value": { "stringValue": "codex-call-source-backed-1" }
+                },
+                {
+                  "key": "arguments",
+                  "value": { "stringValue": "{\"command\":\"true\"}" }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": { "stringValue": "12" }
+                },
+                {
+                  "key": "success",
+                  "value": { "stringValue": "true" }
+                },
+                {
+                  "key": "output",
+                  "value": { "stringValue": "ok" }
+                },
+                {
+                  "key": "app.version",
+                  "value": { "stringValue": "source-fixture" }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

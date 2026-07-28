@@ -14,23 +14,17 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared redaction-status copy for setup commands.
-
-Observability setup should not prompt for privacy policy. It should
-state the current effective state and point at the audited toggle
-command so operators can make that choice deliberately.
-"""
+"""Shared canonical-v8 redaction-policy guidance for setup commands."""
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import click
 
 
 def print_redaction_status_hint(cfg: Any, *, indent: str = "  ") -> None:
-    """Print the effective redaction state and the command to flip it."""
+    """Point operators at the effective per-destination policy."""
     status, command_label, command = redaction_status_hint(cfg)
     click.echo(f"{indent}Redaction: {status}")
     click.echo(f"{indent}{command_label}: {command}")
@@ -38,28 +32,9 @@ def print_redaction_status_hint(cfg: Any, *, indent: str = "  ") -> None:
 
 def redaction_status_hint(cfg: Any) -> tuple[str, str, str]:
     """Return ``(status, command_label, command)`` for setup summaries."""
-    config_disabled = _config_disables_redaction(cfg)
-    env_value = os.environ.get("DEFENSECLAW_DISABLE_REDACTION", "").strip()
-    env_disabled = env_value.lower() in {"1", "true", "yes", "on"}
-
-    if config_disabled or env_disabled:
-        source = "privacy.disable_redaction=true" if config_disabled else ""
-        if env_disabled:
-            env_source = f"DEFENSECLAW_DISABLE_REDACTION={env_value}"
-            source = f"{source}, {env_source}" if source else env_source
-        status = f"OFF (RAW telemetry; {source})"
-        command = "defenseclaw setup redaction on"
-        if env_disabled:
-            command = f"unset DEFENSECLAW_DISABLE_REDACTION && {command}"
-        return status, "To re-enable redaction", command
-
+    del cfg
     return (
-        "ON (redacted telemetry)",
-        "To send raw prompts/tool args/tool calls",
-        "defenseclaw setup redaction off --yes",
+        "PER DESTINATION (defaults are unredacted)",
+        "Inspect collection and route redaction",
+        "defenseclaw config show --effective --section observability",
     )
-
-
-def _config_disables_redaction(cfg: Any) -> bool:
-    privacy = getattr(cfg, "privacy", None)
-    return bool(getattr(privacy, "disable_redaction", False))

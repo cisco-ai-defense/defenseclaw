@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -39,7 +40,7 @@ func TestWriteCreatesFile0600(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
-	if mode := info.Mode().Perm(); mode != 0o600 {
+	if mode := info.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o600 {
 		t.Errorf("file mode = %o; want 0600", mode)
 	}
 }
@@ -58,8 +59,28 @@ func TestWriteOverwritesExisting(t *testing.T) {
 		t.Errorf("got %q; want %q", got, "new")
 	}
 	info, _ := os.Stat(path)
-	if mode := info.Mode().Perm(); mode != 0o600 {
+	if mode := info.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o600 {
 		t.Errorf("file mode = %o; want 0600", mode)
+	}
+}
+
+func TestWriteDoesNotChangeSharedParentMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory-mode regression")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(filepath.Join(dir, "secret"), []byte("fixture")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o750 {
+		t.Fatalf("shared parent mode = %o, want preserved 750", got)
 	}
 }
 
@@ -79,6 +100,29 @@ func TestWriteRefusesSymlink(t *testing.T) {
 	got, _ := os.ReadFile(target)
 	if string(got) != "real" {
 		t.Errorf("symlink target was modified: %q", got)
+	}
+}
+
+func TestProtectFileRefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("real"), 0o644); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	if err := ProtectFile(link); err == nil {
+		t.Fatal("ProtectFile accepted a symlink")
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o644 {
+		t.Fatalf("symlink target mode changed to %o", info.Mode().Perm())
 	}
 }
 
@@ -107,7 +151,7 @@ func TestCreateExclusiveCreates0600(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 	info, _ := os.Stat(path)
-	if mode := info.Mode().Perm(); mode != 0o600 {
+	if mode := info.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o600 {
 		t.Errorf("file mode = %o; want 0600", mode)
 	}
 }

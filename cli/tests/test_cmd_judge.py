@@ -597,7 +597,7 @@ class WizardHookPromptTests(unittest.TestCase):
     def test_checkbox_selector_toggles_with_keys(self):
         keys = iter([" ", "j", " ", "\r"])
         with patch.object(cmd_setup.click, "getchar", side_effect=lambda: next(keys)), \
-                patch.object(cmd_setup, "_stdout_is_tty", return_value=False):
+                patch.object(cmd_setup, "_supports_terminal_redraw", return_value=True):
             got = cmd_setup._prompt_checkbox_selection(
                 ["codex", "hermes"],
                 default_selected=["codex"],
@@ -605,6 +605,12 @@ class WizardHookPromptTests(unittest.TestCase):
                 empty_ok=True,
             )
         self.assertEqual(got, ["hermes"])
+
+    def test_setup_checkbox_recognizes_windows_extended_arrows(self):
+        self.assertEqual(cmd_setup._checkbox_key_name("\x00H"), "up")
+        self.assertEqual(cmd_setup._checkbox_key_name("\xe0H"), "up")
+        self.assertEqual(cmd_setup._checkbox_key_name("\x00P"), "down")
+        self.assertEqual(cmd_setup._checkbox_key_name("\xe0P"), "down")
 
 
 if __name__ == "__main__":

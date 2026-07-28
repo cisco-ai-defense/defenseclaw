@@ -18,10 +18,13 @@ The audit DB is connector-agnostic. Every audit row records its own `connector` 
 ```bash
 defenseclaw status
 defenseclaw alerts --limit 25
-tail -n 200 ~/.defenseclaw/gateway.jsonl | jq -r 'select(.connector) | .connector' | sort | uniq -c
+defenseclaw-gateway audit export --limit 200 --output - \
+  | jq -r 'select(.connector) | .connector' | sort | uniq -c
 ```
 
-`status` shows enforcement flags plus a per-connector block for every active connector. `alerts` lists the most recent decisions as a table. The JSONL histogram gives you a quick by-connector view of recent gateway events.
+`status` shows enforcement flags plus a per-connector block for every active
+connector. `alerts` lists the most recent decisions as a table. The SQLite
+export histogram gives you a quick by-connector view of recent canonical events.
 
 </Step>
 
@@ -50,10 +53,12 @@ defenseclaw setup codex --mode action
 ```bash
 defenseclaw doctor
 defenseclaw alerts --limit 10
-tail -n 100 ~/.defenseclaw/gateway.jsonl | jq -r 'select(.connector) | .connector' | sort | uniq -c
+defenseclaw-gateway audit export --limit 100 --output - \
+  | jq -r 'select(.connector) | .connector' | sort | uniq -c
 ```
 
-`doctor` confirms connector health. `alerts` and the JSONL histogram show new events landing under the expected connector.
+`doctor` confirms connector health. `alerts` and the SQLite export histogram
+show new events landing under the expected connector.
 
 </Step>
 

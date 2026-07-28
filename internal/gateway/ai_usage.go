@@ -39,7 +39,9 @@ func (a *APIServer) handleAIUsage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if a.aiDiscovery == nil {
+	discovery, releaseDiscovery := a.leaseAIDiscovery()
+	defer releaseDiscovery()
+	if discovery == nil {
 		a.writeJSON(w, http.StatusOK, map[string]any{
 			"enabled": false,
 			"summary": map[string]any{
@@ -49,7 +51,7 @@ func (a *APIServer) handleAIUsage(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	report := a.aiDiscovery.Snapshot()
+	report := discovery.Snapshot()
 	// Stamp per-component identity / presence on each signal so
 	// `defenseclaw agent usage --detail` and any other API
 	// consumer can render the same confidence numbers
@@ -57,7 +59,7 @@ func (a *APIServer) handleAIUsage(w http.ResponseWriter, r *http.Request) {
 	// round-trip and without re-implementing the engine.
 	// Snapshot() already returns a clone, so mutating in place is
 	// safe and never touches the persistent state file.
-	inventory.EnrichSignalsWithComponentConfidence(report.Signals, a.aiDiscovery.ConfidenceParams())
+	inventory.EnrichSignalsWithComponentConfidence(report.Signals, discovery.ConfidenceParams())
 	report = a.sanitizeAIUsageReportForResponse(report)
 	a.writeJSON(w, http.StatusOK, map[string]any{
 		"enabled": true,
@@ -71,18 +73,20 @@ func (a *APIServer) handleAIUsageScan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if a.aiDiscovery == nil {
+	discovery, releaseDiscovery := a.leaseAIDiscovery()
+	defer releaseDiscovery()
+	if discovery == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ai discovery disabled"})
 		return
 	}
-	report, err := a.aiDiscovery.ScanNow(r.Context())
+	report, err := discovery.ScanNow(r.Context())
 	if err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	// Same enrichment as the GET path (see handleAIUsage above):
 	// keep the wire shape identical between cached / refresh.
-	inventory.EnrichSignalsWithComponentConfidence(report.Signals, a.aiDiscovery.ConfidenceParams())
+	inventory.EnrichSignalsWithComponentConfidence(report.Signals, discovery.ConfidenceParams())
 	report = a.sanitizeAIUsageReportForResponse(report)
 	a.writeJSON(w, http.StatusOK, map[string]any{
 		"enabled": true,
@@ -92,11 +96,10 @@ func (a *APIServer) handleAIUsageScan(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *APIServer) sanitizeAIUsageReportForResponse(report inventory.AIDiscoveryReport) inventory.AIDiscoveryReport {
-	if a == nil || a.aiDiscovery == nil {
+	if a == nil {
 		return report
 	}
-	opts := a.aiDiscovery.Options()
-	inventory.SanitizeEvidenceForWire(report.Signals, opts.DisableRedaction, opts.StoreRawLocalPaths)
+	inventory.SanitizeEvidenceForWire(report.Signals)
 	return report
 }
 
@@ -124,9 +127,7 @@ type componentRollup struct {
 	LastActiveAt    string                       `json:"last_active_at,omitempty"`
 }
 
-// componentLocation is one row in the per-component locations view.
-// RawPath is populated only when the gateway is configured with
-// `privacy.disable_redaction=true && ai_discovery.store_raw_local_paths=true`.
+// componentLocation is one scrubbed row in the per-component locations view.
 type componentLocation struct {
 	Detector      string  `json:"detector"`
 	State         string  `json:"state,omitempty"`
@@ -135,7 +136,6 @@ type componentLocation struct {
 	WorkspaceHash string  `json:"workspace_hash,omitempty"`
 	Quality       float64 `json:"quality,omitempty"`
 	MatchKind     string  `json:"match_kind,omitempty"`
-	RawPath       string  `json:"raw_path,omitempty"`
 	LastSeen      string  `json:"last_seen,omitempty"`
 }
 
@@ -148,21 +148,24 @@ func (a *APIServer) handleAIUsageComponents(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if a.aiDiscovery == nil {
+	discovery, releaseDiscovery := a.leaseAIDiscovery()
+	defer releaseDiscovery()
+	if discovery == nil {
 		a.writeJSON(w, http.StatusOK, map[string]any{
 			"enabled":    false,
 			"components": []any{},
 		})
 		return
 	}
-	report := a.aiDiscovery.Snapshot()
-	rolled := rollupComponents(report.Signals, a.aiDiscovery.ConfidenceParams(), allowRawLocations(a))
+	report := discovery.Snapshot()
+	params := discovery.ConfidenceParams()
+	rolled := rollupComponents(report.Signals, params)
 	a.writeJSON(w, http.StatusOK, map[string]any{
 		"enabled":        true,
 		"scan_id":        report.Summary.ScanID,
 		"scanned_at":     report.Summary.ScannedAt,
 		"components":     rolled,
-		"policy_version": a.aiDiscovery.ConfidenceParams().Policy.Version,
+		"policy_version": params.Policy.Version,
 	})
 }
 
@@ -175,7 +178,13 @@ func (a *APIServer) handleAIUsageComponentLocations(w http.ResponseWriter, r *ht
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if a.aiDiscovery == nil || a.aiDiscovery.InventoryStore() == nil {
+	discovery, releaseDiscovery := a.leaseAIDiscovery()
+	defer releaseDiscovery()
+	var store *inventory.InventoryStore
+	if discovery != nil {
+		store = discovery.InventoryStore()
+	}
+	if store == nil {
 		a.writeJSON(w, http.StatusOK, map[string]any{
 			"enabled":   false,
 			"locations": []any{},
@@ -187,8 +196,7 @@ func (a *APIServer) handleAIUsageComponentLocations(w http.ResponseWriter, r *ht
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "expected /api/v1/ai-usage/components/{ecosystem}/{name}/locations"})
 		return
 	}
-	includeRaw := allowRawLocations(a)
-	locs, err := a.aiDiscovery.InventoryStore().ListComponentLocations(r.Context(), ecosystem, name, includeRaw)
+	locs, err := store.ListComponentLocations(r.Context(), ecosystem, name, false)
 	if err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -209,7 +217,13 @@ func (a *APIServer) handleAIUsageComponentHistory(w http.ResponseWriter, r *http
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if a.aiDiscovery == nil || a.aiDiscovery.InventoryStore() == nil {
+	discovery, releaseDiscovery := a.leaseAIDiscovery()
+	defer releaseDiscovery()
+	var store *inventory.InventoryStore
+	if discovery != nil {
+		store = discovery.InventoryStore()
+	}
+	if store == nil {
 		a.writeJSON(w, http.StatusOK, map[string]any{
 			"enabled": false,
 			"history": []any{},
@@ -221,7 +235,7 @@ func (a *APIServer) handleAIUsageComponentHistory(w http.ResponseWriter, r *http
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "expected /api/v1/ai-usage/components/{ecosystem}/{name}/history"})
 		return
 	}
-	hist, err := a.aiDiscovery.InventoryStore().ComponentHistory(r.Context(), ecosystem, name, 50)
+	hist, err := store.ComponentHistory(r.Context(), ecosystem, name, 50)
 	if err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -245,10 +259,9 @@ func (a *APIServer) handleAIUsageComponentHistory(w http.ResponseWriter, r *http
 // the gateway has `aiDiscovery.ConfidenceParams()` it should pass
 // that value so this rollup matches what the SQL history shows.
 //
-// `includeRawPaths` controls whether RawPath leaks into the
-// componentLocation rows; the caller derives it from
-// `privacy.disable_redaction && ai_discovery.store_raw_local_paths`.
-func rollupComponents(signals []inventory.AISignal, params inventory.ConfidenceParams, includeRawPaths bool) []componentRollup {
+// RawPath is intentionally omitted from every API projection even when the
+// local forensic store retains it.
+func rollupComponents(signals []inventory.AISignal, params inventory.ConfidenceParams) []componentRollup {
 	type key struct{ ecosystem, name string }
 	bySigKey := map[key][]inventory.AISignal{}
 	for _, sig := range signals {
@@ -330,9 +343,6 @@ func rollupComponents(signals []inventory.AISignal, params inventory.ConfidenceP
 				if !sig.LastSeen.IsZero() {
 					loc.LastSeen = sig.LastSeen.UTC().Format(time.RFC3339)
 				}
-				if includeRawPaths {
-					loc.RawPath = ev.RawPath
-				}
 				entry.Locations = append(entry.Locations, loc)
 			}
 		}
@@ -371,19 +381,6 @@ func rollupComponents(signals []inventory.AISignal, params inventory.ConfidenceP
 		return out[i].Name < out[j].Name
 	})
 	return out
-}
-
-// allowRawLocations evaluates the two-flag composition that controls
-// whether RawPath leaks beyond the local process. We re-read both
-// flags from the discovery options so a config reload is reflected
-// without restarting the gateway. Defaults to false (the safest
-// stance) when the discovery service is not running.
-func allowRawLocations(a *APIServer) bool {
-	if a == nil || a.aiDiscovery == nil {
-		return false
-	}
-	opts := a.aiDiscovery.Options()
-	return opts.DisableRedaction && opts.StoreRawLocalPaths
 }
 
 // componentPathSegmentMax bounds {ecosystem} and {name} so a hostile
@@ -456,13 +453,15 @@ func (a *APIServer) handleAIUsageConfidencePolicy(w http.ResponseWriter, r *http
 	if source == "" {
 		source = "merged"
 	}
+	discovery, releaseDiscovery := a.leaseAIDiscovery()
+	defer releaseDiscovery()
 	switch source {
 	case "merged":
 		// Even when AI discovery is disabled we can still surface
 		// the embedded default — operators want to inspect the
 		// shipping policy before deciding whether to enable
 		// discovery at all.
-		if a.aiDiscovery == nil {
+		if discovery == nil {
 			policy, err := inventory.LoadDefaultConfidencePolicy()
 			if err != nil {
 				a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -478,7 +477,7 @@ func (a *APIServer) handleAIUsageConfidencePolicy(w http.ResponseWriter, r *http
 		a.writeJSON(w, http.StatusOK, map[string]any{
 			"source":  "merged",
 			"enabled": true,
-			"policy":  a.aiDiscovery.ConfidenceParams().Policy,
+			"policy":  discovery.ConfidenceParams().Policy,
 		})
 	case "default":
 		policy, err := inventory.LoadDefaultConfidencePolicy()
@@ -488,7 +487,7 @@ func (a *APIServer) handleAIUsageConfidencePolicy(w http.ResponseWriter, r *http
 		}
 		a.writeJSON(w, http.StatusOK, map[string]any{
 			"source":  "default",
-			"enabled": a.aiDiscovery != nil,
+			"enabled": discovery != nil,
 			"policy":  policy,
 		})
 	default:
@@ -575,10 +574,6 @@ func (a *APIServer) handleAIUsageDiscovery(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if a.aiDiscovery == nil {
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ai discovery disabled"})
-		return
-	}
 	var report inventory.AIDiscoveryReport
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -586,7 +581,13 @@ func (a *APIServer) handleAIUsageDiscovery(w http.ResponseWriter, r *http.Reques
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
-	if err := a.aiDiscovery.IngestExternalReport(r.Context(), &report); err != nil {
+	discovery, releaseDiscovery := a.leaseAIDiscovery()
+	defer releaseDiscovery()
+	if discovery == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ai discovery disabled"})
+		return
+	}
+	if err := discovery.IngestExternalReport(r.Context(), &report); err != nil {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}

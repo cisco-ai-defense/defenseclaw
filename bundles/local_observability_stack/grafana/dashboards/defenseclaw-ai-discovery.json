@@ -277,7 +277,7 @@
     {
       "type": "stat",
       "title": "Active AI signals",
-      "description": "Latest snapshot of distinct AI usage signals (CLIs, IDE extensions, SDKs, MCP servers, ...) that the continuous discovery loop is fingerprinting on the host. Sourced from the gauge `defenseclaw.ai.discovery.active_signals` (last value per (source, privacy_mode)). 0 with the sidecar enabled means the loop hasn't completed a scan yet — check the next panel.",
+      "description": "Current snapshot of distinct AI usage signals (CLIs, IDE extensions, SDKs, MCP servers, ...) from the newest non-stale service instance per logical (source, privacy_mode). No data means no current discovery sample; 0 means the latest completed scan found no active signals.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -290,7 +290,7 @@
       },
       "targets": [
         {
-          "expr": "sum(max_over_time(defenseclaw_ai_discovery_active_signals{source=~\"$source\"}[$__range])) or vector(0)",
+          "expr": "sum(max by (source, privacy_mode) ((defenseclaw_ai_discovery_active_signals{source=~\"$source\"} and (timestamp(defenseclaw_ai_discovery_active_signals{source=~\"$source\"}) == on (source, privacy_mode) group_left max by (source, privacy_mode) (timestamp(defenseclaw_ai_discovery_active_signals{source=~\"$source\"})))) and (timestamp(defenseclaw_ai_discovery_active_signals{source=~\"$source\"}) >= time() - 300)))",
           "refId": "A",
           "instant": true
         }
@@ -339,7 +339,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_ai_discovery_runs_total{source=~\"$source\"}[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(defenseclaw_ai_discovery_runs_total{source=~\"$source\"}[5m])) * 60",
           "refId": "A",
           "instant": true
         }
@@ -376,7 +376,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_ai_discovery_new_signals_total{source=~\"$source\"}[1h])) or vector(0)",
+          "expr": "sum(increase(defenseclaw_ai_discovery_new_signals_total{source=~\"$source\"}[1h]))",
           "refId": "A",
           "instant": true
         }
@@ -428,7 +428,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_ai_discovery_gone_signals_total{source=~\"$source\"}[1h])) or vector(0)",
+          "expr": "sum(increase(defenseclaw_ai_discovery_gone_signals_total{source=~\"$source\"}[1h]))",
           "refId": "A",
           "instant": true
         }
@@ -464,7 +464,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_ai_discovery_errors_total[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(defenseclaw_ai_discovery_errors_total{source=~\"$source\"}[5m])) * 60",
           "refId": "A",
           "instant": true
         }
@@ -516,7 +516,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_ai_discovery_files_scanned_total[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(defenseclaw_ai_discovery_files_scanned_total{source=~\"$source\"}[5m])) * 60",
           "refId": "A",
           "instant": true
         }
@@ -674,7 +674,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (signal_category) (max_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]))",
+          "expr": "sum by (signal_category) (increase(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]))",
           "legendFormat": "{{signal_category}}",
           "refId": "A"
         }
@@ -707,7 +707,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (state) (max_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]))",
+          "expr": "sum by (state) (increase(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]))",
           "legendFormat": "{{state}}",
           "refId": "A"
         }
@@ -740,7 +740,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, sum by (ai_vendor, ai_product, signal_category) (max_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range])))",
+          "expr": "topk(20, sum by (ai_vendor, ai_product, signal_category) (increase(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range])))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -797,7 +797,7 @@
       },
       "targets": [
         {
-          "expr": "topk(15, sum by (detector) (max_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range])))",
+          "expr": "topk(15, sum by (detector) (increase(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range])))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -987,7 +987,7 @@
     {
       "type": "table",
       "title": "Active signals by source",
-      "description": "Current active discovery-signal gauge grouped by source and privacy mode. This is current presence, while the panels above summarize observations over the selected range.",
+      "description": "Current active discovery-signal gauge grouped by source and privacy mode, deduplicated to the newest non-stale service-instance sample for each logical series. This is current presence, while the panels above summarize observations over the selected range.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1000,7 +1000,7 @@
       },
       "targets": [
         {
-          "expr": "max by (source, privacy_mode) (defenseclaw_ai_discovery_active_signals{source=~\"$source\"})",
+          "expr": "max by (source, privacy_mode) ((defenseclaw_ai_discovery_active_signals{source=~\"$source\"} and (timestamp(defenseclaw_ai_discovery_active_signals{source=~\"$source\"}) == on (source, privacy_mode) group_left max by (source, privacy_mode) (timestamp(defenseclaw_ai_discovery_active_signals{source=~\"$source\"})))) and (timestamp(defenseclaw_ai_discovery_active_signals{source=~\"$source\"}) >= time() - 300))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -1316,8 +1316,8 @@
     },
     {
       "type": "table",
-      "title": "Slow detectors (Tempo, p95 child-span duration)",
-      "description": "TraceQL search over the per-detector child spans (`defenseclaw.ai.discovery.detector`). Sorted by duration so the slowest detectors float to the top — this is the right entry point if scan p95 is climbing in the latency panel above.",
+      "title": "Recent detector spans (Tempo)",
+      "description": "Recent traces containing per-detector child spans (`defenseclaw.ai.discovery.detector`). This is a trace search, not a p95 aggregation; use the scan-duration metrics above for quantiles.",
       "datasource": {
         "type": "tempo",
         "uid": "defenseclaw-tempo"
@@ -1387,7 +1387,7 @@
     {
       "type": "logs",
       "title": "AI discovery summary log",
-      "description": "OTel log records emitted by `EmitAIDiscoverySummaryLog` once per scan (`event.name=defenseclaw.ai.discovery`). Severity is INFO when result=ok, WARN when result≠ok. Body fields: source, privacy_mode, result, duration_ms, signals_total, active_total, new_total, gone_total, files_scanned. Loki flattens the dotted attribute keys to underscores (e.g. `event.name` → `event_name`).",
+      "description": "Canonical v8 summary records emitted once per completed scan (`event.name=ai.discovery.completed`). Severity and bounded body fields describe the scan result; Loki exposes dotted body attributes with underscores.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -1400,7 +1400,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"ai_discovery\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.discovery.completed\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -1418,7 +1418,7 @@
     {
       "type": "logs",
       "title": "AI discovery per-signal log",
-      "description": "Per-signal OTel log records emitted by `EmitAIDiscoverySignalLog` (`event.name=defenseclaw.ai.discovery.signal`). One record per signal per scan; bounded labels keep cardinality safe. Use the search bar to grep for a specific vendor/product or detector.",
+      "description": "Canonical v8 per-signal records (`event.name=ai_component.discovered|changed|confidence.changed|removed`). Use log details or search for a vendor, product, or detector.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -1431,7 +1431,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_gateway_event_type=\"ai_discovery\" | json | __error__=\"\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"ai_component[.](discovered|changed|confidence[.]changed|removed)\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -1449,7 +1449,7 @@
     {
       "type": "logs",
       "title": "Gateway ai_discovery events (Loki)",
-      "description": "Sanitized gateway envelope events with `event_type=ai_discovery` (`gatewaylog.EventAIDiscovery`). These carry the audit-trail payload (signal_id, scan_id, evidence_types, path_hashes) and are HMAC-stamped for integrity. Loki's `| json` parser flattens nested keys with `_`, so the AIDiscoveryPayload fields (`ai_discovery.scan_id`, `.signal_id`, `.state`, `.category`, `.vendor`, `.product`) show up here as `ai_discovery_*` (no `defenseclaw_` prefix — that prefix is reserved for envelope-level OTel attributes set by `EmitGatewayEventLog`).",
+      "description": "Canonical v8 discovery stream: `ai.discovery.completed` summaries and `ai_component.*` signal changes with bounded discovery and component fields.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -1462,7 +1462,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit\"} | defenseclaw_gateway_event_type=\"ai_discovery\" | line_format \"{{.severity}} | scan={{.ai_discovery_scan_id}} signal={{.ai_discovery_signal_id}} state={{.ai_discovery_state}} category={{.ai_discovery_category}} vendor={{.ai_discovery_vendor}} product={{.ai_discovery_product}} | {{__line__}}\"",
+          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit\"} | json | __error__=\"\" | event_name=~\"ai[.]discovery[.]completed|ai_component[.](discovered|changed|confidence[.]changed|removed)\" | line_format \"{{.severity}} | scan={{.body_defenseclaw_ai_discovery_scan_id}} signal={{.body_defenseclaw_ai_discovery_signal_id}} detector={{.body_defenseclaw_ai_discovery_signal}} component={{.body_defenseclaw_ai_component_type}} vendor={{.body_defenseclaw_ai_component_vendor}} product={{.body_defenseclaw_ai_component_product}}\"",
           "refId": "A"
         }
       ],
@@ -1490,7 +1490,7 @@
   "timepicker": {},
   "timezone": "",
   "title": "DefenseClaw — AI Agent Usage & Detection",
-  "description": "Continuous AI inventory and discovery health: active signals, vendor/product attribution, confidence, detector throughput, errors, logs, and Tempo scan traces.",
+  "description": "Continuous AI inventory and discovery health: active signals, vendor/product attribution, confidence, detector throughput, errors, logs, and Tempo scan traces. No series means discovery is disabled or has not reported a scan; it is distinct from a measured zero.",
   "uid": "defenseclaw-ai-discovery",
   "version": 3,
   "weekStart": ""

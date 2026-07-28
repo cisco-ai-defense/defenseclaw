@@ -69,7 +69,14 @@ struct CommandDefinition: Identifiable, Hashable, Sendable {
     }
 
     var changesState: Bool {
-        !["info", "scan"].contains(category)
+        let tokens = arguments.map { $0.lowercased() }
+        // Scan commands refresh on-disk caches, and doctor always rewrites
+        // doctor_cache.json even when it only reports checks. Treat those as
+        // mutations so managed/invalid installations cannot bypass the
+        // lower-level CLIRunner gate through the command palette.
+        if category == "scan" || tokens.first == "doctor" { return true }
+        if tokens.starts(with: ["agent", "discover"]) { return true }
+        return category != "info"
     }
 
     var requiresTerminal: Bool {

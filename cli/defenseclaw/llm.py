@@ -82,18 +82,7 @@ import json
 import os
 import sys
 import time
-from contextlib import contextmanager
 from typing import Any
-
-try:
-    from opentelemetry import trace as otel_trace
-except ImportError:
-    otel_trace = None  # type: ignore[assignment]
-
-try:
-    from opentelemetry import metrics as otel_metrics
-except ImportError:
-    otel_metrics = None  # type: ignore[assignment]
 
 from defenseclaw.gateway_error_codes import ERR_LLM_BRIDGE_ERROR
 
@@ -115,46 +104,48 @@ def _debug(msg: str) -> None:
         sys.stderr.write(f"[llm-bridge] {msg}\n")
 
 
-_bridge_hist = None
+def _emit_llm_bridge_observation(
+    *,
+    model: str,
+    provider: str,
+    status: str,
+    duration_ms: float,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    response_model: str = "",
+    response_id: str = "",
+    finish_reasons: list[str] | None = None,
+) -> None:
+    """Best-effort handoff to the process-owned generated v8 runtime.
 
+    The bridge remains usable by a stand-alone plugin scanner, where no
+    DefenseClaw configuration or gateway exists. With an active v8 install,
+    Python never owns an SDK provider: it submits source facts and the gateway
+    creates the canonical metric and model span.
+    """
 
-def _llm_bridge_histogram():
-    global _bridge_hist
-    if otel_metrics is None:
-        return None
-    if _bridge_hist is None:
-        meter = otel_metrics.get_meter("defenseclaw")
-        _bridge_hist = meter.create_histogram(
-            name="defenseclaw.llm_bridge.latency",
-            unit="ms",
-            description="LiteLLM bridge call latency",
-        )
-    return _bridge_hist
+    try:
+        from defenseclaw import config as config_module
+        from defenseclaw.logger import Logger
 
-
-def _record_llm_bridge_latency(model: str, status: str, duration_ms: float) -> None:
-    h = _llm_bridge_histogram()
-    if h is None:
-        return
-    attrs = {"status": status}
-    if model:
-        attrs["gen_ai.request.model"] = model
-    h.record(duration_ms, attributes=attrs)
-
-
-@contextmanager
-def _genai_span(model: str, provider_hint: str):
-    if otel_trace is None:
-        yield
-        return
-    tracer = otel_trace.get_tracer("defenseclaw.llm")
-    with tracer.start_as_current_span("gen_ai.chat.completions") as span:
-        span.set_attribute("gen_ai.operation.name", "chat")
-        if model:
-            span.set_attribute("gen_ai.request.model", model)
-        if provider_hint:
-            span.set_attribute("gen_ai.provider.name", provider_hint)
-        yield
+        config_module.require_v8_config()
+        logger = Logger.from_config(config_module.load())
+        try:
+            logger.log_llm_bridge(
+                model=model,
+                provider=provider,
+                status=status,
+                duration_ms=duration_ms,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                response_model=response_model,
+                response_id=response_id,
+                finish_reasons=finish_reasons,
+            )
+        finally:
+            logger.close()
+    except Exception as exc:
+        _debug(f"canonical v8 observability handoff unavailable: {exc!r}")
 
 
 def _log_bridge_error_json(status: str, message: str) -> None:
@@ -279,6 +270,7 @@ def _load_plugin_llm_config() -> dict[str, Any]:
         # also keeps the import surface minimal for plugin scanner
         # subprocesses that don't need the whole ``Config`` class.
         from defenseclaw.config import load as _load_config
+        from defenseclaw.config import require_v8_config as _require_v8_config
         from defenseclaw.scanner._llm_env import (
             inject_llm_env,
             litellm_completion_kwargs,
@@ -288,6 +280,7 @@ def _load_plugin_llm_config() -> dict[str, Any]:
         return {}
 
     try:
+        _require_v8_config()
         cfg = _load_config()
     except Exception as exc:
         _debug(f"config.load() failed; check ~/.defenseclaw/config.yaml: {exc!r}")
@@ -464,21 +457,22 @@ def call_llm(request: dict) -> dict:
     kwargs["temperature"] = request.get("temperature", 0.0)
 
     t0 = time.perf_counter()
-    with _genai_span(model, provider_hint):
-        try:
-            response = litellm.completion(**kwargs)
-        except Exception as exc:
-            ms = (time.perf_counter() - t0) * 1000.0
-            st = _classify_llm_exception(exc)
-            _record_llm_bridge_latency(model, st, ms)
-            _log_bridge_error_json(st, f"{type(exc).__name__}: {exc}")
-            return {
-                "content": "",
-                "model": model,
-                "usage": {},
-                "error": f"{type(exc).__name__}: {exc}",
-                "error_code": ERR_LLM_BRIDGE_ERROR,
-            }
+    try:
+        response = litellm.completion(**kwargs)
+    except Exception as exc:
+        ms = (time.perf_counter() - t0) * 1000.0
+        st = _classify_llm_exception(exc)
+        _emit_llm_bridge_observation(
+            model=model, provider=provider_hint, status=st, duration_ms=ms
+        )
+        _log_bridge_error_json(st, f"{type(exc).__name__}: {exc}")
+        return {
+            "content": "",
+            "model": model,
+            "usage": {},
+            "error": f"{type(exc).__name__}: {exc}",
+            "error_code": ERR_LLM_BRIDGE_ERROR,
+        }
 
     # LiteLLM normalizes responses to the OpenAI ChatCompletion shape
     # regardless of provider, so a single extraction path works for
@@ -491,7 +485,9 @@ def call_llm(request: dict) -> dict:
             content = getattr(msg, "content", "") or ""
     except Exception as exc:
         ms_bad = (time.perf_counter() - t0) * 1000.0
-        _record_llm_bridge_latency(model, "internal", ms_bad)
+        _emit_llm_bridge_observation(
+            model=model, provider=provider_hint, status="internal", duration_ms=ms_bad
+        )
         _log_bridge_error_json("internal", f"malformed LiteLLM response: {exc}")
         return {
             "content": "",
@@ -515,11 +511,27 @@ def call_llm(request: dict) -> dict:
             "total_tokens": total_tokens,
         }
 
-    _record_llm_bridge_latency(model, "success", (time.perf_counter() - t0) * 1000.0)
+    response_model = getattr(response, "model", "") or model
+    finish_reasons = [
+        str(getattr(choice, "finish_reason", ""))
+        for choice in (getattr(response, "choices", None) or [])
+        if getattr(choice, "finish_reason", "")
+    ]
+    _emit_llm_bridge_observation(
+        model=model,
+        provider=provider_hint,
+        status="success",
+        duration_ms=(time.perf_counter() - t0) * 1000.0,
+        input_tokens=int(usage.get("prompt_tokens", 0) or 0),
+        output_tokens=int(usage.get("completion_tokens", 0) or 0),
+        response_model=response_model,
+        response_id=str(getattr(response, "id", "") or ""),
+        finish_reasons=finish_reasons,
+    )
 
     return {
         "content": content,
-        "model": getattr(response, "model", "") or model,
+        "model": response_model,
         "usage": usage,
         "error": None,
         "error_code": None,

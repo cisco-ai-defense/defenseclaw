@@ -25,12 +25,12 @@
 #   9090        — Prometheus UI
 #   8888        — Collector self-metrics
 #
-# SECURITY: all host-side port publishes are scoped to the loopback
-# interface (127.0.0.1) so a developer laptop joining a coffee-shop
-# Wi-Fi does not accidentally expose Grafana/Prometheus/Tempo to the
-# LAN. If you need LAN access (e.g. sharing a dashboard with a
-# teammate), override HOST_BIND=0.0.0.0 in your shell *and* set a real
-# Grafana admin password via GF_SECURITY_ADMIN_PASSWORD.
+# SECURITY: all host-side port publishes default to the loopback interface
+# (127.0.0.1) so a developer laptop joining a coffee-shop Wi-Fi does not
+# accidentally expose Grafana/Prometheus/Tempo to the LAN. The managed
+# `defenseclaw setup` path always removes inherited HOST_BIND values. Operators
+# who intentionally need a different bind must use the manual Compose procedure
+# documented in README.md and secure the exposed services independently.
 #
 # Teardown drops everything including persisted data volumes:
 #   docker compose down -v
@@ -91,7 +91,7 @@ services:
       # The admin + remote-write APIs are convenient for local work (purge
       # stale series after a histogram-bucket change, push test data) and the
       # 127.0.0.1 bind keeps them off the network. Drop these flags if you
-      # ever publish 9090 to a LAN via HOST_BIND=0.0.0.0.
+      # ever publish 9090 through the documented manual Compose override.
       - "--web.enable-admin-api"
       - "--web.enable-remote-write-receiver"
       - "--enable-feature=exemplar-storage,native-histograms"
@@ -137,17 +137,19 @@ services:
     container_name: defenseclaw-grafana
     environment:
       # This is a developer-laptop stack: every host port is published on
-      # ${HOST_BIND:-127.0.0.1} (loopback), so the dashboard is only
+      # ${HOST_BIND:-127.0.0.1} (loopback by default), so the dashboard is only
       # reachable from the same machine. A login prompt on a localhost-only
       # dashboard is pure friction, so Grafana opens with no login —
       # anonymous access with the Admin role and the login form disabled.
       # The loopback bind is the security boundary here. If you expose this
-      # to a LAN (HOST_BIND=0.0.0.0), turn auth back on: set
+      # through the documented manual override, turn auth back on: set
       # GF_AUTH_ANONYMOUS_ENABLED=false and GF_SECURITY_ADMIN_PASSWORD=<pw>.
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
       - GF_AUTH_DISABLE_LOGIN_FORM=true
-      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
+      # Layered Node Graph layout keeps causal agent DAGs readable. The graph
+      # falls back to Grafana's force layout above its supported node limit.
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor,nodeGraphDotLayout
       - GF_USERS_DEFAULT_THEME=dark
     volumes:
       - grafana-data:/var/lib/grafana

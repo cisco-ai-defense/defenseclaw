@@ -83,6 +83,7 @@ func TestRuleAxesSnapshotMatchesCommittedJSON(t *testing.T) {
 		t.Fatalf("read %s (commit it after running with UPDATE_RULE_AXES_JSON=1): %v", snapshotPath, err)
 	}
 
+	committed = bytes.ReplaceAll(committed, []byte("\r\n"), []byte("\n"))
 	if !bytes.Equal(rendered, committed) {
 		t.Errorf(
 			"axes.go and %s have diverged.\n"+

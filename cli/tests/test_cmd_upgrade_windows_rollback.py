@@ -22,24 +22,56 @@ import struct
 from pathlib import Path
 
 import pytest
-from defenseclaw import windows_acl
+from defenseclaw import bundle_refresh, windows_acl
 from defenseclaw.commands import cmd_upgrade
 from defenseclaw.windows_acl import WindowsFileSecurity
 
-ORIGINAL = WindowsFileSecurity(owner=b"original-owner", dacl=b"original-dacl", dacl_protected=False)
-PRIVATE = WindowsFileSecurity(owner=b"private-owner", dacl=b"private-dacl", dacl_protected=True)
-DRIFTED = WindowsFileSecurity(owner=b"attacker-owner", dacl=b"drifted-dacl", dacl_protected=False)
+
+def _sid(*subauthorities: int, authority: int = 5) -> bytes:
+    return (
+        bytes((1, len(subauthorities)))
+        + authority.to_bytes(6, "big")
+        + b"".join(struct.pack("<I", value) for value in subauthorities)
+    )
+
+
+def _dacl(*aces: tuple[int, int, int, bytes]) -> bytes:
+    payload = b""
+    for ace_type, ace_flags, access_mask, sid in aces:
+        size = 8 + len(sid)
+        payload += struct.pack("<BBHI", ace_type, ace_flags, size, access_mask) + sid
+    return struct.pack("<BBHHH", 2, 0, 8 + len(payload), len(aces), 0) + payload
+
+
+_ORIGINAL_OWNER = _sid(21, 101, 202, 303, 1001)
+_PRIVATE_OWNER = _sid(21, 101, 202, 303, 1002)
+_DRIFTED_OWNER = _sid(21, 101, 202, 303, 1003)
+ORIGINAL = WindowsFileSecurity(
+    owner=_ORIGINAL_OWNER,
+    dacl=_dacl((0, 0, 0x001F01FF, _ORIGINAL_OWNER)),
+    dacl_protected=False,
+)
+PRIVATE = WindowsFileSecurity(
+    owner=_PRIVATE_OWNER,
+    dacl=_dacl((0, 0, 0x001F01FF, _PRIVATE_OWNER)),
+    dacl_protected=True,
+)
+DRIFTED = WindowsFileSecurity(
+    owner=_DRIFTED_OWNER,
+    dacl=_dacl((0, 0, 0x001F01FF, _DRIFTED_OWNER)),
+    dacl_protected=False,
+)
 INHERITABLE_PRIVATE = WindowsFileSecurity(
-    owner=b"private-owner",
-    dacl=b"inheritable-private-dacl",
+    owner=_PRIVATE_OWNER,
+    dacl=_dacl((0, 0x03, 0x001F01FF, _PRIVATE_OWNER)),
     dacl_protected=True,
 )
 _HIGH_LABEL_SID = b"\x01\x01" + (16).to_bytes(6, "big") + (0x3000).to_bytes(4, "little")
 _HIGH_LABEL_ACE = struct.pack("<BBHI", 0x11, 0, 8 + len(_HIGH_LABEL_SID), 0x00000003) + _HIGH_LABEL_SID
 HIGH_MANDATORY_LABEL = struct.pack("<BBHHH", 2, 0, 8 + len(_HIGH_LABEL_ACE), 1, 0) + _HIGH_LABEL_ACE
 LABELED = WindowsFileSecurity(
-    owner=b"labeled-owner",
-    dacl=b"labeled-dacl",
+    owner=_PRIVATE_OWNER,
+    dacl=PRIVATE.dacl,
     dacl_protected=True,
     mandatory_label=HIGH_MANDATORY_LABEL,
     sacl_protected=True,
@@ -124,6 +156,17 @@ def test_windows_hard_cut_security_round_trips_label_and_accepts_legacy(tmp_path
     partial["windows_security"] = partial_security
     with pytest.raises(OSError, match="Windows security is invalid"):
         cmd_upgrade._snapshot_from_recovery_json(partial)
+
+
+def test_windows_bundle_security_round_trips_mandatory_label() -> None:
+    encoded = bundle_refresh._serialize_windows_security(LABELED)
+
+    decoded = cmd_upgrade._parse_bundle_windows_security(
+        {"managed/member.yaml": encoded},
+        {"managed/member.yaml"},
+    )
+
+    assert decoded == {"managed/member.yaml": LABELED}
 
 
 @pytest.mark.parametrize("name", ["config.yaml", ".env", ".migration_state.json"])

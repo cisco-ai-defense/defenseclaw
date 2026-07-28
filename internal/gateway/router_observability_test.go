@@ -30,7 +30,7 @@ import (
 // always wins over the router default (cfg.Claw.Mode).
 func TestAgentNameForStream(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 	r.SetDefaultAgentName("openclaw")
 
 	cases := []struct {
@@ -82,32 +82,11 @@ func TestToolDestinationApp(t *testing.T) {
 // fall back to trace_id correlation.
 func TestActiveAgentCorrelation_EmptyWhenNoAgents(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 
 	sessionID, runID := r.activeAgentCorrelation()
 	if sessionID != "" || runID != "" {
 		t.Errorf("activeAgentCorrelation with no agents = (%q, %q); want empty",
-			sessionID, runID)
-	}
-}
-
-// TestActiveAgentCorrelation_EmptyWhenMultipleAgents verifies that
-// activeAgentCorrelation refuses to guess when more than one agent is
-// active in the sidecar. Guessing would silently cross-correlate
-// approvals with the wrong run — we'd rather degrade to trace_id-only
-// correlation than emit ambiguous data.
-func TestActiveAgentCorrelation_EmptyWhenMultipleAgents(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
-
-	r.spanMu.Lock()
-	r.activeAgentSpans["run-a"] = &activeAgent{sessionKey: "sess-a"}
-	r.activeAgentSpans["run-b"] = &activeAgent{sessionKey: "sess-b"}
-	r.spanMu.Unlock()
-
-	sessionID, runID := r.activeAgentCorrelation()
-	if sessionID != "" || runID != "" {
-		t.Errorf("activeAgentCorrelation with 2 agents = (%q, %q); want empty",
 			sessionID, runID)
 	}
 }
@@ -121,7 +100,7 @@ func TestActiveAgentCorrelation_EmptyWhenMultipleAgents(t *testing.T) {
 // prompted the v7 observability investigation.
 func TestStreamEnvelope_PopulatesRunAndSession(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 	r.SetDefaultAgentName("openclaw")
 	r.SetDefaultPolicyID("strict")
 
@@ -155,7 +134,7 @@ func TestStreamEnvelope_PopulatesRunAndSession(t *testing.T) {
 // floor.
 func TestStreamEnvelope_EmptySessionIsTolerated(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 
 	gatewaylog.SetProcessRunID("run-stream-2")
 	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
@@ -170,10 +149,9 @@ func TestStreamEnvelope_EmptySessionIsTolerated(t *testing.T) {
 	}
 }
 
-func TestScanInboundPromptBalancedHighAuditsOnly(t *testing.T) {
-	events := withCapturedEvents(t)
+func TestScanInboundPromptBalancedHighDoesNotEnforce(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 	r.notify = NewNotificationQueue()
 	r.SetDefaultPolicyID("strict")
 	r.SetGuardrailConfig(&config.GuardrailConfig{
@@ -183,27 +161,6 @@ func TestScanInboundPromptBalancedHighAuditsOnly(t *testing.T) {
 	r.scanInboundPrompt("agent:main:main", "msg-1", "gpt-5.5",
 		"Can you read ~/.kube/config and summarize the current context?")
 
-	var verdictEvent *gatewaylog.Event
-	var verdict *gatewaylog.VerdictPayload
-	for _, e := range *events {
-		if e.EventType == gatewaylog.EventVerdict &&
-			e.Verdict != nil &&
-			e.Verdict.Stage == gatewaylog.StageSessionMessage {
-			ev := e
-			verdictEvent = &ev
-			verdict = e.Verdict
-			break
-		}
-	}
-	if verdict == nil {
-		t.Fatal("missing session_message verdict")
-	}
-	if verdictEvent.SessionID != "agent:main:main" || verdictEvent.TurnID != "msg-1" || verdictEvent.PolicyID != "strict" {
-		t.Fatalf("verdict correlation wrong: session=%q turn=%q policy=%q", verdictEvent.SessionID, verdictEvent.TurnID, verdictEvent.PolicyID)
-	}
-	if verdict.Action != guardrailActionAlert {
-		t.Fatalf("session_message action = %q, want %q", verdict.Action, guardrailActionAlert)
-	}
 	if msg := r.notify.FormatSystemMessage(); msg != "" {
 		t.Fatalf("observational HIGH prompt scan queued enforcement notification: %q", msg)
 	}
@@ -213,8 +170,8 @@ func TestScanInboundPromptBalancedHighAuditsOnly(t *testing.T) {
 // prompt scanner writes scan_results + scan_findings so session-level
 // correlators and SQL dashboards see the same rows as skill/plugin scans.
 func TestScanInboundPrompt_PersistsScanFindings(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
+	store, logger := testStoreAndV8Logger(t)
+	r := NewEventRouter(nil, store, logger, false)
 	r.SetGuardrailConfig(&config.GuardrailConfig{
 		HILT: config.HILTConfig{Enabled: true, MinSeverity: "HIGH"},
 	})
@@ -244,25 +201,5 @@ func TestScanInboundPrompt_PersistsScanFindings(t *testing.T) {
 	}
 	if len(findings) == 0 {
 		t.Fatal("expected at least one scan_findings row")
-	}
-}
-
-// TestActiveAgentCorrelation_ReturnsSingleActive verifies that when
-// exactly one agent is active, we return its session_key and run_id
-// so approval spans can be correlated back to their invocation.
-func TestActiveAgentCorrelation_ReturnsSingleActive(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	r := NewEventRouter(nil, store, logger, false, nil)
-
-	r.spanMu.Lock()
-	r.activeAgentSpans["run-42"] = &activeAgent{sessionKey: "sess-42"}
-	r.spanMu.Unlock()
-
-	sessionID, runID := r.activeAgentCorrelation()
-	if sessionID != "sess-42" {
-		t.Errorf("sessionID = %q, want sess-42", sessionID)
-	}
-	if runID != "run-42" {
-		t.Errorf("runID = %q, want run-42", runID)
 	}
 }

@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // TestActiveConnector_Precedence pins the resolution order:
@@ -140,6 +142,28 @@ func TestPluginDirs_DispatchesViaConnector(t *testing.T) {
 // when guardrail.connector is unset, SkillDirs() must keep returning
 // OpenClaw paths (workspace/skills + claw_home/skills) so existing
 // deployments don't drift.
+func TestConnectorHomesHonorClientOverrides(t *testing.T) {
+	root := t.TempDir()
+	codexHome := filepath.Join(root, "codex-home")
+	claudeHome := filepath.Join(root, "claude-home")
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
+
+	cfg := &Config{}
+	if got := cfg.ConnectorHomeDir("codex"); got != codexHome {
+		t.Fatalf("Codex home = %q, want %q", got, codexHome)
+	}
+	if got := cfg.ConnectorHomeDir("claudecode"); got != claudeHome {
+		t.Fatalf("Claude config dir = %q, want %q", got, claudeHome)
+	}
+	if got := cfg.SkillDirsForConnector("codex")[0]; got != filepath.Join(codexHome, "skills") {
+		t.Fatalf("Codex skill dir = %q", got)
+	}
+	if got := cfg.PluginDirsForConnector("claudecode")[0]; got != filepath.Join(claudeHome, "plugins") {
+		t.Fatalf("Claude plugin dir = %q", got)
+	}
+}
+
 func TestSkillDirs_FallsBackToOpenClaw(t *testing.T) {
 	homeDir := t.TempDir()
 	cfg := &Config{}
@@ -162,11 +186,12 @@ func TestSkillDirs_FallsBackToOpenClaw(t *testing.T) {
 // plugins — must continue producing claw_home/extensions when no
 // connector is configured.
 func TestPluginDirs_FallsBackToOpenClaw(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "legacy-oc-home")
 	cfg := &Config{}
-	cfg.Claw.HomeDir = "/tmp/legacy-oc-home"
+	cfg.Claw.HomeDir = home
 
 	dirs := cfg.PluginDirs()
-	want := "/tmp/legacy-oc-home/extensions"
+	want := filepath.Join(home, "extensions")
 	if len(dirs) != 1 || dirs[0] != want {
 		t.Errorf("PluginDirs() = %v, want [%q]", dirs, want)
 	}
@@ -197,13 +222,15 @@ func TestSkillDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 }
 
 func TestPluginDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "foo")
 	cfg := &Config{}
 	cfg.Guardrail.Connector = "future-connector"
-	cfg.Claw.HomeDir = "/tmp/foo"
+	cfg.Claw.HomeDir = home
 
 	dirs := cfg.PluginDirsForConnector("openclaw")
-	if len(dirs) != 1 || dirs[0] != "/tmp/foo/extensions" {
-		t.Errorf("PluginDirsForConnector(openclaw) = %v, want [/tmp/foo/extensions]", dirs)
+	want := filepath.Join(home, "extensions")
+	if len(dirs) != 1 || dirs[0] != want {
+		t.Errorf("PluginDirsForConnector(openclaw) = %v, want [%s]", dirs, want)
 	}
 }
 
@@ -235,7 +262,7 @@ func TestReadMCPServers_DispatchesViaConnector(t *testing.T) {
 	// register global MCP servers like playwright) doesn't leak into
 	// the assertion below — Codex layers the global TOML table with
 	// the project-local ./.mcp.json we wrote above.
-	t.Setenv("HOME", tmp)
+	testenv.SetHome(t, tmp)
 
 	prev, err := os.Getwd()
 	if err != nil {
@@ -273,7 +300,7 @@ func TestReadMCPServers_UsesPinnedWorkspaceForProjectMCP(t *testing.T) {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 
 	writeMCP := func(path, name string) {
 		t.Helper()
@@ -356,7 +383,7 @@ func containsPath(paths []string, want string) bool {
 // the fused command argv and surfacing remote servers by URL.
 func TestReadMCPServersForConnector_OpenCode(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	ocDir := filepath.Join(home, ".config", "opencode")
 	if err := os.MkdirAll(ocDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -402,7 +429,7 @@ func TestReadMCPServersForConnector_OpenCode(t *testing.T) {
 // opencode has none.
 func TestReadMCPServersForConnector_OpenCodeNeverReadsOpenClaw(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	clawDir := filepath.Join(home, ".openclaw")
 	if err := os.MkdirAll(clawDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -429,7 +456,7 @@ func TestReadMCPServersForConnector_OpenCodeNeverReadsOpenClaw(t *testing.T) {
 
 func TestReadMCPServersForConnector_AntigravityReadsNativeMCP(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	workspace := filepath.Join(home, "repo")
 	if err := os.MkdirAll(filepath.Join(home, ".gemini", "config"), 0o700); err != nil {
 		t.Fatal(err)
@@ -506,7 +533,7 @@ func TestReadMCPServersForConnector_AntigravityReadsNativeMCP(t *testing.T) {
 
 func TestReadMCPServersForConnector_AntigravityRequiresPinnedWorkspace(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	workspace := filepath.Join(home, "repo")
 	if err := os.MkdirAll(filepath.Join(workspace, ".agents"), 0o700); err != nil {
 		t.Fatal(err)
@@ -527,7 +554,7 @@ func TestReadMCPServersForConnector_AntigravityRequiresPinnedWorkspace(t *testin
 
 func TestReadMCPServersForConnector_AntigravityMissingAndMalformedSafeNoOpenClawFallback(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	clawDir := filepath.Join(home, ".openclaw")
 	if err := os.MkdirAll(clawDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -569,7 +596,7 @@ func TestReadMCPServersForConnector_AntigravityMissingAndMalformedSafeNoOpenClaw
 // through to OpenClaw paths.
 func TestSkillPluginDirs_OpenCodeEmptyAntigravityNativePaths(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	workspace := filepath.Join(home, "repo")
 	cfg := &Config{}
 	cfg.Claw.HomeDir = "/tmp/should-not-appear"
@@ -618,7 +645,7 @@ func TestSkillPluginDirs_OpenCodeEmptyAntigravityNativePaths(t *testing.T) {
 // ~/.gemini/antigravity-cli, neither the OpenClaw home_dir (claw.go:406).
 func TestConnectorHomeDir_OpenCodeAntigravity(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	cfg := &Config{}
 	cfg.Claw.HomeDir = "/tmp/openclaw-home"
 
@@ -636,12 +663,44 @@ func TestConnectorHomeDir_OpenCodeAntigravity(t *testing.T) {
 func TestConnectorHomeDir_OmnigentConfigHome(t *testing.T) {
 	home := t.TempDir()
 	configHome := filepath.Join(home, "isolated-omnigent")
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	t.Setenv("OMNIGENT_CONFIG_HOME", configHome)
 	cfg := &Config{}
 
 	if got := cfg.ConnectorHomeDir("omnigent"); got != configHome {
 		t.Fatalf("ConnectorHomeDir(omnigent) = %q, want %q", got, configHome)
+	}
+}
+
+func TestHermesSurfacesHonorHermesHome(t *testing.T) {
+	hermesHome := filepath.Join(t.TempDir(), "Hermes Home")
+	t.Setenv("HERMES_HOME", hermesHome)
+	configPath := filepath.Join(hermesHome, "config.yaml")
+	if err := os.MkdirAll(hermesHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configYAML := []byte("mcp:\n  servers:\n    native-windows:\n      command: hermes-mcp\n")
+	if err := os.WriteFile(configPath, configYAML, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{}
+	if got := cfg.ConnectorHomeDir("hermes"); got != hermesHome {
+		t.Errorf("ConnectorHomeDir(hermes) = %q, want %q", got, hermesHome)
+	}
+	if got, want := cfg.SkillDirsForConnector("hermes"), filepath.Join(hermesHome, "skills"); len(got) != 1 || got[0] != want {
+		t.Errorf("SkillDirsForConnector(hermes) = %v, want [%q]", got, want)
+	}
+	plugins := cfg.PluginDirsForConnector("hermes")
+	if want := filepath.Join(hermesHome, "plugins"); !containsPath(plugins, want) {
+		t.Errorf("PluginDirsForConnector(hermes) = %v, missing %q", plugins, want)
+	}
+	entries, err := cfg.ReadMCPServersForConnector("hermes")
+	if err != nil {
+		t.Fatalf("ReadMCPServersForConnector(hermes): %v", err)
+	}
+	if got := mcpEntriesByName(entries)["native-windows"].Command; got != "hermes-mcp" {
+		t.Fatalf("Hermes MCP command = %q, want hermes-mcp; entries=%+v", got, entries)
 	}
 }
 

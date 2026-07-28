@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import re
 import sys
 import types
 from datetime import UTC, datetime
@@ -19,6 +20,7 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 import pytest
+import yaml
 
 try:
     import tomllib
@@ -35,6 +37,9 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 OBS = DATA / "local_observability_stack"
 COMPOSE = OBS / "docker-compose.yml"
 OTEL = OBS / "otel-collector" / "config.yaml"
+OBS_README = OBS / "README.md"
+SOURCE_OBS = REPO_ROOT / "bundles" / "local_observability_stack"
+SOURCE_COMPOSE = SOURCE_OBS / "docker-compose.yml"
 
 BRIDGE_DIR = DATA / "splunk_local_bridge"
 CI_COMPOSE = BRIDGE_DIR / "compose" / "docker-compose.ci.yml"
@@ -56,6 +61,18 @@ O11Y_README = O11Y / "README.md"
 
 INSTALLER = DATA / "scripts" / "install-openshell-sandbox.sh"
 
+_SECURE_HOST_BIND_PORT = re.compile(
+    r"^\$\{(?P<variable>HOST_BIND):-(?P<default>127\.0\.0\.1)\}:"
+    r"(?P<host_port>[1-9]\d{0,4}):(?P<container_port>[1-9]\d{0,4})(?:/tcp)?$"
+)
+_LOCAL_OBSERVABILITY_PORTS: dict[str, tuple[tuple[int, int], ...]] = {
+    "otel-collector": ((4317, 4317), (4318, 4318), (8888, 8888), (13133, 13133)),
+    "prometheus": ((9090, 9090),),
+    "loki": ((3100, 3100),),
+    "tempo": ((3200, 3200), (9095, 9095)),
+    "grafana": ((3000, 3000),),
+}
+
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
@@ -64,6 +81,58 @@ def _read(path: Path) -> str:
 def _load_toml(path: Path) -> dict:
     with path.open("rb") as handle:
         return tomllib.load(handle)
+
+
+def _assert_secure_host_bind_ports(
+    compose_text: str,
+    *,
+    service: str,
+    expected_ports: tuple[tuple[int, int], ...],
+) -> tuple[str, ...]:
+    """Validate every published port for one service as a secure default bind."""
+    document = yaml.safe_load(compose_text)
+    assert isinstance(document, dict), "Compose document must be a mapping"
+    services = document.get("services")
+    assert isinstance(services, dict), "Compose services must be a mapping"
+    service_config = services.get(service)
+    assert isinstance(service_config, dict), f"Compose service {service!r} is missing"
+    assert "network_mode" not in service_config, (
+        f"Compose service {service!r} must not bypass port publishing with network_mode"
+    )
+    ports = service_config.get("ports")
+    assert isinstance(ports, list), f"Compose service {service!r} ports must be a list"
+
+    observed: list[tuple[int, int]] = []
+    entries: list[str] = []
+    for entry in ports:
+        assert isinstance(entry, str), (
+            f"Compose service {service!r} port {entry!r} must use secure short syntax"
+        )
+        match = _SECURE_HOST_BIND_PORT.fullmatch(entry)
+        assert match is not None, (
+            f"Compose service {service!r} port {entry!r} must use "
+            "${HOST_BIND:-127.0.0.1}:HOST:CONTAINER"
+        )
+        host_port = int(match.group("host_port"))
+        container_port = int(match.group("container_port"))
+        assert host_port <= 65535 and container_port <= 65535, (
+            f"Compose service {service!r} contains an invalid TCP port"
+        )
+        observed.append((host_port, container_port))
+        entries.append(entry)
+
+    assert sorted(observed) == sorted(expected_ports), (
+        f"Compose service {service!r} publishes {observed!r}, expected {expected_ports!r}"
+    )
+    return tuple(entries)
+
+
+def _render_host_bind_port(entry: str, host_bind: str | None = None) -> str:
+    """Render the strictly validated HOST_BIND subset used by this bundle."""
+    match = _SECURE_HOST_BIND_PORT.fullmatch(entry)
+    assert match is not None
+    address = host_bind or match.group("default")
+    return f"{address}:{match.group('host_port')}:{match.group('container_port')}"
 
 
 def _load_module(name: str, path: Path, stubs: dict[str, types.ModuleType] | None = None):
@@ -75,6 +144,117 @@ def _load_module(name: str, path: Path, stubs: dict[str, types.ModuleType] | Non
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+# --------------------------------------------------------------------------- #
+# Local-observability Compose publishing contract
+# --------------------------------------------------------------------------- #
+def test_local_observability_compose_source_matches_packaged_data() -> None:
+    assert COMPOSE.read_bytes() == SOURCE_COMPOSE.read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("service", "expected_ports"),
+    _LOCAL_OBSERVABILITY_PORTS.items(),
+)
+def test_local_observability_ports_use_secure_host_bind_default(
+    service: str, expected_ports: tuple[tuple[int, int], ...]
+) -> None:
+    _assert_secure_host_bind_ports(
+        _read(COMPOSE), service=service, expected_ports=expected_ports
+    )
+
+
+@pytest.mark.parametrize(("service", "port"), (("grafana", 3000), ("prometheus", 9090)))
+@pytest.mark.parametrize(
+    "unsafe_template",
+    (
+        "127.0.0.1:PORT:PORT",
+        "192.0.2.10:PORT:PORT",
+        "0.0.0.0:PORT:PORT",
+        "[::]:PORT:PORT",
+        "PORT:PORT",
+        "PORT",
+        "${HOST_BIND}:PORT:PORT",
+        "${HOST_BIND-127.0.0.1}:PORT:PORT",
+        "${HOST_BIND:-}:PORT:PORT",
+        "${HOST_BIND:-0.0.0.0}:PORT:PORT",
+        "${HOST_BIND:-::}:PORT:PORT",
+        "${HOST_BIND:-127.0.0.2}:PORT:PORT",
+        "${BIND:-127.0.0.1}:PORT:PORT",
+        "${HOST_BIND:-127.0.0.1:PORT:PORT",
+        "${HOST_BIND:-127.0.0.1}:PORT",
+        "${HOST_BIND:-127.0.0.1}:OTHER:PORT",
+        "${HOST_BIND:-127.0.0.1}:PORT:OTHER",
+    ),
+)
+def test_secure_host_bind_rejects_unsafe_or_malformed_mappings(
+    service: str, port: int, unsafe_template: str
+) -> None:
+    other_port = port + 1
+    mapping = unsafe_template.replace("PORT", str(port)).replace("OTHER", str(other_port))
+    compose = f"services:\n  {service}:\n    ports:\n      - {json.dumps(mapping)}\n"
+    with pytest.raises(AssertionError):
+        _assert_secure_host_bind_ports(
+            compose, service=service, expected_ports=((port, port),)
+        )
+
+
+@pytest.mark.parametrize(("service", "port"), (("grafana", 3000), ("prometheus", 9090)))
+def test_secure_host_bind_rejects_host_networking_and_extra_wildcard_publish(
+    service: str, port: int
+) -> None:
+    secure = f"${{HOST_BIND:-127.0.0.1}}:{port}:{port}"
+    host_network = (
+        f"services:\n  {service}:\n    network_mode: host\n"
+        f"    ports:\n      - {json.dumps(secure)}\n"
+    )
+    duplicate_wildcard = (
+        f"services:\n  {service}:\n    ports:\n"
+        f"      - {json.dumps(secure)}\n      - \"0.0.0.0:{port}:{port}\"\n"
+    )
+    unbound_long_syntax = (
+        f"services:\n  {service}:\n    ports:\n"
+        f"      - target: {port}\n        published: {port}\n"
+    )
+    for compose in (host_network, duplicate_wildcard, unbound_long_syntax):
+        with pytest.raises(AssertionError):
+            _assert_secure_host_bind_ports(
+                compose, service=service, expected_ports=((port, port),)
+            )
+
+
+def test_host_bind_default_and_documented_manual_override_rendering() -> None:
+    compose = _read(COMPOSE)
+    rendered_default: set[str] = set()
+    rendered_empty: set[str] = set()
+    rendered_override: set[str] = set()
+    for service, expected_ports in _LOCAL_OBSERVABILITY_PORTS.items():
+        entries = _assert_secure_host_bind_ports(
+            compose, service=service, expected_ports=expected_ports
+        )
+        rendered_default.update(_render_host_bind_port(entry) for entry in entries)
+        rendered_empty.update(_render_host_bind_port(entry, "") for entry in entries)
+        rendered_override.update(
+            _render_host_bind_port(entry, "192.0.2.10") for entry in entries
+        )
+
+    expected_default = {
+        f"127.0.0.1:{host_port}:{container_port}"
+        for ports in _LOCAL_OBSERVABILITY_PORTS.values()
+        for host_port, container_port in ports
+    }
+    expected_override = {
+        mapping.replace("127.0.0.1", "192.0.2.10") for mapping in expected_default
+    }
+    assert rendered_default == expected_default
+    assert rendered_empty == expected_default
+    assert rendered_override == expected_override
+
+    readme = _read(OBS_README)
+    assert '$env:HOST_BIND = "192.0.2.10"' in readme
+    assert "HOST_BIND=192.0.2.10 docker compose up -d" in readme
+    assert "managed controller's loopback enforcement" in readme
 
 
 # --------------------------------------------------------------------------- #
@@ -90,10 +270,9 @@ def test_f0561_local_grafana_is_loopback_bound_and_loginless() -> None:
     assert "GF_AUTH_ANONYMOUS_ENABLED=true" in text
     assert "GF_AUTH_DISABLE_LOGIN_FORM=true" in text
     # the loopback bind is what actually protects the stack
-    assert "${HOST_BIND:-127.0.0.1}:3000:3000" in text
+    _assert_secure_host_bind_ports(text, service="grafana", expected_ports=((3000, 3000),))
     # no required-password gate (the :? form) and no all-interfaces publish
     assert "GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:?" not in text
-    assert '"0.0.0.0:3000:3000"' not in text
 
 
 # --------------------------------------------------------------------------- #
@@ -107,8 +286,9 @@ def test_f0562_local_prometheus_apis_enabled_but_loopback_bound() -> None:
     assert '"--web.enable-remote-write-receiver"' in text
     assert '"--web.enable-lifecycle"' in text
     # the loopback bind is the security boundary, not the absence of the APIs
-    assert "${HOST_BIND:-127.0.0.1}:9090:9090" in text
-    assert '"0.0.0.0:9090:9090"' not in text
+    _assert_secure_host_bind_ports(
+        text, service="prometheus", expected_ports=((9090, 9090),)
+    )
 
 
 # --------------------------------------------------------------------------- #

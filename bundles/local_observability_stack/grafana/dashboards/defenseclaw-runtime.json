@@ -318,6 +318,7 @@
     {
       "type": "timeseries",
       "title": "File descriptors",
+      "description": "Open file descriptors when the runtime can read a real non-negative count. The -1 unsupported/unreadable sentinel is excluded rather than plotted as activity.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -330,7 +331,7 @@
       },
       "targets": [
         {
-          "expr": "max(defenseclaw_runtime_fd_in_use)",
+          "expr": "max(defenseclaw_runtime_fd_in_use >= 0)",
           "legendFormat": "fds",
           "refId": "A"
         }
@@ -348,8 +349,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Block and TUI refresh SLO compliance",
-      "description": "Recorded five-minute compliance ratios for admission-block latency under two seconds and TUI refresh latency under five seconds.",
+      "title": "Admission block SLO compliance",
+      "description": "Recorded five-minute compliance ratio for admission-block latency under two seconds. Source family: metric.defenseclaw.slo.block.latency with the generated local-observability-v1 projection.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -365,11 +366,6 @@
           "expr": "slo:defenseclaw_block_latency:ratio_5m",
           "legendFormat": "block < 2000 ms",
           "refId": "A"
-        },
-        {
-          "expr": "slo:defenseclaw_tui_refresh:ratio_5m",
-          "legendFormat": "TUI refresh < 5000 ms",
-          "refId": "B"
         }
       ],
       "fieldConfig": {
@@ -567,7 +563,7 @@
     {
       "type": "timeseries",
       "title": "OTLP exporter freshness (seconds since last export)",
-      "description": "Should stay near the export interval (~2s).  >300s = alerts fire and telemetry is likely blind.",
+      "description": "Should stay near the configured export interval; values above 300 seconds trigger the stalled-exporter alert. Source family: metric.defenseclaw.telemetry.exporter.last_export_ts with the generated local-observability-v1 exporter label.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -725,7 +721,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit\"} | defenseclaw_gateway_event_type=\"error\" | json | __error__=\"\" | line_format \"[{{.error_subsystem}}/{{.error_code}}] {{.error_message}}\"",
+          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit\"} | json | __error__=\"\" | event_name=~\".*failed|.*rejected|subsystem[.]degraded|schema[.]validation_failed|sqlite[.]write_failed\" | line_format \"[{{.event_name}}/{{.outcome}}] {{if .body_defenseclaw_health_error_summary}}{{.body_defenseclaw_health_error_summary}}{{else if .body_defenseclaw_scan_error_summary}}{{.body_defenseclaw_scan_error_summary}}{{else}}{{.body_defenseclaw_judge_error_summary}}{{end}}\"",
           "refId": "A"
         }
       ],
@@ -799,6 +795,98 @@
           "unit": "short"
         }
       }
+    },
+    {
+      "type": "row",
+      "title": "Watcher health",
+      "description": "Filesystem watcher failures, reconnect recovery, and connector hook self-heal activity emitted by generated asset.lifecycle metric families.",
+      "gridPos": {
+        "x": 0,
+        "y": 85,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Watcher errors/hour",
+      "description": "Rolling one-hour fsnotify watcher errors. Zero is healthy; sustained non-zero values indicate that filesystem changes may not be observed reliably.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 86,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(defenseclaw_watcher_errors_total[1h])) or on() vector(0)",
+          "legendFormat": "errors",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Runtime recoveries/hour",
+      "description": "Rolling one-hour successful gateway reconnects and watchdog-observed sidecar down-to-healthy recoveries. Initial boot connections and steady-healthy watchdog probes are deliberately excluded.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 86,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(defenseclaw_watcher_restarts_total[1h])) or on() vector(0)",
+          "legendFormat": "recoveries",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Hook self-heals/hour by connector",
+      "description": "Successful restoration of DefenseClaw-owned connector hook configuration after removal. Each series is correlated by connector and watched target type.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 86,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (connector, target_type) (increase(defenseclaw_watcher_events_total{event_type=\"hook-heal\"}[1h])) or on() vector(0)",
+          "legendFormat": "{{connector}} · {{target_type}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
     }
   ],
   "preload": false,
@@ -820,7 +908,7 @@
   "timezone": "",
   "title": "DefenseClaw — Runtime & Reliability",
   "uid": "defenseclaw-runtime",
-  "version": 1,
+  "version": 2,
   "weekStart": "",
   "description": "Gateway runtime, storage, exporter, audit-sink, and error health. This is the single operations dashboard for local process and telemetry reliability."
 }

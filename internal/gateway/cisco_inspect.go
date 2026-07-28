@@ -20,19 +20,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
-
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 var defaultEnabledRules = []map[string]string{
@@ -56,18 +56,16 @@ var defaultEnabledRules = []map[string]string{
 type inspectCall struct {
 	client         *http.Client
 	endpoint       string
-	tel            *telemetry.Provider
-	urlPath        string                    // e.g. "/api/v1/inspect/chat"
-	payload        map[string]interface{}    // mutated on 400 retry (delete "config")
-	setAuth        func(req *http.Request)   // set auth header on each attempt
-	telSpanName    string                    // e.g. "cisco.inspect.chat"
-	onUnauthorized func() (shouldRetry bool) // nil: 401 is terminal (opensource default)
+	urlPath        string                     // e.g. "/api/v1/inspect/chat"
+	payload        map[string]interface{}     // mutated on 400 retry (delete "config")
+	setAuth        func(req *http.Request)    // set auth header on each attempt
+	onUnauthorized func(context.Context) bool // nil: 401 is terminal (opensource default)
 }
 
-// doInspectHTTP executes an AID inspection HTTP call, applying the
-// shared transport, telemetry, and 4xx-drop-config retry logic. Returns
-// a normalized verdict on success, or nil on any failure — matching the
-// pre-existing fail-open contract downstream call sites rely on.
+// doInspectHTTP executes an AID inspection HTTP call, applying the shared
+// transport, generated-v8 metrics, and 4xx-drop-config retry logic. The
+// caller owns the request context and any surrounding generated phase span.
+// This helper must not create an independent trace root.
 //
 // The 401 branch depends on whether call.onUnauthorized is set:
 //   - nil (opensource / API-key path): 401 is a terminal error, emitted
@@ -79,22 +77,16 @@ type inspectCall struct {
 //     invoked on the fresh attempt, giving the caller a chance to attach
 //     a refreshed token. Retry cap widens to 3 attempts (initial + 400
 //     retry + 401 retry).
-func doInspectHTTP(call inspectCall) *ScanVerdict {
-	url := call.endpoint + call.urlPath
-	ctx := context.Background()
-	var span trace.Span
-	if call.tel != nil && call.tel.TracesEnabled() {
-		ctx, span = call.tel.Tracer().Start(ctx, call.telSpanName)
-		span.SetAttributes(
-			attribute.String("http.request.method", http.MethodPost),
-			attribute.String("url.full", url),
-		)
+func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, call inspectCall) *ScanVerdict {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	defer func() {
-		if span != nil {
-			span.End()
-		}
-	}()
+	if call.client == nil || call.setAuth == nil {
+		EmitCiscoError(ctx, gatewaylog.ErrCodeInvalidResponse, "inspection client is unavailable")
+		recordCiscoInspectV8(ctx, runtime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
+		return nil
+	}
+	url := call.endpoint + call.urlPath
 
 	maxAttempts := 2
 	if call.onUnauthorized != nil {
@@ -105,11 +97,15 @@ func doInspectHTTP(call inspectCall) *ScanVerdict {
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		body, err := json.Marshal(call.payload)
 		if err != nil {
+			EmitCiscoError(ctx, gatewaylog.ErrCodeInvalidResponse, "request encoding failed")
+			recordCiscoInspectV8(ctx, runtime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
 			return nil
 		}
 
-		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
+			EmitCiscoError(ctx, gatewaylog.ErrCodeInvalidResponse, "request construction failed")
+			recordCiscoInspectV8(ctx, runtime, -1, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
 			return nil
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -120,22 +116,24 @@ func doInspectHTTP(call inspectCall) *ScanVerdict {
 		resp, err := call.client.Do(req)
 		if err != nil {
 			fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] error: %v\n", err)
-			if call.tel != nil {
-				call.tel.RecordCiscoInspectLatency(ctx, float64(time.Since(start).Milliseconds()), "upstream-error")
+			outcome := observability.OutcomeFailed
+			var networkError net.Error
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) ||
+				errors.As(err, &networkError) && networkError.Timeout() {
+				outcome = observability.OutcomeTimedOut
 			}
-			EmitCiscoError(ctx, call.tel, gatewaylog.ErrCodeUpstreamError, err.Error())
+			EmitCiscoError(ctx, gatewaylog.ErrCodeUpstreamError, err.Error())
+			recordCiscoInspectV8(ctx, runtime, time.Since(start), outcome, gatewaylog.ErrCodeUpstreamError)
 			return nil
 		}
 
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		resp.Body.Close()
-		elapsedMs := float64(time.Since(start).Milliseconds())
-		if call.tel != nil {
-			outcome := "success"
-			if resp.StatusCode != http.StatusOK {
-				outcome = fmt.Sprintf("http-%d", resp.StatusCode)
-			}
-			call.tel.RecordCiscoInspectLatency(ctx, elapsedMs, outcome)
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		_ = resp.Body.Close()
+		elapsed := time.Since(start)
+		if readErr != nil {
+			EmitCiscoError(ctx, gatewaylog.ErrCodeInvalidResponse, "response body read failed")
+			recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
+			return nil
 		}
 
 		if resp.StatusCode == http.StatusBadRequest && !triedWithoutRules {
@@ -161,14 +159,16 @@ func doInspectHTTP(call inspectCall) *ScanVerdict {
 				delete(call.payload, "config")
 				triedWithoutRules = true
 				fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] HTTP 400 with rules-related body, retrying without config\n")
+				recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeRejected, "")
 				continue
 			}
 		}
 
 		if resp.StatusCode == http.StatusUnauthorized && call.onUnauthorized != nil && !retriedAfter401 {
-			if call.onUnauthorized() {
+			if call.onUnauthorized(ctx) {
 				retriedAfter401 = true
 				fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] HTTP 401, refreshed credentials and retrying\n")
+				recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeRejected, "")
 				continue
 			}
 		}
@@ -177,16 +177,19 @@ func doInspectHTTP(call inspectCall) *ScanVerdict {
 			bodySnippet := string(respBody[:minInt(len(respBody), 200)])
 			fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] error: HTTP %d: %s\n",
 				resp.StatusCode, redaction.MessageContent(bodySnippet))
-			EmitCiscoError(ctx, call.tel, gatewaylog.ErrCodeInvalidResponse,
+			EmitCiscoError(ctx, gatewaylog.ErrCodeInvalidResponse,
 				fmt.Sprintf("HTTP %d: %s", resp.StatusCode, redaction.MessageContent(bodySnippet)))
+			recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
 			return nil
 		}
 
 		var data map[string]interface{}
 		if err := json.Unmarshal(respBody, &data); err != nil {
-			EmitCiscoError(ctx, call.tel, gatewaylog.ErrCodeInvalidResponse, "json: "+err.Error())
+			EmitCiscoError(ctx, gatewaylog.ErrCodeInvalidResponse, "json: "+err.Error())
+			recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeFailed, gatewaylog.ErrCodeInvalidResponse)
 			return nil
 		}
+		recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeCompleted, "")
 		return normalizeCiscoResponse(data)
 	}
 	return nil
@@ -206,23 +209,50 @@ type CiscoInspectClient struct {
 	timeout      time.Duration
 	enabledRules []map[string]string
 	client       *http.Client
-	tel          *telemetry.Provider
+
+	observabilityV8Mu sync.RWMutex
+	observabilityV8   hookLifecycleMetricV8Runtime
 }
 
-// SetTelemetry wires OTel metrics (optional). Called from NewGuardrailProxy.
-func (c *CiscoInspectClient) SetTelemetry(p *telemetry.Provider) {
+// bindObservabilityV8 replaces the old Provider pointer with the
+// generation-pinned generated metric capability. The request context passed to
+// Inspect owns trace construction; the client must never create a second root
+// span for the same network operation.
+func (c *CiscoInspectClient) bindObservabilityV8(runtime hookLifecycleMetricV8Runtime) {
 	if c == nil {
 		return
 	}
-	c.tel = p
+	c.observabilityV8Mu.Lock()
+	c.observabilityV8 = runtime
+	c.observabilityV8Mu.Unlock()
 }
 
-// EmitCiscoError records a structured gateway error + optional metric for Cisco Inspect.
+func (c *CiscoInspectClient) observabilityV8Runtime() hookLifecycleMetricV8Runtime {
+	if c == nil {
+		return nil
+	}
+	c.observabilityV8Mu.RLock()
+	defer c.observabilityV8Mu.RUnlock()
+	return c.observabilityV8
+}
+
+func ciscoInspectRuntimeFromContext(ctx context.Context, fallback hookLifecycleMetricV8Runtime) hookLifecycleMetricV8Runtime {
+	if ctx != nil {
+		if phaseRuntime, ok := ctx.Value(ciscoInspectMetricRuntimeContextKey{}).(hookLifecycleMetricV8Runtime); ok {
+			return phaseRuntime
+		}
+	}
+	return fallback
+}
+
+// EmitCiscoError records the structured gateway error for Cisco Inspect. The
+// caller records the matching generated metric in the same request scope so it
+// retains W3C and DefenseClaw correlation.
 // ctx supplies request correlation (request_id / session_id / trace_id)
 // and agent identity; pass context.Background() only from boot / test
 // harnesses where no request exists. Routes through emitError so the
 // stampEventCorrelation choke point populates the envelope.
-func EmitCiscoError(ctx context.Context, tel *telemetry.Provider, code gatewaylog.ErrorCode, detail string) {
+func EmitCiscoError(ctx context.Context, code gatewaylog.ErrorCode, detail string) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -236,9 +266,6 @@ func EmitCiscoError(ctx context.Context, tel *telemetry.Provider, code gatewaylo
 		"cisco ai defense inspect",
 		cause,
 	)
-	if tel != nil {
-		tel.RecordCiscoError(ctx, string(code))
-	}
 }
 
 // NewCiscoInspectClient creates a client from the config. Returns nil if no
@@ -281,11 +308,18 @@ func NewCiscoInspectClient(cfg *config.CiscoAIDefenseConfig, dotenvPath string) 
 }
 
 // Inspect sends messages to Cisco AI Defense and returns a normalized verdict.
-// Returns nil on any error so the caller can fall back to local-only scanning.
-func (c *CiscoInspectClient) Inspect(messages []ChatMessage) *ScanVerdict {
+// The caller's context is mandatory for cancellation and W3C parentage. The
+// generated guardrail ai_defense CLIENT phase owns the span; this client only
+// records the two canonical Cisco metric families. Returns nil on any error so
+// the caller can fall back to local-only scanning.
+func (c *CiscoInspectClient) Inspect(ctx context.Context, messages []ChatMessage) *ScanVerdict {
 	if c == nil || c.apiKey == "" {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	runtime := ciscoInspectRuntimeFromContext(ctx, c.observabilityV8Runtime())
 
 	chatMsgs := make([]map[string]string, len(messages))
 	for i, m := range messages {
@@ -297,16 +331,14 @@ func (c *CiscoInspectClient) Inspect(messages []ChatMessage) *ScanVerdict {
 		payload["config"] = map[string]interface{}{"enabled_rules": c.enabledRules}
 	}
 
-	return doInspectHTTP(inspectCall{
+	return doInspectHTTP(ctx, runtime, inspectCall{
 		client:   c.client,
 		endpoint: c.endpoint,
-		tel:      c.tel,
 		urlPath:  "/api/v1/inspect/chat",
 		payload:  payload,
 		setAuth: func(req *http.Request) {
 			req.Header.Set("X-Cisco-AI-Defense-API-Key", c.apiKey)
 		},
-		telSpanName: "cisco.inspect.chat",
 	})
 }
 

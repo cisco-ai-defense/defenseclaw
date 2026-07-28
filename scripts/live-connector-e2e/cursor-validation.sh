@@ -40,12 +40,12 @@ dc_write_env_key CURSOR_API_KEY "${CURSOR_API_KEY:-}"
 dc_init_defenseclaw
 dc_setup_connector cursor action
 
-before="$(dc_gateway_jsonl_count)"
+before="$(dc_event_cursor)"
 dc_log "driving trivial headless prompt through cursor-agent"
 dc_timeout 120 cursor-agent -p "Reply with only the word ready. Do not use any tools." \
   --output-format json --force >/tmp/dc-cursor-validation.log 2>&1 || \
   dc_warn "cursor-agent exited non-zero (see /tmp/dc-cursor-validation.log)"
-sleep 2
+dc_wait_for_connector_event cursor "${before}" || true
 
 fired=1
 if dc_assert_fired cursor "${before}"; then

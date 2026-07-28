@@ -67,8 +67,8 @@ func TestAntigravityProfileDecode_RealAgyPayload(t *testing.T) {
 	if req.SessionID != "f74b1ea2-4369-45c5-9716-8f6b57b3e999" {
 		t.Errorf("SessionID=%q want f74b1ea2-4369-45c5-9716-8f6b57b3e999", req.SessionID)
 	}
-	if req.TurnID != "21" {
-		t.Errorf("TurnID=%q want 21 (stepIdx projected onto string TurnID)", req.TurnID)
+	if req.TurnID != "" {
+		t.Errorf("TurnID=%q want empty; stepIdx is a trajectory step, not a turn", req.TurnID)
 	}
 	if req.ToolName != "run_command" {
 		t.Errorf("ToolName=%q want run_command — must come from toolCall.name not top-level", req.ToolName)
@@ -87,6 +87,29 @@ func TestAntigravityProfileDecode_RealAgyPayload(t *testing.T) {
 	}
 	if req.Payload == nil {
 		t.Errorf("Payload nil — must round-trip the original payload for downstream evaluators")
+	}
+}
+
+func TestAntigravityProfileDecode_DoesNotConflateOperationIDsWithTurns(t *testing.T) {
+	for name, payload := range map[string]map[string]interface{}{
+		"step index":   {"stepIdx": float64(21), "toolCall": map[string]interface{}{"name": "run_command"}},
+		"tool call id": {"toolCallId": "call-21", "toolCall": map[string]interface{}{"name": "run_command"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := antigravityProfileDecode(payload).TurnID; got != "" {
+				t.Fatalf("TurnID=%q want empty", got)
+			}
+		})
+	}
+}
+
+func TestAntigravityProfileDecode_PreservesExplicitTurnID(t *testing.T) {
+	if got := antigravityProfileDecode(map[string]interface{}{
+		"turn_id":  "turn-21",
+		"stepIdx":  float64(21),
+		"toolCall": map[string]interface{}{"name": "run_command"},
+	}).TurnID; got != "turn-21" {
+		t.Fatalf("TurnID=%q want turn-21", got)
 	}
 }
 

@@ -1,0 +1,2509 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.defenseclaw.dev/config/v8/defenseclaw-config.schema.json",
+  "title": "DefenseClaw configuration v8",
+  "description": "Canonical source schema for DefenseClaw config_version 8. Every defined configuration object is closed; extensible maps declare the schema of their values explicitly.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "config_version"
+  ],
+  "x-defenseclaw-owner": "internal/config",
+  "x-defenseclaw-legacy-top-level-fields": [
+    "audit_db",
+    "audit_sinks",
+    "judge_bodies_db",
+    "otel",
+    "splunk"
+  ],
+  "x-defenseclaw-coverage": "closed",
+  "properties": {
+    "config_version": {
+      "type": "integer",
+      "const": 8,
+      "description": "Required configuration schema version."
+    },
+    "llm": {
+      "$ref": "#/$defs/llm"
+    },
+    "default_llm_api_key_env": {
+      "type": "string",
+      "maxLength": 256,
+      "description": "Deprecated pre-v5 LLM key environment variable name retained by the existing configuration contract."
+    },
+    "default_llm_model": {
+      "type": "string",
+      "maxLength": 1024,
+      "description": "Deprecated pre-v5 model retained by the existing configuration contract."
+    },
+    "data_dir": {
+      "$ref": "#/$defs/pathString"
+    },
+    "quarantine_dir": {
+      "$ref": "#/$defs/pathString"
+    },
+    "plugin_dir": {
+      "$ref": "#/$defs/pathString"
+    },
+    "policy_dir": {
+      "$ref": "#/$defs/pathString"
+    },
+    "environment": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "tenant_id": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "workspace_id": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "deployment_mode": {
+      "type": "string",
+      "enum": [
+        "",
+        "managed_enterprise",
+        "unmanaged_byod",
+        "ci_cd",
+        "sandboxed",
+        "server",
+        "saas"
+      ]
+    },
+    "discovery_source": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "claw": {
+      "$ref": "#/$defs/claw"
+    },
+    "agent": {
+      "$ref": "#/$defs/agent"
+    },
+    "inspect_llm": {
+      "$ref": "#/$defs/inspectLLM"
+    },
+    "cisco_ai_defense": {
+      "$ref": "#/$defs/ciscoAIDefense"
+    },
+    "scanners": {
+      "$ref": "#/$defs/scanners"
+    },
+    "openshell": {
+      "$ref": "#/$defs/openShell"
+    },
+    "watch": {
+      "$ref": "#/$defs/watch"
+    },
+    "firewall": {
+      "$ref": "#/$defs/firewall"
+    },
+    "guardrail": {
+      "$ref": "#/$defs/guardrail"
+    },
+    "gateway": {
+      "$ref": "#/$defs/gateway"
+    },
+    "cloud_auth": {
+      "$ref": "#/$defs/cloudAuth"
+    },
+    "skill_actions": {
+      "$ref": "#/$defs/actionMatrix"
+    },
+    "mcp_actions": {
+      "$ref": "#/$defs/actionMatrix"
+    },
+    "plugin_actions": {
+      "$ref": "#/$defs/actionMatrix"
+    },
+    "asset_policy": {
+      "$ref": "#/$defs/assetPolicy"
+    },
+    "registries": {
+      "$ref": "#/$defs/registries"
+    },
+    "claude_code": {
+      "$ref": "#/$defs/agentHook"
+    },
+    "codex": {
+      "$ref": "#/$defs/agentHook"
+    },
+    "connector_hooks": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "$ref": "#/$defs/stableName"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/agentHook"
+      }
+    },
+    "webhooks": {
+      "$ref": "#/$defs/webhooks"
+    },
+    "observability": {
+      "$ref": "#/$defs/observability"
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Reserved non-observability privacy section. privacy.disable_redaction is a v7 field and is intentionally rejected in v8."
+    },
+    "ai_discovery": {
+      "$ref": "#/$defs/aiDiscovery"
+    },
+    "application_protection": {
+      "$ref": "#/$defs/applicationProtection"
+    },
+    "notifications": {
+      "$ref": "#/$defs/notifications"
+    },
+    "managed": {
+      "$ref": "#/$defs/managedIPC"
+    }
+  },
+  "$defs": {
+    "boundedString": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "stringList": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "$ref": "#/$defs/boundedString"
+      }
+    },
+    "stringMap": {
+      "type": "object",
+      "maxProperties": 1024,
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 16384
+      }
+    },
+    "connectorName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "envNameOrEmpty": {
+      "anyOf": [
+        {
+          "const": ""
+        },
+        {
+          "$ref": "#/$defs/envName"
+        }
+      ]
+    },
+    "llm": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": { "$ref": "#/$defs/boundedString" },
+        "provider": { "$ref": "#/$defs/boundedString" },
+        "api_key": { "type": "string", "maxLength": 65536 },
+        "api_key_env": { "$ref": "#/$defs/envNameOrEmpty" },
+        "base_url": { "type": "string", "maxLength": 8192 },
+        "timeout": { "type": "integer", "minimum": 0, "maximum": 86400, "default": 30 },
+        "max_retries": { "type": "integer", "minimum": 0, "maximum": 1000, "default": 2 },
+        "instance_name": { "$ref": "#/$defs/boundedString" },
+        "forward_custom_headers": { "type": "boolean", "default": true },
+        "region": { "$ref": "#/$defs/boundedString" },
+        "tls": { "$ref": "#/$defs/llmTLS" },
+        "bedrock": { "$ref": "#/$defs/bedrock" },
+        "vertex": { "$ref": "#/$defs/vertex" },
+        "azure": { "$ref": "#/$defs/azure" },
+        "extra_headers": { "$ref": "#/$defs/stringMap" }
+      }
+    },
+    "llmTLS": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ca_cert_file": { "$ref": "#/$defs/boundedString" },
+        "ca_cert_pem": { "type": "string", "maxLength": 1048576 },
+        "insecure_skip_verify": { "type": "boolean", "default": false }
+      }
+    },
+    "bedrock": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "region": { "$ref": "#/$defs/boundedString" },
+        "auth_mode": {
+          "type": "string",
+          "enum": ["api_key", "iam_credentials", "profile", "instance_role"]
+        },
+        "access_key_env": { "$ref": "#/$defs/envNameOrEmpty" },
+        "secret_key_env": { "$ref": "#/$defs/envNameOrEmpty" },
+        "session_token_env": { "$ref": "#/$defs/envNameOrEmpty" },
+        "profile_name": { "$ref": "#/$defs/boundedString" },
+        "inference_profile": { "$ref": "#/$defs/boundedString" },
+        "deployment_aliases": { "$ref": "#/$defs/stringMap" }
+      }
+    },
+    "vertex": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project_id": { "$ref": "#/$defs/boundedString" },
+        "region": { "$ref": "#/$defs/boundedString" },
+        "auth_mode": {
+          "type": "string",
+          "enum": ["service_account", "adc", "workload_identity"]
+        },
+        "service_account_json_env": { "$ref": "#/$defs/envNameOrEmpty" }
+      }
+    },
+    "azure": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": { "type": "string", "maxLength": 8192 },
+        "api_version": { "$ref": "#/$defs/boundedString" },
+        "auth_mode": { "type": "string", "enum": ["api_key", "managed_identity"] },
+        "deployment_aliases": { "$ref": "#/$defs/stringMap" }
+      }
+    },
+    "inspectLLM": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "$ref": "#/$defs/boundedString" },
+        "model": { "$ref": "#/$defs/boundedString" },
+        "api_key": { "type": "string", "maxLength": 65536 },
+        "api_key_env": { "$ref": "#/$defs/envNameOrEmpty" },
+        "base_url": { "type": "string", "maxLength": 8192 },
+        "timeout": { "type": "integer", "minimum": 0, "maximum": 86400, "default": 30 },
+        "max_retries": { "type": "integer", "minimum": 0, "maximum": 1000, "default": 3 }
+      }
+    },
+    "ciscoAIDefense": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": { "type": "string", "maxLength": 8192, "default": "https://us.api.inspect.aidefense.security.cisco.com" },
+        "api_key": { "type": "string", "maxLength": 65536 },
+        "api_key_env": { "$ref": "#/$defs/envNameOrEmpty" },
+        "timeout_ms": { "type": "integer", "minimum": 0, "maximum": 86400000, "default": 3000 },
+        "enabled_rules": { "$ref": "#/$defs/stringList" },
+        "scan_hook_surface": { "type": "boolean", "default": true }
+      }
+    },
+    "scanners": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "skill_scanner": { "$ref": "#/$defs/skillScanner" },
+        "mcp_scanner": { "$ref": "#/$defs/mcpScanner" },
+        "plugin_scanner": { "$ref": "#/$defs/boundedString" },
+        "plugin_llm": { "$ref": "#/$defs/llm" },
+        "codeguard": { "$ref": "#/$defs/boundedString" }
+      }
+    },
+    "skillScanner": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "binary": { "$ref": "#/$defs/boundedString" },
+        "use_llm": { "type": "boolean" },
+        "use_behavioral": { "type": "boolean" },
+        "enable_meta": { "type": "boolean" },
+        "use_trigger": { "type": "boolean" },
+        "use_virustotal": { "type": "boolean" },
+        "use_aidefense": { "type": "boolean" },
+        "llm_consensus_runs": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "policy": { "$ref": "#/$defs/boundedString" },
+        "lenient": { "type": "boolean" },
+        "llm": { "$ref": "#/$defs/llm" },
+        "virustotal_api_key": { "type": "string", "maxLength": 65536 },
+        "virustotal_api_key_env": { "$ref": "#/$defs/envNameOrEmpty" }
+      }
+    },
+    "mcpScanner": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "binary": { "$ref": "#/$defs/boundedString" },
+        "analyzers": { "$ref": "#/$defs/boundedString" },
+        "scan_prompts": { "type": "boolean" },
+        "scan_resources": { "type": "boolean" },
+        "scan_instructions": { "type": "boolean" },
+        "llm": { "$ref": "#/$defs/llm" }
+      }
+    },
+    "openShell": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "binary": { "$ref": "#/$defs/boundedString" },
+        "policy_dir": { "$ref": "#/$defs/boundedString" },
+        "mode": { "type": "string", "maxLength": 64 },
+        "version": { "type": "string", "maxLength": 128, "default": "0.6.2" },
+        "sandbox_home": { "$ref": "#/$defs/boundedString" },
+        "auto_pair": { "type": ["boolean", "null"], "default": true },
+        "host_networking": { "type": "boolean", "default": true }
+      }
+    },
+    "watch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "debounce_ms": { "type": "integer", "minimum": 0, "maximum": 86400000, "default": 500 },
+        "auto_block": { "type": "boolean", "default": true },
+        "allow_list_bypass_scan": { "type": "boolean", "default": true },
+        "rescan_enabled": { "type": "boolean", "default": true },
+        "rescan_interval_min": { "type": "integer", "minimum": 0, "maximum": 525600, "default": 60 },
+        "rescan_content_gated": { "type": "boolean", "default": true }
+      }
+    },
+    "firewall": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "config_file": { "$ref": "#/$defs/boundedString" },
+        "rules_file": { "$ref": "#/$defs/boundedString" },
+        "anchor_name": { "$ref": "#/$defs/boundedString" }
+      }
+    },
+    "guardrailMode": {
+      "type": "string",
+      "enum": ["observe", "action"]
+    },
+    "guardrailModeOrInherit": {
+      "type": "string",
+      "enum": ["", "observe", "action"]
+    },
+    "detectionStrategy": {
+      "type": "string",
+      "enum": ["regex_only", "regex_judge", "judge_first"]
+    },
+    "detectionStrategyOrInherit": {
+      "type": "string",
+      "enum": ["", "regex_only", "regex_judge", "judge_first"]
+    },
+    "hilt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "min_severity": { "type": "string", "enum": ["", "LOW", "MEDIUM", "HIGH", "CRITICAL"] }
+      }
+    },
+    "judge": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "injection": { "type": "boolean" },
+        "pii": { "type": "boolean" },
+        "pii_prompt": { "type": "boolean" },
+        "pii_completion": { "type": "boolean" },
+        "tool_injection": { "type": "boolean" },
+        "exfil": { "type": "boolean" },
+        "timeout": { "type": "number", "minimum": 0, "maximum": 86400, "default": 30 },
+        "hook_connectors": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "anyOf": [
+              { "const": "*" },
+              { "$ref": "#/$defs/connectorName" }
+            ]
+          }
+        },
+        "hook_timeout": { "type": "number", "minimum": 0, "maximum": 86400 },
+        "llm": { "$ref": "#/$defs/llm" },
+        "model": { "$ref": "#/$defs/boundedString" },
+        "api_key_env": { "$ref": "#/$defs/envNameOrEmpty" },
+        "api_base": { "type": "string", "maxLength": 8192 },
+        "fallbacks": { "$ref": "#/$defs/stringList" },
+        "adjudication_timeout": { "type": "number", "minimum": 0, "maximum": 86400, "default": 5 }
+      }
+    },
+    "perConnectorGuardrail": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "$ref": "#/$defs/guardrailModeOrInherit" },
+        "hilt": { "$ref": "#/$defs/hilt" },
+        "hook_fail_mode": { "type": "string", "enum": ["", "open", "closed"] },
+        "block_message": { "$ref": "#/$defs/boundedString" },
+        "rule_pack_dir": { "$ref": "#/$defs/boundedString" },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "guardrail": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "mode": { "$ref": "#/$defs/guardrailMode" },
+        "scanner_mode": { "type": "string", "enum": ["local", "remote", "both"] },
+        "host": { "$ref": "#/$defs/boundedString" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "connector": { "$ref": "#/$defs/boundedString" },
+        "allow_empty_providers": { "type": "boolean", "default": false },
+        "allow_private_upstreams": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        },
+        "llm": { "$ref": "#/$defs/llm" },
+        "model": { "$ref": "#/$defs/boundedString", "deprecated": true },
+        "model_name": { "$ref": "#/$defs/boundedString", "deprecated": true },
+        "api_key_env": { "$ref": "#/$defs/envNameOrEmpty", "deprecated": true },
+        "api_base": { "type": "string", "maxLength": 8192, "deprecated": true },
+        "original_model": { "$ref": "#/$defs/boundedString" },
+        "block_message": { "$ref": "#/$defs/boundedString" },
+        "stream_buffer_bytes": { "type": "integer", "minimum": 0, "maximum": 1073741824 },
+        "rule_pack_dir": { "$ref": "#/$defs/boundedString" },
+        "judge": { "$ref": "#/$defs/judge" },
+        "hilt": { "$ref": "#/$defs/hilt" },
+        "detection_strategy": { "$ref": "#/$defs/detectionStrategy" },
+        "detection_strategy_prompt": { "$ref": "#/$defs/detectionStrategyOrInherit" },
+        "detection_strategy_completion": { "$ref": "#/$defs/detectionStrategyOrInherit" },
+        "detection_strategy_tool_call": { "$ref": "#/$defs/detectionStrategyOrInherit" },
+        "judge_sweep": { "type": "boolean" },
+        "retain_judge_bodies": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether raw judge responses are retained in the local forensic store."
+        },
+        "judge_persist_queue_depth": { "type": "integer", "minimum": 0, "maximum": 1048576, "default": 1024 },
+        "allow_unknown_llm_domains": { "type": "boolean", "default": false },
+        "llm_role": {
+          "type": "string",
+          "enum": ["", "judge_only", "judge_and_agent"]
+        },
+        "hook_fail_mode": { "type": "string", "enum": ["open", "closed"], "default": "closed" },
+        "hook_self_heal": { "type": "boolean", "default": true },
+        "hook_self_heal_debounce_ms": { "type": "integer", "minimum": 0, "maximum": 86400000, "default": 500 },
+        "connectors": {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": { "$ref": "#/$defs/connectorName" },
+          "additionalProperties": { "$ref": "#/$defs/perConnectorGuardrail" }
+        }
+      }
+    },
+    "gatewayWatcherAsset": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "take_action": { "type": "boolean" },
+        "dirs": { "$ref": "#/$defs/stringList" }
+      }
+    },
+    "gatewayWatcherMCP": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "take_action": { "type": "boolean" }
+      }
+    },
+    "gatewayWatcher": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "skill": { "$ref": "#/$defs/gatewayWatcherAsset" },
+        "plugin": { "$ref": "#/$defs/gatewayWatcherAsset" },
+        "mcp": { "$ref": "#/$defs/gatewayWatcherMCP" }
+      }
+    },
+    "watchdog": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "interval": { "type": "integer", "minimum": 0, "maximum": 86400, "default": 30 },
+        "debounce": { "type": "integer", "minimum": 0, "maximum": 1000000, "default": 2 }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host": { "$ref": "#/$defs/boundedString" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "token": { "type": "string", "maxLength": 65536 },
+        "token_env": { "$ref": "#/$defs/envNameOrEmpty" },
+        "tls": { "type": "boolean" },
+        "tls_skip_verify": { "type": "boolean" },
+        "device_key_file": { "$ref": "#/$defs/boundedString" },
+        "auto_approve_safe": { "type": "boolean" },
+        "reconnect_ms": { "type": "integer", "minimum": 0, "maximum": 86400000, "default": 800 },
+        "max_reconnect_ms": { "type": "integer", "minimum": 0, "maximum": 86400000, "default": 15000 },
+        "approval_timeout_s": { "type": "integer", "minimum": 0, "maximum": 86400, "default": 30 },
+        "api_port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 18970 },
+        "api_bind": { "$ref": "#/$defs/boundedString" },
+        "fleet_mode": { "type": "string", "enum": ["", "auto", "enabled", "disabled"], "default": "auto" },
+        "config_reload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": { "type": "string", "enum": ["hot", "restart"], "default": "hot" }
+          }
+        },
+        "watcher": { "$ref": "#/$defs/gatewayWatcher" },
+        "watchdog": { "$ref": "#/$defs/watchdog" }
+      }
+    },
+    "cloudAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "type": "string", "enum": ["cmid"] },
+        "lib_path": { "$ref": "#/$defs/pathString" }
+      }
+    },
+    "managedIPC": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "socket_path": { "$ref": "#/$defs/pathString" },
+        "socket_mode": {
+          "type": "string",
+          "pattern": "^0?[0-7]{3}$"
+        },
+        "allowed_team_ids": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/boundedString" }
+        },
+        "allowed_signing_ids": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/boundedString" }
+        },
+        "allowed_bundle_ids": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/boundedString" }
+        }
+      }
+    },
+    "severityAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "file": { "type": "string", "enum": ["none", "quarantine"] },
+        "runtime": { "type": "string", "enum": ["disable", "enable"] },
+        "install": { "type": "string", "enum": ["block", "allow", "none"] }
+      }
+    },
+    "actionMatrix": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "critical": { "$ref": "#/$defs/severityAction" },
+        "high": { "$ref": "#/$defs/severityAction" },
+        "medium": { "$ref": "#/$defs/severityAction" },
+        "low": { "$ref": "#/$defs/severityAction" },
+        "info": { "$ref": "#/$defs/severityAction" }
+      }
+    },
+    "assetPolicyRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/boundedString" },
+        "connector": { "$ref": "#/$defs/boundedString" },
+        "reason": { "$ref": "#/$defs/boundedString" },
+        "url": { "type": "string", "maxLength": 8192 },
+        "command": { "$ref": "#/$defs/boundedString" },
+        "args_prefix": { "$ref": "#/$defs/stringList" },
+        "transport": { "$ref": "#/$defs/boundedString" },
+        "source_path_contains": { "$ref": "#/$defs/stringList" }
+      }
+    },
+    "assetPolicyRules": {
+      "type": "array",
+      "maxItems": 16384,
+      "items": { "$ref": "#/$defs/assetPolicyRule" }
+    },
+    "assetRuntimeDetection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "terminal_commands": { "type": "boolean" },
+        "unknown_terminal_mcp": { "type": "string", "enum": ["", "observe", "action"] }
+      }
+    },
+    "assetTypePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": { "type": "string", "enum": ["allow", "deny", "block"] },
+        "registry_required": { "type": "boolean" },
+        "registry_empty_action": { "type": "string", "enum": ["deny", "block", "allow", "warn"] },
+        "registry": { "$ref": "#/$defs/assetPolicyRules" },
+        "allowed": { "$ref": "#/$defs/assetPolicyRules" },
+        "denied": { "$ref": "#/$defs/assetPolicyRules" },
+        "runtime_detection": { "$ref": "#/$defs/assetRuntimeDetection" }
+      }
+    },
+    "perConnectorAssetTypePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": { "type": "string", "enum": ["", "allow", "deny", "block"] },
+        "registry_required": { "type": "boolean" },
+        "registry_empty_action": { "type": "string", "enum": ["", "deny", "block", "allow", "warn"] }
+      }
+    },
+    "perConnectorAssetPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "$ref": "#/$defs/guardrailModeOrInherit" },
+        "mcp": { "$ref": "#/$defs/perConnectorAssetTypePolicy" },
+        "skill": { "$ref": "#/$defs/perConnectorAssetTypePolicy" },
+        "plugin": { "$ref": "#/$defs/perConnectorAssetTypePolicy" }
+      }
+    },
+    "assetPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "mode": { "$ref": "#/$defs/guardrailMode" },
+        "mcp": { "$ref": "#/$defs/assetTypePolicy" },
+        "skill": { "$ref": "#/$defs/assetTypePolicy" },
+        "plugin": { "$ref": "#/$defs/assetTypePolicy" },
+        "connectors": {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": { "$ref": "#/$defs/connectorName" },
+          "additionalProperties": { "$ref": "#/$defs/perConnectorAssetPolicy" }
+        }
+      }
+    },
+    "registrySource": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/boundedString" },
+        "kind": { "type": "string", "enum": ["", "clawhub", "smithery", "skills_sh", "http_yaml", "http_json", "git", "file"] },
+        "url": { "type": "string", "maxLength": 8192 },
+        "content": { "type": "string", "enum": ["", "skill", "mcp", "both"] },
+        "auth_env": { "$ref": "#/$defs/envNameOrEmpty" },
+        "enabled": { "type": "boolean" },
+        "auto_sync": { "type": "boolean" },
+        "sync_interval_hours": { "type": "integer", "minimum": 0, "maximum": 876000 },
+        "last_sync": { "$ref": "#/$defs/boundedString" },
+        "last_status": { "$ref": "#/$defs/boundedString" }
+      }
+    },
+    "registries": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sources": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/registrySource" }
+        }
+      }
+    },
+    "applicationProtectionAssetPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "$ref": "#/$defs/guardrailModeOrInherit" }
+      }
+    },
+    "applicationProtectionConnector": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "min_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "guardrail": { "$ref": "#/$defs/perConnectorGuardrail" },
+        "asset_policy": { "$ref": "#/$defs/applicationProtectionAssetPolicy" }
+      }
+    },
+    "applicationProtection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "min_confidence": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.8 },
+        "remove_when_gone": { "type": "boolean", "default": false },
+        "gone_after_min": { "type": "integer", "minimum": 0, "maximum": 5256000, "default": 60 },
+        "include_connectors": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/connectorName" }
+        },
+        "exclude_connectors": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/connectorName" }
+        },
+        "guardrail": { "$ref": "#/$defs/perConnectorGuardrail" },
+        "asset_policy": { "$ref": "#/$defs/applicationProtectionAssetPolicy" },
+        "connectors": {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": { "$ref": "#/$defs/connectorName" },
+          "additionalProperties": { "$ref": "#/$defs/applicationProtectionConnector" }
+        }
+      }
+    },
+    "notificationSources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hook": { "type": "boolean", "default": true },
+        "guardrail": { "type": "boolean", "default": true },
+        "asset_policy": { "type": "boolean", "default": true }
+      }
+    },
+    "duration": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h))*$"
+        },
+        {
+          "type": "integer",
+          "minimum": 0
+        }
+      ]
+    },
+    "notifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "block_enforced": { "type": "boolean", "default": true },
+        "block_would_block": { "type": "boolean", "default": false },
+        "hitl_approval": { "type": "boolean", "default": true },
+        "sources": { "$ref": "#/$defs/notificationSources" },
+        "dedup_window": { "$ref": "#/$defs/duration", "default": "30s" },
+        "max_per_minute": { "type": "integer", "minimum": 0, "maximum": 1000000, "default": 12 }
+      }
+    },
+    "pathString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "stableName": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+    },
+    "selectorToken": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+    },
+    "envName": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,255}$"
+    },
+    "claw": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "home_dir": {
+          "$ref": "#/$defs/pathString"
+        },
+        "config_file": {
+          "$ref": "#/$defs/pathString"
+        },
+        "workspace_dir": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "openclaw_home_original": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^(?:[a-z0-9][a-z0-9-]{0,127})?$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 256
+        }
+      }
+    },
+    "agentHook": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "mode": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "fail_mode": {
+          "type": "string",
+          "enum": [
+            "open",
+            "closed"
+          ]
+        },
+        "scan_on_session_start": {
+          "type": "boolean"
+        },
+        "scan_on_stop": {
+          "type": "boolean"
+        },
+        "scan_paths": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/pathString"
+          }
+        },
+        "component_scan_interval_minutes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        }
+      }
+    },
+    "webhooks": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "$ref": "#/$defs/webhook"
+      }
+    },
+    "webhook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "type"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/stableName"
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "slack",
+            "pagerduty",
+            "webex",
+            "generic"
+          ],
+          "default": "generic"
+        },
+        "secret_env": {
+          "$ref": "#/$defs/envName"
+        },
+        "room_id": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "min_severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "events": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "block",
+              "scan",
+              "guardrail",
+              "drift",
+              "health"
+            ]
+          }
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647,
+          "default": 10
+        },
+        "cooldown_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "aiDiscovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Existing AI discovery source controls with the retired v7 emit_otel routing switch intentionally omitted.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "passive",
+            "enhanced"
+          ]
+        },
+        "scan_interval_min": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "process_interval_s": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "scan_roots": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/pathString"
+          }
+        },
+        "signature_packs": {
+          "type": "array",
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "allow_workspace_signatures": {
+          "type": "boolean"
+        },
+        "disabled_signature_ids": {
+          "type": "array",
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "include_shell_history": {
+          "type": "boolean"
+        },
+        "include_package_manifests": {
+          "type": "boolean"
+        },
+        "include_env_var_names": {
+          "type": "boolean"
+        },
+        "include_network_domains": {
+          "type": "boolean"
+        },
+        "max_files_per_scan": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "max_file_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "store_raw_local_paths": {
+          "type": "boolean"
+        },
+        "confidence_policy_path": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "require_trusted_binary_paths": {
+          "type": "boolean"
+        },
+        "trusted_binary_prefixes": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/pathString"
+          }
+        }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Single v8 owner of collection, local retention, redaction, destinations, routing, resource attributes, trace sampling, and metric export policy.",
+      "properties": {
+        "bucket_catalog_version": {
+          "type": "integer",
+          "const": 1,
+          "default": 1
+        },
+        "resource": {
+          "$ref": "#/$defs/resource"
+        },
+        "trace_policy": {
+          "$ref": "#/$defs/tracePolicy"
+        },
+        "metric_policy": {
+          "$ref": "#/$defs/metricPolicy"
+        },
+        "defaults": {
+          "$ref": "#/$defs/defaultBucketPolicy"
+        },
+        "buckets": {
+          "$ref": "#/$defs/bucketPolicies"
+        },
+        "redaction_profiles": {
+          "$ref": "#/$defs/redactionProfiles"
+        },
+        "connectors": {
+          "$ref": "#/$defs/connectorObservabilityMap"
+        },
+        "local": {
+          "$ref": "#/$defs/localStore"
+        },
+        "destinations": {
+          "type": "array",
+          "maxItems": 64,
+          "x-defenseclaw-semantic-constraint": "Destination names must be unique after canonical normalization.",
+          "items": {
+            "$ref": "#/$defs/destination"
+          }
+        }
+      }
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "attributes": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,127}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        }
+      }
+    },
+    "tracePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sampler": {
+          "type": "string",
+          "enum": [
+            "always_on",
+            "always_off",
+            "traceidratio",
+            "parentbased_always_on",
+            "parentbased_always_off",
+            "parentbased_traceidratio"
+          ],
+          "default": "parentbased_always_on"
+        },
+        "sampler_arg": {
+          "type": "string",
+          "pattern": "^(?:0(?:\\.[0-9]+)?|1(?:\\.0+)?)$"
+        },
+        "semantic_profile": {
+          "type": "string",
+          "const": "defenseclaw-genai-rich-v1",
+          "default": "defenseclaw-genai-rich-v1"
+        },
+        "compatibility_aliases": {
+          "type": "boolean",
+          "default": true
+        },
+        "limits": {
+          "$ref": "#/$defs/traceLimits"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "sampler"
+            ],
+            "properties": {
+              "sampler": {
+                "enum": [
+                  "traceidratio",
+                  "parentbased_traceidratio"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "sampler_arg"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "sampler_arg"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "traceLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_attributes_per_span": {
+          "type": "integer",
+          "minimum": 32,
+          "maximum": 256,
+          "default": 128
+        },
+        "max_events_per_span": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128,
+          "default": 64
+        },
+        "max_links_per_span": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "default": 32
+        },
+        "max_attributes_per_event": {
+          "type": "integer",
+          "minimum": 4,
+          "maximum": 64,
+          "default": 32
+        },
+        "max_attribute_value_bytes": {
+          "type": "integer",
+          "minimum": 256,
+          "maximum": 65536,
+          "default": 16384
+        },
+        "max_projected_span_bytes": {
+          "type": "integer",
+          "minimum": 4096,
+          "maximum": 1048576,
+          "default": 262144
+        },
+        "max_stacktrace_bytes": {
+          "type": "integer",
+          "minimum": 256,
+          "maximum": 131072,
+          "default": 32768
+        },
+        "max_message_items": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 512,
+          "default": 128
+        }
+      }
+    },
+    "metricPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "export_interval_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647,
+          "default": 60
+        },
+        "temporality": {
+          "type": "string",
+          "enum": [
+            "delta",
+            "cumulative"
+          ],
+          "default": "delta"
+        }
+      }
+    },
+    "collectPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "logs": {
+          "type": "boolean",
+          "default": true
+        },
+        "traces": {
+          "type": "boolean",
+          "default": true
+        },
+        "metrics": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "defaultBucketPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "collect": {
+          "$ref": "#/$defs/collectPolicy"
+        },
+        "redaction_profile": {
+          "$ref": "#/$defs/profileName"
+        }
+      }
+    },
+    "bucketPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "collect": {
+          "$ref": "#/$defs/collectPolicy"
+        },
+        "redaction_profile": {
+          "$ref": "#/$defs/profileName"
+        }
+      }
+    },
+    "bucketPolicies": {
+      "type": "object",
+      "maxProperties": 14,
+      "propertyNames": {
+        "$ref": "#/$defs/bucketName"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/bucketPolicy"
+      }
+    },
+    "bucketName": {
+      "type": "string",
+      "enum": [
+        "compliance.activity",
+        "security.finding",
+        "guardrail.evaluation",
+        "enforcement.action",
+        "model.io",
+        "tool.activity",
+        "asset.scan",
+        "asset.lifecycle",
+        "network.egress",
+        "agent.lifecycle",
+        "ai.discovery",
+        "telemetry.ingest",
+        "platform.health",
+        "diagnostic"
+      ]
+    },
+    "profileName": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "none",
+            "sensitive",
+            "content",
+            "strict",
+            "legacy-v7"
+          ]
+        },
+        {
+          "$ref": "#/$defs/stableName"
+        }
+      ]
+    },
+    "redactionProfiles": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/stableName"
+          },
+          {
+            "not": {
+              "enum": [
+                "none",
+                "sensitive",
+                "content",
+                "strict",
+                "legacy-v7"
+              ]
+            }
+          }
+        ]
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/customRedactionProfile"
+      }
+    },
+    "customRedactionProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "extends"
+      ],
+      "properties": {
+        "extends": {
+          "type": "string",
+          "enum": [
+            "sensitive",
+            "content",
+            "strict"
+          ]
+        },
+        "detectors": {
+          "type": "array",
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "pii",
+              "credentials",
+              "secrets"
+            ]
+          }
+        },
+        "field_classes": {
+          "$ref": "#/$defs/fieldClassModes"
+        }
+      },
+      "x-defenseclaw-semantic-constraint": "Profile-strength and detect-with-detector requirements are enforced by the compiler. Custom profiles extend one built-in redacting profile, so inheritance cannot cycle."
+    },
+    "fieldClassModes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "metadata": {
+          "$ref": "#/$defs/fieldClassMode"
+        },
+        "identifier": {
+          "$ref": "#/$defs/fieldClassMode"
+        },
+        "content": {
+          "$ref": "#/$defs/fieldClassMode"
+        },
+        "reason": {
+          "$ref": "#/$defs/fieldClassMode"
+        },
+        "evidence": {
+          "$ref": "#/$defs/fieldClassMode"
+        },
+        "error": {
+          "$ref": "#/$defs/fieldClassMode"
+        },
+        "path": {
+          "$ref": "#/$defs/fieldClassMode"
+        },
+        "credential": {
+          "$ref": "#/$defs/fieldClassMode"
+        }
+      }
+    },
+    "fieldClassMode": {
+      "type": "string",
+      "enum": [
+        "preserve",
+        "detect",
+        "whole",
+        "hash",
+        "remove"
+      ]
+    },
+    "connectorObservabilityMap": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "$ref": "#/$defs/stableName"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/connectorObservability"
+      }
+    },
+    "connectorObservability": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Notification-only connector compatibility. The v7 audit_sinks child is intentionally absent.",
+      "properties": {
+        "webhooks": {
+          "$ref": "#/$defs/webhooks"
+        }
+      }
+    },
+    "localStore": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/pathString",
+          "description": "Defaults dynamically to <data_dir>/audit.db."
+        },
+        "judge_bodies_path": {
+          "$ref": "#/$defs/pathString",
+          "description": "Defaults dynamically to <data_dir>/judge_bodies.db."
+        },
+        "retention_days": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 106751,
+          "default": 90,
+          "description": "Zero retains event, evidence, and judge-body history forever and requires a persistent capacity warning. The maximum is the largest whole-day period representable as a Go time.Duration."
+        }
+      },
+      "x-defenseclaw-semantic-constraint": "The two database paths must be distinct from each other and every other configured file after lexical, real-path, symlink, hard-link, and inode checks."
+    },
+    "destination": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/jsonlDestination"
+        },
+        {
+          "$ref": "#/$defs/consoleDestination"
+        },
+        {
+          "$ref": "#/$defs/prometheusDestination"
+        },
+        {
+          "$ref": "#/$defs/splunkHECDestination"
+        },
+        {
+          "$ref": "#/$defs/httpJSONLDestination"
+        },
+        {
+          "$ref": "#/$defs/otlpDestination"
+        }
+      ]
+    },
+    "destinationName": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/stableName"
+        },
+        {
+          "not": {
+            "const": "local-sqlite"
+          }
+        }
+      ]
+    },
+    "jsonlDestination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "path"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/destinationName"
+        },
+        "kind": {
+          "const": "jsonl"
+        },
+        "enabled": {
+          "$ref": "#/$defs/destinationEnabled"
+        },
+        "path": {
+          "$ref": "#/$defs/pathString"
+        },
+        "rotation": {
+          "$ref": "#/$defs/rotation"
+        },
+        "batch": {
+          "$ref": "#/$defs/queueBatch"
+        },
+        "send": {
+          "$ref": "#/$defs/logSend"
+        },
+        "routes": {
+          "$ref": "#/$defs/logRoutes"
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/$defs/sendRoutesExclusive"
+        }
+      ]
+    },
+    "consoleDestination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/destinationName"
+        },
+        "kind": {
+          "const": "console"
+        },
+        "enabled": {
+          "$ref": "#/$defs/destinationEnabled"
+        },
+        "batch": {
+          "$ref": "#/$defs/queueBatch"
+        },
+        "send": {
+          "$ref": "#/$defs/logSend"
+        },
+        "routes": {
+          "$ref": "#/$defs/logRoutes"
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/$defs/sendRoutesExclusive"
+        }
+      ]
+    },
+    "prometheusDestination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "listen",
+        "path"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/destinationName"
+        },
+        "kind": {
+          "const": "prometheus"
+        },
+        "enabled": {
+          "$ref": "#/$defs/destinationEnabled"
+        },
+        "listen": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/",
+          "maxLength": 1024
+        },
+        "send": {
+          "$ref": "#/$defs/metricSend"
+        },
+        "routes": {
+          "$ref": "#/$defs/metricRoutes"
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/$defs/sendRoutesExclusive"
+        }
+      ]
+    },
+    "splunkHECDestination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "endpoint",
+        "token_env"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/destinationName"
+        },
+        "kind": {
+          "const": "splunk_hec"
+        },
+        "enabled": {
+          "$ref": "#/$defs/destinationEnabled"
+        },
+        "endpoint": {
+          "$ref": "#/$defs/httpEndpoint"
+        },
+        "token_env": {
+          "$ref": "#/$defs/envName"
+        },
+        "index": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "source": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "sourcetype": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "sourcetype_overrides": {
+          "$ref": "#/$defs/sourcetypeOverrides"
+        },
+        "tls": {
+          "$ref": "#/$defs/httpTLS"
+        },
+        "timeout_ms": {
+          "$ref": "#/$defs/timeoutMS"
+        },
+        "network_safety": {
+          "$ref": "#/$defs/networkSafety"
+        },
+        "batch": {
+          "$ref": "#/$defs/batch"
+        },
+        "send": {
+          "$ref": "#/$defs/logSend"
+        },
+        "routes": {
+          "$ref": "#/$defs/logRoutes"
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/$defs/sendRoutesExclusive"
+        }
+      ]
+    },
+    "httpJSONLDestination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "endpoint"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/destinationName"
+        },
+        "kind": {
+          "const": "http_jsonl"
+        },
+        "enabled": {
+          "$ref": "#/$defs/destinationEnabled"
+        },
+        "endpoint": {
+          "$ref": "#/$defs/httpEndpoint"
+        },
+        "method": {
+          "type": "string",
+          "enum": [
+            "POST",
+            "PUT",
+            "PATCH"
+          ],
+          "default": "POST"
+        },
+        "bearer_env": {
+          "$ref": "#/$defs/envName"
+        },
+        "headers": {
+          "$ref": "#/$defs/headers"
+        },
+        "tls": {
+          "$ref": "#/$defs/httpTLS"
+        },
+        "timeout_ms": {
+          "$ref": "#/$defs/timeoutMS"
+        },
+        "network_safety": {
+          "$ref": "#/$defs/networkSafety"
+        },
+        "batch": {
+          "$ref": "#/$defs/batch"
+        },
+        "send": {
+          "$ref": "#/$defs/logSend"
+        },
+        "routes": {
+          "$ref": "#/$defs/logRoutes"
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/$defs/sendRoutesExclusive"
+        }
+      ]
+    },
+    "otlpDestination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/destinationName"
+        },
+        "kind": {
+          "const": "otlp"
+        },
+        "preset": {
+          "type": "string",
+          "const": "galileo"
+        },
+        "enabled": {
+          "$ref": "#/$defs/destinationEnabled"
+        },
+        "protocol": {
+          "type": "string",
+          "enum": [
+            "grpc",
+            "grpc/protobuf",
+            "http",
+            "http/protobuf"
+          ],
+          "default": "grpc"
+        },
+        "endpoint": {
+          "$ref": "#/$defs/otlpEndpoint"
+        },
+        "headers": {
+          "$ref": "#/$defs/headers"
+        },
+        "logger_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "OTel log instrumentation-scope name. Valid only when this destination selects logs."
+        },
+        "tls": {
+          "$ref": "#/$defs/otlpTLS"
+        },
+        "timeout_ms": {
+          "$ref": "#/$defs/timeoutMS"
+        },
+        "network_safety": {
+          "$ref": "#/$defs/networkSafety"
+        },
+        "signal_overrides": {
+          "$ref": "#/$defs/signalOverrides"
+        },
+        "batch": {
+          "$ref": "#/$defs/batch"
+        },
+        "send": {
+          "$ref": "#/$defs/otlpSend"
+        },
+        "routes": {
+          "$ref": "#/$defs/otlpRoutes"
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/$defs/sendRoutesExclusive"
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "galileo"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "send": {
+                "$ref": "#/$defs/traceSend"
+              },
+              "routes": {
+                "$ref": "#/$defs/traceRoutes"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "destinationEnabled": {
+      "type": "boolean",
+      "default": true
+    },
+    "sourcetypeOverrides": {
+      "type": "object",
+      "maxProperties": 1024,
+      "propertyNames": {
+        "$ref": "#/$defs/selectorToken"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "description": "Maps registered audit producer keys to Splunk sourcetypes. Registration and UTF-8 byte length are compiler-validated."
+    },
+    "sendRoutesExclusive": {
+      "not": {
+        "required": [
+          "send",
+          "routes"
+        ]
+      }
+    },
+    "rotation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_size_mb": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647,
+          "default": 50
+        },
+        "max_backups": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647,
+          "default": 5
+        },
+        "max_age_days": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647,
+          "default": 30
+        },
+        "compress": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "timeoutMS": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647,
+      "default": 10000
+    },
+    "queueBatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_queue_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536,
+          "default": 2048,
+          "description": "Maximum projected records retained by this destination queue."
+        },
+        "max_queue_bytes": {
+          "type": "integer",
+          "minimum": 4198400,
+          "maximum": 268435456,
+          "default": 67108864,
+          "description": "Maximum immutable projected payload bytes retained by this destination queue."
+        }
+      }
+    },
+    "batch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_queue_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536,
+          "default": 2048,
+          "description": "Maximum projected records retained by this destination queue."
+        },
+        "max_queue_bytes": {
+          "type": "integer",
+          "minimum": 4198400,
+          "maximum": 268435456,
+          "default": 67108864,
+          "description": "Maximum immutable projected payload bytes retained by this destination queue."
+        },
+        "max_export_batch_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192,
+          "default": 512,
+          "description": "Maximum records in one outbound request."
+        },
+        "max_export_batch_bytes": {
+          "type": "integer",
+          "minimum": 4263936,
+          "maximum": 67108864,
+          "default": 8388608,
+          "description": "Hard ceiling for one fully encoded outbound request."
+        },
+        "scheduled_delay_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600000,
+          "default": 5000,
+          "description": "Maximum normal batching delay in milliseconds."
+        }
+      },
+      "x-defenseclaw-semantic-constraint": "max_export_batch_size must not exceed max_queue_size. Queue bytes count projected payloads and export batch bytes count encoded requests, so no ordering between those byte fields is inferred. Adapter and preset defaults are resolved by the compiler."
+    },
+    "networkSafety": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow_private_networks": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_cgnat": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "httpTLS": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "insecure_skip_verify": {
+          "type": "boolean",
+          "default": false
+        },
+        "ca_cert": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      }
+    },
+    "otlpTLS": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "insecure": {
+          "type": "boolean",
+          "default": false
+        },
+        "ca_cert": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      }
+    },
+    "httpEndpoint": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^https?://[^\\s]+$",
+      "not": {
+        "pattern": "^https?://[^/@]+@"
+      }
+    },
+    "otlpEndpoint": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "not": {
+        "pattern": "^[A-Za-z][A-Za-z0-9+.-]*://[^/@]+@"
+      }
+    },
+    "headers": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/headerValue"
+      }
+    },
+    "headerValue": {
+      "oneOf": [
+        {
+          "type": "string",
+          "maxLength": 16384
+        },
+        {
+          "$ref": "#/$defs/secretEnvRef"
+        }
+      ]
+    },
+    "secretEnvRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "env"
+      ],
+      "properties": {
+        "env": {
+          "$ref": "#/$defs/envName"
+        }
+      },
+      "description": "Explicit secret-provider reference name. Runtime resolution checks the DefenseClaw key store first, then the named environment variable; resolved bytes never enter effective configuration."
+    },
+    "signalOverrides": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "logs": {
+          "$ref": "#/$defs/signalOverride"
+        },
+        "traces": {
+          "$ref": "#/$defs/signalOverride"
+        },
+        "metrics": {
+          "$ref": "#/$defs/signalOverride"
+        }
+      }
+    },
+    "signalOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/",
+          "maxLength": 1024
+        }
+      }
+    },
+    "logSend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signals",
+        "buckets"
+      ],
+      "properties": {
+        "signals": {
+          "const": [
+            "logs"
+          ]
+        },
+        "buckets": {
+          "$ref": "#/$defs/bucketList"
+        },
+        "redaction_profile": {
+          "$ref": "#/$defs/profileName"
+        }
+      }
+    },
+    "metricSend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signals",
+        "buckets"
+      ],
+      "properties": {
+        "signals": {
+          "const": [
+            "metrics"
+          ]
+        },
+        "buckets": {
+          "$ref": "#/$defs/bucketList"
+        }
+      }
+    },
+    "traceSend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signals",
+        "buckets"
+      ],
+      "properties": {
+        "signals": {
+          "const": [
+            "traces"
+          ]
+        },
+        "buckets": {
+          "$ref": "#/$defs/bucketList"
+        },
+        "redaction_profile": {
+          "$ref": "#/$defs/profileName"
+        }
+      }
+    },
+    "otlpSend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signals",
+        "buckets"
+      ],
+      "properties": {
+        "signals": {
+          "$ref": "#/$defs/signals"
+        },
+        "buckets": {
+          "$ref": "#/$defs/bucketList"
+        },
+        "redaction_profile": {
+          "$ref": "#/$defs/profileName"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "signals": {
+                "const": [
+                  "metrics"
+                ]
+              }
+            },
+            "required": [
+              "signals"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "redaction_profile"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "signals": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "logs",
+          "traces",
+          "metrics"
+        ]
+      }
+    },
+    "bucketList": {
+      "oneOf": [
+        {
+          "const": [
+            "*"
+          ]
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 14,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/bucketName"
+          }
+        }
+      ]
+    },
+    "logRoutes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/logRoute"
+      }
+    },
+    "metricRoutes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/metricRoute"
+      }
+    },
+    "traceRoutes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "x-defenseclaw-semantic-constraint": "Route names must be unique within the destination.",
+      "items": {
+        "$ref": "#/$defs/traceRoute"
+      }
+    },
+    "otlpRoutes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/otlpRoute"
+      }
+    },
+    "logRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "signals",
+        "selector"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/stableName"
+        },
+        "signals": {
+          "const": [
+            "logs"
+          ]
+        },
+        "selector": {
+          "$ref": "#/$defs/selector"
+        },
+        "action": {
+          "$ref": "#/$defs/routeAction"
+        },
+        "redaction_profile": {
+          "$ref": "#/$defs/profileName"
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/$defs/dropHasNoProfile"
+        }
+      ]
+    },
+    "metricRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "signals",
+        "selector"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/stableName"
+        },
+        "signals": {
+          "const": [
+            "metrics"
+          ]
+        },
+        "selector": {
+          "$ref": "#/$defs/selector"
+        },
+        "action": {
+          "$ref": "#/$defs/routeAction"
+        }
+      }
+    },
+    "traceRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "signals",
+        "selector"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/stableName"
+        },
+        "signals": {
+          "const": [
+            "traces"
+          ]
+        },
+        "selector": {
+          "$ref": "#/$defs/selector"
+        },
+        "action": {
+          "$ref": "#/$defs/routeAction"
+        },
+        "redaction_profile": {
+          "$ref": "#/$defs/profileName"
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/$defs/dropHasNoProfile"
+        }
+      ]
+    },
+    "otlpRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "signals",
+        "selector"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/stableName"
+        },
+        "signals": {
+          "$ref": "#/$defs/signals"
+        },
+        "selector": {
+          "$ref": "#/$defs/selector"
+        },
+        "action": {
+          "$ref": "#/$defs/routeAction"
+        },
+        "redaction_profile": {
+          "$ref": "#/$defs/profileName"
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/$defs/dropHasNoProfile"
+        },
+        {
+          "if": {
+            "properties": {
+              "signals": {
+                "const": [
+                  "metrics"
+                ]
+              }
+            },
+            "required": [
+              "signals"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "redaction_profile"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "routeAction": {
+      "type": "string",
+      "enum": [
+        "send",
+        "drop"
+      ],
+      "default": "send"
+    },
+    "dropHasNoProfile": {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "drop"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "not": {
+          "required": [
+            "redaction_profile"
+          ]
+        }
+      }
+    },
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "buckets": {
+          "$ref": "#/$defs/bucketList"
+        },
+        "sources": {
+          "$ref": "#/$defs/selectorValues"
+        },
+        "connectors": {
+          "$ref": "#/$defs/selectorValues"
+        },
+        "actions": {
+          "$ref": "#/$defs/selectorValues"
+        },
+        "event_names": {
+          "$ref": "#/$defs/selectorValues"
+        },
+        "min_severity": {
+          "$ref": "#/$defs/severity"
+        }
+      }
+    },
+    "selectorValues": {
+      "oneOf": [
+        {
+          "const": [
+            "*"
+          ]
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/selectorToken"
+          }
+        }
+      ]
+    },
+    "severity": {
+      "type": "string",
+      "enum": [
+        "INFO",
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+        "CRITICAL"
+      ]
+    }
+  }
+}

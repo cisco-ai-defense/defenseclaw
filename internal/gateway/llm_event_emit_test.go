@@ -10,15 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
-
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 func TestHookLLMEventMetaLifecycleCorrelation(t *testing.T) {
@@ -62,8 +55,8 @@ func TestHookLLMEventMetaLifecycleCorrelation(t *testing.T) {
 	if resumed.ExecutionID == root.ExecutionID {
 		t.Fatalf("execution id did not change across gateway restart: %q", resumed.ExecutionID)
 	}
-	api := &APIServer{hookSessionTraces: map[string]hookSessionTrace{
-		hookSessionTraceKey(root): {meta: root},
+	api := &APIServer{hookSessionStates: map[string]hookSessionState{
+		hookSessionStateKey(root): {meta: root},
 	}}
 	turn := hookLLMEventMeta(
 		"codex", "session-stable", "turn-3", "gpt-5", "codex", "", "", "codex",
@@ -72,6 +65,364 @@ func TestHookLLMEventMetaLifecycleCorrelation(t *testing.T) {
 	turn = api.mergeHookSessionLifecycle(turn)
 	if !turn.SessionResumed || turn.SessionSource != "resume" {
 		t.Fatalf("turn did not inherit resumed session metadata: %+v", turn)
+	}
+}
+
+func TestCorrelatedCanonicalLogHelpersReportEmitterFailure(t *testing.T) {
+	emitter := &failingHookLifecycleEmitter{}
+	meta := llmEventMeta{
+		Source: "codex", SessionID: "session-emitter-failure",
+		TurnID: "turn-emitter-failure", PromptID: "prompt-emitter-failure",
+		ToolID: "tool-emitter-failure", ToolIDReported: true,
+	}
+	if promptID, persisted, err := emitLLMPromptEventV8WithEmitterStatus(
+		t.Context(), emitter, meta, "prompt", nil,
+	); promptID != meta.PromptID || persisted || err == nil {
+		t.Fatalf("prompt emission id=%q persisted=%t err=%v", promptID, persisted, err)
+	}
+	if persisted, err := emitHookToolLogV8WithEmitter(
+		t.Context(), emitter, meta, "call", "shell", `{}`, "", nil,
+	); persisted || err == nil {
+		t.Fatalf("tool emission persisted=%t err=%v", persisted, err)
+	}
+}
+
+func TestHookSessionStateSnapshotExplicitAgentMissDoesNotSelectSibling(t *testing.T) {
+	t.Parallel()
+	root := llmEventMeta{
+		Source: "codex", SessionID: "shared-session", AgentID: "agent-root",
+		RootAgentID: "agent-root", RootSessionID: "shared-session",
+	}
+	sibling := llmEventMeta{
+		Source: "codex", SessionID: "shared-session", AgentID: "agent-sibling",
+		RootAgentID: "agent-root", ParentAgentID: "agent-root", RootSessionID: "shared-session", AgentDepth: 1,
+	}
+	rootKey := hookSessionStateKey(root)
+	siblingKey := hookSessionStateKey(sibling)
+	api := &APIServer{
+		hookSessionStates: map[string]hookSessionState{
+			rootKey:    {meta: root},
+			siblingKey: {meta: sibling},
+		},
+		hookSessionStateOrder: []string{rootKey, siblingKey},
+	}
+
+	if got, ok := api.hookSessionStateSnapshot("codex", "shared-session", "agent-missing"); ok {
+		t.Fatalf("explicit agent miss selected unrelated state: %+v", got.meta)
+	}
+}
+
+func TestHookDecisionMetaReusesLifecycleExecutionAcrossStartTurnResumeAndChild(t *testing.T) {
+	api := &APIServer{}
+	assertCursor := func(label string, req codexHookRequest) llmEventMeta {
+		t.Helper()
+		api.emitCodexHookLLMEvent(t.Context(), req, nil, nil)
+		snapshot, ok := api.hookLifecycleSnapshot("codex", req.SessionID, req.AgentID)
+		if !ok {
+			t.Fatalf("%s lifecycle snapshot missing", label)
+		}
+		decision, _, ok := api.hookDecisionMeta(t.Context(), agentHookRequest{
+			ConnectorName: "codex",
+			AgentID:       req.AgentID,
+			AgentName:     payloadString(req.Payload, "agent_name"),
+			AgentType:     req.AgentType,
+			HookEventName: req.HookEventName,
+			SessionID:     req.SessionID,
+			TurnID:        req.TurnID,
+			Payload:       req.Payload,
+		})
+		if !ok {
+			t.Fatalf("%s decision meta missing", label)
+		}
+		if decision.ExecutionID == "" || decision.ExecutionID != snapshot.ExecutionID {
+			t.Errorf("%s decision execution=%q want retained lifecycle execution=%q", label, decision.ExecutionID, snapshot.ExecutionID)
+		}
+		if decision.LifecycleID != snapshot.LifecycleID || decision.OperationID != snapshot.OperationID ||
+			decision.Phase != snapshot.Phase || decision.Sequence != snapshot.Sequence {
+			t.Errorf("%s decision cursor=%+v want retained lifecycle cursor=%+v", label, decision, snapshot)
+		}
+		return snapshot
+	}
+
+	const (
+		rootSession = "019f4ef9-3098-7d63-8bfe-1435139f1cce"
+		rootAgent   = "agent-real-shaped-root"
+	)
+	start := codexHookRequest{
+		HookEventName: "SessionStart", SessionID: rootSession, AgentID: rootAgent, AgentType: "codex",
+		Payload: map[string]interface{}{
+			"root_agent_id": rootAgent, "agent_depth": 0, "source": "startup",
+		},
+	}
+	first := assertCursor("initial session start", start)
+
+	turn := codexHookRequest{
+		HookEventName: "UserPromptSubmit", SessionID: rootSession, TurnID: "turn-real-1",
+		AgentID: rootAgent, AgentType: "codex", Prompt: "continue the same execution",
+		Payload: map[string]interface{}{"root_agent_id": rootAgent, "agent_depth": 0},
+	}
+	active := assertCursor("following turn", turn)
+	if active.ExecutionID != first.ExecutionID {
+		t.Fatalf("following turn execution=%q want active start execution=%q", active.ExecutionID, first.ExecutionID)
+	}
+
+	resume := start
+	resume.Payload = map[string]interface{}{
+		"root_agent_id": rootAgent, "agent_depth": 0, "source": "resume",
+	}
+	second := assertCursor("resumed session start", resume)
+	if second.ExecutionID == first.ExecutionID {
+		t.Fatalf("resumed session did not rotate execution %q", first.ExecutionID)
+	}
+
+	child := codexHookRequest{
+		HookEventName: "SubagentStart", SessionID: "019f4ef9-child-session", TurnID: "turn-child-1",
+		AgentID: "agent-real-shaped-child", AgentType: "codex",
+		Payload: map[string]interface{}{
+			"root_agent_id": rootAgent, "parent_agent_id": rootAgent,
+			"root_session_id": rootSession, "parent_session_id": rootSession,
+			"agent_depth": 1, "task": "verify execution correlation",
+		},
+	}
+	childSnapshot := assertCursor("subagent start", child)
+	if childSnapshot.ExecutionID == second.ExecutionID {
+		t.Fatalf("child reused parent execution %q", second.ExecutionID)
+	}
+}
+
+func TestHookDecisionMetaKeepsExplicitUnknownParentAgent(t *testing.T) {
+	root := llmEventMeta{
+		Source: "geminicli", SessionID: "parent-session", AgentID: "retained-root",
+		RootAgentID: "retained-root", RootSessionID: "parent-session",
+		LifecycleID: "root-lifecycle", ExecutionID: "root-execution", AgentDepth: 0,
+	}
+	rootKey := hookSessionStateKey(root)
+	api := &APIServer{
+		hookSessionStates:     map[string]hookSessionState{rootKey: {meta: root}},
+		hookSessionStateOrder: []string{rootKey},
+	}
+	req := agentHookRequest{
+		ConnectorName: "geminicli", HookEventName: "BeforeTool", SessionID: "child-session",
+		TurnID: "child-turn", AgentID: "child-agent", AgentName: "child", AgentType: "subagent",
+		ToolName: "Bash",
+		Payload: map[string]any{
+			"root_agent_id": "reported-root", "parent_agent_id": "explicit-unknown",
+			"parent_session_id": "parent-session", "agent_depth": 2,
+			"tool_call_id": "child-call",
+		},
+	}
+
+	meta, _, ok := api.hookDecisionMeta(t.Context(), req)
+	if !ok {
+		t.Fatal("hook decision meta was not produced")
+	}
+	if meta.ParentAgentID != "explicit-unknown" {
+		t.Fatalf("explicit unknown parent was replaced: %+v", meta)
+	}
+	if meta.RootAgentID != "reported-root" {
+		t.Fatalf("explicit lineage root was replaced by conversation fallback: %+v", meta)
+	}
+}
+
+func TestHookDecisionMetaResolvesParentSessionWhenParentAgentIsNotReported(t *testing.T) {
+	root := llmEventMeta{
+		Source: "geminicli", SessionID: "parent-session", AgentID: "retained-root",
+		RootAgentID: "retained-root", RootSessionID: "parent-session",
+		LifecycleID: "root-lifecycle", ExecutionID: "root-execution", AgentDepth: 0,
+	}
+	rootKey := hookSessionStateKey(root)
+	api := &APIServer{
+		hookSessionStates:     map[string]hookSessionState{rootKey: {meta: root}},
+		hookSessionStateOrder: []string{rootKey},
+	}
+	req := agentHookRequest{
+		ConnectorName: "geminicli", HookEventName: "BeforeTool", SessionID: "child-session",
+		TurnID: "child-turn", AgentID: "child-agent", AgentName: "child", AgentType: "subagent",
+		ToolName: "Bash",
+		Payload: map[string]any{
+			"parent_session_id": "parent-session", "agent_depth": 1,
+			"tool_call_id": "child-call",
+		},
+	}
+
+	meta, _, ok := api.hookDecisionMeta(t.Context(), req)
+	if !ok {
+		t.Fatal("hook decision meta was not produced")
+	}
+	if meta.ParentAgentID != root.AgentID || meta.RootAgentID != root.RootAgentID {
+		t.Fatalf("parent-session-only lineage was not reconciled: %+v", meta)
+	}
+}
+
+func TestMergeHookSessionLifecyclePreservesStoredInferredLineage(t *testing.T) {
+	t.Parallel()
+	stored := llmEventMeta{
+		Source: "codex", SessionID: "child-session", AgentID: "agent-child",
+		RootAgentID: "agent-root", ParentAgentID: "agent-root", LineageProvenance: "inferred",
+		RootSessionID: "root-session", ParentSessionID: "root-session", AgentDepth: 1,
+		LifecycleID: "lifecycle-child", ExecutionID: "execution-child",
+	}
+	api := &APIServer{hookSessionStates: map[string]hookSessionState{
+		hookSessionStateKey(stored): {meta: stored},
+	}}
+	incoming := llmEventMeta{
+		Source: "codex", SessionID: "child-session", AgentID: "agent-child",
+		RootAgentID: "agent-child", LineageProvenance: "inferred",
+		RootSessionID: "child-session", LifecycleEvent: "tool_start",
+	}
+
+	merged := api.mergeHookSessionLifecycle(incoming)
+	if merged.RootAgentID != "agent-root" || merged.ParentAgentID != "agent-root" || merged.AgentDepth != 1 {
+		t.Fatalf("stored child lineage drifted on a later event: %+v", merged)
+	}
+	if merged.RootSessionID != "root-session" || merged.ParentSessionID != "root-session" {
+		t.Fatalf("stored session lineage drifted on a later event: %+v", merged)
+	}
+}
+
+func TestMergeHookSessionLifecycleTrustsLiveResolvedParentOverSelfRootPlaceholder(t *testing.T) {
+	t.Parallel()
+	stored := llmEventMeta{
+		Source: "codex", SessionID: "child-session", AgentID: "agent-child",
+		RootAgentID: "agent-child", LineageProvenance: "inferred",
+		RootSessionID: "child-session", AgentDepth: 0,
+		LifecycleID: "lifecycle-child", ExecutionID: "execution-child",
+		LifecycleEvent: "tool_end", Sequence: 2,
+	}
+	api := &APIServer{hookSessionStates: map[string]hookSessionState{
+		hookSessionStateKey(stored): {meta: stored},
+	}}
+	incoming := llmEventMeta{
+		Source: "codex", SessionID: "child-session", AgentID: "agent-child",
+		RootAgentID: "agent-root", ParentAgentID: "agent-root", ParentAgentReported: true,
+		ParentLineageResolved: true,
+		LineageProvenance:     "inferred", RootSessionID: "child-session", AgentDepth: 1,
+		LifecycleID: "lifecycle-child", ExecutionID: "execution-child",
+		LifecycleEvent: "subagent_stop", Sequence: 3,
+	}
+
+	merged := api.mergeHookSessionLifecycle(incoming)
+	if merged.RootAgentID != "agent-root" || merged.ParentAgentID != "agent-root" || merged.AgentDepth != 1 {
+		t.Fatalf("live resolved parent did not replace self-root placeholder: %+v", merged)
+	}
+	if merged.LineageProvenance != "inferred" {
+		t.Fatalf("partially inferred lineage was mislabeled reported: %+v", merged)
+	}
+	if !merged.ParentLineageResolved {
+		t.Fatalf("live resolved parent lost its authority marker: %+v", merged)
+	}
+}
+
+func TestMergeHookSessionLifecycleTrustsFullyReportedNestedLineage(t *testing.T) {
+	t.Parallel()
+	stored := llmEventMeta{
+		Source: "codex", SessionID: "grandchild-session", AgentID: "agent-grandchild",
+		RootAgentID: "agent-root-old", ParentAgentID: "agent-parent-old", LineageProvenance: "inferred",
+		RootSessionID: "root-session-old", ParentSessionID: "parent-session-old", AgentDepth: 2,
+		LifecycleID: "lifecycle-grandchild", ExecutionID: "execution-grandchild",
+	}
+	api := &APIServer{hookSessionStates: map[string]hookSessionState{
+		hookSessionStateKey(stored): {meta: stored},
+	}}
+	incoming := llmEventMeta{
+		Source: "codex", SessionID: "grandchild-session", AgentID: "agent-grandchild",
+		RootAgentID: "agent-root-new", ParentAgentID: "agent-parent-new", ParentAgentReported: true,
+		LineageProvenance: "reported", RootSessionID: "root-session-new",
+		ParentSessionID: "parent-session-new", AgentDepth: 3,
+		LifecycleID: "lifecycle-grandchild", ExecutionID: "execution-grandchild",
+	}
+
+	merged := api.mergeHookSessionLifecycle(incoming)
+	if merged.RootAgentID != "agent-root-new" || merged.ParentAgentID != "agent-parent-new" || merged.AgentDepth != 3 {
+		t.Fatalf("fully reported nested lineage was replaced by snapshot: %+v", merged)
+	}
+	if merged.RootSessionID != "root-session-new" || merged.ParentSessionID != "parent-session-new" {
+		t.Fatalf("fully reported nested sessions were replaced by snapshot: %+v", merged)
+	}
+}
+
+func TestMergeHookSessionLifecycleTrustsExplicitParentOverUnverifiedDepthOneFallback(t *testing.T) {
+	t.Parallel()
+	stored := llmEventMeta{
+		Source: "codex", SessionID: "child-session", AgentID: "agent-child",
+		RootAgentID: "fallback-root", ParentAgentID: "fallback-root", LineageProvenance: "inferred",
+		RootSessionID: "child-session", ParentSessionID: "child-session", AgentDepth: 1,
+		LifecycleID: "lifecycle-child", ExecutionID: "execution-child",
+	}
+	api := &APIServer{hookSessionStates: map[string]hookSessionState{
+		hookSessionStateKey(stored): {meta: stored},
+	}}
+	incoming := llmEventMeta{
+		Source: "codex", SessionID: "child-session", AgentID: "agent-child",
+		RootAgentID: "reported-parent", ParentAgentID: "reported-parent", ParentAgentReported: true,
+		ParentLineageResolved: true, LineageProvenance: "inferred",
+		RootSessionID: "reported-session", ParentSessionID: "reported-session", AgentDepth: 1,
+		LifecycleID: "lifecycle-child", ExecutionID: "execution-child",
+	}
+
+	merged := api.mergeHookSessionLifecycle(incoming)
+	if merged.RootAgentID != incoming.RootAgentID || merged.ParentAgentID != incoming.ParentAgentID ||
+		merged.RootSessionID != incoming.RootSessionID || merged.ParentSessionID != incoming.ParentSessionID ||
+		merged.AgentDepth != incoming.AgentDepth {
+		t.Fatalf("unverified fallback outranked explicit parent: %+v", merged)
+	}
+}
+
+func TestMergeHookSessionLifecyclePreservesNestedRootForUnresolvedParentOnlyEvent(t *testing.T) {
+	t.Parallel()
+	stored := llmEventMeta{
+		Source: "codex", SessionID: "grandchild-session", AgentID: "agent-grandchild",
+		RootAgentID: "agent-root", ParentAgentID: "agent-parent-old", LineageProvenance: "inferred",
+		ParentLineageResolved: true,
+		RootSessionID:         "root-session", ParentSessionID: "parent-session", AgentDepth: 2,
+		LifecycleID: "lifecycle-grandchild", ExecutionID: "execution-grandchild",
+	}
+	api := &APIServer{hookSessionStates: map[string]hookSessionState{
+		hookSessionStateKey(stored): {meta: stored},
+	}}
+	incoming := llmEventMeta{
+		Source: "codex", SessionID: "grandchild-session", AgentID: "agent-grandchild",
+		RootAgentID: "agent-parent-new", ParentAgentID: "agent-parent-new", ParentAgentReported: true,
+		LineageProvenance: "inferred", RootSessionID: "grandchild-session", AgentDepth: 1,
+		LifecycleID: "lifecycle-grandchild", ExecutionID: "execution-grandchild",
+		LifecycleEvent: "tool_end",
+	}
+
+	merged := api.mergeHookSessionLifecycle(incoming)
+	if merged.RootAgentID != "agent-root" || merged.AgentDepth != 2 {
+		t.Fatalf("unresolved parent-only event replaced canonical root/depth: %+v", merged)
+	}
+	if merged.ParentAgentID != "agent-parent-new" {
+		t.Fatalf("explicit parent was not overlaid on canonical lineage: %+v", merged)
+	}
+	if merged.RootSessionID != "root-session" || merged.ParentSessionID != "parent-session" {
+		t.Fatalf("unresolved parent-only event replaced canonical sessions: %+v", merged)
+	}
+}
+
+func TestRememberHookSessionStateDoesNotCorruptExistingParentFromChildFallback(t *testing.T) {
+	t.Parallel()
+	api := &APIServer{}
+	root := llmEventMeta{
+		Source: "codex", SessionID: "shared-session", AgentID: "agent-root",
+		RootAgentID: "agent-root", LineageProvenance: "inferred", RootSessionID: "shared-session",
+		LifecycleID: "lifecycle-root", ExecutionID: "execution-root", LifecycleEvent: "session_start",
+	}
+	api.rememberHookSessionState(context.Background(), root)
+	childWithBadFallback := llmEventMeta{
+		Source: "codex", SessionID: "shared-session", AgentID: "agent-child",
+		RootAgentID: "agent-child", ParentAgentID: "agent-root", LineageProvenance: "inferred",
+		RootSessionID: "shared-session", AgentDepth: 1,
+		LifecycleID: "lifecycle-child", ExecutionID: "execution-child", LifecycleEvent: "subagent_start",
+	}
+	api.rememberHookSessionState(context.Background(), childWithBadFallback)
+
+	stored, ok := api.hookSessionStateSnapshot("codex", "shared-session", "agent-root")
+	if !ok {
+		t.Fatal("root state was lost")
+	}
+	if stored.meta.RootAgentID != "agent-root" || stored.meta.ParentAgentID != "" || stored.meta.AgentDepth != 0 {
+		t.Fatalf("child fallback corrupted the existing root: %+v", stored.meta)
 	}
 }
 
@@ -174,6 +525,34 @@ func TestHookPhaseSequenceIsOrderedAndDirected(t *testing.T) {
 	}
 }
 
+func TestHookPhaseSequenceSurvivesCanonicalCachePressure(t *testing.T) {
+	api := &APIServer{}
+	base := llmEventMeta{
+		Source: "codex", SessionID: "long-session", AgentID: "long-agent",
+		LifecycleID: "long-lifecycle", ExecutionID: "long-execution",
+		LifecycleEvent: "turn_start", LifecycleState: "active", Phase: "planning",
+	}
+	var last llmEventMeta
+	for i := 0; i < hookPromptCacheMaxEntries+2; i++ {
+		meta := base
+		meta.LifecycleDedupe = "transition-" + strconv.Itoa(i)
+		if i%2 == 1 {
+			meta.Phase = "model"
+		}
+		var record bool
+		last, record = api.prepareHookLifecycleTransition(meta)
+		if !record {
+			t.Fatalf("unique transition %d was treated as replay", i)
+		}
+	}
+	if want := int64(hookPromptCacheMaxEntries + 2); last.Sequence != want {
+		t.Fatalf("sequence after cache pressure=%d want=%d", last.Sequence, want)
+	}
+	if len(api.hookPhaseStates) > hookPromptCacheMaxEntries || len(api.hookPhaseStateOrder) > hookPromptCacheMaxEntries {
+		t.Fatalf("phase cache exceeded bound: states=%d order=%d", len(api.hookPhaseStates), len(api.hookPhaseStateOrder))
+	}
+}
+
 func TestHookOperationIDPairsToolStartAndEndWithoutCollapsingTurn(t *testing.T) {
 	t.Parallel()
 	base := llmEventMeta{
@@ -194,134 +573,6 @@ func TestHookOperationIDPairsToolStartAndEndWithoutCollapsingTurn(t *testing.T) 
 	}
 	if firstStart.OperationID == secondStart.OperationID {
 		t.Fatalf("distinct tool calls in one turn collapsed to %q", firstStart.OperationID)
-	}
-}
-
-func TestOpenCodeChildSessionParentsToParentConversationTrace(t *testing.T) {
-	api, exporter := newHookLLMSpanTestAPI(t)
-	rootPayload := map[string]interface{}{
-		"hook_event_name": "session.created",
-		"session_id":      "parent-session",
-	}
-	api.emitAgentHookLLMEvent(
-		context.Background(), normalizeAgentHookRequest("opencode", rootPayload), nil,
-	)
-	childPayload := map[string]interface{}{
-		"hook_event_name":   "session.created",
-		"session_id":        "child-session",
-		"parent_session_id": "parent-session",
-	}
-	api.emitAgentHookLLMEvent(
-		context.Background(), normalizeAgentHookRequest("opencode", childPayload), nil,
-	)
-
-	spans := exporter.GetSpans()
-	if len(spans) != 3 {
-		t.Fatalf("spans=%d want parent start anchor+fresh parent/child anchors", len(spans))
-	}
-	var parent, child tracetest.SpanStub
-	for _, span := range spans {
-		switch spanAttributeStrings(span)["gen_ai.conversation.id"] {
-		case "parent-session":
-			parent = span
-		case "child-session":
-			child = span
-		}
-	}
-	if !parent.SpanContext.IsValid() || !child.SpanContext.IsValid() {
-		t.Fatalf("missing parent/child spans: %+v", spans)
-	}
-	if child.Parent.SpanID() != parent.SpanContext.SpanID() ||
-		child.SpanContext.TraceID() != parent.SpanContext.TraceID() {
-		t.Fatalf("child parent/trace mismatch: parent=%s child.parent=%s", parent.SpanContext.SpanID(), child.Parent.SpanID())
-	}
-	if got := spanAttributeStrings(child)["defenseclaw.session.parent.id"]; got != "parent-session" {
-		t.Fatalf("child parent session=%q", got)
-	}
-}
-
-func TestExplicitRootAgentIDParentsNativeChildInSameTrace(t *testing.T) {
-	api, exporter := newHookLLMSpanTestAPI(t)
-	api.emitCodexHookLLMEvent(context.Background(), codexHookRequest{
-		HookEventName: "SessionStart",
-		SessionID:     "parent-session",
-		AgentID:       "native-root",
-		AgentType:     "codex",
-		Payload: map[string]interface{}{
-			"hook_event_name": "SessionStart",
-			"session_id":      "parent-session",
-			"agent_id":        "native-root",
-		},
-	}, nil, nil)
-	api.emitCodexHookLLMEvent(context.Background(), codexHookRequest{
-		HookEventName: "SubagentStart",
-		SessionID:     "child-session",
-		AgentID:       "native-child",
-		AgentType:     "researcher",
-		Payload: map[string]interface{}{
-			"hook_event_name":   "SubagentStart",
-			"session_id":        "child-session",
-			"parent_session_id": "parent-session",
-			"agent_id":          "native-child",
-		},
-	}, nil, nil)
-
-	spans := exporter.GetSpans()
-	if len(spans) != 3 {
-		t.Fatalf("spans=%d want parent start anchor+fresh parent/child anchors", len(spans))
-	}
-	var parent, child tracetest.SpanStub
-	for _, span := range spans {
-		attrs := spanAttributeStrings(span)
-		switch attrs["gen_ai.agent.id"] {
-		case "native-root":
-			parent = span
-		case "native-child":
-			child = span
-		}
-	}
-	if !parent.SpanContext.IsValid() || !child.SpanContext.IsValid() {
-		t.Fatalf("missing parent/child spans: %+v", spans)
-	}
-	if child.Parent.SpanID() != parent.SpanContext.SpanID() ||
-		child.SpanContext.TraceID() != parent.SpanContext.TraceID() {
-		t.Fatalf("child did not reuse authoritative parent trace: parent=%s child.parent=%s", parent.SpanContext.SpanID(), child.Parent.SpanID())
-	}
-	if got := spanAttributeStrings(child)["defenseclaw.agent.parent.id"]; got != "native-root" {
-		t.Fatalf("child parent agent=%q want native-root", got)
-	}
-	childAttrs := spanAttributeStrings(child)
-	if got := childAttrs["defenseclaw.agent.root.id"]; got != "native-root" {
-		t.Fatalf("child root agent=%q want native-root", got)
-	}
-	if got := childAttrs["defenseclaw.session.root.id"]; got != "parent-session" {
-		t.Fatalf("child root session=%q want parent-session", got)
-	}
-}
-
-func TestLifecycleOnlySessionEndProducesLogAndTrace(t *testing.T) {
-	events := captureGatewayEvents(t)
-	api, exporter := newHookLLMSpanTestAPI(t)
-	for _, event := range []string{"session_start", "session_end"} {
-		payload := map[string]interface{}{
-			"hook_event_name": event,
-			"session_id":      "openhands-lifecycle-only",
-		}
-		api.emitAgentHookLLMEvent(
-			context.Background(), normalizeAgentHookRequest("openhands", payload), nil,
-		)
-	}
-	if got := len(exporter.GetSpans()); got != 3 {
-		t.Fatalf("spans=%d want start anchor+terminal anchor+transition", got)
-	}
-	var terminalLogs int
-	for _, event := range *events {
-		if event.AgentLifecycleEvent == "session_end" && event.AgentLifecycleState == "completed" {
-			terminalLogs++
-		}
-	}
-	if terminalLogs != 1 {
-		t.Fatalf("terminal lifecycle logs=%d want 1", terminalLogs)
 	}
 }
 
@@ -346,38 +597,6 @@ func TestHermesNestedSubagentIdentityNormalizesChildSession(t *testing.T) {
 	)
 	if meta.ParentSessionID != "parent-hermes-session" || meta.ParentAgentID == "" || meta.AgentDepth != 1 {
 		t.Fatalf("normalized child hierarchy=%+v", meta)
-	}
-}
-
-func TestAntigravityDelegationToolInfersEveryChildLifecycle(t *testing.T) {
-	events := captureGatewayEvents(t)
-	api, exporter := newHookLLMSpanTestAPI(t)
-	payload := map[string]interface{}{
-		"hook_event_name": "PreToolUse",
-		"conversationId":  "antigravity-delegation",
-		"tool_name":       "invoke_subagent",
-		"tool_call_id":    "delegation-call-1",
-		"tool_input": map[string]interface{}{
-			"Subagents": []interface{}{
-				map[string]interface{}{"Role": "researcher", "Prompt": "research"},
-				map[string]interface{}{"Role": "reviewer", "Prompt": "review"},
-			},
-		},
-	}
-	api.emitAgentHookLLMEvent(
-		context.Background(), normalizeAgentHookRequest("antigravity", payload), nil,
-	)
-	if got := len(exporter.GetSpans()); got != 3 {
-		t.Fatalf("spans=%d want root+two inferred child anchors", got)
-	}
-	children := map[string]bool{}
-	for _, event := range *events {
-		if event.AgentLifecycleEvent == "subagent_start" {
-			children[event.AgentName] = true
-		}
-	}
-	if !children["researcher"] || !children["reviewer"] || len(children) != 2 {
-		t.Fatalf("inferred child lifecycle logs=%v", children)
 	}
 }
 
@@ -462,258 +681,6 @@ func TestExplicitSubagentConnectorsKeepStableChildIdentity(t *testing.T) {
 	}
 }
 
-func captureGatewayEvents(t *testing.T) *[]gatewaylog.Event {
-	t.Helper()
-	prev := EventWriter()
-	w, err := gatewaylog.New(gatewaylog.Config{})
-	if err != nil {
-		t.Fatalf("gatewaylog.New: %v", err)
-	}
-	var events []gatewaylog.Event
-	w.WithFanout(func(e gatewaylog.Event) {
-		events = append(events, e)
-	})
-	SetEventWriter(w)
-	t.Cleanup(func() {
-		SetEventWriter(prev)
-		_ = w.Close()
-	})
-	return &events
-}
-
-func TestLLMEventEmit_RedactsByDefaultAndSendsRawWhenDisabled(t *testing.T) {
-	events := captureGatewayEvents(t)
-	t.Cleanup(func() { redaction.SetDisableAll(false) })
-
-	meta := llmEventMeta{
-		Source:    "codex",
-		Provider:  "openai",
-		Model:     "gpt-4o",
-		SessionID: "sess-1",
-		RequestID: "req-1",
-		AgentType: "codex",
-		UserID:    "alice",
-	}
-
-	redaction.SetDisableAll(false)
-	emitLLMPromptEvent(context.Background(), meta, "raw user prompt", []byte(`{"messages":[{"role":"user","content":"raw user prompt"}]}`))
-	if len(*events) != 1 {
-		t.Fatalf("events=%d want 1", len(*events))
-	}
-	redacted := (*events)[0]
-	if redacted.LLMPrompt == nil {
-		t.Fatalf("missing llm_prompt payload: %+v", redacted)
-	}
-	if redacted.LLMPrompt.Prompt == "raw user prompt" {
-		t.Fatalf("prompt leaked with redaction enabled")
-	}
-	if !strings.HasPrefix(redacted.LLMPrompt.Prompt, "<redacted") {
-		t.Fatalf("prompt was not redacted placeholder: %q", redacted.LLMPrompt.Prompt)
-	}
-	if redacted.UserID != "alice" || redacted.AgentType != "codex" {
-		t.Fatalf("envelope lost user/agent type: %+v", redacted)
-	}
-
-	redaction.SetDisableAll(true)
-	emitLLMPromptEvent(context.Background(), meta, "raw user prompt", []byte(`{"raw":true}`))
-	if len(*events) != 2 {
-		t.Fatalf("events=%d want 2", len(*events))
-	}
-	raw := (*events)[1]
-	if raw.LLMPrompt.Prompt != "raw user prompt" {
-		t.Fatalf("prompt=%q, want raw prompt", raw.LLMPrompt.Prompt)
-	}
-	if raw.LLMPrompt.RawRequestBody != `{"raw":true}` {
-		t.Fatalf("raw_request_body=%q", raw.LLMPrompt.RawRequestBody)
-	}
-}
-
-func TestClaudeCodeHookResponseLinksToLastPrompt(t *testing.T) {
-	events := captureGatewayEvents(t)
-	t.Cleanup(func() { redaction.SetDisableAll(false) })
-	redaction.SetDisableAll(true)
-
-	api := &APIServer{}
-	api.emitClaudeCodeHookLLMEvent(context.Background(), claudeCodeHookRequest{
-		HookEventName: "UserPromptSubmit",
-		SessionID:     "sess-claude",
-		Model:         "claude-3-5-sonnet",
-		Prompt:        "write tests",
-		AgentType:     "claude-code",
-	}, nil, []byte(`{"hook_event_name":"UserPromptSubmit","prompt":"write tests"}`))
-	api.emitClaudeCodeHookLLMEvent(context.Background(), claudeCodeHookRequest{
-		HookEventName:        "Stop",
-		SessionID:            "sess-claude",
-		Model:                "claude-3-5-sonnet",
-		LastAssistantMessage: "done",
-		AgentType:            "claude-code",
-	}, nil, []byte(`{"hook_event_name":"Stop","last_assistant_message":"done"}`))
-
-	var prompt *gatewaylog.LLMPromptPayload
-	var response *gatewaylog.LLMResponsePayload
-	var lifecycleCount int
-	for i := range *events {
-		if (*events)[i].LLMPrompt != nil {
-			prompt = (*events)[i].LLMPrompt
-		}
-		if (*events)[i].LLMResponse != nil {
-			response = (*events)[i].LLMResponse
-		}
-		if (*events)[i].Lifecycle != nil && (*events)[i].Lifecycle.Subsystem == "agent" {
-			lifecycleCount++
-		}
-	}
-	if prompt == nil || response == nil {
-		t.Fatalf("unexpected events: %+v", *events)
-	}
-	if lifecycleCount != 2 {
-		t.Fatalf("agent lifecycle events=%d want prompt+stop transitions", lifecycleCount)
-	}
-	if response.ReplyToPromptID != prompt.PromptID {
-		t.Fatalf("reply_to_prompt_id=%q want %q", response.ReplyToPromptID, prompt.PromptID)
-	}
-	if response.Response != "done" {
-		t.Fatalf("response=%q", response.Response)
-	}
-}
-
-func TestClaudeCodeMessageDisplayEmitsRealtimeCorrelatedResponse(t *testing.T) {
-	events := captureGatewayEvents(t)
-	t.Cleanup(func() { redaction.SetDisableAll(false) })
-	redaction.SetDisableAll(true)
-	api := &APIServer{}
-	api.emitClaudeCodeHookLLMEvent(context.Background(), claudeCodeHookRequest{
-		HookEventName: "MessageDisplay",
-		SessionID:     "claude-stream-session",
-		TurnID:        "turn-stream",
-		MessageID:     "display-message-1",
-		Delta:         "streamed assistant output",
-		DisplayFinal:  true,
-		AgentType:     "claude-code",
-	}, nil, nil)
-	var response *gatewaylog.LLMResponsePayload
-	for i := range *events {
-		if (*events)[i].LLMResponse != nil {
-			response = (*events)[i].LLMResponse
-		}
-	}
-	if response == nil || response.ResponseID != "display-message-1" ||
-		response.TurnID != "turn-stream" || response.Response != "streamed assistant output" {
-		t.Fatalf("message display response=%+v events=%+v", response, *events)
-	}
-}
-
-func TestCodexHookSameTurnPromptsGetDistinctIDsAndCorrelateToLatest(t *testing.T) {
-	events := captureGatewayEvents(t)
-	t.Cleanup(func() { redaction.SetDisableAll(false) })
-	redaction.SetDisableAll(true)
-
-	api := &APIServer{}
-	base := codexHookRequest{
-		SessionID: "sess-codex",
-		TurnID:    "turn-1",
-		Model:     "gpt-5.5",
-		AgentType: "codex",
-		Payload: map[string]interface{}{
-			"user_id":   "alice-id",
-			"user_name": "alice",
-		},
-	}
-	first := base
-	first.HookEventName = "UserPromptSubmit"
-	first.Prompt = "first prompt"
-	api.emitCodexHookLLMEvent(context.Background(), first, nil, []byte(`{"hook_event_name":"UserPromptSubmit","prompt":"first prompt"}`))
-
-	second := base
-	second.HookEventName = "UserPromptSubmit"
-	second.Prompt = "second prompt"
-	api.emitCodexHookLLMEvent(context.Background(), second, nil, []byte(`{"hook_event_name":"UserPromptSubmit","prompt":"second prompt"}`))
-
-	tool := base
-	tool.HookEventName = "PreToolUse"
-	tool.ToolName = "shell"
-	tool.ToolUseID = "tool-1"
-	tool.ToolInput = map[string]interface{}{"cmd": "echo ok"}
-	api.emitCodexHookLLMEvent(context.Background(), tool, nil, []byte(`{"hook_event_name":"PreToolUse"}`))
-
-	stop := base
-	stop.HookEventName = "Stop"
-	stop.LastAssistantMessage = "done"
-	api.emitCodexHookLLMEvent(context.Background(), stop, nil, []byte(`{"hook_event_name":"Stop","last_assistant_message":"done"}`))
-
-	var promptEvents []gatewaylog.Event
-	var toolEnvelope, responseEnvelope gatewaylog.Event
-	for _, event := range *events {
-		if event.LLMPrompt != nil {
-			promptEvents = append(promptEvents, event)
-		}
-		if event.Tool != nil {
-			toolEnvelope = event
-		}
-		if event.LLMResponse != nil {
-			responseEnvelope = event
-		}
-	}
-	if len(promptEvents) != 2 {
-		t.Fatalf("prompt events=%d want 2; all=%+v", len(promptEvents), *events)
-	}
-	firstPrompt := promptEvents[0].LLMPrompt
-	secondPrompt := promptEvents[1].LLMPrompt
-	toolEvent := toolEnvelope.Tool
-	response := responseEnvelope.LLMResponse
-	if firstPrompt == nil || secondPrompt == nil || toolEvent == nil || response == nil {
-		t.Fatalf("unexpected events: %+v", *events)
-	}
-	if firstPrompt.PromptID == secondPrompt.PromptID {
-		t.Fatalf("same-turn prompt ids collided: %q", firstPrompt.PromptID)
-	}
-	if toolEvent.ReplyToPromptID != secondPrompt.PromptID {
-		t.Fatalf("tool reply_to_prompt_id=%q want latest prompt %q", toolEvent.ReplyToPromptID, secondPrompt.PromptID)
-	}
-	if response.ReplyToPromptID != secondPrompt.PromptID {
-		t.Fatalf("response reply_to_prompt_id=%q want latest prompt %q", response.ReplyToPromptID, secondPrompt.PromptID)
-	}
-	if got := promptEvents[1].UserID; got != "alice-id" {
-		t.Fatalf("user_id=%q want alice-id", got)
-	}
-	if got := toolEnvelope.DestinationApp; got != "builtin" {
-		t.Fatalf("destination_app=%q want builtin", got)
-	}
-}
-
-func TestCodexHookMCPToolSetsDestinationApp(t *testing.T) {
-	events := captureGatewayEvents(t)
-	t.Cleanup(func() { redaction.SetDisableAll(false) })
-	redaction.SetDisableAll(true)
-
-	api := &APIServer{}
-	req := codexHookRequest{
-		HookEventName: "PreToolUse",
-		SessionID:     "sess-codex",
-		TurnID:        "turn-1",
-		Model:         "gpt-5.5",
-		ToolName:      "mcp__github__search_issues",
-		ToolUseID:     "tool-1",
-		Payload: map[string]interface{}{
-			"mcp_server_name": "github",
-		},
-	}
-	api.emitCodexHookLLMEvent(context.Background(), req, nil, []byte(`{"hook_event_name":"PreToolUse"}`))
-
-	var toolEvent *gatewaylog.Event
-	for i := range *events {
-		if (*events)[i].Tool != nil {
-			toolEvent = &(*events)[i]
-		}
-	}
-	if toolEvent == nil {
-		t.Fatalf("tool event missing: %+v", *events)
-	}
-	if got := toolEvent.DestinationApp; got != "mcp:github" {
-		t.Fatalf("destination_app=%q want mcp:github", got)
-	}
-}
-
 func TestHookLLMEventMetaFallsBackToLocalUser(t *testing.T) {
 	current, err := osuser.Current()
 	if err != nil || current == nil {
@@ -754,123 +721,6 @@ func TestHookToolDestinationApp(t *testing.T) {
 				t.Fatalf("hookToolDestinationApp(%q, %q) = %q, want %q", tc.serverName, tc.toolName, got, tc.want)
 			}
 		})
-	}
-}
-
-func newHookLLMSpanTestAPI(t *testing.T) (*APIServer, *tracetest.InMemoryExporter) {
-	t.Helper()
-	reader := sdkmetric.NewManualReader()
-	exporter := tracetest.NewInMemoryExporter()
-	provider, err := telemetry.NewProviderForTraceTest(reader, exporter)
-	if err != nil {
-		t.Fatalf("NewProviderForTraceTest: %v", err)
-	}
-	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
-	return &APIServer{otel: provider}, exporter
-}
-
-func spanAttributeStrings(span tracetest.SpanStub) map[string]string {
-	out := make(map[string]string, len(span.Attributes))
-	for _, item := range span.Attributes {
-		out[string(item.Key)] = item.Value.AsString()
-	}
-	return out
-}
-
-func spanByOperation(t *testing.T, spans tracetest.SpanStubs, operation string) tracetest.SpanStub {
-	t.Helper()
-	for _, span := range spans {
-		if spanAttributeStrings(span)["gen_ai.operation.name"] == operation {
-			return span
-		}
-	}
-	t.Fatalf("operation %q not found in %d spans", operation, len(spans))
-	return tracetest.SpanStub{}
-}
-
-func parentSpan(t *testing.T, spans tracetest.SpanStubs, child tracetest.SpanStub) tracetest.SpanStub {
-	t.Helper()
-	for _, span := range spans {
-		if span.SpanContext.SpanID() == child.Parent.SpanID() {
-			return span
-		}
-	}
-	t.Fatalf("parent span %s not found for %q", child.Parent.SpanID(), child.Name)
-	return tracetest.SpanStub{}
-}
-
-func TestCodexHookCompletedTurnEmitsCanonicalGenAISpan(t *testing.T) {
-	t.Cleanup(func() { redaction.SetDisableAll(false) })
-	redaction.SetDisableAll(true)
-	api, exporter := newHookLLMSpanTestAPI(t)
-
-	prompt := codexHookRequest{
-		HookEventName: "UserPromptSubmit",
-		SessionID:     "sess-codex-span",
-		TurnID:        "turn-1",
-		Model:         "gpt-5.5",
-		Prompt:        "explain the routing bug",
-		AgentID:       "codex-agent",
-		AgentType:     "codex",
-	}
-	api.emitCodexHookLLMEvent(context.Background(), prompt, nil, nil)
-	stop := prompt
-	stop.HookEventName = "Stop"
-	stop.Prompt = ""
-	stop.LastAssistantMessage = "the connector bridge was missing"
-	api.emitCodexHookLLMEvent(context.Background(), stop, nil, nil)
-
-	spans := exporter.GetSpans()
-	if len(spans) != 4 {
-		t.Fatalf("spans=%d want prompt anchor+terminal anchor+transition+chat", len(spans))
-	}
-	span := spanByOperation(t, spans, "chat")
-	agent := parentSpan(t, spans, span)
-	if agent.Parent.IsValid() {
-		t.Fatalf("hook agent retained filtered HTTP parent %s", agent.Parent.SpanID())
-	}
-	if span.Parent.SpanID() != agent.SpanContext.SpanID() {
-		t.Fatalf("chat parent=%s want session agent=%s", span.Parent.SpanID(), agent.SpanContext.SpanID())
-	}
-	if span.SpanContext.TraceID() != agent.SpanContext.TraceID() {
-		t.Fatalf("chat trace=%s want session trace=%s", span.SpanContext.TraceID(), agent.SpanContext.TraceID())
-	}
-	for _, candidate := range spans {
-		if candidate.Name == "agent.lifecycle turn_end" &&
-			candidate.SpanContext.TraceID() != span.SpanContext.TraceID() {
-			t.Fatalf("terminal transition trace=%s want chat trace=%s", candidate.SpanContext.TraceID(), span.SpanContext.TraceID())
-		}
-	}
-	if span.Name != "chat gpt-5.5" {
-		t.Fatalf("span name=%q", span.Name)
-	}
-	attrs := spanAttributeStrings(span)
-	for key, want := range map[string]string{
-		"gen_ai.operation.name":            "chat",
-		"gen_ai.provider.name":             "openai",
-		"gen_ai.request.model":             "gpt-5.5",
-		"gen_ai.response.model":            "gpt-5.5",
-		"gen_ai.conversation.id":           "sess-codex-span",
-		"openinference.span.kind":          "LLM",
-		"defenseclaw.llm.guardrail":        "connector_hook",
-		"defenseclaw.llm.guardrail.result": "observed",
-	} {
-		if got := attrs[key]; got != want {
-			t.Errorf("%s=%q want %q", key, got, want)
-		}
-	}
-	if !strings.Contains(attrs["gen_ai.input.messages"], "explain the routing bug") {
-		t.Fatalf("input messages=%q", attrs["gen_ai.input.messages"])
-	}
-	if !strings.Contains(attrs["gen_ai.output.messages"], "connector bridge was missing") {
-		t.Fatalf("output messages=%q", attrs["gen_ai.output.messages"])
-	}
-
-	// Hook delivery may retry after a timeout. The same Stop must not create a
-	// duplicate Galileo trace.
-	api.emitCodexHookLLMEvent(context.Background(), stop, nil, nil)
-	if got := len(exporter.GetSpans()); got != 4 {
-		t.Fatalf("spans after duplicate Stop=%d want 4", got)
 	}
 }
 
@@ -929,280 +779,6 @@ func TestNormalizeHookReportedCostAccumulatesIncrementalPerCallCost(t *testing.T
 	}
 }
 
-func TestCodexHookCompletedTurnAttachesObservedTokenUsage(t *testing.T) {
-	t.Cleanup(func() { redaction.SetDisableAll(false) })
-	redaction.SetDisableAll(true)
-	api, exporter := newHookLLMSpanTestAPI(t)
-
-	prompt := codexHookRequest{
-		HookEventName: "UserPromptSubmit", SessionID: "sess-usage", TurnID: "turn-1",
-		Model: "gpt-5.5", Prompt: "count these tokens", AgentType: "codex",
-	}
-	api.emitCodexHookLLMEvent(context.Background(), prompt, nil, nil)
-	stop := prompt
-	stop.HookEventName = "Stop"
-	stop.Prompt = ""
-	stop.LastAssistantMessage = "done"
-	stop.Payload = map[string]interface{}{
-		"usage": map[string]interface{}{
-			"input_tokens": float64(321), "output_tokens": float64(45),
-		},
-	}
-	api.emitCodexHookLLMEvent(context.Background(), stop, nil, nil)
-
-	chat := spanByOperation(t, exporter.GetSpans(), "chat")
-	for key, want := range map[string]int64{
-		"gen_ai.usage.input_tokens": 321, "gen_ai.usage.output_tokens": 45,
-	} {
-		got, ok := attrByKey(chat.Attributes, key)
-		if !ok || got.AsInt64() != want {
-			t.Fatalf("%s=%d ok=%v want %d", key, got.AsInt64(), ok, want)
-		}
-	}
-}
-
-func TestHookChatSpanOmitsUnknownTokenUsage(t *testing.T) {
-	t.Cleanup(func() { redaction.SetDisableAll(false) })
-	redaction.SetDisableAll(true)
-	api, exporter := newHookLLMSpanTestAPI(t)
-	api.rememberHookLLMSpanPrompt(llmEventMeta{
-		Source: "codex", SessionID: "sess-unknown-usage", TurnID: "turn-1",
-	}, "prompt")
-	api.emitHookLLMSpan(context.Background(), llmEventMeta{
-		Source: "codex", SessionID: "sess-unknown-usage", TurnID: "turn-1",
-	}, "response")
-
-	chat := spanByOperation(t, exporter.GetSpans(), "chat")
-	for _, key := range []string{"gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens"} {
-		if _, ok := attrByKey(chat.Attributes, key); ok {
-			t.Fatalf("%s should be absent when the connector did not report usage", key)
-		}
-	}
-}
-
-func TestHookChatSpanUsesPromptTimestampForTurnLatency(t *testing.T) {
-	t.Cleanup(func() { redaction.SetDisableAll(false) })
-	redaction.SetDisableAll(true)
-	api, exporter := newHookLLMSpanTestAPI(t)
-	meta := llmEventMeta{Source: "codex", SessionID: "sess-latency", TurnID: "turn-1"}
-	api.rememberHookLLMSpanPrompt(meta, "prompt")
-
-	key := hookLLMSpanPromptKeys(meta)[0]
-	api.llmPromptMu.Lock()
-	snapshot := api.hookLLMSpanPrompts[key]
-	snapshot.startedAt = time.Now().Add(-2 * time.Second)
-	api.hookLLMSpanPrompts[key] = snapshot
-	api.llmPromptMu.Unlock()
-
-	api.emitHookLLMSpan(context.Background(), meta, "response")
-	chat := spanByOperation(t, exporter.GetSpans(), "chat")
-	if duration := chat.EndTime.Sub(chat.StartTime); duration < 2*time.Second {
-		t.Fatalf("chat duration=%s want at least 2s from prompt to completion", duration)
-	}
-}
-
-func TestClaudeCodeHookSpanUsesFallbackModelAndPersistentSinkRedaction(t *testing.T) {
-	t.Cleanup(func() { redaction.SetDisableAll(false) })
-	redaction.SetDisableAll(false)
-	api, exporter := newHookLLMSpanTestAPI(t)
-
-	api.emitClaudeCodeHookLLMEvent(context.Background(), claudeCodeHookRequest{
-		HookEventName: "UserPromptSubmit",
-		SessionID:     "sess-claude-span",
-		Prompt:        "private prompt marker",
-		AgentType:     "claude-code",
-	}, nil, nil)
-	api.emitClaudeCodeHookLLMEvent(context.Background(), claudeCodeHookRequest{
-		HookEventName:        "Stop",
-		SessionID:            "sess-claude-span",
-		LastAssistantMessage: "private response marker",
-		AgentType:            "claude-code",
-	}, nil, nil)
-
-	spans := exporter.GetSpans()
-	if len(spans) != 4 {
-		t.Fatalf("spans=%d want prompt anchor+terminal anchor+transition+chat", len(spans))
-	}
-	chat := spanByOperation(t, spans, "chat")
-	completionAnchor := parentSpan(t, spans, chat)
-	if chat.SpanContext.TraceID() != completionAnchor.SpanContext.TraceID() {
-		t.Fatalf("chat trace=%s want completion anchor trace=%s", chat.SpanContext.TraceID(), completionAnchor.SpanContext.TraceID())
-	}
-	if chat.Name != "chat claudecode" {
-		t.Fatalf("span name=%q want %q", chat.Name, "chat claudecode")
-	}
-	attrs := spanAttributeStrings(chat)
-	if attrs["gen_ai.provider.name"] != "claudecode" {
-		t.Fatalf("provider=%q want claudecode", attrs["gen_ai.provider.name"])
-	}
-	for _, key := range []string{"gen_ai.input.messages", "gen_ai.output.messages"} {
-		if strings.Contains(attrs[key], "private") {
-			t.Fatalf("%s leaked raw content: %q", key, attrs[key])
-		}
-		if attrs[key] == "" {
-			t.Fatalf("%s is empty", key)
-		}
-	}
-}
-
-func TestClaudeCodeCompletedToolRotatesTraceAndKeepsSessionCorrelation(t *testing.T) {
-	t.Cleanup(func() { redaction.SetDisableAll(false) })
-	redaction.SetDisableAll(true)
-	api, exporter := newHookLLMSpanTestAPI(t)
-
-	pre := claudeCodeHookRequest{
-		HookEventName: "PreToolUse", SessionID: "claude-session", TurnID: "turn-1",
-		ToolName: "Bash", ToolUseID: "tool-1", ToolInput: map[string]interface{}{"command": "pwd"},
-		AgentID: "claude-agent", AgentType: "claudecode",
-	}
-	api.emitClaudeCodeHookLLMEvent(context.Background(), pre, nil, nil)
-	startSpans := exporter.GetSpans()
-	if len(startSpans) != 1 {
-		t.Fatalf("spans after PreToolUse=%d want start anchor", len(startSpans))
-	}
-	startAnchor := spanByOperation(t, startSpans, "invoke_agent")
-
-	post := pre
-	post.HookEventName = "PostToolUse"
-	post.ToolResponse = map[string]interface{}{"output": "/workspace"}
-	api.emitClaudeCodeHookLLMEvent(context.Background(), post, nil, nil)
-
-	spans := exporter.GetSpans()
-	if len(spans) != 3 {
-		t.Fatalf("spans=%d want start anchor+completion anchor+tool", len(spans))
-	}
-	toolSpan := spanByOperation(t, spans, "execute_tool")
-	completionAnchor := parentSpan(t, spans, toolSpan)
-	if completionAnchor.SpanContext.TraceID() == startAnchor.SpanContext.TraceID() {
-		t.Fatalf("Claude Code completion reused finalized start trace %s", startAnchor.SpanContext.TraceID())
-	}
-	if toolSpan.SpanContext.TraceID() != completionAnchor.SpanContext.TraceID() {
-		t.Fatalf("tool trace=%s want completion anchor trace=%s", toolSpan.SpanContext.TraceID(), completionAnchor.SpanContext.TraceID())
-	}
-	for _, span := range []tracetest.SpanStub{completionAnchor, toolSpan} {
-		attrs := spanAttributeStrings(span)
-		if attrs["gen_ai.conversation.id"] != "claude-session" {
-			t.Fatalf("%s conversation=%q want claude-session", span.Name, attrs["gen_ai.conversation.id"])
-		}
-		if attrs["gen_ai.agent.id"] != "claude-agent" {
-			t.Fatalf("%s agent=%q want claude-agent", span.Name, attrs["gen_ai.agent.id"])
-		}
-	}
-}
-
-func TestGenericHookExportsAtModelCompletionWithoutStop(t *testing.T) {
-	t.Cleanup(func() { redaction.SetDisableAll(false) })
-	redaction.SetDisableAll(true)
-	api, exporter := newHookLLMSpanTestAPI(t)
-
-	api.emitAgentHookLLMEvent(context.Background(), agentHookRequest{
-		ConnectorName: "geminicli", HookEventName: "BeforeModel", SessionID: "session-1",
-		TurnID: "turn-1", Content: "real-time prompt", AgentName: "gemini",
-		Payload: map[string]interface{}{"model": "gemini-2.5-pro"},
-	}, nil)
-	api.emitAgentHookLLMEvent(context.Background(), agentHookRequest{
-		ConnectorName: "geminicli", HookEventName: "AfterModel", SessionID: "session-1",
-		TurnID: "turn-1", Content: "real-time response", AgentName: "gemini",
-		Payload: map[string]interface{}{"model": "gemini-2.5-pro"},
-	}, nil)
-
-	spans := exporter.GetSpans()
-	if len(spans) != 3 {
-		t.Fatalf("spans=%d want prompt anchor+completion anchor+chat before Stop", len(spans))
-	}
-	chat := spanByOperation(t, spans, "chat")
-	agent := parentSpan(t, spans, chat)
-	if chat.SpanContext.TraceID() != agent.SpanContext.TraceID() {
-		t.Fatalf("chat trace=%s want completion anchor trace=%s", chat.SpanContext.TraceID(), agent.SpanContext.TraceID())
-	}
-	attrs := spanAttributeStrings(chat)
-	if !strings.Contains(attrs["gen_ai.output.messages"], "real-time response") {
-		t.Fatalf("output=%q", attrs["gen_ai.output.messages"])
-	}
-}
-
-func TestCodexHookCompletedToolExportsBeforeSessionStop(t *testing.T) {
-	t.Cleanup(func() { redaction.SetDisableAll(false) })
-	redaction.SetDisableAll(true)
-	api, exporter := newHookLLMSpanTestAPI(t)
-
-	pre := codexHookRequest{
-		HookEventName: "PreToolUse", SessionID: "session-tool", TurnID: "turn-1",
-		ToolName: "shell", ToolUseID: "tool-1", ToolInput: map[string]interface{}{"cmd": "pwd"},
-	}
-	api.emitCodexHookLLMEvent(context.Background(), pre, nil, nil)
-	spans := exporter.GetSpans()
-	if len(spans) != 1 {
-		t.Fatalf("spans after PreToolUse=%d want immediate session root", len(spans))
-	}
-	root := spanByOperation(t, spans, "invoke_agent")
-	post := pre
-	post.HookEventName = "PostToolUse"
-	post.ToolResponse = map[string]interface{}{"output": "/workspace"}
-	api.emitCodexHookLLMEvent(context.Background(), post, nil, nil)
-
-	spans = exporter.GetSpans()
-	if len(spans) != 3 {
-		t.Fatalf("spans=%d want start anchor + completion anchor + completed tool before Stop", len(spans))
-	}
-	toolSpan := spanByOperation(t, spans, "execute_tool")
-	agent := parentSpan(t, spans, toolSpan)
-	if agent.SpanContext.TraceID() == root.SpanContext.TraceID() {
-		t.Fatalf("tool completion reused the already exported start trace %s", root.SpanContext.TraceID())
-	}
-	if agent.Parent.IsValid() {
-		t.Fatalf("hook agent retained filtered HTTP parent %s", agent.Parent.SpanID())
-	}
-	if toolSpan.Parent.SpanID() != agent.SpanContext.SpanID() {
-		t.Fatalf("tool parent=%s want session agent=%s", toolSpan.Parent.SpanID(), agent.SpanContext.SpanID())
-	}
-	if toolSpan.SpanContext.TraceID() != agent.SpanContext.TraceID() {
-		t.Fatalf("tool trace=%s want session trace=%s", toolSpan.SpanContext.TraceID(), agent.SpanContext.TraceID())
-	}
-	attrs := spanAttributeStrings(toolSpan)
-	for _, key := range []string{"gen_ai.tool.call.arguments", "gen_ai.tool.call.result"} {
-		if attrs[key] == "" {
-			t.Fatalf("%s is empty", key)
-		}
-	}
-
-	// A later tool gets another independently indexable completion trace. The
-	// stable session and agent attributes, rather than late trace appends,
-	// correlate both operations.
-	pre2 := pre
-	pre2.ToolName = "apply_patch"
-	pre2.ToolUseID = "tool-2"
-	pre2.ToolInput = map[string]interface{}{"patch": "test"}
-	api.emitCodexHookLLMEvent(context.Background(), pre2, nil, nil)
-	post2 := pre2
-	post2.HookEventName = "PostToolUse"
-	post2.ToolResponse = map[string]interface{}{"output": "done"}
-	api.emitCodexHookLLMEvent(context.Background(), post2, nil, nil)
-	spans = exporter.GetSpans()
-	if len(spans) != 6 {
-		t.Fatalf("spans after second tool=%d want two start anchors + two completion anchors + two tools", len(spans))
-	}
-	toolCount := 0
-	toolTraceIDs := map[trace.TraceID]struct{}{}
-	for _, candidate := range spans {
-		if spanAttributeStrings(candidate)["gen_ai.operation.name"] != "execute_tool" {
-			continue
-		}
-		toolCount++
-		completionAnchor := parentSpan(t, spans, candidate)
-		if candidate.SpanContext.TraceID() != completionAnchor.SpanContext.TraceID() {
-			t.Fatalf("tool %q is not attached to its completion anchor", candidate.Name)
-		}
-		toolTraceIDs[candidate.SpanContext.TraceID()] = struct{}{}
-	}
-	if toolCount != 2 {
-		t.Fatalf("tool spans=%d want 2", toolCount)
-	}
-	if len(toolTraceIDs) != 2 {
-		t.Fatalf("tool completion traces=%d want 2 independently indexable traces", len(toolTraceIDs))
-	}
-}
-
 func TestHookLLMSpanPromptCacheIsBoundedAndCorrelatesOverlappingTurns(t *testing.T) {
 	api := &APIServer{}
 	for i := 0; i < hookPromptCacheMaxEntries+10; i++ {
@@ -1233,6 +809,89 @@ func TestHookLLMSpanPromptCacheIsBoundedAndCorrelatesOverlappingTurns(t *testing
 	}
 }
 
+func TestHookLLMSpanPromptCacheIsExecutionScoped(t *testing.T) {
+	api := &APIServer{}
+	executionA := llmEventMeta{
+		Source: "codex", SessionID: "shared", AgentID: "agent", TurnID: "turn",
+		PromptID: "prompt", ExecutionID: "execution-a",
+	}
+	executionB := executionA
+	executionB.ExecutionID = "execution-b"
+
+	api.rememberHookLLMSpanPrompt(executionA, "prompt from execution A")
+	api.rememberHookLLMSpanPrompt(executionB, "prompt from execution B")
+
+	first, ok := api.takeHookLLMSpanPrompt(executionA, "response from execution A")
+	if !ok || first.content != "prompt from execution A" {
+		t.Fatalf("execution A snapshot=%+v emit=%v", first, ok)
+	}
+	second, ok := api.takeHookLLMSpanPrompt(executionB, "response from execution B")
+	if !ok || second.content != "prompt from execution B" {
+		t.Fatalf("execution B snapshot=%+v emit=%v", second, ok)
+	}
+}
+
+func TestHookLLMSpanUsageCacheIsExecutionScoped(t *testing.T) {
+	api := &APIServer{}
+	executionA := llmEventMeta{
+		Source: "codex", SessionID: "shared", AgentID: "agent", TurnID: "turn",
+		ExecutionID: "execution-a",
+	}
+	executionB := executionA
+	executionB.ExecutionID = "execution-b"
+
+	api.rememberHookLLMSpanUsage(executionA, hookTokenUsage{PromptTokens: 11, CompletionTokens: 12})
+	api.rememberHookLLMSpanUsage(executionB, hookTokenUsage{PromptTokens: 21, CompletionTokens: 22})
+
+	usageA := api.takeHookLLMSpanUsage(executionA)
+	usageB := api.takeHookLLMSpanUsage(executionB)
+	if usageA.promptTokens != 11 || usageA.completionTokens != 12 {
+		t.Fatalf("execution A usage=%+v", usageA)
+	}
+	if usageB.promptTokens != 21 || usageB.completionTokens != 22 {
+		t.Fatalf("execution B usage=%+v", usageB)
+	}
+}
+
+func TestHookLLMSpanCompletionDoesNotSuppressWithoutExactReceipt(t *testing.T) {
+	t.Run("execution", func(t *testing.T) {
+		api := &APIServer{}
+		executionA := llmEventMeta{
+			Source: "codex", SessionID: "shared", AgentID: "agent", TurnID: "turn",
+			PromptID: "prompt", ExecutionID: "execution-a",
+		}
+		executionB := executionA
+		executionB.ExecutionID = "execution-b"
+
+		if _, ok := api.takeHookLLMSpanPrompt(executionA, "same response"); !ok {
+			t.Fatal("first execution completion was suppressed")
+		}
+		if _, ok := api.takeHookLLMSpanPrompt(executionA, "same response"); !ok {
+			t.Fatal("same-content completion without an exact receipt was suppressed")
+		}
+		if _, ok := api.takeHookLLMSpanPrompt(executionB, "same response"); !ok {
+			t.Fatal("second execution completion was suppressed by the first")
+		}
+	})
+
+	t.Run("agent", func(t *testing.T) {
+		api := &APIServer{}
+		agentA := llmEventMeta{
+			Source: "codex", SessionID: "shared", AgentID: "agent-a", TurnID: "turn",
+			PromptID: "prompt", ExecutionID: "execution",
+		}
+		agentB := agentA
+		agentB.AgentID = "agent-b"
+
+		if _, ok := api.takeHookLLMSpanPrompt(agentA, "same response"); !ok {
+			t.Fatal("first agent completion was suppressed")
+		}
+		if _, ok := api.takeHookLLMSpanPrompt(agentB, "same response"); !ok {
+			t.Fatal("second agent completion was suppressed by the first")
+		}
+	})
+}
+
 func TestBoundedHookLLMSpanContent(t *testing.T) {
 	content := strings.Repeat("x", hookLLMSpanMaxContentBytes+100)
 	if got := len(boundedHookLLMSpanContent(content)); got != hookLLMSpanMaxContentBytes {
@@ -1259,6 +918,123 @@ func TestHookToolInvocationQueuePreservesRepeatedSameToolCalls(t *testing.T) {
 	if len(api.hookToolInvocations) != 0 || len(api.hookToolInvocationOrder) != 0 {
 		t.Fatalf("tool queue not drained: %#v %#v", api.hookToolInvocations, api.hookToolInvocationOrder)
 	}
+}
+
+func TestHookToolInvocationCacheIsExecutionScopedAndCompletionIsNotContentDeduped(t *testing.T) {
+	executionA := llmEventMeta{
+		Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+		ExecutionID: "execution-a",
+	}
+	executionB := executionA
+	executionB.ExecutionID = "execution-b"
+
+	t.Run("invocation cache", func(t *testing.T) {
+		api := &APIServer{}
+		api.rememberHookToolInvocation(executionA, "Bash", `{"command":"execution-a"}`)
+		api.rememberHookToolInvocation(executionB, "Bash", `{"command":"execution-b"}`)
+
+		second, ok := api.takeHookToolInvocation(executionB, "Bash", "same result")
+		if !ok || second.arguments != `{"command":"execution-b"}` {
+			t.Fatalf("execution B invocation=%+v emit=%v", second, ok)
+		}
+		first, ok := api.takeHookToolInvocation(executionA, "Bash", "same result")
+		if !ok || first.arguments != `{"command":"execution-a"}` {
+			t.Fatalf("execution A invocation=%+v emit=%v", first, ok)
+		}
+	})
+
+	t.Run("completion observations", func(t *testing.T) {
+		api := &APIServer{}
+		if _, ok := api.takeHookToolInvocation(executionA, "Bash", "same result"); !ok {
+			t.Fatal("first execution completion was suppressed")
+		}
+		if _, ok := api.takeHookToolInvocation(executionA, "Bash", "same result"); !ok {
+			t.Fatal("same-content completion without an exact receipt was suppressed")
+		}
+		if _, ok := api.takeHookToolInvocation(executionB, "Bash", "same result"); !ok {
+			t.Fatal("second execution completion was suppressed by the first")
+		}
+	})
+}
+
+func TestHookToolInvocationExactIDDoesNotQueueTwiceButDoesNotSuppressCompletion(t *testing.T) {
+	api := &APIServer{}
+	meta := llmEventMeta{
+		Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+		ExecutionID: "execution", ToolID: "tool-call",
+	}
+	arguments := `{"command":"printf ok"}`
+	api.rememberHookToolInvocation(meta, "Bash", arguments)
+	api.rememberHookToolInvocation(meta, "Bash", arguments)
+
+	if _, ok := api.takeHookToolInvocation(meta, "Bash", "same result"); !ok {
+		t.Fatal("first completion was suppressed")
+	}
+	if snapshot, ok := api.takeHookToolInvocation(meta, "Bash", "same result"); !ok || snapshot.id != "" {
+		t.Fatalf("second completion should remain an independent observation without queued state: %+v ok=%v", snapshot, ok)
+	}
+	if len(api.hookToolInvocations) != 0 || len(api.hookToolInvocationOrder) != 0 {
+		t.Fatalf("duplicate delivery left queued state: %#v %#v", api.hookToolInvocations, api.hookToolInvocationOrder)
+	}
+}
+
+func TestHookToolInvocationNativeIDReplacesPendingArguments(t *testing.T) {
+	api := &APIServer{}
+	meta := llmEventMeta{
+		Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+		ExecutionID: "execution", ToolID: "tool-call",
+	}
+	api.rememberHookToolInvocation(meta, "Bash", `{"command":"printf old"}`)
+	api.rememberHookToolInvocation(meta, "Bash", `{"command": "printf new"}`)
+
+	if got := len(api.hookToolInvocations[hookToolInvocationKey(meta, "Bash")]); got != 1 {
+		t.Fatalf("native tool ID queued %d pending invocations want=1", got)
+	}
+	if got := len(api.hookToolInvocationOrder); got != 1 {
+		t.Fatalf("native tool ID queue order entries=%d want=1", got)
+	}
+	snapshot, ok := api.takeHookToolInvocation(meta, "Bash", "same result")
+	if !ok || snapshot.arguments != `{"command": "printf new"}` {
+		t.Fatalf("native tool ID completion snapshot=%+v emit=%v", snapshot, ok)
+	}
+	if snapshot, ok := api.takeHookToolInvocation(meta, "Bash", "same result"); !ok || snapshot.id != "" {
+		t.Fatalf("native tool completion without an exact receipt was suppressed: %+v ok=%v", snapshot, ok)
+	}
+}
+
+func TestHookToolCompletionIdentityUsesNativeIDOrPendingInvocation(t *testing.T) {
+	t.Run("native ID", func(t *testing.T) {
+		api := &APIServer{}
+		meta := llmEventMeta{
+			Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+			ExecutionID: "execution", ToolID: "tool-call",
+		}
+		if _, ok := api.takeHookToolInvocation(meta, "Bash", `{"output":"first"}`); !ok {
+			t.Fatal("first native tool completion was suppressed")
+		}
+		if _, ok := api.takeHookToolInvocation(meta, "Bash", `{"output": "second"}`); !ok {
+			t.Fatal("native tool completion without an exact receipt was suppressed")
+		}
+		api.rememberHookToolInvocation(meta, "Bash", `{"command":"late replay"}`)
+		if got := len(api.hookToolInvocations[hookToolInvocationKey(meta, "Bash")]); got != 1 {
+			t.Fatalf("new native tool start after completion queued %d pending invocations want=1", got)
+		}
+	})
+
+	t.Run("no ID repeated calls", func(t *testing.T) {
+		api := &APIServer{}
+		meta := llmEventMeta{
+			Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+			ExecutionID: "execution",
+		}
+		api.rememberHookToolInvocation(meta, "Bash", `{"command":"first"}`)
+		api.rememberHookToolInvocation(meta, "Bash", `{"command":"second"}`)
+		first, firstOK := api.takeHookToolInvocation(meta, "Bash", "same result")
+		second, secondOK := api.takeHookToolInvocation(meta, "Bash", "same result")
+		if !firstOK || !secondOK || first.id == "" || second.id == "" || first.id == second.id {
+			t.Fatalf("no-ID repeated completions first=%+v/%v second=%+v/%v", first, firstOK, second, secondOK)
+		}
+	})
 }
 
 func TestBeforeToolSelectionHasBoundedToolLifecycle(t *testing.T) {

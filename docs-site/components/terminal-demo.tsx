@@ -28,7 +28,7 @@ interface ScriptLine {
   text: string;
 }
 
-const INSTALL_VERSION = '0.8.4';
+const INSTALL_VERSION = '0.8.6';
 
 // Static header — typed once on initial mount and never replayed.
 // `defenseclaw-gateway` is the canonical companion install line and

@@ -6,8 +6,6 @@ package scanner
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -19,14 +17,7 @@ import (
 // mistaken for a clean scan. The result is still returned so callers
 // can inspect ExitCode / findings for diagnostics.
 func TestMCPScanner_NonZeroExitFailsClosed(t *testing.T) {
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "fake-mcp.sh")
-	script := "#!/bin/sh\n" +
-		`echo '{"scanner":"mcp-scanner","target":"my-server","findings":[{"id":"f1","severity":"HIGH","title":"t","line_number":4}]}'` + "\n" +
-		"exit 3\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	bin := buildScannerFixture(t, `{"scanner":"mcp-scanner","target":"my-server","findings":[{"id":"f1","severity":"HIGH","title":"t","line_number":4}]}`+"\n", 3)
 
 	ms := NewMCPScannerFromLLM(config.MCPScannerConfig{Binary: bin}, config.LLMConfig{}, config.CiscoAIDefenseConfig{})
 

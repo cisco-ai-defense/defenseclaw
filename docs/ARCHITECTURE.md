@@ -160,7 +160,7 @@ only component with direct access to all subsystems.
 | Enforcement engine | Manages block/allow lists in SQLite (`internal/enforce/`) — separate from OPA |
 | OPA policy engine | Runs Rego policies for admission, guardrail verdicts, firewall, audit, sandbox, skill-actions — compiled once via `sync.Once` |
 | Inspection pipeline | 4-stage detection: (1) regex patterns → (2) Cisco AI Defense cloud scanner → (3) LLM judge → (4) OPA verdict aggregation |
-| Audit / SIEM | Logs all events to SQLite (WAL), rotating JSONL (50MB via lumberjack), Splunk HEC, OpenTelemetry |
+| Audit / SIEM | Config-v8 bucket collection, mandatory SQLite log history, and independent JSONL, console, Splunk HEC, HTTP JSONL, Prometheus, OTLP, and Galileo destination projections |
 | Webhook dispatch | Pushes enforcement events to Slack (Block Kit), PagerDuty (Events v2), Webex, generic HMAC-SHA256 with severity/event filtering and retry |
 | Firewall | Kernel-level network filtering (iptables on Linux, pfctl on macOS) |
 | Watcher | File system monitoring for skill installation/removal events |
@@ -168,7 +168,7 @@ only component with direct access to all subsystems.
 | Daemon control | PID file management, process lifecycle (start/stop/restart), lumberjack log rotation |
 | Telemetry | OpenTelemetry tracing and metrics (spans for tools, approvals, LLM calls, guardrail stages, agent lifecycle) |
 | TUI dashboard | 12-panel Python Textual terminal UI (Overview, Alerts, Skills, MCPs, Plugins, Inventory, Logs, Audit, Activity, AI Discovery, Registries, Setup) |
-| PII redaction | Two-layer redaction: `<redacted len=N sha=8hex>` — sink layer always redacts regardless of reveal flag |
+| PII redaction | Central per-destination field-class profiles (`none`, `sensitive`, `content`, `strict`, custom); fresh-v8 defaults are full-fidelity/unredacted |
 | Hot reload | `config.yaml` watched with fsnotify; full config is reloaded, validated, diffed, and reconciled in-process. `gateway.config_reload.mode: restart` opts into a validated full gateway restart instead. |
 
 ### 4. SQLite Database
@@ -358,9 +358,9 @@ The Go gateway's key internal packages are:
 | `gatewaylog/` | Structured JSONL event writer with fanout callbacks (rotating, 50MB) |
 | `guardrail/` | RulePack loading, JudgeYAML definitions, LRU-cached suppressions |
 | `inventory/` | Installed skills/MCP server tracking (AIBOM) |
-| `notify/` | Cross-platform desktop notifications (osascript on macOS, notify-send on Linux, stderr fallback) for watchdog alerts |
+| `notify/` | Desktop notifications on macOS (`osascript`), Linux (`notify-send`), and Windows (an in-process `Shell_NotifyIconW` broker owned by the signed gateway), with labelled stderr fallback when native delivery fails |
 | `policy/` | OPA engine — 7 Rego files (admission, guardrail, firewall, audit, skill_actions, sandbox, openshell), compiled once via `sync.Once` |
-| `redaction/` | Two-layer PII redaction: `<redacted len=N sha=8hex>`, ForSink variants always redact |
+| `redaction/` | Central field-class projection transforms: preserve, detect substrings, redact whole, keyed hash, or remove |
 | `sandbox/` | NVIDIA OpenShell sandbox policy enforcement |
 | `scanner/` | 9 built-in scanner implementations: ClawShield (injection, malware, PII, secrets, vuln), CodeGuard, MCP scanner, Skill scanner, Plugin scanner. Common `Scanner` interface |
 | `telemetry/` | OpenTelemetry: `guardrail/{stage}` and `guardrail.{phase}` span hierarchy, `inspect/{tool}` spans, 20+ metric instruments (verdicts, judge latency, cache hits, sink delivery, stream lifecycle) |
@@ -419,19 +419,20 @@ components.
    the model to proactively inform the user about the enforcement action.
 5. Notifications are not drained on read — every session sees them until expiry.
 
-## Audit Bridge
+## Canonical Observability Pipeline
 
-The `auditBridge` (`internal/gateway/audit_bridge.go`) translates audit events
-from the SQLite store into the structured JSONL gateway log, providing a
-single correlated observability stream.
+Config v8 classifies every generated family into one bucket and signal before
+collection. One canonical record then fans out to mandatory local SQLite and
+each matching optional destination. Destination selection, field-class
+redaction, schema/size validation, batching, and delivery are independent; no
+adapter receives a raw producer object or another destination's projection.
 
-- Registered as a callback on `audit.Logger` — fires on every persisted event.
-- Translates audit actions into `gatewaylog.EventLifecycle` with subsystem
-  inference (scanner, watcher, gateway, api, sinks, telemetry, enforcement).
-- Skips actions that already have dedicated structured emissions on the hot
-  path (`guardrail-verdict`, `llm-judge-response`) to avoid duplicate rows.
-- Stateless: relies on `audit.sanitizeEvent` for PII redaction — forwards
-  text verbatim without re-running detection.
+Collection runs before routing and sampling, so disabling a signal avoids its
+normal construction cost. A small content-safe SQLite-only compliance floor
+survives ordinary log collection disablement. The canonical family registry at
+`schemas/telemetry/v8/registry.yaml` generates schemas, builders, fixtures, and
+backend projections so JSONL, Splunk, general OTLP, Galileo, and local dashboards
+cannot acquire separate handwritten telemetry vocabularies.
 
 ## Plugin Scanner Registry
 

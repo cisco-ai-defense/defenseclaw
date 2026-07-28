@@ -20,7 +20,10 @@ import json
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
+import requests
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_setup_provider import (
     OVERLAY_ENV,
@@ -31,6 +34,8 @@ from defenseclaw.commands.cmd_setup_provider import (
     _write_overlay,
     provider,
 )
+from defenseclaw.context import AppContext
+from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
 
 class TestNormalizeDomain(unittest.TestCase):
@@ -176,14 +181,33 @@ class TestProviderAddCommand(unittest.TestCase):
             "DEFENSECLAW_OVERLAY_ROOT": os.path.dirname(overlay_path),
         }
 
+    @staticmethod
+    def _app(overlay_dir: str, *, api_bind: str = "0.0.0.0", api_port: int = 29871) -> AppContext:
+        app = AppContext()
+        gateway = SimpleNamespace(
+            api_bind=api_bind,
+            api_port=api_port,
+            token="configured-token",
+            resolved_token=lambda: "resolved-token",
+        )
+        app.cfg = SimpleNamespace(
+            data_dir=overlay_dir,
+            gateway=gateway,
+            guardrail=SimpleNamespace(connector="claude-code", port=4000),
+        )
+        return app
+
     def test_add_writes_overlay(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "overlay.json")
             res = self._run(
                 "add",
-                "--name", "Acme",
-                "--domain", "llm.acme.test",
-                "--env-key", "ACME_API_KEY",
+                "--name",
+                "Acme",
+                "--domain",
+                "llm.acme.test",
+                "--env-key",
+                "ACME_API_KEY",
                 "--no-reload",
                 env=self._env_for(path),
             )
@@ -200,9 +224,12 @@ class TestProviderAddCommand(unittest.TestCase):
             for _ in range(3):
                 res = self._run(
                     "add",
-                    "--name", "Acme",
-                    "--domain", "https://llm.acme.test/v1/chat/completions",
-                    "--env-key", "ACME_API_KEY",
+                    "--name",
+                    "Acme",
+                    "--domain",
+                    "https://llm.acme.test/v1/chat/completions",
+                    "--env-key",
+                    "ACME_API_KEY",
                     "--no-reload",
                     env=self._env_for(path),
                 )
@@ -217,11 +244,21 @@ class TestProviderAddCommand(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "overlay.json")
             self._run(
-                "add", "--name", "Acme", "--domain", "llm-a.test", "--no-reload",
+                "add",
+                "--name",
+                "Acme",
+                "--domain",
+                "llm-a.test",
+                "--no-reload",
                 env=self._env_for(path),
             )
             self._run(
-                "add", "--name", "Acme", "--domain", "llm-b.test", "--no-reload",
+                "add",
+                "--name",
+                "Acme",
+                "--domain",
+                "llm-b.test",
+                "--no-reload",
                 env=self._env_for(path),
             )
             with open(path, encoding="utf-8") as f:
@@ -233,17 +270,28 @@ class TestProviderAddCommand(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "overlay.json")
             self._run(
-                "add", "--name", "Gone", "--domain", "gone.test", "--no-reload",
+                "add",
+                "--name",
+                "Gone",
+                "--domain",
+                "gone.test",
+                "--no-reload",
                 env=self._env_for(path),
             )
             res = self._run(
-                "remove", "--name", "Gone", "--no-reload",
+                "remove",
+                "--name",
+                "Gone",
+                "--no-reload",
                 env=self._env_for(path),
             )
             self.assertEqual(res.exit_code, 0, res.output)
             # Second remove must exit non-zero so scripts can tell.
             res2 = self._run(
-                "remove", "--name", "Gone", "--no-reload",
+                "remove",
+                "--name",
+                "Gone",
+                "--no-reload",
                 env=self._env_for(path),
             )
             self.assertNotEqual(res2.exit_code, 0)
@@ -266,6 +314,133 @@ class TestProviderAddCommand(unittest.TestCase):
             os.environ.pop(OVERLAY_ENV, None)
             if orig is not None:
                 os.environ["DEFENSECLAW_OVERLAY_ROOT"] = orig
+
+    @mock.patch("defenseclaw.commands.cmd_setup_provider.OrchestratorClient")
+    def test_add_readd_remove_reload_live_sidecar(self, client_cls: mock.Mock) -> None:
+        client_cls.return_value.reload_provider_registry.return_value = {
+            "status": "ok",
+            "provider_count": 1,
+        }
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "custom-providers.json")
+            app = self._app(d)
+            env = self._env_for(path)
+            for args in (
+                ["add", "--name", "Acme", "--domain", "one.test"],
+                ["add", "--name", "Acme", "--domain", "two.test"],
+                ["remove", "--name", "Acme"],
+            ):
+                result = CliRunner().invoke(provider, args, obj=app, env=env)
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn("disk and live state match", result.output)
+            self.assertEqual(client_cls.call_count, 3)
+            for call in client_cls.call_args_list:
+                self.assertEqual(call.kwargs["host"], "127.0.0.1")
+                self.assertEqual(call.kwargs["port"], 29871)
+                self.assertEqual(call.kwargs["token"], "resolved-token")
+
+    @mock.patch("defenseclaw.commands.cmd_setup_provider.OrchestratorClient")
+    def test_persisted_reload_failure_is_nonzero_and_not_rolled_back(self, client_cls: mock.Mock) -> None:
+        client_cls.return_value.reload_provider_registry.side_effect = requests.ConnectionError()
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "custom-providers.json")
+            result = CliRunner().invoke(
+                provider,
+                ["add", "--name", "Acme", "--domain", "one.test"],
+                obj=self._app(d),
+                env=self._env_for(path),
+            )
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("persisted successfully on disk", result.output)
+            self.assertIn("live reload failed", result.output)
+            with open(path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["providers"][0]["name"], "Acme")
+
+    @mock.patch("defenseclaw.commands.cmd_setup_provider.OrchestratorClient")
+    def test_no_reload_is_explicit_disk_only(self, client_cls: mock.Mock) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "custom-providers.json")
+            result = CliRunner().invoke(
+                provider,
+                ["add", "--name", "Acme", "--domain", "one.test", "--no-reload"],
+                obj=self._app(d),
+                env=self._env_for(path),
+            )
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("disk-only operation", result.output)
+            client_cls.assert_not_called()
+
+    @mock.patch("defenseclaw.commands.cmd_setup_provider.OrchestratorClient")
+    def test_show_json_prefers_live_registry_and_never_prints_token(self, client_cls: mock.Mock) -> None:
+        client_cls.return_value.provider_registry.return_value = {
+            "providers": [{"name": "Live", "domains": ["live.test"]}],
+            "ollama_ports": [],
+        }
+        with tempfile.TemporaryDirectory() as d:
+            result = CliRunner().invoke(provider, ["show", "--json"], obj=self._app(d))
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.output)
+            self.assertTrue(payload["live"])
+            self.assertEqual(payload["source"], "live-sidecar")
+            self.assertNotIn("resolved-token", result.output)
+
+    @mock.patch("defenseclaw.commands.cmd_setup_provider.OrchestratorClient")
+    def test_list_json_labels_disk_fallback(self, client_cls: mock.Mock) -> None:
+        client_cls.return_value.provider_registry.side_effect = requests.ConnectionError()
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "custom-providers.json")
+            _write_overlay(path, _Overlay([{"name": "Disk", "domains": ["disk.test"]}], []))
+            result = CliRunner().invoke(
+                provider,
+                ["list", "--json"],
+                obj=self._app(d),
+                env=self._env_for(path),
+            )
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.output)
+            self.assertFalse(payload["live"])
+            self.assertEqual(payload["source"], "disk-fallback")
+            self.assertIn("may not match", payload["warning"])
+
+    @mock.patch("defenseclaw.commands.cmd_setup_provider.OrchestratorClient")
+    def test_show_human_prominently_labels_disk_fallback(self, client_cls: mock.Mock) -> None:
+        client_cls.return_value.provider_registry.side_effect = requests.ConnectionError()
+        with tempfile.TemporaryDirectory() as d:
+            result = CliRunner().invoke(provider, ["show"], obj=self._app(d))
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("DISK FALLBACK", result.output)
+            self.assertIn("may not match the running sidecar", result.output)
+
+    @mock.patch("defenseclaw.commands.cmd_setup_provider.OrchestratorClient")
+    def test_auth_and_malformed_live_results_are_labeled_and_nonzero(self, client_cls: mock.Mock) -> None:
+        auth_response = requests.Response()
+        auth_response.status_code = 401
+        cases = (
+            (requests.HTTPError(response=auth_response), "authentication failed"),
+            (ValueError("bad payload"), "malformed response"),
+        )
+        with tempfile.TemporaryDirectory() as d:
+            for error, label in cases:
+                with self.subTest(label=label):
+                    client_cls.return_value.provider_registry.side_effect = error
+                    result = CliRunner().invoke(provider, ["show", "--json"], obj=self._app(d))
+                    self.assertNotEqual(result.exit_code, 0)
+                    payload = json.loads(result.output)
+                    self.assertFalse(payload["live"])
+                    self.assertEqual(payload["source"], "disk-fallback")
+                    self.assertEqual(payload["live_error"], label)
+
+
+class TestProviderGatewayClient(unittest.TestCase):
+    def test_wildcard_bind_normalizes_to_loopback(self) -> None:
+        for bind in ("", "0.0.0.0", "::", "[::]", "*"):
+            cfg = SimpleNamespace(gateway=SimpleNamespace(api_bind=bind))
+            self.assertEqual(gateway_api_client_host(cfg), "127.0.0.1")
+
+    def test_provider_client_sends_token_headers(self) -> None:
+        client = OrchestratorClient(host="127.0.0.1", port=29871, token="test-token")
+        self.assertEqual(client._session.headers["Authorization"], "Bearer test-token")
+        self.assertEqual(client._session.headers["X-DC-Auth"], "Bearer test-token")
 
 
 class TestReadOverlayMalformedShapes(unittest.TestCase):

@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func assertHookAPITokenRejectedByEnsureAndLoad(t *testing.T, want string, fixture func(*testing.T) string) {
@@ -86,28 +88,20 @@ func TestEnsureHookAPITokenDoesNotCreateHooksInUntrustedDataDir(t *testing.T) {
 }
 
 func TestHookAPITokenRejectsSymlinkHooksDirectory(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink creation requires additional privileges on Windows")
-	}
-	assertHookAPITokenRejectedByEnsureAndLoad(t, "escapes hooks dir", func(t *testing.T) string {
+	assertHookAPITokenRejectedByEnsureAndLoadAny(t, []string{"escapes hooks dir", "reparse points are not allowed"}, func(t *testing.T) string {
 		dataDir := t.TempDir()
 		targetDataDir := t.TempDir()
 		if _, err := EnsureHookAPIToken(targetDataDir, "codex"); err != nil {
 			t.Fatalf("seed target token: %v", err)
 		}
 		targetHooksDir := filepath.Join(targetDataDir, "hooks")
-		if err := os.Symlink(targetHooksDir, filepath.Join(dataDir, "hooks")); err != nil {
-			t.Fatalf("symlink hooks: %v", err)
-		}
+		createTestDirectoryRedirect(t, filepath.Join(dataDir, "hooks"), targetHooksDir)
 		return dataDir
 	})
 }
 
 func TestHookAPITokenRejectsSymlinkedDataDirParent(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink creation requires additional privileges on Windows")
-	}
-	assertHookAPITokenRejectedByEnsureAndLoad(t, "symlinks are not allowed", func(t *testing.T) string {
+	assertHookAPITokenRejectedByEnsureAndLoadAny(t, []string{"symlinks are not allowed", "reparse points are not allowed"}, func(t *testing.T) string {
 		linkRoot := t.TempDir()
 		targetRoot := t.TempDir()
 		dataTarget := filepath.Join(targetRoot, "data")
@@ -115,9 +109,7 @@ func TestHookAPITokenRejectsSymlinkedDataDirParent(t *testing.T) {
 			t.Fatalf("mkdir target data dir: %v", err)
 		}
 		link := filepath.Join(linkRoot, "linked-parent")
-		if err := os.Symlink(targetRoot, link); err != nil {
-			t.Fatalf("symlink parent: %v", err)
-		}
+		createTestDirectoryRedirect(t, link, targetRoot)
 		return filepath.Join(link, "data")
 	})
 }
@@ -157,7 +149,7 @@ func TestLoadHookAPITokensValidatesExistingFiles(t *testing.T) {
 }
 
 func TestConnectorHookWriterPreservesScopedAPITokenFormat(t *testing.T) {
-	dataDir := t.TempDir()
+	dataDir := testenv.PrivateTempDir(t)
 	token, err := EnsureHookAPIToken(dataDir, "codex")
 	if err != nil {
 		t.Fatalf("EnsureHookAPIToken: %v", err)

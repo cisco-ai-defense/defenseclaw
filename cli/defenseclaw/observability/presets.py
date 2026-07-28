@@ -16,21 +16,13 @@
 
 """Observability preset registry.
 
-Each preset describes a first-class telemetry destination. A preset
-resolves to one of two targets:
-
-* ``otel`` — a named entry in ``otel.destinations[]`` in ``config.yaml``,
-  used by the gateway's unified OTel provider (traces + metrics + logs via
-  independent processors/readers in ``internal/telemetry/provider.go``).
-* ``audit_sinks`` — an entry in the ``audit_sinks:`` list, used by the
-  audit manager to fan out security events (see
-  ``internal/audit/sinks``). Supported kinds: ``splunk_hec``,
-  ``otlp_logs``, ``http_jsonl``.
+Each preset describes one canonical v8 destination adapter. OTLP presets can
+carry logs, traces, and metrics according to adapter capabilities; Splunk HEC
+and HTTP JSONL presets carry logs.
 
 All header values that reference secrets use ``${VAR}`` substitution so
 the tokens themselves live in ``~/.defenseclaw/.env`` rather than
-``config.yaml``. See ``internal/audit/sinks/otlp_logs.go`` and
-``internal/telemetry/provider.go`` for the runtime expansion contract.
+``config.yaml``. The canonical Go runtime resolves the references at export.
 """
 
 from __future__ import annotations
@@ -38,8 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-Target = Literal["otel", "audit_sinks"]
-SinkKind = Literal["splunk_hec", "otlp_logs", "http_jsonl"]
+AdapterKind = Literal["splunk_hec", "http_jsonl"]
 Signal = Literal["traces", "metrics", "logs"]
 
 
@@ -47,15 +38,12 @@ Signal = Literal["traces", "metrics", "logs"]
 class Preset:
     """Declarative description of a telemetry destination preset.
 
-    Fields are intentionally flat — the writer in
-    ``observability.writer`` consumes this struct together with the
-    user-supplied inputs to produce the YAML diff that lands in
-    ``config.yaml``.
+    Fields are intentionally flat so the v8 setup writer can resolve inputs
+    without duplicating vendor constants.
     """
 
     id: str
     display_name: str
-    target: Target
     description: str
 
     # ---- otel target ----
@@ -84,8 +72,8 @@ class Preset:
     span_filter_required_attributes: tuple[str, ...] = ()
     span_filter_operations: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
-    # ---- audit_sinks target ----
-    sink_kind: SinkKind | None = None
+    # Non-OTLP destination adapter. ``None`` means OTLP.
+    adapter_kind: AdapterKind | None = None
 
     # ---- secrets ----
     # Canonical env var name for this preset's primary credential. The
@@ -112,7 +100,6 @@ class Preset:
 SPLUNK_O11Y = Preset(
     id="splunk-o11y",
     display_name="Splunk Observability Cloud",
-    target="otel",
     description="Traces + metrics + logs via OTLP HTTP to ingest.<realm>.observability.splunkcloud.com",
     otel_protocol="http",
     endpoint_template="ingest.{realm}.observability.splunkcloud.com",
@@ -131,8 +118,7 @@ SPLUNK_O11Y = Preset(
 SPLUNK_HEC = Preset(
     id="splunk-hec",
     display_name="Splunk HEC",
-    target="audit_sinks",
-    sink_kind="splunk_hec",
+    adapter_kind="splunk_hec",
     description="Audit events via Splunk HTTP Event Collector",
     token_env="DEFENSECLAW_SPLUNK_HEC_TOKEN",
     token_label="Splunk HEC token",
@@ -148,8 +134,7 @@ SPLUNK_HEC = Preset(
 SPLUNK_ENTERPRISE = Preset(
     id="splunk-enterprise",
     display_name="Splunk Enterprise HEC",
-    target="audit_sinks",
-    sink_kind="splunk_hec",
+    adapter_kind="splunk_hec",
     description="Remote Splunk Enterprise audit events via HTTP Event Collector",
     token_env="DEFENSECLAW_SPLUNK_HEC_TOKEN",
     token_label="Splunk Enterprise HEC token",
@@ -169,7 +154,6 @@ SPLUNK_ENTERPRISE = Preset(
 DATADOG = Preset(
     id="datadog",
     display_name="Datadog",
-    target="otel",
     description="Traces + metrics + logs via OTLP HTTP to Datadog",
     otel_protocol="http",
     endpoint_template="https://otlp.{site}.datadoghq.com",
@@ -187,7 +171,6 @@ DATADOG = Preset(
 HONEYCOMB = Preset(
     id="honeycomb",
     display_name="Honeycomb",
-    target="otel",
     description="Traces + metrics + logs via OTLP HTTP to api.honeycomb.io",
     otel_protocol="http",
     endpoint_template="https://api.honeycomb.io",
@@ -212,7 +195,6 @@ HONEYCOMB = Preset(
 NEWRELIC = Preset(
     id="newrelic",
     display_name="New Relic",
-    target="otel",
     description="Traces + metrics + logs via OTLP HTTP to otlp.<region>.nr-data.net",
     otel_protocol="http",
     endpoint_template="https://otlp.{region}.nr-data.net",
@@ -230,7 +212,6 @@ NEWRELIC = Preset(
 GRAFANA_CLOUD = Preset(
     id="grafana-cloud",
     display_name="Grafana Cloud",
-    target="otel",
     description="Traces + metrics + logs via OTLP HTTP to grafana.net OTLP gateway",
     otel_protocol="http",
     endpoint_template="https://otlp-gateway-{region}.grafana.net",
@@ -248,7 +229,6 @@ GRAFANA_CLOUD = Preset(
 GALILEO = Preset(
     id="galileo",
     display_name="Galileo",
-    target="otel",
     description="GenAI traces via OTLP HTTP/protobuf to Galileo Cloud or a self-hosted deployment",
     otel_protocol="http",
     endpoint_template="{endpoint}",
@@ -314,7 +294,6 @@ GALILEO = Preset(
 LOCAL_OTLP = Preset(
     id="local-otlp",
     display_name="Local Observability Stack",
-    target="otel",
     description=(
         "Bundled docker-compose stack on loopback (OTel Collector + "
         "Prometheus + Loki + Tempo + Grafana). Driven by "
@@ -348,16 +327,12 @@ LOCAL_OTLP = Preset(
 GENERIC_OTLP = Preset(
     id="otlp",
     display_name="Generic OTLP",
-    target="otel",
-    description="Generic OTLP endpoint (grpc or http); lands in otel: or audit_sinks[otlp_logs]",
+    description="Generic canonical OTLP endpoint (gRPC or HTTP/protobuf)",
     otel_protocol="grpc",
     endpoint_template="{endpoint}",
     signal_url_paths={},
-    # Writer treats this as "user decides target at apply time" by
-    # honouring the ``target_override`` input (``otel`` vs
-    # ``audit_sinks``). Default is ``otel``; when the caller supplies
-    # ``--target audit_sinks``, the writer builds an ``otlp_logs`` sink
-    # instead.
+    # ``--signals logs`` narrows this adapter to logs without creating a
+    # separate routing plane.
     token_env="",
     token_label="",
     prompts=(
@@ -369,8 +344,7 @@ GENERIC_OTLP = Preset(
 GENERIC_WEBHOOK = Preset(
     id="webhook",
     display_name="Generic HTTP JSONL",
-    target="audit_sinks",
-    sink_kind="http_jsonl",
+    adapter_kind="http_jsonl",
     description="HTTP(S) webhook that receives audit events as JSON lines",
     token_env="",
     token_label="Webhook bearer token env var name",

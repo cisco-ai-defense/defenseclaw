@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Hook guardrail evaluations — verdict funnel, severity breakdown, runtime alerts, and inspect latency. All panels source from defenseclaw_inspect_evaluations_total which fires on every hook connector.",
+  "description": "Guardrail evaluations, OPA policy checks, runtime security alerts, and inspect latency across hook, API, proxy, and EventRouter producers. Verdict panels use generated v8 evaluation metrics; alert panels use the purpose-built defenseclaw_alert_count_total series.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -180,7 +180,7 @@
         "name": "severity",
         "label": "Severity",
         "type": "custom",
-        "query": "CRITICAL,HIGH,MEDIUM,LOW,INFO,NONE",
+        "query": "CRITICAL,HIGH,MEDIUM,LOW,INFO",
         "multi": true,
         "includeAll": true,
         "allValue": ".+",
@@ -218,10 +218,6 @@
           {
             "text": "INFO",
             "value": "INFO"
-          },
-          {
-            "text": "NONE",
-            "value": "NONE"
           }
         ],
         "skipUrlSync": false,
@@ -256,7 +252,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", action=~\"$action\", severity=~\"$severity\"}[1h])) or vector(0)",
+          "expr": "sum(increase(defenseclaw_inspect_evaluations_total{connector=~\"$connector\", action=~\"$action\", severity=~\"$severity\"}[1h])) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -285,7 +281,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"block\", tool=~\"$connector:.*\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h])), 0.0001) or vector(0)",
+          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"block\", connector=~\"$connector\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{connector=~\"$connector\"}[1h])), 0.0001) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -329,7 +325,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"confirm\", tool=~\"$connector:.*\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h])), 0.0001) or vector(0)",
+          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"confirm\", connector=~\"$connector\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{connector=~\"$connector\"}[1h])), 0.0001) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -355,7 +351,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert\", tool=~\"$connector:.*\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h])), 0.0001) or vector(0)",
+          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert\", connector=~\"$connector\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{connector=~\"$connector\"}[1h])), 0.0001) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -413,7 +409,7 @@
     {
       "type": "stat",
       "title": "Alerts / min (5m)",
-      "description": "Runtime security alerts fired in the last 5 minutes.",
+      "description": "Concrete runtime security alerts emitted in the last 5 minutes, independently of guardrail decision vocabulary.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -426,7 +422,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=~\"alert|warn\", tool=~\"$connector:.*\"}[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(defenseclaw_alert_count_total{connector=~\"$connector\"}[5m])) * 60 or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -480,7 +476,7 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(sum by (tool, action) (increase(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", action=~\"$action\", severity=~\"$severity\"}[1h])))",
+          "expr": "sort_desc(sum by (tool, action) (increase(defenseclaw_inspect_evaluations_total{connector=~\"$connector\", action=~\"$action\", severity=~\"$severity\"}[1h])))",
           "instant": true,
           "format": "time_series",
           "legendFormat": "{{tool}} -> {{action}}",
@@ -509,7 +505,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", severity=~\"$severity\"}[$__rate_interval]))",
+          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{connector=~\"$connector\", severity=~\"$severity\"}[$__rate_interval]))",
           "legendFormat": "{{action}}",
           "refId": "A"
         }
@@ -541,7 +537,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (tool) (rate(defenseclaw_inspect_evaluations_total{action=~\"$action\", severity=~\"$severity\", tool=~\"$connector:.*\"}[$__rate_interval]))",
+          "expr": "sum by (tool) (rate(defenseclaw_inspect_evaluations_total{action=~\"$action\", severity=~\"$severity\", connector=~\"$connector\"}[$__rate_interval]))",
           "legendFormat": "{{tool}}",
           "refId": "A"
         }
@@ -584,7 +580,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (severity) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", action=~\"$action\"}[$__rate_interval]))",
+          "expr": "sum by (severity) (rate(defenseclaw_inspect_evaluations_total{connector=~\"$connector\", action=~\"$action\"}[$__rate_interval]))",
           "legendFormat": "{{severity}}",
           "refId": "A"
         }
@@ -617,7 +613,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (tool, action, severity) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\", action!~\"allow|none\", severity=~\"$severity\"}[$__rate_interval])) or on() vector(0)",
+          "expr": "sum by (tool, action, severity) (rate(defenseclaw_inspect_evaluations_total{connector=~\"$connector\", action!~\"allow|none\", severity=~\"$severity\"}[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{tool}} -> {{action}} [{{severity}}]",
           "refId": "A"
         }
@@ -661,8 +657,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (action, severity) (rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert\", tool=~\"$connector:.*\"}[$__rate_interval])) or on() vector(0)",
-          "legendFormat": "{{action}} [{{severity}}]",
+          "expr": "sum by (alert_type, alert_severity) (rate(defenseclaw_alert_count_total{connector=~\"$connector\"}[$__rate_interval])) or on() vector(0)",
+          "legendFormat": "{{alert_type}} [{{alert_severity}}]",
           "refId": "A"
         }
       ],
@@ -887,7 +883,7 @@
     {
       "type": "logs",
       "title": "Recent guardrail events",
-      "description": "Gateway log records for verdict and scan events.",
+      "description": "Canonical v8 guardrail evaluation and related enforcement logs from proxy, external API, EventRouter, and OPA policy producers.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -901,8 +897,16 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | gen_ai_agent_name=~\"$connector\" | defenseclaw_gateway_event_type=~\"tool_invocation|scan|scan_finding|llm_prompt|llm_response|error\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | event_name=~\"tool[.]invocation[.].*|scan[.].*|finding[.](observed|correlated)|model[.].*|.*failed\"",
           "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        },
+        {
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | event_name=~\"guardrail[.]evaluation[.](completed|failed)\"",
+          "refId": "B",
           "datasource": {
             "type": "loki",
             "uid": "defenseclaw-loki"
@@ -914,6 +918,191 @@
         "wrapLogMessage": true,
         "dedupStrategy": "none",
         "enableLogDetails": true
+      }
+    },
+    {
+      "type": "row",
+      "title": "Cisco AI Defense inspection",
+      "gridPos": {
+        "x": 0,
+        "y": 71,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "title": "AI Defense attempts / min",
+      "description": "Cisco AI Defense HTTP inspection attempts per minute, including a rejected first attempt when the client retries without a rules override. This metric does not project a connector label into Prometheus, so the panel is process-global and the Connector selection does not apply.\n\ncovered_by:\n  - defenseclaw_cisco_inspect_latency_milliseconds → internal/gateway/cisco_inspect_observability_v8.go",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 72,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(defenseclaw_cisco_inspect_latency_milliseconds_count[$__rate_interval])) * 60 or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "AI Defense errors (1h)",
+      "description": "Structured Cisco AI Defense client failures in the last hour. Codes distinguish invalid responses from upstream transport failures. This metric does not project a connector label into Prometheus, so the panel is process-global and the Connector selection does not apply.\n\ncovered_by:\n  - defenseclaw_cisco_errors → internal/gateway/cisco_inspect_observability_v8.go",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 72,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(defenseclaw_cisco_errors_total[1h])) or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "AI Defense completion rate (1h)",
+      "description": "Share of Cisco AI Defense HTTP attempts that produced a valid inspection response. Rejected rule-override attempts and failures remain visible in the denominator. This metric does not project a connector label into Prometheus, so the panel is process-global and the Connector selection does not apply.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 72,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(defenseclaw_cisco_inspect_latency_milliseconds_count{outcome=\"completed\"}[1h])) / clamp_min(sum(rate(defenseclaw_cisco_inspect_latency_milliseconds_count[1h])), 0.0001) or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "AI Defense latency p95 (5m)",
+      "description": "Cisco AI Defense HTTP inspection p95 over five minutes across completed, rejected, failed, and timed-out attempts. This metric does not project a connector label into Prometheus, so the panel is process-global and the Connector selection does not apply.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 72,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(defenseclaw_cisco_inspect_latency_milliseconds_bucket[5m]))) or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "AI Defense latency by outcome",
+      "description": "p50, p95, and p99 HTTP inspection latency split by the canonical outcome vocabulary. A rejected series usually means the configured API key owns its rule catalog and DefenseClaw retried without an override. This metric does not project a connector label into Prometheus, so the panel is process-global and the Connector selection does not apply.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 76,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, outcome) (rate(defenseclaw_cisco_inspect_latency_milliseconds_bucket[$__rate_interval])))",
+          "legendFormat": "p50 · {{outcome}}",
+          "refId": "P50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(defenseclaw_cisco_inspect_latency_milliseconds_bucket[$__rate_interval])))",
+          "legendFormat": "p95 · {{outcome}}",
+          "refId": "P95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, outcome) (rate(defenseclaw_cisco_inspect_latency_milliseconds_bucket[$__rate_interval])))",
+          "legendFormat": "p99 · {{outcome}}",
+          "refId": "P99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "AI Defense errors by code",
+      "description": "Cisco AI Defense errors grouped by bounded gateway error code. UPSTREAM_ERROR is transport/cancellation/timeout; INVALID_RESPONSE is HTTP, body, or JSON validation failure. This metric does not project a connector label into Prometheus, so the panel is process-global and the Connector selection does not apply.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 76,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (code) (increase(defenseclaw_cisco_errors_total[$__range])) or on() vector(0)",
+          "legendFormat": "{{code}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
       }
     }
   ],
@@ -934,6 +1123,6 @@
   "timezone": "",
   "title": "DefenseClaw — Guardrail Evaluations",
   "uid": "defenseclaw-security",
-  "version": 4,
+  "version": 6,
   "weekStart": ""
 }

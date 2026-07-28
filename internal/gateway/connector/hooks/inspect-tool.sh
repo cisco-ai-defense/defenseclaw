@@ -54,22 +54,25 @@ defenseclaw_harden_env
 DEFENSECLAW_HOOK_CONNECTOR="inspect"
 DEFENSECLAW_HOOK_NAME="inspect-tool"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
+RUNTIME_CONNECTOR="$(defenseclaw_shared_runtime_connector "$HOOK_DIR")"
+FAIL_MODE="$(defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR")"
 
 # Avarice F-2025 / chain F-3397: load the gateway bearer token before
 # any agent-controlled input is touched. See inspect-request.sh for
 # the full rationale (hook now authenticates and treats 401/403 as a
 # fail-closed event regardless of FAIL_MODE).
-if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+TOKEN_FILE="$(defenseclaw_shared_hook_token_file "$HOOK_DIR" "$RUNTIME_CONNECTOR")"
+if [ ! -f "$TOKEN_FILE" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token inspect inspect-tool "tool"
 fi
-if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${HOOK_DIR}/{{.TokenFile}}" ]; then
-  {{if .ScopedToken}}
-  DEFENSECLAW_GATEWAY_TOKEN="$(tr -d '\r\n' < "${HOOK_DIR}/{{.TokenFile}}")"
+if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "$TOKEN_FILE" ]; then
+  if [ -n "$RUNTIME_CONNECTOR" ]; then
+    DEFENSECLAW_GATEWAY_TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
+  else
+    # shellcheck source=/dev/null
+    . "$TOKEN_FILE"
+  fi
   export DEFENSECLAW_GATEWAY_TOKEN
-  {{else}}
-  # shellcheck source=/dev/null
-  . "${HOOK_DIR}/{{.TokenFile}}"
-  {{end}}
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 
@@ -80,12 +83,9 @@ TOOL_INPUT="$(defenseclaw_read_stdin_capped)" || {
 }
 
 API_ADDR="{{.APIAddr}}"
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
 
-# Transport failures (gateway down / 5xx) always allow unless
-# DEFENSECLAW_STRICT_AVAILABILITY=1; a DefenseClaw outage must not
-# brick the user's tool calls. Response failures (4xx / parse error)
-# respect FAIL_MODE.
+# Transport and response failures respect FAIL_MODE;
+# DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override.
 fail_unreachable() {
   defenseclaw_log_hook_failure inspect inspect-tool "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "tool" "$1"
@@ -118,9 +118,9 @@ if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 CONNECTOR_HEADER_ARGS=()
-{{if .ConnectorName}}
-CONNECTOR_HEADER_ARGS=(-H "X-DefenseClaw-Connector: {{.ConnectorName}}")
-{{end}}
+if [ -n "$RUNTIME_CONNECTOR" ]; then
+  CONNECTOR_HEADER_ARGS=(-H "X-DefenseClaw-Connector: ${RUNTIME_CONNECTOR}")
+fi
 
 RESPONSE=$(jq -n --arg tool "$TOOL_NAME" --arg args "$TOOL_INPUT" \
   '{tool: $tool, args: $args}' | \

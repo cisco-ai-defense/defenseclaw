@@ -19,7 +19,7 @@ guardrail is misconfigured.
 ### Install
 
 ```bash
-VERSION=0.8.4
+VERSION=0.8.6
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector claudecode
 ```
@@ -48,10 +48,11 @@ In one terminal, open the live dashboard (audit + alerts + logs panels):
 defenseclaw tui
 ```
 
-Or for a scripted view, tail the gateway's JSONL fan-out:
+Or take a scripted snapshot from mandatory SQLite event history:
 
 ```bash
-tail -f ~/.defenseclaw/gateway.jsonl | jq 'select(.connector == "claudecode")'
+defenseclaw-gateway audit export --limit 200 --output - \
+  | jq 'select(.connector == "claudecode")'
 ```
 
 In Claude Code, ask the assistant to run any tool call (e.g. "list files in this directory"). New rows should appear within a second or two. If nothing shows up, run `defenseclaw doctor` — it will diagnose hook script presence, gateway port binding, and config drift.
@@ -104,10 +105,11 @@ defenseclaw alerts --limit 10
 1   CRITICAL   2026-05-08 14:02:11   block   rm -rf /var/tmp/defenseclaw-demo-empty   CMD-RM-RF
 ```
 
-Use `defenseclaw alerts --show 1` for the full record (rule path, scanner, evidence). Or live-tail the JSONL fan-out filtered to high-severity rows:
+Use `defenseclaw alerts --show 1` for the full record (rule path, scanner,
+evidence). For a scriptable SQLite snapshot filtered to high-severity rows:
 
 ```bash
-tail -f ~/.defenseclaw/gateway.jsonl \
+defenseclaw-gateway audit export --limit 200 --output - \
   | jq 'select(.connector == "claudecode" and (.severity == "HIGH" or .severity == "CRITICAL"))'
 ```
 

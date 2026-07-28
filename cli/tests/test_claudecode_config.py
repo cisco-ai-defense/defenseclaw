@@ -24,12 +24,15 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw import connector_paths
 
 from tests.connector_fixtures import make_claudecode_settings
+from tests.environment import isolated_home_env
 
 
 class _IsolatedHome:
@@ -37,21 +40,17 @@ class _IsolatedHome:
 
     def __init__(self) -> None:
         self._tmp: tempfile.TemporaryDirectory | None = None
-        self._prev_home: str | None = None
         self.home: str = ""
 
     def __enter__(self) -> str:
         self._tmp = tempfile.TemporaryDirectory(prefix="dc-cc-")
         self.home = self._tmp.name
-        self._prev_home = os.environ.get("HOME")
-        os.environ["HOME"] = self.home
+        self._env = patch.dict(os.environ, isolated_home_env(self.home), clear=False)
+        self._env.start()
         return self.home
 
     def __exit__(self, *exc):
-        if self._prev_home is None:
-            os.environ.pop("HOME", None)
-        else:
-            os.environ["HOME"] = self._prev_home
+        self._env.stop()
         if self._tmp is not None:
             self._tmp.cleanup()
 
@@ -60,7 +59,7 @@ class MakeClaudeCodeSettingsShapeTests(unittest.TestCase):
     def test_default_seeds_empty_hooks_and_mcp(self):
         with _IsolatedHome() as home:
             path = make_claudecode_settings(home)
-            self.assertTrue(path.endswith(".claude/settings.json"))
+            self.assertEqual(Path(path).parts[-2:], (".claude", "settings.json"))
             with open(path) as fh:
                 doc = json.load(fh)
             self.assertEqual(doc["hooks"], [])

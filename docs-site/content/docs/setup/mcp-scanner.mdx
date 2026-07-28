@@ -110,7 +110,7 @@ Just like skills, MCP scanning is most valuable as part of an admission pipeline
   </Step>
 </Steps>
 
-If you only want one-shot scans (no watcher), keep `setup guardrail`'s admission off and run `defenseclaw mcp scan --all` from CI or a daily cron. The findings still flow to the same audit sinks.
+If you only want one-shot scans (no watcher), keep `setup guardrail`'s admission off and run `defenseclaw mcp scan --all` from CI or a daily cron. The findings still enter mandatory local history and every matching v8 observability destination.
 
 ## Configure the action mapping
 

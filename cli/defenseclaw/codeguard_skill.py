@@ -318,7 +318,11 @@ def _makedirs_owner_only(path: str, *, stop_at: str = "") -> None:
             # (typically permissions on the parent), instead of
             # silently failing to archive.
             raise
-        if not existed:
+        if not existed and os.name == "nt":
+            from defenseclaw.file_permissions import make_private_directory
+
+            make_private_directory(comp)
+        elif not existed:
             try:
                 os.chmod(comp, 0o700)
             except OSError:

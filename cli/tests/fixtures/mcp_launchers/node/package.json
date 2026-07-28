@@ -1,0 +1,8 @@
+{
+  "name": "defenseclaw-mcp-launcher-fixture",
+  "version": "1.0.1",
+  "private": true,
+  "bin": {
+    "defenseclaw-mcp-launcher-fixture": "server.js"
+  }
+}

@@ -5,14 +5,19 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 )
 
@@ -38,8 +43,11 @@ func TestHandleListProviders_ReturnsMergedRegistry(t *testing.T) {
 	prov := &mockProvider{}
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "action")
+	proxy.gatewayToken = "test-token"
+	proxy.skipAuthForTest = false
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/config/providers", nil)
+	req.Header.Set("X-DC-Auth", "Bearer test-token")
 	rec := httptest.NewRecorder()
 	proxy.handleListProviders(rec, req)
 
@@ -83,6 +91,183 @@ func TestHandleListProviders_RejectsNonGET(t *testing.T) {
 	proxy.handleListProviders(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+}
+
+func sidecarProviderTestHandler(token string) http.Handler {
+	cfg := &config.Config{Gateway: config.GatewayConfig{Token: token}}
+	api := NewAPIServer("127.0.0.1:29871", nil, nil, nil, nil, cfg)
+	mux := http.NewServeMux()
+	api.registerProviderRoutes(mux)
+	return api.tokenAuth(api.apiCSRFProtect(mux))
+}
+
+func TestSidecarProviderRoutes_RequireAuthWithoutProxyListener(t *testing.T) {
+	handler := sidecarProviderTestHandler("sidecar-token")
+	for _, tc := range []struct {
+		name   string
+		header string
+		want   int
+	}{
+		{name: "missing", want: http.StatusUnauthorized},
+		{name: "invalid", header: "Bearer wrong", want: http.StatusUnauthorized},
+		{name: "valid x-dc-auth", header: "Bearer sidecar-token", want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v1/config/providers", nil)
+			if tc.header != "" {
+				req.Header.Set("X-DC-Auth", tc.header)
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestSidecarProviderReload_UpdatesRegistryWithoutProxyListener(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "custom-providers.json")
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", path)
+	if err := ReloadProviderRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", "")
+		_ = ReloadProviderRegistry()
+	})
+
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"SidecarOnly","domains":["sidecar-only.test"]}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	handler := sidecarProviderTestHandler("sidecar-token")
+	req := httptest.NewRequest(http.MethodPost, "/v1/config/providers/reload", nil)
+	req.Header.Set("Authorization", "Bearer sidecar-token")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DefenseClaw-Client", "test")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	if !isKnownProviderDomain("https://sidecar-only.test/v1/chat/completions") {
+		t.Fatal("sidecar provider reload did not update the in-memory registry")
+	}
+}
+
+func TestProviderManagementHookOnlyIntegration(t *testing.T) {
+	dir := t.TempDir()
+	overlayPath := filepath.Join(dir, "custom-providers.json")
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", overlayPath)
+	if err := ReloadProviderRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", "")
+		_ = ReloadProviderRegistry()
+	})
+
+	reservePort := func() int {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+		if err := ln.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return port
+	}
+	apiPort := reservePort()
+	proxyPort := reservePort()
+	addr := fmt.Sprintf("127.0.0.1:%d", apiPort)
+	cfg := &config.Config{Gateway: config.GatewayConfig{Token: "integration-token"}}
+	api := NewAPIServer(addr, NewSidecarHealth(), nil, nil, nil, cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- api.Run(ctx) }()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	baseURL := "http://" + addr
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, err := client.Get(baseURL + "/health")
+		if err == nil {
+			_ = resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("sidecar API did not start on non-default port %d: %v", apiPort, err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	reload := func(providerName, domain string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"providers":[{"name":%q,"domains":[%q]}]}`, providerName, domain)
+		if err := os.WriteFile(overlayPath, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/config/providers/reload", strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-DC-Auth", "Bearer integration-token")
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-DefenseClaw-Client", "integration-test")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("reload status = %d", resp.StatusCode)
+		}
+	}
+
+	reload("IntegrationProvider", "first.integration.test")
+	reload("IntegrationProvider", "second.integration.test")
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/v1/config/providers", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer integration-token")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list status = %d", resp.StatusCode)
+	}
+	var registry providersListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&registry); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, provider := range registry.Providers {
+		if provider.Name == "IntegrationProvider" && len(provider.Domains) == 1 && provider.Domains[0] == "second.integration.test" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("re-added provider missing from live registry: %+v", registry.Providers)
+	}
+
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", proxyPort), 200*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatalf("guardrail proxy port %d unexpectedly opened", proxyPort)
+	}
+
+	cancel()
+	select {
+	case <-errCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("sidecar API did not stop")
 	}
 }
 

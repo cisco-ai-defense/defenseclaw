@@ -1,0 +1,170 @@
+---
+title: Capabilities and commands
+description: Native Windows capability status and the complete public DefenseClaw CLI and gateway command-family inventory.
+keywords:
+  - DefenseClaw Windows capability matrix
+  - DefenseClaw Windows CLI
+  - defenseclaw commands Windows
+  - defenseclaw-gateway commands Windows
+---
+
+Command registration is not the same as Windows certification. This page
+separates what the installed binaries expose from the native Windows behavior
+the release actually qualifies.
+
+## Capability matrix
+
+| Capability | Status | Native Windows boundary |
+| --- | --- | --- |
+| Codex and Claude Code connector setup | **Supported** | Same-user native agent, native hook executable, authenticated loopback gateway. |
+| Cursor, Windsurf, Gemini CLI, Copilot CLI, Antigravity, OpenCode, and Hermes setup | **Not certified** | Cross-platform setup code exists, but the native Windows release does not qualify it. |
+| OpenHands, OmniGent, OpenClaw, and ZeptoClaw setup | **Unsupported** | Their required WSL, terminal/sandbox, or proxy topology is not hosted by native Windows DefenseClaw. |
+| Python CLI | **Supported** | Packaged launcher and embedded runtime; PowerShell and cmd. Individual optional/network subcommands retain their caveats below. |
+| TUI | **Supported** | Native console input, UTF-8 output, clipboard support, managed process cancellation, and safe fallback when redraw is unavailable. |
+| Gateway start/status/restart/stop | **Supported** | Detached current-user process with authenticated PID/start/executable identity. Not a Windows service. |
+| Logon startup | **Supported** | Installer-owned HKCU Run value and no-console startup helper when a connector is configured. |
+| Watchdog | **Limited** | Config-enabled detached process with protected identity. Not a service or Scheduled Task. |
+| Observe and action modes | **Supported** | Action applies only to declared connector/event response surfaces. |
+| Fail open/fail closed | **Supported** | Effective connector setting covers transport and invalid response failures. Internal evaluator panic remains a reported fail-open boundary. |
+| Native hooks | **Supported** | `defenseclaw-hook.exe`; no Bash, cmd wrapper, `jq`, or proxy is required. |
+| Native OTLP ingress | **Supported** | Codex logs/metrics/traces; Claude Code logs/metrics with traces disabled. Observation only. |
+| Mandatory local audit | **Supported** | SQLite persists locally even without an outbound destination. |
+| Remote telemetry destinations | **Limited** | Supported when explicitly configured and reachable; credentials, network policy, and destination capabilities remain operator responsibilities. |
+| Skills, plugins, MCPs, agents, and command discovery | **Supported** | Scans the supported connectors' documented native roots. Discovery is not proof an asset is safe. |
+| Skill and MCP scanning | **Supported** | Packaged scanners are included. Remote URL/registry scans require optional network access. |
+| CodeGuard | **Limited** | Explicit opt-in; Codex skill and Claude Code plugin installation may need the agent/network. It is never silently installed. |
+| Skill runtime enable/disable | **Limited** | Exact inventoried identities only, at Codex leading `$skill` selection and Claude Code `UserPromptExpansion`. |
+| Plugin runtime enable/disable | **Limited** | Hard event enforcement for Claude Code expansion; Codex is advisory. |
+| Skill quarantine/restore | **Supported** | Journaled, provenance/hash-checked move and restore. Separate block/disable state survives restore. |
+| Plugin quarantine/restore | **Limited** | Validated filesystem move/restore; no claim of the stronger skill transaction guarantee. |
+| Alerts and local history | **Supported** | Connector-attributed list/show/acknowledge/dismiss and TUI views. |
+| Windows notifications | **Limited** | Native notification broker for an attended Explorer user session; not a service/session-zero delivery guarantee. |
+| Policy create/validate/test/activate | **Supported** | Local policy and firewall evaluation; external judges/providers remain optional configuration. |
+| Status, doctor, config, and version | **Supported** | Safe default output masks secrets; doctor can preview approved repair actions. |
+| Connector/global enable and disable | **Supported** | Restart reconciles runtime state. `--no-restart` can leave visible desired/runtime drift. |
+| Gateway token rotation | **Supported** | Global transactional rotation, all active connectors refreshed, readiness/auth verified, exact prior state restored on failure. |
+| Native automatic upgrade | **Limited** | Only from a source version authorized by the target's signed Windows baseline matrix. No manual downgrade/rollback command. |
+| Fresh/repair/uninstall packaged lifecycle | **Supported** | Signed per-user Setup in a non-elevated interactive user session. |
+| Offline install/servicing | **Limited** | Self-contained Setup after authenticated staging; remote registries/providers/destinations are not offline features. |
+| Local observability and Local Splunk | **Limited** | Optional Hyper-V Docker Desktop/Linux-container path on x64 Pro/Enterprise/Education only. |
+| OpenShell sandbox | **Unsupported** | Linux-only lifecycle. |
+| Model proxy/rerouting for supported connectors | **Not applicable** | Codex and Claude Code keep their direct upstream path; Windows enforcement is hook-native. |
+| POSIX services and hook shells | **Not applicable** | Windows uses native processes, HKCU startup, and the native hook runner. |
+
+## Public `defenseclaw` command inventory
+
+The following groups come from the installed Click command tree. “Limited”
+means the group contains an optional dependency, a connector-specific surface,
+or an advanced operation; it does not mean every listed subcommand is broken.
+
+| Command family | Public subcommands | Windows classification |
+| --- | --- | --- |
+| `agent` | `components`, `history`, `show`; `confidence explain`, `confidence policy default/show/validate`; `discover`; `discovery disable/enable/scan/setup/status`; `processes`; `signatures disable/enable/install/list/validate`; `usage` | **Supported** for local inventory/discovery; external metadata sources are optional. |
+| `aibom` | `scan` | **Supported** local scan. |
+| `alerts` | `acknowledge`, `dismiss`; the group itself lists/shows alerts | **Supported**. |
+| `audit` | `log-activity` | **Supported**. Audit export is on `defenseclaw-gateway`. |
+| `codeguard` | `install`, `install-skill`, `status` | **Limited** explicit opt-in; agent/network requirements apply. |
+| `config` | `path`, `reference`, `show`, `validate` | **Supported**. Do not use `config show --reveal` in diagnostics. |
+| `doctor` | no subcommands | **Supported**. Use `--fix --dry-run` before approving fixes. |
+| `guardrail` | `block-message`, `disable`, `enable`, `fail-mode`, `hilt`; `judge add/list/remove`; `list-packs`; `status` | **Supported** for Codex/Claude Code; event limits still apply. |
+| `init` | no subcommands | **Limited** to supported native connector choices; sandbox setup is unsupported. |
+| `keys` | `check`, `fill-missing`, `list`, `set` | **Supported**, but secret values must not be pasted into support output. |
+| `mcp` | `allow`, `block`, `list`, `scan`, `set`, `unblock`, `unset` | **Supported** for certified connector roots; remote scans are optional network operations. |
+| `migrations` | `reset`, `status`, `unmark` | **Limited** advanced recovery/upgrade surface; do not change markers without a diagnosed reason. |
+| `observability` | `destination test`, `plan` | **Limited** to configured destinations and their network/credential contract. |
+| `plugin` | `allow`, `block`, `disable`, `enable`, `info`, `install`, `list`, `quarantine`, `remove`, `restore`, `scan`, `unblock` | **Limited** by connector runtime-disable and quarantine guarantees. |
+| `policy` | `activate`, `create`, `delete`; `edit actions/firewall/guardrail/scanner`; `list`, `show`, `test`, `validate` | **Supported**. Optional remote judge/provider behavior is separately configured. |
+| `quickstart` | no subcommands | **Limited** to supported native connectors; Windows sandbox/proxy choices are rejected. |
+| `registry` | `add`, `approve`, `edit`, `entries`, `list`, `reject`, `remove`, `require`, `show`, `sync`, `test`, `wizard` | **Limited**; sync/test can require network and registry trust policy. |
+| `reset` | no subcommands | **Supported** but destructive and confirmation-gated. It is not uninstall. |
+| `sandbox` | `init`, `setup` | **Unsupported** on native Windows. |
+| `settings` | `save` | **Supported**. |
+| `setup` | See the complete setup inventory below. | **Limited**: only the explicitly supported connector and optional-feature paths apply on Windows. |
+| `skill` | `allow`, `block`, `disable`, `enable`, `info`, `install`, `list`, `quarantine`, `restore`, `scan`, `search`, `unblock` | **Supported**, with the runtime-disable limits in the capability matrix. |
+| `status` | no subcommands | **Supported**; `--json` includes per-connector runtime posture. |
+| `tool` | `allow`, `block`, `list`, `status`, `unblock` | **Supported** local policy state. |
+| `tui` | no subcommands | **Supported**. |
+| `uninstall` | no subcommands | **Supported**; packaged installs hand off to trusted Setup. |
+| `upgrade` | no subcommands | **Limited** to signed-manifest-authorized Windows sources. |
+| `version` | no subcommands | **Supported**; detects component drift. |
+
+The root also exposes `--version`. With no command, an interactive terminal can
+launch the TUI; scripts should always name the intended command.
+
+### Complete `setup` inventory
+
+The public tree contains:
+
+- Connector aliases: `antigravity`, `claude-code`, `codex`, `copilot`,
+  `cursor`, `geminicli`, `hermes`, `omnigent`, `openclaw`, `opencode`,
+  `openhands`, `windsurf`, `zeptoclaw`.
+- Core setup: `gateway`, `guardrail`, `llm`, `mcp-scanner`, `migrate-llm`,
+  `notifications`, `notifications-set`, `registry`, `remove`, `rotate-token`,
+  `skill-scanner`, `trusted-paths add/list/remove`.
+- Providers and routes: `provider add/list/remove/show`,
+  `observability add/disable/enable/list/remove/test`, and
+  `webhook add/disable/enable/list/remove/show/test`.
+- Galileo: `galileo disable/enable/remove/status/test`.
+- Local observability: `local-observability down/env/logs/reset/status/up/url`.
+- Splunk: the `splunk` setup surface plus
+  `splunk dashboards apply/destroy/plan`.
+
+On native Windows, only `codex` and `claude-code` are certified connector
+aliases. The other aliases remain visible because this is one cross-platform
+CLI; their presence does not override the platform gate. Local observability,
+Splunk, providers, webhooks, Galileo, registries, and remote destinations are
+optional and retain their own prerequisites.
+
+## Public `defenseclaw-gateway` command inventory
+
+| Command family | Public subcommands | Windows classification |
+| --- | --- | --- |
+| `start`, `status`, `restart`, `stop` | no child commands | **Supported** current-user daemon lifecycle. |
+| `watchdog` | `start`, `status`, `stop` | **Limited** config-enabled detached monitor, not an OS service. |
+| `audit` | `export` | **Supported**. Exported content can be sensitive; handle it as audit data. |
+| `connector` | `list-backups`, `reconcile`, `teardown`, `verify` | **Supported** for Codex and Claude Code; low-level operator/recovery surface. |
+| `policy` | `domains`, `evaluate`, `evaluate-firewall`, `reload`, `show`, `validate` | **Supported**. |
+| `provenance` | `show` | **Supported**. |
+| `scan` | `code` | **Supported** CodeGuard/ClawShield source scan. |
+| `enterprise hooks` | `install`, `reconcile`, `uninstall`, `watch` | **Unsupported** as a general public-package guardian. **Limited exception:** administrator-managed Claude Code policy when binaries are separately deployed in a protected machine-owned path; see [Enterprise deployment](/docs/setup/enterprise-deployment#native-windows-claude-code-managed-hooks). |
+| `sandbox` | `exec`, `policy`, `restart`, `shell`, `start`, `status`, `stop` | **Unsupported** on native Windows. |
+| `completion` | `powershell`; also generates `bash`, `fish`, `zsh` scripts | **Supported** for PowerShell. Other shell generators emit text but those shells are outside native Windows certification. |
+
+Hidden `hook`, `notify`, `config-v8`, and `observability-v8` helpers are
+implementation interfaces used by managed launchers and the CLI. They are not
+public operator commands and are intentionally excluded from the inventory.
+
+## Safe common workflows
+
+These commands do not require secret values:
+
+```powershell
+# Identity and health
+defenseclaw version
+defenseclaw-gateway status
+defenseclaw status
+defenseclaw doctor
+
+# Configuration and policy checks
+defenseclaw config validate
+defenseclaw policy validate
+defenseclaw observability plan
+
+# Local inventory and scans
+defenseclaw skill list
+defenseclaw skill scan
+defenseclaw mcp list
+defenseclaw mcp scan
+defenseclaw-gateway scan code .
+
+# Connector posture
+defenseclaw guardrail status
+defenseclaw guardrail fail-mode
+```
+
+The product commands are identical in cmd. PowerShell-specific multiline
+syntax and path expressions in this guide are labeled. Avoid environment-dump
+commands, `config show --reveal`, credential display flags, or copying audit
+and backup trees into a support ticket.
+
+For the cross-platform option reference, see [CLI reference](/docs/reference/cli).

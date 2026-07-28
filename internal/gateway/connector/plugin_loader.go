@@ -120,6 +120,13 @@ func LoadPlugins(dir string) ([]Connector, error) {
 		}
 		return nil, fmt.Errorf("resolve plugin dir %s: %w", dir, err)
 	}
+	info, err := os.Stat(realDir)
+	if err != nil {
+		return nil, fmt.Errorf("stat plugin dir %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("plugin path %s is not a directory", dir)
+	}
 
 	if err := validatePluginRootChain(realDir); err != nil {
 		emitPluginRejection("PLUGIN_ROOT_UNSAFE",

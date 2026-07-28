@@ -1,0 +1,277 @@
+{
+  "contract": "hash-v1",
+  "default_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "default_key_id": "630dcd2966c4",
+  "vectors": [
+    {
+      "name": "ordinary-text",
+      "field_class": "content",
+      "value": "  plain text  ",
+      "normalized": "  plain text  ",
+      "token": "<hashed class=content v=1 key=630dcd2966c4 len=14 hmac=2d6b7af64e4a41bd419181d545f67170bb356bf267d493ae10009a906abd2810>"
+    },
+    {
+      "name": "unicode-nfc",
+      "field_class": "content",
+      "value": "résumé",
+      "normalized": "résumé",
+      "token": "<hashed class=content v=1 key=630dcd2966c4 len=10 hmac=4e01773818a2db95a85bfe10f670f921e42e8275c36d6c2dbee9d2122c16c76c>"
+    },
+    {
+      "name": "unicode13-nfc-combining",
+      "field_class": "content",
+      "value": "Å",
+      "normalized": "Å",
+      "token": "<hashed class=content v=1 key=630dcd2966c4 len=3 hmac=5e0743ce1d3ed7b35a1b9e4b3ae90c6d47bf81ed8810ad85739228cdc0e8ea62>"
+    },
+    {
+      "name": "posix-path",
+      "field_class": "path",
+      "value": "/var//lib/./defenseclaw/../logs/",
+      "normalized": "/var/lib/logs",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=32 hmac=8221373c3324640354d297e2cc74d8d8d867f044778f3af1d5a78aef2c6e27e8>"
+    },
+    {
+      "name": "windows-drive",
+      "field_class": "path",
+      "value": "C:\\Users\\Alice\\..\\Bob\\\\file.txt",
+      "normalized": "c:/Users/Bob/file.txt",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=31 hmac=45ffe1e3ed08763e040a55d7effbd89cece76fea5ff30061043ba04cbe336060>"
+    },
+    {
+      "name": "windows-drive-relative",
+      "field_class": "path",
+      "value": "D:folder\\sub\\..\\file.txt",
+      "normalized": "d:folder/file.txt",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=24 hmac=60a2464a67cc56b10b20df674fb96c13ccc58fc1c9c877f91e77caec2a30727d>"
+    },
+    {
+      "name": "unc-path",
+      "field_class": "path",
+      "value": "\\\\SERVER\\\\Share\\.\\Folder\\..\\Secret.txt",
+      "normalized": "//SERVER/Share/Secret.txt",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=38 hmac=4ecc24f4121951f9971353341f7234c488a0d8b0e8c1df99b20c39a3463ea81b>"
+    },
+    {
+      "name": "unc-root-crossing",
+      "field_class": "path",
+      "value": "\\\\SERVER\\Share\\..\\..\\private\\file.txt",
+      "normalized": "//SERVER/Share/private/file.txt",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=37 hmac=6fd9eab870ab935fe97822cebb8a7d43d558936f95f5d4283d7133535fef4267>"
+    },
+    {
+      "name": "unc-without-share-is-relative",
+      "field_class": "path",
+      "value": "\\\\SERVER\\..\\..\\file.txt",
+      "normalized": "//../file.txt",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=23 hmac=f99965e902272530152acb926eec9870a0b21918807912b629c38f770ee251e3>"
+    },
+    {
+      "name": "relative-parent",
+      "field_class": "path",
+      "value": "../../workspace/./agent/../config.yaml",
+      "normalized": "../../workspace/config.yaml",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=38 hmac=b97a924b660eb8c15e38553f90e54977c77bcb075196651eba12ef9de9a1c379>"
+    },
+    {
+      "name": "absolute-root-crossing",
+      "field_class": "path",
+      "value": "/../../etc/../tmp/",
+      "normalized": "/tmp",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=18 hmac=5523e5bfa4a1a83ce4fe76b08b89277d8a6aed60f4c00e0b2ecd13ad206765df>"
+    },
+    {
+      "name": "uri-full",
+      "field_class": "path",
+      "value": "HTTPS://User:pa%73s@EXAMPLE.COM:443/a/./b/../%7euser/%2fkeep?b=2&a=%7e%2f#secret",
+      "normalized": "https://User:pass@example.com/a/~user/%2Fkeep?b=2&a=~%2F",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=80 hmac=40ffab888a376b0877d15084721b8fea9086a7ef635f3b80bf871886f724bf4d>"
+    },
+    {
+      "name": "uri-query-order",
+      "field_class": "path",
+      "value": "http://Example.COM:80/a/../b?z=last&a=first&a=%41#ignored",
+      "normalized": "http://example.com/b?z=last&a=first&a=A",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=57 hmac=59edf353a76f2d4e7626188a5cd5cf4342d32212635cef9ff08fef6185b74d98>"
+    },
+    {
+      "name": "uri-host-percent-and-default-port",
+      "field_class": "path",
+      "value": "HTTP://EX%2fAMPLE.COM:080/%41/./b",
+      "normalized": "http://ex%2Fample.com/A/b",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=33 hmac=0c5c6c7edc91a9b7f61186c8be202521ec475ab21cabbc6f624fab260263d6d2>"
+    },
+    {
+      "name": "uri-ipv6-literal",
+      "field_class": "path",
+      "value": "HTTP://[2001:DB8::1]:080/a/../b",
+      "normalized": "http://[2001:db8::1]/b",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=31 hmac=cc3d04991cb9dbf72385a566cb939d99767db18ae3df7384dfad1f59a4cca0e6>"
+    },
+    {
+      "name": "uri-ipv4-mapped-ipv6-literal",
+      "field_class": "path",
+      "value": "http://[::ffff:192.0.2.128]/a",
+      "normalized": "http://[::ffff:192.0.2.128]/a",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=29 hmac=3a460d8504bc9439929f04832a6cb8f73b21361fb67b7cda8cfb507e7a76cd9b>"
+    },
+    {
+      "name": "uri-ipv4-embedded-ipv6-literal",
+      "field_class": "path",
+      "value": "http://[64:ff9b::192.0.2.33]/a",
+      "normalized": "http://[64:ff9b::192.0.2.33]/a",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=30 hmac=2dc4d8578a6833f6478c9e7d59ecb1c5c5ee50a64219f0ac921964c809b0f62c>"
+    },
+    {
+      "name": "uri-ipvfuture-literal",
+      "field_class": "path",
+      "value": "http://[v1.fe80]/a",
+      "normalized": "http://[v1.fe80]/a",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=18 hmac=c6534516aaf67da2a24c7d59c8033930f8f4f7c2a61d0c8d47db6557b83046b3>"
+    },
+    {
+      "name": "non-hierarchical-scheme-text-is-lexical",
+      "field_class": "path",
+      "value": "URN:EXAMPLE:a/../b%7e?z=%2f#frag",
+      "normalized": "b%7e?z=%2f#frag",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=32 hmac=3dde219fd4ed586f568d41e919f2fba2bac4cc6cf141a44f04ae37392e7f41f8>"
+    },
+    {
+      "name": "uri-non-http-default-port-preserved",
+      "field_class": "path",
+      "value": "WS://EXAMPLE.COM:80/a/../b",
+      "normalized": "ws://example.com:80/b",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=26 hmac=60cd3916334f6342cc0d84b702e449dd7434354de78702a21ee25978e9692fc3>"
+    },
+    {
+      "name": "uri-encoded-dot-segments",
+      "field_class": "path",
+      "value": "https://EXAMPLE.test/a/%2e/%2E%2E/b",
+      "normalized": "https://example.test/b",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=35 hmac=c4ccb023277f5f417d85becd0221dbb0bf86471340ad2a9b4a26dac2dcfb250f>"
+    },
+    {
+      "name": "uri-zero-padded-https-default-port",
+      "field_class": "path",
+      "value": "https://EXAMPLE.test:0443/a",
+      "normalized": "https://example.test/a",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=27 hmac=08a62f8ced7c977e17e014ffe267c9160532faa6906948cf33376c4d7298b1ab>"
+    },
+    {
+      "name": "uri-zero-padded-nondefault-port",
+      "field_class": "path",
+      "value": "http://EXAMPLE.test:00081/a",
+      "normalized": "http://example.test:00081/a",
+      "token": "<hashed class=path v=1 key=630dcd2966c4 len=27 hmac=0c0896e982f3e6cf8f94aba6e4d0a6a2617ca4df7b9b31895b31e70f7e8cb872>"
+    },
+    {
+      "name": "rotated-key",
+      "field_class": "path",
+      "value": "/var/lib/defenseclaw/state.db",
+      "normalized": "/var/lib/defenseclaw/state.db",
+      "key_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "key_id": "72dbb7336c76",
+      "token": "<hashed class=path v=1 key=72dbb7336c76 len=29 hmac=aaabdba107ec6f54a5a9e7fd8b230b3a757a411fabcf3aa0728f303e58bbf82c>"
+    }
+  ],
+  "error_vectors": [
+    {
+      "name": "uri-invalid-percent",
+      "field_class": "path",
+      "value": "https://example.test/%zz",
+      "error": "normalization_failed"
+    },
+    {
+      "name": "uri-invalid-fragment-percent",
+      "field_class": "path",
+      "value": "https://example.test/path#%",
+      "error": "normalization_failed"
+    },
+    {
+      "name": "uri-space-in-path",
+      "field_class": "path",
+      "value": "https://example.test/a path",
+      "error": "normalization_failed"
+    },
+    {
+      "name": "uri-unclosed-ip-literal",
+      "field_class": "path",
+      "value": "https://[broken/path",
+      "error": "normalization_failed"
+    },
+    {
+      "name": "uri-invalid-ip-literal",
+      "field_class": "path",
+      "value": "https://[broken]/path",
+      "error": "normalization_failed"
+    },
+    {
+      "name": "uri-nonnumeric-port",
+      "field_class": "path",
+      "value": "https://example.test:port/path",
+      "error": "normalization_failed"
+    },
+    {
+      "name": "uri-missing-authority",
+      "field_class": "path",
+      "value": "https://",
+      "error": "normalization_failed"
+    },
+    {
+      "name": "uri-empty-host",
+      "field_class": "path",
+      "value": "https:///private",
+      "error": "normalization_failed"
+    },
+    {
+      "name": "uri-port-without-host",
+      "field_class": "path",
+      "value": "https://:443/path",
+      "error": "normalization_failed"
+    },
+    {
+      "name": "uri-empty-port",
+      "field_class": "path",
+      "value": "https://example.test:/private",
+      "error": "normalization_failed"
+    },
+    {
+      "name": "uri-ip-literal-empty-port",
+      "field_class": "path",
+      "value": "https://[::1]:/path",
+      "error": "normalization_failed"
+    },
+    {
+      "name": "uri-non-ascii-host",
+      "field_class": "path",
+      "value": "https://exämple.test/private",
+      "error": "normalization_failed"
+    },
+    {
+      "name": "unicode-after-13",
+      "field_class": "content",
+      "value": "🫠",
+      "error": "unicode_repertoire"
+    },
+    {
+      "name": "key-too-short",
+      "field_class": "content",
+      "value": "private-value",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e",
+      "error": "invalid_key"
+    },
+    {
+      "name": "key-too-long",
+      "field_class": "content",
+      "value": "private-value",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "error": "invalid_key"
+    },
+    {
+      "name": "unsupported-field-class",
+      "field_class": "unknown",
+      "value": "private-value",
+      "error": "unsupported_class"
+    }
+  ]
+}

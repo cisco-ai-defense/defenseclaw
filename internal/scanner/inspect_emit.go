@@ -11,15 +11,13 @@
 package scanner
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
-
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 )
 
 // InspectFinding is the scanner-package-neutral input shape that
@@ -33,7 +31,8 @@ import (
 // AID lane, asset policy) populate it from their own
 // detector-specific structures (gateway.RuleFinding, AID
 // classifications, config.AssetPolicyDecision, etc.) and pass
-// already-redacted strings — EmitInspectFindings does not redact.
+// source-backed strings. Redaction is deliberately deferred to the canonical
+// v8 destination projection.
 type InspectFinding struct {
 	// RuleID is the stable detection rule identifier. Empty means
 	// "let EnsureRuleID synthesize from scanner+category+title".
@@ -41,8 +40,8 @@ type InspectFinding struct {
 	// Title is a short human-readable label. May be displayed
 	// in TUI / dashboards.
 	Title string
-	// Description is the long form. Caller must redact before
-	// passing in; EmitInspectFindings will not redact again.
+	// Description is the source-supplied long form. It remains unredacted until
+	// the canonical v8 destination projection.
 	Description string
 	// Severity is the canonical CRITICAL|HIGH|MEDIUM|LOW|INFO.
 	Severity Severity
@@ -54,20 +53,19 @@ type InspectFinding struct {
 	// Confidence is the detector's self-reported certainty in
 	// [0,1]. Zero means "not computed" and is omitted on the wire.
 	Confidence float64
-	// Evidence is the matched literal (already redacted by the
-	// caller via redaction.ForSinkEvidence). EmitInspectFindings
-	// turns it into ContentFingerprint = sha256(evidence)[:8] so
-	// correlator can match the same value across turns without
-	// persisting the cleartext.
+	// Evidence is a bounded matched excerpt, not the complete prompt, response,
+	// tool payload, or file. EmitInspectFindings retains it as the canonical
+	// evidence summary and also derives ContentFingerprint = sha256(evidence)[:8]
+	// so the correlator can match the same value across turns.
 	Evidence string
-	// Location is the file/tool/source location. Caller must
-	// redact path/line if applicable.
+	// Location is the file/tool/source location. The v8 field classification
+	// causes path redaction to be applied independently per destination.
 	Location string
 	// LineNumber is the 1-based source line; nil when not
 	// meaningful.
 	LineNumber *int
-	// Remediation is human-readable fix guidance. Caller must
-	// redact.
+	// Remediation is source- or rule-catalog-supplied human-readable guidance.
+	// The adapter never asks a model to invent it.
 	Remediation string
 	// ToolCapabilityClass labels what kind of tool this finding
 	// attached to (read_fs / write_fs / exec_shell / network_fetch
@@ -84,6 +82,10 @@ type InspectFinding struct {
 // invocation, one mid-stream check, one tool-call-inspect, one
 // watcher rescan) and hand it to EmitInspectFindings.
 type InspectFindingSource struct {
+	// ScanID is an optional caller-minted UUID used when the enclosing trace
+	// must carry the durable scan join before this function persists findings.
+	// Empty preserves the normal EmitScanResult allocation behavior.
+	ScanID string
 	// Scanner is one of the runtime-finding enum values defined
 	// in NormalizeScannerEnum: hook-rules | inline-codeguard |
 	// ai-defense | asset-policy | tool-call-inspect | inspect-http
@@ -124,35 +126,16 @@ type InspectFindingSource struct {
 	ScanError string
 }
 
-// EmitInspectFindings fans the source into the existing scanner
-// emission pipeline: EmitScanResult writes scan_results +
-// scan_findings, emits EventScan + N×EventScanFinding, records
-// defenseclaw_scan_findings_by_rule_total, and (when session +
-// agent_instance_id are populated) runs the lethal-trifecta
-// correlator. Returns the evaluation_id (newly generated when the
-// caller passed empty) and the underlying scan_id for the caller
-// to stamp on its audit row.
-//
-// The function is intentionally tolerant: a nil writer / nil
-// persistence / nil telemetry each disable that surface. The only
-// hard requirement is a non-empty Scanner value (so the writer's
-// schema gate doesn't drop the event).
-func EmitInspectFindings(
-	ctx context.Context,
-	w *gatewaylog.Writer,
-	pers ScanPersistence,
-	tel ScanTelemetry,
-	src InspectFindingSource,
-	agent AgentIdentity,
-) (evaluationID, scanID string, err error) {
+// BuildInspectScanResult converts one runtime inspection into the canonical
+// scanner result consumed by the v8 audit logger. Keeping this adaptation
+// independent from delivery lets live gateway producers use one generated v8
+// pipeline without reconstructing findings or losing caller-provided
+// evaluation and scan identifiers.
+func BuildInspectScanResult(src InspectFindingSource) (evaluationID string, result *ScanResult) {
 	evaluationID = strings.TrimSpace(src.EvaluationID)
 	if evaluationID == "" {
 		evaluationID = uuid.New().String()
 	}
-	// Propagate evaluation_id onto the AgentIdentity so
-	// EmitScanResult stamps it on every emitted payload + DB row
-	// without each caller having to set it themselves.
-	agent.EvaluationID = evaluationID
 
 	if strings.TrimSpace(src.Scanner) == "" {
 		// Defensive — keep the writer's schema gate happy; the
@@ -168,7 +151,8 @@ func EmitInspectFindings(
 		ts = time.Now().UTC()
 	}
 
-	result := &ScanResult{
+	result = &ScanResult{
+		ScanID:     src.ScanID,
 		Scanner:    src.Scanner,
 		Target:     src.Target,
 		Timestamp:  ts,
@@ -183,14 +167,12 @@ func EmitInspectFindings(
 			result.Findings = append(result.Findings, adaptInspectFinding(in, src.Scanner))
 		}
 	}
-
-	scanID, err = EmitScanResult(ctx, w, pers, tel, result, agent)
-	return evaluationID, scanID, err
+	return evaluationID, result
 }
 
-// adaptInspectFinding maps the gateway-package-neutral
-// InspectFinding into the existing scanner.Finding shape that
-// EmitScanResult understands. Caller is responsible for redaction.
+// adaptInspectFinding maps the gateway-package-neutral InspectFinding into the
+// existing scanner.Finding shape that EmitScanResult understands. It bounds
+// source evidence but intentionally does not redact it; v8 routing owns that.
 func adaptInspectFinding(in InspectFinding, scannerName string) Finding {
 	severity := in.Severity
 	if severity == "" {
@@ -223,9 +205,24 @@ func adaptInspectFinding(in InspectFinding, scannerName string) Finding {
 		ExternalEndpoint:    in.ExternalEndpoint,
 	}
 	if strings.TrimSpace(in.Evidence) != "" {
+		f.EvidenceSummary = boundedInspectEvidenceSummary(in.Evidence)
 		f.ContentFingerprint = evidenceFingerprint(in.Evidence)
 	}
 	return f
+}
+
+const maxInspectEvidenceSummaryBytes = 4096
+
+func boundedInspectEvidenceSummary(value string) string {
+	value = strings.TrimSpace(strings.ToValidUTF8(value, "\uFFFD"))
+	if len(value) <= maxInspectEvidenceSummaryBytes {
+		return value
+	}
+	cut := maxInspectEvidenceSummaryBytes
+	for cut > 0 && !utf8.ValidString(value[:cut]) {
+		cut--
+	}
+	return value[:cut]
 }
 
 // clampConfidence pins the detector's reported score into the
@@ -243,11 +240,11 @@ func clampConfidence(c float64) float64 {
 	}
 }
 
-// evidenceFingerprint returns the first 8 hex chars of
-// sha256(evidence) — the same fingerprint shape the correlator
-// already reads via ScanFinding.ContentFingerprint. Caller must
-// redact the evidence string before passing it in; we hash
-// whatever they hand us.
+// evidenceFingerprint returns the first 8 hex chars of sha256(evidence) — the
+// same fingerprint shape the correlator already reads via
+// ScanFinding.ContentFingerprint. It hashes the source excerpt before any
+// destination projection so correlation remains stable across redaction
+// profiles.
 func evidenceFingerprint(evidence string) string {
 	sum := sha256.Sum256([]byte(evidence))
 	return hex.EncodeToString(sum[:])[:8]

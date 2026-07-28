@@ -43,7 +43,9 @@ long-term archival or customer-managed production path.
 - `build/`
   - generated app archive location
 - [package_local_mode_app.sh](package_local_mode_app.sh)
-  - packages the app source into `build/defenseclaw_local_mode.tgz`
+  - packages the app source into `build/defenseclaw_local_mode.tgz` on the
+    macOS/Linux bridge path; native Windows performs deterministic packaging
+    in Python and never invokes this shell launcher
 - `../s3_exporter/`
   - optional local sidecar that exports batches from local Splunk to S3 as
     normalized JSONL.GZ plus manifests
@@ -92,6 +94,9 @@ That means:
 - alerts are disabled in Free mode
 - no local Splunk user bootstrap inside the bundle
 - no credential prompt for Splunk Web in the default local profile
+- `SPLUNK_PASSWORD` remains a cryptographically random, protected
+  container-bootstrap requirement; it is not a Splunk Free Web login and is
+  revealed only through `defenseclaw setup splunk --show-credentials`
 - if someone needs Enterprise behavior later, they must install a real Enterprise license
 
 For more detail on the Free-tier behavior and limits, see

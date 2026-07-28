@@ -64,10 +64,8 @@ defenseclaw_harden_resources
 defenseclaw_harden_env
 
 # Fail mode governs response-layer failures (4xx, bad JSON, missing
-# action). Transport failures (gateway unreachable / 5xx) are handled
-# separately by fail_unreachable below — they ALWAYS allow unless the
-# operator has set DEFENSECLAW_STRICT_AVAILABILITY=1, because a
-# DefenseClaw outage must not brick the user's agent. Set BEFORE the
+# action) and transport failures (gateway unreachable / timeout / 5xx).
+# DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override. Set BEFORE the
 # missing-token check so defenseclaw_handle_missing_token below has a
 # stable FAIL_MODE to log against.
 FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
@@ -114,7 +112,7 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 
 # Transport-layer failure: gateway is unreachable, the connection was
 # refused, the request timed out, or the gateway answered with 5xx.
-# Always allow unless the operator opted into strict availability.
+# Follow FAIL_MODE; strict availability is an additional force-closed override.
 fail_unreachable() {
   defenseclaw_log_hook_failure codex codex-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "codex tool" "$1"
@@ -187,9 +185,13 @@ if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
 fi
 
-ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
+ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
+case "$ACTION" in
+  allow|block|confirm) ;;
+  *) fail_response "invalid or missing action in gateway response" ;;
+esac
 
 # Codex's hook protocol is strictly EITHER structured JSON on stdout
 # with exit 0 (Codex parses the decision from the JSON) OR exit 2

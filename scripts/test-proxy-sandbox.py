@@ -726,6 +726,7 @@ def test_post_call_guardrail(sidecar_base: str, r: Results) -> None:
 
     # 10a. Report a clean verdict — should succeed
     code, body = http_post(url, {
+        "evaluation_id": "sandbox-clean-completion",
         "direction": "completion",
         "model": "test-model",
         "action": "allow",
@@ -741,6 +742,7 @@ def test_post_call_guardrail(sidecar_base: str, r: Results) -> None:
 
     # 10b. Report a blocked verdict — should succeed
     code, body = http_post(url, {
+        "evaluation_id": "sandbox-blocked-completion",
         "direction": "completion",
         "model": "test-model",
         "action": "block",
@@ -786,6 +788,7 @@ def test_post_call_guardrail(sidecar_base: str, r: Results) -> None:
     # 10e. OPA guardrail evaluate — local scan result
     eval_url = f"{sidecar_base}/v1/guardrail/evaluate"
     code, body = http_post(eval_url, {
+        "evaluation_id": "sandbox-opa-evaluate",
         "direction": "prompt",
         "model": "claude-opus",
         "mode": "observe",

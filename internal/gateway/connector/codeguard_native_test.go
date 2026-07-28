@@ -19,10 +19,23 @@ package connector
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestConnectorEnvHomeDirResolvesRelativeOverride(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("CODEX_HOME", "relative-codex-home")
+
+	want := filepath.Join(root, "relative-codex-home")
+	if got := codexHomeDir(); got != want {
+		t.Fatalf("codexHomeDir() = %q, want %q", got, want)
+	}
+}
 
 func TestCodexCodeGuardSkillInstallCopiesSoftwareSecurity(t *testing.T) {
 	dir := t.TempDir()
@@ -133,19 +146,23 @@ func TestClaudeCodeCodeGuardPluginInstallSkipsWhenAlreadyInstalled(t *testing.T)
 func installFakeClaude(t *testing.T, dir string) {
 	t.Helper()
 	binDir := filepath.Join(dir, "bin")
-	script := filepath.Join(binDir, "claude")
-	writeTestFile(t, script, `#!/bin/sh
-printf '%s\n' "$*" >> "$DEFENSECLAW_FAKE_CLAUDE_LOG"
-if [ "$1" = "plugin" ] && [ "$2" = "list" ]; then
-  if [ -n "$DEFENSECLAW_FAKE_CLAUDE_LIST" ]; then
-    printf '%s\n' "$DEFENSECLAW_FAKE_CLAUDE_LIST"
-  fi
-  exit 0
-fi
-exit 0
+	name := "claude"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	source := filepath.Join(binDir, "main.go")
+	writeTestFile(t, source, `package main
+import ("fmt"; "os"; "strings")
+func main() {
+  f, err := os.OpenFile(os.Getenv("DEFENSECLAW_FAKE_CLAUDE_LOG"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+  if err != nil { panic(err) }
+  _, _ = fmt.Fprintln(f, strings.Join(os.Args[1:], " "))
+  _ = f.Close()
+  if len(os.Args) >= 3 && os.Args[1] == "plugin" && os.Args[2] == "list" { fmt.Println(os.Getenv("DEFENSECLAW_FAKE_CLAUDE_LIST")) }
+}
 `)
-	if err := os.Chmod(script, 0o755); err != nil {
-		t.Fatalf("chmod fake claude: %v", err)
+	if output, err := exec.Command("go", "build", "-o", filepath.Join(binDir, name), source).CombinedOutput(); err != nil {
+		t.Fatalf("build fake claude: %v\n%s", err, output)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }

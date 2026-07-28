@@ -25,6 +25,10 @@ import (
 )
 
 var fallbackWriter io.Writer = os.Stderr
+var notifySendLookPath = exec.LookPath
+var notifySendRun = func(path string, args ...string) error {
+	return exec.Command(path, args...).Run()
+}
 
 // sendPlatform delivers the notification via libnotify's notify-send
 // CLI. notify-send has no native subtitle field, so when one is set
@@ -32,7 +36,7 @@ var fallbackWriter io.Writer = os.Stderr
 // writer in notify.go already preserves the structured form for
 // non-display environments.
 func sendPlatform(n Notification) error {
-	path, err := exec.LookPath("notify-send")
+	path, err := notifySendLookPath("notify-send")
 	if err != nil {
 		return err
 	}
@@ -44,5 +48,5 @@ func sendPlatform(n Notification) error {
 			body = n.Subtitle + " — " + body
 		}
 	}
-	return exec.Command(path, n.Title, body).Run()
+	return notifySendRun(path, n.Title, body)
 }

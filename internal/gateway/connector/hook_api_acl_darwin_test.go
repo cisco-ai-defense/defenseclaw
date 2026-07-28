@@ -7,10 +7,13 @@
 package connector
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestHookAPITokenRejectsWriteCapableDarwinACL(t *testing.T) {
@@ -36,5 +39,15 @@ func TestHookAPITokenDarwinACLIgnoresAllowInPathname(t *testing.T) {
 	}
 	if err := hookAPIValidateDirectoryACL(path); err != nil {
 		t.Fatalf("pathname text was mistaken for an ACL entry: %v", err)
+	}
+}
+
+func TestHookAPITokenDarwinACLInspectionTimesOut(t *testing.T) {
+	err := hookAPIValidateDirectoryACLWithInspector("/fixture", time.Millisecond, func(ctx context.Context, _ string) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	if err == nil || !strings.Contains(err.Error(), "timed out after 1ms") {
+		t.Fatalf("ACL inspection error = %v, want bounded timeout", err)
 	}
 }
