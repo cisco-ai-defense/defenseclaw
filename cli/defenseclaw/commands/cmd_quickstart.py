@@ -235,6 +235,10 @@ def quickstart_cmd(
             hilt_min_severity=hilt_min_severity or "",
         )
     )
+    _require_operational_success(
+        report,
+        gateway_requested=not skip_gateway,
+    )
     if json_summary:
         payload = report.to_dict()
         if connector_source:
@@ -248,6 +252,25 @@ def quickstart_cmd(
         _render_first_run_report(report, CLIRenderer())
     if report.status == "needs_attention":
         sys.exit(1)
+
+
+def _require_operational_success(report, *, gateway_requested: bool) -> None:
+    """Make quickstart's requested operational outcomes command-fatal.
+
+    Bootstrap warnings are normally advisory so interactive first-run flows
+    can finish with remediation hints. Quickstart is an automation boundary:
+    its selected connector must be established, and a requested gateway start
+    must leave the sidecar running. Promote only those warnings before
+    rendering so human output, JSON, and the process exit status agree.
+    """
+    from defenseclaw.bootstrap import _rollup_status
+
+    if gateway_requested:
+        for step in report.setup + report.readiness:
+            if step.name in {"Connector", "Sidecar"} and step.status == "warn":
+                step.status = "fail"
+
+    report.status = _rollup_status(report.setup, report.readiness)
 
 
 def _configured_quickstart_connectors(cfg_mod) -> list[str]:

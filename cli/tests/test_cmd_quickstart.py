@@ -23,6 +23,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
+from defenseclaw.bootstrap import StepResult
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.inventory import agent_discovery
@@ -48,6 +49,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
             env={
                 "DEFENSECLAW_HOME": self.tmp_dir,
                 "HOME": self.home_dir,
+                "USERPROFILE": self.home_dir,
                 "PATH": self.empty_path,
             },
         )
@@ -237,6 +239,147 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         from defenseclaw.config import _normalize_hook_fail_mode
         raw = cfg["guardrail"].get("hook_fail_mode", "")
         self.assertEqual(_normalize_hook_fail_mode(raw), "closed")
+
+    def test_requested_gateway_start_failure_is_nonzero_in_human_and_json(self):
+        def invoke(args):
+            failed_start = StepResult(
+                "Sidecar",
+                "warn",
+                "simulated gateway start failure",
+                "defenseclaw-gateway status",
+            )
+            with (
+                patch(
+                    "defenseclaw.bootstrap._start_gateway_structured",
+                    return_value=failed_start,
+                ),
+                patch("defenseclaw.bootstrap._pid_file_running", return_value=False),
+            ):
+                return self._invoke(args)
+
+        human = invoke(["--connector", "codex"])
+        self.assertEqual(human.exit_code, 1, human.output + (human.stderr or ""))
+        self.assertIn("status=needs_attention", human.output)
+        self.assertIn("simulated gateway start failure", human.output)
+
+        structured = invoke([
+            "--connector",
+            "codex",
+            "--json-summary",
+            "--force",
+        ])
+        self.assertEqual(
+            structured.exit_code,
+            1,
+            structured.output + (structured.stderr or ""),
+        )
+        summary = json.loads(structured.output)
+        self.assertEqual(summary["status"], "needs_attention")
+        sidecars = [
+            step
+            for step in summary["setup"] + summary["readiness"]
+            if step["name"] == "Sidecar"
+        ]
+        self.assertTrue(sidecars)
+        self.assertTrue(all(step["status"] == "fail" for step in sidecars))
+
+    def test_gateway_start_success_but_readiness_failure_is_nonzero(self):
+        with (
+            patch(
+                "defenseclaw.bootstrap._start_gateway_structured",
+                return_value=StepResult("Sidecar", "pass", "started"),
+            ),
+            patch("defenseclaw.bootstrap._pid_file_running", return_value=False),
+        ):
+            result = self._invoke([
+                "--connector",
+                "codex",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 1, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["status"], "needs_attention")
+        readiness = {step["name"]: step for step in summary["readiness"]}
+        self.assertEqual(readiness["Sidecar"]["status"], "fail")
+        self.assertEqual(readiness["Sidecar"]["detail"], "not confirmed after start")
+
+    def test_selected_connector_establishment_failure_is_nonzero(self):
+        missing_connector = StepResult(
+            "Connector",
+            "warn",
+            "Codex config not found yet",
+            "defenseclaw setup codex",
+        )
+        with patch(
+            "defenseclaw.bootstrap._connector_readiness",
+            return_value=missing_connector,
+        ), patch(
+            "defenseclaw.bootstrap._start_gateway_structured",
+            return_value=StepResult("Sidecar", "pass", "started"),
+        ), patch(
+            "defenseclaw.bootstrap._pid_file_running",
+            return_value=True,
+        ):
+            result = self._invoke([
+                "--connector",
+                "codex",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 1, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["status"], "needs_attention")
+        readiness = {step["name"]: step for step in summary["readiness"]}
+        self.assertEqual(readiness["Connector"]["status"], "fail")
+        self.assertEqual(readiness["Connector"]["detail"], "Codex config not found yet")
+
+    def test_optional_warning_only_remains_partial_and_zero(self):
+        advisory = [StepResult("Skill scanner", "warn", "optional scanner unavailable")]
+        with (
+            patch("defenseclaw.bootstrap._scanner_availability", return_value=advisory),
+            patch(
+                "defenseclaw.bootstrap._connector_readiness",
+                return_value=StepResult("Connector", "pass", "Codex config found"),
+            ),
+        ):
+            result = self._invoke([
+                "--connector",
+                "codex",
+                "--skip-gateway",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["status"], "partial")
+        self.assertFalse(
+            any(
+                step["status"] == "fail"
+                for step in summary["setup"] + summary["readiness"]
+            )
+        )
+
+    def test_fully_healthy_report_is_ready_and_zero(self):
+        available = [StepResult("Skill scanner", "pass", "found")]
+        with (
+            patch("defenseclaw.bootstrap._scanner_availability", return_value=available),
+            patch(
+                "defenseclaw.bootstrap._connector_readiness",
+                return_value=StepResult("Connector", "pass", "Codex config found"),
+            ),
+            patch("defenseclaw.bootstrap.shutil.which", return_value="available"),
+        ):
+            result = self._invoke([
+                "--connector",
+                "codex",
+                "--skip-gateway",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["status"], "ready")
 
     # --- SU-12: never silently default to codex ------------------------
     def test_no_connector_no_detection_errors_not_codex(self):
