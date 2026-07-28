@@ -1266,6 +1266,10 @@ private-secret-name = "DefenseClaw must remain redacted"
         $setupAcceptanceFunction -match '''pending-reboot''' -and
         $setupAcceptanceFunction -match '''converged''') `
         'native Setup acceptance proves exact 3010 and authenticated same-boot pending cleanup custody'
+    Assert-True ($setupAcceptanceFunction -match
+        '\(\$terminalProperties -join '',''\) -cne ''phase,schema_version''' -and
+        $setupAcceptanceFunction -notmatch '\$legacyJournal\.transaction') `
+        'native Setup acceptance treats the completed journal only as the frozen terminal tombstone'
     Assert-True ($contractFunction -match
         '(?s)/uninstall.*?-AllowedExitCodes @\(3010\).*?setup-contract-uninstall\.log') `
         'packaged connector contract accepts only restart-required full-uninstall success'
