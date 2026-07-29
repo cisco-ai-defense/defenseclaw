@@ -1091,8 +1091,14 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
         # an *enforcement* connector (KNOWN_CONNECTORS) is still a
         # corruption signal and rejects the cache.
         for name in KNOWN_AGENT_KINDS:
-            raw = raw_agents.get(name)
-            if not isinstance(raw, dict):
+            if name not in raw_agents:
+                # Discovery-only kinds may legitimately be missing from a
+                # pre-KNOWN_AGENT_KINDS cache written by an older CLI.
+                # Synthesize a "not installed" default so we don't force
+                # a rescan for every upgraded host on first read after
+                # bump. Absence for an enforcement connector is still a
+                # corruption signal — reject the cache and let the caller
+                # re-scan.
                 if name in KNOWN_CONNECTORS:
                     return None
                 agents[name] = AgentSignal(
@@ -1104,6 +1110,13 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
                     error="",
                 )
                 continue
+            raw = raw_agents[name]
+            if not isinstance(raw, dict):
+                # Entry exists but isn't a dict — that's real corruption
+                # (a scalar / null where a nested object was expected),
+                # not the legacy-cache-missing-a-new-kind case above.
+                # Reject the whole cache and rescan.
+                return None
             agents[name] = AgentSignal(
                 name=str(raw.get("name") or name),
                 installed=bool(raw.get("installed")),

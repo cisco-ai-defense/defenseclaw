@@ -103,6 +103,61 @@ def test_cache_miss_hit_and_ttl_expiry(monkeypatch, tmp_path):
     assert refreshed.agents["claudecode"].installed is True
 
 
+def test_corrupt_cache_entry_forces_rescan_not_synth_default(monkeypatch, tmp_path):
+    """A present-but-malformed cache entry must reject the whole cache.
+
+    Distinguished from an absent legacy entry (older CLI didn't know
+    about a newly-added discovery-only kind), which is synthesised as
+    ``installed=False`` so upgrade hosts don't rescan every read.
+
+    Before the fix, `raw_agents.get(name)` returned `None` for both
+    cases and the loop treated them identically, so a corrupt on-disk
+    entry (scalar / null where a nested object should be) was silently
+    reported as "not installed" until the TTL expired. Now: absent →
+    synth default; present-but-not-a-dict → return None → rescan.
+    """
+    _pin_home(monkeypatch, tmp_path)
+    data_dir = Path(os.environ["DEFENSECLAW_HOME"])
+    data_dir.mkdir(parents=True)
+    # Write a cache with a valid discovery-only entry alongside a
+    # corrupted one. `aider` is a discovery-only kind (in
+    # KNOWN_AGENT_KINDS but NOT KNOWN_CONNECTORS).
+    (data_dir / ad.CACHE_FILENAME).write_text(
+        json.dumps(
+            {
+                "version": ad.CACHE_SCHEMA_VERSION,
+                "scanned_at": "2026-05-04T18:21:00Z",
+                "ttl_seconds": ad.CACHE_TTL_SECONDS,
+                "agents": {
+                    # `aider` is present but a scalar instead of the
+                    # expected dict — that's corruption. Every other
+                    # kind is absent, which would normally be treated
+                    # as legacy-missing.
+                    "aider": "not-a-dict",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ad, "_now_utc", lambda: datetime(2026, 5, 4, 18, 22, tzinfo=timezone.utc))
+    scanned: list[str] = []
+
+    def fake_scan(name: str, **_kwargs) -> ad.AgentSignal:
+        scanned.append(name)
+        return _signal(name)
+
+    monkeypatch.setattr(ad, "_scan_agent", fake_scan)
+
+    disc = ad.discover_agents()
+
+    # Corrupt entry forces a full rescan — cache_hit is False, and
+    # every KNOWN_AGENT_KINDS is scanned (not synthesised).
+    assert disc.cache_hit is False, "corrupt entry silently accepted"
+    assert set(scanned) == set(ad.KNOWN_AGENT_KINDS), (
+        f"corrupt cache did NOT trigger a full rescan: scanned={scanned}"
+    )
+
+
 def test_schema_version_mismatch_rescans(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     data_dir = Path(os.environ["DEFENSECLAW_HOME"])
