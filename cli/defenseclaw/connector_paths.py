@@ -55,7 +55,6 @@ import hashlib
 import json
 import ntpath
 import os
-import re
 import stat
 import subprocess
 import sys
@@ -1814,9 +1813,37 @@ def _strip_jsonc(raw: str) -> str:
                     index += 1
                 index = min(index + 2, len(raw))
                 continue
+        if char == "," and _next_jsonc_significant_char(raw, index + 1) in ("}", "]"):
+            index += 1
+            continue
         out.append(char)
         index += 1
-    return re.sub(r",(?=\s*[}\]])", "", "".join(out))
+    return "".join(out)
+
+
+def _next_jsonc_significant_char(raw: str, index: int) -> str:
+    """Return the next non-whitespace, non-comment JSONC character."""
+
+    while index < len(raw):
+        char = raw[index]
+        if char.isspace():
+            index += 1
+            continue
+        if char == "/" and index + 1 < len(raw):
+            next_char = raw[index + 1]
+            if next_char == "/":
+                index += 2
+                while index < len(raw) and raw[index] not in "\r\n":
+                    index += 1
+                continue
+            if next_char == "*":
+                end = raw.find("*/", index + 2)
+                if end < 0:
+                    return ""
+                index = end + 2
+                continue
+        return char
+    return ""
 
 
 # --- Low-level file/CLI helpers --------------------------------------------

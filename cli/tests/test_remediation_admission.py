@@ -242,18 +242,74 @@ class TestF0541TightenedFirstPartyProvenance(unittest.TestCase):
     def test_amp_policy_plugin_marker_is_exact_and_home_anchored(self):
         marker = ".config/amp/plugins/defenseclaw.ts"
         self.assertIn(marker, self.constraints)
-        self.assertTrue(
-            _matches_provenance(
-                self.constraints,
-                "/home/u/.config/amp/plugins/defenseclaw.ts",
-            )
-        )
+        with tempfile.TemporaryDirectory(prefix="dclaw-amp-home-") as home:
+            with patch.dict(
+                os.environ,
+                {"HOME": home, "USERPROFILE": home},
+            ):
+                self.assertTrue(
+                    _matches_provenance(
+                        self.constraints,
+                        os.path.join(home, *marker.split("/")),
+                    )
+                )
+                self.assertFalse(
+                    _matches_provenance(
+                        self.constraints,
+                        os.path.join(
+                            home,
+                            "attacker",
+                            *marker.split("/"),
+                        ),
+                    )
+                )
+                self.assertFalse(
+                    _matches_provenance(
+                        self.constraints,
+                        os.path.join(
+                            os.path.dirname(home),
+                            "attacker",
+                            *marker.split("/"),
+                        ),
+                    )
+                )
         self.assertFalse(
             _matches_provenance(
                 self.constraints,
                 "/home/u/.config/amp/plugins/untrusted.ts",
             )
         )
+
+    def test_evaluate_admission_scans_amp_marker_outside_resolved_home(self):
+        pe = SimpleNamespace(
+            is_blocked=lambda *a: False,
+            is_allowed=lambda *a: False,
+            is_quarantined=lambda *a: False,
+        )
+        bundled_policies = os.path.join(
+            os.path.dirname(defenseclaw.__file__), "_data", "policies"
+        )
+        with tempfile.TemporaryDirectory(prefix="dclaw-amp-home-") as home:
+            with patch.dict(
+                os.environ,
+                {"HOME": home, "USERPROFILE": home},
+            ):
+                decision = evaluate_admission(
+                    pe,
+                    policy_dir=bundled_policies,
+                    target_type="plugin",
+                    name="defenseclaw",
+                    source_path=os.path.join(
+                        os.path.dirname(home),
+                        "attacker",
+                        ".config",
+                        "amp",
+                        "plugins",
+                        "defenseclaw.ts",
+                    ),
+                )
+        self.assertEqual(decision.verdict, "scan")
+        self.assertEqual(decision.source, "scan-required")
 
 
 # ---------------------------------------------------------------------------

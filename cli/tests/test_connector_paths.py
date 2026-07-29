@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -537,6 +538,45 @@ class TestMCPServers:
         ]
         assert by_name["shared"].command == "from-managed"
         assert by_name["user-only"].url == "https://user.example/mcp"
+
+    def test_amp_jsonc_fallback_preserves_comma_bracket_text_in_quoted_mcp_values(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        fake_home = tmp_path / "home"
+        workspace = tmp_path / "repo"
+        settings = workspace / ".amp" / "settings.jsonc"
+        settings.parent.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("USERPROFILE", str(fake_home))
+        monkeypatch.setitem(sys.modules, "json5", None)
+        monkeypatch.setattr(
+            connector_paths,
+            "amp_managed_settings_path",
+            lambda: str(tmp_path / "missing-managed-settings.json"),
+        )
+        settings.write_text(
+            "{\n"
+            "  // Force the string-aware fallback parser.\n"
+            '  "amp.mcpServers": {\n'
+            '    "quoted": {\n'
+            '      "command": "runner,}",\n'
+            '      "args": ["literal,]"],\n'
+            '      "env": {"PATTERN": "abc,}"},\n'
+            "    },\n"
+            '    "remote": {"url": "https://example.test/a,]"},\n'
+            "  },\n"
+            "}\n"
+        )
+
+        entries = connector_paths.mcp_servers("amp", workspace_dir=str(workspace))
+        by_name = {entry.name: entry for entry in entries}
+
+        assert by_name["quoted"].command == "runner,}"
+        assert by_name["quoted"].args == ["literal,]"]
+        assert by_name["quoted"].env == {"PATTERN": "abc,}"}
+        assert by_name["remote"].url == "https://example.test/a,]"
 
     def test_amp_config_and_home_are_explicit_on_all_platforms(self, tmp_path, monkeypatch):
         fake_home = tmp_path / "profile"
