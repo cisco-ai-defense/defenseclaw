@@ -1959,8 +1959,14 @@ class TestSaveOwnershipBackup(unittest.TestCase):
             stat_paths.append(os.path.normcase(os.path.realpath(path)))
             return real_stat(path, *args, **kwargs)
 
+        # This test covers the parent walk, not host system-binary custody.
         with (
             patch.object(cmd_init_sandbox.os, "stat", side_effect=recording_stat),
+            patch.object(
+                cmd_init_sandbox,
+                "_trusted_privileged_argv",
+                return_value=["/usr/bin/chmod"],
+            ),
             patch.object(cmd_init_sandbox.subprocess, "run", return_value=MagicMock(returncode=0)),
         ):
             cmd_init_sandbox._ensure_parent_traversal(os.path.join(self.oc_home, "target"))
