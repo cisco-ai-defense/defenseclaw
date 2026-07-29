@@ -256,28 +256,38 @@ func TestAIStateStoreV2ToV3Migration_DropsItemLevelCategoriesOnly(t *testing.T) 
 	tmp := t.TempDir()
 	statePath := filepath.Join(tmp, "ai_discovery_state.json")
 
-	// Handcraft a v2 state file: one item-level entry (mcp_server)
-	// that MUST be dropped, one non-item-level entry
-	// (supported_connector) that MUST be preserved.
-	v2 := aiStateFile{
-		Version: 2,
-		Signals: map[string]aiStoredSignal{
-			"mcp-fp-drop": {
-				AISignal: AISignal{
-					SignalID: "mcp-fp-drop",
-					Category: SignalMCPServer,
-					Vendor:   "Cursor",
-				},
-			},
-			"connector-fp-keep": {
-				AISignal: AISignal{
-					SignalID: "connector-fp-keep",
-					Category: SignalSupportedConnector,
-					Vendor:   "Cursor",
-				},
+	// Handcraft a v2 state file: one entry per item-level category
+	// (all MUST be dropped on Load), plus one non-item-level entry
+	// (supported_connector, MUST be preserved). Covering every
+	// item-level category means a regression that accidentally
+	// dropped one category from itemLevelCategories still trips
+	// this test — otherwise a partial revert (e.g. removing only
+	// SignalSkill) would slip through if we only asserted on
+	// mcp_server.
+	//
+	// Fingerprints (the map keys) are unique per category since they
+	// double as our assertion handles.
+	fingerprintsToDrop := map[string]string{
+		"mcp-fp-drop":    SignalMCPServer,
+		"plugin-fp-drop": SignalPlugin,
+		"rule-fp-drop":   SignalRule,
+		"skill-fp-drop":  SignalSkill,
+	}
+	signals := map[string]aiStoredSignal{
+		"connector-fp-keep": {
+			AISignal: AISignal{
+				SignalID: "connector-fp-keep",
+				Category: SignalSupportedConnector,
+				Vendor:   "Cursor",
 			},
 		},
 	}
+	for fp, cat := range fingerprintsToDrop {
+		signals[fp] = aiStoredSignal{
+			AISignal: AISignal{SignalID: fp, Category: cat, Vendor: "Cursor"},
+		}
+	}
+	v2 := aiStateFile{Version: 2, Signals: signals}
 	raw, err := json.Marshal(v2)
 	if err != nil {
 		t.Fatalf("marshal v2 fixture: %v", err)
@@ -291,8 +301,10 @@ func TestAIStateStoreV2ToV3Migration_DropsItemLevelCategoriesOnly(t *testing.T) 
 	if err != nil {
 		t.Fatalf("load v2 state: %v", err)
 	}
-	if _, present := got.Signals["mcp-fp-drop"]; present {
-		t.Errorf("v2->v3 migration: item-level mcp_server entry survived Load; must be dropped")
+	for fp, cat := range fingerprintsToDrop {
+		if _, present := got.Signals[fp]; present {
+			t.Errorf("v2->v3 migration: item-level %s entry %q survived Load; must be dropped", cat, fp)
+		}
 	}
 	if _, present := got.Signals["connector-fp-keep"]; !present {
 		t.Errorf("v2->v3 migration: non-item-level supported_connector entry was dropped; must be preserved")

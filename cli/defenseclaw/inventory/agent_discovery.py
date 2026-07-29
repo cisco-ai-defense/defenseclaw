@@ -673,7 +673,8 @@ def _ai_discovery_trust_config(
     try:
         with open(path, encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
-    except OSError:
+    except (OSError, yaml.YAMLError):
+        # See _ai_discovery_home_dirs for the same fallback rationale.
         raw = {}
     if not isinstance(raw, dict):
         return False, ()
@@ -703,7 +704,15 @@ def _ai_discovery_home_dirs(
     try:
         with open(path, encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
-    except OSError:
+    except (OSError, yaml.YAMLError):
+        # OSError: config.yaml unreadable / absent. YAMLError: file
+        # exists but its contents are malformed (mid-write, hand-edit
+        # that broke indentation, etc.). Either way, fall back to the
+        # empty tuple — the caller then uses the single-tenant $HOME
+        # default. Silently degrading to that fallback is preferable
+        # to raising here: config-parse failures already surface
+        # through the primary Load() path in the sidecar boot, so
+        # this side-channel accessor shouldn't gate discovery.
         return ()
     if not isinstance(raw, dict):
         return ()
