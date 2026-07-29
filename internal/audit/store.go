@@ -3804,6 +3804,7 @@ func (s *Store) InsertNetworkEgressEvent(e NetworkEgressRow) error {
 			e.Details = strings.ReplaceAll(e.Details, rawURL, e.URL)
 		}
 	}
+	e.Details = netguard.ScrubURLsInText(e.Details)
 	if e.ID == "" {
 		e.ID = uuid.New().String()
 	}

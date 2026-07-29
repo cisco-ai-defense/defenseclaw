@@ -48,6 +48,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/google/uuid"
@@ -4146,22 +4147,10 @@ func redactAuthValue(val string) string {
 	return "[set]"
 }
 
-// scrubURLSecrets removes sensitive query parameters (key, api-key, apikey,
-// token) from a URL string before logging.  Returns the original string
-// unmodified when it contains no query string.
+// scrubURLSecrets returns a URL safe for diagnostics. It never changes the URL
+// used for the upstream request.
 func scrubURLSecrets(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.RawQuery == "" {
-		return raw
-	}
-	q := u.Query()
-	for _, k := range []string{"key", "api-key", "apikey", "token"} {
-		if q.Has(k) {
-			q.Set(k, "REDACTED")
-		}
-	}
-	u.RawQuery = q.Encode()
-	return u.String()
+	return netguard.ScrubURLString(raw)
 }
 
 // isOllamaLoopback returns true when targetURL points at a loopback

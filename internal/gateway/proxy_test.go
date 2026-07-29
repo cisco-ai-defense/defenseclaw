@@ -2075,12 +2075,13 @@ func TestScrubURLSecrets(t *testing.T) {
 		want string
 	}{
 		{"no query", "https://api.openai.com/v1/chat/completions", "https://api.openai.com/v1/chat/completions"},
-		{"gemini key", "https://generativelanguage.googleapis.com/models/gemini:generate?key=AIza1234secret", "https://generativelanguage.googleapis.com/models/gemini:generate?key=REDACTED"},
-		{"multiple params", "https://example.com/api?key=secret&alt=sse", "https://example.com/api?alt=sse&key=REDACTED"},
-		{"api-key param", "https://example.com?api-key=secret", "https://example.com?api-key=REDACTED"},
-		{"token param", "https://example.com?token=abc123", "https://example.com?token=REDACTED"},
+		{"gemini key", "https://generativelanguage.googleapis.com/models/gemini:generate?key=AIza1234secret", "https://generativelanguage.googleapis.com/models/gemini:generate?key=%3Credacted%3E"},
+		{"multiple params", "https://example.com/api?key=secret&alt=sse", "https://example.com/api?key=%3Credacted%3E&alt=sse"},
+		{"api-key param", "https://example.com?api-key=secret", "https://example.com?api-key=%3Credacted%3E"},
+		{"token param", "https://example.com?token=abc123", "https://example.com?token=%3Credacted%3E"},
+		{"encoded token param", "https://example.com?tok%65n=abc123", "https://example.com?tok%65n=%3Credacted%3E"},
 		{"no sensitive params", "https://api.openai.com?model=gpt-4", "https://api.openai.com?model=gpt-4"},
-		{"invalid url", "://bad", "://bad"},
+		{"invalid url", "://bad?token=secret", "<unparseable-url>"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

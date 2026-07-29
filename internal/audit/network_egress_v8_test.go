@@ -5,6 +5,7 @@ package audit
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -12,6 +13,7 @@ import (
 )
 
 func TestNetworkEgressV8RuntimeOwnsAllowedAndBlockedLogs(t *testing.T) {
+	const detailsSecret = "network-details-secret"
 	for _, test := range []struct {
 		name      string
 		blocked   bool
@@ -37,7 +39,9 @@ func TestNetworkEgressV8RuntimeOwnsAllowedAndBlockedLogs(t *testing.T) {
 				UserID: "user-1", ToolID: "call-1",
 				Hostname: "api.example.com", URL: "https://api.example.com/v1/chat?api-key=secret",
 				HTTPMethod: "POST", Protocol: "https", DecisionCode: "NETWORK_POLICY_DECISION",
-				PolicyOutcome: "policy evaluated", Details: "matched policy", Blocked: test.blocked,
+				PolicyOutcome: "policy evaluated",
+				Details:       "matched policy https://api.example.com/v1/chat?tok%65n=" + detailsSecret,
+				Blocked:       test.blocked,
 			}
 			if err := logger.LogNetworkEgress(context.Background(), event); err != nil {
 				t.Fatalf("LogNetworkEgress: %v", err)
@@ -83,6 +87,10 @@ func TestNetworkEgressV8RuntimeOwnsAllowedAndBlockedLogs(t *testing.T) {
 			}
 			if _, exists := body["url.full"]; exists {
 				t.Fatalf("egress log unexpectedly retained full URL: %#v", body)
+			}
+			reason, _ := body["defenseclaw.network.reason"].(string)
+			if strings.Contains(reason, detailsSecret) || !strings.Contains(reason, "%3Credacted%3E") {
+				t.Fatalf("profile-none egress reason was not sanitized: %q", reason)
 			}
 		})
 	}

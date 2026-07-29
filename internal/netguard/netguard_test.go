@@ -21,6 +21,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/sensitivequery"
 )
 
 func TestIsPrivateOrReserved(t *testing.T) {
@@ -92,6 +94,31 @@ func TestScrubURL(t *testing.T) {
 			mustHide: []string{"abc123sig", "AKIA"},
 			mustKeep: []string{"api.amazonaws.com"},
 		},
+		{
+			in:       "https://example.test/path?tok%65n=encoded-secret&safe=ok",
+			mustHide: []string{"encoded-secret"},
+			mustKeep: []string{"tok%65n=%3Credacted%3E", "safe=ok"},
+		},
+		{
+			in:       "https://example.test/path?%2574oken=nested-secret;model=safe",
+			mustHide: []string{"nested-secret"},
+			mustKeep: []string{"%2574oken=%3Credacted%3E", "model=safe"},
+		},
+		{
+			in:       "https://example.test/path?token%3Dencoded-secret",
+			mustHide: []string{"encoded-secret"},
+			mustKeep: []string{"redacted=%3Credacted%3E"},
+		},
+		{
+			in:       "https://example.test/path?token%3Dencoded-secret%26safe%3Dok",
+			mustHide: []string{"encoded-secret"},
+			mustKeep: []string{"redacted=%3Credacted%3E"},
+		},
+		{
+			in:       "https://example.test/path?token%3Dsecret=x&safe=ok",
+			mustHide: []string{"token%3Dsecret"},
+			mustKeep: []string{"redacted=%3Credacted%3E", "safe=ok"},
+		},
 	}
 	for _, tc := range cases {
 		got := ScrubURLString(tc.in)
@@ -105,6 +132,114 @@ func TestScrubURL(t *testing.T) {
 				t.Errorf("ScrubURLString(%q) = %q; missing %q", tc.in, got, k)
 			}
 		}
+	}
+}
+
+func TestScrubURLPreservesSafeQueryBytesAndDuplicates(t *testing.T) {
+	raw := "https://example.test/path?model=a%2Fb&tok%65n=first&token=second&model=last#fragment"
+	got := ScrubURLString(raw)
+	want := "https://example.test/path?model=a%2Fb&tok%65n=%3Credacted%3E&token=%3Credacted%3E&model=last#fragment"
+	if got != want {
+		t.Fatalf("ScrubURLString() = %q, want %q", got, want)
+	}
+}
+
+func TestScrubURLMalformedInputNeverReturnsRaw(t *testing.T) {
+	const raw = "://bad?token=do-not-log"
+	got := ScrubURLString(raw)
+	if got != "<unparseable-url>" || strings.Contains(got, "do-not-log") {
+		t.Fatalf("ScrubURLString(%q) = %q", raw, got)
+	}
+}
+
+func FuzzScrubURLStringSensitiveQueryKeys(f *testing.F) {
+	const sentinel = "defenseclaw-query-secret-sentinel"
+	for _, key := range []string{
+		"token", "tok%65n", "%74oken", "api%5Fkey", "X-Amz%2DSignature",
+		"%2574oken", "tok%6Zn", "token%3D" + sentinel,
+	} {
+		f.Add(key)
+	}
+	f.Fuzz(func(t *testing.T, key string) {
+		if len(key) > 256 || strings.ContainsAny(key, "&;=#") {
+			return
+		}
+		sensitive, valid := sensitivequery.Classify(key)
+		if !sensitive && valid {
+			return
+		}
+		got := ScrubURLString("https://example.test/path?" + key + "=" + sentinel)
+		if strings.Contains(got, sentinel) {
+			t.Fatalf("ScrubURLString leaked sentinel for key %q: %q", key, got)
+		}
+	})
+}
+
+func TestScrubURLStringQueryLimitsFailClosed(t *testing.T) {
+	t.Parallel()
+	const sentinel = "defenseclaw-query-secret-sentinel"
+	bytePrefix := "token="
+	exactBytes := bytePrefix + strings.Repeat("a", maxLoggedQueryBytes-len(bytePrefix)-len(sentinel)) + sentinel
+	safeBytePrefix := "safe="
+	overBytes := safeBytePrefix + strings.Repeat("a", maxLoggedQueryBytes-len(safeBytePrefix)-len(sentinel)+1) + sentinel
+
+	exactPairs := make([]string, 0, maxLoggedQueryPairs)
+	for i := 0; i < maxLoggedQueryPairs-1; i++ {
+		exactPairs = append(exactPairs, "model=ok")
+	}
+	exactPairs = append(exactPairs, "token="+sentinel)
+	overPairs := append([]string{}, exactPairs[:len(exactPairs)-1]...)
+	overPairs = append(overPairs, "model=ok", "safe="+sentinel)
+
+	for _, query := range []string{
+		exactBytes,
+		overBytes,
+		strings.Join(exactPairs, "&"),
+		strings.Join(overPairs, "&"),
+	} {
+		got := ScrubURLString("https://example.test/path?" + query)
+		if strings.Contains(got, sentinel) {
+			t.Fatalf("ScrubURLString leaked sentinel at a query limit: %q", got)
+		}
+	}
+}
+
+func TestScrubURLsInTextHandlesUppercaseAndNestedURLs(t *testing.T) {
+	const sentinel = "defenseclaw-nested-url-secret"
+	input := "outer HTTPS://gateway.example.test/callback?next=" +
+		"https://inner.example.test/data?tok%65n=" + sentinel
+	got := ScrubURLsInText(input)
+	if strings.Contains(got, sentinel) {
+		t.Fatalf("ScrubURLsInText leaked nested URL credentials: %q", got)
+	}
+	if !strings.Contains(strings.ToLower(got), "https://gateway.example.test") {
+		t.Fatalf("ScrubURLsInText lost uppercase-scheme diagnostic context: %q", got)
+	}
+	if strings.Count(got, redactedQueryValue) != 1 {
+		t.Fatalf("ScrubURLsInText() = %q, want one redacted nested value", got)
+	}
+}
+
+func TestScrubURLsInTextLimitsFailClosed(t *testing.T) {
+	t.Parallel()
+	oversize := "https://example.test/?token=secret" +
+		strings.Repeat("x", maxDiagnosticTextBytes)
+	if got := ScrubURLsInText(oversize); got != redactedDiagnosticText {
+		t.Fatalf("oversize diagnostic text = %q, want fail-closed placeholder", got)
+	}
+
+	urls := make([]string, maxDiagnosticURLs+1)
+	for i := range urls {
+		urls[i] = "https://example.test/?token=secret"
+	}
+	if got := ScrubURLsInText(strings.Join(urls, " ")); got != redactedDiagnosticText {
+		t.Fatalf("excessive diagnostic URLs did not fail closed")
+	}
+
+	urls = urls[:maxDiagnosticURLs]
+	got := ScrubURLsInText(strings.Join(urls, " "))
+	if strings.Contains(got, "secret") || strings.Count(got, redactedQueryValue) != maxDiagnosticURLs {
+		t.Fatalf("bounded diagnostic URLs were not independently scrubbed")
 	}
 }
 

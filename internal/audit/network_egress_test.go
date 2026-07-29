@@ -112,17 +112,25 @@ func TestNetworkEgressEvent_effectiveSeverity(t *testing.T) {
 }
 
 func TestNetworkEgressEventToRowRedactsURLCredentials(t *testing.T) {
+	rawURL := "https://alice:secret@api.example.test/v1/data?api_key=secret&region=us#fragment"
 	event := NetworkEgressEvent{
 		Hostname:      "api.example.test",
-		URL:           "https://alice:secret@api.example.test/v1/data?api_key=secret&region=us#fragment",
+		URL:           rawURL,
 		PolicyOutcome: "allowed",
+		Details:       "allowed outbound request to " + rawURL,
 	}
 	row := event.toRow()
 	if strings.Contains(row.URL, "alice") || strings.Contains(row.URL, "secret") {
 		t.Fatalf("persisted URL leaked credentials: %q", row.URL)
 	}
+	if strings.Contains(row.Details, "alice") || strings.Contains(row.Details, "secret") {
+		t.Fatalf("persisted details leaked credentials: %q", row.Details)
+	}
 	if !strings.Contains(row.URL, "api_key=%3Credacted%3E") || !strings.Contains(row.URL, "region=us") {
 		t.Fatalf("persisted URL did not retain safe diagnostic context: %q", row.URL)
+	}
+	if !strings.Contains(row.Details, "api_key=%3Credacted%3E") || !strings.Contains(row.Details, "region=us") {
+		t.Fatalf("persisted details did not retain safe diagnostic context: %q", row.Details)
 	}
 }
 
@@ -145,6 +153,59 @@ func TestStore_InsertNetworkEgressEventRedactsURLInDetails(t *testing.T) {
 	}
 	if !strings.Contains(rows[0].Details, "%3Credacted%3E") {
 		t.Fatalf("persisted details did not retain redacted URL context: %q", rows[0].Details)
+	}
+}
+
+func TestStore_InsertNetworkEgressEventKeepsTruncatedURLConsistentInDetails(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	rawURL := "https://alice:secret@api.example.test/" + strings.Repeat("a", 600)
+	const prefix = "allowed outbound request to "
+	if err := store.InsertNetworkEgressEvent(NetworkEgressRow{
+		Hostname: "api.example.test", URL: rawURL, PolicyOutcome: "allowed",
+		Details: prefix + rawURL,
+	}); err != nil {
+		t.Fatalf("InsertNetworkEgressEvent: %v", err)
+	}
+	rows, err := store.QueryNetworkEgressEvents(NetworkEgressFilter{})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("QueryNetworkEgressEvents rows=%d err=%v", len(rows), err)
+	}
+	if len(rows[0].URL) != 512 || rows[0].Details != prefix+rows[0].URL {
+		t.Fatalf("persisted details URL differs from truncated URL: url=%q details=%q", rows[0].URL, rows[0].Details)
+	}
+}
+
+func TestNetworkEgressDetailsScrubURLsIndependently(t *testing.T) {
+	const sentinel = "details-only-secret"
+	event := NetworkEgressEvent{
+		Hostname:      "api.example.test",
+		PolicyOutcome: "blocked",
+		Details: "first https://api.example.test/a?tok%65n=" + sentinel +
+			" then https://api.example.test/b?api%5Fkey=" + sentinel,
+	}
+	row := event.toRow()
+	if strings.Contains(row.Details, sentinel) {
+		t.Fatalf("toRow details leaked embedded URL credentials: %q", row.Details)
+	}
+	if strings.Count(row.Details, "%3Credacted%3E") != 2 {
+		t.Fatalf("toRow details did not retain two redacted URL contexts: %q", row.Details)
+	}
+}
+
+func TestNetworkEgressWhitespaceURLRemainsEmpty(t *testing.T) {
+	event := NetworkEgressEvent{
+		Hostname:      "api.example.test",
+		URL:           "   ",
+		PolicyOutcome: "allowed",
+		Details:       "safe diagnostic spacing",
+	}
+	row := event.toRow()
+	if row.URL != "" {
+		t.Fatalf("toRow URL = %q, want empty for whitespace-only input", row.URL)
+	}
+	if row.Details != event.Details {
+		t.Fatalf("toRow details = %q, want %q", row.Details, event.Details)
 	}
 }
 
