@@ -169,6 +169,15 @@ func (m *ConfigManager) Run(ctx context.Context) error {
 	// the rest of the process lifetime. Empty means "no watch yet";
 	// non-empty is the exact directory currently registered with fsw.
 	var envConfigWatchedDir string
+	// envConfigWatchedAncestor is the currently-watched *ancestor* of
+	// the target env_config directory when the target itself doesn't
+	// exist yet. Unclassified fsnotify events under this ancestor
+	// (typically a Create when the target dir gets mkdir'd) re-arm
+	// ensureEnvConfigWatched so the eventual creation of the target
+	// dir promotes the watch immediately — without this the ancestor
+	// watch would fire events that classify() drops, and only the 30s
+	// ticker would notice.
+	var envConfigWatchedAncestor string
 	ensureEnvConfigWatched := func() {
 		envPath := m.getEnvConfigPath()
 		if envPath == "" {
@@ -178,6 +187,7 @@ func (m *ConfigManager) Run(ctx context.Context) error {
 		if want == dir {
 			// Same directory as config.yaml — that watch is enough.
 			envConfigWatchedDir = want
+			envConfigWatchedAncestor = ""
 			return
 		}
 		if envConfigWatchedDir == want {
@@ -185,20 +195,19 @@ func (m *ConfigManager) Run(ctx context.Context) error {
 		}
 		if err := fsw.Add(want); err == nil {
 			envConfigWatchedDir = want
+			envConfigWatchedAncestor = ""
 			return
 		}
 		// Add failed — most likely because the directory doesn't
 		// exist yet. Try the nearest existing ancestor so a
 		// subsequent mkdir of the env_config dir surfaces as a
-		// fsnotify Create event we can react to. Silently skip if
-		// even that fails; the independent ticker below retries.
+		// fsnotify Create event under the ancestor — the event-loop's
+		// "unclassified event under envConfigWatchedAncestor" branch
+		// (below) then re-arms this function, which finally succeeds
+		// in adding the target dir now that it exists.
 		for anc := filepath.Dir(want); anc != "" && anc != "/" && anc != filepath.Dir(anc); anc = filepath.Dir(anc) {
 			if err := fsw.Add(anc); err == nil {
-				// Record the effective watched dir (the ancestor)
-				// so the ticker below skips re-adding it. We do
-				// NOT set envConfigWatchedDir = want because that
-				// would make classify's dir comparison bogus; the
-				// ancestor watch is a "fill in later" placeholder.
+				envConfigWatchedAncestor = anc
 				return
 			}
 		}
@@ -239,6 +248,18 @@ func (m *ConfigManager) Run(ctx context.Context) error {
 		case event := <-fsw.Events:
 			which := m.classify(event.Name)
 			if which == "" {
+				// Unclassified event, but it might be a Create under
+				// our ancestor watch — the "AVC just mkdir'd the
+				// env_config parent directory" case that lets the
+				// watch we deferred at boot actually attach. If we
+				// have an ancestor watch and this Create looks like
+				// it's under it, re-run ensureEnvConfigWatched so the
+				// target-dir Add can succeed now.
+				if envConfigWatchedAncestor != "" &&
+					event.Op&fsnotify.Create != 0 &&
+					filepath.Dir(filepath.Clean(event.Name)) == envConfigWatchedAncestor {
+					ensureEnvConfigWatched()
+				}
 				continue
 			}
 			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {

@@ -230,16 +230,61 @@ _semver_gt() {
   local a="$1" b="$2"
   # Fast path: identical strings are not "greater than".
   [[ "${a}" == "${b}" ]] && return 1
-  # Split into <main>[-<pre>].
-  local a_main="${a%%-*}" a_pre=""
-  local b_main="${b%%-*}" b_pre=""
-  if [[ "${a}" == *-* ]]; then a_pre="${a#*-}"; fi
-  if [[ "${b}" == *-* ]]; then b_pre="${b#*-}"; fi
-  # Compare MAJOR.MINOR.PATCH numerically. Extra numeric identifiers
-  # past the third position (rare in practice) also participate.
-  local IFS=.
-  local -a am=(${a_main}) bm=(${b_main})
-  unset IFS
+  # semver_re elsewhere in this file accepts an optional [._+-]-prefixed
+  # tail after MAJOR.MINOR.PATCH, so a version can arrive as any of
+  # `2.1.144`, `2.1.144-rc.1`, `2.1.144.beta`, `2.1.144_dev`, or
+  # `2.1.144+build.5`. Split the numeric MAJOR.MINOR.PATCH prefix off
+  # every candidate before comparing so the prefix comparison is
+  # apples-to-apples, then treat everything after that first non-digit
+  # boundary as the prerelease/build tail. SemVer §10 says build
+  # metadata (`+…`) MUST be ignored for precedence — strip it after the
+  # prefix split.
+  _semver_gt_split() {
+    # sets `__prefix` and `__tail` from $1
+    local raw="$1"
+    __prefix=""
+    __tail=""
+    local i ch
+    for (( i = 0; i < ${#raw}; i++ )); do
+      ch="${raw:${i}:1}"
+      if [[ "${ch}" =~ [0-9.] ]]; then
+        __prefix+="${ch}"
+      else
+        __tail="${raw:${i}}"
+        break
+      fi
+    done
+    # SemVer §10: build metadata (`+build.5`, `+meta`, …) MUST be
+    # ignored for precedence. Strip it BEFORE peeling the leading
+    # separator so `<main>+build.N` produces an empty tail (making the
+    # whole version rank identically to `<main>`).
+    if [[ "${__tail:0:1}" == "+" ]]; then
+      __tail=""
+    else
+      __tail="${__tail%%+*}"
+    fi
+    # Strip a leading separator character from the tail so downstream
+    # split-by-`.` doesn't see a leading empty element.
+    if [[ -n "${__tail}" ]]; then
+      case "${__tail:0:1}" in
+        -|_|. ) __tail="${__tail:1}" ;;
+      esac
+    fi
+    # Guard trailing dots on __prefix (e.g. splitting "2.0.0.foo").
+    __prefix="${__prefix%.}"
+  }
+  local __prefix __tail
+  _semver_gt_split "${a}"
+  local a_main="${__prefix}" a_pre="${__tail}"
+  _semver_gt_split "${b}"
+  local b_main="${__prefix}" b_pre="${__tail}"
+  # Compare MAJOR.MINOR.PATCH numerically. Use `read -ra` (not the
+  # unquoted `am=(${a_main})` split) so shell globbing can't expand a
+  # `*` in a hostile version string against the working directory
+  # (SC2206). IFS is scoped to the read via env-prefix syntax.
+  local -a am bm
+  IFS=. read -ra am <<< "${a_main}"
+  IFS=. read -ra bm <<< "${b_main}"
   local i len an bn
   len=${#am[@]}
   if (( ${#bm[@]} > len )); then len=${#bm[@]}; fi
@@ -256,9 +301,9 @@ _semver_gt() {
   if [[ -z "${a_pre}" && -z "${b_pre}" ]]; then return 1; fi
   if [[ -z "${a_pre}" ]]; then return 0; fi   # no-prerelease > prerelease
   if [[ -z "${b_pre}" ]]; then return 1; fi
-  local IFS=.
-  local -a apr=(${a_pre}) bpr=(${b_pre})
-  unset IFS
+  local -a apr bpr
+  IFS=. read -ra apr <<< "${a_pre}"
+  IFS=. read -ra bpr <<< "${b_pre}"
   local aid bid a_is_num b_is_num
   len=${#apr[@]}
   if (( ${#bpr[@]} > len )); then len=${#bpr[@]}; fi
@@ -317,6 +362,24 @@ _native_claudecode_version_from_bin() {
   # dropping the version we could have discovered.
   local resolved
   resolved="$(readlink -f -- "${bin}" 2>/dev/null || true)"
+  # If `readlink -f` succeeded but the final basename isn't SemVer-
+  # shaped, fall through to the mid-chain walk anyway. Case where
+  # this matters: a shim like
+  #   .../.local/bin/claude -> ../share/claude/versions/<X.Y.Z>/claude
+  # canonicalises to `.../versions/<X.Y.Z>/claude` — final basename
+  # is `claude`, which fails the regex, but the parent directory
+  # `<X.Y.Z>` is what we want. macOS 12.3+ would silently drop this
+  # discovery without the fallback; older macOS would find it via the
+  # walk. Same on-disk layout → different result across macOS versions.
+  if [[ -n "${resolved}" ]]; then
+    local fast_dname
+    fast_dname="$(basename -- "${resolved}")"
+    if ! [[ "${fast_dname}" =~ ${semver_re} ]]; then
+      # Give the mid-chain walk a chance to find a version-labelled
+      # intermediate hop before conceding.
+      resolved=""
+    fi
+  fi
   if [[ -z "${resolved}" ]]; then
     # Portable one-hop-at-a-time walk. Stops when we reach a non-
     # symlink (the concrete target) or after a chain-length guard
@@ -353,7 +416,20 @@ _native_claudecode_version_from_bin() {
   [[ -n "${resolved}" ]] || return 0
   local dname
   dname="$(basename -- "${resolved}")"
-  [[ "${dname}" =~ ${semver_re} ]] || return 0
+  # If the final basename isn't semver-shaped, consult the parent
+  # directory basename — the common newer-installer layout points
+  # directly at the executable inside a version-labelled parent
+  # (`versions/<X.Y.Z>/claude`). Skip this only if the parent's
+  # basename also fails the regex; concede empty rather than guess.
+  if ! [[ "${dname}" =~ ${semver_re} ]]; then
+    local parent_dname
+    parent_dname="$(basename -- "$(dirname -- "${resolved}")")"
+    if [[ "${parent_dname}" =~ ${semver_re} ]]; then
+      echo "${parent_dname}"
+      return
+    fi
+    return 0
+  fi
   echo "${dname}"
 }
 

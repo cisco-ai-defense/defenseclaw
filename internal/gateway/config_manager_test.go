@@ -784,7 +784,15 @@ func TestConfigManagerEnvConfigOverlayRejectsMalformed(t *testing.T) {
 		t.Fatalf("initial load: %v", err)
 	}
 	applied := 0
-	mgr := NewConfigManager(cfgPath, initial, nil, nil, func(context.Context, *config.Config, *config.Config, ConfigDiff) error {
+	// Pass a real SidecarHealth so we can also assert that a rejected
+	// overlay flips the config component to StateError with the
+	// underlying validator error recorded, and that a valid overlay
+	// returns it to StateRunning. The nil-health version of this test
+	// would pass even if the health-write branch was ripped out of
+	// Reload, which defeats the "surface overlay errors through health"
+	// requirement.
+	health := NewSidecarHealth()
+	mgr := NewConfigManager(cfgPath, initial, nil, health, func(context.Context, *config.Config, *config.Config, ConfigDiff) error {
 		applied++
 		return nil
 	})
@@ -804,6 +812,9 @@ func TestConfigManagerEnvConfigOverlayRejectsMalformed(t *testing.T) {
 	}
 	if got := mgr.Current().CiscoAIDefense.Endpoint; got != euEndpoint {
 		t.Fatalf("good overlay did not apply: current endpoint = %q, want %q", got, euEndpoint)
+	}
+	if snap := health.Snapshot(); snap.Config.State != StateRunning {
+		t.Fatalf("after good overlay: health.Config.State = %q, want %q", snap.Config.State, StateRunning)
 	}
 
 	// Step 2: every payload here is either malformed JSON, wrong shape,
@@ -831,6 +842,29 @@ func TestConfigManagerEnvConfigOverlayRejectsMalformed(t *testing.T) {
 			t.Fatalf("payload %q reverted the endpoint to %q, want last-good EU %q",
 				body, got, euEndpoint)
 		}
+		// The rejected overlay must have flipped the config component
+		// to StateError with a non-empty error message so operators
+		// see WHY discovery is stuck on the last-good endpoint.
+		snap := health.Snapshot()
+		if snap.Config.State != StateError {
+			t.Fatalf("payload %q: health.Config.State = %q, want %q", body, snap.Config.State, StateError)
+		}
+		if snap.Config.LastError == "" {
+			t.Fatalf("payload %q: health.Config.LastError is empty, want the overlay-validator message", body)
+		}
+	}
+
+	// Finally: a valid overlay must return the health component to
+	// StateRunning — a stuck StateError after recovery would hide a
+	// working install behind a stale alert.
+	if err := os.WriteFile(envPath, []byte(goodBody), 0o600); err != nil {
+		t.Fatalf("write recovery overlay: %v", err)
+	}
+	if err := mgr.Reload(context.Background(), "test-recover"); err != nil {
+		t.Fatalf("reload with recovery overlay: %v", err)
+	}
+	if snap := health.Snapshot(); snap.Config.State != StateRunning {
+		t.Fatalf("after recovery overlay: health.Config.State = %q, want %q", snap.Config.State, StateRunning)
 	}
 }
 
