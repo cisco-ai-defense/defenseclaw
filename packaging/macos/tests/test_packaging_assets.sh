@@ -25,6 +25,9 @@ t_guardian_and_enumerator_plists_exist_and_parse() {
     local out rc=0
     out="$(plutil -lint "${g}" 2>&1)" || rc=$?
     assert_status "${rc}" 0 "guardian plutil -lint should succeed"
+    # Reset rc so a prior failure on the guardian doesn't stick and
+    # mask a clean parse (or a fresh failure) on the enumerator.
+    rc=0
     out="$(plutil -lint "${e}" 2>&1)" || rc=$?
     assert_status "${rc}" 0 "enumerator plutil -lint should succeed"
   fi

@@ -116,6 +116,14 @@ t_default_aid_endpoint_matches_go() {
     "${REPO_ROOT}/internal/config/config.go" \
     | head -1 \
     | sed -E 's/.*"cisco_ai_defense\.endpoint",[[:space:]]*"([^"]+)".*/\1/')"
+  # If the grep+sed pipeline produces nothing (viper default renamed,
+  # constant relocated, quoting changed) the drift comparison would
+  # silently pass on "" == "". Fail hard so we notice the extraction
+  # bug instead of losing the sync guard.
+  if [[ -z "${go_default}" ]]; then
+    _fail "could not extract cisco_ai_defense.endpoint viper default from internal/config/config.go"
+    return 1
+  fi
   assert_eq "${shell_default}" "${go_default}" \
     "DEFAULT_AID_ENDPOINT in installer_lib.sh matches viper default in config.go"
 }

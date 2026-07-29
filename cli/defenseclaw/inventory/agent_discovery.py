@@ -246,9 +246,11 @@ _SPECS: dict[str, _AgentSpec] = {
         # than expecting a top-level binary. `binary_name=""` disables
         # the exec-based liveness probe for signals that are purely
         # extension-installed — the config-file probe is enough.
+        # Paths mirror the `cline` entry in ai_signatures.json so
+        # discovery does not false-positive on every editor user.
         (
-            "~/.vscode/extensions",
-            "~/.cursor/extensions",
+            "~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev",
+            "~/Library/Application Support/Code/User/globalStorage/rooveterinaryinc.roo-cline",
         ),
         "",
         (),
@@ -290,9 +292,12 @@ def _read_pkg_version(path: str) -> str:
     """
     try:
         with open(path, encoding="utf-8") as f:
-            value = json.load(f).get("version", "")
+            payload = json.load(f)
     except (OSError, ValueError):
         return ""
+    if not isinstance(payload, dict):
+        return ""
+    value = payload.get("version", "")
     return value if isinstance(value, str) else ""
 
 

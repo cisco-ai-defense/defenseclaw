@@ -114,7 +114,11 @@ _read_json_field() {
   local path="$1"
   local field="$2"
   local py
-  py="$(command -v python3 || echo /usr/bin/python3)"
+  if [ -x /usr/bin/python3 ]; then
+    py="/usr/bin/python3"
+  else
+    py="$(command -v python3 || echo /usr/bin/python3)"
+  fi
   "${py}" -c '
 import json, sys
 try:
@@ -793,12 +797,17 @@ _valid_aid_endpoint_url() {
   case "${candidate}" in
     *[[:space:]]*|*'"'*|*'\'*) return 1 ;;
   esac
-  # Bare-origin shape:
-  #   https://<host>[:port]
-  # <host> = one or more hostname labels (letters, digits, hyphen)
-  # separated by dots. No userinfo, no path, no query, no fragment.
-  local re='^https://[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*(:[0-9]+)?$'
-  [[ "${candidate}" =~ ${re} ]]
+  # Bare-origin shape. Host must either end in `.cisco.com` (the
+  # AVC-owned AI Defense hostnames) or be a loopback for local dev.
+  # This mirrors validateAIDefenseEndpoint in internal/config/env_config.go
+  # -- the sync-guard test in TestValidateAIDefenseEndpoint fails CI if
+  # either side loosens its checks.
+  local re_cisco='^https://[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*\.cisco\.com(:[0-9]+)?$'
+  local re_loopback='^https://(localhost|127\.0\.0\.1)(:[0-9]+)?$'
+  if [[ "${candidate}" =~ ${re_cisco} ]] || [[ "${candidate}" =~ ${re_loopback} ]]; then
+    return 0
+  fi
+  return 1
 }
 
 # resolve_aid_endpoint OVERRIDE CONFIG_FILE -> stdout effective endpoint

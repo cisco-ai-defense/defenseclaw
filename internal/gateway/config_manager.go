@@ -252,6 +252,7 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 	// refuse to blow away a working endpoint with a bad one because a
 	// hostile env_config is precisely the exfiltration vector the
 	// validate step defends against.
+	var envOverlayErr error
 	if m.envConfigPath != "" {
 		if ep, envErr := config.LoadEnvConfigEndpoint(m.envConfigPath); envErr == nil {
 			// The strings.TrimRight("/", ...) call inside
@@ -264,15 +265,11 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 			// next.CiscoAIDefense.Endpoint. Surface a health-check
 			// error so the operator sees it in the sidecar status
 			// output but keep serving traffic against the current
-			// endpoint.
+			// endpoint. The health write is deferred to the terminal
+			// SetConfig calls below so the successful-apply / no-diff
+			// paths don't unconditionally overwrite the error state.
 			fmt.Fprintf(os.Stderr, "[config] env_config overlay rejected: %v (retaining current endpoint)\n", envErr)
-			if m.health != nil {
-				m.health.SetConfig(StateError, envErr.Error(), map[string]interface{}{
-					"path":            m.path,
-					"env_config_path": m.envConfigPath,
-					"reason":          reason,
-				})
-			}
+			envOverlayErr = envErr
 		}
 	}
 	// managed_enterprise: preserve boot-time-derived runtime state
@@ -323,7 +320,13 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 	diff := diffConfigs(oldCfg, next)
 	if len(diff.Changed) == 0 {
 		if m.health != nil {
-			m.health.SetConfig(StateRunning, "", map[string]interface{}{
+			state := StateRunning
+			msg := ""
+			if envOverlayErr != nil {
+				state = StateError
+				msg = envOverlayErr.Error()
+			}
+			m.health.SetConfig(state, msg, map[string]interface{}{
 				"path":       m.path,
 				"generation": m.gen.Load(),
 				"reason":     reason,
@@ -353,7 +356,13 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 			fmt.Sprintf("generation=%d changed=%s reason=%s", gen, strings.Join(diff.Changed, ","), reason))
 	}
 	if m.health != nil {
-		m.health.SetConfig(StateRunning, "", map[string]interface{}{
+		state := StateRunning
+		msg := ""
+		if envOverlayErr != nil {
+			state = StateError
+			msg = envOverlayErr.Error()
+		}
+		m.health.SetConfig(state, msg, map[string]interface{}{
 			"path":             m.path,
 			"generation":       gen,
 			"reason":           reason,

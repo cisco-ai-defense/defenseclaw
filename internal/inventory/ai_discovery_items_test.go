@@ -212,11 +212,25 @@ func TestBuildAIDiscoveryPayload_CarriesItemFields(t *testing.T) {
 		if out.AgentKind != "cursor" {
 			t.Fatalf("disable=%v: AgentKind=%q want cursor", disable, out.AgentKind)
 		}
-		if out.ItemKind != "mcp_server" || out.ItemName != "github" {
-			t.Fatalf("disable=%v: item metadata missing: kind=%q name=%q", disable, out.ItemKind, out.ItemName)
+		if out.ItemKind != "mcp_server" {
+			t.Fatalf("disable=%v: ItemKind=%q want mcp_server", disable, out.ItemKind)
 		}
-		if out.ItemAttributes["transport"] != "stdio" {
-			t.Fatalf("disable=%v: transport attr = %q, want stdio", disable, out.ItemAttributes["transport"])
+		if disable {
+			// Extended (unredacted) mode: raw metadata preserved.
+			if out.ItemName != "github" {
+				t.Fatalf("disable=true: ItemName=%q want github", out.ItemName)
+			}
+			if out.ItemAttributes["transport"] != "stdio" {
+				t.Fatalf("disable=true: transport attr = %q, want stdio", out.ItemAttributes["transport"])
+			}
+		} else {
+			// Redacted mode: item-level free-text metadata scrubbed.
+			if out.ItemName != "" {
+				t.Fatalf("disable=false: ItemName=%q want empty (redacted)", out.ItemName)
+			}
+			if out.ItemAttributes != nil {
+				t.Fatalf("disable=false: ItemAttributes=%v want nil (redacted)", out.ItemAttributes)
+			}
 		}
 	}
 }

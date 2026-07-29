@@ -545,7 +545,7 @@ assert_existing_secure_dir_or_absent "$LOG_DIR"
 # Move legacy paths aside (best-effort, timestamped, never deleted).
 # Version tag comes from the binary source when available so the backup
 # path is distinguishable across attempts.
-_installer_version_tag="$("$BINARY_SOURCE" --version 2>/dev/null | head -1 || true)"
+_installer_version_tag="$("$BINARY_SOURCE" --version 2>/dev/null | /usr/bin/head -1 || true)"
 [ -z "$_installer_version_tag" ] && _installer_version_tag="unknown"
 _installer_version_tag="$(printf '%s' "$_installer_version_tag" | /usr/bin/tr -c '[:alnum:]._-' '_' | /usr/bin/head -c 32)"
 [ -z "$_installer_version_tag" ] && _installer_version_tag="unknown"

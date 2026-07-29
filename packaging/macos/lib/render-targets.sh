@@ -113,7 +113,7 @@ for c in deduped:
 PY
 }
 
-connectors_lines="$(extract_connectors 2>/dev/null || true)"
+connectors_lines="$(extract_connectors || true)"
 if [[ -z "${connectors_lines}" ]]; then
   die "no connectors resolvable from ${CONFIG_PATH}"
 fi
@@ -142,6 +142,10 @@ chmod 0640 "${tmp}"
 # reconcile identical rows unnecessarily.
 if [[ -f "${MANIFEST_PATH}" ]] && cmp -s "${tmp}" "${MANIFEST_PATH}"; then
   log "targets.yaml unchanged (users=$(printf '%s\n' "${user_lines}" | grep -c . || true))"
+  # Self-heal ownership/mode on the retained manifest so a chown/chmod
+  # drift outside our control doesn't survive a no-op render tick.
+  chown root:wheel "${MANIFEST_PATH}" 2>/dev/null || true
+  chmod 0640 "${MANIFEST_PATH}" 2>/dev/null || true
   exit 0
 fi
 

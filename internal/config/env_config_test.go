@@ -126,6 +126,7 @@ func TestValidateAIDefenseEndpoint(t *testing.T) {
 		{"fragment-rejected", "https://us.api.inspect.aidefense.security.cisco.com#x", false},
 		{"scheme-only-rejected", "https://", false},
 		{"gibberish-rejected", "not-a-url", false},
+		{"non-cisco-host-rejected", "https://attacker.example.com", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

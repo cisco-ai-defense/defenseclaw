@@ -2147,6 +2147,7 @@ class AIDiscoveryConfig:
     confidence_policy_path: str = ""
     require_trusted_binary_paths: bool = False
     trusted_binary_prefixes: list[str] = field(default_factory=list)
+    home_dirs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -4865,6 +4866,7 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         confidence_policy_path=str(raw.get("confidence_policy_path", "") or ""),
         require_trusted_binary_paths=bool(raw.get("require_trusted_binary_paths", False)),
         trusted_binary_prefixes=[str(v) for v in (raw.get("trusted_binary_prefixes", []) or [])],
+        home_dirs=[str(v) for v in (raw.get("home_dirs", []) or [])],
     )
 
 

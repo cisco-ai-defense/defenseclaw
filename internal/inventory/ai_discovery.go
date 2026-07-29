@@ -295,14 +295,14 @@ type LocalModelInfo struct {
 // (`LastSeen`) from "the underlying thing was running / used since the
 // previous scan" (`LastActiveAt`).
 type AISignal struct {
-	Fingerprint        string          `json:"fingerprint"`
-	SignalID           string          `json:"signal_id"`
-	SignatureID        string          `json:"signature_id"`
-	Name               string          `json:"name"`
-	Vendor             string          `json:"vendor"`
-	Product            string          `json:"product"`
-	Category           string          `json:"category"`
-	SupportedConnector string          `json:"supported_connector,omitempty"`
+	Fingerprint        string `json:"fingerprint"`
+	SignalID           string `json:"signal_id"`
+	SignatureID        string `json:"signature_id"`
+	Name               string `json:"name"`
+	Vendor             string `json:"vendor"`
+	Product            string `json:"product"`
+	Category           string `json:"category"`
+	SupportedConnector string `json:"supported_connector,omitempty"`
 	// AgentKind is the effective first-class connector identity for
 	// this signal — derived from the parent AISignature's
 	// SupportedConnector, or from the agent-promotion lookup table for
@@ -317,22 +317,22 @@ type AISignal struct {
 	ItemKind       string            `json:"item_kind,omitempty"`
 	ItemName       string            `json:"item_name,omitempty"`
 	ItemAttributes map[string]string `json:"item_attributes,omitempty"`
-	Confidence         float64         `json:"confidence"`
-	State              string          `json:"state"`
-	Detector           string          `json:"detector"`
-	Source             string          `json:"source"`
-	EvidenceTypes      []string        `json:"evidence_types,omitempty"`
-	PathHashes         []string        `json:"path_hashes,omitempty"`
-	Basenames          []string        `json:"basenames,omitempty"`
-	WorkspaceHash      string          `json:"workspace_hash,omitempty"`
-	Version            string          `json:"version,omitempty"`
-	Component          *AIComponent    `json:"component,omitempty"`
-	Model              *LocalModelInfo `json:"model,omitempty"`
-	Runtime            *ProcessRuntime `json:"runtime,omitempty"`
-	FirstSeen          time.Time       `json:"first_seen"`
-	LastSeen           time.Time       `json:"last_seen"`
-	LastActiveAt       *time.Time      `json:"last_active_at,omitempty"`
-	EvidenceHash       string          `json:"-"`
+	Confidence     float64           `json:"confidence"`
+	State          string            `json:"state"`
+	Detector       string            `json:"detector"`
+	Source         string            `json:"source"`
+	EvidenceTypes  []string          `json:"evidence_types,omitempty"`
+	PathHashes     []string          `json:"path_hashes,omitempty"`
+	Basenames      []string          `json:"basenames,omitempty"`
+	WorkspaceHash  string            `json:"workspace_hash,omitempty"`
+	Version        string            `json:"version,omitempty"`
+	Component      *AIComponent      `json:"component,omitempty"`
+	Model          *LocalModelInfo   `json:"model,omitempty"`
+	Runtime        *ProcessRuntime   `json:"runtime,omitempty"`
+	FirstSeen      time.Time         `json:"first_seen"`
+	LastSeen       time.Time         `json:"last_seen"`
+	LastActiveAt   *time.Time        `json:"last_active_at,omitempty"`
+	EvidenceHash   string            `json:"-"`
 	// ModelAPISourceHash is an internal, privacy-preserving origin key used
 	// to apply lifecycle decisions only to the exact local server that was
 	// conclusively inventoried. It is persisted via aiStoredSignal but never
@@ -1443,11 +1443,14 @@ func mcpServersFromFile(path string, maxBytes int64) ([]config.MCPServerEntry, e
 			return config.ParseMCPServersJSON(innerTrim)
 		}
 	}
-	// Bare object — pass the whole file. If it turns out to be an
-	// unrelated JSON blob the parser returns an empty slice (no server
-	// keys), which is fine — the caller falls back to the file-level
-	// signal.
-	return config.ParseMCPServersJSON(trimmed)
+	// Bare object with no `mcpServers`/`servers` wrapper — refuse to
+	// synthesize server entries from arbitrary top-level keys. Generic
+	// JSON files matched by `mcp_paths` (settings.json, VS Code user
+	// preferences, etc.) are full of unrelated top-level keys and
+	// ParseMCPServersJSON would otherwise emit one bogus mcp_server
+	// signal per key. The file-level catalog signal still fires from
+	// the caller.
+	return nil, nil
 }
 
 // urlHost extracts the host portion of a URL for the safe
@@ -2805,7 +2808,12 @@ func (s *ContinuousDiscoveryService) emitTelemetry(ctx context.Context, report A
 			Confidence: sig.Confidence,
 			AgentKind:  sig.AgentKind,
 			ItemKind:   sig.ItemKind,
-			ItemName:   sig.ItemName,
+		}
+		// ItemName may carry user-visible tool names or free-form
+		// hints. Only stamp it on the OTel record when the operator
+		// has explicitly opted out of redaction.
+		if s.opts.DisableRedaction {
+			otelAttrs.ItemName = sig.ItemName
 		}
 		s.otel.RecordAIDiscoverySignal(ctx, otelAttrs)
 		s.otel.EmitAIDiscoverySignalLog(ctx, otelAttrs)
@@ -3361,6 +3369,10 @@ func BuildAIDiscoveryPayload(sig AISignal, scanID string, opts PayloadOpts) *gat
 	if !opts.DisableRedaction {
 		// Redacted mode: ship only the minimal set above. Extended
 		// fields stay zero so omitempty hides them from receivers.
+		// ItemName / ItemAttributes may contain user-visible tool
+		// names or free-form hints; scrub them before the wire.
+		out.ItemName = ""
+		out.ItemAttributes = nil
 		return out
 	}
 	// Extended mode: every field below ships so downstream OTel /

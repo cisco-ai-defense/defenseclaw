@@ -125,5 +125,17 @@ func validateAIDefenseEndpoint(endpoint string) error {
 	if strings.EqualFold(endpoint, "https://") {
 		return errors.New("must contain a host")
 	}
-	return nil
+	// Restrict which hosts the installer / agent will trust. An
+	// operator-controlled env_config.json is the only path to override
+	// the default endpoint, so we allow the production Cisco AI Defense
+	// hostnames plus loopback for local dev, and reject anything else.
+	host := strings.ToLower(u.Hostname())
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
+		return nil
+	}
+	if strings.HasSuffix(host, ".cisco.com") {
+		return nil
+	}
+	return fmt.Errorf("host %q is not an AI Defense endpoint (must end in .cisco.com or be a loopback address)", host)
 }

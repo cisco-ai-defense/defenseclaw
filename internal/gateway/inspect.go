@@ -315,7 +315,7 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 		// "not computed" and omits it on the wire.
 		for _, f := range aid.Findings {
 			rf := RuleFinding{
-				RuleID:   findingTag + f,
+				RuleID:   f,
 				Title:    f,
 				Severity: aid.Severity,
 				Tags:     []string{strings.TrimSuffix(findingTag, ":")},

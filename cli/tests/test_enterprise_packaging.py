@@ -170,8 +170,16 @@ def test_launchd_hook_guardian_is_separate_privileged_job():
     # path intentionally cannot catch (SharedWriter Write/Chmod on native
     # agent configs, shared-across-connector generic scripts). Any drift in
     # this value should be a deliberate policy change, not an accidental edit.
-    assert "--interval" in payload["ProgramArguments"]
-    assert "60s" in payload["ProgramArguments"]
+    args = payload["ProgramArguments"]
+    assert "--interval" in args, "guardian must pass --interval flag"
+    interval_idx = args.index("--interval")
+    # The value must immediately follow the flag, otherwise the CLI
+    # will misparse the argv (a lone "60s" later in the vector would
+    # bind to a different flag or be ignored).
+    assert interval_idx + 1 < len(args), "--interval has no value argument"
+    assert args[interval_idx + 1] == "60s", (
+        f"guardian --interval value must be 60s, got {args[interval_idx + 1]!r}"
+    )
     assert payload["EnvironmentVariables"]["DEFENSECLAW_DEPLOYMENT_MODE"] == "managed_enterprise"
     assert (
         payload["EnvironmentVariables"]["DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"]
