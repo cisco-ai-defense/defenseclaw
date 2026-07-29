@@ -2468,6 +2468,45 @@
       "since": "0.8.8"
     },
     {
+      "name": "DEFENSECLAW_DEFERRED_RUN_HELPER_ACK",
+      "category": "test_fixture",
+      "purpose": "Carries the acknowledgement path for the isolated deferred-cleanup Run launch fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined absolute path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/deferred_uninstall_cleanup_windows_test.go", "description": "Native Windows deferred-cleanup Run launch fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.8"
+    },
+    {
+      "name": "DEFENSECLAW_DEFERRED_RUN_HELPER_TRANSACTION",
+      "category": "test_fixture",
+      "purpose": "Carries the expected transaction identifier for the isolated deferred-cleanup Run launch fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined lowercase 32-hex transaction identifier", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/deferred_uninstall_cleanup_windows_test.go", "description": "Native Windows deferred-cleanup Run launch fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.8"
+    },
+    {
+      "name": "DEFENSECLAW_DEFERRED_RUN_ROOT",
+      "category": "test_fixture",
+      "purpose": "Supplies the isolated cache root used to reproduce the former environment-based Run registration.",
+      "default": "unset",
+      "accepted_values": ["test-defined absolute path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/deferred_uninstall_cleanup_windows_test.go", "description": "Native Windows deferred-cleanup Run launch fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.8"
+    },
+    {
       "name": "DEFENSECLAW_LONG_PATH_HELPER",
       "category": "test_fixture",
       "purpose": "Selects the isolated native Setup long-path helper subprocess.",
