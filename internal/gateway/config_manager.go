@@ -159,20 +159,64 @@ func (m *ConfigManager) Run(ctx context.Context) error {
 	// coalesces duplicate Add calls to a no-op anyway. We do NOT
 	// treat a failure here as fatal: the config.yaml watch is the
 	// primary channel; env_config-driven reloads are a nice-to-have.
-	envConfigDirWatched := false
-	if envPath := m.getEnvConfigPath(); envPath != "" {
-		envDir := filepath.Dir(filepath.Clean(envPath))
-		if envDir != dir {
-			if err := fsw.Add(envDir); err != nil {
-				fmt.Fprintf(os.Stderr, "[config] env_config watch %s deferred: %v (will retry on each reload)\n", envDir, err)
-			} else {
-				envConfigDirWatched = true
+	//
+	// envConfigWatchedDir records the specific directory we succeeded
+	// in registering — NOT just a bool. SetEnvConfigPath can be called
+	// after Run has started (its doc contract) and can point at a
+	// different directory than the one we first watched; a bare "were
+	// we ever able to watch anything?" flag would then skip re-adding
+	// the new directory, silently muting env_config-driven reloads for
+	// the rest of the process lifetime. Empty means "no watch yet";
+	// non-empty is the exact directory currently registered with fsw.
+	var envConfigWatchedDir string
+	ensureEnvConfigWatched := func() {
+		envPath := m.getEnvConfigPath()
+		if envPath == "" {
+			return
+		}
+		want := filepath.Dir(filepath.Clean(envPath))
+		if want == dir {
+			// Same directory as config.yaml — that watch is enough.
+			envConfigWatchedDir = want
+			return
+		}
+		if envConfigWatchedDir == want {
+			return
+		}
+		if err := fsw.Add(want); err == nil {
+			envConfigWatchedDir = want
+			return
+		}
+		// Add failed — most likely because the directory doesn't
+		// exist yet. Try the nearest existing ancestor so a
+		// subsequent mkdir of the env_config dir surfaces as a
+		// fsnotify Create event we can react to. Silently skip if
+		// even that fails; the independent ticker below retries.
+		for anc := filepath.Dir(want); anc != "" && anc != "/" && anc != filepath.Dir(anc); anc = filepath.Dir(anc) {
+			if err := fsw.Add(anc); err == nil {
+				// Record the effective watched dir (the ancestor)
+				// so the ticker below skips re-adding it. We do
+				// NOT set envConfigWatchedDir = want because that
+				// would make classify's dir comparison bogus; the
+				// ancestor watch is a "fill in later" placeholder.
+				return
 			}
-		} else {
-			// Same dir as config.yaml — nothing more to watch.
-			envConfigDirWatched = true
 		}
 	}
+	// First-boot attempt. On failure the ticker + per-reload retry
+	// below will keep re-trying, and SetEnvConfigPath is also safe to
+	// call after Run has started.
+	ensureEnvConfigWatched()
+
+	// Independent retry ticker. Without this, the env_config watch
+	// only re-tries when SOME OTHER watched file (config.yaml) fires
+	// a reload event — but env_config is meant to be the trigger
+	// itself. If the AVC pipeline drops env_config.json at
+	// /opt/cisco/secureclient/defenseclaw/env_config.json 3 hours
+	// after install and config.yaml hasn't changed in the meantime,
+	// nothing would ever notice without a periodic probe.
+	envWatchRetryTicker := time.NewTicker(30 * time.Second)
+	defer envWatchRetryTicker.Stop()
 
 	timer := time.NewTimer(time.Hour)
 	if !timer.Stop() {
@@ -222,18 +266,14 @@ func (m *ConfigManager) Run(ctx context.Context) error {
 			if err := m.Reload(ctx, reason); err != nil {
 				fmt.Fprintf(os.Stderr, "[config] reload failed: %v\n", err)
 			}
-			// Retry env_config dir watch after every reload — the AVC
-			// packaging pipeline may have just created it, and fsnotify
-			// silently ignores duplicate Add calls if we're already
-			// watching.
-			if envPath := m.getEnvConfigPath(); envPath != "" && !envConfigDirWatched {
-				envDir := filepath.Dir(filepath.Clean(envPath))
-				if envDir != dir {
-					if err := fsw.Add(envDir); err == nil {
-						envConfigDirWatched = true
-					}
-				}
-			}
+			// Piggyback on the reload path — the AVC packaging pipeline
+			// may have just created the env_config directory. The
+			// independent envWatchRetryTicker below covers the case
+			// where NOTHING in config.yaml has changed but env_config
+			// arrives on its own timeline.
+			ensureEnvConfigWatched()
+		case <-envWatchRetryTicker.C:
+			ensureEnvConfigWatched()
 		}
 	}
 }
@@ -280,62 +320,33 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 			// see exactly what's on disk.
 			next.CiscoAIDefense.Endpoint = ep
 		} else if !errors.Is(envErr, config.ErrEnvConfigMissing) {
-			// Malformed / rejected env_config — do not touch
-			// next.CiscoAIDefense.Endpoint. Surface a health-check
-			// error so the operator sees it in the sidecar status
-			// output but keep serving traffic against the current
-			// endpoint. The health write is deferred to the terminal
-			// SetConfig calls below so the successful-apply / no-diff
-			// paths don't unconditionally overwrite the error state.
+			// Malformed / rejected env_config. Copy the currently-active
+			// endpoint (oldCfg) onto next so a bad overlay cannot revert
+			// the runtime endpoint to the config.yaml value. `next` was
+			// just loaded from config.yaml and doesn't yet reflect the
+			// last-good env_config overlay we applied; leaving it alone
+			// would drop that overlay on the next diff.
+			//
+			// Surface a health-check error so the operator sees it in
+			// the sidecar status output but keep serving traffic against
+			// the current endpoint. The health write is deferred to the
+			// terminal SetConfig calls below so the successful-apply /
+			// no-diff paths don't unconditionally overwrite the error
+			// state.
+			if oldCfg != nil {
+				next.CiscoAIDefense.Endpoint = oldCfg.CiscoAIDefense.Endpoint
+			}
 			fmt.Fprintf(os.Stderr, "[config] env_config overlay rejected: %v (retaining current endpoint)\n", envErr)
 			envOverlayErr = envErr
 		}
 	}
-	// managed_enterprise: preserve boot-time-derived runtime state
-	// on the next snapshot BEFORE we diff. Every field carried here
-	// is either mapstructure:"-" (never present in config.yaml) or
-	// synthesised at process start; failing to preserve them makes
-	// diffConfigs report gateway=changed on every reload — including
-	// the env_config-driven ones this feature exists to enable — and
-	// applyConfigReload rejects the whole reload with "config reload
-	// requires gateway restart for: gateway". applyConfigReload has
-	// a partial preservation step at line ~1165 (Token only) but it
-	// fires AFTER diffing, so it can't stop the false restart signal.
-	// Kept here scoped to managed_enterprise per operator direction —
-	// the OSS reload path is intentionally untouched.
-	//
-	// Fields preserved:
-	//   Gateway.Token     — synthesised by ensureGatewayTokenSynthesis
-	//                        on first boot; not written into
-	//                        config.yaml on disk.
-	//   Gateway.NoTLS     — mapstructure:"-", set at boot from
-	//                        RequiresTLSWithMode(&OpenShell). Runtime
-	//                        state, not user-configurable.
-	//   Gateway.SandboxHome, Gateway.ClawHome — mapstructure:"-",
-	//                        derived from OpenShell / os.UserHomeDir()
-	//                        at Load time. Stable across reloads on
-	//                        the same host but the initial cached
-	//                        snapshot may have been rendered before
-	//                        every derivation ran.
-	if oldCfg != nil && managed.IsManagedEnterprise(next.DeploymentMode) {
-		if strings.TrimSpace(next.Gateway.Token) == "" && strings.TrimSpace(oldCfg.Gateway.Token) != "" {
-			next.Gateway.Token = oldCfg.Gateway.Token
-		}
-		// NoTLS is bool — the "was it set on the runtime side and
-		// zeroed by LoadFromFile?" question reduces to
-		// "old=true, new=false". Copy that specific transition; the
-		// reverse (old=false, new=true) can only happen if the OpenShell
-		// mode legitimately flipped, which is a real change.
-		if oldCfg.Gateway.NoTLS && !next.Gateway.NoTLS {
-			next.Gateway.NoTLS = true
-		}
-		if next.Gateway.SandboxHome == "" && oldCfg.Gateway.SandboxHome != "" {
-			next.Gateway.SandboxHome = oldCfg.Gateway.SandboxHome
-		}
-		if next.Gateway.ClawHome == "" && oldCfg.Gateway.ClawHome != "" {
-			next.Gateway.ClawHome = oldCfg.Gateway.ClawHome
-		}
-	}
+	// managed_enterprise: carry boot-time-derived runtime Gateway
+	// fields forward onto the freshly-loaded snapshot BEFORE we diff.
+	// Extracted into preserveManagedGatewayRuntimeFields so tests can
+	// exercise the exact production preservation path via Reload
+	// (rather than duplicating the logic locally, which would let a
+	// regression here slip past the test suite).
+	preserveManagedGatewayRuntimeFields(oldCfg, next)
 	diff := diffConfigs(oldCfg, next)
 	if len(diff.Changed) == 0 {
 		if m.health != nil {
@@ -441,6 +452,62 @@ func resetTimer(timer *time.Timer, d time.Duration) {
 		}
 	}
 	timer.Reset(d)
+}
+
+// preserveManagedGatewayRuntimeFields carries boot-time-derived runtime
+// Gateway fields from oldCfg onto next before diffConfigs runs. Every
+// field carried here is either mapstructure:"-" (never present in
+// config.yaml) or synthesised at process start; failing to preserve
+// them makes diffConfigs report gateway=changed on every reload and
+// applyConfigReload rejects the whole reload with
+// "config reload requires gateway restart for: gateway".
+//
+// applyConfigReload has a partial preservation step of its own (Token
+// only, line ~1165 in sidecar.go) but it fires AFTER diffing, so it
+// can't stop the false restart signal. This helper runs BEFORE the
+// diff and is the single source of truth for pre-diff normalisation.
+//
+// Kept scoped to managed_enterprise per operator direction — the OSS
+// reload path is intentionally untouched.
+//
+// Fields preserved:
+//   - Gateway.Token — synthesised by ensureGatewayTokenSynthesis on
+//     first boot; not written into config.yaml on disk.
+//   - Gateway.NoTLS — mapstructure:"-", set at boot from
+//     RequiresTLSWithMode(&OpenShell). Runtime state, not user-
+//     configurable.
+//   - Gateway.SandboxHome, Gateway.ClawHome — mapstructure:"-",
+//     derived from OpenShell / os.UserHomeDir() at Load time. Stable
+//     across reloads on the same host but the initial cached snapshot
+//     may have been rendered before every derivation ran.
+//
+// nil-safe: no-op when oldCfg or next is nil (mirrors diffConfigs'
+// early-out for the boot-time / first-load case where nothing to
+// preserve).
+func preserveManagedGatewayRuntimeFields(oldCfg, next *config.Config) {
+	if oldCfg == nil || next == nil {
+		return
+	}
+	if !managed.IsManagedEnterprise(next.DeploymentMode) {
+		return
+	}
+	if strings.TrimSpace(next.Gateway.Token) == "" && strings.TrimSpace(oldCfg.Gateway.Token) != "" {
+		next.Gateway.Token = oldCfg.Gateway.Token
+	}
+	// NoTLS is bool — the "was it set on the runtime side and zeroed
+	// by LoadFromFile?" question reduces to "old=true, new=false".
+	// Copy that specific transition; the reverse (old=false, new=true)
+	// can only happen if the OpenShell mode legitimately flipped,
+	// which is a real change.
+	if oldCfg.Gateway.NoTLS && !next.Gateway.NoTLS {
+		next.Gateway.NoTLS = true
+	}
+	if next.Gateway.SandboxHome == "" && oldCfg.Gateway.SandboxHome != "" {
+		next.Gateway.SandboxHome = oldCfg.Gateway.SandboxHome
+	}
+	if next.Gateway.ClawHome == "" && oldCfg.Gateway.ClawHome != "" {
+		next.Gateway.ClawHome = oldCfg.Gateway.ClawHome
+	}
 }
 
 func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {

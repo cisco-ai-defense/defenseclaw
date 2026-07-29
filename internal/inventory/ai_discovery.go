@@ -1592,6 +1592,7 @@ func dirItems(path string) ([]dirItem, bool) {
 	if err != nil {
 		return nil, false
 	}
+	defer f.Close()
 	// Page-read until we've collected maxItemsPerDirectory *visible*
 	// entries (or the directory is exhausted). Reading in a single
 	// f.ReadDir(maxItemsPerDirectory) call filters AFTER the cap, so a

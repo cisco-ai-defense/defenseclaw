@@ -765,20 +765,51 @@ func TestConfigManagerEnvConfigOverlayRejectsMalformed(t *testing.T) {
 	cfgPath := filepath.Join(dir, config.DefaultConfigName)
 	envPath := filepath.Join(dir, "env_config.json")
 
-	writeConfigWithEndpoint(t, cfgPath, dir, "https://us.api.inspect.aidefense.security.cisco.com")
+	const usEndpoint = "https://us.api.inspect.aidefense.security.cisco.com"
+	const euEndpoint = "https://eu.api.inspect.aidefense.security.cisco.com"
+
+	// config.yaml starts on US. We will overlay EU, then feed malformed
+	// payloads and confirm the runtime endpoint stays on EU (i.e. the
+	// last-good overlay), NOT on the config.yaml default. Two failure
+	// modes are covered by this shape:
+	//
+	//  1. Callback should not fire on a rejected overlay.
+	//  2. Rejected overlay must not silently revert the endpoint to
+	//     config.yaml — a malformed env_config.json is exactly the
+	//     exfiltration surface that would otherwise let a hostile writer
+	//     roll us back to the installer default endpoint.
+	writeConfigWithEndpoint(t, cfgPath, dir, usEndpoint)
 	initial, err := config.LoadFromFile(cfgPath)
 	if err != nil {
 		t.Fatalf("initial load: %v", err)
 	}
-	applied := false
+	applied := 0
 	mgr := NewConfigManager(cfgPath, initial, nil, nil, func(context.Context, *config.Config, *config.Config, ConfigDiff) error {
-		applied = true
+		applied++
 		return nil
 	})
 	mgr.SetEnvConfigPath(envPath)
 
-	// Every payload here is either malformed JSON, wrong shape, or a
-	// URL that _valid_aid_endpoint_url would reject on the shell side.
+	// Step 1: apply a valid EU overlay so the runtime endpoint is
+	// distinct from the config.yaml default.
+	goodBody := `{"cisco_ai_defense_endpoint": "` + euEndpoint + `"}`
+	if err := os.WriteFile(envPath, []byte(goodBody), 0o600); err != nil {
+		t.Fatalf("write good overlay: %v", err)
+	}
+	if err := mgr.Reload(context.Background(), "test-good"); err != nil {
+		t.Fatalf("reload with good overlay: %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("good overlay: callback fired %d times, want 1", applied)
+	}
+	if got := mgr.Current().CiscoAIDefense.Endpoint; got != euEndpoint {
+		t.Fatalf("good overlay did not apply: current endpoint = %q, want %q", got, euEndpoint)
+	}
+
+	// Step 2: every payload here is either malformed JSON, wrong shape,
+	// or a URL that _valid_aid_endpoint_url would reject on the shell
+	// side. None of them should modify the runtime endpoint or fire the
+	// callback — the last-good EU overlay must be preserved.
 	badPayloads := []string{
 		`{not json`,
 		`{"cisco_ai_defense_endpoint": "http://us.api.inspect.aidefense.security.cisco.com"}`,       // http://
@@ -789,15 +820,16 @@ func TestConfigManagerEnvConfigOverlayRejectsMalformed(t *testing.T) {
 		if err := os.WriteFile(envPath, []byte(body), 0o600); err != nil {
 			t.Fatalf("write env_config %q: %v", body, err)
 		}
-		applied = false
-		if err := mgr.Reload(context.Background(), "test"); err != nil {
+		before := applied
+		if err := mgr.Reload(context.Background(), "test-bad"); err != nil {
 			t.Fatalf("reload with malformed env_config %q: %v", body, err)
 		}
-		if applied {
+		if applied != before {
 			t.Fatalf("apply callback fired on rejected env_config payload: %q", body)
 		}
-		if got := mgr.Current().CiscoAIDefense.Endpoint; got != "https://us.api.inspect.aidefense.security.cisco.com" {
-			t.Fatalf("payload %q corrupted the endpoint to %q", body, got)
+		if got := mgr.Current().CiscoAIDefense.Endpoint; got != euEndpoint {
+			t.Fatalf("payload %q reverted the endpoint to %q, want last-good EU %q",
+				body, got, euEndpoint)
 		}
 	}
 }
@@ -945,28 +977,28 @@ func TestDiffConfigsCiscoAIDefenseKeepsRestartInOpensource(t *testing.T) {
 // (simulating what ensureGatewayTokenSynthesis produces), and confirms
 // Reload succeeds and does NOT surface a bogus gateway change.
 func TestReloadPreservesSynthesizedGatewayTokenBeforeDiff(t *testing.T) {
-	// Exercise the pre-diff preservation logic directly. We can't
-	// use a full Reload path here because managed_enterprise
-	// LoadFromFile insists on a root-owned config.yaml (managed
-	// config trust check) which t.TempDir() cannot produce. What
-	// matters is that when the runtime cached snapshot carries a
-	// synthesised token and the on-disk snapshot doesn't,
-	// diffConfigs sees them as equal (no gateway churn). Simulate
-	// that shape and diff.
+	// Exercise the ACTUAL production preservation helper. Duplicating
+	// the preservation logic locally in this test would let a
+	// regression in preserveManagedGatewayRuntimeFields itself slip
+	// past — the whole point of extracting the helper was so tests can
+	// call the same code Reload does.
+	//
+	// (We can't drive a full Reload path here because
+	// managed_enterprise LoadFromFile insists on a root-owned
+	// config.yaml (managed config trust check) which t.TempDir()
+	// can't produce; calling the helper directly is the closest we
+	// can get without root.)
 	oldCfg := config.DefaultConfig()
 	oldCfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
 	oldCfg.Gateway.Token = "boot-time-synthesised-token"
 
 	// "Freshly loaded from config.yaml" — no token, everything else
 	// identical.
-	freshFromDisk := cloneConfig(oldCfg)
-	freshFromDisk.Gateway.Token = ""
+	next := cloneConfig(oldCfg)
+	next.Gateway.Token = ""
 
-	// Apply the same pre-diff preservation the Reload path uses.
-	next := cloneConfig(freshFromDisk)
-	if strings.TrimSpace(next.Gateway.Token) == "" && strings.TrimSpace(oldCfg.Gateway.Token) != "" {
-		next.Gateway.Token = oldCfg.Gateway.Token
-	}
+	preserveManagedGatewayRuntimeFields(oldCfg, next)
+
 	diff := diffConfigs(oldCfg, next)
 	if slices.Contains(diff.RestartRequired, "gateway") {
 		t.Fatalf("gateway landed in RestartRequired despite pre-diff token preservation; RestartRequired=%v", diff.RestartRequired)
@@ -1006,19 +1038,10 @@ func TestReloadPreservesRuntimeGatewayFieldsBeforeDiff(t *testing.T) {
 	next.Gateway.SandboxHome = ""
 	next.Gateway.ClawHome = ""
 
-	// Mirror the Reload pre-diff preservation.
-	if strings.TrimSpace(next.Gateway.Token) == "" && strings.TrimSpace(oldCfg.Gateway.Token) != "" {
-		next.Gateway.Token = oldCfg.Gateway.Token
-	}
-	if oldCfg.Gateway.NoTLS && !next.Gateway.NoTLS {
-		next.Gateway.NoTLS = true
-	}
-	if next.Gateway.SandboxHome == "" && oldCfg.Gateway.SandboxHome != "" {
-		next.Gateway.SandboxHome = oldCfg.Gateway.SandboxHome
-	}
-	if next.Gateway.ClawHome == "" && oldCfg.Gateway.ClawHome != "" {
-		next.Gateway.ClawHome = oldCfg.Gateway.ClawHome
-	}
+	// Call the ACTUAL production helper — not a local reimplementation.
+	// A regression in preserveManagedGatewayRuntimeFields must reach
+	// this test.
+	preserveManagedGatewayRuntimeFields(oldCfg, next)
 
 	diff := diffConfigs(oldCfg, next)
 	if slices.Contains(diff.RestartRequired, "gateway") {
@@ -1026,6 +1049,19 @@ func TestReloadPreservesRuntimeGatewayFieldsBeforeDiff(t *testing.T) {
 	}
 	if slices.Contains(diff.Changed, "gateway") {
 		t.Fatalf("gateway ended up in Changed after runtime-field preservation; Changed=%v", diff.Changed)
+	}
+	// Every runtime field should now be present on `next`.
+	if next.Gateway.Token != "boot-time-synthesised-token" {
+		t.Fatalf("Token: got %q, want boot-time-synthesised-token", next.Gateway.Token)
+	}
+	if !next.Gateway.NoTLS {
+		t.Fatal("NoTLS: got false, want true")
+	}
+	if next.Gateway.SandboxHome != "/home/sandbox" {
+		t.Fatalf("SandboxHome: got %q, want /home/sandbox", next.Gateway.SandboxHome)
+	}
+	if next.Gateway.ClawHome != "/var/root" {
+		t.Fatalf("ClawHome: got %q, want /var/root", next.Gateway.ClawHome)
 	}
 }
 

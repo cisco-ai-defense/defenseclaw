@@ -188,8 +188,7 @@ _native_claudecode_version_from_dir() {
   #      b) executable file: versions/<X.Y.Z>                 (newer)
   #    Discovery must accept both — a QA host was silently reporting
   #    version="" because it only had shape (b) and no `current`
-  #    symlink. Same sort -V idiom used by the codex Homebrew Caskroom
-  #    probe. Handles partial installs where the `current` symlink
+  #    symlink. Handles partial installs where the `current` symlink
   #    hasn't been flipped yet, and hosts that never publish a `current`
   #    pointer at all.
   local versions_dir="${base}/versions" entry
@@ -202,8 +201,7 @@ _native_claudecode_version_from_dir() {
       [[ -d "${entry}" || -f "${entry}" ]] || continue
       dname="$(basename "${entry}")"
       [[ "${dname}" =~ ${semver_re} ]] || continue
-      if [[ -z "${ver}" ]] || \
-         [[ "$(printf '%s\n%s\n' "${ver}" "${dname}" | sort -V | tail -1)" == "${dname}" ]]; then
+      if [[ -z "${ver}" ]] || _semver_gt "${dname}" "${ver}"; then
         ver="${dname}"
       fi
     done
@@ -212,6 +210,78 @@ _native_claudecode_version_from_dir() {
       return
     fi
   fi
+}
+
+# _semver_gt A B -> exit 0 iff A > B under SemVer 2.0.0 precedence.
+#
+# Ordering is: MAJOR.MINOR.PATCH first (numeric), then prerelease tail.
+# A version WITHOUT a prerelease tail is HIGHER than the same version
+# WITH one (e.g. 2.1.144 > 2.1.144-rc.1 > 2.1.144-alpha). Numeric
+# identifiers in the prerelease tail compare numerically ("2" < "10");
+# alphanumeric identifiers compare lexically; numeric identifiers rank
+# below alphanumeric ones per §11.4.3.
+#
+# This replaces the `sort -V` idiom used previously — BSD sort -V (macOS)
+# treats `1.0.0-alpha` as GREATER than `1.0.0`, which is the opposite of
+# SemVer. `_native_claudecode_version_from_dir` and `_version_ge` both
+# route through here so a supported-stable install is never starved by
+# a same-major-minor prerelease.
+_semver_gt() {
+  local a="$1" b="$2"
+  # Fast path: identical strings are not "greater than".
+  [[ "${a}" == "${b}" ]] && return 1
+  # Split into <main>[-<pre>].
+  local a_main="${a%%-*}" a_pre=""
+  local b_main="${b%%-*}" b_pre=""
+  if [[ "${a}" == *-* ]]; then a_pre="${a#*-}"; fi
+  if [[ "${b}" == *-* ]]; then b_pre="${b#*-}"; fi
+  # Compare MAJOR.MINOR.PATCH numerically. Extra numeric identifiers
+  # past the third position (rare in practice) also participate.
+  local IFS=.
+  local -a am=(${a_main}) bm=(${b_main})
+  unset IFS
+  local i len an bn
+  len=${#am[@]}
+  if (( ${#bm[@]} > len )); then len=${#bm[@]}; fi
+  for (( i = 0; i < len; i++ )); do
+    an="${am[i]:-0}"
+    bn="${bm[i]:-0}"
+    # Guard non-numeric segments (they'd trip arithmetic under set -u).
+    [[ "${an}" =~ ^[0-9]+$ ]] || an=0
+    [[ "${bn}" =~ ^[0-9]+$ ]] || bn=0
+    if (( an > bn )); then return 0; fi
+    if (( an < bn )); then return 1; fi
+  done
+  # Main parts equal — compare prerelease tails per SemVer §11.4.
+  if [[ -z "${a_pre}" && -z "${b_pre}" ]]; then return 1; fi
+  if [[ -z "${a_pre}" ]]; then return 0; fi   # no-prerelease > prerelease
+  if [[ -z "${b_pre}" ]]; then return 1; fi
+  local IFS=.
+  local -a apr=(${a_pre}) bpr=(${b_pre})
+  unset IFS
+  local aid bid a_is_num b_is_num
+  len=${#apr[@]}
+  if (( ${#bpr[@]} > len )); then len=${#bpr[@]}; fi
+  for (( i = 0; i < len; i++ )); do
+    aid="${apr[i]:-}"
+    bid="${bpr[i]:-}"
+    if [[ -z "${aid}" ]]; then return 1; fi  # shorter tail loses (§11.4.4)
+    if [[ -z "${bid}" ]]; then return 0; fi
+    a_is_num=false; b_is_num=false
+    [[ "${aid}" =~ ^[0-9]+$ ]] && a_is_num=true
+    [[ "${bid}" =~ ^[0-9]+$ ]] && b_is_num=true
+    if ${a_is_num} && ${b_is_num}; then
+      if (( 10#${aid} > 10#${bid} )); then return 0; fi
+      if (( 10#${aid} < 10#${bid} )); then return 1; fi
+      continue
+    fi
+    if ${a_is_num}; then return 1; fi  # numeric < alphanumeric (§11.4.3)
+    if ${b_is_num}; then return 0; fi
+    # Both alphanumeric — lexicographic.
+    if [[ "${aid}" > "${bid}" ]]; then return 0; fi
+    if [[ "${aid}" < "${bid}" ]]; then return 1; fi
+  done
+  return 1
 }
 
 # _native_claudecode_version_from_bin BIN -> echoes the version or "".
@@ -237,15 +307,49 @@ _native_claudecode_version_from_bin() {
   # follows the symlink and fails when the ultimate target is missing.
   [[ -e "${bin}" ]] || return 0
   local -r semver_re='^[0-9]+\.[0-9]+\.[0-9]+([._+-].*)?$'
-  # Prefer a full path resolution (readlink -f / GNU readlink) so a
-  # chain of symlinks is walked to the final target; fall back to the
-  # single-hop readlink used elsewhere in this file when -f is
-  # unsupported (BSD `readlink` on older macOS didn't ship -f, though
-  # 12+ does). The basename of whichever we get MUST match the semver
-  # regex — otherwise the shim points at something we don't understand
-  # and we return empty rather than guess.
+  # Resolve the entire symlink chain to the final concrete target.
+  # `readlink -f` walks the chain and prints the canonical path when
+  # available (GNU coreutils and macOS 12+); older BSD `readlink -n`
+  # only returns the immediate target, which for a shim like
+  # `.../.local/bin/claude -> ../share/claude/current`
+  # (which itself points at `versions/<X.Y.Z>`) yields `current`,
+  # basenames to `current`, and fails the semver regex — silently
+  # dropping the version we could have discovered.
   local resolved
-  resolved="$(readlink -f -- "${bin}" 2>/dev/null || readlink -n -- "${bin}" 2>/dev/null || true)"
+  resolved="$(readlink -f -- "${bin}" 2>/dev/null || true)"
+  if [[ -z "${resolved}" ]]; then
+    # Portable one-hop-at-a-time walk. Stops when we reach a non-
+    # symlink (the concrete target) or after a chain-length guard
+    # to defend against symlink loops. Also stops at a resolved
+    # basename that already matches the semver regex — that means
+    # a mid-chain node is version-labelled (the newer native-installer
+    # shape where `bin/claude` is a symlink into `versions/<X.Y.Z>/`
+    # directly), so we don't need to walk further even if the final
+    # target is an executable named `claude` rather than `<X.Y.Z>`.
+    local cur="${bin}"
+    local step=0
+    local -r max_steps=16
+    local next dname_walk
+    while [[ -L "${cur}" ]] && (( step < max_steps )); do
+      next="$(readlink -n -- "${cur}" 2>/dev/null || true)"
+      [[ -n "${next}" ]] || break
+      # Resolve relative targets against the link's directory.
+      if [[ "${next}" != /* ]]; then
+        next="$(cd -- "$(dirname -- "${cur}")" && pwd -P)/${next}"
+      fi
+      dname_walk="$(basename -- "${next}")"
+      if [[ "${dname_walk}" =~ ${semver_re} ]]; then
+        # Mid-chain version marker — good enough.
+        resolved="${next}"
+        break
+      fi
+      cur="${next}"
+      step=$((step + 1))
+    done
+    if [[ -z "${resolved}" ]]; then
+      resolved="${cur}"
+    fi
+  fi
   [[ -n "${resolved}" ]] || return 0
   local dname
   dname="$(basename -- "${resolved}")"
@@ -272,16 +376,17 @@ if [[ -z "${MIN_CLAUDECODE_VERSION:-}" ]]; then
   readonly MIN_CURSOR_VERSION="1.7.0"
 fi
 
-# _version_ge A B -> exit 0 iff A >= B under `sort -V` semantics.
+# _version_ge A B -> exit 0 iff A >= B under SemVer 2.0.0 precedence.
 # Empty inputs treated as "no answer" — returns 1. Used by
 # _pick_highest_supported below and by direct callers that need to
-# check a single version against a minimum.
+# check a single version against a minimum. Routes through _semver_gt
+# so BSD sort -V's inverted prerelease ordering can't feed a stable
+# release below MIN when a same-major-minor prerelease is present.
 _version_ge() {
   local a="$1" b="$2"
   [[ -n "${a}" && -n "${b}" ]] || return 1
-  local highest
-  highest="$(printf '%s\n%s\n' "${a}" "${b}" | sort -V | tail -1)"
-  [[ "${highest}" == "${a}" ]]
+  [[ "${a}" == "${b}" ]] && return 0
+  _semver_gt "${a}" "${b}"
 }
 
 # _pick_highest_supported MIN_VERSION VERSION... -> echoes the highest
@@ -301,14 +406,14 @@ _pick_highest_supported() {
   for v in "$@"; do
     [[ -n "${v}" ]] || continue
     # Track the overall highest so we always return *something* when
-    # candidates exist.
-    if [[ -z "${best_overall}" ]] || \
-       [[ "$(printf '%s\n%s\n' "${best_overall}" "${v}" | sort -V | tail -1)" == "${v}" ]]; then
+    # candidates exist. Route through _semver_gt so a same-major-minor
+    # prerelease can never outrank its stable (BSD sort -V's inverted
+    # prerelease order would).
+    if [[ -z "${best_overall}" ]] || _semver_gt "${v}" "${best_overall}"; then
       best_overall="${v}"
     fi
     if _version_ge "${v}" "${min}"; then
-      if [[ -z "${best_supported}" ]] || \
-         [[ "$(printf '%s\n%s\n' "${best_supported}" "${v}" | sort -V | tail -1)" == "${v}" ]]; then
+      if [[ -z "${best_supported}" ]] || _semver_gt "${v}" "${best_supported}"; then
         best_supported="${v}"
       fi
     fi
