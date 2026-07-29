@@ -158,6 +158,7 @@ def _run_optional_json_property(
         for name in (
             "Get-OptionalJsonPropertyValue",
             "Get-OptionalJsonStringValue",
+            "Get-OptionalJsonStringArrayValue",
         )
     )
     command = (
@@ -167,8 +168,9 @@ def _run_optional_json_property(
         "$record = [Environment]::GetEnvironmentVariable('DC_TEST_JSON') | "
         "ConvertFrom-Json\n"
         "$propertyName = [Environment]::GetEnvironmentVariable('DC_TEST_PROPERTY')\n"
-        "if ($propertyName -ceq 'previous_connectors') {\n"
-        "    $values = @(Get-OptionalJsonPropertyValue "
+        "$isStringArray = $propertyName -in @('previous_connectors', 'verified_connectors')\n"
+        "if ($isStringArray) {\n"
+        "    $values = @(Get-OptionalJsonStringArrayValue "
         "-InputObject $record -PropertyName $propertyName)\n"
         "} else {\n"
         "    $value = Get-OptionalJsonStringValue "
@@ -177,7 +179,7 @@ def _run_optional_json_property(
         "}\n"
         "[Console]::Out.WriteLine('count={0}' -f $values.Count)\n"
         "[Console]::Out.WriteLine('value=<{0}>' -f ($values -join ','))\n"
-        "if ($propertyName -cne 'previous_connectors') {\n"
+        "if (-not $isStringArray) {\n"
         "    [Console]::Out.WriteLine('is_null={0}' -f ($null -eq $value))\n"
         "    [Console]::Out.WriteLine('equals_empty={0}' -f ($value -ceq ''))\n"
         "}\n"
@@ -304,9 +306,16 @@ def test_deferred_uninstall_custody_rejects_inherit_only_creator_owner(
             "count=1\nvalue=<>\nis_null=False\nequals_empty=True",
         ),
         ('{"target_connector":"none"}', "previous_connectors", "count=0\nvalue=<>"),
+        ('{"verified_connectors":null}', "verified_connectors", "count=0\nvalue=<>"),
+        ('{"verified_connectors":[]}', "verified_connectors", "count=0\nvalue=<>"),
         (
             '{"previous_connectors":["codex","claudecode"]}',
             "previous_connectors",
+            "count=2\nvalue=<codex,claudecode>",
+        ),
+        (
+            '{"verified_connectors":["codex","claudecode"]}',
+            "verified_connectors",
             "count=2\nvalue=<codex,claudecode>",
         ),
         (
@@ -505,6 +514,7 @@ def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> 
         "cleanup_boot_identifier",
         "maintenance_sha256",
         "previous_connectors",
+        "verified_connectors",
         "data_root",
         "gateway_path",
         "gateway_sha256",

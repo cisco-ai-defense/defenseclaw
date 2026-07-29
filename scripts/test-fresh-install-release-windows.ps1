@@ -338,6 +338,22 @@ function Get-OptionalJsonStringValue {
     return [string]$value
 }
 
+function Get-OptionalJsonStringArrayValue {
+    param(
+        [Parameter(Mandatory = $true)]$InputObject,
+        [Parameter(Mandatory = $true)][string]$PropertyName
+    )
+
+    $value = Get-OptionalJsonPropertyValue `
+        -InputObject $InputObject `
+        -PropertyName $PropertyName
+    foreach ($item in @($value)) {
+        if ($null -ne $item) {
+            [string]$item
+        }
+    }
+}
+
 function Assert-ExactDeferredUninstallState {
     param(
         [Parameter(Mandatory = $true)][string]$LocalAppData,
@@ -529,12 +545,15 @@ function Assert-ExactDeferredUninstallState {
             throw "Converged uninstall retained a transaction artifact: $transactionArtifact"
         }
     }
-    $recordConnectors = @($cleanupRecord.verified_connectors | ForEach-Object { [string]$_ })
     $journalConnectors = @(
-        Get-OptionalJsonPropertyValue `
+        Get-OptionalJsonStringArrayValue `
             -InputObject $transaction `
-            -PropertyName "previous_connectors" |
-            ForEach-Object { [string]$_ }
+            -PropertyName "previous_connectors"
+    )
+    $recordConnectors = @(
+        Get-OptionalJsonStringArrayValue `
+            -InputObject $cleanupRecord `
+            -PropertyName "verified_connectors"
     )
     if ($recordConnectors.Count -ne 0 -or $journalConnectors.Count -ne 0) {
         throw "Connector-none release uninstall retained connector cleanup authority"
