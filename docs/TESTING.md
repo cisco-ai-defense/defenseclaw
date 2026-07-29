@@ -62,10 +62,25 @@ smoke therefore installs authenticated historical releases in a temporary
 The protected release workflow creates one sealed candidate from the current
 `main` commit selected by the dispatch. In that same run it uses the public installer on Linux,
 macOS, and Windows, upgrades the latest authenticated older release, the
-published `0.8.5` and `0.8.4` boundaries, and the newest authenticated
-`0.7.x`, `0.6.x`, and `0.5.x` releases on Linux and macOS, and publishes those
-exact bytes only after every smoke check passes.
+exact published `0.8.6` field-recovery anchor, the published `0.8.5` and
+`0.8.4` boundaries, and the newest authenticated `0.7.x`, `0.6.x`, and
+`0.5.x` releases on Linux and macOS, and publishes those exact bytes only
+after every smoke check passes.
 There is no separate certification operation or reusable receipt.
+
+For a target newer than `0.8.7`, the seven required POSIX lanes are explicit:
+
+1. the latest authenticated stable release older than the target (`0.8.7` for
+   a `0.8.8` target);
+2. exact `0.8.6`, including its clean missing-migration-cursor field state;
+3. exact `0.8.5`, the hard-cut/update-mechanism boundary;
+4. exact `0.8.4`, the immutable bridge boundary;
+5. the newest authenticated `0.7.x` release (`0.7.2` today);
+6. the newest authenticated `0.6.x` release (`0.6.6` today); and
+7. the newest authenticated `0.5.x` release (`0.5.0` today).
+
+The resolver fails closed if any fixed anchor or family lane cannot be
+authenticated; it does not silently shrink this set.
 
 ```bash
 # Current platform, proving one old controller refuses the unsigned candidate.
@@ -129,10 +144,13 @@ managed bundle bytes, and retain operator files. Unknown future config families
 fail closed until their fixture and verifier are reviewed.
 
 One manual release dispatch builds and seals one candidate, then runs
-`scripts/test-upgrade-protocol-release.sh --success-path-only` from the latest
-authenticated older release, the `0.8.5` hard-cut boundary, the `0.8.4` bridge
-boundary, and representative `0.7.x`, `0.6.x`, and `0.5.x` sources on Linux
-and macOS. Five seeded sources resolve their published wheel dependency graph.
+`scripts/test-upgrade-protocol-release.sh --success-path-only` from all seven
+lanes above on Linux and macOS. This includes the exact `0.8.6`
+missing-cursor recovery fixture, not merely a normal `0.8.6` install. Five
+ordinary seeded sources resolve their published wheel dependency graph.
+The exact `0.8.5` lane additionally runs exact public `0.8.1` through the full
+bridge route. Every candidate resolver invocation excludes ambient `uv` from
+`PATH`, requiring the resolver's authenticated private tool handoff to work.
 The `0.8.4` boundary instead starts with deliberate dependency drift and must
 prove the authenticated rollback-safe bridge refresh before the `0.8.5`
 handoff. It also runs the public POSIX installer on Linux
@@ -169,7 +187,7 @@ contract and operator command.
 | `.github/workflows/telemetry-registry.yml` | Exhaustive telemetry-registry mutation, provenance, and failure-atomicity suites for telemetry-sensitive PRs, nightly, and manual dispatch |
 | `.github/workflows/e2e.yml` | Self-hosted end-to-end suites and scheduled validation |
 | `.github/workflows/release.yaml` | One manual build, sign, smoke, and publish pipeline for a reviewed `main` commit |
-| `.github/workflows/pre-release-certification.yml` | Reusable exact-candidate install and six-baseline POSIX upgrade smoke jobs |
+| `.github/workflows/release-candidate-smoke.yml` | Reusable exact-candidate install and POSIX upgrade smoke jobs |
 
 Ordinary PR and main CI always run `make telemetry-check`, which compiles the
 real registry and rejects stale generated runtime or Go outputs. The two

@@ -3,13 +3,13 @@
 
 name: Release candidate smoke
 
-# release.yaml builds and signs one sealed candidate. This reusable workflow
+# release.yaml builds and signs one sealed candidate. This smoke workflow
 # exercises those exact bytes in the same dispatch before publication.
 on:
   workflow_call:
     inputs:
       candidate_artifact:
-        description: Immutable Actions artifact containing release-candidate/.
+        description: Immutable Actions artifact containing release-candidate.tar.
         required: true
         type: string
       version:
@@ -61,7 +61,13 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ inputs.candidate_artifact }}
-          path: release-candidate
+          path: candidate-transport
+      - name: Restore exact candidate modes
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py unpack-transport \
+            --archive candidate-transport/release-candidate.tar \
+            --destination release-candidate
       - name: Verify and install exact signed bytes
         env:
           RELEASE_TAG: ${{ inputs.version }}
@@ -109,10 +115,17 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ inputs.candidate_artifact }}
-          path: release-candidate
+          path: candidate-transport
+      - name: Restore exact candidate modes
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py unpack-transport \
+            --archive candidate-transport/release-candidate.tar \
+            --destination release-candidate
       - name: Exercise authenticated upgrade baseline
         env:
           BASELINE: ${{ matrix.baseline }}
+          SELECTED_BASELINES: ${{ inputs.baselines }}
           RELEASE_TAG: ${{ inputs.version }}
           RELEASE_COMMIT: ${{ inputs.commit }}
           UPGRADE_SMOKE_SKIP_SOURCE_CONTRACTS: "1"
@@ -127,14 +140,40 @@ jobs:
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             release-candidate/dist/checksums.txt
+          # Derive special validation roles from the signed candidate's
+          # effective policy and manifest. The caller-provided matrix is only
+          # accepted when it contains both authenticated anchors.
+          lane_role="$(python3 scripts/select-release-validation-lane.py \
+            --policy "$UPGRADE_BASELINE_POLICY" \
+            --manifest release-candidate/dist/upgrade-manifest.json \
+            --selected-json "$SELECTED_BASELINES" \
+            --baseline "$BASELINE")"
           baseline_dependencies=published
-          # The 0.8.4 boundary deliberately starts with dependency drift. The
-          # resolver must transactionally normalize it before the 0.8.5 cut.
-          if [[ "$BASELINE" == "0.8.4" ]]; then
-            baseline_dependencies=target
+          UPGRADE_SMOKE_FIELD_RECOVERY_CASES=0
+          case "$lane_role" in
+            bridge-dependency-drift)
+              # The authenticated bridge boundary deliberately starts with
+              # dependency drift. The resolver must normalize it before the
+              # first native-v8 cut.
+              baseline_dependencies=target
+              ;;
+            field-recovery)
+              # The derived immutable anchor exercises both the exact clean
+              # missing-cursor state and corrupt local audit recovery.
+              UPGRADE_SMOKE_FIELD_RECOVERY_CASES=1
+              ;;
+            published) ;;
+            *) echo "invalid release validation lane: $lane_role" >&2; exit 1 ;;
+          esac
+          export UPGRADE_SMOKE_FIELD_RECOVERY_CASES
+          smoke_baselines="$BASELINE"
+          if [[ "$BASELINE" == "0.8.5" ]]; then
+            # Keep the selected seven-lane policy compact while proving the
+            # exact public source that exercises the longest supported bridge.
+            smoke_baselines="${BASELINE},0.8.1"
           fi
           bash scripts/test-upgrade-protocol-release.sh \
-            --from-version "$BASELINE" \
+            --from-versions "$smoke_baselines" \
             --target-version "$RELEASE_TAG" \
             --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
             --baseline-mode seed \
@@ -163,12 +202,20 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ inputs.candidate_artifact }}
-          path: release-candidate
+          path: candidate-transport
+      - name: Restore exact candidate modes
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python scripts/release_candidate.py unpack-transport `
+            --archive candidate-transport/release-candidate.tar `
+            --destination release-candidate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify and exercise install.ps1
         env:
           RELEASE_TAG: ${{ inputs.version }}
           RELEASE_COMMIT: ${{ inputs.commit }}
         run: |
+          $ErrorActionPreference = 'Stop'
           python scripts/release_candidate.py verify `
             --root release-candidate --version "$env:RELEASE_TAG" --commit "$env:RELEASE_COMMIT"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -183,6 +230,7 @@ jobs:
             -ReleaseDir "$env:GITHUB_WORKSPACE/release-candidate/dist" `
             -TargetVersion "$env:RELEASE_TAG" `
             -DiagnosticsRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-release-bootstrap-diagnostics')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload Windows bootstrap diagnostics on failure
         if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

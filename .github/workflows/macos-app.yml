@@ -45,7 +45,7 @@ on:
       - "internal/**"
       - "extensions/defenseclaw/**"
       - ".github/workflows/macos-app.yml"
-      - ".github/workflows/pre-release-certification.yml"
+      - ".github/workflows/release-candidate-smoke.yml"
   workflow_dispatch:
 
 permissions:

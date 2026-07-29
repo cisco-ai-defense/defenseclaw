@@ -191,6 +191,196 @@ def _write_release_inventory(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_text(json.dumps([rows]), encoding="utf-8")
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode round-trip contract")
+def test_candidate_transport_is_deterministic_and_restores_actions_normalized_modes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    dist = source / "dist"
+    dist.mkdir(parents=True)
+    installer = dist / "install.sh"
+    installer.write_bytes(b"#!/bin/sh\nexit 0\n")
+    installer.chmod(0o755)
+    manifest = dist / "checksums.txt"
+    manifest.write_text("sealed candidate\n", encoding="utf-8")
+    manifest.chmod(0o644)
+
+    first = tmp_path / "candidate-first.tar"
+    second = tmp_path / "candidate-second.tar"
+    release_candidate.pack_transport(source, first)
+    os.utime(source, (1_700_000_000, 1_700_000_000))
+    os.utime(dist, (1_700_000_001, 1_700_000_001))
+    os.utime(installer, (1_700_000_002, 1_700_000_002))
+    os.utime(manifest, (1_700_000_003, 1_700_000_003))
+    release_candidate.pack_transport(source, second)
+    assert first.read_bytes() == second.read_bytes()
+
+    # actions/upload-artifact normalizes the transported file itself to 0644.
+    # The exact candidate modes must still survive inside the deterministic tar.
+    first.chmod(0o644)
+    shutil.rmtree(source)
+    restored = tmp_path / "restored"
+    release_candidate.unpack_transport(first, restored)
+
+    assert (restored / "dist/install.sh").read_bytes() == b"#!/bin/sh\nexit 0\n"
+    assert stat.S_IMODE((restored / "dist/install.sh").stat().st_mode) == 0o755
+    assert stat.S_IMODE((restored / "dist/checksums.txt").stat().st_mode) == 0o644
+
+
+def test_candidate_transport_normalizes_windows_filesystem_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    source.chmod(0o777)
+    payload = source / "payload"
+    payload.write_bytes(b"candidate")
+    payload.chmod(0o666)
+    archive_path = tmp_path / "candidate.tar"
+
+    with monkeypatch.context() as windows:
+        windows.setattr(release_candidate, "POSIX_TRANSPORT_CUSTODY", False)
+        release_candidate.pack_transport(source, archive_path)
+
+    with tarfile.open(archive_path, "r:") as archive:
+        members = {member.name: member for member in archive}
+    assert members[release_candidate.TRANSPORT_ARCHIVE_ROOT].mode == 0o700
+    assert members[f"{release_candidate.TRANSPORT_ARCHIVE_ROOT}/payload"].mode == 0o600
+
+
+def _write_transport_fixture(
+    path: Path,
+    *,
+    malicious: tarfile.TarInfo,
+) -> None:
+    root = tarfile.TarInfo(release_candidate.TRANSPORT_ARCHIVE_ROOT)
+    root.type = tarfile.DIRTYPE
+    root.mode = 0o755
+    root.uid = root.gid = 0
+    root.uname = root.gname = ""
+    root.mtime = 0
+    malicious.uid = malicious.gid = 0
+    malicious.uname = malicious.gname = ""
+    malicious.mtime = 0
+    with tarfile.open(path, "w", format=tarfile.USTAR_FORMAT) as archive:
+        archive.addfile(root)
+        archive.addfile(malicious, io.BytesIO(b"x") if malicious.isreg() else None)
+    path.chmod(0o600)
+
+
+@pytest.mark.parametrize("attack", ["traversal", "symlink", "windows-invalid"])
+def test_candidate_transport_rejects_unsafe_members_before_creating_destination(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    archive_path = tmp_path / f"{attack}.tar"
+    if attack == "traversal":
+        malicious = tarfile.TarInfo("candidate/../escaped")
+        malicious.type = tarfile.REGTYPE
+        malicious.mode = 0o644
+        malicious.size = 1
+    elif attack == "symlink":
+        malicious = tarfile.TarInfo("candidate/link")
+        malicious.type = tarfile.SYMTYPE
+        malicious.mode = 0o755
+        malicious.linkname = "../escaped"
+    else:
+        malicious = tarfile.TarInfo("candidate/windows?invalid")
+        malicious.type = tarfile.REGTYPE
+        malicious.mode = 0o644
+        malicious.size = 1
+    _write_transport_fixture(archive_path, malicious=malicious)
+    destination = tmp_path / "destination"
+
+    with pytest.raises(release_candidate.CandidateError, match="transport"):
+        release_candidate.unpack_transport(archive_path, destination)
+
+    assert not destination.exists()
+    assert not (tmp_path / "escaped").exists()
+
+
+def test_candidate_transport_keeps_tar_modes_strict_on_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_path = tmp_path / "unsafe-mode.tar"
+    member = tarfile.TarInfo(f"{release_candidate.TRANSPORT_ARCHIVE_ROOT}/payload")
+    member.type = tarfile.REGTYPE
+    member.mode = 0o666
+    member.size = 1
+    _write_transport_fixture(archive_path, malicious=member)
+    destination = tmp_path / "destination"
+
+    with monkeypatch.context() as windows:
+        windows.setattr(release_candidate, "POSIX_TRANSPORT_CUSTODY", False)
+        with pytest.raises(release_candidate.CandidateError, match="unsafe permissions"):
+            release_candidate.unpack_transport(archive_path, destination)
+
+    assert not destination.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX custody simulation of the Windows branch")
+def test_candidate_transport_windows_does_not_apply_posix_archive_custody(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_source = tmp_path / "candidate-source.tar"
+    member = tarfile.TarInfo(f"{release_candidate.TRANSPORT_ARCHIVE_ROOT}/payload")
+    member.type = tarfile.REGTYPE
+    member.mode = 0o600
+    member.size = 1
+    _write_transport_fixture(archive_source, malicious=member)
+    archive_path = tmp_path / "candidate.tar"
+    os.link(archive_source, archive_path)
+    archive_path.chmod(0o666)
+    destination = tmp_path / "destination"
+
+    with monkeypatch.context() as windows:
+        windows.setattr(release_candidate, "POSIX_TRANSPORT_CUSTODY", False)
+        release_candidate.unpack_transport(archive_path, destination)
+
+    assert (destination / "payload").read_bytes() == b"x"
+
+
+def test_candidate_transport_refuses_existing_destination(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "payload").write_text("candidate", encoding="utf-8")
+    archive_path = tmp_path / "candidate.tar"
+    release_candidate.pack_transport(source, archive_path)
+    destination = tmp_path / "destination"
+    destination.mkdir()
+
+    with pytest.raises(release_candidate.CandidateError, match="already exists"):
+        release_candidate.unpack_transport(archive_path, destination)
+
+
+def test_candidate_transport_rejects_entry_inserted_while_packing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "payload").write_text("candidate", encoding="utf-8")
+    output = tmp_path / "candidate.tar"
+    original = release_candidate._transport_tree
+    calls = 0
+
+    def changing_tree(root: Path) -> list[tuple[str, Path, os.stat_result]]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            (root / "inserted").write_text("late entry", encoding="utf-8")
+        return original(root)
+
+    monkeypatch.setattr(release_candidate, "_transport_tree", changing_tree)
+    with pytest.raises(release_candidate.CandidateError, match="source tree changed"):
+        release_candidate.pack_transport(source, output)
+
+    assert not output.exists()
+
+
 def test_release_progression_requires_target_newer_than_reviewed_and_published(
     tmp_path: Path,
 ) -> None:
@@ -242,6 +432,38 @@ def test_release_progression_uses_published_stable_max_even_when_policy_lags(
 
     with pytest.raises(release_candidate.CandidateError, match=r"current stable 0\.8\.5"):
         release_candidate.validate_release_progression("0.8.4", releases)
+
+
+def test_release_progression_admits_only_the_exact_published_target_for_rerun(
+    tmp_path: Path,
+) -> None:
+    releases = tmp_path / "releases.json"
+    _write_release_inventory(
+        releases,
+        [
+            {
+                "tag_name": "0.8.6",
+                "draft": False,
+                "prerelease": False,
+            }
+        ],
+    )
+
+    with pytest.raises(release_candidate.CandidateError, match="strictly newer"):
+        release_candidate.validate_release_progression("0.8.6", releases)
+
+    assert release_candidate.validate_release_progression(
+        "0.8.6",
+        releases,
+        allow_existing_target=True,
+    ) == ("0.8.4", "0.8.6")
+
+    with pytest.raises(release_candidate.CandidateError, match="strictly newer"):
+        release_candidate.validate_release_progression(
+            "0.8.5",
+            releases,
+            allow_existing_target=True,
+        )
 
 
 def test_release_progression_fails_closed_on_unorderable_stable_release(
@@ -957,6 +1179,7 @@ def test_hard_cut_release_provenance_is_deterministic_signed_payload(
             {
                 "tagName": HARD_CUT_VERSION,
                 "isDraft": False,
+                "isPrerelease": False,
                 "isImmutable": True,
                 "assets": [
                     {
@@ -1155,6 +1378,56 @@ def test_posix_only_publish_set_omits_only_windows_binaries() -> None:
         "defenseclaw-upgrade.ps1",
         "defenseclaw-upgrade.sh",
     } <= posix_only
+
+
+def test_signed_rescue_bootstrap_starts_with_release_channel_protocol() -> None:
+    assert {"defenseclaw-rescue.sh", "defenseclaw-rescue.ps1"}.isdisjoint(
+        release_candidate.resolver_asset_names("0.8.7")
+    )
+    assert {"defenseclaw-rescue.sh", "defenseclaw-rescue.ps1"} <= set(release_candidate.resolver_asset_names("0.8.8"))
+    assert (
+        release_candidate.RESOLVER_ASSETS["defenseclaw-rescue.sh"].completeness_marker
+        == b"# DefenseClaw rescue bootstrap complete v1"
+    )
+    assert (
+        release_candidate.RESOLVER_ASSETS["defenseclaw-rescue.ps1"].completeness_marker
+        == b"# DefenseClaw Windows rescue bootstrap complete v1"
+    )
+
+
+def test_public_installers_are_immutable_checksummed_assets_from_088_forward(
+    tmp_path: Path,
+) -> None:
+    assert release_candidate.installer_asset_names("0.8.7") == ()
+    assert release_candidate.installer_asset_names("0.8.8") == (
+        "install.ps1",
+        "install.sh",
+    )
+    payload = set(release_candidate.payload_asset_names("0.8.8", "unverified"))
+    published = set(release_candidate.published_asset_names("0.8.8", "unverified"))
+    assert {"install.sh", "install.ps1"} <= payload <= published
+
+    staged = tmp_path / "installers"
+    staged.mkdir()
+    release_candidate._copy_installer_assets(staged, "0.8.8")
+    release_candidate._validate_installer_assets(staged, "0.8.8")
+    for name in release_candidate.installer_asset_names("0.8.8"):
+        assert (staged / name).read_bytes() == release_candidate.INSTALLER_ASSETS[name].source.read_bytes()
+
+    if os.name == "posix":
+        (staged / "install.sh").chmod(stat.S_IMODE((staged / "install.sh").stat().st_mode) ^ stat.S_IRGRP)
+        with pytest.raises(
+            release_candidate.CandidateError,
+            match="installer mode differs from reviewed source",
+        ):
+            release_candidate._validate_installer_assets(staged, "0.8.8")
+        (staged / "install.sh").chmod(
+            stat.S_IMODE(release_candidate.INSTALLER_ASSETS["install.sh"].source.stat().st_mode)
+        )
+
+    (staged / "install.sh").write_bytes(b"#!/bin/sh\nexit 0\n")
+    with pytest.raises(release_candidate.CandidateError, match="differs from reviewed source"):
+        release_candidate._validate_installer_assets(staged, "0.8.8")
 
 
 def test_windows_setup_custody_starts_at_086_and_survives_legacy_omission() -> None:
@@ -1647,7 +1920,7 @@ def test_candidate_seals_and_verifies_exact_publish_set(tmp_path: Path) -> None:
     checksums = release_candidate._parse_checksums(root / "dist/checksums.txt")
     assert tuple(sorted(checksums)) == release_candidate.payload_asset_names(VERSION, "notarized")
     for name in release_candidate.resolver_asset_names(VERSION):
-        assert (root / "dist" / name).read_bytes() == (release_candidate.RESOLVER_ASSET_SOURCES[name].read_bytes())
+        assert (root / "dist" / name).read_bytes() == (release_candidate.RESOLVER_ASSETS[name].source.read_bytes())
     assert (root / "RELEASE_NOTES.md").read_text(encoding="utf-8") == "# Candidate notes\n"
 
     release_json = tmp_path / "published.json"
@@ -1656,6 +1929,7 @@ def test_candidate_seals_and_verifies_exact_publish_set(tmp_path: Path) -> None:
             {
                 "tagName": VERSION,
                 "isDraft": False,
+                "isPrerelease": False,
                 "isImmutable": True,
                 "assets": [
                     {
@@ -1669,6 +1943,46 @@ def test_candidate_seals_and_verifies_exact_publish_set(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     release_candidate.verify_published_release(root, release_json, VERSION, COMMIT)
+
+
+@pytest.mark.parametrize(
+    "release_state",
+    (
+        {"isDraft": True, "isPrerelease": False},
+        {"isDraft": False, "isPrerelease": True},
+        {"isDraft": False},
+        {"isPrerelease": False},
+    ),
+)
+def test_published_candidate_requires_explicit_non_draft_non_prerelease_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    release_state: dict[str, bool],
+) -> None:
+    monkeypatch.setattr(release_candidate, "verify", lambda *_args, **_kwargs: None)
+    release_json = tmp_path / "published-state.json"
+    release_json.write_text(
+        json.dumps(
+            {
+                "tagName": VERSION,
+                "isImmutable": True,
+                "assets": [],
+                **release_state,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        release_candidate.CandidateError,
+        match="draft, or prerelease status",
+    ):
+        release_candidate.verify_published_release(
+            tmp_path,
+            release_json,
+            VERSION,
+            COMMIT,
+        )
 
 
 def test_candidate_verification_rejects_effective_baseline_snapshot_mutation(
@@ -1704,6 +2018,7 @@ def test_publication_can_omit_every_windows_specific_asset(
             {
                 "tagName": VERSION,
                 "isDraft": False,
+                "isPrerelease": False,
                 "isImmutable": True,
                 "assets": published_assets,
             }
@@ -1930,6 +2245,7 @@ def test_candidate_seals_and_verifies_explicit_unverified_macos_assets(
             {
                 "tagName": VERSION,
                 "isDraft": False,
+                "isPrerelease": False,
                 "isImmutable": True,
                 "assets": [
                     {
@@ -1953,9 +2269,12 @@ def test_windows_release_gate_does_not_require_a_posix_execute_bit(
     resolver.write_bytes(b"#!/usr/bin/env bash\n" + release_candidate.RESOLVER_COMPLETENESS_MARKER + b"\n")
     resolver.chmod(0o600)
     monkeypatch.setitem(
-        release_candidate.RESOLVER_ASSET_SOURCES,
+        release_candidate.RESOLVER_ASSETS,
         "defenseclaw-upgrade.sh",
-        resolver,
+        release_candidate.ReviewedScriptAsset(
+            resolver,
+            release_candidate.RESOLVER_COMPLETENESS_MARKER,
+        ),
     )
     monkeypatch.setattr(release_candidate.os, "name", "nt")
 
@@ -1970,14 +2289,163 @@ def test_local_release_harness_stages_exact_reviewed_resolvers(tmp_path: Path) -
 
     assert {path.name for path in release_dir.iterdir()} == set(release_candidate.resolver_asset_names(VERSION))
     for name in release_candidate.resolver_asset_names(VERSION):
-        assert (release_dir / name).read_bytes() == release_candidate.RESOLVER_ASSET_SOURCES[name].read_bytes()
+        assert (release_dir / name).read_bytes() == (release_candidate.RESOLVER_ASSETS[name].source.read_bytes())
 
     with pytest.raises(release_candidate.CandidateError, match="destination already exists"):
         release_candidate.stage_resolvers(release_dir, VERSION)
 
 
+def test_local_release_harness_stages_exact_reviewed_installers(tmp_path: Path) -> None:
+    release_dir = tmp_path / "release"
+    release_dir.mkdir()
+
+    release_candidate.stage_installers(release_dir, "0.8.8")
+
+    assert {path.name for path in release_dir.iterdir()} == set(release_candidate.installer_asset_names("0.8.8"))
+    for name in release_candidate.installer_asset_names("0.8.8"):
+        assert (release_dir / name).read_bytes() == release_candidate.INSTALLER_ASSETS[name].source.read_bytes()
+
+    with pytest.raises(release_candidate.CandidateError, match="destination already exists"):
+        release_candidate.stage_installers(release_dir, "0.8.8")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX installer-mode contract")
+def test_installer_staging_uses_the_validated_snapshot_after_source_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_dir = tmp_path / "release"
+    release_dir.mkdir()
+    installer = tmp_path / "install.sh"
+    marker = release_candidate.INSTALLER_ASSETS["install.sh"].completeness_marker
+    reviewed_payload = b"#!/bin/sh\nprintf 'reviewed\\n'\n" + marker + b"\n"
+    installer.write_bytes(reviewed_payload)
+    installer.chmod(0o751)
+    monkeypatch.setitem(
+        release_candidate.INSTALLER_ASSETS,
+        "install.sh",
+        release_candidate.ReviewedScriptAsset(installer, marker),
+    )
+    validate = release_candidate._validated_installer_source
+
+    def replace_after_validation(name: str) -> release_candidate.InstallerSnapshot:
+        snapshot = validate(name)
+        if name == "install.sh":
+            installer.write_bytes(b"#!/bin/sh\nprintf 'replaced\\n'\n" + marker + b"\n")
+            installer.chmod(0o700)
+        return snapshot
+
+    monkeypatch.setattr(release_candidate, "_validated_installer_source", replace_after_validation)
+
+    release_candidate.stage_installers(release_dir, "0.8.8")
+
+    staged = release_dir / "install.sh"
+    assert staged.read_bytes() == reviewed_payload
+    assert stat.S_IMODE(staged.stat().st_mode) == 0o751
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX installer-mode contract")
+def test_installer_staging_rejects_mode_change_against_validated_snapshot(
+    tmp_path: Path,
+) -> None:
+    release_dir = tmp_path / "release"
+    release_dir.mkdir()
+    snapshots = release_candidate._copy_installer_assets(release_dir, "0.8.8")
+    installer = release_dir / "install.sh"
+    installer.chmod(snapshots["install.sh"].mode ^ stat.S_IRGRP)
+
+    with pytest.raises(release_candidate.CandidateError, match="installer mode differs"):
+        release_candidate._validate_installer_assets(
+            release_dir,
+            "0.8.8",
+            snapshots=snapshots,
+        )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX executable-bit contract")
+def test_reviewed_installer_execute_bit_uses_the_validated_lstat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer = tmp_path / "install.sh"
+    marker = release_candidate.INSTALLER_ASSETS["install.sh"].completeness_marker
+    payload = b"#!/bin/sh\nexit 0\n" + marker + b"\n"
+    installer.write_bytes(payload)
+    installer.chmod(0o700)
+    monkeypatch.setitem(
+        release_candidate.INSTALLER_ASSETS,
+        "install.sh",
+        release_candidate.ReviewedScriptAsset(installer, marker),
+    )
+    real_stat = Path.stat
+
+    def reject_following_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if path == installer and follow_symlinks:
+            raise AssertionError(f"unexpected Path.stat(follow_symlinks={follow_symlinks})")
+        return real_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", reject_following_stat)
+
+    snapshot = release_candidate._validated_installer_source("install.sh")
+    assert snapshot.payload == payload
+    assert snapshot.sha256 == hashlib.sha256(snapshot.payload).hexdigest()
+    assert snapshot.mode == 0o700
+
+
+@pytest.mark.parametrize(
+    ("name", "payload"),
+    (
+        ("install.sh", b"#!/bin/sh\nexit 0\n"),
+        ("install.ps1", b"exit 0\n"),
+    ),
+)
+def test_reviewed_installer_requires_final_completeness_marker(
+    name: str,
+    payload: bytes,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer = tmp_path / name
+    installer.write_bytes(payload)
+    installer.chmod(0o700)
+    marker = release_candidate.INSTALLER_ASSETS[name].completeness_marker
+    monkeypatch.setitem(
+        release_candidate.INSTALLER_ASSETS,
+        name,
+        release_candidate.ReviewedScriptAsset(installer, marker),
+    )
+
+    with pytest.raises(release_candidate.CandidateError, match="lacks its completeness marker"):
+        release_candidate._validated_installer_source(name)
+
+
+def test_reviewed_installer_requires_a_defined_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delitem(release_candidate.INSTALLER_ASSETS, "install.sh")
+
+    with pytest.raises(release_candidate.CandidateError, match=r"installer source is not defined: install\.sh"):
+        release_candidate._validated_installer_source("install.sh")
+
+
+def test_missing_release_installer_preserves_lstat_failure(
+    tmp_path: Path,
+) -> None:
+    release_dir = tmp_path / "release"
+    release_dir.mkdir()
+
+    with pytest.raises(release_candidate.CandidateError, match="missing installer asset") as error:
+        release_candidate._validate_installer_assets(release_dir, "0.8.8")
+
+    assert isinstance(error.value.__cause__, FileNotFoundError)
+
+
 def test_exact_reviewed_release_sources_have_cross_platform_lf_attributes() -> None:
     reviewed = (
+        "scripts/defenseclaw-rescue.sh",
+        "scripts/defenseclaw-rescue.ps1",
+        "scripts/install.sh",
+        "scripts/install.ps1",
         "scripts/upgrade.sh",
         "scripts/upgrade.ps1",
         "cli/defenseclaw/install_publish.py",
@@ -3341,6 +3809,83 @@ def test_hard_cut_auto_bridge_exactly_matches_older_published_baselines(
         release_candidate._validate_upgrade_manifest(manifest_path, "0.8.5")
 
 
+def test_unpublished_windows_bridge_retains_direct_post_hard_cut_baselines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = tmp_path / "upgrade-baselines.json"
+    policy.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "published_baselines": ["0.8.7", "0.8.4", "0.8.3"],
+                "published_baseline_config_versions": {
+                    "0.8.7": 8,
+                    "0.8.4": 7,
+                    "0.8.3": 7,
+                },
+                "platform_published_baselines": {"windows": ["0.8.7", "0.8.3"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    digest_policy = tmp_path / "historical-artifact-digests.json"
+    digest_policy.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "signed_wheel_coverage_starts_at": "0.8.3",
+                "signed_checksum_exceptions": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        release_candidate,
+        "HISTORICAL_ARTIFACT_DIGESTS_PATH",
+        digest_policy,
+    )
+    manifest_path = tmp_path / "upgrade-manifest.json"
+    manifest = {
+        "schema_version": 2,
+        "runtime_config_version": 8,
+        "release_version": "0.8.8",
+        "min_upgrade_protocol": 2,
+        "controller_upgrade_protocol": 2,
+        "migration_failure_policy": "fail",
+        "minimum_source_version": "0.8.4",
+        "required_bridge_version": "0.8.4",
+        "auto_bridge_from": ["0.8.3"],
+        "tested_source_versions": ["0.8.7", "0.8.4", "0.8.3"],
+        "platform_tested_source_versions": {"windows": ["0.8.7"]},
+        "release_artifacts": release_candidate._expected_release_artifacts("0.8.8"),
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(
+        release_candidate,
+        "_runtime_config_version_from_source",
+        lambda _version: 8,
+    )
+
+    release_candidate._validate_upgrade_manifest(
+        manifest_path,
+        "0.8.8",
+        baseline_policy_path=policy,
+    )
+
+    manifest["platform_tested_source_versions"]["windows"].append("0.8.3")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(
+        release_candidate.CandidateError,
+        match="must exactly match the reviewed Windows matrix",
+    ):
+        release_candidate._validate_upgrade_manifest(
+            manifest_path,
+            "0.8.8",
+            baseline_policy_path=policy,
+        )
+
+
 def test_bridge_candidate_accepts_schema_two_policy_before_bridge_is_published(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3451,6 +3996,46 @@ def test_followup_candidate_accepts_published_v8_baseline(
     assert release_candidate._load_upgrade_baseline_policy() == (
         ["0.8.5", "0.8.4"],
         {"windows": ["0.8.4"]},
+    )
+
+
+def test_followup_candidate_accepts_direct_windows_v8_baseline_without_unpublished_bridge(
+    tmp_path: Path,
+) -> None:
+    policy = json.loads((ROOT / "release" / "upgrade-baselines.json").read_text(encoding="utf-8"))
+    policy["published_baselines"].insert(0, "0.8.7")
+    policy["published_baseline_config_versions"]["0.8.7"] = 8
+    policy["platform_published_baselines"]["windows"].insert(0, "0.8.7")
+    policy_path = tmp_path / "effective-upgrade-baselines.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    manifest_path = tmp_path / "upgrade-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "runtime_config_version": 8,
+                "release_version": "0.8.8",
+                "min_upgrade_protocol": 2,
+                "controller_upgrade_protocol": 2,
+                "migration_failure_policy": "fail",
+                "minimum_source_version": "0.8.4",
+                "required_bridge_version": "0.8.4",
+                "auto_bridge_from": [
+                    item for item in policy["published_baselines"] if tuple(map(int, item.split("."))) < (0, 8, 4)
+                ],
+                "tested_source_versions": policy["published_baselines"],
+                "platform_tested_source_versions": {"windows": ["0.8.7"]},
+                "release_artifacts": release_candidate._expected_release_artifacts("0.8.8"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    release_candidate._validate_upgrade_manifest(
+        manifest_path,
+        "0.8.8",
+        baseline_policy_path=policy_path,
     )
 
 

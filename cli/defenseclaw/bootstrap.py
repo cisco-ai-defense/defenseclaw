@@ -30,10 +30,12 @@ and safe to call from background contexts.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -191,6 +193,293 @@ class FirstRunReport:
         return data
 
 
+class FreshMigrationStateError(OSError):
+    """A fresh v8 config was published but its migration cursor was not."""
+
+
+_FRESH_MIGRATION_PENDING_FILE = ".migration_state.fresh.pending.json"
+_FRESH_MIGRATION_PENDING_SCHEMA = 1
+_MAX_FRESH_MIGRATION_PENDING_BYTES = 16 * 1024
+_MAX_FRESH_CONFIG_BYTES = 4 * 1024 * 1024
+
+
+def fresh_migration_pending_path(data_dir: str) -> str:
+    """Return the exact-config retry marker used by init and signed recovery."""
+    normalized = os.path.abspath(os.path.expanduser(data_dir))
+    return os.path.join(normalized, _FRESH_MIGRATION_PENDING_FILE)
+
+
+def _fresh_migration_pending_path(data_dir: str) -> str:
+    """Compatibility alias for the private name introduced by PR #610."""
+    return fresh_migration_pending_path(data_dir)
+
+
+def _read_bounded_regular_file(path: str, maximum: int, *, private: bool) -> bytes:
+    from defenseclaw.file_permissions import open_regular_file_no_follow
+
+    descriptor = open_regular_file_no_follow(path)
+    try:
+        info = os.fstat(descriptor)
+        # CPython 3.12 reports st_nlink as zero on Windows; the secure opener
+        # already rejects reparse points and verifies the opened file identity.
+        if (
+            (os.name != "nt" and info.st_nlink != 1)
+            or not 0 < info.st_size <= maximum
+            or (private and os.name != "nt" and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077))
+        ):
+            raise OSError("fresh migration-state recovery evidence is not a bounded private file")
+        raw = b""
+        while len(raw) <= info.st_size:
+            chunk = os.read(descriptor, info.st_size + 1 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
+        if len(raw) != info.st_size:
+            raise OSError("fresh migration-state recovery evidence changed while reading")
+        return raw
+    finally:
+        os.close(descriptor)
+
+
+def _fresh_config_identity(cfg: Config) -> tuple[str, str]:
+    from defenseclaw.config import config_path_for_data_dir
+
+    path = os.path.abspath(os.fspath(config_path_for_data_dir(cfg.data_dir)))
+    raw = _read_bounded_regular_file(path, _MAX_FRESH_CONFIG_BYTES, private=False)
+    return path, hashlib.sha256(raw).hexdigest()
+
+
+def _fresh_migration_state():
+    from defenseclaw import __version__, migration_state
+    from defenseclaw.migrations import MIGRATIONS
+
+    return migration_state.bootstrap(
+        None,
+        from_version=__version__,
+        package_version=__version__,
+        registry_versions=[version for version, _description, _migration in MIGRATIONS],
+    )
+
+
+def _fresh_migration_pending_payload(cfg: Config) -> dict[str, object]:
+    from defenseclaw import __version__
+
+    config_path, config_sha256 = _fresh_config_identity(cfg)
+    return {
+        "schema": _FRESH_MIGRATION_PENDING_SCHEMA,
+        "package_version": __version__,
+        "config_path": config_path,
+        "config_sha256": config_sha256,
+    }
+
+
+def _load_fresh_migration_pending(cfg: Config) -> dict[str, object] | None:
+    """Load exact retry authority without trusting paths stored inside it."""
+    marker_path = fresh_migration_pending_path(cfg.data_dir)
+    if not os.path.lexists(marker_path):
+        return None
+
+    from defenseclaw import __version__
+
+    try:
+        payload = json.loads(
+            _read_bounded_regular_file(
+                marker_path,
+                _MAX_FRESH_MIGRATION_PENDING_BYTES,
+                private=True,
+            )
+        )
+    except (json.JSONDecodeError, UnicodeError, OSError, TypeError) as exc:
+        raise FreshMigrationStateError(
+            "fresh migration-state recovery evidence is unsafe or unreadable; "
+            "leave it in place and run the latest signed upgrade resolver"
+        ) from exc
+
+    expected_keys = {"schema", "package_version", "config_path", "config_sha256"}
+    if not isinstance(payload, dict) or set(payload) != expected_keys:
+        raise FreshMigrationStateError(
+            "fresh migration-state recovery evidence has an unknown shape; "
+            "leave it in place and run the latest signed upgrade resolver"
+        )
+    if payload.get("package_version") != __version__:
+        raise FreshMigrationStateError(
+            "fresh migration-state recovery is pending from DefenseClaw "
+            f"{payload.get('package_version', 'unknown')}; run the latest signed upgrade resolver "
+            "instead of inferring migration state with a different version"
+        )
+
+    try:
+        expected = _fresh_migration_pending_payload(cfg)
+    except OSError as exc:
+        raise FreshMigrationStateError(
+            "fresh migration-state recovery config is unavailable; "
+            "leave the marker in place and run the latest signed upgrade resolver"
+        ) from exc
+    if payload != expected or getattr(cfg, "_source_config_version", None) != 8:
+        raise FreshMigrationStateError(
+            "fresh migration-state recovery evidence does not match the current config; "
+            "leave it in place and run the latest signed upgrade resolver"
+        )
+    return payload
+
+
+def _record_fresh_migration_retry(cfg: Config) -> str:
+    from defenseclaw.file_lock import locked_file_update
+    from defenseclaw.file_permissions import atomic_write_text_secure, make_private_directory
+
+    try:
+        payload = _fresh_migration_pending_payload(cfg)
+    except OSError as exc:
+        raise FreshMigrationStateError("fresh migration-state recovery config is unavailable") from exc
+    marker_path = _fresh_migration_pending_path(cfg.data_dir)
+
+    make_private_directory(cfg.data_dir)
+    with locked_file_update(marker_path):
+        if os.path.lexists(marker_path):
+            raise OSError("fresh migration-state recovery evidence already exists")
+
+        def write_marker(stream) -> None:
+            json.dump(payload, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+
+        atomic_write_text_secure(
+            marker_path,
+            write_marker,
+            prefix=".migration_state.fresh.pending.",
+        )
+        persisted = _load_fresh_migration_pending(cfg)
+        if persisted is None:
+            raise FreshMigrationStateError("fresh migration-state recovery evidence disappeared during publication")
+        if persisted != payload:
+            raise FreshMigrationStateError("fresh migration-state recovery evidence changed during publication")
+    return marker_path
+
+
+def repair_pending_first_run_config(cfg: Config) -> bool:
+    """Retry cursor publication for an exact config saved by a fresh run.
+
+    The pending record is written only after the fresh v8 config is durably
+    saved and binds the retry to those exact config bytes, package version,
+    and path. A later init can therefore repair the cursor before mutating the
+    config again without treating an unrelated cursorless v8 installation as
+    fresh.
+    """
+    marker_path = _fresh_migration_pending_path(cfg.data_dir)
+    if not os.path.lexists(marker_path):
+        return False
+
+    from defenseclaw import migration_state
+    from defenseclaw.file_lock import locked_file_update
+    from defenseclaw.file_permissions import delete_file_durable
+
+    try:
+        with locked_file_update(marker_path):
+            if _load_fresh_migration_pending(cfg) is None:
+                raise FreshMigrationStateError(
+                    "fresh migration-state recovery evidence disappeared before cursor publication; "
+                    "no migration cursor was inferred"
+                )
+            state = _fresh_migration_state()
+            try:
+                migration_state.save_if_absent(cfg.data_dir, state)
+            except OSError as exc:
+                raise FreshMigrationStateError(
+                    "could not publish the pending fresh migration cursor; "
+                    "the retry marker was retained for signed recovery"
+                ) from exc
+            try:
+                observed = migration_state.load(cfg.data_dir)
+            except OSError as exc:
+                raise FreshMigrationStateError(
+                    "the pending fresh migration cursor was published but could not be read back; "
+                    "the retry marker was retained for signed recovery"
+                ) from exc
+            if observed != state:
+                raise FreshMigrationStateError(
+                    "an existing migration cursor does not match the pending fresh installation; "
+                    "it was preserved and the retry marker remains for signed recovery"
+                )
+            try:
+                delete_file_durable(marker_path)
+            except OSError as exc:
+                raise FreshMigrationStateError(
+                    "the pending fresh migration cursor is complete, but its retry marker could not be cleared; "
+                    "rerun init with this version to finish cleanup"
+                ) from exc
+    except FreshMigrationStateError:
+        raise
+    except OSError as exc:
+        raise FreshMigrationStateError(
+            "could not complete the pending fresh migration cursor; the retry marker was retained for signed recovery"
+        ) from exc
+    return True
+
+
+def finalize_first_run_config(cfg: Config, *, was_config_absent: bool) -> bool:
+    """Publish the finalized config and, for a fresh v8 install, its cursor.
+
+    ``was_config_absent`` must be captured before any first-run mutation.
+    Guided setup can save the config several times while configuring the
+    connector, and :func:`bootstrap_env` runs after the first publication, so
+    checking for the config file here would misclassify every successful fresh
+    install as an existing one.
+
+    Cursor publication is deliberately ordered after ``cfg.save()``.  A failed
+    config write therefore cannot create or advance migration state.  Existing
+    cursor paths are preserved without parsing so corrupt, unknown-schema, and
+    future-schema recovery evidence remains untouched.
+
+    Returns ``True`` when a fresh cursor was created and ``False`` for an
+    existing config or cursor.
+    """
+    cfg.save()
+    if not was_config_absent:
+        return False
+    if getattr(cfg, "_source_config_version", None) != 8:
+        return False
+
+    from defenseclaw import migration_state
+    from defenseclaw.file_permissions import delete_file_durable
+
+    try:
+        marker_path = _record_fresh_migration_retry(cfg)
+    except (FreshMigrationStateError, OSError) as exc:
+        raise FreshMigrationStateError(
+            "config was saved, but retryable fresh migration state could not be registered; "
+            "run the latest signed upgrade resolver before continuing"
+        ) from exc
+
+    state = _fresh_migration_state()
+    try:
+        created = migration_state.save_if_absent(cfg.data_dir, state)
+    except OSError as exc:
+        raise FreshMigrationStateError(
+            "could not publish the fresh-install migration cursor; "
+            "the retry marker was retained, so rerunning init with this version is safe"
+        ) from exc
+
+    try:
+        observed = migration_state.load(cfg.data_dir)
+    except OSError as exc:
+        raise FreshMigrationStateError(
+            "the fresh-install migration cursor was published but could not be read back; "
+            "the retry marker was retained, so rerunning init with this version is safe"
+        ) from exc
+    if observed != state:
+        raise FreshMigrationStateError(
+            "an existing migration cursor does not match the pending fresh installation; "
+            "it was preserved and the retry marker remains for signed recovery"
+        )
+    try:
+        delete_file_durable(marker_path)
+    except OSError as exc:
+        raise FreshMigrationStateError(
+            "the fresh migration cursor is complete, but its retry marker could not be cleared; "
+            "rerun init with this version to finish cleanup"
+        ) from exc
+    return created
+
+
 def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
     """Initialize ``~/.defenseclaw/`` and related state.
 
@@ -300,7 +589,11 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     scanner_mode = _normalize_scanner_mode(options.scanner_mode)
     connector_mode_warnings: list[dict] = []
 
-    new_config = not os.path.exists(cfg_mod.config_path())
+    # ``lexists`` keeps a broken symlink or other pre-existing directory entry
+    # on the existing-install path.  Fresh bootstrap must never reinterpret an
+    # operator-controlled config path merely because its target is unavailable.
+    was_config_absent = not os.path.lexists(cfg_mod.config_path())
+    new_config = was_config_absent
     if not new_config:
         try:
             cfg_mod.require_v8_config()
@@ -326,7 +619,27 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             )
     try:
         cfg = cfg_mod.load()
-    except Exception:
+    except Exception as exc:
+        if connector == "none" and not was_config_absent:
+            cfg = cfg_mod.default_config()
+            setup.append(
+                StepResult(
+                    "Config",
+                    "fail",
+                    f"existing configuration could not be loaded and was preserved: {exc}",
+                    "defenseclaw config validate",
+                )
+            )
+            return FirstRunReport(
+                status="needs_attention",
+                config_file=str(cfg_mod.config_path()),
+                data_dir=cfg.data_dir,
+                connector=connector,
+                profile=profile,
+                setup=setup,
+                next_commands=["defenseclaw config validate"],
+                connector_mode_warnings=connector_mode_warnings,
+            )
         cfg = cfg_mod.default_config()
         cfg_mod.prepare_fresh_v8_config(cfg)
         new_config = True
@@ -338,14 +651,32 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         if new_config and getattr(cfg, "_source_config_version", 0) == 0:
             cfg_mod.prepare_fresh_v8_config(cfg)
 
+    try:
+        repaired_migration_state = repair_pending_first_run_config(cfg)
+    except FreshMigrationStateError as exc:
+        setup.append(StepResult("Migration State", "fail", str(exc), "defenseclaw init"))
+        return FirstRunReport(
+            status="needs_attention",
+            config_file=str(cfg_mod.config_path()),
+            data_dir=cfg.data_dir,
+            connector=connector,
+            profile=profile,
+            setup=setup,
+            next_commands=["defenseclaw init"],
+            connector_mode_warnings=connector_mode_warnings,
+        )
+    if repaired_migration_state:
+        setup.append(StepResult("Migration State", "pass", "recovered pending fresh cursor"))
+
     cfg.environment = cfg_mod.detect_environment()
-    if profile == "action":
+    if connector != "none" and profile == "action":
         mode_warning = _first_run_action_mode_warning(connector, getattr(cfg, "data_dir", ""))
         if mode_warning:
             connector_mode_warnings.append(mode_warning)
             profile = "observe"
 
-    _apply_first_run_choices(cfg, options, connector, profile, scanner_mode)
+    if connector != "none":
+        _apply_first_run_choices(cfg, options, connector, profile, scanner_mode)
 
     try:
         cfg.save()
@@ -360,88 +691,100 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         setup.append(StepResult("Config", "fail", str(exc), "defenseclaw config validate"))
 
     store = Store(cfg.audit_db)
+    logger = None
     try:
-        store.init()
-    except Exception as exc:  # broad: sqlite/file errors need to surface
-        setup.append(StepResult("Audit DB", "fail", str(exc), "defenseclaw doctor --fix"))
-    # A genuinely new/pre-v8 bootstrap has no canonical graph yet. Re-running
-    # first-run against v8 must use the live owner and must not silently drop
-    # ordinary v8 setup mutations.
-    logger = (
-        Logger.no_runtime()
-        if new_config or getattr(cfg, "_source_config_version", None) != 8
-        else Logger.from_config(cfg)
-    )
+        try:
+            store.init()
+        except Exception as exc:  # broad: sqlite/file errors need to surface
+            setup.append(StepResult("Audit DB", "fail", str(exc), "defenseclaw doctor --fix"))
+        # A genuinely new/pre-v8 bootstrap has no canonical graph yet. Re-running
+        # first-run against v8 must use the live owner and must not silently drop
+        # ordinary v8 setup mutations.
+        logger = (
+            Logger.no_runtime()
+            if new_config or getattr(cfg, "_source_config_version", None) != 8
+            else Logger.from_config(cfg)
+        )
 
-    try:
         bootstrap = bootstrap_env(cfg, logger)
         if bootstrap.errors:
             setup.extend(StepResult("Bootstrap", "fail", e, "defenseclaw doctor --fix") for e in bootstrap.errors)
         else:
             setup.append(StepResult("Bootstrap", "pass", cfg.data_dir))
-    finally:
-        pass
 
-    _persist_first_run_secrets(cfg, options, setup)
+        _persist_first_run_secrets(cfg, options, setup)
 
-    if options.skip_install:
-        setup.append(StepResult("Scanners", "skip", "--skip-install"))
-    else:
-        scanner_status = _scanner_availability(cfg)
-        setup.extend(scanner_status)
+        if options.skip_install:
+            setup.append(StepResult("Scanners", "skip", "--skip-install"))
+        else:
+            scanner_status = _scanner_availability(cfg)
+            setup.extend(scanner_status)
 
-    app = AppContext()
-    app.cfg = cfg
-    app.store = store
-    app.logger = logger
+        app = AppContext()
+        app.cfg = cfg
+        app.store = store
+        app.logger = logger
 
-    setup.append(_quiet_guardrail_setup(app, connector, verbose=options.verbose))
-    setup.extend(_connector_mode_warning_steps(connector_mode_warnings))
+        if connector == "none":
+            setup.append(StepResult("Guardrail", "skip", "no connector requested"))
+        else:
+            setup.append(_quiet_guardrail_setup(app, connector, verbose=options.verbose))
+        setup.extend(_connector_mode_warning_steps(connector_mode_warnings))
 
-    if options.sandbox:
-        setup.append(
-            StepResult(
-                "Sandbox",
-                "warn",
-                "sandbox setup is experimental, Linux-only, and OpenClaw/OpenShell-only",
-                "defenseclaw sandbox setup",
+        if options.sandbox:
+            setup.append(
+                StepResult(
+                    "Sandbox",
+                    "warn",
+                    "sandbox setup is experimental, Linux-only, and OpenClaw/OpenShell-only",
+                    "defenseclaw sandbox setup",
+                )
             )
+
+        if options.start_gateway:
+            setup.append(_start_gateway_structured(cfg))
+        else:
+            setup.append(
+                StepResult(
+                    "Sidecar",
+                    "skip",
+                    "not started (--no-start-gateway)",
+                    "defenseclaw-gateway start",
+                )
+            )
+
+        try:
+            finalize_first_run_config(cfg, was_config_absent=was_config_absent)
+        except FreshMigrationStateError as exc:
+            setup.append(StepResult("Migration State", "fail", str(exc), "defenseclaw init"))
+        except OSError as exc:
+            setup.append(StepResult("Config Save", "fail", str(exc), "defenseclaw config validate"))
+
+        readiness = (
+            targeted_readiness(cfg, options)
+            if options.verify
+            else [StepResult("Readiness", "skip", "--no-verify", "defenseclaw doctor")]
         )
 
-    if options.start_gateway:
-        setup.append(_start_gateway_structured(cfg))
-    else:
-        setup.append(StepResult("Sidecar", "skip", "not started (--no-start-gateway)", "defenseclaw-gateway start"))
-
-    try:
-        cfg.save()
-    except OSError as exc:
-        setup.append(StepResult("Config Save", "fail", str(exc), "defenseclaw config validate"))
-
-    readiness = (
-        targeted_readiness(cfg, options)
-        if options.verify
-        else [StepResult("Readiness", "skip", "--no-verify", "defenseclaw doctor")]
-    )
-
-    try:
-        logger.close()
+        next_commands = _next_commands(setup, readiness, cfg, profile)
+        status = _rollup_status(setup, readiness)
+        return FirstRunReport(
+            status=status,
+            config_file=str(cfg_mod.config_path()),
+            data_dir=cfg.data_dir,
+            connector=connector,
+            profile=profile,
+            setup=setup,
+            readiness=readiness,
+            next_commands=next_commands,
+            connector_mode_warnings=connector_mode_warnings,
+        )
     finally:
-        store.close()
-
-    next_commands = _next_commands(setup, readiness, cfg, profile)
-    status = _rollup_status(setup, readiness)
-    return FirstRunReport(
-        status=status,
-        config_file=str(cfg_mod.config_path()),
-        data_dir=cfg.data_dir,
-        connector=connector,
-        profile=profile,
-        setup=setup,
-        readiness=readiness,
-        next_commands=next_commands,
-        connector_mode_warnings=connector_mode_warnings,
-    )
+        try:
+            if logger is not None:
+                logger.close()
+        finally:
+            store.close()
 
 
 def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult]:
@@ -533,7 +876,9 @@ def _normalize_connector(raw: str | None) -> str:
     value = (raw or "").strip().lower()
     if value in {"claude", "claude-code", "claude_code"}:
         value = "claudecode"
-    if value in {"none", ""}:
+    if value == "none":
+        return "none"
+    if value == "":
         value = "codex"
     try:
         return connector_paths.normalize(value)
@@ -1055,6 +1400,8 @@ def _pid_looks_like_gateway(pid: int) -> bool:
 
 
 def _connector_readiness(cfg: Config, connector: str) -> StepResult:
+    if connector == "none":
+        return StepResult("Connector", "skip", "no connector requested")
     if connector == "openclaw":
         path = os.path.expanduser(cfg.claw.config_file)
         if os.path.isfile(path):

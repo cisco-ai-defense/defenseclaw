@@ -11,8 +11,6 @@
 set -euo pipefail
 umask 077
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
 if [[ $# -ne 2 ]]; then
     echo "usage: $0 RELEASE_DIR VERSION" >&2
     exit 64
@@ -20,9 +18,14 @@ fi
 
 RELEASE_DIR="$(cd "$1" && pwd)"
 VERSION="$2"
-[[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+INSTALLER="${RELEASE_DIR}/install.sh"
+[[ "${VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
     echo "invalid release version: ${VERSION}" >&2
     exit 64
+}
+[[ -f "${INSTALLER}" && ! -L "${INSTALLER}" ]] || {
+    echo "sealed candidate POSIX installer is unavailable: ${INSTALLER}" >&2
+    exit 1
 }
 
 for command_name in uv cosign python3; do
@@ -200,7 +203,7 @@ if ! HOME="${BOOTSTRAP_HOME}" \
     TMPDIR="${BOOTSTRAP_TMP}" \
     PATH="${BOOTSTRAP_PATH}" \
     VERSION="${VERSION}" \
-    /bin/bash "${ROOT}/scripts/install.sh" \
+    /bin/bash "${INSTALLER}" \
     --local "${RELEASE_DIR}" \
     --yes \
     --connector none \
@@ -236,7 +239,7 @@ DEFENSECLAW_HOME="${BOOTSTRAP_HOME}/.defenseclaw" \
 TMPDIR="${BOOTSTRAP_TMP}" \
 PATH="${BOOTSTRAP_PATH}" \
 VERSION="${VERSION}" \
-/bin/bash "${ROOT}/scripts/install.sh" \
+/bin/bash "${INSTALLER}" \
     --local "${RELEASE_DIR}" \
     --yes \
     --connector none \
@@ -268,7 +271,7 @@ if ! HOME="${EXTERNAL_HOME}" \
     EXTERNAL_COSIGN_PATH="${EXTERNAL_COSIGN}" \
     EXTERNAL_COSIGN_MARKER="${EXTERNAL_COSIGN_MARKER}" \
     VERSION="${VERSION}" \
-    /bin/bash "${ROOT}/scripts/install.sh" \
+    /bin/bash "${INSTALLER}" \
     --local "${RELEASE_DIR}" \
     --yes \
     --connector none \

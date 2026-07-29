@@ -587,7 +587,13 @@ function Read-SharedText([string]$Path) {
     return ''
 }
 
-function Get-LatestHookDecision([string]$Path, [string]$Name, [int]$Since) {
+function Get-LatestHookDecision(
+    [string]$Path,
+    [string]$Name,
+    [int]$Since,
+    [string]$SessionID = '',
+    [string]$HookEvent = ''
+) {
     $lines = @(Get-EventLines $Path)
     if ($Since -ge $lines.Count) { return $null }
     $match = $null
@@ -602,6 +608,14 @@ function Get-LatestHookDecision([string]$Path, [string]$Name, [int]$Since) {
             $enforced = $body.PSObject.Properties['defenseclaw.guardrail.enforced']
             if ($null -eq $wouldBlock -or $null -eq $enforced) { continue }
             $correlation = Get-JsonPropertyValue $eventRecord 'correlation'
+            if (-not [string]::IsNullOrWhiteSpace($SessionID) -and
+                [string](Get-JsonPropertyValue $correlation 'session_id') -cne $SessionID) {
+                continue
+            }
+            if (-not [string]::IsNullOrWhiteSpace($HookEvent) -and
+                [string](Get-JsonPropertyValue $body 'defenseclaw.hook.event') -cne $HookEvent) {
+                continue
+            }
             $match = [pscustomobject][ordered]@{
                 connector = [string](Get-JsonPropertyValue $eventRecord 'connector')
                 action = [string](Get-JsonPropertyValue $body 'defenseclaw.guardrail.effective_action')
@@ -616,6 +630,22 @@ function Get-LatestHookDecision([string]$Path, [string]$Name, [int]$Since) {
         } catch { continue }
     }
     return $match
+}
+
+function Wait-HookDecisionAfter(
+    [int]$Since,
+    [DateTime]$Deadline,
+    [string]$SessionID,
+    [string]$HookEvent
+) {
+    do {
+        $decision = Get-LatestHookDecision `
+            $script:GatewayJsonl $Connector $Since $SessionID $HookEvent
+        if ($null -ne $decision) { return $decision }
+        if ([DateTime]::UtcNow -ge $Deadline) { return $null }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $Deadline)
+    return $null
 }
 
 function Test-OtlpEvent([string]$Path, [string]$Name, [int]$Since) {
@@ -644,6 +674,97 @@ function Invoke-Tool([string]$Name, [string[]]$Arguments, [int[]]$Allowed = @(0)
     return Invoke-NativeProcess -FilePath $file -ArgumentList $Arguments -InputPath $InputPath -TimeoutSeconds $Timeout -AllowedExitCodes $Allowed -LogPath $log
 }
 
+function Wait-GatewayHookReady([int]$Timeout = 90) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($Timeout)
+    $hookExecutable = Get-StableHookRuntimeExecutable
+    if (-not (Test-Path -LiteralPath $hookExecutable -PathType Leaf)) {
+        throw "stable hook runtime is unavailable for readiness: $hookExecutable"
+    }
+    $probeRoot = Join-Path $StateRoot 'gateway-hook-readiness'
+    Protect-TestDirectory $probeRoot
+    $lastError = 'no native hook readiness probe completed'
+
+    for ($attempt = 1; [DateTime]::UtcNow -lt $deadline; $attempt++) {
+        $probeID = "dc-windows-ready-$Connector-$([Guid]::NewGuid().ToString('N'))"
+        $sessionPath = Join-Path $probeRoot "session-$attempt.json"
+        $toolPath = Join-Path $probeRoot "tool-$attempt.json"
+        $sessionPayload = [ordered]@{
+            hook_event_name = 'SessionStart'
+            session_id = $probeID
+            turn_id = "$probeID-turn"
+            agent_id = "$Connector-readiness"
+            agent_name = "$Connector Windows readiness"
+            agent_type = "$Connector-cli"
+        }
+        $toolPayload = [ordered]@{
+            hook_event_name = 'PreToolUse'
+            session_id = $probeID
+            turn_id = "$probeID-turn"
+            agent_id = "$Connector-readiness"
+            agent_name = "$Connector Windows readiness"
+            agent_type = "$Connector-cli"
+            tool_name = if ($Connector -eq 'claudecode') { 'Bash' } else { 'shell' }
+            tool_input = [ordered]@{ command = 'echo dc-gateway-readiness' }
+        }
+        [IO.File]::WriteAllText(
+            $sessionPath,
+            ($sessionPayload | ConvertTo-Json -Depth 6 -Compress),
+            [Text.UTF8Encoding]::new($false)
+        )
+        [IO.File]::WriteAllText(
+            $toolPath,
+            ($toolPayload | ConvertTo-Json -Depth 6 -Compress),
+            [Text.UTF8Encoding]::new($false)
+        )
+
+        try {
+            $remaining = [Math]::Max(1, [int][Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalSeconds))
+            $probeTimeout = [Math]::Min(15, $remaining)
+            $beforeSession = @(Get-EventLines $script:GatewayJsonl).Count
+            $sessionResult = Invoke-NativeProcess -FilePath $hookExecutable `
+                -ArgumentList @('hook', '--connector', $Connector, '--event', 'SessionStart') `
+                -InputPath $sessionPath -TimeoutSeconds $probeTimeout -AllowedExitCodes @(0, 2) `
+                -LogPath (Join-Path $script:LogRoot "gateway-readiness-$attempt-session.log")
+            $decisionDeadline = [DateTime]::UtcNow.AddSeconds(2)
+            if ($decisionDeadline -gt $deadline) { $decisionDeadline = $deadline }
+            $sessionDecision = Wait-HookDecisionAfter `
+                $beforeSession $decisionDeadline $probeID 'SessionStart'
+            if ($sessionResult.ExitCode -ne 0 -or $null -eq $sessionDecision -or
+                $sessionDecision.action -cne 'allow' -or $sessionDecision.raw_action -cne 'allow' -or
+                $sessionDecision.would_block) {
+                throw "SessionStart readiness did not produce a canonical allow decision (exit=$($sessionResult.ExitCode))"
+            }
+
+            $remaining = [Math]::Max(1, [int][Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalSeconds))
+            $probeTimeout = [Math]::Min(15, $remaining)
+            $beforeTool = @(Get-EventLines $script:GatewayJsonl).Count
+            $toolResult = Invoke-NativeProcess -FilePath $hookExecutable `
+                -ArgumentList @('hook', '--connector', $Connector, '--event', 'PreToolUse') `
+                -InputPath $toolPath -TimeoutSeconds $probeTimeout -AllowedExitCodes @(0, 2) `
+                -LogPath (Join-Path $script:LogRoot "gateway-readiness-$attempt-tool.log")
+            $decisionDeadline = [DateTime]::UtcNow.AddSeconds(2)
+            if ($decisionDeadline -gt $deadline) { $decisionDeadline = $deadline }
+            $toolDecision = Wait-HookDecisionAfter `
+                $beforeTool $decisionDeadline $probeID 'PreToolUse'
+            if ($toolResult.ExitCode -ne 0 -or $null -eq $toolDecision -or
+                $toolDecision.action -cne 'allow' -or $toolDecision.raw_action -cne 'allow' -or
+                $toolDecision.would_block) {
+                throw "PreToolUse readiness did not produce a canonical allow decision (exit=$($toolResult.ExitCode))"
+            }
+
+            Write-Result 'gateway-hook-readiness' pass `
+                "stable native SessionStart -> PreToolUse allow after $attempt probe(s)"
+            return
+        } catch {
+            $lastError = Protect-LogText $_.Exception.Message
+            Write-Warning "gateway hook readiness probe $attempt is not ready: $lastError"
+        }
+
+        if ([DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 250 }
+    }
+    throw "gateway hook API did not become semantically ready within ${Timeout}s; last probe: $lastError"
+}
+
 function Wait-Gateway([int]$Timeout = 90) {
     $deadline = [DateTime]::UtcNow.AddSeconds($Timeout)
     $lastError = 'no status probe completed'
@@ -652,13 +773,15 @@ function Wait-Gateway([int]$Timeout = 90) {
         $probeTimeout = [Math]::Min(15, $remaining)
         try {
             Invoke-Tool 'defenseclaw-gateway' @('status') @(0) -Timeout $probeTimeout | Out-Null
+            $remaining = [Math]::Max(1, [int][Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalSeconds))
+            Wait-GatewayHookReady -Timeout $remaining
             return
         } catch {
             $lastError = Protect-LogText $_.Exception.Message
             Start-Sleep -Milliseconds 500
         }
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw "gateway did not become healthy within ${Timeout}s; last status probe: $lastError"
+    throw "gateway did not become healthy within ${Timeout}s; last status or hook probe: $lastError"
 }
 
 function Set-IsolatedGatewayPort {

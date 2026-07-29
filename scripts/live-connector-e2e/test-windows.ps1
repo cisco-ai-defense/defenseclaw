@@ -619,6 +619,34 @@ private-secret-name = "DefenseClaw must remain redacted"
         DEFENSECLAW_HOME = $ownedRoot
     } -PassThru -WindowStyle Hidden
     try {
+        $argvOwnedReady = $false
+        $argvOwnedStopwatch = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            do {
+                $argvOwnedRows = @(Get-CimInstance Win32_Process `
+                    -Filter "ProcessId = $($argvOwnedDescendant.Id)" `
+                    -ErrorAction SilentlyContinue)
+                $argvOwnedCommandLine = if ($argvOwnedRows.Count -eq 1) {
+                    [string]$argvOwnedRows[0].CommandLine
+                } else {
+                    ''
+                }
+                $argvOwnedReady =
+                    -not [string]::IsNullOrWhiteSpace($argvOwnedCommandLine) -and
+                    $argvOwnedCommandLine.IndexOf(
+                        [IO.Path]::GetFullPath($StateRoot),
+                        [StringComparison]::OrdinalIgnoreCase
+                    ) -ge 0
+                if ($argvOwnedReady) { break }
+                Start-Sleep -Milliseconds 100
+            } while ($argvOwnedStopwatch.Elapsed -lt [TimeSpan]::FromSeconds(5))
+        } finally {
+            $argvOwnedStopwatch.Stop()
+        }
+        if (-not $argvOwnedReady) {
+            throw 'isolated cleanup fixture setup failed: exact argv-owned process and StateRoot were not queryable within 5 seconds'
+        }
+
         $expectedProductExecutable = Get-NormalizedExecutablePath $productExecutable
         $productStartIdentity = ''
         $productLiveExecutable = ''
@@ -781,6 +809,14 @@ private-secret-name = "DefenseClaw must remain redacted"
     $nativePathHelpersText = [IO.File]::ReadAllText($nativePathHelpers)
     $nativePathInitializerText = [IO.File]::ReadAllText($nativePathInitializer)
     $installerText = [IO.File]::ReadAllText($installer)
+    $nativeProcessFunction = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Invoke-WindowsNativeProcess\b.*?(?=\r?\nfunction )'
+    ).Value
+    $diagnosticTailFunction = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Add-WindowsNativeDiagnosticTail\b.*?(?=\r?\nfunction )'
+    ).Value
     Assert-True ($nativeWorkflowText -match '(?s)connector-contract:.*?connector: \[codex, claudecode\].*?windows-native-required:') 'required Windows contract matrix contains Codex and Claude'
     Assert-True ($nativeWorkflowText -match '(?m)^\s+name: Windows Native Required\s*$') 'stable aggregate check name exists'
     foreach ($job in @('windows-go', 'windows-python', 'powershell-static', 'package-artifact', 'packaged-acceptance', 'connector-contract')) {
@@ -857,8 +893,25 @@ private-secret-name = "DefenseClaw must remain redacted"
         Assert-True ($nativeWorkflowText -match [regex]::Escape($testName)) "native Windows Go DACL step reaches $testName"
     }
     Assert-True ($nativeWorkflowText -match '''test'', ''-v'', ''-count=1'', ''-run'', \$daclTestPattern, ''\./internal/safefile'', ''\./internal/managed'', ''\./internal/gateway/connector''') 'Go DACL regressions execute in every owning package without cache reuse'
-    Assert-True ($nativeWorkflowText -match "'test'.*'\./\.\.\.'") 'full Go suite is required'
-    Assert-True ($nativeWorkflowText -match '''-p=1''.*''-skip''.*\$windowsInapplicable') 'full Go suite serializes packages and excludes only declared Windows-inapplicable tests'
+    Assert-True ($nativeWorkflowText -match
+        '''test'', ''-list'', ''\^\(Test\|Fuzz\|Example\)'', ''\./internal/gateway''' -and
+        $nativeWorkflowText -match '\(\$index % 4\) -eq \$shard' -and
+        $nativeWorkflowText -match '''-run'', \$shardPattern, ''\./internal/gateway''' -and
+        $nativeWorkflowText -match '\$_ -ne ''github\.com/defenseclaw/defenseclaw/internal/gateway''' -and
+        $nativeWorkflowText -match '\$remainingArguments = @\(') `
+        'full native Go suite shards the gateway process and separately selects every remaining package'
+    Assert-True ($nativeWorkflowText -match '(?s)''-p=1''.*?''-skip''.*?\$windowsInapplicable') 'native Go suite serializes packages and excludes only declared Windows-inapplicable tests'
+    Assert-True ($nativeWorkflowText -match '''test'', ''-json'', ''-count=1''' -and
+        $nativeWorkflowText -match '-GoTestFailureSummaryPath \$goFailureSummary' -and
+        $nativeWorkflowText -match 'go-test-failure-summary\.log') `
+        'full Go suite retains a bounded structured failure summary'
+    Assert-True ($nativeProcessFunction -match
+        '(?s)\$exitCode = if \(\$timedOut\).*?if \(\$GoTestFailureSummaryPath -and.*?\$exitCode -notin \$AllowedExitCodes.*?Get-GoTestFailureSummary' -and
+        $nativeProcessFunction -match
+        '(?s)\$failureOutput = if \(\$goTestFailureSummary\).*?throw "\$FilePath \$reason`n\$failureOutput"' -and
+        $diagnosticTailFunction -match
+        '(?s)function Add-WindowsNativeDiagnosticTail.*?\$boundedText = Limit-WindowsNativeText.*?\$retainedBytes -gt \$MaxBytes') `
+        'native process harness parses Go JSON only on failure, bounds collection, and reports the focused summary instead of the full JSON stream'
     Assert-True ($nativeWorkflowText -match 'Validate registered Windows Codex and Claude hook commands') 'native Windows workflow has a required Doctor hook-command step'
     Assert-True ($nativeWorkflowText -match "'pytest', 'cli/tests/test_cmd_doctor_windows_hooks\.py', '-q'") 'Doctor validates registered Windows hook commands explicitly'
     Assert-True ($nativeWorkflowText -match "Get-ChildItem cli/tests -Recurse -File -Filter 'test_\*\.py'") 'complete Python suite discovers every test file'
@@ -1208,8 +1261,18 @@ private-secret-name = "DefenseClaw must remain redacted"
         'interactive Setup acceptance owns and cleans built-in-root fixtures without environment trust authority'
     Assert-True ($setupAcceptanceFunction -match '\$cachedSetup' -and
         $setupAcceptanceFunction -match 'Join-Path \$cacheRoot ''DefenseClawSetup-x64\.exe''' -and
-        $setupAcceptanceFunction -match 'cached setup self-uninstall left installer cache behind') `
-        'native Setup acceptance executes the cached Apps & Features binary and proves deferred self-delete removes InstallerCache'
+        $setupAcceptanceFunction -match '-AllowedExitCodes @\(3010\)' -and
+        $setupAcceptanceFunction -match 'uninstall-cleanup\.json' -and
+        $setupAcceptanceFunction -match '''pending-reboot''' -and
+        $setupAcceptanceFunction -match '''converged''') `
+        'native Setup acceptance proves exact 3010 and authenticated same-boot pending cleanup custody'
+    Assert-True ($setupAcceptanceFunction -match
+        '\(\$terminalProperties -join '',''\) -cne ''phase,schema_version''' -and
+        $setupAcceptanceFunction -notmatch '\$legacyJournal\.transaction') `
+        'native Setup acceptance treats the completed journal only as the frozen terminal tombstone'
+    Assert-True ($contractFunction -match
+        '(?s)/uninstall.*?-AllowedExitCodes @\(3010\).*?setup-contract-uninstall\.log') `
+        'packaged connector contract accepts only restart-required full-uninstall success'
     Assert-True ($nativeHarnessText -match '-StateRoot \$contractProfileRoot -HomeRoot \$contractHome -NativeDataRoot \$dataRoot' -and
         $nativeHarnessText -match '-AllowNativeDataRoot' -and
         $harnessText -match 'NativeDataRoot is restricted to an explicitly authorized packaged contract run' -and
@@ -1324,7 +1387,55 @@ private-secret-name = "DefenseClaw must remain redacted"
     Assert-True ($doctorContract -match "(?s)Write-Result 'doctor:windows-hook-recovery'.*?try\s*\{.*?DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT = '1'.*?defenseclaw-gateway' @\('start'\).*?\}\s*finally\s*\{.*?Remove-Item Env:DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT.*?\}.*?Wait-Gateway") `
         'unversioned fixture override is scoped to the post-Doctor gateway restart'
     Assert-True ($harnessText -match 'obsolete shell-hook guidance for native Windows') 'Doctor connector contract rejects obsolete shell guidance'
-    Assert-True ($harnessText -match 'function Wait-Gateway\(\[int\]\$Timeout = 90\)' -and $harnessText -match '\$probeTimeout = \[Math\]::Min\(15, \$remaining\)') 'gateway readiness uses bounded Windows-native status probes'
+    $gatewayWait = [regex]::Match($harnessText, '(?s)function Wait-Gateway\b.*?\n\}').Value
+    $gatewayHookReadiness = [regex]::Match(
+        $harnessText,
+        '(?s)function Wait-GatewayHookReady\b.*?\n\}'
+    ).Value
+    Assert-True ($gatewayWait -match "Invoke-Tool 'defenseclaw-gateway' @\('status'\)" -and
+        $gatewayWait -match '\$probeTimeout = \[Math\]::Min\(15, \$remaining\)' -and
+        $gatewayWait -match 'Wait-GatewayHookReady -Timeout \$remaining') `
+        'gateway readiness requires bounded status and native hook API probes'
+    $readinessSession = $gatewayHookReadiness.IndexOf(
+        "-ArgumentList @('hook', '--connector', `$Connector, '--event', 'SessionStart')",
+        [StringComparison]::Ordinal
+    )
+    $readinessTool = $gatewayHookReadiness.IndexOf(
+        "-ArgumentList @('hook', '--connector', `$Connector, '--event', 'PreToolUse')",
+        [StringComparison]::Ordinal
+    )
+    $readinessSessionDecision = $gatewayHookReadiness.IndexOf(
+        '$beforeSession $decisionDeadline $probeID ''SessionStart''',
+        [StringComparison]::Ordinal
+    )
+    $readinessToolDecision = $gatewayHookReadiness.IndexOf(
+        '$beforeTool $decisionDeadline $probeID ''PreToolUse''',
+        [StringComparison]::Ordinal
+    )
+    Assert-True ($gatewayHookReadiness -match 'Get-StableHookRuntimeExecutable' -and
+        $readinessSession -ge 0 -and $readinessTool -gt $readinessSession -and
+        $readinessSessionDecision -gt $readinessSession -and
+        $readinessToolDecision -gt $readinessTool) `
+        'gateway restart readiness exercises the stable native SessionStart to PreToolUse path'
+    Assert-True ($gatewayHookReadiness -match '\$sessionDecision\.action -cne ''allow''' -and
+        $gatewayHookReadiness -match '\$sessionDecision\.raw_action -cne ''allow''' -and
+        $gatewayHookReadiness -match '\$sessionDecision\.would_block' -and
+        $gatewayHookReadiness -match '\$toolDecision\.action -cne ''allow''' -and
+        $gatewayHookReadiness -match '\$toolDecision\.raw_action -cne ''allow''' -and
+        $gatewayHookReadiness -match '\$toolDecision\.would_block') `
+        'gateway restart readiness requires canonical non-blocking allow decisions'
+    $latestHookDecision = [regex]::Match(
+        $harnessText,
+        '(?s)function Get-LatestHookDecision\b.*?\n\}'
+    ).Value
+    $hookDecisionWait = [regex]::Match(
+        $harnessText,
+        '(?s)function Wait-HookDecisionAfter\b.*?\n\}'
+    ).Value
+    Assert-True ($latestHookDecision -match 'Get-JsonPropertyValue \$correlation ''session_id''' -and
+        $latestHookDecision -match 'Get-JsonPropertyValue \$body ''defenseclaw\.hook\.event''' -and
+        $hookDecisionWait -match '\$SessionID \$HookEvent') `
+        'gateway hook readiness accepts only the current probe session and event decision'
     $isolatedCleanup = [regex]::Match($harnessText, '(?s)function Stop-IsolatedProcessTree\b.*?\n\}').Value
     Assert-True ($isolatedCleanup -match 'HashSet\[int\]' -and
         $isolatedCleanup -match '\$ancestor\[0\]\.ParentProcessId' -and

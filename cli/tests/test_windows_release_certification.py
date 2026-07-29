@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 HARNESS = (ROOT / "scripts" / "windows-native-ci.ps1").read_text(encoding="utf-8")
 PACKAGED_V8_VALIDATOR = (ROOT / "scripts" / "validate_packaged_v8_resources.py").read_text(encoding="utf-8")
 RELEASE_PATH = ROOT / ".github" / "workflows" / "release.yaml"
-SMOKE_PATH = ROOT / ".github" / "workflows" / "pre-release-certification.yml"
+SMOKE_PATH = ROOT / ".github" / "workflows" / "release-candidate-smoke.yml"
 FRESH_INSTALL = (ROOT / "scripts" / "test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")
 DISPOSABLE_LAUNCHER = (ROOT / "scripts" / "invoke-windows-setup-standard-user-ci.ps1").read_text(encoding="utf-8")
 STANDARD_USER_PROCESS_LAUNCHER = (ROOT / "scripts" / "windows-disposable-standard-user-launcher.cs").read_text(
@@ -263,9 +263,13 @@ def test_release_documentation_matches_the_fresh_only_gate() -> None:
     assert ".certification.json" not in installer
     assert "A merge to `main` is the review-and-CI boundary" in ci
     assert "does not poll or replay `Windows Native CI`" in ci
-    assert "first native Windows release" in release
-    assert "has no older native Windows baseline" in release
-    assert "fresh-install only" in release
+    assert "Windows acceptance is" in release
+    assert "fresh-install-only" in release
+    assert re.search(
+        r"no historical Windows baseline is inferred or\s+required",
+        release,
+    )
+    assert "first native Windows release" not in release
 
 
 def test_native_wheel_stages_and_verifies_v8_runtime_assets() -> None:
@@ -329,3 +333,19 @@ def test_setup_uninstall_acceptance_retains_connector_cleanup_authority() -> Non
     assert "Get-NativeConnectorBackupMarkers" in consumed
     assert "Assert-NativeConnectorCleanupAuthorityPresent $dataRoot $repairedRoster" in acceptance
     assert "Assert-NativeConnectorBackupMarkersConsumed $dataRoot" in acceptance
+
+
+def test_setup_uninstall_acceptance_separates_signed_cli_from_unsigned_fixture() -> None:
+    acceptance = _function("Invoke-SetupAcceptance")
+
+    assert "if ($requireSignedProduct)" in acceptance
+    assert "'uninstall', '--all', '--yes'" in acceptance
+    assert "restart required.*3010" in acceptance
+    assert "Native installer state is not an authenticated signed user installation" in acceptance
+    assert "unsigned native CLI refusal mutated installed state" in acceptance
+    assert "Invoke-WindowsSetupStandardUserProcess $cachedSetup" in acceptance
+    assert "'/uninstall', '/quiet', 'DELETEUSERDATA=1'" in acceptance
+    assert acceptance.count("-AllowedExitCodes @(3010)") >= 3
+    assert "RegistryValueOptions]::DoNotExpandEnvironmentNames" in acceptance
+    assert "RegistryValueKind]::String" in acceptance
+    assert "Run value is not the exact absolute cached Setup command" in acceptance

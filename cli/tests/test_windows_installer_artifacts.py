@@ -27,6 +27,8 @@ PACKAGED_V8_VALIDATOR = ROOT / "scripts" / "validate_packaged_v8_resources.py"
 AUTHENTICODE_PS1 = ROOT / "scripts" / "windows-authenticode.ps1"
 BINARY_IDENTITY_PS1 = ROOT / "scripts" / "windows-binary-identity.ps1"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yaml"
+WINDOWS_NATIVE_WORKFLOW = ROOT / ".github" / "workflows" / "windows-native.yml"
+WINDOWS_NATIVE_CI = ROOT / "scripts" / "windows-native-ci.ps1"
 SPEC = importlib.util.spec_from_file_location("windows_installer_artifacts", HELPER_PATH)
 assert SPEC and SPEC.loader
 artifacts = importlib.util.module_from_spec(SPEC)
@@ -246,6 +248,7 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
 
     for name, data in {
         "defenseclaw-launcher.exe": b"launcher",
+        "defenseclaw-hook-launcher.exe": b"hook launcher",
         "defenseclaw-startup.exe": b"startup",
         "cosign.exe": b"cosign",
         "requirements-release.txt": b"example==1 --hash=sha256:abc\n",
@@ -282,6 +285,7 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
         "setup": _sha256(setup),
         "gateway": gateway_sha256,
         "hook": hook_sha256,
+        "hook-launcher": _sha256(payload / "defenseclaw-hook-launcher.exe"),
         "launcher": _sha256(payload / "defenseclaw-launcher.exe"),
         "startup-launcher": _sha256(payload / "defenseclaw-startup.exe"),
         "cosign": _sha256(payload / "cosign.exe"),
@@ -313,6 +317,11 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
     )
     add_evidence("bin/defenseclaw-gateway.exe", "./expanded/gateway/defenseclaw.exe", gateway_sha256)
     add_evidence("bin/defenseclaw-hook.exe", "./expanded/gateway/defenseclaw-hook.exe", hook_sha256)
+    add_evidence(
+        "bin/defenseclaw-hook-launcher.exe",
+        "./payload/defenseclaw-hook-launcher.exe",
+        component_hashes["hook-launcher"],
+    )
     add_evidence(
         "runtime/python/python.exe",
         "./expanded/python/python.exe",
@@ -687,6 +696,100 @@ def test_reproducible_launcher_builds_include_final_pe_resources() -> None:
     assert body.index("Set-WindowsExecutableResource") < body.index("Get-FileHashHex $target")
     assert "Build-VerifiedGoBinary $launcher" in build and "$reproducibilityRoot 'launcher'" in build
     assert "Build-VerifiedGoBinary $startupLauncher" in build and "$reproducibilityRoot 'startup'" in build
+    assert "Build-VerifiedGoBinary $hookLauncher './cmd/defenseclaw-hook-launcher'" in build
+    assert "$reproducibilityRoot 'hook'" in build
+    assert "[Environment]::SetEnvironmentVariable('GOOS', 'windows')" in body
+    assert "[Environment]::SetEnvironmentVariable('GOARCH', 'amd64')" in body
+
+
+def test_hook_launcher_size_signing_and_inventory_order_is_fail_closed() -> None:
+    build = BUILD_PS1.read_text(encoding="utf-8")
+    size_gate = "Assert-HookLauncherArtifact $hookLauncher"
+    signing = "$payloadSigned = Set-FileSignaturesIfConfigured"
+    evidence = (
+        "[pscustomobject]@{ Installed = 'bin/defenseclaw-hook-launcher.exe'; "
+        "Source = $hookLauncher; Sbom = './payload/defenseclaw-hook-launcher.exe' }"
+    )
+    assert "$HookLauncherMaxUnsignedBytes = 8MB" in build
+    assert size_gate in build
+    assert evidence in build
+    assert build.index(size_gate) < build.index(signing) < build.index(evidence)
+    signing_call = build[build.index(signing) : build.index("foreach ($resourceContract", build.index(signing))]
+    assert "$hookLauncher" in signing_call
+    assert "'--component', \"hook-launcher=$hookLauncher\"" in build
+    assert "hook_launcher_sha256 = Get-FileHashHex $hookLauncher" in build
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows PowerShell file semantics")
+def test_hook_launcher_size_gate_rejects_oversized_artifact(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell")
+    if powershell is None:
+        pytest.skip("Windows PowerShell is required for the launcher size-gate fixture")
+    launcher = tmp_path / "defenseclaw-hook-launcher.exe"
+    launcher.write_bytes(b"\0" * (8 * 1024 * 1024))
+    harness = tmp_path / "hook-launcher-size.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "$HookLauncherName = 'defenseclaw-hook-launcher.exe'\n"
+        "$HookLauncherMaxUnsignedBytes = 8MB\n"
+        f"{_builder_function('Assert-HookLauncherArtifact')}\n"
+        "Assert-HookLauncherArtifact $env:DC_TEST_HOOK_LAUNCHER\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["DC_TEST_HOOK_LAUNCHER"] = str(launcher)
+    accepted = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+        check=False,
+    )
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+
+    with launcher.open("ab") as stream:
+        stream.write(b"\0")
+    rejected = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+        check=False,
+    )
+    assert rejected.returncode != 0
+    assert "no larger than 8388608 bytes before" in rejected.stderr
+    assert "signing" in rejected.stderr
+
+
+def test_native_windows_workflow_builds_distinct_hook_launcher() -> None:
+    workflow = WINDOWS_NATIVE_WORKFLOW.read_text(encoding="utf-8")
+    assert "./cmd/defenseclaw-hook-launcher" in workflow
+    assert "defenseclaw-hook-launcher.exe" in workflow
+    assert "HookRuntime launcher exceeds the unsigned 8 MiB size ceiling" in workflow
+
+
+def test_native_lifecycle_ci_binds_stable_launcher_to_installed_source() -> None:
+    harness = WINDOWS_NATIVE_CI.read_text(encoding="utf-8")
+    publication = re.search(
+        r"(?ms)^function Assert-StableHookLauncherPublication\b.*?(?=^function |\Z)",
+        harness,
+    )
+    assert publication
+    body = publication.group(0)
+    assert "Assert-WindowsExecutableResource -Path $path -Component 'hook'" in body
+    assert "Get-FileHash -LiteralPath $Source -Algorithm SHA256" in body
+    assert "Get-FileHash -LiteralPath $Published -Algorithm SHA256" in body
+    assert "Get-CiscoAuthenticodeState $Source" in body
+    assert "Get-CiscoAuthenticodeState $Published" in body
+    assert body.count("Assert-CiscoAuthenticodeSignature") == 2
+    assert harness.count("Assert-StableHookLauncherPublication `") == 2
+    assert "DefenseClaw stable HookRuntime launcher" in harness
+    assert "./payload/defenseclaw-hook-launcher.exe" in harness
+    assert "provenance.inputs.hook_launcher_sha256" in harness
+    assert "installed HookRuntime launcher source digest differs from release provenance" in harness
+    assert "installed payload manifest does not bind the HookRuntime launcher source digest" in harness
 
 
 def test_signed_release_stages_offline_resource_verifier_before_lifecycle() -> None:
@@ -894,14 +997,15 @@ def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -
     assert document["comment"] == f"DefenseClaw source commit: {args.source_commit}"
     assert summary["python_distributions"] == 2
     assert summary["go_modules"] == 2
-    assert summary["payload_digests"] == 10
-    assert summary["authenticode_files"] == 10
+    assert summary["payload_digests"] == 11
+    assert summary["authenticode_files"] == 11
     assert {package["name"] for package in document["packages"]} >= {
         "DefenseClaw Windows Setup",
         "DefenseClaw embedded installer payload",
         "CPython embeddable runtime",
         "DefenseClaw gateway executable",
         "DefenseClaw hook executable",
+        "DefenseClaw stable HookRuntime launcher",
         "DefenseClaw native CLI launcher",
         "DefenseClaw native startup launcher",
         "Sigstore Cosign verifier",
@@ -914,6 +1018,7 @@ def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -
     assert "./expanded/python/stdlib/json/__init__.py" in file_names
     assert "./expanded/site-packages/defenseclaw/__init__.py" in file_names
     assert "./expanded/gateway/defenseclaw-hook.exe" in file_names
+    assert "./payload/defenseclaw-hook-launcher.exe" in file_names
     setup_package = next(package for package in document["packages"] if package["name"] == "DefenseClaw Windows Setup")
     assert setup_package["checksums"][0]["checksumValue"] == _sha256(args.setup)
     setup_file = next(file for file in document["files"] if file["fileName"] == "./DefenseClawSetup-x64.exe")
@@ -922,6 +1027,10 @@ def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -
         file for file in document["files"] if file["fileName"] == "./expanded/gateway/defenseclaw-hook.exe"
     )
     assert '"installed_path":"bin/defenseclaw-hook.exe"' in hook_file["comment"]
+    hook_launcher_file = next(
+        file for file in document["files"] if file["fileName"] == "./payload/defenseclaw-hook-launcher.exe"
+    )
+    assert '"installed_path":"bin/defenseclaw-hook-launcher.exe"' in hook_launcher_file["comment"]
 
 
 def test_sbom_fails_closed_when_payload_digest_no_longer_matches(tmp_path: Path) -> None:
@@ -935,6 +1044,52 @@ def test_sbom_fails_closed_when_required_component_is_absent(tmp_path: Path) -> 
     args = _fixture(tmp_path)
     (args.payload_root / "cosign.exe").unlink()
     with pytest.raises(artifacts.ArtifactError, match="Payload digest coverage mismatch"):
+        artifacts.build_sbom(args)
+
+
+def test_sbom_requires_canonical_hook_launcher_payload(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    launcher = args.payload_root / "defenseclaw-hook-launcher.exe"
+    launcher.unlink()
+    manifest_path = args.payload_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["files"][launcher.name]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    artifacts.deterministic_zip(args.payload_root, args.embedded_payload, args.source_epoch, include_root=True)
+    with pytest.raises(artifacts.ArtifactError, match=r"Required payload component is absent \(hook_launcher\)"):
+        artifacts.build_sbom(args)
+
+
+def test_sbom_rejects_case_colliding_hook_launcher_manifest_name(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    manifest_path = args.payload_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"]["DefenseClaw-Hook-Launcher.exe"] = manifest["files"]["defenseclaw-hook-launcher.exe"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(artifacts.ArtifactError, match="case-colliding file names"):
+        artifacts.build_sbom(args)
+
+
+def test_sbom_rejects_unexpected_extra_payload_artifact(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    (args.payload_root / "unexpected-launcher.exe").write_bytes(b"unexpected")
+    with pytest.raises(artifacts.ArtifactError, match="Payload digest coverage mismatch"):
+        artifacts.build_sbom(args)
+
+
+def test_sbom_rejects_case_colliding_authenticode_inventory_path(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    manifest_path = args.payload_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    evidence = dict(manifest["authenticode"]["files"]["bin/defenseclaw-hook-launcher.exe"])
+    evidence["installed_path"] = "bin/DefenseClaw-Hook-Launcher.exe"
+    manifest["authenticode"]["files"][evidence["installed_path"]] = evidence
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    inventory = json.loads(args.authenticode_inventory.read_text(encoding="utf-8"))
+    inventory["files"][evidence["installed_path"]] = evidence
+    args.authenticode_inventory.write_text(json.dumps(inventory), encoding="utf-8")
+    artifacts.deterministic_zip(args.payload_root, args.embedded_payload, args.source_epoch, include_root=True)
+    with pytest.raises(artifacts.ArtifactError, match="Case-colliding Authenticode installed paths"):
         artifacts.build_sbom(args)
 
 

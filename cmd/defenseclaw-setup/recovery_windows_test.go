@@ -91,6 +91,10 @@ func TestPendingRecoveryWaitsForLockedGatewayAndRestoresState(t *testing.T) {
 				calls = append(calls, "verify-release")
 				return verifyOwnedRuntimeReleased(path, root)
 			},
+			func(setupTransaction) error {
+				calls = append(calls, "restore-hook")
+				return nil
+			},
 			func(_ string, _ string, wanted serviceState) (serviceState, error) {
 				calls = append(calls, "restore-services")
 				if wanted != (serviceState{Gateway: true, Watchdog: true}) {
@@ -131,7 +135,7 @@ func TestPendingRecoveryWaitsForLockedGatewayAndRestoresState(t *testing.T) {
 		t.Fatalf("restored maintenance = %q, %v", maintenanceAfter, err)
 	}
 	assertPathAbsent(t, transaction.MaintenanceBackup)
-	wantCalls := "authenticate-stop:gateway+watchdog,verify-release,restore-services,journal:complete"
+	wantCalls := "authenticate-stop:gateway+watchdog,verify-release,restore-hook,restore-services,journal:complete"
 	if got := strings.Join(calls, ","); got != wantCalls {
 		t.Fatalf("pending recovery calls = %q, want %q", got, wantCalls)
 	}
@@ -172,6 +176,10 @@ func TestCommittedRecoveryWaitsForLockedGatewayBeforeConvergence(t *testing.T) {
 		Converge: func(got setupTransaction) error {
 			return convergeRecoveredCommittedSetupTransactionWithRuntime(
 				got,
+				func(string) error {
+					calls = append(calls, "disable-hook")
+					return nil
+				},
 				func(string, string) (serviceState, error) {
 					calls = append(calls, "authenticate-stop:gateway+watchdog")
 					go func() {
@@ -209,7 +217,7 @@ func TestCommittedRecoveryWaitsForLockedGatewayBeforeConvergence(t *testing.T) {
 	if closeErr := <-releaseDone; closeErr != nil {
 		t.Fatalf("release gateway fixture handle: %v", closeErr)
 	}
-	wantCalls := "authenticate-stop:gateway+watchdog,verify-release,converge,journal:converged,cleanup,journal:complete"
+	wantCalls := "disable-hook,authenticate-stop:gateway+watchdog,verify-release,converge,journal:converged,cleanup,journal:complete"
 	if got := strings.Join(calls, ","); got != wantCalls {
 		t.Fatalf("committed recovery calls = %q, want %q", got, wantCalls)
 	}
@@ -400,6 +408,7 @@ func TestRecoveryRejectsForeignGatewayProcessWithoutMutation(t *testing.T) {
 		transaction,
 		stopOwnedServices,
 		verifyOwnedRuntimeReleased,
+		func(setupTransaction) error { return nil },
 		func(string, string, serviceState) (serviceState, error) {
 			started = true
 			return serviceState{}, nil

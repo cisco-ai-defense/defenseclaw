@@ -658,9 +658,46 @@ PY
         python3 "${build_root}/scripts/release_candidate.py" stage-resolvers \
             --release-dir "${out}" \
             --version "${TARGET_VERSION}"
+        python3 "${build_root}/scripts/release_candidate.py" stage-installers \
+            --release-dir "${out}" \
+            --version "${TARGET_VERSION}"
     fi
-    (cd "${out}" && find . -type f ! -name checksums.txt ! -name checksums.txt.sig ! -name checksums.txt.pem \
-        | sed 's#^\./##' | sort | xargs shasum -a 256 > checksums.txt)
+    local checksum_tmp="${WORKDIR}/candidate-checksums.txt"
+    python3 - "${out}" "${checksum_tmp}" <<'PY'
+import hashlib
+from pathlib import Path
+import stat
+import sys
+
+root = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+files: list[tuple[bytes, str, Path]] = []
+for path in root.rglob("*"):
+    if not stat.S_ISREG(path.lstat().st_mode):
+        continue
+    if path.name == "checksums.txt" or path.name.startswith("checksums.txt."):
+        continue
+    relative = path.relative_to(root).as_posix()
+    if "\n" in relative or "\r" in relative:
+        raise SystemExit(f"candidate artifact name is not checksum-safe: {relative!r}")
+    try:
+        sort_key = relative.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise SystemExit(f"candidate artifact name is not canonical UTF-8: {relative!r}") from exc
+    files.append((sort_key, relative, path))
+
+# Bytewise UTF-8 ordering is the deterministic LC_ALL=C contract without a
+# GNU-only sort/sed extension or a delimiter-sensitive xargs pipeline.
+files.sort(key=lambda item: item[0])
+with destination.open("w", encoding="utf-8", newline="\n") as output:
+    for _, relative, path in files:
+        digest = hashlib.sha256()
+        with path.open("rb") as artifact:
+            for chunk in iter(lambda: artifact.read(1024 * 1024), b""):
+                digest.update(chunk)
+        output.write(f"{digest.hexdigest()}  {relative}\n")
+PY
+    mv "${checksum_tmp}" "${out}/checksums.txt"
 }
 
 prepare_release_root() {
@@ -1476,6 +1513,7 @@ DEFENSECLAW_GATEWAY_TOKEN=${gateway_token}
 ENV
     unset gateway_token
     finalize_observability_upgrade_fixture
+    seed_legacy_audit_permission_fixture
 }
 
 seed_native_v8_observability_fixture() {
@@ -1603,6 +1641,7 @@ PY
     chmod 600 "${data_dir}/config.yaml" "${data_dir}/.env"
     cp -p "${data_dir}/config.yaml" "${evidence_dir}/config.historical.source"
     cp -p "${data_dir}/.env" "${evidence_dir}/environment.historical.source"
+    seed_legacy_audit_permission_fixture
 }
 
 seed_already_v8_observability_fixture() {
@@ -1671,6 +1710,41 @@ EOF
     cat >"${data_dir}/observability-stack/grafana/dashboards/team-upgrade-smoke.json" <<'EOF'
 {"title":"Operator Custom Dashboard","uid":"team-upgrade-smoke"}
 EOF
+}
+
+seed_legacy_audit_permission_fixture() {
+    target_uses_observability_v8 || return 0
+    local audit_db="${SMOKE_HOME}/.defenseclaw/state/audit-custom.db"
+
+    # Historical releases created SQLite files with the caller's umask. A
+    # normal 0022 login therefore produced 0644 even though the current audit
+    # runtime safely intersects existing permissions with 0600 on activation.
+    # Keep that field state in every real upgrade fixture so the authenticated
+    # resolver cannot accidentally require permissions old releases never set.
+    (
+        umask 022
+        python3 - "${audit_db}" <<'PY'
+from pathlib import Path
+import sqlite3
+import stat
+import sys
+
+path = Path(sys.argv[1])
+if path.exists() or path.is_symlink():
+    raise SystemExit("legacy audit permission fixture already exists")
+with sqlite3.connect(path) as connection:
+    connection.execute(
+        "CREATE TABLE release_upgrade_legacy_mode_fixture "
+        "(value TEXT PRIMARY KEY NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO release_upgrade_legacy_mode_fixture VALUES ('preserved')"
+    )
+mode = stat.S_IMODE(path.lstat().st_mode)
+if mode != 0o644:
+    raise SystemExit(f"legacy audit permission fixture mode={mode:04o}; want 0644")
+PY
+    )
 }
 
 seed_upgrade_fixture() {
@@ -1920,6 +1994,11 @@ verify_upgrade() {
     local venv_python="${SMOKE_HOME}/.defenseclaw/.venv/bin/python"
     local release_dir="${RELEASE_ROOT}/${TARGET_VERSION}"
     local require_v8=0
+    local audit_expectation="${1:-preserved}"
+    case "${audit_expectation}" in
+        preserved|recovered) ;;
+        *) die "invalid upgrade audit verification mode: ${audit_expectation}" ;;
+    esac
     if target_uses_observability_v8; then
         require_v8=1
     fi
@@ -2606,6 +2685,48 @@ print("v8_recovery_backups=historical_and_bridge_byte_exact")
 print("local_bundle_manifest=target_exact_custom_preserved")
 PY
         fi
+
+        "${venv_python}" -I -B - \
+            "${SMOKE_HOME}/.defenseclaw" "${audit_expectation}" <<'PY'
+from pathlib import Path
+import sqlite3
+import stat
+import sys
+
+database = Path(sys.argv[1]) / "state/audit-custom.db"
+expectation = sys.argv[2]
+info = database.lstat()
+if (
+    database.is_symlink()
+    or not stat.S_ISREG(info.st_mode)
+    or stat.S_IMODE(info.st_mode) != 0o600
+):
+    raise SystemExit("legacy-readable audit fixture was not tightened to mode 0600")
+with sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=1.0) as connection:
+    if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
+        raise SystemExit("target audit fixture failed quick_check")
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'release_upgrade_legacy_mode_fixture'"
+    ).fetchone()
+    if expectation == "preserved":
+        if table != (1,):
+            raise SystemExit("legacy-readable audit fixture table did not survive the upgrade")
+        row = connection.execute(
+            "SELECT value FROM release_upgrade_legacy_mode_fixture"
+        ).fetchone()
+        if row != ("preserved",):
+            raise SystemExit("legacy-readable audit fixture did not survive the upgrade")
+    elif expectation == "recovered":
+        if table is not None:
+            raise SystemExit("corrupt audit recovery retained the discarded legacy fixture")
+    else:
+        raise SystemExit("invalid audit verification expectation")
+if expectation == "preserved":
+    print("legacy_audit_mode_0644=tightened_to_0600")
+else:
+    print("corrupt_audit_recovery=fresh_mode_0600")
+PY
 
         local receipt_from
         receipt_from="$(expected_upgrade_receipt_source \

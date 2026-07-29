@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -14,20 +15,28 @@ from pathlib import Path
 
 import pytest
 import yaml
+from defenseclaw import resolver_hint
+
+from scripts import release_candidate
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/release.yaml"
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 WINDOWS_CI_WORKFLOW = ROOT / ".github/workflows/windows-native.yml"
 MACOS_CI_WORKFLOW = ROOT / ".github/workflows/macos-app.yml"
-CERTIFICATION_WORKFLOW = ROOT / ".github/workflows/pre-release-certification.yml"
+CERTIFICATION_WORKFLOW = ROOT / ".github/workflows/release-candidate-smoke.yml"
 PROTOCOL_GATE = ROOT / "scripts/test-upgrade-protocol-release.sh"
 HISTORICAL_BOOTSTRAP_GATE = ROOT / "scripts/test-historical-bootstrap-dependencies.sh"
 RECEIPT_CHECK = ROOT / "scripts/check_upgrade_receipt.py"
 MACOS_BUILD = ROOT / "scripts/build-macos-app-release.sh"
 POSIX_INSTALLER = ROOT / "scripts/install.sh"
 POSIX_FRESH_RELEASE = ROOT / "scripts/test-fresh-install-release.sh"
+RELEASE_VALIDATION_LANE = ROOT / "scripts/select-release-validation-lane.py"
 DIGEST_CAPABLE_UPLOAD_ACTION = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+POSIX_POLICY_PERSISTENCE = pytest.mark.skipif(
+    os.name != "posix",
+    reason="release baseline persistence requires O_NOFOLLOW descriptor custody",
+)
 COSIGN_INSTALLER_ACTION = "sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da"
 
 
@@ -56,6 +65,12 @@ def _bash_executable() -> str:
 
 def _workflow() -> dict[str, object]:
     return yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+
+
+def _powershell_message_text(source: str) -> str:
+    """Collapse layout and adjacent single-quoted PowerShell literals."""
+
+    return re.sub(r"'\s*\+\s*'", "", " ".join(source.split()))
 
 
 def _ci_workflow() -> dict[str, object]:
@@ -185,11 +200,16 @@ def test_release_is_one_manual_dispatch_from_reviewed_main() -> None:
     triggers = workflow["on"]
     assert set(triggers) == {"workflow_dispatch"}
     inputs = triggers["workflow_dispatch"]["inputs"]
-    assert set(inputs) == {"version", "immutable_releases_confirmed"}
+    assert set(inputs) == {
+        "operation",
+        "version",
+    }
+    assert inputs["operation"]["required"] == "true"
+    assert inputs["operation"]["type"] == "choice"
+    assert inputs["operation"]["options"] == ["release", "repair-channel"]
+    assert inputs["operation"]["default"] == "release"
     assert inputs["version"]["required"] == "true"
     assert inputs["version"]["type"] == "string"
-    assert inputs["immutable_releases_confirmed"]["required"] == "true"
-    assert inputs["immutable_releases_confirmed"]["default"] == "false"
     assert workflow["permissions"] == {"contents": "read", "actions": "read"}
     assert workflow["concurrency"] == {
         "group": "release-${{ github.repository }}",
@@ -198,6 +218,7 @@ def test_release_is_one_manual_dispatch_from_reviewed_main() -> None:
 
     jobs = workflow["jobs"]
     assert set(jobs) == {
+        "reject-non-main-repair",
         "release-preflight",
         "build-runtime-candidate",
         "macos-app",
@@ -205,7 +226,14 @@ def test_release_is_one_manual_dispatch_from_reviewed_main() -> None:
         "assemble-release-candidate",
         "release-smoke",
         "publish-release",
+        "advance-stable-channel",
+        "repair-stable-channel",
     }
+    assert jobs["release-preflight"]["if"] == "inputs.operation == 'release'"
+    reject_repair = jobs["reject-non-main-repair"]
+    assert reject_repair["if"] == ("inputs.operation == 'repair-channel' && github.ref != 'refs/heads/main'")
+    assert reject_repair["permissions"] == {}
+    assert all("uses" not in step for step in reject_repair["steps"])
     assert jobs["build-runtime-candidate"]["needs"] == "release-preflight"
     assert jobs["macos-app"]["needs"] == [
         "release-preflight",
@@ -230,13 +258,26 @@ def test_release_is_one_manual_dispatch_from_reviewed_main() -> None:
         "assemble-release-candidate",
         "release-smoke",
     ]
+    assert jobs["advance-stable-channel"]["needs"] == [
+        "release-preflight",
+        "assemble-release-candidate",
+        "publish-release",
+    ]
+    assert jobs["advance-stable-channel"]["if"] == "inputs.operation == 'release'"
+    repair = jobs["repair-stable-channel"]
+    assert repair["if"] == "inputs.operation == 'repair-channel' && github.ref == 'refs/heads/main'"
+    repair_checkout = next(step for step in repair["steps"] if step.get("uses", "").startswith("actions/checkout@"))
+    assert repair_checkout["with"]["ref"] == "${{ github.sha }}"
     assert {name: job.get("timeout-minutes") for name, job in jobs.items() if name != "release-smoke"} == {
+        "reject-non-main-repair": "5",
         "release-preflight": "20",
         "build-runtime-candidate": "45",
         "macos-app": "60",
         "windows-installer": "60",
         "assemble-release-candidate": "30",
         "publish-release": "45",
+        "advance-stable-channel": "20",
+        "repair-stable-channel": "20",
     }
 
     text = WORKFLOW.read_text(encoding="utf-8")
@@ -264,22 +305,81 @@ def test_release_jobs_pin_the_bundle_verifier_binary() -> None:
         if step.get("uses", "").startswith("sigstore/cosign-installer@")
     ]
 
-    assert len(installers) == 6
+    assert len(installers) == 8
     assert all(step["uses"] == COSIGN_INSTALLER_ACTION for step in installers)
-    assert all(step.get("with") == {"cosign-release": "v2.6.2"} for step in installers)
+    versions = [step.get("with", {}).get("cosign-release") for step in installers]
+    assert versions.count("v2.6.2") == 6
+    assert versions.count("v2.6.3") == 2
+    channel = _workflow()["jobs"]["advance-stable-channel"]
+    channel_installer = next(
+        step for step in channel["steps"] if step.get("uses", "").startswith("sigstore/cosign-installer@")
+    )
+    assert channel_installer["with"] == {"cosign-release": "v2.6.3"}
+    repair = _workflow()["jobs"]["repair-stable-channel"]
+    assert repair["permissions"] == {"contents": "write", "id-token": "write"}
+    repair_installer = next(
+        step for step in repair["steps"] if step.get("uses", "").startswith("sigstore/cosign-installer@")
+    )
+    assert repair_installer["with"] == {"cosign-release": "v2.6.3"}
 
 
-def test_release_immutability_preflight_uses_operator_confirmation_without_admin_token() -> None:
+def test_cosign_version_split_is_documented_and_bound_to_offline_production_pins() -> None:
+    assert release_candidate.WINDOWS_COSIGN_VERSION == "2.6.2"
+    assert re.fullmatch(r"[0-9a-f]{64}", release_candidate.WINDOWS_COSIGN_SHA256)
+    assert resolver_hint.COSIGN_BOOTSTRAP_VERSION == "2.6.3"
+    production_digests = {
+        resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "amd64")],
+        resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "arm64")],
+        resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "amd64")],
+        resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "arm64")],
+    }
+    assert len(production_digests) == 4
+    assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in production_digests)
+
+    # These are the shipped rescue/install verifier identities, not a
+    # network-dependent availability probe.
+    for relative in (
+        "scripts/defenseclaw-rescue.sh",
+        "scripts/install.sh",
+        "scripts/upgrade.sh",
+    ):
+        verifier = (ROOT / relative).read_text(encoding="utf-8")
+        for digest in production_digests:
+            assert digest in verifier, (relative, digest)
+    windows_rescue = (ROOT / "scripts/defenseclaw-rescue.ps1").read_text(encoding="utf-8")
+    assert resolver_hint.COSIGN_BOOTSTRAP_SHA256[("windows", "amd64")] in windows_rescue
+    strategy = (ROOT / "docs/RELEASE_VALIDATION.md").read_text(encoding="utf-8")
+    normalized_strategy = " ".join(strategy.split())
+    assert "native Windows and release-candidate jobs use `2.6.2`" in normalized_strategy
+    assert "signed stable-channel and public rescue paths use `2.6.3`" in normalized_strategy
+    assert "flaky network probe" in strategy
+
+
+def test_release_proves_published_immutability_without_operator_attestation() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
 
     assert "repos/$GITHUB_REPOSITORY/immutable-releases" not in text
-    assert "IMMUTABLE_RELEASES_CONFIRMED" in text
-    assert "inputs.immutable_releases_confirmed" in text
-    assert "Immutable Releases confirmation required" in text
+    assert "IMMUTABLE_RELEASES_CONFIRMED" not in text
+    assert "inputs.immutable_releases_confirmed" not in text
+    assert "inputs.expected_commit" not in text
+    assert "Immutable Releases confirmation required" not in text
     assert "scripts/release_api_retry.py prove-published" in text
     helper = (ROOT / "scripts/release_api_retry.py").read_text(encoding="utf-8")
     assert '"isImmutable": payload.get("immutable")' in helper
     assert "verify_published_release" in helper
+
+
+def test_release_sensitive_policy_covers_channel_and_windows_publication_authority() -> None:
+    policy = json.loads((ROOT / "release/certification-policy.json").read_text(encoding="utf-8"))
+    sensitive = set(policy["release_sensitive_paths"])
+
+    assert {
+        ".github/workflows/windows-native.yml",
+        "scripts/defenseclaw-rescue.ps1",
+        "scripts/invoke-windows-setup-standard-user-ci.ps1",
+        "scripts/publish-release-channel.sh",
+        "scripts/release_channel.py",
+    } <= sensitive
 
 
 def test_release_automation_never_publishes_runtime_to_python_package_indexes() -> None:
@@ -338,28 +438,48 @@ def test_release_accepts_dispatch_sha_reachable_from_reviewed_main() -> None:
         assert retired not in workflow_text
 
 
-def test_release_selects_six_authenticated_posix_upgrade_baselines(
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        (
+            "0.8.7",
+            ["0.8.6", "0.8.5", "0.8.4", "0.7.2", "0.6.6", "0.5.0"],
+        ),
+        (
+            "0.8.8",
+            ["0.8.7", "0.8.6", "0.8.5", "0.8.4", "0.7.2", "0.6.6", "0.5.0"],
+        ),
+    ],
+)
+@POSIX_POLICY_PERSISTENCE
+def test_release_selects_authenticated_posix_and_field_recovery_baselines(
     tmp_path: Path,
+    target: str,
+    expected: list[str],
 ) -> None:
     preflight = _workflow()["jobs"]["release-preflight"]
     step = _step(preflight, "Resolve authenticated POSIX upgrade baselines")
     assert "scripts/resolve_upgrade_baselines.py" in step["run"]
-    program = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    assert "scripts/release-preflight.py select-baselines" in step["run"]
 
     policy = tmp_path / "effective-upgrade-baselines.json"
+    versions = [
+        "0.8.7",
+        "0.8.6",
+        "0.8.5",
+        "0.8.4",
+        "0.7.2",
+        "0.7.1",
+        "0.6.6",
+        "0.6.5",
+        "0.5.0",
+    ]
     policy.write_text(
         json.dumps(
             {
-                "published_baselines": [
-                    "0.5.0",
-                    "0.6.5",
-                    "0.7.1",
-                    "0.8.6",
-                    "0.8.5",
-                    "0.8.4",
-                    "0.6.6",
-                    "0.7.2",
-                ],
+                "schema_version": 2,
+                "published_baselines": versions,
+                "published_baseline_config_versions": {version: 8 if version >= "0.8.5" else 7 for version in versions},
                 "platform_published_baselines": {
                     "windows": ["0.8.6"],
                 },
@@ -367,10 +487,20 @@ def test_release_selects_six_authenticated_posix_upgrade_baselines(
         ),
         encoding="utf-8",
     )
+    policy.chmod(0o600)
     output = tmp_path / "github-output"
     completed = subprocess.run(
-        [sys.executable, "-", str(policy), "0.8.7", str(output)],
-        input=program,
+        [
+            sys.executable,
+            str(ROOT / "scripts/release-preflight.py"),
+            "select-baselines",
+            "--policy",
+            str(policy),
+            "--version",
+            target,
+            "--github-output",
+            str(output),
+        ],
         text=True,
         capture_output=True,
         check=False,
@@ -378,17 +508,78 @@ def test_release_selects_six_authenticated_posix_upgrade_baselines(
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert output.read_text(encoding="utf-8") == (
-        'upgrade_baselines=["0.8.6","0.8.5","0.8.4","0.7.2","0.6.6","0.5.0"]\n'
+        "upgrade_baselines=" + json.dumps(expected, separators=(",", ":")) + "\n"
     )
     updated = json.loads(policy.read_text(encoding="utf-8"))
     assert updated["platform_published_baselines"]["windows"] == []
 
 
-def test_release_target_must_advance_published_stable_state() -> None:
+def test_historical_validation_lane_requires_exactly_six_unique_releases(
+    tmp_path: Path,
+) -> None:
+    versions = ["0.8.6", "0.8.5", "0.8.4", "0.7.2", "0.6.6", "0.5.0"]
+    policy = tmp_path / "effective-upgrade-baselines.json"
+    policy.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "published_baselines": versions,
+                "published_baseline_config_versions": {version: 8 if version >= "0.8.5" else 7 for version in versions},
+                "platform_published_baselines": {"windows": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "upgrade-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "release_version": "0.8.7",
+                "required_bridge_version": "0.8.4",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def select(selected: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(RELEASE_VALIDATION_LANE),
+                "--policy",
+                str(policy),
+                "--manifest",
+                str(manifest),
+                "--selected-json",
+                json.dumps(selected),
+                "--baseline",
+                "0.8.6",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    valid = select(versions)
+    assert valid.returncode == 0, valid.stdout + valid.stderr
+    assert valid.stdout.strip() == "field-recovery"
+
+    for invalid in (
+        versions[:-1],
+        [*versions[:-1], "0.6.6"],
+        [*versions, "0.5.0"],
+    ):
+        rejected = select(invalid)
+        assert rejected.returncode == 2
+        assert "must contain exactly 6 distinct releases" in rejected.stderr
+
+
+def test_release_target_must_be_absent_from_published_stable_state() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     assert "gh api --paginate --slurp" in text
     assert '"repos/$GITHUB_REPOSITORY/releases?per_page=100"' in text
     assert "scripts/release_candidate.py validate-version" in text
+    assert "--allow-existing-target" not in text
     assert "--releases-json published-releases.json" in text
 
 
@@ -417,12 +608,12 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
     assert assemble["outputs"]["artifact_name"] == ("${{ steps.names.outputs.candidate }}")
     upload = next(step for step in assemble["steps"] if step.get("id") == "upload")
     assert upload["uses"] == DIGEST_CAPABLE_UPLOAD_ACTION
-    assert upload["with"]["path"] == "release-candidate/"
+    assert upload["with"]["path"] == "release-candidate.tar"
     digest_guard = _step(assemble, "Require candidate artifact digest output")
     assert digest_guard["env"]["CANDIDATE_ARTIFACT_DIGEST"] == ("${{ steps.upload.outputs.artifact-digest }}")
 
     smoke = jobs["release-smoke"]
-    assert smoke["uses"] == "./.github/workflows/pre-release-certification.yml"
+    assert smoke["uses"] == "./.github/workflows/release-candidate-smoke.yml"
     assert smoke["with"]["candidate_artifact"] == ("${{ needs.assemble-release-candidate.outputs.artifact_name }}")
     assert smoke["with"]["baselines"] == ("${{ needs.release-preflight.outputs.upgrade_baselines }}")
     publish = jobs["publish-release"]
@@ -431,7 +622,7 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
     )
     assert candidate_download["with"] == {
         "name": "${{ needs.assemble-release-candidate.outputs.artifact_name }}",
-        "path": "release-candidate",
+        "path": "candidate-transport",
     }
     assert "scripts/release_candidate.py verify" in str(publish)
 
@@ -446,6 +637,117 @@ def test_build_once_candidate_is_reused_by_tests_and_publisher() -> None:
         "release_candidate.py assemble",
     ):
         assert rebuilding_command not in smoke_text
+
+
+def test_mode_preserving_transport_wraps_every_candidate_artifact_boundary() -> None:
+    jobs = _workflow()["jobs"]
+    assemble = jobs["assemble-release-candidate"]
+    assemble_steps = assemble["steps"]
+    seal_index = next(
+        index for index, step in enumerate(assemble_steps) if step.get("name") == "Seal all candidate bytes"
+    )
+    pack_index = next(
+        index
+        for index, step in enumerate(assemble_steps)
+        if step.get("name") == "Preserve candidate modes for Actions transport"
+    )
+    upload_index = next(index for index, step in enumerate(assemble_steps) if step.get("id") == "upload")
+    pack = assemble_steps[pack_index]["run"]
+    assert seal_index < pack_index < upload_index
+    assert "release_candidate.py pack-transport" in pack
+    assert "--source release-candidate" in pack
+    assert "--output release-candidate.tar" in pack
+    assert assemble_steps[upload_index]["with"]["path"] == "release-candidate.tar"
+
+    for job_name, verify_step_name in (
+        ("publish-release", "Verify the exact tested candidate"),
+        ("advance-stable-channel", "Reverify the exact published candidate"),
+    ):
+        steps = jobs[job_name]["steps"]
+        download_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step.get("with", {}).get("name") == "${{ needs.assemble-release-candidate.outputs.artifact_name }}"
+        )
+        restore_index = next(
+            index for index, step in enumerate(steps) if step.get("name") == "Restore exact candidate modes"
+        )
+        verify_index = next(index for index, step in enumerate(steps) if step.get("name") == verify_step_name)
+        assert download_index < restore_index < verify_index
+        assert steps[download_index]["with"]["path"] == "candidate-transport"
+        restore = steps[restore_index]["run"]
+        assert "release_candidate.py unpack-transport" in restore
+        assert "--archive candidate-transport/release-candidate.tar" in restore
+        assert "--destination release-candidate" in restore
+
+    smoke_jobs = _certification_workflow()["jobs"]
+    for job_name, verify_step_name in (
+        ("posix-fresh-install", "Verify and install exact signed bytes"),
+        ("posix-upgrade", "Exercise authenticated upgrade baseline"),
+        ("windows-fresh-install", "Verify and exercise install.ps1"),
+    ):
+        steps = smoke_jobs[job_name]["steps"]
+        download_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step.get("with", {}).get("name") == "${{ inputs.candidate_artifact }}"
+        )
+        restore_index = next(
+            index for index, step in enumerate(steps) if step.get("name") == "Restore exact candidate modes"
+        )
+        verify_index = next(index for index, step in enumerate(steps) if step.get("name") == verify_step_name)
+        assert download_index < restore_index < verify_index
+        assert steps[download_index]["with"]["path"] == "candidate-transport"
+        restore = steps[restore_index]["run"]
+        assert "release_candidate.py unpack-transport" in restore
+        assert "candidate-transport/release-candidate.tar" in restore
+        assert "--destination release-candidate" in restore
+
+
+def test_mode_preserving_transport_wraps_every_unsigned_ci_candidate_boundary() -> None:
+    jobs = _ci_workflow()["jobs"]
+    producer_steps = jobs["unsigned-upgrade-candidate"]["steps"]
+    prepare_index = next(index for index, step in enumerate(producer_steps) if step.get("id") == "prepare")
+    pack_index = next(
+        index
+        for index, step in enumerate(producer_steps)
+        if step.get("name") == "Preserve candidate modes for Actions transport"
+    )
+    upload_index = next(
+        index
+        for index, step in enumerate(producer_steps)
+        if step.get("uses", "").startswith("actions/upload-artifact@")
+    )
+    assert prepare_index < pack_index < upload_index
+    pack_step = producer_steps[pack_index]
+    pack = pack_step["run"]
+    assert "release_candidate.py pack-transport" in pack
+    assert pack_step["env"] == {"CANDIDATE_ROOT": "${{ steps.prepare.outputs.root }}"}
+    assert '--source "$CANDIDATE_ROOT"' in pack
+    assert "steps.prepare.outputs.root" not in pack
+    assert "--output unsigned-candidate.tar" in pack
+    assert producer_steps[upload_index]["with"]["path"] == "unsigned-candidate.tar"
+
+    for job_name, run_step_name in (
+        ("selective-upgrade-smoke", "Run selected deterministic success/refusal contract"),
+        ("main-release-smoke", "Run exact-SHA candidate representative upgrade canary"),
+    ):
+        steps = jobs[job_name]["steps"]
+        download_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step.get("with", {}).get("name") == "${{ needs.unsigned-upgrade-candidate.outputs.artifact_name }}"
+        )
+        restore_index = next(
+            index for index, step in enumerate(steps) if step.get("name") == "Restore exact candidate modes"
+        )
+        run_index = next(index for index, step in enumerate(steps) if step.get("name") == run_step_name)
+        assert download_index < restore_index < run_index
+        assert steps[download_index]["with"]["path"] == "unsigned-candidate-transport"
+        restore = steps[restore_index]["run"]
+        assert "release_candidate.py unpack-transport" in restore
+        assert "--archive unsigned-candidate-transport/unsigned-candidate.tar" in restore
+        assert "--destination unsigned-candidate" in restore
 
 
 def test_runtime_candidate_keeps_generated_policy_outside_goreleaser_checkout() -> None:
@@ -546,6 +848,11 @@ def test_exact_posix_fresh_install_and_twelve_upgrade_cells_gate_publication() -
     assert "scripts/release_candidate.py verify" in fresh
     assert "scripts/verify-sigstore-blob.py" in fresh
     assert "bash scripts/test-fresh-install-release.sh" in fresh
+    fresh_harness = POSIX_FRESH_RELEASE.read_text(encoding="utf-8")
+    assert 'INSTALLER="${RELEASE_DIR}/install.sh"' in fresh_harness
+    assert r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$" in fresh_harness
+    assert '/bin/bash "${INSTALLER}"' in fresh_harness
+    assert "${ROOT}/scripts/install.sh" not in fresh_harness
 
     upgrade_job = jobs["posix-upgrade"]
     assert upgrade_job["strategy"] == {
@@ -572,11 +879,19 @@ def test_exact_posix_fresh_install_and_twelve_upgrade_cells_gate_publication() -
     assert "scripts/release_candidate.py verify" in upgrade
     assert "scripts/verify-sigstore-blob.py" in upgrade
     assert "bash scripts/test-upgrade-protocol-release.sh" in upgrade
-    assert '--from-version "$BASELINE"' in upgrade
+    assert '--from-versions "$smoke_baselines"' in upgrade
+    assert 'smoke_baselines="$BASELINE"' in upgrade
+    assert 'if [[ "$BASELINE" == "0.8.5" ]]' in upgrade
+    assert 'smoke_baselines="${BASELINE},0.8.1"' in upgrade
     assert "--success-path-only" in upgrade
     assert "--baseline-mode seed" in upgrade
     assert "baseline_dependencies=published" in upgrade
-    assert 'if [[ "$BASELINE" == "0.8.4" ]]' in upgrade
+    assert 'if [[ "$BASELINE" == "0.8.4" ]]' not in upgrade
+    assert "scripts/select-release-validation-lane.py" in upgrade
+    selector = RELEASE_VALIDATION_LANE.read_text(encoding="utf-8")
+    assert "required_bridge_version" in selector
+    assert "published_baseline_config_versions" in selector
+    assert "bridge-dependency-drift" in upgrade
     assert "baseline_dependencies=target" in upgrade
     assert '--baseline-dependencies "$baseline_dependencies"' in upgrade
 
@@ -733,6 +1048,8 @@ def test_windows_install_ps1_smoke_uses_disposable_native_profile_and_layout() -
     assert "-Mode bootstrap-acceptance" in smoke
     assert "-ArtifactRoot $ReleaseDir" in smoke
     assert "-TargetVersion $TargetVersion" in smoke
+    assert '$installer = Join-Path $ReleaseDir "install.ps1"' in smoke
+    assert '$installer = Join-Path $PSScriptRoot "install.ps1"' not in smoke
     assert "'bootstrap-acceptance'" in disposable
     assert "test-fresh-install-release-windows.ps1" in disposable
     assert "install.ps1" in disposable
@@ -775,10 +1092,47 @@ def test_windows_install_ps1_smoke_uses_disposable_native_profile_and_layout() -
     assert "Second fresh-installer invocation unexpectedly succeeded" not in smoke
 
 
+def test_windows_fresh_install_refuses_reparse_release_inputs_before_bootstrap() -> None:
+    smoke = (ROOT / "scripts/test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")
+    directory_guard = smoke[
+        smoke.index("function Resolve-RegularReleaseDirectory {") : smoke.index(
+            "\nfunction Assert-RegularReleaseFile {"
+        )
+    ]
+    file_guard = smoke[
+        smoke.index("function Assert-RegularReleaseFile {") : smoke.index(
+            "\n$ReleaseDir = Resolve-RegularReleaseDirectory"
+        )
+    ]
+
+    assert "[IO.DirectoryInfo]::new($full)" in directory_guard
+    assert "[IO.FileAttributes]::ReparsePoint" in directory_guard
+    assert "[IO.FileInfo]::new($full)" in file_guard
+    assert "[IO.FileAttributes]::ReparsePoint" in file_guard
+
+    directory_check = smoke.index("$ReleaseDir = Resolve-RegularReleaseDirectory -Path $ReleaseDir")
+    release_file_check = smoke.index("foreach ($path in @($installer, $cosign, $setup))")
+    execute = smoke.index("$first = Invoke-CapturedProcess")
+    assert directory_check < release_file_check < execute
+    assert "Assert-RegularReleaseFile -Path $path" in smoke[release_file_check:execute]
+
+
 def test_windows_pr_ci_executes_public_bootstrap_against_authenticated_fixture() -> None:
     jobs = _windows_ci_workflow()["jobs"]
     bootstrap = jobs["public-bootstrap-acceptance"]
     rendered = str(bootstrap)
+    release_download = next(
+        step["run"]
+        for step in bootstrap["steps"]
+        if step.get("name") == "Download authenticated public bootstrap fixture"
+    )
+    bootstrap_script = next(
+        step["run"]
+        for step in bootstrap["steps"]
+        if step.get("name") == "Exercise current public bootstrap under a real disposable user"
+    )
+    release_messages = _powershell_message_text(release_download)
+    bootstrap_messages = _powershell_message_text(bootstrap_script)
 
     assert bootstrap["runs-on"] == "windows-latest"
     assert int(bootstrap["timeout-minutes"]) >= 50
@@ -789,6 +1143,15 @@ def test_windows_pr_ci_executes_public_bootstrap_against_authenticated_fixture()
     assert bootstrap["env"]["BOOTSTRAP_FIXTURE_VERSION"] == "0.8.7"
     assert bootstrap["env"]["BOOTSTRAP_FIXTURE_RUN_ID"] == "30063491006"
     assert bootstrap["env"]["BOOTSTRAP_FIXTURE_ARTIFACT"] == ("release-candidate-30063491006-1")
+    assert re.fullmatch(
+        r"[0-9a-f]{64}",
+        bootstrap["env"]["BOOTSTRAP_LEGACY_INSTALLER_SHA256"],
+    )
+    # .gitattributes keeps install.ps1 on LF so this digest is platform-independent.
+    assert (
+        bootstrap["env"]["BOOTSTRAP_LEGACY_INSTALLER_SHA256"]
+        == hashlib.sha256((ROOT / "scripts/install.ps1").read_bytes()).hexdigest()
+    )
     assert "sigstore/cosign-installer@" in rendered
     assert "gh release view" in rendered
     assert "release not found" in rendered
@@ -797,6 +1160,25 @@ def test_windows_pr_ci_executes_public_bootstrap_against_authenticated_fixture()
     assert "gh release download" in rendered
     assert "actions/download-artifact@" in rendered
     assert "checksums.txt.bundle" in rendered
+    assert 'select(.name == "install.ps1")' in release_download
+    assert "$installerAssetCount -notmatch '^[0-9]+$'" in release_download
+    assert "[int]$installerAssetCount -gt 1" in release_download
+    assert "[int]$installerAssetCount -eq 1" in release_download
+    assert "--pattern install.ps1" in release_download
+    assert "$env:BOOTSTRAP_FIXTURE_VERSION -cne '0.8.7'" in release_download
+    assert "The authenticated release is missing its exact immutable install.ps1 asset" in release_messages
+    assert "Pinned legacy 0.8.7 has no install.ps1 asset" in release_download
+    assert ("$fixtureInstaller = Join-Path $env:DC_BOOTSTRAP_RELEASE_DIR 'install.ps1'") in bootstrap_script
+    assert "BOOTSTRAP_FIXTURE_SOURCE" in rendered
+    assert "$isPinnedLegacyFixture" in bootstrap_script
+    assert "$env:BOOTSTRAP_FIXTURE_VERSION -ceq '0.8.7'" in bootstrap_script
+    assert "$env:BOOTSTRAP_FIXTURE_SOURCE -ceq 'candidate'" in bootstrap_script
+    assert "$env:BOOTSTRAP_FIXTURE_RUN_ID -ceq '30063491006'" in bootstrap_script
+    assert "The authenticated candidate/release is missing its exact immutable install.ps1 asset" in bootstrap_messages
+    assert "Resolve-Path -LiteralPath ./scripts/install.ps1" in bootstrap_script
+    assert ("Get-FileHash -LiteralPath $legacyInstaller -Algorithm SHA256") in bootstrap_script
+    assert ("Get-FileHash -LiteralPath $fixtureInstaller -Algorithm SHA256") in bootstrap_script
+    assert "$env:BOOTSTRAP_LEGACY_INSTALLER_SHA256" in bootstrap_script
     assert "test-fresh-install-release-windows.ps1" in rendered
     assert "-ReleaseDir $env:DC_BOOTSTRAP_RELEASE_DIR" in rendered
     assert "-TargetVersion $env:BOOTSTRAP_FIXTURE_VERSION" in rendered
@@ -820,10 +1202,16 @@ def test_posix_installer_cannot_bypass_upgrade_graph_on_existing_install() -> No
 def test_publish_uses_all_assets_from_the_exact_tested_candidate() -> None:
     jobs = _workflow()["jobs"]
     publish = jobs["publish-release"]
+    channel = jobs["advance-stable-channel"]
     assert publish["environment"] == "release"
     assert publish["permissions"] == {"contents": "write"}
+    assert channel["environment"] == "release"
+    assert channel["permissions"] == {"contents": "write", "id-token": "write"}
+    repair = jobs["repair-stable-channel"]
+    assert repair["environment"] == "release"
+    assert repair["permissions"] == {"contents": "write", "id-token": "write"}
     for name, job in jobs.items():
-        if name != "publish-release":
+        if name not in {"publish-release", "advance-stable-channel", "repair-stable-channel"}:
             assert job.get("permissions") != {"contents": "write"}
 
     rendered = str(publish)
@@ -839,36 +1227,61 @@ def test_publish_uses_all_assets_from_the_exact_tested_candidate() -> None:
     assert "git push" not in text
     assert "push:\n" not in text
     assert "Publish tag and selected sealed assets" in text
-    assert "prove-published" in text
+    assert "prove-published" not in str(publish)
+    assert "prove-published" in str(channel)
+
+
+def test_channel_repair_uses_the_bounded_exact_custody_downloader() -> None:
+    repair = _workflow()["jobs"]["repair-stable-channel"]
+    target = _step(repair, "Resolve immutable repair target")["run"]
+    download = _step(repair, "Download bounded release proof")["run"]
+
+    assert 'TARGET_REF="refs/defenseclaw/repair-target/$TAG"' in target
+    assert '"refs/tags/$TAG:$TARGET_REF"' in target
+    assert 'git rev-parse "$TARGET_REF^{commit}"' in target
+    assert "FETCH_HEAD" not in target
+    assert "gh release download" not in download
+    assert "--pattern" not in download
+    assert "python3 scripts/download_release_custody.py" in download
+    assert '--repository "$GITHUB_REPOSITORY"' in download
+    assert "--release-json published-release.json" in download
+    assert "--output-dir release-custody" in download
+    assert "python3 -" not in download
 
 
 def test_release_publish_retries_only_after_absence_and_reconciles_ambiguity() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
-    publish = _workflow()["jobs"]["publish-release"]
+    jobs = _workflow()["jobs"]
+    publish = jobs["publish-release"]
+    channel = jobs["advance-stable-channel"]
     rendered = "\n".join(step.get("run", "") for step in publish["steps"])
+    channel_rendered = "\n".join(step.get("run", "") for step in channel["steps"])
     namespace = _step(publish, "Recheck remote release namespace")
     create = _step(publish, "Publish tag and selected sealed assets")
 
     assert publish["timeout-minutes"] == "45"
-    assert text.count("scripts/release_api_retry.py require-absent") == 1
+    assert text.count("scripts/release_api_retry.py require-releasable") == 1
+    assert "Tag-only recovery candidate" in text
+    assert "--allow-existing-target" not in text
     assert "scripts/release_api_retry.py reconcile-create" in namespace["run"]
     assert "--candidate-root release-candidate" in namespace["run"]
     assert "--omit-windows-binaries" not in namespace["run"]
-    assert "--check-main" not in namespace["run"]
+    assert "--check-main" in namespace["run"]
     assert create["if"] == ("steps.release-namespace.outputs.create_required == 'true'")
     assert "for attempt in 1 2 3" in rendered
     assert "timeout --signal=TERM --kill-after=30s 10m" in rendered
     assert rendered.count("scripts/release_api_retry.py reconcile-create") == 2
-    assert "--check-main" not in rendered
+    assert rendered.count("--check-main") == 2
     assert 'reconcile_status" != "10"' in rendered
     assert "refusing another create" in rendered
     assert "Release API retries exhausted" in rendered
-    assert "scripts/release_api_retry.py prove-published" in rendered
+    assert "scripts/release_api_retry.py prove-published" not in rendered
+    assert "scripts/release_api_retry.py prove-published" in channel_rendered
     create_index = rendered.index('gh release create "$RELEASE_TAG"')
     precheck_index = rendered.index("scripts/release_api_retry.py reconcile-create")
     reconcile_index = rendered.rindex("scripts/release_api_retry.py reconcile-create")
-    prove_index = rendered.index("scripts/release_api_retry.py prove-published")
-    assert precheck_index < create_index < reconcile_index < prove_index
+    assert precheck_index < create_index < reconcile_index
+    assert channel["needs"][-1] == "publish-release"
 
 
 def test_every_release_remote_action_is_commit_pinned() -> None:
@@ -978,12 +1391,20 @@ def test_external_resolver_boundaries_disable_python_bytecode() -> None:
 
 def test_exact_bridge_success_paths_require_authenticated_refresh_evidence() -> None:
     text = PROTOCOL_GATE.read_text(encoding="utf-8")
-    staged_start = text.index("run_candidate_updater_staged_success() {")
-    staged_end = text.index("\n}\n\nrun_candidate_updater_direct_success() {", staged_start)
-    direct_start = staged_end + 3
-    direct_end = text.index("\n}\n\nrun_protocol_case() {", direct_start)
-    staged = text[staged_start:staged_end]
-    direct = text[direct_start:direct_end]
+    staged_match = re.search(
+        r"^run_candidate_updater_staged_success\(\) \{\n(?P<body>.*?)^\}$",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    direct_match = re.search(
+        r"^run_candidate_updater_direct_success\(\) \{\n(?P<body>.*?)^\}$",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert staged_match is not None
+    assert direct_match is not None
+    staged = staged_match.group("body")
+    direct = direct_match.group("body")
     refresh = (
         "Refresh authenticated ${baseline} bridge → fresh controller → "
         "${OBSERVABILITY_V8_HARD_CUT_VERSION} → ${TARGET_VERSION}"

@@ -31,7 +31,7 @@ func TestDirectoryCleanupCommandDeletesLiteralTarget(t *testing.T) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "marker.txt"), []byte("owned"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, setupArtifactName), []byte("owned"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	journalPath := filepath.Join(t.TempDir(), "setup-transaction.json")
@@ -120,6 +120,44 @@ func TestDirectoryCleanupCommandPreservesRecreatedTransactionTarget(t *testing.T
 	}
 }
 
+func TestDirectoryCleanupCommandPreservesUnexpectedOwnedEntry(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "DefenseClaw Installer Cache")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string]string{
+		setupArtifactName: "owned",
+		"unexpected.txt":  "preserve",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	journalPath := filepath.Join(t.TempDir(), "setup-transaction.json")
+	transactionID := "0123456789abcdef0123456789abcdef"
+	writeDeferredCleanupJournal(t, journalPath, root, transactionID)
+	powerShell, err := systemPowerShellPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := directoryCleanupCommand(
+		powerShell,
+		root,
+		journalPath,
+		2147483647,
+		transactionID,
+		5*time.Second,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("cleanup helper failed: %v: %s", err, output)
+	}
+	for _, name := range []string{setupArtifactName, "unexpected.txt"} {
+		if _, err := os.Stat(filepath.Join(root, name)); err != nil {
+			t.Fatalf("cleanup helper removed %s despite unexpected residue: %v", name, err)
+		}
+	}
+}
+
 func TestDirectoryCleanupCommandSkipsDeleteWhenParentWaitTimesOut(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "DefenseClaw Installer Cache")
 	if err := os.MkdirAll(root, 0o755); err != nil {
@@ -169,6 +207,39 @@ func TestDirectoryCleanupCommandSkipsDeleteWhenParentWaitTimesOut(t *testing.T) 
 	}
 }
 
+func TestDirectoryCleanupCommandRejectsFrozenTerminalTombstone(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "DefenseClaw Installer Cache")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(root, "preserve.txt")
+	if err := os.WriteFile(marker, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(t.TempDir(), "setup-transaction.json")
+	if err := writeJSON(journalPath, frozenTerminalSetupJournal()); err != nil {
+		t.Fatal(err)
+	}
+	powerShell, err := systemPowerShellPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := directoryCleanupCommand(
+		powerShell,
+		root,
+		journalPath,
+		2147483647,
+		"0123456789abcdef0123456789abcdef",
+		5*time.Second,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("cleanup helper failed: %v: %s", err, output)
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "preserve" {
+		t.Fatalf("terminal tombstone authorized deferred cleanup: %q, %v", data, err)
+	}
+}
+
 func writeDeferredCleanupJournal(t *testing.T, journalPath, maintenanceRoot, transactionID string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(journalPath), 0o700); err != nil {
@@ -176,7 +247,7 @@ func writeDeferredCleanupJournal(t *testing.T, journalPath, maintenanceRoot, tra
 	}
 	journal := setupJournal{
 		SchemaVersion: setupJournalSchemaVersion,
-		Phase:         setupPhaseConverged,
+		Phase:         setupPhaseComplete,
 		Transaction: setupTransaction{
 			SchemaVersion:   setupTransactionSchemaVersion,
 			ID:              transactionID,

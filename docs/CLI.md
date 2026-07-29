@@ -557,9 +557,15 @@ environment, cursor, and managed bundle before reporting rollback.
 
 **Version-specific migrations** are defined in `cli/defenseclaw/migrations.py`
 and run while an authenticated upgrade advances across the release boundary
-that owns them. An authenticated same-version request is a no-op: it does not
-reinstall artifacts or run migrations. Each migration is keyed to the release
-it ships with. For example, the v0.3.0 migration removes
+that owns them. An authenticated same-version request is normally a no-op.
+The two explicit field-recovery cases below are the exceptions: the resolver
+can authenticate the exact clean published `0.8.6` state whose cursor is
+entirely absent, and `--recover-corrupt-audit` can replace an explicitly
+proven-corrupt active store only after preserving its exact durable database
+and WAL bytes. It never guesses from a damaged or partial cursor. A WAL-aware
+read-only probe may rebuild SQLite's disposable shared-memory index before the
+tuple enters custody. Each migration is keyed to the release it ships with.
+For example, the v0.3.0 migration removes
 legacy `models.providers.defenseclaw`, `models.providers.litellm`, and
 `agents.defaults.model.primary` prefixed entries from `openclaw.json` (written
 by 0.2.0's guardrail setup) while preserving plugin registration.
@@ -580,6 +586,15 @@ the v7 file.
 - `--yes`, `-y` — skip confirmation prompts
 - `--version VERSION` — select a specific final release; required bridges are
   still staged (default: latest)
+- `--recover-corrupt-audit` — the installed public command forwards this
+  opt-in only during authenticated POSIX release-resolver delegation. It exits
+  with status 2 if that delegation is bypassed, and the native Windows path
+  also rejects it. Live immutable SQLite preflight can only flag suspected
+  corruption. After the gateway stops, the resolver copies the exact database
+  set into a private probe directory and requires that bounded probe to confirm
+  corruption before preserving the source database and its present WAL/SHM
+  sidecars in crash-resumable upgrade-backup custody and activating a fresh
+  local store. This separate opt-in is required even with `--yes`.
 - `--allow-unverified` — legacy-only unsafe override. It cannot bypass the
   signed manifest, checksum, bridge, or migration requirements for `0.8.4+`.
 
@@ -605,70 +620,57 @@ matrix is empty. Use the current target-release POSIX resolver on every
 | A source outside the published matrix, including assetless `0.7.0`, `0.2.x`, or historical `0.3.x` releases | No tested in-place path is inferred. Remain on the current version and contact support for a source-specific, state-aware recovery plan. Do not uninstall, overwrite state, or force an intermediate hop. |
 | Direct installer from `0.8.3 → 0.8.5` | Refused before service stop or installed mutation. Manual artifact copying is unsupported because it bypasses bridge selection and rollback. Use the release-owned resolver; selecting a final version there does not bypass the bridge. |
 
+If an exact clean published `0.8.6` installation has no migration-cursor file,
+use the authenticated current target-release resolver. Before authorizing that
+compatibility path, it authenticates the published `0.8.6` wheel and release
+identity and rejects migration residue, manual artifact copies, partial or
+damaged cursors, and ambiguous observability state. It then backs up the source
+and lets the target migration engine reconstruct the release-owned cursor.
+Frozen installed CLIs cannot gain this repair retroactively.
+
+If gateway startup reports SQLite corruption in the configured local audit
+store, rerun that same authenticated resolver with
+`--recover-corrupt-audit`. The resolver never treats a timeout, lock, generic
+I/O error, or unsafe path as proof of corruption. A successful recovery moves
+the exact main database and present SQLite sidecars into
+`backups/upgrade-*/audit-corrupt/`, retains them for offline forensics, and
+health-checks a newly initialized active store. Historical records in that
+custody file are not automatically imported into the fresh active database.
+
 **Examples:**
 
-The bootstrap intentionally uses `releases/latest/download` to locate the
-current resolver rather than the `0.8.4` bridge's older resolver. That URL is
-only a locator: the signed checksum identity, exact resolver digest,
-completeness marker, and syntax check authenticate the bytes before execution.
+Starting with `0.8.8`, the installed command is a small authenticated
+bootstrap. It verifies the signed stable-channel record, downloads the exact
+immutable tagged resolver bound by that record, checks its SHA-256,
+completeness marker, and Bash syntax, then hands the operation to that fresh
+resolver process:
 
 ```bash
-# POSIX: one-command staged resolver (do not add --version)
-(
-  set -eu
-  unset VERSION
-  umask 077
-  d="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-upgrade.XXXXXX")"
-  trap 'rm -rf "$d"' EXIT
-  cosign_bin="$(command -v cosign || true)"
-  if [ -z "$cosign_bin" ]; then
-    platform="$(uname -s | tr '[:upper:]' '[:lower:]')/$(uname -m)"
-    case "$platform" in
-      darwin/x86_64) cosign_asset=cosign-darwin-amd64; cosign_sha=5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be ;;
-      darwin/arm64) cosign_asset=cosign-darwin-arm64; cosign_sha=ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e ;;
-      linux/x86_64|linux/amd64) cosign_asset=cosign-linux-amd64; cosign_sha=7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4 ;;
-      linux/aarch64|linux/arm64) cosign_asset=cosign-linux-arm64; cosign_sha=b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917 ;;
-      *) echo "Unsupported platform for automatic Cosign verification" >&2; exit 1 ;;
-    esac
-    cosign_bin="$d/$cosign_asset"
-    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-      --max-filesize 209715200 --output "$cosign_bin" \
-      "https://github.com/sigstore/cosign/releases/download/v2.6.3/$cosign_asset"
-    if command -v sha256sum >/dev/null; then
-      cosign_actual="$(sha256sum "$cosign_bin" | awk '{print $1}')"
-    else
-      cosign_actual="$(shasum -a 256 "$cosign_bin" | awk '{print $1}')"
-    fi
-    [ "$cosign_actual" = "$cosign_sha" ]
-    chmod 700 "$cosign_bin"
-  fi
-  for name in defenseclaw-upgrade.sh checksums.txt checksums.txt.sig checksums.txt.pem; do
-    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-      --output "$d/$name" \
-      "https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/$name"
-  done
-  "$cosign_bin" verify-blob \
-    --certificate "$d/checksums.txt.pem" \
-    --signature "$d/checksums.txt.sig" \
-    --certificate-identity \
-      'https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main' \
-    --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-    "$d/checksums.txt"
-  line="$(grep -E '^[0-9a-f]{64}  defenseclaw-upgrade[.]sh$' "$d/checksums.txt")"
-  [ "$(printf '%s\n' "$line" | wc -l | tr -d ' ')" = 1 ]
-  expected="${line%% *}"
-  if command -v sha256sum >/dev/null; then
-    actual="$(sha256sum "$d/defenseclaw-upgrade.sh" | awk '{print $1}')"
-  else
-    actual="$(shasum -a 256 "$d/defenseclaw-upgrade.sh" | awk '{print $1}')"
-  fi
-  [ "$actual" = "$expected" ]
-  [ "$(tail -n 1 "$d/defenseclaw-upgrade.sh")" = \
-    '# DefenseClaw upgrade resolver complete v1' ]
-  bash -n "$d/defenseclaw-upgrade.sh"
-  bash "$d/defenseclaw-upgrade.sh" --yes
-)
+# Normal POSIX path: signed-channel discovery and fresh resolver handoff.
+defenseclaw upgrade --yes
+
+# Explicit final target; the current signed resolver still inserts every
+# required bridge and refuses downgrades or unsupported source states.
+defenseclaw upgrade --version 0.8.8 --yes
 ```
+
+If the installed Python command itself is broken, obtain
+`defenseclaw-rescue.sh` from an authenticated `0.8.8` or later release. Save it
+as a regular file, authenticate those saved bytes, and then run:
+
+```bash
+/bin/sh ./defenseclaw-rescue.sh --yes
+```
+
+That `/bin/sh` runs only the POSIX clean-environment trampoline; the
+trampoline explicitly enters the trusted system `/bin/bash` before parsing
+the embedded Bash payload.
+
+Authenticate that bootstrap once through the tagged release's signed
+`checksums.txt`; a `releases/latest/download` URL is only a locator and must
+never be streamed directly into a shell. The rescue then follows the same
+signed mutable channel as the normal command. See
+[Authenticated release channel and rescue bootstrap](RELEASE_CHANNEL.md).
 
 > **Windows hard-cut unavailable:** `0.8.4` intentionally published no
 > Windows gateway or rollback binary, so there is no authenticated Windows

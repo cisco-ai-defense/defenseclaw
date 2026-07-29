@@ -81,9 +81,12 @@ jobs:
           else
             echo 'sensitive=false' >> "$GITHUB_OUTPUT"
           fi
+      # Resolve authenticated live state on every PR so a newly published
+      # immutable release cannot first break the unconditional main-push path
+      # after merge. Path sensitivity still controls the expensive candidate
+      # build and upgrade matrices below.
       - id: version
-        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
-        name: Resolve candidate against live stable state when needed
+        name: Resolve candidate against live stable state
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -98,12 +101,10 @@ jobs:
             --published-releases published-releases.json \
             --github-output "$GITHUB_OUTPUT" >/dev/null
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
-        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
       - id: baseline-name
         if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
         run: echo "name=ci-effective-upgrade-baselines-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
       - id: baselines
-        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
         name: Resolve one authenticated effective baseline snapshot
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -359,17 +360,20 @@ jobs:
 
   python-lint-test:
     # Preserve the existing required-check name while making it the single
-    # authority over lint, every isolated test partition, and combined coverage.
+    # authority over live release validation, lint, every isolated test
+    # partition, and combined coverage.
     name: Python Lint & Test
-    needs: [python-test, python-lint]
+    needs: [release-validation-plan, python-test, python-lint]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Require lint and every Python test partition
+      - name: Require release validation, lint, and every Python test partition
         env:
+          RELEASE_VALIDATION_RESULT: ${{ needs.release-validation-plan.result }}
           PYTHON_REGULAR_RESULT: ${{ needs.python-test.result }}
           PYTHON_LINT_RESULT: ${{ needs.python-lint.result }}
         run: |
+          test "$RELEASE_VALIDATION_RESULT" = success
           test "$PYTHON_REGULAR_RESULT" = success
           test "$PYTHON_LINT_RESULT" = success
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -682,10 +686,18 @@ jobs:
           root="$(sed -n 's/^OK: Prepared candidate release root: //p' prepare-candidate.log | tail -1)"
           test -d "$root"
           echo "root=$root" >> "$GITHUB_OUTPUT"
+      - name: Preserve candidate modes for Actions transport
+        env:
+          CANDIDATE_ROOT: ${{ steps.prepare.outputs.root }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py pack-transport \
+            --source "$CANDIDATE_ROOT" \
+            --output unsigned-candidate.tar
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: ${{ steps.name.outputs.artifact_name }}
-          path: ${{ steps.prepare.outputs.root }}/
+          path: unsigned-candidate.tar
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
@@ -717,7 +729,13 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ needs.unsigned-upgrade-candidate.outputs.artifact_name }}
-          path: unsigned-candidate
+          path: unsigned-candidate-transport
+      - name: Restore exact candidate modes
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py unpack-transport \
+            --archive unsigned-candidate-transport/unsigned-candidate.tar \
+            --destination unsigned-candidate
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ needs.release-validation-plan.outputs.baseline_artifact }}
@@ -786,7 +804,13 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ needs.unsigned-upgrade-candidate.outputs.artifact_name }}
-          path: unsigned-candidate
+          path: unsigned-candidate-transport
+      - name: Restore exact candidate modes
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py unpack-transport \
+            --archive unsigned-candidate-transport/unsigned-candidate.tar \
+            --destination unsigned-candidate
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ needs.release-validation-plan.outputs.baseline_artifact }}

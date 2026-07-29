@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -50,6 +51,16 @@ func (source *fakeObservabilityV8HealthSource) set(
 	source.mu.Lock()
 	source.snapshot = snapshot
 	source.mu.Unlock()
+}
+
+type observabilityV8HealthSourceFunc func(
+	context.Context,
+) (observabilityruntime.DestinationHealthSnapshot, error)
+
+func (source observabilityV8HealthSourceFunc) DestinationHealthSnapshot(
+	ctx context.Context,
+) (observabilityruntime.DestinationHealthSnapshot, error) {
+	return source(ctx)
 }
 
 // connByName indexes a snapshot's per-connector roster by connector name.
@@ -308,6 +319,9 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 		details["retention_state"] != "healthy" || details["retention_days"] != int64(90) {
 		t.Fatalf("details=%+v", details)
 	}
+	if _, ok := details["event_history_failure"]; ok {
+		t.Fatalf("empty event history failure was exposed: %+v", details)
+	}
 	rows, ok := details["destinations"].([]map[string]interface{})
 	if !ok || len(rows) != 3 {
 		t.Fatalf("destinations=%T %+v", details["destinations"], details["destinations"])
@@ -330,6 +344,70 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 		if stringContains(string(encoded), forbidden) {
 			t.Fatalf("health disclosed forbidden %q: %s", forbidden, encoded)
 		}
+	}
+}
+
+func TestObservabilityV8HealthOnlyExposesValidRetentionFailures(t *testing.T) {
+	tests := []struct {
+		name          string
+		failure       string
+		wantFailure   string
+		wantPublished bool
+	}{
+		{
+			name:          "valid",
+			failure:       "scheduler_failed",
+			wantFailure:   "scheduler_failed",
+			wantPublished: true,
+		},
+		{
+			name:    "invalid",
+			failure: "secret_internal_failure",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			health := renderObservabilityV8Health(
+				time.Now().UTC(),
+				observabilityruntime.DestinationHealthSnapshot{},
+				nil,
+				"degraded",
+				test.failure,
+				30,
+				"",
+			)
+			failure, published := health.Details["retention_failure"]
+			if published != test.wantPublished {
+				t.Fatalf(
+					"retention_failure published = %t, want %t: %+v",
+					published,
+					test.wantPublished,
+					health.Details,
+				)
+			}
+			if published && failure != test.wantFailure {
+				t.Fatalf("retention_failure = %v, want %q", failure, test.wantFailure)
+			}
+		})
+	}
+}
+
+func TestObservabilityV8HealthHidesInvalidEventHistoryFailureButFailsClosed(t *testing.T) {
+	health := renderObservabilityV8Health(
+		time.Now().UTC(),
+		observabilityruntime.DestinationHealthSnapshot{},
+		nil,
+		"healthy",
+		"",
+		30,
+		"secret_internal_failure",
+	)
+	if health.State != StateError {
+		t.Fatalf("telemetry state = %q, want %q", health.State, StateError)
+	}
+	if _, published := health.Details["event_history_failure"]; published {
+		t.Fatalf("invalid event_history_failure was exposed: %+v", health.Details)
 	}
 }
 
@@ -361,6 +439,83 @@ func TestObservabilityV8HealthRejectsStaleFailureAcrossReload(t *testing.T) {
 	rows = health.Snapshot().Telemetry.Details["destinations"].([]map[string]interface{})
 	if rows[0]["failure"] != nil || rows[0]["generation"] != uint64(9) {
 		t.Fatalf("stale transition contaminated successor: %+v", rows[0])
+	}
+}
+
+func TestObservabilityV8HealthSnapshotFailureIsBoundedAndFailClosed(t *testing.T) {
+	const secret = "https://secret.example.invalid?token=do-not-disclose"
+	tests := []struct {
+		name   string
+		source observabilityV8HealthSource
+	}{
+		{
+			name: "source error",
+			source: observabilityV8HealthSourceFunc(func(
+				context.Context,
+			) (observabilityruntime.DestinationHealthSnapshot, error) {
+				return observabilityruntime.DestinationHealthSnapshot{}, errors.New(secret)
+			}),
+		},
+		{
+			name: "source timeout",
+			source: observabilityV8HealthSourceFunc(func(
+				ctx context.Context,
+			) (observabilityruntime.DestinationHealthSnapshot, error) {
+				<-ctx.Done()
+				return observabilityruntime.DestinationHealthSnapshot{}, errors.New(secret)
+			}),
+		},
+		{
+			name: "source panic",
+			source: observabilityV8HealthSourceFunc(func(
+				context.Context,
+			) (observabilityruntime.DestinationHealthSnapshot, error) {
+				panic(secret)
+			}),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			health := NewSidecarHealth()
+			health.bindObservabilityV8HealthSource(test.source)
+			health.setObservabilityV8Retention("degraded", 30, "scheduler_failed")
+			health.setObservabilityV8EventHistoryFailure("sqlite_write_failed")
+
+			snapshot := health.Snapshot()
+			if snapshot.Telemetry.State != StateError {
+				t.Fatalf("telemetry state = %q, want %q", snapshot.Telemetry.State, StateError)
+			}
+			if snapshot.Telemetry.LastError != ObservabilityV8HealthSnapshotUnavailable {
+				t.Fatalf(
+					"telemetry last_error = %q, want %q",
+					snapshot.Telemetry.LastError,
+					ObservabilityV8HealthSnapshotUnavailable,
+				)
+			}
+			details := snapshot.Telemetry.Details
+			if details["snapshot_state"] != "unavailable" ||
+				details["retention_state"] != "degraded" ||
+				details["retention_days"] != int64(30) ||
+				details["retention_failure"] != "scheduler_failed" ||
+				details["event_history_failure"] != "sqlite_write_failed" {
+				t.Fatalf("telemetry details = %+v", details)
+			}
+			if _, ok := details["generation"]; ok {
+				t.Fatalf("unavailable snapshot retained a generation: %+v", details)
+			}
+			if _, ok := details["destinations"]; ok {
+				t.Fatalf("unavailable snapshot retained destination health: %+v", details)
+			}
+
+			encoded, err := json.Marshal(snapshot.Telemetry)
+			if err != nil {
+				t.Fatalf("marshal telemetry: %v", err)
+			}
+			if strings.Contains(string(encoded), secret) {
+				t.Fatalf("telemetry disclosed source failure: %s", encoded)
+			}
+		})
 	}
 }
 

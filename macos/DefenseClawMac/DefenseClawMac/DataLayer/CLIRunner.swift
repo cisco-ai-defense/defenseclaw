@@ -26,7 +26,14 @@ struct CLIResult: Sendable {
     var output: String
     var cancelled: Bool = false
     var outputTruncated: Bool = false
-    var succeeded: Bool { exitCode == 0 && !outputTruncated }
+    var succeeded: Bool { exitCode == 0 && !cancelled && !outputTruncated }
+}
+
+enum CLICancellationDisposition: Sendable, Equatable {
+    case requested
+    case alreadyRequested
+    case finishing
+    case notFound
 }
 
 enum CLIOutputLimits {
@@ -44,6 +51,195 @@ enum CLIOutputLimits {
 private struct CapturedCLIOutput: Sendable {
     var output: String
     var truncated: Bool
+}
+
+/// Coordinates the detached pipe reader with direct-process termination.
+/// A descendant can inherit stdout/stderr and keep the pipe open after the
+/// command itself exits, so EOF alone is not a reliable completion signal.
+private final class CLIOutputReadControl: @unchecked Sendable {
+    private let lock = NSLock()
+    private var parentExited = false
+
+    deinit {}
+
+    func markParentExited() {
+        lock.lock()
+        parentExited = true
+        lock.unlock()
+    }
+
+    var hasParentExited: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return parentExited
+    }
+}
+
+/// A directly spawned command that is also the leader of its own process
+/// group. Group isolation must be established by `posix_spawn`; trying to call
+/// `setpgid` after `Process.run()` races the child reaching `exec`.
+private final class CLIProcess: @unchecked Sendable {
+    let processIdentifier: pid_t
+    let processGroupIdentifier: pid_t
+
+    private init(processIdentifier: pid_t) {
+        self.processIdentifier = processIdentifier
+        self.processGroupIdentifier = processIdentifier
+    }
+
+    deinit {}
+
+    static func spawn(
+        executable: String,
+        arguments: [String],
+        environment: [String: String],
+        outputPipe: Pipe,
+        inputPipe: Pipe?
+    ) throws -> CLIProcess {
+        guard !executable.utf8.contains(0),
+              arguments.allSatisfy({ !$0.utf8.contains(0) }),
+              environment.allSatisfy({
+                  !$0.key.isEmpty
+                      && !$0.key.contains("=")
+                      && !$0.key.utf8.contains(0)
+                      && !$0.value.utf8.contains(0)
+              }) else {
+            throw posixError(EINVAL)
+        }
+
+        var fileActions: posix_spawn_file_actions_t?
+        try check(posix_spawn_file_actions_init(&fileActions))
+        defer { _ = posix_spawn_file_actions_destroy(&fileActions) }
+
+        let outputReadDescriptor = outputPipe.fileHandleForReading.fileDescriptor
+        let outputWriteDescriptor = outputPipe.fileHandleForWriting.fileDescriptor
+        try check(posix_spawn_file_actions_addclose(&fileActions, outputReadDescriptor))
+        try check(posix_spawn_file_actions_adddup2(
+            &fileActions,
+            outputWriteDescriptor,
+            STDOUT_FILENO
+        ))
+        try check(posix_spawn_file_actions_adddup2(
+            &fileActions,
+            outputWriteDescriptor,
+            STDERR_FILENO
+        ))
+        try check(posix_spawn_file_actions_addclose(&fileActions, outputWriteDescriptor))
+
+        if let inputPipe {
+            let inputReadDescriptor = inputPipe.fileHandleForReading.fileDescriptor
+            let inputWriteDescriptor = inputPipe.fileHandleForWriting.fileDescriptor
+            try check(posix_spawn_file_actions_adddup2(
+                &fileActions,
+                inputReadDescriptor,
+                STDIN_FILENO
+            ))
+            try check(posix_spawn_file_actions_addclose(&fileActions, inputReadDescriptor))
+            try check(posix_spawn_file_actions_addclose(&fileActions, inputWriteDescriptor))
+        }
+
+        var attributes: posix_spawnattr_t?
+        try check(posix_spawnattr_init(&attributes))
+        defer { _ = posix_spawnattr_destroy(&attributes) }
+
+        var defaultSignals = sigset_t()
+        sigemptyset(&defaultSignals)
+        sigaddset(&defaultSignals, SIGINT)
+        sigaddset(&defaultSignals, SIGTERM)
+        try check(posix_spawnattr_setsigdefault(&attributes, &defaultSignals))
+
+        var signalMask = sigset_t()
+        sigemptyset(&signalMask)
+        try check(posix_spawnattr_setsigmask(&attributes, &signalMask))
+
+        let flags = Int16(POSIX_SPAWN_SETPGROUP)
+            | Int16(POSIX_SPAWN_SETSIGDEF)
+            | Int16(POSIX_SPAWN_SETSIGMASK)
+            | Int16(POSIX_SPAWN_CLOEXEC_DEFAULT)
+        try check(posix_spawnattr_setflags(&attributes, flags))
+        // A zero pgroup value makes the child a process-group leader whose
+        // group identifier is its own PID.
+        try check(posix_spawnattr_setpgroup(&attributes, 0))
+
+        let argumentStrings = [executable] + arguments
+        let environmentStrings = environment
+            .map { "\($0.key)=\($0.value)" }
+            .sorted()
+        var childPID: pid_t = 0
+        let spawnStatus = try withCStringArray(argumentStrings) { argumentVector in
+            try withCStringArray(environmentStrings) { environmentVector in
+                executable.withCString { executablePointer in
+                    posix_spawn(
+                        &childPID,
+                        executablePointer,
+                        &fileActions,
+                        &attributes,
+                        argumentVector,
+                        environmentVector
+                    )
+                }
+            }
+        }
+        try check(spawnStatus)
+        return CLIProcess(processIdentifier: childPID)
+    }
+
+    var isProcessGroupRunning: Bool {
+        if Darwin.kill(-processGroupIdentifier, 0) == 0 { return true }
+        return errno == EPERM
+    }
+
+    @discardableResult
+    func signalProcessGroup(_ signal: Int32) -> Bool {
+        if Darwin.kill(-processGroupIdentifier, signal) == 0 { return true }
+        return errno == EPERM
+    }
+
+    func waitUntilExit() -> Int32 {
+        var status: Int32 = 0
+        var waitResult: pid_t
+        repeat {
+            waitResult = Darwin.waitpid(processIdentifier, &status, 0)
+        } while waitResult == -1 && errno == EINTR
+
+        guard waitResult == processIdentifier else { return 126 }
+        let terminationSignal = status & 0x7f
+        if terminationSignal == 0 {
+            return (status >> 8) & 0xff
+        }
+        if terminationSignal != 0x7f {
+            return terminationSignal
+        }
+        return 126
+    }
+
+    private static func check(_ status: Int32) throws {
+        guard status == 0 else { throw posixError(status) }
+    }
+
+    private static func posixError(_ code: Int32) -> NSError {
+        NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+    }
+
+    private static func withCStringArray<Result>(
+        _ strings: [String],
+        body: (UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) throws -> Result
+    ) throws -> Result {
+        var pointers: [UnsafeMutablePointer<CChar>?] = []
+        pointers.reserveCapacity(strings.count + 1)
+        for string in strings {
+            guard let pointer = strdup(string) else {
+                pointers.forEach { free($0) }
+                throw posixError(ENOMEM)
+            }
+            pointers.append(pointer)
+        }
+        pointers.append(nil)
+        defer { pointers.dropLast().forEach { free($0) } }
+        return try pointers.withUnsafeMutableBufferPointer { buffer in
+            try body(buffer.baseAddress!)
+        }
+    }
 }
 
 private enum CLIUTF8 {
@@ -225,9 +421,20 @@ actor CLIRunner {
     /// User override (App Settings ▸ Connection) wins; otherwise search standard locations.
     static let pathOverrideKey = "defenseclawBinaryPath"
 
+    private struct ActiveRun {
+        let token: UUID
+        let process: CLIProcess
+        var cancellationRequested: Bool
+        var cancellationTask: Task<Void, Never>?
+    }
+
+    private enum RunState {
+        case reserved(cancelRequested: Bool)
+        case running(ActiveRun)
+    }
+
     private var cachedPaths: [String: String] = [:]
-    private var runningProcesses: [UUID: Process] = [:]
-    private var cancellationRequests = Set<UUID>()
+    private var runStates: [UUID: RunState] = [:]
     private var installationContext: InstallationContext
 
     init(context: InstallationContext = .resolve()) {
@@ -237,13 +444,25 @@ actor CLIRunner {
     func rebind(to context: InstallationContext) {
         guard installationContext != context else { return }
         if installationContext.permitsMutation, !context.permitsMutation {
-            for (runID, process) in runningProcesses where process.isRunning {
-                cancellationRequests.insert(runID)
-                process.interrupt()
+            let activeRuns = runStates.compactMap { executionID, state -> (UUID, ActiveRun)? in
+                guard case .running(let active) = state,
+                      active.process.isProcessGroupRunning else { return nil }
+                return (executionID, active)
+            }
+            for (executionID, active) in activeRuns {
+                _ = requestCancellation(executionID: executionID, token: active.token)
             }
         }
         installationContext = context
         cachedPaths.removeAll()
+    }
+
+    /// Reserve an Activity run before its visible row is published. This makes
+    /// a cancellation click racing process launch durable instead of a no-op.
+    func reserve(runID: UUID) -> Bool {
+        guard runStates[runID] == nil else { return false }
+        runStates[runID] = .reserved(cancelRequested: false)
+        return true
     }
 
     func locateBinary() -> String? {
@@ -381,6 +600,28 @@ actor CLIRunner {
         runID: UUID? = nil,
         onLine: (@Sendable (String) async -> Void)? = nil
     ) async -> CLIResult {
+        let executionID = runID ?? UUID()
+        if runID != nil {
+            switch runStates[executionID] {
+            case .reserved(let cancelRequested):
+                runStates[executionID] = nil
+                if cancelRequested {
+                    return CLIResult(
+                        exitCode: 130,
+                        output: "Command cancelled before launch.\n",
+                        cancelled: true
+                    )
+                }
+            case .running:
+                return CLIResult(
+                    exitCode: 125,
+                    output: "A command with this run identifier is already active.\n"
+                )
+            case nil:
+                break
+            }
+        }
+
         if mutation, !installationContext.permitsMutation {
             let reason = installationContext.accessMode.reason ?? "This installation is read only."
             return CLIResult(exitCode: 77, output: "Operation refused by the Mac app: \(reason)")
@@ -389,9 +630,6 @@ actor CLIRunner {
             let setting = binaryName == "defenseclaw" ? " Set its path in Settings ▸ Connection." : ""
             return CLIResult(exitCode: 127, output: "\(binaryName) binary not found.\(setting)")
         }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: binary)
-        proc.arguments = arguments
         var env = Self.subprocessEnvironment()
         env["NO_COLOR"] = "1"
         for (key, value) in environment where !key.isEmpty {
@@ -402,29 +640,52 @@ actor CLIRunner {
         for (key, value) in installationContext.protectedSubprocessEnvironment {
             env[key] = value
         }
-        proc.environment = env
 
         let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
         let inputPipe = standardInput == nil ? nil : Pipe()
-        proc.standardInput = inputPipe
 
+        let proc: CLIProcess
         do {
-            try proc.run()
+            proc = try CLIProcess.spawn(
+                executable: binary,
+                arguments: arguments,
+                environment: env,
+                outputPipe: pipe,
+                inputPipe: inputPipe
+            )
+            try? pipe.fileHandleForWriting.close()
+            try? inputPipe?.fileHandleForReading.close()
         } catch {
             return CLIResult(exitCode: 126, output: "Failed to launch \(binary): \(error.localizedDescription)")
         }
-        if let runID { runningProcesses[runID] = proc }
+        let runToken = UUID()
+        runStates[executionID] = .running(ActiveRun(
+            token: runToken,
+            process: proc,
+            cancellationRequested: false,
+            cancellationTask: nil
+        ))
 
         if let standardInput, let inputPipe {
             inputPipe.fileHandleForWriting.write(Data((standardInput + "\n").utf8))
             try? inputPipe.fileHandleForWriting.close()
         }
 
+        let readControl = CLIOutputReadControl()
+
+        // A detached waiter keeps the actor available for cancellation while a
+        // command is alive. It also tells the reader when the direct process has
+        // exited, even if a descendant still owns the pipe's write end.
+        let terminationTask = Task.detached(priority: .utility) {
+            let exitCode = proc.waitUntilExit()
+            readControl.markParentExited()
+            return exitCode
+        }
+
         // A detached reader keeps draining the pipe even if the calling Task is
-        // cancelled. Stopping reads early can otherwise leave the child blocked
-        // on a full pipe while its parent waits for termination.
+        // cancelled. poll(2) bounds each wait, and the post-exit drain has a
+        // hard ceiling, so a descendant-held pipe cannot leave an Activity row
+        // running forever after the direct process exits.
         let outputTask = Task.detached(priority: .utility) {
             var collector = BoundedCLIOutputCollector()
             var streamer = BoundedCLILineStreamer()
@@ -438,7 +699,37 @@ actor CLIRunner {
             }
             let emitLines = lineContinuation != nil
             var readBuffer = [UInt8](repeating: 0, count: CLIOutputLimits.readChunkBytes)
+            var parentExitObservedAt: ContinuousClock.Instant?
             readLoop: while true {
+                if readControl.hasParentExited {
+                    let now = ContinuousClock.now
+                    if let observedAt = parentExitObservedAt,
+                       now - observedAt >= .milliseconds(500) {
+                        break readLoop
+                    }
+                    if parentExitObservedAt == nil { parentExitObservedAt = now }
+                }
+                var descriptor = pollfd(
+                    fd: pipe.fileHandleForReading.fileDescriptor,
+                    events: Int16(POLLIN | POLLHUP | POLLERR),
+                    revents: 0
+                )
+                let pollResult = Darwin.poll(&descriptor, 1, 100)
+                if pollResult == 0 {
+                    if readControl.hasParentExited { break readLoop }
+                    continue readLoop
+                }
+                if pollResult < 0 {
+                    if errno == EINTR { continue readLoop }
+                    let message = String(cString: strerror(errno))
+                    let lines = collector.appendStreamError(message, emitLines: emitLines)
+                    if lineContinuation != nil {
+                        for line in streamer.linesToEmit(from: lines) {
+                            lineContinuation?.yield(line)
+                        }
+                    }
+                    break readLoop
+                }
                 let byteCount = readBuffer.withUnsafeMutableBytes { buffer in
                     Darwin.read(
                         pipe.fileHandleForReading.fileDescriptor,
@@ -489,29 +780,110 @@ actor CLIRunner {
             return finished.capture
         }
 
-        let captured = await withTaskCancellationHandler {
-            await outputTask.value
+        let completion = await withTaskCancellationHandler {
+            let captured = await outputTask.value
+            let exitCode = await terminationTask.value
+            return (captured, exitCode)
         } onCancel: {
-            if proc.isRunning { proc.interrupt() }
+            Task {
+                await self.requestCancellation(executionID: executionID, token: runToken)
+            }
         }
-        proc.waitUntilExit()
-        let explicitlyCancelled = runID.map { cancellationRequests.remove($0) != nil } ?? false
+
+        let explicitlyCancelled: Bool
+        let cancellationTask: Task<Void, Never>?
+        if case .running(let active) = runStates[executionID], active.token == runToken {
+            explicitlyCancelled = active.cancellationRequested
+            cancellationTask = active.cancellationTask
+        } else {
+            explicitlyCancelled = false
+            cancellationTask = nil
+        }
+        // Keep the token-guarded state registered until an accepted
+        // cancellation finishes its bounded group escalation. Otherwise a
+        // direct parent that exits on SIGINT could let an ignoring descendant
+        // outlive both the run result and the later SIGTERM/SIGKILL steps.
+        if let cancellationTask {
+            await cancellationTask.value
+        }
+        if case .running(let active) = runStates[executionID], active.token == runToken {
+            runStates[executionID] = nil
+        }
         let cancelled = Task.isCancelled || explicitlyCancelled
-        if let runID { runningProcesses[runID] = nil }
         return CLIResult(
-            exitCode: proc.terminationStatus,
-            output: captured.output,
+            exitCode: completion.1,
+            output: completion.0.output,
             cancelled: cancelled,
-            outputTruncated: captured.truncated
+            outputTruncated: completion.0.truncated
         )
     }
 
-    /// Interrupt an Activity-owned process. The process remains registered
-    /// until its output stream closes, so the final exit status is retained.
-    func cancel(runID: UUID) {
-        guard let process = runningProcesses[runID], process.isRunning else { return }
-        cancellationRequests.insert(runID)
-        process.interrupt()
+    /// Request bounded cancellation of an Activity-owned process. Repeated
+    /// requests share one escalation ladder and never target a later run that
+    /// happens to reuse the same public identifier.
+    @discardableResult
+    func cancel(runID: UUID) -> CLICancellationDisposition {
+        requestCancellation(executionID: runID, token: nil)
+    }
+
+    private func requestCancellation(
+        executionID: UUID,
+        token expectedToken: UUID?
+    ) -> CLICancellationDisposition {
+        guard let state = runStates[executionID] else { return .notFound }
+        switch state {
+        case .reserved(let cancelRequested):
+            guard !cancelRequested else { return .alreadyRequested }
+            runStates[executionID] = .reserved(cancelRequested: true)
+            return .requested
+        case .running(var active):
+            if let expectedToken, active.token != expectedToken { return .notFound }
+            guard !active.cancellationRequested else { return .alreadyRequested }
+            guard active.process.isProcessGroupRunning else { return .finishing }
+            active.cancellationRequested = true
+            runStates[executionID] = .running(active)
+            guard active.process.signalProcessGroup(SIGINT) else {
+                active.cancellationRequested = false
+                runStates[executionID] = .running(active)
+                return .finishing
+            }
+            active.cancellationTask = scheduleCancellationEscalation(
+                executionID: executionID,
+                token: active.token
+            )
+            runStates[executionID] = .running(active)
+            return .requested
+        }
+    }
+
+    private func scheduleCancellationEscalation(
+        executionID: UUID,
+        token: UUID
+    ) -> Task<Void, Never> {
+        Task.detached { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard await self?.terminateIfNeeded(executionID: executionID, token: token) == true else {
+                return
+            }
+            try? await Task.sleep(for: .seconds(1))
+            await self?.killIfNeeded(executionID: executionID, token: token)
+        }
+    }
+
+    private func terminateIfNeeded(executionID: UUID, token: UUID) -> Bool {
+        guard case .running(let active) = runStates[executionID],
+              active.token == token,
+              active.cancellationRequested,
+              active.process.isProcessGroupRunning else { return false }
+        return active.process.signalProcessGroup(SIGTERM)
+    }
+
+    private func killIfNeeded(executionID: UUID, token: UUID) {
+        guard case .running(let active) = runStates[executionID],
+              active.token == token,
+              active.cancellationRequested,
+              active.process.isProcessGroupRunning else { return }
+        _ = active.process.signalProcessGroup(SIGKILL)
     }
 
     /// Lightweight doctor probe (TUI Shift+D) — parsed into check rows.

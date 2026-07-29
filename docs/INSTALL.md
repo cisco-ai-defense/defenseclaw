@@ -391,27 +391,41 @@ checksummed release assets still carry the requested version everywhere.
 
 Preferred — from the Actions UI:
 
-```
-Actions -> Release -> Run workflow -> version: 0.8.7
-  -> immutable_releases_confirmed: true
+```text
+Actions -> Release -> Run workflow -> operation: release
+  -> version: 0.8.8
 ```
 
 Or dispatch it with GitHub CLI:
 
 ```bash
-gh workflow run release.yaml --ref main \
-  -f version=0.8.7 \
-  -f immutable_releases_confirmed=true
+gh workflow run release.yaml \
+  --repo cisco-ai-defense/defenseclaw \
+  --ref main \
+  -f operation=release \
+  -f version=0.8.8
 ```
+
+Selecting **main**, the operation, and the version is the whole release
+request. Anything merged to `main` is source-certified, and GitHub
+automatically freezes the run's exact `github.sha`; operators do not copy a
+commit SHA or confirm repository settings.
 
 Do not create or push the tag yourself. The workflow must retain exclusive
 ownership of that namespace until its tested candidate is approved and
-published.
+published. If only the exact same-commit tag exists and no release was created,
+redispatching that version can safely resume publication. Once an immutable
+release exists, `operation=release` never rebuilds it, even from the same
+commit. Rerun only the failed post-release channel job from its original run, or
+dispatch `operation=repair-channel` for an existing immutable `0.8.8+` version.
+Published, conflicting, mutable, or unsafe partially populated namespaces fail
+before the expensive build matrix.
 
 > The version MUST be bare `X.Y.Z` with no `v` prefix. `scripts/install.sh`,
 > `scripts/upgrade.sh`, and `defenseclaw upgrade` all build URLs of the
 > form `releases/download/X.Y.Z/...`, and the workflow rejects any tag
-> that doesn't match `^[0-9]+\.[0-9]+\.[0-9]+$`.
+> that doesn't match
+> `^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`.
 
 Do NOT manually `gh release create` — it would create an empty Immutable
 Release that the workflow can't attach assets to (this is what broke the
@@ -974,6 +988,46 @@ release-owned resolver materializes them privately. The conventional `.whl`,
 `.tar.gz`, and `.zip` asset names are signed refusal envelopes. Renaming,
 extracting, or package-installing either form is not a supported manual path;
 use the resolver so the bridge and rollback contract cannot be skipped.
+
+#### Recovering incomplete field state
+
+The current target-release POSIX resolver also handles two field states that a
+frozen installed CLI cannot repair retroactively:
+
+- The exact clean published `0.8.6` state whose cursor file is entirely absent
+  can be recovered after the resolver authenticates that release's source
+  wheel, clean config-v8 shape, local bundle, and lack of migration residue.
+  A damaged cursor, partial cursor, manual binary/wheel copy, or ambiguous
+  configuration is not inferred from a version string and remains fail-closed.
+- A configured local audit SQLite store that live immutable preflight suspects
+  is corrupt can be explicitly recovered before a fresh store is initialized:
+
+  ```bash
+  # Run only a saved regular file authenticated against signed checksums.txt.
+  /bin/sh ./defenseclaw-rescue.sh --yes --recover-corrupt-audit
+  ```
+
+  The separate flag is required even with `--yes` because the retained
+  historical audit records are no longer queried by the new active database.
+  Live immutable preflight is only a suspicion signal; it never proves
+  corruption or authorizes movement. With explicit recovery, the resolver
+  first stops the gateway and creates a private copy. That stopped-gateway copy
+  is the sole integrity authority before any source custody or movement:
+  databases with a WAL are opened read/write with `query_only` enabled so
+  SQLite can apply the copied WAL safely, while databases without a WAL use
+  immutable read-only mode. The exact source database and WAL bytes, plus any
+  source SHM or journal sidecars that were present and identity-sealed before
+  the copy, are retained under `backups/upgrade-*/audit-corrupt/`; do not delete
+  that custody directory. Any SHM index created solely for the private probe is
+  disposable and is removed with that temporary probe. A timeout, lock,
+  generic I/O error, unsafe path, or changed inode is never reclassified as
+  corruption and never authorizes moving the store.
+
+Use the authenticated current target-release resolver asset, not the frozen
+installed command, when an older release refuses before downloading target
+artifacts. The resolver supports the same recovery when the target artifacts
+were already installed but gateway readiness failed, so a same-version retry
+does not leave the host stranded.
 
 #### 0.8.5 hard cut and the 0.8.4 bridge
 

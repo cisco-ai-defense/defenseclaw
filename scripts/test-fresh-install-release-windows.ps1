@@ -10,8 +10,9 @@
     Folders. Environment-variable profile spoofing is intentionally unsupported.
     The parent mode therefore delegates to the repository's disposable
     standard-user launcher. Child mode runs with a real isolated profile and
-    HKCU hive, installs through scripts/install.ps1, repeats the authenticated
-    handoff, verifies the installed version, and proves complete uninstall.
+    HKCU hive, installs through the exact sealed install.ps1 release asset,
+    repeats the authenticated handoff, verifies the installed version, and
+    proves complete uninstall.
 #>
 
 [CmdletBinding()]
@@ -30,7 +31,32 @@ if ($TargetVersion -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)
     throw "TargetVersion must be canonical X.Y.Z"
 }
 
-$ReleaseDir = (Resolve-Path -LiteralPath $ReleaseDir -ErrorAction Stop).Path
+function Resolve-RegularReleaseDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $full = [IO.Path]::GetFullPath($Path)
+    $item = [IO.DirectoryInfo]::new($full)
+    $item.Refresh()
+    if (-not $item.Exists -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Bootstrap acceptance release input must be a regular directory: $full"
+    }
+    return $full
+}
+
+function Assert-RegularReleaseFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $full = [IO.Path]::GetFullPath($Path)
+    $item = [IO.FileInfo]::new($full)
+    $item.Refresh()
+    if (-not $item.Exists -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Bootstrap acceptance release input must be a regular file: $full"
+    }
+}
+
+$ReleaseDir = Resolve-RegularReleaseDirectory -Path $ReleaseDir
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
 function Invoke-CapturedProcess {
@@ -125,7 +151,10 @@ function Get-UserPathEntryCount {
 function Wait-ForPathRemoval {
     param([Parameter(Mandatory = $true)][string]$Path)
 
-    for ($attempt = 0; $attempt -lt 80 -and (Test-Path -LiteralPath $Path); $attempt++) {
+    # Native Setup's transaction-bound helper may wait up to two minutes for
+    # its parent to exit. Keep release smoke aligned with that product bound
+    # plus scheduling margin while retaining the final fail-closed assertion.
+    for ($attempt = 0; $attempt -lt 520 -and (Test-Path -LiteralPath $Path); $attempt++) {
         Start-Sleep -Milliseconds 250
     }
 }
@@ -220,7 +249,7 @@ if ([string]::IsNullOrWhiteSpace($userProfile) -or
     throw "Disposable bootstrap child does not have a token-bound real user profile"
 }
 
-$installer = Join-Path $PSScriptRoot "install.ps1"
+$installer = Join-Path $ReleaseDir "install.ps1"
 $powerShell = Join-Path $PSHOME "pwsh.exe"
 $cosign = Join-Path $ReleaseDir "cosign-windows-amd64.exe"
 $setup = Join-Path $ReleaseDir "DefenseClawSetup-x64.exe"
@@ -243,10 +272,11 @@ foreach ($path in @(
         throw "Bootstrap acceptance refuses pre-existing product state: $path"
     }
 }
-foreach ($path in @($installer, $powerShell, $cosign, $setup)) {
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        throw "Bootstrap acceptance input is missing: $path"
-    }
+if (-not (Test-Path -LiteralPath $powerShell -PathType Leaf)) {
+    throw "Bootstrap acceptance input is missing: $powerShell"
+}
+foreach ($path in @($installer, $cosign, $setup)) {
+    Assert-RegularReleaseFile -Path $path
 }
 
 # The supported public path has no custom home override. Setup and the

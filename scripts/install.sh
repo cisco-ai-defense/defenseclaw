@@ -1996,3 +1996,4 @@ print_success
 }
 
 main "$@"
+# DefenseClaw POSIX installer complete v1

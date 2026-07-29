@@ -28,11 +28,14 @@
 # release install (install.sh) and is release-specific.
 #
 # Usage:
-#   ./scripts/upgrade.sh [--yes] [--version VERSION] [--plan] [--help]
+#   ./scripts/upgrade.sh [--yes] [--version VERSION] [--recover-corrupt-audit] [--plan] [--help]
 #
 # Options:
 #   --yes, -y             Skip confirmation prompts
 #   --version VERSION     Select a specific final release (required bridges are still staged)
+#   --recover-corrupt-audit
+#                         Preserve a corrupt audit SQLite set in upgrade backup
+#                         custody and activate a fresh local audit store
 #   --plan                Verify contracts and print the resolved path only
 #   --help, -h            Show this help
 #
@@ -88,6 +91,8 @@ readonly UPGRADE_PROTOCOL_VERSION=2
 readonly OBSERVABILITY_V8_HARD_CUT_VERSION="0.8.5"
 readonly COSIGN_BOOTSTRAP_VERSION="2.6.3"
 readonly COSIGN_BOOTSTRAP_MAX_BYTES="209715200"
+readonly UV_BOOTSTRAP_VERSION="0.11.28"
+readonly UV_BOOTSTRAP_MAX_BYTES="209715200"
 readonly UPGRADE_MANIFEST_NAME="upgrade-manifest.json"
 readonly RELEASE_PROVENANCE_NAME="release-provenance.json"
 readonly HISTORICAL_BOOTSTRAP_MCP_SCANNER_CONSTRAINT='cisco-ai-mcp-scanner @ https://files.pythonhosted.org/packages/5d/74/6e72cbd496c0d33dfab1b4aee62792620236e63cccf278a8c896c6feb740/cisco_ai_mcp_scanner-4.7.2-py3-none-any.whl#sha256=6ed0b8ced168886f572aec30a971c7b0e2e1de7eea489d3821627184fd271ac8'
@@ -113,6 +118,8 @@ UPGRADE_ADVISORY_LOCK_DEVICE=""
 UPGRADE_ADVISORY_LOCK_INODE=""
 BRIDGE_PHASE1_RECOVERY_TERMINAL_CONTROLLER=""
 BRIDGE_PHASE1_RECOVERY_TERMINAL_VERSION=""
+UV_BIN=""
+STAGING_DIR=""
 
 # ── Terminal Formatting ───────────────────────────────────────────────────────
 
@@ -157,6 +164,161 @@ PY
 
 version_gte() {
     ! version_lt "$1" "$2"
+}
+
+prepare_upgrade_staging() {
+    if [[ -z "${STAGING_DIR}" ]]; then
+        STAGING_DIR="$(mktemp -d)" \
+            || die "Could not create private upgrade staging. No changes were made."
+        chmod 700 "${STAGING_DIR}" \
+            || die "Could not protect private upgrade staging. No changes were made."
+    fi
+    python3 - "${STAGING_DIR}" <<'PY' \
+        || die "Private upgrade staging is unsafe. No changes were made."
+import os
+import stat
+import sys
+
+path = os.path.abspath(sys.argv[1])
+info = os.lstat(path)
+if (
+    stat.S_ISLNK(info.st_mode)
+    or not stat.S_ISDIR(info.st_mode)
+    or info.st_uid != os.geteuid()
+    or stat.S_IMODE(info.st_mode) != 0o700
+):
+    raise SystemExit(1)
+PY
+}
+
+cleanup_upgrade_staging() {
+    [[ -z "${STAGING_DIR:-}" ]] || rm -rf -- "${STAGING_DIR}"
+    STAGING_DIR=""
+    UV_BIN=""
+}
+
+resolve_upgrade_uv() {
+    [[ -n "${UV_BIN}" && -x "${UV_BIN}" ]] && return 0
+    [[ -n "${STAGING_DIR:-}" && -d "${STAGING_DIR}" && ! -L "${STAGING_DIR}" ]] \
+        || die "Private staging is unavailable for Python tool custody. No changes were made."
+
+    local tool_root="${STAGING_DIR}/upgrade-tools"
+    local archive=""
+    local asset=""
+    local expected=""
+    local member=""
+    mkdir -p "${tool_root}" \
+        || die "Could not create private Python tool custody. No changes were made."
+    chmod 700 "${tool_root}" \
+        || die "Could not protect private Python tool custody. No changes were made."
+
+    case "$(uname -s)/$(uname -m)" in
+        Darwin/x86_64)
+            asset="uv-x86_64-apple-darwin.tar.gz"
+            expected="2ad79983127ffca7d77b77ce6a24278d7e4f7b817a1acf72fea5f8124b4aac5e"
+            member="uv-x86_64-apple-darwin/uv"
+            ;;
+        Darwin/arm64)
+            asset="uv-aarch64-apple-darwin.tar.gz"
+            expected="33540eb7c883ab857eff79bd5ac2aa31fe27b595abecb4a9c003a2c998447232"
+            member="uv-aarch64-apple-darwin/uv"
+            ;;
+        Linux/x86_64|Linux/amd64)
+            asset="uv-x86_64-unknown-linux-gnu.tar.gz"
+            expected="e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224"
+            member="uv-x86_64-unknown-linux-gnu/uv"
+            ;;
+        Linux/aarch64|Linux/arm64)
+            asset="uv-aarch64-unknown-linux-gnu.tar.gz"
+            expected="03e9fe0a81b0718d0bc84625de3885df6cc3f89a8b6af6121d6b9f6113fb6533"
+            member="uv-aarch64-unknown-linux-gnu/uv"
+            ;;
+        *)
+            die "Automatic uv bootstrap is unavailable on this platform. No changes were made."
+            ;;
+    esac
+    archive="${tool_root}/${asset}"
+    info "Authenticating temporary pinned uv ${UV_BOOTSTRAP_VERSION}..."
+    curl --fail --silent --show-error --location \
+        --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --max-filesize "${UV_BOOTSTRAP_MAX_BYTES}" \
+        --output "${archive}" \
+        "https://github.com/astral-sh/uv/releases/download/${UV_BOOTSTRAP_VERSION}/${asset}" \
+        || die "Could not download the pinned uv bootstrap. No changes were made."
+    python3 - "${archive}" "${expected}" "${UV_BOOTSTRAP_MAX_BYTES}" <<'PY' \
+        || die "Pinned uv bootstrap authentication failed. No changes were made."
+import hashlib
+import os
+import stat
+import sys
+
+path, expected, maximum_raw = sys.argv[1:]
+maximum = int(maximum_raw)
+info = os.lstat(path)
+if (
+    stat.S_ISLNK(info.st_mode)
+    or not stat.S_ISREG(info.st_mode)
+    or info.st_uid != os.geteuid()
+    or not 0 < info.st_size <= maximum
+):
+    raise SystemExit(1)
+digest = hashlib.sha256()
+with open(path, "rb") as stream:
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
+raise SystemExit(0 if digest.hexdigest() == expected else 1)
+PY
+    tar -xOzf "${archive}" "${member}" > "${tool_root}/uv" \
+        || die "Could not extract the pinned uv executable. No changes were made."
+    [[ -s "${tool_root}/uv" \
+       && "$(wc -c < "${tool_root}/uv" | tr -d ' ')" -le "${UV_BOOTSTRAP_MAX_BYTES}" ]] \
+        || die "Pinned uv executable is empty or oversized. No changes were made."
+    chmod 700 "${tool_root}/uv" \
+        || die "Could not protect pinned uv private custody. No changes were made."
+    local uv_reported
+    uv_reported="$(env -i HOME="${HOME}" LANG=C LC_ALL=C PATH=/usr/bin:/bin \
+        "${tool_root}/uv" --version 2>/dev/null || true)"
+    [[ "${uv_reported}" == "uv ${UV_BOOTSTRAP_VERSION}"* ]] \
+        || die "Pinned uv executable reported an unexpected version. No changes were made."
+    UV_BIN="${tool_root}/uv"
+    ok "Pinned uv ${UV_BOOTSTRAP_VERSION} authenticated in private upgrade custody"
+}
+
+require_authenticated_upgrade_uv_handoff() {
+    [[ -n "${UV_BIN:-}" \
+       && "${UV_BIN}" == "${STAGING_DIR}/upgrade-tools/uv" \
+       && -f "${UV_BIN}" \
+       && -x "${UV_BIN}" \
+       && ! -L "${UV_BIN}" \
+       && "${UV_BIN%/*}" != *:* \
+       && -f "${INSTALL_DIR}/defenseclaw-gateway" \
+       && -x "${INSTALL_DIR}/defenseclaw-gateway" \
+       && ! -L "${INSTALL_DIR}/defenseclaw-gateway" \
+       && "${INSTALL_DIR}" != *:* ]] \
+        || die "Authenticated private uv or installed gateway is unavailable for the historical controller handoff."
+}
+
+retain_authenticated_upgrade_uv_staging() {
+    require_authenticated_upgrade_uv_handoff
+    local previous_staging="${STAGING_DIR}"
+    local retained_staging=""
+    retained_staging="$(mktemp -d "${STAGING_DIR%/*}/defenseclaw-upgrade-uv.XXXXXX")" \
+        || die "Could not retain authenticated uv for the historical controller handoff."
+    if ! chmod 700 "${retained_staging}" \
+        || ! mkdir "${retained_staging}/upgrade-tools" \
+        || ! chmod 700 "${retained_staging}/upgrade-tools"; then
+        rm -rf -- "${retained_staging}"
+        die "Could not protect retained authenticated uv custody."
+    fi
+    if ! mv -- "${UV_BIN}" "${retained_staging}/upgrade-tools/uv"; then
+        rm -rf -- "${retained_staging}"
+        die "Could not retain authenticated uv for the historical controller handoff."
+    fi
+    STAGING_DIR="${retained_staging}"
+    UV_BIN="${STAGING_DIR}/upgrade-tools/uv"
+    rm -rf -- "${previous_staging}" \
+        || die "Could not retire completed hard-cut staging."
+    require_authenticated_upgrade_uv_handoff
 }
 
 # Keep one bounded, fail-closed parser for every phase-one gateway.pid
@@ -386,9 +548,8 @@ preflight_python_wheel() {
     local wheel="$1"
     local uv_bin
     local -a dependency_args=(--only-binary litellm)
-    uv_bin="$(command -v uv 2>/dev/null || true)"
-    [[ -z "${uv_bin}" ]] \
-        && die "uv not found on PATH — cannot update Python CLI. Install uv, then re-run the upgrade."
+    resolve_upgrade_uv
+    uv_bin="${UV_BIN}"
 
     local preflight_python="${DEFENSECLAW_VENV}/bin/python"
     if [[ ! -x "${preflight_python}" ]]; then
@@ -494,7 +655,6 @@ recover_interrupted_phase_two() {
     [[ -e "${journal}" || -L "${journal}" ]] || return 0
     [[ "${PLAN_ONLY}" -eq 0 ]] \
         || die "An interrupted hard-cut recovery is active. Re-run without --plan so the authenticated 0.8.4 bridge can be restored first."
-
     section "Recovering Interrupted Hard-Cut Upgrade"
     local recovery_fields wheel expected_digest receipt_status recorded_config_path uv_bin venv_python
     recovery_fields="$(python3 - "${journal}" "${DEFENSECLAW_HOME}" <<'PY'
@@ -764,7 +924,15 @@ if status in {"succeeded", "rolled_back"}:
     if gateway_version.returncode != 0 or reported_versions != [expected_version]:
         raise SystemExit("terminal phase-two gateway version is not proven")
     cli_version = subprocess.run(
-        [str(venv_python), "-I", "-B", "-c", "from defenseclaw import __version__; print(__version__)"],
+        [
+            str(venv_python),
+            "-X",
+            "pycache_prefix=/dev/null",
+            "-I",
+            "-B",
+            "-c",
+            "from defenseclaw import __version__; print(__version__)",
+        ],
         capture_output=True,
         text=True,
         timeout=10,
@@ -813,9 +981,9 @@ PY
        && -n "${recorded_config_path}" ]] \
         || die "Interrupted phase-two recovery journal did not yield a pending bridge plan."
 
-    uv_bin="$(command -v uv 2>/dev/null || true)"
-    [[ -n "${uv_bin}" ]] \
-        || die "uv is required to bootstrap the retained 0.8.4 recovery controller."
+    prepare_upgrade_staging
+    resolve_upgrade_uv
+    uv_bin="${UV_BIN}"
     venv_python="${DEFENSECLAW_VENV}/bin/python"
     python3 - "${journal_root}/phase-two-mutator.lease" "${uv_bin}" \
         "${DEFENSECLAW_VENV}" "${venv_python}" "${wheel}" "${expected_digest}" <<'PY' \
@@ -2007,6 +2175,386 @@ finally:
 PY
 }
 
+preflight_081_observability_source() {
+    local classification classifier_python
+    [[ "${CURRENT_VERSION}" == "0.8.1" \
+       && "${RELEASE_VERSION}" == "0.8.4" \
+       && "${STAGED_FINAL_VERSION}" == "${OBSERVABILITY_V8_HARD_CUT_VERSION}" ]] \
+        || return 0
+
+    classifier_python="${TARGET_CONTROLLER_VENV}/bin/python"
+    [[ -x "${classifier_python}" ]] || return 1
+    classification="$("${classifier_python}" -I -B - "${CONFIG_PATH}" "${DATA_DIR}" <<'PY'
+import os
+import stat
+import sys
+
+from defenseclaw.migrations import _observability_v8_upgrade_environment_snapshot
+from defenseclaw.observability.v8_migration import (
+    _parse_v7,
+    convert_v7_observability_to_v8,
+)
+
+
+def exact(actual, expected):
+    if isinstance(actual, dict) or isinstance(expected, dict):
+        return (
+            isinstance(actual, dict)
+            and isinstance(expected, dict)
+            and len(actual) == len(expected)
+            and all(
+                key in actual
+                and type(next(item for item in actual if item == key)) is type(key)
+                and exact(actual[key], value)
+                for key, value in expected.items()
+            )
+        )
+    if isinstance(actual, list) or isinstance(expected, list):
+        return (
+            isinstance(actual, list)
+            and isinstance(expected, list)
+            and len(actual) == len(expected)
+            and all(exact(left, right) for left, right in zip(actual, expected))
+        )
+    return type(actual) is type(expected) and actual == expected
+
+
+flat_placeholder = {
+    "enabled": False,
+    "endpoint": "",
+    "protocol": "grpc",
+    "headers": {},
+    "tls": {"ca_cert": "", "insecure": False},
+    "batch": {
+        "max_queue_size": 2048,
+        "max_export_batch_size": 512,
+        "scheduled_delay_ms": 5000,
+    },
+    "traces": {
+        "enabled": True,
+        "sampler": "always_on",
+        "sampler_arg": "1.0",
+        "endpoint": "",
+        "protocol": "",
+        "url_path": "",
+    },
+    "logs": {
+        "enabled": True,
+        "emit_individual_findings": False,
+        "endpoint": "",
+        "protocol": "",
+        "url_path": "",
+    },
+    "metrics": {
+        "enabled": True,
+        "endpoint": "",
+        "protocol": "",
+        "url_path": "",
+        "export_interval_s": 60,
+    },
+    "resource": {"attributes": {}},
+}
+
+
+def is_observability_decision(name):
+    return (
+        name in {
+            "DEFENSECLAW_DISABLE_REDACTION",
+            "DEFENSECLAW_JSONL_DISABLE",
+            "DEFENSECLAW_PERSIST_JUDGE",
+            "OTEL_SERVICE_NAME",
+        }
+        or name.startswith(("OTEL_", "DEFENSECLAW_OTEL_", "OPENCLAW_OTEL_"))
+    )
+
+
+config_path, data_dir = map(os.path.abspath, sys.argv[1:])
+info = os.lstat(config_path)
+if (
+    stat.S_ISLNK(info.st_mode)
+    or not stat.S_ISREG(info.st_mode)
+    or info.st_uid != os.geteuid()
+    or not 0 < info.st_size <= 4 * 1024 * 1024
+):
+    raise RuntimeError("0.8.1 observability preflight config is unsafe")
+descriptor = os.open(
+    config_path,
+    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+)
+try:
+    opened = os.fstat(descriptor)
+    if not os.path.samestat(info, opened):
+        raise RuntimeError("0.8.1 observability config changed while opening")
+    raw = b""
+    while len(raw) <= info.st_size:
+        chunk = os.read(descriptor, info.st_size + 1 - len(raw))
+        if not chunk:
+            break
+        raw += chunk
+finally:
+    os.close(descriptor)
+if len(raw) != info.st_size:
+    raise RuntimeError("0.8.1 observability config changed while reading")
+
+document = _parse_v7(raw, config_path)
+environment, _environment_present, _environment_sha256 = (
+    _observability_v8_upgrade_environment_snapshot(os.path.join(data_dir, ".env"))
+)
+environment.pop("DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING", None)
+environment.pop("DEFENSECLAW_UPGRADE_MUTATION_TOKEN", None)
+exact_placeholder = (
+    "config_version" not in document
+    and exact(document.get("otel"), flat_placeholder)
+    and ("observability" not in document or document["observability"] in ({}, []))
+    and ("audit_sinks" not in document or document["audit_sinks"] in ({}, []))
+)
+if exact_placeholder and not any(
+    is_observability_decision(name) for name in environment
+):
+    classification = "historical-placeholder"
+else:
+    convert_v7_observability_to_v8(
+        raw,
+        environment,
+        source_name=config_path,
+        effective_data_dir=data_dir,
+    )
+    classification = "configured"
+
+current = os.lstat(config_path)
+if (
+    not os.path.samestat(info, current)
+    or current.st_size != info.st_size
+    or current.st_mtime_ns != info.st_mtime_ns
+):
+    raise RuntimeError("0.8.1 observability config changed during preflight")
+print(classification)
+PY
+)" || return 1
+    case "${classification}" in
+        historical-placeholder)
+            OBSERVABILITY_081_SOURCE_CLASSIFICATION="${classification}"
+            ok "Authenticated the exact historical 0.8.1 OTel placeholder before mutation"
+            ;;
+        configured)
+            OBSERVABILITY_081_SOURCE_CLASSIFICATION="${classification}"
+            ok "Validated configured 0.8.1 OTel with the authenticated hard-cut controller before mutation"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+
+repair_clean_081_observability_placeholder() {
+    local classification classifier_python
+    [[ "${BRIDGE_PHASE1}" -eq 1 \
+       && "${CURRENT_VERSION}" == "0.8.1" \
+       && "${RELEASE_VERSION}" == "0.8.4" \
+       && "${STAGED_FINAL_VERSION}" == "${OBSERVABILITY_V8_HARD_CUT_VERSION}" ]] \
+        || return 0
+
+    classifier_python="${TARGET_CONTROLLER_VENV}/bin/python"
+    [[ -x "${classifier_python}" ]] || return 1
+    classification="$("${classifier_python}" -I -B - \
+        "${CONFIG_PATH}" "${DATA_DIR}" \
+        "${OBSERVABILITY_081_SOURCE_CLASSIFICATION:-unknown}" <<'PY'
+import os
+import stat
+import sys
+
+import yaml
+from yaml.composer import ComposerError
+from yaml.constructor import ConstructorError
+from yaml.events import AliasEvent
+from yaml.nodes import MappingNode
+
+from defenseclaw.config import locked_config_yaml, write_config_yaml_secure
+from defenseclaw.migrations import _observability_v8_upgrade_environment_snapshot
+from defenseclaw.observability.v8_migration import convert_v7_observability_to_v8
+
+
+class StrictLoader(yaml.SafeLoader):
+    def compose_node(self, parent, index):
+        if self.check_event(AliasEvent):
+            event = self.peek_event()
+            raise ComposerError(None, None, "aliases are not allowed", event.start_mark)
+        return super().compose_node(parent, index)
+
+    def construct_mapping(self, node, deep=False):
+        if not isinstance(node, MappingNode):
+            raise ConstructorError(None, None, "expected a mapping", node.start_mark)
+        result = {}
+        for key_node, value_node in node.value:
+            if key_node.tag != "tag:yaml.org,2002:str" or key_node.value == "<<":
+                raise ConstructorError(None, None, "mapping keys must be unique strings", key_node.start_mark)
+            key = self.construct_object(key_node, deep=deep)
+            if key in result:
+                raise ConstructorError(None, None, "duplicate mapping key", key_node.start_mark)
+            result[key] = self.construct_object(value_node, deep=deep)
+        return result
+
+
+def exact(actual, expected):
+    if isinstance(actual, dict) or isinstance(expected, dict):
+        return (
+            isinstance(actual, dict)
+            and isinstance(expected, dict)
+            and len(actual) == len(expected)
+            and all(
+                key in actual
+                and type(next(item for item in actual if item == key)) is type(key)
+                and exact(actual[key], value)
+                for key, value in expected.items()
+            )
+        )
+    if isinstance(actual, list) or isinstance(expected, list):
+        return (
+            isinstance(actual, list)
+            and isinstance(expected, list)
+            and len(actual) == len(expected)
+            and all(exact(left, right) for left, right in zip(actual, expected))
+        )
+    return type(actual) is type(expected) and actual == expected
+
+
+destination = {
+    "name": "generic-otlp",
+    "preset": "generic-otlp",
+    "enabled": False,
+    "endpoint": "",
+    "protocol": "grpc",
+    "tls": {"ca_cert": "", "insecure": False},
+    "batch": {
+        "max_queue_size": 2048,
+        "max_export_batch_size": 512,
+        "scheduled_delay_ms": 5000,
+    },
+    "traces": {"enabled": True, "endpoint": "", "protocol": "", "url_path": ""},
+    "logs": {"enabled": True, "endpoint": "", "protocol": "", "url_path": ""},
+    "metrics": {
+        "enabled": True,
+        "endpoint": "",
+        "protocol": "",
+        "url_path": "",
+        "export_interval_s": 60,
+    },
+}
+placeholder = {
+    "enabled": False,
+    "traces": {"sampler": "always_on", "sampler_arg": "1.0"},
+    "logs": {"emit_individual_findings": False},
+    "destinations": [destination],
+    "resource": {"attributes": {}},
+}
+
+config_path = os.path.abspath(sys.argv[1])
+data_dir = os.path.abspath(sys.argv[2])
+source_classification = sys.argv[3]
+
+
+with locked_config_yaml(config_path):
+    source_info = os.lstat(config_path)
+    if (
+        stat.S_ISLNK(source_info.st_mode)
+        or not stat.S_ISREG(source_info.st_mode)
+        or source_info.st_uid != os.geteuid()
+        or not 0 < source_info.st_size <= 4 * 1024 * 1024
+    ):
+        raise RuntimeError("0.8.1 placeholder recovery config is unsafe")
+    descriptor = os.open(
+        config_path,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if not os.path.samestat(source_info, opened):
+            raise RuntimeError("0.8.1 placeholder recovery config changed while opening")
+        raw = b""
+        while len(raw) <= source_info.st_size:
+            chunk = os.read(descriptor, source_info.st_size + 1 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
+    finally:
+        os.close(descriptor)
+    if len(raw) != source_info.st_size:
+        raise RuntimeError("0.8.1 placeholder recovery config changed while reading")
+    document = yaml.load(raw, Loader=StrictLoader)
+    exact_placeholder = (
+        isinstance(document, dict)
+        and "config_version" not in document
+        and exact(document.get("otel"), placeholder)
+        and ("observability" not in document or document["observability"] in ({}, []))
+        and ("audit_sinks" not in document or document["audit_sinks"] in ({}, []))
+    )
+    current_info = os.lstat(config_path)
+    if (
+        not os.path.samestat(source_info, current_info)
+        or current_info.st_size != source_info.st_size
+        or current_info.st_mtime_ns != source_info.st_mtime_ns
+    ):
+        raise RuntimeError("0.8.1 observability config changed during classification")
+    if exact_placeholder and source_classification == "historical-placeholder":
+        del document["otel"]["destinations"]
+        write_config_yaml_secure(config_path, document)
+        if os.environ.get("DEFENSECLAW_TEST_FAIL_AFTER_081_PLACEHOLDER_REPAIR") == "1":
+            raise RuntimeError("injected failure after 0.8.1 placeholder repair")
+        print("repaired")
+        raise SystemExit
+
+    if source_classification != "configured":
+        raise RuntimeError(
+            "0.8.1 observability source classification is unavailable or inconsistent"
+        )
+    environment_path = os.path.join(data_dir, ".env")
+    environment, _environment_present, _environment_sha256 = (
+        _observability_v8_upgrade_environment_snapshot(environment_path)
+    )
+    environment.pop("DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING", None)
+    environment.pop("DEFENSECLAW_UPGRADE_MUTATION_TOKEN", None)
+    otel = document.get("otel") if isinstance(document, dict) else None
+    destinations = otel.get("destinations") if isinstance(otel, dict) else None
+    if not isinstance(destinations, list) or not destinations:
+        raise RuntimeError(
+            "0.8.1 post-bridge observability state is malformed or ambiguous"
+        )
+    # The immutable authenticated 0.8.5 controller is the authority for
+    # whether an operator-configured v7 graph can cross the hard cut. This is
+    # a pure conversion: success preserves the source bytes exactly, while
+    # malformed, duplicate, or semantically ambiguous graphs fail before the
+    # placeholder repair mutates config.
+    convert_v7_observability_to_v8(
+        raw,
+        environment,
+        source_name=config_path,
+        effective_data_dir=data_dir,
+    )
+    current_info = os.lstat(config_path)
+    if (
+        not os.path.samestat(source_info, current_info)
+        or current_info.st_size != source_info.st_size
+        or current_info.st_mtime_ns != source_info.st_mtime_ns
+    ):
+        raise RuntimeError("0.8.1 observability config changed during validation")
+    print("configured")
+PY
+)" || return 1
+    case "${classification}" in
+        repaired)
+            ok "Repaired the exact clean 0.8.1 disabled OTel placeholder under phase-one rollback custody"
+            ;;
+        configured)
+            ok "Preserved validated operator-configured 0.8.1 OTel state for the authenticated hard-cut migration"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+
 complete_bridge_phase1_recovery_journal() {
     local expected_plan_id="$1"
     local terminal_controller="${2:-bridge}"
@@ -2785,6 +3333,7 @@ def cleanup_owned_temporaries() -> None:
         raise RuntimeError("phase-one temporary quarantine name allocation was exhausted")
 
     def cleanup_descriptor(descriptor: int) -> None:
+        directory_device = os.fstat(descriptor).st_dev
         with os.scandir(descriptor) as entries:
             members = []
             for entry in entries:
@@ -2792,19 +3341,26 @@ def cleanup_owned_temporaries() -> None:
                     raise RuntimeError(
                         "phase-one temporary cleanup exceeded its scan bound"
                     )
-                members.append(entry)
-        for entry in members:
-            quarantine_match = cleanup_quarantine.fullmatch(entry.name)
+                members.append((entry.name, entry.inode()))
+        for name, observed_inode in members:
+            quarantine_match = cleanup_quarantine.fullmatch(name)
             owned = (
-                entry.name.startswith(generic_prefix)
-                or (entry.name.startswith(cursor_prefix) and entry.name.endswith(".tmp"))
-                or tagged_writer.fullmatch(entry.name) is not None
+                name.startswith(generic_prefix)
+                or (name.startswith(cursor_prefix) and name.endswith(".tmp"))
+                or tagged_writer.fullmatch(name) is not None
                 or quarantine_match is not None
             )
             if not owned:
                 continue
-            info = entry.stat(follow_symlinks=False)
-            if entry.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
+            info = os.lstat(name, dir_fd=descriptor)
+            if (
+                info.st_dev != directory_device
+                or info.st_ino != observed_inode
+            ):
+                raise RuntimeError(
+                    "phase-one owned temporary identity changed before inspection"
+                )
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
                 raise RuntimeError("phase-one owned temporary has an unsafe identity")
             if quarantine_match is not None and (
                 info.st_dev != int(quarantine_match.group(1), 16)
@@ -2814,7 +3370,7 @@ def cleanup_owned_temporaries() -> None:
                 raise RuntimeError(
                     "phase-one cleanup quarantine identity changed before replay"
                 )
-            quarantine_name = quarantine_no_replace(descriptor, entry.name, info)
+            quarantine_name = quarantine_no_replace(descriptor, name, info)
             quarantined = os.stat(
                 quarantine_name,
                 dir_fd=descriptor,
@@ -3319,6 +3875,11 @@ if resume_unsealed_bridge:
                 if isinstance(health_payload, dict)
                 else None
             )
+            api_health = (
+                health_payload.get("api")
+                if isinstance(health_payload, dict)
+                else None
+            )
             provenance = (
                 health_payload.get("provenance")
                 if isinstance(health_payload, dict)
@@ -3329,6 +3890,12 @@ if resume_unsealed_bridge:
                 and (probe.stdout or "").strip() == "200"
                 and isinstance(gateway_health, dict)
                 and gateway_health.get("state") in {"running", "disabled"}
+                # Every supported source (0.5.0, 0.6.6, 0.7.2, 0.8.1,
+                # 0.8.4, 0.8.5, and 0.8.6) publishes api.state through
+                # authenticated /health; an API that answers but is not
+                # running is not a restored healthy source.
+                and isinstance(api_health, dict)
+                and api_health.get("state") == "running"
                 and isinstance(provenance, dict)
                 and provenance.get("binary_version") == bridge_version
             ):
@@ -3539,12 +4106,18 @@ if source_was_running:
             with open(response_path, "rb") as response_file:
                 health = json.load(response_file)
             gateway = health.get("gateway") if isinstance(health, dict) else None
+            api = health.get("api") if isinstance(health, dict) else None
             provenance = health.get("provenance") if isinstance(health, dict) else None
             if (
                 probe.returncode == 0
                 and (probe.stdout or "").strip() == "200"
                 and isinstance(gateway, dict)
                 and gateway.get("state") in {"running", "disabled"}
+                # The reviewed 0.5.0-0.8.6 source contracts all expose
+                # api.state on authenticated /health. Keep rollback health
+                # version-bound instead of accepting mere HTTP reachability.
+                and isinstance(api, dict)
+                and api.get("state") == "running"
                 and isinstance(provenance, dict)
                 and provenance.get("binary_version") == source_version
             ):
@@ -3636,16 +4209,28 @@ ensure_upgrade_lock_before_mutation() {
     fi
 }
 
+early_recovery_exit_trap() {
+    local status=$?
+    trap - EXIT
+    cleanup_upgrade_staging
+    release_upgrade_lock
+    exit "${status}"
+}
+
 # ── Argument Parsing ──────────────────────────────────────────────────────────
 
 YES=0
 PLAN_ONLY=0
+RECOVER_CORRUPT_AUDIT=0
 RELEASE_VERSION="${VERSION:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --yes|-y)   YES=1; shift ;;
         --plan)     PLAN_ONLY=1; shift ;;
+        --recover-corrupt-audit)
+            RECOVER_CORRUPT_AUDIT=1
+            shift ;;
         --version)
             [[ $# -lt 2 ]] && die "--version requires a value"
             RELEASE_VERSION="$2"; shift 2 ;;
@@ -3659,6 +4244,9 @@ while [[ $# -gt 0 ]]; do
   Options:
     --yes, -y             Skip confirmation prompts
     --version VERSION     Select a specific final release; required bridges are still staged
+    --recover-corrupt-audit
+                          Preserve a corrupt audit SQLite set in upgrade backup
+                          custody and activate a fresh local audit store
     --plan                Verify release contracts and print the path; make no changes
     --help, -h            Show this help
 
@@ -3685,7 +4273,7 @@ if [[ -e "${UPGRADE_RECOVERY_ROOT}/phase-one-active.json" \
       || -e "${UPGRADE_RECOVERY_ROOT}/phase-two-active.json" \
       || -L "${UPGRADE_RECOVERY_ROOT}/phase-two-active.json" ]]; then
     acquire_upgrade_lock
-    trap release_upgrade_lock EXIT
+    trap early_recovery_exit_trap EXIT
     recover_interrupted_phase_two
     recover_interrupted_bridge_phase1
     if [[ "${BRIDGE_PHASE1_RECOVERY_TERMINAL_CONTROLLER}" == "bridge" \
@@ -3693,6 +4281,7 @@ if [[ -e "${UPGRADE_RECOVERY_ROOT}/phase-one-active.json" \
           && "${RELEASE_VERSION#v}" == "${BRIDGE_PHASE1_RECOVERY_TERMINAL_VERSION}" ]]; then
         section "Upgrade Complete"
         ok "Recovered and verified DefenseClaw ${BRIDGE_PHASE1_RECOVERY_TERMINAL_VERSION}"
+        cleanup_upgrade_staging
         release_upgrade_lock
         trap - EXIT
         exit 0
@@ -3740,10 +4329,16 @@ else
 fi
 
 REQUESTED_RELEASE_VERSION="${RELEASE_VERSION}"
+if version_lt "${REQUESTED_RELEASE_VERSION}" "0.8.4"; then
+    die "Target release ${REQUESTED_RELEASE_VERSION} predates the oldest reviewed final-target readiness contract (0.8.4). No changes were made.
+  Select 0.8.4 or newer so the release-owned resolver can verify the installed target before committing success."
+fi
 STAGED_FINAL_VERSION=""
 STAGED_FINAL_MIN_PROTOCOL=""
 POST_HARD_CUT_FINAL_VERSION=""
 EXISTING_BRIDGE_REFRESH=0
+HARD_CUT_CURSOR_RECOVERY=0
+HARD_CUT_CURSOR_RECOVERY_SOURCE_VERSION=""
 
 # ── Detect currently installed version ───────────────────────────────────────
 
@@ -3830,12 +4425,19 @@ configured_data_dir = os.path.expanduser(cfg.data_dir or controller_home)
 if not os.path.isabs(configured_data_dir):
     raise RuntimeError("configured data_dir must be absolute for a staged upgrade")
 data_dir = os.path.abspath(configured_data_dir)
+configured_audit_db = os.path.expanduser(
+    getattr(cfg, "audit_db", "") or os.path.join(data_dir, "audit.db")
+)
+if not os.path.isabs(configured_audit_db):
+    configured_audit_db = os.path.join(data_dir, configured_audit_db)
+audit_db = os.path.abspath(configured_audit_db)
 openclaw_home = os.path.abspath(
     os.path.expanduser(requested_openclaw if openclaw_explicit == "1" else cfg.claw.home_dir)
 )
 for label, value in (
     ("configured data_dir", data_dir),
     ("active config path", config_path),
+    ("configured audit database", audit_db),
     ("resolved OpenClaw home", openclaw_home),
 ):
     if any(character in value for character in ("\n", "\r", "\t")):
@@ -3883,14 +4485,16 @@ if (
     or config_info.st_uid != os.geteuid()
 ):
     raise RuntimeError("active config path must be a stable current-user-owned real file")
-print("\t".join((data_dir, config_path, openclaw_home)))
+print("\t".join((data_dir, config_path, openclaw_home, audit_db)))
 PY
     )" || die "Could not resolve a stable controller-home/data-dir/config-path split from the installed source controller. No changes were made."
-    IFS=$'\t' read -r DATA_DIR CONFIG_PATH RESOLVED_OPENCLAW_HOME <<< "${runtime_paths}"
-    [[ -n "${DATA_DIR}" && -n "${CONFIG_PATH}" && -n "${RESOLVED_OPENCLAW_HOME}" ]] \
+    IFS=$'\t' read -r DATA_DIR CONFIG_PATH RESOLVED_OPENCLAW_HOME AUDIT_DB_PATH <<< "${runtime_paths}"
+    [[ -n "${DATA_DIR}" && -n "${CONFIG_PATH}" && -n "${RESOLVED_OPENCLAW_HOME}" \
+        && -n "${AUDIT_DB_PATH}" ]] \
         || die "Installed source returned an incomplete runtime path contract. No changes were made."
     OPENCLAW_HOME="${RESOLVED_OPENCLAW_HOME}"
 else
+    AUDIT_DB_PATH="${DATA_DIR}/audit.db"
     CONFIG_PATH="$(python3 - "${CONFIG_PATH}" <<'PY'
 import os
 import sys
@@ -3910,7 +4514,8 @@ PY
 fi
 [[ -n "${DATA_DIR}" && "${DATA_DIR}" == /* \
    && -n "${CONFIG_PATH}" && "${CONFIG_PATH}" == /* \
-   && -n "${OPENCLAW_HOME}" && "${OPENCLAW_HOME}" == /* ]] \
+   && -n "${OPENCLAW_HOME}" && "${OPENCLAW_HOME}" == /* \
+   && -n "${AUDIT_DB_PATH}" && "${AUDIT_DB_PATH}" == /* ]] \
     || die "Resolved runtime paths are invalid; no changes were made."
 
 if [[ "${COMPONENT_VERSION_SPLIT}" -eq 1 ]]; then
@@ -4006,9 +4611,16 @@ PY
     warn "Found an authenticated interrupted ${CURRENT_VERSION} → ${RELEASE_VERSION} artifact activation; the resolver will re-verify the release and resume it."
 fi
 
+AUDIT_DB_RECOVERY_NEEDED=0
+AUDIT_DB_RECOVERY_USE_DATA_ROOT=0
+AUDIT_DB_RECOVERY_BACKUP_ROOT="${BACKUP_ROOT}"
+AUDIT_DB_RECOVERY_BACKUP_DIR=""
+AUDIT_DB_RECOVERY_CUSTODY=""
+AUDIT_DB_PREFLIGHT_IDENTITY=""
+
 if [[ "${CURRENT_VERSION}" != "unknown" ]] && version_gte "${CURRENT_VERSION}" "0.8.5"; then
     hard_cut_state="$("${DEFENSECLAW_VENV}/bin/python" -I -B - "${CONFIG_PATH}" \
-        "${DATA_DIR}/.migration_state.json" <<'PY' 2>/dev/null || true
+        "${DATA_DIR}/.migration_state.json" "${CURRENT_VERSION}" <<'PY' 2>/dev/null || true
 import json
 import os
 import stat
@@ -4024,13 +4636,16 @@ def bounded_regular(path, limit):
     return info
 
 
-config_path, cursor_path = sys.argv[1:]
+config_path, cursor_path, current_version = sys.argv[1:]
 bounded_regular(config_path, 4 * 1024 * 1024)
 with open(config_path, encoding="utf-8") as stream:
     config = yaml.safe_load(stream)
-bounded_regular(cursor_path, 1024 * 1024)
-with open(cursor_path, encoding="utf-8") as stream:
-    cursor = json.load(stream)
+cursor = None
+cursor_absent = not os.path.lexists(cursor_path)
+if not cursor_absent:
+    bounded_regular(cursor_path, 1024 * 1024)
+    with open(cursor_path, encoding="utf-8") as stream:
+        cursor = json.load(stream)
 valid = (
     isinstance(config, dict)
     and config.get("config_version") == 8
@@ -4039,15 +4654,296 @@ valid = (
     and isinstance(cursor.get("applied"), list)
     and "0.8.5" in cursor["applied"]
 )
-print("valid" if valid else "invalid")
+release_owned_missing_cursor_candidate = (
+    current_version in {"0.8.6", "0.8.7"}
+    and cursor_absent
+    and isinstance(config, dict)
+    and type(config.get("config_version")) is int
+    and config["config_version"] == 8
+)
+print(
+    "valid"
+    if valid
+    else (
+        f"release-owned-missing-cursor:{current_version}"
+        if release_owned_missing_cursor_candidate
+        else "invalid"
+    )
+)
 PY
 )"
-    if [[ "${hard_cut_state}" != "valid" ]]; then
+    if [[ "${hard_cut_state}" == "release-owned-missing-cursor:"* ]]; then
+        HARD_CUT_CURSOR_RECOVERY_SOURCE_VERSION="${hard_cut_state#*:}"
+    elif [[ "${hard_cut_state}" != "valid" ]]; then
         die "CLI and gateway report hard-cut version ${CURRENT_VERSION}, but config-v8 migration state is absent or invalid and no recoverable journal is active. No changes were made.
   Unsupported manual overwrite detected.
   Recovery path: restore the exact 0.8.4 CLI, gateway, config, environment, and migration cursor from the pre-hard-cut backup, verify 0.8.4 health, then run this release-owned resolver without --version."
     fi
 fi
+
+audit_db_probe="$(python3 - "${DATA_DIR}" "${AUDIT_DB_PATH}" "${BACKUP_ROOT}" <<'PY' 2>/dev/null || true
+import json
+import os
+import sqlite3
+import stat
+import sys
+import time
+from pathlib import Path
+
+data_dir = Path(sys.argv[1])
+path = Path(sys.argv[2])
+backup_root = Path(sys.argv[3]).absolute()
+marker = data_dir / ".audit-recovery.json"
+
+
+def sqlite_failure_kind(exc: sqlite3.DatabaseError) -> str:
+    """Classify only explicit SQLite corruption and interruption signals."""
+    message = " ".join(str(exc).strip().lower().split())
+    if "interrupted" in message:
+        return "interrupted"
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int) and not isinstance(code, bool):
+        primary_code = code & 0xFF
+        if primary_code in {
+            getattr(sqlite3, "SQLITE_CORRUPT", 11),
+            getattr(sqlite3, "SQLITE_NOTADB", 26),
+        }:
+            return "corrupt"
+        return "uncertain"
+    # Python 3.10 and older do not expose sqlite_errorcode (and some builds do
+    # not export the SQLITE_* constants). Fall back only to canonical SQLite
+    # corruption diagnostics; every other message remains explicitly uncertain.
+    if (
+        "database disk image is malformed" in message
+        or "file is not a database" in message
+        or message.startswith("malformed database schema")
+    ):
+        return "corrupt"
+    return "uncertain"
+
+
+def corrupt_state() -> str:
+    try:
+        audit_device = path.parent.stat().st_dev
+        backup_authority = backup_root if os.path.lexists(backup_root) else backup_root.parent
+        if audit_device == backup_authority.lstat().st_dev:
+            return "suspected-corrupt"
+        if audit_device == data_dir.stat().st_dev:
+            return "suspected-corrupt-data-backup"
+        return "suspected-corrupt-cross-device"
+    except OSError:
+        return "unavailable"
+
+
+def safe_legacy_sqlite_file(info: os.stat_result) -> bool:
+    # Releases before the hardened audit constructor inherited the process
+    # umask, so otherwise healthy databases and sidecars may be 0644 or 0640.
+    # Read exposure is safe to tighten after activation; write exposure,
+    # aliases, and non-owned/non-regular paths are not safe to consume.
+    return (
+        not stat.S_ISLNK(info.st_mode)
+        and stat.S_ISREG(info.st_mode)
+        and info.st_uid == os.geteuid()
+        and info.st_nlink == 1
+        and stat.S_IMODE(info.st_mode) & 0o022 == 0
+    )
+
+
+def pending_wal_state():
+    wal = Path(f"{path}-wal")
+    if not os.path.lexists(wal):
+        return None
+    try:
+        wal_info = wal.lstat()
+    except OSError:
+        return "unavailable"
+    if not safe_legacy_sqlite_file(wal_info):
+        return "invalid"
+    custody_state = corrupt_state()
+    return (
+        "wal-pending-cross-device"
+        if custody_state == "suspected-corrupt-cross-device"
+        else "wal-pending-data-backup"
+        if custody_state == "suspected-corrupt-data-backup"
+        else "wal-pending"
+        if custody_state == "suspected-corrupt"
+        else "unavailable"
+    )
+
+
+if os.path.lexists(marker):
+    try:
+        marker_info = marker.lstat()
+    except OSError:
+        print("invalid-marker")
+        raise SystemExit
+    if (
+        stat.S_ISLNK(marker_info.st_mode)
+        or not stat.S_ISREG(marker_info.st_mode)
+        or marker_info.st_uid != os.geteuid()
+        or stat.S_IMODE(marker_info.st_mode) & 0o077
+        or not 0 < marker_info.st_size <= 64 * 1024
+    ):
+        print("invalid-marker")
+    else:
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("audit recovery marker is not an object")
+            custody_value = payload.get("custody")
+            if not isinstance(custody_value, str):
+                raise ValueError("audit recovery marker custody is not a path")
+            custody = Path(custody_value).absolute()
+            allowed_roots = {
+                backup_root,
+                (data_dir / "backups").absolute(),
+            }
+            matching_roots = [
+                root
+                for root in allowed_roots
+                if os.path.commonpath((str(custody), str(root))) == str(root)
+                and custody.parent.parent == root
+            ]
+            valid_marker = (
+                payload.get("schema") == 2
+                and payload.get("source") == str(path.absolute())
+                and payload.get("files") == [
+                    "audit.db-wal",
+                    "audit.db-shm",
+                    "audit.db-journal",
+                    "audit.db",
+                ]
+                and isinstance(payload.get("identities"), dict)
+                and len(matching_roots) == 1
+                and custody.name == "audit-corrupt"
+                and custody.parent.name.startswith("upgrade-")
+            )
+        except (KeyError, OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            valid_marker = False
+        print("interrupted" if valid_marker else "invalid-marker")
+    raise SystemExit
+try:
+    info = path.lstat()
+except FileNotFoundError:
+    print("absent")
+    raise SystemExit
+except OSError:
+    print("invalid")
+    raise SystemExit
+
+if not safe_legacy_sqlite_file(info):
+    print("invalid")
+    raise SystemExit
+
+identity = f"{info.st_dev}:{info.st_ino}"
+deadline = time.monotonic() + 15.0
+connection = None
+try:
+    connection = sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True, timeout=1.0)
+    connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+    row = connection.execute("PRAGMA quick_check(1)").fetchone()
+except sqlite3.DatabaseError as exc:
+    failure_kind = sqlite_failure_kind(exc)
+    if failure_kind == "corrupt":
+        state = pending_wal_state()
+        print(f"{state if state is not None else corrupt_state()}\t{identity}")
+    elif failure_kind == "interrupted":
+        print("unchecked")
+    else:
+        print("unavailable")
+else:
+    state = pending_wal_state()
+    if state is None:
+        state = "healthy" if row == ("ok",) else corrupt_state()
+    print(f"{state}\t{identity}")
+finally:
+    if connection is not None:
+        connection.close()
+PY
+)"
+IFS=$'\t' read -r audit_db_state AUDIT_DB_PREFLIGHT_IDENTITY <<< "${audit_db_probe}"
+case "${audit_db_state}" in
+    healthy|absent) ;;
+    wal-pending)
+        if [[ "${RECOVER_CORRUPT_AUDIT}" -eq 1 ]]; then
+            AUDIT_DB_RECOVERY_NEEDED=1
+            warn "The active audit database has a WAL; corruption recovery will run a WAL-aware read-only integrity check after the gateway is stopped."
+        else
+            warn "The active audit database has a WAL that immutable live preflight cannot inspect; normal upgrade will continue without moving audit data."
+        fi
+        ;;
+    wal-pending-data-backup)
+        if [[ "${RECOVER_CORRUPT_AUDIT}" -eq 1 ]]; then
+            AUDIT_DB_RECOVERY_NEEDED=1
+            AUDIT_DB_RECOVERY_USE_DATA_ROOT=1
+            AUDIT_DB_RECOVERY_BACKUP_ROOT="${DATA_DIR}/backups"
+            warn "The active audit database has a WAL; corruption recovery will use same-filesystem data-directory custody and a WAL-aware read-only check after the gateway is stopped."
+        else
+            warn "The active audit database has a WAL that immutable live preflight cannot inspect; normal upgrade will continue without moving audit data."
+        fi
+        ;;
+    wal-pending-cross-device)
+        if [[ "${RECOVER_CORRUPT_AUDIT}" -eq 1 ]]; then
+            die "The configured audit SQLite store has a WAL but resides on a different filesystem from the managed backup root. No changes were made.
+  Move the configured audit store onto the DefenseClaw data filesystem or preserve it manually before selecting a fresh local store; the resolver will not perform a non-atomic cross-filesystem recovery."
+        fi
+        warn "The active audit database has a WAL that immutable live preflight cannot inspect; normal upgrade will continue without moving audit data."
+        ;;
+    unchecked)
+        if [[ "${RECOVER_CORRUPT_AUDIT}" -eq 1 ]]; then
+            die "The bounded read-only audit database integrity probe did not finish. No changes were made.
+  Retry after local audit activity settles; the resolver will not move audit bytes without an explicit SQLite corruption result."
+        fi
+        warn "The bounded read-only audit integrity probe did not finish; normal upgrade will continue without moving audit data."
+        ;;
+    ""|unavailable)
+        if [[ "${RECOVER_CORRUPT_AUDIT}" -eq 1 ]]; then
+            die "The local audit database could not be checked safely. No changes were made.
+  Retry after local audit activity settles; only SQLite's explicit corruption result may authorize fresh-store recovery."
+        fi
+        warn "The live audit database could not be checked conclusively; normal upgrade will continue without moving audit data."
+        ;;
+    suspected-corrupt)
+        if [[ "${RECOVER_CORRUPT_AUDIT}" -eq 1 ]]; then
+            AUDIT_DB_RECOVERY_NEEDED=1
+            warn "Live immutable preflight suspects audit-store corruption; a private post-stop WAL-aware probe will decide whether recovery is authorized."
+        else
+            warn "Live immutable preflight suspects audit-store corruption but is not authoritative; normal upgrade will continue without moving audit data. Re-run with --recover-corrupt-audit for a private post-stop confirmation and recovery."
+        fi
+        ;;
+    suspected-corrupt-data-backup)
+        if [[ "${RECOVER_CORRUPT_AUDIT}" -eq 1 ]]; then
+            AUDIT_DB_RECOVERY_NEEDED=1
+            AUDIT_DB_RECOVERY_USE_DATA_ROOT=1
+            AUDIT_DB_RECOVERY_BACKUP_ROOT="${DATA_DIR}/backups"
+            warn "Live immutable preflight suspects audit-store corruption; a private post-stop probe will use same-filesystem data-directory custody before deciding whether recovery is authorized."
+        else
+            warn "Live immutable preflight suspects audit-store corruption but is not authoritative; normal upgrade will continue without moving audit data. Re-run with --recover-corrupt-audit for a private post-stop confirmation and recovery."
+        fi
+        ;;
+    suspected-corrupt-cross-device)
+        if [[ "${RECOVER_CORRUPT_AUDIT}" -eq 1 ]]; then
+            die "Live immutable preflight suspects audit-store corruption, but the configured store resides on a different filesystem from every managed recovery root. No changes were made.
+  Move the configured audit store onto the DefenseClaw data filesystem or preserve it manually before requesting recovery; the resolver will not perform a non-atomic cross-filesystem operation."
+        fi
+        warn "Live immutable preflight suspects audit-store corruption but is not authoritative; normal upgrade will continue without moving cross-filesystem audit data."
+        ;;
+    interrupted)
+        if [[ "${RECOVER_CORRUPT_AUDIT}" -ne 1 ]]; then
+            die "An interrupted audit-store recovery marker is present. No changes were made.
+  Re-run this authenticated resolver with --recover-corrupt-audit to resume the exact private-custody operation before upgrading."
+        fi
+        AUDIT_DB_RECOVERY_NEEDED=1
+        warn "An interrupted audit-store recovery will be resumed from its durable private-custody marker."
+        ;;
+    invalid-marker)
+        die "The durable audit-store recovery marker at ${DATA_DIR}/.audit-recovery.json is unsafe or unrecognized. No changes were made.
+  Preserve it for support and do not delete it manually; the resolver will not resume an unauthenticated custody operation."
+        ;;
+    *)
+        die "The local audit database path is unsafe or unreadable. No changes were made."
+        ;;
+esac
 
 if [[ "${CURRENT_VERSION}" != "unknown" ]]; then
     validate_version "${CURRENT_VERSION}"
@@ -4229,7 +5125,7 @@ configure_release
 
 section "Downloading Artifacts"
 
-STAGING_DIR="$(mktemp -d)"
+prepare_upgrade_staging
 BRIDGE_PHASE1=0
 BRIDGE_ROLLBACK_ARMED=0
 BRIDGE_ROLLBACK_RUNNING=0
@@ -4265,7 +5161,7 @@ upgrade_exit_trap() {
     fi
     [[ -z "${BRIDGE_GATEWAY_INSTALL_TEMP:-}" ]] || rm -f "${BRIDGE_GATEWAY_INSTALL_TEMP}"
     [[ -z "${BRIDGE_CANDIDATE_VENV:-}" ]] || rm -rf "${BRIDGE_CANDIDATE_VENV}"
-    [[ -z "${STAGING_DIR:-}" ]] || rm -rf "${STAGING_DIR}"
+    cleanup_upgrade_staging
     release_upgrade_lock
     if [[ "${rollback_status}" -ne 0 ]]; then
         err "Automatic source rollback was incomplete. Recovery evidence was preserved at ${BACKUP_DIR:-unknown}."
@@ -4979,6 +5875,76 @@ prepare_release_contract() {
     enforce_tested_source_matrix
     preflight_release_artifacts
 }
+
+authorize_cursorless_field_recovery() {
+    local source_version="${HARD_CUT_CURSOR_RECOVERY_SOURCE_VERSION}"
+    [[ "${source_version}" =~ ^0[.]8[.][67]$ \
+       && "${CURRENT_VERSION}" == "${source_version}" \
+       && "${CURRENT_GATEWAY_VERSION}" == "${source_version}" ]] \
+        || die "Cursorless field recovery is restricted to matching 0.8.6 or 0.8.7 CLI and gateway versions. No changes were made."
+
+    "${DEFENSECLAW_VENV}/bin/python" -I -B - \
+        "${CONFIG_PATH}" "${DATA_DIR}" "${UPGRADE_RECOVERY_ROOT}" \
+        "${source_version}" <<'PY' \
+        || die "Installed ${source_version} state is not the supported public cursorless first-run shape. No changes were made."
+import os
+import stat
+import sys
+
+import yaml
+
+config_path, data_dir, recovery_root = map(os.path.abspath, sys.argv[1:4])
+source_version = sys.argv[4]
+uid = os.geteuid()
+if source_version not in {"0.8.6", "0.8.7"}:
+    raise RuntimeError("unsupported cursorless source version")
+
+
+def read_regular(path, limit):
+    info = os.lstat(path)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != uid
+        or stat.S_IMODE(info.st_mode) & 0o022
+        or not 0 < info.st_size <= limit
+    ):
+        raise RuntimeError(f"unsafe cursorless field-state file: {path}")
+    with open(path, "rb") as stream:
+        raw = stream.read(limit + 1)
+    if len(raw) != info.st_size:
+        raise RuntimeError("cursorless field-state file changed while reading")
+    return raw
+
+
+config = yaml.safe_load(read_regular(config_path, 4 * 1024 * 1024))
+if (
+    not isinstance(config, dict)
+    or type(config.get("config_version")) is not int
+    or config["config_version"] != 8
+):
+    raise RuntimeError("config does not declare integer config_version 8")
+
+cursor_path = os.path.join(data_dir, ".migration_state.json")
+if os.path.lexists(cursor_path):
+    raise RuntimeError("migration cursor must be wholly absent")
+
+for residue in (
+    config_path + ".pre-observability-migration.bak",
+    os.path.join(data_dir, ".migration_state.fresh.pending.json"),
+    os.path.join(data_dir, ".upgrade-receipts"),
+    os.path.join(recovery_root, "phase-one-active.json"),
+    os.path.join(recovery_root, "phase-two-active.json"),
+):
+    if os.path.lexists(residue):
+        raise RuntimeError("active or incomplete upgrade state is present")
+PY
+
+    HARD_CUT_CURSOR_RECOVERY=1
+    prepare_release_contract
+    ok "Accepted exact public ${source_version} cursorless first-run state"
+}
+
 
 capture_hard_cut_target_controller_contract() {
     local expected matches
@@ -6335,9 +7301,8 @@ prepare_bridge_phase1_cli_preflight() {
     local uv_bin preflight_venv preflight_version
     [[ -n "${whl_name:-}" && -f "${STAGING_DIR}/${whl_name}" ]] \
         || die "Bridge CLI artifact is unavailable for preflight; no services changed."
-    uv_bin="$(command -v uv 2>/dev/null || true)"
-    [[ -n "${uv_bin}" ]] \
-        || die "uv not found on PATH — cannot prepare the 0.8.4 bridge without a rollback-safe CLI replacement. No services changed."
+    resolve_upgrade_uv
+    uv_bin="${UV_BIN}"
 
     [[ -d "${DEFENSECLAW_VENV}" && ! -L "${DEFENSECLAW_VENV}" ]] \
         || die "The installed CLI environment is not a managed regular directory at ${DEFENSECLAW_VENV}. No services changed."
@@ -6358,7 +7323,8 @@ if not os.path.islink(launcher) or os.path.realpath(launcher) != os.path.realpat
     )
 PY
 
-    BRIDGE_PYTHON_INTERPRETER="$("${DEFENSECLAW_VENV}/bin/python" -I -B -c 'import os,sys; print(os.path.realpath(getattr(sys, "_base_executable", "") or sys.executable))')" \
+    BRIDGE_PYTHON_INTERPRETER="$("${DEFENSECLAW_VENV}/bin/python" -I -B -c \
+        'import os,sys; print(os.path.realpath(getattr(sys, "_base_executable", "") or sys.executable))')" \
         || die "Could not resolve the source Python interpreter; no services changed."
     [[ -x "${BRIDGE_PYTHON_INTERPRETER}" ]] \
         || die "The source Python interpreter is unavailable; no services changed."
@@ -6546,7 +7512,8 @@ activate_bridge_phase1_cli() {
     local uv_bin source_venv_backup bridge_version bridge_seed
     [[ -n "${whl_name:-}" && -f "${BRIDGE_WHEEL_CUSTODY_PATH}" ]] \
         || die "Bridge CLI artifact is unavailable during activation"
-    uv_bin="$(command -v uv 2>/dev/null || true)"
+    resolve_upgrade_uv
+    uv_bin="${UV_BIN}"
     source_venv_backup="${BACKUP_DIR}/phase1-source-venv"
     [[ ! -e "${source_venv_backup}" && ! -L "${source_venv_backup}" ]] \
         || die "Phase-1 source CLI custody path already exists"
@@ -6951,9 +7918,8 @@ prepare_hard_cut_target_controller() {
         || die "Could not materialize the authenticated hard-cut target controller. No services changed."
     preflight_python_wheel "${materialized_wheel}"
 
-    uv_bin="$(command -v uv 2>/dev/null || true)"
-    [[ -n "${uv_bin}" ]] \
-        || die "uv not found on PATH — cannot prepare the fresh target controller. No services changed."
+    resolve_upgrade_uv
+    uv_bin="${UV_BIN}"
     [[ -x "${DEFENSECLAW_VENV}/bin/python" ]] \
         || die "The installed bridge Python environment is unavailable. No services changed."
     base_python="$("${DEFENSECLAW_VENV}"/bin/python -I -B -c \
@@ -7152,21 +8118,22 @@ continue_post_hard_cut_upgrade() {
     ok "${OBSERVABILITY_V8_HARD_CUT_VERSION} is healthy; continuing to ${final_version}"
 
     # The authenticated bootstrap controller is now installed outside the
-    # private target staging directory.  Drop the completed hard-cut handoff
-    # custody, but keep this resolver's cross-process lock until the ordinary
-    # post-cut child and any inherited mutators have exited.  The completed
-    # 0.8.4 hard-cut rollback is not re-armed for this later transaction.
+    # private target staging directory. Keep the authenticated private uv
+    # available to its frozen final-hop controller; the existing exit trap
+    # removes staging after that child and any inherited mutators have exited.
+    # The completed 0.8.4 hard-cut rollback is not re-armed for this later
+    # transaction.
     unset DEFENSECLAW_STAGED_UPGRADE
     unset DEFENSECLAW_STAGED_BRIDGE_VERSION
     unset DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR
     unset DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION
-    [[ -z "${STAGING_DIR:-}" ]] || rm -rf "${STAGING_DIR}"
-    STAGING_DIR=""
+    retain_authenticated_upgrade_uv_staging
     # The immutable 0.8.5 controller gives child commands 30 seconds but owns
     # a separate 60-second, version-aware gateway health poll. Current gateway
     # binaries consume this process-scoped handoff marker after safe launch so
     # that the controller, rather than both layers, owns the readiness wait.
     env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER \
+        PATH="${UV_BIN%/*}:${INSTALL_DIR}:${PATH}" \
         DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 \
         "${DEFENSECLAW_VENV}/bin/defenseclaw" upgrade --yes --version "${final_version}" \
         || final_status=$?
@@ -7203,13 +8170,22 @@ validate_tarball_members() {
     done <<< "${details}"
 }
 
-prepare_release_contract
+if [[ -n "${HARD_CUT_CURSOR_RECOVERY_SOURCE_VERSION}" ]]; then
+    authorize_cursorless_field_recovery
+else
+    prepare_release_contract
+fi
 FINAL_RELEASE_PROVENANCE_BRIDGE_CHECKSUMS_SHA256="${RELEASE_PROVENANCE_BRIDGE_CHECKSUMS_SHA256}"
 resolve_staged_upgrade
+if version_lt "${RELEASE_VERSION}" "0.8.4"; then
+    die "Target release ${RELEASE_VERSION} predates the oldest reviewed gateway readiness contract (0.8.4). No services changed."
+fi
 
 if [[ "${CURRENT_VERSION}" != "unknown" \
       && "${CURRENT_VERSION}" == "${RELEASE_VERSION}" \
-      && -z "${STAGED_FINAL_VERSION}" ]]; then
+      && -z "${STAGED_FINAL_VERSION}" \
+      && "${HARD_CUT_CURSOR_RECOVERY}" -ne 1 \
+      && "${AUDIT_DB_RECOVERY_NEEDED}" -eq 0 ]]; then
     same_version_recovery="clean"
     if [[ -n "${RELEASE_PROVENANCE_FILE}" ]]; then
         [[ -x "${DEFENSECLAW_VENV}/bin/python" \
@@ -7342,6 +8318,13 @@ if [[ "${BRIDGE_PHASE1}" -eq 1 ]]; then
     printf '%s' "${staged_gateway_version}" | grep -Fq "${RELEASE_VERSION}" \
         || die "Bridge gateway preflight version mismatch: expected ${RELEASE_VERSION}; binary reported: $(printf '%s' "${staged_gateway_version}" | head -n1 | cut -c1-200). No services changed."
     prepare_bridge_phase1_cli_preflight
+    if [[ "${CURRENT_VERSION}" == "0.8.1" \
+          && "${RELEASE_VERSION}" == "0.8.4" \
+          && "${STAGED_FINAL_VERSION}" == "${OBSERVABILITY_V8_HARD_CUT_VERSION}" ]]; then
+        prepare_hard_cut_target_controller
+        preflight_081_observability_source \
+            || die "The installed 0.8.1 observability state is malformed or ambiguous for the authenticated hard-cut migration. No installed state changed."
+    fi
 fi
 
 # ── Confirm ───────────────────────────────────────────────────────────────────
@@ -7352,6 +8335,9 @@ if [[ "${YES}" -eq 0 ]]; then
     printf "    2. Stop gateway, install pre-downloaded artifacts\n"
     printf "    3. Run version-specific migrations\n"
     printf "    4. Restart services and verify health\n"
+    if [[ "${AUDIT_DB_RECOVERY_NEEDED}" -eq 1 ]]; then
+        printf "    5. Preserve the corrupt audit SQLite set in backup custody and activate a fresh store\n"
+    fi
     printf "       ${DIM}Source: github.com/${REPO}/releases/tag/${RELEASE_VERSION}${NC}\n\n"
     read -r -p "  Proceed? [y/N] " REPLY
     case "$REPLY" in
@@ -7428,6 +8414,47 @@ fi
 
 ok "Backup saved to: ${BACKUP_DIR}"
 
+AUDIT_DB_RECOVERY_BACKUP_DIR="${BACKUP_DIR}"
+if [[ "${AUDIT_DB_RECOVERY_NEEDED}" -eq 1 \
+      && "${AUDIT_DB_RECOVERY_USE_DATA_ROOT}" -eq 1 ]]; then
+    AUDIT_DB_RECOVERY_BACKUP_DIR="$(python3 - \
+        "${AUDIT_DB_RECOVERY_BACKUP_ROOT}" "${TIMESTAMP}" <<'PY'
+import os
+import stat
+import sys
+import tempfile
+
+root = os.path.abspath(os.path.expanduser(sys.argv[1]))
+timestamp = sys.argv[2]
+parent = os.path.dirname(root)
+parent_info = os.lstat(parent)
+if (
+    stat.S_ISLNK(parent_info.st_mode)
+    or not stat.S_ISDIR(parent_info.st_mode)
+    or parent_info.st_uid != os.geteuid()
+    or stat.S_IMODE(parent_info.st_mode) & 0o022
+):
+    raise SystemExit("audit backup parent must be a stable current-user-owned directory")
+try:
+    os.mkdir(root, 0o700)
+except FileExistsError:
+    pass
+root_info = os.lstat(root)
+if (
+    stat.S_ISLNK(root_info.st_mode)
+    or not stat.S_ISDIR(root_info.st_mode)
+    or root_info.st_uid != os.geteuid()
+):
+    raise SystemExit("audit backup root must be a current-user-owned real directory")
+os.chmod(root, 0o700)
+directory = tempfile.mkdtemp(prefix=f"upgrade-{timestamp}-audit-", dir=root)
+os.chmod(directory, 0o700)
+print(directory)
+PY
+)" || die "Could not create private same-filesystem audit recovery custody; no services changed."
+    ok "Audit recovery custody prepared: ${AUDIT_DB_RECOVERY_BACKUP_DIR}"
+fi
+
 # Provenance-authenticated direct upgrades commit their receipt before the
 # first service or installed-file mutation. Staged hard cuts keep receipt and
 # rollback custody in the fresh target controller instead.
@@ -7438,6 +8465,459 @@ if [[ "${BRIDGE_PHASE1}" -eq 1 ]]; then
 fi
 
 # ── Stop services ─────────────────────────────────────────────────────────────
+
+quarantine_corrupt_audit_store() {
+    [[ "${AUDIT_DB_RECOVERY_NEEDED}" -eq 1 ]] || return 0
+    if ! AUDIT_DB_RECOVERY_CUSTODY="$(python3 - \
+        "${DATA_DIR}" \
+        "${AUDIT_DB_RECOVERY_BACKUP_DIR}" \
+        "${AUDIT_DB_PATH}" \
+        "${AUDIT_DB_RECOVERY_BACKUP_ROOT}" \
+        "${AUDIT_DB_PREFLIGHT_IDENTITY}" <<'PY'
+import json
+import os
+from pathlib import Path
+import secrets
+import sqlite3
+import stat
+import sys
+import tempfile
+import time
+
+data_dir = Path(sys.argv[1]).absolute()
+backup_dir = Path(sys.argv[2]).absolute()
+audit_db = Path(sys.argv[3]).absolute()
+backup_root = Path(sys.argv[4]).absolute()
+preflight_identity = sys.argv[5]
+marker = data_dir / ".audit-recovery.json"
+names = ("audit.db-wal", "audit.db-shm", "audit.db-journal", "audit.db")
+sources = (
+    ("audit.db-wal", Path(f"{audit_db}-wal")),
+    ("audit.db-shm", Path(f"{audit_db}-shm")),
+    ("audit.db-journal", Path(f"{audit_db}-journal")),
+    ("audit.db", audit_db),
+)
+
+
+def sqlite_failure_kind(exc: sqlite3.DatabaseError) -> str:
+    """Classify only explicit SQLite corruption and interruption signals."""
+    message = " ".join(str(exc).strip().lower().split())
+    if "interrupted" in message:
+        return "interrupted"
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int) and not isinstance(code, bool):
+        primary_code = code & 0xFF
+        if primary_code in {
+            getattr(sqlite3, "SQLITE_CORRUPT", 11),
+            getattr(sqlite3, "SQLITE_NOTADB", 26),
+        }:
+            return "corrupt"
+        return "uncertain"
+    # Python 3.10 and older do not expose sqlite_errorcode (and some builds do
+    # not export the SQLITE_* constants). Fall back only to canonical SQLite
+    # corruption diagnostics; every other message remains explicitly uncertain.
+    if (
+        "database disk image is malformed" in message
+        or "file is not a database" in message
+        or message.startswith("malformed database schema")
+    ):
+        return "corrupt"
+    return "uncertain"
+
+
+def private_directory(path: Path) -> os.stat_result:
+    info = path.lstat()
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) & 0o077
+    ):
+        raise RuntimeError(f"unsafe private directory: {path}")
+    return info
+
+
+def sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def safe_file_identity(path: Path) -> dict:
+    info = path.lstat()
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) & 0o022
+        or info.st_nlink != 1
+    ):
+        raise RuntimeError(f"unsafe audit recovery input: {path.name}")
+    return {
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "size": info.st_size,
+        "mtime_ns": info.st_mtime_ns,
+    }
+
+
+def make_private_custody_file(path: Path, expected: dict) -> dict:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        opened_identity = {
+            "device": opened.st_dev,
+            "inode": opened.st_ino,
+            "size": opened.st_size,
+            "mtime_ns": opened.st_mtime_ns,
+        }
+        if (
+            opened_identity != expected
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(opened.st_mode) & 0o022
+            or opened.st_nlink != 1
+        ):
+            raise RuntimeError(f"unsafe audit recovery custody file: {path.name}")
+        os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+        secured = os.fstat(descriptor)
+        secured_identity = {
+            "device": secured.st_dev,
+            "inode": secured.st_ino,
+            "size": secured.st_size,
+            "mtime_ns": secured.st_mtime_ns,
+        }
+        if (
+            secured_identity != expected
+            or not stat.S_ISREG(secured.st_mode)
+            or secured.st_uid != os.geteuid()
+            or stat.S_IMODE(secured.st_mode) != 0o600
+            or secured.st_nlink != 1
+        ):
+            raise RuntimeError(f"audit recovery custody is not private: {path.name}")
+        return secured_identity
+    finally:
+        os.close(descriptor)
+
+
+def identity_string(identity: dict) -> str:
+    return f"{identity['device']}:{identity['inode']}"
+
+
+def validate_record(record: object) -> dict:
+    if not isinstance(record, dict) or set(record) != {
+        "device",
+        "inode",
+        "size",
+        "mtime_ns",
+    }:
+        raise RuntimeError("invalid audit recovery identity record")
+    if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in record.values()):
+        raise RuntimeError("invalid audit recovery identity value")
+    return record
+
+
+def require_still_corrupt() -> bool:
+    original_identities = {
+        name: safe_file_identity(source)
+        for name, source in sources
+        if os.path.lexists(source)
+    }
+    if "audit.db" not in original_identities:
+        raise RuntimeError("audit database disappeared before the quiesced integrity probe")
+    filesystem = os.statvfs(backup_dir)
+    block_size = filesystem.f_frsize or filesystem.f_bsize
+    required_bytes = sum(
+        ((identity["size"] + block_size - 1) // block_size) * block_size
+        for identity in original_identities.values()
+    )
+    reserve_bytes = 16 * 1024 * 1024
+    available_bytes = filesystem.f_bavail * block_size
+    if available_bytes < required_bytes + reserve_bytes:
+        raise RuntimeError(
+            "insufficient free space for private audit integrity probe "
+            f"(required={required_bytes + reserve_bytes}, available={available_bytes})"
+        )
+
+    def copy_for_probe(source: Path, destination: Path, identity: dict) -> None:
+        source_descriptor = os.open(
+            source,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0),
+        )
+        destination_descriptor = -1
+        try:
+            opened = os.fstat(source_descriptor)
+            opened_identity = {
+                "device": opened.st_dev,
+                "inode": opened.st_ino,
+                "size": opened.st_size,
+                "mtime_ns": opened.st_mtime_ns,
+            }
+            if (
+                opened_identity != identity
+                or not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != os.geteuid()
+                or stat.S_IMODE(opened.st_mode) & 0o022
+                or opened.st_nlink != 1
+            ):
+                raise RuntimeError(f"audit recovery input changed before probing: {source.name}")
+            destination_descriptor = os.open(
+                destination,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_BINARY", 0),
+                0o600,
+            )
+            while True:
+                chunk = os.read(source_descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(destination_descriptor, view)
+                    if written <= 0:
+                        raise OSError("short audit integrity probe copy")
+                    view = view[written:]
+            os.fsync(destination_descriptor)
+            finished = os.fstat(source_descriptor)
+            finished_identity = {
+                "device": finished.st_dev,
+                "inode": finished.st_ino,
+                "size": finished.st_size,
+                "mtime_ns": finished.st_mtime_ns,
+            }
+            if finished_identity != identity:
+                raise RuntimeError(f"audit recovery input changed while probing: {source.name}")
+        finally:
+            if destination_descriptor >= 0:
+                os.close(destination_descriptor)
+            os.close(source_descriptor)
+
+    result = "indeterminate"
+    with tempfile.TemporaryDirectory(prefix=".audit-probe-", dir=backup_dir) as probe_name:
+        probe_dir = Path(probe_name)
+        os.chmod(probe_dir, 0o700)
+        private_directory(probe_dir)
+        for name, source in sources:
+            if name in original_identities:
+                copy_for_probe(source, probe_dir / name, original_identities[name])
+        sync_directory(probe_dir)
+
+        probe_db = probe_dir / "audit.db"
+        probe_wal = probe_dir / "audit.db-wal"
+        deadline = time.monotonic() + 15.0
+        connection = None
+        try:
+            # A copied WAL may arrive with an existing copied SHM, but SQLite
+            # must still be allowed to create or attach disposable
+            # shared-memory state inside this private temporary directory.
+            # mode=rw permits that sidecar handling; query_only still prevents
+            # database mutation. Without a WAL, keep the probe immutable and
+            # read-only.
+            query = "?mode=rw" if probe_wal.exists() else "?mode=ro&immutable=1"
+            connection = sqlite3.connect(probe_db.as_uri() + query, uri=True, timeout=1.0)
+            connection.execute("PRAGMA query_only=ON")
+            connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            row = connection.execute("PRAGMA quick_check(1)").fetchone()
+        except sqlite3.DatabaseError as exc:
+            failure_kind = sqlite_failure_kind(exc)
+            if failure_kind == "corrupt":
+                result = "corrupt"
+            elif failure_kind == "interrupted":
+                result = "interrupted"
+            else:
+                result = "uncertain"
+        else:
+            if row == ("ok",):
+                result = "healthy"
+            elif row is not None:
+                result = "corrupt"
+        finally:
+            if connection is not None:
+                connection.close()
+
+    after = {
+        name: safe_file_identity(source)
+        for name, source in sources
+        if os.path.lexists(source)
+    }
+    if original_identities != after:
+        raise RuntimeError("audit database files changed during the quiesced integrity probe")
+    if result not in {"healthy", "corrupt"}:
+        raise RuntimeError(
+            "quiesced audit database corruption could not be established "
+            f"(SQLite probe result: {result})"
+        )
+    return result == "corrupt"
+
+
+private_directory(data_dir)
+audit_parent_info = audit_db.parent.lstat()
+if (
+    stat.S_ISLNK(audit_parent_info.st_mode)
+    or not stat.S_ISDIR(audit_parent_info.st_mode)
+    or audit_parent_info.st_uid != os.geteuid()
+    or stat.S_IMODE(audit_parent_info.st_mode) & 0o022
+):
+    raise RuntimeError("unsafe audit database parent")
+
+if os.path.lexists(marker):
+    marker_info = marker.lstat()
+    if (
+        stat.S_ISLNK(marker_info.st_mode)
+        or not stat.S_ISREG(marker_info.st_mode)
+        or marker_info.st_uid != os.geteuid()
+        or stat.S_IMODE(marker_info.st_mode) & 0o077
+        or not 0 < marker_info.st_size <= 64 * 1024
+    ):
+        raise RuntimeError("unsafe interrupted audit recovery marker")
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != 2
+        or payload.get("files") != list(names)
+        or payload.get("source") != str(audit_db)
+        or not isinstance(payload.get("custody"), str)
+        or not isinstance(payload.get("identities"), dict)
+    ):
+        raise RuntimeError("invalid interrupted audit recovery marker")
+    custody = Path(payload["custody"]).absolute()
+    allowed_roots = {
+        backup_root,
+        (data_dir / "backups").absolute(),
+    }
+    matching_roots = [
+        root
+        for root in allowed_roots
+        if os.path.commonpath((str(custody), str(root))) == str(root)
+        and custody.parent.parent == root
+    ]
+    if (
+        len(matching_roots) != 1
+        or custody.name != "audit-corrupt"
+        or not custody.parent.name.startswith("upgrade-")
+    ):
+        raise RuntimeError("audit recovery custody escapes the backup root")
+    private_directory(matching_roots[0])
+    private_directory(custody.parent)
+    private_directory(custody)
+    identities = payload["identities"]
+    if set(identities) - set(names) or "audit.db" not in identities:
+        raise RuntimeError("invalid interrupted audit recovery identity set")
+    for record in identities.values():
+        validate_record(record)
+else:
+    private_directory(backup_root)
+    private_directory(backup_dir)
+    if audit_db.parent.stat().st_dev != backup_dir.stat().st_dev:
+        raise RuntimeError("audit recovery requires same-filesystem private backup custody")
+    main_identity = safe_file_identity(audit_db)
+    if not preflight_identity or identity_string(main_identity) != preflight_identity:
+        raise RuntimeError("audit database identity changed after the live integrity probe")
+    if not require_still_corrupt():
+        print("__healthy__")
+        raise SystemExit
+    identities = {}
+    for name, source in sources:
+        if os.path.lexists(source):
+            identities[name] = safe_file_identity(source)
+    if "audit.db" not in identities:
+        raise RuntimeError("audit database disappeared before recovery custody")
+    custody = backup_dir / "audit-corrupt"
+    if os.path.lexists(custody):
+        raise RuntimeError("audit recovery custody target already exists")
+    custody.mkdir(mode=0o700)
+    private_directory(custody)
+    sync_directory(backup_dir)
+    payload = {
+        "schema": 2,
+        "source": str(audit_db),
+        "custody": str(custody),
+        "files": list(names),
+        "identities": identities,
+    }
+    temporary = data_dir / f".audit-recovery.{secrets.token_hex(16)}.tmp"
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    try:
+        encoded = (json.dumps(payload, sort_keys=True) + "\n").encode()
+        view = memoryview(encoded)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short audit recovery marker write")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.rename(temporary, marker)
+    sync_directory(data_dir)
+
+for name, source in sources:
+    destination = custody / name
+    source_exists = os.path.lexists(source)
+    destination_exists = os.path.lexists(destination)
+    recorded = identities.get(name)
+    if recorded is None:
+        if source_exists or destination_exists:
+            raise RuntimeError(f"unexpected audit recovery file appeared: {name}")
+        continue
+    if source_exists and destination_exists:
+        raise RuntimeError(f"audit recovery source and custody both contain {name}")
+    if not source_exists and not destination_exists:
+        raise RuntimeError(f"audit recovery lost recorded file: {name}")
+    observed = safe_file_identity(source if source_exists else destination)
+    if observed != validate_record(recorded):
+        raise RuntimeError(f"audit recovery identity changed: {name}")
+    if source_exists:
+        os.rename(source, destination)
+        sync_directory(source.parent)
+    make_private_custody_file(destination, observed)
+    sync_directory(custody)
+
+if (
+    make_private_custody_file(
+        custody / "audit.db",
+        validate_record(identities["audit.db"]),
+    )
+    != validate_record(identities["audit.db"])
+    or os.path.lexists(audit_db)
+):
+    raise RuntimeError("audit recovery did not establish exact main-database custody")
+marker.unlink()
+sync_directory(data_dir)
+print(custody)
+PY
+    )"; then
+        return 1
+    fi
+    if [[ "${AUDIT_DB_RECOVERY_CUSTODY}" == "__healthy__" ]]; then
+        AUDIT_DB_RECOVERY_CUSTODY=""
+        ok "Post-quiescence audit database is healthy; no audit files were moved"
+        return 0
+    fi
+    [[ -n "${AUDIT_DB_RECOVERY_CUSTODY}" ]] || return 1
+    ok "Preserved corrupt audit SQLite set: ${AUDIT_DB_RECOVERY_CUSTODY}"
+    ok "Fresh local audit store will be initialized and health-checked by the target gateway"
+}
 
 assert_gateway_quiesced() {
     local pid_path="${DATA_DIR}/gateway.pid" pid_fields pid_state pid
@@ -7450,7 +8930,158 @@ assert_gateway_quiesced() {
     fi
 }
 
+legacy_gateway_status_ready() {
+    # Published 0.8.4-0.8.6 gateways do not own the hidden strict readiness
+    # command. Query their authenticated /status endpoint from their installed
+    # Python environment instead. The probe never serializes the bearer token
+    # into argv: the target controller resolves and retains it in memory for
+    # the single loopback request.
+    PYTHONDONTWRITEBYTECODE=1 \
+        DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
+        OPENCLAW_HOME="${OPENCLAW_HOME}" \
+        "${DEFENSECLAW_VENV}/bin/python" -I -B - \
+            "defenseclaw-legacy-readiness-v1" "${RELEASE_VERSION}" 9>&- <<'PY'
+import ipaddress
+import json
+import sys
+import urllib.request
+
+from defenseclaw.config import load
+
+MAX_STATUS_BYTES = 1024 * 1024
+READY_STATES = {"running", "disabled"}
+# These exact contracts were checked against the published 0.8.4, 0.8.5, and
+# 0.8.6 gateway sources. Refuse any unreviewed legacy target instead of
+# guessing that a newer or older /status payload has the same shape.
+REQUIRED_SUBSYSTEMS_BY_VERSION = {
+    "0.8.4": ("api", "gateway", "watcher", "guardrail", "telemetry"),
+    "0.8.5": ("api", "gateway", "watcher", "guardrail", "telemetry"),
+    "0.8.6": ("api", "gateway", "watcher", "guardrail", "telemetry"),
+}
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, new_url):
+        return None
+
+
+def loopback_host(value):
+    candidate = str(value or "").strip()
+    if not candidate or candidate.lower() == "localhost":
+        return "127.0.0.1"
+    unbracketed = candidate[1:-1] if candidate.startswith("[") and candidate.endswith("]") else candidate
+    try:
+        address = ipaddress.ip_address(unbracketed)
+    except ValueError:
+        raise RuntimeError("gateway API host is not a loopback literal") from None
+    if address.is_unspecified:
+        return "::1" if address.version == 6 else "127.0.0.1"
+    if not address.is_loopback:
+        raise RuntimeError("gateway API host is not loopback")
+    return str(address)
+
+
+def main():
+    if len(sys.argv) != 3 or sys.argv[1] != "defenseclaw-legacy-readiness-v1":
+        raise RuntimeError("legacy readiness probe arguments are invalid")
+    expected_version = sys.argv[2]
+    required_subsystems = REQUIRED_SUBSYSTEMS_BY_VERSION.get(expected_version)
+    if required_subsystems is None:
+        raise RuntimeError("legacy readiness has no reviewed target contract")
+    # Published 0.8.4-0.8.6 controllers do not accept load(data_dir=...).
+    # DEFENSECLAW_HOME above is the legacy contract for selecting this exact
+    # target's managed state.
+    cfg = load()
+    gateway = cfg.gateway
+    host = loopback_host(getattr(gateway, "api_bind", ""))
+    port = getattr(gateway, "api_port", 18970)
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise RuntimeError("gateway API port is invalid")
+    token = gateway.resolved_token()
+    if not isinstance(token, str) or not token or "\r" in token or "\n" in token:
+        raise RuntimeError("gateway bearer token is unavailable")
+    url_host = f"[{host}]" if ":" in host else host
+    request = urllib.request.Request(
+        f"http://{url_host}:{port}/status",
+        headers={"Authorization": f"Bearer {token}"},
+        method="GET",
+    )
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        NoRedirect(),
+    )
+    with opener.open(request, timeout=1.0) as response:
+        if response.status != 200:
+            raise RuntimeError("gateway status endpoint did not return HTTP 200")
+        payload = response.read(MAX_STATUS_BYTES + 1)
+    if len(payload) > MAX_STATUS_BYTES:
+        raise RuntimeError("gateway status response exceeded its byte bound")
+    document = json.loads(payload)
+    if not isinstance(document, dict):
+        raise RuntimeError("gateway status response is not an object")
+    provenance = document.get("provenance")
+    if not isinstance(provenance, dict) or provenance.get("binary_version") != expected_version:
+        raise RuntimeError("gateway status provenance does not match the target release")
+    health = document.get("health")
+    if not isinstance(health, dict):
+        raise RuntimeError("gateway status health is missing")
+    for name in required_subsystems:
+        subsystem = health.get(name)
+        if not isinstance(subsystem, dict) or subsystem.get("state") not in READY_STATES:
+            raise RuntimeError(f"gateway subsystem is not ready: {name}")
+
+
+try:
+    main()
+except Exception:
+    raise SystemExit(1) from None
+PY
+}
+
+wait_for_legacy_gateway_readiness() {
+    local timeout_seconds="$1"
+    local started_at="${SECONDS}"
+    local initial_pid="" pid_fields pid_state pid final_fields final_state final_pid
+
+    while (( SECONDS - started_at < timeout_seconds )); do
+        pid_fields="$(gateway_pid_status \
+            "${DATA_DIR}/gateway.pid" "${INSTALL_DIR}/defenseclaw-gateway")" \
+            || return 1
+        pid_state="${pid_fields%%$'\t'*}"
+        pid="${pid_fields#*$'\t'}"
+        if [[ "${pid_state}" == "live" ]]; then
+            if [[ -z "${initial_pid}" ]]; then
+                initial_pid="${pid}"
+            elif [[ "${pid}" != "${initial_pid}" ]]; then
+                return 1
+            fi
+
+            if legacy_gateway_status_ready >/dev/null 2>&1; then
+                final_fields="$(gateway_pid_status \
+                    "${DATA_DIR}/gateway.pid" "${INSTALL_DIR}/defenseclaw-gateway")" \
+                    || return 1
+                final_state="${final_fields%%$'\t'*}"
+                final_pid="${final_fields#*$'\t'}"
+                if [[ "${final_state}" == "live" ]]; then
+                    [[ "${final_pid}" == "${initial_pid}" ]]
+                    return
+                fi
+            fi
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 section "Stopping Services"
+
+SOURCE_GATEWAY_WAS_RUNNING=0
+source_gateway_pid_fields="$(gateway_pid_status \
+    "${DATA_DIR}/gateway.pid" "${INSTALL_DIR}/defenseclaw-gateway")" \
+    || die "Gateway PID custody is invalid before stop; refusing field-state recovery"
+if [[ "${source_gateway_pid_fields%%$'\t'*}" == "live" ]]; then
+    SOURCE_GATEWAY_WAS_RUNNING=1
+fi
 
 step "Stopping defenseclaw-gateway ..."
 if [[ "${BRIDGE_PHASE1}" -eq 1 ]]; then
@@ -7462,6 +9093,22 @@ DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
     "${INSTALL_DIR}/defenseclaw-gateway" stop 2>/dev/null \
     && ok "Gateway stopped" || warn "Gateway was not running"
 assert_gateway_quiesced
+if ! quarantine_corrupt_audit_store; then
+    if [[ ! -e "${DATA_DIR}/.audit-recovery.json" \
+        && ! -L "${DATA_DIR}/.audit-recovery.json" \
+        && "${SOURCE_GATEWAY_WAS_RUNNING}" -eq 1 ]]; then
+        if DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
+            OPENCLAW_HOME="${OPENCLAW_HOME}" \
+            "${INSTALL_DIR}/defenseclaw-gateway" start 9>&- >/dev/null 2>&1; then
+            warn "Audit-store recovery was refused safely; the source gateway was restarted."
+        else
+            warn "Audit-store recovery was refused and the source gateway could not be restarted."
+        fi
+    else
+        warn "Audit-store recovery custody is incomplete; its durable marker was retained for an exact retry."
+    fi
+    die "Could not preserve the corrupt audit SQLite set; target artifacts were not installed."
+fi
 if [[ "${BRIDGE_PHASE1}" -eq 1 ]]; then
     post_stop_health="$(bridge_source_health_observation)" \
         || die "Could not verify source health quiescence after stop; the source will be restored."
@@ -7572,9 +9219,7 @@ else
     die "Gateway version verification failed: expected ${RELEASE_VERSION}; binary reported: $(printf '%s' "${gw_version_output}" | head -n1 | cut -c1-200)"
 fi
 
-UV_BIN="$(command -v uv 2>/dev/null || true)"
-[[ -z "${UV_BIN}" ]] \
-    && die "uv not found on PATH — cannot update Python CLI. Install: curl -LsSf https://astral.sh/uv/install.sh | sh"
+resolve_upgrade_uv
 
 if [[ "${BRIDGE_PHASE1}" -eq 1 ]]; then
     activate_bridge_phase1_cli
@@ -7744,6 +9389,18 @@ if [[ "${UPGRADE_INCOMPLETE}" -eq 1 ]]; then
 fi
 
 if [[ "${BRIDGE_PHASE1}" -eq 1 ]]; then
+    if [[ "${CURRENT_VERSION}" == "0.8.1" \
+          && "${RELEASE_VERSION}" == "0.8.4" \
+          && "${STAGED_FINAL_VERSION}" == "${OBSERVABILITY_V8_HARD_CUT_VERSION}" ]]; then
+        prepare_hard_cut_target_controller
+    fi
+    if ! repair_clean_081_observability_placeholder; then
+        bridge_phase1_cleanup_owned_temporaries \
+            || die "Could not remove resolver-owned mutation temporaries before restoring the source"
+        bridge_phase1_state_transaction seal-active \
+            || die "Could not bind the exact failed bridge state before restoring the source."
+        die "The migrated 0.8.1 observability state is neither the exact historical placeholder nor valid configured OTel. The source will be restored."
+    fi
     restore_bridge_config_comments
     bridge_phase1_cleanup_owned_temporaries \
         || die "Could not remove resolver-owned mutation temporaries before sealing bridge state"
@@ -7774,97 +9431,25 @@ UPGRADE_RECEIPT_FAILURE_CODE="health_check_failed"
 section "Verifying Gateway Health"
 
 HEALTH_TIMEOUT=60
-HEALTH_INTERVAL=2
-ELAPSED=0
-HEALTH_OK=0
-HEALTH_URL="$(DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
-    OPENCLAW_HOME="${OPENCLAW_HOME}" \
-    "${VENV_PYTHON}" "${TARGET_PYTHON_STDIN_ARGS[@]}" <<'PY' 2>/dev/null || true
-from defenseclaw.config import load
-
-cfg = load()
-bind = getattr(cfg.gateway, "api_bind", "")
-if not bind:
-    if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost", "127.0.0.1"):
-        bind = cfg.guardrail.host
-    else:
-        bind = "127.0.0.1"
-print(f"http://{bind}:{cfg.gateway.api_port}/health")
-PY
-)"
-if [[ -z "${HEALTH_URL}" ]]; then
-    HEALTH_URL="http://127.0.0.1:18970/health"
-fi
-
-# Mirror cmd_upgrade._poll_health: print state transitions in real time
-# (including the first "unreachable" probe after a crashed sidecar) so
-# operators aren't staring at a blank terminal for the full timeout.
-LAST_STATE=""
-HEALTH_RESPONSE_FILE="${STAGING_DIR}/gateway-health.json"
-while [[ "${ELAPSED}" -lt "${HEALTH_TIMEOUT}" ]]; do
-    HTTP_CODE=$(DEFENSECLAW_HOME="${DATA_DIR}" \
-        DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
-        OPENCLAW_HOME="${OPENCLAW_HOME}" \
-        curl -s -o "${HEALTH_RESPONSE_FILE}" -w "%{http_code}" "${HEALTH_URL}" 2>/dev/null || echo "000")
-    STATUS=$(cat "${HEALTH_RESPONSE_FILE}" 2>/dev/null || echo "")
-    rm -f "${HEALTH_RESPONSE_FILE}"
-
-    if [[ "${HTTP_CODE}" == "200" && -n "${STATUS}" ]]; then
-        HEALTH_FIELDS="$(printf '%s' "${STATUS}" | python3 -c '
-import json
-import sys
-
-try:
-    payload = json.load(sys.stdin)
-except (TypeError, ValueError):
-    print("unknown\tmissing")
-    raise SystemExit
-gateway = payload.get("gateway")
-provenance = payload.get("provenance")
-state = gateway.get("state", "unknown") if isinstance(gateway, dict) else "unknown"
-version = provenance.get("binary_version", "missing") if isinstance(provenance, dict) else "missing"
-if not isinstance(state, str):
-    state = "unknown"
-if not isinstance(version, str) or not version:
-    version = "missing"
-print(f"{state}\t{version}")
-' 2>/dev/null || printf 'unknown\tmissing')"
-        GW_STATE="${HEALTH_FIELDS%%$'\t'*}"
-        GW_VERSION="${HEALTH_FIELDS#*$'\t'}"
+if version_lt "${RELEASE_VERSION}" "0.8.7"; then
+    step "Verifying the legacy target PID and authenticated local subsystem status ..."
+    if wait_for_legacy_gateway_readiness "${HEALTH_TIMEOUT}"; then
+        ok "Legacy gateway target process and local runtime are ready"
     else
-        GW_STATE="unreachable"
-        GW_VERSION="missing"
+        die "Gateway failed authenticated legacy target readiness; upgrade failed and no success receipt will be emitted"
     fi
-
-    if [[ "${GW_STATE}" != "${LAST_STATE}" ]]; then
-        info "    gateway: ${GW_STATE}"
-        LAST_STATE="${GW_STATE}"
+else
+    step "Verifying exact target process, version, listener, and local subsystem readiness ..."
+    if DEFENSECLAW_HOME="${DATA_DIR}" DEFENSECLAW_CONFIG="${CONFIG_PATH}" \
+            OPENCLAW_HOME="${OPENCLAW_HOME}" \
+            DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 \
+            "${INSTALL_DIR}/defenseclaw-gateway" upgrade-wait-ready \
+                --timeout "${HEALTH_TIMEOUT}s" \
+                --expected-version "${RELEASE_VERSION}" 9>&-; then
+        ok "Gateway target process and local runtime are strictly ready"
+    else
+        die "Gateway failed strict target readiness; upgrade failed and no success receipt will be emitted"
     fi
-
-    if [[ ( "${GW_STATE}" == "running" || "${GW_STATE}" == "disabled" ) \
-          && "${GW_VERSION}" != "${RELEASE_VERSION}" ]]; then
-        info "    gateway version: ${GW_VERSION} (expected ${RELEASE_VERSION})"
-    fi
-
-    if [[ ( "${GW_STATE}" == "running" || "${GW_STATE}" == "disabled" ) \
-          && "${GW_VERSION}" == "${RELEASE_VERSION}" ]]; then
-        if [[ "${GW_STATE}" == "disabled" ]]; then
-            ok "Gateway API is healthy; fleet uplink is disabled by configuration"
-        else
-            ok "Gateway is healthy"
-        fi
-        HEALTH_OK=1
-        break
-    fi
-    sleep "${HEALTH_INTERVAL}"
-    ELAPSED=$((ELAPSED + HEALTH_INTERVAL))
-done
-
-if [[ "${HEALTH_OK}" -eq 0 ]]; then
-    err "Gateway did not become healthy within ${HEALTH_TIMEOUT}s"
-    info "Check ${DATA_DIR}/gateway.log (process log); gateway.jsonl exists only when an optional JSONL destination is configured"
-    info "Run:  defenseclaw-gateway status"
-    exit 1
 fi
 
 if [[ -n "${UPGRADE_RECEIPT_PATH}" ]]; then
@@ -7915,9 +9500,11 @@ if [[ -n "${STAGED_FINAL_VERSION}" ]]; then
     export DEFENSECLAW_CONFIG="${CONFIG_PATH}"
     export OPENCLAW_HOME="${OPENCLAW_HOME}"
     target_status=0
+    require_authenticated_upgrade_uv_handoff
     env -u UV_OVERRIDE \
         UV_CONSTRAINT="${HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE}" \
         UV_EXCLUDE_NEWER="${HISTORICAL_BOOTSTRAP_EXCLUDE_NEWER}" \
+        PATH="${UV_BIN%/*}:${INSTALL_DIR}:${PATH}" \
         "${TARGET_CONTROLLER_CLI}" upgrade --yes --version "${final_version}" \
         || target_status=$?
     if [[ "${target_status}" -eq 0 ]]; then

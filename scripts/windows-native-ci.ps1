@@ -30,6 +30,8 @@ $ErrorActionPreference = 'Stop'
 $windowsResourceVerifierName = 'DefenseClawWindowsResourceVerifier-x64.exe'
 $windowsResourceIconName = 'DefenseClawWindowsResourceIcon.png'
 $windowsResourceVersionName = 'DefenseClawWindowsResourceVersion.txt'
+$hookLauncherInstalledName = 'defenseclaw-hook-launcher.exe'
+$stableHookLauncherName = 'defenseclaw-hook.exe'
 
 $setupStandardUserLauncherSource = Join-Path $PSScriptRoot 'windows-setup-standard-user-launcher.cs'
 if (-not ('DefenseClaw.SetupStandardUserLauncher' -as [type])) {
@@ -179,6 +181,43 @@ function Assert-CiscoAuthenticodeSignature([string]$Path) {
     $state = Get-CiscoAuthenticodeState $Path
     if ($state.Status -ne 'Valid' -or $state.Publisher -ne 'Cisco Systems, Inc.') {
         throw "Cisco Authenticode validation failed for ${Path}: status=$($state.Status), publisher=$($state.Publisher)"
+    }
+}
+
+function Assert-StableHookLauncherPublication(
+    [string]$Source,
+    [string]$Published,
+    [string]$Version,
+    [bool]$RequireSigned
+) {
+    if ([IO.Path]::GetFileName($Source) -cne $hookLauncherInstalledName -or
+        [IO.Path]::GetFileName($Published) -cne $stableHookLauncherName) {
+        throw 'HookRuntime launcher publication does not use canonical source and destination names'
+    }
+    foreach ($path in @($Source, $Published)) {
+        Assert-NoReparseAncestors $path
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "HookRuntime launcher publication is not a regular file: $path"
+        }
+        Assert-WindowsExecutableResource -Path $path -Component 'hook' -Version $Version
+    }
+    $sourceHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash.ToLowerInvariant()
+    $publishedHash = (Get-FileHash -LiteralPath $Published -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($sourceHash -cne $publishedHash) {
+        throw 'stable HookRuntime launcher digest differs from the installed source artifact'
+    }
+    $sourceAuthenticode = Get-CiscoAuthenticodeState $Source
+    $publishedAuthenticode = Get-CiscoAuthenticodeState $Published
+    if ($sourceAuthenticode.Status -cne $publishedAuthenticode.Status -or
+        $sourceAuthenticode.Publisher -cne $publishedAuthenticode.Publisher) {
+        throw 'stable HookRuntime launcher Authenticode identity differs from the installed source artifact'
+    }
+    if ($RequireSigned) {
+        Assert-CiscoAuthenticodeSignature $Source
+        Assert-CiscoAuthenticodeSignature $Published
+    } elseif ($sourceAuthenticode.Status -cne 'NotSigned') {
+        throw "unsigned HookRuntime launcher has unexpected Authenticode status: $($sourceAuthenticode.Status)"
     }
 }
 
@@ -430,6 +469,195 @@ function Limit-WindowsNativeText([AllowNull()][string]$Text, [int]$MaxBytes = 10
     return $head + [Text.Encoding]::UTF8.GetString($markerBytes) + $tail
 }
 
+function Add-WindowsNativeDiagnosticTail(
+    [Collections.Generic.Queue[string]]$Queue,
+    [AllowNull()][string]$Text,
+    [int]$MaxLines,
+    [int]$MaxBytes
+) {
+    if ($MaxLines -le 0 -or $MaxBytes -le 0) { return }
+    # Bound each event before splitting or retaining it. The primary process
+    # capture already owns the raw output; diagnostic queues must not multiply
+    # an oversized JSON Output event beyond the summary's independent budget.
+    $boundedText = Limit-WindowsNativeText ([string]$Text) $MaxBytes
+    $retainedBytes = 0
+    foreach ($retainedLine in $Queue) {
+        $retainedBytes += [Text.Encoding]::UTF8.GetByteCount($retainedLine)
+    }
+    foreach ($line in [regex]::Split($boundedText, '\r?\n')) {
+        if (-not $line) { continue }
+        $Queue.Enqueue($line)
+        $retainedBytes += [Text.Encoding]::UTF8.GetByteCount($line)
+        while ($Queue.Count -gt $MaxLines -or $retainedBytes -gt $MaxBytes) {
+            $removed = $Queue.Dequeue()
+            $retainedBytes -= [Text.Encoding]::UTF8.GetByteCount($removed)
+        }
+    }
+}
+
+function Get-WindowsNativeJsonString([object]$Object, [string]$Name) {
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return '' }
+    return [string]$property.Value
+}
+
+function Get-GoTestFailureSummary(
+    [AllowNull()][string]$Text,
+    [int]$MaxBytes = 262144
+) {
+    if (-not $Text) { return '' }
+
+    $failedTests = [Collections.Generic.List[object]]::new()
+    $failedTestKeys = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    $failedPackages = [Collections.Generic.List[object]]::new()
+    $failedPackageNames = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    $failedTestsOmitted = $false
+    $failedPackagesOmitted = $false
+    $maxFailures = 128
+    $reader = [IO.StringReader]::new($Text)
+    try {
+        while ($null -ne ($line = $reader.ReadLine())) {
+            try {
+                $testEvent = $line.TrimStart([char]0xFEFF) | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                continue
+            }
+            if ((Get-WindowsNativeJsonString $testEvent 'Action') -ne 'fail') { continue }
+            $package = Limit-WindowsNativeText (
+                Get-WindowsNativeJsonString $testEvent 'Package'
+            ) 1024
+            if (-not $package) { continue }
+            $test = Limit-WindowsNativeText (
+                Get-WindowsNativeJsonString $testEvent 'Test'
+            ) 1024
+            if ($test) {
+                $key = "$($package.Length):$package$test"
+                if ($failedTestKeys.Contains($key)) { continue }
+                if ($failedTestKeys.Count -ge $maxFailures) {
+                    $failedTestsOmitted = $true
+                } elseif ($failedTestKeys.Add($key)) {
+                    $failedTests.Add([pscustomobject]@{
+                        Key = $key
+                        Package = $package
+                        Test = $test
+                        Elapsed = Limit-WindowsNativeText (
+                            Get-WindowsNativeJsonString $testEvent 'Elapsed'
+                        ) 64
+                    })
+                }
+            } elseif (-not $failedPackageNames.Contains($package)) {
+                if ($failedPackageNames.Count -ge $maxFailures) {
+                    $failedPackagesOmitted = $true
+                } elseif ($failedPackageNames.Add($package)) {
+                    $failedPackages.Add([pscustomobject]@{
+                        Package = $package
+                        Elapsed = Limit-WindowsNativeText (
+                            Get-WindowsNativeJsonString $testEvent 'Elapsed'
+                        ) 64
+                    })
+                }
+            }
+        }
+    } finally {
+        $reader.Dispose()
+    }
+    if ($failedTests.Count -eq 0 -and $failedPackages.Count -eq 0) { return '' }
+
+    $testOutput = @{}
+    foreach ($failure in $failedTests) {
+        $testOutput[$failure.Key] = [Collections.Generic.Queue[string]]::new()
+    }
+    $packageOutput = @{}
+    $packageCriticalOutput = @{}
+    $packageCriticalRemaining = @{}
+    foreach ($failure in $failedPackages) {
+        $packageOutput[$failure.Package] = [Collections.Generic.Queue[string]]::new()
+        $packageCriticalOutput[$failure.Package] = [Collections.Generic.Queue[string]]::new()
+        $packageCriticalRemaining[$failure.Package] = 0
+    }
+    # At most 128 failed tests and 128 package-only failures are retained.
+    # Per-failure budgets cap aggregate tail queues relative to MaxBytes; the
+    # separate critical-context queues have a 2 KiB floor so panic headers and
+    # goroutine 1 survive deliberately tiny self-test budgets.
+    $tailBytesPerFailure = [Math]::Max(
+        256,
+        [int][Math]::Floor($MaxBytes / ($maxFailures * 2))
+    )
+
+    $reader = [IO.StringReader]::new($Text)
+    try {
+        while ($null -ne ($line = $reader.ReadLine())) {
+            try {
+                $testEvent = $line.TrimStart([char]0xFEFF) | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                continue
+            }
+            if ((Get-WindowsNativeJsonString $testEvent 'Action') -ne 'output') { continue }
+            $package = Limit-WindowsNativeText (
+                Get-WindowsNativeJsonString $testEvent 'Package'
+            ) 1024
+            $test = Limit-WindowsNativeText (
+                Get-WindowsNativeJsonString $testEvent 'Test'
+            ) 1024
+            $output = Get-WindowsNativeJsonString $testEvent 'Output'
+            if ($packageOutput.ContainsKey($package)) {
+                Add-WindowsNativeDiagnosticTail -Queue $packageOutput[$package] `
+                    -Text $output -MaxLines 160 -MaxBytes $tailBytesPerFailure
+                if ($output -match '(?im)^(panic:|fatal error:|runtime: out of memory|.*test timed out after|exit status )') {
+                    $packageCriticalRemaining[$package] = 48
+                }
+                if ([int]$packageCriticalRemaining[$package] -gt 0) {
+                    Add-WindowsNativeDiagnosticTail -Queue $packageCriticalOutput[$package] `
+                        -Text $output -MaxLines 64 -MaxBytes ([Math]::Max(2048, $tailBytesPerFailure))
+                    $packageCriticalRemaining[$package] = [int]$packageCriticalRemaining[$package] - 1
+                }
+            }
+            if ($test) {
+                $key = "$($package.Length):$package$test"
+                if ($testOutput.ContainsKey($key)) {
+                    Add-WindowsNativeDiagnosticTail -Queue $testOutput[$key] `
+                        -Text $output -MaxLines 120 -MaxBytes $tailBytesPerFailure
+                }
+            }
+        }
+    } finally {
+        $reader.Dispose()
+    }
+
+    $summary = [Text.StringBuilder]::new()
+    [void]$summary.AppendLine('go test failure summary (bounded and redacted)')
+    foreach ($failure in $failedTests) {
+        $elapsed = if ($failure.Elapsed) { " [$($failure.Elapsed)s]" } else { '' }
+        [void]$summary.AppendLine("--- FAIL: $($failure.Test) ($($failure.Package))$elapsed")
+        foreach ($line in $testOutput[$failure.Key]) {
+            [void]$summary.AppendLine($line)
+        }
+    }
+    foreach ($failure in $failedPackages) {
+        $elapsed = if ($failure.Elapsed) { " [$($failure.Elapsed)s]" } else { '' }
+        [void]$summary.AppendLine("FAIL package $($failure.Package)$elapsed")
+        foreach ($line in $packageCriticalOutput[$failure.Package]) {
+            [void]$summary.AppendLine($line)
+        }
+        if (-not ($failedTests | Where-Object { $_.Package -eq $failure.Package })) {
+            foreach ($line in $packageOutput[$failure.Package]) {
+                [void]$summary.AppendLine($line)
+            }
+        }
+    }
+    if ($failedTestsOmitted) {
+        [void]$summary.AppendLine('[additional failed tests omitted]')
+    }
+    if ($failedPackagesOmitted) {
+        [void]$summary.AppendLine('[additional failed packages omitted]')
+    }
+    return Limit-WindowsNativeText ($summary.ToString()) $MaxBytes
+}
+
 function Write-BoundedText([string]$Path, [AllowNull()][string]$Text, [int]$MaxBytes = 1048576) {
     $safe = Limit-WindowsNativeText $Text $MaxBytes
     [IO.Directory]::CreateDirectory((Split-Path -Parent $Path)) | Out-Null
@@ -649,9 +877,13 @@ function Invoke-WindowsNativeProcess {
         [int[]]$AllowedExitCodes = @(0),
         [ValidateRange(1, 4200)][int]$TimeoutSeconds = 600,
         [string]$LogPath = '',
+        [string]$GoTestFailureSummaryPath = '',
         [string]$WorkingDirectory = '',
         [switch]$SuppressOutput
     )
+    if ($GoTestFailureSummaryPath -and $SuppressOutput) {
+        throw 'Go test failure summaries are prohibited for credential-bearing process output'
+    }
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $FilePath
     $start.UseShellExecute = $false
@@ -717,14 +949,31 @@ function Invoke-WindowsNativeProcess {
             if (-not $stdoutTask.IsCompleted) { $process.StandardOutput.Dispose() }
             if (-not $stderrTask.IsCompleted) { $process.StandardError.Dispose() }
         }
-        $stdout = Limit-WindowsNativeText (Read-WindowsNativeOutputTask $stdoutTask)
-        $stderr = Limit-WindowsNativeText (Read-WindowsNativeOutputTask $stderrTask)
+        $rawStdout = Read-WindowsNativeOutputTask $stdoutTask
+        $rawStderr = Read-WindowsNativeOutputTask $stderrTask
+        $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
+        $goTestFailureSummary = ''
+        if ($GoTestFailureSummaryPath -and
+            ($timedOut -or $outputReadFailed -or $exitCode -notin $AllowedExitCodes)) {
+            $goTestFailureSummary = Get-GoTestFailureSummary $rawStdout
+            if ($goTestFailureSummary) {
+                Write-BoundedText -Path $GoTestFailureSummaryPath `
+                    -Text $goTestFailureSummary -MaxBytes 262144
+                Write-Host $goTestFailureSummary
+            }
+        }
+        $stdout = Limit-WindowsNativeText $rawStdout
+        $stderr = Limit-WindowsNativeText $rawStderr
         if ($timedOut) {
             $stderr = @($stderr, "[timeout descendants: $timeoutIdentitySummary]" | Where-Object { $_ }) -join [Environment]::NewLine
         }
-        $exitCode = if ($timedOut) { 124 } else { $process.ExitCode }
         $combined = @($stdout, $stderr | Where-Object { $_ }) -join [Environment]::NewLine
-        if ($combined -and -not $SuppressOutput) { Write-Host $combined }
+        # A structured Go failure summary is the bounded, relevant console
+        # diagnostic. Keep the full bounded JSON stream in LogPath without
+        # duplicating it into the exception and Actions log.
+        if ($combined -and -not $SuppressOutput -and -not $goTestFailureSummary) {
+            Write-Host $combined
+        }
         if ($LogPath) {
             $logText = if ($SuppressOutput) {
                 '[credential-bearing process output intentionally suppressed]'
@@ -743,12 +992,14 @@ function Invoke-WindowsNativeProcess {
         Write-WindowsNativeProcessPhase $FilePath $process.Id $(if ($timedOut) { 'failed-timeout' } elseif ($outputReadFailed) { 'failed-output' } elseif ($exitCode -in $AllowedExitCodes) { 'completed' } else { 'failed-exit' })
         if ($outputReadFailed) {
             if ($SuppressOutput) { throw "$FilePath redirected output capture failed" }
-            throw "$FilePath redirected output capture failed`n$combined"
+            $failureOutput = if ($goTestFailureSummary) { $goTestFailureSummary } else { $combined }
+            throw "$FilePath redirected output capture failed`n$failureOutput"
         }
         if ($exitCode -notin $AllowedExitCodes) {
             $reason = if ($timedOut) { "timed out after ${TimeoutSeconds}s" } else { "exited $exitCode" }
             if ($SuppressOutput) { throw "$FilePath $reason" }
-            throw "$FilePath $reason`n$combined"
+            $failureOutput = if ($goTestFailureSummary) { $goTestFailureSummary } else { $combined }
+            throw "$FilePath $reason`n$failureOutput"
         }
         return $result
     } finally {
@@ -1816,6 +2067,7 @@ if mutations:
 print(f'packaged gateway fixture uses isolated API port {cfg.gateway.api_port}')
 '@
     Invoke-Installed $Python @('-I', '-c', $code, $apiPort) -Timeout 60 | Out-Null
+    return $apiPort
 }
 
 function Wait-PathsAbsent([string[]]$Paths, [int]$Attempts = 150) {
@@ -2959,8 +3211,11 @@ function Invoke-WizardConfigureLaterAcceptance(
     Invoke-WizardInstall $Setup $Root 'none' 'observe' $false `
         (Join-Path $Logs 'wizard-configure-later.json')
     Assert-SetupInstallState $InstallRoot 'none' 'observe'
-    if (Test-Path -LiteralPath (Join-Path $DataRoot 'config.yaml')) {
-        throw 'Configure later unexpectedly wrote a DefenseClaw connector configuration'
+    if (-not (Test-Path -LiteralPath (Join-Path $DataRoot 'config.yaml') -PathType Leaf)) {
+        throw 'Configure later did not create the canonical DefenseClaw configuration'
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $DataRoot '.migration_state.json') -PathType Leaf)) {
+        throw 'Configure later did not create the release-bound migration cursor'
     }
     $hookDir = Join-Path $DataRoot 'hooks'
     if (Test-Path -LiteralPath $hookDir) {
@@ -2979,7 +3234,8 @@ function Invoke-WizardConfigureLaterAcceptance(
     Assert-NoGatewayAutoStart
 
     Invoke-WindowsSetupStandardUserProcess $Setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
-        -TimeoutSeconds 600 -LogPath (Join-Path $Logs 'wizard-configure-later-uninstall.log') | Out-Null
+        -AllowedExitCodes @(3010) -TimeoutSeconds 600 `
+        -LogPath (Join-Path $Logs 'wizard-configure-later-uninstall.log') | Out-Null
     if (Test-Path -LiteralPath $InstallRoot) {
         throw "Configure later uninstall left install root behind: $InstallRoot"
     }
@@ -3085,7 +3341,8 @@ function Invoke-WizardConnectorAcceptance(
     # The setup uninstaller must stop services and clean connector wiring
     # itself. Pre-teardown here previously hid dangling hooks in production.
     Invoke-WindowsSetupStandardUserProcess $Setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
-        -TimeoutSeconds 600 -LogPath (Join-Path $Logs "wizard-$ConnectorName-uninstall.log") | Out-Null
+        -AllowedExitCodes @(3010) -TimeoutSeconds 600 `
+        -LogPath (Join-Path $Logs "wizard-$ConnectorName-uninstall.log") | Out-Null
     if (Test-Path -LiteralPath $InstallRoot) {
         throw "wizard $ConnectorName uninstall left install root behind: $InstallRoot"
     }
@@ -3138,6 +3395,9 @@ function Invoke-SetupAcceptance {
     $installRoot = Join-Path $localAppData 'Programs\DefenseClaw'
     $dataRoot = Join-Path $userProfile '.defenseclaw'
     $cacheRoot = Join-Path $localAppData 'DefenseClaw\InstallerCache'
+    $installerStateRoot = Join-Path $localAppData 'DefenseClaw\InstallerState'
+    $cleanupRecordPath = Join-Path $installerStateRoot 'uninstall-cleanup.json'
+    $transactionJournalPath = Join-Path $installerStateRoot 'setup-transaction.json'
     $arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw'
     $connectorConfigPaths = @(
         (Join-Path $userProfile '.codex\config.toml'),
@@ -3154,6 +3414,7 @@ function Invoke-SetupAcceptance {
     $startup = Join-Path $installRoot 'bin\defenseclaw-startup.exe'
     $gateway = Join-Path $installRoot 'bin\defenseclaw-gateway.exe'
     $hook = Join-Path $installRoot 'bin\defenseclaw-hook.exe'
+    $hookLauncherSource = Join-Path $installRoot "bin\$hookLauncherInstalledName"
     $python = Join-Path $installRoot 'runtime\python\python.exe'
     $cosign = Join-Path $installRoot 'runtime\tools\cosign.exe'
     $disposableGithubRunner = $env:GITHUB_ACTIONS -eq 'true' -and
@@ -3217,7 +3478,7 @@ function Invoke-SetupAcceptance {
         }
 
         foreach ($required in @(
-            $launcher, $startup, $gateway, $hook, $python, $cosign,
+            $launcher, $startup, $gateway, $hook, $hookLauncherSource, $python, $cosign,
             (Join-Path $installRoot 'bin\skill-scanner.exe'),
             (Join-Path $installRoot 'bin\mcp-scanner.exe'),
             (Join-Path $installRoot 'bin\defenseclaw-observability.exe')
@@ -3248,6 +3509,11 @@ function Invoke-SetupAcceptance {
                 Assert-CiscoAuthenticodeSignature $productExecutable
             }
         }
+        Assert-StableHookLauncherPublication `
+            -Source $hookLauncherSource `
+            -Published (Get-StableHookRuntimeExecutable) `
+            -Version $packageVersion `
+            -RequireSigned $requireSignedProduct
         $env:DEFENSECLAW_HOME = $dataRoot
         $env:PATH = "$(Join-Path $installRoot 'bin');$env:SystemRoot\System32;$env:SystemRoot"
         $resolved = @(Get-Command defenseclaw -CommandType Application -ErrorAction Stop)[0].Source
@@ -3338,6 +3604,7 @@ function Invoke-SetupAcceptance {
         $installedState.version = '0.8.0'
         $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
         $configPath = Join-Path $dataRoot 'config.yaml'
+        [IO.Directory]::CreateDirectory((Join-Path $dataRoot 'state')) | Out-Null
         $yamlDataRoot = $dataRoot.Replace("'", "''")
         $v7Fixture = @"
 # native Setup 0.8.0 observability migration acceptance fixture
@@ -3437,66 +3704,19 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
             throw 'seeded setup upgrade did not restore the previously running watchdog'
         }
 
-		# Model a committed transaction produced by the legacy Setup journal
-		# schema while its journal-owned maintenance executable differs from the
-		# replacement installer. Recovery must run in the replacement Setup
-		# process; the cached executable is authentication state, never delegated
-		# recovery authority. Keep the real installed gateway and watchdog alive
-		# so this crosses the executable-release race seen in manual validation.
+		# A completed transaction deliberately retains no recovery authority.
+		# Verify the exact legacy-readable terminal envelope; never reconstruct a
+		# pending or committed transaction from this tombstone.
 		$journalPath = Join-Path $localAppData 'DefenseClaw\InstallerState\setup-transaction.json'
-		$cachedSetup = Join-Path $cacheRoot 'DefenseClawSetup-x64.exe'
 		if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) {
 			throw "setup acceptance transaction journal is missing: $journalPath"
 		}
-		if (-not (Test-Path -LiteralPath $cachedSetup -PathType Leaf)) {
-			throw "setup acceptance maintenance executable is missing: $cachedSetup"
-		}
-		$legacyJournal = Get-Content -LiteralPath $journalPath -Raw -Encoding UTF8 | ConvertFrom-Json
-		if ([string]$legacyJournal.phase -cne 'complete') {
-			throw "setup acceptance journal phase is $($legacyJournal.phase), expected complete"
-		}
-		$replacementSetupHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash
-		Copy-Item -LiteralPath $startup -Destination $cachedSetup -Force
-		$legacyMaintenanceHash = (Get-FileHash -LiteralPath $cachedSetup -Algorithm SHA256).Hash
-		if ($legacyMaintenanceHash -ceq $replacementSetupHash) {
-			throw 'legacy maintenance fixture unexpectedly matches the replacement Setup bytes'
-		}
-		$legacyJournal.schema_version = 1
-		$legacyJournal.phase = 'committed'
-		$legacyJournal.transaction.maintenance_sha256 = $legacyMaintenanceHash.ToLowerInvariant()
-		$legacyJournalText = ($legacyJournal | ConvertTo-Json -Depth 20).Replace("`r`n", "`n") + "`n"
-		[IO.File]::WriteAllText($journalPath, $legacyJournalText, [Text.UTF8Encoding]::new($false))
-		$gatewayBeforeLegacyRecovery = Get-GatewayIdentity $dataRoot
-		$watchdogBeforeLegacyRecovery = Get-WatchdogIdentity $dataRoot
-		Assert-OwnedManagedProcess $gatewayBeforeLegacyRecovery $gateway `
-			'legacy committed recovery starting gateway'
-		Assert-OwnedManagedProcess $watchdogBeforeLegacyRecovery $gateway `
-			'legacy committed recovery starting watchdog'
-		Invoke-WindowsSetupStandardUserProcess $setup @(
-			'/upgrade', '/quiet', '/norestart', 'INSTALLSCOPE=user'
-		) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-legacy-committed-recovery.log') | Out-Null
-		$recoveredJournal = Get-Content -LiteralPath $journalPath -Raw -Encoding UTF8 | ConvertFrom-Json
-		if ([string]$recoveredJournal.phase -cne 'complete') {
-			throw "replacement Setup left legacy recovery in phase $($recoveredJournal.phase)"
-		}
-		if ((Get-FileHash -LiteralPath $cachedSetup -Algorithm SHA256).Hash -cne $replacementSetupHash) {
-			throw 'replacement Setup did not publish its candidate maintenance executable'
-		}
-		$recoveredState = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
-		if ([string]$recoveredState.source_commit -cne [string]$upgradedState.source_commit) {
-			throw 'replacement Setup did not retain the exact candidate source commit'
-		}
-		$gatewayAfterLegacyRecovery = Get-GatewayIdentity $dataRoot
-		$watchdogAfterLegacyRecovery = Get-WatchdogIdentity $dataRoot
-		Assert-OwnedManagedProcess $gatewayAfterLegacyRecovery $gateway `
-			'legacy committed recovery-restored gateway'
-		Assert-OwnedManagedProcess $watchdogAfterLegacyRecovery $gateway `
-			'legacy committed recovery-restored watchdog'
-		if (-not (Test-GatewayIdentityChanged $gatewayBeforeLegacyRecovery $gatewayAfterLegacyRecovery)) {
-			throw 'replacement Setup did not restore the gateway after legacy committed recovery'
-		}
-		if (-not (Test-GatewayIdentityChanged $watchdogBeforeLegacyRecovery $watchdogAfterLegacyRecovery)) {
-			throw 'replacement Setup did not restore the watchdog after legacy committed recovery'
+		$terminalJournal = Get-Content -LiteralPath $journalPath -Raw -Encoding UTF8 | ConvertFrom-Json
+		$terminalProperties = @($terminalJournal.PSObject.Properties.Name | Sort-Object)
+		if ([int]$terminalJournal.schema_version -ne 2 -or
+			[string]$terminalJournal.phase -cne 'complete' -or
+			($terminalProperties -join ',') -cne 'phase,schema_version') {
+			throw 'setup acceptance journal is not the exact stable terminal tombstone'
 		}
 
         $stateHashBeforeLockedRepair = (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash
@@ -3566,7 +3786,7 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
         # was launched with the prior port.
         Invoke-Installed $gateway @('stop') @(0, 1) 90 `
             (Join-Path $logs 'setup-before-minimal-config-stop.log') | Out-Null
-        Set-MinimalGatewayAcceptanceConfig $python
+        $gatewayAcceptancePort = Set-MinimalGatewayAcceptanceConfig $python
         Invoke-Installed $startup @() -Timeout 90 -Log (Join-Path $logs 'setup-gateway-startup.log') | Out-Null
         Invoke-Installed $gateway @('watchdog', 'start') -Timeout 90 -Log (Join-Path $logs 'setup-watchdog-start.log') | Out-Null
         Invoke-Installed $gateway @('status') -Timeout 30 | Out-Null
@@ -3590,6 +3810,7 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
             throw "setup repair changed the user-configured connector roster: $($repairedRoster -join ', ')"
         }
         $afterRepair = Get-GatewayIdentity $dataRoot
+        $watchdogAfterRepair = Get-WatchdogIdentity $dataRoot
         if (-not (Test-GatewayIdentityChanged $beforeRepair $afterRepair)) {
             throw 'setup repair did not restart the previously running gateway'
         }
@@ -3600,7 +3821,8 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
 
         Assert-NativeConnectorCleanupAuthorityPresent $dataRoot $repairedRoster
         Invoke-WindowsSetupStandardUserProcess $setup @('/uninstall', '/quiet') `
-            -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-uninstall-preserve.log') | Out-Null
+            -AllowedExitCodes @(3010) -TimeoutSeconds 600 `
+            -LogPath (Join-Path $logs 'setup-uninstall-preserve.log') | Out-Null
         if (Test-Path -LiteralPath $installRoot) { throw "setup uninstall left install root behind: $installRoot" }
         if (-not (Test-Path -LiteralPath $preserved -PathType Leaf)) { throw 'setup uninstall did not preserve user data' }
         if (Test-Path -LiteralPath $arpKey) { throw 'setup uninstall left Installed Apps registration behind' }
@@ -3609,6 +3831,15 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
         Assert-NoGatewayAutoStart
         Assert-UserPathRegistrySnapshot $userPathBefore `
             'setup uninstall did not restore the original user PATH exactly'
+        foreach ($retiredProcess in @($afterRepair, $watchdogAfterRepair)) {
+            if ($null -ne (Get-Process -Id $retiredProcess.ProcessId -ErrorAction SilentlyContinue)) {
+                throw "setup uninstall left managed process running: $($retiredProcess.ProcessId)"
+            }
+        }
+        if (@(Get-NetTCPConnection -State Listen -LocalPort $gatewayAcceptancePort `
+                -ErrorAction SilentlyContinue).Count -ne 0) {
+            throw "setup uninstall left the managed gateway listener on port $gatewayAcceptancePort"
+        }
 
         Invoke-WindowsSetupStandardUserProcess $setup @(
             '/quiet', '/norestart', 'INSTALLSCOPE=user', 'CONNECTOR=none',
@@ -3618,19 +3849,152 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
         if (-not (Test-Path -LiteralPath $cachedSetup -PathType Leaf)) {
             throw "reinstall did not publish the self-servicing setup executable: $cachedSetup"
         }
-        # Exercise the exact Apps & Features self-delete path. The cached
-        # executable cannot remove its own directory until its process exits,
-        # so the transaction-bound deferred helper must finish the deletion.
-        Invoke-WindowsSetupStandardUserProcess $cachedSetup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
-            -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-uninstall-delete.log') | Out-Null
+        if ($requireSignedProduct) {
+            # Exercise the exact packaged CLI handoff for a signed candidate.
+            # It must authenticate the cached Setup and preserve the 3010
+            # result without falling through to generic marker guards.
+            $nativeUninstall = Invoke-WindowsNativeProcess $launcher @(
+                'uninstall', '--all', '--yes'
+            ) -AllowedExitCodes @(3010) -TimeoutSeconds 600 `
+                -LogPath (Join-Path $logs 'setup-uninstall-delete.log')
+            if ("$($nativeUninstall.StdOut)`n$($nativeUninstall.StdErr)" -notmatch
+                '(?i)restart required.*3010') {
+                throw 'native CLI uninstall did not report the preserved Windows 3010 restart result'
+            }
+        } else {
+            # PR artifacts are deliberately unsigned. The production CLI must
+            # reject that state rather than introduce an environment escape
+            # hatch. Prove the refusal is non-mutating, then exercise the same
+            # cached Setup lifecycle directly so 3010 and exact residue remain
+            # covered on every PR.
+            $unsignedRefusal = Invoke-WindowsNativeProcess $launcher @(
+                'uninstall', '--all', '--yes'
+            ) -AllowedExitCodes @(1) -TimeoutSeconds 600 `
+                -LogPath (Join-Path $logs 'setup-uninstall-unsigned-refusal.log')
+            if ("$($unsignedRefusal.StdOut)`n$($unsignedRefusal.StdErr)" -notmatch
+                'Native installer state is not an authenticated signed user installation') {
+                throw 'unsigned native CLI uninstall did not fail closed at signed-state custody'
+            }
+            foreach ($unmodifiedPath in @($installRoot, $cachedSetup)) {
+                if (-not (Test-Path -LiteralPath $unmodifiedPath)) {
+                    throw "unsigned native CLI refusal mutated installed state: $unmodifiedPath"
+                }
+            }
+            Invoke-WindowsSetupStandardUserProcess $cachedSetup @(
+                '/uninstall', '/quiet', 'DELETEUSERDATA=1'
+            ) -AllowedExitCodes @(3010) -TimeoutSeconds 600 `
+                -LogPath (Join-Path $logs 'setup-uninstall-delete.log') | Out-Null
+        }
         if (Test-Path -LiteralPath $installRoot) { throw "setup uninstall left install root behind: $installRoot" }
         if (Test-Path -LiteralPath $dataRoot) { throw "setup uninstall with DELETEUSERDATA=1 left user data behind: $dataRoot" }
-        for ($attempt = 0; $attempt -lt 40 -and (Test-Path -LiteralPath $cacheRoot); $attempt++) {
-            Start-Sleep -Milliseconds 250
+        foreach ($requiredResidue in @(
+            $cachedSetup,
+            (Get-StableHookRuntimeExecutable),
+            (Join-Path (Split-Path -Parent (Get-StableHookRuntimeExecutable)) 'hook-runtime-state.json'),
+            $cleanupRecordPath,
+            $transactionJournalPath
+        )) {
+            if (-not (Test-Path -LiteralPath $requiredResidue -PathType Leaf)) {
+                throw "same-boot uninstall did not retain authenticated cleanup authority: $requiredResidue"
+            }
         }
-        if (Test-Path -LiteralPath $cacheRoot) {
-            throw "cached setup self-uninstall left installer cache behind: $cacheRoot"
+        $cleanupRecord = Get-Content -LiteralPath $cleanupRecordPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $transactionJournal = Get-Content -LiteralPath $transactionJournalPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([int]$cleanupRecord.schema_version -ne 1 -or
+            [string]$cleanupRecord.status -cne 'pending-reboot' -or
+            [string]$cleanupRecord.transaction_id -cnotmatch '^[0-9a-f]{32}$') {
+            throw 'same-boot uninstall did not retain the exact pending cleanup record'
         }
+        if ([int]$transactionJournal.schema_version -ne 2 -or
+            [string]$transactionJournal.phase -cne 'converged' -or
+            [string]$transactionJournal.transaction.action -cne 'uninstall' -or
+            [string]$transactionJournal.transaction.id -cne [string]$cleanupRecord.transaction_id) {
+            throw 'same-boot uninstall did not retain the exact converged uninstall journal'
+        }
+        $hookRuntimeRoot = Split-Path -Parent (Get-StableHookRuntimeExecutable)
+        $hookRuntimeNames = @(
+            Get-ChildItem -LiteralPath $hookRuntimeRoot -Force |
+                ForEach-Object Name |
+                Sort-Object
+        )
+        $expectedHookRuntimeNames = @('defenseclaw-hook.exe', 'hook-runtime-state.json')
+        if (($hookRuntimeNames -join "`0") -cne ($expectedHookRuntimeNames -join "`0")) {
+            throw "same-boot uninstall retained unexpected HookRuntime residue: $($hookRuntimeNames -join ', ')"
+        }
+        $installerStateNames = @(
+            Get-ChildItem -LiteralPath $installerStateRoot -Force |
+                ForEach-Object Name |
+                Sort-Object
+        )
+        $unexpectedInstallerState = @(
+            $installerStateNames |
+                Where-Object { $_ -notin @('setup-transaction.json', 'setup.log', 'uninstall-cleanup.json') }
+        )
+        if ($unexpectedInstallerState.Count -ne 0) {
+            throw "same-boot uninstall retained unrelated InstallerState: $($unexpectedInstallerState -join ', ')"
+        }
+        $cacheNames = @(
+            Get-ChildItem -LiteralPath $cacheRoot -Force |
+                ForEach-Object Name |
+                Sort-Object
+        )
+        if (($cacheNames -join "`0") -cne 'DefenseClawSetup-x64.exe') {
+            throw "same-boot uninstall retained unexpected installer-cache residue: $($cacheNames -join ', ')"
+        }
+        $runKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
+            'Software\Microsoft\Windows\CurrentVersion\Run',
+            $false
+        )
+        if ($null -eq $runKey) {
+            throw 'same-boot uninstall did not retain the cleanup Run key'
+        }
+        try {
+            $runCommand = $runKey.GetValue(
+                'DefenseClawDeferredUninstallCleanup',
+                $null,
+                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+            )
+            $runValueKind = if ($null -eq $runCommand) {
+                $null
+            } else {
+                $runKey.GetValueKind('DefenseClawDeferredUninstallCleanup')
+            }
+        } finally {
+            $runKey.Dispose()
+        }
+        if ($runValueKind -ne [Microsoft.Win32.RegistryValueKind]::String -or
+            [string]$runCommand -cne [string]$cleanupRecord.run_command) {
+            throw 'same-boot uninstall Run value differs from the authenticated cleanup record'
+        }
+        $expectedRunCommand = '"' + $cachedSetup + '" /cleanup /quiet CLEANUPTRANSACTION=' +
+            [string]$cleanupRecord.transaction_id
+        if ([string]$runCommand -cne $expectedRunCommand) {
+            throw 'same-boot uninstall Run value is not the exact absolute cached Setup command'
+        }
+        Invoke-WindowsNativeProcess (Get-StableHookRuntimeExecutable) @(
+            'hook', '--connector', 'codex'
+        ) -AllowedExitCodes @(0) -TimeoutSeconds 30 `
+            -LogPath (Join-Path $logs 'setup-disabled-hook-same-boot.log') | Out-Null
+        Invoke-WindowsSetupStandardUserProcess $cachedSetup @(
+            '/cleanup', '/quiet',
+            "CLEANUPTRANSACTION=$([string]$cleanupRecord.transaction_id)"
+        ) -AllowedExitCodes @(3010) -TimeoutSeconds 120 `
+            -LogPath (Join-Path $logs 'setup-cleanup-same-boot.log') | Out-Null
+        $sameBootRecord = Get-Content -LiteralPath $cleanupRecordPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+        if ([string]$sameBootRecord.status -cne 'pending-reboot' -or
+            [string]$sameBootRecord.transaction_id -cne [string]$cleanupRecord.transaction_id) {
+            throw 'same-boot cleanup changed the authenticated pending record'
+        }
+        if (Test-Path -LiteralPath $installRoot) {
+            throw 'same-boot cleanup recreated the install root'
+        }
+        if (Test-Path -LiteralPath $arpKey) {
+            throw 'same-boot cleanup recreated Installed Apps registration'
+        }
+        Assert-NoDefenseClawRegistration $connectorConfigPaths
+        Assert-UserPathRegistrySnapshot $userPathBefore `
+            'same-boot cleanup changed the restored user PATH'
         Assert-NoGatewayAutoStart
     } catch {
         $acceptanceFailure = $_
@@ -3655,17 +4019,12 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
         if (Test-Path -LiteralPath $installRoot) {
             try {
                 Invoke-WindowsSetupStandardUserProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
-                    -AllowedExitCodes @(0, 1603) -TimeoutSeconds 600 -LogPath (Join-Path $logs 'setup-final-cleanup.log') | Out-Null
+                    -AllowedExitCodes @(3010, 1603) -TimeoutSeconds 600 `
+                    -LogPath (Join-Path $logs 'setup-final-cleanup.log') | Out-Null
             } catch { Write-Warning "setup acceptance cleanup failed: $($_.Exception.Message)" }
         }
         Remove-WizardAgentFixtures $agentFixtures
-        for ($attempt = 0; $attempt -lt 40 -and (Test-Path -LiteralPath $cacheRoot); $attempt++) {
-            Start-Sleep -Milliseconds 250
-        }
         $finalValidationFailures = [Collections.Generic.List[string]]::new()
-        if (Test-Path -LiteralPath $cacheRoot) {
-            $finalValidationFailures.Add("setup uninstall left installer cache behind: $cacheRoot")
-        }
         if ($disposableGithubRunner) {
             try {
                 Assert-NoDefenseClawRegistration $connectorConfigPaths
@@ -3810,7 +4169,8 @@ function Assert-WindowsReleaseSbom(
     [string]$Path,
     [string]$SetupHash,
     [string]$Version,
-    [string]$SourceCommit
+    [string]$SourceCommit,
+    [string]$HookLauncherHash
 ) {
     $sbom = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
     if ([string]$sbom.spdxVersion -cne 'SPDX-2.3' -or
@@ -3885,6 +4245,50 @@ function Assert-WindowsReleaseSbom(
     })
     if ($describesRelationships.Count -ne 1 -or $containsRelationships.Count -ne 1) {
         throw 'release setup SBOM relationships do not bind the document, package, and Setup file'
+    }
+
+    $hookLauncherPackages = @($sbom.packages | Where-Object {
+        [string]$_.name -ceq 'DefenseClaw stable HookRuntime launcher'
+    })
+    if ($hookLauncherPackages.Count -ne 1) {
+        throw 'release setup SBOM must contain exactly one stable HookRuntime launcher package'
+    }
+    $hookLauncherPackage = $hookLauncherPackages[0]
+    if ([string]$hookLauncherPackage.versionInfo -cne $Version -or
+        [string]$hookLauncherPackage.packageFileName -cne 'defenseclaw-hook-launcher.exe') {
+        throw 'release setup SBOM HookRuntime launcher package identity is invalid'
+    }
+    $hookLauncherPackageHashes = @($hookLauncherPackage.checksums | Where-Object {
+        [string]$_.algorithm -ceq 'SHA256' -and
+        [string]$_.checksumValue -ceq $HookLauncherHash
+    })
+    if ($hookLauncherPackageHashes.Count -ne 1) {
+        throw 'release setup SBOM HookRuntime launcher package digest differs from provenance'
+    }
+    $hookLauncherFiles = @($sbom.files | Where-Object {
+        [string]$_.fileName -ceq './payload/defenseclaw-hook-launcher.exe'
+    })
+    if ($hookLauncherFiles.Count -ne 1) {
+        throw 'release setup SBOM must contain exactly one canonical HookRuntime launcher file'
+    }
+    $hookLauncherFile = $hookLauncherFiles[0]
+    $hookLauncherFileHashes = @($hookLauncherFile.checksums | Where-Object {
+        [string]$_.algorithm -ceq 'SHA256' -and
+        [string]$_.checksumValue -ceq $HookLauncherHash
+    })
+    if ($hookLauncherFileHashes.Count -ne 1 -or
+        -not ([string]$hookLauncherFile.comment).Contains(
+            '"installed_path":"bin/defenseclaw-hook-launcher.exe"'
+        )) {
+        throw 'release setup SBOM HookRuntime launcher file lacks exact digest or Authenticode inventory binding'
+    }
+    $hookLauncherRelationships = @($sbom.relationships | Where-Object {
+        [string]$_.spdxElementId -ceq [string]$hookLauncherPackage.SPDXID -and
+        [string]$_.relationshipType -ceq 'CONTAINS' -and
+        [string]$_.relatedSpdxElement -ceq [string]$hookLauncherFile.SPDXID
+    })
+    if ($hookLauncherRelationships.Count -ne 1) {
+        throw 'release setup SBOM does not bind the HookRuntime launcher package to its exact file'
     }
 }
 
@@ -4073,8 +4477,16 @@ function Invoke-WindowsReleaseCertification {
     if ([string]$provenance.version -cne $releaseVersion) {
         throw "release setup provenance version does not match the resolved release: $($provenance.version) != $releaseVersion"
     }
+    $expectedHookLauncherHash = [string]$provenance.inputs.hook_launcher_sha256
+    if ($expectedHookLauncherHash -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'release setup provenance lacks the canonical HookRuntime launcher SHA-256'
+    }
     Assert-WindowsReleaseSbom `
-        $sbomPath $setupHash $releaseVersion ([string]$env:GITHUB_SHA)
+        -Path $sbomPath `
+        -SetupHash $setupHash `
+        -Version $releaseVersion `
+        -SourceCommit ([string]$env:GITHUB_SHA) `
+        -HookLauncherHash $expectedHookLauncherHash
     $releaseMetadataHashes = @{}
     foreach ($metadataPath in @($sidecarPath, $provenancePath, $sbomPath)) {
         $releaseMetadataHashes[$metadataPath] = `
@@ -4174,13 +4586,25 @@ function Invoke-WindowsReleaseCertification {
         $launcher = Join-Path $bin 'defenseclaw.exe'
         $gateway = Join-Path $bin 'defenseclaw-gateway.exe'
         $hook = Join-Path $bin 'defenseclaw-hook.exe'
+        $hookLauncherSource = Join-Path $bin $hookLauncherInstalledName
         $python = Join-Path $installRoot 'runtime\python\python.exe'
-        foreach ($product in @($launcher, $gateway, $hook)) {
+        foreach ($product in @($launcher, $gateway, $hook, $hookLauncherSource)) {
             if (-not (Test-Path -LiteralPath $product -PathType Leaf)) {
                 throw "exact signed Setup did not install required product executable: $product"
             }
             Assert-CiscoAuthenticodeSignature $product
         }
+        $installedHookLauncherHash = (
+            Get-FileHash -LiteralPath $hookLauncherSource -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($installedHookLauncherHash -cne $expectedHookLauncherHash) {
+            throw 'installed HookRuntime launcher source digest differs from release provenance'
+        }
+        Assert-StableHookLauncherPublication `
+            -Source $hookLauncherSource `
+            -Published (Get-StableHookRuntimeExecutable) `
+            -Version $releaseVersion `
+            -RequireSigned $true
         $installedStatePath = Join-Path $installRoot 'installer\install-state.json'
         $installedPayloadPath = Join-Path $installRoot 'installer\payload-manifest.json'
         foreach ($identityPath in @($installedStatePath, $installedPayloadPath)) {
@@ -4194,6 +4618,17 @@ function Invoke-WindowsReleaseCertification {
             if ([string]$installedIdentity.version -cne $releaseVersion) {
                 throw "installed version does not match resolved release in ${identityPath}: $($installedIdentity.version) != $releaseVersion"
             }
+        }
+        $installedPayloadManifest = Get-Content -LiteralPath $installedPayloadPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+        $installedHookLauncherEvidence = $installedPayloadManifest.authenticode.files.
+            'bin/defenseclaw-hook-launcher.exe'
+        if ([string]$installedPayloadManifest.files.'defenseclaw-hook-launcher.exe' -cne
+                $expectedHookLauncherHash -or
+            [string]$installedHookLauncherEvidence.installed_path -cne
+                'bin/defenseclaw-hook-launcher.exe' -or
+            [string]$installedHookLauncherEvidence.sha256 -cne $expectedHookLauncherHash) {
+            throw 'installed payload manifest does not bind the HookRuntime launcher source digest and inventory path'
         }
         Assert-WindowsReleasePersistentPath $launcher $logs
         Assert-PackagedV8ResourceContract $python (Join-Path $installRoot 'runtime\python')
@@ -4952,7 +5387,8 @@ function Invoke-Contract {
         try {
             if ($installed -or (Test-Path -LiteralPath $installRoot)) {
                 Invoke-WindowsSetupStandardUserProcess $setup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
-                    -TimeoutSeconds 600 -LogPath (Join-Path $root 'setup-contract-uninstall.log') | Out-Null
+                    -AllowedExitCodes @(3010) -TimeoutSeconds 600 `
+                    -LogPath (Join-Path $root 'setup-contract-uninstall.log') | Out-Null
             }
         } catch {
             $cleanupErrors.Add($_)
@@ -5045,7 +5481,7 @@ function Get-WindowsNativeCaptureFiles([string]$Root) {
             Sort-Object @{
                 Expression = {
                     if ($_.Name -eq 'wizard-driver.log') { 0 }
-                    elseif ($_.Name -eq 'go-test.log') { 1 }
+                    elseif ($_.Name -in @('go-test-failure-summary.log', 'go-test.log')) { 1 }
                     else { 2 }
                 }
             }, FullName |
@@ -5178,12 +5614,130 @@ function Invoke-SelfTest {
             throw 'bounded native text lost truncation, redaction, or UTF-8 integrity guarantees'
         }
 
+        $goTestJson = @(
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/pkg'
+                Test = 'TestPassing'
+                Output = "passing output must not be retained`n"
+            },
+            [pscustomobject]@{
+                Action = 'pass'
+                Package = 'example.invalid/pkg'
+                Test = 'TestPassing'
+                Elapsed = 0.01
+            },
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/pkg'
+                Test = 'TestFailing'
+                Output = "Authorization: Bearer $headerSecret`n"
+            },
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/pkg'
+                Test = 'TestFailing'
+                Output = "fixture assertion failed`n"
+            },
+            [pscustomobject]@{
+                Action = 'fail'
+                Package = 'example.invalid/pkg'
+                Test = 'TestFailing'
+                Elapsed = 1.25
+            },
+            [pscustomobject]@{
+                Action = 'fail'
+                Package = 'example.invalid/pkg'
+                Elapsed = 1.30
+            },
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/pkg'
+                Output = "panic: package stopped after the test failure`n"
+            },
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/pkg'
+                Output = "goroutine 1 [running]:`n"
+            },
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/crash'
+                Test = 'TestActiveWhenProcessStopped'
+                Output = "active test before package termination`n"
+            },
+            [pscustomobject]@{
+                Action = 'fail'
+                Package = 'example.invalid/crash'
+            }
+        ) | ForEach-Object { $_ | ConvertTo-Json -Compress }
+        $goTestSummary = Get-GoTestFailureSummary (
+            $goTestJson -join [Environment]::NewLine
+        ) 1024
+        if (-not $goTestSummary.Contains(
+            '--- FAIL: TestFailing (example.invalid/pkg) [1.25s]'
+        ) -or -not $goTestSummary.Contains('fixture assertion failed') -or
+            -not $goTestSummary.Contains('panic: package stopped after the test failure') -or
+            -not $goTestSummary.Contains('goroutine 1 [running]') -or
+            -not $goTestSummary.Contains('FAIL package example.invalid/crash') -or
+            -not $goTestSummary.Contains('active test before package termination') -or
+            $goTestSummary.Contains('passing output must not be retained') -or
+            $goTestSummary.Contains($headerSecret) -or
+            -not $goTestSummary.Contains('Authorization: ***REDACTED***') -or
+            [Text.Encoding]::UTF8.GetByteCount($goTestSummary) -gt 1024) {
+            throw 'structured Go test summary lost failure identity, focus, redaction, or bounds'
+        }
+
+        $largeGoTestJson = @(
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/large'
+                Test = 'TestOversizedOutput'
+                Output = (('x' * 1048576) + "`nretained-large-output-tail`n")
+            },
+            [pscustomobject]@{
+                Action = 'fail'
+                Package = 'example.invalid/large'
+                Test = 'TestOversizedOutput'
+            }
+        )
+        $largeGoTestJson += [pscustomobject]@{
+            Action = 'output'
+            Package = 'example.invalid/package-0'
+            Output = "panic: test timed out after 20m0s`n"
+        }
+        $largeGoTestJson += [pscustomobject]@{
+            Action = 'output'
+            Package = 'example.invalid/package-0'
+            Output = "goroutine 1 [chan receive]:`n"
+        }
+        foreach ($index in 0..140) {
+            $largeGoTestJson += [pscustomobject]@{
+                Action = 'fail'
+                Package = "example.invalid/package-$index"
+            }
+        }
+        $largeGoTestSummary = Get-GoTestFailureSummary (
+            @($largeGoTestJson | ForEach-Object {
+                $_ | ConvertTo-Json -Compress
+            }) -join [Environment]::NewLine
+        ) 4096
+        if ([Text.Encoding]::UTF8.GetByteCount($largeGoTestSummary) -gt 4096 -or
+            -not $largeGoTestSummary.Contains('retained-large-output-tail') -or
+            -not $largeGoTestSummary.Contains('panic: test timed out after 20m0s') -or
+            -not $largeGoTestSummary.Contains('goroutine 1 [chan receive]') -or
+            -not $largeGoTestSummary.Contains('[additional failed packages omitted]')) {
+            throw 'structured Go test summary buffered oversized output or lost bounded omission evidence'
+        }
+
         [IO.Directory]::CreateDirectory($captureFixture) | Out-Null
         $boundedPath = Join-Path $captureFixture 'go-test.log'
         Write-BoundedText $boundedPath $boundedInput $boundedLimit
         if ([IO.FileInfo]::new($boundedPath).Length -gt $boundedLimit) {
             throw 'bounded diagnostic file is too large for native capture'
         }
+        $goTestSummaryPath = Join-Path $captureFixture 'go-test-failure-summary.log'
+        Write-BoundedText $goTestSummaryPath $goTestSummary 262144
         foreach ($index in 0..30) {
             Write-BoundedText (Join-Path $captureFixture ("00-before-go-test-{0:D2}.log" -f $index)) 'decoy'
         }
@@ -5201,6 +5755,11 @@ function Invoke-SelfTest {
             $_.FullName.Equals($boundedPath, [StringComparison]::OrdinalIgnoreCase)
         })) {
             throw 'bounded go-test.log was not prioritized into native capture'
+        }
+        if (-not ($captureFiles | Where-Object {
+            $_.FullName.Equals($goTestSummaryPath, [StringComparison]::OrdinalIgnoreCase)
+        })) {
+            throw 'bounded Go failure summary was not prioritized into native capture'
         }
         if ($captureFiles | Where-Object {
             $_.FullName.Equals($oversizedPath, [StringComparison]::OrdinalIgnoreCase)

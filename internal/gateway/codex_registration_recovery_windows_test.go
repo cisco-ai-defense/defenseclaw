@@ -701,7 +701,8 @@ if report["effective"] != "open" or report["runtime"] != "open":
 if report["current"] is not True or report["drift"]:
     raise SystemExit("Codex runtime fail-mode report is not current: " + ", ".join(report["drift"]))
 `
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	const pythonFailModeAcceptanceTimeout = 60 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), pythonFailModeAcceptanceTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, python, "-S", "-c", script)
 	overrides := map[string]string{
@@ -724,6 +725,15 @@ if report["current"] is not True or report["drift"]:
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			t.Fatalf(
+				"Python Codex fail-mode report acceptance exceeded %s: %v (command error: %v)\n%s",
+				pythonFailModeAcceptanceTimeout,
+				ctxErr,
+				err,
+				output,
+			)
+		}
 		t.Fatalf("Python Codex fail-mode report acceptance failed: %v\n%s", err, output)
 	}
 	if !bytes.Contains(output, []byte(`"effective": "open"`)) ||

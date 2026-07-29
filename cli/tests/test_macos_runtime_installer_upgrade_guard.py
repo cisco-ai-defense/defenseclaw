@@ -294,7 +294,7 @@ def test_macos_ci_gates_release_wrappers_with_system_bash() -> None:
     triggers = workflow["on"]
     watched_paths = triggers["pull_request"]["paths"]
     assert "scripts/test-upgrade-protocol-release.sh" in watched_paths
-    assert ".github/workflows/pre-release-certification.yml" in watched_paths
+    assert ".github/workflows/release-candidate-smoke.yml" in watched_paths
 
     steps = workflow["jobs"]["build-and-test"]["steps"]
     gate = next(step for step in steps if step.get("name") == "Exercise release wrappers with system Bash")
@@ -368,7 +368,7 @@ def test_macos_ci_builds_and_verifies_reviewed_runtime_fixture_first() -> None:
         '"scripts/source_release_identity.py"',
         '"scripts/test-upgrade-protocol-release.sh"',
         '"scripts/test-upgrade-release.sh"',
-        '".github/workflows/pre-release-certification.yml"',
+        '".github/workflows/release-candidate-smoke.yml"',
     ):
         assert workflow.count(watched) == 1
     assert 'make -C "${build_root}" dist-cli DIST_DIR="${out}"' in smoke

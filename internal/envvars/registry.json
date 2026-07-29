@@ -133,6 +133,20 @@
       "security_note": "Operator-supplied checksum pin for upgrade artifacts — defense-in-depth alongside the sidecar .sha256 file."
     },
     {
+      "name": "DEFENSECLAW_RESCUE_COSIGN_CANDIDATE",
+      "category": "upgrade_internal",
+      "purpose": "Carries the absolute Cosign path discovered by the POSIX rescue trampoline as inert positional data through an empty environment into the trusted system Bash payload. The payload copies the candidate into its private work directory and accepts it only when the copied bytes match the pinned platform digest; otherwise it downloads and verifies the pinned Cosign release.",
+      "default": "unset (the rescue payload downloads the pinned Cosign release)",
+      "accepted_values": ["absolute path discovered by command -v cosign", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "scripts/defenseclaw-rescue.sh", "description": "The POSIX trampoline passes the discovered path through the clean-environment handoff; the Bash payload unsets the variable and uses only a private digest-verified copy"}
+      ],
+      "since": "0.8.8",
+      "security_note": "Optimization hint only — the ambient executable is never run in place, and its copied bytes receive the same pinned-digest verification as a downloaded Cosign binary."
+    },
+    {
       "name": "DEFENSECLAW_UPGRADE_FRESH_PROCESS",
       "category": "upgrade_internal",
       "purpose": "Marks the isolated installed-CLI child used for an upgrade handoff so the child cannot recursively hand off again and a newly installed gateway can delegate its readiness wait to that supervising controller.",
@@ -2005,6 +2019,19 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_CLEANUP_ACK",
+      "category": "hook_internal",
+      "purpose": "Canonical InstallerCache cleanup acknowledgement path used by the bounded post-exit finalizer.",
+      "default": "unset (set and overwritten by native Setup)",
+      "accepted_values": ["absolute installer-cache acknowledgement path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/deferred_uninstall_cleanup_windows.go", "description": "Post-exit finalizer locks and validates the exact cleanup acknowledgement before removing authenticated installer residue"}
+      ],
+      "since": "0.8.8"
+    },
+    {
       "name": "DEFENSECLAW_CLEANUP_PARENT_PID",
       "category": "hook_internal",
       "purpose": "Parent process identifier awaited by the bounded delayed InstallerCache cleanup helper.",
@@ -2415,6 +2442,71 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_HOOK_DELEGATION_TEST_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the isolated stable-hook delegation helper subprocess.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/hookruntime/delegation_windows_test.go", "description": "Native Windows hook-delegation test fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.8"
+    },
+    {
+      "name": "DEFENSECLAW_DELEGATION_ENV_SENTINEL",
+      "category": "test_fixture",
+      "purpose": "Carries an inherited environment sentinel through the isolated stable-hook delegation fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined value", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/hookruntime/delegation_windows_test.go", "description": "Native Windows hook-delegation test fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.8"
+    },
+    {
+      "name": "DEFENSECLAW_DEFERRED_RUN_HELPER_ACK",
+      "category": "test_fixture",
+      "purpose": "Carries the acknowledgement path for the isolated deferred-cleanup Run launch fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined absolute path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/deferred_uninstall_cleanup_windows_test.go", "description": "Native Windows deferred-cleanup Run launch fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.8"
+    },
+    {
+      "name": "DEFENSECLAW_DEFERRED_RUN_HELPER_TRANSACTION",
+      "category": "test_fixture",
+      "purpose": "Carries the expected transaction identifier for the isolated deferred-cleanup Run launch fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined lowercase 32-hex transaction identifier", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/deferred_uninstall_cleanup_windows_test.go", "description": "Native Windows deferred-cleanup Run launch fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.8"
+    },
+    {
+      "name": "DEFENSECLAW_DEFERRED_RUN_ROOT",
+      "category": "test_fixture",
+      "purpose": "Supplies the isolated cache root used to reproduce the former environment-based Run registration.",
+      "default": "unset",
+      "accepted_values": ["test-defined absolute path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/deferred_uninstall_cleanup_windows_test.go", "description": "Native Windows deferred-cleanup Run launch fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.8"
+    },
+    {
       "name": "DEFENSECLAW_LONG_PATH_HELPER",
       "category": "test_fixture",
       "purpose": "Selects the isolated native Setup long-path helper subprocess.",
@@ -2796,6 +2888,22 @@
         }
       ],
       "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_FAIL_AFTER_081_PLACEHOLDER_REPAIR",
+      "category": "test_fixture",
+      "purpose": "Injects a failure after the clean 0.8.1 placeholder repair to verify phase-one rollback.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "scripts/upgrade.sh",
+          "description": "Authenticated resolver rollback fixture; never set by production upgrade paths"
+        }
+      ],
+      "since": "0.8.8"
     },
     {
       "name": "DEFENSECLAW_GATEWAY_URL",

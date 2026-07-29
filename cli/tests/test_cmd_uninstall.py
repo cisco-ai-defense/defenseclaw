@@ -110,6 +110,14 @@ class BuildPlanTests(unittest.TestCase):
 
 
 class UninstallCommandTests(unittest.TestCase):
+    def setUp(self) -> None:
+        patcher = patch(
+            "defenseclaw.commands.windows_native_uninstall.prepare_native_windows_uninstall",
+            return_value=None,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_dry_run_does_not_execute(self):
         runner = CliRunner()
         with patch("defenseclaw.commands.cmd_uninstall._execute_plan") as exec_mock:

@@ -54,7 +54,7 @@ from defenseclaw.commands.cmd_status import status
 from defenseclaw.commands.cmd_tool import tool
 from defenseclaw.commands.cmd_tui import tui
 from defenseclaw.commands.cmd_uninstall import reset_cmd, uninstall_cmd
-from defenseclaw.commands.cmd_upgrade import upgrade
+from defenseclaw.commands.cmd_upgrade import _maybe_delegate_public_upgrade, upgrade
 from defenseclaw.commands.cmd_version import version_cmd
 from defenseclaw.context import AppContext
 from defenseclaw.resolver_hint import authenticated_resolver_instructions
@@ -343,6 +343,7 @@ def main() -> None:
     """Entrypoint: try TUI handoff first, fall back to Click CLI."""
     ux.configure_console_output()
     _force_utf8_io()
+    _maybe_delegate_public_upgrade(sys.argv[1:])
     if not _try_launch_tui():
         cli()
 

@@ -224,6 +224,7 @@ class SkillScannerWrapper:
 
     def _convert(self, sdk_result: object, target: str, elapsed: float) -> ScanResult:
         """Convert SDK ScanResult → DefenseClaw ScanResult."""
+        scanner_name = self.name()
         findings: list[Finding] = []
         for sf in getattr(sdk_result, "findings", []):
             location = getattr(sf, "file_path", "") or ""
@@ -236,6 +237,9 @@ class SkillScannerWrapper:
             if category:
                 cat_name = category.name if hasattr(category, "name") else str(category)
                 tags.append(cat_name)
+            analyzer = str(getattr(sf, "analyzer", "") or "")
+            if analyzer:
+                tags.append(f"analyzer:{analyzer}")
 
             severity = getattr(sf, "severity", None)
             sev_str = severity.name if hasattr(severity, "name") else str(severity)
@@ -247,12 +251,14 @@ class SkillScannerWrapper:
                 description=getattr(sf, "description", ""),
                 location=location,
                 remediation=getattr(sf, "remediation", "") or "",
-                scanner=getattr(sf, "analyzer", "") or "skill-scanner",
+                # Canonical finding identity names the producer, not the
+                # upstream SDK's internal analyzer, which remains in tags.
+                scanner=scanner_name,
                 tags=tags,
             ))
 
         return ScanResult(
-            scanner="skill-scanner",
+            scanner=scanner_name,
             target=target,
             timestamp=datetime.now(timezone.utc),
             findings=findings,

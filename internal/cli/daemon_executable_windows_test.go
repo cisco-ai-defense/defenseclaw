@@ -76,6 +76,12 @@ observability: {}
 		t.Fatal(err)
 	}
 
+	d := daemon.New(home)
+	t.Cleanup(func() {
+		if running, _ := d.IsRunning(); running {
+			_ = d.Stop(defaultStopTimeout)
+		}
+	})
 	foreignPID := os.Getpid()
 	assertExecutableTestListenerOwner(t, port, foreignPID)
 	startOutput, startExit := runGatewayExecutablePowerShell(t, binary, home, "start")
@@ -116,12 +122,6 @@ observability: {}
 		t.Fatalf("successful start did not render READY-only completion:\n%s", startOutput)
 	}
 
-	d := daemon.New(home)
-	t.Cleanup(func() {
-		if running, _ := d.IsRunning(); running {
-			_ = d.Stop(defaultStopTimeout)
-		}
-	})
 	running, managedPID := d.IsRunning()
 	if !running || !d.HasManagedProcessIdentity(managedPID) {
 		t.Fatalf("managed process identity = (running=%v, PID=%d, strong=%v)", running, managedPID, d.HasManagedProcessIdentity(managedPID))
@@ -248,7 +248,7 @@ observability: {}
 		t.Fatalf("graceful stop did not persist a gateway stop lifecycle event: before=%d after=%d", stopEventsBeforeFinalStop, got)
 	}
 
-	testExecutableStartingDeadline(t, binary)
+	testExecutableReconnectingFleetLifecycle(t, binary)
 }
 
 func executableTestLogTail(home string) string {
@@ -289,11 +289,15 @@ func countGatewayStopEvents(t *testing.T, home string) int {
 	return count
 }
 
-func testExecutableStartingDeadline(t *testing.T, binary string) {
+func testExecutableReconnectingFleetLifecycle(t *testing.T, binary string) {
 	t.Helper()
 	home := t.TempDir()
 	apiPort := reserveExecutableTestPort(t)
-	fleetPort := reserveExecutableTestPort(t)
+	// A rejected WebSocket handshake puts only the external fleet uplink into
+	// a degraded state while every local subsystem is ready. Depending on
+	// whether the first failed handshake or its retry wins the status snapshot,
+	// that truthful state may be reconnecting or error.
+	fleetPort := startExecutableTestRejectingFleetEndpoint(t)
 	configText := fmt.Sprintf(`config_version: 8
 data_dir: %s
 gateway:
@@ -301,7 +305,7 @@ gateway:
   port: %d
   api_bind: 127.0.0.1
   api_port: %d
-  token: win-aud-029-timeout-test-token
+  token: win-aud-029-reconnecting-test-token
   fleet_mode: enabled
   watcher:
     enabled: false
@@ -315,27 +319,63 @@ observability: {}
 		t.Fatal(err)
 	}
 
-	startOutput, startExit := runGatewayExecutablePowerShell(t, binary, home, "start")
-	if startExit == 0 {
-		t.Fatalf("STARTING deadline LASTEXITCODE = 0, want nonzero; output:\n%s", startOutput)
-	}
-	if !strings.Contains(startOutput, "FAILED") || !strings.Contains(startOutput, "remained STARTING") || strings.Contains(startOutput, "OK (PID") {
-		t.Fatalf("STARTING deadline did not render terminal failure:\n%s\ngateway.log tail:\n%s", startOutput, executableTestLogTail(home))
-	}
 	d := daemon.New(home)
-	if running, pid := d.IsRunning(); running {
-		t.Fatalf("timed-out managed process still running as PID %d", pid)
+	t.Cleanup(func() {
+		if running, _ := d.IsRunning(); running {
+			_ = d.Stop(defaultStopTimeout)
+		}
+	})
+	startOutput, startExit := runGatewayExecutablePowerShell(t, binary, home, "start")
+	if startExit != 0 {
+		t.Fatalf("reconnecting-fleet start LASTEXITCODE = %d, want 0; output:\n%s\ngateway.log tail:\n%s", startExit, startOutput, executableTestLogTail(home))
+	}
+	hasDegradedFleetState := strings.Contains(startOutput, "gateway:reconnecting") ||
+		strings.Contains(startOutput, "gateway:error")
+	if !strings.Contains(startOutput, "OK (PID") ||
+		!hasDegradedFleetState ||
+		strings.Contains(startOutput, "STARTING") {
+		t.Fatalf("failed fleet handshake did not render a truthful degraded-ready result:\n%s", startOutput)
+	}
+	running, pid := d.IsRunning()
+	if !running || !d.HasManagedProcessIdentity(pid) {
+		t.Fatalf("reconnecting managed process identity = (running=%v, PID=%d, strong=%v)", running, pid, d.HasManagedProcessIdentity(pid))
+	}
+	assertExecutableTestListenerOwner(t, apiPort, pid)
+
+	stopOutput, stopExit := runGatewayExecutablePowerShell(t, binary, home, "stop")
+	if stopExit != 0 || !strings.Contains(stopOutput, "OK") {
+		t.Fatalf("reconnecting-fleet stop LASTEXITCODE = %d; output:\n%s", stopExit, stopOutput)
+	}
+	if running, stoppedPID := d.IsRunning(); running {
+		t.Fatalf("reconnecting gateway still running after successful stop as PID %d", stoppedPID)
+	}
+	if _, err := daemon.ListenerOwnerPID("127.0.0.1", apiPort); !errors.Is(err, daemon.ErrNoListener) {
+		t.Fatalf("reconnecting gateway listener remains after graceful stop: %v", err)
 	}
 	assertExecutableTestArtifactMissing(t, filepath.Join(home, daemon.PIDFileName))
 	assertExecutableTestArtifactMissing(t, filepath.Join(home, watchdogPIDFile))
 	assertExecutableTestArtifactMissing(t, filepath.Join(home, watchdogStateFile))
-	if _, err := daemon.ListenerOwnerPID("127.0.0.1", apiPort); !errors.Is(err, daemon.ErrNoListener) {
-		t.Fatalf("API listener remains after timeout cleanup: %v", err)
+}
+
+func startExecutableTestRejectingFleetEndpoint(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	statusOutput, statusExit := runGatewayExecutablePowerShell(t, binary, home, "status")
-	if statusExit == 0 {
-		t.Fatalf("status LASTEXITCODE = 0 after timeout cleanup, want nonzero; output:\n%s", statusOutput)
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "fleet unavailable", http.StatusServiceUnavailable)
+		}),
+		ReadHeaderTimeout: time.Second,
 	}
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		_ = server.Close()
+	})
+	return listener.Addr().(*net.TCPAddr).Port
 }
 
 func reserveExecutableTestPort(t *testing.T) int {

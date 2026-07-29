@@ -956,6 +956,9 @@ class TestSetupMCPScannerCommonConfig(unittest.TestCase):
 
 class TestSetupSplunkCommand(unittest.TestCase):
     def setUp(self):
+        self._environment = patch.dict(os.environ, {}, clear=False)
+        self._environment.start()
+        self.addCleanup(self._environment.stop)
         self.app, self.tmp_dir, self.db_path = make_app_context()
         self.runner = CliRunner()
         self._native_local_splunk = patch(

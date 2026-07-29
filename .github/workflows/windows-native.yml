@@ -92,18 +92,77 @@ jobs:
             'TestAtomicWriteFile_PreservesSymlinkedDotfile',
             'TestOpenHandsHookScript_BlockExitsTwo'
           ) -join '|') + ')$'
-          # Keep package execution serial on the four-core hosted runner so
-          # bounded discovery tests are not starved by concurrent packages.
-          Invoke-WindowsNativeProcess $go @('test', '-count=1', '-timeout=20m', '-p=1', '-skip', $windowsInapplicable, './...') -TimeoutSeconds 2100 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-test.log') | Out-Null
+          # The gateway package is large enough that Linux CI already shards
+          # its top-level tests. Partition the native Windows test list in the
+          # same process-isolation shape so one package binary cannot retain
+          # the full suite's resources or bury its terminal panic in a huge
+          # dump. Shards remain sequential on this four-core hosted runner.
+          $gatewayList = Invoke-WindowsNativeProcess $go @(
+            'test', '-list', '^(Test|Fuzz|Example)', './internal/gateway'
+          ) -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-gateway-list.log')
+          $gatewayTests = @(
+            [regex]::Split([string]$gatewayList.StdOut, '\r?\n') |
+                Where-Object { $_ -match '^(Test|Fuzz|Example)\S*$' } |
+                Sort-Object -Unique
+          )
+          if ($gatewayTests.Count -lt 4) {
+            throw "native gateway sharding discovered only $($gatewayTests.Count) top-level tests"
+          }
+          $goTestLog = Join-Path $env:DC_STATE_ROOT 'go-test.log'
+          $goFailureSummary = Join-Path $env:DC_STATE_ROOT 'go-test-failure-summary.log'
+          foreach ($shard in 0..3) {
+            $shardTests = @(
+              for ($index = 0; $index -lt $gatewayTests.Count; $index++) {
+                if (($index % 4) -eq $shard) { [regex]::Escape($gatewayTests[$index]) }
+              }
+            )
+            $shardPattern = '^(' + ($shardTests -join '|') + ')$'
+            Invoke-WindowsNativeProcess $go @(
+              'test', '-json', '-count=1', '-timeout=20m', '-p=1',
+              '-skip', $windowsInapplicable, '-run', $shardPattern, './internal/gateway'
+            ) -TimeoutSeconds 1500 `
+              -LogPath (Join-Path $env:DC_STATE_ROOT ("go-gateway-shard-{0}.log" -f $shard)) `
+              -GoTestFailureSummaryPath $goFailureSummary | Out-Null
+          }
+          $packageList = Invoke-WindowsNativeProcess $go @(
+            'list', './...'
+          ) -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-package-list.log')
+          $remainingPackages = @(
+            [regex]::Split([string]$packageList.StdOut, '\r?\n') |
+              Where-Object {
+                $_ -match '^github\.com/defenseclaw/defenseclaw/' -and
+                $_ -ne 'github.com/defenseclaw/defenseclaw/internal/gateway'
+              }
+          )
+          if (-not $remainingPackages) {
+            throw 'native Go package discovery selected no non-gateway packages'
+          }
+          $remainingArguments = @(
+            'test', '-json', '-count=1', '-timeout=20m', '-p=1',
+            '-skip', $windowsInapplicable
+          ) + $remainingPackages
+          Invoke-WindowsNativeProcess $go $remainingArguments -TimeoutSeconds 2100 `
+            -LogPath $goTestLog -GoTestFailureSummaryPath $goFailureSummary | Out-Null
           Invoke-WindowsNativeProcess $go @('vet', './...') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-vet.log') | Out-Null
           $bin = Join-Path $env:DC_STATE_ROOT 'bin'
           New-Item -ItemType Directory -Force -Path $bin | Out-Null
           $env:CGO_ENABLED = '0'
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
           Invoke-WindowsNativeProcess $go @('build', '-o', (Join-Path $bin 'defenseclaw-gateway.exe'), './cmd/defenseclaw') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-gateway.log') | Out-Null
           Invoke-WindowsNativeProcess $go @('build', '-ldflags', '-H=windowsgui', '-o', (Join-Path $bin 'defenseclaw-hook.exe'), './cmd/defenseclaw-hook') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-hook.log') | Out-Null
+          $hookLauncher = Join-Path $bin 'defenseclaw-hook-launcher.exe'
+          Invoke-WindowsNativeProcess $go @(
+            'build', '-trimpath', '-buildvcs=false', '-ldflags', '-s -w -H=windowsgui',
+            '-o', $hookLauncher, './cmd/defenseclaw-hook-launcher'
+          ) -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-hook-launcher.log') | Out-Null
           $packageVersion = Get-WorkspacePackageVersion
           Assert-WindowsExecutableResource -Path (Join-Path $bin 'defenseclaw-gateway.exe') -Component 'gateway' -Version $packageVersion -Apply
           Assert-WindowsExecutableResource -Path (Join-Path $bin 'defenseclaw-hook.exe') -Component 'hook' -Version $packageVersion -Apply
+          Assert-WindowsExecutableResource -Path $hookLauncher -Component 'hook' -Version $packageVersion -Apply
+          if ((Get-Item -LiteralPath $hookLauncher -Force).Length -gt 8MB) {
+            throw 'HookRuntime launcher exceeds the unsigned 8 MiB size ceiling'
+          }
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
@@ -354,6 +413,10 @@ jobs:
       # permanent release assets and this fallback remains fail-closed evidence.
       BOOTSTRAP_FIXTURE_RUN_ID: "30063491006"
       BOOTSTRAP_FIXTURE_ARTIFACT: release-candidate-30063491006-1
+      # 0.8.7 predates immutable install.ps1 release assets. The compatibility
+      # fallback below is review-bound to these exact repository bytes and is
+      # refused for every other release/candidate identity.
+      BOOTSTRAP_LEGACY_INSTALLER_SHA256: bf9d266ccd3d7a6cd8a1e6dfb0bcb9c2aa258858da2152c4fb435fa26c99f51a
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -422,6 +485,37 @@ jobs:
               throw "Could not download authenticated bootstrap fixture asset: $asset"
             }
           }
+          $installerAssetCount = (
+            gh release view $env:BOOTSTRAP_FIXTURE_VERSION `
+              --repo $env:GITHUB_REPOSITORY `
+              --json assets `
+              --jq '[.assets[] | select(.name == "install.ps1")] | length'
+          )
+          if ($LASTEXITCODE -ne 0 -or $installerAssetCount -notmatch '^[0-9]+$') {
+            throw 'Could not resolve the immutable install.ps1 asset inventory'
+          }
+          if ([int]$installerAssetCount -gt 1) {
+            throw 'The immutable release contains duplicate install.ps1 assets'
+          }
+          if ([int]$installerAssetCount -eq 1) {
+            gh release download $env:BOOTSTRAP_FIXTURE_VERSION `
+              --repo $env:GITHUB_REPOSITORY `
+              --pattern install.ps1 `
+              --dir $fixture
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Could not download the immutable install.ps1 asset'
+            }
+          } elseif ($env:BOOTSTRAP_FIXTURE_VERSION -cne '0.8.7') {
+            throw (
+              'The authenticated release is missing its exact immutable ' +
+              'install.ps1 asset'
+            )
+          } else {
+            Write-Host (
+              'Pinned legacy 0.8.7 has no install.ps1 asset; the digest-bound ' +
+              'compatibility fixture will be staged later.'
+            )
+          }
           "DC_BOOTSTRAP_RELEASE_DIR=$fixture" >> $env:GITHUB_ENV
       - name: Download sealed pre-publication bootstrap fixture
         if: ${{ steps.fixture.outputs.source == 'candidate' }}
@@ -441,7 +535,54 @@ jobs:
           }
           "DC_BOOTSTRAP_RELEASE_DIR=$fixture" >> $env:GITHUB_ENV
       - name: Exercise current public bootstrap under a real disposable user
+        env:
+          BOOTSTRAP_FIXTURE_SOURCE: ${{ steps.fixture.outputs.source }}
         run: |
+          # The pinned 0.8.7 regression fixture predates immutable installer
+          # assets. Every current candidate/release must provide its exact
+          # downloaded install.ps1. The only fallback is this explicitly pinned
+          # legacy fixture, whose reviewed repository bytes are digest-bound
+          # before and after staging.
+          $fixtureInstaller = Join-Path $env:DC_BOOTSTRAP_RELEASE_DIR 'install.ps1'
+          if (-not (Test-Path -LiteralPath $fixtureInstaller -PathType Leaf)) {
+            $isPinnedLegacyFixture = (
+              $env:BOOTSTRAP_FIXTURE_VERSION -ceq '0.8.7' -and
+              (
+                $env:BOOTSTRAP_FIXTURE_SOURCE -ceq 'release' -or
+                (
+                  $env:BOOTSTRAP_FIXTURE_SOURCE -ceq 'candidate' -and
+                  $env:BOOTSTRAP_FIXTURE_RUN_ID -ceq '30063491006' -and
+                  $env:BOOTSTRAP_FIXTURE_ARTIFACT -ceq 'release-candidate-30063491006-1'
+                )
+              )
+            )
+            if (-not $isPinnedLegacyFixture) {
+              throw (
+                'The authenticated candidate/release is missing its exact ' +
+                'immutable install.ps1 asset'
+              )
+            }
+            $legacyInstaller = (
+              Resolve-Path -LiteralPath ./scripts/install.ps1 -ErrorAction Stop
+            ).Path
+            $legacyDigest = (
+              Get-FileHash -LiteralPath $legacyInstaller -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            if ($legacyDigest -cne $env:BOOTSTRAP_LEGACY_INSTALLER_SHA256) {
+              throw (
+                'The reviewed legacy 0.8.7 installer digest changed: ' +
+                "$legacyDigest"
+              )
+            }
+            Copy-Item -LiteralPath $legacyInstaller `
+              -Destination $fixtureInstaller -ErrorAction Stop
+            $stagedLegacyDigest = (
+              Get-FileHash -LiteralPath $fixtureInstaller -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            if ($stagedLegacyDigest -cne $env:BOOTSTRAP_LEGACY_INSTALLER_SHA256) {
+              throw 'The staged legacy 0.8.7 installer lost its digest binding'
+            }
+          }
           $bootstrapState = Join-Path $env:DC_STATE_ROOT (
             'defenseclaw-bootstrap-acceptance-' + [guid]::NewGuid().ToString('N')
           )

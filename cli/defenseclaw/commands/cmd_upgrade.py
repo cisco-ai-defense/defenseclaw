@@ -47,7 +47,8 @@ import tempfile
 import threading
 import time
 import zipfile
-from contextlib import contextmanager, nullcontext
+from collections.abc import Callable, Mapping
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
@@ -62,7 +63,22 @@ from defenseclaw.platform_support import (
     WINDOWS_CERTIFIED_ARCHITECTURES,
     WINDOWS_NOT_CERTIFIED_ARCHITECTURES,
 )
-from defenseclaw.resolver_hint import authenticated_resolver_instructions
+from defenseclaw.release_channel import (
+    MAX_CHANNEL_BYTES,
+    ChannelError,
+    parse_channel,
+)
+from defenseclaw.resolver_hint import (
+    AUTHENTICATED_CA_OVERRIDE_ENV,
+    AUTHENTICATED_CHILD_ENV_PREFIX_REMOVALS,
+    AUTHENTICATED_CHILD_ENV_REMOVALS,
+    AUTHENTICATED_CHILD_FUNCTION_ENV_PREFIX,
+    AUTHENTICATED_CHILD_READONLY_ENV_REMOVALS,
+    COSIGN_BOOTSTRAP_SHA256,
+    COSIGN_BOOTSTRAP_VERSION,
+    RESOLVER_COMPLETENESS_MARKER,
+    authenticated_resolver_instructions,
+)
 from defenseclaw.upgrade_receipt import (
     begin_upgrade_receipt,
     clear_local_bundle_restart_intent,
@@ -130,7 +146,6 @@ _GATEWAY_START_COMMAND_GRACE_SECONDS = 30
 _GATEWAY_STATUS_COMMAND_TIMEOUT_SECONDS = 20
 _STRICT_SIGSTORE_RELEASE_VERSION = "0.8.4"
 _RELEASE_WORKFLOW_IDENTITY = f"https://github.com/{GITHUB_REPO}/.github/workflows/release.yaml@refs/heads/main"
-_COSIGN_BOOTSTRAP_VERSION = "2.6.3"
 _COSIGN_BOOTSTRAP_MAX_BYTES = 200 * 1024 * 1024
 _COSIGN_BOOTSTRAP_ALLOWED_HOSTS = frozenset(
     {
@@ -139,12 +154,28 @@ _COSIGN_BOOTSTRAP_ALLOWED_HOSTS = frozenset(
         "release-assets.githubusercontent.com",
     }
 )
-_COSIGN_BOOTSTRAP_SHA256 = {
-    ("darwin", "amd64"): "5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be",
-    ("darwin", "arm64"): "ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e",
-    ("linux", "amd64"): "7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4",
-    ("linux", "arm64"): "b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917",
-}
+_POSIX_RESOLVER_ASSET = "defenseclaw-upgrade.sh"
+_MAX_RESOLVER_BYTES = 4 * 1024 * 1024
+_MAX_SYSTEM_BASH_BYTES = 32 * 1024 * 1024
+_RELEASE_CHANNEL_REF_URL = f"https://api.github.com/repos/{GITHUB_REPO}/git/ref/heads/release-channel"
+_RELEASE_CHANNEL_RAW_BASE_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}"
+_RELEASE_CHANNEL_REF_MAX_BYTES = 64 * 1024
+_RELEASE_CHANNEL_BUNDLE_MAX_BYTES = 1024 * 1024
+_RELEASE_CHANNEL_AUTH_ATTEMPTS = 3
+_RELEASE_CHANNEL_RETRY_DELAYS = tuple(
+    0.25 * (3**attempt) for attempt in range(max(_RELEASE_CHANNEL_AUTH_ATTEMPTS - 1, 0))
+)
+_MAX_PRIVATE_REDIRECTS = 6
+_AUTHENTICATED_CA_OVERRIDE_ENV = AUTHENTICATED_CA_OVERRIDE_ENV
+_AUTHENTICATED_CHILD_ENV_REMOVALS = (
+    *AUTHENTICATED_CHILD_ENV_REMOVALS,
+    *AUTHENTICATED_CHILD_READONLY_ENV_REMOVALS,
+)
+_AUTHENTICATED_CHILD_ENV_PREFIX_REMOVALS = (
+    AUTHENTICATED_CHILD_FUNCTION_ENV_PREFIX,
+    *AUTHENTICATED_CHILD_ENV_PREFIX_REMOVALS,
+)
+_COSIGN_ENVIRONMENT_CONTEXT_KEY = "defenseclaw.authenticated-cosign-environment-v1"
 _TARGET_CONFIG_VERSION = 8
 _WINDOWS_SETUP_ASSET = "DefenseClawSetup-x64.exe"
 _WINDOWS_SETUP_PROVENANCE_ASSET = f"{_WINDOWS_SETUP_ASSET}.provenance.json"
@@ -194,6 +225,26 @@ class _TargetMigrationCapabilities:
     run_migrations_parameters: frozenset[str]
     migration_versions: frozenset[str]
     supported_config_versions: frozenset[int]
+
+
+@dataclass
+class _TrustedSystemBash:
+    path: str
+    descriptor: int
+    identity: tuple[int, int, int, int, int, int]
+
+    def assert_stable(self) -> None:
+        try:
+            named = os.lstat(self.path)
+            opened = os.fstat(self.descriptor)
+        except OSError as exc:
+            raise OSError("trusted system bash identity is unavailable") from exc
+        if (
+            not _system_bash_info_is_trusted(named)
+            or _system_bash_identity(named) != self.identity
+            or _system_bash_identity(opened) != self.identity
+        ):
+            raise OSError("trusted system bash identity changed before execution")
 
 
 @dataclass(frozen=True)
@@ -364,6 +415,12 @@ class _LocalBundleUpgradeInvocationError(RuntimeError):
 @click.option("--version", "target_version", default=None, help="Upgrade to a specific release version (e.g. 0.3.1)")
 @click.option("--health-timeout", default=60, type=int, help="Seconds to wait for gateway health after restart")
 @click.option(
+    "--recover-corrupt-audit",
+    is_flag=True,
+    default=False,
+    help=("Ask the authenticated POSIX release resolver to preserve a proven-corrupt audit database before upgrading."),
+)
+@click.option(
     "--allow-unverified",
     is_flag=True,
     default=False,
@@ -380,6 +437,7 @@ def upgrade(
     yes: bool,
     target_version: str | None,
     health_timeout: int,
+    recover_corrupt_audit: bool,
     allow_unverified: bool,
 ) -> None:
     """Upgrade DefenseClaw to the latest version.
@@ -395,6 +453,19 @@ def upgrade(
     from defenseclaw import __version__ as controller_version
 
     ux.banner("DefenseClaw Upgrade")
+
+    if recover_corrupt_audit:
+        if platform.system().lower() == "windows":
+            ux.err(
+                "--recover-corrupt-audit is not supported by the native Windows upgrader.",
+                indent="  ",
+            )
+        else:
+            ux.err(
+                "--recover-corrupt-audit must be handled by the authenticated POSIX release resolver.",
+                indent="  ",
+            )
+        raise SystemExit(2)
 
     # ── Resolve target version ───────────────────────────────────────────────
 
@@ -451,6 +522,10 @@ def upgrade(
     recovery_home = _upgrade_recovery_home()
     data_dir = _resolved_upgrade_data_dir(app.cfg, recovery_home=recovery_home)
     active_config_path = _active_upgrade_config_path(recovery_home)
+    native_windows_state = _native_windows_install_state(
+        os_name,
+        expected_version=current_version,
+    )
     if current_version != controller_version:
         _preflight_staged_target_controller_source(
             source_version=current_version,
@@ -458,12 +533,21 @@ def upgrade(
             target_version=target_version,
             recovery_home=recovery_home,
         )
-    _preflight_installed_source_coherence(
-        current_version,
-        os_name,
-        data_dir,
-        config_path=active_config_path,
-    )
+    if native_windows_state is None:
+        _preflight_installed_source_coherence(
+            current_version,
+            os_name,
+            data_dir,
+            config_path=active_config_path,
+        )
+    else:
+        _preflight_installed_source_coherence(
+            current_version,
+            os_name,
+            data_dir,
+            config_path=active_config_path,
+            native_windows_state=native_windows_state,
+        )
 
     # ── Pre-flight: verify artifacts exist ───────────────────────────────────
 
@@ -492,7 +576,6 @@ def upgrade(
         # predate goreleaser's checksum publication; in that case we proceed
         # with a clear warning rather than hard-failing operators on a
         # version they could otherwise install.
-        native_windows_state = _native_windows_install_state(os_name)
         if native_windows_state is not None and allow_unverified:
             ux.err(
                 "--allow-unverified is not permitted for native Windows setup handoff.",
@@ -1339,7 +1422,7 @@ def upgrade(
             else:
                 if not upgrade_body_failed:
                     if checksums is not None and not effective_allow_unverified:
-                        supersede_prior_upgrade_receipts(receipt_path)
+                        _supersede_prior_upgrade_receipts_best_effort(receipt_path)
                     complete_upgrade_receipt(
                         receipt_path,
                         status="partial" if migration_failed else "succeeded",
@@ -1489,7 +1572,7 @@ def _recover_interrupted_same_version_upgrade(
             config_path=config_path,
             recovery_home=recovery_home,
         )
-        supersede_prior_upgrade_receipts(receipt_path)
+        _supersede_prior_upgrade_receipts_best_effort(receipt_path)
         complete_upgrade_receipt(
             receipt_path,
             status="partial" if migration_failed else "succeeded",
@@ -1780,6 +1863,19 @@ def _record_failed_upgrade_receipt(path, failure_code: str) -> None:
         )
 
 
+def _supersede_prior_upgrade_receipts_best_effort(path: Path) -> None:
+    """Keep a successful target health proof from depending on old receipt cleanup."""
+
+    try:
+        supersede_prior_upgrade_receipts(path)
+    except (OSError, ValueError):
+        ux.warn(
+            "Target health is proven, but old upgrade receipt cleanup was deferred; "
+            "a later authenticated upgrade will reconcile it.",
+            indent="  ",
+        )
+
+
 # ---------------------------------------------------------------------------
 # GitHub release helpers
 # ---------------------------------------------------------------------------
@@ -1820,6 +1916,738 @@ def _fetch_latest_version() -> str | None:
         return tag[1:] if tag.startswith("v") else tag
     except (requests.RequestException, KeyError, ValueError):
         return None
+
+
+def _maybe_delegate_public_upgrade(argv: list[str]) -> None:
+    """Authenticate and run the latest release resolver for a public upgrade.
+
+    This is called by the console entry point before Click loads configuration
+    or inspects recovery cursors. Resolver/controller handoffs carry one of the
+    existing internal environment contracts and deliberately bypass this shim.
+    """
+
+    if not argv or argv[0] != "upgrade" or any(item in {"-h", "--help"} for item in argv[1:]):
+        return
+    if os.environ.get(_UPGRADE_HANDOFF_ENV) == "1" or os.environ.get(_STAGED_UPGRADE_ENV) == "1":
+        return
+    if platform.system().lower() == "windows":
+        # The installed Python controller already has an authenticated native
+        # Setup handoff. Do not replace or narrow its supported Windows matrix
+        # until a native resolver trampoline can preserve that exact contract.
+        return
+
+    try:
+        with upgrade.make_context("upgrade", argv[1:]) as command_context:
+            intent = dict(command_context.params)
+    except click.ClickException as exc:
+        exc.show()
+        raise SystemExit(exc.exit_code) from None
+    if intent["allow_unverified"]:
+        ux.err(
+            "--allow-unverified cannot be delegated to a modern release-owned resolver.",
+            indent="  ",
+        )
+        raise SystemExit(2)
+    if intent["target_version"] is not None:
+        intent["target_version"] = _normalize_target_version(intent["target_version"])
+    if os.name != "posix":
+        ux.err("Automatic release-resolver delegation requires macOS or Linux.", indent="  ")
+        raise SystemExit(1)
+    if intent["health_timeout"] != 60:
+        ux.err(
+            "--health-timeout cannot be forwarded to the POSIX release resolver; no resolver was downloaded.",
+            indent="  ",
+        )
+        raise SystemExit(2)
+
+    resolver_args: list[str] = []
+    if intent["yes"]:
+        resolver_args.append("--yes")
+    if intent["recover_corrupt_audit"]:
+        resolver_args.append("--recover-corrupt-audit")
+
+    authenticated_env = _sanitized_authenticated_child_env()
+    click.echo(f"  {ux.dim('→')} Authenticating the DefenseClaw stable release channel and release-owned resolver ...")
+    try:
+        with _authenticated_release_resolver(environment=authenticated_env) as (
+            bash,
+            resolver,
+            resolver_version,
+        ):
+            # The authenticated channel is the stable-target authority. Always
+            # make that target explicit so the resolver never rediscovers an
+            # unsigned "latest" release. An operator may still select an older
+            # immutable target while using the current resolver.
+            target_version = intent["target_version"] or resolver_version
+            resolver_args.extend(("--version", target_version))
+            bash.assert_stable()
+            child_env = dict(authenticated_env)
+            child_env[_UPGRADE_HANDOFF_ENV] = "1"
+            completed = subprocess.run(
+                [bash.path, resolver, *resolver_args],
+                check=False,
+                env=child_env,
+            )
+    except (OSError, subprocess.SubprocessError) as exc:
+        ux.err(f"Release-owned resolver authentication failed: {exc}", indent="  ")
+        ux.subhead(
+            "No configuration, service, migration cursor, or installed artifact was changed.",
+            indent="    ",
+        )
+        raise SystemExit(1) from exc
+    raise SystemExit(completed.returncode)
+
+
+def _warn_ignored_ca_overrides(environment: Mapping[str, str]) -> None:
+    """Report authenticated child CA overrides that will not be inherited."""
+
+    removed_ca_overrides = sorted(set(environment).intersection(_AUTHENTICATED_CA_OVERRIDE_ENV))
+    if not removed_ca_overrides:
+        return
+    ux.warn(
+        "Ignored CA trust overrides for authenticated release discovery: " + ", ".join(removed_ca_overrides),
+        indent="  ",
+    )
+    ux.subhead(
+        "Authenticated resolver and verifier child processes do not use "
+        "private CAs provided only through those variables. HTTPS proxy "
+        "variables remain enabled for their network requests.",
+        indent="    ",
+    )
+
+
+def _sanitized_authenticated_child_env() -> dict[str, str]:
+    """Remove interpreter, loader, shell-hook, and trust-root overrides."""
+
+    environment = os.environ.copy()
+    sanitized = _sanitize_authenticated_environment(environment)
+    _warn_ignored_ca_overrides(environment)
+    return sanitized
+
+
+@contextmanager
+def _authenticated_release_resolver(
+    *,
+    environment: Mapping[str, str] | None = None,
+):
+    """Yield the resolver bound by the authenticated mutable stable channel."""
+
+    trusted_environment = (
+        _sanitized_authenticated_child_env()
+        if environment is None
+        else _sanitize_authenticated_environment(environment)
+    )
+    with _trusted_system_bash() as bash:
+        with tempfile.TemporaryDirectory(prefix="defenseclaw-public-upgrade-") as directory:
+            os.chmod(directory, 0o700)
+            _assert_private_resolver_directory(directory)
+            with _cosign_verifier(strict=True) as cosign:
+                if not cosign:
+                    raise OSError("Cosign verifier is unavailable")
+                with _isolated_cosign_environment(trusted_environment) as cosign_environment:
+                    channel_path, _channel_bundle_path = _download_authenticated_channel_pair(
+                        directory=directory,
+                        cosign=cosign,
+                        cosign_environment=cosign_environment,
+                    )
+
+            try:
+                channel = parse_channel(Path(channel_path).read_bytes())
+            except (OSError, ChannelError) as exc:
+                raise OSError(f"stable release channel is invalid: {exc}") from exc
+            if channel["repository"] != GITHUB_REPO:
+                raise OSError("stable release channel repository does not match DefenseClaw")
+            resolver_version = channel["target_version"]
+            resolver = os.path.join(directory, _POSIX_RESOLVER_ASSET)
+            _download_private_channel_resolver(
+                channel["resolver_url"],
+                resolver,
+                _MAX_RESOLVER_BYTES,
+            )
+            _assert_private_resolver_file(resolver, _MAX_RESOLVER_BYTES)
+            expected = channel["resolver_sha256"]
+            if _sha256_file(resolver) != expected:
+                raise OSError("resolver digest does not match the authenticated stable channel")
+            try:
+                source = Path(resolver).read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise OSError("resolver is not valid UTF-8") from exc
+            if not source.splitlines() or source.splitlines()[-1] != RESOLVER_COMPLETENESS_MARKER:
+                raise OSError("resolver completeness marker is missing")
+            bash.assert_stable()
+            syntax = subprocess.run(
+                [bash.path, "-n", resolver],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+                env=trusted_environment,
+            )
+            if syntax.returncode != 0:
+                raise OSError("resolver failed bash syntax validation")
+            yield bash, resolver, resolver_version
+
+
+def _download_authenticated_channel_pair(
+    *,
+    directory: str,
+    cosign: str,
+    cosign_environment: Mapping[str, str],
+) -> tuple[str, str]:
+    """Return one channel/proof generation authenticated as a pair.
+
+    Resolve the branch once per attempt, then download both paths through that
+    immutable 40-hex commit locator. This prevents independent raw-path caches
+    from mixing channel generations during an atomic branch rotation. Retry a
+    small number of freshly resolved generations, but accept one only when
+    Cosign binds the exact manifest bytes to the exact release-workflow
+    identity. The unsigned ref/commit metadata is only an availability locator,
+    never an authentication input.
+    """
+
+    last_download_error: OSError | None = None
+    for attempt in range(_RELEASE_CHANNEL_AUTH_ATTEMPTS):
+        attempt_directory = os.path.join(
+            directory,
+            f"channel-attempt-{attempt + 1}",
+        )
+        os.mkdir(attempt_directory, 0o700)
+        _assert_private_resolver_directory(attempt_directory)
+        channel_ref_path = os.path.join(
+            attempt_directory,
+            "release-channel-ref.json",
+        )
+        try:
+            _download_private_release_channel_ref(
+                channel_ref_path,
+                _RELEASE_CHANNEL_REF_MAX_BYTES,
+            )
+            _assert_private_resolver_file(
+                channel_ref_path,
+                _RELEASE_CHANNEL_REF_MAX_BYTES,
+            )
+            channel_commit = _release_channel_commit_from_ref(channel_ref_path)
+            channel_path = os.path.join(attempt_directory, "stable.txt")
+            channel_bundle_path = os.path.join(
+                attempt_directory,
+                "stable.txt.bundle",
+            )
+            downloads = (
+                (
+                    "stable.txt",
+                    channel_path,
+                    MAX_CHANNEL_BYTES,
+                ),
+                (
+                    "stable.txt.bundle",
+                    channel_bundle_path,
+                    _RELEASE_CHANNEL_BUNDLE_MAX_BYTES,
+                ),
+            )
+            # Reverse the second request order on alternate attempts so a
+            # short-lived per-path cache split cannot consistently favor one side.
+            if attempt % 2:
+                downloads = tuple(reversed(downloads))
+            for name, destination, maximum in downloads:
+                _download_private_channel_asset(
+                    name,
+                    destination,
+                    maximum,
+                    commit=channel_commit,
+                )
+                _assert_private_resolver_file(destination, maximum)
+        except OSError as exc:
+            last_download_error = exc
+            shutil.rmtree(attempt_directory, ignore_errors=True)
+            if attempt + 1 < _RELEASE_CHANNEL_AUTH_ATTEMPTS:
+                time.sleep(_RELEASE_CHANNEL_RETRY_DELAYS[attempt])
+                continue
+            raise OSError(
+                f"stable channel download failed after {_RELEASE_CHANNEL_AUTH_ATTEMPTS} bounded attempts: {exc}"
+            ) from exc
+
+        verified = subprocess.run(
+            [
+                cosign,
+                "verify-blob",
+                "--bundle",
+                channel_bundle_path,
+                "--certificate-identity",
+                _RELEASE_WORKFLOW_IDENTITY,
+                "--certificate-oidc-issuer",
+                "https://token.actions.githubusercontent.com",
+                channel_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env=dict(cosign_environment),
+        )
+        if verified.returncode == 0:
+            return channel_path, channel_bundle_path
+        shutil.rmtree(attempt_directory, ignore_errors=True)
+        if attempt + 1 < _RELEASE_CHANNEL_AUTH_ATTEMPTS:
+            time.sleep(_RELEASE_CHANNEL_RETRY_DELAYS[attempt])
+
+    message = (
+        "stable channel signature did not match the DefenseClaw release "
+        f"workflow after {_RELEASE_CHANNEL_AUTH_ATTEMPTS} bounded attempts"
+    )
+    if last_download_error is not None:
+        message += f"; most recent channel download failure: {last_download_error}"
+    raise OSError(message)
+
+
+def _release_channel_commit_from_ref(path: str) -> str:
+    """Extract one immutable commit locator from GitHub's bounded ref response."""
+
+    try:
+        payload = Path(path).read_bytes()
+    except OSError as exc:
+        raise OSError("release channel ref response is invalid JSON") from exc
+    # Require one unambiguous commit locator in the entire bounded response,
+    # not merely one object.sha after parsing. This deliberately rejects a
+    # competing nested SHA even when GitHub adds an otherwise ignored field.
+    sha_matches = re.findall(
+        rb'"sha"\s*:\s*"([0-9a-f]{40})"',
+        payload,
+    )
+    if len(sha_matches) != 1:
+        raise OSError("release channel ref response lacks exactly one canonical commit ID")
+
+    def reject_duplicate_fields(
+        pairs: list[tuple[str, object]],
+    ) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for name, value in pairs:
+            if name in result:
+                raise ValueError(f"duplicate JSON field: {name}")
+            result[name] = value
+        return result
+
+    try:
+        document = json.loads(
+            payload,
+            object_pairs_hook=reject_duplicate_fields,
+        )
+    except ValueError as exc:
+        raise OSError("release channel ref response is invalid JSON") from exc
+    if not isinstance(document, dict) or document.get("ref") != ("refs/heads/release-channel"):
+        raise OSError("release channel ref response does not name the exact branch")
+    target = document.get("object")
+    if not isinstance(target, dict) or target.get("type") != "commit":
+        raise OSError("release channel ref response does not name a commit")
+    commit = target.get("sha")
+    if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise OSError("release channel ref response lacks one canonical commit ID")
+    if commit.encode("ascii") != sha_matches[0]:
+        raise OSError("release channel ref response commit binding is ambiguous")
+    return commit
+
+
+def _sanitize_authenticated_environment(
+    environment: Mapping[str, str],
+) -> dict[str, str]:
+    """Apply the authenticated-child policy even to caller-supplied mappings."""
+
+    sanitized = dict(environment)
+    for name in _AUTHENTICATED_CHILD_ENV_REMOVALS:
+        sanitized.pop(name, None)
+    for name in tuple(sanitized):
+        if name.startswith(_AUTHENTICATED_CHILD_ENV_PREFIX_REMOVALS):
+            sanitized.pop(name, None)
+    return sanitized
+
+
+@contextmanager
+def _cosign_environment_roots():
+    """Yield private roots, reusing them only within one Click command."""
+
+    command_context = click.get_current_context(silent=True)
+    if command_context is None:
+        with tempfile.TemporaryDirectory(prefix="defenseclaw-sigstore-home-") as root:
+            yield _create_cosign_environment_roots(root)
+        return
+
+    state = command_context.meta.get(_COSIGN_ENVIRONMENT_CONTEXT_KEY)
+    if state is None:
+        temporary = tempfile.TemporaryDirectory(prefix="defenseclaw-sigstore-home-")
+        try:
+            roots = _create_cosign_environment_roots(temporary.name)
+        except BaseException:
+            temporary.cleanup()
+            raise
+        state = (temporary, roots)
+        command_context.meta[_COSIGN_ENVIRONMENT_CONTEXT_KEY] = state
+
+        def cleanup_command_roots() -> None:
+            try:
+                temporary.cleanup()
+            finally:
+                if command_context.meta.get(_COSIGN_ENVIRONMENT_CONTEXT_KEY) is state:
+                    command_context.meta.pop(_COSIGN_ENVIRONMENT_CONTEXT_KEY, None)
+
+        command_context.call_on_close(cleanup_command_roots)
+    _temporary, roots = state
+    yield roots
+
+
+def _create_cosign_environment_roots(root: str) -> dict[str, str]:
+    """Create one owner-private HOME/XDG root set for authenticated Cosign."""
+
+    os.chmod(root, 0o700)
+    roots = {
+        "HOME": os.path.join(root, "home"),
+        "XDG_CONFIG_HOME": os.path.join(root, "config"),
+        "XDG_CACHE_HOME": os.path.join(root, "cache"),
+        "XDG_DATA_HOME": os.path.join(root, "data"),
+        "XDG_STATE_HOME": os.path.join(root, "state"),
+    }
+    for path in roots.values():
+        os.mkdir(path, 0o700)
+    return roots
+
+
+@contextmanager
+def _isolated_cosign_environment(
+    environment: Mapping[str, str] | None = None,
+):
+    """Give Cosign command-private config/cache roots and sanitized network access."""
+
+    source_environment = os.environ if environment is None else environment
+    _warn_ignored_ca_overrides(source_environment)
+    trusted_environment = _sanitize_authenticated_environment(source_environment)
+    with _cosign_environment_roots() as roots:
+        trusted_environment.update(roots)
+        yield trusted_environment
+
+
+def _system_bash_identity(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+        info.st_size,
+    )
+
+
+def _system_bash_info_is_trusted(info: os.stat_result) -> bool:
+    mode = stat.S_IMODE(info.st_mode)
+    return (
+        stat.S_ISREG(info.st_mode)
+        and info.st_uid == 0
+        and not mode & 0o022
+        and bool(mode & 0o111)
+        and 0 < info.st_size <= _MAX_SYSTEM_BASH_BYTES
+    )
+
+
+@contextmanager
+def _trusted_system_bash():
+    for candidate in ("/bin/bash", "/usr/bin/bash"):
+        try:
+            named = os.lstat(candidate)
+        except OSError:
+            continue
+        if stat.S_ISLNK(named.st_mode) or not _system_bash_info_is_trusted(named):
+            continue
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(candidate, flags)
+        except OSError:
+            continue
+        try:
+            opened = os.fstat(descriptor)
+            identity = _system_bash_identity(named)
+            if not _system_bash_info_is_trusted(opened) or _system_bash_identity(opened) != identity:
+                raise OSError("trusted system bash changed while it was opened")
+            handle = _TrustedSystemBash(candidate, descriptor, identity)
+            handle.assert_stable()
+            yield handle
+            return
+        finally:
+            os.close(descriptor)
+    raise OSError("a trusted root-owned system bash interpreter is unavailable")
+
+
+def _assert_private_resolver_directory(path: str) -> None:
+    info = os.lstat(path)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise OSError("resolver staging directory is not private and caller-owned")
+
+
+def _assert_private_resolver_file(path: str, maximum: int) -> None:
+    info = os.lstat(path)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
+        or not 0 < info.st_size <= maximum
+    ):
+        raise OSError("resolver evidence lost private bounded custody")
+
+
+def _validate_release_asset_url(url: str) -> None:
+    if os.environ.get(_UPGRADE_TEST_RELEASE_BASE_URL_ENV, "").strip():
+        base = _release_download_base()
+        if url != base and not url.startswith(base + "/"):
+            raise OSError("resolver test download left the gated loopback endpoint")
+        return
+    parsed = urlsplit(url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise OSError("release asset URL has an invalid port") from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in _COSIGN_BOOTSTRAP_ALLOWED_HOSTS
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or parsed.fragment
+    ):
+        raise OSError("release asset redirect left the pinned HTTPS host set")
+
+
+def _validate_release_channel_ref_url(url: str) -> None:
+    parsed = urlsplit(url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise OSError("release channel ref URL has an invalid port") from exc
+    expected_path = f"/repos/{GITHUB_REPO}/git/ref/heads/release-channel"
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "api.github.com"
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or parsed.path != expected_path
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise OSError("release channel ref URL left the pinned HTTPS endpoint")
+
+
+def _validate_release_channel_url(
+    url: str,
+    *,
+    commit: str,
+    name: str,
+) -> None:
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None or name not in {
+        "stable.txt",
+        "stable.txt.bundle",
+    }:
+        raise OSError("release channel URL expectation is invalid")
+    parsed = urlsplit(url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise OSError("release channel URL has an invalid port") from exc
+    expected_path = f"/{GITHUB_REPO}/{commit}/{name}"
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "raw.githubusercontent.com"
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or parsed.path != expected_path
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise OSError("release channel URL left the pinned HTTPS endpoint")
+
+
+@contextmanager
+def _authenticated_requests_session():
+    """Return a Requests session that ignores ambient CA settings."""
+
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+def _authenticated_request_proxies(url: str) -> dict[str, str]:
+    """Preserve explicit proxy routing without inheriting CA overrides."""
+
+    environment_proxies = requests.utils.get_environ_proxies(url)
+    scheme = urlsplit(url).scheme
+    proxy = environment_proxies.get(scheme) or environment_proxies.get("all")
+    if not isinstance(proxy, str) or not proxy:
+        return {}
+    return {scheme: proxy}
+
+
+def _download_private_url_with_session(
+    url: str,
+    label: str,
+    destination: str,
+    maximum: int,
+    *,
+    validate_url: Callable[[str], None],
+    session: requests.Session,
+) -> None:
+    """Stream one authenticated-input dependency into private custody."""
+
+    response = None
+    for _redirect in range(_MAX_PRIVATE_REDIRECTS):
+        validate_url(url)
+        try:
+            response = session.get(
+                url,
+                stream=True,
+                timeout=(15, 120),
+                allow_redirects=False,
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Pragma": "no-cache",
+                    "User-Agent": "DefenseClaw-release-channel/1",
+                },
+                proxies=_authenticated_request_proxies(url),
+            )
+        except requests.RequestException as exc:
+            raise OSError(f"could not download {label}") from exc
+        if response.status_code in {301, 302, 303, 307, 308}:
+            location = response.headers.get("location", "")
+            response.close()
+            response = None
+            if not location:
+                raise OSError(f"{label} redirect had no location")
+            url = urljoin(url, location)
+            continue
+        break
+    else:
+        raise OSError(f"{label} download exceeded the redirect limit")
+    if response is None or response.status_code != 200:
+        status = "unavailable" if response is None else str(response.status_code)
+        if response is not None:
+            response.close()
+        raise OSError(f"{label} is unavailable (HTTP {status})")
+
+    content_length = response.headers.get("content-length", "")
+    if content_length:
+        try:
+            declared = int(content_length)
+        except ValueError as exc:
+            response.close()
+            raise OSError(f"{label} has invalid content length") from exc
+        if not 0 < declared <= maximum:
+            response.close()
+            raise OSError(f"{label} exceeds its size limit")
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    size = 0
+    try:
+        descriptor = os.open(destination, flags, 0o600)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            descriptor = -1
+            try:
+                for chunk in response.iter_content(chunk_size=128 * 1024):
+                    if not chunk:
+                        continue
+                    size += len(chunk)
+                    if size > maximum:
+                        raise OSError(f"{label} exceeds its size limit")
+                    stream.write(chunk)
+            except requests.RequestException as exc:
+                raise OSError(f"{label} download was interrupted") from exc
+            stream.flush()
+            os.fsync(stream.fileno())
+    finally:
+        response.close()
+        if descriptor >= 0:
+            os.close(descriptor)
+    if size == 0:
+        raise OSError(f"{label} is empty")
+
+
+def _download_private_url(
+    url: str,
+    label: str,
+    destination: str,
+    maximum: int,
+    *,
+    validate_url: Callable[[str], None],
+) -> None:
+    """Download one authenticated input without ambient Requests settings."""
+
+    with _authenticated_requests_session() as session:
+        _download_private_url_with_session(
+            url,
+            label,
+            destination,
+            maximum,
+            validate_url=validate_url,
+            session=session,
+        )
+
+
+def _download_private_channel_asset(
+    name: str,
+    destination: str,
+    maximum: int,
+    *,
+    commit: str,
+) -> None:
+    if name not in {"stable.txt", "stable.txt.bundle"}:
+        raise OSError("unsupported release channel asset")
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise OSError("release channel asset commit is invalid")
+    _download_private_url(
+        f"{_RELEASE_CHANNEL_RAW_BASE_URL}/{commit}/{name}",
+        f"release channel asset {name}",
+        destination,
+        maximum,
+        validate_url=lambda url: _validate_release_channel_url(
+            url,
+            commit=commit,
+            name=name,
+        ),
+    )
+
+
+def _download_private_release_channel_ref(
+    destination: str,
+    maximum: int,
+) -> None:
+    _download_private_url(
+        _RELEASE_CHANNEL_REF_URL,
+        "release channel ref",
+        destination,
+        maximum,
+        validate_url=_validate_release_channel_ref_url,
+    )
+
+
+def _download_private_channel_resolver(
+    url: str,
+    destination: str,
+    maximum: int,
+) -> None:
+    _download_private_url(
+        url,
+        "release channel resolver",
+        destination,
+        maximum,
+        validate_url=_validate_release_asset_url,
+    )
 
 
 def _github_headers() -> dict[str, str]:
@@ -1918,7 +2746,11 @@ def _detect_platform() -> tuple[str, str]:
     return system, arch
 
 
-def _native_windows_install_state(os_name: str) -> dict[str, object] | None:
+def _native_windows_install_state(
+    os_name: str,
+    *,
+    expected_version: str | None = None,
+) -> dict[str, object] | None:
     """Return installer state for native Windows EXE installs, if present."""
     if os_name != "windows":
         return None
@@ -1932,52 +2764,106 @@ def _native_windows_install_state(os_name: str) -> dict[str, object] | None:
     install_root = _trusted_child_path(local_appdata, "Programs", "DefenseClaw")
     state_path = os.path.join(install_root, "installer", _WINDOWS_INSTALL_STATE)
     try:
+        state_info = os.lstat(state_path)
+        if stat.S_ISLNK(state_info.st_mode) or not stat.S_ISREG(state_info.st_mode):
+            raise OSError("installer state is not a regular file")
+        from defenseclaw import windows_acl
+
+        state_security = windows_acl.capture_path(state_path)
+        windows_acl.assert_trusted_owner(state_security)
+        windows_acl.assert_not_broadly_writable(state_security)
         with open(state_path, encoding="utf-8") as stream:
             state = json.load(stream)
+        state_after = os.lstat(state_path)
+        if (
+            stat.S_ISLNK(state_after.st_mode)
+            or not stat.S_ISREG(state_after.st_mode)
+            or (state_info.st_dev, state_info.st_ino) != (state_after.st_dev, state_after.st_ino)
+            or windows_acl.capture_path(state_path) != state_security
+        ):
+            raise OSError("installer state changed during validation")
     except FileNotFoundError:
         return None
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         ux.err(f"Native installer state could not be read safely: {exc}", indent="  ")
         raise SystemExit(1) from exc
     if not isinstance(state, dict):
         ux.err("Native installer state must be a JSON object.", indent="  ")
         raise SystemExit(1)
-    if state.get("install_kind") != "native-windows-exe":
-        ux.err("Native installer state has an unexpected install kind.", indent="  ")
+    if (
+        state.get("schema_version") != 1
+        or state.get("install_kind") != "native-windows-exe"
+        or state.get("install_scope") != "user"
+        or not isinstance(state.get("version"), str)
+        or _CANONICAL_VERSION_RE.fullmatch(state["version"]) is None
+        or state.get("connector") not in {"none", "codex", "claudecode"}
+        or state.get("mode") not in {"observe", "action"}
+    ):
+        ux.err("Native installer state is not a supported native Windows install.", indent="  ")
+        raise SystemExit(1)
+    if expected_version is not None and state["version"] != expected_version:
+        ux.err(
+            f"Native installer state version {state['version']} does not match the installed CLI {expected_version}.",
+            indent="  ",
+        )
+        raise SystemExit(1)
+    source_commit = state.get("source_commit")
+    if source_commit not in (None, "") and (
+        not isinstance(source_commit, str) or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None
+    ):
+        ux.err("Native installer state has an invalid source build identity.", indent="  ")
+        raise SystemExit(1)
+    if state.get("path_value_created") is True and state.get("path_entry_owned") is not True:
+        ux.err("Native installer state has inconsistent PATH ownership.", indent="  ")
+        raise SystemExit(1)
+    if state.get("path_value_created") is True and state.get("path_separator_reused") is True:
+        ux.err("Native installer state has inconsistent PATH separator ownership.", indent="  ")
         raise SystemExit(1)
 
     root = _trusted_child_path(install_root)
     command_dir = _trusted_child_path(root, "bin")
     expected_root = _trusted_child_path(local_appdata, "Programs", "DefenseClaw")
-    if os.path.normcase(root) != os.path.normcase(expected_root):
-        ux.err(f"Native installer state has an unexpected install root: {root}", indent="  ")
-        raise SystemExit(1)
+    try:
+        from defenseclaw import windows_acl
+
+        for managed_directory in (
+            root,
+            command_dir,
+            _trusted_child_path(root, "installer"),
+        ):
+            managed_security = windows_acl.capture_path(managed_directory, directory=True)
+            windows_acl.assert_trusted_owner(managed_security)
+            windows_acl.assert_not_broadly_writable(managed_security)
+    except (OSError, windows_acl.WindowsAclError) as exc:
+        ux.err(f"Native installer directory custody could not be verified: {exc}", indent="  ")
+        raise SystemExit(1) from exc
     setup = _trusted_child_path(
         local_appdata,
         "DefenseClaw",
         "InstallerCache",
         _WINDOWS_SETUP_ASSET,
     )
-    recorded_setup = state.get("maintenance_path")
-    if recorded_setup and (
-        not isinstance(recorded_setup, str)
-        or os.path.normcase(os.path.realpath(recorded_setup)) != os.path.normcase(setup)
-    ):
-        ux.err("Native installer state has an unexpected maintenance path.", indent="  ")
-        raise SystemExit(1)
-    data_root = state.get("data_root")
     expected_data_root = _trusted_child_path(profile, ".defenseclaw")
-    if data_root and (
-        not isinstance(data_root, str)
-        or os.path.normcase(os.path.realpath(data_root)) != os.path.normcase(expected_data_root)
-    ):
-        ux.err("Native installer state has an unexpected data root.", indent="  ")
-        raise SystemExit(1)
+    expected_paths = {
+        "install root": (state.get("install_root"), expected_root),
+        "command directory": (state.get("command_dir"), command_dir),
+        "data root": (state.get("data_root"), expected_data_root),
+        "runtime": (state.get("runtime"), _trusted_child_path(root, "runtime", "python")),
+        "maintenance path": (state.get("maintenance_path"), setup),
+    }
+    for label, (recorded, expected) in expected_paths.items():
+        if (
+            not isinstance(recorded, str)
+            or os.path.normcase(os.path.realpath(recorded)) != os.path.normcase(expected)
+        ):
+            ux.err(f"Native installer state has an unexpected {label}.", indent="  ")
+            raise SystemExit(1)
+    gateway_path = _trusted_child_path(command_dir, _installed_gateway_filename(os_name))
     state["install_root"] = root
     state["command_dir"] = command_dir
+    state["gateway_path"] = gateway_path
     state["setup_path"] = setup
     state["maintenance_path"] = setup
-    state["install_scope"] = state.get("install_scope", "user")
     state["data_root"] = expected_data_root
     return state
 
@@ -2292,13 +3178,31 @@ def _preflight_installed_source_coherence(
     data_dir: str,
     *,
     config_path: str | None = None,
+    native_windows_state: dict[str, object] | None = None,
 ) -> None:
     """Reject manual/partial release overwrites before target I/O or mutation."""
 
     if _version_key(current_version) < _version_key(_STRICT_SIGSTORE_RELEASE_VERSION):
         return
 
-    gateway_path = os.path.expanduser(os.path.join("~/.local/bin", _installed_gateway_filename(os_name)))
+    native_gateway = native_windows_state is not None
+    if native_gateway:
+        gateway_path = native_windows_state.get("gateway_path")
+        if not isinstance(gateway_path, str) or not gateway_path:
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} native installer state has no canonical gateway."
+            )
+        legacy_gateway = os.path.expanduser(
+            os.path.join("~/.local/bin", _installed_gateway_filename(os_name))
+        )
+        if os.path.lexists(legacy_gateway):
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} has a shadow gateway outside native installer custody."
+            )
+    else:
+        gateway_path = os.path.expanduser(
+            os.path.join("~/.local/bin", _installed_gateway_filename(os_name))
+        )
     try:
         gateway_stat = os.lstat(gateway_path)
     except OSError:
@@ -2309,9 +3213,20 @@ def _preflight_installed_source_coherence(
         _fail_installed_source_coherence(
             f"Installed DefenseClaw {current_version} gateway is not a regular release-managed file."
         )
+    if native_gateway:
+        try:
+            from defenseclaw import windows_acl
+
+            gateway_security = windows_acl.capture_path(gateway_path)
+            windows_acl.assert_trusted_owner(gateway_security)
+            windows_acl.assert_not_broadly_writable(gateway_security)
+        except (OSError, windows_acl.WindowsAclError):
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} gateway is not owned by the native installer."
+            )
     try:
         result = subprocess.run(
-            [gateway_path, "--version"],
+            [gateway_path, "--version-json" if native_gateway else "--version"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -2322,10 +3237,61 @@ def _preflight_installed_source_coherence(
             f"Installed DefenseClaw {current_version} gateway version could not be verified."
         )
     output = (result.stdout or "") + (result.stderr or "")
-    reported = _VERSION_TOKEN_RE.findall(output)
-    if result.returncode != 0 or reported != [current_version]:
-        actual = reported[0] if len(reported) == 1 else "unverifiable"
-        _fail_installed_source_coherence(f"Installed component version drift: CLI={current_version}, gateway={actual}.")
+    if native_gateway:
+        try:
+            identity = json.loads(output)
+        except (TypeError, json.JSONDecodeError):
+            identity = None
+        expected_commit = native_windows_state.get("source_commit")
+        if (
+            result.returncode != 0
+            or not isinstance(identity, dict)
+            or identity.get("schema_version") != 1
+            or identity.get("name") != "defenseclaw-gateway"
+            or identity.get("version") != current_version
+        ):
+            actual = identity.get("version", "unverifiable") if isinstance(identity, dict) else "unverifiable"
+            _fail_installed_source_coherence(
+                f"Installed component version drift: CLI={current_version}, gateway={actual}."
+            )
+        if expected_commit not in (None, "") and identity.get("commit") != expected_commit:
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} gateway build identity does not match installer state."
+            )
+        try:
+            gateway_after = os.lstat(gateway_path)
+        except OSError:
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} gateway changed during validation."
+            )
+        if (
+            stat.S_ISLNK(gateway_after.st_mode)
+            or not stat.S_ISREG(gateway_after.st_mode)
+            or (gateway_stat.st_dev, gateway_stat.st_ino)
+            != (gateway_after.st_dev, gateway_after.st_ino)
+        ):
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} gateway changed during validation."
+            )
+        try:
+            gateway_security_after = windows_acl.capture_path(gateway_path)
+            windows_acl.assert_trusted_owner(gateway_security_after)
+            windows_acl.assert_not_broadly_writable(gateway_security_after)
+        except (OSError, windows_acl.WindowsAclError):
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} gateway ownership changed during validation."
+            )
+        if gateway_security_after != gateway_security:
+            _fail_installed_source_coherence(
+                f"Installed DefenseClaw {current_version} gateway ownership changed during validation."
+            )
+    else:
+        reported = _VERSION_TOKEN_RE.findall(output)
+        if result.returncode != 0 or reported != [current_version]:
+            actual = reported[0] if len(reported) == 1 else "unverifiable"
+            _fail_installed_source_coherence(
+                f"Installed component version drift: CLI={current_version}, gateway={actual}."
+            )
 
     if _version_key(current_version) < _version_key(_OBSERVABILITY_V8_MIGRATION_VERSION):
         return
@@ -3040,7 +4006,11 @@ def _validate_cosign_bootstrap_url(url: str) -> None:
         raise OSError("Cosign bootstrap redirect left the pinned HTTPS host set")
 
 
-def _download_bootstrap_cosign(destination_dir: str) -> str:
+def _download_bootstrap_cosign_with_session(
+    destination_dir: str,
+    *,
+    session: requests.Session,
+) -> str:
     """Download and authenticate the pinned POSIX Cosign verifier.
 
     This deliberately does not install anything system-wide. The verifier is
@@ -3051,7 +4021,7 @@ def _download_bootstrap_cosign(destination_dir: str) -> str:
     """
 
     os_name, arch = _detect_platform()
-    expected = _COSIGN_BOOTSTRAP_SHA256.get((os_name, arch))
+    expected = COSIGN_BOOTSTRAP_SHA256.get((os_name, arch))
     if expected is None or os.name != "posix":
         raise OSError(f"automatic Cosign bootstrap is unavailable for {os_name}/{arch}")
 
@@ -3065,17 +4035,18 @@ def _download_bootstrap_cosign(destination_dir: str) -> str:
         raise OSError("Cosign bootstrap directory is not private and caller-owned")
 
     filename = f"cosign-{os_name}-{arch}"
-    url = f"https://github.com/sigstore/cosign/releases/download/v{_COSIGN_BOOTSTRAP_VERSION}/{filename}"
+    url = f"https://github.com/sigstore/cosign/releases/download/v{COSIGN_BOOTSTRAP_VERSION}/{filename}"
     response = None
-    for _redirect in range(6):
+    for _redirect in range(_MAX_PRIVATE_REDIRECTS):
         _validate_cosign_bootstrap_url(url)
         for attempt in range(1, 4):
             try:
-                response = requests.get(
+                response = session.get(
                     url,
                     stream=True,
                     timeout=(15, 120),
                     allow_redirects=False,
+                    proxies=_authenticated_request_proxies(url),
                 )
             except requests.RequestException as exc:
                 if attempt < 3:
@@ -3167,24 +4138,141 @@ def _download_bootstrap_cosign(destination_dir: str) -> str:
     return destination
 
 
+def _download_bootstrap_cosign(destination_dir: str) -> str:
+    """Download pinned Cosign without ambient Requests CA settings."""
+
+    with _authenticated_requests_session() as session:
+        return _download_bootstrap_cosign_with_session(
+            destination_dir,
+            session=session,
+        )
+
+
+def _copy_authenticated_cosign(source: str, destination_dir: str) -> str:
+    """Copy an ambient verifier only when its bytes match the pinned digest."""
+
+    os_name, arch = _detect_platform()
+    expected = COSIGN_BOOTSTRAP_SHA256.get((os_name, arch))
+    if expected is None or os.name != "posix":
+        raise OSError(f"authenticated Cosign reuse is unavailable for {os_name}/{arch}")
+
+    root_info = os.lstat(destination_dir)
+    if (
+        stat.S_ISLNK(root_info.st_mode)
+        or not stat.S_ISDIR(root_info.st_mode)
+        or root_info.st_uid != os.getuid()
+        or stat.S_IMODE(root_info.st_mode) != 0o700
+    ):
+        raise OSError("Cosign staging directory is not private and caller-owned")
+
+    # PATH-managed tools are commonly symlinks (for example, Homebrew's
+    # ``bin/cosign``).  Follow that one ambient name during open, then bind
+    # every trust decision to the resulting descriptor: fstat must describe a
+    # bounded regular file and the bytes copied from that descriptor must match
+    # the pinned digest.  The private destination remains O_NOFOLLOW.
+    source_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    source_descriptor = os.open(source, source_flags)
+    destination = os.path.join(destination_dir, f"cosign-{os_name}-{arch}-authenticated")
+    destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    destination_flags |= getattr(os, "O_NOFOLLOW", 0)
+    destination_descriptor = -1
+    destination_created = False
+    size = 0
+    digest = hashlib.sha256()
+    try:
+        source_info = os.fstat(source_descriptor)
+        if not stat.S_ISREG(source_info.st_mode) or not 0 < source_info.st_size <= _COSIGN_BOOTSTRAP_MAX_BYTES:
+            raise OSError("ambient Cosign is not a bounded regular file")
+        destination_descriptor = os.open(destination, destination_flags, 0o600)
+        destination_created = True
+        with ExitStack() as stack:
+            owned_source_descriptor = source_descriptor
+            source_descriptor = -1
+            source_stream = stack.enter_context(_owned_fd_stream(owned_source_descriptor, "rb"))
+            owned_destination_descriptor = destination_descriptor
+            destination_descriptor = -1
+            destination_stream = stack.enter_context(_owned_fd_stream(owned_destination_descriptor, "wb"))
+            while chunk := source_stream.read(128 * 1024):
+                size += len(chunk)
+                if size > _COSIGN_BOOTSTRAP_MAX_BYTES:
+                    raise OSError("ambient Cosign exceeds the authentication limit")
+                destination_stream.write(chunk)
+                digest.update(chunk)
+            destination_stream.flush()
+            os.fsync(destination_stream.fileno())
+    except BaseException:
+        if destination_created:
+            try:
+                os.unlink(destination)
+            except OSError:
+                pass
+        raise
+    finally:
+        if source_descriptor >= 0:
+            os.close(source_descriptor)
+        if destination_descriptor >= 0:
+            os.close(destination_descriptor)
+
+    if size == 0 or digest.hexdigest() != expected:
+        os.unlink(destination)
+        raise OSError("ambient Cosign does not match the pinned verifier digest")
+    os.chmod(destination, 0o700)
+    info = os.lstat(destination)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+        or info.st_nlink != 1
+        or info.st_size != size
+        or _sha256_file(destination) != expected
+    ):
+        raise OSError("authenticated Cosign copy lost private file custody")
+    return destination
+
+
+@contextmanager
+def _owned_fd_stream(descriptor: int, mode: str):
+    """Take descriptor ownership before wrapping it in a binary stream."""
+
+    try:
+        stream = os.fdopen(descriptor, mode, closefd=True)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    try:
+        yield stream
+    finally:
+        stream.close()
+
+
 @contextmanager
 def _cosign_verifier(*, strict: bool):
-    """Yield an existing Cosign or an authenticated ephemeral verifier."""
+    """Yield a verifier; strict callers receive only pinned private bytes."""
 
     existing = shutil.which("cosign")
-    if existing:
+    if not strict:
         yield existing
         return
-    if not strict:
-        yield None
-        return
     with tempfile.TemporaryDirectory(prefix="defenseclaw-cosign-") as directory:
-        if os.name == "posix":
-            os.chmod(directory, 0o700)
-        click.echo(
-            f"  {ux.dim('→')} Cosign was not found; authenticating temporary Cosign {_COSIGN_BOOTSTRAP_VERSION} ..."
-        )
-        verifier = _download_bootstrap_cosign(directory)
+        os.chmod(directory, 0o700)
+        verifier = None
+        if existing:
+            try:
+                verifier = _copy_authenticated_cosign(existing, directory)
+            except OSError:
+                ux.subhead(
+                    "Ambient Cosign was rejected by pinned digest or custody "
+                    "checks; falling back to an authenticated temporary verifier.",
+                    indent="  ",
+                )
+                verifier = None
+        if verifier is None:
+            click.echo(f"  {ux.dim('→')} Authenticating temporary Cosign {COSIGN_BOOTSTRAP_VERSION} ...")
+            verifier = _download_bootstrap_cosign(directory)
         ux.ok("Temporary Cosign verifier authenticated")
         yield verifier
 
@@ -3274,13 +4362,15 @@ def _verify_checksums_sigstore(
                 "https://token.actions.githubusercontent.com",
                 checksums_path,
             ]
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
+            with _isolated_cosign_environment() as cosign_environment:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                    env=cosign_environment,
+                )
     except (OSError, subprocess.SubprocessError) as exc:
         ux.err(f"Could not verify checksums.txt Sigstore signature: {exc}", indent="  ")
         raise SystemExit(1) from exc
@@ -6141,6 +7231,11 @@ def _poll_handoff_gateway_readiness(
         f"  {ux.dim('→')} Waiting for strict gateway readiness "
         f"as version {expected_version} (timeout {readiness_timeout}s) ..."
     )
+    readiness_environment = _gateway_process_environment(
+        data_dir,
+        config_path=active_config_path,
+    )
+    readiness_environment[_UPGRADE_HANDOFF_ENV] = "1"
     try:
         completed = subprocess.run(
             [
@@ -6152,7 +7247,7 @@ def _poll_handoff_gateway_readiness(
                 expected_version,
             ],
             check=False,
-            env=_gateway_process_environment(data_dir, config_path=active_config_path),
+            env=readiness_environment,
             timeout=readiness_timeout + 5,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -6172,15 +7267,15 @@ def _poll_health(
 ) -> None:
     """Poll until the expected gateway process reports healthy.
 
-    ``gateway.state=running`` alone is insufficient during a replacement or
+    A fleet ``gateway.state`` alone is insufficient during a replacement or
     rollback: a target process that failed to stop can keep answering on the
-    old socket and make the transaction look successful. An intentionally
-    disabled fleet uplink is also healthy when the local API is serving.
-    Release gateways expose their binary version in the health provenance
-    quartet, so callers that know the expected release require an exact match
-    before accepting either state.
+    old socket and make the transaction look successful. Version-bound checks
+    therefore delegate to the current gateway's authenticated PID, process
+    generation, listener, data-directory, subsystem, and version contract.
+    The legacy public-health fallback only accepts running or intentionally
+    disabled fleet state.
     """
-    if os.environ.get(_UPGRADE_HANDOFF_ENV) == "1":
+    if expected_version is not None:
         _poll_handoff_gateway_readiness(cfg, timeout_seconds, expected_version)
         return
 
@@ -6217,7 +7312,6 @@ def _poll_health(
     # when the sidecar crashed mid-upgrade.
     last_state = ""
     last_err = ""
-    last_reported_version = ""
     click.echo(f"  {ux.dim('→')} Waiting for gateway to become healthy (timeout {timeout_seconds}s) ...")
 
     while time.monotonic() < deadline:
@@ -6230,20 +7324,6 @@ def _poll_health(
                     click.echo(f"    {ux.dim('gateway:')} {gw_state}")
                     last_state = gw_state
                 if gw_state in {"running", "disabled"}:
-                    if expected_version is not None:
-                        provenance = snap.get("provenance")
-                        reported_version = provenance.get("binary_version") if isinstance(provenance, dict) else None
-                        version_label = (
-                            reported_version if isinstance(reported_version, str) and reported_version else "missing"
-                        )
-                        if reported_version != expected_version:
-                            if version_label != last_reported_version:
-                                click.echo(
-                                    f"    {ux.dim('gateway version:')} {version_label} (expected {expected_version})"
-                                )
-                                last_reported_version = version_label
-                            time.sleep(2)
-                            continue
                     if gw_state == "disabled":
                         ux.ok("Gateway API is healthy; fleet uplink is disabled by configuration")
                     else:
@@ -6271,10 +7351,7 @@ def _poll_health(
                 last_state = ""
         time.sleep(2)
 
-    if expected_version is None:
-        ux.warn(f"Gateway did not become healthy within {timeout_seconds}s")
-    else:
-        ux.warn(f"Gateway did not become healthy as version {expected_version} within {timeout_seconds}s")
+    ux.err(f"Gateway did not become healthy within {timeout_seconds}s")
     ux.subhead("Check telemetry: defenseclaw tui (canonical SQLite event history and destination status)")
     ux.subhead("Run:  defenseclaw-gateway status")
     raise SystemExit(1)
@@ -8730,24 +9807,26 @@ def _verify_staged_checksums_signature(
                     f"^https://github.com/{GITHUB_REPO}/.+",
                 ]
             )
-            completed = subprocess.run(
-                [
-                    cosign,
-                    "verify-blob",
-                    "--certificate",
-                    certificate_path,
-                    "--signature",
-                    signature_path,
-                    *identity_args,
-                    "--certificate-oidc-issuer",
-                    "https://token.actions.githubusercontent.com",
-                    checksums_path,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
+            with _isolated_cosign_environment() as cosign_environment:
+                completed = subprocess.run(
+                    [
+                        cosign,
+                        "verify-blob",
+                        "--certificate",
+                        certificate_path,
+                        "--signature",
+                        signature_path,
+                        *identity_args,
+                        "--certificate-oidc-issuer",
+                        "https://token.actions.githubusercontent.com",
+                        checksums_path,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                    env=cosign_environment,
+                )
     except (OSError, subprocess.SubprocessError) as exc:
         raise OSError("staged bridge checksum signature verification failed") from exc
     if completed.returncode != 0:

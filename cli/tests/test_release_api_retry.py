@@ -47,6 +47,21 @@ def _api(responses: list[subprocess.CompletedProcess[str]], sleeps: list[float])
     )
 
 
+def _comparison_payload(
+    status: object,
+    *,
+    base_commit: object = COMMIT,
+    merge_base_commit: object = COMMIT,
+) -> str:
+    return json.dumps(
+        {
+            "status": status,
+            "base_commit": {"sha": base_commit},
+            "merge_base_commit": {"sha": merge_base_commit},
+        }
+    )
+
+
 def test_tag_absence_is_only_an_explicit_404_after_transient_retry() -> None:
     sleeps: list[float] = []
     api = _api(
@@ -92,6 +107,73 @@ def test_release_listing_paginates_before_declaring_absence() -> None:
 
     assert api.release_by_tag(TAG) == target
     assert sleeps == []
+
+
+def test_release_rows_deduplicates_identical_pagination_overlap() -> None:
+    sleeps: list[float] = []
+    first_page = [
+        {
+            "id": index + 1,
+            "tag_name": f"0.7.{index}",
+            "draft": False,
+            "prerelease": False,
+            "immutable": True,
+            "assets": [],
+        }
+        for index in range(100)
+    ]
+    overlap = first_page[-1]
+    newest = {
+        "id": 101,
+        "tag_name": TAG,
+        "draft": False,
+        "prerelease": False,
+        "immutable": True,
+        "assets": [],
+    }
+    api = _api(
+        [
+            _completed(200, body=json.dumps(first_page)),
+            _completed(200, body=json.dumps([overlap, newest])),
+        ],
+        sleeps,
+    )
+
+    rows = api.release_rows()
+
+    assert len(rows) == 101
+    assert rows.count(overlap) == 1
+    assert rows[-1] == newest
+    assert sleeps == []
+
+
+def test_release_rows_rejects_conflicting_pagination_overlap() -> None:
+    sleeps: list[float] = []
+    first_page = [
+        {
+            "id": index + 1,
+            "tag_name": f"0.7.{index}",
+            "draft": False,
+            "prerelease": False,
+            "immutable": True,
+            "assets": [],
+        }
+        for index in range(100)
+    ]
+    changed = dict(first_page[-1], draft=True)
+    api = _api(
+        [
+            _completed(200, body=json.dumps(first_page)),
+            _completed(200, body=json.dumps([changed])),
+        ],
+        sleeps,
+    )
+
+    with pytest.raises(
+        release_api_retry.ReleaseAPIError,
+        match="changed while paginating",
+    ):
+        api.release_rows()
 
 
 def test_transient_exhaustion_is_never_reported_as_absence() -> None:
@@ -158,6 +240,93 @@ def test_permanent_api_failure_does_not_retry_or_look_absent() -> None:
     with pytest.raises(release_api_retry.ReleaseAPIError, match="forbidden"):
         api.release_by_tag(TAG)
     assert sleeps == []
+
+
+@pytest.mark.parametrize("status", ["identical", "ahead"])
+def test_release_commit_on_main_accepts_exact_tip_or_advanced_main(status: str) -> None:
+    requested: list[list[str]] = []
+
+    def runner(*args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        requested.append(list(args[0]))  # type: ignore[arg-type]
+        return _completed(200, body=_comparison_payload(status))
+
+    api = release_api_retry.GitHubReleaseAPI(
+        repository=REPOSITORY,
+        attempts=1,
+        runner=runner,
+    )
+
+    release_api_retry.require_commit_on_main(api, COMMIT)
+
+    assert requested[0][-1] == f"repos/{REPOSITORY}/compare/{COMMIT}...main"
+
+
+@pytest.mark.parametrize("status", ["behind", "diverged"])
+def test_release_commit_on_main_rejects_rewound_or_diverged_main(status: str) -> None:
+    sleeps: list[float] = []
+    api = _api(
+        [
+            _completed(
+                200,
+                body=_comparison_payload(status, merge_base_commit="b" * 40),
+            )
+        ],
+        sleeps,
+    )
+
+    with pytest.raises(release_api_retry.ReleaseAPIError, match=rf"comparison status: {status}"):
+        release_api_retry.require_commit_on_main(api, COMMIT)
+    assert sleeps == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _comparison_payload(None),
+        _comparison_payload([]),
+        _comparison_payload("ahead", base_commit="b" * 40),
+        json.dumps(
+            {
+                "status": "ahead",
+                "base_commit": {"sha": COMMIT},
+                "merge_base_commit": {},
+            }
+        ),
+        _comparison_payload("ahead", merge_base_commit="b" * 40),
+    ],
+)
+def test_release_commit_on_main_rejects_malformed_comparison(payload: str) -> None:
+    sleeps: list[float] = []
+    api = _api([_completed(200, body=payload)], sleeps)
+
+    with pytest.raises(release_api_retry.ReleaseAPIError, match="GitHub main comparison response"):
+        release_api_retry.require_commit_on_main(api, COMMIT)
+    assert sleeps == []
+
+
+def test_release_commit_on_main_rejects_noncanonical_commit_without_api_request() -> None:
+    class NoRequestAPI:
+        def compare_commit_to_main(self, _expected_commit: str) -> str:
+            raise AssertionError("comparison must not run")
+
+    with pytest.raises(release_api_retry.ReleaseAPIError, match="exact 40-character"):
+        release_api_retry.require_commit_on_main(NoRequestAPI(), "a" * 39)  # type: ignore[arg-type]
+
+
+def test_release_commit_on_main_fails_closed_on_api_error() -> None:
+    sleeps: list[float] = []
+    api = _api(
+        [
+            _completed(503, stderr="first"),
+            _completed(None, stderr="transport reset"),
+            _completed(503, stderr="last"),
+        ],
+        sleeps,
+    )
+
+    with pytest.raises(release_api_retry.ReleaseAPIError, match="after 3 attempt"):
+        release_api_retry.require_commit_on_main(api, COMMIT)
+    assert sleeps == [0.25, 0.5]
 
 
 def test_annotated_tag_chain_resolves_to_commit() -> None:
@@ -243,16 +412,20 @@ class _NamespaceAPI:
         self,
         observations: list[tuple[dict[str, object] | None, dict[str, object] | None]],
         *,
-        main: str = COMMIT,
+        main_relation: str = "identical",
         tag_commit: str = COMMIT,
+        release_rows: list[dict[str, object]] | None = None,
     ) -> None:
         self.observations = list(observations)
-        self.main = main
+        self.main_relation = main_relation
         self.tag_commit = tag_commit
+        self.rows = list(release_rows or [])
+        self.compared_commits: list[str] = []
         self._current: tuple[dict[str, object] | None, dict[str, object] | None] | None = None
 
-    def main_commit(self) -> str:
-        return self.main
+    def compare_commit_to_main(self, expected_commit: str) -> str:
+        self.compared_commits.append(expected_commit)
+        return self.main_relation
 
     def tag_ref(self, _tag: str) -> dict[str, object] | None:
         assert self.observations
@@ -266,19 +439,23 @@ class _NamespaceAPI:
     def resolve_tag_commit(self, _payload: dict[str, object]) -> str:
         return self.tag_commit
 
+    def release_rows(self) -> list[dict[str, object]]:
+        return list(self.rows)
 
-def test_namespace_preflight_checks_main_and_both_namespaces() -> None:
+
+def test_namespace_preflight_checks_main_ancestry_and_both_namespaces() -> None:
     absent = _NamespaceAPI([(None, None)])
     release_api_retry.require_absent_namespace(
         absent,
         tag=TAG,
         expected_main_commit=COMMIT,
     )
+    assert absent.compared_commits == [COMMIT]
 
-    advanced = _NamespaceAPI([(None, None)], main="b" * 40)
-    with pytest.raises(release_api_retry.ReleaseAPIError, match="main advanced"):
+    rewound = _NamespaceAPI([(None, None)], main_relation="behind")
+    with pytest.raises(release_api_retry.ReleaseAPIError, match="not reachable"):
         release_api_retry.require_absent_namespace(
-            advanced,
+            rewound,
             tag=TAG,
             expected_main_commit=COMMIT,
         )
@@ -290,6 +467,204 @@ def test_namespace_preflight_checks_main_and_both_namespaces() -> None:
     release_only = _NamespaceAPI([(None, {"tag_name": TAG})])
     with pytest.raises(release_api_retry.ReleaseAPIError, match="occupied by release"):
         release_api_retry.require_absent_namespace(release_only, tag=TAG)
+
+
+def test_releasable_namespace_admits_absence_or_exact_same_commit_tag_only() -> None:
+    absent = _NamespaceAPI([(None, None)])
+    assert (
+        release_api_retry.require_releasable_namespace(
+            absent,  # type: ignore[arg-type]
+            tag=TAG,
+            expected_commit=COMMIT,
+        )
+        is release_api_retry.ReconcileState.ABSENT
+    )
+    assert absent.compared_commits == [COMMIT]
+
+    tag_only = _NamespaceAPI([({"object": {"type": "commit", "sha": COMMIT}}, None)])
+    assert (
+        release_api_retry.require_releasable_namespace(
+            tag_only,  # type: ignore[arg-type]
+            tag=TAG,
+            expected_commit=COMMIT,
+        )
+        is release_api_retry.ReconcileState.ABSENT
+    )
+    assert tag_only.compared_commits == [COMMIT]
+
+
+def test_releasable_namespace_rejects_published_release_with_repair_direction() -> None:
+    published = _NamespaceAPI(
+        [
+            (
+                {"object": {"type": "commit", "sha": COMMIT}},
+                {
+                    "tag_name": TAG,
+                    "draft": False,
+                    "prerelease": False,
+                    "immutable": True,
+                    "assets": [],
+                },
+            )
+        ]
+    )
+    with pytest.raises(
+        release_api_retry.ReleaseAPIError,
+        match=r"already contains a release.*operation=release.*operation=repair-channel",
+    ):
+        release_api_retry.require_releasable_namespace(
+            published,  # type: ignore[arg-type]
+            tag=TAG,
+            expected_commit=COMMIT,
+        )
+    assert published.compared_commits == []
+
+
+@pytest.mark.parametrize(
+    ("tag_payload", "release_payload"),
+    [
+        (
+            None,
+            {
+                "tag_name": TAG,
+                "draft": False,
+                "prerelease": False,
+                "immutable": True,
+                "assets": [],
+            },
+        ),
+        (
+            {"object": {}},
+            {
+                "tag_name": TAG,
+                "draft": True,
+                "prerelease": False,
+                "immutable": False,
+                "assets": [],
+            },
+        ),
+        (
+            {"object": {}},
+            {
+                "tag_name": TAG,
+                "draft": False,
+                "prerelease": True,
+                "immutable": True,
+                "assets": [],
+            },
+        ),
+        (
+            {"object": {}},
+            {
+                "tag_name": TAG,
+                "draft": False,
+                "prerelease": False,
+                "immutable": False,
+                "assets": [],
+            },
+        ),
+    ],
+)
+def test_releasable_namespace_has_one_existing_release_refusal(
+    tag_payload: dict[str, object] | None,
+    release_payload: dict[str, object] | None,
+) -> None:
+    api = _NamespaceAPI([(tag_payload, release_payload)])
+    with pytest.raises(
+        release_api_retry.ReleaseAPIError,
+        match=r"already contains a release.*operation=release.*investigate",
+    ):
+        release_api_retry.require_releasable_namespace(
+            api,  # type: ignore[arg-type]
+            tag=TAG,
+            expected_commit=COMMIT,
+        )
+
+
+def test_releasable_namespace_rejects_another_commit() -> None:
+    api = _NamespaceAPI(
+        [({"object": {"type": "commit", "sha": "b" * 40}}, None)],
+        tag_commit="b" * 40,
+    )
+    with pytest.raises(release_api_retry.ReleaseAPIError, match="points to"):
+        release_api_retry.require_releasable_namespace(
+            api,  # type: ignore[arg-type]
+            tag=TAG,
+            expected_commit=COMMIT,
+        )
+
+
+def test_repair_target_must_be_latest_immutable_stable_release() -> None:
+    stable = {
+        "tag_name": TAG,
+        "draft": False,
+        "prerelease": False,
+        "immutable": True,
+        "assets": [],
+    }
+    api = _NamespaceAPI(
+        [({"object": {"type": "commit", "sha": COMMIT}}, None)],
+        release_rows=[
+            {"tag_name": "nightly", "draft": False, "prerelease": False, "immutable": True},
+            {
+                "tag_name": "0.9.0",
+                "draft": True,
+                "prerelease": False,
+                "immutable": False,
+                "assets": [],
+            },
+            stable,
+            dict(stable),
+            {
+                "tag_name": "0.8.5",
+                "draft": False,
+                "prerelease": False,
+                "immutable": True,
+                "assets": [],
+            },
+        ],
+    )
+
+    release_api_retry.require_latest_immutable_release(
+        api,  # type: ignore[arg-type]
+        tag=TAG,
+        expected_commit=COMMIT,
+    )
+
+    assert api.compared_commits == [COMMIT]
+
+
+def test_repair_target_rejects_rollback_below_latest_immutable_release() -> None:
+    api = _NamespaceAPI(
+        [],
+        release_rows=[
+            {
+                "tag_name": TAG,
+                "draft": False,
+                "prerelease": False,
+                "immutable": True,
+                "assets": [],
+            },
+            {
+                "tag_name": "0.8.7",
+                "draft": False,
+                "prerelease": False,
+                "immutable": True,
+                "assets": [],
+            },
+        ],
+    )
+
+    with pytest.raises(
+        release_api_retry.ReleaseAPIError,
+        match=r"not the latest immutable stable release '0\.8\.7'.*rollback",
+    ):
+        release_api_retry.require_latest_immutable_release(
+            api,  # type: ignore[arg-type]
+            tag=TAG,
+            expected_commit=COMMIT,
+        )
+    assert api.compared_commits == []
 
 
 def test_ambiguous_create_retries_only_after_bounded_proof_of_absence(tmp_path: Path) -> None:
@@ -338,6 +713,256 @@ def test_ambiguous_create_accepts_exact_remote_candidate(
     assert verified == [(TAG, COMMIT)]
 
 
+def test_reconcile_create_accepts_only_persistent_exact_same_commit_tag(
+    tmp_path: Path,
+) -> None:
+    tag_payload = {"object": {"type": "commit", "sha": COMMIT}}
+    api = _NamespaceAPI([(tag_payload, None)] * 3)
+    sleeps: list[float] = []
+
+    state = release_api_retry.reconcile_create(
+        api,  # type: ignore[arg-type]
+        tag=TAG,
+        expected_commit=COMMIT,
+        candidate_root=tmp_path,
+        omit_windows_binaries=True,
+        attempts=3,
+        delay_seconds=0.25,
+        sleep=sleeps.append,
+    )
+
+    assert state is release_api_retry.ReconcileState.ABSENT
+    assert sleeps == [0.25, 0.25]
+    assert api.observations == []
+
+
+def test_reconcile_create_accepts_persistent_tag_only_after_initial_absence(
+    tmp_path: Path,
+) -> None:
+    tag_payload = {"object": {"type": "commit", "sha": COMMIT}}
+    api = _NamespaceAPI(
+        [
+            (None, None),
+            (tag_payload, None),
+            (tag_payload, None),
+        ]
+    )
+    sleeps: list[float] = []
+
+    state = release_api_retry.reconcile_create(
+        api,  # type: ignore[arg-type]
+        tag=TAG,
+        expected_commit=COMMIT,
+        candidate_root=tmp_path,
+        omit_windows_binaries=True,
+        attempts=3,
+        delay_seconds=0.25,
+        sleep=sleeps.append,
+    )
+
+    assert state is release_api_retry.ReconcileState.ABSENT
+    assert sleeps == [0.25, 0.25]
+    assert api.observations == []
+
+
+def test_reconcile_create_extends_final_absent_to_tag_only_transition_once(
+    tmp_path: Path,
+) -> None:
+    tag_payload = {"object": {"type": "commit", "sha": COMMIT}}
+    api = _NamespaceAPI(
+        [
+            (None, None),
+            (tag_payload, None),
+            (tag_payload, None),
+        ]
+    )
+    sleeps: list[float] = []
+
+    state = release_api_retry.reconcile_create(
+        api,  # type: ignore[arg-type]
+        tag=TAG,
+        expected_commit=COMMIT,
+        candidate_root=tmp_path,
+        omit_windows_binaries=True,
+        attempts=2,
+        delay_seconds=0.25,
+        sleep=sleeps.append,
+    )
+
+    assert state is release_api_retry.ReconcileState.ABSENT
+    assert sleeps == [0.25, 0.25]
+    assert api.observations == []
+
+
+def test_reconcile_create_waits_for_release_listing_after_tag_only_observation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    tag_payload = {"object": {"type": "commit", "sha": COMMIT}}
+    release_payload = {
+        "tag_name": TAG,
+        "draft": False,
+        "immutable": True,
+        "assets": [],
+    }
+    api = _NamespaceAPI(
+        [
+            (tag_payload, None),
+            (tag_payload, release_payload),
+        ]
+    )
+    sleeps: list[float] = []
+    verified: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        release_api_retry,
+        "_verify_exact_candidate",
+        lambda **kwargs: verified.append(kwargs),
+    )
+
+    state = release_api_retry.reconcile_create(
+        api,  # type: ignore[arg-type]
+        tag=TAG,
+        expected_commit=COMMIT,
+        candidate_root=tmp_path,
+        omit_windows_binaries=True,
+        attempts=3,
+        delay_seconds=0.25,
+        sleep=sleeps.append,
+    )
+
+    assert state is release_api_retry.ReconcileState.EXACT
+    assert sleeps == [0.25]
+    assert len(verified) == 1
+    assert verified[0]["release_payload"] == release_payload
+    assert api.observations == []
+
+
+def test_reconcile_create_rejects_nonpersistent_tag_only_state(tmp_path: Path) -> None:
+    tag_payload = {"object": {"type": "commit", "sha": COMMIT}}
+    api = _NamespaceAPI(
+        [
+            (tag_payload, None),
+            (None, None),
+            (tag_payload, None),
+        ]
+    )
+    sleeps: list[float] = []
+
+    with pytest.raises(
+        release_api_retry.ReleaseAPIError,
+        match="tag-only state did not persist",
+    ):
+        release_api_retry.reconcile_create(
+            api,  # type: ignore[arg-type]
+            tag=TAG,
+            expected_commit=COMMIT,
+            candidate_root=tmp_path,
+            omit_windows_binaries=True,
+            attempts=3,
+            delay_seconds=0.25,
+            sleep=sleeps.append,
+        )
+
+    assert sleeps == [0.25]
+    assert len(api.observations) == 1
+
+
+def test_reconcile_create_attempts_one_requires_delayed_tag_only_confirmation(
+    tmp_path: Path,
+) -> None:
+    tag_payload = {"object": {"type": "commit", "sha": COMMIT}}
+    api = _NamespaceAPI([(tag_payload, None), (tag_payload, None)])
+    sleeps: list[float] = []
+
+    state = release_api_retry.reconcile_create(
+        api,  # type: ignore[arg-type]
+        tag=TAG,
+        expected_commit=COMMIT,
+        candidate_root=tmp_path,
+        omit_windows_binaries=True,
+        attempts=1,
+        delay_seconds=0.25,
+        sleep=sleeps.append,
+    )
+
+    assert state is release_api_retry.ReconcileState.ABSENT
+    assert sleeps == [0.25]
+    assert api.observations == []
+
+
+def test_reconcile_create_attempts_one_waits_for_eventually_visible_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    tag_payload = {"object": {"type": "commit", "sha": COMMIT}}
+    release_payload = {
+        "tag_name": TAG,
+        "draft": False,
+        "immutable": True,
+        "assets": [],
+    }
+    api = _NamespaceAPI(
+        [
+            (tag_payload, None),
+            (tag_payload, release_payload),
+        ]
+    )
+    verified: list[dict[str, object]] = []
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        release_api_retry,
+        "_verify_exact_candidate",
+        lambda **kwargs: verified.append(kwargs),
+    )
+
+    state = release_api_retry.reconcile_create(
+        api,  # type: ignore[arg-type]
+        tag=TAG,
+        expected_commit=COMMIT,
+        candidate_root=tmp_path,
+        omit_windows_binaries=True,
+        attempts=1,
+        delay_seconds=0.25,
+        sleep=sleeps.append,
+    )
+
+    assert state is release_api_retry.ReconcileState.EXACT
+    assert sleeps == [0.25]
+    assert len(verified) == 1
+    assert verified[0]["release_payload"] == release_payload
+    assert api.observations == []
+
+
+def test_reconcile_create_rejects_mismatched_tag_only_commit_immediately(
+    tmp_path: Path,
+) -> None:
+    tag_payload = {"object": {"type": "commit", "sha": "b" * 40}}
+    api = _NamespaceAPI(
+        [
+            (tag_payload, None),
+            (tag_payload, None),
+            (tag_payload, None),
+        ],
+        tag_commit="b" * 40,
+    )
+    sleeps: list[float] = []
+
+    with pytest.raises(release_api_retry.ReleaseAPIError, match="points to"):
+        release_api_retry.reconcile_create(
+            api,  # type: ignore[arg-type]
+            tag=TAG,
+            expected_commit=COMMIT,
+            candidate_root=tmp_path,
+            omit_windows_binaries=True,
+            attempts=3,
+            delay_seconds=0.25,
+            sleep=sleeps.append,
+        )
+
+    assert sleeps == []
+    assert len(api.observations) == 2
+
+
 def test_nonimmutable_remote_candidate_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -352,7 +977,13 @@ def test_nonimmutable_remote_candidate_is_rejected(
     with pytest.raises(release_api_retry.ReleaseAPIError, match="not immutable"):
         release_api_retry._verify_exact_candidate(
             tag_payload={"object": {"type": "commit", "sha": COMMIT}},
-            release_payload={"tag_name": TAG, "draft": False, "immutable": False, "assets": []},
+            release_payload={
+                "tag_name": TAG,
+                "draft": False,
+                "prerelease": False,
+                "immutable": False,
+                "assets": [],
+            },
             api=api,  # type: ignore[arg-type]
             tag=TAG,
             expected_commit=COMMIT,
@@ -364,7 +995,7 @@ def test_nonimmutable_remote_candidate_is_rejected(
 def test_partial_remote_namespace_fails_closed_without_becoming_absent(tmp_path: Path) -> None:
     api = _NamespaceAPI(
         [
-            ({"object": {}}, None),
+            (None, {"tag_name": TAG}),
             (None, None),
         ]
     )
@@ -403,6 +1034,7 @@ def test_rest_release_shape_is_normalized_for_sealed_candidate_verification() ->
         {
             "tag_name": TAG,
             "draft": False,
+            "prerelease": True,
             "immutable": True,
             "assets": [{"name": "checksums.txt", "digest": "sha256:" + "c" * 64}],
         }
@@ -411,9 +1043,61 @@ def test_rest_release_shape_is_normalized_for_sealed_candidate_verification() ->
     assert normalized == {
         "tagName": TAG,
         "isDraft": False,
+        "isPrerelease": True,
         "isImmutable": True,
         "assets": [{"name": "checksums.txt", "digest": "sha256:" + "c" * 64}],
     }
+
+
+def test_exact_candidate_reconciliation_carries_prerelease_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed: list[dict[str, object]] = []
+
+    def verify_published(
+        _root: Path,
+        release_json: Path,
+        _tag: str,
+        _commit: str,
+        *,
+        omit_windows_binaries: bool,
+    ) -> None:
+        assert omit_windows_binaries is True
+        observed.append(json.loads(release_json.read_text(encoding="utf-8")))
+
+    monkeypatch.setattr(
+        release_api_retry.release_candidate,
+        "verify_published_release",
+        verify_published,
+    )
+    api = _NamespaceAPI([], tag_commit=COMMIT)
+
+    release_api_retry._verify_exact_candidate(
+        tag_payload={"object": {"type": "commit", "sha": COMMIT}},
+        release_payload={
+            "tag_name": TAG,
+            "draft": False,
+            "prerelease": True,
+            "immutable": True,
+            "assets": [],
+        },
+        api=api,  # type: ignore[arg-type]
+        tag=TAG,
+        expected_commit=COMMIT,
+        candidate_root=tmp_path,
+        omit_windows_binaries=True,
+    )
+
+    assert observed == [
+        {
+            "tagName": TAG,
+            "isDraft": False,
+            "isPrerelease": True,
+            "isImmutable": True,
+            "assets": [],
+        }
+    ]
 
 
 @pytest.mark.parametrize(
@@ -450,13 +1134,19 @@ def test_cli_reconciliation_exit_contract(
     assert result == expected_exit
 
 
-def test_cli_publish_precheck_accepts_existing_exact_candidate(
+def test_cli_publish_precheck_accepts_existing_exact_candidate_without_rechecking_main(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     tag_payload = {"object": {"type": "commit", "sha": COMMIT}}
-    release_payload = {"tag_name": TAG, "draft": False, "immutable": True, "assets": []}
-    api = _NamespaceAPI([(tag_payload, release_payload)], main=COMMIT)
+    release_payload = {
+        "tag_name": TAG,
+        "draft": False,
+        "prerelease": False,
+        "immutable": True,
+        "assets": [],
+    }
+    api = _NamespaceAPI([(tag_payload, release_payload)], main_relation="diverged")
     monkeypatch.setattr(release_api_retry, "GitHubReleaseAPI", lambda **_kwargs: api)
     monkeypatch.setattr(release_api_retry, "_verify_exact_candidate", lambda **_kwargs: None)
 
@@ -484,11 +1174,9 @@ def test_cli_publish_precheck_rechecks_main_after_absence(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     class ChangingMainAPI:
-        def __init__(self) -> None:
-            self.commits = iter(("b" * 40,))
-
-        def main_commit(self) -> str:
-            return next(self.commits)
+        def compare_commit_to_main(self, expected_commit: str) -> str:
+            assert expected_commit == COMMIT
+            return "diverged"
 
     api = ChangingMainAPI()
     monkeypatch.setattr(release_api_retry, "GitHubReleaseAPI", lambda **_kwargs: api)
@@ -514,7 +1202,45 @@ def test_cli_publish_precheck_rechecks_main_after_absence(
     )
 
     assert result == 1
-    assert "main advanced during certification" in capsys.readouterr().err
+    assert "not reachable from protected main" in capsys.readouterr().err
+
+
+def test_cli_publish_precheck_accepts_absence_after_main_advances(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class AdvancedMainAPI:
+        def compare_commit_to_main(self, expected_commit: str) -> str:
+            assert expected_commit == COMMIT
+            return "ahead"
+
+    monkeypatch.setattr(
+        release_api_retry,
+        "GitHubReleaseAPI",
+        lambda **_kwargs: AdvancedMainAPI(),
+    )
+    monkeypatch.setattr(
+        release_api_retry,
+        "reconcile_create",
+        lambda *_args, **_kwargs: release_api_retry.ReconcileState.ABSENT,
+    )
+
+    result = release_api_retry.main(
+        [
+            "reconcile-create",
+            "--repository",
+            REPOSITORY,
+            "--tag",
+            TAG,
+            "--commit",
+            COMMIT,
+            "--candidate-root",
+            str(tmp_path),
+            "--check-main",
+        ]
+    )
+
+    assert result == release_api_retry.ABSENT_EXIT_CODE
 
 
 def test_cli_candidate_commands_require_candidate_root(capsys: pytest.CaptureFixture[str]) -> None:

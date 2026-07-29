@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import io
 import json
 import os
+import platform
 import re
 import stat
 import subprocess
 import sys
+import tarfile
 import time
 from pathlib import Path
 
@@ -198,6 +201,7 @@ def test_future_release_smoke_builds_from_isolated_version_stamped_source() -> N
     assert '"${build_root}/scripts/release_candidate.py" prepare-runtime' in build
     assert '"${build_root}/scripts/release_candidate.py" verify-runtime' in build
     assert '"${build_root}/scripts/release_candidate.py" stage-resolvers' in build
+    assert '"${build_root}/scripts/release_candidate.py" stage-installers' in build
     assert "for fixture_os in darwin linux windows; do" in build
     assert 'GOOS="${fixture_os}" GOARCH="${fixture_arch}"' in build
     assert 'make -C "${ROOT}" dist-cli' not in build
@@ -306,6 +310,21 @@ def test_live_continuity_local_candidate_models_strict_sigstore_boundary_only() 
     assert "prepare_required_bridge_assets" in main
     assert main.index("prepare_required_bridge_assets") < main.index("prepare_local_candidate_provenance_fixture")
     assert "assert_local_candidate_provenance_verified" in main
+
+
+def test_upgrade_resolves_relative_audit_db_under_data_dir_before_canonicalization() -> None:
+    upgrade = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
+    start = upgrade.index("configured_audit_db = os.path.expanduser(")
+    end = upgrade.index("\nopenclaw_home = os.path.abspath(", start)
+    resolution = upgrade[start:end]
+
+    relative_path_guard = "if not os.path.isabs(configured_audit_db):"
+    relative_resolution = "configured_audit_db = os.path.join(data_dir, configured_audit_db)"
+    canonicalization = "audit_db = os.path.abspath(configured_audit_db)"
+    assert relative_path_guard in resolution
+    assert relative_resolution in resolution
+    assert resolution.index(relative_path_guard) < resolution.index(relative_resolution)
+    assert resolution.index(relative_resolution) < resolution.index(canonicalization)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="executes the POSIX release fixture")
@@ -601,11 +620,50 @@ def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
     assert "watcher:\n    enabled: false" in fixture
 
     resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
-    assert '"${GW_STATE}" == "running" || "${GW_STATE}" == "disabled"' in resolver
-    assert '"${GW_VERSION}" == "${RELEASE_VERSION}"' in resolver
-    assert "fleet uplink is disabled by configuration" in resolver
+    start_begin = resolver.index('step "Starting defenseclaw-gateway ..."')
+    start_section = resolver[
+        start_begin : resolver.index(
+            'step "Restarting OpenClaw gateway ..."',
+            start_begin,
+        )
+    ]
+    assert "DEFENSECLAW_UPGRADE_FRESH_PROCESS=1" not in start_section
+    readiness_begin = resolver.index('section "Verifying Gateway Health"')
+    readiness_section = resolver[
+        readiness_begin : resolver.index(
+            'if [[ -n "${UPGRADE_RECEIPT_PATH}" ]]',
+            readiness_begin,
+        )
+    ]
+    assert "DEFENSECLAW_UPGRADE_FRESH_PROCESS=1" in readiness_section
+    assert '"${INSTALL_DIR}/defenseclaw-gateway" upgrade-wait-ready' in readiness_section
+    assert "upgrade-wait-ready --help" not in readiness_section
+    assert '--expected-version "${RELEASE_VERSION}"' in readiness_section
+    assert 'version_lt "${RELEASE_VERSION}" "0.8.7"' in readiness_section
+    assert 'wait_for_legacy_gateway_readiness "${HEALTH_TIMEOUT}"' in readiness_section
+    assert "Gateway failed authenticated legacy target readiness" in readiness_section
+    assert "Gateway failed strict target readiness" in readiness_section
+    assert "legacy_gateway_status_ready()" in resolver
+    assert "REQUIRED_SUBSYSTEMS_BY_VERSION = {" in resolver
+    for legacy_version in ("0.8.4", "0.8.5", "0.8.6"):
+        assert (f'"{legacy_version}": ("api", "gateway", "watcher", "guardrail", "telemetry")') in resolver
+    assert "legacy readiness has no reviewed target contract" in resolver
+    assert (
+        'version_lt "${RELEASE_VERSION}" "0.8.4"' in resolver
+        and "predates the oldest reviewed gateway readiness contract" in resolver
+    )
+    assert 'READY_STATES = {"running", "disabled"}' in resolver
+    assert 'provenance.get("binary_version") != expected_version' in resolver
+    assert "urllib.request.ProxyHandler({})" in resolver
+    assert "MAX_STATUS_BYTES = 1024 * 1024" in resolver
+    assert readiness_section.index("wait_for_legacy_gateway_readiness") < readiness_section.index(
+        '"${INSTALL_DIR}/defenseclaw-gateway" upgrade-wait-ready'
+    )
+    assert "HEALTH_RESPONSE_FILE" not in readiness_section
     assert 'gateway_health.get("state") in {"running", "disabled"}' in resolver
     assert 'gateway.get("state") in {"running", "disabled"}' in resolver
+    assert 'api_health.get("state") == "running"' in resolver
+    assert 'api.get("state") == "running"' in resolver
     assert '"${health_state}" == "running" || "${health_state}" == "disabled"' in resolver
     assert '[[ "${health_state}" == "unreachable" ]]' in resolver
     assert "health_probe.returncode != 7" in resolver
@@ -619,6 +677,120 @@ def test_pre_v8_positive_upgrade_fixture_is_hermetic_and_non_mutating() -> None:
     assert "post_stop_state=\"${post_stop_health%%$'\\t'*}\"" in post_stop
     assert '[[ "${post_stop_state}" == "unreachable" ]]' in post_stop
     assert "remains live without PID custody after stop" in post_stop
+    assert "filesystem = os.statvfs(backup_dir)" in resolver
+    assert "insufficient free space for private audit integrity probe" in resolver
+
+
+def test_field_recovery_cases_are_bound_to_explicit_fixture_inputs() -> None:
+    protocol = (ROOT / "scripts" / "test-upgrade-protocol-release.sh").read_text(encoding="utf-8")
+    helper_start = protocol.index("run_candidate_updater_field_recovery_cases() (")
+    helper_end = protocol.index("\n)\n\nrun_protocol_case() {", helper_start)
+    helper = protocol[helper_start:helper_end]
+
+    assert 'if [[ "${baseline}" == "0.8.6" ]]; then' in protocol
+    assert 'local recovery_home="${3:-}"' in protocol
+    assert protocol.count("run_candidate_updater_field_recovery_cases \\") == 2
+    assert 'local installed_target_home="$2"' in helper
+    assert 'local saved_smoke_home="${SMOKE_HOME}"' in helper
+    assert 'local saved_from_version="${FROM_VERSION}"' in helper
+    assert "trap restore_field_recovery_harness_state EXIT" in helper
+    assert helper.index('if [[ "${UPGRADE_SMOKE_FIELD_RECOVERY_CASES:-0}" != "1" ]]') < helper.index(
+        "trap restore_field_recovery_harness_state EXIT"
+    )
+    assert 'SMOKE_HOME="${saved_smoke_home}"' in helper
+    assert 'FROM_VERSION="${saved_from_version}"' in helper
+    assert '"${TARGET_VERSION}" corrupt-audit-same-version "${installed_target_home}"' in helper
+    assert "same-version field recovery requires an explicit installed target fixture" in protocol
+    assert "corrupt-audit|corrupt-audit-same-version" not in protocol
+    assert protocol.count("corrupt-audit-same-version)") == 2
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Bash subshell/trap contract")
+@pytest.mark.parametrize(
+    (
+        "enabled",
+        "fail_recovery",
+        "expected_status",
+        "expected_calls",
+        "expected_cleanups",
+    ),
+    (
+        (False, False, 0, 0, 0),
+        (True, False, 0, 1, 1),
+        (True, True, 23, 1, 1),
+    ),
+)
+def test_field_recovery_helper_restores_globals_on_return_success_and_failure(
+    tmp_path: Path,
+    enabled: bool,
+    fail_recovery: bool,
+    expected_status: int,
+    expected_calls: int,
+    expected_cleanups: int,
+) -> None:
+    protocol = (ROOT / "scripts" / "test-upgrade-protocol-release.sh").read_text(encoding="utf-8")
+    helper_start = protocol.index("run_candidate_updater_field_recovery_cases() (")
+    helper_end = protocol.index("\n)\n\nrun_protocol_case() {", helper_start) + len("\n)")
+    helper = protocol[helper_start:helper_end]
+    trap_anchor = "        local status=$?\n        stop_smoke_gateway || true"
+    assert helper.count(trap_anchor) == 1
+    helper = helper.replace(
+        trap_anchor,
+        '        local status=$?\n        printf "restore\\n" >> "${RESTORE_LOG}"\n        stop_smoke_gateway || true',
+        1,
+    )
+    call_log = tmp_path / "field-recovery-calls"
+    stop_log = tmp_path / "field-recovery-stops"
+    restore_log = tmp_path / "field-recovery-restores"
+    harness = tmp_path / "field-recovery-state.sh"
+    harness.write_text(
+        (
+            "#!/usr/bin/env bash\n"
+            "set -uo pipefail\n"
+            "SMOKE_HOME=original-home\n"
+            "FROM_VERSION=original-version\n"
+            "TARGET_VERSION=0.8.8\n"
+            f"UPGRADE_SMOKE_FIELD_RECOVERY_CASES={int(enabled)}\n"
+            f"FAIL_RECOVERY={int(fail_recovery)}\n"
+            f"CALL_LOG={str(call_log)!r}\n"
+            f"STOP_LOG={str(stop_log)!r}\n"
+            f"RESTORE_LOG={str(restore_log)!r}\n"
+            "stop_smoke_gateway() { printf 'stop\\n' >> \"${STOP_LOG}\"; }\n"
+            "run_candidate_updater_field_recovery_success() {\n"
+            "  printf 'call\\n' >> \"${CALL_LOG}\"\n"
+            "  SMOKE_HOME=mutated-home\n"
+            "  FROM_VERSION=mutated-version\n"
+            '  if [[ "${FAIL_RECOVERY}" == 1 ]]; then exit 23; fi\n'
+            "}\n"
+            f"{helper}\n"
+            "set +e\n"
+            "run_candidate_updater_field_recovery_cases 0.8.7 installed-target-home\n"
+            "status=$?\n"
+            "set -e\n"
+            '[[ "${SMOKE_HOME}" == original-home ]] || exit 91\n'
+            '[[ "${FROM_VERSION}" == original-version ]] || exit 92\n'
+            "printf 'status=%s\\n' \"${status}\"\n"
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        ["bash", str(harness)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == f"status={expected_status}"
+    calls = call_log.read_text(encoding="utf-8").splitlines() if call_log.exists() else []
+    stops = stop_log.read_text(encoding="utf-8").splitlines() if stop_log.exists() else []
+    restores = restore_log.read_text(encoding="utf-8").splitlines() if restore_log.exists() else []
+    assert len(calls) == expected_calls
+    assert len(stops) == expected_cleanups
+    assert len(restores) == expected_cleanups
 
 
 def test_v8_historical_fixture_disables_fleet_and_preseeds_rollback_root() -> None:
@@ -861,7 +1033,265 @@ def test_posix_resolver_bootstraps_recovery_under_fixed_mutator_lease() -> None:
     assert 'for name in ("UV_CONSTRAINT", "UV_OVERRIDE", "UV_EXCLUDE_NEWER")' in recovery
     assert "uv_environment.pop(name, None)" in recovery
     assert "env=uv_environment" in recovery
+    assert "command -v uv" not in recovery
+    assert recovery.index("prepare_upgrade_staging") < recovery.index("resolve_upgrade_uv")
+    assert 'uv_bin="${UV_BIN}"' in recovery
     assert "_recover_interrupted_hard_cut" in text
+
+
+def test_cursorless_field_gate_keeps_the_requested_target_contract() -> None:
+    resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
+    function_start = resolver.index("authorize_cursorless_field_recovery() {")
+    function_end = resolver.index(
+        "\n}\n\n\ncapture_hard_cut_target_controller_contract() {",
+        function_start,
+    )
+    field_gate = resolver[function_start:function_end]
+
+    assert 'CURRENT_VERSION}" == "${source_version}' in field_gate
+    assert 'CURRENT_GATEWAY_VERSION}" == "${source_version}' in field_gate
+    assert 'config["config_version"] != 8' in field_gate
+    assert "migration cursor must be wholly absent" in field_gate
+    assert "phase-one-active.json" in field_gate
+    assert "phase-two-active.json" in field_gate
+    assert field_gate.count("prepare_release_contract") == 1
+    assert 'RELEASE_VERSION="' not in field_gate
+    assert "configure_release" not in field_gate
+    assert "authenticated-source-" not in field_gate
+
+    caller_start = resolver.rindex(
+        'if [[ -n "${HARD_CUT_CURSOR_RECOVERY_SOURCE_VERSION}" ]]; then'
+    )
+    caller_end = resolver.index(
+        'FINAL_RELEASE_PROVENANCE_BRIDGE_CHECKSUMS_SHA256="',
+        caller_start,
+    )
+    caller = resolver[caller_start:caller_end]
+    assert (
+        "then\n"
+        "    authorize_cursorless_field_recovery\n"
+        "else\n"
+        "    prepare_release_contract\n"
+        "fi\n"
+    ) in caller
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX phase-two recovery")
+def test_interrupted_phase_two_downloads_pinned_uv_under_clean_path(
+    tmp_path: Path,
+) -> None:
+    resolver = (ROOT / "scripts/upgrade.sh").read_text(encoding="utf-8")
+    version_match = re.search(
+        r'readonly UV_BOOTSTRAP_VERSION="([^"]+)"',
+        resolver,
+    )
+    maximum_match = re.search(
+        r'readonly UV_BOOTSTRAP_MAX_BYTES="([^"]+)"',
+        resolver,
+    )
+    assert version_match is not None
+    assert maximum_match is not None
+
+    staging_start = resolver.index("prepare_upgrade_staging() {")
+    resolve_start = resolver.index("resolve_upgrade_uv() {", staging_start)
+    staging_functions = resolver[staging_start:resolve_start]
+    resolve_end = resolver.index(
+        "\n\n# Keep one bounded, fail-closed parser",
+        resolve_start,
+    )
+    resolve_function = resolver[resolve_start:resolve_end]
+    uv_assets = {
+        ("Darwin", "x86_64"): (
+            "uv-x86_64-apple-darwin.tar.gz",
+            "uv-x86_64-apple-darwin/uv",
+            "2ad79983127ffca7d77b77ce6a24278d7e4f7b817a1acf72fea5f8124b4aac5e",
+        ),
+        ("Darwin", "arm64"): (
+            "uv-aarch64-apple-darwin.tar.gz",
+            "uv-aarch64-apple-darwin/uv",
+            "33540eb7c883ab857eff79bd5ac2aa31fe27b595abecb4a9c003a2c998447232",
+        ),
+        ("Linux", "x86_64"): (
+            "uv-x86_64-unknown-linux-gnu.tar.gz",
+            "uv-x86_64-unknown-linux-gnu/uv",
+            "e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224",
+        ),
+        ("Linux", "amd64"): (
+            "uv-x86_64-unknown-linux-gnu.tar.gz",
+            "uv-x86_64-unknown-linux-gnu/uv",
+            "e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224",
+        ),
+        ("Linux", "aarch64"): (
+            "uv-aarch64-unknown-linux-gnu.tar.gz",
+            "uv-aarch64-unknown-linux-gnu/uv",
+            "03e9fe0a81b0718d0bc84625de3885df6cc3f89a8b6af6121d6b9f6113fb6533",
+        ),
+        ("Linux", "arm64"): (
+            "uv-aarch64-unknown-linux-gnu.tar.gz",
+            "uv-aarch64-unknown-linux-gnu/uv",
+            "03e9fe0a81b0718d0bc84625de3885df6cc3f89a8b6af6121d6b9f6113fb6533",
+        ),
+    }
+    uv_platform = (platform.system(), platform.machine())
+    if uv_platform not in uv_assets:
+        pytest.skip(f"unsupported uv bootstrap fixture platform: {uv_platform}")
+    uv_asset, uv_member, production_uv_digest = uv_assets[uv_platform]
+    pinned_marker = tmp_path / "pinned-uv-executed"
+    uv_payload = (
+        "#!/bin/sh\n"
+        f"printf executed > {str(pinned_marker)!r}\n"
+        f"if [ \"$#\" -eq 1 ] && [ \"$1\" = \"--version\" ]; then "
+        f"printf 'uv {version_match.group(1)}\\n'; exit 0; fi\n"
+        'printf \'%s|%s\\n\' "$0" "$*" >> "${UV_LOG:?}"\n'
+        "exit 0\n"
+    ).encode()
+    uv_archive = tmp_path / uv_asset
+    with tarfile.open(uv_archive, mode="w:gz") as archive:
+        directory = tarfile.TarInfo(str(Path(uv_member).parent))
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o755
+        archive.addfile(directory)
+        executable = tarfile.TarInfo(uv_member)
+        executable.mode = 0o755
+        executable.size = len(uv_payload)
+        archive.addfile(executable, io.BytesIO(uv_payload))
+    fixture_uv_digest = hashlib.sha256(uv_archive.read_bytes()).hexdigest()
+    assert resolve_function.count(production_uv_digest) == 1
+    resolve_function = resolve_function.replace(
+        production_uv_digest,
+        fixture_uv_digest,
+    )
+    recovery_start = resolver.index("recover_interrupted_phase_two() {")
+    recovery_end = resolver.index(
+        "\n}\n\nacquire_upgrade_lock() {",
+        recovery_start,
+    ) + len("\n}\n")
+    recovery_function = resolver[recovery_start:recovery_end]
+    parser_start = recovery_function.index(
+        '    recovery_fields="$(python3 - "${journal}" "${DEFENSECLAW_HOME}"'
+    )
+    parser_end = recovery_function.index(
+        '    wheel="$(printf',
+        parser_start,
+    )
+    recovery_function = (
+        recovery_function[:parser_start]
+        + "    recovery_fields=\"$(printf '%s\\n' "
+        + '"${TEST_WHEEL}" "${TEST_WHEEL_SHA256}" pending "${TEST_CONFIG}")"\n'
+        + recovery_function[parser_end:]
+    )
+
+    home = tmp_path / "home"
+    controller_home = home / ".defenseclaw"
+    recovery = controller_home / ".upgrade-recovery"
+    venv_python = controller_home / ".venv" / "bin" / "python"
+    known_uv = home / ".local" / "bin" / "uv"
+    recovery.mkdir(parents=True)
+    recovery.chmod(0o700)
+    venv_python.parent.mkdir(parents=True)
+    (
+        controller_home
+        / ".venv"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "defenseclaw"
+    ).mkdir(parents=True)
+    known_uv.parent.mkdir(parents=True)
+    journal = recovery / "phase-two-active.json"
+    journal.write_text("{}\n", encoding="utf-8")
+    journal.chmod(0o600)
+    lease = recovery / "phase-two-mutator.lease"
+    lease.write_text("", encoding="utf-8")
+    lease.chmod(0o600)
+    wheel = tmp_path / "retained-bridge.whl"
+    wheel.write_bytes(b"authenticated retained bridge")
+    wheel_sha256 = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    config = controller_home / "config.yaml"
+    config.write_text("config_version: 8\n", encoding="utf-8")
+    uv_log = tmp_path / "uv.log"
+    recovery_log = tmp_path / "recovery-python.log"
+    known_marker = tmp_path / "known-uv-executed"
+    known_uv.write_text(
+        "#!/bin/sh\n"
+        f"printf executed > {str(known_marker)!r}\n"
+        f"printf '%s\\n' 'uv {version_match.group(1)}'\n",
+        encoding="utf-8",
+    )
+    known_uv.chmod(0o755)
+    venv_python.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$*" >> "${RECOVERY_PYTHON_LOG:?}"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    venv_python.chmod(0o755)
+
+    harness = (
+        "set -euo pipefail\n"
+        "umask 077\n"
+        'HOME="${TEST_HOME}"\n'
+        'DEFENSECLAW_HOME="${TEST_CONTROLLER_HOME}"\n'
+        'CONTROLLER_HOME="${DEFENSECLAW_HOME}"\n'
+        'DEFENSECLAW_VENV="${DEFENSECLAW_HOME}/.venv"\n'
+        "PLAN_ONLY=0\n"
+        "STAGING_DIR=\"\"\n"
+        "UV_BIN=\"\"\n"
+        f'UV_BOOTSTRAP_VERSION="{version_match.group(1)}"\n'
+        f'UV_BOOTSTRAP_MAX_BYTES="{maximum_match.group(1)}"\n'
+        "RED=\"\"; GREEN=\"\"; YELLOW=\"\"; BLUE=\"\"; CYAN=\"\"; BOLD=\"\"; DIM=\"\"; NC=\"\"\n"
+        'die() { printf "die: %s\\n" "$*" >&2; exit 1; }\n'
+        'ok() { printf "ok: %s\\n" "$*"; }\n'
+        'warn() { printf "warn: %s\\n" "$*" >&2; }\n'
+        'info() { printf "info: %s\\n" "$*"; }\n'
+        'section() { printf "section: %s\\n" "$*"; }\n'
+        "curl() {\n"
+        "  local output='' previous=''\n"
+        '  for arg in "$@"; do\n'
+        '    if [[ "${previous}" == "--output" ]]; then output="${arg}"; break; fi\n'
+        '    previous="${arg}"\n'
+        "  done\n"
+        '  [[ -n "${output}" ]] || return 94\n'
+        f"  cp {str(uv_archive)!r} \"${{output}}\"\n"
+        "}\n"
+        + staging_functions
+        + resolve_function
+        + "\n"
+        + recovery_function
+        + "\nrecover_interrupted_phase_two\n"
+        + 'case "${UV_BIN}" in "${STAGING_DIR}/upgrade-tools/uv") ;; *) exit 97 ;; esac\n'
+        + 'grep -F -- "--offline --no-deps --reinstall" "${UV_LOG}" >/dev/null\n'
+        + 'grep -F -- "_recover_interrupted_hard_cut" "${RECOVERY_PYTHON_LOG}" >/dev/null\n'
+        + 'printf "private-uv=%s\\n" "${UV_BIN}"\n'
+        + "cleanup_upgrade_staging\n"
+    )
+    environment = {
+        **os.environ,
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "TEST_HOME": str(home),
+        "TEST_CONTROLLER_HOME": str(controller_home),
+        "TEST_WHEEL": str(wheel),
+        "TEST_WHEEL_SHA256": wheel_sha256,
+        "TEST_CONFIG": str(config),
+        "UV_LOG": str(uv_log),
+        "RECOVERY_PYTHON_LOG": str(recovery_log),
+    }
+    completed = subprocess.run(
+        ["/bin/bash", "-c", harness],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "private-uv=" in completed.stdout
+    assert "/upgrade-tools/uv" in completed.stdout
+    assert not known_marker.exists()
+    assert pinned_marker.read_text(encoding="utf-8") == "executed"
+    assert str(known_uv) not in uv_log.read_text(encoding="utf-8")
 
 
 def test_release_resolver_isolated_python_never_writes_bytecode() -> None:
@@ -1064,6 +1494,18 @@ def test_bridge_controller_hard_cut_establishes_rollback_custody_before_mutation
 def test_posix_resolver_normalizes_every_bridge_through_one_authenticated_handoff() -> None:
     resolver = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
 
+    guard_start = resolver.index("require_authenticated_upgrade_uv_handoff() {")
+    guard_end = resolver.index("\n}\n\nretain_authenticated_upgrade_uv_staging() {", guard_start)
+    guard = resolver[guard_start:guard_end]
+    assert '"${UV_BIN}" == "${STAGING_DIR}/upgrade-tools/uv"' in guard
+    assert '-f "${UV_BIN}"' in guard
+    assert '! -L "${UV_BIN}"' in guard
+    assert '"${UV_BIN%/*}" != *:*' in guard
+    assert '-f "${INSTALL_DIR}/defenseclaw-gateway"' in guard
+    assert '-x "${INSTALL_DIR}/defenseclaw-gateway"' in guard
+    assert '! -L "${INSTALL_DIR}/defenseclaw-gateway"' in guard
+    assert '"${INSTALL_DIR}" != *:*' in guard
+
     resolve_start = resolver.index("resolve_staged_upgrade() {")
     resolve_end = resolver.index("\n}\n\npreflight_bridge_rollback_capability() {", resolve_start)
     resolve = resolver[resolve_start:resolve_end]
@@ -1084,6 +1526,7 @@ def test_posix_resolver_normalizes_every_bridge_through_one_authenticated_handof
         "env -u UV_OVERRIDE \\\n"
         '        UV_CONSTRAINT="${HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE}" \\\n'
         '        UV_EXCLUDE_NEWER="${HISTORICAL_BOOTSTRAP_EXCLUDE_NEWER}" \\\n'
+        '        PATH="${UV_BIN%/*}:${INSTALL_DIR}:${PATH}" \\\n'
         f"        {target_command}"
     )
     assert resolver.count(scoped_target_command) == 1
@@ -1098,18 +1541,22 @@ def test_posix_resolver_normalizes_every_bridge_through_one_authenticated_handof
     continuation_start = resolver.index("continue_post_hard_cut_upgrade() {")
     continuation_end = resolver.index("\n}\n\nvalidate_tarball_members() {", continuation_start)
     continuation = resolver[continuation_start:continuation_end]
-    remove_staging = continuation.index('rm -rf "${STAGING_DIR}"')
+    uv_guard = continuation.index("retain_authenticated_upgrade_uv_staging")
     final_upgrade = continuation.index(
         '"${DEFENSECLAW_VENV}/bin/defenseclaw" upgrade --yes --version "${final_version}"',
-        remove_staging,
+        uv_guard,
     )
     final_exit = continuation.index('exit "${final_status}"', final_upgrade)
-    assert remove_staging < final_upgrade < final_exit
-    assert continuation.index("unset DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION") < remove_staging
+    assert uv_guard < final_upgrade < final_exit
+    assert continuation.index("unset DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION") < uv_guard
+    assert "cleanup_upgrade_staging" not in continuation
     assert "release_upgrade_lock" not in continuation
     assert "trap - EXIT" not in continuation
     assert "HISTORICAL_BOOTSTRAP_CONSTRAINTS_FILE" not in continuation
     assert "env -u UV_CONSTRAINT -u UV_OVERRIDE -u UV_EXCLUDE_NEWER" in continuation
+    assert 'PATH="${UV_BIN%/*}:${INSTALL_DIR}:${PATH}"' in continuation
+    assert resolver.count("require_authenticated_upgrade_uv_handoff") == 4
+    assert resolver.count("retain_authenticated_upgrade_uv_staging") == 2
     assert "UV_CONSTRAINT=''" not in resolver
     assert "UV_OVERRIDE=''" not in resolver
     assert "UV_EXCLUDE_NEWER=''" not in resolver

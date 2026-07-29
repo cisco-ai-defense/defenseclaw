@@ -67,6 +67,74 @@ func validatePrivateProtection(path string, wantDirectory bool) error {
 	return nil
 }
 
+// ValidatePrivateDirectoryOwnership verifies the non-reparse type,
+// current-user ownership, and absence of untrusted write authority needed by
+// an installer writer before it repairs a drifted DACL. Unlike
+// ValidatePrivateDirectory it permits harmless read-only or incomplete DACL
+// drift.
+func ValidatePrivateDirectoryOwnership(path string) error {
+	return validatePrivateOwnership(path, true)
+}
+
+// ValidatePrivateFileOwnership is the file counterpart to
+// ValidatePrivateDirectoryOwnership.
+func ValidatePrivateFileOwnership(path string) error {
+	return validatePrivateOwnership(path, false)
+}
+
+// ValidatePrivateHandle verifies that handle names an object owned by the
+// current user with the same fail-closed private DACL required by
+// ValidatePrivateDirectory and ValidatePrivateFile. Callers that already hold
+// a non-reparse handle can use this to keep security validation bound to the
+// object that they subsequently operate on.
+func ValidatePrivateHandle(handle windows.Handle) error {
+	sd, err := windows.GetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return err
+	}
+	safe, err := privateSecurityDescriptorIsSafe(sd)
+	if err != nil {
+		return err
+	}
+	if !safe {
+		return fmt.Errorf("safefile: private handle has an unsafe owner or DACL")
+	}
+	return nil
+}
+
+func validatePrivateOwnership(path string, wantDirectory bool) error {
+	if err := rejectReparseChain(path); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || (wantDirectory && !info.IsDir()) ||
+		(!wantDirectory && !info.Mode().IsRegular()) {
+		return fmt.Errorf("safefile: private path has an unexpected type: %s", path)
+	}
+	owned, err := windowsPathOwnedByCurrentUser(path)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return fmt.Errorf("safefile: private path is not owned by the current user: %s", path)
+	}
+	repairable, err := privateDACLIsWriterRepairable(path)
+	if err != nil {
+		return err
+	}
+	if !repairable {
+		return fmt.Errorf("safefile: private path DACL is unsafe to repair: %s", path)
+	}
+	return nil
+}
+
 func withLockedDirectory(path string, write func() error) error {
 	ptr, err := winpath.UTF16Ptr(path)
 	if err != nil {
@@ -350,6 +418,13 @@ func privateDACLIsSafe(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	return privateSecurityDescriptorIsSafe(sd)
+}
+
+func privateSecurityDescriptorIsSafe(sd *windows.SECURITY_DESCRIPTOR) (bool, error) {
+	if sd == nil {
+		return false, nil
+	}
 	owner, _, err := sd.Owner()
 	if err != nil {
 		return false, err
@@ -408,6 +483,77 @@ func privateDACLIsSafe(path string) (bool, error) {
 		return false, nil
 	}
 	return foundOwner && foundSystem, nil
+}
+
+func privateDACLIsWriterRepairable(path string) (bool, error) {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return false, err
+	}
+	sd, err := windows.GetNamedSecurityInfo(
+		extended,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return false, err
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return false, err
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		return false, err
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return false, err
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		return false, err
+	}
+	if owner == nil || !owner.Equals(user.User.Sid) {
+		return false, nil
+	}
+	untrustedWrite := windows.ACCESS_MASK(
+		windows.GENERIC_ALL |
+			windows.GENERIC_WRITE |
+			windows.DELETE |
+			windows.WRITE_DAC |
+			windows.WRITE_OWNER |
+			windows.FILE_WRITE_DATA |
+			windows.FILE_APPEND_DATA |
+			windows.FILE_WRITE_EA |
+			windows.FILE_WRITE_ATTRIBUTES |
+			0x00000040, // FILE_DELETE_CHILD
+	)
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			return false, err
+		}
+		if ace == nil {
+			continue
+		}
+		if !isSimpleDiscretionaryACE(ace.Header.AceType) {
+			return false, nil
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		trusted := sid.Equals(user.User.Sid) || sid.Equals(system) ||
+			sid.IsWellKnown(windows.WinCreatorOwnerRightsSid)
+		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE {
+			if trusted && ace.Mask != 0 {
+				return false, nil
+			}
+			continue
+		}
+		if !trusted && ace.Mask&untrustedWrite != 0 {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // isSimpleDiscretionaryACE deliberately recognizes only the two ACE layouts

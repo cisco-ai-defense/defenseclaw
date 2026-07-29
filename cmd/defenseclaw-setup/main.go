@@ -20,6 +20,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -43,6 +45,7 @@ const (
 	defaultPublisher             = "Cisco Systems, Inc."
 	userExitCode                 = 1602
 	installAlreadyRunningCode    = 1618
+	restartRequiredCode          = 3010
 	installTreeRenameMaxAttempts = 40
 	installTreeRenameRetryDelay  = 100 * time.Millisecond
 	// 1603 is the standard fatal-install result. Never use 3010 here: Windows
@@ -157,21 +160,22 @@ func validateRunCommand(command string) error {
 }
 
 type options struct {
-	Action          string
-	Quiet           bool
-	NoRestart       bool // Standard installer property; setup never initiates an OS reboot.
-	InstallScope    string
-	Connector       string
-	Mode            string
-	StartGateway    bool
-	DeleteUserData  bool
-	ConnectorSet    bool
-	ModeSet         bool
-	StartGatewaySet bool
-	WaitPID         uint32
-	FromVersion     string
-	CodexHome       string
-	ClaudeConfigDir string
+	Action             string
+	Quiet              bool
+	NoRestart          bool // Standard installer property; setup never initiates an OS reboot.
+	InstallScope       string
+	Connector          string
+	Mode               string
+	StartGateway       bool
+	DeleteUserData     bool
+	ConnectorSet       bool
+	ModeSet            bool
+	StartGatewaySet    bool
+	WaitPID            uint32
+	FromVersion        string
+	CleanupTransaction string
+	CodexHome          string
+	ClaudeConfigDir    string
 	// PreserveConnectorConfiguration is internal transaction intent, never a
 	// command-line property. Servicing an existing install without an explicit
 	// connector or mode selection must refresh its owned registrations in place
@@ -338,6 +342,9 @@ func run(opts options) (int, error) {
 	if err := validateManagedRoot(installRoot); err != nil {
 		return 1, err
 	}
+	if opts.Action == "cleanup" {
+		return runDeferredUninstallCleanup(opts)
+	}
 	if err := preflightInstalledClients(installRoot); err != nil {
 		if errors.Is(err, errInstalledProcessRunning) {
 			return retryRequiredCode, err
@@ -372,8 +379,12 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		return 1, err
 	}
 	hadInstall := pathExists(installRoot)
-	if err := recoverPendingSetupTransaction(installRoot, dataRoot); err != nil {
+	if err := recoverPendingSetupTransaction(installRoot, dataRoot); err != nil &&
+		!errors.Is(err, errUninstallCleanupRequiresRestart) {
 		return retryRequiredCode, err
+	}
+	if err := supersedeDeferredUninstallCleanup(); err != nil {
+		return retryRequiredCode, fmt.Errorf("supersede deferred uninstall cleanup before install: %w", err)
 	}
 	if err := checkSetupContext(ctx); err != nil {
 		return userExitCode, err
@@ -530,7 +541,16 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		return rollbackQuiescingSetup(transaction, cause)
 	}
 	gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
-	_, err = stopOwnedServicesContext(ctx, gatewayPath, dataRoot)
+	err = quiesceSetupRuntimeForMutation(
+		transaction,
+		gatewayPath,
+		dataRoot,
+		disableStableHookRuntime,
+		func(path, root string) (serviceState, error) {
+			return stopOwnedServicesContext(ctx, path, root)
+		},
+		verifyOwnedRuntimeReleased,
+	)
 	if err != nil {
 		return tryRestore(setupOperationError(ctx, err))
 	}
@@ -727,6 +747,12 @@ func runUninstallContext(ctx context.Context, opts options, installRoot, dataRoo
 		return 1, err
 	}
 	transaction, err := preparePendingSetupTransactionForUninstall(opts, installRoot, dataRoot)
+	if errors.Is(err, errUninstallCleanupRequiresRestart) {
+		if !opts.Quiet {
+			fmt.Println("A Windows restart is still required to finish DefenseClaw cleanup.")
+		}
+		return restartRequiredCode, nil
+	}
 	if err != nil {
 		return retryRequiredCode, err
 	}
@@ -763,34 +789,46 @@ func runUninstallContext(ctx context.Context, opts options, installRoot, dataRoo
 		return rollbackUninstall(err)
 	}
 	gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
-	_, err = stopOwnedServicesContext(ctx, gatewayPath, dataRoot)
+	err = mutateUninstallTreeWithQuiescedRuntime(
+		*transaction,
+		gatewayPath,
+		dataRoot,
+		disableStableHookRuntime,
+		func(path, root string) (serviceState, error) {
+			return stopOwnedServicesContext(ctx, path, root)
+		},
+		verifyOwnedRuntimeReleased,
+		func() error {
+			if err := checkSetupContext(ctx); err != nil {
+				return err
+			}
+			if pathExists(installRoot) {
+				currentState, stateErr := loadExistingInstallState(installRoot)
+				if stateErr != nil {
+					return stateErr
+				}
+				if !installStateMatchesSnapshot(currentState, transaction.PreviousState) {
+					return errors.New("installed state changed after the uninstall transaction began")
+				}
+				pid, imagePath, processErr := liveProcessWithinInstallRoot(installRoot)
+				if processErr != nil {
+					return fmt.Errorf("inspect running DefenseClaw processes: %w", processErr)
+				}
+				if pid != 0 {
+					return fmt.Errorf("%w (PID %d, %s)", errInstalledProcessRunning, pid, imagePath)
+				}
+				if err := renameInstallTree(installRoot, transaction.TrashPath); err != nil {
+					if isTransientInstallTreeRenameError(err) {
+						return errors.New("product files are locked; close running DefenseClaw terminals and retry")
+					}
+					return err
+				}
+			}
+			return nil
+		},
+	)
 	if err != nil {
 		return rollbackUninstall(setupOperationError(ctx, err))
-	}
-	if err := checkSetupContext(ctx); err != nil {
-		return rollbackUninstall(err)
-	}
-	if pathExists(installRoot) {
-		currentState, stateErr := loadExistingInstallState(installRoot)
-		if stateErr != nil {
-			return rollbackUninstall(stateErr)
-		}
-		if !installStateMatchesSnapshot(currentState, transaction.PreviousState) {
-			return rollbackUninstall(errors.New("installed state changed after the uninstall transaction began"))
-		}
-		pid, imagePath, processErr := liveProcessWithinInstallRoot(installRoot)
-		if processErr != nil {
-			return rollbackUninstall(fmt.Errorf("inspect running DefenseClaw processes: %w", processErr))
-		}
-		if pid != 0 {
-			return rollbackUninstall(fmt.Errorf("%w (PID %d, %s)", errInstalledProcessRunning, pid, imagePath))
-		}
-		if err := renameInstallTree(installRoot, transaction.TrashPath); err != nil {
-			if isTransientInstallTreeRenameError(err) {
-				return rollbackUninstall(fmt.Errorf("product files are locked; close running DefenseClaw terminals and retry"))
-			}
-			return rollbackUninstall(err)
-		}
 	}
 	if err := checkSetupContext(ctx); err != nil {
 		return rollbackUninstall(err)
@@ -801,15 +839,15 @@ func runUninstallContext(ctx context.Context, opts options, installRoot, dataRoo
 		}
 		return rollbackUninstall(fmt.Errorf("commit uninstall transaction: %w", err))
 	}
-	deferred, err := finishCommittedSetupTransaction(*transaction)
+	restartRequired, err := finishCommittedSetupTransaction(*transaction)
 	if err != nil {
 		return retryRequiredCode, fmt.Errorf("uninstall committed but convergence is pending: %w", err)
 	}
 	if err := connectorReconciliationPendingError("uninstall"); err != nil {
 		return retryRequiredCode, err
 	}
-	if deferred && !opts.Quiet {
-		fmt.Println("DefenseClaw cleanup will finish after this installer exits.")
+	if restartRequired && !opts.Quiet {
+		fmt.Println("A Windows restart is required to remove the disabled hook launcher and final installer state.")
 	}
 	if !opts.Quiet {
 		if opts.DeleteUserData {
@@ -817,6 +855,9 @@ func runUninstallContext(ctx context.Context, opts options, installRoot, dataRoo
 		} else {
 			fmt.Printf("DefenseClaw application files removed. User data preserved at %s\n", dataRoot)
 		}
+	}
+	if restartRequired {
+		return restartRequiredCode, nil
 	}
 	return 0, nil
 }
@@ -1259,6 +1300,13 @@ func updateInstalledPathOwnership(installRoot string, owned, reusedSeparator, va
 
 func publishMaintenanceCopyForTransaction(transaction setupTransaction, unsignedLocal bool) error {
 	target := transaction.MaintenancePath
+	root := filepath.Dir(target)
+	if err := safefile.ProtectDirectory(root); err != nil {
+		return fmt.Errorf("protect installer cache: %w", err)
+	}
+	if err := validatePrivateTransactionPath(root, true); err != nil {
+		return fmt.Errorf("validate installer cache: %w", err)
+	}
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -1278,14 +1326,20 @@ func publishMaintenanceCopyForTransaction(transaction setupTransaction, unsigned
 		if !strings.EqualFold(digest, transaction.MaintenanceSHA256) {
 			return errors.New("running maintenance executable does not match the transaction digest")
 		}
+		if err := verifySetupExecutablePolicyAt(target, unsignedLocal); err != nil {
+			return err
+		}
+		if err := validatePrivateTransactionPath(target, false); err != nil {
+			return fmt.Errorf("running maintenance executable lacks private custody: %w", err)
+		}
+		protectedDigest, err := fileSHA256(target)
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(protectedDigest, transaction.MaintenanceSHA256) {
+			return errors.New("running maintenance executable changed while its custody was protected")
+		}
 		return verifySetupExecutablePolicyAt(target, unsignedLocal)
-	}
-	root := filepath.Dir(target)
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return err
-	}
-	if err := rejectReparseAncestors(root); err != nil {
-		return err
 	}
 	backup := transaction.MaintenanceBackup
 	staged := transaction.MaintenanceNew
@@ -1312,6 +1366,22 @@ func publishMaintenanceCopyForTransaction(transaction setupTransaction, unsigned
 		return fmt.Errorf("maintenance executable changed after transaction intent: %w", err)
 	}
 	if transaction.MaintenanceExisted {
+		if err := safefile.ProtectFile(target); err != nil {
+			_ = removeAllSafe(staged, root)
+			return fmt.Errorf("protect previous maintenance executable: %w", err)
+		}
+		if err := validatePrivateTransactionPath(target, false); err != nil {
+			_ = removeAllSafe(staged, root)
+			return fmt.Errorf("validate previous maintenance executable: %w", err)
+		}
+		if err := validateMaintenanceSnapshot(
+			target,
+			true,
+			transaction.PreviousMaintenanceSHA256,
+		); err != nil {
+			_ = removeAllSafe(staged, root)
+			return fmt.Errorf("maintenance executable changed while its custody was protected: %w", err)
+		}
 		if err := renameInstallTree(target, backup); err != nil {
 			_ = removeAllSafe(staged, root)
 			return err
@@ -1335,6 +1405,12 @@ func publishMaintenanceCopyForTransaction(transaction setupTransaction, unsigned
 	if err := verifySetupExecutablePolicyAt(target, unsignedLocal); err != nil {
 		return fmt.Errorf("verify published maintenance Authenticode policy: %w", err)
 	}
+	if err := safefile.ProtectFile(target); err != nil {
+		return fmt.Errorf("protect published maintenance executable: %w", err)
+	}
+	if err := validatePrivateTransactionPath(target, false); err != nil {
+		return fmt.Errorf("validate published maintenance executable: %w", err)
+	}
 	return nil
 }
 
@@ -1348,7 +1424,8 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 	if err := os.MkdirAll(filepath.Join(staging, "runtime", "python"), 0o755); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(staging, "installer"), 0o755); err != nil {
+	installerRoot, err := prepareStagedInstallerRoot(staging)
+	if err != nil {
 		return err
 	}
 	if err := extractZipFile(filepath.Join(payload.Root, payload.Manifest.PythonEmbed), filepath.Join(staging, "runtime", "python")); err != nil {
@@ -1375,6 +1452,9 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 		filepath.Join(staging, "bin", "defenseclaw-startup.exe"),
 	); err != nil {
 		return fmt.Errorf("install startup launcher: %w", err)
+	}
+	if err := stageHookLauncher(payload, staging); err != nil {
+		return err
 	}
 	if err := copyFile(
 		filepath.Join(payload.Root, payload.Manifest.CosignVerifier),
@@ -1424,6 +1504,45 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 	}
 	if err := writeJSON(filepath.Join(staging, "installer", "install-state.json"), state); err != nil {
 		return err
+	}
+	for _, path := range []string{
+		installerRoot,
+		filepath.Join(installerRoot, "upgrade-manifest.json"),
+		filepath.Join(installerRoot, "payload-manifest.json"),
+		filepath.Join(installerRoot, "install-state.json"),
+	} {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if err := safefile.ValidatePrivateDirectory(path); err != nil {
+				return fmt.Errorf("validate staged installer custody: %w", err)
+			}
+		} else if err := safefile.ValidatePrivateFile(path); err != nil {
+			return fmt.Errorf("validate staged installer custody: %w", err)
+		}
+	}
+	return nil
+}
+
+func prepareStagedInstallerRoot(staging string) (string, error) {
+	installerRoot := filepath.Join(staging, "installer")
+	if err := safefile.ProtectDirectory(installerRoot); err != nil {
+		return "", fmt.Errorf("protect staged installer metadata: %w", err)
+	}
+	if err := safefile.ValidatePrivateDirectory(installerRoot); err != nil {
+		return "", fmt.Errorf("validate staged installer metadata: %w", err)
+	}
+	return installerRoot, nil
+}
+
+func stageHookLauncher(payload loadedPayload, staging string) error {
+	if err := copyFile(
+		filepath.Join(payload.Root, hookruntime.HookLauncherName),
+		filepath.Join(staging, "bin", hookruntime.HookLauncherName),
+	); err != nil {
+		return fmt.Errorf("install stable hook trampoline: %w", err)
 	}
 	return nil
 }
@@ -1559,20 +1678,35 @@ func validateMachineVersion(output []byte, expectedName, expectedVersion, expect
 }
 
 func runInitialConfigurationWithEnv(root, dataRoot string, opts options, env []string) error {
-	if opts.Connector == "none" {
-		return nil
+	args := initialConfigurationArgs(opts)
+	output, err := runCapturedSetupCommand(
+		setupConfigurationTimeout,
+		env,
+		filepath.Join(root, "bin", "defenseclaw.exe"),
+		args...,
+	)
+	if err != nil {
+		return fmt.Errorf("connector configuration failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	args := []string{
+	return nil
+}
+
+func initialConfigurationArgs(opts options) []string {
+	return []string{
 		"init", "--skip-install", "--non-interactive", "--yes",
 		"--connector", opts.Connector,
 		"--profile", opts.Mode,
 		"--no-start-gateway", "--no-verify",
 	}
-	output, err := runCapturedSetupCommand(setupConfigurationTimeout, env, filepath.Join(root, "bin", "defenseclaw.exe"), args...)
-	if err != nil {
-		return fmt.Errorf("connector configuration failed: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
+}
+
+func runCanonicalInitializationWithEnv(root, dataRoot string, env []string) error {
+	return runInitialConfigurationWithEnv(
+		root,
+		dataRoot,
+		options{Connector: "none", Mode: "observe", Quiet: true},
+		env,
+	)
 }
 
 const packagedMigrationScript = `import inspect, json, sys
@@ -1619,6 +1753,33 @@ if missing:
     raise SystemExit("required migrations are missing: " + ", ".join(missing))
 print(count)`
 
+const packagedCanonicalStateValidationScript = `import json, sys
+from defenseclaw import migration_state
+from defenseclaw.config import load, require_v8_config
+data_root, target_version, manifest_path = sys.argv[1:]
+with open(manifest_path, encoding="utf-8") as stream:
+    manifest = json.load(stream)
+if manifest.get("release_version") != target_version:
+    raise SystemExit("upgrade manifest version mismatch")
+require_v8_config()
+load()
+state = migration_state.load(data_root)
+if state is None:
+    raise SystemExit("migration cursor is missing")
+if state.package_version != target_version:
+    raise SystemExit(
+        "migration cursor package version mismatch: "
+        + str(state.package_version)
+        + " != "
+        + target_version
+    )
+required = tuple(manifest.get("required_cli_migrations", ()))
+applied = set(state.applied)
+missing = [value for value in required if value not in applied]
+if missing:
+    raise SystemExit("required migrations are missing: " + ", ".join(missing))
+print("ok")`
+
 const packagedMigrationPreflightScript = `import json, sys
 from defenseclaw.migrations import preflight_required_migrations
 from_version, to_version, openclaw_home, data_root, manifest_path, scratch_dir = sys.argv[1:]
@@ -1658,6 +1819,48 @@ func runPackagedMigrationsWithEnv(root, dataRoot, fromVersion, toVersion string,
 		return fmt.Errorf("run packaged migrations: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func validateCanonicalReleaseStateWithEnv(root, dataRoot, targetVersion string, env []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), setupMigrationTimeout)
+	defer cancel()
+	cmd := newCanonicalStateValidationCommand(ctx, root, dataRoot, targetVersion)
+	cmd.Env = packagedTargetRuntimeEnv(env, root, dataRoot)
+	output, err := processutil.CombinedOutputTree(cmd, false)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf(
+			"validate canonical release state timed out after %s: %w: %s",
+			setupMigrationTimeout,
+			ctxErr,
+			strings.TrimSpace(string(output)),
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("validate canonical release state: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func newCanonicalStateValidationCommand(
+	ctx context.Context,
+	root, dataRoot, targetVersion string,
+) *exec.Cmd {
+	python := filepath.Join(root, "runtime", "python", "python.exe")
+	manifest := filepath.Join(root, "installer", "upgrade-manifest.json")
+	cmd := newCapturedSetupCommand(
+		ctx,
+		python,
+		"-I",
+		"-X",
+		"utf8",
+		"-c",
+		packagedCanonicalStateValidationScript,
+		dataRoot,
+		targetVersion,
+		manifest,
+	)
+	cmd.Dir = root
+	return cmd
 }
 
 func runPackagedMigrationPreflightWithEnv(
@@ -1977,18 +2180,7 @@ func verifyPayloadManifest(root string, manifest payloadManifest) error {
 			manifest.DistributionFlavor,
 		)
 	}
-	required := []string{
-		manifest.GatewayArchive,
-		manifest.Wheel,
-		manifest.PythonEmbed,
-		manifest.YaraCompatWheel,
-		manifest.SitePackages,
-		manifest.Launcher,
-		manifest.StartupLauncher,
-		manifest.CosignVerifier,
-		manifest.UpgradeManifest,
-	}
-	for _, name := range required {
+	for _, name := range requiredPayloadFiles(manifest) {
 		if strings.TrimSpace(name) == "" {
 			return errors.New("payload manifest is missing a required file name")
 		}
@@ -2016,6 +2208,22 @@ func verifyPayloadManifest(root string, manifest payloadManifest) error {
 		}
 	}
 	return validateAuthenticodeManifest(manifest)
+}
+
+func requiredPayloadFiles(manifest payloadManifest) []string {
+	required := []string{
+		manifest.GatewayArchive,
+		manifest.Wheel,
+		manifest.PythonEmbed,
+		manifest.YaraCompatWheel,
+		manifest.SitePackages,
+		manifest.Launcher,
+		manifest.StartupLauncher,
+		hookruntime.HookLauncherName,
+		manifest.CosignVerifier,
+		manifest.UpgradeManifest,
+	}
+	return required
 }
 
 func validSourceCommit(value string) bool {
@@ -2210,6 +2418,8 @@ func parseArgs(args []string) (options, error) {
 			opts.Action = "help"
 		case "/verify", "-verify", "--verify":
 			opts.Action = "verify"
+		case "/cleanup", "-cleanup", "--cleanup":
+			opts.Action = "cleanup"
 		case "/quiet", "-quiet", "--quiet", "/qn":
 			opts.Quiet = true
 		case "/norestart":
@@ -2260,6 +2470,11 @@ func parseArgs(args []string) (options, error) {
 					return opts, fmt.Errorf("invalid FROMVERSION %q", value)
 				}
 				opts.FromVersion = value
+			case "CLEANUPTRANSACTION":
+				if !validSetupTransactionID(value) {
+					return opts, fmt.Errorf("invalid CLEANUPTRANSACTION %q", value)
+				}
+				opts.CleanupTransaction = value
 			default:
 				return opts, fmt.Errorf("unrecognized setup property %q", key)
 			}
@@ -2273,6 +2488,24 @@ func parseArgs(args []string) (options, error) {
 	}
 	if opts.Mode != "observe" && opts.Mode != "action" {
 		return opts, fmt.Errorf("invalid MODE %q; expected observe or action", opts.Mode)
+	}
+	if opts.Action == "cleanup" && opts.CleanupTransaction == "" {
+		return opts, errors.New("CLEANUPTRANSACTION is required with /cleanup")
+	}
+	if opts.Action != "cleanup" && opts.CleanupTransaction != "" {
+		return opts, errors.New("CLEANUPTRANSACTION is accepted only with /cleanup")
+	}
+	if opts.Action == "cleanup" {
+		expected := []string{
+			"/cleanup",
+			"/quiet",
+			"CLEANUPTRANSACTION=" + opts.CleanupTransaction,
+		}
+		if !slices.Equal(args, expected) {
+			return opts, errors.New(
+				"deferred cleanup requires exact /cleanup /quiet CLEANUPTRANSACTION=<transaction> arguments",
+			)
+		}
 	}
 	return opts, nil
 }

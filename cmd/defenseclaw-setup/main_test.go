@@ -18,7 +18,49 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 )
+
+func TestHookLauncherPayloadInterfaceIsCanonicalAndRequired(t *testing.T) {
+	manifest := payloadManifest{Files: map[string]string{}}
+	if !slices.Contains(requiredPayloadFiles(manifest), hookruntime.HookLauncherName) {
+		t.Fatal("canonical stable hook trampoline payload is not required")
+	}
+	_, complete := unsignedManifestFixture(t)
+	delete(complete.Files, hookruntime.HookLauncherName)
+	if err := verifyPayloadManifest(t.TempDir(), complete); err == nil ||
+		!strings.Contains(err.Error(), hookruntime.HookLauncherName) {
+		t.Fatalf("verifyPayloadManifest missing-launcher error = %v", err)
+	}
+}
+
+func TestStageHookLauncherCopiesCanonicalPayloadToInstalledSource(t *testing.T) {
+	payloadRoot := t.TempDir()
+	staging := t.TempDir()
+	source := filepath.Join(payloadRoot, hookruntime.HookLauncherName)
+	want := []byte("MZ-stable-hook-trampoline")
+	if err := os.WriteFile(source, want, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	payload := loadedPayload{
+		Root: payloadRoot,
+		Manifest: payloadManifest{Files: map[string]string{
+			hookruntime.HookLauncherName: strings.Repeat("a", 64),
+		}},
+	}
+	if err := stageHookLauncher(payload, staging); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(staging, "bin", hookruntime.HookLauncherName)
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("installed stable hook source = %q, want %q", got, want)
+	}
+}
 
 func TestRenameInstallTreeRetriesTransientErrors(t *testing.T) {
 	for _, errno := range []syscall.Errno{5, 32, 33} {
@@ -148,6 +190,37 @@ func TestParseArgsVerifyAction(t *testing.T) {
 	}
 }
 
+func TestParseArgsDeferredCleanupQuietRestartContract(t *testing.T) {
+	transactionID := "0123456789abcdef0123456789abcdef"
+	opts, err := parseArgs([]string{
+		"/cleanup",
+		"/quiet",
+		"CLEANUPTRANSACTION=" + transactionID,
+	})
+	if err != nil {
+		t.Fatalf("parseArgs returned error: %v", err)
+	}
+	if opts.Action != "cleanup" || !opts.Quiet || opts.CleanupTransaction != transactionID {
+		t.Fatalf("deferred cleanup options parsed incorrectly: %+v", opts)
+	}
+	if restartRequiredCode != 3010 {
+		t.Fatalf("restart-required exit code = %d, want Windows 3010", restartRequiredCode)
+	}
+	for _, args := range [][]string{
+		{"/cleanup", "/quiet"},
+		{"/cleanup", "CLEANUPTRANSACTION=invalid"},
+		{"/uninstall", "CLEANUPTRANSACTION=" + transactionID},
+		{"/cleanup", "/quiet", "CLEANUPTRANSACTION=" + transactionID, "DELETEUSERDATA=1"},
+		{"/quiet", "/cleanup", "CLEANUPTRANSACTION=" + transactionID},
+		{"/cleanup", "/quiet", "cleanuptransaction=" + transactionID},
+		{"/cleanup", "/quiet", "CLEANUPTRANSACTION=" + transactionID, "CLEANUPTRANSACTION=" + transactionID},
+	} {
+		if _, err := parseArgs(args); err == nil {
+			t.Fatalf("parseArgs accepted invalid cleanup invocation: %v", args)
+		}
+	}
+}
+
 func TestParseArgsQuietPropertyMatrix(t *testing.T) {
 	for _, connector := range []string{"none", "codex", "claudecode"} {
 		for _, mode := range []string{"observe", "action"} {
@@ -233,6 +306,178 @@ func TestConfiguredConnectorRequiresPersistentGateway(t *testing.T) {
 	if wanted := requestedServices(options{Connector: "none"}, serviceState{}); wanted.Gateway {
 		t.Fatal("CLI-only install unexpectedly required gateway startup")
 	}
+}
+
+func TestCanonicalInitializationUsesExplicitNoConnectorAuthority(t *testing.T) {
+	args := initialConfigurationArgs(options{Connector: "none", Mode: "observe"})
+	want := []string{
+		"init", "--skip-install", "--non-interactive", "--yes",
+		"--connector", "none",
+		"--profile", "observe",
+		"--no-start-gateway", "--no-verify",
+	}
+	if !slices.Equal(args, want) {
+		t.Fatalf("canonical initialization args = %v, want %v", args, want)
+	}
+}
+
+func TestCanonicalStateValidationUsesPackagedRuntimeAndManifest(t *testing.T) {
+	root := t.TempDir()
+	dataRoot := filepath.Join(root, "profile", ".defenseclaw")
+	cmd := newCanonicalStateValidationCommand(context.Background(), root, dataRoot, "0.8.9")
+	want := []string{
+		filepath.Join(root, "runtime", "python", "python.exe"),
+		"-I",
+		"-X",
+		"utf8",
+		"-c",
+		packagedCanonicalStateValidationScript,
+		dataRoot,
+		"0.8.9",
+		filepath.Join(root, "installer", "upgrade-manifest.json"),
+	}
+	if !slices.Equal(cmd.Args, want) {
+		t.Fatalf("canonical validation args = %v, want %v", cmd.Args, want)
+	}
+	if cmd.Dir != root {
+		t.Fatalf("canonical validation directory = %q, want %q", cmd.Dir, root)
+	}
+}
+
+func TestPackagedCanonicalStateValidationFailsClosed(t *testing.T) {
+	tests := []struct {
+		name           string
+		stateSource    string
+		required       []string
+		wantErr        bool
+		wantDiagnostic string
+	}{
+		{
+			name: "valid",
+			stateSource: `class State:
+    applied = ("0.8.5",)
+    package_version = "0.8.9"
+
+def load(data_root):
+    return State()
+`,
+			required: []string{"0.8.5"},
+		},
+		{
+			name: "missing-cursor",
+			stateSource: `def load(data_root):
+    return None
+`,
+			wantErr:        true,
+			wantDiagnostic: "migration cursor is missing",
+		},
+		{
+			name: "missing-required-migration",
+			stateSource: `class State:
+    applied = ()
+    package_version = "0.8.9"
+
+def load(data_root):
+    return State()
+`,
+			required:       []string{"0.8.5"},
+			wantErr:        true,
+			wantDiagnostic: "required migrations are missing: 0.8.5",
+		},
+		{
+			name: "wrong-package-version",
+			stateSource: `class State:
+    applied = ("0.8.5",)
+    package_version = "0.8.8"
+
+def load(data_root):
+    return State()
+`,
+			required:       []string{"0.8.5"},
+			wantErr:        true,
+			wantDiagnostic: "migration cursor package version mismatch: 0.8.8 != 0.8.9",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			output, err := runPackagedCanonicalStateValidationFixture(
+				t,
+				test.stateSource,
+				test.required,
+			)
+			if test.wantErr != (err != nil) {
+				t.Fatalf("validation error = %v, output = %s", err, strings.TrimSpace(string(output)))
+			}
+			if test.wantDiagnostic != "" && !strings.Contains(string(output), test.wantDiagnostic) {
+				t.Fatalf("validation output = %q, want %q", strings.TrimSpace(string(output)), test.wantDiagnostic)
+			}
+		})
+	}
+}
+
+func runPackagedCanonicalStateValidationFixture(
+	t *testing.T,
+	migrationStateSource string,
+	required []string,
+) ([]byte, error) {
+	t.Helper()
+	var python string
+	for _, name := range []string{"python", "python3"} {
+		if path, err := exec.LookPath(name); err == nil {
+			python = path
+			break
+		}
+	}
+	if python == "" {
+		t.Skip("python is unavailable")
+	}
+	root := t.TempDir()
+	packageRoot := filepath.Join(root, "defenseclaw")
+	if err := os.MkdirAll(packageRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"__init__.py":        "",
+		"config.py":          "def require_v8_config():\n    return None\n\ndef load():\n    return object()\n",
+		"migration_state.py": migrationStateSource,
+	} {
+		if err := os.WriteFile(filepath.Join(packageRoot, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest, err := json.Marshal(map[string]interface{}{
+		"release_version":         "0.8.9",
+		"required_cli_migrations": required,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(root, "upgrade-manifest.json")
+	if err := os.WriteFile(manifestPath, manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := filepath.Join(root, "data")
+	if err := os.Mkdir(dataRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fixtureScript := "import sys\nsys.path.insert(0, sys.argv.pop(1))\n" +
+		packagedCanonicalStateValidationScript
+	cmd := exec.Command(
+		python,
+		"-I",
+		"-X",
+		"utf8",
+		"-c",
+		fixtureScript,
+		root,
+		dataRoot,
+		"0.8.9",
+		manifestPath,
+	)
+	cmd.Dir = root
+	cmd.Env = sanitizePythonEnv(os.Environ())
+	return cmd.CombinedOutput()
 }
 
 func TestOrdinaryInstallOfNewerPackageRunsMigrations(t *testing.T) {
