@@ -1966,7 +1966,7 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 				// ComponentTargets cannot read Config without introducing a
 				// package cycle, so bind the watch set through Config's
 				// schema-aware Amp resolver instead of watching static defaults.
-				compTargets["skill"] = cfg.SkillDirsForConnector("amp")
+				compTargets["skill"] = ampWatcherSkillDirs(cfg)
 				compTargets["plugin"] = cfg.PluginDirsForConnector("amp")
 			}
 		}
@@ -2005,6 +2005,34 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 	}
 
 	return skillDirs, pluginDirs, src
+}
+
+// ampWatcherSkillDirs keeps Amp's Claude-compatible skill roots available for
+// discovery without letting the watcher materialize another connector's home.
+// The watcher creates each configured directory before registering fsnotify,
+// so optional .claude/skills roots are watchable only when they already exist.
+func ampWatcherSkillDirs(cfg *config.Config) []string {
+	dirs := cfg.SkillDirsForConnector("amp")
+	optionalClaudeRoots := make(map[string]struct{}, 2)
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		optionalClaudeRoots[filepath.Clean(filepath.Join(home, ".claude", "skills"))] = struct{}{}
+	}
+	if workspace := cfg.ConnectorWorkspaceDir(); workspace != "" {
+		optionalClaudeRoots[filepath.Clean(filepath.Join(workspace, ".claude", "skills"))] = struct{}{}
+	}
+
+	filtered := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		cleaned := filepath.Clean(dir)
+		if _, optional := optionalClaudeRoots[cleaned]; optional {
+			info, err := os.Stat(cleaned)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+		}
+		filtered = append(filtered, dir)
+	}
+	return filtered
 }
 
 // runWatcher starts the skill/MCP install watcher if enabled in config.
