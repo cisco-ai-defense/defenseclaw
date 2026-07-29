@@ -813,30 +813,41 @@ def _reject_reparse_path(path: str, *, allow_missing: bool) -> os.stat_result | 
 
 
 def _windows_acl_snapshot(path: str) -> tuple[str, bool, list[tuple[int, int, int, str]]]:
-    """Read the owner SID and explicit DACL entries using native Win32 APIs."""
+    """Read the owner SID and every DACL ACE using native Win32 APIs."""
     if os.name != "nt":
         raise OSError("Windows ACLs are unavailable on this platform")
     import ctypes
     from ctypes import wintypes
 
-    class _TrusteeW(ctypes.Structure):
-        pass
-
-    _TrusteeW._fields_ = [
-        ("pMultipleTrustee", ctypes.POINTER(_TrusteeW)),
-        ("MultipleTrusteeOperation", wintypes.DWORD),
-        ("TrusteeForm", wintypes.DWORD),
-        ("TrusteeType", wintypes.DWORD),
-        ("ptstrName", ctypes.c_void_p),
-    ]
-
-    class _ExplicitAccessW(ctypes.Structure):
+    class _Acl(ctypes.Structure):
         _fields_ = [
-            ("grfAccessPermissions", wintypes.DWORD),
-            ("grfAccessMode", wintypes.DWORD),
-            ("grfInheritance", wintypes.DWORD),
-            ("Trustee", _TrusteeW),
+            ("AclRevision", wintypes.BYTE),
+            ("Sbz1", wintypes.BYTE),
+            ("AclSize", wintypes.WORD),
+            ("AceCount", wintypes.WORD),
+            ("Sbz2", wintypes.WORD),
         ]
+
+    class _AceHeader(ctypes.Structure):
+        _fields_ = [
+            ("AceType", wintypes.BYTE),
+            ("AceFlags", wintypes.BYTE),
+            ("AceSize", wintypes.WORD),
+        ]
+
+    class _AccessAce(ctypes.Structure):
+        _fields_ = [
+            ("Header", _AceHeader),
+            ("Mask", wintypes.DWORD),
+            ("SidStart", wintypes.DWORD),
+        ]
+
+    access_allowed_ace_type = 0
+    access_denied_ace_type = 1
+    access_modes = {
+        access_allowed_ace_type: 1,  # GRANT_ACCESS
+        access_denied_ace_type: 3,  # DENY_ACCESS
+    }
 
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -852,13 +863,16 @@ def _windows_acl_snapshot(path: str) -> tuple[str, bool, list[tuple[int, int, in
         ctypes.POINTER(ctypes.c_void_p),
     ]
     get_security.restype = wintypes.DWORD
-    get_entries = advapi32.GetExplicitEntriesFromAclW
-    get_entries.argtypes = [
+    # GetExplicitEntriesFromAclW omits inherited ACEs. Setup deliberately
+    # publishes its executable tree with inherited read/execute access, so
+    # custody checks must enumerate the exact DACL instead.
+    get_ace = advapi32.GetAce
+    get_ace.argtypes = [
         ctypes.c_void_p,
-        ctypes.POINTER(wintypes.ULONG),
-        ctypes.POINTER(ctypes.POINTER(_ExplicitAccessW)),
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
     ]
-    get_entries.restype = wintypes.DWORD
+    get_ace.restype = wintypes.BOOL
     sid_to_string = advapi32.ConvertSidToStringSidW
     sid_to_string.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
     sid_to_string.restype = wintypes.BOOL
@@ -892,24 +906,33 @@ def _windows_acl_snapshot(path: str) -> tuple[str, bool, list[tuple[int, int, in
     )
     if result:
         raise OSError(result, ctypes.FormatError(result), path)
-    entries_ptr = ctypes.POINTER(_ExplicitAccessW)()
     try:
         owner_sid = _sid_string(owner.value)
         if not dacl.value:
             return owner_sid, True, []
-        count = wintypes.ULONG()
-        result = get_entries(dacl, ctypes.byref(count), ctypes.byref(entries_ptr))
-        if result:
-            raise OSError(result, ctypes.FormatError(result), path)
+        acl = ctypes.cast(dacl, ctypes.POINTER(_Acl)).contents
         entries = []
-        for index in range(count.value):
-            entry = entries_ptr[index]
-            sid = _sid_string(entry.Trustee.ptstrName) if entry.Trustee.TrusteeForm == 0 else ""
-            entries.append((int(entry.grfAccessPermissions), int(entry.grfAccessMode), int(entry.grfInheritance), sid))
+        for index in range(acl.AceCount):
+            ace_pointer = ctypes.c_void_p()
+            if not get_ace(dacl, index, ctypes.byref(ace_pointer)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            ace = ctypes.cast(ace_pointer, ctypes.POINTER(_AccessAce)).contents
+            if ace.Header.AceSize < ctypes.sizeof(_AccessAce):
+                raise OSError(f"invalid Windows DACL ACE size at index {index}: {path}")
+            access_mode = access_modes.get(ace.Header.AceType)
+            if access_mode is None:
+                raise OSError(f"unsupported Windows DACL ACE type {ace.Header.AceType}: {path}")
+            sid_pointer = ace_pointer.value + _AccessAce.SidStart.offset
+            entries.append(
+                (
+                    int(ace.Mask),
+                    access_mode,
+                    int(ace.Header.AceFlags),
+                    _sid_string(sid_pointer),
+                )
+            )
         return owner_sid, False, entries
     finally:
-        if entries_ptr:
-            local_free(ctypes.cast(entries_ptr, ctypes.c_void_p))
         if descriptor.value:
             local_free(descriptor)
 

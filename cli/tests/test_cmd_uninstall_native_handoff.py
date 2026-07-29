@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
+from defenseclaw import file_permissions
 from defenseclaw.commands import cmd_uninstall
 from defenseclaw.commands import windows_native_uninstall as native
 from defenseclaw.file_permissions import UnsafePathError
@@ -71,9 +72,7 @@ def _install_state(local_app_data: Path, profile: Path) -> dict[str, object]:
         "command_dir": str(install_root / "bin"),
         "data_root": str(profile / ".defenseclaw"),
         "runtime": str(install_root / "runtime" / "python"),
-        "maintenance_path": str(
-            local_app_data / "DefenseClaw" / "InstallerCache" / "DefenseClawSetup-x64.exe"
-        ),
+        "maintenance_path": str(local_app_data / "DefenseClaw" / "InstallerCache" / "DefenseClawSetup-x64.exe"),
         "path_entry_owned": True,
         "connector": "codex",
         "mode": "observe",
@@ -128,6 +127,36 @@ def _native_tree(root: Path) -> tuple[Path, Path]:
     return local_app_data, profile
 
 
+def _set_setup_publication_acl(path: Path) -> None:
+    """Model Setup's inherited owner/SYSTEM plus sandbox read/execute ACL."""
+
+    subprocess.run(
+        [
+            "icacls.exe",
+            str(path),
+            "/inheritance:r",
+            "/remove:g",
+            "*S-1-5-32-544",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [
+            "icacls.exe",
+            str(path),
+            "/grant:r",
+            "*S-1-3-4:(OI)(CI)F",
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-545:(OI)(CI)RX",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def _prepare_from_tree(
     local_app_data: Path,
     profile: Path,
@@ -163,6 +192,128 @@ def test_prepare_uses_known_folders_and_exact_fixed_argv(tmp_path: Path) -> None
     assert request.install_root == str(local_app_data / "Programs" / "DefenseClaw")
     assert request.version == _VERSION
     assert request.source_commit == _SOURCE
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows inherited ACLs")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("publication", ["fresh-install", "repair"])
+def test_prepare_accepts_setup_inherited_read_execute_acl(
+    tmp_path: Path,
+    publication: str,
+) -> None:
+    _set_setup_publication_acl(tmp_path)
+    local_app_data, profile = _native_tree(tmp_path)
+    install_root = local_app_data / "Programs" / "DefenseClaw"
+    if publication == "repair":
+        staged = local_app_data / "Programs" / "DefenseClaw.repair"
+        backup = local_app_data / "Programs" / "DefenseClaw.backup"
+        install_root.rename(backup)
+        staged.mkdir()
+        (staged / "installer").mkdir()
+        for name, value in (
+            ("install-state.json", _install_state(local_app_data, profile)),
+            ("payload-manifest.json", _payload_manifest()),
+        ):
+            (staged / "installer" / name).write_text(json.dumps(value), encoding="utf-8")
+        staged.rename(install_root)
+
+    owner_sid, null_dacl, entries = file_permissions._windows_acl_snapshot(str(install_root))
+    assert owner_sid == file_permissions._windows_current_user_sid()
+    assert null_dacl is False
+    assert any(
+        sid == "S-1-5-32-545" and permissions == 0x001200A9 and access_mode == 1 and inheritance & 0x10
+        for permissions, access_mode, inheritance, sid in entries
+    )
+
+    folders = {
+        native._LOCAL_APP_DATA_FOLDER_ID: str(local_app_data),
+        native._PROFILE_FOLDER_ID: str(profile),
+    }
+    with patch.object(native, "_known_folder_path", side_effect=folders.__getitem__):
+        request = native.prepare_native_windows_uninstall(
+            wipe_data=False,
+            platform_name="win32",
+        )
+
+    assert request is not None
+    assert request.argv == (
+        str(local_app_data / "DefenseClaw" / "InstallerCache" / "DefenseClawSetup-x64.exe"),
+        "/uninstall",
+        "/quiet",
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows inherited ACLs")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("grant_kind", ["explicit", "inherited"])
+def test_private_path_rejects_setup_acl_with_untrusted_modify(
+    tmp_path: Path,
+    grant_kind: str,
+) -> None:
+    _set_setup_publication_acl(tmp_path)
+    install_root = tmp_path / "DefenseClaw"
+    if grant_kind == "inherited":
+        subprocess.run(
+            [
+                "icacls.exe",
+                str(tmp_path),
+                "/grant:r",
+                "*S-1-5-32-545:(OI)(CI)M",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        install_root.mkdir()
+    else:
+        install_root.mkdir()
+        subprocess.run(
+            [
+                "icacls.exe",
+                str(install_root),
+                "/grant:r",
+                "*S-1-5-32-545:M",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    with pytest.raises(native.NativeWindowsUninstallRefusal, match="private DACL"):
+        native._validate_private_path(
+            str(install_root),
+            label="native install root",
+            directory=True,
+        )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows deny ACEs")
+@pytest.mark.allow_subprocess
+def test_private_path_rejects_system_deny_on_setup_acl(tmp_path: Path) -> None:
+    _set_setup_publication_acl(tmp_path)
+    install_root = tmp_path / "DefenseClaw"
+    install_root.mkdir()
+    subprocess.run(
+        [
+            "icacls.exe",
+            str(install_root),
+            "/deny",
+            "*S-1-5-18:F",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    with pytest.raises(
+        native.NativeWindowsUninstallRefusal,
+        match="required private owner/SYSTEM DACL",
+    ):
+        native._validate_private_path(
+            str(install_root),
+            label="native install root",
+            directory=True,
+        )
 
 
 def test_prepare_non_windows_leaves_generic_flow_unchanged() -> None:
@@ -282,6 +433,102 @@ def test_private_path_refuses_wrong_owner_and_broad_dacl(
         native._validate_private_path(str(target), label="native installer state", directory=False)
 
 
+@pytest.mark.parametrize(
+    "permissions",
+    [
+        0x00000002,  # write data / create file
+        0x00000004,  # append data / create directory
+        0x00000040,  # delete child
+        0x00010000,  # delete
+        0x00040000,  # WRITE_DAC
+        0x00080000,  # WRITE_OWNER
+        0x40000000,  # GENERIC_WRITE
+        0x10000000,  # GENERIC_ALL
+        0x00000022,  # execute plus write
+        0x001301BF,  # modify
+        0x001F01FF,  # full control
+    ],
+)
+@pytest.mark.parametrize("inheritance", [0, 0x10])
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows DACL policy")
+def test_private_path_refuses_explicit_or_inherited_untrusted_mutation(
+    tmp_path: Path,
+    permissions: int,
+    inheritance: int,
+) -> None:
+    target = tmp_path / "state.json"
+    target.write_text("{}", encoding="utf-8")
+    current_sid = "S-1-5-21-current"
+    entries = [
+        (0x001F01FF, 1, 0, current_sid),
+        (0x001F01FF, 1, 0, "S-1-5-18"),
+        (permissions, 1, inheritance, "S-1-5-32-545"),
+    ]
+    with (
+        patch.object(
+            file_permissions,
+            "_windows_acl_snapshot",
+            return_value=(current_sid, False, entries),
+        ),
+        patch.object(
+            file_permissions,
+            "_windows_current_user_sid",
+            return_value=current_sid,
+        ),
+        patch.object(file_permissions, "reject_reparse_path"),
+        pytest.raises(native.NativeWindowsUninstallRefusal, match="private DACL"),
+    ):
+        native._validate_private_path(
+            str(target),
+            label="native installer state",
+            directory=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [(0x001F01FF, 1, 0, "S-1-5-21-current")],
+        [(0x001F01FF, 1, 0, "S-1-5-18")],
+        [
+            (0x001F01FF, 1, 0, "S-1-5-21-current"),
+            (0x001F01FF, 1, 0, "S-1-5-18"),
+            (0x001F01FF, 3, 0, "S-1-5-18"),
+        ],
+    ],
+)
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows DACL policy")
+def test_private_path_refuses_missing_or_denied_required_custody(
+    tmp_path: Path,
+    entries: list[tuple[int, int, int, str]],
+) -> None:
+    target = tmp_path / "state.json"
+    target.write_text("{}", encoding="utf-8")
+    current_sid = "S-1-5-21-current"
+    with (
+        patch.object(
+            file_permissions,
+            "_windows_acl_snapshot",
+            return_value=(current_sid, False, entries),
+        ),
+        patch.object(
+            file_permissions,
+            "_windows_current_user_sid",
+            return_value=current_sid,
+        ),
+        patch.object(file_permissions, "reject_reparse_path"),
+        pytest.raises(
+            native.NativeWindowsUninstallRefusal,
+            match="required private owner/SYSTEM DACL",
+        ),
+    ):
+        native._validate_private_path(
+            str(target),
+            label="native installer state",
+            directory=False,
+        )
+
+
 def test_private_path_refuses_reparse(tmp_path: Path) -> None:
     target = tmp_path / "state.json"
     target.write_text("{}", encoding="utf-8")
@@ -331,9 +578,7 @@ def test_execute_uses_locked_authenticated_setup_and_preserves_3010(tmp_path: Pa
 
 def test_execute_refuses_replaced_installer_state(tmp_path: Path) -> None:
     request = _request(tmp_path)
-    replaced = native.NativeWindowsUninstallRequest(
-        **{**request.__dict__, "state_sha256": "f" * 64}
-    )
+    replaced = native.NativeWindowsUninstallRequest(**{**request.__dict__, "state_sha256": "f" * 64})
     with (
         patch.object(native, "prepare_native_windows_uninstall", return_value=replaced),
         pytest.raises(native.NativeWindowsUninstallRefusal, match="changed before"),
