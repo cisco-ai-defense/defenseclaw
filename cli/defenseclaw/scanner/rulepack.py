@@ -54,6 +54,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from typing import TypeAlias
 
 import yaml
 
@@ -83,6 +84,9 @@ _REGEX_FAMILIES = {
     "injection_regexes": ("HIGH", "RP-INJECTION", "Prompt-injection pattern", "prompt-injection"),
     "pii_data_regexes": ("MEDIUM", "RP-PII-DATA", "PII data pattern", "pii"),
 }
+_GO_UNICODE_SCALAR_ESCAPE = re.compile(
+    r"(?P<slashes>\\+)x\{(?P<codepoint>[0-9A-Fa-f]{1,6})\}"
+)
 
 
 @dataclass
@@ -163,6 +167,9 @@ class RulePack:
                 rel = os.path.relpath(full, path)
                 findings.extend(self.scan_text(text, location=rel))
         return findings
+
+
+RulePackOverlayCache: TypeAlias = dict[str, RulePack]
 
 
 def _read_text(path: str) -> str | None:
@@ -271,11 +278,38 @@ def _compile_local_patterns(raw: dict, pack: RulePack) -> None:
 
 
 def _compile(pattern: str, rule_id: str) -> re.Pattern[str] | None:
+    # Go/RE2 accepts ``\x{10FFFF}`` Unicode scalar escapes while Python's
+    # ``re`` does not. Translate only that representational difference so the
+    # static-artifact overlay does not silently drop shipped rules containing
+    # zero-width or other non-ASCII scalars. This is not validation: the
+    # gateway's strict Go loader remains authoritative for the source pattern,
+    # and every other unsupported construct still fails closed to "no Python
+    # overlay rule" here.
+    translated = _translate_go_unicode_scalar_escapes(pattern)
     try:
-        return re.compile(pattern)
+        return re.compile(translated)
     except re.error as exc:
         _log.debug("rule-pack: invalid regex in %s (%s): %s", rule_id, exc, pattern)
         return None
+
+
+def _translate_go_unicode_scalar_escapes(pattern: str) -> str:
+    """Translate valid Go ``\\x{...}`` scalar escapes for Python ``re``."""
+
+    def _replace(match: re.Match[str]) -> str:
+        slashes = match.group("slashes")
+        # An even-length run escapes every backslash, so none remains to
+        # introduce the apparent ``\x{...}`` token at the end of the run.
+        # For an odd-length run, preserve the escaped pairs and translate only
+        # the final, unescaped scalar token.
+        if len(slashes) % 2 == 0:
+            return match.group(0)
+        value = int(match.group("codepoint"), 16)
+        if value > 0x10FFFF or 0xD800 <= value <= 0xDFFF:
+            return match.group(0)
+        return slashes[:-1] + re.escape(chr(value))
+
+    return _GO_UNICODE_SCALAR_ESCAPE.sub(_replace, pattern)
 
 
 def _resolve_dir(cfg, connector: str | None) -> str:
@@ -397,17 +431,34 @@ class RulePackOverlayScanner:
                 result.findings.append(f)
 
 
-def maybe_wrap(inner, cfg, connector: str | None = None):
+def maybe_wrap(
+    inner,
+    cfg,
+    connector: str | None = None,
+    *,
+    pack_cache: RulePackOverlayCache | None = None,
+):
     """Wrap *inner* with the rule-pack overlay iff a rule pack is configured.
 
     Returns *inner* unchanged when no pack is set (or it is empty), so the common
     no-rule-pack path has zero behavior change and pays no extra disk reads.
+    Fan-out callers can provide a per-operation *pack_cache*: it de-duplicates
+    identical effective directories while preserving an explicit connector
+    lookup, so one peer's pack can never bleed into another peer's scan.
     """
     resolved = _active_connector(cfg, connector)
     dir_path = _resolve_dir(cfg, resolved)
     if not dir_path:
         return inner
-    pack = load_rule_pack(dir_path)
+    cache_key = os.path.normcase(
+        os.path.realpath(os.path.abspath(os.path.expanduser(dir_path)))
+    )
+    if pack_cache is not None and cache_key in pack_cache:
+        pack = pack_cache[cache_key]
+    else:
+        pack = load_rule_pack(dir_path)
+        if pack_cache is not None:
+            pack_cache[cache_key] = pack
     if pack.is_empty():
         return inner
     return RulePackOverlayScanner(inner, pack, resolved)

@@ -44,7 +44,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
@@ -5261,13 +5260,14 @@ func TestParseJudgeJSON(t *testing.T) {
 	}
 }
 
-func testJudge() *LLMJudge {
-	rp := guardrail.LoadRulePack("")
+func testJudge(t testing.TB) *LLMJudge {
+	t.Helper()
+	rp := mustLoadRulePack(t, "")
 	return &LLMJudge{rp: rp}
 }
 
 func TestInjectionToVerdict(t *testing.T) {
-	j := testJudge()
+	j := testJudge(t)
 
 	t.Run("clean", func(t *testing.T) {
 		data := map[string]interface{}{
@@ -5326,7 +5326,7 @@ func TestInjectionToVerdict(t *testing.T) {
 }
 
 func TestPIIToVerdict(t *testing.T) {
-	j := testJudge()
+	j := testJudge(t)
 
 	t.Run("clean", func(t *testing.T) {
 		data := map[string]interface{}{}

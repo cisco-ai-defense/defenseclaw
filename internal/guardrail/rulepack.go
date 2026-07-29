@@ -17,14 +17,23 @@
 package guardrail
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
-	"log"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -51,6 +60,41 @@ type RulePack struct {
 	// defaults" — explicitly different from an empty struct, which
 	// would override every field to empty.
 	LocalPatterns *LocalPatterns
+}
+
+// RulePackError is the safe, machine-readable error returned by the strict
+// loader and validator. Path is always relative to the rule-pack root (or "."
+// for the root itself), and Reason never contains YAML values, regexes,
+// prompts, absolute filesystem paths, or wrapped operating-system errors.
+type RulePackError struct {
+	Path   string `json:"path"`
+	Code   string `json:"code"`
+	Reason string `json:"reason"`
+}
+
+func (e *RulePackError) Error() string {
+	if e == nil {
+		return "rule pack error"
+	}
+	return fmt.Sprintf("rule pack %s at %s: %s", e.Code, e.Path, e.Reason)
+}
+
+// RulePackSummary is a deterministic, value-safe description of the loaded
+// RulePack suitable for operator-facing JSON. Rule counts describe YAML
+// overrides loaded into RuleFiles; compiled gateway fallback rules are outside
+// this package and are not counted. Digest fingerprints the complete loaded
+// RulePack, but none of the source regexes, prompts, suppression values, tool
+// names, or filesystem paths are exposed.
+type RulePackSummary struct {
+	JudgeCount         int    `json:"judge_count"`
+	JudgeCategoryCount int    `json:"judge_category_count"`
+	RuleFileCount      int    `json:"rule_file_count"`
+	RuleCount          int    `json:"rule_count"`
+	EnabledRuleCount   int    `json:"enabled_rule_count"`
+	LocalPatternCount  int    `json:"local_pattern_count"`
+	SuppressionCount   int    `json:"suppression_count"`
+	SensitiveToolCount int    `json:"sensitive_tool_count"`
+	Digest             string `json:"digest"`
 }
 
 // LocalPatterns mirrors `rules/local-patterns.yaml`. Each field corresponds
@@ -83,6 +127,11 @@ type SuppressionsConfig struct {
 	PreJudgeStrips   []PreJudgeStrip      `yaml:"pre_judge_strips"`
 	FindingSupps     []FindingSuppression `yaml:"finding_suppressions"`
 	ToolSuppressions []ToolSuppression    `yaml:"tool_suppressions"`
+
+	decoded                bool `yaml:"-"`
+	preJudgeStripsSet      bool `yaml:"-"`
+	findingSuppressionsSet bool `yaml:"-"`
+	toolSuppressionsSet    bool `yaml:"-"`
 }
 
 type PreJudgeStrip struct {
@@ -124,6 +173,9 @@ type JudgeYAML struct {
 	// means "never escalate to CRITICAL from this judge alone" (the
 	// correlator still can, via cross-finding patterns).
 	MinCategoriesForCritical int `yaml:"min_categories_for_critical,omitempty"`
+
+	decoded    bool `yaml:"-"`
+	enabledSet bool `yaml:"-"`
 }
 
 type JudgeCategory struct {
@@ -159,6 +211,9 @@ type RuleDefYAML struct {
 	Severity   string   `yaml:"severity"`
 	Confidence float64  `yaml:"confidence"`
 	Tags       []string `yaml:"tags"`
+
+	decoded       bool `yaml:"-"`
+	confidenceSet bool `yaml:"-"`
 }
 
 // SensitiveToolsConfig maps to sensitive-tools.yaml.
@@ -172,151 +227,507 @@ type SensitiveTool struct {
 	ResultInspection bool   `yaml:"result_inspection"`
 	JudgeResult      bool   `yaml:"judge_result"`
 	MinEntitiesAlert int    `yaml:"min_entities_for_alert,omitempty"`
+
+	decoded             bool `yaml:"-"`
+	resultInspectionSet bool `yaml:"-"`
+	judgeResultSet      bool `yaml:"-"`
 }
 
 // ---------------------------------------------------------------------------
 // Loader
 // ---------------------------------------------------------------------------
 
-// LoadRulePack loads a rule pack from the given directory. Missing files are
-// filled from compiled-in defaults. Corrupt YAML files log a warning and
-// fall back to the embedded default for that file.
-func LoadRulePack(dir string) *RulePack {
-	rp := &RulePack{
-		JudgeConfigs: make(map[string]*JudgeYAML),
-	}
+const (
+	maxRulePackFiles            = 64
+	maxRulePackInventoryEntries = 4096
+	maxRulePackFileBytes        = 1 << 20 // 1 MiB
+	maxRulePackAggregateBytes   = 4 << 20 // 4 MiB
+	maxRulePackRules            = 4096
+	maxRulesPerFile             = 2048
+	maxJudgeCategories          = 256
+	maxSuppressions             = 4096
+	maxSensitiveTools           = 2048
+	maxLocalPatterns            = 4096
+	maxRegexBytes               = 2048
+)
 
-	rp.Suppressions = loadYAML[SuppressionsConfig](dir, "suppressions.yaml")
-	rp.SensitiveTools = loadYAML[SensitiveToolsConfig](dir, "sensitive-tools.yaml")
+var knownJudgeNames = []string{"exfil", "injection", "pii", "tool-injection"}
 
-	for _, name := range []string{"pii", "injection", "tool-injection", "exfil"} {
-		jc := loadYAML[JudgeYAML](dir, filepath.Join("judge", name+".yaml"))
-		if jc != nil {
-			rp.JudgeConfigs[name] = jc
-		}
-	}
-
-	rp.RuleFiles = loadRuleFiles(dir)
-
-	// local-patterns.yaml lives inside rules/ but is parsed separately
-	// because its shape is a top-level pattern dictionary rather than
-	// the {category, rules: [...]} shape that loadRuleFiles expects.
-	// Before this loader was added the file was silently misparsed
-	// into an empty RulesFileYAML, which meant operator edits to it
-	// did nothing — see git history for the drift this resolved.
-	rp.LocalPatterns = loadLocalPatterns(dir)
-
-	return rp
+type diskRulePackFile struct {
+	relPath string
+	full    string
+	size    int64
 }
 
-// loadLocalPatterns reads rules/local-patterns.yaml. Returns nil if the
-// file is absent or malformed so the caller falls back to compiled-in
-// defaults. A nil return is semantically "no override"; an empty struct
-// would override every field to empty (rarely useful) and is reserved
-// for explicit operator intent.
-func loadLocalPatterns(dir string) *LocalPatterns {
-	if dir == "" {
-		return nil
-	}
-	path := filepath.Join(dir, "rules", "local-patterns.yaml")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	var lp LocalPatterns
-	if err := yaml.Unmarshal(data, &lp); err != nil {
-		log.Printf("guardrail: parse %s: %v", path, err)
-		return nil
-	}
-	if lp.Version != 1 {
-		log.Printf("guardrail: %s version %d unsupported, expected 1", path, lp.Version)
-		return nil
-	}
-	return &lp
+var errRulePackFileType = errors.New("rule-pack component is not a regular file")
+
+type rulePackInventory struct {
+	files     map[string]diskRulePackFile
+	ruleFiles []string
+	totalSize int64
 }
 
-// loadRuleFiles reads all rules/*.yaml files from the rule-pack directory.
-// Returns nil if none are found — callers should fall back to hardcoded rules.
-func loadRuleFiles(dir string) []*RulesFileYAML {
-	if dir == "" {
-		return nil
-	}
-	rulesDir := filepath.Join(dir, "rules")
-	entries, err := os.ReadDir(rulesDir)
+// LoadRulePack loads and validates a rule pack. An empty dir selects the
+// validated embedded defaults. A non-empty directory is an operator-supplied
+// overlay: omitted built-in components inherit the embedded version, while a
+// present unreadable, malformed, unsupported, or invalid component fails
+// closed. At least one recognized component must be present.
+func LoadRulePack(dir string) (*RulePack, error) {
+	rp, err := loadEmbeddedRulePack()
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	var files []*RulesFileYAML
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".yaml" {
-			continue
+	if dir == "" {
+		if err := rp.Validate(); err != nil {
+			return nil, err
 		}
-		// local-patterns.yaml is loaded separately via loadLocalPatterns
-		// because its top-level shape doesn't match RulesFileYAML.
-		// Skipping it here avoids producing a phantom rule file entry
-		// (the previous loader silently misparsed it into an empty
-		// RulesFileYAML, polluting the rule file slice).
-		if e.Name() == "local-patterns.yaml" {
-			continue
+		return rp, nil
+	}
+
+	inventory, err := inspectRulePackDirectory(dir)
+	if err != nil {
+		return nil, err
+	}
+	if len(inventory.files) == 0 {
+		return nil, rulePackErr(".", "inventory_empty", "directory contains no recognized rule-pack component")
+	}
+
+	var bytesRead int64
+	decode := func(rel string, out any) error {
+		file, ok := inventory.files[rel]
+		if !ok {
+			return rulePackErr(rel, "internal", "recognized component was not inventoried")
 		}
-		full := filepath.Join(rulesDir, e.Name())
-		data, err := os.ReadFile(full)
+		data, err := readRulePackFile(file)
 		if err != nil {
-			log.Printf("guardrail: read rules/%s: %v", e.Name(), err)
-			continue
+			return err
 		}
-		var rf RulesFileYAML
-		if err := yaml.Unmarshal(data, &rf); err != nil {
-			log.Printf("guardrail: parse rules/%s: %v", e.Name(), err)
-			continue
+		bytesRead += int64(len(data))
+		if bytesRead > maxRulePackAggregateBytes {
+			return rulePackErr(".", "aggregate_size_limit", "rule-pack YAML exceeds the aggregate byte limit")
 		}
-		if rf.Version != 1 {
-			log.Printf("guardrail: rules/%s version %d unsupported, skipping", e.Name(), rf.Version)
-			continue
-		}
-		// Record where the file came from so downstream surfaces
-		// (notably the TUI's rule-pack editor) can round-trip edits
-		// to the exact file without guessing a path from category.
-		rf.SourcePath = full
-		files = append(files, &rf)
+		return decodeStrictYAML(data, rel, out)
 	}
-	return files
+
+	if _, ok := inventory.files["suppressions.yaml"]; ok {
+		var cfg SuppressionsConfig
+		if err := decode("suppressions.yaml", &cfg); err != nil {
+			return nil, err
+		}
+		rp.Suppressions = &cfg
+	}
+	if _, ok := inventory.files["sensitive-tools.yaml"]; ok {
+		var cfg SensitiveToolsConfig
+		if err := decode("sensitive-tools.yaml", &cfg); err != nil {
+			return nil, err
+		}
+		rp.SensitiveTools = &cfg
+	}
+	for _, name := range knownJudgeNames {
+		rel := path.Join("judge", name+".yaml")
+		if _, ok := inventory.files[rel]; !ok {
+			continue
+		}
+		var cfg JudgeYAML
+		if err := decode(rel, &cfg); err != nil {
+			return nil, err
+		}
+		rp.JudgeConfigs[name] = &cfg
+	}
+	if _, ok := inventory.files["rules/local-patterns.yaml"]; ok {
+		var cfg LocalPatterns
+		if err := decode("rules/local-patterns.yaml", &cfg); err != nil {
+			return nil, err
+		}
+		rp.LocalPatterns = &cfg
+	}
+
+	sort.Strings(inventory.ruleFiles)
+	rp.RuleFiles = make([]*RulesFileYAML, 0, len(inventory.ruleFiles))
+	for _, rel := range inventory.ruleFiles {
+		var cfg RulesFileYAML
+		if err := decode(rel, &cfg); err != nil {
+			return nil, err
+		}
+		full := inventory.files[rel].full
+		if absolute, absErr := filepath.Abs(full); absErr == nil {
+			full = absolute
+		}
+		cfg.SourcePath = full
+		rp.RuleFiles = append(rp.RuleFiles, &cfg)
+	}
+
+	if err := rp.Validate(); err != nil {
+		return nil, err
+	}
+	return rp, nil
 }
 
-// loadYAML tries disk first, then embedded default.
-func loadYAML[T any](dir, relPath string) *T {
-	if dir != "" {
-		full := filepath.Join(dir, relPath)
-		if data, err := os.ReadFile(full); err == nil {
-			var out T
-			if err := yaml.Unmarshal(data, &out); err != nil {
-				log.Printf("guardrail: corrupt %s, using default: %v", full, err)
-			} else {
-				return &out
+func loadEmbeddedRulePack() (*RulePack, error) {
+	rp := &RulePack{JudgeConfigs: make(map[string]*JudgeYAML, len(knownJudgeNames))}
+
+	suppressions, err := decodeEmbeddedYAML[SuppressionsConfig]("suppressions.yaml")
+	if err != nil {
+		return nil, err
+	}
+	rp.Suppressions = suppressions
+
+	tools, err := decodeEmbeddedYAML[SensitiveToolsConfig]("sensitive-tools.yaml")
+	if err != nil {
+		return nil, err
+	}
+	rp.SensitiveTools = tools
+
+	for _, name := range knownJudgeNames {
+		rel := path.Join("judge", name+".yaml")
+		judge, err := decodeEmbeddedYAML[JudgeYAML](rel)
+		if err != nil {
+			return nil, err
+		}
+		rp.JudgeConfigs[name] = judge
+	}
+	return rp, nil
+}
+
+func decodeEmbeddedYAML[T any](rel string) (*T, error) {
+	embeddedPath := path.Join("defaults", rel)
+	data, err := fs.ReadFile(defaultsFS, embeddedPath)
+	if err != nil {
+		return nil, rulePackErr(rel, "embedded_read", "embedded component is unavailable")
+	}
+	if len(data) > maxRulePackFileBytes {
+		return nil, rulePackErr(rel, "file_size_limit", "embedded component exceeds the per-file byte limit")
+	}
+	var out T
+	if err := decodeStrictYAML(data, rel, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, rulePackErr(".", "directory_not_found", "rule-pack directory does not exist")
+		}
+		return nil, rulePackErr(".", "directory_unreadable", "rule-pack directory cannot be inspected")
+	}
+	if !info.IsDir() {
+		return nil, rulePackErr(".", "not_directory", "rule-pack path is not a directory")
+	}
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return nil, rulePackErr(".", "directory_unreadable", "rule-pack directory cannot be inspected")
+	}
+
+	inventory := &rulePackInventory{files: make(map[string]diskRulePackFile)}
+	entries := 0
+	err = filepath.WalkDir(resolvedDir, func(full string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return rulePackErr(safeRelativePath(resolvedDir, full), "inventory_unreadable", "rule-pack inventory cannot be inspected")
+		}
+		if full == resolvedDir {
+			return nil
+		}
+		entries++
+		if entries > maxRulePackInventoryEntries {
+			return rulePackErr(".", "inventory_limit", "rule-pack inventory contains too many entries")
+		}
+
+		rel, relErr := filepath.Rel(resolvedDir, full)
+		if relErr != nil {
+			return rulePackErr(".", "inventory_unreadable", "rule-pack inventory cannot be normalized")
+		}
+		rel = filepath.ToSlash(rel)
+		if entry.Type()&os.ModeSymlink != 0 {
+			return rulePackErr(safeInventoryPath(rel), "file_type", "component must be a regular file")
+		}
+		extension := strings.ToLower(path.Ext(rel))
+		if extension != ".yaml" && extension != ".yml" {
+			return nil
+		}
+		if !isRecognizedRulePackYAML(rel) {
+			return rulePackErr(safeInventoryPath(rel), "inventory_unexpected", "unexpected YAML component")
+		}
+
+		fileInfo, infoErr := entry.Info()
+		if infoErr != nil {
+			return rulePackErr(rel, "file_unreadable", "component cannot be inspected")
+		}
+		if entry.Type()&os.ModeSymlink != 0 || !fileInfo.Mode().IsRegular() {
+			return rulePackErr(rel, "file_type", "component must be a regular file")
+		}
+		if fileInfo.Size() > maxRulePackFileBytes {
+			return rulePackErr(rel, "file_size_limit", "component exceeds the per-file byte limit")
+		}
+		if len(inventory.files) >= maxRulePackFiles {
+			return rulePackErr(".", "file_count_limit", "rule pack contains too many YAML components")
+		}
+		inventory.totalSize += fileInfo.Size()
+		if inventory.totalSize > maxRulePackAggregateBytes {
+			return rulePackErr(".", "aggregate_size_limit", "rule-pack YAML exceeds the aggregate byte limit")
+		}
+		inventory.files[rel] = diskRulePackFile{relPath: rel, full: full, size: fileInfo.Size()}
+		if strings.HasPrefix(rel, "rules/") && rel != "rules/local-patterns.yaml" {
+			inventory.ruleFiles = append(inventory.ruleFiles, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		var packErr *RulePackError
+		if errors.As(err, &packErr) {
+			return nil, packErr
+		}
+		return nil, rulePackErr(".", "inventory_unreadable", "rule-pack inventory cannot be inspected")
+	}
+	return inventory, nil
+}
+
+func isRecognizedRulePackYAML(rel string) bool {
+	if path.Ext(rel) != ".yaml" {
+		return false
+	}
+	switch rel {
+	case "suppressions.yaml", "sensitive-tools.yaml", "rules/local-patterns.yaml":
+		return true
+	}
+	for _, name := range knownJudgeNames {
+		if rel == path.Join("judge", name+".yaml") {
+			return true
+		}
+	}
+	return path.Dir(rel) == "rules" && path.Base(rel) != "local-patterns.yaml"
+}
+
+func readRulePackFile(file diskRulePackFile) ([]byte, error) {
+	handle, err := openRulePackFile(file.full)
+	if err != nil {
+		if errors.Is(err, errRulePackFileType) {
+			return nil, rulePackErr(file.relPath, "file_type", "component must be a regular file")
+		}
+		return nil, rulePackErr(file.relPath, "file_unreadable", "component cannot be read")
+	}
+	defer handle.Close()
+
+	info, err := handle.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, rulePackErr(file.relPath, "file_type", "component must be a regular file")
+	}
+	if info.Size() > maxRulePackFileBytes {
+		return nil, rulePackErr(file.relPath, "file_size_limit", "component exceeds the per-file byte limit")
+	}
+	data, err := io.ReadAll(io.LimitReader(handle, maxRulePackFileBytes+1))
+	if err != nil {
+		return nil, rulePackErr(file.relPath, "file_unreadable", "component cannot be read")
+	}
+	if len(data) > maxRulePackFileBytes {
+		return nil, rulePackErr(file.relPath, "file_size_limit", "component exceeds the per-file byte limit")
+	}
+	return data, nil
+}
+
+func decodeStrictYAML(data []byte, rel string, out any) error {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(out); err != nil {
+		if errors.Is(err, io.EOF) {
+			return rulePackErr(rel, "yaml_empty", "component must contain one YAML document")
+		}
+		return rulePackErr(rel, "yaml_invalid", "YAML is invalid or does not match the expected schema")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return rulePackErr(rel, "yaml_documents", "component must contain exactly one YAML document")
+	}
+
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return rulePackErr(rel, "yaml_invalid", "YAML is invalid or does not match the expected schema")
+	}
+	outType := reflect.TypeOf(out)
+	if outType == nil || outType.Kind() != reflect.Pointer ||
+		!yamlNodeMatchesType(yamlDocumentRoot(&document), outType.Elem()) {
+		return rulePackErr(rel, "yaml_invalid", "YAML is invalid or does not match the expected schema")
+	}
+	markDecodedPresence(out, &document)
+	return nil
+}
+
+// yamlNodeMatchesType closes yaml.v3's permissive scalar coercions (for
+// example, an integer ID being converted to a Go string). KnownFields closes
+// object shape; this pass makes scalar and collection types exact.
+func yamlNodeMatchesType(node *yaml.Node, expected reflect.Type) bool {
+	if node == nil || node.Kind == yaml.AliasNode {
+		return false
+	}
+	for expected.Kind() == reflect.Pointer {
+		expected = expected.Elem()
+	}
+	switch expected.Kind() {
+	case reflect.Struct:
+		if node.Kind != yaml.MappingNode {
+			return false
+		}
+		fields := make(map[string]reflect.Type)
+		for index := 0; index < expected.NumField(); index++ {
+			field := expected.Field(index)
+			if field.PkgPath != "" {
+				continue
+			}
+			tag := strings.Split(field.Tag.Get("yaml"), ",")[0]
+			if tag == "-" {
+				continue
+			}
+			if tag == "" {
+				tag = strings.ToLower(field.Name)
+			}
+			fields[tag] = field.Type
+		}
+		for index := 0; index+1 < len(node.Content); index += 2 {
+			key, value := node.Content[index], node.Content[index+1]
+			if key.Kind != yaml.ScalarNode || key.ShortTag() != "!!str" {
+				return false
+			}
+			fieldType, ok := fields[key.Value]
+			if !ok || !yamlNodeMatchesType(value, fieldType) {
+				return false
+			}
+		}
+		return true
+	case reflect.Slice:
+		if node.Kind != yaml.SequenceNode {
+			return false
+		}
+		for _, child := range node.Content {
+			if !yamlNodeMatchesType(child, expected.Elem()) {
+				return false
+			}
+		}
+		return true
+	case reflect.Map:
+		if expected.Key().Kind() != reflect.String || node.Kind != yaml.MappingNode {
+			return false
+		}
+		for index := 0; index+1 < len(node.Content); index += 2 {
+			key, value := node.Content[index], node.Content[index+1]
+			if key.Kind != yaml.ScalarNode || key.ShortTag() != "!!str" ||
+				!yamlNodeMatchesType(value, expected.Elem()) {
+				return false
+			}
+		}
+		return true
+	case reflect.String:
+		return node.Kind == yaml.ScalarNode && node.ShortTag() == "!!str"
+	case reflect.Bool:
+		return node.Kind == yaml.ScalarNode && node.ShortTag() == "!!bool"
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return node.Kind == yaml.ScalarNode && node.ShortTag() == "!!int"
+	case reflect.Float32, reflect.Float64:
+		return node.Kind == yaml.ScalarNode &&
+			(node.ShortTag() == "!!float" || node.ShortTag() == "!!int")
+	default:
+		return false
+	}
+}
+
+func markDecodedPresence(out any, document *yaml.Node) {
+	root := yamlDocumentRoot(document)
+	switch typed := out.(type) {
+	case *SuppressionsConfig:
+		typed.decoded = true
+		typed.preJudgeStripsSet = yamlMappingHas(root, "pre_judge_strips")
+		typed.findingSuppressionsSet = yamlMappingHas(root, "finding_suppressions")
+		typed.toolSuppressionsSet = yamlMappingHas(root, "tool_suppressions")
+	case *JudgeYAML:
+		typed.decoded = true
+		typed.enabledSet = yamlMappingHas(root, "enabled")
+	case *RulesFileYAML:
+		rules := yamlMappingValue(root, "rules")
+		if rules == nil || rules.Kind != yaml.SequenceNode {
+			return
+		}
+		for i := range typed.Rules {
+			if i >= len(rules.Content) {
+				break
+			}
+			ruleNode := rules.Content[i]
+			typed.Rules[i].decoded = true
+			typed.Rules[i].confidenceSet = yamlMappingHas(ruleNode, "confidence")
+		}
+	case *SensitiveToolsConfig:
+		tools := yamlMappingValue(root, "tools")
+		if tools == nil || tools.Kind != yaml.SequenceNode {
+			return
+		}
+		for i := range typed.Tools {
+			if i >= len(tools.Content) {
+				break
+			}
+			toolNode := tools.Content[i]
+			typed.Tools[i].decoded = true
+			typed.Tools[i].resultInspectionSet = yamlMappingHas(toolNode, "result_inspection")
+			typed.Tools[i].judgeResultSet = yamlMappingHas(toolNode, "judge_result")
+		}
+	}
+}
+
+func yamlDocumentRoot(document *yaml.Node) *yaml.Node {
+	if document == nil {
+		return nil
+	}
+	if document.Kind == yaml.DocumentNode && len(document.Content) == 1 {
+		return document.Content[0]
+	}
+	return document
+}
+
+func yamlMappingHas(node *yaml.Node, key string) bool {
+	return yamlMappingValue(node, key) != nil
+}
+
+func yamlMappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}
+
+func safeRelativePath(root, full string) string {
+	rel, err := filepath.Rel(root, full)
+	if err != nil {
+		return "."
+	}
+	return safeInventoryPath(filepath.ToSlash(rel))
+}
+
+func safeInventoryPath(rel string) string {
+	rel = path.Clean(strings.TrimSpace(rel))
+	if rel == "." || rel == "" || strings.HasPrefix(rel, "../") || path.IsAbs(rel) {
+		return "."
+	}
+	parts := strings.Split(rel, "/")
+	for _, part := range parts {
+		if part == "" || part == ".." || len(part) > 128 {
+			return "."
+		}
+		for _, r := range part {
+			if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') &&
+				!(r >= '0' && r <= '9') && r != '.' && r != '-' && r != '_' {
+				return "."
 			}
 		}
 	}
+	return rel
+}
 
-	// ("Embedded rule-pack fallback uses
-	// OS-specific paths"): embed.FS paths are always slash-
-	// separated regardless of GOOS. The previous filepath.Join
-	// produced `defaults\sensitive-tools.yaml` on Windows, so
-	// fs.ReadFile could not locate the embedded default and
-	// LoadRulePack silently returned a RulePack with nil
-	// SensitiveTools / Suppressions. We use path.Join (which is
-	// always slash-separated) for the embed.FS lookup while
-	// keeping filepath.Join above for the real-filesystem path.
-	embeddedPath := path.Join("defaults", filepath.ToSlash(relPath))
-	data, err := fs.ReadFile(defaultsFS, embeddedPath)
-	if err != nil {
-		return nil
-	}
-	var out T
-	if err := yaml.Unmarshal(data, &out); err != nil {
-		log.Printf("guardrail: corrupt embedded %s: %v", embeddedPath, err)
-		return nil
-	}
-	return &out
+func rulePackErr(rel, code, reason string) *RulePackError {
+	return &RulePackError{Path: safeInventoryPath(rel), Code: code, Reason: reason}
 }
 
 // LookupSensitiveTool returns the config for a tool name, or nil.
@@ -393,80 +804,556 @@ func (c *JudgeCategory) EffectiveSeverity(direction, fallback string) string {
 	return fallback
 }
 
-// Validate checks basic integrity of the rule pack. Logs warnings but
-// does not return errors — the rule pack degrades gracefully.
-//
-// As a side effect, every regex pattern referenced by the rule pack is
-// compiled here (via compileRegex, which memoizes). This surfaces bad
-// patterns at load time as a warning — previously an invalid pattern
-// would silently be skipped on every request with no operator signal.
-func (rp *RulePack) Validate() {
+// Validate checks the complete effective rule pack. Validation is fail-closed:
+// the first error is returned as a value-safe RulePackError and no invalid
+// pack is returned by LoadRulePack.
+func (rp *RulePack) Validate() error {
 	if rp == nil {
-		return
+		return rulePackErr(".", "validation", "rule pack must not be nil")
 	}
-	if rp.Suppressions != nil && rp.Suppressions.Version != 1 {
-		log.Printf("guardrail: suppressions.yaml version %d unsupported, expected 1", rp.Suppressions.Version)
+	if err := rp.validateJudges(); err != nil {
+		return err
 	}
-	for name, jc := range rp.JudgeConfigs {
-		if jc.Version != 1 {
-			log.Printf("guardrail: judge/%s.yaml version %d unsupported, expected 1", name, jc.Version)
-		}
-		if jc.SystemPrompt == "" {
-			log.Printf("guardrail: judge/%s.yaml has empty system_prompt", name)
-		}
+	if err := rp.validateRuleFiles(); err != nil {
+		return err
 	}
-
-	if rp.Suppressions != nil {
-		for _, s := range rp.Suppressions.PreJudgeStrips {
-			checkPattern("pre_judge_strip", s.ID, s.Pattern)
-		}
-		for _, s := range rp.Suppressions.FindingSupps {
-			checkPattern("finding_suppression:finding_pattern", s.ID, s.FindingPattern)
-			checkPattern("finding_suppression:entity_pattern", s.ID, s.EntityPattern)
-		}
-		for _, s := range rp.Suppressions.ToolSuppressions {
-			checkPattern("tool_suppression:tool_pattern", s.ToolPattern, s.ToolPattern)
-		}
+	if err := rp.validateLocalPatterns(); err != nil {
+		return err
 	}
-
-	for _, rf := range rp.RuleFiles {
-		for _, r := range rf.Rules {
-			checkPattern("rule:"+rf.Category, r.ID, r.Pattern)
-		}
+	if err := rp.validateSuppressions(); err != nil {
+		return err
 	}
+	return rp.validateSensitiveTools()
 }
 
-// checkPattern compiles pattern and logs a warning if it is invalid.
-// Uses regexp.Compile directly (not compileRegex) so validation surfaces
-// the exact error message. compileRegex will itself cache the negative
-// result the first time it's queried for an invalid pattern in a hot path.
-func checkPattern(kind, id, pattern string) {
-	if pattern == "" {
-		return
+func (rp *RulePack) validateRuleFiles() error {
+	seenCategories := make(map[string]struct{}, len(rp.RuleFiles))
+	seenIDs := make(map[string]struct{})
+	totalRules := 0
+	for fileIndex, ruleFile := range rp.RuleFiles {
+		rel := ruleFileValidationPath(ruleFile, fileIndex)
+		if ruleFile == nil {
+			return rulePackErr(rel, "validation", "rule file must not be null")
+		}
+		if ruleFile.Version != 1 {
+			return rulePackErr(rel, "version", "version must be 1")
+		}
+		category := strings.TrimSpace(ruleFile.Category)
+		if category == "" {
+			return rulePackErr(rel, "validation", "category must not be blank")
+		}
+		if _, exists := seenCategories[category]; exists {
+			return rulePackErr(rel, "duplicate_category", "category duplicates another rule file")
+		}
+		seenCategories[category] = struct{}{}
+		if len(ruleFile.Rules) > maxRulesPerFile {
+			return rulePackErr(rel, "rule_count_limit", "rule file contains too many rules")
+		}
+		totalRules += len(ruleFile.Rules)
+		if totalRules > maxRulePackRules {
+			return rulePackErr(".", "rule_count_limit", "rule pack contains too many rules")
+		}
+
+		enabled := 0
+		for ruleIndex := range ruleFile.Rules {
+			rule := &ruleFile.Rules[ruleIndex]
+			ruleID := strings.TrimSpace(rule.ID)
+			if ruleID == "" {
+				return rulePackErr(rel, "validation", fmt.Sprintf("rule %d id must not be blank", ruleIndex))
+			}
+			if _, exists := seenIDs[ruleID]; exists {
+				return rulePackErr(rel, "duplicate_rule_id", fmt.Sprintf("rule %d id duplicates another rule", ruleIndex))
+			}
+			seenIDs[ruleID] = struct{}{}
+			if err := validateRequiredRegex(rel, fmt.Sprintf("rule %d pattern", ruleIndex), rule.Pattern); err != nil {
+				return err
+			}
+			if strings.TrimSpace(rule.Title) == "" {
+				return rulePackErr(rel, "validation", fmt.Sprintf("rule %d title must not be blank", ruleIndex))
+			}
+			if !validSeverity(rule.Severity) {
+				return rulePackErr(rel, "severity", fmt.Sprintf("rule %d severity must be LOW, MEDIUM, HIGH, or CRITICAL", ruleIndex))
+			}
+			if rule.decoded && !rule.confidenceSet {
+				return rulePackErr(rel, "validation", fmt.Sprintf("rule %d confidence is required", ruleIndex))
+			}
+			if math.IsNaN(rule.Confidence) || math.IsInf(rule.Confidence, 0) ||
+				rule.Confidence < 0 || rule.Confidence > 1 {
+				return rulePackErr(rel, "confidence", fmt.Sprintf("rule %d confidence must be finite and between 0 and 1", ruleIndex))
+			}
+			if len(rule.Tags) == 0 {
+				return rulePackErr(rel, "validation", fmt.Sprintf("rule %d tags must not be empty", ruleIndex))
+			}
+			seenTags := make(map[string]struct{}, len(rule.Tags))
+			for tagIndex, tag := range rule.Tags {
+				tag = strings.TrimSpace(tag)
+				if tag == "" {
+					return rulePackErr(rel, "validation", fmt.Sprintf("rule %d tag %d must not be blank", ruleIndex, tagIndex))
+				}
+				if _, exists := seenTags[tag]; exists {
+					return rulePackErr(rel, "validation", fmt.Sprintf("rule %d tags must be unique", ruleIndex))
+				}
+				seenTags[tag] = struct{}{}
+			}
+			if rule.Enabled == nil || *rule.Enabled {
+				enabled++
+			}
+		}
+		if enabled == 0 {
+			return rulePackErr(rel, "empty_category", "category must contain at least one enabled rule")
+		}
+	}
+	return nil
+}
+
+func (rp *RulePack) validateJudges() error {
+	if rp.JudgeConfigs == nil {
+		return rulePackErr("judge", "validation", "judge configurations are required")
+	}
+	for _, required := range knownJudgeNames {
+		if rp.JudgeConfigs[required] == nil {
+			return rulePackErr(path.Join("judge", required+".yaml"), "validation", "required judge configuration is missing")
+		}
+	}
+	if len(rp.JudgeConfigs) > len(knownJudgeNames) {
+		return rulePackErr("judge", "inventory_unexpected", "unexpected judge configuration")
+	}
+
+	names := make([]string, 0, len(rp.JudgeConfigs))
+	for name := range rp.JudgeConfigs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	seenFindingIDs := make(map[string]struct{})
+	totalCategories := 0
+	for _, name := range names {
+		judge := rp.JudgeConfigs[name]
+		rel := path.Join("judge", safeJudgeName(name)+".yaml")
+		if judge == nil {
+			return rulePackErr(rel, "validation", "judge configuration must not be null")
+		}
+		if judge.Version != 1 {
+			return rulePackErr(rel, "version", "version must be 1")
+		}
+		if judge.decoded && !judge.enabledSet {
+			return rulePackErr(rel, "validation", "enabled is required")
+		}
+		if strings.TrimSpace(judge.Name) == "" || judge.Name != name {
+			return rulePackErr(rel, "validation", "judge name must match its component name")
+		}
+		if strings.TrimSpace(judge.SystemPrompt) == "" {
+			return rulePackErr(rel, "validation", "system_prompt must not be blank")
+		}
+		if len(judge.Categories) == 0 {
+			return rulePackErr(rel, "validation", "categories must not be empty")
+		}
+		totalCategories += len(judge.Categories)
+		if totalCategories > maxJudgeCategories {
+			return rulePackErr("judge", "category_count_limit", "rule pack contains too many judge categories")
+		}
+		if judge.MinCategoriesForHigh < 0 || judge.MinCategoriesForCritical < 0 {
+			return rulePackErr(rel, "validation", "category thresholds must not be negative")
+		}
+		if judge.MinCategoriesForHigh > len(judge.Categories) ||
+			judge.MinCategoriesForCritical > len(judge.Categories) {
+			return rulePackErr(rel, "validation", "category threshold exceeds category count")
+		}
+		if judge.SingleCategoryMaxSev != "" && !validSeverity(judge.SingleCategoryMaxSev) {
+			return rulePackErr(rel, "severity", "single_category_max_severity must be LOW, MEDIUM, HIGH, or CRITICAL")
+		}
+
+		categoryNames := make([]string, 0, len(judge.Categories))
+		for category := range judge.Categories {
+			categoryNames = append(categoryNames, category)
+		}
+		sort.Strings(categoryNames)
+		for categoryIndex, categoryName := range categoryNames {
+			category := judge.Categories[categoryName]
+			if strings.TrimSpace(categoryName) == "" {
+				return rulePackErr(rel, "validation", fmt.Sprintf("category %d name must not be blank", categoryIndex))
+			}
+			findingID := strings.TrimSpace(category.FindingID)
+			if findingID == "" {
+				return rulePackErr(rel, "validation", fmt.Sprintf("category %d finding_id must not be blank", categoryIndex))
+			}
+			if _, exists := seenFindingIDs[findingID]; exists {
+				return rulePackErr(rel, "duplicate_finding_id", fmt.Sprintf("category %d finding_id duplicates another category", categoryIndex))
+			}
+			seenFindingIDs[findingID] = struct{}{}
+			severities := []string{
+				category.Severity,
+				category.SeverityDefault,
+				category.SeverityPrompt,
+				category.SeverityCompletion,
+			}
+			hasSeverity := false
+			for _, severity := range severities {
+				if severity == "" {
+					continue
+				}
+				hasSeverity = true
+				if !validSeverity(severity) {
+					return rulePackErr(rel, "severity", fmt.Sprintf("category %d contains an invalid severity", categoryIndex))
+				}
+			}
+			if !hasSeverity {
+				return rulePackErr(rel, "severity", fmt.Sprintf("category %d must define a severity", categoryIndex))
+			}
+		}
+	}
+	return nil
+}
+
+func (rp *RulePack) validateLocalPatterns() error {
+	if rp.LocalPatterns == nil {
+		return nil
+	}
+	if rp.LocalPatterns.Version != 1 {
+		return rulePackErr("rules/local-patterns.yaml", "version", "version must be 1")
+	}
+	fields := []struct {
+		name    string
+		values  []string
+		regexes bool
+	}{
+		{name: "injection", values: rp.LocalPatterns.Injection},
+		{name: "injection_regexes", values: rp.LocalPatterns.InjectionRegexes, regexes: true},
+		{name: "pii_requests", values: rp.LocalPatterns.PIIRequests},
+		{name: "pii_data_regexes", values: rp.LocalPatterns.PIIDataRegexes, regexes: true},
+		{name: "secrets", values: rp.LocalPatterns.Secrets},
+		{name: "exfiltration", values: rp.LocalPatterns.Exfiltration},
+	}
+	total := 0
+	configuredFields := 0
+	for _, field := range fields {
+		if field.values != nil {
+			configuredFields++
+		}
+		total += len(field.values)
+		if total > maxLocalPatterns {
+			return rulePackErr("rules/local-patterns.yaml", "pattern_count_limit", "local pattern set contains too many entries")
+		}
+		seen := make(map[string]struct{}, len(field.values))
+		for index, value := range field.values {
+			if strings.TrimSpace(value) == "" {
+				return rulePackErr("rules/local-patterns.yaml", "validation", fmt.Sprintf("%s entry %d must not be blank", field.name, index))
+			}
+			if len(value) > maxRegexBytes {
+				return rulePackErr("rules/local-patterns.yaml", "pattern_size_limit", fmt.Sprintf("%s entry %d exceeds 2048 bytes", field.name, index))
+			}
+			if _, exists := seen[value]; exists {
+				return rulePackErr("rules/local-patterns.yaml", "validation", fmt.Sprintf("%s entries must be unique", field.name))
+			}
+			seen[value] = struct{}{}
+			if field.regexes {
+				if _, err := regexp.Compile(value); err != nil {
+					return rulePackErr("rules/local-patterns.yaml", "regex", fmt.Sprintf("%s entry %d is not a valid Go regular expression", field.name, index))
+				}
+			}
+		}
+	}
+	if configuredFields == 0 {
+		return rulePackErr("rules/local-patterns.yaml", "validation", "at least one local pattern family must be configured")
+	}
+	if configuredFields == len(fields) && total == 0 {
+		return rulePackErr("rules/local-patterns.yaml", "validation", "local pattern set must not clear every pattern family")
+	}
+	return nil
+}
+
+func (rp *RulePack) validateSuppressions() error {
+	const rel = "suppressions.yaml"
+	if rp.Suppressions == nil {
+		return rulePackErr(rel, "validation", "suppressions configuration is required")
+	}
+	cfg := rp.Suppressions
+	if cfg.Version != 1 {
+		return rulePackErr(rel, "version", "version must be 1")
+	}
+	if cfg.decoded &&
+		(!cfg.preJudgeStripsSet || !cfg.findingSuppressionsSet || !cfg.toolSuppressionsSet) {
+		return rulePackErr(rel, "validation", "all suppression lists are required")
+	}
+	total := len(cfg.PreJudgeStrips) + len(cfg.FindingSupps) + len(cfg.ToolSuppressions)
+	if total > maxSuppressions {
+		return rulePackErr(rel, "suppression_count_limit", "configuration contains too many suppressions")
+	}
+	seenIDs := make(map[string]struct{}, len(cfg.PreJudgeStrips)+len(cfg.FindingSupps))
+	for index, suppression := range cfg.PreJudgeStrips {
+		suppressionID := strings.TrimSpace(suppression.ID)
+		if suppressionID == "" {
+			return rulePackErr(rel, "validation", fmt.Sprintf("pre_judge_strip %d id must not be blank", index))
+		}
+		if _, exists := seenIDs[suppressionID]; exists {
+			return rulePackErr(rel, "duplicate_suppression_id", fmt.Sprintf("pre_judge_strip %d id duplicates another suppression", index))
+		}
+		seenIDs[suppressionID] = struct{}{}
+		if err := validateRequiredRegex(rel, fmt.Sprintf("pre_judge_strip %d pattern", index), suppression.Pattern); err != nil {
+			return err
+		}
+		if strings.TrimSpace(suppression.Context) == "" {
+			return rulePackErr(rel, "validation", fmt.Sprintf("pre_judge_strip %d context must not be blank", index))
+		}
+		if len(suppression.AppliesTo) == 0 {
+			return rulePackErr(rel, "validation", fmt.Sprintf("pre_judge_strip %d applies_to must not be empty", index))
+		}
+		seenTargets := make(map[string]struct{}, len(suppression.AppliesTo))
+		for appliesIndex, appliesTo := range suppression.AppliesTo {
+			if strings.TrimSpace(appliesTo) == "" {
+				return rulePackErr(rel, "validation", fmt.Sprintf("pre_judge_strip %d applies_to entry %d must not be blank", index, appliesIndex))
+			}
+			if !knownJudgeName(appliesTo) {
+				return rulePackErr(rel, "validation", fmt.Sprintf("pre_judge_strip %d applies_to entry %d is unsupported", index, appliesIndex))
+			}
+			if _, exists := seenTargets[appliesTo]; exists {
+				return rulePackErr(rel, "validation", fmt.Sprintf("pre_judge_strip %d applies_to entries must be unique", index))
+			}
+			seenTargets[appliesTo] = struct{}{}
+		}
+	}
+	for index, suppression := range cfg.FindingSupps {
+		suppressionID := strings.TrimSpace(suppression.ID)
+		if suppressionID == "" {
+			return rulePackErr(rel, "validation", fmt.Sprintf("finding_suppression %d id must not be blank", index))
+		}
+		if _, exists := seenIDs[suppressionID]; exists {
+			return rulePackErr(rel, "duplicate_suppression_id", fmt.Sprintf("finding_suppression %d id duplicates another suppression", index))
+		}
+		seenIDs[suppressionID] = struct{}{}
+		if err := validateRequiredRegex(rel, fmt.Sprintf("finding_suppression %d finding_pattern", index), suppression.FindingPattern); err != nil {
+			return err
+		}
+		if err := validateRequiredRegex(rel, fmt.Sprintf("finding_suppression %d entity_pattern", index), suppression.EntityPattern); err != nil {
+			return err
+		}
+		if suppression.Condition != "" &&
+			suppression.Condition != "is_epoch" &&
+			suppression.Condition != "is_platform_id" {
+			return rulePackErr(rel, "validation", fmt.Sprintf("finding_suppression %d condition is unsupported", index))
+		}
+		if strings.TrimSpace(suppression.Reason) == "" {
+			return rulePackErr(rel, "validation", fmt.Sprintf("finding_suppression %d reason must not be blank", index))
+		}
+	}
+	seenToolPatterns := make(map[string]struct{}, len(cfg.ToolSuppressions))
+	for index, suppression := range cfg.ToolSuppressions {
+		if err := validateRequiredRegex(rel, fmt.Sprintf("tool_suppression %d tool_pattern", index), suppression.ToolPattern); err != nil {
+			return err
+		}
+		if _, exists := seenToolPatterns[suppression.ToolPattern]; exists {
+			return rulePackErr(rel, "validation", fmt.Sprintf("tool_suppression %d duplicates another tool pattern", index))
+		}
+		seenToolPatterns[suppression.ToolPattern] = struct{}{}
+		if len(suppression.SuppressFindings) == 0 {
+			return rulePackErr(rel, "validation", fmt.Sprintf("tool_suppression %d suppress_findings must not be empty", index))
+		}
+		seenFindings := make(map[string]struct{}, len(suppression.SuppressFindings))
+		for findingIndex, finding := range suppression.SuppressFindings {
+			findingID := strings.TrimSpace(finding)
+			if findingID == "" {
+				return rulePackErr(rel, "validation", fmt.Sprintf("tool_suppression %d suppress_findings entry %d must not be blank", index, findingIndex))
+			}
+			if _, exists := seenFindings[findingID]; exists {
+				return rulePackErr(rel, "validation", fmt.Sprintf("tool_suppression %d suppress_findings entries must be unique", index))
+			}
+			seenFindings[findingID] = struct{}{}
+		}
+		if strings.TrimSpace(suppression.Reason) == "" {
+			return rulePackErr(rel, "validation", fmt.Sprintf("tool_suppression %d reason must not be blank", index))
+		}
+	}
+	return nil
+}
+
+func (rp *RulePack) validateSensitiveTools() error {
+	const rel = "sensitive-tools.yaml"
+	if rp.SensitiveTools == nil {
+		return rulePackErr(rel, "validation", "sensitive-tools configuration is required")
+	}
+	cfg := rp.SensitiveTools
+	if cfg.Version != 1 {
+		return rulePackErr(rel, "version", "version must be 1")
+	}
+	if len(cfg.Tools) == 0 {
+		return rulePackErr(rel, "validation", "tools must not be empty")
+	}
+	if len(cfg.Tools) > maxSensitiveTools {
+		return rulePackErr(rel, "tool_count_limit", "configuration contains too many sensitive tools")
+	}
+	seenNames := make(map[string]struct{}, len(cfg.Tools))
+	for index, tool := range cfg.Tools {
+		toolName := strings.TrimSpace(tool.Name)
+		if toolName == "" {
+			return rulePackErr(rel, "validation", fmt.Sprintf("tool %d name must not be blank", index))
+		}
+		if _, exists := seenNames[toolName]; exists {
+			return rulePackErr(rel, "duplicate_tool", fmt.Sprintf("tool %d name duplicates another tool", index))
+		}
+		seenNames[toolName] = struct{}{}
+		if tool.decoded && (!tool.resultInspectionSet || !tool.judgeResultSet) {
+			return rulePackErr(rel, "validation", fmt.Sprintf("tool %d inspection booleans are required", index))
+		}
+		if !tool.ResultInspection && !tool.JudgeResult {
+			return rulePackErr(rel, "validation", fmt.Sprintf("tool %d must enable at least one inspection mode", index))
+		}
+		if tool.JudgeResult && !tool.ResultInspection {
+			return rulePackErr(rel, "validation", fmt.Sprintf("tool %d judge_result requires result_inspection", index))
+		}
+		if tool.MinEntitiesAlert < 0 {
+			return rulePackErr(rel, "validation", fmt.Sprintf("tool %d min_entities_for_alert must not be negative", index))
+		}
+	}
+	return nil
+}
+
+func validateRequiredRegex(rel, field, pattern string) error {
+	if strings.TrimSpace(pattern) == "" {
+		return rulePackErr(rel, "validation", field+" must not be blank")
+	}
+	if len(pattern) > maxRegexBytes {
+		return rulePackErr(rel, "pattern_size_limit", field+" exceeds 2048 bytes")
 	}
 	if _, err := regexp.Compile(pattern); err != nil {
-		log.Printf("guardrail: %s %q has invalid regex %q: %v", kind, id, pattern, err)
+		return rulePackErr(rel, "regex", field+" is not a valid Go regular expression")
+	}
+	return nil
+}
+
+func validSeverity(severity string) bool {
+	switch severity {
+	case "LOW", "MEDIUM", "HIGH", "CRITICAL":
+		return true
+	default:
+		return false
 	}
 }
 
-// String returns a concise summary of what was loaded.
+func knownJudgeName(name string) bool {
+	for _, known := range knownJudgeNames {
+		if name == known {
+			return true
+		}
+	}
+	return false
+}
+
+func ruleFileValidationPath(ruleFile *RulesFileYAML, index int) string {
+	if ruleFile != nil && ruleFile.SourcePath != "" {
+		base := filepath.Base(ruleFile.SourcePath)
+		if safe := safeInventoryPath(path.Join("rules", base)); safe != "." {
+			return safe
+		}
+	}
+	return path.Join("rules", fmt.Sprintf("component-%d.yaml", index))
+}
+
+func safeJudgeName(name string) string {
+	for _, known := range knownJudgeNames {
+		if name == known {
+			return known
+		}
+	}
+	return "component"
+}
+
+// Summary returns deterministic counts and a SHA-256 fingerprint of the
+// complete loaded RulePack configuration. Rule counts cover loaded YAML
+// overrides, not compiled gateway fallback rules. Source paths are excluded.
+func (rp *RulePack) Summary() RulePackSummary {
+	if rp == nil {
+		var summary RulePackSummary
+		sum := sha256.Sum256([]byte("null"))
+		summary.Digest = hex.EncodeToString(sum[:])
+		return summary
+	}
+	summary := rp.counts()
+
+	ruleFiles := make([]RulesFileYAML, 0, len(rp.RuleFiles))
+	for _, ruleFile := range rp.RuleFiles {
+		if ruleFile == nil {
+			continue
+		}
+		cloned := *ruleFile
+		cloned.SourcePath = ""
+		ruleFiles = append(ruleFiles, cloned)
+	}
+	canonical := struct {
+		Suppressions   *SuppressionsConfig
+		JudgeConfigs   map[string]*JudgeYAML
+		SensitiveTools *SensitiveToolsConfig
+		RuleFiles      []RulesFileYAML
+		LocalPatterns  *LocalPatterns
+	}{
+		Suppressions:   rp.Suppressions,
+		JudgeConfigs:   rp.JudgeConfigs,
+		SensitiveTools: rp.SensitiveTools,
+		RuleFiles:      ruleFiles,
+		LocalPatterns:  rp.LocalPatterns,
+	}
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		encoded = []byte("invalid")
+	}
+	sum := sha256.Sum256(encoded)
+	summary.Digest = hex.EncodeToString(sum[:])
+	return summary
+}
+
+func (rp *RulePack) counts() RulePackSummary {
+	var summary RulePackSummary
+	if rp == nil {
+		return summary
+	}
+	summary.JudgeCount = len(rp.JudgeConfigs)
+	for _, judge := range rp.JudgeConfigs {
+		if judge != nil {
+			summary.JudgeCategoryCount += len(judge.Categories)
+		}
+	}
+	summary.RuleFileCount = len(rp.RuleFiles)
+	for _, ruleFile := range rp.RuleFiles {
+		if ruleFile == nil {
+			continue
+		}
+		summary.RuleCount += len(ruleFile.Rules)
+		for index := range ruleFile.Rules {
+			if ruleFile.Rules[index].Enabled == nil || *ruleFile.Rules[index].Enabled {
+				summary.EnabledRuleCount++
+			}
+		}
+	}
+	if patterns := rp.LocalPatterns; patterns != nil {
+		summary.LocalPatternCount =
+			len(patterns.Injection) +
+				len(patterns.InjectionRegexes) +
+				len(patterns.PIIRequests) +
+				len(patterns.PIIDataRegexes) +
+				len(patterns.Secrets) +
+				len(patterns.Exfiltration)
+	}
+	if suppressions := rp.Suppressions; suppressions != nil {
+		summary.SuppressionCount =
+			len(suppressions.PreJudgeStrips) +
+				len(suppressions.FindingSupps) +
+				len(suppressions.ToolSuppressions)
+	}
+	if tools := rp.SensitiveTools; tools != nil {
+		summary.SensitiveToolCount = len(tools.Tools)
+	}
+	return summary
+}
+
+// String returns a concise, value-safe summary of what was loaded.
 func (rp *RulePack) String() string {
 	if rp == nil {
 		return "RulePack{nil}"
 	}
-	nSupp := 0
-	if rp.Suppressions != nil {
-		nSupp = len(rp.Suppressions.FindingSupps) + len(rp.Suppressions.PreJudgeStrips) + len(rp.Suppressions.ToolSuppressions)
-	}
-	nTools := 0
-	if rp.SensitiveTools != nil {
-		nTools = len(rp.SensitiveTools.Tools)
-	}
-	nRuleFiles := len(rp.RuleFiles)
-	nRules := 0
-	for _, rf := range rp.RuleFiles {
-		nRules += len(rf.Rules)
-	}
+	summary := rp.counts()
 	return fmt.Sprintf("RulePack{judges=%d, suppressions=%d, sensitive_tools=%d, rule_files=%d, rules=%d}",
-		len(rp.JudgeConfigs), nSupp, nTools, nRuleFiles, nRules)
+		summary.JudgeCount,
+		summary.SuppressionCount,
+		summary.SensitiveToolCount,
+		summary.RuleFileCount,
+		summary.RuleCount,
+	)
 }

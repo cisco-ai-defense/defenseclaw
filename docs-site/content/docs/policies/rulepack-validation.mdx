@@ -1,0 +1,113 @@
+---
+title: Validate rule packs
+description: Strict, offline validation for bundled, partial, and custom DefenseClaw guardrail rule packs.
+keywords:
+  - DefenseClaw rule pack validation
+  - validate-pack
+  - custom guardrail rules
+  - defenseclaw doctor
+---
+
+Rule-pack validation uses the same Go loader that enforces the pack in the
+gateway. It checks the directory offline: the gateway service does not need to
+be running, and validation does not make a network request.
+
+```bash
+defenseclaw guardrail validate-pack /path/to/rule-pack
+```
+
+A valid pack exits `0` and prints component counts plus a content digest. A
+pack that the helper successfully checks and finds invalid exits `1` with a
+bounded diagnostic that identifies the component path, error code, and reason.
+If the authoritative helper is missing, cannot run, times out, or returns an
+incompatible response, the command exits `2` and reports that validation is
+unavailable. Exit `2` does not determine whether the pack itself is valid.
+
+For CI or scripts, request the versioned JSON result:
+
+```bash
+defenseclaw guardrail validate-pack /path/to/rule-pack --json
+```
+
+<Callout type="warn" title="Validation is fail-closed for files you provide">
+If a recognized component file is present, the entire file must parse and
+validate. A malformed rule, invalid Go regular expression, unsupported schema
+version, or invalid replacement component fails the pack. DefenseClaw does not
+silently discard the bad file or keep only the entries that happened to parse.
+</Callout>
+
+## Partial packs and fallback
+
+A nonempty rule-pack directory is an overlay on the gateway's compiled
+baseline. You can maintain a small pack that contains only the components your
+organization changes.
+
+Fallback is component-specific:
+
+- If `suppressions.yaml` or `sensitive-tools.yaml` is absent, the compiled
+  baseline for that component remains active.
+- If a known judge file is absent, that judge category keeps its compiled
+  baseline. A present judge file replaces that whole category and must
+  validate.
+- `rules/local-patterns.yaml` is optional. When it is absent, the compiled
+  local patterns remain active.
+- Every other present direct `rules/*.yaml` file (excluding
+  `rules/local-patterns.yaml`) is validated as one rule-category override or
+  addition. Omitted built-in categories keep their compiled defaults.
+- Custom rule-category filenames and category names are allowed. They add a
+  category instead of requiring a matching built-in category.
+
+This makes partial packs practical without weakening validation: missing known
+components inherit a baseline, while present components are accepted in full
+or rejected in full.
+
+## Doctor checks effective connector packs
+
+Run doctor after changing configuration:
+
+```bash
+defenseclaw doctor
+```
+
+Doctor resolves the effective rule-pack directory for every configured
+connector, including per-connector overrides. Each result stays attributed to
+its connector. When several connectors share one directory, doctor validates
+that directory once and reuses the result for their attributed rows.
+
+Only a compatible response from the authoritative validator can produce a
+`PASS` row. An invalid pack produces `FAIL`. If the installed gateway helper is
+missing or its validation protocol is incompatible, doctor produces `WARN` and
+never treats directory presence as proof that the pack is valid.
+
+## Apply a validated pack
+
+Validation is a preflight; it does not change the running gateway. Point the
+global or per-connector `rule_pack_dir` at the validated directory, then restart
+the gateway through your normal setup or service workflow. Startup and restart
+load the pack through the same strict validator.
+
+```bash
+defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/my-org
+defenseclaw setup guardrail \
+  --rule-pack-dir ~/.defenseclaw/policies/guardrail/my-org \
+  --restart
+defenseclaw doctor
+```
+
+DefenseClaw does not watch rule-pack files for live changes. Editing a file in
+the active directory does not update an already running gateway, and
+`defenseclaw-gateway policy reload` reloads OPA policy rather than guardrail
+rule packs. Validate the finished directory and restart the gateway at the
+deployment boundary.
+
+## Safe editing loop
+
+1. Copy the closest bundled pack or create a partial overlay directory.
+2. Make one focused component change.
+3. Run `defenseclaw guardrail validate-pack PATH`.
+4. Run your rule fixtures or representative scans.
+5. Update `rule_pack_dir`, restart the gateway, and run `defenseclaw doctor`.
+
+Do not use Python regular-expression behavior as a substitute for validation.
+Rule patterns are enforced by the Go gateway, so the gateway validator is the
+source of truth for accepted syntax.

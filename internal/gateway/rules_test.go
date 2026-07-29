@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -763,7 +764,9 @@ func TestApplyRulePackOverrides_AddsNewCategoryKeepsDefaults(t *testing.T) {
 		},
 	}
 
-	ApplyRulePackOverrides(rp)
+	if err := ApplyRulePackOverrides(rp); err != nil {
+		t.Fatal(err)
+	}
 
 	if got, want := len(allRuleCategories), len(defaultRuleCategories)+1; got != want {
 		t.Fatalf("expected %d categories (defaults + new), got %d", want, got)
@@ -806,7 +809,9 @@ func TestApplyRulePackOverrides_ReplacesNamedCategoryOnly(t *testing.T) {
 		},
 	}
 
-	ApplyRulePackOverrides(rp)
+	if err := ApplyRulePackOverrides(rp); err != nil {
+		t.Fatal(err)
+	}
 
 	if got, want := len(allRuleCategories), len(defaultRuleCategories); got != want {
 		t.Fatalf("expected %d categories, got %d", want, got)
@@ -838,17 +843,27 @@ func TestApplyRulePackOverrides_NilRulePack(t *testing.T) {
 	savedCategories := allRuleCategories
 	defer func() { allRuleCategories = savedCategories }()
 
-	originalLen := len(allRuleCategories)
-	ApplyRulePackOverrides(nil)
-	if len(allRuleCategories) != originalLen {
-		t.Error("nil rule pack should not change allRuleCategories")
+	if err := ApplyRulePackOverrides(secretOverridePack("STALE", `stale_[a-f0-9]+`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyRulePackOverrides(nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(allRuleCategories) != len(defaultRuleCategories) {
+		t.Fatalf("nil rule pack did not restore generated defaults: got %d categories, want %d", len(allRuleCategories), len(defaultRuleCategories))
+	}
+	if containsRuleID(findingIDs(ScanAllRules("stale_deadbeef", "exec")), "STALE") {
+		t.Fatal("nil rule pack retained the previous override")
 	}
 }
 
-func TestApplyRulePackOverrides_InvalidRegexSkipped(t *testing.T) {
+func TestApplyRulePackOverrides_InvalidRegexRejectedAtomically(t *testing.T) {
 	savedCategories := allRuleCategories
 	defer func() { allRuleCategories = savedCategories }()
 
+	if err := ApplyRulePackOverrides(secretOverridePack("ACTIVE", `active_[a-f0-9]+`)); err != nil {
+		t.Fatal(err)
+	}
 	rp := &guardrail.RulePack{
 		RuleFiles: []*guardrail.RulesFileYAML{
 			{
@@ -861,17 +876,23 @@ func TestApplyRulePackOverrides_InvalidRegexSkipped(t *testing.T) {
 		},
 	}
 
-	ApplyRulePackOverrides(rp)
-
-	if len(allRuleCategories) != len(savedCategories) {
-		t.Error("category with only invalid regexes should be skipped, leaving originals unchanged")
+	if err := ApplyRulePackOverrides(rp); err == nil {
+		t.Fatal("invalid regex candidate unexpectedly activated")
+	} else if strings.Contains(err.Error(), "[invalid") || strings.Contains(err.Error(), "error parsing regexp") {
+		t.Fatalf("activation error leaked rejected regex details: %v", err)
+	}
+	if !containsRuleID(findingIDs(ScanAllRules("active_deadbeef", "exec")), "ACTIVE") {
+		t.Fatal("rejected candidate replaced the previously active rule set")
 	}
 }
 
-func TestApplyRulePackOverrides_DisabledInvalidRegexSkipped(t *testing.T) {
+func TestApplyRulePackOverrides_DisabledInvalidRegexRejected(t *testing.T) {
 	savedCategories := allRuleCategories
 	defer func() { allRuleCategories = savedCategories }()
 
+	if err := ApplyRulePackOverrides(secretOverridePack("ACTIVE", `active_[a-f0-9]+`)); err != nil {
+		t.Fatal(err)
+	}
 	disabled := false
 	rp := &guardrail.RulePack{
 		RuleFiles: []*guardrail.RulesFileYAML{
@@ -886,11 +907,11 @@ func TestApplyRulePackOverrides_DisabledInvalidRegexSkipped(t *testing.T) {
 		},
 	}
 
-	ApplyRulePackOverrides(rp)
-
-	findings := ScanAllRules("enabled_good_deadbeef DISABLED-BAD", "exec")
-	if len(findings) != 1 || findings[0].RuleID != "ENABLED-GOOD" {
-		t.Fatalf("findings = %+v, want only ENABLED-GOOD", findings)
+	if err := ApplyRulePackOverrides(rp); err == nil {
+		t.Fatal("disabled invalid regex candidate unexpectedly activated")
+	}
+	if !containsRuleID(findingIDs(ScanAllRules("active_deadbeef", "exec")), "ACTIVE") {
+		t.Fatal("rejected disabled-regex candidate replaced the previously active rule set")
 	}
 }
 
@@ -951,14 +972,21 @@ func containsRuleID(ids []string, want string) bool {
 	return false
 }
 
+func mustApplyConnectorRulePack(t testing.TB, connector string, rp *guardrail.RulePack) {
+	t.Helper()
+	if err := ApplyConnectorRulePackOverrides(connector, rp); err != nil {
+		t.Fatalf("apply connector %q rule pack: %v", connector, err)
+	}
+}
+
 // TestScanAllRulesForConnector_PerConnectorIsolation verifies the core parity
 // fix: connector A scans against A's pack and connector B against B's pack, so
 // A's custom rule fires only on A and B's only on B — no cross-contamination.
 func TestScanAllRulesForConnector_PerConnectorIsolation(t *testing.T) {
 	resetConnectorRuleCategories(t)
 
-	ApplyConnectorRulePackOverrides("conn-a", secretOverridePack("CONN-A", `conn_a_token_[a-f0-9]+`))
-	ApplyConnectorRulePackOverrides("conn-b", secretOverridePack("CONN-B", `conn_b_token_[a-f0-9]+`))
+	mustApplyConnectorRulePack(t, "conn-a", secretOverridePack("CONN-A", `conn_a_token_[a-f0-9]+`))
+	mustApplyConnectorRulePack(t, "conn-b", secretOverridePack("CONN-B", `conn_b_token_[a-f0-9]+`))
 
 	aToken := "leaked conn_a_token_deadbeef here"
 	bToken := "leaked conn_b_token_deadbeef here"
@@ -990,7 +1018,7 @@ func TestScanAllRulesForConnector_FallsBackToGlobal(t *testing.T) {
 	// Register one connector so the map is non-empty, then query a DIFFERENT,
 	// unregistered connector — it must fall back to the defaults (which detect
 	// a real AWS key), not borrow conn-a's narrowed secret set.
-	ApplyConnectorRulePackOverrides("conn-a", secretOverridePack("CONN-A", `conn_a_token_[a-f0-9]+`))
+	mustApplyConnectorRulePack(t, "conn-a", secretOverridePack("CONN-A", `conn_a_token_[a-f0-9]+`))
 
 	awsKey := "AKIAIOSFODNN7EXAMPLE"
 	for _, connector := range []string{"", "unregistered"} {
@@ -1013,8 +1041,8 @@ func TestScanAllRulesForConnector_FallsBackToGlobal(t *testing.T) {
 func TestScanAllRulesForConnector_ConcurrentNoCrossContamination(t *testing.T) {
 	resetConnectorRuleCategories(t)
 
-	ApplyConnectorRulePackOverrides("conn-a", secretOverridePack("CONN-A", `conn_a_token_[a-f0-9]+`))
-	ApplyConnectorRulePackOverrides("conn-b", secretOverridePack("CONN-B", `conn_b_token_[a-f0-9]+`))
+	mustApplyConnectorRulePack(t, "conn-a", secretOverridePack("CONN-A", `conn_a_token_[a-f0-9]+`))
+	mustApplyConnectorRulePack(t, "conn-b", secretOverridePack("CONN-B", `conn_b_token_[a-f0-9]+`))
 
 	const iterations = 200
 	var wg sync.WaitGroup
@@ -1053,8 +1081,10 @@ func TestApplyConnectorRulePackOverrides_NilPackPinsDefaults(t *testing.T) {
 
 	// Narrow the GLOBAL set to a single custom secret rule (simulating a
 	// primary pack), then register conn-default with a nil pack.
-	ApplyRulePackOverrides(secretOverridePack("PRIMARY-ONLY", `primary_token_[a-f0-9]+`))
-	ApplyConnectorRulePackOverrides("conn-default", nil)
+	if err := ApplyRulePackOverrides(secretOverridePack("PRIMARY-ONLY", `primary_token_[a-f0-9]+`)); err != nil {
+		t.Fatal(err)
+	}
+	mustApplyConnectorRulePack(t, "conn-default", nil)
 
 	// conn-default must detect a real AWS key (compiled-in default), and must
 	// NOT carry the primary's narrowed rule.
@@ -1067,11 +1097,67 @@ func TestApplyConnectorRulePackOverrides_NilPackPinsDefaults(t *testing.T) {
 	}
 
 	// Empty connector name is ignored (no panic, no entry).
-	ApplyConnectorRulePackOverrides("", secretOverridePack("IGNORED", `x`))
+	mustApplyConnectorRulePack(t, "", secretOverridePack("IGNORED", `x`))
 	ruleCategoriesMu.RLock()
 	_, present := connectorRuleCategories[""]
 	ruleCategoriesMu.RUnlock()
 	if present {
 		t.Error("empty connector name should not be registered")
+	}
+}
+
+func TestConnectorRulePackOverrideKeysAreCanonical(t *testing.T) {
+	resetConnectorRuleCategories(t)
+
+	mustApplyConnectorRulePack(t, "  CoDeX  ", secretOverridePack("CANONICAL", `canonical_token`))
+	if !containsRuleID(ruleIDsForConnector("codex", "canonical_token"), "CANONICAL") {
+		t.Fatal("canonical lookup did not resolve a mixed-case published override")
+	}
+	ruleCategoriesMu.RLock()
+	_, canonicalPresent := connectorRuleCategories["codex"]
+	_, rawPresent := connectorRuleCategories["CoDeX"]
+	ruleCategoriesMu.RUnlock()
+	if !canonicalPresent || rawPresent {
+		t.Fatalf("canonical key present=%t raw key present=%t, want true/false", canonicalPresent, rawPresent)
+	}
+
+	RemoveConnectorRulePackOverrides(" CODEX ")
+	if containsRuleID(ruleIDsForConnector("codex", "canonical_token"), "CANONICAL") {
+		t.Fatal("mixed-case removal left the canonical override active")
+	}
+}
+
+func TestPublishConnectorRulePackGenerationRetiresOnlyStaleManualEntries(t *testing.T) {
+	resetConnectorRuleCategories(t)
+
+	oldManual, err := compileRulePackCategories(secretOverridePack("OLD-MANUAL", `old_manual_token`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	retainedManual, err := compileRulePackCategories(secretOverridePack("NEW-MANUAL", `new_manual_token`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dynamic, err := compileRulePackCategories(secretOverridePack("DYNAMIC", `dynamic_token`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishConnectorRulePackOverrides("removed", oldManual)
+	publishConnectorRulePackOverrides("retained", oldManual)
+	publishConnectorRulePackOverrides("automatic", dynamic)
+
+	publishConnectorRulePackGeneration(
+		[]string{" REMOVED ", " ReTaInEd "},
+		map[string]*compiledRulePackCategories{" RETAINED ": retainedManual},
+	)
+
+	if containsRuleID(ruleIDsForConnector("removed", "old_manual_token"), "OLD-MANUAL") {
+		t.Error("removed manual connector retained its stale rule set")
+	}
+	if !containsRuleID(ruleIDsForConnector("retained", "new_manual_token"), "NEW-MANUAL") {
+		t.Error("retained manual connector did not receive the candidate rule set")
+	}
+	if !containsRuleID(ruleIDsForConnector("automatic", "dynamic_token"), "DYNAMIC") {
+		t.Error("unrelated automatic connector rule set was removed")
 	}
 }

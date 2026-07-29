@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -86,13 +87,23 @@ var allRuleCategories = append([]ruleCategory(nil), defaultRuleCategories...)
 // single-connector path untouched. Guarded by ruleCategoriesMu.
 var connectorRuleCategories = map[string][]ruleCategory{}
 
+func canonicalConnectorRulePackKey(connector string) string {
+	return strings.ToLower(strings.TrimSpace(connector))
+}
+
 // maxRegexCompileTime caps how long a single user-supplied regex may take to
 // compile, guarding against ReDoS-style patterns in rule pack YAML files.
 const maxRegexCompileTime = 2 * time.Second
 
+var (
+	errRegexPatternSize    = errors.New("pattern exceeds size limit")
+	errRegexPatternSyntax  = errors.New("pattern syntax is invalid")
+	errRegexCompileTimeout = errors.New("pattern compilation timed out")
+)
+
 func compileRegexSafe(pattern string) (*regexp.Regexp, error) {
 	if len(pattern) > 2048 {
-		return nil, fmt.Errorf("pattern too long (%d chars)", len(pattern))
+		return nil, errRegexPatternSize
 	}
 	type result struct {
 		re  *regexp.Regexp
@@ -105,9 +116,12 @@ func compileRegexSafe(pattern string) (*regexp.Regexp, error) {
 	}()
 	select {
 	case r := <-ch:
-		return r.re, r.err
+		if r.err != nil {
+			return nil, errRegexPatternSyntax
+		}
+		return r.re, nil
 	case <-time.After(maxRegexCompileTime):
-		return nil, fmt.Errorf("compile timed out after %v", maxRegexCompileTime)
+		return nil, errRegexCompileTimeout
 	}
 }
 
@@ -125,18 +139,42 @@ func compileRegexSafe(pattern string) (*regexp.Regexp, error) {
 //
 // This function is idempotent: it always starts from defaultRuleCategories,
 // so repeated calls (config reload, tests) converge on the same state.
-func ApplyRulePackOverrides(rp *guardrail.RulePack) {
-	if rp == nil || len(rp.RuleFiles) == 0 {
+func ApplyRulePackOverrides(rp *guardrail.RulePack) error {
+	compiled, err := compileRulePackCategories(rp)
+	if err != nil {
+		return err
+	}
+	publishRulePackOverrides(compiled)
+	return nil
+}
+
+type compiledRulePackCategories struct {
+	categories []ruleCategory
+	overridden int
+	added      int
+}
+
+func compileRulePackCategories(rp *guardrail.RulePack) (*compiledRulePackCategories, error) {
+	merged, overridden, added, err := mergeRulePackCategories(rp)
+	if err != nil {
+		return nil, err
+	}
+	return &compiledRulePackCategories{
+		categories: merged,
+		overridden: overridden,
+		added:      added,
+	}, nil
+}
+
+func publishRulePackOverrides(compiled *compiledRulePackCategories) {
+	if compiled == nil {
 		return
 	}
-
-	merged, overridden, added := mergeRulePackCategories(rp)
-
 	ruleCategoriesMu.Lock()
-	allRuleCategories = merged
+	allRuleCategories = compiled.categories
 	ruleCategoriesMu.Unlock()
 	fmt.Fprintf(os.Stderr, "[guardrail] rule pack merged: %d categories overridden, %d added, %d defaults retained\n",
-		overridden, added, len(defaultRuleCategories)-overridden)
+		compiled.overridden, compiled.added, len(defaultRuleCategories)-compiled.overridden)
 }
 
 // ApplyConnectorRulePackOverrides registers a connector-scoped rule set built
@@ -150,19 +188,76 @@ func ApplyRulePackOverrides(rp *guardrail.RulePack) {
 // pinned to a known set rather than inheriting whatever the primary happened
 // to install. Connectors with no entry fall back to allRuleCategories via
 // ScanAllRulesForConnector. Empty connector names are ignored.
-func ApplyConnectorRulePackOverrides(connector string, rp *guardrail.RulePack) {
-	connector = strings.TrimSpace(connector)
+func ApplyConnectorRulePackOverrides(connector string, rp *guardrail.RulePack) error {
+	connector = canonicalConnectorRulePackKey(connector)
+	if connector == "" {
+		return nil
+	}
+
+	compiled, err := compileRulePackCategories(rp)
+	if err != nil {
+		return fmt.Errorf("connector %s rule pack activation: %w", connector, err)
+	}
+	publishConnectorRulePackOverrides(connector, compiled)
+	return nil
+}
+
+func publishConnectorRulePackOverrides(connector string, compiled *compiledRulePackCategories) {
+	connector = canonicalConnectorRulePackKey(connector)
+	if connector == "" || compiled == nil {
+		return
+	}
+	ruleCategoriesMu.Lock()
+	connectorRuleCategories[connector] = compiled.categories
+	ruleCategoriesMu.Unlock()
+	fmt.Fprintf(os.Stderr, "[guardrail] connector %s rule set: %d categories overridden, %d added, %d defaults retained\n",
+		connector, compiled.overridden, compiled.added, len(defaultRuleCategories)-compiled.overridden)
+}
+
+// publishConnectorRulePackGeneration replaces the manual connector portion of
+// the current generation under one lock. Dynamically protected connectors are
+// left intact unless they also appeared in the previous manual connector set.
+func publishConnectorRulePackGeneration(
+	previousManual []string,
+	next map[string]*compiledRulePackCategories,
+) {
+	canonicalNext := make(map[string]*compiledRulePackCategories, len(next))
+	for rawName, compiled := range next {
+		name := canonicalConnectorRulePackKey(rawName)
+		if name == "" || compiled == nil {
+			continue
+		}
+		canonicalNext[name] = compiled
+	}
+
+	ruleCategoriesMu.Lock()
+	for _, rawName := range previousManual {
+		name := canonicalConnectorRulePackKey(rawName)
+		if name == "" {
+			continue
+		}
+		if _, retained := canonicalNext[name]; !retained {
+			delete(connectorRuleCategories, name)
+		}
+	}
+	for name, compiled := range canonicalNext {
+		connectorRuleCategories[name] = compiled.categories
+	}
+	ruleCategoriesMu.Unlock()
+}
+
+// RemoveConnectorRulePackOverrides removes connector-scoped runtime state
+// after a connector is cleanly torn down. A later scan for that connector
+// falls back to the current generated global defaults instead of retaining a
+// stale override from an earlier activation.
+func RemoveConnectorRulePackOverrides(connector string) {
+	connector = canonicalConnectorRulePackKey(connector)
 	if connector == "" {
 		return
 	}
-
-	merged, overridden, added := mergeRulePackCategories(rp)
-
 	ruleCategoriesMu.Lock()
-	connectorRuleCategories[connector] = merged
+	delete(connectorRuleCategories, connector)
 	ruleCategoriesMu.Unlock()
-	fmt.Fprintf(os.Stderr, "[guardrail] connector %s rule set: %d categories overridden, %d added, %d defaults retained\n",
-		connector, overridden, added, len(defaultRuleCategories)-overridden)
 }
 
 // mergeRulePackCategories builds a full rule-category slice by merging the
@@ -171,11 +266,11 @@ func ApplyConnectorRulePackOverrides(connector string, rp *guardrail.RulePack) {
 // (ApplyRulePackOverrides) and the per-connector store
 // (ApplyConnectorRulePackOverrides) share identical merge semantics. A nil
 // pack or one with no rule files yields a copy of defaultRuleCategories.
-func mergeRulePackCategories(rp *guardrail.RulePack) (merged []ruleCategory, overridden, added int) {
+func mergeRulePackCategories(rp *guardrail.RulePack) (merged []ruleCategory, overridden, added int, err error) {
 	merged = make([]ruleCategory, len(defaultRuleCategories))
 	copy(merged, defaultRuleCategories)
 	if rp == nil || len(rp.RuleFiles) == 0 {
-		return merged, 0, 0
+		return merged, 0, 0, nil
 	}
 
 	idx := make(map[string]int, len(merged))
@@ -183,18 +278,22 @@ func mergeRulePackCategories(rp *guardrail.RulePack) (merged []ruleCategory, ove
 		idx[c.Name] = i
 	}
 
-	for _, rf := range rp.RuleFiles {
+	for fileIndex, rf := range rp.RuleFiles {
 		if rf == nil || rf.Category == "" {
 			continue
 		}
 		var compiled []PatternRule
-		for _, r := range rf.Rules {
-			if r.Enabled != nil && !*r.Enabled {
-				continue
-			}
+		for ruleIndex, r := range rf.Rules {
 			re, err := compileRegexSafe(r.Pattern)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "[guardrail] skip rule %s: bad pattern: %v\n", r.ID, err)
+				return nil, 0, 0, fmt.Errorf(
+					"rule-pack category entry %d rule %d contains an invalid regular expression: %w",
+					fileIndex,
+					ruleIndex,
+					err,
+				)
+			}
+			if r.Enabled != nil && !*r.Enabled {
 				continue
 			}
 			compiled = append(compiled, PatternRule{
@@ -218,7 +317,7 @@ func mergeRulePackCategories(rp *guardrail.RulePack) (merged []ruleCategory, ove
 			added++
 		}
 	}
-	return merged, overridden, added
+	return merged, overridden, added, nil
 }
 
 // severityRank maps severity strings to numeric ranks for comparison.
@@ -328,7 +427,7 @@ func ScanAllRulesForConnector(connector, text, toolName string) []RuleFinding {
 	if ManagedEnterpriseActive() {
 		return nil
 	}
-	connector = strings.TrimSpace(connector)
+	connector = canonicalConnectorRulePackKey(connector)
 	ruleCategoriesMu.RLock()
 	cats := allRuleCategories
 	if connector != "" {

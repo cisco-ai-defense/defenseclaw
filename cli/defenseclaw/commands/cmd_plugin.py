@@ -27,7 +27,7 @@ import os
 import re
 import shutil
 import subprocess
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
 
@@ -47,6 +47,9 @@ from defenseclaw.inventory.plugin_identity import (
     resolve_plugin_identity,
     validate_plugin_id,
 )
+
+if TYPE_CHECKING:
+    from defenseclaw.scanner.rulepack import RulePackOverlayCache
 
 
 def _api_bind_host(app: AppContext) -> str:
@@ -191,9 +194,6 @@ def scan(
     # ``scanners.plugin.llm:`` overrides) into the wrapper. The
     # wrapper layers per-call CLI flags on top before dispatching.
     scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
-    # R4: overlay the configured guardrail rule pack over the plugin source.
-    # No-op when no rule_pack_dir is set.
-    scanner = maybe_wrap(scanner, app.cfg)
 
     matches: list[tuple[str, str]] = []
     if _looks_like_explicit_path(name_or_path):
@@ -231,6 +231,7 @@ def scan(
         click.echo("  Provide a path, a DefenseClaw plugin name, or a connector plugin name.", err=True)
         raise SystemExit(1)
 
+    pack_cache: RulePackOverlayCache = {}
     for idx, (connector, scan_dir) in enumerate(matches):
         if len(matches) > 1 and not as_json:
             if idx:
@@ -238,7 +239,12 @@ def scan(
             click.echo(ux._style(f"── connector: {connector} ──", fg="cyan"))
         _scan_one_plugin_dir(
             app,
-            scanner,
+            maybe_wrap(
+                scanner,
+                app.cfg,
+                connector,
+                pack_cache=pack_cache,
+            ),
             scan_dir=scan_dir,
             connector=connector,
             as_json=as_json,
@@ -555,10 +561,16 @@ def _scan_all_plugins(
         lenient,
     )
     scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
-    scanner = maybe_wrap(scanner, app.cfg)
+    pack_cache: RulePackOverlayCache = {}
 
     json_groups: list[dict[str, Any]] = []
     for connector in connectors:
+        connector_scanner = maybe_wrap(
+            scanner,
+            app.cfg,
+            connector,
+            pack_cache=pack_cache,
+        )
         if len(connectors) > 1 and not as_json:
             click.echo(ux._style(f"\n── connector: {connector} ──", fg="cyan"))
 
@@ -597,7 +609,7 @@ def _scan_all_plugins(
         group_results: list[dict[str, Any]] = []
         for pid, scan_dir in targets:
             try:
-                result = scanner.scan(scan_dir, **scan_options)
+                result = connector_scanner.scan(scan_dir, **scan_options)
             except Exception as exc:  # noqa: BLE001 — surface, keep sweeping.
                 errored += 1
                 if not as_json:
@@ -838,13 +850,19 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
                 )
 
         scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
-        scanner = maybe_wrap(scanner, app.cfg)
+        pack_cache: RulePackOverlayCache = {}
         scan_results: dict[str, Any] = {}
         try:
             for connector, _install_root in targets:
                 if pre_decisions[connector].verdict != "allowed":
                     plugin_path = installed_by_connector[connector]
-                    scan_results[connector] = scanner.scan(plugin_path)
+                    connector_scanner = maybe_wrap(
+                        scanner,
+                        app.cfg,
+                        connector,
+                        pack_cache=pack_cache,
+                    )
+                    scan_results[connector] = connector_scanner.scan(plugin_path)
         except Exception as exc:
             transaction.rollback()
             click.echo(f"error: scan failed for connector={connector}: {exc}", err=True)

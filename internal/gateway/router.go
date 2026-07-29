@@ -49,6 +49,7 @@ type EventRouter struct {
 	observabilityV8Lifecycle     lifecycleV8Runtime
 	observabilityV8Authoritative bool
 	configMu                     sync.RWMutex
+	rulePackMu                   sync.RWMutex
 	notify                       *NotificationQueue
 	judge                        *LLMJudge
 	rp                           *guardrail.RulePack
@@ -334,7 +335,18 @@ func (r *EventRouter) logStreamToolAction(sessionKey, action, toolName, toolID, 
 
 // SetRulePack configures the guardrail rule pack for tool result inspection.
 func (r *EventRouter) SetRulePack(rp *guardrail.RulePack) {
+	r.rulePackMu.Lock()
 	r.rp = rp
+	r.rulePackMu.Unlock()
+}
+
+func (r *EventRouter) rulePack() *guardrail.RulePack {
+	if r == nil {
+		return nil
+	}
+	r.rulePackMu.RLock()
+	defer r.rulePackMu.RUnlock()
+	return r.rp
 }
 
 // Route dispatches a single event frame to the correct handler.
@@ -1356,10 +1368,11 @@ func (r *EventRouter) handleToolResult(evt EventFrame) {
 //     logged once per call so the operator can see the degraded state —
 //     the deterministic scan still runs.
 func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
-	if r.rp == nil || payload.Output == "" {
+	rp := r.rulePack()
+	if rp == nil || payload.Output == "" {
 		return
 	}
-	stool := r.rp.LookupSensitiveTool(payload.Tool)
+	stool := rp.LookupSensitiveTool(payload.Tool)
 	if stool == nil || !stool.ResultInspection {
 		return
 	}

@@ -70,6 +70,7 @@ gateway:
 guardrail:
   enabled: false
   connector: codex
+  rule_pack_dir: ""
 observability: {}
 `, home, port, token)
 	if err := os.WriteFile(filepath.Join(home, config.DefaultConfigName), []byte(configText), 0o600); err != nil {
@@ -116,7 +117,7 @@ observability: {}
 
 	startOutput, startExit = runGatewayExecutablePowerShell(t, binary, home, "start")
 	if startExit != 0 {
-		t.Fatalf("start LASTEXITCODE = %d after collision removal, want 0; output:\n%s", startExit, startOutput)
+		t.Fatalf("start LASTEXITCODE = %d after collision removal, want 0; output:\n%s\ngateway.log tail:\n%s", startExit, startOutput, executableTestLogTail(home))
 	}
 	if !strings.Contains(startOutput, "OK (PID") || strings.Contains(startOutput, "STARTING") {
 		t.Fatalf("successful start did not render READY-only completion:\n%s", startOutput)
@@ -313,6 +314,7 @@ gateway:
     enabled: false
 guardrail:
   enabled: false
+  rule_pack_dir: ""
 observability: {}
 `, home, fleetPort, apiPort)
 	if err := os.WriteFile(filepath.Join(home, config.DefaultConfigName), []byte(configText), 0o600); err != nil {
