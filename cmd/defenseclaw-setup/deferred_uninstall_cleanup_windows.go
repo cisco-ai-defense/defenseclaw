@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -36,6 +37,9 @@ const (
 	deferredCleanupRunValueName = "DefenseClawDeferredUninstallCleanup"
 	deferredCleanupRunValueType = registry.SZ
 	deferredCleanupFileLimit    = int64(4 << 20)
+
+	deferredCleanupBootIdentityDomain = "DefenseClaw deferred cleanup boot identity v1\x00"
+	processTelemetryBufferSize        = 64 << 10
 )
 
 var (
@@ -50,7 +54,47 @@ type systemBootEnvironmentInformation struct {
 	BootFlags      uint64
 }
 
+type processTelemetryIDInformation struct {
+	HeaderSize                  uint32
+	ProcessID                   uint32
+	ProcessStartKey             uint64
+	CreateTime                  uint64
+	CreateInterruptTime         uint64
+	CreateUnbiasedInterruptTime uint64
+	ProcessSequenceNumber       uint64
+	SessionCreateTime           uint64
+	SessionID                   uint32
+	BootID                      uint32
+	ImageChecksum               uint32
+	ImageTimeDateStamp          uint32
+	UserSIDOffset               uint32
+	ImagePathOffset             uint32
+	PackageNameOffset           uint32
+	RelativeAppNameOffset       uint32
+	CommandLineOffset           uint32
+}
+
+type ntQueryInformationProcessFunc func(
+	process windows.Handle,
+	informationClass int32,
+	buffer unsafe.Pointer,
+	bufferLength uint32,
+	returnedLength *uint32,
+) windows.NTStatus
+
 func windowsBootIdentifier() (string, error) {
+	environmentIdentifier, err := windowsBootEnvironmentIdentifier()
+	if err != nil {
+		return "", err
+	}
+	telemetryBootID, err := windowsProcessTelemetryBootID()
+	if err != nil {
+		return "", err
+	}
+	return composeWindowsBootIdentifier(environmentIdentifier, telemetryBootID)
+}
+
+func windowsBootEnvironmentIdentifier() (string, error) {
 	var info systemBootEnvironmentInformation
 	var returned uint32
 	if err := windows.NtQuerySystemInformation(
@@ -65,6 +109,93 @@ func windowsBootIdentifier() (string, error) {
 		return "", errors.New("Windows boot identifier response was truncated")
 	}
 	return canonicalWindowsBootIdentifier(info.BootIdentifier.String())
+}
+
+func windowsProcessTelemetryBootID() (uint32, error) {
+	dll := windows.NewLazySystemDLL("ntdll.dll")
+	procedure := dll.NewProc("NtQueryInformationProcess")
+	if err := procedure.Find(); err != nil {
+		return 0, fmt.Errorf("resolve NtQueryInformationProcess: %w", err)
+	}
+	return queryWindowsProcessTelemetryBootID(func(
+		process windows.Handle,
+		informationClass int32,
+		buffer unsafe.Pointer,
+		bufferLength uint32,
+		returnedLength *uint32,
+	) windows.NTStatus {
+		status, _, _ := procedure.Call(
+			uintptr(process),
+			uintptr(informationClass),
+			uintptr(buffer),
+			uintptr(bufferLength),
+			uintptr(unsafe.Pointer(returnedLength)),
+		)
+		return windows.NTStatus(uint32(status))
+	})
+}
+
+func queryWindowsProcessTelemetryBootID(
+	query ntQueryInformationProcessFunc,
+) (uint32, error) {
+	if query == nil {
+		return 0, errors.New("Windows process telemetry query is unavailable")
+	}
+	buffer := make([]byte, processTelemetryBufferSize)
+	var returned uint32
+	status := query(
+		windows.CurrentProcess(),
+		windows.ProcessTelemetryIdInformation,
+		unsafe.Pointer(&buffer[0]),
+		uint32(len(buffer)),
+		&returned,
+	)
+	if status != windows.STATUS_SUCCESS {
+		return 0, fmt.Errorf("query Windows process telemetry: %w", status)
+	}
+	fixedHeaderSize := uint32(unsafe.Sizeof(processTelemetryIDInformation{}))
+	if returned < fixedHeaderSize || returned > uint32(len(buffer)) {
+		return 0, errors.New("Windows process telemetry response length is invalid")
+	}
+	info := (*processTelemetryIDInformation)(unsafe.Pointer(&buffer[0]))
+	if info.HeaderSize < fixedHeaderSize || info.HeaderSize > returned {
+		return 0, errors.New("Windows process telemetry header size is invalid")
+	}
+	if info.ProcessID != windows.GetCurrentProcessId() {
+		return 0, errors.New("Windows process telemetry identifies a different process")
+	}
+	return info.BootID, nil
+}
+
+func composeWindowsBootIdentifier(
+	environmentIdentifier string,
+	telemetryBootID uint32,
+) (string, error) {
+	canonicalEnvironment, err := canonicalWindowsBootIdentifier(environmentIdentifier)
+	if err != nil {
+		return "", err
+	}
+	material := make(
+		[]byte,
+		0,
+		len(deferredCleanupBootIdentityDomain)+len(canonicalEnvironment)+4,
+	)
+	material = append(material, deferredCleanupBootIdentityDomain...)
+	material = append(material, canonicalEnvironment...)
+	var encodedBootID [4]byte
+	binary.LittleEndian.PutUint32(encodedBootID[:], telemetryBootID)
+	material = append(material, encodedBootID[:]...)
+	digest := sha256.Sum256(material)
+	encoded := hex.EncodeToString(digest[:16])
+	identifier := encoded[:8] + "-" +
+		encoded[8:12] + "-" +
+		encoded[12:16] + "-" +
+		encoded[16:20] + "-" +
+		encoded[20:32]
+	if !validBootIdentifier(identifier) {
+		return "", errors.New("derived Windows boot identifier is invalid")
+	}
+	return identifier, nil
 }
 
 func canonicalWindowsBootIdentifier(value string) (string, error) {

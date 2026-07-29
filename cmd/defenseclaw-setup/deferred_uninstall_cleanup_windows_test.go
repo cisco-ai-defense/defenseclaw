@@ -71,6 +71,203 @@ func TestWindowsBootIdentifierReturnsCanonicalValue(t *testing.T) {
 	}
 }
 
+func TestComposeWindowsBootIdentifierIsDeterministicAndDomainSeparated(t *testing.T) {
+	first, err := composeWindowsBootIdentifier(deferredCleanupBootOne, 0x11223344)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const expected = "124a2a11-3686-92c6-3006-2e91636ef5fa"
+	if first != expected {
+		t.Fatalf("composite boot identifier = %q, want %q", first, expected)
+	}
+	second, err := composeWindowsBootIdentifier(deferredCleanupBootOne, 0x11223344)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("composite boot identifiers differ: %q and %q", first, second)
+	}
+	if !validBootIdentifier(first) {
+		t.Fatalf("composite boot identifier = %q", first)
+	}
+	differentBoot, err := composeWindowsBootIdentifier(deferredCleanupBootOne, 0x11223345)
+	if err != nil {
+		t.Fatal(err)
+	}
+	differentEnvironment, err := composeWindowsBootIdentifier(deferredCleanupBootTwo, 0x11223344)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == differentBoot || first == differentEnvironment ||
+		differentBoot == differentEnvironment {
+		t.Fatalf(
+			"composite boot identities are not distinct: first=%q boot=%q environment=%q",
+			first,
+			differentBoot,
+			differentEnvironment,
+		)
+	}
+}
+
+func TestComposeWindowsBootIdentifierRejectsInvalidEnvironment(t *testing.T) {
+	if got, err := composeWindowsBootIdentifier("not-a-guid", 1); err == nil || got != "" {
+		t.Fatalf("composite boot identifier = %q, error %v", got, err)
+	}
+}
+
+func TestWindowsProcessTelemetryBootIDIsStableWithinCurrentBoot(t *testing.T) {
+	first, err := windowsProcessTelemetryBootID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := windowsProcessTelemetryBootID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("process telemetry boot IDs differ within one boot: %d and %d", first, second)
+	}
+}
+
+func TestQueryWindowsProcessTelemetryBootIDValidatesExactResponse(t *testing.T) {
+	const expectedBootID = uint32(0x11223344)
+	got, err := queryWindowsProcessTelemetryBootID(func(
+		process windows.Handle,
+		informationClass int32,
+		buffer unsafe.Pointer,
+		bufferLength uint32,
+		returnedLength *uint32,
+	) windows.NTStatus {
+		if process != windows.CurrentProcess() {
+			t.Fatalf("process handle = %v, want current process", process)
+		}
+		if informationClass != windows.ProcessTelemetryIdInformation {
+			t.Fatalf(
+				"information class = %d, want %d",
+				informationClass,
+				windows.ProcessTelemetryIdInformation,
+			)
+		}
+		if bufferLength != processTelemetryBufferSize {
+			t.Fatalf("buffer length = %d, want %d", bufferLength, processTelemetryBufferSize)
+		}
+		info := (*processTelemetryIDInformation)(buffer)
+		info.HeaderSize = uint32(unsafe.Sizeof(*info))
+		info.ProcessID = windows.GetCurrentProcessId()
+		info.BootID = expectedBootID
+		*returnedLength = info.HeaderSize
+		return windows.STATUS_SUCCESS
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != expectedBootID {
+		t.Fatalf("process telemetry boot ID = %d, want %d", got, expectedBootID)
+	}
+}
+
+func TestQueryWindowsProcessTelemetryBootIDFailsClosed(t *testing.T) {
+	fixedHeaderSize := uint32(unsafe.Sizeof(processTelemetryIDInformation{}))
+	tests := []struct {
+		name   string
+		status windows.NTStatus
+		mutate func(*processTelemetryIDInformation, *uint32)
+	}{
+		{
+			name:   "API failure",
+			status: windows.STATUS_ACCESS_DENIED,
+		},
+		{
+			name: "truncated response",
+			mutate: func(info *processTelemetryIDInformation, returned *uint32) {
+				info.HeaderSize = fixedHeaderSize
+				*returned = fixedHeaderSize - 1
+			},
+		},
+		{
+			name: "oversized response",
+			mutate: func(info *processTelemetryIDInformation, returned *uint32) {
+				info.HeaderSize = fixedHeaderSize
+				*returned = processTelemetryBufferSize + 1
+			},
+		},
+		{
+			name: "short fixed header",
+			mutate: func(info *processTelemetryIDInformation, returned *uint32) {
+				info.HeaderSize = fixedHeaderSize - 1
+				*returned = fixedHeaderSize
+			},
+		},
+		{
+			name: "header exceeds response",
+			mutate: func(info *processTelemetryIDInformation, returned *uint32) {
+				info.HeaderSize = fixedHeaderSize + 1
+				*returned = fixedHeaderSize
+			},
+		},
+		{
+			name: "wrong process",
+			mutate: func(info *processTelemetryIDInformation, returned *uint32) {
+				info.HeaderSize = fixedHeaderSize
+				info.ProcessID = windows.GetCurrentProcessId() + 1
+				*returned = fixedHeaderSize
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			query := func(
+				_ windows.Handle,
+				_ int32,
+				buffer unsafe.Pointer,
+				_ uint32,
+				returnedLength *uint32,
+			) windows.NTStatus {
+				info := (*processTelemetryIDInformation)(buffer)
+				info.HeaderSize = fixedHeaderSize
+				info.ProcessID = windows.GetCurrentProcessId()
+				info.BootID = 1
+				*returnedLength = fixedHeaderSize
+				if test.mutate != nil {
+					test.mutate(info, returnedLength)
+				}
+				return test.status
+			}
+			if got, err := queryWindowsProcessTelemetryBootID(query); err == nil || got != 0 {
+				t.Fatalf("process telemetry boot ID = %d, error %v", got, err)
+			}
+		})
+	}
+	if got, err := queryWindowsProcessTelemetryBootID(nil); err == nil || got != 0 {
+		t.Fatalf("nil-query process telemetry boot ID = %d, error %v", got, err)
+	}
+}
+
+func TestCompositeBootIdentityPreservesHibernateAndRestartBoundary(t *testing.T) {
+	uninstallBoot, err := composeWindowsBootIdentifier(deferredCleanupBootOne, 188)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hibernateBoot, err := composeWindowsBootIdentifier(deferredCleanupBootOne, 188)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartBoot, err := composeWindowsBootIdentifier(deferredCleanupBootOne, 189)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := deferredUninstallCleanupRecord{UninstallBootIdentifier: uninstallBoot}
+	if err := validateDeferredCleanupBootTransition(record, hibernateBoot); !errors.Is(
+		err,
+		errUninstallCleanupRequiresRestart,
+	) {
+		t.Fatalf("hibernate-equivalent transition error = %v", err)
+	}
+	if err := validateDeferredCleanupBootTransition(record, restartBoot); err != nil {
+		t.Fatalf("restart transition rejected: %v", err)
+	}
+}
+
 func TestDeferredCleanupRunCommandLaunchesExactAbsoluteUnicodePath(t *testing.T) {
 	if deferredCleanupRunValueType != registry.SZ {
 		t.Fatalf(
