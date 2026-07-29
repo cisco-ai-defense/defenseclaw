@@ -20,6 +20,9 @@
 param(
     [Parameter(Mandatory = $true)][string]$ReleaseDir,
     [Parameter(Mandatory = $true)][string]$TargetVersion,
+    [Parameter(Mandatory = $true)]
+    [ValidateSet("immediate", "deferred")]
+    [string]$UninstallContract,
     [Parameter(DontShow = $true)][switch]$Child,
     [Parameter(DontShow = $true)][string]$StateRoot = "",
     [Parameter(DontShow = $true)][string]$DiagnosticsRoot = ""
@@ -149,11 +152,150 @@ function Get-UserPathEntryCount {
     ).Count
 }
 
+function Assert-NoReparsePathChain {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $current = [IO.Path]::GetFullPath($Path)
+    while ($true) {
+        try {
+            $attributes = [IO.File]::GetAttributes($current)
+            if ($attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Deferred uninstall authority crosses a reparse point: $current"
+            }
+        } catch [IO.FileNotFoundException] {
+            # Missing transaction artifacts are expected after convergence.
+        } catch [IO.DirectoryNotFoundException] {
+            # Continue with the first existing ancestor.
+        }
+        $parent = [IO.Directory]::GetParent($current)
+        if ($null -eq $parent) {
+            break
+        }
+        $current = $parent.FullName
+    }
+}
+
+function Assert-CanonicalPathBinding {
+    param(
+        [Parameter(Mandatory = $true)][string]$Actual,
+        [Parameter(Mandatory = $true)][string]$Expected,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    if (-not [IO.Path]::IsPathFullyQualified($Actual)) {
+        throw "$Label is not an absolute filesystem path"
+    }
+    $normalizedActual = [IO.Path]::GetFullPath($Actual)
+    $normalizedExpected = [IO.Path]::GetFullPath($Expected)
+    if (-not $Actual.Equals($normalizedActual, [StringComparison]::OrdinalIgnoreCase) -or
+        -not $normalizedActual.Equals(
+            $normalizedExpected,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "$Label is not bound to the exact canonical path"
+    }
+}
+
+function Assert-PrivatePathCustody {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$Directory
+    )
+
+    Assert-NoReparsePathChain -Path $Path
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ([bool]$item.PSIsContainer -ne [bool]$Directory -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Deferred uninstall authority is not the required regular path: $Path"
+    }
+
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $owner = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $actualOwner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if (-not $acl.AreAccessRulesProtected -or $actualOwner -cne $owner) {
+        throw "Deferred uninstall authority is not owner-controlled with a protected DACL: $Path"
+    }
+    $systemSid = "S-1-5-18"
+    $creatorOwnerSid = "S-1-3-0"
+    $foundOwner = $false
+    $foundSystem = $false
+    foreach ($rule in $acl.GetAccessRules(
+            $true,
+            $true,
+            [Security.Principal.SecurityIdentifier]
+        )) {
+        $sid = $rule.IdentityReference.Value
+        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) {
+            throw (
+                "Deferred uninstall authority contains a non-allow ACE " +
+                "($sid): $Path"
+            )
+        }
+        if ([int64]$rule.FileSystemRights -eq 0) {
+            continue
+        }
+        if ($sid -ceq $owner -or $sid -ceq $creatorOwnerSid) {
+            $foundOwner = $true
+            continue
+        }
+        if ($sid -ceq $systemSid) {
+            $foundSystem = $true
+            continue
+        }
+        throw "Deferred uninstall authority grants access to an unexpected SID ($sid): $Path"
+    }
+    if (-not $foundOwner -or -not $foundSystem) {
+        throw "Deferred uninstall authority lacks required owner and SYSTEM access: $Path"
+    }
+}
+
+function Assert-WindowsAMD64Executable {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = [IO.File]::Open(
+        $Path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read
+    )
+    $reader = [IO.BinaryReader]::new($stream)
+    try {
+        if ($stream.Length -lt 70 -or $reader.ReadUInt16() -ne 0x5A4D) {
+            throw "Deferred HookRuntime launcher is not a valid PE executable"
+        }
+        $stream.Position = 0x3C
+        $peOffset = [int64]$reader.ReadUInt32()
+        if ($peOffset -lt 64 -or $peOffset -gt ($stream.Length - 6)) {
+            throw "Deferred HookRuntime launcher has an invalid PE header offset"
+        }
+        $stream.Position = $peOffset
+        if ($reader.ReadUInt32() -ne 0x00004550 -or $reader.ReadUInt16() -ne 0x8664) {
+            throw "Deferred HookRuntime launcher is not a Windows AMD64 executable"
+        }
+    } finally {
+        $reader.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Wait-ForPathRemoval {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    # Historical installers use a transaction-bound post-exit helper that may
+    # wait up to two minutes for its parent to exit. The current deferred
+    # cleanup contract returns 3010 and must never enter this compatibility
+    # wait.
+    for ($attempt = 0; $attempt -lt 520 -and (Test-Path -LiteralPath $Path); $attempt++) {
+        Start-Sleep -Milliseconds 250
+    }
+}
+
 function Assert-ExactDeferredUninstallState {
     param(
         [Parameter(Mandatory = $true)][string]$LocalAppData,
         [Parameter(Mandatory = $true)][string]$CacheRoot,
-        [Parameter(Mandatory = $true)][string]$ExpectedSetup
+        [Parameter(Mandatory = $true)][string]$ExpectedSetup,
+        [Parameter(Mandatory = $true)][string]$ExpectedProvenance
     )
 
     $productRoot = Join-Path $LocalAppData "DefenseClaw"
@@ -164,7 +306,16 @@ function Assert-ExactDeferredUninstallState {
     $hookStatePath = Join-Path $hookRuntimeRoot "hook-runtime-state.json"
     $cleanupRecordPath = Join-Path $installerStateRoot "uninstall-cleanup.json"
     $transactionJournalPath = Join-Path $installerStateRoot "setup-transaction.json"
+    $cacheAckPath = Join-Path $CacheRoot "uninstall-cleanup-ack.json"
+    $installRoot = Join-Path $LocalAppData "Programs\DefenseClaw"
+    $dataRoot = Join-Path (
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    ) ".defenseclaw"
+    $expectedHookPath = Join-Path $installRoot "bin\defenseclaw-hook.exe"
 
+    foreach ($authorityRoot in @($hookRuntimeRoot, $CacheRoot, $installerStateRoot)) {
+        Assert-PrivatePathCustody -Path $authorityRoot -Directory
+    }
     foreach ($requiredResidue in @(
         $cachedSetup,
         $hookLauncher,
@@ -175,6 +326,7 @@ function Assert-ExactDeferredUninstallState {
         if (-not (Test-Path -LiteralPath $requiredResidue -PathType Leaf)) {
             throw "Same-boot uninstall did not retain authenticated cleanup authority: $requiredResidue"
         }
+        Assert-PrivatePathCustody -Path $requiredResidue
     }
 
     $cleanupRecord = Get-Content -LiteralPath $cleanupRecordPath -Raw -Encoding UTF8 |
@@ -183,17 +335,55 @@ function Assert-ExactDeferredUninstallState {
         ConvertFrom-Json
     $hookState = Get-Content -LiteralPath $hookStatePath -Raw -Encoding UTF8 |
         ConvertFrom-Json
+    $provenance = Get-Content -LiteralPath $ExpectedProvenance -Raw -Encoding UTF8 |
+        ConvertFrom-Json
+    $releaseUnsigned = [bool]$provenance.unsigned
+    $productExecutablesSigned = [bool]$provenance.inputs.product_executables_authenticode_signed
+    if ($releaseUnsigned -eq $productExecutablesSigned) {
+        throw "Release provenance has an inconsistent Windows signing posture"
+    }
 
     if ([int]$cleanupRecord.schema_version -ne 1 -or
         [string]$cleanupRecord.status -cne "pending-reboot" -or
-        [string]$cleanupRecord.transaction_id -cnotmatch "^[0-9a-f]{32}$") {
+        [string]$cleanupRecord.transaction_id -cnotmatch "^[0-9a-f]{32}$" -or
+        [string]$cleanupRecord.cleanup_boot_identifier -cne "" -or
+        [string]$cleanupRecord.uninstall_boot_identifier -cnotmatch (
+            "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-" +
+            "[0-9a-f]{4}-[0-9a-f]{12}$"
+        )) {
         throw "Same-boot uninstall did not retain the exact pending cleanup record"
     }
-    if (-not ([IO.Path]::GetFullPath([string]$cleanupRecord.maintenance_path)).Equals(
-            [IO.Path]::GetFullPath($cachedSetup),
-            [StringComparison]::OrdinalIgnoreCase
-        ) -or
-        [string]$cleanupRecord.run_value_name -cne "DefenseClawDeferredUninstallCleanup") {
+    $transactionID = [string]$cleanupRecord.transaction_id
+    foreach ($pathBinding in @(
+        @([string]$cleanupRecord.runtime_root, $hookRuntimeRoot, "cleanup runtime root"),
+        @([string]$cleanupRecord.launcher_path, $hookLauncher, "cleanup launcher"),
+        @([string]$cleanupRecord.state_path, $hookStatePath, "cleanup state"),
+        @(
+            [string]$cleanupRecord.retired_launcher_path,
+            "$hookLauncher.retired.$transactionID",
+            "retired cleanup launcher"
+        ),
+        @(
+            [string]$cleanupRecord.retired_state_path,
+            "$hookStatePath.retired.$transactionID",
+            "retired cleanup state"
+        ),
+        @([string]$cleanupRecord.hook_path, $expectedHookPath, "cleanup hook target"),
+        @([string]$cleanupRecord.maintenance_path, $cachedSetup, "cleanup maintenance executable"),
+        @([string]$cleanupRecord.installer_state_root, $installerStateRoot, "installer-state root"),
+        @([string]$cleanupRecord.journal_path, $transactionJournalPath, "cleanup journal"),
+        @([string]$cleanupRecord.record_path, $cleanupRecordPath, "cleanup record"),
+        @([string]$cleanupRecord.cache_ack_path, $cacheAckPath, "cleanup cache acknowledgement"),
+        @([string]$hookState.runtime_root, $hookRuntimeRoot, "HookRuntime state root"),
+        @([string]$hookState.launcher_path, $hookLauncher, "HookRuntime state launcher"),
+        @([string]$hookState.hook_path, $expectedHookPath, "HookRuntime state hook target")
+    )) {
+        Assert-CanonicalPathBinding `
+            -Actual ([string]$pathBinding[0]) `
+            -Expected ([string]$pathBinding[1]) `
+            -Label ([string]$pathBinding[2])
+    }
+    if ([string]$cleanupRecord.run_value_name -cne "DefenseClawDeferredUninstallCleanup") {
         throw "Same-boot uninstall cleanup record does not bind the canonical cached Setup authority"
     }
     $expectedSetupDigest = (Get-FileHash -LiteralPath $ExpectedSetup -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -202,16 +392,144 @@ function Assert-ExactDeferredUninstallState {
         [string]$cleanupRecord.maintenance_sha256 -cne $cachedSetupDigest) {
         throw "Same-boot uninstall cleanup record does not bind the exact release Setup digest"
     }
+    $transaction = $transactionJournal.transaction
     if ([int]$transactionJournal.schema_version -ne 2 -or
         [string]$transactionJournal.phase -cne "converged" -or
-        [string]$transactionJournal.transaction.action -cne "uninstall" -or
-        [string]$transactionJournal.transaction.id -cne [string]$cleanupRecord.transaction_id) {
+        [int]$transaction.schema_version -ne 1 -or
+        [string]$transaction.action -cne "uninstall" -or
+        [string]$transaction.id -cne $transactionID -or
+        [bool]$transaction.maintenance_existed -ne $true -or
+        [string]$transaction.previous_maintenance_sha256 -cne $cachedSetupDigest -or
+        [string]$transaction.previous_maintenance_sha256 -cne (
+            [string]$cleanupRecord.maintenance_sha256
+        ) -or
+        [string]$transaction.maintenance_sha256 -cne "" -or
+        [bool]$transaction.had_install -ne $true -or
+        $null -eq $transaction.previous_state -or
+        [bool]$transaction.delete_user_data -ne $true -or
+        [string]$transaction.target_connector -cne "none" -or
+        [bool]$transaction.target_services.gateway -ne $false -or
+        [bool]$transaction.target_services.watchdog -ne $false) {
         throw "Same-boot uninstall did not retain the exact converged uninstall journal"
+    }
+    $previousState = $transaction.previous_state
+    if ([int]$previousState.schema_version -ne 1 -or
+        [string]$previousState.install_kind -cne "native-windows-exe" -or
+        [string]$previousState.install_scope -cne "user" -or
+        [string]$previousState.connector -cne "none" -or
+        [bool]$previousState.unsigned_local_artifact -ne $releaseUnsigned -or
+        [bool]$previousState.release_signing_required -ne $true) {
+        throw "Converged uninstall journal does not bind the authenticated native installation"
+    }
+    foreach ($previousStateBinding in @(
+        @([string]$previousState.install_root, $installRoot, "previous install root"),
+        @([string]$previousState.data_root, $dataRoot, "previous install data root"),
+        @([string]$previousState.maintenance_path, $cachedSetup, "previous maintenance executable")
+    )) {
+        Assert-CanonicalPathBinding `
+            -Actual ([string]$previousStateBinding[0]) `
+            -Expected ([string]$previousStateBinding[1]) `
+            -Label ([string]$previousStateBinding[2])
+    }
+    foreach ($transactionPathBinding in @(
+        @([string]$transaction.install_root, $installRoot, "transaction install root"),
+        @([string]$transaction.data_root, $dataRoot, "transaction data root"),
+        @([string]$transaction.maintenance_path, $cachedSetup, "transaction maintenance executable"),
+        @([string]$transaction.staging_path, "$installRoot.staging.$transactionID", "transaction staging"),
+        @([string]$transaction.backup_path, "$installRoot.backup.$transactionID", "transaction backup"),
+        @([string]$transaction.trash_path, "$installRoot.uninstall.$transactionID", "transaction trash"),
+        @(
+            [string]$transaction.maintenance_new,
+            "$cachedSetup.new.$transactionID",
+            "transaction maintenance staging"
+        ),
+        @(
+            [string]$transaction.maintenance_backup,
+            "$cachedSetup.backup.$transactionID",
+            "transaction maintenance backup"
+        )
+    )) {
+        Assert-CanonicalPathBinding `
+            -Actual ([string]$transactionPathBinding[0]) `
+            -Expected ([string]$transactionPathBinding[1]) `
+            -Label ([string]$transactionPathBinding[2])
+        Assert-NoReparsePathChain -Path ([string]$transactionPathBinding[0])
+    }
+    foreach ($transactionArtifact in @(
+        [string]$transaction.install_root,
+        [string]$transaction.staging_path,
+        [string]$transaction.backup_path,
+        [string]$transaction.trash_path,
+        [string]$transaction.maintenance_new,
+        [string]$transaction.maintenance_backup
+    )) {
+        if (Test-Path -LiteralPath $transactionArtifact) {
+            throw "Converged uninstall retained a transaction artifact: $transactionArtifact"
+        }
+    }
+    $recordConnectors = @($cleanupRecord.verified_connectors | ForEach-Object { [string]$_ })
+    $journalConnectors = @($transaction.previous_connectors | ForEach-Object { [string]$_ })
+    if ($recordConnectors.Count -ne 0 -or $journalConnectors.Count -ne 0) {
+        throw "Connector-none release uninstall retained connector cleanup authority"
     }
     if ([int]$hookState.schema_version -ne 2 -or
         [string]$hookState.status -cne "disabled" -or
-        [string]$hookState.transaction_id -cne [string]$cleanupRecord.transaction_id) {
+        [string]$hookState.transaction_id -cne $transactionID -or
+        [string]$hookState.data_root -cne "" -or
+        [string]$hookState.gateway_path -cne "" -or
+        [string]$hookState.gateway_sha256 -cne "") {
         throw "Same-boot uninstall did not retain the exact disabled HookRuntime state"
+    }
+    $expectedHookLauncherDigest = [string]$provenance.inputs.hook_launcher_sha256
+    $actualHookLauncherDigest = (
+        Get-FileHash -LiteralPath $hookLauncher -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    $hookLauncherItem = Get-Item -LiteralPath $hookLauncher -Force
+    if ($expectedHookLauncherDigest -cnotmatch "^[0-9a-f]{64}$" -or
+        $actualHookLauncherDigest -cne $expectedHookLauncherDigest -or
+        [string]$cleanupRecord.launcher_sha256 -cne $expectedHookLauncherDigest -or
+        [string]$hookState.launcher_sha256 -cne $expectedHookLauncherDigest -or
+        [int64]$cleanupRecord.launcher_size -ne [int64]$hookLauncherItem.Length -or
+        [string]$cleanupRecord.launcher_kind -cne "trampoline" -or
+        [string]$hookState.launcher_kind -cne "trampoline" -or
+        [string]$cleanupRecord.hook_sha256 -cnotmatch "^[0-9a-f]{64}$" -or
+        [string]$cleanupRecord.hook_sha256 -cne [string]$hookState.hook_sha256) {
+        throw "Same-boot uninstall did not cross-bind the exact sealed HookRuntime launcher"
+    }
+    Assert-WindowsAMD64Executable -Path $hookLauncher
+    $hookSignature = Get-AuthenticodeSignature -FilePath $hookLauncher
+    $hookPublisher = if ($null -eq $hookSignature.SignerCertificate) {
+        ""
+    } else {
+        $hookSignature.SignerCertificate.GetNameInfo(
+            [Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+            $false
+        )
+    }
+    if ($releaseUnsigned) {
+        if ($hookSignature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned -or
+            $null -ne $hookSignature.SignerCertificate -or
+            [bool]$cleanupRecord.launcher_signed -ne $false -or
+            [bool]$cleanupRecord.unsigned_local_artifact -ne $true -or
+            [string]$cleanupRecord.signer_thumbprint_sha256 -cne "") {
+            throw "Explicitly unverified release retained inconsistent unsigned-local HookRuntime authority"
+        }
+    } else {
+        if ($hookSignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or
+            $null -eq $hookSignature.SignerCertificate -or
+            $hookPublisher -cne "Cisco Systems, Inc." -or
+            [bool]$cleanupRecord.launcher_signed -ne $true -or
+            [bool]$cleanupRecord.unsigned_local_artifact -ne $false) {
+            throw "Signed release retained a HookRuntime launcher without valid Cisco Authenticode"
+        }
+        $actualSignerDigest = [Convert]::ToHexString(
+            [Security.Cryptography.SHA256]::HashData(
+                $hookSignature.SignerCertificate.RawData
+            )
+        ).ToLowerInvariant()
+        if ([string]$cleanupRecord.signer_thumbprint_sha256 -cne $actualSignerDigest) {
+            throw "Same-boot uninstall HookRuntime signer differs from the authenticated cleanup record"
+        }
     }
 
     $hookRuntimeNames = @(
@@ -241,6 +559,9 @@ function Assert-ExactDeferredUninstallState {
     )
     if ($unexpectedInstallerState.Count -ne 0) {
         throw "Same-boot uninstall retained unrelated InstallerState: $($unexpectedInstallerState -join ', ')"
+    }
+    foreach ($installerStateName in $installerStateNames) {
+        Assert-PrivatePathCustody -Path (Join-Path $installerStateRoot $installerStateName)
     }
 
     $cacheNames = @(
@@ -287,9 +608,28 @@ function Assert-ExactDeferredUninstallState {
         [string]$runCommand -cne [string]$cleanupRecord.run_command) {
         throw "Same-boot uninstall Run value differs from the authenticated cleanup record"
     }
-    $expectedRunCommand = '"' + $cachedSetup + '" /cleanup /quiet CLEANUPTRANSACTION=' +
+    $runCommandMatch = [regex]::Match(
+        [string]$runCommand,
+        '^"(?<path>[^"]+)" (?<tail>/cleanup /quiet CLEANUPTRANSACTION=[0-9a-f]{32})$'
+    )
+    $expectedTail = "/cleanup /quiet CLEANUPTRANSACTION=" +
         [string]$cleanupRecord.transaction_id
-    if ([string]$runCommand -cne $expectedRunCommand) {
+    $rawRunPath = [string]$runCommandMatch.Groups["path"].Value
+    $normalizedRunPath = if ($runCommandMatch.Success) {
+        [IO.Path]::GetFullPath($rawRunPath)
+    } else {
+        ""
+    }
+    if (-not $runCommandMatch.Success -or
+        [string]$runCommandMatch.Groups["tail"].Value -cne $expectedTail -or
+        -not $rawRunPath.Equals(
+            $normalizedRunPath,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not $normalizedRunPath.Equals(
+                [IO.Path]::GetFullPath($cachedSetup),
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
         throw "Same-boot uninstall Run value is not the exact absolute cached Setup command"
     }
 }
@@ -320,6 +660,7 @@ if (-not $Child) {
             -ArtifactRoot $ReleaseDir `
             -StateRoot $stateBase `
             -TargetVersion $TargetVersion `
+            -BootstrapUninstallContract $UninstallContract `
             -DiagnosticsRoot $DiagnosticsRoot `
             -TimeoutSeconds 1800
         $helperCompleted = $true
@@ -388,6 +729,7 @@ $installer = Join-Path $ReleaseDir "install.ps1"
 $powerShell = Join-Path $PSHOME "pwsh.exe"
 $cosign = Join-Path $ReleaseDir "cosign-windows-amd64.exe"
 $setup = Join-Path $ReleaseDir "DefenseClawSetup-x64.exe"
+$setupProvenance = Join-Path $ReleaseDir "DefenseClawSetup-x64.exe.provenance.json"
 $installRoot = Join-Path $localAppData "Programs\DefenseClaw"
 $dataRoot = Join-Path $userProfile ".defenseclaw"
 $cacheRoot = Join-Path $localAppData "DefenseClaw\InstallerCache"
@@ -410,7 +752,7 @@ foreach ($path in @(
 if (-not (Test-Path -LiteralPath $powerShell -PathType Leaf)) {
     throw "Bootstrap acceptance input is missing: $powerShell"
 }
-foreach ($path in @($installer, $cosign, $setup)) {
+foreach ($path in @($installer, $cosign, $setup, $setupProvenance)) {
     Assert-RegularReleaseFile -Path $path
 }
 
@@ -490,10 +832,15 @@ try {
     $uninstall = Invoke-CapturedProcess `
         -FilePath $setup `
         -ArgumentList @("/uninstall", "/quiet", "DELETEUSERDATA=1")
-    if ($uninstall.ExitCode -ne 3010) {
+    $expectedUninstallExitCode = if ($UninstallContract -ceq "deferred") {
+        3010
+    } else {
+        0
+    }
+    if ($uninstall.ExitCode -ne $expectedUninstallExitCode) {
         throw (
-            "Native uninstall did not return the required Windows restart result " +
-            "3010 ($($uninstall.ExitCode)):`n$($uninstall.Output)"
+            "Native uninstall did not return the required $UninstallContract " +
+            "result $expectedUninstallExitCode ($($uninstall.ExitCode)):`n$($uninstall.Output)"
         )
     }
     $installed = $false
@@ -509,10 +856,18 @@ try {
         )) {
         throw "Public bootstrap uninstall did not restore the original user PATH exactly"
     }
-    Assert-ExactDeferredUninstallState `
-        -LocalAppData $localAppData `
-        -CacheRoot $cacheRoot `
-        -ExpectedSetup $setup
+    if ($UninstallContract -ceq "deferred") {
+        Assert-ExactDeferredUninstallState `
+            -LocalAppData $localAppData `
+            -CacheRoot $cacheRoot `
+            -ExpectedSetup $setup `
+            -ExpectedProvenance $setupProvenance
+    } else {
+        Wait-ForPathRemoval -Path $cacheRoot
+        if (Test-Path -LiteralPath $cacheRoot) {
+            throw "Historical immediate uninstall left installer-cache state behind: $cacheRoot"
+        }
+    }
     Write-Host "Fresh Windows public bootstrap passed: $TargetVersion" -ForegroundColor Green
 } finally {
     if ($installed -or (Test-Path -LiteralPath $installRoot)) {

@@ -589,6 +589,7 @@ jobs:
           ./scripts/test-fresh-install-release-windows.ps1 `
             -ReleaseDir $env:DC_BOOTSTRAP_RELEASE_DIR `
             -TargetVersion $env:BOOTSTRAP_FIXTURE_VERSION `
+            -UninstallContract immediate `
             -StateRoot $bootstrapState `
             -DiagnosticsRoot $env:DC_DIAGNOSTICS
       - name: Capture bounded diagnostics

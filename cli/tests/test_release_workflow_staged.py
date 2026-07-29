@@ -18,6 +18,10 @@ import yaml
 from defenseclaw import resolver_hint
 
 from scripts import release_candidate
+from tests.windows_release_contracts import (
+    DEFERRED_UNINSTALL_FORBIDDEN_MARKERS,
+    DEFERRED_UNINSTALL_REQUIRED_MARKERS,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/release.yaml"
@@ -1037,6 +1041,7 @@ def test_windows_release_accepts_signed_or_explicitly_unverified_setup_and_is_fr
     assert windows_smoke["runs-on"] == "windows-latest"
     assert "scripts/test-fresh-install-release-windows.ps1" in str(windows_smoke)
     assert "-TargetVersion" in str(windows_smoke)
+    assert "-UninstallContract deferred" in str(windows_smoke)
     assert "-SuccessPathOnly" not in str(windows_smoke)
 
 
@@ -1048,6 +1053,7 @@ def test_windows_install_ps1_smoke_uses_disposable_native_profile_and_layout() -
     assert "-Mode bootstrap-acceptance" in smoke
     assert "-ArtifactRoot $ReleaseDir" in smoke
     assert "-TargetVersion $TargetVersion" in smoke
+    assert "-BootstrapUninstallContract $UninstallContract" in smoke
     assert '$installer = Join-Path $ReleaseDir "install.ps1"' in smoke
     assert '$installer = Join-Path $PSScriptRoot "install.ps1"' not in smoke
     assert "'bootstrap-acceptance'" in disposable
@@ -1079,18 +1085,10 @@ def test_windows_install_ps1_smoke_uses_disposable_native_profile_and_layout() -
     assert "$first = Invoke-CapturedProcess" in smoke
     assert "$second = Invoke-CapturedProcess" in smoke
     assert "DELETEUSERDATA=1" in smoke
-    assert "$uninstall.ExitCode -ne 3010" in smoke
-    assert "$uninstall.ExitCode -ne 0" not in smoke
-    assert "Assert-ExactDeferredUninstallState" in smoke
-    assert '"pending-reboot"' in smoke
-    assert '"converged"' in smoke
-    assert '"disabled"' in smoke
-    assert '"DefenseClawDeferredUninstallCleanup"' in smoke
-    assert "[Microsoft.Win32.RegistryValueKind]::String" in smoke
-    assert "cleanup record does not bind the exact release Setup digest" in smoke
-    assert "uninstall retained unrelated managed residue" in smoke
-    assert "Same-boot uninstall Run value is not the exact absolute cached Setup command" in smoke
-    assert "Wait-ForPathRemoval -Path $cacheRoot" not in smoke
+    for marker in DEFERRED_UNINSTALL_REQUIRED_MARKERS:
+        assert marker in smoke
+    for marker in DEFERRED_UNINSTALL_FORBIDDEN_MARKERS:
+        assert marker not in smoke
     assert 'GetEnvironmentVariable("Path", "User")' in smoke
     assert "uninstall did not restore the original user PATH exactly" in smoke
 
@@ -1123,7 +1121,9 @@ def test_windows_fresh_install_refuses_reparse_release_inputs_before_bootstrap()
     assert "[IO.FileAttributes]::ReparsePoint" in file_guard
 
     directory_check = smoke.index("$ReleaseDir = Resolve-RegularReleaseDirectory -Path $ReleaseDir")
-    release_file_check = smoke.index("foreach ($path in @($installer, $cosign, $setup))")
+    release_file_check = smoke.index(
+        "foreach ($path in @($installer, $cosign, $setup, $setupProvenance))"
+    )
     execute = smoke.index("$first = Invoke-CapturedProcess")
     assert directory_check < release_file_check < execute
     assert "Assert-RegularReleaseFile -Path $path" in smoke[release_file_check:execute]
@@ -1194,6 +1194,7 @@ def test_windows_pr_ci_executes_public_bootstrap_against_authenticated_fixture()
     assert "test-fresh-install-release-windows.ps1" in rendered
     assert "-ReleaseDir $env:DC_BOOTSTRAP_RELEASE_DIR" in rendered
     assert "-TargetVersion $env:BOOTSTRAP_FIXTURE_VERSION" in rendered
+    assert "-UninstallContract immediate" in rendered
     assert "-StateRoot $bootstrapState" in rendered
     assert "-DiagnosticsRoot $env:DC_DIAGNOSTICS" in rendered
     smoke = (ROOT / "scripts/test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")

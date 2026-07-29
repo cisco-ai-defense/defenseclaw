@@ -10,6 +10,11 @@ from pathlib import Path
 
 import yaml
 
+from tests.windows_release_contracts import (
+    DEFERRED_UNINSTALL_FORBIDDEN_MARKERS,
+    DEFERRED_UNINSTALL_REQUIRED_MARKERS,
+)
+
 ROOT = Path(__file__).resolve().parents[2]
 HARNESS = (ROOT / "scripts" / "windows-native-ci.ps1").read_text(encoding="utf-8")
 PACKAGED_V8_VALIDATOR = (ROOT / "scripts" / "validate_packaged_v8_resources.py").read_text(encoding="utf-8")
@@ -123,6 +128,7 @@ def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> 
     assert "scripts/verify-sigstore-blob.py" in rendered
     assert "scripts/test-fresh-install-release-windows.ps1" in rendered
     assert "-TargetVersion" in rendered
+    assert "-UninstallContract deferred" in rendered
     assert "-SuccessPathOnly" not in rendered
     assert "defenseclaw-release-bootstrap-diagnostics" in rendered
     diagnostics = _step(job, "Upload Windows bootstrap diagnostics on failure")
@@ -146,6 +152,7 @@ def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> 
     assert "-Mode bootstrap-acceptance" in FRESH_INSTALL
     assert "-ArtifactRoot $ReleaseDir" in FRESH_INSTALL
     assert "-TargetVersion $TargetVersion" in FRESH_INSTALL
+    assert "-BootstrapUninstallContract $UninstallContract" in FRESH_INSTALL
     assert "$env:RUNNER_TEMP" in FRESH_INSTALL
     assert "$env:DC_WINDOWS_NATIVE_BASE_ROOT" in FRESH_INSTALL
     assert "Refusing to clean unexpected bootstrap acceptance state" in FRESH_INSTALL
@@ -189,22 +196,14 @@ def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> 
     assert "$second = Invoke-CapturedProcess" in FRESH_INSTALL
     assert "Out-String -Width 32768" in FRESH_INSTALL
     assert "DELETEUSERDATA=1" in FRESH_INSTALL
-    assert "$uninstall.ExitCode -ne 3010" in FRESH_INSTALL
-    assert "$uninstall.ExitCode -ne 0" not in FRESH_INSTALL
-    assert "Assert-ExactDeferredUninstallState" in FRESH_INSTALL
-    assert '"pending-reboot"' in FRESH_INSTALL
-    assert '"converged"' in FRESH_INSTALL
-    assert '"disabled"' in FRESH_INSTALL
-    assert '"DefenseClawDeferredUninstallCleanup"' in FRESH_INSTALL
-    assert "[Microsoft.Win32.RegistryValueKind]::String" in FRESH_INSTALL
-    assert "cleanup record does not bind the exact release Setup digest" in FRESH_INSTALL
-    assert "uninstall retained unrelated managed residue" in FRESH_INSTALL
-    assert "Same-boot uninstall Run value is not the exact absolute cached Setup command" in FRESH_INSTALL
-    assert "Wait-ForPathRemoval -Path $cacheRoot" not in FRESH_INSTALL
+    for marker in DEFERRED_UNINSTALL_REQUIRED_MARKERS:
+        assert marker in FRESH_INSTALL
+    for marker in DEFERRED_UNINSTALL_FORBIDDEN_MARKERS:
+        assert marker not in FRESH_INSTALL
     assert 'GetEnvironmentVariable("Path", "User")' in FRESH_INSTALL
     assert "uninstall did not restore the original user PATH exactly" in FRESH_INSTALL
     assert FRESH_INSTALL.rindex("$installed = $false") > FRESH_INSTALL.index(
-        "$uninstall.ExitCode -ne 3010"
+        "$uninstall.ExitCode -ne $expectedUninstallExitCode"
     )
     assert FRESH_INSTALL.rindex("$installed = $false") < FRESH_INSTALL.index(
         "Assert-ExactDeferredUninstallState `"
