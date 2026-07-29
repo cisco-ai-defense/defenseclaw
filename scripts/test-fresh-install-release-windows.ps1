@@ -392,15 +392,23 @@ function Assert-ExactDeferredUninstallState {
     $cleanupBootIdentifier = Get-OptionalJsonStringValue `
         -InputObject $cleanupRecord `
         -PropertyName "cleanup_boot_identifier"
-    if ([int]$cleanupRecord.schema_version -ne 1 -or
-        [string]$cleanupRecord.status -cne "pending-reboot" -or
-        [string]$cleanupRecord.transaction_id -cnotmatch "^[0-9a-f]{32}$" -or
-        $cleanupBootIdentifier -cne "" -or
-        [string]$cleanupRecord.uninstall_boot_identifier -cnotmatch (
+    if ([int]$cleanupRecord.schema_version -ne 1) {
+        throw "Same-boot uninstall retained an unsupported cleanup record schema"
+    }
+    if ([string]$cleanupRecord.status -cne "pending-reboot") {
+        throw "Same-boot uninstall cleanup record is not pending reboot"
+    }
+    if ([string]$cleanupRecord.transaction_id -cnotmatch "^[0-9a-f]{32}$") {
+        throw "Same-boot uninstall cleanup record has an invalid transaction identity"
+    }
+    if ($cleanupBootIdentifier -cne "") {
+        throw "Same-boot uninstall cleanup record prematurely names a cleanup boot"
+    }
+    if ([string]$cleanupRecord.uninstall_boot_identifier -cnotmatch (
             "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-" +
             "[0-9a-f]{4}-[0-9a-f]{12}$"
         )) {
-        throw "Same-boot uninstall did not retain the exact pending cleanup record"
+        throw "Same-boot uninstall cleanup record has an invalid uninstall boot identity"
     }
     $transactionID = [string]$cleanupRecord.transaction_id
     foreach ($pathBinding in @(

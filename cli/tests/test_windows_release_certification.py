@@ -483,6 +483,15 @@ def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> 
         "$hookState.gateway_sha256",
     ):
         assert unsafe_access not in FRESH_INSTALL
+    for precise_cleanup_record_failure in (
+        "unsupported cleanup record schema",
+        "cleanup record is not pending reboot",
+        "invalid transaction identity",
+        "prematurely names a cleanup boot",
+        "invalid uninstall boot identity",
+    ):
+        assert precise_cleanup_record_failure in FRESH_INSTALL
+    assert "did not retain the exact pending cleanup record" not in FRESH_INSTALL
     assert 'GetEnvironmentVariable("Path", "User")' in FRESH_INSTALL
     assert "uninstall did not restore the original user PATH exactly" in FRESH_INSTALL
     assert FRESH_INSTALL.rindex("$installed = $false") > FRESH_INSTALL.index(
