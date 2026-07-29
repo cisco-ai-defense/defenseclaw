@@ -603,6 +603,35 @@ def test_semver_regex_matches_across_files():
     semver_py = (repo_root / "cli" / "defenseclaw" / "inventory" / "_semver.py").read_text()
     radar_py = (repo_root / "scripts" / "connector-version-radar.py").read_text()
 
+    def _eval_string_expr(node: ast.AST) -> str | None:
+        """Evaluate a string-typed constant-fold expression to its value.
+
+        Handles bare string literals plus BinOp trees whose leaves are
+        string constants and whose operators are `+`. Returns None if
+        the node contains anything else (a non-string constant, an
+        arithmetic op, a name reference, …). Both Python source shapes
+
+            _VERSION_RE = re.compile("abc")
+            _VERSION_RE = re.compile("a" + "b" + "c")
+
+        resolve to the same "abc"; the two files can therefore diverge
+        in formatting without spuriously tripping the drift guard, and
+        a real drift in the pattern content still trips it because
+        we're comparing the evaluated string not the source syntax.
+        Implicit adjacent-literal concatenation (``"a" "b"``) is
+        already collapsed to a single ``ast.Constant`` by the parser
+        so no extra handling is needed for that shape.
+        """
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = _eval_string_expr(node.left)
+            right = _eval_string_expr(node.right)
+            if left is None or right is None:
+                return None
+            return left + right
+        return None
+
     def _extract(source: str, source_path: str) -> str:
         tree = ast.parse(source)
         for node in ast.walk(tree):
@@ -618,24 +647,16 @@ def test_semver_regex_matches_across_files():
                     and value.func.attr == "compile"):
                 continue
             # `re.compile(...)` accepts (pattern, flags). We care only
-            # about the pattern arg. Concatenate every string literal
-            # in it so multi-line
-            #     re.compile("a" "b")
-            # style splits still compare correctly.
-            pattern_parts: list[str] = []
+            # about the pattern arg.
             pattern_arg = value.args[0]
-            if isinstance(pattern_arg, ast.Constant) and isinstance(pattern_arg.value, str):
-                pattern_parts.append(pattern_arg.value)
-            elif isinstance(pattern_arg, ast.BinOp):
-                # Not expected today, but be resilient to a future
-                # concatenation refactor.
-                pattern_parts.append(ast.unparse(pattern_arg))
-            else:
+            evaluated = _eval_string_expr(pattern_arg)
+            if evaluated is None:
                 raise AssertionError(
                     f"{source_path}: unsupported _VERSION_RE literal shape "
-                    f"{ast.dump(pattern_arg)}"
+                    f"{ast.dump(pattern_arg)} — extend _eval_string_expr "
+                    f"if you added dynamic construction."
                 )
-            return "".join(pattern_parts)
+            return evaluated
         raise AssertionError(f"{source_path}: _VERSION_RE = re.compile(...) not found")
 
     semver_pat = _extract(semver_py, "_semver.py")
