@@ -217,6 +217,7 @@ function Assert-PrivatePathCustody {
     }
     $systemSid = "S-1-5-18"
     $creatorOwnerSid = "S-1-3-0"
+    $ownerRightsSid = "S-1-3-4"
     $foundOwner = $false
     $foundSystem = $false
     foreach ($rule in $acl.GetAccessRules(
@@ -234,7 +235,11 @@ function Assert-PrivatePathCustody {
         if ([int64]$rule.FileSystemRights -eq 0) {
             continue
         }
-        if ($sid -ceq $owner -or $sid -ceq $creatorOwnerSid) {
+        # OWNER RIGHTS is owner-relative, so it is safe only after the
+        # concrete current-user owner and protected DACL checks above.
+        if ($sid -ceq $owner -or
+            $sid -ceq $creatorOwnerSid -or
+            $sid -ceq $ownerRightsSid) {
             $foundOwner = $true
             continue
         }

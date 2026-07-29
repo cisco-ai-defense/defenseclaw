@@ -10,6 +10,7 @@ DEFERRED_UNINSTALL_REQUIRED_MARKERS = (
     "Assert-ExactDeferredUninstallState",
     "Assert-NoReparsePathChain",
     "Assert-PrivatePathCustody",
+    '$ownerRightsSid = "S-1-3-4"',
     "Assert-WindowsAMD64Executable",
     "Get-AuthenticodeSignature -FilePath $hookLauncher",
     "hook_launcher_sha256",

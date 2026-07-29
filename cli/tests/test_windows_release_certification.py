@@ -5,9 +5,13 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tests.windows_release_contracts import (
@@ -40,10 +44,121 @@ def _function(name: str) -> str:
     return match.group(0)
 
 
+def _fresh_install_function(name: str) -> str:
+    match = re.search(
+        rf"(?ms)^function {re.escape(name)}\b.*?(?=^function |\Z)",
+        FRESH_INSTALL,
+    )
+    assert match, f"missing PowerShell function {name}"
+    return match.group(0)
+
+
+def _set_private_custody_acl(path: Path, *extra_rules: str) -> None:
+    subprocess.run(
+        ["icacls.exe", str(path), "/inheritance:r"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [
+            "icacls.exe",
+            str(path),
+            "/grant:r",
+            "*S-1-3-4:(OI)(CI)F",
+            "*S-1-5-18:(OI)(CI)F",
+            *extra_rules,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _run_private_custody_assertion(path: Path) -> subprocess.CompletedProcess[str]:
+    powershell = shutil.which("powershell.exe") or shutil.which("pwsh")
+    assert powershell is not None
+    environment = {
+        **os.environ,
+        "POWERSHELL_TELEMETRY_OPTOUT": "1",
+        "DC_TEST_CUSTODY_PATH": str(path),
+    }
+    if Path(powershell).name.casefold() == "powershell.exe":
+        environment["PSModulePath"] = str(Path(powershell).parent / "Modules")
+    functions = "\n\n".join(
+        _fresh_install_function(name)
+        for name in (
+            "Assert-NoReparsePathChain",
+            "Assert-PrivatePathCustody",
+        )
+    )
+    command = (
+        "$ErrorActionPreference = 'Stop'\n"
+        f"{functions}\n"
+        "try {\n"
+        "    Assert-PrivatePathCustody "
+        "-Path ([Environment]::GetEnvironmentVariable('DC_TEST_CUSTODY_PATH')) "
+        "-Directory\n"
+        "} catch {\n"
+        "    [Console]::Error.WriteLine($_.Exception.Message)\n"
+        "    exit 1\n"
+        "}\n"
+    )
+    return subprocess.run(
+        [
+            powershell,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            command,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+
 def _step(job: dict[str, object], name: str) -> dict[str, object]:
     matches = [step for step in job["steps"] if step.get("name") == name]
     assert len(matches) == 1, f"missing unique step: {name}"
     return matches[0]
+
+
+@pytest.mark.skipif(
+    os.name != "nt"
+    or not (shutil.which("pwsh") or shutil.which("powershell.exe")),
+    reason="validates native Windows release-custody ACLs",
+)
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("extra_rules", "expected_returncode", "expected_error"),
+    [
+        ((), 0, ""),
+        (
+            ("*S-1-5-32-545:(OI)(CI)M",),
+            1,
+            "unexpected SID (S-1-5-32-545)",
+        ),
+    ],
+)
+def test_deferred_uninstall_custody_accepts_only_owner_rights_and_system(
+    tmp_path: Path,
+    extra_rules: tuple[str, ...],
+    expected_returncode: int,
+    expected_error: str,
+) -> None:
+    custody = tmp_path / "custody"
+    custody.mkdir()
+    _set_private_custody_acl(custody, *extra_rules)
+
+    completed = _run_private_custody_assertion(custody)
+    output = completed.stdout + completed.stderr
+
+    assert completed.returncode == expected_returncode, output
+    assert expected_error in output
 
 
 def test_release_accepts_signed_or_explicitly_unverified_setup_and_exact_four_sidecars() -> None:
