@@ -1079,6 +1079,18 @@ def test_windows_install_ps1_smoke_uses_disposable_native_profile_and_layout() -
     assert "$first = Invoke-CapturedProcess" in smoke
     assert "$second = Invoke-CapturedProcess" in smoke
     assert "DELETEUSERDATA=1" in smoke
+    assert "$uninstall.ExitCode -ne 3010" in smoke
+    assert "$uninstall.ExitCode -ne 0" not in smoke
+    assert "Assert-ExactDeferredUninstallState" in smoke
+    assert '"pending-reboot"' in smoke
+    assert '"converged"' in smoke
+    assert '"disabled"' in smoke
+    assert '"DefenseClawDeferredUninstallCleanup"' in smoke
+    assert "[Microsoft.Win32.RegistryValueKind]::String" in smoke
+    assert "cleanup record does not bind the exact release Setup digest" in smoke
+    assert "uninstall retained unrelated managed residue" in smoke
+    assert "Same-boot uninstall Run value is not the exact absolute cached Setup command" in smoke
+    assert "Wait-ForPathRemoval -Path $cacheRoot" not in smoke
     assert 'GetEnvironmentVariable("Path", "User")' in smoke
     assert "uninstall did not restore the original user PATH exactly" in smoke
 

@@ -12,7 +12,8 @@
     standard-user launcher. Child mode runs with a real isolated profile and
     HKCU hive, installs through the exact sealed install.ps1 release asset,
     repeats the authenticated handoff, verifies the installed version, and
-    proves complete uninstall.
+    proves immediate uninstall plus the exact authenticated cleanup state that
+    must remain until Windows restarts.
 #>
 
 [CmdletBinding()]
@@ -148,14 +149,148 @@ function Get-UserPathEntryCount {
     ).Count
 }
 
-function Wait-ForPathRemoval {
-    param([Parameter(Mandatory = $true)][string]$Path)
+function Assert-ExactDeferredUninstallState {
+    param(
+        [Parameter(Mandatory = $true)][string]$LocalAppData,
+        [Parameter(Mandatory = $true)][string]$CacheRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedSetup
+    )
 
-    # Native Setup's transaction-bound helper may wait up to two minutes for
-    # its parent to exit. Keep release smoke aligned with that product bound
-    # plus scheduling margin while retaining the final fail-closed assertion.
-    for ($attempt = 0; $attempt -lt 520 -and (Test-Path -LiteralPath $Path); $attempt++) {
-        Start-Sleep -Milliseconds 250
+    $productRoot = Join-Path $LocalAppData "DefenseClaw"
+    $hookRuntimeRoot = Join-Path $productRoot "HookRuntime"
+    $installerStateRoot = Join-Path $productRoot "InstallerState"
+    $cachedSetup = Join-Path $CacheRoot "DefenseClawSetup-x64.exe"
+    $hookLauncher = Join-Path $hookRuntimeRoot "defenseclaw-hook.exe"
+    $hookStatePath = Join-Path $hookRuntimeRoot "hook-runtime-state.json"
+    $cleanupRecordPath = Join-Path $installerStateRoot "uninstall-cleanup.json"
+    $transactionJournalPath = Join-Path $installerStateRoot "setup-transaction.json"
+
+    foreach ($requiredResidue in @(
+        $cachedSetup,
+        $hookLauncher,
+        $hookStatePath,
+        $cleanupRecordPath,
+        $transactionJournalPath
+    )) {
+        if (-not (Test-Path -LiteralPath $requiredResidue -PathType Leaf)) {
+            throw "Same-boot uninstall did not retain authenticated cleanup authority: $requiredResidue"
+        }
+    }
+
+    $cleanupRecord = Get-Content -LiteralPath $cleanupRecordPath -Raw -Encoding UTF8 |
+        ConvertFrom-Json
+    $transactionJournal = Get-Content -LiteralPath $transactionJournalPath -Raw -Encoding UTF8 |
+        ConvertFrom-Json
+    $hookState = Get-Content -LiteralPath $hookStatePath -Raw -Encoding UTF8 |
+        ConvertFrom-Json
+
+    if ([int]$cleanupRecord.schema_version -ne 1 -or
+        [string]$cleanupRecord.status -cne "pending-reboot" -or
+        [string]$cleanupRecord.transaction_id -cnotmatch "^[0-9a-f]{32}$") {
+        throw "Same-boot uninstall did not retain the exact pending cleanup record"
+    }
+    if (-not ([IO.Path]::GetFullPath([string]$cleanupRecord.maintenance_path)).Equals(
+            [IO.Path]::GetFullPath($cachedSetup),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]$cleanupRecord.run_value_name -cne "DefenseClawDeferredUninstallCleanup") {
+        throw "Same-boot uninstall cleanup record does not bind the canonical cached Setup authority"
+    }
+    $expectedSetupDigest = (Get-FileHash -LiteralPath $ExpectedSetup -Algorithm SHA256).Hash.ToLowerInvariant()
+    $cachedSetupDigest = (Get-FileHash -LiteralPath $cachedSetup -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($cachedSetupDigest -cne $expectedSetupDigest -or
+        [string]$cleanupRecord.maintenance_sha256 -cne $cachedSetupDigest) {
+        throw "Same-boot uninstall cleanup record does not bind the exact release Setup digest"
+    }
+    if ([int]$transactionJournal.schema_version -ne 2 -or
+        [string]$transactionJournal.phase -cne "converged" -or
+        [string]$transactionJournal.transaction.action -cne "uninstall" -or
+        [string]$transactionJournal.transaction.id -cne [string]$cleanupRecord.transaction_id) {
+        throw "Same-boot uninstall did not retain the exact converged uninstall journal"
+    }
+    if ([int]$hookState.schema_version -ne 2 -or
+        [string]$hookState.status -cne "disabled" -or
+        [string]$hookState.transaction_id -cne [string]$cleanupRecord.transaction_id) {
+        throw "Same-boot uninstall did not retain the exact disabled HookRuntime state"
+    }
+
+    $hookRuntimeNames = @(
+        Get-ChildItem -LiteralPath $hookRuntimeRoot -Force |
+            ForEach-Object Name |
+            Sort-Object
+    )
+    $expectedHookRuntimeNames = @("defenseclaw-hook.exe", "hook-runtime-state.json")
+    if (($hookRuntimeNames -join "`0") -cne ($expectedHookRuntimeNames -join "`0")) {
+        throw "Same-boot uninstall retained unexpected HookRuntime residue: $($hookRuntimeNames -join ', ')"
+    }
+
+    $installerStateNames = @(
+        Get-ChildItem -LiteralPath $installerStateRoot -Force |
+            ForEach-Object Name |
+            Sort-Object
+    )
+    $unexpectedInstallerState = @(
+        $installerStateNames |
+            Where-Object {
+                $_ -notin @(
+                    "setup-transaction.json",
+                    "setup.log",
+                    "uninstall-cleanup.json"
+                )
+            }
+    )
+    if ($unexpectedInstallerState.Count -ne 0) {
+        throw "Same-boot uninstall retained unrelated InstallerState: $($unexpectedInstallerState -join ', ')"
+    }
+
+    $cacheNames = @(
+        Get-ChildItem -LiteralPath $CacheRoot -Force |
+            ForEach-Object Name |
+            Sort-Object
+    )
+    if (($cacheNames -join "`0") -cne "DefenseClawSetup-x64.exe") {
+        throw "Same-boot uninstall retained unexpected installer-cache residue: $($cacheNames -join ', ')"
+    }
+
+    $productRootNames = @(
+        Get-ChildItem -LiteralPath $productRoot -Force |
+            ForEach-Object Name |
+            Sort-Object
+    )
+    $expectedProductRootNames = @("HookRuntime", "InstallerCache", "InstallerState")
+    if (($productRootNames -join "`0") -cne ($expectedProductRootNames -join "`0")) {
+        throw "Same-boot uninstall retained unrelated managed residue: $($productRootNames -join ', ')"
+    }
+
+    $runKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
+        "Software\Microsoft\Windows\CurrentVersion\Run",
+        $false
+    )
+    if ($null -eq $runKey) {
+        throw "Same-boot uninstall did not retain the cleanup Run key"
+    }
+    try {
+        $runCommand = $runKey.GetValue(
+            "DefenseClawDeferredUninstallCleanup",
+            $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+        $runValueKind = if ($null -eq $runCommand) {
+            $null
+        } else {
+            $runKey.GetValueKind("DefenseClawDeferredUninstallCleanup")
+        }
+    } finally {
+        $runKey.Dispose()
+    }
+    if ($runValueKind -ne [Microsoft.Win32.RegistryValueKind]::String -or
+        [string]$runCommand -cne [string]$cleanupRecord.run_command) {
+        throw "Same-boot uninstall Run value differs from the authenticated cleanup record"
+    }
+    $expectedRunCommand = '"' + $cachedSetup + '" /cleanup /quiet CLEANUPTRANSACTION=' +
+        [string]$cleanupRecord.transaction_id
+    if ([string]$runCommand -cne $expectedRunCommand) {
+        throw "Same-boot uninstall Run value is not the exact absolute cached Setup command"
     }
 }
 
@@ -355,13 +490,16 @@ try {
     $uninstall = Invoke-CapturedProcess `
         -FilePath $setup `
         -ArgumentList @("/uninstall", "/quiet", "DELETEUSERDATA=1")
-    if ($uninstall.ExitCode -ne 0) {
-        throw "Native uninstall failed ($($uninstall.ExitCode)):`n$($uninstall.Output)"
+    if ($uninstall.ExitCode -ne 3010) {
+        throw (
+            "Native uninstall did not return the required Windows restart result " +
+            "3010 ($($uninstall.ExitCode)):`n$($uninstall.Output)"
+        )
     }
-    Wait-ForPathRemoval -Path $cacheRoot
-    foreach ($path in @($installRoot, $dataRoot, $cacheRoot, $arpKey)) {
+    $installed = $false
+    foreach ($path in @($installRoot, $dataRoot, $arpKey)) {
         if (Test-Path -LiteralPath $path) {
-            throw "Public bootstrap uninstall left managed state behind: $path"
+            throw "Public bootstrap uninstall left active managed state behind: $path"
         }
     }
     if (-not [string]::Equals(
@@ -371,7 +509,10 @@ try {
         )) {
         throw "Public bootstrap uninstall did not restore the original user PATH exactly"
     }
-    $installed = $false
+    Assert-ExactDeferredUninstallState `
+        -LocalAppData $localAppData `
+        -CacheRoot $cacheRoot `
+        -ExpectedSetup $setup
     Write-Host "Fresh Windows public bootstrap passed: $TargetVersion" -ForegroundColor Green
 } finally {
     if ($installed -or (Test-Path -LiteralPath $installRoot)) {
@@ -379,7 +520,7 @@ try {
             $cleanup = Invoke-CapturedProcess `
                 -FilePath $setup `
                 -ArgumentList @("/uninstall", "/quiet", "DELETEUSERDATA=1")
-            if ($cleanup.ExitCode -ne 0) {
+            if ($cleanup.ExitCode -notin @(0, 3010)) {
                 Write-Warning "Emergency native uninstall failed ($($cleanup.ExitCode))"
             }
         } catch {

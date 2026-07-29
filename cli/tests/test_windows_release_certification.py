@@ -189,10 +189,25 @@ def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> 
     assert "$second = Invoke-CapturedProcess" in FRESH_INSTALL
     assert "Out-String -Width 32768" in FRESH_INSTALL
     assert "DELETEUSERDATA=1" in FRESH_INSTALL
+    assert "$uninstall.ExitCode -ne 3010" in FRESH_INSTALL
+    assert "$uninstall.ExitCode -ne 0" not in FRESH_INSTALL
+    assert "Assert-ExactDeferredUninstallState" in FRESH_INSTALL
+    assert '"pending-reboot"' in FRESH_INSTALL
+    assert '"converged"' in FRESH_INSTALL
+    assert '"disabled"' in FRESH_INSTALL
+    assert '"DefenseClawDeferredUninstallCleanup"' in FRESH_INSTALL
+    assert "[Microsoft.Win32.RegistryValueKind]::String" in FRESH_INSTALL
+    assert "cleanup record does not bind the exact release Setup digest" in FRESH_INSTALL
+    assert "uninstall retained unrelated managed residue" in FRESH_INSTALL
+    assert "Same-boot uninstall Run value is not the exact absolute cached Setup command" in FRESH_INSTALL
+    assert "Wait-ForPathRemoval -Path $cacheRoot" not in FRESH_INSTALL
     assert 'GetEnvironmentVariable("Path", "User")' in FRESH_INSTALL
     assert "uninstall did not restore the original user PATH exactly" in FRESH_INSTALL
     assert FRESH_INSTALL.rindex("$installed = $false") > FRESH_INSTALL.index(
-        "uninstall did not restore the original user PATH exactly"
+        "$uninstall.ExitCode -ne 3010"
+    )
+    assert FRESH_INSTALL.rindex("$installed = $false") < FRESH_INSTALL.index(
+        "Assert-ExactDeferredUninstallState `"
     )
     canonical_version = "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
     assert canonical_version in FRESH_INSTALL
