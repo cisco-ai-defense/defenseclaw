@@ -3767,15 +3767,41 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
         if (-not (Test-Path -LiteralPath $cachedSetup -PathType Leaf)) {
             throw "reinstall did not publish the self-servicing setup executable: $cachedSetup"
         }
-        # Exercise the exact packaged CLI handoff. It must authenticate the
-        # cached Setup and preserve the 3010 result without falling through to
-        # generic marker guards.
-        $nativeUninstall = Invoke-WindowsNativeProcess $launcher @('uninstall', '--all', '--yes') `
-            -AllowedExitCodes @(3010) -TimeoutSeconds 600 `
-            -LogPath (Join-Path $logs 'setup-uninstall-delete.log')
-        if ("$($nativeUninstall.StdOut)`n$($nativeUninstall.StdErr)" -notmatch
-            '(?i)restart required.*3010') {
-            throw 'native CLI uninstall did not report the preserved Windows 3010 restart result'
+        if ($requireSignedProduct) {
+            # Exercise the exact packaged CLI handoff for a signed candidate.
+            # It must authenticate the cached Setup and preserve the 3010
+            # result without falling through to generic marker guards.
+            $nativeUninstall = Invoke-WindowsNativeProcess $launcher @(
+                'uninstall', '--all', '--yes'
+            ) -AllowedExitCodes @(3010) -TimeoutSeconds 600 `
+                -LogPath (Join-Path $logs 'setup-uninstall-delete.log')
+            if ("$($nativeUninstall.StdOut)`n$($nativeUninstall.StdErr)" -notmatch
+                '(?i)restart required.*3010') {
+                throw 'native CLI uninstall did not report the preserved Windows 3010 restart result'
+            }
+        } else {
+            # PR artifacts are deliberately unsigned. The production CLI must
+            # reject that state rather than introduce an environment escape
+            # hatch. Prove the refusal is non-mutating, then exercise the same
+            # cached Setup lifecycle directly so 3010 and exact residue remain
+            # covered on every PR.
+            $unsignedRefusal = Invoke-WindowsNativeProcess $launcher @(
+                'uninstall', '--all', '--yes'
+            ) -AllowedExitCodes @(1) -TimeoutSeconds 600 `
+                -LogPath (Join-Path $logs 'setup-uninstall-unsigned-refusal.log')
+            if ("$($unsignedRefusal.StdOut)`n$($unsignedRefusal.StdErr)" -notmatch
+                'Native installer state is not an authenticated signed user installation') {
+                throw 'unsigned native CLI uninstall did not fail closed at signed-state custody'
+            }
+            foreach ($unmodifiedPath in @($installRoot, $cachedSetup)) {
+                if (-not (Test-Path -LiteralPath $unmodifiedPath)) {
+                    throw "unsigned native CLI refusal mutated installed state: $unmodifiedPath"
+                }
+            }
+            Invoke-WindowsSetupStandardUserProcess $cachedSetup @(
+                '/uninstall', '/quiet', 'DELETEUSERDATA=1'
+            ) -AllowedExitCodes @(3010) -TimeoutSeconds 600 `
+                -LogPath (Join-Path $logs 'setup-uninstall-delete.log') | Out-Null
         }
         if (Test-Path -LiteralPath $installRoot) { throw "setup uninstall left install root behind: $installRoot" }
         if (Test-Path -LiteralPath $dataRoot) { throw "setup uninstall with DELETEUSERDATA=1 left user data behind: $dataRoot" }
