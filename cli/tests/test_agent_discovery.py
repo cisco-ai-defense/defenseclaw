@@ -584,31 +584,69 @@ def test_semver_regex_matches_across_files():
     ``defenseclaw/inventory/_semver.py`` and
     ``scripts/connector-version-radar.py`` intentionally keep separate
     copies of the semver regex (the radar is a standalone lab script
-    outside the CLI import path), but the two definitions MUST stay
-    byte-for-byte identical — a drift means one side accepts a
-    version shape the other rejects, which produces
-    hard-to-reproduce ``ValueError``s on the radar path or the
-    reverse.
+    outside the CLI import path), but the two compiled patterns MUST
+    stay identical — a drift means one side accepts a version shape
+    the other rejects, which produces hard-to-reproduce ``ValueError``s
+    on the radar path or the reverse.
+
+    Uses ``ast`` to find the ``_VERSION_RE = re.compile(...)`` node in
+    each file and concatenates every string argument literal. A prior
+    version of this test scanned for the first `)` byte after the
+    marker, which stopped inside the lookbehind ``(?<![0-9A-Za-z])``
+    and only compared the prefix — CodeRabbit caught that during PR
+    review. AST parsing is the robust way to grab the full pattern
+    argument regardless of formatting.
     """
-    import re as _re
+    import ast
 
     repo_root = Path(__file__).resolve().parents[2]
     semver_py = (repo_root / "cli" / "defenseclaw" / "inventory" / "_semver.py").read_text()
     radar_py = (repo_root / "scripts" / "connector-version-radar.py").read_text()
 
-    def _extract(source: str) -> str:
-        # Grab the multi-line re.compile(...) literal starting at
-        # `_VERSION_RE = re.compile(`. The two files use identical
-        # formatting so a plain substring compare is enough.
-        marker = "_VERSION_RE = re.compile("
-        start = source.index(marker) + len(marker)
-        end = source.index(")", start)
-        return source[start:end].strip()
+    def _extract(source: str, source_path: str) -> str:
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            if not (len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == "_VERSION_RE"):
+                continue
+            value = node.value
+            if not (isinstance(value, ast.Call)
+                    and isinstance(value.func, ast.Attribute)
+                    and value.func.attr == "compile"):
+                continue
+            # `re.compile(...)` accepts (pattern, flags). We care only
+            # about the pattern arg. Concatenate every string literal
+            # in it so multi-line
+            #     re.compile("a" "b")
+            # style splits still compare correctly.
+            pattern_parts: list[str] = []
+            pattern_arg = value.args[0]
+            if isinstance(pattern_arg, ast.Constant) and isinstance(pattern_arg.value, str):
+                pattern_parts.append(pattern_arg.value)
+            elif isinstance(pattern_arg, ast.BinOp):
+                # Not expected today, but be resilient to a future
+                # concatenation refactor.
+                pattern_parts.append(ast.unparse(pattern_arg))
+            else:
+                raise AssertionError(
+                    f"{source_path}: unsupported _VERSION_RE literal shape "
+                    f"{ast.dump(pattern_arg)}"
+                )
+            return "".join(pattern_parts)
+        raise AssertionError(f"{source_path}: _VERSION_RE = re.compile(...) not found")
 
-    assert _extract(semver_py) == _extract(radar_py), (
+    semver_pat = _extract(semver_py, "_semver.py")
+    radar_pat = _extract(radar_py, "connector-version-radar.py")
+    assert semver_pat == radar_pat, (
         "_VERSION_RE in _semver.py has drifted from "
-        "scripts/connector-version-radar.py — keep the two byte-for-byte "
-        "identical or route both through a shared import."
+        "scripts/connector-version-radar.py:\n"
+        f"  _semver.py:      {semver_pat!r}\n"
+        f"  version-radar:   {radar_pat!r}\n"
+        "Keep the two byte-for-byte identical or route both through a "
+        "shared import."
     )
 
 
