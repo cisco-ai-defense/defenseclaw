@@ -708,6 +708,17 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		configPath = config.ConfigPath()
 	}
 	s.configMgr = NewConfigManager(configPath, s.currentConfig(), s.logger, s.health, s.applyConfigReload)
+	// managed_enterprise: wire the AVC-authored env_config.json so the
+	// ConfigManager overlays cisco_ai_defense_endpoint on every reload
+	// and watches its parent dir for late arrivals (AVC packaging can
+	// drop the file AFTER DefenseClaw is installed — the installer
+	// warns and falls back to a US-prod default when that happens, and
+	// the overlay corrects the endpoint the moment the file appears).
+	// Opensource installs pass an empty path and get the pre-overlay
+	// behavior verbatim.
+	if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
+		s.configMgr.SetEnvConfigPath(config.DefaultEnvConfigPath)
+	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -1327,6 +1338,39 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 		s.attachApplicationProtectionObserver(ctx, next.Gateway.Token)
 	}
 
+	// AI Defense inspector hot-rebuild. Fires when any field on
+	// CiscoAIDefense changes — most commonly a fresh
+	// cisco_ai_defense_endpoint from AVC's env_config.json arriving
+	// after DefenseClaw was installed. pickInspector reads
+	// s.currentConfig() (already swapped to the applied snapshot
+	// above via s.publishConfig), so it will construct against the
+	// new endpoint. Same fail-closed contract as boot: a nil
+	// inspector disables the hook-lane AID call entirely; the proxy
+	// lane's SetManagedInspection is called only in managed_enterprise
+	// mode.
+	if inspectorNeedsRebuild(oldCfg, newCfg) {
+		tel := s.otelSnapshot()
+		if nextOTel != nil {
+			tel = nextOTel
+		}
+		if inspector := s.pickInspector(ctx, tel); inspector != nil {
+			if api := s.apiSnapshot(); api != nil {
+				api.SetCiscoInspector(inspector)
+			}
+		} else if api := s.apiSnapshot(); api != nil {
+			// Reload rejected the inspector (managed provider now
+			// unavailable, or endpoint now empty). Clear the API
+			// binding so the hook lane fails open cleanly instead of
+			// keeping stale state that points at the old endpoint.
+			api.SetCiscoInspector(nil)
+		}
+		if nextManagedEnterprise {
+			if proxy := s.proxySnapshot(); proxy != nil {
+				proxy.SetManagedInspection(true, s.newManagedInspector(ctx, tel, "proxy remote inspection disabled"))
+			}
+		}
+	}
+
 	// managed_enterprise: refresh the connector / MCP endpoint inventory
 	// on every reload — MCP servers and connectors can change via config
 	// without restarting the discovery scanner. Rebuild the emitter from
@@ -1429,7 +1473,18 @@ func otelNeedsReload(oldCfg, newCfg *config.Config) bool {
 		oldCfg.Gateway.Port != newCfg.Gateway.Port ||
 		!reflect.DeepEqual(oldCfg.Claw, newCfg.Claw) ||
 		oldCfg.Guardrail.Connector != newCfg.Guardrail.Connector ||
-		!reflect.DeepEqual(oldCfg.Guardrail.Connectors, newCfg.Guardrail.Connectors)
+		!reflect.DeepEqual(oldCfg.Guardrail.Connectors, newCfg.Guardrail.Connectors) ||
+		// AI Defense endpoint feeds the managed-enterprise telemetry log
+		// exporter (newCiscoAIDLogProcessor → newCiscoAIDLogExporter),
+		// which captures the ingest URL by value at construction. A
+		// late-arriving env_config.json changes the endpoint and the
+		// telemetry sink needs to point at the new region — a full OTel
+		// rebuild is heavier than strictly necessary, but it's the
+		// established reload boundary and this path fires rarely (once
+		// per env_config update). The inspector side is reloaded
+		// separately (inspectorNeedsRebuild) so it can hot-swap without
+		// touching OTel.
+		oldCfg.CiscoAIDefense.Endpoint != newCfg.CiscoAIDefense.Endpoint
 }
 
 func auditSinksNeedReload(oldCfg, newCfg *config.Config) bool {
@@ -1445,6 +1500,21 @@ func rulePackNeedsReload(oldCfg, newCfg *config.Config) bool {
 		return false
 	}
 	return oldCfg.Guardrail.RulePackDir != newCfg.Guardrail.RulePackDir
+}
+
+// inspectorNeedsRebuild reports whether any field on
+// cfg.CiscoAIDefense has changed such that the AID inspector needs to
+// be rebuilt. The inspector captures endpoint + timeout by value at
+// construction (see NewCiscoDefenseClawInspectClient), so any change
+// under this struct is a real signal — deep-equal is the right grain.
+// Called from applyConfigReload after the env_config overlay so a
+// late-arriving env_config.json reaches the running inspector without
+// a full OTel teardown.
+func inspectorNeedsRebuild(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return false
+	}
+	return !reflect.DeepEqual(oldCfg.CiscoAIDefense, newCfg.CiscoAIDefense)
 }
 
 func judgeNeedsReload(oldCfg, newCfg *config.Config) bool {

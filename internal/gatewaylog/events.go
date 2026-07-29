@@ -848,6 +848,29 @@ type AIDiscoveryPayload struct {
 	WorkspaceHash string   `json:"workspace_hash,omitempty"`
 	LastSeen      string   `json:"last_seen,omitempty"`
 
+	// AgentKind is the connector slug of the agent that owns this
+	// signal (e.g. "cursor", "claudecode", "codex"). It is derived
+	// from the matched AISignature's SupportedConnector plus a small
+	// promotion table for signatures we treat as first-class agents
+	// without setting SupportedConnector (aider / continue / cline /
+	// claudedesktop). Ships in the clear on every payload — the value
+	// is a structural connector identifier, not user content.
+	AgentKind string `json:"agent_kind,omitempty"`
+	// ItemKind names the shape of the sub-item this signal represents
+	// when the detector emits item-level rows: "mcp_server" | "plugin"
+	// | "skill" | "rule". File-level signals leave this empty.
+	ItemKind string `json:"item_kind,omitempty"`
+	// ItemName is the sub-item's name/id — MCP server key from
+	// mcp.json, plugin/skill/rule child basename, etc. Ships in the
+	// clear (structural identifier).
+	ItemName string `json:"item_name,omitempty"`
+	// ItemAttributes carries a small map of structural per-item hints
+	// (`transport`, `command_basename`, `url_host`, `child_type`).
+	// Raw args / env / URLs / commands are deliberately excluded —
+	// those can carry user-controlled content and must go through the
+	// existing `evidence` gate instead.
+	ItemAttributes map[string]string `json:"item_attributes,omitempty"`
+
 	// Extended fields below are gated by privacy.disable_redaction.
 	// The shipping helper (BuildAIDiscoveryPayload) reads the flag
 	// from the gateway config; raw call sites that build their own

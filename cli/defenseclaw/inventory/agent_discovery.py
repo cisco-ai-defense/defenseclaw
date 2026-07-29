@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import shutil
@@ -32,6 +33,8 @@ from typing import NamedTuple
 
 import yaml
 
+from defenseclaw.inventory._semver import pick_highest_supported
+
 # `grp` is POSIX-only. We import it lazily-but-at-module-load so the
 # group-ownership check below can run without an inline import,
 # while still keeping Windows hosts importable.
@@ -41,7 +44,12 @@ except ImportError:  # pragma: no cover - non-POSIX
     _grp = None  # type: ignore[assignment]
 
 from defenseclaw.config import config_path_for_data_dir, default_data_path
-from defenseclaw.connector_paths import KNOWN_CONNECTORS, _expand, omnigent_config_path
+from defenseclaw.connector_paths import (
+    KNOWN_AGENT_KINDS,
+    KNOWN_CONNECTORS,
+    _expand,
+    omnigent_config_path,
+)
 
 # Sentinel error returned by ``_version_for_binary`` when a connector
 # binary resolves outside the trusted install prefixes. Callers (e.g.
@@ -126,6 +134,15 @@ class AgentSignal:
     binary_path: str
     version: str
     error: str
+    # ``source`` records WHERE the reported ``version`` came from — the
+    # native-installer symlink, an NVM node_modules root, the ChatGPT.app
+    # bundle, etc. Populated only by the three item-level collectors
+    # (claudecode / codex / cursor) added for the multi-install
+    # discovery fix; other connectors leave it empty and legacy JSON
+    # caches without the field deserialize with the empty default. Kept
+    # optional so callers that ignore the field (older TUI renderers)
+    # keep working.
+    source: str = ""
 
 
 @dataclass
@@ -204,6 +221,290 @@ _SPECS: dict[str, _AgentSpec] = {
         "omnigent",
         ("--version",),
     ),
+    # Discovery-only agents (not in KNOWN_CONNECTORS). Config
+    # candidates mirror the corresponding entries in
+    # internal/inventory/ai_signatures.json so `agent discover` picks
+    # up the same install signals the sidecar does.
+    "aider": _AgentSpec(
+        ("~/.aider.conf.yml", "~/.aider", ".aider.conf.yml"),
+        "aider",
+        ("--version",),
+    ),
+    "continue": _AgentSpec(
+        (
+            "~/.continue/config.json",
+            "~/.continue/config.yaml",
+            "~/.continue",
+            ".continue/config.json",
+        ),
+        "continue",
+        ("--version",),
+    ),
+    "cline": _AgentSpec(
+        # Cline / Roo Code lives inside the VS Code / Cursor extension
+        # storage tree; probe the extension-installed marker rather
+        # than expecting a top-level binary. `binary_name=""` disables
+        # the exec-based liveness probe for signals that are purely
+        # extension-installed — the config-file probe is enough.
+        (
+            "~/.vscode/extensions",
+            "~/.cursor/extensions",
+        ),
+        "",
+        (),
+    ),
+    "claudedesktop": _AgentSpec(
+        (
+            "~/Library/Application Support/Claude/claude_desktop_config.json",
+            "~/.config/Claude/claude_desktop_config.json",
+            "~/AppData/Roaming/Claude/claude_desktop_config.json",
+        ),
+        "",
+        (),
+    ),
+}
+
+
+# Minimum-supported agent versions for the hook-contract gate. Values
+# mirror ``min_inclusive`` in
+# cli/defenseclaw/inventory/hook_contracts.json and the
+# ``MinAgentVersion`` constants in
+# internal/gateway/connector/hook_contract.go. When updating any of the
+# three copies, update all three — the test
+# ``test_min_versions_match_hook_contracts_json`` catches drift on CI.
+_MIN_SUPPORTED_VERSIONS: dict[str, str] = {
+    "claudecode": "2.1.144",
+    "codex": "0.124.0",
+    "cursor": "1.7.0",
+}
+
+
+def _read_pkg_version(path: str) -> str:
+    """Return the top-level ``.version`` string from a package.json.
+
+    Metadata-only: parses JSON, returns "" for any error (missing file,
+    unreadable file, malformed JSON, missing field, non-string value).
+    Never exec's the binary the package.json describes. Mirrors the
+    ``_read_json_version`` helper in packaging/macos/lib/installer_lib.sh
+    so the two discovery paths stay behavior-equivalent.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            value = json.load(f).get("version", "")
+    except (OSError, ValueError):
+        return ""
+    return value if isinstance(value, str) else ""
+
+
+def _collect_node_manager_pkg_versions(
+    home: str, npm_scope: str, pkg: str
+) -> list[tuple[str, str]]:
+    """Enumerate (source_path, version) tuples across Node version managers.
+
+    Node version managers (NVM, Volta, fnm, asdf) install npm globals
+    under a per-node-version root, so an operator running two Node
+    versions has two copies of the same ``@scope/pkg``. Discovery must
+    enumerate every root and let ``pick_highest_supported`` sort out the
+    winner — QA regression: previously not probed at all.
+
+    Read-only glob cost: one readdir per manager root. Cheap even on
+    developer boxes with a dozen node versions.
+    """
+    rel = f"{npm_scope}/{pkg}/package.json"
+    roots = (
+        f"{home}/.nvm/versions/node/*/lib/node_modules/{rel}",
+        f"{home}/.local/share/fnm/node-versions/*/installation/lib/node_modules/{rel}",
+        f"{home}/.asdf/installs/nodejs/*/.npm/lib/node_modules/{rel}",
+        f"{home}/.volta/tools/image/packages/{npm_scope}/{pkg}/*/package.json",
+    )
+    out: list[tuple[str, str]] = []
+    for pattern in roots:
+        for candidate in sorted(glob.glob(pattern)):
+            version = _read_pkg_version(candidate)
+            if version:
+                out.append((candidate, version))
+    return out
+
+
+def _native_claudecode_version_from_dir(base: str) -> tuple[str, str]:
+    """Read Claude Code's native-installer layout under ``base``.
+
+    Matches ``_native_claudecode_version_from_dir`` in
+    packaging/macos/lib/installer_lib.sh. Layout:
+        base/
+          current           -> symlink to versions/<X.Y.Z>
+          versions/<X.Y.Z>/ actual install root
+    The active ``current`` pointer wins over the highest ``versions/*``
+    entry so a user who ran ``claude version rollback`` gets the same
+    version the sidecar reports. Returns ``("", "")`` when base is
+    missing or nothing looks like a semver.
+    """
+    if not base or not os.path.isdir(base):
+        return "", ""
+    current = os.path.join(base, "current")
+    if os.path.islink(current) and os.path.exists(current):
+        target = os.readlink(current)
+        candidate = os.path.basename(target)
+        # Same regex tolerance as installer_lib.sh: accept anything
+        # that starts X.Y.Z, allow the usual prerelease / build tails.
+        if candidate and candidate[0].isdigit():
+            return f"{base}/current -> {candidate}", candidate
+    versions_dir = os.path.join(base, "versions")
+    if os.path.isdir(versions_dir):
+        entries: list[str] = []
+        for name in os.listdir(versions_dir):
+            if name and name[0].isdigit():
+                entries.append(name)
+        if entries:
+            # Ordered by ``pick_highest_supported`` at the caller; we
+            # just report every version we found. Return one tuple per
+            # candidate so pre-releases are ordered correctly.
+            highest = max(entries, key=_version_sort_key)
+            return f"{versions_dir}/{highest}", highest
+    return "", ""
+
+
+def _version_sort_key(raw: str) -> tuple[int, ...]:
+    """Lightweight sort key used only inside the native-installer probe.
+
+    ``pick_highest_supported`` is the authoritative comparator for the
+    final winner across all channels; this helper just picks the
+    highest entry under ``versions/`` before feeding it upstream. Any
+    string that doesn't look like a semver sorts to ``(0,)`` so it
+    loses to real versions.
+    """
+    parts: list[int] = []
+    for token in raw.split("."):
+        digits = ""
+        for ch in token:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts) or (0,)
+
+
+def _collect_claudecode_versions(home: str) -> list[tuple[str, str]]:
+    """Return (source_path, version) for every claudecode install found.
+
+    Enumerates all five distribution channels:
+      1. Anthropic native installer (per-user).
+      2. System-wide native install (/opt/claude, /usr/local/share/claude).
+      3. npm-global (user, system, Homebrew).
+      4. Node version managers (NVM, Volta, fnm, asdf).
+      5. VS Code / Cursor editor extensions.
+    Metadata-only — no binary is exec'd.
+    """
+    out: list[tuple[str, str]] = []
+    for base in (
+        os.path.join(home, ".local", "share", "claude"),
+        "/opt/claude",
+        "/usr/local/share/claude",
+    ):
+        source, version = _native_claudecode_version_from_dir(base)
+        if version:
+            out.append((source, version))
+    for pkg in (
+        f"{home}/.npm-global/lib/node_modules/@anthropic-ai/claude-code/package.json",
+        "/usr/local/lib/node_modules/@anthropic-ai/claude-code/package.json",
+        "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/package.json",
+    ):
+        version = _read_pkg_version(pkg)
+        if version:
+            out.append((pkg, version))
+    for pattern in (
+        f"{home}/.cursor/extensions/anthropic.claude-code-*/package.json",
+        f"{home}/.vscode/extensions/anthropic.claude-code-*/package.json",
+    ):
+        for candidate in sorted(glob.glob(pattern)):
+            version = _read_pkg_version(candidate)
+            if version:
+                out.append((candidate, version))
+    out.extend(_collect_node_manager_pkg_versions(home, "@anthropic-ai", "claude-code"))
+    return out
+
+
+def _collect_codex_versions(home: str) -> list[tuple[str, str]]:
+    """Return (source_path, version) for every codex install found.
+
+    Metadata-only: ChatGPT.app bundle carries no ``package.json`` today,
+    so we skip the exec path entirely (the shell installer keeps a
+    bundle-exec probe because it runs at install time as root and can
+    afford ``sudo -u`` drop-privs; the Python discovery pass has no
+    such lifecycle guarantee). Homebrew Caskroom, npm-global, and node
+    version managers all expose enumerable metadata files.
+    """
+    out: list[tuple[str, str]] = []
+    for caskroom in ("/opt/homebrew/Caskroom/codex", "/usr/local/Caskroom/codex"):
+        if not os.path.isdir(caskroom):
+            continue
+        try:
+            entries = sorted(os.listdir(caskroom))
+        except OSError:
+            continue
+        for name in entries:
+            if not name or not name[0].isdigit():
+                continue
+            out.append((os.path.join(caskroom, name), name))
+    for pkg in (
+        f"{home}/.npm-global/lib/node_modules/@openai/codex/package.json",
+        "/usr/local/lib/node_modules/@openai/codex/package.json",
+        "/opt/homebrew/lib/node_modules/@openai/codex/package.json",
+    ):
+        version = _read_pkg_version(pkg)
+        if version:
+            out.append((pkg, version))
+    out.extend(_collect_node_manager_pkg_versions(home, "@openai", "codex"))
+    return out
+
+
+def _collect_cursor_versions(home: str) -> list[tuple[str, str]]:
+    """Return (source_path, version) for every Cursor.app install found.
+
+    Cursor.app is a signed macOS bundle with two version sources that
+    can drift out of sync across a release:
+      - ``Info.plist`` -> ``CFBundleShortVersionString`` (marketing).
+      - ``Contents/Resources/app/package.json`` -> ``.version`` (npm
+        layout the bundled agent actually reports).
+    Enumerating both lets the highest-supported policy pick whichever
+    one meets the hook contract's minimum.
+    """
+    del home  # Cursor lives under /Applications; home is unused today.
+    out: list[tuple[str, str]] = []
+    plist = "/Applications/Cursor.app/Contents/Info.plist"
+    if os.path.isfile(plist):
+        try:
+            proc = subprocess.run(
+                ["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString", plist],
+                capture_output=True,
+                text=True,
+                timeout=VERSION_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            proc = None
+        if proc is not None and proc.returncode == 0:
+            version = (proc.stdout or "").strip()
+            if version:
+                out.append((plist, version))
+    pkg = "/Applications/Cursor.app/Contents/Resources/app/package.json"
+    version = _read_pkg_version(pkg)
+    if version:
+        out.append((pkg, version))
+    return out
+
+
+# _SCAN_METADATA_ONLY maps connector name -> collector function. When a
+# connector has an entry here, ``_scan_agent`` uses the metadata-only
+# discovery path instead of shutil.which + subprocess.run. This is the
+# fix for QA regressions #1 (Anthropic native installer fails the
+# trust-prefix gate) and #2 (Homebrew wins first-hit over supported
+# NVM). Every other connector keeps the legacy ``--version`` exec path.
+_SCAN_METADATA_ONLY = {
+    "claudecode": _collect_claudecode_versions,
+    "codex": _collect_codex_versions,
+    "cursor": _collect_cursor_versions,
 }
 
 
@@ -229,7 +530,7 @@ def discover_agents(
                     data_dir=data_dir,
                     require_trusted_binary_paths=require_trusted,
                 ),
-                KNOWN_CONNECTORS,
+                KNOWN_AGENT_KINDS,
             )
         )
     agents = {signal.name: signal for signal in signals}
@@ -298,6 +599,46 @@ def _scan_agent(
         config_path = omnigent_config_path()
         config_candidates = (config_path, os.path.dirname(config_path))
     config_path = _first_existing_path(config_candidates)
+
+    collector = _SCAN_METADATA_ONLY.get(name)
+    if collector is not None:
+        # Metadata-only path for the three connectors with multi-channel
+        # installs (claudecode, codex, cursor). Enumerates every visible
+        # install and picks the highest that meets the hook contract's
+        # MinAgentVersion — see _MIN_SUPPORTED_VERSIONS above and QA
+        # regressions #1 / #2 in the PR description.
+        candidates = collector(os.path.expanduser("~"))
+        min_version = _MIN_SUPPORTED_VERSIONS.get(name, "")
+        picked = pick_highest_supported(candidates, min_version)
+        if picked is not None:
+            source, version = picked
+            installed = True
+            return AgentSignal(
+                name=name,
+                installed=installed,
+                config_path=config_path,
+                # binary_path stays empty in the metadata path — we
+                # deliberately dodged shutil.which to avoid the
+                # untrusted-prefix rejection. Downstream renderers
+                # already treat binary_path as best-effort.
+                binary_path="",
+                version=version,
+                error="",
+                source=source,
+            )
+        # No enumerable installs found. Fall through to the legacy
+        # config-file-presence branch below so an operator with a bare
+        # `~/.claude` directory still shows installed=True.
+        return AgentSignal(
+            name=name,
+            installed=bool(config_path),
+            config_path=config_path,
+            binary_path="",
+            version="",
+            error="",
+            source="",
+        )
+
     binary_path = _which(spec.binary_name) if spec.binary_name else ""
     version = ""
     error = ""
@@ -687,10 +1028,27 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
 
     agents: dict[str, AgentSignal] = {}
     try:
-        for name in KNOWN_CONNECTORS:
+        # Legacy caches predate the discovery-only agent expansion
+        # (KNOWN_AGENT_KINDS vs KNOWN_CONNECTORS). A missing entry for a
+        # freshly-added agent is a normal upgrade case, not a corrupt
+        # cache — treat it as "not installed" so we don't invalidate the
+        # entire cache on first read after upgrade. A missing entry for
+        # an *enforcement* connector (KNOWN_CONNECTORS) is still a
+        # corruption signal and rejects the cache.
+        for name in KNOWN_AGENT_KINDS:
             raw = raw_agents.get(name)
             if not isinstance(raw, dict):
-                return None
+                if name in KNOWN_CONNECTORS:
+                    return None
+                agents[name] = AgentSignal(
+                    name=name,
+                    installed=False,
+                    config_path="",
+                    binary_path="",
+                    version="",
+                    error="",
+                )
+                continue
             agents[name] = AgentSignal(
                 name=str(raw.get("name") or name),
                 installed=bool(raw.get("installed")),
@@ -698,6 +1056,11 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
                 binary_path=str(raw.get("binary_path") or ""),
                 version=str(raw.get("version") or ""),
                 error=str(raw.get("error") or ""),
+                # ``source`` was added when the multi-install discovery
+                # path landed; legacy caches don't carry it, hence the
+                # empty default. Not a corruption signal — just an
+                # older cache.
+                source=str(raw.get("source") or ""),
             )
     except Exception:
         return None
@@ -781,7 +1144,7 @@ def _ordered_connector_names(disc: AgentDiscovery) -> list[str]:
     for name in DISCOVERY_PRECEDENCE:
         if name in disc.agents:
             names.append(name)
-    for name in KNOWN_CONNECTORS:
+    for name in KNOWN_AGENT_KINDS:
         if name in disc.agents and name not in names:
             names.append(name)
     return names

@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,6 +52,15 @@ type ConfigManager struct {
 	logger *audit.Logger
 	health *SidecarHealth
 
+	// envConfigPath is the AVC-authored env_config.json (see
+	// config.DefaultEnvConfigPath). When set, Reload overlays
+	// cisco_ai_defense_endpoint from that file on top of the
+	// config.yaml value before diffing, and Run adds the file's parent
+	// directory to the fsnotify watch set so a late-arriving
+	// env_config.json triggers a reload. Empty means "no overlay" —
+	// this is what opensource / non-managed installs pass.
+	envConfigPath string
+
 	current atomic.Value // *config.Config
 	gen     atomic.Uint64
 	mu      sync.Mutex
@@ -70,6 +80,19 @@ func NewConfigManager(path string, initial *config.Config, logger *audit.Logger,
 		m.current.Store(cloneConfig(initial))
 	}
 	return m
+}
+
+// SetEnvConfigPath wires the AVC env_config.json path onto an existing
+// ConfigManager. Callers (managed_enterprise sidecar boot) invoke this
+// after NewConfigManager and BEFORE Run — the fsnotify watch on the
+// env_config parent dir is set up inside Run. A subsequent call to
+// SetEnvConfigPath after Run has started has no effect on the watch
+// set; Reload still picks up whatever the current value is.
+func (m *ConfigManager) SetEnvConfigPath(path string) {
+	if m == nil {
+		return
+	}
+	m.envConfigPath = strings.TrimSpace(path)
 }
 
 func (m *ConfigManager) Current() *config.Config {
@@ -110,11 +133,39 @@ func (m *ConfigManager) Run(ctx context.Context) error {
 		return fmt.Errorf("config watcher: watch %s: %w", dir, err)
 	}
 
+	// Best-effort watch on the AVC env_config.json parent directory.
+	// The dir may not exist yet (AVC packaging can drop it AFTER
+	// DefenseClaw is installed) and it may equal the config.yaml dir
+	// on unusual layouts. Deduping by string is enough — fsnotify
+	// coalesces duplicate Add calls to a no-op anyway. We do NOT
+	// treat a failure here as fatal: the config.yaml watch is the
+	// primary channel; env_config-driven reloads are a nice-to-have.
+	envConfigDirWatched := false
+	if m.envConfigPath != "" {
+		envDir := filepath.Dir(filepath.Clean(m.envConfigPath))
+		if envDir != dir {
+			if err := fsw.Add(envDir); err != nil {
+				fmt.Fprintf(os.Stderr, "[config] env_config watch %s deferred: %v (will retry on each reload)\n", envDir, err)
+			} else {
+				envConfigDirWatched = true
+			}
+		} else {
+			// Same dir as config.yaml — nothing more to watch.
+			envConfigDirWatched = true
+		}
+	}
+
 	timer := time.NewTimer(time.Hour)
 	if !timer.Stop() {
 		<-timer.C
 	}
 	pending := false
+	// pendingTrigger identifies which of the two watched files
+	// armed the debounce, so the reason= tag on the reload log line
+	// tells operators which file changed. First event of a burst
+	// wins (subsequent events in the same debounce window are
+	// already scheduled and don't need to be re-labelled).
+	pendingTrigger := ""
 	for {
 		select {
 		case <-ctx.Done():
@@ -123,11 +174,15 @@ func (m *ConfigManager) Run(ctx context.Context) error {
 			}
 			return ctx.Err()
 		case event := <-fsw.Events:
-			if !m.matches(event.Name) {
+			which := m.classify(event.Name)
+			if which == "" {
 				continue
 			}
 			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
 				continue
+			}
+			if !pending {
+				pendingTrigger = which
 			}
 			pending = true
 			resetTimer(timer, configReloadDebounce)
@@ -139,9 +194,26 @@ func (m *ConfigManager) Run(ctx context.Context) error {
 			if !pending {
 				continue
 			}
+			reason := "fsnotify"
+			if pendingTrigger != "" {
+				reason = "fsnotify:" + pendingTrigger
+			}
 			pending = false
-			if err := m.Reload(ctx, "fsnotify"); err != nil {
+			pendingTrigger = ""
+			if err := m.Reload(ctx, reason); err != nil {
 				fmt.Fprintf(os.Stderr, "[config] reload failed: %v\n", err)
+			}
+			// Retry env_config dir watch after every reload — the AVC
+			// packaging pipeline may have just created it, and fsnotify
+			// silently ignores duplicate Add calls if we're already
+			// watching.
+			if m.envConfigPath != "" && !envConfigDirWatched {
+				envDir := filepath.Dir(filepath.Clean(m.envConfigPath))
+				if envDir != dir {
+					if err := fsw.Add(envDir); err == nil {
+						envConfigDirWatched = true
+					}
+				}
 			}
 		}
 	}
@@ -168,6 +240,85 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 	}
 	if oldCfg != nil && managed.IsManagedEnterprise(oldCfg.DeploymentMode) && !managed.IsManagedEnterprise(next.DeploymentMode) {
 		return fmt.Errorf("config reload cannot downgrade deployment_mode from managed_enterprise")
+	}
+	// AVC env_config.json overlay. When present and well-formed the
+	// endpoint from env_config wins over whatever the installer wrote
+	// into config.yaml, so a region change delivered AFTER install
+	// takes effect on the next reload. When the file is missing (the
+	// pre-arrival case) we leave next.CiscoAIDefense.Endpoint alone,
+	// which yields the config.yaml value (a hardcoded US-prod default
+	// during install if env_config was also missing at install time).
+	// When the file is present but malformed we LOG + RETAIN — we
+	// refuse to blow away a working endpoint with a bad one because a
+	// hostile env_config is precisely the exfiltration vector the
+	// validate step defends against.
+	if m.envConfigPath != "" {
+		if ep, envErr := config.LoadEnvConfigEndpoint(m.envConfigPath); envErr == nil {
+			// The strings.TrimRight("/", ...) call inside
+			// NewCiscoDefenseClawInspectClient tolerates a trailing
+			// slash; we don't normalise here so the diff engine can
+			// see exactly what's on disk.
+			next.CiscoAIDefense.Endpoint = ep
+		} else if !errors.Is(envErr, config.ErrEnvConfigMissing) {
+			// Malformed / rejected env_config — do not touch
+			// next.CiscoAIDefense.Endpoint. Surface a health-check
+			// error so the operator sees it in the sidecar status
+			// output but keep serving traffic against the current
+			// endpoint.
+			fmt.Fprintf(os.Stderr, "[config] env_config overlay rejected: %v (retaining current endpoint)\n", envErr)
+			if m.health != nil {
+				m.health.SetConfig(StateError, envErr.Error(), map[string]interface{}{
+					"path":            m.path,
+					"env_config_path": m.envConfigPath,
+					"reason":          reason,
+				})
+			}
+		}
+	}
+	// managed_enterprise: preserve boot-time-derived runtime state
+	// on the next snapshot BEFORE we diff. Every field carried here
+	// is either mapstructure:"-" (never present in config.yaml) or
+	// synthesised at process start; failing to preserve them makes
+	// diffConfigs report gateway=changed on every reload — including
+	// the env_config-driven ones this feature exists to enable — and
+	// applyConfigReload rejects the whole reload with "config reload
+	// requires gateway restart for: gateway". applyConfigReload has
+	// a partial preservation step at line ~1165 (Token only) but it
+	// fires AFTER diffing, so it can't stop the false restart signal.
+	// Kept here scoped to managed_enterprise per operator direction —
+	// the OSS reload path is intentionally untouched.
+	//
+	// Fields preserved:
+	//   Gateway.Token     — synthesised by ensureGatewayTokenSynthesis
+	//                        on first boot; not written into
+	//                        config.yaml on disk.
+	//   Gateway.NoTLS     — mapstructure:"-", set at boot from
+	//                        RequiresTLSWithMode(&OpenShell). Runtime
+	//                        state, not user-configurable.
+	//   Gateway.SandboxHome, Gateway.ClawHome — mapstructure:"-",
+	//                        derived from OpenShell / os.UserHomeDir()
+	//                        at Load time. Stable across reloads on
+	//                        the same host but the initial cached
+	//                        snapshot may have been rendered before
+	//                        every derivation ran.
+	if oldCfg != nil && managed.IsManagedEnterprise(next.DeploymentMode) {
+		if strings.TrimSpace(next.Gateway.Token) == "" && strings.TrimSpace(oldCfg.Gateway.Token) != "" {
+			next.Gateway.Token = oldCfg.Gateway.Token
+		}
+		// NoTLS is bool — the "was it set on the runtime side and
+		// zeroed by LoadFromFile?" question reduces to
+		// "old=true, new=false". Copy that specific transition; the
+		// reverse (old=false, new=true) can only happen if the OpenShell
+		// mode legitimately flipped, which is a real change.
+		if oldCfg.Gateway.NoTLS && !next.Gateway.NoTLS {
+			next.Gateway.NoTLS = true
+		}
+		if next.Gateway.SandboxHome == "" && oldCfg.Gateway.SandboxHome != "" {
+			next.Gateway.SandboxHome = oldCfg.Gateway.SandboxHome
+		}
+		if next.Gateway.ClawHome == "" && oldCfg.Gateway.ClawHome != "" {
+			next.Gateway.ClawHome = oldCfg.Gateway.ClawHome
+		}
 	}
 	diff := diffConfigs(oldCfg, next)
 	if len(diff.Changed) == 0 {
@@ -237,6 +388,23 @@ func (m *ConfigManager) matches(path string) bool {
 	return filepath.Clean(path) == m.path
 }
 
+// classify reports which watched file the fsnotify event refers to:
+// "config" for the primary config.yaml, "env_config" for the AVC-authored
+// env_config.json, or "" for anything else in the watched dirs (state
+// files, sidecar caches, unrelated writes). We watch entire directories
+// rather than files because atomic-write dances (tempfile + rename) fire
+// events on the target's *parent*, not the target itself.
+func (m *ConfigManager) classify(path string) string {
+	cleaned := filepath.Clean(path)
+	if cleaned == m.path {
+		return "config"
+	}
+	if m.envConfigPath != "" && cleaned == filepath.Clean(m.envConfigPath) {
+		return "env_config"
+	}
+	return ""
+}
+
 func resetTimer(timer *time.Timer, d time.Duration) {
 	if !timer.Stop() {
 		select {
@@ -301,6 +469,16 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		"tenant_id":        {},
 		"workspace_id":     {},
 		"discovery_source": {},
+	}
+	// managed_enterprise: cisco_ai_defense is hot-reloadable. The AID
+	// inspector rebuild path (inspectorNeedsRebuild → applyConfigReload)
+	// and the OTel log-sink rebuild (otelNeedsReload folds
+	// CiscoAIDefense.Endpoint) together cover every field on the
+	// struct. Opensource callers keep the pre-existing restart-required
+	// behavior so a stray CiscoAIDefense change on that path still
+	// forces the operator's attention.
+	if managed.IsManagedEnterprise(newCfg.DeploymentMode) {
+		hotReloadable["cisco_ai_defense"] = struct{}{}
 	}
 	for _, path := range changed {
 		if path == "guardrail" && guardrailNeedsRestart(oldCfg, newCfg) {

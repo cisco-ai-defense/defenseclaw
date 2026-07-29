@@ -23,7 +23,7 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from defenseclaw.connector_paths import KNOWN_CONNECTORS
+from defenseclaw.connector_paths import KNOWN_AGENT_KINDS, KNOWN_CONNECTORS
 from defenseclaw.inventory import agent_discovery as ad
 
 
@@ -81,7 +81,7 @@ def test_cache_miss_hit_and_ttl_expiry(monkeypatch, tmp_path):
     first = ad.discover_agents()
     assert first.cache_hit is False
     assert first.agents["codex"].installed is True
-    assert len(calls) == len(KNOWN_CONNECTORS)
+    assert len(calls) == len(KNOWN_AGENT_KINDS)
 
     cache_file = Path(os.environ["DEFENSECLAW_HOME"]) / ad.CACHE_FILENAME
     assert cache_file.is_file()
@@ -128,8 +128,15 @@ def test_schema_version_mismatch_rescans(monkeypatch, tmp_path):
 
 
 def test_timeout_sets_error_and_does_not_mark_binary_only_install(monkeypatch, tmp_path):
+    # Retargeted from codex → openclaw: codex now uses the metadata-only
+    # collector (_collect_codex_versions) rather than shutil.which +
+    # --version exec, so the "timeout on exec" branch is only reachable
+    # from connectors that stayed on the legacy path (openclaw, hermes,
+    # zeptoclaw, geminicli, etc.). Everything the assertion cares about
+    # — timeout produces an error, binary_only-install stays false —
+    # applies identically to any legacy-path connector.
     _pin_home(monkeypatch, tmp_path)
-    monkeypatch.setattr(ad.shutil, "which", lambda name: "/usr/local/bin/codex")
+    monkeypatch.setattr(ad.shutil, "which", lambda name: "/usr/local/bin/openclaw")
     # M-4: bypass the trusted-prefix file-existence check so we can
     # exercise the timeout branch with a path the test doesn't have to
     # actually create on disk.
@@ -140,18 +147,21 @@ def test_timeout_sets_error_and_does_not_mark_binary_only_install(monkeypatch, t
 
     monkeypatch.setattr(ad.subprocess, "run", timeout)
 
-    signal = ad._scan_agent("codex")
+    signal = ad._scan_agent("openclaw")
 
-    assert signal.binary_path == "/usr/local/bin/codex"
+    assert signal.binary_path == "/usr/local/bin/openclaw"
     assert signal.config_path == ""
     assert signal.installed is False
     assert "timed out" in signal.error
 
 
 def test_version_probe_uses_no_shell_and_list_args(monkeypatch, tmp_path):
+    # Retargeted from codex → openclaw (same reason as
+    # test_timeout_sets_error_and_does_not_mark_binary_only_install:
+    # codex no longer takes the exec path).
     _pin_home(monkeypatch, tmp_path)
     calls = []
-    monkeypatch.setattr(ad.shutil, "which", lambda name: "/opt/bin/codex")
+    monkeypatch.setattr(ad.shutil, "which", lambda name: "/opt/bin/openclaw")
     # M-4: this fake binary lives in /opt/bin (not a default trusted
     # prefix); waive the trust check so the test focuses on subprocess
     # invocation contract.
@@ -159,16 +169,16 @@ def test_version_probe_uses_no_shell_and_list_args(monkeypatch, tmp_path):
 
     def fake_run(args, **kwargs):
         calls.append((args, kwargs))
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout="codex 1.2.3\n", stderr="")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="openclaw 1.2.3\n", stderr="")
 
     monkeypatch.setattr(ad.subprocess, "run", fake_run)
 
-    signal = ad._scan_agent("codex")
+    signal = ad._scan_agent("openclaw")
 
     assert signal.installed is True
-    assert signal.version == "codex 1.2.3"
+    assert signal.version == "openclaw 1.2.3"
     args, kwargs = calls[0]
-    assert args == ["/opt/bin/codex", "--version"]
+    assert args == ["/opt/bin/openclaw", "--version"]
     assert kwargs["shell"] is False
     assert kwargs["timeout"] == 2.0
     assert kwargs["capture_output"] is True
@@ -257,8 +267,15 @@ def test_omnigent_discovery_does_not_fall_back_when_config_home_is_set(monkeypat
 # binary that lives outside the canonical install prefixes (an attacker
 # who can prepend a hostile directory to PATH could otherwise have us
 # run their binary as part of a passive discovery scan).
+#
+# NOTE (2026-07): retargeted from codex → openclaw. codex now uses the
+# metadata-only collector (_collect_codex_versions) which never
+# shutil.which's the binary, so the trust-prefix gate isn't reachable
+# from that connector. The gate still applies identically to every
+# legacy-path connector (openclaw, hermes, zeptoclaw, geminicli,
+# copilot, opencode) — these tests cover it via openclaw.
 def test_version_probe_probes_untrusted_prefix_by_default(monkeypatch, tmp_path):
-    hostile = tmp_path / "hostile_bin" / "codex"
+    hostile = tmp_path / "hostile_bin" / "openclaw"
     hostile.parent.mkdir(parents=True, exist_ok=True)
     hostile.write_text("#!/bin/sh\nexit 0\n")
     hostile.chmod(0o755)
@@ -268,21 +285,21 @@ def test_version_probe_probes_untrusted_prefix_by_default(monkeypatch, tmp_path)
 
     def fake_run(*args, **kwargs):
         called.append((args, kwargs))
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout="codex 0.0\n", stderr="")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="openclaw 0.0\n", stderr="")
 
     monkeypatch.setattr(ad.subprocess, "run", fake_run)
     monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
 
-    signal = ad._scan_agent("codex")
+    signal = ad._scan_agent("openclaw")
 
     assert called, "default discovery should probe without trusted-prefix enforcement"
     assert signal.binary_path == str(hostile)
-    assert signal.version == "codex 0.0"
+    assert signal.version == "openclaw 0.0"
     assert signal.error == ""
 
 
 def test_version_probe_refuses_binary_outside_trusted_prefix_when_enabled(monkeypatch, tmp_path):
-    hostile = tmp_path / "hostile_bin" / "codex"
+    hostile = tmp_path / "hostile_bin" / "openclaw"
     hostile.parent.mkdir(parents=True, exist_ok=True)
     hostile.write_text("#!/bin/sh\nexit 0\n")
     hostile.chmod(0o755)
@@ -297,7 +314,7 @@ def test_version_probe_refuses_binary_outside_trusted_prefix_when_enabled(monkey
     monkeypatch.setattr(ad.subprocess, "run", fake_run)
     monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
 
-    signal = ad._scan_agent("codex", require_trusted_binary_paths=True)
+    signal = ad._scan_agent("openclaw", require_trusted_binary_paths=True)
 
     assert called == [], "version probe exec'd a binary outside the trusted prefix"
     assert signal.binary_path == str(hostile)
@@ -333,9 +350,11 @@ def test_trust_check_canonicalises_operator_prefix_symlink(monkeypatch, tmp_path
 
 
 def test_trust_check_accepts_config_prefix_when_required(monkeypatch, tmp_path):
+    # Retargeted from codex → openclaw: same reason as
+    # test_version_probe_probes_untrusted_prefix_by_default.
     data_dir = tmp_path / ".defenseclaw"
     data_dir.mkdir()
-    binary = tmp_path / "tools" / "codex"
+    binary = tmp_path / "tools" / "openclaw"
     binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_text("#!/bin/sh\nexit 0\n")
     binary.chmod(0o755)
@@ -347,17 +366,17 @@ def test_trust_check_accepts_config_prefix_when_required(monkeypatch, tmp_path):
     monkeypatch.setattr(ad.shutil, "which", lambda name: str(binary))
 
     def fake_run(args, **kwargs):
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout="codex 1.2.3\n", stderr="")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="openclaw 1.2.3\n", stderr="")
 
     monkeypatch.setattr(ad.subprocess, "run", fake_run)
     signal = ad._scan_agent(
-        "codex",
+        "openclaw",
         data_dir=data_dir,
         require_trusted_binary_paths=True,
     )
 
     assert signal.installed is True
-    assert signal.version == "codex 1.2.3"
+    assert signal.version == "openclaw 1.2.3"
 
 
 def test_trust_check_accepts_homebrew_symlink_targets(monkeypatch, tmp_path):

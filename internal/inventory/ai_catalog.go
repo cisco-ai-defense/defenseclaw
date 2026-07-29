@@ -115,6 +115,45 @@ type aiSignatureCatalog struct {
 	Signatures []AISignature `json:"signatures"`
 }
 
+// promotedAgentKinds maps signature.ID → connector slug for
+// signatures we treat as first-class agents WITHOUT setting the
+// catalog's `supported_connector` field on them.
+//
+// Why keep this separate from `SupportedConnector`: setting the
+// catalog field would flip the emitted `category` inside
+// `detectConfigPaths` from `workspace_artifact` (or `editor_extension`
+// / `desktop_app`) to `supported_connector`, which in turn changes
+// every affected signal's fingerprint. In non-managed_enterprise mode
+// the sidecar ships only lifecycle deltas, so that reclassification
+// would produce a one-time `gone`+`new` delta pair per user on every
+// host running one of these agents. This table gives us the agent
+// identity on the wire (as `agent_kind`) without disturbing the
+// existing category-level classification or the signal fingerprints.
+//
+// Only expand this table for signatures whose product IS an agent the
+// dashboards should treat as first-class. For signatures that already
+// carry `SupportedConnector` in ai_signatures.json (openclaw, codex,
+// claudecode, cursor, windsurf, …), the connector value flows through
+// directly and this table is not consulted.
+var promotedAgentKinds = map[string]string{
+	"aider":          "aider",
+	"continue":       "continue",
+	"cline":          "cline",
+	"claude-desktop": "claudedesktop",
+}
+
+// AgentKindForSignature returns the connector slug that identifies
+// this signature's owning agent (e.g. "cursor", "claudecode",
+// "aider"), or "" if the signature is not associated with a
+// first-class agent. Callers should prefer `sig.SupportedConnector`
+// when set — this helper only handles the promotion cases above.
+func AgentKindForSignature(sig AISignature) string {
+	if sig.SupportedConnector != "" {
+		return sig.SupportedConnector
+	}
+	return promotedAgentKinds[sig.ID]
+}
+
 // LoadAISignatures returns the embedded catalog after basic validation.
 func LoadAISignatures() ([]AISignature, error) {
 	raw, err := aiSignatureFS.ReadFile("ai_signatures.json")

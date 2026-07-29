@@ -245,6 +245,119 @@ JSON
   assert_eq "${got}" "0.142.0" "codex version from user-npm metadata"
 }
 
+t_claudecode_native_versions_file_variant() {
+  # QA-reported layout: newer Claude Code native installers publish each
+  # release as an executable *file* at versions/<X.Y.Z> (not a directory)
+  # and skip the `current` symlink entirely. The dispatcher lives at
+  # ~/.local/bin/claude and symlinks to ../share/claude/versions/<X.Y.Z>.
+  # Before the fix the versions/*/ scan only enumerated directories, so
+  # this layout reported an empty version and every reconcile logged
+  # "agent version not probed; using connector default hook contract".
+  local home; home="$(mktest_tmp)"
+  local vers="${home}/.local/share/claude/versions"
+  mkdir -p "${vers}"
+  : > "${vers}/2.1.220"; chmod 0755 "${vers}/2.1.220"
+  : > "${vers}/2.1.219"; chmod 0755 "${vers}/2.1.219"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.220" "claudecode picks highest versions/<X.Y.Z> when they are executable files"
+}
+
+t_claudecode_native_bin_shim_probe() {
+  # Same host shape as above, PLUS the ~/.local/bin/claude PATH shim
+  # pointing at the active version. Exercises the new bin-symlink
+  # probe end-to-end: even if the versions/ scan were removed, the
+  # shim alone should surface the active version.
+  local home; home="$(mktest_tmp)"
+  local vers="${home}/.local/share/claude/versions"
+  mkdir -p "${vers}"
+  : > "${vers}/2.1.220"; chmod 0755 "${vers}/2.1.220"
+
+  mkdir -p "${home}/.local/bin"
+  ln -s "../share/claude/versions/2.1.220" "${home}/.local/bin/claude"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.220" "claudecode resolves version via ~/.local/bin/claude PATH shim"
+}
+
+t_claudecode_native_bin_shim_helper_direct() {
+  # Direct exercise of the pure helper: absolute-target and relative-
+  # target symlinks, dangling shim, non-semver target.
+  local home; home="$(mktest_tmp)"
+  local vers="${home}/.local/share/claude/versions"
+  mkdir -p "${vers}"
+  : > "${vers}/2.1.220"; chmod 0755 "${vers}/2.1.220"
+
+  # Relative symlink (matches what the installer actually writes).
+  mkdir -p "${home}/.local/bin"
+  ln -s "../share/claude/versions/2.1.220" "${home}/.local/bin/claude"
+  local got
+  got="$(_native_claudecode_version_from_bin "${home}/.local/bin/claude")"
+  assert_eq "${got}" "2.1.220" "bin-shim helper resolves relative symlink"
+
+  # Absolute symlink variant.
+  ln -sfn "${vers}/2.1.220" "${home}/.local/bin/claude"
+  got="$(_native_claudecode_version_from_bin "${home}/.local/bin/claude")"
+  assert_eq "${got}" "2.1.220" "bin-shim helper resolves absolute symlink"
+
+  # Dangling symlink returns empty.
+  ln -sfn "${vers}/2.9.999-does-not-exist" "${home}/.local/bin/claude"
+  got="$(_native_claudecode_version_from_bin "${home}/.local/bin/claude" 2>/dev/null || true)"
+  assert_eq "${got}" "" "bin-shim helper returns empty on dangling symlink"
+
+  # Non-symlink returns empty (regular executable at that path).
+  rm -f "${home}/.local/bin/claude"
+  : > "${home}/.local/bin/claude"; chmod 0755 "${home}/.local/bin/claude"
+  got="$(_native_claudecode_version_from_bin "${home}/.local/bin/claude" 2>/dev/null || true)"
+  assert_eq "${got}" "" "bin-shim helper returns empty when path is a regular file, not a symlink"
+
+  # Non-semver target basename returns empty.
+  rm -f "${home}/.local/bin/claude"
+  mkdir -p "${vers}/nightly"
+  ln -s "${vers}/nightly" "${home}/.local/bin/claude"
+  got="$(_native_claudecode_version_from_bin "${home}/.local/bin/claude" 2>/dev/null || true)"
+  assert_eq "${got}" "" "bin-shim helper rejects non-semver target basename"
+}
+
+t_claudecode_native_bin_shim_wins_over_stale_versions() {
+  # The shim's target must always be included in the candidate pool.
+  # QA hit a variant where versions/ contained an older executable file
+  # (say a leftover 2.1.144) AND the shim pointed at the newer
+  # 2.1.220 file. Both are seen; the highest wins. This is the exact
+  # scenario where the pre-fix probe returned "" (dir-only scan skipped
+  # the file variant entirely).
+  local home; home="$(mktest_tmp)"
+  local vers="${home}/.local/share/claude/versions"
+  mkdir -p "${vers}"
+  : > "${vers}/2.1.144"; chmod 0755 "${vers}/2.1.144"
+  : > "${vers}/2.1.220"; chmod 0755 "${vers}/2.1.220"
+
+  mkdir -p "${home}/.local/bin"
+  ln -s "../share/claude/versions/2.1.220" "${home}/.local/bin/claude"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.220" "highest of versions/<file> pool + shim target wins"
+}
+
+t_claudecode_native_helper_direct_file_variant() {
+  # Direct-call parity: the from_dir() helper must accept regular
+  # files under versions/ too, mirroring the classic directory-shape
+  # test above (t_claudecode_via_native_helper_direct).
+  local base; base="$(mktest_tmp)/opt-claude"
+  mkdir -p "${base}/versions"
+  : > "${base}/versions/2.1.220"; chmod 0755 "${base}/versions/2.1.220"
+  : > "${base}/versions/2.1.219"; chmod 0755 "${base}/versions/2.1.219"
+  # Also stage a stray directory to prove both shapes coexist.
+  mkdir -p "${base}/versions/2.1.180"
+
+  local got
+  got="$(_native_claudecode_version_from_dir "${base}")"
+  assert_eq "${got}" "2.1.220" "from_dir helper picks highest across mixed dir + file version entries"
+}
+
 t_unknown_connector() {
   local got
   got="$(discover_agent_version geminicli "$(mktest_tmp)" 2>/dev/null || true)"
@@ -259,6 +372,11 @@ run_case "claudecode via native versions/*  (no symlink)"         t_claudecode_v
 run_case "claudecode native broken current symlink falls back"    t_claudecode_native_broken_current_symlink_falls_back
 run_case "claudecode native install wins over stale npm"          t_claudecode_native_wins_over_stale_npm
 run_case "claudecode native helper direct-call semantics"         t_claudecode_via_native_helper_direct
+run_case "claudecode native versions/<X.Y.Z> as executable file"  t_claudecode_native_versions_file_variant
+run_case "claudecode ~/.local/bin/claude PATH shim probe"         t_claudecode_native_bin_shim_probe
+run_case "claudecode bin-shim helper direct semantics"            t_claudecode_native_bin_shim_helper_direct
+run_case "claudecode shim + stale versions/<file> pool"           t_claudecode_native_bin_shim_wins_over_stale_versions
+run_case "claudecode from_dir helper accepts file variant"        t_claudecode_native_helper_direct_file_variant
 run_case "codex without home metadata"       t_codex_no_home_metadata_uses_system_or_empty
 run_case "codex from user npm metadata"      t_codex_from_user_npm_metadata
 run_case "codex ChatGPT.app-bundled wins over stale npm" t_codex_chatgpt_app_bundled_wins_over_npm

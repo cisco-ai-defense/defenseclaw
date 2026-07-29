@@ -3280,24 +3280,51 @@ func (p *Provider) RecordAIDiscoveryRun(ctx context.Context, source, privacyMode
 	_ = signalsTotal // summary count is carried in logs; signal counter is per-signal below.
 }
 
+// AIDiscoverySignalAttrs is the sanitized, low-cardinality attribute
+// set for one AI usage signal emission. Passed as a struct so the OTel
+// metric label surface can grow (agent_kind, item_kind, item_name)
+// without breaking positional call sites. Values that must NOT be
+// stamped on high-cardinality metrics (raw item names) are excluded
+// from the metric path in RecordAIDiscoverySignal — they only reach
+// EmitAIDiscoverySignalLog where log-record cardinality is not a
+// concern.
+type AIDiscoverySignalAttrs struct {
+	Category   string
+	Vendor     string
+	Product    string
+	State      string
+	Detector   string
+	Confidence float64
+	AgentKind  string
+	// ItemKind is bounded ("mcp_server" | "plugin" | "skill" | "rule"
+	// | ""), safe to stamp on metrics.
+	ItemKind string
+	// ItemName is unbounded (arbitrary MCP server key / plugin dir
+	// name). Emitted on log records but suppressed on metrics to keep
+	// the metric label set bounded.
+	ItemName string
+}
+
 // RecordAIDiscoverySignal records one sanitized AI usage signal.
-func (p *Provider) RecordAIDiscoverySignal(ctx context.Context, category, vendor, product, state, detector string, confidence float64) {
+func (p *Provider) RecordAIDiscoverySignal(ctx context.Context, in AIDiscoverySignalAttrs) {
 	if p == nil || !p.Enabled() || p.metrics == nil {
 		return
 	}
 	attrs := metric.WithAttributes(
-		attribute.String("signal.category", normalizeTelemetryLabel(category, "unknown")),
-		attribute.String("ai.vendor", normalizeTelemetryLabel(vendor, "unknown")),
-		attribute.String("ai.product", normalizeTelemetryLabel(product, "unknown")),
-		attribute.String("state", normalizeTelemetryLabel(state, "seen")),
-		attribute.String("detector", normalizeTelemetryLabel(detector, "unknown")),
-		attribute.String("confidence", confidenceBucket(confidence)),
+		attribute.String("signal.category", normalizeTelemetryLabel(in.Category, "unknown")),
+		attribute.String("ai.vendor", normalizeTelemetryLabel(in.Vendor, "unknown")),
+		attribute.String("ai.product", normalizeTelemetryLabel(in.Product, "unknown")),
+		attribute.String("state", normalizeTelemetryLabel(in.State, "seen")),
+		attribute.String("detector", normalizeTelemetryLabel(in.Detector, "unknown")),
+		attribute.String("confidence", confidenceBucket(in.Confidence)),
+		attribute.String("agent_kind", normalizeTelemetryLabel(in.AgentKind, "unknown")),
+		attribute.String("item_kind", normalizeTelemetryLabel(in.ItemKind, "none")),
 	)
 	p.metrics.aiDiscoverySignals.Add(ctx, 1, attrs)
-	if state == "new" || state == "changed" {
+	if in.State == "new" || in.State == "changed" {
 		p.metrics.aiDiscoveryNewSignals.Add(ctx, 1, attrs)
 	}
-	if state == "gone" {
+	if in.State == "gone" {
 		p.metrics.aiDiscoveryGoneSignals.Add(ctx, 1, attrs)
 	}
 }
@@ -3347,7 +3374,7 @@ func (p *Provider) EmitAIDiscoverySummaryLog(ctx context.Context, source, privac
 	p.logger.Emit(ctx, rec)
 }
 
-func (p *Provider) EmitAIDiscoverySignalLog(ctx context.Context, category, vendor, product, state, detector string, confidence float64) {
+func (p *Provider) EmitAIDiscoverySignalLog(ctx context.Context, in AIDiscoverySignalAttrs) {
 	if !p.LogsEnabled() {
 		return
 	}
@@ -3361,13 +3388,22 @@ func (p *Provider) EmitAIDiscoverySignalLog(ctx context.Context, category, vendo
 	rec.AddAttributes(
 		otellog.String("event.name", "defenseclaw.ai.discovery.signal"),
 		otellog.String("event.domain", "defenseclaw.ai_visibility"),
-		otellog.String("signal.category", normalizeTelemetryLabel(category, "unknown")),
-		otellog.String("ai.vendor", normalizeTelemetryLabel(vendor, "unknown")),
-		otellog.String("ai.product", normalizeTelemetryLabel(product, "unknown")),
-		otellog.String("state", normalizeTelemetryLabel(state, "seen")),
-		otellog.String("detector", normalizeTelemetryLabel(detector, "unknown")),
-		otellog.String("confidence", confidenceBucket(confidence)),
+		otellog.String("signal.category", normalizeTelemetryLabel(in.Category, "unknown")),
+		otellog.String("ai.vendor", normalizeTelemetryLabel(in.Vendor, "unknown")),
+		otellog.String("ai.product", normalizeTelemetryLabel(in.Product, "unknown")),
+		otellog.String("state", normalizeTelemetryLabel(in.State, "seen")),
+		otellog.String("detector", normalizeTelemetryLabel(in.Detector, "unknown")),
+		otellog.String("confidence", confidenceBucket(in.Confidence)),
 	)
+	if in.AgentKind != "" {
+		rec.AddAttributes(otellog.String("defenseclaw.ai.discovery.agent_kind", in.AgentKind))
+	}
+	if in.ItemKind != "" {
+		rec.AddAttributes(otellog.String("defenseclaw.ai.discovery.item_kind", in.ItemKind))
+	}
+	if in.ItemName != "" {
+		rec.AddAttributes(otellog.String("defenseclaw.ai.discovery.item_name", in.ItemName))
+	}
 	p.logger.Emit(ctx, rec)
 }
 

@@ -96,12 +96,35 @@ const (
 //     `ai-sdks` signature into per-component (e.g. openai==1.45.0) rows
 //     without dropping data on restart.
 //
+// v3 changed the fingerprint composition for the four item-level
+// detectors (`mcp_server`, `plugin`, `rule`, `skill`): those now fold
+// the per-item name into the fingerprint so a single `mcp.json` with
+// two servers produces two distinct signal_ids instead of collapsing
+// to one. To avoid emitting a spurious `gone` flood for every
+// pre-upgrade file-level signal, Load() drops v2-era stored entries in
+// those four categories during the v2→v3 migration — they will simply
+// reappear as item-level `new` signals on the first post-upgrade scan.
+// The remaining twelve categories keep their fingerprints and their
+// stored entries, so no lifecycle churn for them.
+//
 // v1 state files are migrated transparently on Load() — old entries land
-// in v2 with empty EvidenceHash, which makes the first post-upgrade scan
+// with empty EvidenceHash, which makes the first post-upgrade scan
 // behave like a `seen` (we explicitly skip the `!=` comparison when the
 // stored hash is empty so an upgrade does not produce a flood of
 // `changed` events the operator never asked for).
-const aiDiscoveryStateVersion = 2
+const aiDiscoveryStateVersion = 3
+
+// itemLevelCategories are the categories whose fingerprint composition
+// changed at state version 3 (see aiDiscoveryStateVersion above).
+// v2-era stored entries in these categories are dropped on load so the
+// v2→v3 migration does not produce a spurious `gone` event per
+// pre-upgrade file-level signal.
+var itemLevelCategories = map[string]bool{
+	SignalMCPServer: true,
+	SignalPlugin:    true,
+	SignalRule:      true,
+	SignalSkill:     true,
+}
 
 var allowedAISignalCategories = map[string]bool{
 	SignalSupportedConnector: true,
@@ -280,6 +303,20 @@ type AISignal struct {
 	Product            string          `json:"product"`
 	Category           string          `json:"category"`
 	SupportedConnector string          `json:"supported_connector,omitempty"`
+	// AgentKind is the effective first-class connector identity for
+	// this signal — derived from the parent AISignature's
+	// SupportedConnector, or from the agent-promotion lookup table for
+	// signatures we treat as agents without setting SupportedConnector
+	// (see agentKindForSignature in ai_catalog.go). Preserved on the
+	// wire via gatewaylog.AIDiscoveryPayload.AgentKind.
+	AgentKind string `json:"agent_kind,omitempty"`
+	// ItemKind / ItemName / ItemAttributes are non-empty on
+	// item-level signals emitted by detectMCPPaths / detectPlugins /
+	// detectRules / detectSkills. See the corresponding wire fields on
+	// gatewaylog.AIDiscoveryPayload for shape and privacy notes.
+	ItemKind       string            `json:"item_kind,omitempty"`
+	ItemName       string            `json:"item_name,omitempty"`
+	ItemAttributes map[string]string `json:"item_attributes,omitempty"`
 	Confidence         float64         `json:"confidence"`
 	State              string          `json:"state"`
 	Detector           string          `json:"detector"`
@@ -1360,13 +1397,134 @@ func (s *ContinuousDiscoveryService) detectConfigPaths() []AISignal {
 	return out
 }
 
+// mcpServersFromFile parses an MCP config file and returns the list of
+// declared server entries. It tolerates both top-level shapes DefenseClaw
+// supports today:
+//   - the plain-object form ({"github": {...}, "playwright": {...}})
+//   - the wrapped form ({"mcpServers": {"github": {...}}} — Cursor,
+//     Claude Desktop, Windsurf, VS Code)
+//   - the array form ([{"name": "github", ...}, ...] — Codex)
+//
+// Errors are returned but callers should treat them as non-fatal (a
+// malformed mcp.json still produces the fallback file-level signal via
+// the empty return slice path).
+func mcpServersFromFile(path string, maxBytes int64) ([]config.MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if maxBytes > 0 && int64(len(data)) > maxBytes {
+		data = data[:maxBytes]
+	}
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return nil, nil
+	}
+	// Array form.
+	if trimmed[0] == '[' {
+		return config.ParseMCPServersJSONArray(trimmed)
+	}
+	// Object form — either the wrapped `{"mcpServers": {...}}` shape or
+	// a bare `{"name": {...}}` map. Peek at the top level cheaply so we
+	// know which slice to pass to the object parser.
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &top); err != nil {
+		return nil, err
+	}
+	for _, key := range []string{"mcpServers", "servers"} {
+		if inner, ok := top[key]; ok {
+			innerTrim := bytes.TrimSpace(inner)
+			if len(innerTrim) == 0 {
+				continue
+			}
+			if innerTrim[0] == '[' {
+				return config.ParseMCPServersJSONArray(innerTrim)
+			}
+			return config.ParseMCPServersJSON(innerTrim)
+		}
+	}
+	// Bare object — pass the whole file. If it turns out to be an
+	// unrelated JSON blob the parser returns an empty slice (no server
+	// keys), which is fine — the caller falls back to the file-level
+	// signal.
+	return config.ParseMCPServersJSON(trimmed)
+}
+
+// urlHost extracts the host portion of a URL for the safe
+// item_attributes hint. Returns "" for parse failure or empty input.
+func urlHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// mcpItemAttributes builds the bounded, structural attribute map that
+// ships in AISignal.ItemAttributes for an MCP-server item. Deliberately
+// scoped to metadata that is safe to leave in-clear on the wire:
+//   - transport ("stdio", "sse", "http", ...)
+//   - command_basename (the basename of the launcher — "npx", "python",
+//     "docker" — not the full command line or its args)
+//   - url_host (the host portion of the remote URL, if any)
+//   - disabled ("true" | "false") so dashboards can hide disabled servers
+//
+// Raw command / args / env / URL / headers / OAuth are intentionally
+// omitted. Those can be user-controlled and belong behind the existing
+// `evidence` privacy gate, not on top-level payload fields.
+func mcpItemAttributes(entry config.MCPServerEntry) map[string]string {
+	attrs := map[string]string{}
+	if entry.Transport != "" {
+		attrs["transport"] = entry.Transport
+	}
+	if entry.Command != "" {
+		attrs["command_basename"] = filepath.Base(entry.Command)
+	}
+	if host := urlHost(entry.URL); host != "" {
+		attrs["url_host"] = host
+	}
+	if entry.Disabled {
+		attrs["disabled"] = "true"
+	}
+	if len(attrs) == 0 {
+		return nil
+	}
+	return attrs
+}
+
 func (s *ContinuousDiscoveryService) detectMCPPaths() []AISignal {
 	var out []AISignal
 	for _, sig := range s.catalog {
 		for _, candidate := range sig.MCPPaths {
 			for _, path := range s.expandCandidatePath(candidate) {
-				if pathExists(path) {
+				if !pathExists(path) {
+					continue
+				}
+				// Item-level: parse the file and emit one signal per
+				// declared MCP server. On any parse/read error, or if
+				// the file declares no servers, fall back to the
+				// file-level signal so operators still see the
+				// presence hit.
+				entries, err := mcpServersFromFile(path, s.opts.MaxFileBytes)
+				if err != nil || len(entries) == 0 {
 					out = append(out, s.signalFromPath(sig, SignalMCPServer, "mcp", path))
+					continue
+				}
+				for _, entry := range entries {
+					name := strings.TrimSpace(entry.Name)
+					if name == "" {
+						continue
+					}
+					item := &aiItemInfo{
+						Kind:       "mcp_server",
+						Name:       name,
+						Attributes: mcpItemAttributes(entry),
+					}
+					out = append(out, s.signalFromPathItem(sig, SignalMCPServer, "mcp", path, item))
 				}
 			}
 		}
@@ -1374,88 +1532,115 @@ func (s *ContinuousDiscoveryService) detectMCPPaths() []AISignal {
 	return out
 }
 
-// dirHasEntry reports whether path exists AND, if it's a directory,
-// contains at least one entry. Non-directory targets (a file at the
-// path) count as "populated" so operator-authored single-file surfaces
-// (e.g. `~/.claude/CLAUDE.md` used as a rule scalar) still trigger.
-// Empty directories return false — the "reserved for future use" case
-// we don't want polluting the dashboard.
+// detectSkills / detectRules / detectPlugins mirror detectMCPPaths and
+// emit one signal per child entry inside the matched directory. If the
+// target is a single file rather than a directory (the `~/.claude/CLAUDE.md`
+// case), a single item-level signal is emitted with the file basename as
+// the item name. Empty directories produce nothing — that is the
+// "reserved for future use" case the plain presence check would have
+// swept up.
 //
-// Uses ReadDir with a bounded read so a pathological directory (millions
-// of entries, e.g. `~/.cache`) doesn't stall a scan: os.ReadDir slurps
-// the whole thing, but here we only need to know "is len > 0" so we
-// call the lower-level (*File).ReadDir(1) shortcut which stops after
-// the first entry.
-func dirHasEntry(path string) bool {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	if !fi.IsDir() {
-		return true
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	// ReadDir(1) returns io.EOF when the directory is empty; any
-	// successful read of >=1 entry proves populated.
-	entries, err := f.ReadDir(1)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return false
-	}
-	return len(entries) > 0
-}
-
-// detectSkills / detectRules / detectPlugins mirror detectMCPPaths but
-// require the target path to contain at least one entry (see
-// dirHasEntry). This distinguishes "surface configured with skills /
-// rules / plugins" from "the agent left an empty scaffold directory".
 // The three functions are kept separate rather than parameterized so
 // each maps cleanly to a signature-catalog field name and a category
 // constant — trivial to grep, trivial to disable via
 // disabled_signature_ids per surface.
-func (s *ContinuousDiscoveryService) detectSkills() []AISignal {
+
+// maxItemsPerDirectory caps how many children a plugin/skill/rule
+// directory contributes to a single scan. The bound protects the scan
+// budget from a pathologically large directory (thousands of skill
+// files) while still comfortably covering realistic layouts (a Codex
+// plugins folder holds a handful of entries).
+const maxItemsPerDirectory = 256
+
+// dirItems returns up to maxItemsPerDirectory entries of the directory
+// at path, or a single synthetic "file"/"symlink" entry when the path
+// is not a directory. The second return is true iff the path exists
+// and yielded at least one item.
+func dirItems(path string) ([]dirItem, bool) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, false
+	}
+	if !fi.IsDir() {
+		// Single-file target ("~/.claude/CLAUDE.md" etc.) — treat as
+		// one item named by its basename.
+		return []dirItem{{Name: filepath.Base(path), IsDir: false}}, true
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	entries, err := f.ReadDir(maxItemsPerDirectory)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, false
+	}
+	if len(entries) == 0 {
+		return nil, false
+	}
+	out := make([]dirItem, 0, len(entries))
+	for _, entry := range entries {
+		name := strings.TrimSpace(entry.Name())
+		if name == "" || strings.HasPrefix(name, ".") {
+			// Skip hidden entries (`.DS_Store`, editor swap files);
+			// they don't represent user-authored skills/rules/plugins.
+			continue
+		}
+		out = append(out, dirItem{Name: name, IsDir: entry.IsDir()})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+type dirItem struct {
+	Name  string
+	IsDir bool
+}
+
+// itemDirDetector is the shared body of the plugin/rule/skill
+// detectors. `paths` selects the signature-catalog field (SkillPaths /
+// RulePaths / PluginPaths), category is the SignalPlugin / SignalRule /
+// SignalSkill constant, detector is the wire "detector" label.
+func (s *ContinuousDiscoveryService) itemDirDetector(paths func(AISignature) []string, category, detector, itemKind string) []AISignal {
 	var out []AISignal
 	for _, sig := range s.catalog {
-		for _, candidate := range sig.SkillPaths {
+		for _, candidate := range paths(sig) {
 			for _, path := range s.expandCandidatePath(candidate) {
-				if dirHasEntry(path) {
-					out = append(out, s.signalFromPath(sig, SignalSkill, "skill", path))
+				items, ok := dirItems(path)
+				if !ok {
+					continue
+				}
+				for _, entry := range items {
+					attrs := map[string]string{"child_type": "file"}
+					if entry.IsDir {
+						attrs["child_type"] = "dir"
+					}
+					item := &aiItemInfo{
+						Kind:       itemKind,
+						Name:       entry.Name,
+						Attributes: attrs,
+					}
+					out = append(out, s.signalFromPathItem(sig, category, detector, path, item))
 				}
 			}
 		}
 	}
 	return out
+}
+
+func (s *ContinuousDiscoveryService) detectSkills() []AISignal {
+	return s.itemDirDetector(func(sig AISignature) []string { return sig.SkillPaths }, SignalSkill, "skill", "skill")
 }
 
 func (s *ContinuousDiscoveryService) detectRules() []AISignal {
-	var out []AISignal
-	for _, sig := range s.catalog {
-		for _, candidate := range sig.RulePaths {
-			for _, path := range s.expandCandidatePath(candidate) {
-				if dirHasEntry(path) {
-					out = append(out, s.signalFromPath(sig, SignalRule, "rule", path))
-				}
-			}
-		}
-	}
-	return out
+	return s.itemDirDetector(func(sig AISignature) []string { return sig.RulePaths }, SignalRule, "rule", "rule")
 }
 
 func (s *ContinuousDiscoveryService) detectPlugins() []AISignal {
-	var out []AISignal
-	for _, sig := range s.catalog {
-		for _, candidate := range sig.PluginPaths {
-			for _, path := range s.expandCandidatePath(candidate) {
-				if dirHasEntry(path) {
-					out = append(out, s.signalFromPath(sig, SignalPlugin, "plugin", path))
-				}
-			}
-		}
-	}
-	return out
+	return s.itemDirDetector(func(sig AISignature) []string { return sig.PluginPaths }, SignalPlugin, "plugin", "plugin")
 }
 
 func (s *ContinuousDiscoveryService) detectBinaries() []AISignal {
@@ -2333,11 +2518,39 @@ func (s *ContinuousDiscoveryService) detectShellHistory() ([]AISignal, int, erro
 }
 
 func (s *ContinuousDiscoveryService) signalFromPath(sig AISignature, category, detector, path string) AISignal {
+	return s.signalFromPathItem(sig, category, detector, path, nil)
+}
+
+// aiItemInfo carries per-item detail for the item-level detectors
+// (MCP servers inside a mcp.json, plugin/skill/rule children inside a
+// directory). It is threaded through signalFromEvidenceWithComponent
+// so the item name folds into the fingerprint (yielding one distinct
+// signal_id per server / plugin / skill / rule) and lands on the wire
+// via AISignal.ItemKind / ItemName / ItemAttributes.
+//
+// Kind is one of "mcp_server" | "plugin" | "skill" | "rule". Name is
+// the sub-item identifier (mcp.json key, child basename). Attributes
+// is a bounded structural hint map — DO NOT put user-controlled
+// values (raw commands, args, env, URLs) in here. Prefer the existing
+// evidence gate for anything privacy-sensitive.
+type aiItemInfo struct {
+	Kind       string
+	Name       string
+	Attributes map[string]string
+}
+
+// signalFromPathItem is the item-level variant of signalFromPath. When
+// item is nil the behaviour is identical to signalFromPath (one signal
+// per matched path). When item is non-nil the returned signal carries
+// ItemKind / ItemName / ItemAttributes and its fingerprint includes
+// the item name so item-level rows from the same file/directory
+// remain distinct across scans.
+func (s *ContinuousDiscoveryService) signalFromPathItem(sig AISignature, category, detector, path string, item *aiItemInfo) AISignal {
 	ev := AIEvidence{Type: detector, Basename: filepath.Base(path), PathHash: hashPath(path)}
 	if s.opts.StoreRawLocalPaths {
 		ev.RawPath = path
 	}
-	out := s.signalFromEvidence(sig, category, detector, []AIEvidence{ev})
+	out := s.signalFromEvidenceWithComponentAndItem(sig, category, detector, []AIEvidence{ev}, nil, item)
 	// "Last active" for path-evidence detectors (config / binary /
 	// MCP / extension) defaults to the file's modification time when
 	// available. That's a meaningful liveness proxy: an `~/.codex/`
@@ -2370,6 +2583,17 @@ func (s *ContinuousDiscoveryService) signalFromEvidence(sig AISignature, categor
 // (`openai` vs `langchain` vs `llama-index` under `ai-sdks`) get
 // distinct, stable fingerprints.
 func (s *ContinuousDiscoveryService) signalFromEvidenceWithComponent(sig AISignature, category, detector string, evidence []AIEvidence, component *AIComponent) AISignal {
+	return s.signalFromEvidenceWithComponentAndItem(sig, category, detector, evidence, component, nil)
+}
+
+// signalFromEvidenceWithComponentAndItem is the item-aware variant.
+// When item is non-nil the item's Kind+Name folds into the fingerprint
+// so per-item rows from the same evidence (each MCP server inside a
+// single mcp.json; each plugin/skill/rule child inside a single
+// directory) get distinct, stable signal_ids across scans. The item
+// metadata also lands on the wire via AISignal.ItemKind / ItemName /
+// ItemAttributes.
+func (s *ContinuousDiscoveryService) signalFromEvidenceWithComponentAndItem(sig AISignature, category, detector string, evidence []AIEvidence, component *AIComponent, item *aiItemInfo) AISignal {
 	sort.Slice(evidence, func(i, j int) bool {
 		return evidence[i].Type+evidence[i].PathHash+evidence[i].ValueHash < evidence[j].Type+evidence[j].PathHash+evidence[j].ValueHash
 	})
@@ -2380,6 +2604,14 @@ func (s *ContinuousDiscoveryService) signalFromEvidenceWithComponent(sig AISigna
 		// in the fingerprint so the same manifest matching multiple
 		// AI SDK packages produces distinct, stable per-package rows.
 		fpInputs = append(fpInputs, "component:"+strings.ToLower(component.Ecosystem)+"/"+strings.ToLower(component.Name))
+	}
+	if item != nil && item.Name != "" {
+		// Item name (kind-qualified, lowercased) participates in the
+		// fingerprint so item-level rows from the same evidence stay
+		// distinct across scans. Kind is included so a plugin named
+		// "github" and an MCP server named "github" from the same
+		// agent cannot collide.
+		fpInputs = append(fpInputs, "item:"+strings.ToLower(item.Kind)+"/"+strings.ToLower(item.Name))
 	}
 	fp := hashValue(strings.Join(fpInputs, "|"))
 	product := sig.Name
@@ -2400,12 +2632,26 @@ func (s *ContinuousDiscoveryService) signalFromEvidenceWithComponent(sig AISigna
 		Product:            product,
 		Category:           category,
 		SupportedConnector: sig.SupportedConnector,
+		AgentKind:          AgentKindForSignature(sig),
 		Confidence:         sig.Confidence,
 		Detector:           detector,
 		Source:             "sidecar",
 		EvidenceHash:       evidenceHash,
 		Evidence:           evidence,
 		Component:          component,
+	}
+	if item != nil {
+		out.ItemKind = item.Kind
+		out.ItemName = item.Name
+		if len(item.Attributes) > 0 {
+			// Defensive copy so callers can safely reuse or mutate
+			// their local attribute map after emitting.
+			attrs := make(map[string]string, len(item.Attributes))
+			for k, v := range item.Attributes {
+				attrs[k] = v
+			}
+			out.ItemAttributes = attrs
+		}
 	}
 	if component != nil && component.Version != "" {
 		// Surface the parsed lockfile version on the existing
@@ -2550,8 +2796,19 @@ func (s *ContinuousDiscoveryService) emitTelemetry(ctx context.Context, report A
 		if sig.State != AIStateNew && sig.State != AIStateChanged && sig.State != AIStateGone {
 			continue
 		}
-		s.otel.RecordAIDiscoverySignal(ctx, sig.Category, sig.Vendor, sig.Product, sig.State, sig.Detector, sig.Confidence)
-		s.otel.EmitAIDiscoverySignalLog(ctx, sig.Category, sig.Vendor, sig.Product, sig.State, sig.Detector, sig.Confidence)
+		otelAttrs := telemetry.AIDiscoverySignalAttrs{
+			Category:   sig.Category,
+			Vendor:     sig.Vendor,
+			Product:    sig.Product,
+			State:      sig.State,
+			Detector:   sig.Detector,
+			Confidence: sig.Confidence,
+			AgentKind:  sig.AgentKind,
+			ItemKind:   sig.ItemKind,
+			ItemName:   sig.ItemName,
+		}
+		s.otel.RecordAIDiscoverySignal(ctx, otelAttrs)
+		s.otel.EmitAIDiscoverySignalLog(ctx, otelAttrs)
 	}
 	// Component-level emission off the SHARED snapshot so every
 	// downstream consumer sees byte-identical identity / presence
@@ -3073,17 +3330,21 @@ type PayloadOpts struct {
 // payloads identical to what the sidecar emits.
 func BuildAIDiscoveryPayload(sig AISignal, scanID string, opts PayloadOpts) *gatewaylog.AIDiscoveryPayload {
 	out := &gatewaylog.AIDiscoveryPayload{
-		ScanID:        scanID,
-		SignalID:      sig.SignalID,
-		Category:      sig.Category,
-		Vendor:        sig.Vendor,
-		Product:       sig.Product,
-		Confidence:    sig.Confidence,
-		State:         sig.State,
-		EvidenceTypes: sig.EvidenceTypes,
-		PathHashes:    sig.PathHashes,
-		Basenames:     sig.Basenames,
-		WorkspaceHash: sig.WorkspaceHash,
+		ScanID:         scanID,
+		SignalID:       sig.SignalID,
+		Category:       sig.Category,
+		Vendor:         sig.Vendor,
+		Product:        sig.Product,
+		Confidence:     sig.Confidence,
+		State:          sig.State,
+		EvidenceTypes:  sig.EvidenceTypes,
+		PathHashes:     sig.PathHashes,
+		Basenames:      sig.Basenames,
+		WorkspaceHash:  sig.WorkspaceHash,
+		AgentKind:      sig.AgentKind,
+		ItemKind:       sig.ItemKind,
+		ItemName:       sig.ItemName,
+		ItemAttributes: sig.ItemAttributes,
 	}
 	// Model filenames commonly contain the same private repository/model
 	// identity as sig.Model.ID. Do not let that identity bypass the extended
@@ -3477,11 +3738,27 @@ func (s *AIStateStore) Load() (aiStateFile, error) {
 	// version state file (e.g. written by a newer gateway and then
 	// read by an older one) doesn't silently look like an empty
 	// inventory and produce spurious "all new" change events.
-	if out.Version != 1 && out.Version != aiDiscoveryStateVersion {
-		return aiStateFile{}, fmt.Errorf("ai-discovery state file at %s has unsupported version %d (expected 1 or %d)", s.path, out.Version, aiDiscoveryStateVersion)
+	if out.Version != 1 && out.Version != 2 && out.Version != aiDiscoveryStateVersion {
+		return aiStateFile{}, fmt.Errorf("ai-discovery state file at %s has unsupported version %d (expected 1, 2, or %d)", s.path, out.Version, aiDiscoveryStateVersion)
 	}
 	if out.Signals == nil {
 		out.Signals = map[string]aiStoredSignal{}
+	}
+	// v2 → v3 migration: drop pre-upgrade stored entries in the four
+	// categories whose fingerprint composition changed to include the
+	// per-item name. If we kept these entries, every one of them would
+	// be seen as `gone` on the first post-upgrade scan (their file-level
+	// fingerprint no longer matches any newly-emitted item-level
+	// fingerprint), producing a one-time flood of gone-events. Dropping
+	// them silently means the first post-upgrade scan re-baselines
+	// those categories as `new` at item granularity, which is the
+	// expected behaviour documented on aiDiscoveryStateVersion.
+	if out.Version < aiDiscoveryStateVersion {
+		for fp, stored := range out.Signals {
+			if itemLevelCategories[stored.AISignal.Category] {
+				delete(out.Signals, fp)
+			}
+		}
 	}
 	// Rehydrate the in-memory AISignal.{EvidenceHash,Evidence} from
 	// their stored mirrors so the rest of the code path can keep
