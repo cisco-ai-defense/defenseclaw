@@ -690,6 +690,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 50
     permissions:
+      # Download the sealed candidate from its producing run and check out the
+      # repository containing the replay validator and signature verifier.
       actions: read
       contents: read
     env:

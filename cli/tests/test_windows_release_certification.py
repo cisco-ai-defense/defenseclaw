@@ -582,6 +582,12 @@ def test_windows_release_validator_can_replay_an_exact_failed_candidate() -> Non
         "actions": "read",
         "contents": "read",
     }
+    assert replay["env"] == {
+        "REPLAY_RUN_ID": "${{ inputs.release_candidate_replay_run_id }}",
+        "REPLAY_ARTIFACT": "${{ inputs.release_candidate_replay_artifact }}",
+        "REPLAY_VERSION": "${{ inputs.release_candidate_replay_version }}",
+        "REPLAY_COMMIT": "${{ inputs.release_candidate_replay_commit }}",
+    }
     assert "github.event_name == 'workflow_dispatch'" in replay["if"]
     assert "inputs.release_candidate_replay_run_id != ''" in replay["if"]
 
