@@ -311,6 +311,7 @@ def test_complete_setup_acl_accepts_only_public_root_administrator_authority(
             "_windows_current_user_sid",
             return_value=current_sid,
         ),
+        patch.object(file_permissions.os, "name", "nt"),
         patch.object(file_permissions, "reject_reparse_path"),
     ):
         native._validate_private_path(
