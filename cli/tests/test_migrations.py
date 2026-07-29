@@ -27,7 +27,7 @@ import unittest
 from unittest.mock import patch
 
 import yaml
-from defenseclaw.file_permissions import set_file_mode
+from defenseclaw.file_permissions import protect_private_file, set_file_mode
 from defenseclaw.migrations import (
     _LEGACY_FLAT_REGO_FILENAMES,
     MigrationContext,
@@ -671,11 +671,14 @@ class TestMigrate040PermsTighten(unittest.TestCase):
             msg=ctx.changes,
         )
 
-    def test_noop_when_already_0o600(self):
+    def test_noop_when_already_private(self):
         device_key = os.path.join(self.data_dir, "device.key")
         with open(device_key, "w") as f:
             f.write("secretkey")
-        os.chmod(device_key, 0o600)
+        if os.name == "nt":
+            protect_private_file(device_key)
+        else:
+            os.chmod(device_key, 0o600)
 
         ctx = _ctx(self.tmp, self.data_dir)
         _migrate_0_4_0(ctx)
