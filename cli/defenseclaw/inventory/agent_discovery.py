@@ -331,7 +331,7 @@ def _collect_node_manager_pkg_versions(
     return out
 
 
-def _native_claudecode_version_from_dir(base: str) -> tuple[str, str]:
+def _native_claudecode_version_from_dir(base: str) -> list[tuple[str, str]]:
     """Read Claude Code's native-installer layout under ``base``.
 
     Matches ``_native_claudecode_version_from_dir`` in
@@ -345,49 +345,31 @@ def _native_claudecode_version_from_dir(base: str) -> tuple[str, str]:
     missing or nothing looks like a semver.
     """
     if not base or not os.path.isdir(base):
-        return "", ""
+        return []
     current = os.path.join(base, "current")
     if os.path.islink(current) and os.path.exists(current):
         target = os.readlink(current)
         candidate = os.path.basename(target)
         # Same regex tolerance as installer_lib.sh: accept anything
         # that starts X.Y.Z, allow the usual prerelease / build tails.
+        # `current` is the authoritative user choice (survives
+        # `claude version rollback`), so it wins over the versions/*
+        # scan and short-circuits enumeration.
         if candidate and candidate[0].isdigit():
-            return f"{base}/current -> {candidate}", candidate
+            return [(f"{base}/current -> {candidate}", candidate)]
     versions_dir = os.path.join(base, "versions")
+    out: list[tuple[str, str]] = []
     if os.path.isdir(versions_dir):
-        entries: list[str] = []
+        # No `current` pointer: return one tuple per candidate rather
+        # than pre-picking with a local sort key. The naive digit-prefix
+        # sort here would put "3.0.0-alpha" ahead of the stable "2.1.144"
+        # and starve pick_highest_supported (the authoritative
+        # comparator that understands prerelease tails) of the stable
+        # entry.
         for name in os.listdir(versions_dir):
             if name and name[0].isdigit():
-                entries.append(name)
-        if entries:
-            # Ordered by ``pick_highest_supported`` at the caller; we
-            # just report every version we found. Return one tuple per
-            # candidate so pre-releases are ordered correctly.
-            highest = max(entries, key=_version_sort_key)
-            return f"{versions_dir}/{highest}", highest
-    return "", ""
-
-
-def _version_sort_key(raw: str) -> tuple[int, ...]:
-    """Lightweight sort key used only inside the native-installer probe.
-
-    ``pick_highest_supported`` is the authoritative comparator for the
-    final winner across all channels; this helper just picks the
-    highest entry under ``versions/`` before feeding it upstream. Any
-    string that doesn't look like a semver sorts to ``(0,)`` so it
-    loses to real versions.
-    """
-    parts: list[int] = []
-    for token in raw.split("."):
-        digits = ""
-        for ch in token:
-            if ch.isdigit():
-                digits += ch
-            else:
-                break
-        parts.append(int(digits) if digits else 0)
-    return tuple(parts) or (0,)
+                out.append((f"{versions_dir}/{name}", name))
+    return out
 
 
 def _collect_claudecode_versions(home: str) -> list[tuple[str, str]]:
@@ -407,9 +389,7 @@ def _collect_claudecode_versions(home: str) -> list[tuple[str, str]]:
         "/opt/claude",
         "/usr/local/share/claude",
     ):
-        source, version = _native_claudecode_version_from_dir(base)
-        if version:
-            out.append((source, version))
+        out.extend(_native_claudecode_version_from_dir(base))
     for pkg in (
         f"{home}/.npm-global/lib/node_modules/@anthropic-ai/claude-code/package.json",
         "/usr/local/lib/node_modules/@anthropic-ai/claude-code/package.json",

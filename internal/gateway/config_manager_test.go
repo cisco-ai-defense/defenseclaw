@@ -848,7 +848,8 @@ func TestConfigManagerClassifyDistinguishesFiles(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, config.DefaultConfigName)
 	envPath := filepath.Join(dir, "env_config.json")
-	mgr := &ConfigManager{path: filepath.Clean(cfgPath), envConfigPath: envPath}
+	mgr := &ConfigManager{path: filepath.Clean(cfgPath)}
+	mgr.SetEnvConfigPath(envPath)
 
 	if got := mgr.classify(cfgPath); got != "config" {
 		t.Fatalf("classify(config.yaml) = %q, want \"config\"", got)
@@ -860,7 +861,7 @@ func TestConfigManagerClassifyDistinguishesFiles(t *testing.T) {
 		t.Fatalf("classify(unrelated) = %q, want empty", got)
 	}
 	// Empty envConfigPath: env_config.json events should be ignored.
-	mgr.envConfigPath = ""
+	mgr.SetEnvConfigPath("")
 	if got := mgr.classify(envPath); got != "" {
 		t.Fatalf("classify(env_config.json) with unset path = %q, want empty (opensource-mode guard)", got)
 	}

@@ -79,17 +79,24 @@ t_claudecode_probe_picks_nvm_over_stale_homebrew() {
 }
 
 t_claudecode_probe_reads_native_installer_current_symlink() {
-  local home tmp base versions out
+  # Verifies the "current symlink wins over higher versions/*/" contract
+  # of the native-layout probe. Exercised directly against
+  # _native_claudecode_version_from_dir with a caller-supplied base dir
+  # so a real Claude Code install under /opt/claude,
+  # /usr/local/share/claude, /usr/local/bin/claude, or
+  # /opt/homebrew/bin/claude on the dev box or CI runner cannot leak
+  # into the assertion (discover_agent_version probes those absolute
+  # roots unconditionally and they aren't sandboxable).
+  local tmp base versions out
   tmp="$(mktest_tmp)"
-  home="${tmp}/home"
-  base="${home}/.local/share/claude"
+  base="${tmp}/home/.local/share/claude"
   versions="${base}/versions"
   mkdir -p "${versions}/2.5.0" "${versions}/2.1.144"
   # `current` symlink points at 2.1.144 even though 2.5.0 is present —
   # simulates a user who ran `claude version rollback`.
   ln -s "${versions}/2.1.144" "${base}/current"
 
-  out="$(discover_agent_version claudecode "${home}")"
+  out="$(_native_claudecode_version_from_dir "${base}")"
   assert_eq "${out}" "2.1.144" "current symlink wins over higher versions/*/"
 }
 

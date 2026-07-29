@@ -349,7 +349,11 @@ _collect_node_manager_pkg_versions() {
     "${home}"/.nvm/versions/node/*/lib/node_modules/"${relpath}"
     "${home}"/.local/share/fnm/node-versions/*/installation/lib/node_modules/"${relpath}"
     "${home}"/.asdf/installs/nodejs/*/.npm/lib/node_modules/"${relpath}"
-    "${home}"/.volta/tools/image/packages/"${npm_scope}"/"${pkg}"/*/package.json
+    # Volta's package image layout is:
+    #   ~/.volta/tools/image/packages/<scope>/<pkg>/<version>/lib/node_modules/<scope>/<pkg>/package.json
+    # An earlier iteration stopped at `<version>/package.json` and
+    # silently missed every scoped Volta install.
+    "${home}"/.volta/tools/image/packages/"${npm_scope}"/"${pkg}"/*/lib/node_modules/"${relpath}"
   )
   local candidate v
   for candidate in "${roots[@]}"; do
@@ -803,7 +807,11 @@ _valid_aid_endpoint_url() {
   # -- the sync-guard test in TestValidateAIDefenseEndpoint fails CI if
   # either side loosens its checks.
   local re_cisco='^https://[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*\.cisco\.com(:[0-9]+)?$'
-  local re_loopback='^https://(localhost|127\.0\.0\.1)(:[0-9]+)?$'
+  # Loopback: IPv4/hostname bare, or IPv6 in bracketed URL form. The Go
+  # validator's u.Hostname() unwraps the brackets, so validateAIDefense
+  # Endpoint accepts https://[::1] and https://[::1]:8080 as loopback;
+  # the shell needs the same coverage or the sync-guard test drifts.
+  local re_loopback='^https://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?$'
   if [[ "${candidate}" =~ ${re_cisco} ]] || [[ "${candidate}" =~ ${re_loopback} ]]; then
     return 0
   fi

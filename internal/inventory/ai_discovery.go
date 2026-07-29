@@ -1414,7 +1414,12 @@ func mcpServersFromFile(path string, maxBytes int64) ([]config.MCPServerEntry, e
 		return nil, err
 	}
 	if maxBytes > 0 && int64(len(data)) > maxBytes {
-		data = data[:maxBytes]
+		// Reject explicitly rather than truncating: a JSON document
+		// clipped mid-object virtually always fails to parse, and the
+		// caller would fall through to the file-level signal with a
+		// generic "malformed" reason. An explicit error lets the log
+		// line say what actually happened.
+		return nil, fmt.Errorf("mcpServersFromFile: %s exceeds max %d bytes", path, maxBytes)
 	}
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 {
@@ -1474,7 +1479,9 @@ func urlHost(raw string) string {
 //   - command_basename (the basename of the launcher — "npx", "python",
 //     "docker" — not the full command line or its args)
 //   - url_host (the host portion of the remote URL, if any)
-//   - disabled ("true" | "false") so dashboards can hide disabled servers
+//   - disabled ("true", present only when the server is disabled;
+//     absent means enabled — dashboards should filter with
+//     `disabled == "true"` or `NOT EXISTS(disabled)`, not `== "false"`)
 //
 // Raw command / args / env / URL / headers / OAuth are intentionally
 // omitted. Those can be user-controlled and belong behind the existing
@@ -1517,10 +1524,21 @@ func (s *ContinuousDiscoveryService) detectMCPPaths() []AISignal {
 					out = append(out, s.signalFromPath(sig, SignalMCPServer, "mcp", path))
 					continue
 				}
+				// Bound the emission count the same way itemDirDetector /
+				// dirItems bound skill/plugin/rule enumeration. A single
+				// mcp.json may declare arbitrarily many servers (the file
+				// itself is bounded by MaxFileBytes ≈ 4 MB, which parses
+				// to tens of thousands of entries in the worst case) —
+				// without a cap that's one persisted signal + one OTel
+				// record + one payload per entry, per scan.
+				emitted := 0
 				for _, entry := range entries {
 					name := strings.TrimSpace(entry.Name)
 					if name == "" {
 						continue
+					}
+					if emitted >= maxItemsPerDirectory {
+						break
 					}
 					item := &aiItemInfo{
 						Kind:       "mcp_server",
@@ -1528,6 +1546,7 @@ func (s *ContinuousDiscoveryService) detectMCPPaths() []AISignal {
 						Attributes: mcpItemAttributes(entry),
 					}
 					out = append(out, s.signalFromPathItem(sig, SignalMCPServer, "mcp", path, item))
+					emitted++
 				}
 			}
 		}
@@ -1573,23 +1592,48 @@ func dirItems(path string) ([]dirItem, bool) {
 	if err != nil {
 		return nil, false
 	}
-	defer f.Close()
-	entries, err := f.ReadDir(maxItemsPerDirectory)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, false
-	}
-	if len(entries) == 0 {
-		return nil, false
-	}
-	out := make([]dirItem, 0, len(entries))
-	for _, entry := range entries {
-		name := strings.TrimSpace(entry.Name())
-		if name == "" || strings.HasPrefix(name, ".") {
-			// Skip hidden entries (`.DS_Store`, editor swap files);
-			// they don't represent user-authored skills/rules/plugins.
-			continue
+	// Page-read until we've collected maxItemsPerDirectory *visible*
+	// entries (or the directory is exhausted). Reading in a single
+	// f.ReadDir(maxItemsPerDirectory) call filters AFTER the cap, so a
+	// directory whose first 256 entries are all dotfiles (`.DS_Store`,
+	// editor swaps) yields zero visible items and dirItems reports
+	// false — dropping the presence signal entirely on noisy dirs.
+	// A larger read window keeps the total-work bound proportional to
+	// the emitted result cap while resisting hostile filenames.
+	out := make([]dirItem, 0, maxItemsPerDirectory)
+	const pageSize = maxItemsPerDirectory * 4 // 1024 dirents / page
+	// Total scan bound: don't loop forever on a directory with
+	// millions of dotfiles. dirItemsMaxScan caps total inspected
+	// entries at 16× the emitted cap.
+	const dirItemsMaxScan = maxItemsPerDirectory * 16
+	scanned := 0
+	for len(out) < maxItemsPerDirectory && scanned < dirItemsMaxScan {
+		entries, err := f.ReadDir(pageSize)
+		if len(entries) == 0 {
+			if err != nil && !errors.Is(err, io.EOF) {
+				return nil, false
+			}
+			break
 		}
-		out = append(out, dirItem{Name: name, IsDir: entry.IsDir()})
+		scanned += len(entries)
+		for _, entry := range entries {
+			name := strings.TrimSpace(entry.Name())
+			if name == "" || strings.HasPrefix(name, ".") {
+				// Skip hidden entries (`.DS_Store`, editor swap files);
+				// they don't represent user-authored skills/rules/plugins.
+				continue
+			}
+			out = append(out, dirItem{Name: name, IsDir: entry.IsDir()})
+			if len(out) >= maxItemsPerDirectory {
+				break
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, false
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	if len(out) == 0 {

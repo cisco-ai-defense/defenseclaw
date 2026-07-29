@@ -41,6 +41,68 @@ def _write_pkg_json(path: Path, version: str) -> None:
     path.write_text(json.dumps({"version": version}))
 
 
+# Absolute paths that _collect_claudecode_versions probes unconditionally.
+# Tests that assert on a specific claudecode version MUST neutralize these
+# via _neutralize_absolute_agent_roots — otherwise a dev-box or CI runner
+# with a real system-wide install can outrank the fixture and the exact-
+# version assertion drifts. Same rationale applies to
+# _neutralize_absolute_codex_roots for codex tests.
+_CLAUDECODE_ABSOLUTE_PREFIXES: tuple[str, ...] = (
+    "/opt/claude",
+    "/usr/local/share/claude",
+    "/usr/local/lib/node_modules/@anthropic-ai/claude-code",
+    "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code",
+    "/usr/local/bin/claude",
+    "/opt/homebrew/bin/claude",
+    "/opt/claude/bin/claude",
+)
+
+_CODEX_ABSOLUTE_PREFIXES: tuple[str, ...] = (
+    "/Applications/ChatGPT.app",
+    "/opt/homebrew/Caskroom/codex",
+    "/usr/local/Caskroom/codex",
+    "/usr/local/lib/node_modules/@openai/codex",
+    "/opt/homebrew/lib/node_modules/@openai/codex",
+)
+
+
+def _neutralize_absolute_agent_roots(monkeypatch, *, allow_prefixes: tuple[str, ...] = ()) -> None:
+    """Make every absolute system-wide agent install path look absent.
+
+    ``allow_prefixes`` is passthrough for paths the caller has staged
+    inside the tmp_path fixture; anything else absolute (starting with a
+    prefix in _CLAUDECODE_ABSOLUTE_PREFIXES or _CODEX_ABSOLUTE_PREFIXES)
+    is reported as missing to os.path.isfile / isdir / islink /
+    os.path.exists / os.readlink. Relative paths and tmp-path children
+    pass through unchanged.
+    """
+    original_isfile = os.path.isfile
+    original_isdir = os.path.isdir
+    original_islink = os.path.islink
+    original_exists = os.path.exists
+    original_readlink = os.readlink
+
+    blocked = _CLAUDECODE_ABSOLUTE_PREFIXES + _CODEX_ABSOLUTE_PREFIXES
+
+    def _is_blocked(p: str) -> bool:
+        s = str(p)
+        if any(s.startswith(allow) for allow in allow_prefixes):
+            return False
+        return any(s == b or s.startswith(b + "/") for b in blocked)
+
+    monkeypatch.setattr(os.path, "isfile", lambda p: False if _is_blocked(p) else original_isfile(p))
+    monkeypatch.setattr(os.path, "isdir", lambda p: False if _is_blocked(p) else original_isdir(p))
+    monkeypatch.setattr(os.path, "islink", lambda p: False if _is_blocked(p) else original_islink(p))
+    monkeypatch.setattr(os.path, "exists", lambda p: False if _is_blocked(p) else original_exists(p))
+
+    def _fake_readlink(p):
+        if _is_blocked(p):
+            raise OSError(2, "No such file or directory", str(p))
+        return original_readlink(p)
+
+    monkeypatch.setattr(os, "readlink", _fake_readlink)
+
+
 def _native_layout(base: Path, active: str, others: tuple[str, ...] = ()) -> None:
     """Simulate the Anthropic native-installer layout under ``base``."""
     versions = base / "versions"
@@ -110,6 +172,13 @@ def test_claudecode_nvm_wins_over_stale_homebrew(monkeypatch, tmp_path: Path) ->
     monkeypatch.setattr(os.path, "expanduser", lambda p: p.replace("~", str(home)) if p.startswith("~") else p)
 
     homebrew_pkg = Path("/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/package.json")
+    # Neutralize every OTHER absolute claudecode path (so a real
+    # /opt/claude or /usr/local/... on the runner can't influence the
+    # assertion), but leave the specific homebrew package.json path
+    # unblocked — the test's `os.path.isfile` monkeypatch below expects
+    # to be able to override it.
+    _neutralize_absolute_agent_roots(monkeypatch, allow_prefixes=(str(homebrew_pkg),))
+
     nvm_pkg = home / ".nvm/versions/node/v22.21.0/lib/node_modules/@anthropic-ai/claude-code/package.json"
     # We can't write to /opt/homebrew inside the test sandbox, so intercept
     # _read_pkg_version instead — this keeps the assertion pinned to the
@@ -148,6 +217,7 @@ def test_claudecode_native_installer_yields_real_version(monkeypatch, tmp_path: 
     _native_layout(home / ".local" / "share" / "claude", active="2.5.0")
 
     monkeypatch.setattr(os.path, "expanduser", lambda p: p.replace("~", str(home)) if p.startswith("~") else p)
+    _neutralize_absolute_agent_roots(monkeypatch)
 
     signal = ad._scan_agent("claudecode")
     assert signal.installed is True
@@ -158,6 +228,36 @@ def test_claudecode_native_installer_yields_real_version(monkeypatch, tmp_path: 
     # comment above.
     assert signal.binary_path == ""
     assert signal.error == ""
+
+
+def test_claudecode_native_versions_dir_emits_all_candidates(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Without ``current``, every versions/*/ entry reaches pick_highest_supported.
+
+    Regression guard for the previous ``max(entries, key=_version_sort_key)``
+    behavior, which pre-picked a single winner using a digit-prefix
+    sort. That local sort dropped every prerelease tail and starved the
+    authoritative comparator; if a same-major-minor prerelease and its
+    stable both existed under versions/*, the release ordering fell
+    through to arrival order rather than SemVer rules. The fix returns
+    every candidate to pick_highest_supported so it decides the winner.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    base = home / ".local" / "share" / "claude"
+    versions = base / "versions"
+    (versions / "2.1.144").mkdir(parents=True, exist_ok=True)
+    (versions / "2.1.144-rc.1").mkdir(parents=True, exist_ok=True)
+    # NO `current` symlink — that's the code path this test targets.
+    monkeypatch.setattr(os.path, "expanduser", lambda p: p.replace("~", str(home)) if p.startswith("~") else p)
+    _neutralize_absolute_agent_roots(monkeypatch)
+
+    signal = ad._scan_agent("claudecode")
+    assert signal.installed is True
+    # SemVer: 2.1.144 > 2.1.144-rc.1 — the stable must win even though
+    # the naive digit-prefix key rated both as (2,1,144).
+    assert signal.version == "2.1.144"
 
 
 def test_claudecode_native_symlink_beats_older_versions_dir(monkeypatch, tmp_path: Path) -> None:
@@ -175,6 +275,7 @@ def test_claudecode_native_symlink_beats_older_versions_dir(monkeypatch, tmp_pat
         others=("2.5.0",),
     )
     monkeypatch.setattr(os.path, "expanduser", lambda p: p.replace("~", str(home)) if p.startswith("~") else p)
+    _neutralize_absolute_agent_roots(monkeypatch)
 
     signal = ad._scan_agent("claudecode")
     assert signal.installed is True

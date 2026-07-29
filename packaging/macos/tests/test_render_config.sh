@@ -246,12 +246,14 @@ t_resolve_aid_endpoint_precedence() {
     "override takes precedence over --config-file"
 
   # Trailing slash stripped from either source for consistent path
-  # joining downstream.
-  out="$(resolve_aid_endpoint "https://host.example.com/" "${cfg}")"
-  assert_eq "${out}" "https://host.example.com" "trailing slash stripped from override"
-  printf '{"cisco_ai_defense_endpoint": "https://host.example.com/"}\n' >"${cfg}"
+  # joining downstream. Use a .cisco.com host so the strict host-suffix
+  # gate accepts it — `_valid_aid_endpoint_url` only allows AI Defense
+  # (.cisco.com) hosts and loopback for local dev.
+  out="$(resolve_aid_endpoint "https://us.api.inspect.aidefense.security.cisco.com/" "${cfg}")"
+  assert_eq "${out}" "https://us.api.inspect.aidefense.security.cisco.com" "trailing slash stripped from override"
+  printf '{"cisco_ai_defense_endpoint": "https://us.api.inspect.aidefense.security.cisco.com/"}\n' >"${cfg}"
   out="$(resolve_aid_endpoint "" "${cfg}")"
-  assert_eq "${out}" "https://host.example.com" "trailing slash stripped from config-file value"
+  assert_eq "${out}" "https://us.api.inspect.aidefense.security.cisco.com" "trailing slash stripped from config-file value"
 
   # HTTPS bare-origin contract (post PR-579 review): the resolver
   # rejects every non-bare-origin shape at rc 3 so a mis-typed

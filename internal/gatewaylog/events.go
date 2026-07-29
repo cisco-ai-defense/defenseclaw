@@ -859,16 +859,23 @@ type AIDiscoveryPayload struct {
 	// ItemKind names the shape of the sub-item this signal represents
 	// when the detector emits item-level rows: "mcp_server" | "plugin"
 	// | "skill" | "rule". File-level signals leave this empty.
+	// Ships in the clear on every payload — structural, no user content.
 	ItemKind string `json:"item_kind,omitempty"`
 	// ItemName is the sub-item's name/id — MCP server key from
-	// mcp.json, plugin/skill/rule child basename, etc. Ships in the
-	// clear (structural identifier).
+	// mcp.json, plugin/skill/rule child basename, etc. These can carry
+	// user-visible tool names or free-form hints (e.g. "my-secret-tool")
+	// so BuildAIDiscoveryPayload gates them on privacy.disable_redaction:
+	// scrubbed in default (redacted) mode, shipped verbatim only when
+	// the operator has explicitly opted out. Raw call sites bypassing
+	// BuildAIDiscoveryPayload MUST apply the same gate.
 	ItemName string `json:"item_name,omitempty"`
 	// ItemAttributes carries a small map of structural per-item hints
 	// (`transport`, `command_basename`, `url_host`, `child_type`).
-	// Raw args / env / URLs / commands are deliberately excluded —
-	// those can carry user-controlled content and must go through the
-	// existing `evidence` gate instead.
+	// Same privacy contract as ItemName above — scrubbed by
+	// BuildAIDiscoveryPayload unless privacy.disable_redaction is set.
+	// Raw args / env / URLs / commands are deliberately excluded even
+	// in disable-redaction mode; those can carry user-controlled
+	// content and must go through the existing `evidence` gate instead.
 	ItemAttributes map[string]string `json:"item_attributes,omitempty"`
 
 	// Extended fields below are gated by privacy.disable_redaction.

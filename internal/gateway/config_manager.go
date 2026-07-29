@@ -59,11 +59,29 @@ type ConfigManager struct {
 	// directory to the fsnotify watch set so a late-arriving
 	// env_config.json triggers a reload. Empty means "no overlay" —
 	// this is what opensource / non-managed installs pass.
-	envConfigPath string
+	//
+	// Stored via atomic.Pointer so SetEnvConfigPath is safe to call
+	// concurrently with the Run loop's readers (classify() and the
+	// Reload overlay). The Provider interface's doc contract says
+	// SetEnvConfigPath after Run has started must "still be picked up
+	// on the next Reload"; plain field access would race on that path.
+	envConfigPath atomic.Pointer[string]
 
 	current atomic.Value // *config.Config
 	gen     atomic.Uint64
 	mu      sync.Mutex
+}
+
+// getEnvConfigPath returns the current env_config.json overlay path, or
+// "" if none has been set. Safe for concurrent use with SetEnvConfigPath.
+func (m *ConfigManager) getEnvConfigPath() string {
+	if m == nil {
+		return ""
+	}
+	if p := m.envConfigPath.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 func NewConfigManager(path string, initial *config.Config, logger *audit.Logger, health *SidecarHealth, apply configApplyFunc) *ConfigManager {
@@ -92,7 +110,8 @@ func (m *ConfigManager) SetEnvConfigPath(path string) {
 	if m == nil {
 		return
 	}
-	m.envConfigPath = strings.TrimSpace(path)
+	trimmed := strings.TrimSpace(path)
+	m.envConfigPath.Store(&trimmed)
 }
 
 func (m *ConfigManager) Current() *config.Config {
@@ -141,8 +160,8 @@ func (m *ConfigManager) Run(ctx context.Context) error {
 	// treat a failure here as fatal: the config.yaml watch is the
 	// primary channel; env_config-driven reloads are a nice-to-have.
 	envConfigDirWatched := false
-	if m.envConfigPath != "" {
-		envDir := filepath.Dir(filepath.Clean(m.envConfigPath))
+	if envPath := m.getEnvConfigPath(); envPath != "" {
+		envDir := filepath.Dir(filepath.Clean(envPath))
 		if envDir != dir {
 			if err := fsw.Add(envDir); err != nil {
 				fmt.Fprintf(os.Stderr, "[config] env_config watch %s deferred: %v (will retry on each reload)\n", envDir, err)
@@ -207,8 +226,8 @@ func (m *ConfigManager) Run(ctx context.Context) error {
 			// packaging pipeline may have just created it, and fsnotify
 			// silently ignores duplicate Add calls if we're already
 			// watching.
-			if m.envConfigPath != "" && !envConfigDirWatched {
-				envDir := filepath.Dir(filepath.Clean(m.envConfigPath))
+			if envPath := m.getEnvConfigPath(); envPath != "" && !envConfigDirWatched {
+				envDir := filepath.Dir(filepath.Clean(envPath))
 				if envDir != dir {
 					if err := fsw.Add(envDir); err == nil {
 						envConfigDirWatched = true
@@ -253,8 +272,8 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 	// hostile env_config is precisely the exfiltration vector the
 	// validate step defends against.
 	var envOverlayErr error
-	if m.envConfigPath != "" {
-		if ep, envErr := config.LoadEnvConfigEndpoint(m.envConfigPath); envErr == nil {
+	if envPath := m.getEnvConfigPath(); envPath != "" {
+		if ep, envErr := config.LoadEnvConfigEndpoint(envPath); envErr == nil {
 			// The strings.TrimRight("/", ...) call inside
 			// NewCiscoDefenseClawInspectClient tolerates a trailing
 			// slash; we don't normalise here so the diff engine can
@@ -408,7 +427,7 @@ func (m *ConfigManager) classify(path string) string {
 	if cleaned == m.path {
 		return "config"
 	}
-	if m.envConfigPath != "" && cleaned == filepath.Clean(m.envConfigPath) {
+	if envPath := m.getEnvConfigPath(); envPath != "" && cleaned == filepath.Clean(envPath) {
 		return "env_config"
 	}
 	return ""

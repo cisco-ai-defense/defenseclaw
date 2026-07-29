@@ -62,8 +62,14 @@ t_install_requires_root() {
     return 0
   fi
   local out rc=0
+  # The override endpoint MUST pass _valid_aid_endpoint_url so the
+  # non-root check downstream is what actually kills the invocation
+  # (`.cisco.com`-suffixed hosts are the only non-loopback shape the
+  # validator accepts — see installer_lib.sh:_valid_aid_endpoint_url).
+  # An arbitrary example.test host now trips the URL validator first
+  # and never reaches the root-EUID guard, so the assertion drifts.
   out="$("${INSTALL_SH}" --connector codex \
-    --override-endpoint https://ci.example.test 2>&1)" || rc=$?
+    --override-endpoint https://sam-aid-004864.api.inspect.aidefense.aiteam.cisco.com 2>&1)" || rc=$?
   assert_status "${rc}" 1 "non-root should exit non-zero"
   assert_contains "${out}" "must run as root" "explains root requirement"
 }
