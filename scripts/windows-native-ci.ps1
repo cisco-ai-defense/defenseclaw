@@ -3859,10 +3859,29 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
         if (($cacheNames -join "`0") -cne 'DefenseClawSetup-x64.exe') {
             throw "same-boot uninstall retained unexpected installer-cache residue: $($cacheNames -join ', ')"
         }
-        $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-        $runCommand = Get-ItemPropertyValue -LiteralPath $runKey `
-            -Name 'DefenseClawDeferredUninstallCleanup' -ErrorAction Stop
-        if ([string]$runCommand -cne [string]$cleanupRecord.run_command) {
+        $runKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
+            'Software\Microsoft\Windows\CurrentVersion\Run',
+            $false
+        )
+        if ($null -eq $runKey) {
+            throw 'same-boot uninstall did not retain the cleanup Run key'
+        }
+        try {
+            $runCommand = $runKey.GetValue(
+                'DefenseClawDeferredUninstallCleanup',
+                $null,
+                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+            )
+            $runValueKind = if ($null -eq $runCommand) {
+                $null
+            } else {
+                $runKey.GetValueKind('DefenseClawDeferredUninstallCleanup')
+            }
+        } finally {
+            $runKey.Dispose()
+        }
+        if ($runValueKind -ne [Microsoft.Win32.RegistryValueKind]::ExpandString -or
+            [string]$runCommand -cne [string]$cleanupRecord.run_command) {
             throw 'same-boot uninstall Run value differs from the authenticated cleanup record'
         }
         Invoke-WindowsNativeProcess (Get-StableHookRuntimeExecutable) @(

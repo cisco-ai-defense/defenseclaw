@@ -346,3 +346,5 @@ def test_setup_uninstall_acceptance_separates_signed_cli_from_unsigned_fixture()
     assert "Invoke-WindowsSetupStandardUserProcess $cachedSetup" in acceptance
     assert "'/uninstall', '/quiet', 'DELETEUSERDATA=1'" in acceptance
     assert acceptance.count("-AllowedExitCodes @(3010)") >= 3
+    assert "RegistryValueOptions]::DoNotExpandEnvironmentNames" in acceptance
+    assert "RegistryValueKind]::ExpandString" in acceptance
