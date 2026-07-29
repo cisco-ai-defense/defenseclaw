@@ -327,6 +327,27 @@ t_resolve_aid_endpoint_precedence() {
   printf '{"cisco_ai_defense_endpoint": "not-a-url"}\n' >"${cfg}"
   rc=0; resolve_aid_endpoint "" "${cfg}" >/dev/null 2>&1 || rc=$?
   assert_status "${rc}" 2 "config file with malformed URL -> rc 2"
+
+  # Loopback parity with the Go validator's TestValidateAIDefense
+  # Endpoint. Each of these shapes MUST be accepted (rc 0); the Go
+  # side's u.Hostname() unwraps bracketed IPv6, so if either side
+  # loosens or tightens beyond the other the sync-guard fails.
+  for lo in \
+    "https://localhost" \
+    "https://localhost:8080" \
+    "https://127.0.0.1" \
+    "https://127.0.0.1:8080" \
+    "https://[::1]" \
+    "https://[::1]:8080"; do
+    rc=0; out="$(resolve_aid_endpoint "${lo}" "${cfg}" 2>/dev/null)" || rc=$?
+    assert_status "${rc}" 0 "loopback ${lo} accepted (Go/shell parity)"
+    assert_eq "${out}" "${lo}" "loopback ${lo} round-trips unchanged"
+  done
+
+  # And bare cisco.com must be rejected on the shell exactly like Go's
+  # HasSuffix(".cisco.com") — the leading dot IS required.
+  rc=0; resolve_aid_endpoint "https://cisco.com" "${cfg}" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 3 "bare cisco.com (no leading dot subdomain) rejected"
 }
 
 t_managed_enterprise_verdict_sources_locked() {

@@ -17,8 +17,12 @@
 package inventory
 
 import (
+	"encoding/json"
+	"errors"
+	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -234,3 +238,91 @@ func TestBuildAIDiscoveryPayload_CarriesItemFields(t *testing.T) {
 		}
 	}
 }
+
+// TestAIStateStoreV2ToV3Migration_DropsItemLevelCategoriesOnly is the
+// regression guard for the state-file migration in AIStateStore.Load.
+// A v2 state file's entries in the four item-level categories
+// (mcp_server / plugin / rule / skill) must be silently dropped so
+// the first post-upgrade scan re-baselines them as `new` at item
+// granularity, rather than producing a spurious flood of `gone`
+// events for the pre-upgrade file-level fingerprints. Everything
+// else in a v2 file — the categories whose fingerprint composition
+// did NOT change — must be preserved verbatim.
+//
+// Regression seen if this drops: dashboards get an inbound wave of
+// `state=gone` signals for every historical MCP server / plugin /
+// rule / skill on every upgraded host on the day of the release.
+func TestAIStateStoreV2ToV3Migration_DropsItemLevelCategoriesOnly(t *testing.T) {
+	tmp := t.TempDir()
+	statePath := filepath.Join(tmp, "ai_discovery_state.json")
+
+	// Handcraft a v2 state file: one item-level entry (mcp_server)
+	// that MUST be dropped, one non-item-level entry
+	// (supported_connector) that MUST be preserved.
+	v2 := aiStateFile{
+		Version: 2,
+		Signals: map[string]aiStoredSignal{
+			"mcp-fp-drop": {
+				AISignal: AISignal{
+					SignalID: "mcp-fp-drop",
+					Category: SignalMCPServer,
+					Vendor:   "Cursor",
+				},
+			},
+			"connector-fp-keep": {
+				AISignal: AISignal{
+					SignalID: "connector-fp-keep",
+					Category: SignalSupportedConnector,
+					Vendor:   "Cursor",
+				},
+			},
+		},
+	}
+	raw, err := json.Marshal(v2)
+	if err != nil {
+		t.Fatalf("marshal v2 fixture: %v", err)
+	}
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		t.Fatalf("write v2 state: %v", err)
+	}
+
+	store := NewAIStateStore(statePath)
+	got, err := store.Load()
+	if err != nil {
+		t.Fatalf("load v2 state: %v", err)
+	}
+	if _, present := got.Signals["mcp-fp-drop"]; present {
+		t.Errorf("v2->v3 migration: item-level mcp_server entry survived Load; must be dropped")
+	}
+	if _, present := got.Signals["connector-fp-keep"]; !present {
+		t.Errorf("v2->v3 migration: non-item-level supported_connector entry was dropped; must be preserved")
+	}
+
+	// A future-version state file must be rejected. This is the
+	// forward-compat guard — an older gateway must not silently
+	// treat a newer-version state file as empty and produce a wave
+	// of "all new" delta events on next scan.
+	futureVersion := aiDiscoveryStateVersion + 1
+	future := aiStateFile{
+		Version: futureVersion,
+		Signals: map[string]aiStoredSignal{},
+	}
+	raw, err = json.Marshal(future)
+	if err != nil {
+		t.Fatalf("marshal future fixture: %v", err)
+	}
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		t.Fatalf("write future state: %v", err)
+	}
+	if _, err := store.Load(); err == nil {
+		t.Fatalf("load future-version state: got nil error, want unsupported-version error")
+	} else if !strings.Contains(err.Error(), "unsupported version") {
+		t.Fatalf("load future-version state: err = %v, want an 'unsupported version' message", err)
+	}
+}
+
+// Reference `errors` so `go build` doesn't complain about the import
+// if the migration test is ever gutted; the migration path itself
+// wraps errors internally and the assertion above uses strings.Contains
+// rather than errors.Is (the wrapped error is not a public sentinel).
+var _ = errors.Is

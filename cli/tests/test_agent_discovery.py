@@ -576,3 +576,81 @@ def test_render_discovery_table_includes_connectors_and_cache_state():
     assert "cached" in rendered
     assert "codex" in rendered
     assert "yes" in rendered
+
+
+def test_semver_regex_matches_across_files():
+    """Drift guard for the two _VERSION_RE definitions.
+
+    ``defenseclaw/inventory/_semver.py`` and
+    ``scripts/connector-version-radar.py`` intentionally keep separate
+    copies of the semver regex (the radar is a standalone lab script
+    outside the CLI import path), but the two definitions MUST stay
+    byte-for-byte identical — a drift means one side accepts a
+    version shape the other rejects, which produces
+    hard-to-reproduce ``ValueError``s on the radar path or the
+    reverse.
+    """
+    import re as _re
+
+    repo_root = Path(__file__).resolve().parents[2]
+    semver_py = (repo_root / "cli" / "defenseclaw" / "inventory" / "_semver.py").read_text()
+    radar_py = (repo_root / "scripts" / "connector-version-radar.py").read_text()
+
+    def _extract(source: str) -> str:
+        # Grab the multi-line re.compile(...) literal starting at
+        # `_VERSION_RE = re.compile(`. The two files use identical
+        # formatting so a plain substring compare is enough.
+        marker = "_VERSION_RE = re.compile("
+        start = source.index(marker) + len(marker)
+        end = source.index(")", start)
+        return source[start:end].strip()
+
+    assert _extract(semver_py) == _extract(radar_py), (
+        "_VERSION_RE in _semver.py has drifted from "
+        "scripts/connector-version-radar.py — keep the two byte-for-byte "
+        "identical or route both through a shared import."
+    )
+
+
+def test_known_agent_kinds_matches_go_promoted_agent_kinds():
+    """Drift guard for the KNOWN_AGENT_KINDS ↔ promotedAgentKinds contract.
+
+    The Python-side ``KNOWN_AGENT_KINDS`` (this file's neighbour
+    ``defenseclaw/connector_paths.py``) lists discovery-only agents that
+    the CLI treats as first-class for inventory / TUI purposes but that
+    have no DefenseClaw enforcement path. The Go side promotes the same
+    set via ``promotedAgentKinds`` in
+    ``internal/inventory/ai_catalog.go``; the connector-slug VALUES on
+    both sides must agree, otherwise dashboards that join on
+    ``agent_kind`` will silently miss surfaces on one side.
+
+    The Go map keys are signature IDs (``claude-desktop``) whose
+    Python analogue in ``KNOWN_AGENT_KINDS`` is the *normalised* slug
+    (``claudedesktop``); this test compares the two sides after
+    stripping the documented `-` → `` normalisation. Any drift —
+    add/remove/rename on either side — trips the assertion.
+    """
+    import re
+
+    repo_root = Path(__file__).resolve().parents[2]
+    catalog_go = (repo_root / "internal" / "inventory" / "ai_catalog.go").read_text()
+
+    # Extract the map body between the opening `{` and matching `}` on
+    # promotedAgentKinds. `\A(?:.|\n)*?` skips ahead lazily; keeping
+    # this pattern tight avoids matching later map blocks.
+    match = re.search(
+        r"promotedAgentKinds\s*=\s*map\[string\]string\{([^}]+)\}",
+        catalog_go,
+    )
+    assert match, "promotedAgentKinds map not found in ai_catalog.go"
+    entries = re.findall(r'"([^"]+)"\s*:\s*"([^"]+)"', match.group(1))
+    assert entries, "promotedAgentKinds body parsed to zero entries — regex drift?"
+
+    # Every Go-side connector-slug value must appear in KNOWN_AGENT_KINDS.
+    go_slugs = {slug for _, slug in entries}
+    python_promoted = set(KNOWN_AGENT_KINDS) - set(KNOWN_CONNECTORS)
+    assert go_slugs == python_promoted, (
+        f"KNOWN_AGENT_KINDS ↔ promotedAgentKinds drift: "
+        f"Go-only={sorted(go_slugs - python_promoted)}, "
+        f"Python-only={sorted(python_promoted - go_slugs)}"
+    )

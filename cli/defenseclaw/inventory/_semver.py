@@ -37,9 +37,17 @@ from functools import cmp_to_key
 
 # Matches the first "x.y.z(-prerelease)?(+build)?" substring in a
 # larger string so we tolerate outputs like "codex-cli 0.145.0" or
-# "1.9.0 (build 42)". Same regex as
-# scripts/connector-version-radar.py:_VERSION_RE — keep them aligned;
-# radar imports this module now so the definitions stay single-source.
+# "1.9.0 (build 42)".
+#
+# scripts/connector-version-radar.py maintains its OWN copy of this
+# regex (see `_VERSION_RE` there). The radar is a standalone script
+# invoked outside the `defenseclaw` package import path (macOS lab
+# runners, cron jobs); making it import from this module would drag
+# the whole CLI dependency tree into every invocation. If either copy
+# ever diverges, the drift-guard test
+# ``test_semver_regex_matches_across_files`` in
+# ``cli/tests/test_agent_discovery.py`` trips — keep both definitions
+# byte-for-byte identical.
 _VERSION_RE = re.compile(
     r"(?<![0-9A-Za-z])v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)"
     r"(?:-(?P<prerelease>[0-9A-Za-z.-]+))?"

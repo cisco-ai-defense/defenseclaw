@@ -282,6 +282,31 @@ def test_claudecode_native_symlink_beats_older_versions_dir(monkeypatch, tmp_pat
     assert signal.version == "2.1.144"
 
 
+def test_claudecode_home_dirs_enumerates_every_home(monkeypatch, tmp_path: Path) -> None:
+    """AIDiscoveryConfig.home_dirs is threaded into the collectors.
+
+    Multi-tenant host with two operators; each has a distinct native
+    install version. _scan_agent must enumerate BOTH homes and let
+    pick_highest_supported choose the winner, rather than staying
+    pinned to the process-owner's $HOME.
+    """
+    homeA = tmp_path / "homeA"
+    homeB = tmp_path / "homeB"
+    homeA.mkdir()
+    homeB.mkdir()
+    _native_layout(homeA / ".local" / "share" / "claude", active="2.1.144")
+    _native_layout(homeB / ".local" / "share" / "claude", active="2.5.0")
+    # Point HOME at homeA so the "no home_dirs → fall back to $HOME"
+    # branch would report 2.1.144. With home_dirs=[A, B] we expect the
+    # higher 2.5.0 from homeB to win.
+    monkeypatch.setattr(os.path, "expanduser", lambda p: p.replace("~", str(homeA)) if p.startswith("~") else p)
+    _neutralize_absolute_agent_roots(monkeypatch)
+
+    signal = ad._scan_agent("claudecode", home_dirs=(str(homeA), str(homeB)))
+    assert signal.installed is True
+    assert signal.version == "2.5.0"
+
+
 def test_claudecode_no_installs_falls_back_to_config_presence(monkeypatch, tmp_path: Path) -> None:
     """No enumerable installs → still installed=True when ~/.claude exists."""
     home = tmp_path / "home"

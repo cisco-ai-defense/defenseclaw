@@ -507,6 +507,10 @@ def discover_agents(
 
     scanned_at = _format_rfc3339(_now_utc())
     require_trusted, _prefixes = _ai_discovery_trust_config(data_dir)
+    # Resolve the operator-configured home_dirs list once and pass it
+    # down. Empty means "use the current user's $HOME" — that keeps the
+    # single-tenant default identical to the pre-home_dirs behaviour.
+    home_dirs = _ai_discovery_home_dirs(data_dir)
     with ThreadPoolExecutor(max_workers=4) as pool:
         signals = list(
             pool.map(
@@ -514,6 +518,7 @@ def discover_agents(
                     name,
                     data_dir=data_dir,
                     require_trusted_binary_paths=require_trusted,
+                    home_dirs=home_dirs,
                 ),
                 KNOWN_AGENT_KINDS,
             )
@@ -577,6 +582,7 @@ def _scan_agent(
     *,
     data_dir: str | os.PathLike[str] | None = None,
     require_trusted_binary_paths: bool = False,
+    home_dirs: tuple[str, ...] = (),
 ) -> AgentSignal:
     spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
     config_candidates = spec.config_candidates
@@ -592,7 +598,17 @@ def _scan_agent(
         # install and picks the highest that meets the hook contract's
         # MinAgentVersion — see _MIN_SUPPORTED_VERSIONS above and QA
         # regressions #1 / #2 in the PR description.
-        candidates = collector(os.path.expanduser("~"))
+        #
+        # home_dirs (from ai_discovery.home_dirs in config.yaml) lets
+        # multi-tenant hosts enumerate every operator's installs from a
+        # single sidecar; empty falls back to the current process's
+        # $HOME so single-tenant behavior is unchanged. Duplicate
+        # (source, version) pairs are naturally deduped inside
+        # pick_highest_supported by the highest-wins policy.
+        homes = home_dirs if home_dirs else (os.path.expanduser("~"),)
+        candidates: list[tuple[str, str]] = []
+        for h in homes:
+            candidates.extend(collector(h))
         min_version = _MIN_SUPPORTED_VERSIONS.get(name, "")
         picked = pick_highest_supported(candidates, min_version)
         if picked is not None:
@@ -666,6 +682,51 @@ def _ai_discovery_trust_config(
         return False, ()
     prefixes = tuple(str(v).strip() for v in (block.get("trusted_binary_prefixes", []) or []) if str(v).strip())
     return bool(block.get("require_trusted_binary_paths", False)), prefixes
+
+
+def _ai_discovery_home_dirs(
+    data_dir: str | os.PathLike[str] | None = None,
+) -> tuple[str, ...]:
+    """Return the operator-configured ``ai_discovery.home_dirs`` list.
+
+    Empty when the field is absent — callers should fall back to
+    ``[os.path.expanduser("~")]`` in that case. Multi-tenant hosts
+    (shared build boxes, notebook servers with per-user home dirs) set
+    this so a single sidecar can enumerate every operator's installs
+    without needing one process per user.
+
+    Kept read-only: config.yaml is the authoritative source (rendered
+    by install.sh from operator flags), so the discovery pass doesn't
+    mutate it here.
+    """
+    path = config_path_for_data_dir(data_dir)
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+    except OSError:
+        return ()
+    if not isinstance(raw, dict):
+        return ()
+    block = raw.get("ai_discovery")
+    if not isinstance(block, dict):
+        return ()
+    dirs = block.get("home_dirs", []) or []
+    if not isinstance(dirs, list):
+        return ()
+    # Expand and canonicalise each entry; drop empties + duplicates
+    # while preserving encounter order.
+    seen: set[str] = set()
+    out: list[str] = []
+    for entry in dirs:
+        raw_dir = str(entry).strip()
+        if not raw_dir:
+            continue
+        expanded = os.path.expanduser(raw_dir)
+        if expanded in seen:
+            continue
+        seen.add(expanded)
+        out.append(expanded)
+    return tuple(out)
 
 
 def _trusted_bin_prefixes(

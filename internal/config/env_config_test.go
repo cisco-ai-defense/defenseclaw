@@ -118,6 +118,17 @@ func TestValidateAIDefenseEndpoint(t *testing.T) {
 		{"bare-origin-eu-with-port", "https://eu.api.inspect.aidefense.security.cisco.com:443", true},
 		{"trailing-slash", "https://us.api.inspect.aidefense.security.cisco.com/", true},
 
+		// Loopback cases — the shell side must accept exactly this
+		// same set. `[::1]` in particular was added after CodeRabbit
+		// flagged that the Go validator accepted it but the shell
+		// regex only allowed `localhost`/`127.0.0.1`.
+		{"loopback-localhost", "https://localhost", true},
+		{"loopback-localhost-port", "https://localhost:8080", true},
+		{"loopback-ipv4", "https://127.0.0.1", true},
+		{"loopback-ipv4-port", "https://127.0.0.1:8080", true},
+		{"loopback-ipv6", "https://[::1]", true},
+		{"loopback-ipv6-port", "https://[::1]:8080", true},
+
 		{"http-rejected", "http://us.api.inspect.aidefense.security.cisco.com", false},
 		{"userinfo-rejected", "https://user@us.api.inspect.aidefense.security.cisco.com", false},
 		{"userpass-rejected", "https://user:pass@us.api.inspect.aidefense.security.cisco.com", false},
@@ -127,6 +138,7 @@ func TestValidateAIDefenseEndpoint(t *testing.T) {
 		{"scheme-only-rejected", "https://", false},
 		{"gibberish-rejected", "not-a-url", false},
 		{"non-cisco-host-rejected", "https://attacker.example.com", false},
+		{"bare-cisco-com-rejected", "https://cisco.com", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
