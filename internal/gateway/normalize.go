@@ -123,7 +123,7 @@ func canonicalIDFromRuleID(ruleID string) string {
 	upper := strings.ToUpper(ruleID)
 
 	// Already in canonical form (prefixed with a known category)
-	for _, prefix := range []string{"SEC-", "CMD-", "PATH-", "C2-", "COG-", "TRUST-", "JUDGE-"} {
+	for _, prefix := range []string{"SEC-", "CMD-", "PATH-", "C2-", "COG-", "TRUST-", "OBFUSC-", "JUDGE-"} {
 		if strings.HasPrefix(upper, prefix) {
 			return upper
 		}
@@ -198,6 +198,8 @@ func categoryFromFindingID(id string) string {
 	case strings.HasPrefix(upper, "COG-"):
 		return CatCognitiveTamper
 	case strings.HasPrefix(upper, "TRUST-"):
+		return CatPromptInjection
+	case strings.HasPrefix(upper, "OBFUSC-"):
 		return CatPromptInjection
 	case strings.HasPrefix(upper, "JUDGE-INJ"):
 		return CatPromptInjection

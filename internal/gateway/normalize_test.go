@@ -114,12 +114,13 @@ func TestNormalizeRuleFindings(t *testing.T) {
 	findings := []RuleFinding{
 		{RuleID: "SEC-AWS-KEY", Title: "AWS access key", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 		{RuleID: "TRUST-JAILBREAK", Title: "Jailbreak attempt", Severity: "CRITICAL", Confidence: 0.92, Tags: []string{"prompt-injection"}},
+		{RuleID: "OBFUSC-UNICODE-ZWSP", Title: "Zero-width character obfuscation", Severity: "HIGH", Confidence: 0.95, Tags: []string{"prompt-injection", "obfuscation"}},
 		{RuleID: "C2-NGROK", Title: "ngrok tunnel", Severity: "HIGH", Confidence: 0.85, Tags: []string{"exfiltration", "c2"}},
 	}
 
 	nfs := NormalizeRuleFindings(findings, "tool-call-inspect")
-	if len(nfs) != 3 {
-		t.Fatalf("expected 3, got %d", len(nfs))
+	if len(nfs) != 4 {
+		t.Fatalf("expected 4, got %d", len(nfs))
 	}
 
 	tests := []struct {
@@ -129,7 +130,8 @@ func TestNormalizeRuleFindings(t *testing.T) {
 	}{
 		{0, "SEC-AWS-KEY", CatCredentialLeak},
 		{1, "TRUST-JAILBREAK", CatPromptInjection},
-		{2, "C2-NGROK", CatDataExfil},
+		{2, "OBFUSC-UNICODE-ZWSP", CatPromptInjection},
+		{3, "C2-NGROK", CatDataExfil},
 	}
 
 	for _, tt := range tests {
@@ -178,6 +180,7 @@ func TestCategoryFromTags(t *testing.T) {
 		expected string
 	}{
 		{[]string{"prompt-injection"}, CatPromptInjection},
+		{[]string{"execution", "obfuscation"}, CatDangerousExec},
 		{[]string{"credential"}, CatCredentialLeak},
 		{[]string{"execution", "reverse-shell"}, CatDangerousExec},
 		{[]string{"exfiltration", "c2"}, CatDataExfil},
@@ -203,6 +206,7 @@ func TestCanonicalIDFromRuleID(t *testing.T) {
 	}{
 		{"SEC-AWS-KEY", "SEC-AWS-KEY"},
 		{"CMD-REVSHELL-BASH", "CMD-REVSHELL-BASH"},
+		{"OBFUSC-UNICODE-ZWSP", "OBFUSC-UNICODE-ZWSP"},
 		{"JUDGE-INJ-INSTRUCT", "JUDGE-INJ-INSTRUCT"},
 		{"JUDGE-PII-EMAIL", "JUDGE-PII-EMAIL"},
 		{"pii-data:123-45-6789", "LP-PII-DATA"},

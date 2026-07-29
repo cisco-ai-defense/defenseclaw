@@ -92,6 +92,9 @@ export interface RegexLintResult {
 // RE2 supports inline flag groups at the start of a pattern — `(?i)foo`,
 // `(?ims)foo` — that V8 rejects with "Invalid group". JS expresses the
 // same thing as a separate flags arg to `new RegExp(pattern, flags)`.
+// Go also spells Unicode scalar escapes as `\x{200B}` while V8 uses
+// `\u{200B}` with the `u` flag, so translate that syntax without changing
+// the represented code point.
 //
 // We also collapse any *consecutive* leading flag groups (`(?i)(?m)foo`)
 // because RE2 treats them as additive. We do NOT touch mid-pattern flag
@@ -108,6 +111,23 @@ function toV8(pattern: string, extraFlags: string): { pattern: string; flags: st
     if (!m) break;
     for (const ch of m[1]) flagSet.add(ch);
     p = p.slice(m[0].length);
+  }
+  p = p.replace(/\\x\{([^}]*)\}/g, (_escape, hex: string) => {
+    if (!/^[0-9A-Fa-f]+$/.test(hex)) {
+      throw new SyntaxError('invalid Go Unicode scalar escape');
+    }
+    const codePoint = Number.parseInt(hex, 16);
+    if (codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+      throw new SyntaxError('invalid Go Unicode scalar value');
+    }
+    if (codePoint <= 0xffff) {
+      return `\\u${codePoint.toString(16).padStart(4, '0')}`;
+    }
+    flagSet.add('u');
+    return `\\u{${codePoint.toString(16)}}`;
+  });
+  if (/\\x\{/.test(p)) {
+    throw new SyntaxError('unterminated Go Unicode scalar escape');
   }
   return { pattern: p, flags: Array.from(flagSet).join('') };
 }

@@ -1282,7 +1282,7 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-ENV-DUMP",
-        "pattern": "(?:^|[^A-Za-z0-9_./-])(?:env|printenv|export\\s+-p)\\b",
+        "pattern": "(?i)(?:^|[^A-Za-z0-9_./-])(?:printenv\\b|export\\s+-p\\b|env\\s*[|>])",
         "title": "Environment variable dump",
         "severity": "HIGH",
         "confidence": 0.8,
@@ -1735,7 +1735,7 @@
       "kind": "rule:secret",
       "body": {
         "id": "SEC-AWS-KEY",
-        "pattern": "(?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[0-9A-Z]{16,}",
+        "pattern": "\\b(?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[0-9A-Z]{16,}",
         "title": "AWS access key",
         "severity": "CRITICAL",
         "confidence": 0.95,
@@ -3292,6 +3292,38 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "RECIPE-OBFUSC-UNICODE-ZWSP",
+      "title": "Zero-width character obfuscation",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "OBFUSC-UNICODE-ZWSP",
+        "pattern": "(?:[A-Za-z0-9][\\x{200B}\\x{200C}\\x{200D}\\x{FEFF}][\\s\\S]*?){10,}",
+        "title": "Zero-width character obfuscation",
+        "severity": "HIGH",
+        "confidence": 0.95,
+        "tags": [
+          "prompt-injection",
+          "obfuscation"
+        ]
+      },
+      "why": "Requires ten zero-width characters immediately after ASCII alphanumerics, avoiding isolated formatting artifacts and emoji ZWJ sequences.",
+      "examples": [
+        "a​b‌c‍d﻿e​f‌g‍h﻿i​j‌"
+      ],
+      "counterexamples": [
+        "copy​paste",
+        "👩‍💻"
+      ],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection",
+        "obfuscation"
       ],
       "data_axis": [
         "ingress_untrusted"

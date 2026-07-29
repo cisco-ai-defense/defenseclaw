@@ -36,7 +36,7 @@ import { highlightRegoToHtml, tokenizeRego } from '../components/policy-creator/
 import { highlightJsonToHtml, tokenizeJson } from '../components/policy-creator/lib/json-highlight.js';
 import { filterIndex } from '../components/policy-creator/playground/cmdk-filter.js';
 import { policyFromPreset } from '../components/policy-creator/lib/presets.js';
-import { validatePolicy } from '../components/policy-creator/lib/validators.js';
+import { lintRegex, testRegex, validatePolicy } from '../components/policy-creator/lib/validators.js';
 import type { CorrelationPattern, Policy } from '../components/policy-creator/types.js';
 
 // ── fixtures ────────────────────────────────────────────────────────
@@ -103,6 +103,48 @@ test('install script honors DEFENSECLAW_HOME with the standard home fallback', (
   assert.match(script, /DC_ROOT="\$\{DEFENSECLAW_HOME:-\$\{HOME\}\/\.defenseclaw\}"/);
   assert.match(script, /POLICIES_ROOT="\$\{DC_ROOT\}\/policies"/);
   assert.doesNotMatch(script, /POLICIES_ROOT="\$\{HOME\}\/\.defenseclaw\/policies"/);
+});
+
+test('regex tester supports the shipped Go Unicode scalar syntax', () => {
+  const pattern = String.raw`(?:[A-Za-z0-9][\x{200B}\x{200C}\x{200D}\x{FEFF}][\s\S]*?){10,}`;
+  assert.equal(lintRegex(pattern).compiled, true);
+  assert.equal(lintRegex(String.raw`\x{FDD0}`).compiled, true);
+  assert.equal(lintRegex(String.raw`\x{0000200B}`).compiled, true);
+  assert.equal(lintRegex(String.raw`\x{200B}\_`).compiled, true);
+  assert.equal(lintRegex(String.raw`\x{110000}`).compiled, false);
+  assert.equal(lintRegex(String.raw`\x{D800}`).compiled, false);
+  assert.equal(lintRegex(String.raw`\x{not-hex}`).compiled, false);
+  assert.equal(lintRegex(String.raw`\x{200B`).compiled, false);
+
+  const positive =
+    'a' +
+    '\u200B' +
+    'b' +
+    '\u200C' +
+    'c' +
+    '\u200D' +
+    'd' +
+    '\uFEFF' +
+    'e' +
+    '\u200B' +
+    'f' +
+    '\u200C' +
+    'g' +
+    '\u200D' +
+    'h' +
+    '\uFEFF' +
+    'i' +
+    '\u200B' +
+    'j' +
+    '\u200C';
+  const results = testRegex(pattern, '', [positive], [
+    'copy' + '\u200B' + 'paste',
+    '👩' + '\u200D' + '💻',
+  ]);
+  assert.deepEqual(
+    results.map((result) => result.actual),
+    ['match', 'no-match', 'no-match'],
+  );
 });
 
 // ── share: round trip ───────────────────────────────────────────────

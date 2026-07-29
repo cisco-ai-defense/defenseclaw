@@ -227,6 +227,20 @@ func TestCommandRules_TruePositives(t *testing.T) {
 	}
 }
 
+func TestCommandRules_EnvDumpPrecision(t *testing.T) {
+	for _, input := range []string{
+		`env LOG_LEVEL=debug ./server`,
+		`env -i HOME=/tmp ./script`,
+		`dotenv configuration`,
+	} {
+		for _, finding := range ScanAllRules(input, "shell") {
+			if finding.RuleID == "CMD-ENV-DUMP" {
+				t.Fatalf("unexpected CMD-ENV-DUMP for environment assignment %q", input)
+			}
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Command rules — false positives
 // ---------------------------------------------------------------------------

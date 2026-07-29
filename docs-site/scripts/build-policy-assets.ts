@@ -320,6 +320,33 @@ function buildRecipes(strict: PresetBundle): Recipe[] {
       examples: ['https://hooks.slack.com/services/T0000/B0000/abcdefg12345'],
       counterexamples: ['https://hooks.slack.com/wrongpath', 'https://example.com'],
     },
+    'OBFUSC-UNICODE-ZWSP': {
+      examples: [
+        'a' +
+          '\u200B' +
+          'b' +
+          '\u200C' +
+          'c' +
+          '\u200D' +
+          'd' +
+          '\uFEFF' +
+          'e' +
+          '\u200B' +
+          'f' +
+          '\u200C' +
+          'g' +
+          '\u200D' +
+          'h' +
+          '\uFEFF' +
+          'i' +
+          '\u200B' +
+          'j' +
+          '\u200C',
+      ],
+      counterexamples: ['copy' + '\u200B' + 'paste', '👩' + '\u200D' + '💻'],
+      why:
+        'Requires ten zero-width characters immediately after ASCII alphanumerics, avoiding isolated formatting artifacts and emoji ZWJ sequences.',
+    },
   };
 
   for (const [filename, file] of Object.entries(strict.guardrail.rules)) {

@@ -234,6 +234,7 @@ var ruleAxes = map[string][]DataAxis{
 	"INJ-DAN-MODE":          {AxisIngressUntrusted},
 	"INJ-OVERRIDE":          {AxisIngressUntrusted},
 	"INJ-DELIMITER-HIJACK":  {AxisIngressUntrusted},
+	"OBFUSC-UNICODE-ZWSP":   {AxisIngressUntrusted},
 	"TRUST-AUTHORITY-CLAIM": {AxisIngressUntrusted},
 	"TRUST-NEW-INSTRUCTION": {AxisIngressUntrusted},
 	"TRUST-SAFETY-OVERRIDE": {AxisIngressUntrusted},

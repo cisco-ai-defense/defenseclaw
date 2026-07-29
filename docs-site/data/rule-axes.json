@@ -192,6 +192,12 @@
       ]
     },
     {
+      "id": "OBFUSC-UNICODE-ZWSP",
+      "axes": [
+        "ingress_untrusted"
+      ]
+    },
+    {
       "id": "PATH-ETC-PASSWD",
       "axes": [
         "sensitive_access"

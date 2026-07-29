@@ -29,6 +29,7 @@ func TestAxesForRuleID_KnownMappings(t *testing.T) {
 		{"CRED-AWS-FILE", []DataAxis{AxisSensitiveAccess}},
 		{"C2-WEBHOOK-SITE", []DataAxis{AxisEgressExternal}},
 		{"INJ-IGNORE-ALL", []DataAxis{AxisIngressUntrusted}},
+		{"OBFUSC-UNICODE-ZWSP", []DataAxis{AxisIngressUntrusted}},
 		{"SEC-SLACK-WEBHOOK", []DataAxis{AxisSensitiveAccess, AxisEgressExternal}},
 		{"SSRF-AWS-META", []DataAxis{AxisSensitiveAccess, AxisEgressExternal}},
 	}
@@ -99,6 +100,7 @@ func TestAxesForRuleID_CoversRealScannerRules(t *testing.T) {
 		"JUDGE-EXFIL-CHANNEL":  {AxisEgressExternal},
 		"JUDGE-INJ-INSTRUCT":   {AxisIngressUntrusted},
 		"JUDGE-TOOL-INJ-EXFIL": {AxisSensitiveAccess, AxisEgressExternal},
+		"OBFUSC-UNICODE-ZWSP":  {AxisIngressUntrusted},
 		// Command rules that open an egress channel
 		"CMD-CURL-UPLOAD": {AxisEgressExternal},
 		"CMD-ENV-DUMP":    {AxisSensitiveAccess},
