@@ -119,22 +119,42 @@ def test_corrupt_cache_entry_forces_rescan_not_synth_default(monkeypatch, tmp_pa
     _pin_home(monkeypatch, tmp_path)
     data_dir = Path(os.environ["DEFENSECLAW_HOME"])
     data_dir.mkdir(parents=True)
-    # Write a cache with a valid discovery-only entry alongside a
-    # corrupted one. `aider` is a discovery-only kind (in
-    # KNOWN_AGENT_KINDS but NOT KNOWN_CONNECTORS).
+    # Populate every KNOWN_CONNECTORS entry with a valid dict so the
+    # loop reaches the discovery-only slice without an earlier
+    # "connector missing → reject" bailout. `aider` (discovery-only,
+    # in KNOWN_AGENT_KINDS but NOT KNOWN_CONNECTORS) is left as a
+    # scalar — that's the corruption the new branch is supposed to
+    # catch. Prior iteration of this test left every connector absent,
+    # so the pre-fix code path would also rescan (for the missing
+    # enforcement connectors) and the assertion would pass without
+    # ever exercising the new corrupt-entry branch.
+    valid_dict = {
+        "name": "placeholder",
+        "installed": False,
+        "config_path": "",
+        "binary_path": "",
+        "version": "",
+        "error": "",
+    }
+    agents_fixture: dict[str, object] = {
+        connector: dict(valid_dict, name=connector) for connector in ad.KNOWN_CONNECTORS
+    }
+    # Fill valid dicts for every OTHER discovery-only kind too, so
+    # `aider` is the only entry that could plausibly force a rescan.
+    for kind in ad.KNOWN_AGENT_KINDS:
+        if kind in ad.KNOWN_CONNECTORS or kind == "aider":
+            continue
+        agents_fixture[kind] = dict(valid_dict, name=kind)
+    # And now the corrupt entry — scalar where a dict is expected.
+    agents_fixture["aider"] = "not-a-dict"
+
     (data_dir / ad.CACHE_FILENAME).write_text(
         json.dumps(
             {
                 "version": ad.CACHE_SCHEMA_VERSION,
                 "scanned_at": "2026-05-04T18:21:00Z",
                 "ttl_seconds": ad.CACHE_TTL_SECONDS,
-                "agents": {
-                    # `aider` is present but a scalar instead of the
-                    # expected dict — that's corruption. Every other
-                    # kind is absent, which would normally be treated
-                    # as legacy-missing.
-                    "aider": "not-a-dict",
-                },
+                "agents": agents_fixture,
             }
         ),
         encoding="utf-8",
@@ -150,9 +170,13 @@ def test_corrupt_cache_entry_forces_rescan_not_synth_default(monkeypatch, tmp_pa
 
     disc = ad.discover_agents()
 
-    # Corrupt entry forces a full rescan — cache_hit is False, and
-    # every KNOWN_AGENT_KINDS is scanned (not synthesised).
-    assert disc.cache_hit is False, "corrupt entry silently accepted"
+    # Only the corrupt `aider` entry can invalidate the cache in this
+    # fixture — every other kind has a valid dict. cache_hit=False +
+    # a full rescan proves the new branch fires.
+    assert disc.cache_hit is False, (
+        "corrupt discovery-only entry silently accepted "
+        "(all other kinds have valid dict entries; only `aider` is malformed)"
+    )
     assert set(scanned) == set(ad.KNOWN_AGENT_KINDS), (
         f"corrupt cache did NOT trigger a full rescan: scanned={scanned}"
     )
