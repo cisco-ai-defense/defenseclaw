@@ -107,13 +107,20 @@ def _payload_manifest() -> dict[str, object]:
     }
 
 
-def _native_tree(root: Path) -> tuple[Path, Path]:
+def _native_tree(
+    root: Path,
+    *,
+    protect_windows_custody: bool = False,
+) -> tuple[Path, Path]:
     local_app_data = root / "known-local"
     profile = root / "known-profile"
     installer = local_app_data / "Programs" / "DefenseClaw" / "installer"
     cache = local_app_data / "DefenseClaw" / "InstallerCache"
     installer.mkdir(parents=True)
     cache.mkdir(parents=True)
+    if protect_windows_custody:
+        file_permissions._protect_private_directory(str(installer))
+        file_permissions._protect_private_directory(str(cache))
     profile.mkdir()
     (installer / "install-state.json").write_text(
         json.dumps(_install_state(local_app_data, profile)),
@@ -128,15 +135,13 @@ def _native_tree(root: Path) -> tuple[Path, Path]:
 
 
 def _set_setup_publication_acl(path: Path) -> None:
-    """Model Setup's inherited owner/SYSTEM plus sandbox read/execute ACL."""
+    """Model the complete inherited ACL preserved by Setup on this machine."""
 
     subprocess.run(
         [
             "icacls.exe",
             str(path),
             "/inheritance:r",
-            "/remove:g",
-            "*S-1-5-32-544",
         ],
         check=True,
         capture_output=True,
@@ -149,6 +154,7 @@ def _set_setup_publication_acl(path: Path) -> None:
             "/grant:r",
             "*S-1-3-4:(OI)(CI)F",
             "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F",
             "*S-1-5-32-545:(OI)(CI)RX",
         ],
         check=True,
@@ -202,28 +208,65 @@ def test_prepare_accepts_setup_inherited_read_execute_acl(
     publication: str,
 ) -> None:
     _set_setup_publication_acl(tmp_path)
-    local_app_data, profile = _native_tree(tmp_path)
+    local_app_data, profile = _native_tree(
+        tmp_path,
+        protect_windows_custody=True,
+    )
     install_root = local_app_data / "Programs" / "DefenseClaw"
     if publication == "repair":
         staged = local_app_data / "Programs" / "DefenseClaw.repair"
         backup = local_app_data / "Programs" / "DefenseClaw.backup"
         install_root.rename(backup)
         staged.mkdir()
-        (staged / "installer").mkdir()
+        installer = staged / "installer"
+        installer.mkdir()
+        file_permissions._protect_private_directory(str(installer))
         for name, value in (
             ("install-state.json", _install_state(local_app_data, profile)),
             ("payload-manifest.json", _payload_manifest()),
         ):
-            (staged / "installer" / name).write_text(json.dumps(value), encoding="utf-8")
+            (installer / name).write_text(json.dumps(value), encoding="utf-8")
         staged.rename(install_root)
 
     owner_sid, null_dacl, entries = file_permissions._windows_acl_snapshot(str(install_root))
     assert owner_sid == file_permissions._windows_current_user_sid()
     assert null_dacl is False
     assert any(
-        sid == "S-1-5-32-545" and permissions == 0x001200A9 and access_mode == 1 and inheritance & 0x10
+        sid == "S-1-5-32-545"
+        and permissions == 0x001200A9
+        and access_mode == 1
+        and inheritance & 0x10
         for permissions, access_mode, inheritance, sid in entries
     )
+    assert any(
+        sid == "S-1-5-32-544"
+        and permissions == 0x001F01FF
+        and access_mode == 1
+        and inheritance == 0x13
+        for permissions, access_mode, inheritance, sid in entries
+    )
+    for sensitive in (
+        install_root / "installer",
+        install_root / "installer" / "install-state.json",
+        install_root / "installer" / "payload-manifest.json",
+        local_app_data / "DefenseClaw" / "InstallerCache",
+        local_app_data / "DefenseClaw" / "InstallerCache" / "DefenseClawSetup-x64.exe",
+    ):
+        assert file_permissions.windows_acl_write_error(sensitive) is None
+        sensitive_owner, sensitive_null_dacl, sensitive_entries = (
+            file_permissions._windows_acl_snapshot(str(sensitive))
+        )
+        assert sensitive_owner == file_permissions._windows_current_user_sid()
+        assert sensitive_null_dacl is False
+        assert {
+            sid
+            for permissions, _access_mode, _inheritance, sid in sensitive_entries
+            if permissions
+        } <= {
+            sensitive_owner,
+            "S-1-5-18",
+            "S-1-3-4",
+        }
 
     folders = {
         native._LOCAL_APP_DATA_FOLDER_ID: str(local_app_data),
@@ -241,6 +284,205 @@ def test_prepare_accepts_setup_inherited_read_execute_acl(
         "/uninstall",
         "/quiet",
     )
+
+
+def test_complete_setup_acl_accepts_only_public_root_administrator_authority(
+    tmp_path: Path,
+) -> None:
+    """Cover both inherited ACL failures reported from the same Setup tree."""
+
+    install_root = tmp_path / "DefenseClaw"
+    install_root.mkdir()
+    current_sid = "S-1-5-21-current"
+    entries = [
+        (0x001200A9, 1, 0x13, "S-1-5-21-codex-sandbox-users"),
+        (0x001F01FF, 1, 0x13, "S-1-5-32-544"),
+        (0x001F01FF, 1, 0x13, "S-1-5-18"),
+        (0x001F01FF, 1, 0x13, "S-1-3-4"),
+    ]
+    with (
+        patch.object(
+            file_permissions,
+            "_windows_acl_snapshot",
+            return_value=(current_sid, False, entries),
+        ),
+        patch.object(
+            file_permissions,
+            "_windows_current_user_sid",
+            return_value=current_sid,
+        ),
+        patch.object(file_permissions, "reject_reparse_path"),
+    ):
+        native._validate_private_path(
+            str(install_root),
+            label="native install root",
+            directory=True,
+            setup_root=True,
+        )
+        with pytest.raises(native.NativeWindowsUninstallRefusal, match="private DACL"):
+            native._validate_private_path(
+                str(install_root),
+                label="native installer-state directory",
+                directory=True,
+            )
+
+
+@pytest.mark.parametrize(
+    ("sid", "permissions", "inheritance"),
+    [
+        ("S-1-5-32-544", 0x001F01FF, 0x00),  # explicit Administrators
+        ("S-1-5-32-544", 0x001F01FF, 0x03),  # non-inherited Administrators
+        ("S-1-5-32-544", 0x001F01FF, 0x10),  # inherited without OI/CI
+        ("S-1-5-32-544", 0x001301BF, 0x13),  # inherited Administrators modify
+        ("S-1-5-32-545", 0x001301BF, 0x13),  # Users modify
+        ("S-1-1-0", 0x00000002, 0x13),  # Everyone create/write
+        ("S-1-5-11", 0x00000004, 0x13),  # Authenticated Users append/create
+        ("S-1-5-21-arbitrary", 0x00010000, 0x13),  # arbitrary SID delete
+        ("S-1-5-21-arbitrary", 0x00040000, 0x13),  # arbitrary SID WRITE_DAC
+        ("S-1-5-21-arbitrary", 0x00080000, 0x13),  # arbitrary SID WRITE_OWNER
+        ("S-1-5-21-arbitrary", 0x40000000, 0x13),  # arbitrary generic write
+    ],
+)
+def test_setup_root_rejects_noncanonical_mutable_ace(
+    tmp_path: Path,
+    sid: str,
+    permissions: int,
+    inheritance: int,
+) -> None:
+    install_root = tmp_path / "DefenseClaw"
+    install_root.mkdir()
+    current_sid = "S-1-5-21-current"
+    entries = [
+        (0x001F01FF, 1, 0, current_sid),
+        (0x001F01FF, 1, 0, "S-1-5-18"),
+        (permissions, 1, inheritance, sid),
+    ]
+    with (
+        patch.object(
+            file_permissions,
+            "_windows_acl_snapshot",
+            return_value=(current_sid, False, entries),
+        ),
+        patch.object(
+            file_permissions,
+            "_windows_current_user_sid",
+            return_value=current_sid,
+        ),
+        patch.object(file_permissions, "reject_reparse_path"),
+        pytest.raises(native.NativeWindowsUninstallRefusal, match="private DACL"),
+    ):
+        native._validate_private_path(
+            str(install_root),
+            label="native install root",
+            directory=True,
+            setup_root=True,
+        )
+
+
+@pytest.mark.parametrize("owner_sid", ["", "S-1-5-21-other"])
+def test_setup_root_rejects_wrong_owner(
+    tmp_path: Path,
+    owner_sid: str,
+) -> None:
+    install_root = tmp_path / "DefenseClaw"
+    install_root.mkdir()
+    current_sid = "S-1-5-21-current"
+    entries = [
+        (0x001F01FF, 1, 0, current_sid),
+        (0x001F01FF, 1, 0, "S-1-5-18"),
+        (0x001F01FF, 1, 0x13, "S-1-5-32-544"),
+    ]
+    with (
+        patch.object(
+            file_permissions,
+            "_windows_acl_snapshot",
+            return_value=(owner_sid, False, entries),
+        ),
+        patch.object(
+            file_permissions,
+            "_windows_current_user_sid",
+            return_value=current_sid,
+        ),
+        patch.object(file_permissions, "reject_reparse_path"),
+        pytest.raises(native.NativeWindowsUninstallRefusal, match="current-user owned"),
+    ):
+        native._validate_private_path(
+            str(install_root),
+            label="native install root",
+            directory=True,
+            setup_root=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [
+            (0x001F01FF, 1, 0, "S-1-5-21-current"),
+            (0x001F01FF, 1, 0x13, "S-1-5-32-544"),
+        ],
+        [
+            (0x001F01FF, 1, 0, "S-1-5-18"),
+            (0x001F01FF, 1, 0x13, "S-1-5-32-544"),
+        ],
+    ],
+)
+def test_setup_root_rejects_missing_required_custody(
+    tmp_path: Path,
+    entries: list[tuple[int, int, int, str]],
+) -> None:
+    install_root = tmp_path / "DefenseClaw"
+    install_root.mkdir()
+    current_sid = "S-1-5-21-current"
+    with (
+        patch.object(
+            file_permissions,
+            "_windows_acl_snapshot",
+            return_value=(current_sid, False, entries),
+        ),
+        patch.object(
+            file_permissions,
+            "_windows_current_user_sid",
+            return_value=current_sid,
+        ),
+        patch.object(file_permissions, "reject_reparse_path"),
+        pytest.raises(
+            native.NativeWindowsUninstallRefusal,
+            match="required private owner/SYSTEM DACL",
+        ),
+    ):
+        native._validate_private_path(
+            str(install_root),
+            label="native install root",
+            directory=True,
+            setup_root=True,
+        )
+
+
+def test_setup_root_rejects_null_dacl(tmp_path: Path) -> None:
+    install_root = tmp_path / "DefenseClaw"
+    install_root.mkdir()
+    current_sid = "S-1-5-21-current"
+    with (
+        patch.object(
+            file_permissions,
+            "_windows_acl_snapshot",
+            return_value=(current_sid, True, []),
+        ),
+        patch.object(
+            file_permissions,
+            "_windows_current_user_sid",
+            return_value=current_sid,
+        ),
+        patch.object(file_permissions, "reject_reparse_path"),
+        pytest.raises(native.NativeWindowsUninstallRefusal, match="null DACL"),
+    ):
+        native._validate_private_path(
+            str(install_root),
+            label="native install root",
+            directory=True,
+            setup_root=True,
+        )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows inherited ACLs")
@@ -284,6 +526,7 @@ def test_private_path_rejects_setup_acl_with_untrusted_modify(
             str(install_root),
             label="native install root",
             directory=True,
+            setup_root=True,
         )
 
 
@@ -313,6 +556,7 @@ def test_private_path_rejects_system_deny_on_setup_acl(tmp_path: Path) -> None:
             str(install_root),
             label="native install root",
             directory=True,
+            setup_root=True,
         )
 
 
@@ -345,8 +589,14 @@ def test_prepare_refuses_missing_cached_setup(tmp_path: Path) -> None:
     local_app_data, profile = _native_tree(tmp_path)
     setup = local_app_data / "DefenseClaw" / "InstallerCache" / "DefenseClawSetup-x64.exe"
 
-    def validate(path: str, *, label: str, directory: bool) -> None:
-        del directory
+    def validate(
+        path: str,
+        *,
+        label: str,
+        directory: bool,
+        setup_root: bool = False,
+    ) -> None:
+        del directory, setup_root
         if os.path.normcase(path) == os.path.normcase(str(setup)):
             raise native.NativeWindowsUninstallRefusal(f"{label} is missing")
 
@@ -553,6 +803,32 @@ def test_locked_setup_handle_reads_exact_regular_file(tmp_path: Path) -> None:
 
     assert len(digest) == 64
     assert source == _SOURCE
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows hard-link custody")
+def test_private_json_and_locked_setup_reject_hardlinks(tmp_path: Path) -> None:
+    state = tmp_path / "install-state.json"
+    state.write_text("{}\n", encoding="utf-8")
+    os.link(state, tmp_path / "state-shadow.json")
+    with pytest.raises(
+        native.NativeWindowsUninstallRefusal,
+        match="hard-link identity",
+    ):
+        native._read_private_json(
+            str(state),
+            label="native installer state",
+            limit=native._MAX_INSTALL_STATE_BYTES,
+        )
+
+    setup = tmp_path / "DefenseClawSetup-x64.exe"
+    _write_pe(setup)
+    os.link(setup, tmp_path / "setup-shadow.exe")
+    with pytest.raises(
+        native.NativeWindowsUninstallRefusal,
+        match="hard-link identity",
+    ):
+        with native._open_locked_setup(str(setup)):
+            pass
 
 
 def test_execute_uses_locked_authenticated_setup_and_preserves_3010(tmp_path: Path) -> None:

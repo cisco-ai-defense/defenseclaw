@@ -1985,6 +1985,7 @@ if mutations:
 print(f'packaged gateway fixture uses isolated API port {cfg.gateway.api_port}')
 '@
     Invoke-Installed $Python @('-I', '-c', $code, $apiPort) -Timeout 60 | Out-Null
+    return $apiPort
 }
 
 function Wait-PathsAbsent([string[]]$Paths, [int]$Attempts = 150) {
@@ -3703,7 +3704,7 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
         # was launched with the prior port.
         Invoke-Installed $gateway @('stop') @(0, 1) 90 `
             (Join-Path $logs 'setup-before-minimal-config-stop.log') | Out-Null
-        Set-MinimalGatewayAcceptanceConfig $python
+        $gatewayAcceptancePort = Set-MinimalGatewayAcceptanceConfig $python
         Invoke-Installed $startup @() -Timeout 90 -Log (Join-Path $logs 'setup-gateway-startup.log') | Out-Null
         Invoke-Installed $gateway @('watchdog', 'start') -Timeout 90 -Log (Join-Path $logs 'setup-watchdog-start.log') | Out-Null
         Invoke-Installed $gateway @('status') -Timeout 30 | Out-Null
@@ -3727,6 +3728,7 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
             throw "setup repair changed the user-configured connector roster: $($repairedRoster -join ', ')"
         }
         $afterRepair = Get-GatewayIdentity $dataRoot
+        $watchdogAfterRepair = Get-WatchdogIdentity $dataRoot
         if (-not (Test-GatewayIdentityChanged $beforeRepair $afterRepair)) {
             throw 'setup repair did not restart the previously running gateway'
         }
@@ -3747,6 +3749,15 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
         Assert-NoGatewayAutoStart
         Assert-UserPathRegistrySnapshot $userPathBefore `
             'setup uninstall did not restore the original user PATH exactly'
+        foreach ($retiredProcess in @($afterRepair, $watchdogAfterRepair)) {
+            if ($null -ne (Get-Process -Id $retiredProcess.ProcessId -ErrorAction SilentlyContinue)) {
+                throw "setup uninstall left managed process running: $($retiredProcess.ProcessId)"
+            }
+        }
+        if (@(Get-NetTCPConnection -State Listen -LocalPort $gatewayAcceptancePort `
+                -ErrorAction SilentlyContinue).Count -ne 0) {
+            throw "setup uninstall left the managed gateway listener on port $gatewayAcceptancePort"
+        }
 
         Invoke-WindowsSetupStandardUserProcess $setup @(
             '/quiet', '/norestart', 'INSTALLSCOPE=user', 'CONNECTOR=none',
@@ -3756,11 +3767,16 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
         if (-not (Test-Path -LiteralPath $cachedSetup -PathType Leaf)) {
             throw "reinstall did not publish the self-servicing setup executable: $cachedSetup"
         }
-        # Exercise the exact Apps & Features path. Full uninstall deliberately
-        # retains authenticated cleanup authority until a distinct boot.
-        Invoke-WindowsSetupStandardUserProcess $cachedSetup @('/uninstall', '/quiet', 'DELETEUSERDATA=1') `
+        # Exercise the exact packaged CLI handoff. It must authenticate the
+        # cached Setup and preserve the 3010 result without falling through to
+        # generic marker guards.
+        $nativeUninstall = Invoke-WindowsNativeProcess $launcher @('uninstall', '--all', '--yes') `
             -AllowedExitCodes @(3010) -TimeoutSeconds 600 `
-            -LogPath (Join-Path $logs 'setup-uninstall-delete.log') | Out-Null
+            -LogPath (Join-Path $logs 'setup-uninstall-delete.log')
+        if ("$($nativeUninstall.StdOut)`n$($nativeUninstall.StdErr)" -notmatch
+            '(?i)restart required.*3010') {
+            throw 'native CLI uninstall did not report the preserved Windows 3010 restart result'
+        }
         if (Test-Path -LiteralPath $installRoot) { throw "setup uninstall left install root behind: $installRoot" }
         if (Test-Path -LiteralPath $dataRoot) { throw "setup uninstall with DELETEUSERDATA=1 left user data behind: $dataRoot" }
         foreach ($requiredResidue in @(
@@ -3787,6 +3803,66 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
             [string]$transactionJournal.transaction.id -cne [string]$cleanupRecord.transaction_id) {
             throw 'same-boot uninstall did not retain the exact converged uninstall journal'
         }
+        $hookRuntimeRoot = Split-Path -Parent (Get-StableHookRuntimeExecutable)
+        $hookRuntimeNames = @(
+            Get-ChildItem -LiteralPath $hookRuntimeRoot -Force |
+                ForEach-Object Name |
+                Sort-Object
+        )
+        $expectedHookRuntimeNames = @('defenseclaw-hook.exe', 'hook-runtime-state.json')
+        if (($hookRuntimeNames -join "`0") -cne ($expectedHookRuntimeNames -join "`0")) {
+            throw "same-boot uninstall retained unexpected HookRuntime residue: $($hookRuntimeNames -join ', ')"
+        }
+        $installerStateNames = @(
+            Get-ChildItem -LiteralPath $installerStateRoot -Force |
+                ForEach-Object Name |
+                Sort-Object
+        )
+        $unexpectedInstallerState = @(
+            $installerStateNames |
+                Where-Object { $_ -notin @('setup-transaction.json', 'setup.log', 'uninstall-cleanup.json') }
+        )
+        if ($unexpectedInstallerState.Count -ne 0) {
+            throw "same-boot uninstall retained unrelated InstallerState: $($unexpectedInstallerState -join ', ')"
+        }
+        $cacheNames = @(
+            Get-ChildItem -LiteralPath $cacheRoot -Force |
+                ForEach-Object Name |
+                Sort-Object
+        )
+        if (($cacheNames -join "`0") -cne 'DefenseClawSetup-x64.exe') {
+            throw "same-boot uninstall retained unexpected installer-cache residue: $($cacheNames -join ', ')"
+        }
+        $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+        $runCommand = Get-ItemPropertyValue -LiteralPath $runKey `
+            -Name 'DefenseClawDeferredUninstallCleanup' -ErrorAction Stop
+        if ([string]$runCommand -cne [string]$cleanupRecord.run_command) {
+            throw 'same-boot uninstall Run value differs from the authenticated cleanup record'
+        }
+        Invoke-WindowsNativeProcess (Get-StableHookRuntimeExecutable) @(
+            'hook', '--connector', 'codex'
+        ) -AllowedExitCodes @(0) -TimeoutSeconds 30 `
+            -LogPath (Join-Path $logs 'setup-disabled-hook-same-boot.log') | Out-Null
+        Invoke-WindowsSetupStandardUserProcess $cachedSetup @(
+            '/cleanup', '/quiet',
+            "CLEANUPTRANSACTION=$([string]$cleanupRecord.transaction_id)"
+        ) -AllowedExitCodes @(3010) -TimeoutSeconds 120 `
+            -LogPath (Join-Path $logs 'setup-cleanup-same-boot.log') | Out-Null
+        $sameBootRecord = Get-Content -LiteralPath $cleanupRecordPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+        if ([string]$sameBootRecord.status -cne 'pending-reboot' -or
+            [string]$sameBootRecord.transaction_id -cne [string]$cleanupRecord.transaction_id) {
+            throw 'same-boot cleanup changed the authenticated pending record'
+        }
+        if (Test-Path -LiteralPath $installRoot) {
+            throw 'same-boot cleanup recreated the install root'
+        }
+        if (Test-Path -LiteralPath $arpKey) {
+            throw 'same-boot cleanup recreated Installed Apps registration'
+        }
+        Assert-NoDefenseClawRegistration $connectorConfigPaths
+        Assert-UserPathRegistrySnapshot $userPathBefore `
+            'same-boot cleanup changed the restored user PATH'
         Assert-NoGatewayAutoStart
     } catch {
         $acceptanceFailure = $_

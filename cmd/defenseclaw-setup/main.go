@@ -1299,6 +1299,13 @@ func updateInstalledPathOwnership(installRoot string, owned, reusedSeparator, va
 
 func publishMaintenanceCopyForTransaction(transaction setupTransaction, unsignedLocal bool) error {
 	target := transaction.MaintenancePath
+	root := filepath.Dir(target)
+	if err := safefile.ProtectDirectory(root); err != nil {
+		return fmt.Errorf("protect installer cache: %w", err)
+	}
+	if err := validatePrivateTransactionPath(root, true); err != nil {
+		return fmt.Errorf("validate installer cache: %w", err)
+	}
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -1318,14 +1325,20 @@ func publishMaintenanceCopyForTransaction(transaction setupTransaction, unsigned
 		if !strings.EqualFold(digest, transaction.MaintenanceSHA256) {
 			return errors.New("running maintenance executable does not match the transaction digest")
 		}
+		if err := verifySetupExecutablePolicyAt(target, unsignedLocal); err != nil {
+			return err
+		}
+		if err := validatePrivateTransactionPath(target, false); err != nil {
+			return fmt.Errorf("running maintenance executable lacks private custody: %w", err)
+		}
+		protectedDigest, err := fileSHA256(target)
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(protectedDigest, transaction.MaintenanceSHA256) {
+			return errors.New("running maintenance executable changed while its custody was protected")
+		}
 		return verifySetupExecutablePolicyAt(target, unsignedLocal)
-	}
-	root := filepath.Dir(target)
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return err
-	}
-	if err := rejectReparseAncestors(root); err != nil {
-		return err
 	}
 	backup := transaction.MaintenanceBackup
 	staged := transaction.MaintenanceNew
@@ -1352,6 +1365,22 @@ func publishMaintenanceCopyForTransaction(transaction setupTransaction, unsigned
 		return fmt.Errorf("maintenance executable changed after transaction intent: %w", err)
 	}
 	if transaction.MaintenanceExisted {
+		if err := safefile.ProtectFile(target); err != nil {
+			_ = removeAllSafe(staged, root)
+			return fmt.Errorf("protect previous maintenance executable: %w", err)
+		}
+		if err := validatePrivateTransactionPath(target, false); err != nil {
+			_ = removeAllSafe(staged, root)
+			return fmt.Errorf("validate previous maintenance executable: %w", err)
+		}
+		if err := validateMaintenanceSnapshot(
+			target,
+			true,
+			transaction.PreviousMaintenanceSHA256,
+		); err != nil {
+			_ = removeAllSafe(staged, root)
+			return fmt.Errorf("maintenance executable changed while its custody was protected: %w", err)
+		}
 		if err := renameInstallTree(target, backup); err != nil {
 			_ = removeAllSafe(staged, root)
 			return err
@@ -1375,6 +1404,12 @@ func publishMaintenanceCopyForTransaction(transaction setupTransaction, unsigned
 	if err := verifySetupExecutablePolicyAt(target, unsignedLocal); err != nil {
 		return fmt.Errorf("verify published maintenance Authenticode policy: %w", err)
 	}
+	if err := safefile.ProtectFile(target); err != nil {
+		return fmt.Errorf("protect published maintenance executable: %w", err)
+	}
+	if err := validatePrivateTransactionPath(target, false); err != nil {
+		return fmt.Errorf("validate published maintenance executable: %w", err)
+	}
 	return nil
 }
 
@@ -1388,7 +1423,8 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 	if err := os.MkdirAll(filepath.Join(staging, "runtime", "python"), 0o755); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(staging, "installer"), 0o755); err != nil {
+	installerRoot, err := prepareStagedInstallerRoot(staging)
+	if err != nil {
 		return err
 	}
 	if err := extractZipFile(filepath.Join(payload.Root, payload.Manifest.PythonEmbed), filepath.Join(staging, "runtime", "python")); err != nil {
@@ -1468,7 +1504,36 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 	if err := writeJSON(filepath.Join(staging, "installer", "install-state.json"), state); err != nil {
 		return err
 	}
+	for _, path := range []string{
+		installerRoot,
+		filepath.Join(installerRoot, "upgrade-manifest.json"),
+		filepath.Join(installerRoot, "payload-manifest.json"),
+		filepath.Join(installerRoot, "install-state.json"),
+	} {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if err := safefile.ValidatePrivateDirectory(path); err != nil {
+				return fmt.Errorf("validate staged installer custody: %w", err)
+			}
+		} else if err := safefile.ValidatePrivateFile(path); err != nil {
+			return fmt.Errorf("validate staged installer custody: %w", err)
+		}
+	}
 	return nil
+}
+
+func prepareStagedInstallerRoot(staging string) (string, error) {
+	installerRoot := filepath.Join(staging, "installer")
+	if err := safefile.ProtectDirectory(installerRoot); err != nil {
+		return "", fmt.Errorf("protect staged installer metadata: %w", err)
+	}
+	if err := safefile.ValidatePrivateDirectory(installerRoot); err != nil {
+		return "", fmt.Errorf("validate staged installer metadata: %w", err)
+	}
+	return installerRoot, nil
 }
 
 func stageHookLauncher(payload loadedPayload, staging string) error {

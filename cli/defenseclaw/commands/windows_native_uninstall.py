@@ -44,6 +44,10 @@ _IMAGE_FILE_MACHINE_AMD64 = 0x8664
 _PRODUCT_PUBLISHER = "Cisco Systems, Inc."
 _RESTART_REQUIRED = 3010
 _INSTALL_FAILURE = 1603
+_BUILTIN_ADMINISTRATORS_SID = "S-1-5-32-544"
+_FILE_ALL_ACCESS = 0x001F01FF
+_SETUP_ROOT_ADMIN_INHERITANCE = 0x01 | 0x02 | 0x10
+_WINDOWS_WRITE_MASK = 0x10000000 | 0x40000000 | 0x000D0156
 _SOURCE_BUILD_ID = re.compile(rb"defenseclaw-setup-([0-9a-f]{40})")
 _SOURCE_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 _TRANSACTION_ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -176,15 +180,20 @@ def prepare_native_windows_uninstall(
     if not os.path.lexists(state_path):
         return None
 
-    for path, label, directory in (
-        (install_root, "native install root", True),
-        (installer_root, "native installer-state directory", True),
-        (state_path, "native installer state", False),
-        (payload_manifest_path, "native payload manifest", False),
-        (cache_root, "native installer cache", True),
-        (setup_path, "cached native Setup", False),
+    for path, label, directory, setup_root in (
+        (install_root, "native install root", True, True),
+        (installer_root, "native installer-state directory", True, False),
+        (state_path, "native installer state", False, False),
+        (payload_manifest_path, "native payload manifest", False, False),
+        (cache_root, "native installer cache", True, False),
+        (setup_path, "cached native Setup", False, False),
     ):
-        _validate_private_path(path, label=label, directory=directory)
+        _validate_private_path(
+            path,
+            label=label,
+            directory=directory,
+            setup_root=setup_root,
+        )
 
     state, state_sha256 = _read_private_json(
         state_path,
@@ -313,7 +322,13 @@ def _exact_child(root: str, *parts: str) -> str:
     return candidate
 
 
-def _validate_private_path(path: str, *, label: str, directory: bool) -> None:
+def _validate_private_path(
+    path: str,
+    *,
+    label: str,
+    directory: bool,
+    setup_root: bool = False,
+) -> None:
     from defenseclaw.file_permissions import (
         _windows_acl_has_required_access,
         reject_reparse_path,
@@ -332,7 +347,7 @@ def _validate_private_path(path: str, *, label: str, directory: bool) -> None:
         raise NativeWindowsUninstallRefusal(
             f"{label.capitalize()} is not the expected regular {'directory' if directory else 'file'}."
         )
-    problem = windows_acl_write_error(path)
+    problem = _windows_setup_root_acl_write_error(path) if setup_root else windows_acl_write_error(path)
     if problem is not None:
         raise NativeWindowsUninstallRefusal(
             f"{label.capitalize()} is not current-user owned with a private DACL: {problem}."
@@ -349,6 +364,49 @@ def _validate_private_path(path: str, *, label: str, directory: bool) -> None:
         )
 
 
+def _windows_setup_root_acl_write_error(path: str) -> str | None:
+    """Accept only Setup's inherited OS-administrator grant at the public root."""
+
+    from defenseclaw.file_permissions import (
+        _windows_acl_snapshot,
+        _windows_current_user_sid,
+    )
+
+    try:
+        owner_sid, null_dacl, entries = _windows_acl_snapshot(path)
+        current_sid = _windows_current_user_sid()
+    except OSError as exc:
+        return f"cannot read Windows ACL ({exc})"
+    if null_dacl:
+        return "ACL grants write access to Everyone (null DACL)"
+    if owner_sid != current_sid:
+        return f"owner SID {owner_sid or '<unknown>'} is not the current user"
+
+    trusted = {"S-1-3-4", "S-1-5-18", current_sid}
+    for permissions, access_mode, inheritance, sid in entries:
+        if access_mode not in (1, 2) or not permissions & _WINDOWS_WRITE_MASK:
+            continue
+        if sid in trusted:
+            continue
+        if sid == "S-1-3-0" and inheritance & 0x08:
+            continue
+        # This is the well-known Windows administrator authority, not a
+        # product allowlist. UAC keeps it deny-only in a standard token, while
+        # an elevated local administrator can already take ownership of this
+        # per-user execution tree. Accept only Setup's exact inherited
+        # directory grant here; every custody-bearing child is validated by
+        # the strict path and Setup publishes those children owner/SYSTEM-only.
+        if (
+            sid == _BUILTIN_ADMINISTRATORS_SID
+            and access_mode == 1
+            and permissions == _FILE_ALL_ACCESS
+            and inheritance == _SETUP_ROOT_ADMIN_INHERITANCE
+        ):
+            continue
+        return f"ACL grants write access to untrusted SID {sid or '<unknown>'}"
+    return None
+
+
 def _read_private_json(
     path: str,
     *,
@@ -360,7 +418,10 @@ def _read_private_json(
     try:
         fd = open_regular_file_no_follow(path)
         try:
-            size = os.fstat(fd).st_size
+            opened = os.fstat(fd)
+            if getattr(opened, "st_nlink", 1) != 1:
+                raise OSError("file has an unexpected hard-link identity")
+            size = opened.st_size
             if size <= 0 or size > limit:
                 raise OSError(f"file is outside the {limit}-byte bound")
             raw = _read_exact_fd(fd, size)
@@ -562,6 +623,10 @@ def _open_locked_setup(path: str) -> Iterator[BinaryIO]:
         ):
             raise NativeWindowsUninstallRefusal(
                 "Cached native Setup handle is not a regular non-reparse file."
+            )
+        if information.nNumberOfLinks != 1:
+            raise NativeWindowsUninstallRefusal(
+                "Cached native Setup has an unexpected hard-link identity."
             )
         final_path = _final_path_for_handle(handle, get_final_path)
         if os.path.normcase(os.path.abspath(final_path)) != os.path.normcase(
