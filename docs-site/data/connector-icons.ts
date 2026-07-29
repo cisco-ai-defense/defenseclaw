@@ -6,6 +6,7 @@ export interface ConnectorIconDefinition {
 }
 
 export const connectorIconDefinitions: Record<string, ConnectorIconDefinition> = {
+  amp: { source: 'amp-color.svg', target: 'amp.svg', accent: '#f34e3f' },
   antigravity: { source: 'antigravity-color.svg', target: 'antigravity.svg', accent: '#7767e8' },
   claudecode: { source: 'claudecode-color.svg', target: 'claudecode.svg', accent: '#d97757' },
   codex: { source: 'codex-color.svg', target: 'codex.svg', accent: '#10a37f' },

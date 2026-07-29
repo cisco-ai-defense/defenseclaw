@@ -13,12 +13,14 @@
 # driver under drivers/. This file defines functions only — callers own
 # `set -euo pipefail`.
 #
-# Cross-OS note: on Linux/macOS the agent invokes the installed Bash hook
-# script (~/.defenseclaw/hooks/<connector>-hook.sh). On native Windows the
-# agent invokes `defenseclaw-hook hook --connector <name> --event <ev>`
-# (PR #308). Both forward the stdin event payload to the local gateway, so
-# every assertion below works against canonical ~/.defenseclaw/audit.db history
-# regardless of OS.
+# Cross-OS note: on Linux/macOS most agents invoke an installed Bash hook
+# script (~/.defenseclaw/hooks/<connector>-hook.sh). Amp instead loads a
+# TypeScript plugin, so deterministic contract probes call the same
+# `defenseclaw-gateway hook` command the plugin's HTTP transport reaches. On
+# native Windows the native harness uses `defenseclaw-hook hook --connector
+# <name> --event <ev>` (PR #308). All paths forward the stdin event payload to
+# the local gateway, so every assertion below works against canonical
+# ~/.defenseclaw/audit.db history regardless of OS.
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -256,9 +258,10 @@ PY
 # Hook entrypoint (cross-OS)
 # ---------------------------------------------------------------------------
 
-# dc_hook_script <connector> — installed Bash hook path for unix. The claude
+# dc_hook_script <connector> — installed Bash hook path for unix. The Claude
 # connector's script is named claude-code-hook.sh; everything else follows
 # <connector>-hook.sh (see internal/gateway/connector/hooks/ + cmd_setup.py).
+# Amp does not use this helper because its installed entrypoint is TypeScript.
 dc_hook_script() {
   local connector="$1" base
   case "${connector}" in
@@ -269,9 +272,12 @@ dc_hook_script() {
 }
 
 # dc_invoke_hook <connector> <event> <payload_file> — feed a golden event
-# payload into the installed hook entrypoint and echo "exit:<code>" on the
-# last line so callers can assert verdict shaping. On Windows this targets the
-# native no-console `defenseclaw-hook hook` subcommand instead of the Bash script.
+# payload into the connector's canonical contract entrypoint and echo
+# "exit:<code>" on the last line so callers can assert verdict shaping. On
+# Unix Amp dispatches through `defenseclaw-gateway hook` because its installed
+# agent entrypoint is a TypeScript plugin rather than an executable shell hook.
+# On Windows this targets the native no-console `defenseclaw-hook hook`
+# subcommand instead of a Bash script.
 #
 # Stdout of the hook (the agent-native decision JSON) is forwarded verbatim
 # before the trailing exit line.
@@ -279,6 +285,19 @@ dc_invoke_hook() {
   local connector="$1" event="$2" payload="$3" code out
   if dc_is_windows; then
     out="$(defenseclaw-hook hook --connector "${connector}" --event "${event}" < "${payload}" 2>&1)" && code=0 || code=$?
+  elif [ "${connector}" = "amp" ]; then
+    local amp_event
+    amp_event="$(jq -er '.hook_event_name | select(type == "string" and length > 0)' "${payload}")" || {
+      dc_err "Amp payload is missing a non-empty hook_event_name: ${payload}"
+      printf 'exit:127\n'
+      return 0
+    }
+    if [ "${amp_event}" != "${event}" ]; then
+      dc_err "Amp event mismatch: requested ${event}, payload declares ${amp_event}"
+      printf 'exit:127\n'
+      return 0
+    fi
+    out="$(defenseclaw-gateway hook --connector amp --event "${event}" < "${payload}" 2>&1)" && code=0 || code=$?
   else
     local script; script="$(dc_hook_script "${connector}")"
     if [ ! -x "${script}" ]; then

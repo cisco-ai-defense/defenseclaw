@@ -1,0 +1,12 @@
+{
+  "name": "defenseclaw-amp-plugin-typecheck",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "tsc --project tsconfig.json && node --test amp-plugin.test.mjs"
+  },
+  "devDependencies": {
+    "@ampcode/plugin": "0.0.0-20260729002615-g8a974c9",
+    "typescript": "5.9.3"
+  }
+}

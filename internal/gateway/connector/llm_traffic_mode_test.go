@@ -26,7 +26,7 @@ func TestLLMTrafficModeForConnector(t *testing.T) {
 	proxy := []string{"openclaw", "zeptoclaw"}
 	hooks := []string{
 		"claudecode", "codex", "hermes", "cursor", "windsurf",
-		"geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent",
+		"geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp",
 	}
 	for _, name := range proxy {
 		if got := LLMTrafficModeForConnector(name); got != LLMTrafficModeProxy {
@@ -55,12 +55,13 @@ func TestLLMTrafficModeForConnector(t *testing.T) {
 // traffic mode, so /v1/connectors and the CLI render the judge-only
 // custom-provider wording.
 func TestHookOnlyConnectorCapabilities_SetLLMTrafficMode(t *testing.T) {
-	for _, c := range []*hookOnlyConnector{
+	for _, c := range []ConnectorCapabilityProvider{
 		NewHermesConnector(), NewOpenCodeConnector(), NewCursorConnector(),
+		NewAMPConnector(),
 	} {
 		caps := c.Capabilities(SetupOpts{APIAddr: "127.0.0.1:18970"})
 		if caps.LLMTrafficMode != LLMTrafficModeHooksOnly {
-			t.Errorf("%s Capabilities.LLMTrafficMode=%q, want hooks-only", c.Name(), caps.LLMTrafficMode)
+			t.Errorf("Capabilities.LLMTrafficMode=%q, want hooks-only", caps.LLMTrafficMode)
 		}
 	}
 }

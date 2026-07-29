@@ -620,6 +620,72 @@
       "local_endpoints": []
     },
     {
+      "id": "amp",
+      "name": "Amp",
+      "vendor": "Amp",
+      "category": "supported_connector",
+      "confidence": 0.95,
+      "supported_connector": "amp",
+      "binary_names": [
+        "amp"
+      ],
+      "process_names": [
+        "amp"
+      ],
+      "config_paths": [
+        "~/.config/amp/settings.json",
+        "~/.config/amp/settings.jsonc",
+        "/Library/Application Support/ampcode/managed-settings.json",
+        "/etc/ampcode/managed-settings.json",
+        "$ProgramData/ampcode/managed-settings.json",
+        ".amp/settings.json",
+        ".amp/settings.jsonc",
+        ".amp/plugins",
+        "~/.config/amp/plugins",
+        "~/.config/agents/skills",
+        "~/.agents/skills",
+        "~/.config/amp/skills",
+        ".agents/skills",
+        ".claude/skills",
+        "~/.claude/skills",
+        ".agents/checks",
+        "~/.config/amp/checks",
+        "~/.config/agents/checks",
+        "~/.config/amp/AGENTS.md",
+        "~/.config/AGENTS.md",
+        "/Library/Application Support/ampcode/AGENTS.md",
+        "/etc/ampcode/AGENTS.md",
+        "$ProgramData/ampcode/AGENTS.md",
+        "AGENTS.md"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [
+        "~/.config/amp/settings.json",
+        "~/.config/amp/settings.jsonc",
+        "/Library/Application Support/ampcode/managed-settings.json",
+        "/etc/ampcode/managed-settings.json",
+        "$ProgramData/ampcode/managed-settings.json",
+        ".amp/settings.json",
+        ".amp/settings.jsonc"
+      ],
+      "package_names": [
+        "@ampcode/cli"
+      ],
+      "env_var_names": [
+        "AMP_API_KEY"
+      ],
+      "domain_patterns": [
+        "ampcode.com"
+      ],
+      "history_patterns": [
+        "ampcode",
+        "amp -x",
+        "amp --execute"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
       "id": "omnigent",
       "name": "OmniGent",
       "vendor": "OmniGent",

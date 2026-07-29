@@ -52,6 +52,7 @@ MODE_PICKER_CHOICES: tuple[ModeChoice, ...] = (
     ModeChoice("openhands", "OpenHands", "n", False, "command hooks via ~/.openhands/hooks.json"),
     ModeChoice("antigravity", "Antigravity", "a", False, "PreToolUse hooks via ~/.gemini/config/hooks.json"),
     ModeChoice("opencode", "OpenCode", "e", False, "auto-loaded JS bridge plugin; tool.execute.before blocking"),
+    ModeChoice("amp", "Amp", "i", False, "synchronous TypeScript policy plugin; native confirm/block"),
     ModeChoice("omnigent", "OmniGent", "m", False, "custom policy ALLOW/ASK/DENY + optional native OTLP"),
 )
 
@@ -252,6 +253,11 @@ def preview_for_switch(current_wire: str, dest_wire: str) -> str:
             "OmniGent: setup will re-run to refresh the custom Python policy runtime, "
             "config, and runtime files."
         )
+    if current == dest and dest == "amp":
+        return (
+            "Amp: setup will re-run to refresh the synchronous TypeScript policy plugin, "
+            "permissions inventory, and runtime files."
+        )
     if current == dest:
         return f"{label}: setup will re-run to refresh hooks, config, and runtime files."
     if choice_for_wire(dest).guardrail_ok:
@@ -264,6 +270,12 @@ def preview_for_switch(current_wire: str, dest_wire: str) -> str:
             "OmniGent: installs the custom Python policy runtime, maps all six phases "
             "to ALLOW/ASK/DENY, and honors per-connector policy mode."
         )
+    if dest == "amp":
+        return (
+            "Amp: installs the synchronous TypeScript policy plugin, gates tool.call execution "
+            "and model-bound tool.result output, and records lifecycle events for Agent 360, Galileo, and other "
+            "configured observability destinations."
+        )
     return (
         f"{label}: runs hook-driven connector setup, wires hooks and native OTel where supported, "
         "and honors guardrail.mode for PreToolUse deny verdicts."
@@ -272,7 +284,11 @@ def preview_for_switch(current_wire: str, dest_wire: str) -> str:
 
 def _choice_action(choice: ModeChoice, *, current_wire: str) -> MenuAction:
     active = " (active)" if normalize_connector(current_wire) == choice.wire else ""
-    guardrail = "guardrail" if choice.guardrail_ok else ("policy" if choice.wire == "omnigent" else "hooks")
+    guardrail = (
+        "guardrail"
+        if choice.guardrail_ok
+        else ("policy" if choice.wire in {"omnigent", "amp"} else "hooks")
+    )
     return MenuAction(
         action_id=choice.wire,
         # Escape the opening bracket so Rich treats ``[c] Codex`` as

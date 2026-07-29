@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -35,7 +36,10 @@ from typing import Any, NamedTuple, TypedDict
 
 from defenseclaw import connector_paths
 from defenseclaw.config import Config, SkillActionsConfig, _expand
-from defenseclaw.inventory.plugin_directories import discover_plugin_directories
+from defenseclaw.inventory.plugin_directories import (
+    discover_plugin_directories,
+    read_amp_plugin_source,
+)
 from defenseclaw.inventory.plugin_identity import (
     AmbiguousPluginIdentityError,
     filesystem_identity_key,
@@ -642,6 +646,7 @@ def _attach_connector_paths(
             connector,
             openclaw_config=cfg.claw.config_file,
             openclaw_home=cfg.claw.home_dir,
+            workspace_dir=cfg.connector_workspace_dir(),
         )
     except Exception:
         out["connector_config_files"] = []
@@ -657,6 +662,20 @@ def _attach_connector_paths(
         out["connector_mcp_files"] = list(_collect_mcp_config_files(connector, cfg))
     except Exception:
         out["connector_mcp_files"] = []
+    try:
+        out["connector_rule_files"] = connector_paths.rule_paths(
+            connector,
+            workspace_dir=cfg.connector_workspace_dir(),
+        )
+    except Exception:
+        out["connector_rule_files"] = []
+    try:
+        out["connector_policy_settings"] = connector_paths.connector_policy_settings(
+            connector,
+            workspace_dir=cfg.connector_workspace_dir(),
+        )
+    except Exception:
+        out["connector_policy_settings"] = {}
 
 
 def _sync_legacy_connector_paths(out: dict[str, Any]) -> None:
@@ -707,11 +726,18 @@ def _collect_mcp_config_files(connector: str, cfg: Config) -> list[str]:
         connector,
         openclaw_config=cfg.claw.config_file,
         openclaw_home=cfg.claw.home_dir,
+        workspace_dir=cfg.connector_workspace_dir(),
     )
     out: list[str] = []
     for path in candidates:
         base = os.path.basename(path).lower()
-        if base.endswith(".json") or base.endswith(".toml") or base.endswith(".yaml") or base.endswith(".yml"):
+        if (
+            base.endswith(".json")
+            or base.endswith(".jsonc")
+            or base.endswith(".toml")
+            or base.endswith(".yaml")
+            or base.endswith(".yml")
+        ):
             out.append(path)
     return out
 
@@ -1553,6 +1579,7 @@ def _agents_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
     * zeptoclaw  — ``~/.zeptoclaw/agents.json`` array
     * geminicli  — ``.gemini/agents`` and ``~/.gemini/agents``
     * copilot    — ``.github/agents`` and ``~/.copilot/agents``
+    * amp        — static plugin metadata and ``createAgent({name})`` calls
     """
     home = os.path.expanduser("~")
     name = (connector or "").lower()
@@ -1578,6 +1605,8 @@ def _agents_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
                 os.path.join(home, ".copilot", "agents"),
             ]
         )
+    if name == "amp":
+        return _agents_from_amp_plugins(cfg)
     return []
 
 
@@ -1755,6 +1784,387 @@ def _agents_from_zeptoclaw_json(path: str) -> list[dict[str, Any]]:
                 "kind": "agent",
             }
         )
+    return rows
+
+
+_AMP_AGENT_MODE_RE = re.compile(
+    r"^[ \t]*//[ \t]*@amp-agent-mode[ \t]+(?P<metadata>\{[^\r\n]*\})[ \t]*\r?$",
+    re.MULTILINE,
+)
+_AMP_CREATE_AGENT_CALL_RE = re.compile(
+    r"\bcreateAgent[ \t\r\n]*\([ \t\r\n]*\{",
+)
+_AMP_REGISTER_AGENT_MODE_CALL_RE = re.compile(
+    r"\bregisterAgentMode[ \t\r\n]*\([ \t\r\n]*\{",
+)
+_AMP_AGENT_NAME_RE = re.compile(r"[A-Za-z0-9_. -]{1,128}")
+_AMP_AGENT_MODE_MAX_CHARS = 24
+_AMP_AGENT_OBJECT_MAX_CHARS = 65_536
+
+
+def _mask_ts_for_amp_agent_discovery(source: str) -> tuple[str, set[int]]:
+    """Mask TS comments/string contents while preserving offsets and quotes.
+
+    Amp plugin inventory is intentionally static: TypeScript is never imported
+    or executed. This bounded lexical pass makes call detection ignore examples
+    embedded in comments, quoted strings, and template literals. It also
+    records real ``//`` token offsets so the intentionally comment-based
+    ``@amp-agent-mode`` annotation can be distinguished from string content.
+    """
+
+    masked = list(source)
+    line_comment_starts: set[int] = set()
+    index = 0
+    source_len = len(source)
+
+    def _blank(position: int) -> None:
+        if source[position] not in "\r\n":
+            masked[position] = " "
+
+    while index < source_len:
+        current = source[index]
+        following = source[index + 1] if index + 1 < source_len else ""
+        if current == "/" and following == "/":
+            line_comment_starts.add(index)
+            _blank(index)
+            _blank(index + 1)
+            index += 2
+            while index < source_len and source[index] not in "\r\n":
+                _blank(index)
+                index += 1
+            continue
+        if current == "/" and following == "*":
+            _blank(index)
+            _blank(index + 1)
+            index += 2
+            while index < source_len:
+                if source[index] == "*" and index + 1 < source_len and source[index + 1] == "/":
+                    _blank(index)
+                    _blank(index + 1)
+                    index += 2
+                    break
+                _blank(index)
+                index += 1
+            continue
+        if current not in {"'", '"', "`"}:
+            index += 1
+            continue
+
+        quote = current
+        # Keep only the delimiters. The masked content cannot manufacture
+        # identifiers, braces, or calls, while the retained delimiters let the
+        # property parser locate a literal value in the original source.
+        index += 1
+        while index < source_len:
+            char = source[index]
+            if char == "\\":
+                _blank(index)
+                if index + 1 < source_len:
+                    _blank(index + 1)
+                index += 2
+                continue
+            if char == quote:
+                index += 1
+                break
+            _blank(index)
+            index += 1
+
+    return "".join(masked), line_comment_starts
+
+
+def _skip_masked_whitespace(masked: str, index: int, limit: int) -> int:
+    while index < limit and masked[index].isspace():
+        index += 1
+    return index
+
+
+def _matching_amp_agent_object(masked: str, opening: int) -> int:
+    """Return the matching top-level ``}``, bounded to one call object."""
+
+    depth = 0
+    limit = min(len(masked), opening + _AMP_AGENT_OBJECT_MAX_CHARS)
+    for index in range(opening, limit):
+        if masked[index] == "{":
+            depth += 1
+        elif masked[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return -1
+
+
+def _plain_ts_string_literal(source: str, start: int, limit: int) -> str:
+    """Return a plain single/double-quoted literal, rejecting escapes."""
+
+    if start >= limit or source[start] not in {"'", '"'}:
+        return ""
+    quote = source[start]
+    chars: list[str] = []
+    for index in range(start + 1, limit):
+        char = source[index]
+        if char == quote:
+            return "".join(chars)
+        if char == "\\" or char in "\r\n":
+            return ""
+        chars.append(char)
+        if len(chars) > 128:
+            return ""
+    return ""
+
+
+def _amp_literal_properties_from_object(
+    source: str,
+    masked: str,
+    opening: int,
+    closing: int,
+    property_names: tuple[str, ...],
+) -> dict[str, str]:
+    """Extract requested top-level properties when their values are literals."""
+
+    values: dict[str, str] = {}
+    depth = 1
+    index = opening + 1
+    while index < closing:
+        char = masked[index]
+        if char == "{":
+            depth += 1
+            index += 1
+            continue
+        if char == "}":
+            depth -= 1
+            index += 1
+            continue
+        if depth != 1:
+            index += 1
+            continue
+        matched_property = ""
+        for property_name in property_names:
+            if not masked.startswith(property_name, index):
+                continue
+            before = masked[index - 1] if index > opening + 1 else ""
+            after_index = index + len(property_name)
+            after = masked[after_index] if after_index < closing else ""
+            if (before and (before.isalnum() or before in "_$")) or (
+                after and (after.isalnum() or after in "_$")
+            ):
+                continue
+            matched_property = property_name
+            break
+        if not matched_property:
+            index += 1
+            continue
+        after_index = index + len(matched_property)
+        value_index = _skip_masked_whitespace(masked, after_index, closing)
+        if value_index >= closing or masked[value_index] != ":":
+            index = after_index
+            continue
+        value_index = _skip_masked_whitespace(masked, value_index + 1, closing)
+        literal = _plain_ts_string_literal(source, value_index, closing)
+        if literal and matched_property not in values:
+            values[matched_property] = literal
+        index = value_index + 1
+    return values
+
+
+def _amp_call_object_ranges(masked: str, call_pattern: re.Pattern[str]) -> list[tuple[int, int]]:
+    """Return bounded object ranges for real calls matched in lexical code."""
+
+    ranges: list[tuple[int, int]] = []
+    for match in call_pattern.finditer(masked):
+        opening = match.end() - 1
+        closing = _matching_amp_agent_object(masked, opening)
+        if closing < 0:
+            continue
+        after = _skip_masked_whitespace(masked, closing + 1, len(masked))
+        if after < len(masked) and masked[after] == ")":
+            ranges.append((opening, closing))
+    return ranges
+
+
+def _amp_assigned_agent_variable(masked: str, call_start: int) -> str:
+    """Return the local variable assigned one ``createAgent`` call, if plain."""
+
+    prefix = masked[max(0, call_start - 512) : call_start]
+    match = re.search(
+        r"(?:^|[;{}\r\n])[ \t]*"
+        r"(?:const|let|var)[ \t\r\n]+"
+        r"(?P<variable>[A-Za-z_$][A-Za-z0-9_$]*)[ \t\r\n]*=[ \t\r\n]*"
+        r"(?:amp[ \t\r\n]*(?:\.[ \t\r\n]*experimental[ \t\r\n]*)?\.[ \t\r\n]*)?$",
+        prefix,
+    )
+    return match.group("variable") if match else ""
+
+
+def _amp_invocation_has_parent_thread(masked: str, variable: str, start: int) -> bool:
+    """Return whether a later agent invocation is tied to a parent thread."""
+
+    invocation = re.compile(
+        rf"\b{re.escape(variable)}[ \t\r\n]*\.[ \t\r\n]*"
+        r"(?:run|createThread)[ \t\r\n]*\(",
+    )
+    for match in invocation.finditer(masked, start):
+        opening = match.end() - 1
+        depth = 0
+        limit = min(len(masked), opening + _AMP_AGENT_OBJECT_MAX_CHARS)
+        closing = -1
+        for index in range(opening, limit):
+            if masked[index] == "(":
+                depth += 1
+            elif masked[index] == ")":
+                depth -= 1
+                if depth == 0:
+                    closing = index
+                    break
+        if closing >= 0 and re.search(
+            r"\bparentThreadID\b",
+            masked[opening + 1 : closing],
+        ):
+            return True
+    return False
+
+
+def _amp_custom_agent_definitions(source: str, masked: str) -> list[tuple[str, str]]:
+    """Find literal custom agents and conservatively classify subagent use.
+
+    ``createAgent`` is shared by Amp custom modes and independently spawned
+    agents, so the call alone is not evidence that a subagent exists. Report
+    ``custom-agent`` by default and upgrade to ``subagent`` only when a later
+    ``run`` or ``createThread`` invocation is explicitly tied to a parent via
+    ``parentThreadID``. Standalone/background commands can use the same methods
+    without forming a delegation edge. Comments and strings remain masked.
+    """
+
+    agents: list[tuple[str, str]] = []
+    for match in _AMP_CREATE_AGENT_CALL_RE.finditer(masked):
+        opening = match.end() - 1
+        closing = _matching_amp_agent_object(masked, opening)
+        if closing < 0:
+            continue
+        after = _skip_masked_whitespace(masked, closing + 1, len(masked))
+        if after >= len(masked) or masked[after] != ")":
+            continue
+        properties = _amp_literal_properties_from_object(
+            source,
+            masked,
+            opening,
+            closing,
+            ("name",),
+        )
+        name = properties.get("name", "")
+        if not _AMP_AGENT_NAME_RE.fullmatch(name):
+            continue
+        kind = "custom-agent"
+        variable = _amp_assigned_agent_variable(masked, match.start())
+        if variable and _amp_invocation_has_parent_thread(masked, variable, after + 1):
+            kind = "subagent"
+        agents.append((name, kind))
+    return agents
+
+
+def _amp_create_agent_names(source: str, masked: str) -> list[str]:
+    """Compatibility projection of statically discovered custom-agent names."""
+
+    return [name for name, _kind in _amp_custom_agent_definitions(source, masked)]
+
+
+def _amp_registered_agent_modes(source: str, masked: str) -> list[tuple[str, str]]:
+    """Find official literal ``registerAgentMode({key, label})`` calls."""
+
+    modes: list[tuple[str, str]] = []
+    for opening, closing in _amp_call_object_ranges(masked, _AMP_REGISTER_AGENT_MODE_CALL_RE):
+        properties = _amp_literal_properties_from_object(
+            source,
+            masked,
+            opening,
+            closing,
+            ("key", "label"),
+        )
+        key = properties.get("key", "").strip()
+        label = properties.get("label", "").strip()
+        if (
+            key
+            and label
+            and len(key) <= _AMP_AGENT_MODE_MAX_CHARS
+            and len(label) <= _AMP_AGENT_MODE_MAX_CHARS
+        ):
+            modes.append((key, label))
+    return modes
+
+
+def _agents_from_amp_plugins(cfg: Config) -> list[dict[str, Any]]:
+    """Statically inventory Amp custom modes/subagents without executing TS."""
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for plugin_root in cfg.plugin_dirs("amp"):
+        for plugin in discover_plugin_directories(plugin_root, connector="amp"):
+            if not os.path.isfile(plugin.path):
+                continue
+            source = read_amp_plugin_source(plugin.path)
+            if not source:
+                continue
+            masked_source, line_comment_starts = _mask_ts_for_amp_agent_discovery(source)
+            source_ids: set[str] = set()
+
+            def _record_mode(key: str, label: str) -> None:
+                identity = key.casefold()
+                if identity in seen:
+                    return
+                seen.add(identity)
+                source_ids.add(identity)
+                rows.append(
+                    {
+                        "id": key,
+                        "name": label,
+                        "source": plugin.path,
+                        "kind": "agent-mode",
+                        "plugin": plugin.id,
+                        "mode_key": key,
+                    }
+                )
+
+            # Official Amp surface. The lexical/object parser only accepts
+            # literal top-level key/label properties from executable code.
+            for key, label in _amp_registered_agent_modes(source, masked_source):
+                _record_mode(key, label)
+
+            # Optional compatibility fallback for static plugins that expose
+            # inventory metadata but cannot call registerAgentMode directly.
+            for match in _AMP_AGENT_MODE_RE.finditer(source):
+                comment_start = source.find("//", match.start(), match.end())
+                if comment_start not in line_comment_starts:
+                    continue
+                try:
+                    metadata = json.loads(match.group("metadata"))
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(metadata, dict):
+                    continue
+                key = str(metadata.get("key") or "").strip()
+                label = str(metadata.get("label") or "").strip()
+                if (
+                    not key
+                    or not label
+                    or len(key) > _AMP_AGENT_MODE_MAX_CHARS
+                    or len(label) > _AMP_AGENT_MODE_MAX_CHARS
+                ):
+                    continue
+                _record_mode(key, label)
+
+            for agent_name, kind in _amp_custom_agent_definitions(source, masked_source):
+                identity = agent_name.casefold()
+                if not agent_name or identity in seen or identity in source_ids:
+                    continue
+                seen.add(identity)
+                rows.append(
+                    {
+                        "id": agent_name,
+                        "name": agent_name,
+                        "source": plugin.path,
+                        "kind": kind,
+                        "plugin": plugin.id,
+                    }
+                )
     return rows
 
 
@@ -2135,6 +2545,11 @@ def _build_aibom_from_filesystem(
     limitations: list[InventoryLimitation] = []
     for cat_key, note in _FILESYSTEM_ONLY_CONNECTOR_NOTES.items():
         if cat_key not in cats:
+            continue
+        if connector == "amp" and cat_key == "agents":
+            # Amp custom agents/modes have a supported static plugin-source
+            # adapter. An empty result means none are installed, not that the
+            # capability is unsupported.
             continue
         result = results.get(cat_key)
         if result is None or result.items or result.error is not None:

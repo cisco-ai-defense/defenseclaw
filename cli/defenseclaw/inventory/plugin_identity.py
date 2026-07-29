@@ -113,7 +113,13 @@ def _regular_file_no_links(path: str, root: str) -> bool:
 
 def read_plugin_manifest(plugin_path: str) -> tuple[dict[str, Any], str] | None:
     """Read the first supported bounded, regular manifest without links."""
-    root = os.path.realpath(plugin_path)
+    # Keep the lexical root for component-by-component link checks.  Using a
+    # physical root here breaks valid paths beneath a symlinked system
+    # ancestor, notably macOS where /var resolves to /private/var: candidate
+    # paths still carry the lexical prefix and can never compare equal to the
+    # physical root.  _regular_file_no_links resolves both paths separately
+    # for its final containment check.
+    root = os.path.abspath(plugin_path)
     if is_link_or_reparse(plugin_path) or not os.path.isdir(root):
         raise PluginIdentityError("plugin source must be a regular directory, not a link")
     for rel in MANIFEST_FILES:

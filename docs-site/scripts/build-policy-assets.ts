@@ -476,11 +476,22 @@ function buildScenarios(): Scenario[] {
       input: {
         target_type: 'plugin',
         target_name: 'defenseclaw',
-        path: '/Users/op/.defenseclaw/plugins/defenseclaw',
+        path: '/Users/op/.config/amp/plugins/defenseclaw.ts',
         block_list: [],
         allow_list: [
-          { target_type: 'plugin', target_name: 'defenseclaw', reason: 'first-party DefenseClaw plugin' },
+          {
+            target_type: 'plugin',
+            target_name: 'defenseclaw',
+            reason: 'first-party DefenseClaw plugin',
+            source_path_contains: ['.config/amp/plugins/defenseclaw.ts'],
+          },
         ],
+        scan_result: {
+          max_severity: 'CRITICAL',
+          total_findings: 1,
+          scanner_name: 'mcp-scanner',
+          findings: [{ severity: 'CRITICAL', scanner: 'mcp-scanner', title: 'Allow-list precedence fixture' }],
+        },
       },
     },
     {

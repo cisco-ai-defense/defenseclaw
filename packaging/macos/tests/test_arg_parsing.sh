@@ -11,9 +11,16 @@ t_install_help() {
   out="$("${INSTALL_SH}" --help 2>&1)" || _fail "--help should exit 0"
   assert_contains "${out}" "--mode {observe|action}" "mode flag in help"
   assert_contains "${out}" "--connector LIST"        "connector flag in help"
+  assert_contains "${out}" "amp, codex, claudecode, cursor" "Amp listed as supported"
   assert_not_contains "${out}" "--disable-redaction" "removed global redaction flag"
   assert_contains "${out}" "comma-separated"         "comma-separated note in help"
   assert_contains "${out}" "Per-user hook wiring"    "per-user section header"
+}
+
+t_install_accepts_amp_as_auto_wire_connector() {
+  local out rc=0
+  out="$("${INSTALL_SH}" --connector "amp" 2>&1)" || rc=$?
+  assert_not_contains "${out}" "is not in the auto-wire list" "Amp must be auto-wired"
 }
 
 t_install_bad_mode_exits_nonzero() {
@@ -95,6 +102,19 @@ t_uninstall_help() {
   assert_contains "${out}" "config + runtime"        "purge target preserved-state note"
   assert_contains "${out}" "--keep-agent-configs"    "scrub opt-out documented"
   assert_contains "${out}" "scrub DefenseClaw"        "scrub behavior documented"
+  assert_contains "${out}" ".config/amp/plugins/defenseclaw.ts" "Amp plugin cleanup documented"
+  assert_contains "${out}" "connector_backups/amp/config.json" "Amp backup authority documented"
+}
+
+t_uninstall_routes_amp_through_backup_authority() {
+  local body
+  body="$(cat "${UNINSTALL_SH}")"
+  assert_contains "${body}" "scrub_agent_config amp" \
+    "purge invokes the Amp-specific scrub handler"
+  assert_contains "${body}" '/.config/amp/plugins/defenseclaw.ts' \
+    "purge targets only Amp's documented system plugin"
+  assert_contains "${body}" '/.defenseclaw/connector_backups/amp/config.json' \
+    "purge supplies Amp's structured backup authority"
 }
 
 t_install_help_documents_env() {
@@ -231,6 +251,7 @@ run_case "install --bogus"                t_install_unknown_flag_exits_nonzero
 run_case "install --connector cursor,,X"  t_install_empty_connector_entry_exits_nonzero
 run_case "install --port out-of-range"    t_install_bad_port_exits_nonzero
 run_case "install unsupported connector"  t_install_warns_unsupported_connector
+run_case "install Amp connector is auto-wired" t_install_accepts_amp_as_auto_wire_connector
 run_case "install non-root rejected"      t_install_requires_root
 run_case "install --env flag documented"  t_install_help_documents_env
 run_case "install --env garbage rejected" t_install_bad_env_exits_nonzero
@@ -241,5 +262,6 @@ run_case "install HTTPS --override-endpoint accepted before preflight" t_install
 run_case "install DEFAULT_ENV=prod"       t_install_default_env_is_prod
 run_case "install userspace ownership is descriptor-anchored" t_install_userspace_ownership_stays_descriptor_anchored
 run_case "uninstall --help"               t_uninstall_help
+run_case "uninstall Amp cleanup uses backup authority" t_uninstall_routes_amp_through_backup_authority
 run_case "uninstall --bogus"              t_uninstall_unknown_flag
 run_case "uninstall non-root rejected"    t_uninstall_requires_root

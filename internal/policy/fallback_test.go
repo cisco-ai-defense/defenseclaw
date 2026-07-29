@@ -96,6 +96,28 @@ func TestEvaluateAdmissionFallback_FirstPartyBadProvenance(t *testing.T) {
 	}
 }
 
+func TestEvaluateAdmissionFallback_AmpManagedPluginOnly(t *testing.T) {
+	profile := defaultFallbackProfile()
+
+	managed := EvaluateAdmissionFallback(AdmissionInput{
+		TargetType: "plugin",
+		TargetName: "defenseclaw",
+		Path:       `C:\Users\operator\.config\amp\plugins\defenseclaw.ts`,
+	}, profile)
+	if managed.Verdict != "allowed" {
+		t.Errorf("managed Amp bridge verdict = %q, want allowed", managed.Verdict)
+	}
+
+	sibling := EvaluateAdmissionFallback(AdmissionInput{
+		TargetType: "plugin",
+		TargetName: "defenseclaw",
+		Path:       `C:\Users\operator\.config\amp\plugins\untrusted.ts`,
+	}, profile)
+	if sibling.Verdict != "scan" {
+		t.Errorf("untrusted Amp sibling verdict = %q, want scan", sibling.Verdict)
+	}
+}
+
 func TestEvaluateAdmissionFallback_FirstPartyNoConstraints(t *testing.T) {
 	profile := defaultProfile()
 	profile.FirstPartyAllow[firstPartyKey("plugin", "defenseclaw")] = firstPartyEntry{

@@ -3855,9 +3855,6 @@ def _sanitized_discovery_report(disc: agent_discovery.AgentDiscovery, *, duratio
     for name, signal in disc.agents.items():
         agents[name] = {
             "installed": bool(signal.installed),
-            "configured": bool(signal.configured),
-            "active": bool(signal.active),
-            "mode": signal.mode,
             "has_config": bool(signal.config_path),
             "config_basename": _basename(signal.config_path),
             "config_path_hash": _path_hash(signal.config_path),

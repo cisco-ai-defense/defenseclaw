@@ -10,7 +10,8 @@ fails, is cancelled, or is skipped.
 
 The merge gate covers:
 
-- native Go tests, `go vet`, and gateway/hook builds;
+- native Go tests, including current-user Windows DACL regressions, followed by
+  `go vet` and gateway/hook builds;
 - the Python suite and headless TUI checks;
 - PowerShell parsing, timeout, redaction, and process-tree cleanup contracts;
 - a release-shaped Windows amd64 gateway archive and Python wheel;
@@ -19,7 +20,12 @@ The merge gate covers:
   token-bound disposable Windows profile;
 - installed CLI, gateway lifecycle, doctor, scanner, and dependency checks;
 - Setup build and native install/repair/uninstall acceptance; and
-- deterministic Codex and Claude Code connector contract tests.
+- required PowerShell contract cells for Codex, Claude Code, and Amp covering
+  setup, observe/action allow/block behavior, audit correlation,
+  gateway-generated connector telemetry, bounded timeout handling, teardown,
+  and cleanup. Amp additionally proves all five documented plugin callbacks,
+  the Task/subagent boundary, a private managed plugin, self-heal, and
+  tamper-recovery behavior.
 
 The packaged test artifact is built once and reused by the disposable lifecycle
 jobs. The public-bootstrap shard uses the authenticated `0.8.7` release as its
@@ -35,6 +41,13 @@ process, listener, account/profile, and temporary-state cleanup.
 
 A merge to `main` is the review-and-CI boundary. The Release workflow trusts
 that boundary and does not poll or replay `Windows Native CI`.
+
+The secret-bearing real-client cells in `Connector Live E2E` are a separate,
+manual regression layer, not a release dependency or fork-pull-request merge
+gate. Its native Windows matrix covers Codex, Claude Code, and Amp. The Amp cell
+uses `AMP_API_KEY`, runs the official CLI through its native TypeScript plugin,
+and requires lifecycle, tool allow/block, audit, and gateway-generated
+connector telemetry evidence. It does not claim that Amp exports native OTLP.
 
 One manual Release dispatch builds the publishable Windows amd64 and arm64
 gateway binaries plus the x64 `DefenseClawSetup-x64.exe` from the reviewed

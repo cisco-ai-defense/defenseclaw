@@ -239,6 +239,22 @@ class TestF0541TightenedFirstPartyProvenance(unittest.TestCase):
             )
         )
 
+    def test_amp_policy_plugin_marker_is_exact_and_home_anchored(self):
+        marker = ".config/amp/plugins/defenseclaw.ts"
+        self.assertIn(marker, self.constraints)
+        self.assertTrue(
+            _matches_provenance(
+                self.constraints,
+                "/home/u/.config/amp/plugins/defenseclaw.ts",
+            )
+        )
+        self.assertFalse(
+            _matches_provenance(
+                self.constraints,
+                "/home/u/.config/amp/plugins/untrusted.ts",
+            )
+        )
+
 
 # ---------------------------------------------------------------------------
 # F-0401 — path-pinned allow fails closed on empty presented path

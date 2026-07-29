@@ -149,7 +149,7 @@ func TestHookContractNeedsActionOverride(t *testing.T) {
 
 func TestHookContractsCoverHookEndpoints(t *testing.T) {
 	reg := NewDefaultRegistry()
-	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"} {
+	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
 		conn, ok := reg.Get(name)
 		if !ok {
 			t.Fatalf("registry missing %s", name)
@@ -171,10 +171,11 @@ func TestHookContractsCoverHookEndpoints(t *testing.T) {
 			if len(contract.AIDSurfaces) == 0 {
 				t.Fatalf("%s contract %s missing AID surfaces", name, contract.ContractID)
 			}
-			if contract.ResponseFieldName == "" && name != "omnigent" {
+			directResponse := name == "omnigent" || name == "amp"
+			if contract.ResponseFieldName == "" && !directResponse {
 				t.Fatalf("%s contract %s missing response field", name, contract.ContractID)
 			}
-			if name == "omnigent" && contract.ResponseFieldName != "" {
+			if directResponse && contract.ResponseFieldName != "" {
 				t.Fatalf("%s contract %s must return its policy verdict directly, not through %q", name, contract.ContractID, contract.ResponseFieldName)
 			}
 		}
@@ -868,6 +869,39 @@ func TestHookContractDriftExcludesGeneratedArtifactChanges(t *testing.T) {
 	if !HookContractLockDrifted(previous, current) {
 		t.Fatal("agent version changes must remain lock drift")
 	}
+
+	t.Run("Amp relative release age is presentation-only", func(t *testing.T) {
+		previous := HookContractLockEntry{
+			Connector:              "amp",
+			RawAgentVersion:        "0.0.1785342457-g1011d5 (released 2026-07-29T16:27:37.000Z, 2h ago)",
+			NormalizedAgentVersion: "0.0.1785342457",
+			ContractID:             "amp-plugin-v1",
+		}
+		current := previous
+		current.RawAgentVersion = "0.0.1785342457-g1011d5 (released 2026-07-29T16:27:37.000Z, 3h ago)"
+		if HookContractCompatibilityDrifted(previous, current) {
+			t.Fatal("Amp's changing relative release-age annotation must not cause contract drift")
+		}
+
+		current.RawAgentVersion = "0.0.1785342457-gdifferent (released 2026-07-29T16:27:37.000Z, 3h ago)"
+		if !HookContractCompatibilityDrifted(previous, current) {
+			t.Fatal("Amp's stable version+commit identity change must remain contract drift")
+		}
+	})
+
+	t.Run("other raw prerelease identities remain significant", func(t *testing.T) {
+		previous := HookContractLockEntry{
+			Connector:              "codex",
+			RawAgentVersion:        "codex-cli 0.144.0-alpha.4",
+			NormalizedAgentVersion: "0.144.0",
+			ContractID:             "codex-hooks-v1",
+		}
+		current := previous
+		current.RawAgentVersion = "codex-cli 0.144.0-alpha.5"
+		if !HookContractCompatibilityDrifted(previous, current) {
+			t.Fatal("non-Amp raw prerelease identity changes must remain contract drift")
+		}
+	})
 }
 
 func TestHookContractLockEntryIncludesResolvedLocations(t *testing.T) {

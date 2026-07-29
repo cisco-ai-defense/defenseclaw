@@ -22,7 +22,7 @@ param(
     [string]$StateRoot = (Join-Path ([IO.Path]::GetTempPath()) "defenseclaw-wizard-smoke-$PID"),
     [ValidateRange(1, 60)]
     [int]$TimeoutSeconds = 15,
-    [ValidateSet('none', 'codex', 'claudecode')]
+    [ValidateSet('none', 'codex', 'claudecode', 'amp')]
     [string]$Connector = 'claudecode',
     [ValidateSet('observe', 'action')]
     [string]$Mode = 'observe',
@@ -364,7 +364,7 @@ function Get-WizardObservation(
     }
 }
 
-$connectorIndices = @{ none = 0; codex = 1; claudecode = 2 }
+$connectorIndices = @{ none = 0; codex = 1; claudecode = 2; amp = 3 }
 $modeIndices = @{ observe = 0; action = 1 }
 $process = $null
 $finished = $false
@@ -452,7 +452,7 @@ try {
     $headingControl = Get-WizardControl $window 1011 'heading'
 
     $control = [Diagnostics.Stopwatch]::StartNew()
-    foreach ($index in 0..2) {
+    foreach ($index in 0..3) {
         Set-AndAssertComboSelection $connectorControl $index 'Connector'
     }
     foreach ($index in 0..1) {

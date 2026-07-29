@@ -9,9 +9,10 @@ keywords:
   - DefenseClaw token rotation
 ---
 
-Windows enforcement and telemetry are separate paths. Hooks can return a
-decision; native OTLP cannot. Both enter an authenticated loopback gateway and
-then use the same local audit and optional outbound observability pipeline.
+Windows enforcement and telemetry are separate paths. Hooks and Amp's
+`tool.call` plugin callback can return a decision; native OTLP cannot. Every
+supported event channel enters an authenticated loopback gateway and then uses
+the same local audit and optional outbound observability pipeline.
 
 ## Connector telemetry channels
 
@@ -19,18 +20,22 @@ then use the same local audit and optional outbound observability pipeline.
 | --- | --- | --- | --- |
 | Codex | Ten current lifecycle/tool events; the only enforcement path. | OTLP logs, metrics, and traces over HTTP/JSON. | Hooks in `%CODEX_HOME%\managed_config.toml`; marked OTLP/notify fields in `%CODEX_HOME%\config.toml`. |
 | Claude Code | 28 current lifecycle/tool/configuration events; the only enforcement path. | OTLP logs and metrics over HTTP/JSON; traces are explicitly disabled. | Marked hooks and OTLP environment entries in `%CLAUDE_CONFIG_DIR%\settings.json`. |
+| Amp | Five plugin callbacks; `tool.call` gates execution and `tool.result` can withhold output before model delivery. The other three are observation-only. | No documented customer native-OTLP exporter or W3C `traceparent` surface. DefenseClaw generates canonical logs, metrics, and spans from the callbacks. | Owner-only TypeScript system plugin at `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts`. |
 
-Both connectors configure a connector-scoped bearer and source/client identity
-for native OTLP. Codex does not place the credential in the endpoint URL.
-Claude Code stores the managed exporter settings in its configuration, not in
-the interactive shell. A scoped credential is accepted only for its connector
-and OTLP route; it cannot authenticate the management API, another connector,
-or a non-loopback request.
+Codex and Claude Code configure a connector-scoped bearer and source/client
+identity for native OTLP. Codex does not place the credential in the endpoint
+URL. Claude Code stores the managed exporter settings in its configuration,
+not in the interactive shell. Amp has no native-OTLP credential because it has
+no documented native exporter; its plugin uses a connector-scoped hook
+credential. A scoped credential is accepted only for its connector and route;
+it cannot authenticate the management API, another connector, or a non-loopback
+request.
 
 <Callout type="info" title="Native OTLP is observation-only">
 A native OTLP log, metric, or trace can enrich audit and dashboards, but it
 arrives after or beside agent activity. It cannot block a prompt or tool. Only
-the declared hook response surfaces can enforce action mode.
+the declared hook response surfaces and Amp's `tool.call` / `tool.result`
+callbacks can enforce action mode.
 </Callout>
 
 ## Local audit is always present
@@ -44,8 +49,8 @@ The v8 observability pipeline writes mandatory local SQLite audit data to
 
 In the supported standalone hook topology, “gateway disabled” in a fleet row
 means there is no OpenClaw fleet WebSocket to dial. It does not mean the local
-hook API, policy evaluation, native OTLP ingest, local audit, alerts, or TUI
-have stopped.
+hook/plugin API, policy evaluation, native OTLP ingest, local audit, alerts, or
+TUI have stopped.
 
 `gateway.jsonl` is **not** a default audit file. It exists only if an optional
 `kind: jsonl` destination is configured to write that path. The detached
@@ -82,7 +87,7 @@ DefenseClaw uses distinct credentials for distinct jobs:
 | Credential class | Scope | Operator rule |
 | --- | --- | --- |
 | Gateway master token | Local gateway control/lifecycle authentication. Stored through the protected DefenseClaw environment file. | Rotate with the CLI; do not edit, print, or pass it on an argv. |
-| Connector hook credential | One connector's hook API route. | Managed by setup/teardown; never copy its sidecar. |
+| Connector hook/plugin credential | One connector's hook or plugin API route. | Managed by setup/teardown; never copy its sidecar or the credential-bearing Amp plugin. |
 | Connector native-OTLP credential | One connector's OTLP routes only. | Stable across unrelated master-token rotation and revoked during connector teardown. |
 | Provider or destination credentials | Only the configured external provider/destination. | Reference protected environment names; do not place literal values in YAML or support output. |
 
@@ -104,8 +109,9 @@ and an externally managed noncanonical token environment is not rewritten.
 
 Connector-scoped OTLP credentials remain distinct from the master token. The
 rotation does not expose them and does not turn one connector's credential into
-a cross-connector credential. Restart every configured agent after a successful
-rotation so its next hook subprocess uses the reconciled generation.
+a cross-connector credential. Restart every configured Codex or Claude Code
+agent, and fully exit and relaunch Amp, after a successful rotation so the next
+hook or plugin callback uses the reconciled generation.
 
 Verify without reading any token:
 
@@ -141,8 +147,14 @@ A production native Windows release requires:
 2. the exact Setup SHA-256 named by the release metadata;
 3. a valid Authenticode signature from `Cisco Systems, Inc.` on Setup;
 4. signed and verified inner product executables; and
-5. release-pipeline certification of that exact signed Setup with pinned real
-   Codex and Claude Code versions.
+5. release-pipeline certification of that exact signed Setup through the
+   deterministic native Windows x64 matrix for Codex, Claude Code, and Amp.
+
+The deterministic native gate is the certification basis. A separately
+configured real-agent run can add upstream smoke evidence, but it is not a
+substitute for that gate. In particular, an authenticated Amp turn requires
+`AMP_API_KEY`; the absence or presence of that optional secret does not change
+the packaged native Windows support classification.
 
 Pull-request and local Setup artifacts are unsigned test builds. Passing the
 deterministic PR suite proves code and lifecycle behavior, not production
@@ -191,7 +203,8 @@ connector homes as separate supported identities.
 | Setup transaction | Pre-commit failure rolls back owned changes; ambiguous or committed phases retain a journal and require safe recovery/convergence. |
 | Hook delivery/response | Effective `closed` blocks supported events for transport and malformed/unauthorized response failures. |
 | Managed enterprise hook | The narrow administrator-managed Claude Code path fails closed when protected policy identity is invalid. |
-| Runtime skill selection | A disabled-state database or provenance failure blocks the exact Codex/Claude skill-selection surface. |
+| Runtime skill selection | A disabled-state database or provenance failure blocks the exact Codex/Claude skill-selection surface. Amp has no separate skill-load callback; its resulting tool calls remain governed at `tool.call`. |
+| Amp plugin initialization | Amp executes plugin top-level code while loading. DefenseClaw enforcement starts only when the managed plugin is loaded and receives `tool.call`; it does not sandbox sibling plugin initialization or define multi-plugin handler order. |
 | Internal evaluator panic | Fails open with warning and telemetry because no authoritative verdict was produced. |
 | Optional exporter outage | Local SQLite and healthy gateway operation continue; the destination is reported degraded. |
 

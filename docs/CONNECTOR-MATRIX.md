@@ -11,27 +11,75 @@ For the historical change log of how each row got to its current state, see
 
 ## At a glance
 
-| Feature                     | OpenClaw | ZeptoClaw | Claude Code | Codex | Hermes | Cursor | Windsurf | Gemini CLI | Copilot CLI | OpenHands | Antigravity | OpenCode | OmniGent |
-| --------------------------- | -------- | --------- | ----------- | ----- | ------ | ------ | -------- | ---------- | ----------- | --------- | ----------- | -------- | -------- |
-| LLM traffic interception    | OK       | OK        | n/a         | n/a   | n/a    | n/a    | n/a      | n/a        | n/a         | n/a       | n/a         | n/a      | n/a      |
-| Proxy-side response scan    | OK       | OK        | n/a         | n/a   | n/a    | n/a    | n/a      | n/a        | n/a         | n/a       | n/a         | n/a      | n/a      |
-| Hook telemetry              | OK       | n/a*      | OK          | OK    | OK     | OK     | OK       | OK         | OK          | OK        | OK          | OK       | OK       |
-| Hook `mode=action` blocking | OK       | n/a*      | OK          | partial | partial | partial | partial | partial    | partial     | partial   | partial     | partial  | OK       |
-| Native human approval       | brokered | n/a       | PreToolUse  | no    | no     | event-specific | no | no | preToolUse | no        | PreToolUse  | no       | ASK      |
-| Subprocess enforcement      | OK       | OK        | OK          | OK    | no     | no     | no       | no         | no          | no        | no          | no       | no       |
-| Skill scan / list / enable  | OK       | OK        | OK          | OK    | skills | skills/rules | no skills | skills | skills/rules | skills | skills/rules | no skills | no skills |
-| Watcher (skills + plugins)  | OK       | OK        | OK          | OK    | skills/plugins | skills | discovery | skills/extensions | skills | skills | skills/plugins | no | no |
-| Native OTLP ingest          | OK       | n/a       | OK          | OK    | hook-only | hook-only | hook-only | OK | env-opt-in | hook-only | hook-only | hook-only | env-opt-in |
+| Feature                     | OpenClaw | ZeptoClaw | Claude Code | Codex | Hermes | Cursor | Windsurf | Gemini CLI | Copilot CLI | OpenHands | Antigravity | OpenCode | Amp | OmniGent |
+| --------------------------- | -------- | --------- | ----------- | ----- | ------ | ------ | -------- | ---------- | ----------- | --------- | ----------- | -------- | --- | -------- |
+| LLM traffic interception    | OK       | OK        | n/a         | n/a   | n/a    | n/a    | n/a      | n/a        | n/a         | n/a       | n/a         | n/a      | n/a | n/a      |
+| Proxy-side response scan    | OK       | OK        | n/a         | n/a   | n/a    | n/a    | n/a      | n/a        | n/a         | n/a       | n/a         | n/a      | n/a | n/a      |
+| Hook telemetry              | OK       | n/a*      | OK          | OK    | OK     | OK     | OK       | OK         | OK          | OK        | OK          | OK       | OK | OK       |
+| Hook `mode=action` blocking | OK       | n/a*      | OK          | partial | partial | partial | partial | partial    | partial     | partial   | partial     | partial  | OK | OK       |
+| Native human approval       | brokered | n/a       | PreToolUse  | no    | no     | event-specific | no | no | preToolUse | no        | PreToolUse  | no       | `tool.call` | ASK      |
+| Subprocess enforcement      | OK       | OK        | OK          | OK    | no     | no     | no       | no         | no          | no        | no          | no       | no | no       |
+| Skill scan / list / enable  | OK       | OK        | OK          | OK    | skills | skills/rules | no skills | skills | skills/rules | skills | skills/rules | no skills | skills | no skills |
+| Watcher (skills + plugins)  | OK       | OK        | OK          | OK    | skills/plugins | skills | discovery | skills/extensions | skills | skills | skills/plugins | no | skills/plugins/rules | no |
+| Native OTLP ingest          | OK       | n/a       | OK          | OK    | hook-only | hook-only | hook-only | OK | env-opt-in | hook-only | hook-only | hook-only | hook-only | env-opt-in |
 
 `*` = "not applicable" because the host agent has no schema slot for
 external-script hook invocation. See **By-design connector limitations**
 below for the architectural reason and how the security guarantee is
 preserved without it.
 
-The Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands, Antigravity, OpenCode, and OmniGent connectors do not
+The Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands, Antigravity,
+OpenCode, Amp, and OmniGent connectors do not
 redirect LLM traffic through the proxy in v1. They are still first-class
 connectors with explicit hook, MCP, skill/rule/plugin/agent, CodeGuard, and
 telemetry capability rows where the vendor has documented local surfaces.
+
+### Amp system-policy plugin setup
+
+Amp integrates through its documented TypeScript plugin API. Run:
+
+```bash
+defenseclaw setup amp --mode action --yes
+```
+
+Setup installs one owner-only system plugin at
+`~/.config/amp/plugins/defenseclaw.ts` on macOS/Linux or
+`%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` on native Windows. The
+default policy allow-list names only that exact first-party file, never the
+whole plugins directory. Teardown restores the managed backup and will not
+silently discard a user-modified artifact.
+
+The plugin sends Amp's five documented callbacks: `session.start`,
+`agent.start`, `tool.call`, `tool.result`, and `agent.end`. `tool.call` gates
+pre-execution input; `tool.result` can preserve, withhold/replace, or confirm
+completed output before model delivery, but cannot undo tool side effects.
+The three session/agent callbacks are lifecycle telemetry. Fail-closed applies
+after the plugin has loaded. Headless execute mode must give plugins time to
+become ready before the turn begins:
+
+```bash
+amp -x "your prompt" --plugin-ready-timeout 30
+```
+
+Amp provides no customer native-OTLP or W3C `traceparent` surface. DefenseClaw
+generates canonical hook logs, metrics, and spans from those callbacks.
+Agent 360 selects `connector=amp` dynamically. Galileo receives the same
+existing canonical spans when they satisfy `galileo-rich-v2`; DefenseClaw
+uses Amp's reported custom-agent definition or built-in mode when available,
+but does not invent provider/model identity, model request/response IDs, stable
+agent IDs, parent-subagent links, or native trace identities. Child threads are
+independently observed when Amp emits their events, while missing lineage
+remains explicitly absent.
+
+MCP configuration is discovery/scan only and remains writable through
+`amp mcp add` or Amp settings. AgentSkills are discovered, scanned, and
+writable in Amp's documented roots. Plugins and custom agents, effective
+working-directory/parent guidance up to `$HOME`, on-demand subtree guidance,
+user guidance, OS-managed guidance, and project/global checks are read-only
+discovery surfaces. At each applicable location, `AGENTS.md` takes precedence
+and falls back to `AGENT.md`, then `CLAUDE.md`, when absent.
+CodeGuard is an explicit opt-in AgentSkill. Remote Amp Orbs do not load the
+local plugin and are outside this connector's enforcement boundary.
 
 ### OmniGent custom-policy setup
 
@@ -104,7 +152,7 @@ touches the *agent* is per-connector. Each connector reports an
 | Connector class | `llm_traffic_mode` | A bound custom provider… |
 | --- | --- | --- |
 | OpenClaw, ZeptoClaw | `proxy` | is **enforced** on the agent's model traffic (agent upstream, judge, or both) |
-| every hook connector (Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot, OpenHands, Antigravity, OpenCode, OmniGent) | `hooks-only` | configures DefenseClaw's **judge/aux model only** — the agent's own model calls are never routed through or inspected |
+| every hook/plugin connector (Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot, OpenHands, Antigravity, OpenCode, Amp, OmniGent) | `hooks-only` | configures DefenseClaw's **judge/aux model only** — the agent's own model calls are never routed through or inspected |
 
 The CLI states this when binding (`setup llm`) and when listing
 (`setup provider list`), so an operator can't silently attach a custom provider
@@ -129,6 +177,7 @@ represent DefenseClaw Windows support or release certification.
 | --------- | ----- | ----- | -------------- | -------------- |
 | Codex | supported | supported | supported | Current Codex releases run natively on Windows and expose Windows-specific hook commands; DefenseClaw uses its native hook entrypoint. |
 | Claude Code | supported | supported | supported | Native Windows with Git for Windows is documented and supports command hooks. |
+| Amp | supported | supported | supported | Amp and the DefenseClaw system policy plugin use native `%USERPROFILE%\.config\amp\plugins`; packaged setup, ACL, lifecycle, and release qualification are certified on Windows x64. |
 | Cursor | supported | supported | **not certified** | Windows setup code exists, but the DefenseClaw native release contract does not certify it. Cursor CLI remains WSL-only. |
 | Windsurf | supported | supported | **not certified** | Windows setup code exists, but the DefenseClaw native release contract does not certify it. |
 | Gemini CLI | supported | supported | **not certified** | Windows setup code exists, but the DefenseClaw native release contract does not certify it. |
@@ -158,6 +207,7 @@ is `not separately documented` rather than an inferred support promise.
 | -------------- | --------------------- | ------------------------------------ |
 | Codex | WSL2 is documented; WSL1 is no longer supported starting with Codex 0.115. | Native Windows supported; WSL is out of scope. |
 | Claude Code | WSL1 and WSL2 are documented alternatives to native Windows with Git for Windows. | Native Windows supported; WSL is out of scope. |
+| Amp | Upstream publishes a native Windows installation; WSL is not required for the system plugin. | Native Windows is supported through the packaged setup lifecycle and release-gating CI; WSL and mixed native/WSL profiles are out of scope. |
 | Hermes | Linux/WSL2 is upstream Tier 1 and tested on current WSL2; it is a separate installation from native Windows. | Not certified by DefenseClaw on native Windows; WSL is out of scope. |
 | Cursor | Cursor CLI is supported on Windows through WSL; Cursor IDE hooks run on native Windows. | Native IDE hooks are not certified by DefenseClaw; the WSL-only CLI is not configured. |
 | Windsurf | Hook docs publish Linux/WSL configuration locations as well as native Windows locations. | Not certified by DefenseClaw on native Windows; WSL is out of scope. |
@@ -168,7 +218,8 @@ is `not separately documented` rather than an inferred support promise.
 | OpenCode | Direct Windows execution is available, while upstream recommends WSL for the best experience. | The JavaScript bridge is not certified by DefenseClaw on native Windows; WSL is out of scope. |
 | OmniGent | Linux terminal and sandbox prerequisites are documented; WSL is not explicitly supported as a Windows product path. | Unsupported on native Windows; no WSL connector is implemented or certified. |
 
-Evidence checked 2026-06-30 against the current upstream documentation:
+General evidence checked 2026-06-30 against the current upstream
+documentation; Amp sources checked 2026-07-29:
 [Codex install](https://github.com/openai/codex#quickstart),
 [Codex Windows](https://developers.openai.com/codex/windows),
 [Codex hooks](https://developers.openai.com/codex/hooks),
@@ -181,6 +232,8 @@ Evidence checked 2026-06-30 against the current upstream documentation:
 [Antigravity hooks](https://antigravity.google/docs/hooks),
 [OpenCode Windows](https://opencode.ai/docs/windows-wsl/),
 [OpenCode plugins](https://opencode.ai/docs/plugins/),
+[Amp manual](https://ampcode.com/manual),
+[Amp plugin API](https://ampcode.com/manual/plugin-api),
 [Hermes platform support](https://hermes-agent.nousresearch.com/docs/getting-started/platform-support),
 [Hermes native Windows guide](https://hermes-agent.nousresearch.com/docs/user-guide/windows-native),
 [OpenHands CLI quick start](https://docs.openhands.dev/openhands/usage/cli/quick-start),
@@ -189,12 +242,19 @@ Evidence checked 2026-06-30 against the current upstream documentation:
 [OmniGent desktop](https://omnigent.ai/docs/interact/desktop), and
 [ZeptoClaw installation](https://zeptoclaw.com/docs/getting-started/installation/).
 
-Windows DefenseClaw is **hook-only**. The certified Codex and Claude Code
-registrations invoke `defenseclaw-hook.exe` natively, without Git Bash, `jq`,
-shell shims, or WSL. OpenCode's cross-platform JavaScript bridge is not
-certified on native Windows. The Go registry and Python `platform_support`
-module mirror the current supported/not-certified/unsupported statuses and
-reasons, pinned by parity tests.
+Windows DefenseClaw is **hook/plugin-only**. The certified Codex and Claude
+Code registrations invoke `defenseclaw-hook.exe` natively. The certified Amp
+registration loads the owner-only TypeScript system-policy plugin at
+`%USERPROFILE%\.config\amp\plugins\defenseclaw.ts`; it does not use the hook
+executable. None of the three requires Git Bash, `jq`, shell shims, or WSL.
+Amp certification is based on the deterministic native Windows x64 matrix for
+the packaged setup, ACL, lifecycle, and callback contract. An optional
+authenticated live smoke requires `AMP_API_KEY` and is not the certification
+basis. OpenCode's cross-platform JavaScript bridge is not certified on native
+Windows. The Go registry and Python
+`platform_support` module mirror the current
+supported/not-certified/unsupported statuses and reasons, pinned by parity
+tests.
 
 ## Versioned Hook Contracts
 
@@ -228,6 +288,7 @@ with a warning. Action mode fails closed on that contract mismatch.
 | OpenHands | hook contract | unversioned / documented hooks; tested with `OpenHands CLI 1.16.0` | `openhands-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
 | Antigravity | hook contract | `>=1.0.0` | `antigravity-hooks-v2` / `v7` | prompt, tool_call, tool_result, event_content |
 | OpenCode | hook contract | unversioned / stable plugin API | `opencode-hooks-v1` / `v6` (JS bridge plugin) | tool_call, tool_result |
+| Amp | plugin contract | `>=0.0.1785334225` | `amp-plugin-v1` / `v1` (TypeScript system-policy plugin) | prompt, tool_call, tool_result, event_content |
 | OmniGent | hook contract | unversioned / documented custom-policy API | `omnigent-custom-policy-v1` / `v1` (Python policy bridge) | prompt, tool_call, tool_result, event_content |
 
 No hook contract currently has a `max_exclusive` ceiling. We only add an upper
@@ -246,6 +307,10 @@ been validated with `OpenHands CLI 1.16.0`, and is accepted as unversioned
 until upstream publishes a hook-version floor. DefenseClaw installs OpenHands
 globally through `~/.openhands/hooks.json` by default and uses repo-local
 `.openhands/hooks.json` only when a workspace is pinned.
+Amp's normalized release number `0.0.1785334225` is DefenseClaw's pinned
+contract snapshot and certification floor for `amp-plugin-v1`; it is not an
+upstream-declared minimum plugin version. Execute mode additionally requires
+`--plugin-ready-timeout 30` for complete startup coverage.
 Claude Code is pinned to the current documented hook surface captured at
 `2.1.144`; older Claude Code versions exposed smaller event sets.
 
@@ -263,6 +328,7 @@ Claude Code is pinned to the current documented hook surface captured at
 | OpenHands | yes | no | none | `pre_tool_use`, `user_prompt_submit`, `stop` | yes | user,workspace | `~/.openhands/hooks.json` or `<workspace>/.openhands/hooks.json` |
 | Antigravity | yes | yes | `PreToolUse` | `PreToolUse` | no | user | `~/.gemini/config/hooks.json` |
 | OpenCode | yes | no | none | `tool.execute.before` | yes | user | `~/.config/opencode/plugins/defenseclaw.js` (JS bridge plugin) |
+| Amp | yes | yes | `tool.call`, `tool.result` | `tool.call`, `tool.result` | yes, once loaded | user | `~/.config/amp/plugins/defenseclaw.ts` |
 | OmniGent | yes | yes | `UserPromptSubmit`, `PreToolUse`, `BeforeModel` | all six mapped policy phases | yes | user | `$OMNIGENT_CONFIG_HOME/config.yaml` when set, otherwise `~/.omnigent/config.yaml`, plus installed Python policy |
 
 `confirm` verdicts are rendered as native ask only when the event is listed in
@@ -282,6 +348,7 @@ audit. The DefenseClaw TUI can review those records but cannot resume the call.
 | OpenHands | `~/.openhands/mcp.json` | `~/.agents/skills`, `~/.openhands/skills/installed`, `~/.openhands/cache/skills/public-skills/skills` (`~/.openhands/skills`, `~/.openhands/microagents` discovery only; workspace equivalents with `--workspace`) | `AGENTS.md` discovery only when workspace-pinned | unsupported | unsupported | opt-in skill |
 | Antigravity | `~/.gemini/config/mcp_config.json`, `<workspace>/.agents/mcp_config.json` (read/write); `<plugin>/mcp_config.json` discovery only | AgentSkills folder form read/write: `~/.gemini/config/skills/<skill>/SKILL.md`, `<workspace>/.agents/skills/<skill>/SKILL.md`; CLI direct `~/.gemini/antigravity-cli/skills/*.md` discovery only | `~/.gemini/GEMINI.md`, `<workspace>/.agents/rules/`, `<plugin>/rules/*.md` discovery only | `~/.gemini/config/plugins/<plugin>/`, `<workspace>/.agents/plugins/<plugin>/` install/list/scan/remove; `~/.gemini/antigravity-cli/plugins/<plugin>/` discovery/scan | plugin-contained `<plugin>/agents/` discovery only; standalone agents unsupported | opt-in skill |
 | OpenCode | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) |
+| Amp | user/workspace JSON/JSONC plus skill `mcp.json` discovery/scan; writes stay in `amp mcp add` | documented AgentSkills roots read/write | cwd/parents up to `$HOME` plus on-demand subtree guidance (`AGENTS.md` → `AGENT.md` → `CLAUDE.md`), user/managed guidance, and project/global checks discovery-only | system/project plugin discovery/scan; setup manages only `defenseclaw.ts` | plugin-defined custom agents and modes discovery-only | opt-in AgentSkill |
 | OmniGent | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) | unsupported (v1) |
 
 CodeGuard native assets are never installed by CLI startup, `init`, sandbox
@@ -298,6 +365,7 @@ non-CodeGuard paths require `--replace`.
 | Gemini CLI | native logs/metrics/traces in settings.json | loopback path token | hook telemetry |
 | Copilot CLI | native traces/metrics via documented env vars | header token | hook telemetry |
 | OpenHands | no documented native OTLP | header token | hook telemetry |
+| Amp | no documented native OTLP or `traceparent` | connector-scoped header token | canonical logs, spans, and counters generated from five plugin callbacks |
 | OmniGent | optional logs/metrics via externally supplied OTLP env vars; traces with optional `tracing` extra | header token | hook-generated logs, spans, counters |
 | Hermes / Cursor / Windsurf / OpenCode | no documented native OTLP | n/a | hook-generated logs, spans, counters |
 
@@ -306,8 +374,8 @@ non-CodeGuard paths require `--replace`.
 ## Live E2E coverage
 
 The [`.github/workflows/connector-live-e2e.yml`](../.github/workflows/connector-live-e2e.yml)
-workflow proves each hook connector end-to-end against real upstream agents
-and flags when an upstream release breaks a hook. It is intentionally
+workflow exercises hook/plugin connectors against real upstream agents and
+flags when an upstream release breaks an event contract. It is intentionally
 separate from `e2e.yml` so it can go red on an upstream regression without
 blocking the OpenClaw stack gate. The harness lives under
 [`scripts/live-connector-e2e/`](../scripts/live-connector-e2e).
@@ -316,17 +384,21 @@ blocking the OpenClaw stack gate. The harness lives under
 
 | Layer | What it proves | LLM? | Secrets? | OSes | When |
 | ----- | -------------- | ---- | -------- | ---- | ---- |
-| **A — Contract matrix** | Feeds golden stdin payloads into the *installed* hook entrypoint and asserts the gateway received the event, the verdict was shaped correctly, and teardown is clean. | no | no | linux, macos, windows | every run; fork-safe |
-| **B — Live agent matrix** | Installs the real agent at its latest version, runs `defenseclaw setup`, drives lifecycle + forced tool calls through the real harness, and asserts observe / block / OTLP / teardown. | yes (deterministic prompts) | yes | per the reality matrix below | nightly + manual dispatch |
+| **A — Contract matrix** | Feeds golden event payloads into the installed connector contract and asserts the gateway received the event, the verdict was shaped correctly, and teardown is clean. | no | no | linux, macos, windows | every run; fork-safe |
+| **B — Live agent matrix** | Installs the real agent at its selected version, runs `defenseclaw setup`, drives lifecycle + forced tool calls through the real harness, and asserts observe / block / supported telemetry / teardown. | yes (deterministic prompts) | yes | per the reality matrix below | manual dispatch |
 
-Layer A targets `~/.defenseclaw/hooks/<connector>-hook.sh` on Linux/macOS and
-the native `defenseclaw-gateway hook --connector <c> --event <e>` subcommand on
-Windows. Both forward the payload to the local gateway, so every assertion uses
-canonical SQLite event history regardless of OS. An explicit JSONL destination
-may be tested separately, but it is not an implicit mirror or the lifecycle
-contract authority.
+For command-hook connectors, Layer A targets
+`~/.defenseclaw/hooks/<connector>-hook.sh` on Linux/macOS and the native
+`defenseclaw-gateway hook --connector <c> --event <e>` subcommand on Windows.
+Amp setup instead installs its TypeScript system plugin; the deterministic
+harness submits its five golden callback shapes through the same authenticated
+gateway contract after validating the managed plugin. Strict compilation
+against the pinned `@ampcode/plugin` package separately verifies the TypeScript
+API surface. Every event assertion uses canonical SQLite history regardless of
+OS. An explicit JSONL destination may be tested separately, but it is not an
+implicit mirror or the lifecycle contract authority.
 
-Hooks are **harness-driven**, not LLM-driven: the agent fires
+Contract events are **harness-driven**, not LLM-driven: the agent fires
 `SessionStart` / `PreToolUse` / etc. as a function of its lifecycle, so Layer B
 only needs the model to run the one shell command it is explicitly told to.
 Enforcement is proven with a filesystem **sentinel**: the allow probe runs a
@@ -350,6 +422,7 @@ contract; an advisory or contract-only probe does not promote a connector.
 | Copilot CLI | live\* | live\* | live\* (not certified) | `copilot -p` | user-level hooks only; entitled token |
 | OpenHands | live | — | — | `openhands --headless --json` | Docker runtime, Linux-only |
 | OpenCode | contract-only | contract-only | contract-only (not certified) | — | JS bridge plugin (tool.execute.before blocks); live smoke pending |
+| Amp | live | live | live\* (certified) | `amp -x "prompt" --plugin-ready-timeout 30` | The deterministic system-plugin and packaged Windows lifecycle gates establish certification. Optional authenticated live smoke requires `AMP_API_KEY`; Amp has no native OTLP. |
 | Hermes | contract-only | contract-only | contract-only (not certified) | — | Native Windows is upstream Tier 1, but DefenseClaw does not certify the connector there. |
 | Windsurf | contract-only | contract-only | contract-only (not certified) | — | no headless CLI/SDK |
 | Antigravity | contract-only | contract-only | contract-only (not certified) | — | headless auth is OAuth, no API key |
@@ -361,11 +434,13 @@ to gating once stable. Contract-only connectors run Layer A on every OS and are
 intentionally absent from Layer B.
 
 > **Current rollout:** the nightly schedule runs **Layer A only**. Layer B is
-> manual-dispatch-only and presently scoped to the connectors we can
-> authenticate with Azure OpenAI / Amazon Bedrock — **Codex, Claude Code, and
-> OpenHands**. **Gemini CLI, Cursor, and Copilot live cells are deferred** until
-> their native keys (`GOOGLE_API_KEY`, `CURSOR_API_KEY`, `COPILOT_CLI_TOKEN`)
-> are configured; all three still get full Layer A coverage in the meantime.
+> manual-dispatch-only and presently scoped to the connectors for which the
+> required secret is configured. Codex, Claude Code, and OpenHands can use the
+> documented Azure OpenAI / Amazon Bedrock alternatives below; Amp uses
+> `AMP_API_KEY`. **Gemini CLI, Cursor, and Copilot live cells are deferred**
+> until their native keys (`GOOGLE_API_KEY`, `CURSOR_API_KEY`,
+> `COPILOT_CLI_TOKEN`) are configured. Every connector still gets its
+> deterministic Layer A coverage without an LLM secret.
 
 ### Alternative LLM auth (Azure OpenAI / Amazon Bedrock)
 
@@ -380,6 +455,7 @@ it the nightly default, or flip the `use_azure` / `use_bedrock` dispatch toggle.
 | Codex | `OPENAI_API_KEY` | yes — seeds `[model_providers.azure]` in `~/.codex/config.toml` | no (Codex is OpenAI-only) |
 | Claude Code | `ANTHROPIC_API_KEY` | no | yes — `CLAUDE_CODE_USE_BEDROCK=1` + AWS chain |
 | OpenHands | `LLM_API_KEY` | yes — `azure/<deployment>` via LiteLLM | yes — `bedrock/<profile>` via LiteLLM (wins if both set) |
+| Amp | `AMP_API_KEY` | no | no |
 | Gemini CLI / Cursor / Copilot | native key | — | — |
 
 Required inputs per backend:
@@ -394,9 +470,9 @@ Required inputs per backend:
   `AWS_SESSION_TOKEN`); Variable `AWS_REGION` (defaults to `us-east-1`).
   Optional model-id overrides: `CLAUDE_BEDROCK_MODEL`, `OPENHANDS_BEDROCK_MODEL`.
 
-Gemini CLI, Cursor, and Copilot have **no** Azure/Bedrock substitute — they
-require their native provider key (`GOOGLE_API_KEY`, `CURSOR_API_KEY`,
-`COPILOT_CLI_TOKEN`) to run live.
+Amp, Gemini CLI, Cursor, and Copilot have **no** Azure/Bedrock substitute —
+they require their native provider key (`AMP_API_KEY`, `GOOGLE_API_KEY`,
+`CURSOR_API_KEY`, `COPILOT_CLI_TOKEN`) to run live.
 
 ### Version policy (alert-only)
 

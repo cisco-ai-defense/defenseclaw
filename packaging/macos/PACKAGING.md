@@ -22,10 +22,10 @@ Standard install (observe mode, Codex connector only):
 sudo ./install.sh
 ```
 
-Typical enterprise install (action mode, Cursor + Claude Code hooks):
+Typical enterprise install (action mode, Amp + Cursor + Claude Code hooks):
 
 ```sh
-sudo ./install.sh --mode action --connector cursor,claudecode
+sudo ./install.sh --mode action --connector amp,cursor,claudecode
 ```
 
 Common flags:
@@ -33,7 +33,7 @@ Common flags:
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--mode {observe\|action}` | `observe` | Guardrail + asset_policy mode |
-| `--connector LIST` | `codex` | Comma-separated: `codex`, `claudecode`, `cursor` |
+| `--connector LIST` | `codex` | Comma-separated: `amp`, `codex`, `claudecode`, `cursor` |
 | `--port PORT` | `18970` | Loopback API port |
 | `--env {prod\|preview}` | `prod` | Select the built-in Cisco AI Defense HTTPS origin |
 | `--override-endpoint URL` | — | Override `--env` with an HTTPS bare origin |
@@ -110,7 +110,7 @@ Purge flags:
 
 | Flag | Purpose |
 | --- | --- |
-| `--purge` | Delete `/opt/cisco/secureclient/defenseclaw/` (runtime + config + audit DB), `/Library/Logs/Cisco/SecureClient/DefenseClaw/`, `~/.defenseclaw/`, legacy service-user dscl records from pre-root installs, and scrub `~/.codex/config.toml`, `~/.claude/settings.json`, `~/.cursor/hooks.json` |
+| `--purge` | Delete `/opt/cisco/secureclient/defenseclaw/` (runtime + config + audit DB), `/Library/Logs/Cisco/SecureClient/DefenseClaw/`, `~/.defenseclaw/`, legacy service-user dscl records from pre-root installs, scrub `~/.codex/config.toml`, `~/.claude/settings.json`, and `~/.cursor/hooks.json`, and backup-safely restore/remove `~/.config/amp/plugins/defenseclaw.ts` |
 | `--keep-agent-configs` | With `--purge`, skip the agent-config scrub. Only safe if reinstalling immediately — otherwise dangling hook refs will fail-close every agent tool call. |
 | `--user USER` | Per-user cleanup target (default `$SUDO_USER`) |
 | `-y, --yes` | Skip purge confirmation prompt |
@@ -152,7 +152,20 @@ Requires `sudo`. The installer:
 - Writes `/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist` (`root:wheel 0644`) and `launchctl bootstrap`s it.
 - Writes `/opt/cisco/secureclient/defenseclaw/etc/config.yaml` as `root:wheel 0640`.
 - Does NOT create a dedicated service user. The gateway daemon runs as root (uid 0) because the managed cloud auth provider requires root to read and re-perm its credential store on disk.
-- Wires per-user hook configs in the target user's `~/.codex/config.toml`, `~/.claude/settings.json`, and/or `~/.cursor/hooks.json` depending on `--connector`.
+- Wires per-user hooks through the machine-wide guardian. Codex, Claude Code,
+  and Cursor use their native config files. Amp uses the managed
+  `~/.config/amp/plugins/defenseclaw.ts` policy plugin. The package does not
+  precreate that TypeScript file; connector reconciliation renders it with its
+  scoped token and records
+  `~/.defenseclaw/connector_backups/amp/config.json` as restore authority.
+- During `--purge`, the Amp plugin is removed (when DefenseClaw originally
+  created it) or its exact pristine bytes and mode are restored (when a file
+  predated setup) only if the backup has the expected `amp/config` identity,
+  captures that exact plugin path, contains valid pristine/post SHA-256
+  values, and the current plugin still matches the recorded post-install hash.
+  A path safety failure, missing/invalid backup, symlink/hard-link, or content
+  drift is preserved and makes purge refuse deletion of the per-user
+  DefenseClaw state so an operator can investigate.
 - Refuses legacy pre-managed-layout install locations (`/Library/DefenseClaw/`, `/Library/Application Support/DefenseClaw/`, `/Library/Logs/DefenseClaw/`, `/Library/LaunchDaemons/com.defenseclaw.gateway.plist`, and `/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist`) and the corresponding `com.defenseclaw.gateway` / `com.defenseclaw.hook-guardian` launchd jobs before mutation. Existing deployments must use the release-owned staged upgrader; the fresh installer does not sweep or cut over legacy state.
 
 ### Runtime privileges

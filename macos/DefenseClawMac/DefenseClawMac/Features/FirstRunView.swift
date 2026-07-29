@@ -68,7 +68,7 @@ struct FirstRunView: View {
 
     private static let connectors = [
         "codex", "claudecode", "zeptoclaw", "openclaw", "hermes", "cursor",
-        "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent",
+        "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent",
     ]
     private static let installerURL = URL(
         string: "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh"

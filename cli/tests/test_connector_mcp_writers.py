@@ -121,6 +121,12 @@ class TestZeptoClawUnsupported:
         with pytest.raises(MCPWriteUnsupportedError, match="unknown connector"):
             set_mcp_server("future-frame", "demo", {"command": "x"})
 
+    def test_amp_set_and_unset_are_read_only(self):
+        with pytest.raises(MCPWriteUnsupportedError, match="amp mcp add"):
+            set_mcp_server("amp", "demo", {"command": "x"})
+        with pytest.raises(MCPWriteUnsupportedError, match="read-only"):
+            unset_mcp_server("amp", "demo")
+
 
 # ---------------------------------------------------------------------------
 # Claude Code — patches ~/.claude/settings.json
@@ -187,6 +193,44 @@ class TestClaudeCodeWrites:
         assert_owner_only_directory(metadata_dir)
         assert_owner_only_file(metadata_files[0])
         assert_owner_only_file(Path(f"{metadata_files[0]}.lock"))
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows MAX_PATH publication contract")
+    def test_windows_private_metadata_uses_compact_staging_name(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        settings = tmp_path / ".claude" / "settings.json"
+
+        # Choose a data-home length that leaves the durable metadata name
+        # valid while the historical basename-repeating candidate exceeds
+        # MAX_PATH on hosts where direct Win32 calls still enforce it.
+        short_home = tmp_path / "d"
+        monkeypatch.setenv("DEFENSECLAW_HOME", str(short_home))
+        short_metadata = connector_paths._claude_mcp_ownership_path(str(settings))
+        short_legacy_candidate = os.path.join(
+            os.path.dirname(short_metadata),
+            (
+                f".{os.path.basename(short_metadata)}"
+                f".observability-v8-candidate-{'0' * 32}.tmp"
+            ),
+        )
+        padding = max(1, 270 - len(short_legacy_candidate))
+        data_home = tmp_path / ("d" * padding)
+        monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
+        metadata = Path(connector_paths._claude_mcp_ownership_path(str(settings)))
+        legacy_candidate = os.path.join(
+            str(metadata.parent),
+            (
+                f".{metadata.name}"
+                f".observability-v8-candidate-{'0' * 32}.tmp"
+            ),
+        )
+        assert len(legacy_candidate) >= 260
+        assert len(str(metadata)) < 260
+
+        set_mcp_server("claudecode", "demo", {"command": "inert-demo"})
+        assert_owner_only_directory(metadata.parent)
+        assert_owner_only_file(metadata)
+        unset_mcp_server("claudecode", "demo")
+        assert not metadata.exists()
 
     def test_set_and_unset_refuse_symlinked_settings(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -2331,7 +2375,7 @@ class TestCoverage:
                 # Requires injected setter — assert it raises without one.
                 with pytest.raises(RuntimeError):
                     set_mcp_server(name, "x", {"command": "y"})
-            elif name in {"zeptoclaw", "omnigent"}:
+            elif name in {"zeptoclaw", "amp", "omnigent"}:
                 with pytest.raises(MCPWriteUnsupportedError):
                     set_mcp_server(name, "x", {"command": "y"})
             elif name == "windsurf":

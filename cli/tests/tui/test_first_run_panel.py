@@ -37,6 +37,7 @@ def test_first_run_defaults_match_go_panel_argv() -> None:
         "openhands",
         "antigravity",
         "opencode",
+        "amp",
         "omnigent",
     )
     assert panel.args() == (
@@ -90,6 +91,21 @@ def test_first_run_cycles_choices_and_bools() -> None:
         "--start-gateway",
         "--no-verify",
     )
+
+
+def test_first_run_selects_amp_and_builds_init_command() -> None:
+    panel = FirstRunPanelModel()
+    panel.cursor = 0
+
+    # Amp is the penultimate option, so moving left twice from the default
+    # Codex selection exercises the same choice-cycling path as the TUI.
+    panel.handle_key("left")
+    panel.handle_key("left")
+
+    assert panel.value("Connector") == "amp"
+    args = panel.args()
+    connector_index = args.index("--connector")
+    assert args[connector_index + 1] == "amp"
 
 
 def test_first_run_passes_hitl_flags_only_in_action_profile() -> None:

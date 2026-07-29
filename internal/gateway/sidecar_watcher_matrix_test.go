@@ -12,6 +12,7 @@ package gateway
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -331,6 +332,45 @@ func TestResolveWatcherDirs_OpenHandsUsesPinnedWorkspace(t *testing.T) {
 	}
 	if !anyContains(skillDirs, filepath.Join(workspace, ".agents", "skills")) {
 		t.Fatalf("OpenHands skill dirs = %v, want pinned workspace %s", skillDirs, workspace)
+	}
+}
+
+func TestResolveWatcherDirs_AMPUsesEffectiveSettings(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	workspace := filepath.Join(home, "repo")
+	if err := os.MkdirAll(filepath.Join(workspace, ".amp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{
+		"amp.skills.path": "team-skills",
+		"amp.skills.disableClaudeCodeSkills": true
+	}`
+	if err := os.WriteFile(filepath.Join(workspace, ".amp", "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{Claw: config.ClawConfig{WorkspaceDir: workspace}}
+	wcfg := config.GatewayWatcherConfig{}
+	wcfg.Skill.Enabled = true
+	wcfg.Plugin.Enabled = true
+
+	skillDirs, pluginDirs, src := resolveWatcherDirs(cfg, connector.NewAMPConnector(), wcfg)
+
+	if src.Skill != watcherDirsFromConnector || src.Plugin != watcherDirsFromConnector {
+		t.Fatalf("Amp watcher sources = %+v, want connector-resolved skills and plugins", src)
+	}
+	if !anyContains(skillDirs, filepath.Join(workspace, "team-skills")) {
+		t.Fatalf("Amp skill dirs = %v, missing relative amp.skills.path rooted at workspace", skillDirs)
+	}
+	for _, dir := range skillDirs {
+		if strings.Contains(dir, filepath.Join(".claude", "skills")) {
+			t.Fatalf("Amp skill dirs = %v, Claude-compatible roots must be disabled", skillDirs)
+		}
+	}
+	if !anyContains(pluginDirs, filepath.Join(workspace, ".amp", "plugins")) {
+		t.Fatalf("Amp plugin dirs = %v, missing workspace plugin root", pluginDirs)
 	}
 }
 

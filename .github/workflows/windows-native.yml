@@ -433,7 +433,7 @@ jobs:
       # 0.8.7 predates immutable install.ps1 release assets. The compatibility
       # fallback below is review-bound to these exact repository bytes and is
       # refused for every other release/candidate identity.
-      BOOTSTRAP_LEGACY_INSTALLER_SHA256: bf9d266ccd3d7a6cd8a1e6dfb0bcb9c2aa258858da2152c4fb435fa26c99f51a
+      BOOTSTRAP_LEGACY_INSTALLER_SHA256: c5f03c7559dd941ca06acdaddeac9262f37911cd8393fe98d4af1aa32b7eb20a
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -634,7 +634,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        connector: [codex, claudecode]
+        connector: [codex, claudecode, amp]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:

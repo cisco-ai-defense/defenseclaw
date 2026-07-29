@@ -78,6 +78,7 @@ _render_checkbox_menu = terminal_checkbox.render_checkbox_menu
             "openhands",
             "antigravity",
             "opencode",
+            "amp",
             "omnigent",
             "none",
         ],
@@ -508,7 +509,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     click.echo(f"    {ux.accent('defenseclaw doctor')}           " + ux.dim("Verify connectivity and credentials"))
     click.echo(f"    {ux.accent('defenseclaw skill scan all')}   " + ux.dim("Scan installed agent skills"))
     click.echo(f"    {ux.accent('defenseclaw mcp scan --all')}   " + ux.dim("Scan configured MCP servers"))
-    click.echo(f"    {ux.accent('defenseclaw setup <connector>')} " + ux.dim("Add another agent (codex, claudecode)"))
+    click.echo(
+        f"    {ux.accent('defenseclaw setup <connector>')} "
+        + ux.dim("Add another agent (codex, claudecode, amp)")
+    )
 
     store.close()
 

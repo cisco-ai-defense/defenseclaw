@@ -13,10 +13,11 @@ This page is the single source of truth for "can this connector do X?". Every ro
 
 <Callout title="Connector capability is not platform certification">
 This matrix describes each connector's product-level hook or proxy contract.
-Native Windows currently certifies only Codex and Claude Code, both as
-hook-only connectors; the Windows package does not provide a subprocess
-sandbox. See the [native Windows connector matrix](/docs/get-started/windows/connectors-enforcement)
-before applying these rows to Windows.
+Native Windows currently certifies Codex and Claude Code as hook-backed
+connectors and Amp as a system-plugin connector; the Windows package does not
+provide a subprocess sandbox. See the [native Windows connector
+matrix](/docs/get-started/windows/connectors-enforcement) before applying these
+rows to Windows.
 </Callout>
 
 <CapabilityMatrix />
@@ -54,12 +55,12 @@ Pick a row with **proxy family**, **block: yes**, **native ask: yes**, **fail-cl
 
 ### "I want enforcement on Claude Code without the proxy"
 
-Hook-only enforcement is supported on [Claude Code](/docs/connectors/claudecode), [Codex](/docs/connectors/codex), [Cursor](/docs/connectors/cursor), [Gemini CLI](/docs/connectors/geminicli), [Hermes](/docs/connectors/hermes), [Windsurf](/docs/connectors/windsurf), [Copilot CLI](/docs/connectors/copilot), [OpenHands](/docs/connectors/openhands), [Antigravity](/docs/connectors/antigravity), [OpenCode](/docs/connectors/opencode), and [OmniGent](/docs/connectors/omnigent). The constraint: hook-only enforcement cannot block a request the agent has not yet asked the hook about. Trust the hook surface to scope what's possible.
+Direct-to-upstream hook enforcement is supported on [Claude Code](/docs/connectors/claudecode), [Codex](/docs/connectors/codex), [Cursor](/docs/connectors/cursor), [Gemini CLI](/docs/connectors/geminicli), [Hermes](/docs/connectors/hermes), [Windsurf](/docs/connectors/windsurf), [Copilot CLI](/docs/connectors/copilot), [OpenHands](/docs/connectors/openhands), [Antigravity](/docs/connectors/antigravity), [OpenCode](/docs/connectors/opencode), and [OmniGent](/docs/connectors/omnigent). [Amp](/docs/connectors/amp) uses a direct-to-upstream system policy plugin instead. The constraint is the same: these connectors cannot block a request the agent has not yet presented to their hook or policy surface.
 
 ### "I want HITL approvals to surface inside the agent UI"
 
-Pick a row with **native ask: yes**: OpenClaw, Claude Code (PreToolUse), Cursor (beforeShellExecution / beforeMCPExecution), GitHub Copilot CLI (preToolUse), Antigravity (verified PreToolUse), or OmniGent (`request`, `tool_call`, `llm_request`). Confirm verdicts on every other connector/event take an immediate connector-specific fallback; there is no TUI approval queue.
+Pick a row with **native ask: yes**: OpenClaw, Claude Code (PreToolUse), Cursor (beforeShellExecution / beforeMCPExecution), GitHub Copilot CLI (preToolUse), Antigravity (verified PreToolUse), Amp (`tool.call` and model-bound `tool.result` in the active foreground thread), or OmniGent (`request`, `tool_call`, `llm_request`). Confirm verdicts on every other connector/event take an immediate connector-specific fallback; there is no TUI approval queue.
 
 ### "I want fail-closed on transport failures"
 
-Pick a row with **fail-closed: yes**: OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Gemini CLI, OpenCode, OpenHands, and OmniGent. GitHub Copilot CLI, Hermes, Windsurf, and Antigravity do not expose a DefenseClaw-controlled fail-closed transport response.
+Pick a row with **fail-closed: yes**: OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Amp, OpenHands, and OmniGent. GitHub Copilot CLI, Hermes, Windsurf, and Antigravity do not expose a DefenseClaw-controlled fail-closed transport response.

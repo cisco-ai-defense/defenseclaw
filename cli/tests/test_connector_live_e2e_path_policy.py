@@ -14,6 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import re
 from pathlib import Path
 
@@ -121,3 +122,48 @@ def test_full_matrix_allowlist_rejects_unrelated_and_near_miss_paths(
     path: str,
 ) -> None:
     assert not _selects_full_connector_matrix(path)
+
+
+def test_amp_is_reachable_through_contract_and_manual_live_layers() -> None:
+    workflow = (ROOT / ".github/workflows/connector-live-e2e.yml").read_text(encoding="utf-8")
+    full_match = re.search(r"^\s*full='([^']+)'$", workflow, flags=re.MULTILINE)
+    assert full_match is not None
+    assert "amp" in json.loads(full_match.group(1))["connector"]
+    assert re.search(r"^\s+- amp$", workflow, flags=re.MULTILINE)
+
+    live = workflow.split("  live-matrix:", 1)[1].split("  windows-live:", 1)[0]
+    assert "if: ${{ github.event_name == 'workflow_dispatch' }}" in live
+    assert "{ connector: amp,        os: ubuntu-latest,  dcos: linux }" in live
+    assert "{ connector: amp,        os: macos-latest,   dcos: macos }" in live
+    assert "AMP_API_KEY: ${{ secrets.AMP_API_KEY }}" in live
+    assert "AMP_VERSION:" in live
+
+    windows = workflow.split("  windows-live:", 1)[1].split("  report:", 1)[0]
+    assert "github.event_name == 'workflow_dispatch'" in windows
+    assert "connector: [codex, claudecode, amp]" in windows
+    assert "AMP_API_KEY: ${{ secrets.AMP_API_KEY }}" in windows
+    assert "AMP_VERSION: ${{ inputs.version }}" in windows
+
+    run = (ROOT / "scripts/live-connector-e2e/run.sh").read_text(encoding="utf-8")
+    assert re.search(r"^ALL_CONNECTORS=\([^)]*\bamp\b", run, flags=re.MULTILINE)
+
+    setup = (ROOT / "scripts/live-connector-e2e/lib/setup.sh").read_text(encoding="utf-8")
+    assert ".config/amp/plugins/defenseclaw.ts" in setup
+
+    common = (ROOT / "scripts/live-connector-e2e/lib/common.sh").read_text(encoding="utf-8")
+    assert ".hook_event_name" in common
+    assert '[ "${amp_event}" != "${event}" ]' in common
+    assert "Amp event mismatch" in common
+    assert 'defenseclaw-gateway hook --connector amp --event "${event}"' in common
+
+    contract = (ROOT / "scripts/live-connector-e2e/contract-smoke.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'dc_invoke_hook "${DC_E2E_CONNECTOR}" "${native_event}"' in contract
+
+    driver = (ROOT / "scripts/live-connector-e2e/drivers/amp.sh").read_text(encoding="utf-8")
+    assert "@ampcode/cli@${AMP_VERSION:-latest}" in driver
+    assert 'dc_write_env_key AMP_API_KEY "${AMP_API_KEY}"' in driver
+    assert 'amp -x "${prompt}" --plugin-ready-timeout 30' in driver
+    assert "DC_DRIVER_SUPPORTS_BLOCK=1" in driver
+    assert "DC_DRIVER_SUPPORTS_OTLP=0" in driver

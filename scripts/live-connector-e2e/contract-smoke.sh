@@ -56,6 +56,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${HERE}/lib/assert.sh"
 # shellcheck source=lib/setup.sh
 . "${HERE}/lib/setup.sh"
+if [ "${DC_E2E_ISOLATE_GATEWAY:-0}" = "1" ]; then
+  # shellcheck source=lib/persistent-macos.sh
+  . "${HERE}/lib/persistent-macos.sh"
+fi
 
 golden_dir="${DC_E2E_GOLDEN_DIR}/${DC_E2E_CONNECTOR}"
 if [ ! -d "${golden_dir}" ]; then
@@ -65,6 +69,9 @@ fi
 dc_section "contract smoke: ${DC_E2E_CONNECTOR} ($(dc_detect_os))"
 
 dc_init_defenseclaw
+if [ "${DC_E2E_ISOLATE_GATEWAY:-0}" = "1" ]; then
+  dc_persist_isolate_gateway_config || dc_die "could not configure isolated gateway ports"
+fi
 
 # Capture the exact pre-setup agent config. Teardown is correct when it
 # restores these bytes (or restores absence), not when the resulting file
@@ -89,9 +96,14 @@ overall_rc=0
 # drive_event <event_label> <payload_file> <expect:allow|block>
 drive_event() {
   local label="$1" payload="$2" expect="$3"
-  local before after out code
+  local before after out code native_event
+  if ! native_event="$(jq -er '.hook_event_name | select(type == "string" and length > 0)' "${payload}")"; then
+    dc_record_result "${label}:fixture" fail "missing non-empty hook_event_name in ${payload}"
+    overall_rc=1
+    return
+  fi
   before="$(dc_event_cursor)"
-  out="$(dc_invoke_hook "${DC_E2E_CONNECTOR}" "${label}" "${payload}")"
+  out="$(dc_invoke_hook "${DC_E2E_CONNECTOR}" "${native_event}" "${payload}")"
   # Portable BRE: BSD sed (macOS) treats \+ as a literal '+', so use
   # [0-9][0-9]* for "one or more digits" — otherwise the exit code parses
   # empty on macOS and every allow assertion (which requires exit 0) fails.
@@ -140,8 +152,12 @@ drive_event() {
 
 # Drive whatever golden payloads exist for this connector.
 [ -f "${golden_dir}/session_start.json" ] && drive_event "SessionStart" "${golden_dir}/session_start.json" allow
+[ -f "${golden_dir}/agent_start.json" ] && drive_event "AgentStart" "${golden_dir}/agent_start.json" allow
 [ -f "${golden_dir}/pre_tool_allow.json" ] && drive_event "PreTool-allow" "${golden_dir}/pre_tool_allow.json" allow
+[ -f "${golden_dir}/tool_result.json" ] && drive_event "ToolResult" "${golden_dir}/tool_result.json" allow
+[ -f "${golden_dir}/subagent_tool_call.json" ] && drive_event "SubagentToolCall" "${golden_dir}/subagent_tool_call.json" allow
 [ -f "${golden_dir}/pre_tool_block.json" ] && drive_event "PreTool-block" "${golden_dir}/pre_tool_block.json" block
+[ -f "${golden_dir}/agent_end.json" ] && drive_event "AgentEnd" "${golden_dir}/agent_end.json" allow
 
 # Schema invariant over everything emitted so far.
 if dc_assert_schema 1; then

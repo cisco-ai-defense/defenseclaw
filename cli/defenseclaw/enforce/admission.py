@@ -84,6 +84,7 @@ def _default_admission_policy() -> AdmissionPolicyData:
                     ".zeptoclaw/extensions/defenseclaw",
                     ".claude/extensions/defenseclaw",
                     ".codex/extensions/defenseclaw",
+                    ".config/amp/plugins/defenseclaw.ts",
                 ],
             ),
             ("skill", "codeguard"): (
@@ -696,6 +697,11 @@ _DEFENSECLAW_HOME_COMPONENTS = frozenset(
         ".codex",
     }
 )
+_DEFENSECLAW_HOME_PREFIXES = frozenset(
+    {
+        (".config", "amp"),
+    }
+)
 
 
 def _matches_provenance(constraints: list[str], source_path: str) -> bool:
@@ -743,6 +749,11 @@ def _matches_provenance(constraints: list[str], source_path: str) -> bool:
             # directly above the matched run is one. Otherwise an attacker
             # parent (``/tmp/attacker/extensions/defenseclaw``) would match.
             if constraint_parts[0] in _DEFENSECLAW_HOME_COMPONENTS:
+                return True
+            if any(
+                tuple(constraint_parts[: len(prefix)]) == prefix
+                for prefix in _DEFENSECLAW_HOME_PREFIXES
+            ):
                 return True
             if i > 0 and components[i - 1] in _DEFENSECLAW_HOME_COMPONENTS:
                 return True

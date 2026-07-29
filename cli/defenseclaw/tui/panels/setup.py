@@ -5552,7 +5552,7 @@ def _effective_guardrail_value(
     """
 
     guardrail = getattr(cfg, "guardrail", None)
-    if method_name == "effective_hook_fail_mode" and connector in {"claudecode", "codex"} and hasattr(cfg, "data_dir"):
+    if method_name == "effective_hook_fail_mode" and connector in {"claudecode", "codex", "amp"} and hasattr(cfg, "data_dir"):
         try:
             from defenseclaw.fail_mode import connector_fail_mode_report
 
@@ -6603,6 +6603,7 @@ def _connector_setup_alias(wire: str) -> str:
         "openhands",
         "antigravity",
         "opencode",
+        "amp",
         "omnigent",
     }:
         return normalized

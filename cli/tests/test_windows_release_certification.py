@@ -1,10 +1,11 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""Contracts for the first native Windows release."""
+"""Fail-closed contracts for native Windows release and Amp validation."""
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -34,6 +35,7 @@ OWNER_RIGHTS_FULL_CONTROL_ACE = "(A;OICI;FA;;;OW)"
 SYSTEM_FULL_CONTROL_ACE = "(A;OICI;FA;;;SY)"
 CREATOR_OWNER_INHERIT_ONLY_FULL_CONTROL_ACE = "(A;OICIIO;FA;;;CO)"
 BUILTIN_USERS_FULL_CONTROL_ACE = "(A;OICI;FA;;;S-1-5-32-545)"
+LIVE = (ROOT / "scripts" / "live-connector-e2e" / "run-windows.ps1").read_text(encoding="utf-8")
 
 
 def _workflow(path: Path) -> dict[str, object]:
@@ -455,6 +457,7 @@ def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> 
         "-Operation release-certification",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
+        "AMP_API_KEY",
     ):
         assert retired not in smoke_text
 
@@ -720,10 +723,23 @@ def test_setup_acceptance_validates_packaged_resources_before_first_run() -> Non
         "openinference-v1.json",
     ):
         assert resource in PACKAGED_V8_VALIDATOR
+    for loader in (
+        "_schema_validator()",
+        "telemetry_v8_schema_bytes()",
+        "telemetry_v8_catalog_bytes()",
+        "v7_exporter_selection_bytes()",
+        '"galileo-rich-v2"',
+        '"local-observability-v1"',
+        '"openinference-v1"',
+    ):
+        assert loader in PACKAGED_V8_VALIDATOR
     assert "runtime unexpectedly contains a Lib/schemas fallback tree" in (PACKAGED_V8_VALIDATOR)
     assert "scripts\\validate_packaged_v8_resources.py" in resource_contract
+    assert "Test-Path -LiteralPath $validator -PathType Leaf" in resource_contract
+    assert "'-I', $validator" in resource_contract
     assert "'--site-packages', $sitePackages" in resource_contract
     assert "'--runtime-root', $RuntimeRoot" in resource_contract
+    assert "'--label', 'packaged'" in resource_contract
 
     probe = "Assert-PackagedV8ResourceContract $python (Join-Path $installRoot 'runtime\\python')"
     assert acceptance.index(probe) < acceptance.index("'init', '--skip-install'")
@@ -756,3 +772,171 @@ def test_setup_uninstall_acceptance_separates_signed_cli_from_unsigned_fixture()
     assert "RegistryValueOptions]::DoNotExpandEnvironmentNames" in acceptance
     assert "RegistryValueKind]::String" in acceptance
     assert "Run value is not the exact absolute cached Setup command" in acceptance
+
+
+def test_amp_native_windows_coverage_is_separate_from_the_release_channel() -> None:
+    release = RELEASE_PATH.read_text(encoding="utf-8")
+    windows_native = (ROOT / ".github" / "workflows" / "windows-native.yml").read_text(encoding="utf-8")
+    connector_live = (ROOT / ".github" / "workflows" / "connector-live-e2e.yml").read_text(encoding="utf-8")
+
+    assert "windows-real-client-certification:" not in release
+    for secret in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AMP_API_KEY"):
+        assert secret not in release
+
+    assert "connector: [codex, claudecode, amp]" in windows_native
+    assert "connector: [codex, claudecode, amp]" in connector_live
+    assert "AMP_API_KEY: ${{ secrets.AMP_API_KEY }}" in connector_live
+    assert "AMP_VERSION: ${{ inputs.version }}" in connector_live
+    assert "-Layer live" in connector_live
+
+    for contract in (
+        'amp.on("session.start"',
+        'amp.on("agent.start"',
+        'amp.on("tool.call"',
+        'amp.on("tool.result"',
+        'amp.on("agent.end"',
+        "subagent_tool_call.json",
+        "amp:plugin-contract",
+        "amp:private-plugin",
+        "amp:self-heal",
+        "doctor:windows-hook-tamper",
+        "doctor:windows-hook-recovery",
+        "gateway-generated connector telemetry",
+    ):
+        assert contract in LIVE
+
+
+def test_amp_windows_live_prompts_invoke_native_pwsh_explicitly() -> None:
+    helper = re.search(
+        r"(?ms)^function Get-AmpWindowsPowerShellToolCommand\b.*?(?=^function |\Z)",
+        LIVE,
+    )
+    result_gate = re.search(
+        r"(?ms)^function Assert-AmpAuthenticatedToolResultGate\b.*?(?=^function |\Z)",
+        LIVE,
+    )
+    live_run = re.search(
+        r"(?ms)^function Invoke-LiveRun\b.*?(?=^function |\Z)",
+        LIVE,
+    )
+    assert helper is not None
+    assert result_gate is not None
+    assert live_run is not None
+    assert "(Get-Process -Id $PID).Path.Replace('\\', '/')" in helper.group(0)
+    assert '-NoLogo -NoProfile -NonInteractive -Command' in helper.group(0)
+    assert "cannot contain double quotes" in helper.group(0)
+    assert "Get-AmpWindowsPowerShellToolCommand(" in result_gate.group(0)
+    assert result_gate.group(0).count("Get-Content -Raw -LiteralPath") == 1
+    assert live_run.group(0).count("Get-AmpWindowsPowerShellToolCommand") == 2
+    assert "if ($Connector -eq 'amp')" in live_run.group(0)
+    assert "blocked-remove-target" in live_run.group(0)
+    assert "Remove-Item -LiteralPath '$escapedBlockTarget' -Recurse -Force" in live_run.group(0)
+    assert "blocked Amp action modified its disposable destructive target" in live_run.group(0)
+    assert live_run.group(0).count(r"C:\Windows\System32\config\SAM") == 1
+
+
+def test_amp_windows_validation_evidence_is_not_faked() -> None:
+    registry = json.loads(
+        (ROOT / "cli" / "defenseclaw" / "inventory" / "validated_versions.json").read_text(encoding="utf-8")
+    )
+    windows = registry["connectors"]["amp"]["os"]["windows"]
+    assert windows["run_url"] == ""
+
+
+def test_setup_acceptance_exercises_atomic_observability_v8_upgrade() -> None:
+    acceptance = _function("Invoke-SetupAcceptance")
+
+    for contract in (
+        "installedState.version = '0.8.0'",
+        "FROMVERSION=0.8.0",
+        "config_version: 7",
+        "temporality: delta",
+        '(otlp.get("tls") or {}).get("insecure") is True',
+        '(otlp.get("network_safety") or {}).get("allow_private_networks") is True',
+        "config-v8', 'validate'",
+        "setup-seeded-v8-contract.log",
+        "'0.8.5' -notin @($migrationCursor.applied)",
+        "Get-GatewayIdentity $dataRoot",
+        "Get-WatchdogIdentity $dataRoot",
+        "seeded upgrade-restored gateway",
+        "seeded upgrade-restored watchdog",
+    ):
+        assert contract in acceptance
+
+
+def test_minimal_gateway_fixture_disables_external_v8_destinations() -> None:
+    minimal = _function("Set-MinimalGatewayAcceptanceConfig")
+
+    for contract in (
+        "config_path_for_data_dir",
+        "load_validate_v8",
+        "mutate_v8_config",
+        "V8YAMLMutation.set",
+        '("observability", "destinations", index, "enabled")',
+        'frozenset({"http_jsonl", "otlp", "splunk_hec"})',
+        'destination.get("enabled", True)',
+    ):
+        assert contract in minimal
+    assert minimal.index("cfg.save()") < minimal.index("mutate_v8_config(")
+
+
+def test_packaged_rotation_probes_only_owned_gateway_without_secret_output() -> None:
+    process = _function("Invoke-WindowsNativeProcess")
+    rotation = _function("Assert-PackagedClaudeTokenRotation")
+    authentication = _function("Assert-ClaudeNativeOtlpRotationAuthentication")
+    authority = _function("Assert-ClaudeNativeOtlpProbeAuthority")
+    listener = _function("Assert-OwnedGatewayApiListener")
+    owned_process = _function("Assert-OwnedManagedProcess")
+    stale_identity = _function("Assert-StaleGatewayProcessIdentityRejected")
+    port = _function("Get-PackagedGatewayApiPort")
+    posture = _function("Get-PackagedRotationConnectorPosture")
+    posture_assertion = _function("Assert-PackagedRotationActionClosedPosture")
+
+    assert "[switch]$SuppressOutput" in process
+    assert "if ($combined -and -not $SuppressOutput -and -not $goTestFailureSummary)" in process
+    assert "[credential-bearing process output intentionally suppressed]" in process
+    assert 'if ($SuppressOutput) { throw "$FilePath $reason" }' in process
+    assert rotation.count("-SuppressOutput") == 5
+    assert "'setup', 'codex', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'" in rotation
+    assert "'setup', 'claude-code', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'" in rotation
+    assert "Get-PackagedRotationConnectorPosture $statusBefore" in rotation
+    assert "Get-PackagedRotationConnectorPosture $status" in rotation
+    assert "$postureAfterJson -cne $postureBeforeJson" in rotation
+    assert "changed the exact connector roster or effective mode/fail-mode posture" in rotation
+    assert "Get-WindowsNativeGatewayTokenFromDotenvState $tokenAState" in rotation
+    assert "Get-WindowsNativeGatewayTokenFromDotenvState $tokenBState" in rotation
+    assert "[string]::Equals($tokenA, $tokenB" in rotation
+    assert "Assert-WindowsNativeCredentialValuesAbsent" in rotation
+    assert "Get-ClaudeNativeOtlpRotationProbes $ClaudeHome" in rotation
+    assert "Assert-ClaudeNativeOtlpForeignPortRejected" in rotation
+    assert "substituted a gateway master token for scoped credentials" in rotation
+    assert "$scopedTokens[0], $scopedTokens[1]" in rotation
+
+    assert "os.environ.pop('DEFENSECLAW_CONFIG', None)" in port
+    assert "cfg = load(data_dir=root)" in port
+    assert "Path(cfg.data_dir).resolve() != root" in port
+    assert "$endpoint.Port -ne $GatewayPort" in authority
+    assert "Get-NetTCPConnection -State Listen -LocalPort $GatewayPort" in listener
+    assert "OwningProcess -ne [int]$GatewayIdentity.ProcessId" in listener
+    assert "Assert-OwnedManagedProcess $GatewayIdentity $GatewayPath" in listener
+    assert "$liveStartIdentity -cne [string]$Identity.StartIdentity" in owned_process
+    assert "Assert-OwnedManagedProcess $stale $GatewayPath" in stale_identity
+    assert "accepted a stale or reused gateway process identity" in stale_identity
+    assert "Assert-StaleGatewayProcessIdentityRejected" in rotation
+    for field in (
+        "fail_effective",
+        "fail_configured",
+        "fail_desired",
+        "fail_runtime",
+        "fail_current",
+        "fail_drift",
+    ):
+        assert field in posture
+        assert field in posture_assertion
+    assert "[Net.IPAddress]::IsLoopback($address)" in listener
+    assert authentication.index("Assert-ClaudeNativeOtlpProbeAuthority") < authentication.index(
+        "[Net.Http.HttpClientHandler]::new()"
+    )
+    assert authentication.index("Assert-OwnedGatewayApiListener") < authentication.index(
+        "[Net.Http.HttpClientHandler]::new()"
+    )

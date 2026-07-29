@@ -40,6 +40,7 @@ Use `<binary> --help` for any command.
 | `setup codex` / `setup claude-code` | Configure observability-only connector aliases |
 | `setup hermes` / `setup cursor` / `setup windsurf` | Configure hook-first observability aliases |
 | `setup geminicli` / `setup copilot` | Configure observability aliases with native OTel where supported |
+| `setup amp` | Install Amp's synchronous user-scope system-policy plugin; observe by default, or gate `tool.call` execution and model-bound `tool.result` with `--mode action` |
 | `setup splunk` | Configure Splunk O11y, local Splunk bridge, or remote Splunk Enterprise HEC |
 | `setup galileo [status\|test\|enable\|disable\|remove]` | Configure real-time Galileo Cloud/self-hosted OTLP traces; test uses the live gateway path by default |
 | `setup observability add\|list\|enable\|disable\|remove\|test` | Manage config-v8 OTLP, Galileo, Splunk HEC, JSONL, HTTP JSONL, console, and Prometheus destinations |
@@ -168,6 +169,10 @@ execute from `opencode.json`. DefenseClaw refuses commands that resolve
 outside trusted install prefixes unless you add the directory to
 `DEFENSECLAW_TRUSTED_BIN_PREFIXES` or pass `--force-untrusted-command` for
 that one write.
+
+For `--connector amp`, MCP inventory and scanning are read-only. `mcp set` and
+`mcp unset` refuse to rewrite Amp JSON/JSONC or bypass workspace approval and
+direct the operator to `amp mcp add` or Amp settings instead.
 
 ### plugin
 

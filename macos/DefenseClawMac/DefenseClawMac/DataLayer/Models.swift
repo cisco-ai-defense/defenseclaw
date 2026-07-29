@@ -223,6 +223,7 @@ func friendlyConnectorName(_ connector: String) -> String {
     case "openhands": return "OpenHands"
     case "antigravity": return "Antigravity"
     case "opencode": return "OpenCode"
+    case "amp": return "Amp"
     case "omnigent": return "OmniGent"
     case let value where !value.isEmpty:
         return value.prefix(1).uppercased() + value.dropFirst()

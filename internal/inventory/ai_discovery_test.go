@@ -162,10 +162,72 @@ func TestLoadAISignatures_ContainsRequiredSurfaces(t *testing.T) {
 	for _, sig := range sigs {
 		seen[sig.ID] = true
 	}
-	for _, id := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "ai-sdks", "lemonade"} {
+	for _, id := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent", "ai-sdks", "lemonade"} {
 		if !seen[id] {
 			t.Fatalf("signature %q missing", id)
 		}
+	}
+}
+
+func TestAmpSignatureIncludesNativeConfigAndAssetPaths(t *testing.T) {
+	sigs, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	var amp *AISignature
+	for i := range sigs {
+		if sigs[i].ID == "amp" {
+			amp = &sigs[i]
+			break
+		}
+	}
+	if amp == nil {
+		t.Fatal("Amp signature missing")
+	}
+	if amp.SupportedConnector != "amp" || amp.Vendor != "Amp" {
+		t.Fatalf("Amp identity mismatch: %+v", *amp)
+	}
+	for _, want := range []string{
+		"~/.config/amp/settings.json",
+		"~/.config/amp/settings.jsonc",
+		"/Library/Application Support/ampcode/managed-settings.json",
+		"/etc/ampcode/managed-settings.json",
+		"$ProgramData/ampcode/managed-settings.json",
+		".amp/settings.json",
+		".amp/plugins",
+		"~/.config/amp/plugins",
+		"~/.config/agents/skills",
+		"~/.config/amp/skills",
+		".agents/checks",
+		"~/.config/amp/checks",
+		"~/.config/amp/AGENTS.md",
+		"~/.config/AGENTS.md",
+		"/Library/Application Support/ampcode/AGENTS.md",
+		"/etc/ampcode/AGENTS.md",
+		"$ProgramData/ampcode/AGENTS.md",
+	} {
+		if !stringSliceContains(amp.ConfigPaths, want) {
+			t.Errorf("Amp config paths missing %q: %v", want, amp.ConfigPaths)
+		}
+	}
+	for _, want := range []string{
+		"~/.config/amp/settings.json",
+		"~/.config/amp/settings.jsonc",
+		"/Library/Application Support/ampcode/managed-settings.json",
+		"/etc/ampcode/managed-settings.json",
+		"$ProgramData/ampcode/managed-settings.json",
+		".amp/settings.json",
+		".amp/settings.jsonc",
+	} {
+		if !stringSliceContains(amp.MCPPaths, want) {
+			t.Errorf("Amp MCP paths missing %q: %v", want, amp.MCPPaths)
+		}
+	}
+	if !stringSliceContains(amp.PackageNames, "@ampcode/cli") {
+		t.Errorf("Amp package names missing @ampcode/cli: %v", amp.PackageNames)
+	}
+	if !stringSliceContains(amp.EnvVarNames, "AMP_API_KEY") {
+		t.Errorf("Amp environment variables missing AMP_API_KEY: %v", amp.EnvVarNames)
 	}
 }
 

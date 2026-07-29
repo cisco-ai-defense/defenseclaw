@@ -323,6 +323,8 @@ class InventorySnapshot:
     connector_skill_dirs: tuple[str, ...] = ()
     connector_plugin_dirs: tuple[str, ...] = ()
     connector_mcp_files: tuple[str, ...] = ()
+    connector_rule_files: tuple[str, ...] = ()
+    connector_policy_settings: Mapping[str, Any] = field(default_factory=dict)
     live: bool = False
     skills: tuple[InventorySkill, ...] = ()
     plugins: tuple[InventoryPlugin, ...] = ()
@@ -350,6 +352,12 @@ class InventorySnapshot:
             connector_skill_dirs=tuple(str(item) for item in raw.get("connector_skill_dirs") or ()),
             connector_plugin_dirs=tuple(str(item) for item in raw.get("connector_plugin_dirs") or ()),
             connector_mcp_files=tuple(str(item) for item in raw.get("connector_mcp_files") or ()),
+            connector_rule_files=tuple(str(item) for item in raw.get("connector_rule_files") or ()),
+            connector_policy_settings=(
+                raw.get("connector_policy_settings")
+                if isinstance(raw.get("connector_policy_settings"), Mapping)
+                else {}
+            ),
             live=bool(raw.get("live")),
             skills=tuple(
                 InventorySkill.from_mapping(item)

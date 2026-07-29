@@ -42,7 +42,7 @@ On **native Windows**, DefenseClaw is **hook-only**. The current Windows
 connector scope deliberately excludes WSL and requires both the upstream agent
 and the complete DefenseClaw hook path to run directly on Windows.
 
-- **Supported and certified:** Codex and Claude Code.
+- **Supported and certified:** Codex, Claude Code, and Amp.
 - **Not certified:** Cursor, Windsurf, Gemini CLI, Copilot CLI, Antigravity,
   OpenCode, and Hermes. Their cross-platform setup code is not a native Windows
   support commitment.
@@ -50,9 +50,11 @@ and the complete DefenseClaw hook path to run directly on Windows.
   WSL, terminal/sandbox, or local-proxy topology is not hosted by native
   Windows DefenseClaw.
 
-The certified connectors invoke the native `defenseclaw-hook.exe` entrypoint;
-they do not add a WSL, Git Bash, `jq`, or POSIX-shell dependency. Upstream
-agent prerequisites still apply, including Git for Windows for Claude Code.
+Codex and Claude Code invoke the native `defenseclaw-hook.exe` entrypoint; Amp
+loads its owner-only system policy plugin from
+`%USERPROFILE%\.config\amp\plugins\defenseclaw.ts`. None adds a WSL, Git Bash,
+`jq`, or POSIX-shell dependency. Upstream agent prerequisites still apply,
+including Git for Windows for Claude Code.
 
 WSL availability is tracked for upstream research in
 [`CONNECTOR-MATRIX.md`](CONNECTOR-MATRIX.md), but it is not part of the current
@@ -1187,7 +1189,7 @@ DefenseClaw supports multiple agent frameworks. Set the active mode in `~/.defen
 
 ```yaml
 claw:
-  mode: openclaw        # openclaw | zeptoclaw | claudecode | codex | hermes | cursor | windsurf | geminicli | copilot | openhands | antigravity | opencode | omnigent
+  mode: openclaw        # openclaw | zeptoclaw | claudecode | codex | hermes | cursor | windsurf | geminicli | copilot | openhands | antigravity | opencode | amp | omnigent
   home_dir: ""          # auto-detected; override to use a custom path
 ```
 

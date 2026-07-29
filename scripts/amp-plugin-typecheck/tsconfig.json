@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "lib": [
+      "ESNext",
+      "DOM"
+    ],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true,
+    "paths": {
+      "@ampcode/plugin": [
+        "./node_modules/@ampcode/plugin/index.d.ts"
+      ]
+    },
+    "strict": true,
+    "target": "ES2022"
+  },
+  "files": [
+    "symbol-observable.d.ts",
+    "../../internal/gateway/connector/hooks/amp-plugin.ts"
+  ]
+}

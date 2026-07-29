@@ -10,8 +10,8 @@ t_single() {
 
 t_multi() {
   local got
-  got="$(parse_connectors "cursor,claudecode,codex" | tr '\n' '|')"
-  assert_eq "${got}" "cursor|claudecode|codex|" "multi connector ordering"
+  got="$(parse_connectors "amp,cursor,claudecode,codex" | tr '\n' '|')"
+  assert_eq "${got}" "amp|cursor|claudecode|codex|" "multi connector ordering"
 }
 
 t_whitespace_and_case() {
@@ -60,6 +60,8 @@ t_empty_string_rejected() {
 
 t_is_supported() {
   local rc
+  is_supported_connector "amp"; rc=$?
+  assert_status "${rc}" 0 "amp supported"
   is_supported_connector "codex"; rc=$?
   assert_status "${rc}" 0 "codex supported"
   is_supported_connector "claudecode"; rc=$?

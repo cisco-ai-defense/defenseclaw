@@ -124,11 +124,77 @@ func TestPrivateSecurityDescriptorRejectsForeignOwner(t *testing.T) {
 	}
 }
 
+func TestProtectFileWindowsDoesNotRequireWriteOwner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "owner-no-write-owner.json")
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	descriptor, err := windows.SecurityDescriptorFromString(
+		"O:" + user.User.Sid.String() +
+			"D:P(A;;GRGWRCWD;;;" + user.User.Sid.String() + ")(A;;GA;;;SY)",
+	)
+	if err != nil {
+		t.Fatalf("private test descriptor: %v", err)
+	}
+	attributes := windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: descriptor,
+	}
+	pathPtr, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(
+		pathPtr,
+		windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ,
+		&attributes,
+		windows.CREATE_NEW,
+		windows.FILE_ATTRIBUTE_NORMAL,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("create current-user-owned test file: %v", err)
+	}
+	if err := windows.CloseHandle(handle); err != nil {
+		t.Fatalf("close current-user-owned test file: %v", err)
+	}
+	if mask := windowsAllowMaskForSID(t, path, user.User.Sid); mask&windows.WRITE_OWNER != 0 {
+		t.Fatalf("test precondition failed: owner ACE grants WRITE_OWNER (mask 0x%x)", uint32(mask))
+	}
+
+	if err := ProtectFile(path); err != nil {
+		t.Fatalf("ProtectFile should not require WRITE_OWNER for an already-owned file: %v", err)
+	}
+	owner, err := windowsPathOwner(path)
+	if err != nil {
+		t.Fatalf("inspect protected owner: %v", err)
+	}
+	if owner == nil || !owner.Equals(user.User.Sid) {
+		t.Fatalf("ProtectFile changed owner: got %v, want %s", owner, user.User.Sid)
+	}
+	safe, err := privateDACLIsSafe(path)
+	if err != nil {
+		t.Fatalf("inspect protected DACL: %v", err)
+	}
+	if !safe {
+		t.Fatal("ProtectFile did not install a protected current-user/SYSTEM DACL")
+	}
+}
+
 func ownWindowsTestPath(t *testing.T, path string) {
 	t.Helper()
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil || user == nil || user.User.Sid == nil {
 		t.Fatalf("current token user: %v", err)
+	}
+	owner, err := windowsPathOwner(path)
+	if err != nil {
+		t.Fatalf("inspect test path owner %s: %v", path, err)
+	}
+	if owner != nil && owner.Equals(user.User.Sid) {
+		return
 	}
 	if err := windows.SetNamedSecurityInfo(
 		path,

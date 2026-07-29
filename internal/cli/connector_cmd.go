@@ -50,7 +50,7 @@ var connectorCmd = &cobra.Command{
 	Long: `Low-level connector lifecycle commands.
 
 These subcommands operate on a single connector adapter (openclaw, codex,
-claudecode, zeptoclaw, or any plugin connector) and intentionally bypass
+claudecode, amp, zeptoclaw, or any plugin connector) and intentionally bypass
 the interactive 'defenseclaw setup' flow. They are primarily intended for
 the 'defenseclaw uninstall' flow and for operator debugging when a
 connector handoff (S7) leaves residual state behind.
@@ -212,13 +212,6 @@ func bindConnectorLifecycleConfigHome(connectorName string) (func(), error) {
 	if home == "" {
 		return func() {}, nil
 	}
-	if strings.TrimSpace(home) != home || strings.ContainsAny(home, "\x00\r\n") ||
-		!filepath.IsAbs(home) || filepath.Clean(home) != home {
-		return nil, fmt.Errorf("config home is not an absolute normalized path")
-	}
-	if err := validateConnectorLifecycleConfigHomePath(home); err != nil {
-		return nil, fmt.Errorf("config home path is unsafe: %w", err)
-	}
 
 	variable := ""
 	switch connectorName {
@@ -226,8 +219,22 @@ func bindConnectorLifecycleConfigHome(connectorName string) (func(), error) {
 		variable = "CODEX_HOME"
 	case "claudecode":
 		variable = "CLAUDE_CONFIG_DIR"
+	case "amp":
+		// Amp does not expose a config-home environment override. The
+		// validated path is carried in SetupOpts.ConfigHome instead, so this
+		// process never has to mutate USERPROFILE.
 	default:
 		return nil, fmt.Errorf("explicit config home is unsupported for connector %q", connectorName)
+	}
+	if strings.TrimSpace(home) != home || strings.ContainsAny(home, "\x00\r\n") ||
+		!filepath.IsAbs(home) || filepath.Clean(home) != home {
+		return nil, fmt.Errorf("config home is not an absolute normalized path")
+	}
+	if err := validateConnectorLifecycleConfigHomePath(home); err != nil {
+		return nil, fmt.Errorf("config home path is unsafe: %w", err)
+	}
+	if connectorName == "amp" {
+		return func() {}, nil
 	}
 	previous, existed := os.LookupEnv(variable)
 	if err := os.Setenv(variable, home); err != nil {
@@ -282,6 +289,10 @@ func resolveConnectorOpts(dataDir string) connector.SetupOpts {
 		DataDir:     dataDir,
 		Interactive: false,
 	}
+	name := resolveActiveConnectorName(dataDir)
+	if name == "amp" {
+		opts.ConfigHome = strings.TrimSpace(connectorFlagConfigHome)
+	}
 	if cfg == nil {
 		return opts
 	}
@@ -294,7 +305,7 @@ func resolveConnectorOpts(dataDir string) connector.SetupOpts {
 		opts.ProxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
 	}
 	opts.WorkspaceDir = cfg.ConnectorWorkspaceDir()
-	opts.AgentExecutable = connector.LoadCachedAgentExecutable(dataDir, resolveActiveConnectorName(dataDir))
+	opts.AgentExecutable = connector.LoadCachedAgentExecutable(dataDir, name)
 	opts.APIToken = cfg.Gateway.ResolvedToken()
 	return opts
 }
@@ -315,8 +326,8 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	if !ok {
 		return fmt.Errorf("connector reconcile: unknown connector %q", name)
 	}
-	if name != "claudecode" && name != "codex" {
-		return fmt.Errorf("connector reconcile: selected refresh is supported only for claudecode and codex")
+	if name != "claudecode" && name != "codex" && name != "amp" {
+		return fmt.Errorf("connector reconcile: selected refresh is supported only for claudecode, codex, and amp")
 	}
 	if warning, supportErr := connector.CheckPlatformSupportOnHost(name); supportErr != nil {
 		return fmt.Errorf("connector reconcile %s: %w", name, supportErr)
