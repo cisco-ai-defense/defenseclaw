@@ -171,11 +171,16 @@ def _run_optional_json_property(
         "    $values = @(Get-OptionalJsonPropertyValue "
         "-InputObject $record -PropertyName $propertyName)\n"
         "} else {\n"
-        "    $values = @(Get-OptionalJsonStringValue "
-        "-InputObject $record -PropertyName $propertyName)\n"
+        "    $value = Get-OptionalJsonStringValue "
+        "-InputObject $record -PropertyName $propertyName\n"
+        "    $values = @($value)\n"
         "}\n"
         "[Console]::Out.WriteLine('count={0}' -f $values.Count)\n"
         "[Console]::Out.WriteLine('value=<{0}>' -f ($values -join ','))\n"
+        "if ($propertyName -cne 'previous_connectors') {\n"
+        "    [Console]::Out.WriteLine('is_null={0}' -f ($null -eq $value))\n"
+        "    [Console]::Out.WriteLine('equals_empty={0}' -f ($value -ceq ''))\n"
+        "}\n"
     )
     return _run_powershell(
         command,
@@ -273,28 +278,61 @@ def test_deferred_uninstall_custody_rejects_inherit_only_creator_owner(
 @pytest.mark.parametrize(
     ("json_value", "property_name", "expected"),
     [
-        ('{"status":"pending-reboot"}', "cleanup_boot_identifier", "count=1\nvalue=<>"),
-        ('{"cleanup_boot_identifier":""}', "cleanup_boot_identifier", "count=1\nvalue=<>"),
+        (
+            '{"status":"pending-reboot"}',
+            "cleanup_boot_identifier",
+            "count=1\nvalue=<>\nis_null=False\nequals_empty=True",
+        ),
+        (
+            '{"cleanup_boot_identifier":""}',
+            "cleanup_boot_identifier",
+            "count=1\nvalue=<>\nis_null=False\nequals_empty=True",
+        ),
+        (
+            '{"cleanup_boot_identifier":null}',
+            "cleanup_boot_identifier",
+            "count=1\nvalue=<>\nis_null=False\nequals_empty=True",
+        ),
         (
             '{"cleanup_boot_identifier":"next-boot"}',
             "cleanup_boot_identifier",
-            "count=1\nvalue=<next-boot>",
+            "count=1\nvalue=<next-boot>\nis_null=False\nequals_empty=False",
         ),
-        ('{"action":"uninstall"}', "maintenance_sha256", "count=1\nvalue=<>"),
+        (
+            '{"action":"uninstall"}',
+            "maintenance_sha256",
+            "count=1\nvalue=<>\nis_null=False\nequals_empty=True",
+        ),
         ('{"target_connector":"none"}', "previous_connectors", "count=0\nvalue=<>"),
         (
             '{"previous_connectors":["codex","claudecode"]}',
             "previous_connectors",
             "count=2\nvalue=<codex,claudecode>",
         ),
-        ('{"status":"disabled"}', "data_root", "count=1\nvalue=<>"),
-        ('{"status":"disabled"}', "gateway_path", "count=1\nvalue=<>"),
-        ('{"status":"disabled"}', "gateway_sha256", "count=1\nvalue=<>"),
-        ('{"launcher_signed":false}', "signer_thumbprint_sha256", "count=1\nvalue=<>"),
+        (
+            '{"status":"disabled"}',
+            "data_root",
+            "count=1\nvalue=<>\nis_null=False\nequals_empty=True",
+        ),
+        (
+            '{"status":"disabled"}',
+            "gateway_path",
+            "count=1\nvalue=<>\nis_null=False\nequals_empty=True",
+        ),
+        (
+            '{"status":"disabled"}',
+            "gateway_sha256",
+            "count=1\nvalue=<>\nis_null=False\nequals_empty=True",
+        ),
+        (
+            '{"launcher_signed":false}',
+            "signer_thumbprint_sha256",
+            "count=1\nvalue=<>\nis_null=False\nequals_empty=True",
+        ),
         (
             '{"signer_thumbprint_sha256":"aaaaaaaa"}',
             "signer_thumbprint_sha256",
-            "count=1\nvalue=<aaaaaaaa>",
+            "count=1\nvalue=<aaaaaaaa>\nis_null=False\nequals_empty=False",
         ),
     ],
 )

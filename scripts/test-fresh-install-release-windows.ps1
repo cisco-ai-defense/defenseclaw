@@ -329,11 +329,13 @@ function Get-OptionalJsonStringValue {
         [Parameter(Mandatory = $true)][string]$PropertyName
     )
 
-    return [string](
-        Get-OptionalJsonPropertyValue `
-            -InputObject $InputObject `
-            -PropertyName $PropertyName
-    )
+    $value = Get-OptionalJsonPropertyValue `
+        -InputObject $InputObject `
+        -PropertyName $PropertyName
+    if ($null -eq $value) {
+        return ""
+    }
+    return [string]$value
 }
 
 function Assert-ExactDeferredUninstallState {
