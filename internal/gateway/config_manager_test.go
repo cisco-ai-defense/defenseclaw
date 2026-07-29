@@ -781,7 +781,7 @@ func TestConfigManagerEnvConfigOverlayRejectsMalformed(t *testing.T) {
 	// URL that _valid_aid_endpoint_url would reject on the shell side.
 	badPayloads := []string{
 		`{not json`,
-		`{"cisco_ai_defense_endpoint": "http://us.api.inspect.aidefense.security.cisco.com"}`,   // http://
+		`{"cisco_ai_defense_endpoint": "http://us.api.inspect.aidefense.security.cisco.com"}`,       // http://
 		`{"cisco_ai_defense_endpoint": "https://user@us.api.inspect.aidefense.security.cisco.com"}`, // userinfo
 		`{"cisco_ai_defense_endpoint": "https://us.api.inspect.aidefense.security.cisco.com/api"}`,  // path
 	}
