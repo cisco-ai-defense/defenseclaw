@@ -210,6 +210,10 @@ func TestParseArgsDeferredCleanupQuietRestartContract(t *testing.T) {
 		{"/cleanup", "/quiet"},
 		{"/cleanup", "CLEANUPTRANSACTION=invalid"},
 		{"/uninstall", "CLEANUPTRANSACTION=" + transactionID},
+		{"/cleanup", "/quiet", "CLEANUPTRANSACTION=" + transactionID, "DELETEUSERDATA=1"},
+		{"/quiet", "/cleanup", "CLEANUPTRANSACTION=" + transactionID},
+		{"/cleanup", "/quiet", "cleanuptransaction=" + transactionID},
+		{"/cleanup", "/quiet", "CLEANUPTRANSACTION=" + transactionID, "CLEANUPTRANSACTION=" + transactionID},
 	} {
 		if _, err := parseArgs(args); err == nil {
 			t.Fatalf("parseArgs accepted invalid cleanup invocation: %v", args)

@@ -3880,9 +3880,14 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"cod
         } finally {
             $runKey.Dispose()
         }
-        if ($runValueKind -ne [Microsoft.Win32.RegistryValueKind]::ExpandString -or
+        if ($runValueKind -ne [Microsoft.Win32.RegistryValueKind]::String -or
             [string]$runCommand -cne [string]$cleanupRecord.run_command) {
             throw 'same-boot uninstall Run value differs from the authenticated cleanup record'
+        }
+        $expectedRunCommand = '"' + $cachedSetup + '" /cleanup /quiet CLEANUPTRANSACTION=' +
+            [string]$cleanupRecord.transaction_id
+        if ([string]$runCommand -cne $expectedRunCommand) {
+            throw 'same-boot uninstall Run value is not the exact absolute cached Setup command'
         }
         Invoke-WindowsNativeProcess (Get-StableHookRuntimeExecutable) @(
             'hook', '--connector', 'codex'

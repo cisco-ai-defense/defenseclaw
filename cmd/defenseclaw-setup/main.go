@@ -20,6 +20,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -2493,6 +2494,18 @@ func parseArgs(args []string) (options, error) {
 	}
 	if opts.Action != "cleanup" && opts.CleanupTransaction != "" {
 		return opts, errors.New("CLEANUPTRANSACTION is accepted only with /cleanup")
+	}
+	if opts.Action == "cleanup" {
+		expected := []string{
+			"/cleanup",
+			"/quiet",
+			"CLEANUPTRANSACTION=" + opts.CleanupTransaction,
+		}
+		if !slices.Equal(args, expected) {
+			return opts, errors.New(
+				"deferred cleanup requires exact /cleanup /quiet CLEANUPTRANSACTION=<transaction> arguments",
+			)
+		}
 	}
 	return opts, nil
 }

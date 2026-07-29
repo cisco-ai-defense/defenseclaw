@@ -34,6 +34,7 @@ import (
 const (
 	deferredCleanupRunKeyPath   = `Software\Microsoft\Windows\CurrentVersion\Run`
 	deferredCleanupRunValueName = "DefenseClawDeferredUninstallCleanup"
+	deferredCleanupRunValueType = registry.SZ
 	deferredCleanupFileLimit    = int64(4 << 20)
 )
 
@@ -81,15 +82,26 @@ func deferredCleanupRunCommand(maintenancePath, transactionID string) (string, e
 	if !validSetupTransactionID(transactionID) {
 		return "", errors.New("deferred cleanup startup command requires a valid transaction identity")
 	}
-	localAppData, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
+	expectedPath, err := defaultMaintenancePath()
 	if err != nil {
-		return "", fmt.Errorf("resolve LocalAppData for deferred cleanup: %w", err)
+		return "", fmt.Errorf("resolve canonical deferred cleanup executable: %w", err)
 	}
-	executable := maintenancePath
-	if compact, ok := compactRunPath(maintenancePath, localAppData, `%LOCALAPPDATA%`); ok {
-		executable = compact
+	if !samePath(maintenancePath, expectedPath) {
+		return "", errors.New("deferred cleanup startup executable is not the canonical cached Setup path")
 	}
-	command := quote(executable) + " /cleanup /quiet CLEANUPTRANSACTION=" + transactionID
+	return deferredCleanupRunCommandForPath(expectedPath, transactionID)
+}
+
+func deferredCleanupRunCommandForPath(maintenancePath, transactionID string) (string, error) {
+	if !validSetupTransactionID(transactionID) {
+		return "", errors.New("deferred cleanup startup command requires a valid transaction identity")
+	}
+	if !filepath.IsAbs(maintenancePath) ||
+		filepath.Clean(maintenancePath) != maintenancePath ||
+		!strings.EqualFold(filepath.Base(maintenancePath), setupArtifactName) {
+		return "", errors.New("deferred cleanup startup executable is not a clean absolute cached Setup path")
+	}
+	command := quote(maintenancePath) + " /cleanup /quiet CLEANUPTRANSACTION=" + transactionID
 	if err := validateRunCommand(command); err != nil {
 		return "", fmt.Errorf("configure %s startup registration: %w", deferredCleanupRunValueName, err)
 	}
@@ -113,11 +125,11 @@ func configureDeferredCleanupRunValue(command string) error {
 	if readErr != nil && readErr != registry.ErrNotExist {
 		return readErr
 	}
-	if readErr == nil && (current != command || valueType != registry.EXPAND_SZ) {
+	if readErr == nil && (current != command || valueType != deferredCleanupRunValueType) {
 		return errors.New("refusing to replace an unrelated deferred uninstall cleanup startup registration")
 	}
 	if readErr != nil {
-		if err := key.SetExpandStringValue(deferredCleanupRunValueName, command); err != nil {
+		if err := key.SetStringValue(deferredCleanupRunValueName, command); err != nil {
 			return err
 		}
 	}
@@ -144,7 +156,7 @@ func removeDeferredCleanupRunValue(command string) error {
 	if readErr != nil {
 		return readErr
 	}
-	if current != command || valueType != registry.EXPAND_SZ {
+	if current != command || valueType != deferredCleanupRunValueType {
 		return errors.New("refusing to remove an unrelated deferred uninstall cleanup startup registration")
 	}
 	if err := key.DeleteValue(deferredCleanupRunValueName); err != nil && err != registry.ErrNotExist {
@@ -1848,7 +1860,7 @@ try {
         $expectedSetup=[IO.Path]::GetFullPath([IO.Path]::Combine($expectedCache,'DefenseClawSetup-x64.exe'))
         $expectedAck=[IO.Path]::GetFullPath([IO.Path]::Combine($expectedCache,'uninstall-cleanup-ack.json'))
         $expectedRunName='DefenseClawDeferredUninstallCleanup'
-        $expectedRunCommand='"%LOCALAPPDATA%\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe" /cleanup /quiet CLEANUPTRANSACTION='+$expectedID
+        $expectedRunCommand='"'+$expectedSetup+'" /cleanup /quiet CLEANUPTRANSACTION='+$expectedID
         $stateRoot=[IO.Path]::GetFullPath([IO.Path]::Combine($local,'DefenseClaw','InstallerState'))
         $runtimeRoot=[IO.Path]::GetFullPath([IO.Path]::Combine($local,'DefenseClaw','HookRuntime'))
         if (-not [string]::Equals([IO.Path]::GetFullPath([string]$record.maintenance_path),$expectedSetup,[StringComparison]::OrdinalIgnoreCase) -or
@@ -1912,7 +1924,7 @@ try {
                 }
                 if ($null -ne $current) {
                     if ($run.GetValueKind([string]$record.run_value_name) -ne
-                        [Microsoft.Win32.RegistryValueKind]::ExpandString) {
+                        [Microsoft.Win32.RegistryValueKind]::String) {
                         exit 0
                     }
                     $run.DeleteValue([string]$record.run_value_name,$false)

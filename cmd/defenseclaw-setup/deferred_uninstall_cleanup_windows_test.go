@@ -9,20 +9,26 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
 const (
 	deferredCleanupBootOne = "00112233-4455-6677-8899-aabbccddeeff"
 	deferredCleanupBootTwo = "ffeeddcc-bbaa-9988-7766-554433221100"
+
+	deferredCleanupRunHelperAckEnv         = "DEFENSECLAW_DEFERRED_RUN_HELPER_ACK"
+	deferredCleanupRunHelperTransactionEnv = "DEFENSECLAW_DEFERRED_RUN_HELPER_TRANSACTION"
 )
 
 type deferredCleanupFixture struct {
@@ -63,6 +69,170 @@ func TestWindowsBootIdentifierReturnsCanonicalValue(t *testing.T) {
 	if !validBootIdentifier(got) {
 		t.Fatalf("boot identifier = %q", got)
 	}
+}
+
+func TestDeferredCleanupRunCommandLaunchesExactAbsoluteUnicodePath(t *testing.T) {
+	if deferredCleanupRunValueType != registry.SZ {
+		t.Fatalf(
+			"deferred cleanup Run value type = %d, want REG_SZ (%d)",
+			deferredCleanupRunValueType,
+			registry.SZ,
+		)
+	}
+	cacheRoot := filepath.Join(t.TempDir(), "Local App Data \u03a9", "DefenseClaw", "InstallerCache")
+	if err := os.MkdirAll(cacheRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.ProtectDirectory(cacheRoot); err != nil {
+		t.Fatal(err)
+	}
+	maintenancePath := filepath.Join(cacheRoot, setupArtifactName)
+	if err := copyFile(os.Args[0], maintenancePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.ProtectFile(maintenancePath); err != nil {
+		t.Fatal(err)
+	}
+	transactionID := "0123456789abcdef0123456789abcdef"
+	command, err := deferredCleanupRunCommandForPath(maintenancePath, transactionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := quote(maintenancePath) +
+		" /cleanup /quiet CLEANUPTRANSACTION=" + transactionID
+	if command != expected {
+		t.Fatalf("deferred cleanup Run command = %q, want exact absolute %q", command, expected)
+	}
+	if units := runCommandUTF16Units(command); units > maxRunCommandUTF16Units {
+		t.Fatalf("deferred cleanup Run command length = %d, want <= %d", units, maxRunCommandUTF16Units)
+	}
+
+	acknowledgement := filepath.Join(t.TempDir(), "cleanup acknowledgement.txt")
+	t.Setenv(deferredCleanupRunHelperAckEnv, acknowledgement)
+	t.Setenv(deferredCleanupRunHelperTransactionEnv, transactionID)
+	t.Setenv("DEFENSECLAW_DEFERRED_RUN_ROOT", cacheRoot)
+	legacyCommand := quote(`%DEFENSECLAW_DEFERRED_RUN_ROOT%\`+setupArtifactName) +
+		" /cleanup /quiet CLEANUPTRANSACTION=" + transactionID
+	if exitCode, err := launchRawWindowsRunCommandForTest(legacyCommand); err == nil ||
+		(!errors.Is(err, windows.ERROR_FILE_NOT_FOUND) &&
+			!errors.Is(err, windows.ERROR_PATH_NOT_FOUND)) {
+		t.Fatalf("unexpanded legacy Run command = exit %d, error %v", exitCode, err)
+	}
+	if _, err := os.Stat(acknowledgement); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpanded legacy Run command created acknowledgement: %v", err)
+	}
+
+	exitCode, err := launchRawWindowsRunCommandForTest(command)
+	if err != nil {
+		t.Fatalf("launch exact deferred cleanup Run command: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("deferred cleanup Run command exit code = %d", exitCode)
+	}
+	body, err := os.ReadFile(acknowledgement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedAcknowledgement := strings.Join(
+		[]string{
+			"/cleanup",
+			"/quiet",
+			"CLEANUPTRANSACTION=" + transactionID,
+			"",
+		},
+		"\n",
+	)
+	if string(body) != expectedAcknowledgement {
+		t.Fatalf("deferred cleanup acknowledgement = %q, want %q", body, expectedAcknowledgement)
+	}
+}
+
+func TestDeferredCleanupRunCommandRejectsInvalidPathIdentityAndLength(t *testing.T) {
+	transactionID := "0123456789abcdef0123456789abcdef"
+	for _, test := range []struct {
+		name string
+		path string
+		id   string
+	}{
+		{name: "relative path", path: setupArtifactName, id: transactionID},
+		{
+			name: "unclean path",
+			path: `C:\cache\..\cache\` + setupArtifactName,
+			id:   transactionID,
+		},
+		{name: "wrong executable", path: `C:\cache\foreign.exe`, id: transactionID},
+		{
+			name: "command too long",
+			path: filepath.Join(`C:\`, strings.Repeat("long-segment-", 24), setupArtifactName),
+			id:   transactionID,
+		},
+		{name: "missing transaction", path: `C:\cache\` + setupArtifactName},
+		{name: "uppercase transaction", path: `C:\cache\` + setupArtifactName, id: strings.Repeat("A", 32)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if command, err := deferredCleanupRunCommandForPath(test.path, test.id); err == nil || command != "" {
+				t.Fatalf("unsafe deferred cleanup command = %q, error %v", command, err)
+			}
+		})
+	}
+}
+
+func TestDeferredCleanupRunCommandPinsCanonicalKnownFolderPath(t *testing.T) {
+	maintenancePath, err := defaultMaintenancePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transactionID := "0123456789abcdef0123456789abcdef"
+	command, err := deferredCleanupRunCommand(maintenancePath, transactionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := quote(maintenancePath) +
+		" /cleanup /quiet CLEANUPTRANSACTION=" + transactionID
+	if command != expected {
+		t.Fatalf("canonical deferred cleanup command = %q, want %q", command, expected)
+	}
+	shadow := filepath.Join(t.TempDir(), setupArtifactName)
+	if command, err := deferredCleanupRunCommand(shadow, transactionID); err == nil || command != "" {
+		t.Fatalf("shadow deferred cleanup command = %q, error %v", command, err)
+	}
+}
+
+func launchRawWindowsRunCommandForTest(command string) (uint32, error) {
+	commandLine, err := windows.UTF16FromString(command)
+	if err != nil {
+		return 0, err
+	}
+	startup := windows.StartupInfo{Cb: uint32(unsafe.Sizeof(windows.StartupInfo{}))}
+	var process windows.ProcessInformation
+	if err := windows.CreateProcess(
+		nil,
+		&commandLine[0],
+		nil,
+		nil,
+		false,
+		windows.CREATE_NO_WINDOW,
+		nil,
+		nil,
+		&startup,
+		&process,
+	); err != nil {
+		return 0, err
+	}
+	defer windows.CloseHandle(process.Thread)
+	defer windows.CloseHandle(process.Process)
+	result, err := windows.WaitForSingleObject(process.Process, uint32((30*time.Second)/time.Millisecond))
+	if err != nil {
+		return 0, err
+	}
+	if result != windows.WAIT_OBJECT_0 {
+		return 0, fmt.Errorf("deferred cleanup helper wait result = %#x", result)
+	}
+	var exitCode uint32
+	if err := windows.GetExitCodeProcess(process.Process, &exitCode); err != nil {
+		return 0, err
+	}
+	return exitCode, nil
 }
 
 func TestAuthenticatedUninstallMaintenanceDigestUsesPreUninstallSnapshot(t *testing.T) {

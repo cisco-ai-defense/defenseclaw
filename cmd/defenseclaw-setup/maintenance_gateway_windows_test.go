@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -22,6 +23,29 @@ import (
 const maintenanceGatewayTestVersion = "9.9.9"
 
 func TestMain(m *testing.M) {
+	if acknowledgement := os.Getenv(deferredCleanupRunHelperAckEnv); acknowledgement != "" {
+		transactionID := os.Getenv(deferredCleanupRunHelperTransactionEnv)
+		expected := []string{
+			"/cleanup",
+			"/quiet",
+			"CLEANUPTRANSACTION=" + transactionID,
+		}
+		if !validSetupTransactionID(transactionID) ||
+			!slices.Equal(os.Args[1:], expected) {
+			os.Exit(41)
+		}
+		if _, err := parseArgs(os.Args[1:]); err != nil {
+			os.Exit(42)
+		}
+		if err := os.WriteFile(
+			acknowledgement,
+			[]byte(strings.Join(os.Args[1:], "\n")+"\n"),
+			0o600,
+		); err != nil {
+			os.Exit(43)
+		}
+		os.Exit(0)
+	}
 	if os.Getenv("DEFENSECLAW_SETUP_MAINTENANCE_TEST_HELPER") == "1" &&
 		len(os.Args) == 2 && os.Args[1] == "--version-json" {
 		fmt.Printf(`{"schema_version":1,"name":"defenseclaw-gateway","version":%q}`, maintenanceGatewayTestVersion)
