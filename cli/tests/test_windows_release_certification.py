@@ -24,11 +24,16 @@ HARNESS = (ROOT / "scripts" / "windows-native-ci.ps1").read_text(encoding="utf-8
 PACKAGED_V8_VALIDATOR = (ROOT / "scripts" / "validate_packaged_v8_resources.py").read_text(encoding="utf-8")
 RELEASE_PATH = ROOT / ".github" / "workflows" / "release.yaml"
 SMOKE_PATH = ROOT / ".github" / "workflows" / "release-candidate-smoke.yml"
+WINDOWS_NATIVE_PATH = ROOT / ".github" / "workflows" / "windows-native.yml"
 FRESH_INSTALL = (ROOT / "scripts" / "test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")
 DISPOSABLE_LAUNCHER = (ROOT / "scripts" / "invoke-windows-setup-standard-user-ci.ps1").read_text(encoding="utf-8")
 STANDARD_USER_PROCESS_LAUNCHER = (ROOT / "scripts" / "windows-disposable-standard-user-launcher.cs").read_text(
     encoding="utf-8"
 )
+OWNER_RIGHTS_FULL_CONTROL_ACE = "(A;OICI;FA;;;OW)"
+SYSTEM_FULL_CONTROL_ACE = "(A;OICI;FA;;;SY)"
+CREATOR_OWNER_INHERIT_ONLY_FULL_CONTROL_ACE = "(A;OICIIO;FA;;;CO)"
+BUILTIN_USERS_FULL_CONTROL_ACE = "(A;OICI;FA;;;S-1-5-32-545)"
 
 
 def _workflow(path: Path) -> dict[str, object]:
@@ -53,22 +58,68 @@ def _fresh_install_function(name: str) -> str:
     return match.group(0)
 
 
-def _set_private_custody_acl(path: Path, *extra_rules: str) -> None:
-    subprocess.run(
-        ["icacls.exe", str(path), "/inheritance:r"],
-        check=True,
+def _run_powershell(
+    command: str,
+    environment_overrides: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    powershell = shutil.which("powershell.exe") or shutil.which("pwsh")
+    assert powershell is not None
+    environment = {
+        **os.environ,
+        "POWERSHELL_TELEMETRY_OPTOUT": "1",
+        **environment_overrides,
+    }
+    if Path(powershell).name.casefold() == "powershell.exe":
+        environment["PSModulePath"] = str(Path(powershell).parent / "Modules")
+    return subprocess.run(
+        [
+            powershell,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            command,
+        ],
+        check=False,
         capture_output=True,
         text=True,
+        timeout=30,
+        env=environment,
     )
+
+
+def _set_private_custody_acl(path: Path, *extra_rules: str) -> None:
+    _replace_private_custody_acl(
+        path,
+        OWNER_RIGHTS_FULL_CONTROL_ACE,
+        SYSTEM_FULL_CONTROL_ACE,
+        *extra_rules,
+    )
+
+
+def _replace_private_custody_acl(path: Path, *rules: str) -> None:
+    command = """
+$ErrorActionPreference = 'Stop'
+$currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$dacl = [Environment]::GetEnvironmentVariable('DC_TEST_DACL_SDDL')
+$descriptor = [Security.AccessControl.DirectorySecurity]::new()
+$descriptor.SetSecurityDescriptorSddlForm(('O:{0}{1}' -f $currentSid, $dacl))
+Set-Acl -LiteralPath ([Environment]::GetEnvironmentVariable('DC_TEST_CUSTODY_PATH')) `
+    -AclObject $descriptor
+"""
+    completed = _run_powershell(
+        command,
+        {
+            "DC_TEST_CUSTODY_PATH": str(path),
+            "DC_TEST_DACL_SDDL": "D:P" + "".join(rules),
+        },
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def _restore_inherited_test_acl(path: Path) -> None:
     subprocess.run(
-        [
-            "icacls.exe",
-            str(path),
-            "/grant:r",
-            "*S-1-3-4:(OI)(CI)F",
-            "*S-1-5-18:(OI)(CI)F",
-            *extra_rules,
-        ],
+        ["icacls.exe", str(path), "/inheritance:e"],
         check=True,
         capture_output=True,
         text=True,
@@ -76,15 +127,6 @@ def _set_private_custody_acl(path: Path, *extra_rules: str) -> None:
 
 
 def _run_private_custody_assertion(path: Path) -> subprocess.CompletedProcess[str]:
-    powershell = shutil.which("powershell.exe") or shutil.which("pwsh")
-    assert powershell is not None
-    environment = {
-        **os.environ,
-        "POWERSHELL_TELEMETRY_OPTOUT": "1",
-        "DC_TEST_CUSTODY_PATH": str(path),
-    }
-    if Path(powershell).name.casefold() == "powershell.exe":
-        environment["PSModulePath"] = str(Path(powershell).parent / "Modules")
     functions = "\n\n".join(
         _fresh_install_function(name)
         for name in (
@@ -104,20 +146,43 @@ def _run_private_custody_assertion(path: Path) -> subprocess.CompletedProcess[st
         "    exit 1\n"
         "}\n"
     )
-    return subprocess.run(
-        [
-            powershell,
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            command,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        env=environment,
+    return _run_powershell(command, {"DC_TEST_CUSTODY_PATH": str(path)})
+
+
+def _run_optional_json_property(
+    json_value: str,
+    property_name: str,
+) -> subprocess.CompletedProcess[str]:
+    functions = "\n\n".join(
+        _fresh_install_function(name)
+        for name in (
+            "Get-OptionalJsonPropertyValue",
+            "Get-OptionalJsonStringValue",
+        )
+    )
+    command = (
+        "$ErrorActionPreference = 'Stop'\n"
+        "Set-StrictMode -Version Latest\n"
+        f"{functions}\n"
+        "$record = [Environment]::GetEnvironmentVariable('DC_TEST_JSON') | "
+        "ConvertFrom-Json\n"
+        "$propertyName = [Environment]::GetEnvironmentVariable('DC_TEST_PROPERTY')\n"
+        "if ($propertyName -ceq 'previous_connectors') {\n"
+        "    $values = @(Get-OptionalJsonPropertyValue "
+        "-InputObject $record -PropertyName $propertyName)\n"
+        "} else {\n"
+        "    $values = @(Get-OptionalJsonStringValue "
+        "-InputObject $record -PropertyName $propertyName)\n"
+        "}\n"
+        "[Console]::Out.WriteLine('count={0}' -f $values.Count)\n"
+        "[Console]::Out.WriteLine('value=<{0}>' -f ($values -join ','))\n"
+    )
+    return _run_powershell(
+        command,
+        {
+            "DC_TEST_JSON": json_value,
+            "DC_TEST_PROPERTY": property_name,
+        },
     )
 
 
@@ -128,8 +193,7 @@ def _step(job: dict[str, object], name: str) -> dict[str, object]:
 
 
 @pytest.mark.skipif(
-    os.name != "nt"
-    or not (shutil.which("pwsh") or shutil.which("powershell.exe")),
+    os.name != "nt" or not (shutil.which("pwsh") or shutil.which("powershell.exe")),
     reason="validates native Windows release-custody ACLs",
 )
 @pytest.mark.allow_subprocess
@@ -138,7 +202,7 @@ def _step(job: dict[str, object], name: str) -> dict[str, object]:
     [
         ((), 0, ""),
         (
-            ("*S-1-5-32-545:(OI)(CI)M",),
+            (BUILTIN_USERS_FULL_CONTROL_ACE,),
             1,
             "unexpected SID (S-1-5-32-545)",
         ),
@@ -152,13 +216,97 @@ def test_deferred_uninstall_custody_accepts_only_owner_rights_and_system(
 ) -> None:
     custody = tmp_path / "custody"
     custody.mkdir()
-    _set_private_custody_acl(custody, *extra_rules)
+    subprocess.run(
+        [
+            "icacls.exe",
+            str(custody),
+            "/grant:r",
+            "*S-1-5-32-544:(OI)(CI)F",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
-    completed = _run_private_custody_assertion(custody)
-    output = completed.stdout + completed.stderr
+    try:
+        _set_private_custody_acl(custody, *extra_rules)
+        completed = _run_private_custody_assertion(custody)
+        output = completed.stdout + completed.stderr
 
-    assert completed.returncode == expected_returncode, output
-    assert expected_error in output
+        assert completed.returncode == expected_returncode, output
+        assert expected_error in output
+    finally:
+        _restore_inherited_test_acl(custody)
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or not (shutil.which("pwsh") or shutil.which("powershell.exe")),
+    reason="validates native Windows release-custody ACLs",
+)
+@pytest.mark.allow_subprocess
+def test_deferred_uninstall_custody_rejects_inherit_only_creator_owner(
+    tmp_path: Path,
+) -> None:
+    custody = tmp_path / "custody"
+    custody.mkdir()
+    _replace_private_custody_acl(
+        custody,
+        CREATOR_OWNER_INHERIT_ONLY_FULL_CONTROL_ACE,
+        SYSTEM_FULL_CONTROL_ACE,
+    )
+
+    try:
+        completed = _run_private_custody_assertion(custody)
+        output = completed.stdout + completed.stderr
+
+        assert completed.returncode == 1, output
+        assert "lacks required owner and SYSTEM access" in output
+    finally:
+        _restore_inherited_test_acl(custody)
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or not (shutil.which("pwsh") or shutil.which("powershell.exe")),
+    reason="validates PowerShell JSON handling under StrictMode",
+)
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("json_value", "property_name", "expected"),
+    [
+        ('{"status":"pending-reboot"}', "cleanup_boot_identifier", "count=1\nvalue=<>"),
+        ('{"cleanup_boot_identifier":""}', "cleanup_boot_identifier", "count=1\nvalue=<>"),
+        (
+            '{"cleanup_boot_identifier":"next-boot"}',
+            "cleanup_boot_identifier",
+            "count=1\nvalue=<next-boot>",
+        ),
+        ('{"action":"uninstall"}', "maintenance_sha256", "count=1\nvalue=<>"),
+        ('{"target_connector":"none"}', "previous_connectors", "count=0\nvalue=<>"),
+        (
+            '{"previous_connectors":["codex","claudecode"]}',
+            "previous_connectors",
+            "count=2\nvalue=<codex,claudecode>",
+        ),
+        ('{"status":"disabled"}', "data_root", "count=1\nvalue=<>"),
+        ('{"status":"disabled"}', "gateway_path", "count=1\nvalue=<>"),
+        ('{"status":"disabled"}', "gateway_sha256", "count=1\nvalue=<>"),
+        ('{"launcher_signed":false}', "signer_thumbprint_sha256", "count=1\nvalue=<>"),
+        (
+            '{"signer_thumbprint_sha256":"aaaaaaaa"}',
+            "signer_thumbprint_sha256",
+            "count=1\nvalue=<aaaaaaaa>",
+        ),
+    ],
+)
+def test_optional_release_state_property_is_strict_mode_safe(
+    json_value: str,
+    property_name: str,
+    expected: str,
+) -> None:
+    completed = _run_optional_json_property(json_value, property_name)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.strip().replace("\r\n", "\n") == expected
 
 
 def test_release_accepts_signed_or_explicitly_unverified_setup_and_exact_four_sidecars() -> None:
@@ -315,14 +463,32 @@ def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> 
         assert marker in FRESH_INSTALL
     for marker in DEFERRED_UNINSTALL_FORBIDDEN_MARKERS:
         assert marker not in FRESH_INSTALL
+    for optional_property in (
+        "cleanup_boot_identifier",
+        "maintenance_sha256",
+        "previous_connectors",
+        "data_root",
+        "gateway_path",
+        "gateway_sha256",
+        "signer_thumbprint_sha256",
+    ):
+        assert f'-PropertyName "{optional_property}"' in FRESH_INSTALL
+    for unsafe_access in (
+        "$cleanupRecord.cleanup_boot_identifier",
+        "$cleanupRecord.signer_thumbprint_sha256",
+        "$transaction.maintenance_sha256",
+        "$transaction.previous_connectors",
+        "$hookState.data_root",
+        "$hookState.gateway_path",
+        "$hookState.gateway_sha256",
+    ):
+        assert unsafe_access not in FRESH_INSTALL
     assert 'GetEnvironmentVariable("Path", "User")' in FRESH_INSTALL
     assert "uninstall did not restore the original user PATH exactly" in FRESH_INSTALL
     assert FRESH_INSTALL.rindex("$installed = $false") > FRESH_INSTALL.index(
         "$uninstall.ExitCode -ne $expectedUninstallExitCode"
     )
-    assert FRESH_INSTALL.rindex("$installed = $false") < FRESH_INSTALL.index(
-        "Assert-ExactDeferredUninstallState `"
-    )
+    assert FRESH_INSTALL.rindex("$installed = $false") < FRESH_INSTALL.index("Assert-ExactDeferredUninstallState `")
     canonical_version = "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
     assert canonical_version in FRESH_INSTALL
     assert canonical_version in DISPOSABLE_LAUNCHER
@@ -337,6 +503,55 @@ def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> 
         "InjectPolicyCleanupFailure",
     ):
         assert obsolete not in FRESH_INSTALL
+
+
+def test_windows_release_validator_can_replay_an_exact_failed_candidate() -> None:
+    workflow = _workflow(WINDOWS_NATIVE_PATH)
+    dispatch_inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    assert set(dispatch_inputs) == {
+        "release_candidate_replay_run_id",
+        "release_candidate_replay_artifact",
+        "release_candidate_replay_version",
+        "release_candidate_replay_commit",
+    }
+    assert all(value["required"] == "false" for value in dispatch_inputs.values())
+    assert all(value["type"] == "string" for value in dispatch_inputs.values())
+
+    replay = workflow["jobs"]["release-validator-replay"]
+    rendered = str(replay)
+    assert replay["runs-on"] == "windows-latest"
+    assert int(replay["timeout-minutes"]) >= 45
+    assert replay["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+    }
+    assert "github.event_name == 'workflow_dispatch'" in replay["if"]
+    assert "inputs.release_candidate_replay_run_id != ''" in replay["if"]
+
+    identity = _step(replay, "Validate exact replay identity")["run"]
+    assert "^[1-9][0-9]*$" in identity
+    assert "^release-candidate-${escapedRunID}-[1-9][0-9]*$" in identity
+    assert "^[0-9a-f]{40}$" in identity
+
+    download = _step(replay, "Download exact sealed release candidate")
+    assert download["with"]["repository"] == "cisco-ai-defense/defenseclaw"
+    assert download["with"]["run-id"] == ("${{ inputs.release_candidate_replay_run_id }}")
+    assert download["with"]["github-token"] == "${{ github.token }}"
+
+    authentication = _step(replay, "Restore and authenticate exact release candidate")["run"]
+    assert "release_candidate.py unpack-transport" in authentication
+    assert "release_candidate.py verify" in authentication
+    assert "verify-sigstore-blob.py" in authentication
+    assert "release.yaml@refs/heads/main" in authentication
+
+    exercise = _step(replay, "Replay current validator against exact failed candidate")["run"]
+    assert "test-fresh-install-release-windows.ps1" in exercise
+    assert "-TargetVersion $env:REPLAY_VERSION" in exercise
+    assert "-UninstallContract deferred" in exercise
+    assert "-StateRoot $replayState" in exercise
+    assert "-DiagnosticsRoot $env:DC_DIAGNOSTICS" in exercise
+    assert "release-candidate-30488158730-1" not in rendered
+    assert "10a998fbff1b4d77be8629b3099d8b868219dc4c" not in rendered
 
 
 def test_disposable_setup_failure_preserves_bounded_native_log_before_profile_cleanup() -> None:
