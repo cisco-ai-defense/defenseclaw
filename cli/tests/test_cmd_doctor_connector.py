@@ -846,6 +846,19 @@ class TestCheckHookHealth(unittest.TestCase):
         self.assertEqual(r.checks[-1]["status"], "fail")
         self.assertIn("not found", r.checks[-1]["detail"])
 
+    @patch("defenseclaw.commands.cmd_doctor._check_cursor_configured_runtime")
+    def test_passive_cursor_health_disables_runtime_probe(self, configured_runtime) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hook = os.path.join(tmp, "hooks.json")
+            with open(hook, "w", encoding="utf-8") as fh:
+                fh.write('{"hooks": [], "owner": "defenseclaw"}\n')
+            r = _DoctorResult(passive=True)
+
+            _check_hook_health(self._cfg(tmp, "cursor", [hook]), "cursor", r)
+
+        configured_runtime.assert_called_once()
+        self.assertIs(configured_runtime.call_args.kwargs["probe_runtime"], False)
+
     def test_opencode_flat_js_plugin_passes(self) -> None:
         """opencode's hook is a flat ``.js`` file (not JSON) keyed on the
         bare ``defenseclaw`` marker — the format-agnostic check must accept it."""

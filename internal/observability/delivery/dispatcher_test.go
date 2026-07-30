@@ -278,6 +278,14 @@ func TestDispatcherRejectsInvalidCapacityBeforeStartingWorker(t *testing.T) {
 			config.Retry.InitialBackoff = 2 * time.Second
 			config.Retry.MaxBackoff = time.Second
 		},
+		func(config *delivery.Config) {
+			config.Circuit.TransientFailureThreshold = 1
+			config.Circuit.OpenDuration = 0
+		},
+		func(config *delivery.Config) {
+			config.Circuit.TransientFailureThreshold = 33
+			config.Circuit.OpenDuration = time.Second
+		},
 		func(config *delivery.Config) { config.ObserverInterval = -1 },
 	}
 	for index, mutate := range mutations {

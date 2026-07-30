@@ -31,6 +31,7 @@ from defenseclaw.tui.panels.overview import (
     ConnectorHealth,
     DoctorCache,
     DoctorCheck,
+    DoctorRepairSummary,
     HealthSnapshot,
     OverviewConfig,
     OverviewPanelModel,
@@ -130,10 +131,6 @@ def test_omnigent_zero_traffic_notice_uses_policy_wording() -> None:
     assert "hook setup" not in notice
 
 
-
-
-
-
 def test_overview_v8_rows_merge_policy_and_exact_live_health_without_inference() -> None:
     model = _model()
     model.set_observability_status(
@@ -228,9 +225,7 @@ def test_overview_v8_rows_merge_policy_and_exact_live_health_without_inference()
     assert collector.state == "degraded"
     assert collector.health_reason == "queue_full"
     assert collector.redaction == "unredacted (none)"
-    assert collector.limits == (
-        "queue=2048 items/64.0 MiB; batch=512 items/8.0 MiB; delay=5000ms"
-    )
+    assert collector.limits == ("queue=2048 items/64.0 MiB; batch=512 items/8.0 MiB; delay=5000ms")
     assert collector.queue == "4/16 items, 2.0 KiB/8.0 KiB, 2 dropped"
     assert collector.activity == ("ok 2026-07-06T10:00:00Z; error 2026-07-06T10:01:00Z (retryable_delivery)")
     assert collector.endpoint == "https://collector.example.test/v1/traces"
@@ -243,8 +238,6 @@ def test_overview_v8_rows_merge_policy_and_exact_live_health_without_inference()
     assert storage.judge_capture == "disabled"
     assert storage.retention_health == "degraded"
     assert storage.retention_failure == "run_failed"
-
-
 
 
 def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:
@@ -401,6 +394,16 @@ def test_doctor_cache_missing_required_credentials_and_keys_status() -> None:
     assert status.label == "4 missing: KEY_A, KEY_B (+2 more)"
     assert keys_overflow_suffix(5, 2) == " (+3 more)"
 
+    model.set_doctor_cache(
+        DoctorCache(
+            warned=1,
+            checks=(DoctorCheck("warn", "Doctor cache", "cache unavailable"),),
+            outcome="warning",
+            cache_valid=False,
+        )
+    )
+    assert model.keys_status().available is False
+
 
 def test_doctor_box_all_green_failures_stale_and_live_recovery() -> None:
     now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
@@ -452,6 +455,106 @@ def test_doctor_box_all_green_failures_stale_and_live_recovery() -> None:
     assert all(check.badge == "STALE" for check in recovered.checks)
     assert not any("Doctor found 2 failure(s)" in notice.message for notice in model.build_notices(now=now))
     assert any("/health disagrees" in notice.message for notice in model.build_notices(now=now))
+
+
+def test_future_dated_doctor_cache_fails_closed_after_clock_skew_tolerance() -> None:
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+    model = _model()
+    model.set_doctor_cache(
+        DoctorCache(
+            captured_at=now + timedelta(minutes=6),
+            passed=5,
+            schema_version=2,
+            outcome="healthy",
+        )
+    )
+
+    box = model.doctor_box(now=now)
+
+    assert box.stale is True
+    assert box.run_outcome == "warning"
+    assert box.all_green is False
+    notices = model.build_notices(now=now)
+    assert any("Doctor cache is stale" in notice.message for notice in notices)
+    assert any("last Doctor run needs operator attention" in notice.message for notice in notices)
+
+
+def test_doctor_box_keeps_repair_failures_separate_and_never_green() -> None:
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+    model = _model()
+    model.set_doctor_cache(
+        DoctorCache(
+            captured_at=now,
+            passed=5,
+            schema_version=2,
+            mode="repair",
+            outcome="failed",
+            exit_code=1,
+            repair_summary=DoctorRepairSummary(applied=2, failed=1, blocked=1),
+            repair_states=("applied", "applied", "failed", "blocked"),
+        )
+    )
+
+    box = model.doctor_box(now=now)
+    assert box.summary_parts == ("5 pass",)
+    assert box.repair_summary_parts == ("2 applied", "1 failed", "1 blocked")
+    assert box.run_outcome == "failed"
+    assert box.all_green is False
+    notices = model.build_notices(now=now)
+    assert any(notice.level == "error" and "1 failed, 1 blocked" in notice.message for notice in notices)
+
+
+def test_doctor_box_fails_closed_on_unexplained_schema_v2_outcome() -> None:
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+    model = _model()
+    model.set_doctor_cache(
+        DoctorCache(
+            captured_at=now,
+            passed=5,
+            schema_version=2,
+            outcome="failed",
+        )
+    )
+
+    box = model.doctor_box(now=now)
+    assert box.summary_parts == ("5 pass",)
+    assert box.repair_summary_parts == ()
+    assert box.run_outcome == "failed"
+    assert box.all_green is False
+    assert any(
+        notice.level == "error" and "last Doctor run ended with a failed outcome" in notice.message
+        for notice in model.build_notices(now=now)
+    )
+
+
+def test_doctor_cache_fails_closed_on_understated_or_unknown_detail() -> None:
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+
+    understated = DoctorCache(
+        captured_at=now,
+        failed=1,
+        schema_version=2,
+        outcome="healthy",
+    )
+    assert understated.outcome_state() == "failed"
+
+    unknown_repair = DoctorCache(
+        captured_at=now,
+        passed=1,
+        schema_version=2,
+        outcome="healthy",
+        repair_states=("future_success_state",),
+    )
+    assert unknown_repair.outcome_state() == "warning"
+
+    invalid_cache = DoctorCache(
+        captured_at=now,
+        passed=1,
+        schema_version=2,
+        outcome="healthy",
+        cache_valid=False,
+    )
+    assert invalid_cache.outcome_state() == "warning"
 
 
 def test_live_health_contradicts_known_labels() -> None:

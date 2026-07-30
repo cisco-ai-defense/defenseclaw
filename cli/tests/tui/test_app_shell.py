@@ -58,6 +58,8 @@ from defenseclaw.tui.panels.logs import FILTER_HOOKS, LogsPanelModel
 from defenseclaw.tui.panels.mcps import MCPRow, MCPsPanelModel
 from defenseclaw.tui.panels.overview import (
     ConnectorHealth,
+    DoctorCache,
+    DoctorRepairSummary,
     EnforcementCounts,
     HealthSnapshot,
     OverviewConfig,
@@ -2101,6 +2103,362 @@ async def test_periodic_refresh_reloads_logs_and_doctor_cache(tmp_path) -> None:
         assert table.row_count == 2
         assert app.overview_model.doctor is not None
         assert app.overview_model.doctor.failed == 1
+
+
+def test_load_doctor_cache_schema_v2_preserves_health_and_repairs(tmp_path) -> None:
+    (tmp_path / "doctor_cache.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "captured_at": "2026-05-21T02:31:22Z",
+                "mode": "repair",
+                "outcome": "failed",
+                "exit_code": 1,
+                "passed": 99,
+                "failed": 99,
+                "summary": {
+                    "passed": 7,
+                    "failed": 0,
+                    "warned": 0,
+                    "skipped": 1,
+                },
+                "checks": [{"status": "pass", "label": "Config", "detail": "valid"}],
+                "repair_summary": {
+                    "planned": 0,
+                    "applied": 1,
+                    "failed": 0,
+                    "blocked": 1,
+                    "manual": 0,
+                    "noop": 0,
+                    "declined": 0,
+                    "requires_confirmation": 0,
+                },
+                # The detail record independently prevents a false green even
+                # if a stale or partially written summary understates failures.
+                "repairs": [
+                    {"state": "applied", "label": "protect dotenv"},
+                    {"state": "failed", "label": "restart gateway"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = DefenseClawTUI(data_dir=tmp_path)
+
+    app._load_doctor_cache()  # noqa: SLF001 - exercise the disk consumer.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert (cache.passed, cache.failed, cache.warned, cache.skipped) == (7, 0, 0, 1)
+    assert cache.repair_count("applied") == 1
+    assert cache.repair_count("failed") == 1
+    assert cache.repair_count("blocked") == 1
+    box = app.overview_model.doctor_box(now=datetime(2026, 5, 21, 2, 31, 22, tzinfo=timezone.utc))
+    assert box.summary_parts == ("7 pass", "1 skip")
+    assert box.repair_summary_parts == ("1 applied", "1 failed", "1 blocked")
+    assert box.run_outcome == "failed"
+    assert box.all_green is False
+
+
+def test_overview_renders_schema_v2_outcome_and_repairs_in_both_layouts() -> None:
+    from rich.console import Console
+
+    overview = OverviewPanelModel(OverviewConfig(), version="test")
+    overview.set_doctor_cache(
+        DoctorCache(
+            captured_at=datetime.now(timezone.utc),
+            passed=7,
+            schema_version=2,
+            mode="repair",
+            outcome="failed",
+            exit_code=1,
+            repair_summary=DoctorRepairSummary(applied=1, failed=1, blocked=1),
+            repair_states=("applied", "failed", "blocked"),
+        )
+    )
+    app = DefenseClawTUI(overview_model=overview)
+
+    compact = app._overview_body_text(overview.service_cards())  # noqa: SLF001
+    console = Console(file=io.StringIO(), width=220, height=100, record=True)
+    console.print(app._overview_renderable())  # noqa: SLF001
+    wide = console.export_text()
+
+    assert "outcome=failed" in compact
+    assert "Repairs  1 applied  1 failed  1 blocked" in compact
+    assert "Outcome  FAILED" in wide
+    assert "Repairs  1 applied  1 failed  1 blocked" in wide
+
+
+def test_load_doctor_cache_rejects_incomplete_schema_v2_as_healthy(tmp_path) -> None:
+    (tmp_path / "doctor_cache.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "captured_at": "2026-05-21T02:31:22Z",
+                "mode": "repair",
+                "outcome": "healthy",
+                # Missing exit_code and repair_summary: this may be truncated
+                # or written by an incompatible producer, so it cannot restore
+                # a green state even though its aggregate claims success.
+                "summary": {"passed": 1, "failed": 0, "warned": 0, "skipped": 0},
+                "checks": [{"status": "pass", "label": "Config", "detail": "valid"}],
+                "repairs": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = DefenseClawTUI(data_dir=tmp_path)
+
+    app._load_doctor_cache()  # noqa: SLF001 - exercise the disk consumer.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert cache.cache_valid is False
+    assert cache.outcome_state() == "warning"
+    box = app.overview_model.doctor_box(now=datetime(2026, 5, 21, 2, 31, 22, tzinfo=timezone.utc))
+    assert box.run_outcome == "warning"
+    assert box.all_green is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {
+            "captured_at": "2026-05-21T02:31:22Z",
+            "passed": "1",
+            "failed": 0,
+            "warned": 0,
+            "skipped": 0,
+            "checks": [],
+        },
+        {
+            "schema_version": 2,
+            "mode": "check",
+            "outcome": "healthy",
+            "exit_code": 0,
+            "summary": {"passed": 1, "failed": 0, "warned": 0, "skipped": 0},
+            "checks": [],
+            "repair_summary": {
+                "planned": 0,
+                "applied": 0,
+                "failed": 0,
+                "blocked": 0,
+                "manual": 0,
+                "noop": 0,
+                "declined": 0,
+                "requires_confirmation": 0,
+            },
+            "repairs": [],
+        },
+    ),
+)
+def test_load_doctor_cache_rejects_malformed_or_undated_green_payload(
+    tmp_path, payload
+) -> None:
+    (tmp_path / "doctor_cache.json").write_text(json.dumps(payload), encoding="utf-8")
+    app = DefenseClawTUI(data_dir=tmp_path)
+
+    app._load_doctor_cache()  # noqa: SLF001 - exercise the disk consumer.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert cache.cache_valid is False
+    assert cache.outcome_state(
+        now=datetime(2026, 5, 21, 2, 31, 22, tzinfo=timezone.utc)
+    ) == "warning"
+    assert app.overview_model.doctor_box(
+        now=datetime(2026, 5, 21, 2, 31, 22, tzinfo=timezone.utc)
+    ).all_green is False
+
+
+@pytest.mark.parametrize("repair", ({}, {"state": ""}))
+def test_load_doctor_cache_rejects_blank_repair_state_as_healthy(tmp_path, repair) -> None:
+    (tmp_path / "doctor_cache.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "captured_at": "2026-05-21T02:31:22Z",
+                "mode": "repair",
+                "outcome": "healthy",
+                "exit_code": 0,
+                "summary": {"passed": 1, "failed": 0, "warned": 0, "skipped": 0},
+                "checks": [{"status": "pass", "label": "Config", "detail": "valid"}],
+                "repair_summary": {
+                    "planned": 0,
+                    "applied": 0,
+                    "failed": 0,
+                    "blocked": 0,
+                    "manual": 0,
+                    "noop": 0,
+                    "declined": 0,
+                    "requires_confirmation": 0,
+                },
+                "repairs": [repair],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = DefenseClawTUI(data_dir=tmp_path)
+
+    app._load_doctor_cache()  # noqa: SLF001 - exercise the disk consumer.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert cache.cache_valid is False
+    assert cache.repair_states == ("",)
+    assert cache.outcome_state() == "warning"
+    box = app.overview_model.doctor_box(now=datetime(2026, 5, 21, 2, 31, 22, tzinfo=timezone.utc))
+    assert box.run_outcome == "warning"
+    assert box.all_green is False
+
+
+def test_load_doctor_cache_replaces_prior_green_when_refresh_is_malformed(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "doctor_cache.json"
+    path.write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-05-21T02:31:22Z",
+                "passed": 1,
+                "failed": 0,
+                "warned": 0,
+                "skipped": 0,
+                "checks": [{"status": "pass", "label": "Config", "detail": "valid"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = DefenseClawTUI(data_dir=tmp_path)
+    readiness_syncs: list[None] = []
+    monkeypatch.setattr(app, "_sync_setup_readiness", lambda: readiness_syncs.append(None))
+
+    app._load_doctor_cache()  # noqa: SLF001 - exercise the disk consumer.
+    assert app.overview_model.doctor is not None
+    assert app.overview_model.doctor_box(
+        now=datetime(2026, 5, 21, 2, 31, 22, tzinfo=timezone.utc)
+    ).all_green
+
+    path.write_text("{", encoding="utf-8")
+    app._load_doctor_cache()  # noqa: SLF001 - malformed refresh must replace green state.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert cache.cache_valid is False
+    assert cache.warned == 1
+    assert cache.outcome_state() == "warning"
+    assert len(cache.checks) == 1
+    assert cache.checks[0].status == "warn"
+    assert cache.checks[0].label == "Doctor cache"
+    assert "malformed JSON" in cache.checks[0].detail
+    assert readiness_syncs == [None, None]
+
+
+def test_load_doctor_cache_replaces_prior_green_when_cache_disappears(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "doctor_cache.json"
+    path.write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-05-21T02:31:22Z",
+                "passed": 1,
+                "failed": 0,
+                "warned": 0,
+                "skipped": 0,
+                "checks": [{"status": "pass", "label": "Config", "detail": "valid"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = DefenseClawTUI(data_dir=tmp_path)
+    readiness_syncs: list[None] = []
+    monkeypatch.setattr(app, "_sync_setup_readiness", lambda: readiness_syncs.append(None))
+
+    app._load_doctor_cache()  # noqa: SLF001 - exercise the disk consumer.
+    assert app.overview_model.doctor_box(
+        now=datetime(2026, 5, 21, 2, 31, 22, tzinfo=timezone.utc)
+    ).all_green
+
+    path.unlink()
+    app._load_doctor_cache()  # noqa: SLF001 - a deleted refresh must replace green state.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert cache.cache_valid is False
+    assert cache.warned == 1
+    assert cache.outcome_state() == "warning"
+    assert cache.checks[0].status == "warn"
+    assert "no longer exists" in cache.checks[0].detail
+    assert app.overview_model.keys_status().available is False
+    assert readiness_syncs == [None, None]
+
+
+def test_load_doctor_cache_fails_closed_on_invalid_utf8(tmp_path) -> None:
+    (tmp_path / "doctor_cache.json").write_bytes(b"\xff\xfe\x00")
+    app = DefenseClawTUI(data_dir=tmp_path)
+    app.overview_model.set_doctor_cache(
+        DoctorCache(
+            captured_at=datetime.now(timezone.utc),
+            passed=1,
+            outcome="healthy",
+        )
+    )
+
+    app._load_doctor_cache()  # noqa: SLF001 - invalid bytes must replace green state.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert cache.cache_valid is False
+    assert cache.outcome_state() == "warning"
+    assert cache.checks[0].status == "warn"
+    assert "not valid UTF-8 JSON" in cache.checks[0].detail
+
+
+def test_load_doctor_cache_fails_closed_when_existing_cache_cannot_be_read(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "doctor_cache.json"
+    path.write_text("{}", encoding="utf-8")
+    app = DefenseClawTUI(data_dir=tmp_path)
+    readiness_syncs: list[None] = []
+    monkeypatch.setattr(app, "_sync_setup_readiness", lambda: readiness_syncs.append(None))
+    original_read_text = Path.read_text
+
+    def _raise_for_doctor_cache(candidate: Path, *args, **kwargs):
+        if candidate == path:
+            raise OSError("permission denied")
+        return original_read_text(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _raise_for_doctor_cache)
+
+    app._load_doctor_cache()  # noqa: SLF001 - exercise the disk consumer.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert cache.cache_valid is False
+    assert cache.outcome_state() == "warning"
+    assert "could not be read" in cache.checks[0].detail
+    assert readiness_syncs == [None]
+
+
+@pytest.mark.parametrize("payload", ([], "healthy", 1, None))
+def test_load_doctor_cache_fails_closed_on_non_object_payload(
+    tmp_path, monkeypatch, payload
+) -> None:
+    (tmp_path / "doctor_cache.json").write_text(json.dumps(payload), encoding="utf-8")
+    app = DefenseClawTUI(data_dir=tmp_path)
+    readiness_syncs: list[None] = []
+    monkeypatch.setattr(app, "_sync_setup_readiness", lambda: readiness_syncs.append(None))
+
+    app._load_doctor_cache()  # noqa: SLF001 - exercise the disk consumer.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert cache.cache_valid is False
+    assert cache.outcome_state() == "warning"
+    assert "JSON object" in cache.checks[0].detail
+    assert readiness_syncs == [None]
 
 
 @pytest.mark.asyncio

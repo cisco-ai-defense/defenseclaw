@@ -760,6 +760,37 @@ process setting.
   through DNS rebinding.
 - Remote plaintext credentials generate a persistent warning and compliance event.
 
+## Destination failure circuits
+
+Each optional destination signal route (logs, traces, or metrics) has its own
+in-memory delivery circuit. By default, three consecutive terminal transient
+or permanent-payload batches open it for 30 seconds. A single payload-specific
+rejection does not suppress unrelated valid telemetry. Authentication and
+unsafe-endpoint failures are terminal for that route, so they open immediately
+for 24 hours because retrying the same configuration would only repeat
+expensive or unsafe work.
+
+While open, new and already queued work for that signal route is rejected
+before adapter delivery and size-estimation work. Sibling signal routes and
+other destinations are independent, and mandatory local SQLite persistence
+continues. When the cooldown expires, exactly one record is admitted as a
+half-open recovery probe; success closes the circuit and a terminal failure
+reopens it.
+
+Circuit state, consecutive failures, the bounded failure class, and the open
+deadline are available through gateway health and `defenseclaw doctor`.
+Transient-open and half-open states are warnings; an open authentication,
+permanent-payload, or unsafe-endpoint circuit is a failed Doctor check.
+
+The circuit is runtime suppression, not a silent policy edit: it does not
+rewrite `config.yaml` or permanently disable a route. Repair the destination
+credential or endpoint and reload the gateway. If the export is no longer
+wanted, disable that named optional route explicitly:
+
+```bash
+defenseclaw setup observability disable NAME
+```
+
 ## Alert runbooks
 
 These headings are stable targets for the bundled Prometheus alert annotations.
@@ -798,8 +829,11 @@ These headings are stable targets for the bundled Prometheus alert annotations.
 3. Use `defenseclaw observability destination test NAME` for a non-mutating
    handshake. Use `--write-probe` only when an isolated adapter write is acceptable;
    it does not populate dashboards.
-4. Inspect destination queue/drop/retry health in **Runtime & Reliability**. One
-   stalled destination does not stop its siblings or mandatory local SQLite.
+4. Inspect destination queue/drop/retry and circuit health in **Runtime &
+   Reliability**. An open circuit suppresses that route's adapter work while
+   mandatory local SQLite and sibling destinations continue. Repair and reload,
+   or use `defenseclaw setup observability disable NAME` to change policy
+   explicitly.
 
 ### Runbook: audit sink
 

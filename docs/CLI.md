@@ -676,9 +676,63 @@ manual artifact URLs fail closed instead of silently bypassing the bridge.
 
 ### doctor
 
-```
-defenseclaw doctor [--json]
+```bash
+defenseclaw doctor [--json-output | --json] [--passive]
+defenseclaw doctor --fix [--dry-run] [--yes] [--fix-id REPAIR_ID]...
 ```
 
 Runs connectivity and credential checks against all configured services
-(sidecar, guardrail proxy, Cisco AI Defense, Splunk, scanners).
+(sidecar, guardrail proxy, Cisco AI Defense, Splunk, scanners), validates
+component and active-connector compatibility, and inspects audit, identity, and
+observability runtime health.
+
+`--json-output` (also available as `--json`) emits Doctor schema v2. Health
+checks remain in `checks` and `summary`; repair attempts are reported
+independently in `repairs` and `repair_summary`. Each repair record includes a
+stable `repair_id`, risk, dependencies, effects, blockers, restart potential,
+platform, and one of these states:
+
+`applicable`, `noop`, `blocked`, `manual`, `requires_confirmation`, `declined`,
+`applied`, or `failed`.
+
+The top-level `outcome` and `exit_code` combine those two tracks without adding
+repair results to the health counters. A failed health check or a failed or
+blocked repair exits 1; warnings and work requiring operator attention remain
+visible without being misreported as successful repairs.
+
+Use `--passive` when diagnosis must not create synthetic telemetry, invoke an
+LLM, or submit inspection content. It still performs local and bounded
+read-only checks. Every `--fix --dry-run` is passive and runs planners only, so
+it cannot mutate disk or restart a service.
+
+`--fix-id` is repeatable and selects an exact repair plus its declared
+dependencies. A JSON repair invocation must be a `--dry-run` preview or include
+`--yes`. `--yes` can approve eligible safe and disruptive work, but by itself
+it does not opt into policy or experimental repairs. Those require their exact
+ID; experimental identity recovery additionally requires an attended prompt.
+
+Important repair boundaries:
+
+- `doctor.state.audit-db.initialize` creates a verified empty schema only when
+  the database name is safely absent and the gateway is inactive. Publication
+  is atomic and no-overwrite; Doctor refuses ambiguous sidecars, links/reparse
+  points, invalid custody, corruption, or an existing database.
+- `doctor.identity.device-key.initialize` can mint an absent Ed25519 identity
+  only when explicitly selected in an attended run. It publishes
+  HMAC-bound provenance before the key and never overwrites or silently
+  replaces an identity whose continuity is uncertain. Blanket `--yes` is
+  ignored for this repair.
+- `doctor.component.compatibility.review` reports CLI, gateway, or required
+  plugin release drift with the exact authenticated upgrade or trusted
+  reinstall guidance, but never launches that release change from inside
+  Doctor's repair transaction.
+- `doctor.connector.compatibility.review` reports unsupported or untested
+  external connector versions as a manual, experimental decision. Doctor
+  shows the supported range or setup guidance. Exact attended selection may
+  refresh bounded local version evidence, but Doctor never installs,
+  downgrades, or launches an unsupported connector workload.
+
+Gateway repairs can securely create or rotate a locally managed token, correct
+token-provider drift, start a stopped managed sidecar, or restart a stale
+generation. The plan marks restart-capable work; custom `token_env` providers
+remain externally managed.

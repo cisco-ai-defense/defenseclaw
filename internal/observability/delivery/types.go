@@ -67,6 +67,18 @@ const (
 	OutcomeAmbiguous        DeliveryOutcome = "ambiguous"
 )
 
+// FailureClass is the bounded, content-free reason class retained by the
+// circuit breaker. It deliberately collapses ambiguous transport outcomes into
+// transient and never carries an adapter error, endpoint, header, or payload.
+type FailureClass string
+
+const (
+	FailureClassTransient        FailureClass = "transient"
+	FailureClassAuthentication   FailureClass = "authentication"
+	FailureClassPermanentPayload FailureClass = "permanent_payload"
+	FailureClassUnsafeEndpoint   FailureClass = "unsafe_endpoint"
+)
+
 // DeliveryResult contains no free-form adapter diagnostics. DeliveredItems and
 // RejectedItems must both be positive, non-overflowing, and sum to Batch.Len
 // only when Outcome is OutcomePartial. They must be zero for every other
@@ -154,6 +166,7 @@ const (
 	ReasonIntakeStopped     EnqueueReason = "intake_stopped"
 	ReasonOriginLoop        EnqueueReason = "origin_loop"
 	ReasonInvalidPayload    EnqueueReason = "invalid_payload"
+	ReasonCircuitOpen       EnqueueReason = "circuit_open"
 )
 
 type EnqueueResult struct {
@@ -180,15 +193,28 @@ const (
 type HealthReason string
 
 const (
-	HealthReasonActivated      HealthReason = "activated"
-	HealthReasonQueueFull      HealthReason = "queue_full"
-	HealthReasonRetryable      HealthReason = "retryable_delivery"
-	HealthReasonPartial        HealthReason = "partial_delivery"
-	HealthReasonDeliveryFailed HealthReason = "delivery_failed"
-	HealthReasonRecovered      HealthReason = "delivery_recovered"
-	HealthReasonIntakeStopped  HealthReason = "intake_stopped"
-	HealthReasonClosed         HealthReason = "closed"
-	HealthReasonOriginLoop     HealthReason = "origin_loop"
+	HealthReasonActivated       HealthReason = "activated"
+	HealthReasonQueueFull       HealthReason = "queue_full"
+	HealthReasonRetryable       HealthReason = "retryable_delivery"
+	HealthReasonPartial         HealthReason = "partial_delivery"
+	HealthReasonDeliveryFailed  HealthReason = "delivery_failed"
+	HealthReasonRecovered       HealthReason = "delivery_recovered"
+	HealthReasonIntakeStopped   HealthReason = "intake_stopped"
+	HealthReasonClosed          HealthReason = "closed"
+	HealthReasonOriginLoop      HealthReason = "origin_loop"
+	HealthReasonCircuitOpen     HealthReason = "circuit_open"
+	HealthReasonCircuitHalfOpen HealthReason = "circuit_half_open"
+)
+
+// CircuitState is the exact, content-free breaker vocabulary. Circuit state is
+// orthogonal to lifecycle HealthState: for example, a stopped dispatcher can
+// retain the final open state in a detached retirement snapshot.
+type CircuitState string
+
+const (
+	CircuitClosed   CircuitState = "closed"
+	CircuitOpen     CircuitState = "open"
+	CircuitHalfOpen CircuitState = "half_open"
 )
 
 // Counters are monotonic record counters, not request counters.
@@ -221,15 +247,19 @@ type QueueSnapshot struct {
 // signal that has no DefenseClaw-owned queue. Reason is a closed token owned by
 // the source package; it never contains an error, endpoint, header, or payload.
 type HealthSnapshot struct {
-	Destination string
-	Generation  uint64
-	Signal      string
-	State       HealthState
-	Reason      string
-	Queue       *QueueSnapshot
-	Counters    Counters
-	LastSuccess time.Time
-	LastFailure time.Time
+	Destination         string
+	Generation          uint64
+	Signal              string
+	State               HealthState
+	Reason              string
+	CircuitState        CircuitState
+	ConsecutiveFailures uint64
+	CircuitOpenUntil    time.Time
+	LastFailureClass    FailureClass
+	Queue               *QueueSnapshot
+	Counters            Counters
+	LastSuccess         time.Time
+	LastFailure         time.Time
 }
 
 // SnapshotSource exposes no transport operation or mutable queue handle.
@@ -267,6 +297,16 @@ type RetryPolicy struct {
 	Jitter         func(time.Duration, int) time.Duration
 }
 
+// CircuitPolicy bounds cross-batch suppression after terminal delivery
+// failures. The zero value selects conservative process defaults. A custom
+// policy must set both fields. OpenDuration applies after the threshold for
+// transient and payload-specific failures. Authentication and unsafe-endpoint
+// failures on the route use the dispatcher's longer bounded interval.
+type CircuitPolicy struct {
+	TransientFailureThreshold int
+	OpenDuration              time.Duration
+}
+
 // Config is generation-owned and immutable after NewDispatcher returns.
 type Config struct {
 	Destination      string
@@ -280,6 +320,7 @@ type Config struct {
 	ScheduledDelay   time.Duration
 	AttemptTimeout   time.Duration
 	Retry            RetryPolicy
+	Circuit          CircuitPolicy
 	Observer         Observer
 	ObserverInterval time.Duration
 }

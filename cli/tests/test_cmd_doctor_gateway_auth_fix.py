@@ -141,11 +141,15 @@ def test_gateway_auth_probes_status_with_bearer_without_rendering_token(tmp_path
     ):
         _check_gateway_auth(_cfg(str(tmp_path), token=secret), result)
 
-    assert result.checks[-1] == {
-        "status": "pass",
-        "label": "Gateway authentication",
-        "detail": "local token accepted",
-    }
+    check = result.checks[-1]
+    assert check["status"] == "pass"
+    assert check["label"] == "Gateway authentication"
+    assert check["detail"] == "local token accepted"
+    assert check["check_id"].startswith("doctor.check.general.gateway.authentication.")
+    assert check["section"] == "general"
+    assert check["reason_code"] == ""
+    assert check["remediation"] == ""
+    assert check["duration_ms"] == 0
     assert probe.call_args.kwargs["headers"] == {"Authorization": f"Bearer {secret}"}
     assert secret not in repr(result.checks)
 
@@ -415,7 +419,10 @@ def test_doctor_repairs_before_running_diagnostics():
     raw_doctor = doctor.callback.__wrapped__
     app = SimpleNamespace(cfg=SimpleNamespace())
     with (
-        patch("defenseclaw.commands.cmd_doctor._run_fixers", side_effect=_fixers),
+        patch(
+            "defenseclaw.commands.cmd_doctor._run_fixers_with_lock",
+            side_effect=_fixers,
+        ),
         patch("defenseclaw.commands.cmd_doctor._check_config", side_effect=_first_check),
         pytest.raises(RuntimeError, match="ordering assertion"),
     ):
@@ -672,9 +679,11 @@ def test_fixer_exception_is_a_redacted_failure(tmp_path):
             json_out=True,
         )
 
-    failure = next(row for row in result.checks if row["label"] == "fix: stale gateway PID file")
-    assert failure["status"] == "fail"
-    assert result.failed == 1
+    failure = next(row for row in result.repairs if row["repair_id"] == "doctor.gateway.pid.remove-stale")
+    assert failure["state"] == "blocked"
+    assert failure["detail"] == "RuntimeError: planner raised unexpectedly"
+    assert result.failed == 0
+    assert result.repair_summary.blocked >= 1
     assert secret not in repr(result.to_dict())
 
 

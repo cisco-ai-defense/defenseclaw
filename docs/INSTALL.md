@@ -798,7 +798,9 @@ Checks performed:
 | Check | What it verifies |
 |-------|------------------|
 | Config file | `~/.defenseclaw/config.yaml` exists and is valid |
-| Audit database | SQLite database is accessible |
+| Audit database | File custody, read-only SQLite integrity, required `audit_events`/`scan_results`/`findings` schema, and available storage |
+| Device identity | Ed25519 key custody and HMAC-bound provenance without replacing a prior identity |
+| Component and connector compatibility | CLI/gateway/plugin release alignment and cached active-agent versions against registered connector contracts |
 | Scanner binaries | `skill-scanner` and `mcp-scanner` CLIs are on PATH |
 | Sidecar health | `GET /health` to the sidecar; reports gateway, watcher, and guardrail sub-states |
 | Gateway authentication | Authenticated `GET /status` using the locally resolved gateway token |
@@ -808,24 +810,79 @@ Checks performed:
 | Cisco AI Defense | Endpoint health check (if remote scanner mode is enabled) |
 | VirusTotal | API connectivity check (if VirusTotal is enabled) |
 | Splunk HEC | HEC endpoint check (if Splunk is enabled) |
+| Observability destinations | Effective route, queue/delivery health, and per-destination/signal circuit state while mandatory local SQLite remains available |
 
 Output uses colored PASS/FAIL/WARN/SKIP indicators. Exits with code 1
-if any check fails.
+if a health check fails or a repair fails or is blocked.
 
 ```bash
 # Run all checks
 defenseclaw doctor
+
+# Avoid billable/content-submitting/synthetic probes
+defenseclaw doctor --passive
+
+# Machine-readable schema v2 (--json is an alias)
+defenseclaw doctor --json-output
 
 # Preview safe repairs
 defenseclaw doctor --fix --dry-run
 
 # Apply repairs without interactive confirmation
 defenseclaw doctor --fix --yes
+
+# Select one repair and its declared dependencies
+defenseclaw doctor --fix --fix-id doctor.state.audit-db.initialize
+
+# Identity recovery is always attended; do not add --yes
+defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize
 ```
 
-`--fix` runs repairs before diagnostics, so its summary and exit code describe
-the post-repair state. For a missing token on a locally managed non-OpenClaw
-installation, Doctor generates a 32-byte token, stores it in
+`--fix` runs repairs before diagnostics, so the health summary describes the
+post-repair state. Schema-v2 JSON deliberately keeps health `checks`/`summary`
+separate from `repairs`/`repair_summary`; the top-level `outcome` and
+`exit_code` account for both. Repair records carry stable IDs, risk,
+dependencies, effects, blockers, restart potential, platform, and an explicit
+plan/apply state.
+
+`--fix --dry-run` invokes read-only planners only and is always passive:
+synthetic telemetry, LLM inference, and inspection-content submission are
+suppressed. `--fix-id` is repeatable and includes declared dependencies. A real
+JSON repair requires `--yes`; blanket `--yes` does not opt into policy or
+experimental work. Exact policy selections still require an exact repair ID,
+and experimental identity recovery always requires an attended confirmation.
+
+When the audit database name is safely absent and the managed gateway is
+inactive, `doctor.state.audit-db.initialize` can build and validate an empty
+current schema, then publish it atomically with no-overwrite semantics. It
+refuses to replace an existing database or continue through ambiguous journal
+sidecars, links/reparse points, invalid ownership/DACLs, corrupt state, or
+concurrent gateway use. An existing damaged database must be restored or
+migrated; Doctor does not erase it.
+
+`doctor.identity.device-key.initialize` is intentionally more restrictive.
+After exact selection and an attended continuity warning, it may mint an absent
+Ed25519 identity and publish HMAC-bound provenance before making the key
+visible. It never runs under blanket `--yes`, overwrites a key, or regenerates
+when prior identity evidence makes continuity ambiguous.
+
+Unsupported and untested active connector versions appear in health output and
+the `doctor.connector.compatibility.review` repair plan. The result is manual
+and experimental: Doctor reports registered ranges and trusted setup/vendor
+guidance. With exact attended selection it can refresh bounded local version
+evidence without emitting telemetry; it never installs, upgrades, downgrades,
+or launches an unsupported external connector workload. If refreshed evidence
+is still outside the contract, the repair remains manual. Human approval is a
+decision boundary, not permission for an unsafe best-effort mutation.
+
+CLI, gateway, and required plugin release drift similarly appears under
+`doctor.component.compatibility.review`. Doctor shows the authenticated
+`defenseclaw upgrade --version ...` or trusted reinstall guidance, but keeps
+the release change outside its repair lock so upgrade preflight, receipts, and
+rollback remain authoritative.
+
+For a missing token on a locally managed non-OpenClaw installation, Doctor
+generates a 32-byte token, stores it in
 `~/.defenseclaw/.env` with mode `0600` on POSIX or a private DACL on Windows,
 and never prints its value. If the configured token is rejected by a running
 gateway, Doctor can restart the gateway to reconcile its in-memory
@@ -848,6 +905,20 @@ inject the CLI or its child processes (for example `PATH`, dynamic-loader
 variables, connector-home overrides, proxy variables, and DefenseClaw
 security opt-outs). Put those settings in the invoking service environment
 instead of the credential file.
+
+Repeated optional observability export failures do not consume unbounded
+delivery work. Transient and payload-specific failures require the bounded
+failure threshold, so one bad payload cannot suppress later valid telemetry;
+authentication and unsafe-endpoint failures open that destination/signal route
+immediately. The circuit exposes its failure class and recovery window through
+gateway health and Doctor, and later admits one bounded half-open probe. Sibling
+signals and mandatory local SQLite persistence continue. Doctor never silently
+changes observability policy; repair the credential/endpoint and reload, or
+explicitly disable the optional route:
+
+```bash
+defenseclaw setup observability disable NAME
+```
 
 Other setup commands run a subset of these checks when `--verify` is
 enabled (the default). If verification fails, the output suggests

@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -1109,6 +1110,26 @@ class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):
 
         mock_anthropic.assert_called_once()
 
+    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False)
+    @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="sk-ant-test")
+    @patch("defenseclaw.commands.cmd_doctor._verify_anthropic")
+    def test_passive_anthropic_check_never_invokes_model(
+        self,
+        mock_anthropic,
+        _mock_resolve,
+    ):
+        cfg = self._make_cfg(
+            model="anthropic/claude-sonnet-4-5-20250514",
+            api_key_env="ANTHROPIC_API_KEY",
+        )
+        r = _DoctorResult(passive=True)
+
+        _check_llm_api_key(cfg, r)
+
+        mock_anthropic.assert_not_called()
+        self.assertEqual(r.checks[-1]["status"], "skip")
+        self.assertIn("passive mode", r.checks[-1]["detail"])
+
     @patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=False)
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="sk-test")
     @patch("defenseclaw.commands.cmd_doctor._verify_openai")
@@ -1191,12 +1212,7 @@ class AnthropicProbeModelTests(unittest.TestCase):
 
 
 class DoctorCacheWriteTests(unittest.TestCase):
-    """P3-#21: `_write_doctor_cache` must emit a JSON file that the
-    Go TUI can parse into a ``DoctorCache`` via
-    ``internal/tui/doctor_cache.go``. Keep these assertions in
-    lockstep with ``TestDoctorCache_PythonCompatibleTimestamp`` on
-    the Go side.
-    """
+    """`_write_doctor_cache` must emit an atomic Textual-TUI snapshot."""
 
     def _run_write(self, tmpdir, result):
         from defenseclaw.commands.cmd_doctor import (
@@ -1241,8 +1257,7 @@ class DoctorCacheWriteTests(unittest.TestCase):
         self.assertEqual(payload["warned"], 2)
         self.assertEqual(payload["skipped"], 0)
         self.assertEqual(len(payload["checks"]), 3)
-        # captured_at must be an ISO-8601 with Z suffix so Go's
-        # time.Time parser accepts it.
+        # captured_at is an unambiguous RFC3339 UTC value.
         self.assertIn("captured_at", payload)
         self.assertTrue(payload["captured_at"].endswith("Z"), payload["captured_at"])
 
@@ -1334,6 +1349,24 @@ class DoctorJsonOutputTests(unittest.TestCase):
         self.assertEqual(d["failed"], 0)
         self.assertEqual(len(d["checks"]), 3)
         self.assertEqual(d["checks"][0]["label"], "Config")
+
+    def test_planned_repair_prevents_false_healthy_outcome(self):
+        from defenseclaw.doctor_engine import RepairRecord
+
+        r = _DoctorResult(mode="plan", passive=True)
+        r.record_repair(
+            RepairRecord(
+                repair_id="doctor.example",
+                label="Example",
+                state="applicable",
+                risk="safe",
+                detail="would repair",
+            )
+        )
+
+        result = r.to_dict()
+        self.assertEqual(result["outcome"], "warning")
+        self.assertEqual(result["exit_code"], 0)
 
     def test_llm_reachability_suppresses_probe_stdout_when_json_mode(self):
         from defenseclaw.commands import cmd_doctor
@@ -1869,21 +1902,61 @@ class DoctorFixDryRunTests(unittest.TestCase):
             openshell=OpenShellConfig(),
         )
 
-    def test_dry_run_skips_each_fixer_and_does_not_call_underlying_fns(self):
+    def test_dry_run_calls_only_read_only_planners(self):
         from defenseclaw.commands import cmd_doctor
 
         cfg = self._make_cfg()
         result = _DoctorResult()
-        # Patch the individual fixer functions to flag any invocation.
+        planner_result = ("plan", "would repair the applicable state")
+        healthy_prerequisite = cmd_doctor.RepairDecision("noop", "already healthy")
         with (
-            patch.object(cmd_doctor, "_fix_stale_pid") as fix_pid,
-            patch.object(cmd_doctor, "_fix_gateway_token") as fix_token,
-            patch.object(cmd_doctor, "_fix_gateway_token_env") as fix_token_env,
-            patch.object(cmd_doctor, "_fix_gateway_token_drift") as fix_drift,
-            patch.object(cmd_doctor, "_fix_gateway_service") as fix_service,
-            patch.object(cmd_doctor, "_fix_dotenv_perms") as fix_dotenv,
-            patch.object(cmd_doctor, "_fix_pristine_backup") as fix_pristine,
-            patch.object(cmd_doctor, "_fix_plugin_registry_required") as fix_plugin_reg,
+            patch.object(
+                cmd_doctor,
+                "_plan_canonical_config_preflight",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_audit_db_recovery",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_device_key_recovery",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_connector_compatibility_review",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_connector_compatibility_gate",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_component_compatibility_review",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_component_compatibility_gate",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(cmd_doctor, "_fix_stale_pid", return_value=planner_result) as fix_pid,
+            patch.object(cmd_doctor, "_fix_gateway_token", return_value=planner_result) as fix_token,
+            patch.object(cmd_doctor, "_fix_gateway_token_env", return_value=planner_result) as fix_token_env,
+            patch.object(cmd_doctor, "_fix_gateway_token_drift", return_value=planner_result) as fix_drift,
+            patch.object(cmd_doctor, "_fix_gateway_service", return_value=planner_result) as fix_service,
+            patch.object(cmd_doctor, "_fix_dotenv_perms", return_value=planner_result) as fix_dotenv,
+            patch.object(cmd_doctor, "_fix_pristine_backup", return_value=planner_result) as fix_pristine,
+            patch.object(
+                cmd_doctor,
+                "_fix_plugin_registry_required",
+                return_value=planner_result,
+            ) as fix_plugin_reg,
             patch.object(cmd_doctor, "_fix_connector_residue") as fix_residue,
         ):
             cmd_doctor._run_fixers(
@@ -1894,34 +1967,38 @@ class DoctorFixDryRunTests(unittest.TestCase):
                 dry_run=True,
             )
 
-            fix_pid.assert_not_called()
-            fix_token.assert_not_called()
-            fix_token_env.assert_not_called()
-            fix_drift.assert_not_called()
-            fix_service.assert_not_called()
-            fix_dotenv.assert_not_called()
-            fix_pristine.assert_not_called()
-            # OTHER-5: the plugin-registry dead-end fixer is wired into --fix
-            # but, like the rest, must not run under --dry-run.
-            fix_plugin_reg.assert_not_called()
+            for planner in (
+                fix_pid,
+                fix_token,
+                fix_token_env,
+                fix_drift,
+                fix_service,
+                fix_dotenv,
+                fix_pristine,
+                fix_plugin_reg,
+            ):
+                planner.assert_called_once()
+                self.assertTrue(planner.call_args.kwargs["plan_only"])
             # D7: the connector-teardown fixer was removed from --fix entirely,
             # so it is never invoked even though it remains importable.
             fix_residue.assert_not_called()
 
-        # Each remaining fixer should have produced a "skip" record so the TUI
-        # can list every step the real run would touch. The teardown fixer was
-        # removed (D7); the plugin-registry dead-end fixer was added (OTHER-5).
-        # Stale generated hooks are detected as a warning only — there is no
-        # auto-fixer for them, so they do not appear here.
-        fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
-        self.assertEqual(len(fix_records), 8)
-        for record in fix_records:
-            self.assertEqual(record["status"], "skip")
-            self.assertIn("dry-run", record["detail"])
+        # Repairs have their own typed collection and do not contaminate
+        # post-repair health counts. The policy-changing repair is visible but
+        # explicitly requires selection on the real run.
+        self.assertEqual(result.checks, [])
+        self.assertEqual(len(result.repairs), 15)
+        self.assertEqual(
+            {record["state"] for record in result.repairs},
+            {"applicable", "noop", "requires_confirmation"},
+        )
+        self.assertEqual(result.repair_summary.planned, 7)
+        self.assertEqual(result.repair_summary.requires_confirmation, 1)
+        self.assertEqual(result.repair_summary.noop, 7)
         # Doctor must NEVER offer connector teardown from --fix (D7).
         self.assertNotIn(
-            "fix: connector residue",
-            [c["label"] for c in fix_records],
+            "connector residue",
+            [record["label"] for record in result.repairs],
         )
 
     def test_real_fix_invokes_each_fixer_when_dry_run_false(self):
@@ -1929,16 +2006,60 @@ class DoctorFixDryRunTests(unittest.TestCase):
 
         cfg = self._make_cfg()
         result = _DoctorResult()
+
+        def planned_then_applied(*_args, **kwargs):
+            return ("plan", "would repair") if kwargs.get("plan_only") else ("pass", "ok")
+
+        healthy_prerequisite = cmd_doctor.RepairDecision("noop", "already healthy")
         with (
-            patch.object(cmd_doctor, "_fix_stale_pid", return_value=("pass", "ok")),
-            patch.object(cmd_doctor, "_fix_gateway_token", return_value=("pass", "ok")),
-            patch.object(cmd_doctor, "_fix_gateway_token_env", return_value=("pass", "ok")),
-            patch.object(cmd_doctor, "_fix_gateway_token_drift", return_value=("pass", "ok")),
-            patch.object(cmd_doctor, "_fix_gateway_service", return_value=("pass", "ok")),
-            patch.object(cmd_doctor, "_fix_dotenv_perms", return_value=("pass", "ok")),
+            patch.object(
+                cmd_doctor,
+                "_plan_canonical_config_preflight",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_audit_db_recovery",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_device_key_recovery",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_connector_compatibility_review",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_connector_compatibility_gate",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_component_compatibility_review",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_component_compatibility_gate",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(cmd_doctor, "_fix_stale_pid", side_effect=planned_then_applied),
+            patch.object(cmd_doctor, "_fix_gateway_token", side_effect=planned_then_applied),
+            patch.object(cmd_doctor, "_fix_gateway_token_env", side_effect=planned_then_applied),
+            patch.object(cmd_doctor, "_fix_gateway_token_drift", side_effect=planned_then_applied),
+            patch.object(cmd_doctor, "_fix_gateway_service", side_effect=planned_then_applied),
+            patch.object(cmd_doctor, "_fix_dotenv_perms", side_effect=planned_then_applied),
             patch.object(cmd_doctor, "_gateway_dotenv_safety_problem", return_value=""),
-            patch.object(cmd_doctor, "_fix_pristine_backup", return_value=("pass", "ok")),
-            patch.object(cmd_doctor, "_fix_plugin_registry_required", return_value=("pass", "ok")),
+            patch.object(cmd_doctor, "_fix_pristine_backup", side_effect=planned_then_applied),
+            patch.object(
+                cmd_doctor,
+                "_fix_plugin_registry_required",
+                side_effect=planned_then_applied,
+            ) as fix_plugin_reg,
             # _fix_connector_residue is intentionally NOT wired into --fix (D7);
             # patch it so a regression that re-adds it would surface as an extra row.
             patch.object(cmd_doctor, "_fix_connector_residue", return_value=("pass", "ok")) as fix_residue,
@@ -1951,18 +2072,17 @@ class DoctorFixDryRunTests(unittest.TestCase):
                 dry_run=False,
             )
 
-        fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
-        # Eight fixers run: the connector-teardown fixer was removed (D7) and
-        # the plugin-registry dead-end fixer was added (OTHER-5). Stale
-        # generated hooks are warning-only (no auto-fixer), so they are not
-        # counted here.
-        self.assertEqual(len(fix_records), 8)
-        for record in fix_records:
-            self.assertEqual(record["status"], "pass")
+        self.assertEqual(result.checks, [])
+        self.assertEqual(len(result.repairs), 15)
+        self.assertEqual(result.repair_summary.applied, 7)
+        self.assertEqual(result.repair_summary.manual, 1)
+        self.assertEqual(result.repair_summary.noop, 7)
+        self.assertEqual(fix_plugin_reg.call_count, 1)
+        self.assertTrue(fix_plugin_reg.call_args.kwargs["plan_only"])
         fix_residue.assert_not_called()
         self.assertNotIn(
-            "fix: connector residue",
-            [c["label"] for c in fix_records],
+            "connector residue",
+            [record["label"] for record in result.repairs],
         )
 
     def test_dry_run_flag_is_exposed_on_click_command(self):
@@ -1971,6 +2091,8 @@ class DoctorFixDryRunTests(unittest.TestCase):
         opts = {p.name: p for p in doctor.params}
         self.assertIn("dry_run", opts)
         self.assertTrue(opts["dry_run"].is_flag)
+        self.assertTrue(opts["passive"].is_flag)
+        self.assertTrue(opts["fix_ids"].multiple)
 
     def test_dry_run_banner_discloses_restart_and_no_teardown(self):
         from defenseclaw.commands import cmd_doctor
@@ -2151,6 +2273,14 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
                     self.send_response(302)
                     self.send_header("Location", "/leaked")
                     self.end_headers()
+                elif self.path == "/trickle":
+                    self.send_response(200)
+                    self.send_header("Content-Length", "20")
+                    self.end_headers()
+                    for _ in range(20):
+                        self.wfile.write(b"x")
+                        self.wfile.flush()
+                        time.sleep(0.1)
                 else:
                     body = health_body if self.path == "/health" else b"reached"
                     self.send_response(200)
@@ -2225,6 +2355,17 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
         status, body = _http_probe(self._url("/ok"), timeout=5.0)
         self.assertEqual(status, 200, (status, body))
         self.assertIn("reached", body)
+
+    def test_probe_timeout_is_a_total_wall_clock_deadline(self):
+        from defenseclaw.commands.cmd_doctor import _http_probe
+
+        started = time.monotonic()
+        status, body = _http_probe(self._url("/trickle"), timeout=0.12)
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(status, 0)
+        self.assertIn("total deadline", body)
+        self.assertLess(elapsed, 1.0)
 
     def test_sidecar_health_parses_complete_large_multi_connector_document(self):
         self.assertGreater(len(self.health_body), 2_000)
@@ -2395,6 +2536,13 @@ class DoctorFixHelpTextTests(unittest.TestCase):
         help_text = " ".join((opts["do_fix"].help or "").split()).lower()
         self.assertIn("restart", help_text)
         self.assertIn("--dry-run", help_text)
+
+    def test_json_output_has_short_alias(self):
+        from defenseclaw.commands.cmd_doctor import doctor
+
+        json_option = next(param for param in doctor.params if param.name == "json_out")
+        self.assertIn("--json-output", json_option.opts)
+        self.assertIn("--json", json_option.opts)
 
     def test_fix_docstring_discloses_restart_and_drops_teardown(self):
         from defenseclaw.commands.cmd_doctor import doctor

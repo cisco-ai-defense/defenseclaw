@@ -71,6 +71,7 @@ from defenseclaw.tui.panels.mcps import MCPsPanelModel
 from defenseclaw.tui.panels.overview import (
     DoctorCache,
     DoctorCheck,
+    DoctorRepairSummary,
     EnforcementCounts,
     OverviewCommandIntent,
     OverviewConfig,
@@ -7648,6 +7649,41 @@ class DefenseClawTUI(App[None]):
                     f"[{TOKENS.accent_amber}] to rerun)[/]"
                 )
             doctor_lines: list[RenderableType] = [Text.from_markup(header_markup)]
+            if doctor.run_outcome:
+                outcome_color = {
+                    "healthy": TOKENS.accent_green,
+                    "warning": TOKENS.accent_amber,
+                    "failed": TOKENS.accent_red,
+                }.get(doctor.run_outcome, TOKENS.accent_amber)
+                doctor_lines.append(
+                    Text.from_markup(
+                        f"[{TOKENS.text_secondary}]Outcome[/]  "
+                        f"[{outcome_color} bold]{doctor.run_outcome.upper()}[/]"
+                    )
+                )
+            if doctor.repair_summary_parts:
+                repair_colors = {
+                    "applied": TOKENS.accent_green,
+                    "failed": TOKENS.accent_red,
+                    "blocked": TOKENS.accent_red,
+                    "manual": TOKENS.accent_amber,
+                    "awaiting approval": TOKENS.accent_amber,
+                    "declined": TOKENS.text_muted,
+                    "planned": TOKENS.accent_amber,
+                    "no-op": TOKENS.text_muted,
+                }
+                repair_parts: list[str] = []
+                for part in doctor.repair_summary_parts:
+                    count, _, label = part.partition(" ")
+                    color = repair_colors.get(label, TOKENS.accent_amber)
+                    repair_parts.append(
+                        f"[{color} bold]{count}[/] [{TOKENS.text_secondary}]{label}[/]"
+                    )
+                doctor_lines.append(
+                    Text.from_markup(
+                        f"[{TOKENS.text_secondary}]Repairs[/]  " + "  ".join(repair_parts)
+                    )
+                )
             if doctor.checks:
                 doctor_lines.append(
                     Text("─" * 40, style=TOKENS.border_muted)
@@ -8254,8 +8290,21 @@ class DefenseClawTUI(App[None]):
         if not doctor.empty:
             doctor_summary = "  ".join(doctor.summary_parts) or "no data"
             doctor_summary += f"  {doctor.age_label}"
+            if doctor.run_outcome:
+                outcome_color = {
+                    "healthy": TOKENS.accent_green,
+                    "warning": TOKENS.accent_amber,
+                    "failed": TOKENS.accent_red,
+                }.get(doctor.run_outcome, TOKENS.accent_amber)
+                doctor_summary += (
+                    f"  [{outcome_color} bold]outcome={doctor.run_outcome}[/]"
+                )
             if doctor.stale:
                 doctor_summary += " (stale)"
+            if doctor.repair_summary_parts:
+                doctor_lines.append(
+                    "  Repairs  " + "  ".join(doctor.repair_summary_parts)
+                )
             for check in doctor.checks[:2]:
                 color = TOKENS.accent_red if check.badge == "FAIL" else TOKENS.accent_amber
                 if check.badge == "STALE":
@@ -11693,13 +11742,11 @@ class DefenseClawTUI(App[None]):
     def _load_doctor_cache(self) -> None:
         """Hydrate the Overview DOCTOR box from the on-disk cache.
 
-        Mirrors ``internal/tui/doctor_cache.go``: ``defenseclaw doctor``
-        writes ``<data_dir>/doctor_cache.json`` after every run, and
-        the Go TUI reads it on startup so the dashboard shows a real
-        pass/fail/warn/skip summary plus the top failure instead of
-        "not yet run — press d to run doctor". Until this loader was
-        wired into ``_refresh_models_from_disk`` the panel stayed
-        empty even after the user had successfully run doctor.
+        ``defenseclaw doctor`` writes ``<data_dir>/doctor_cache.json`` after
+        every run. The Textual TUI reads it on startup so the dashboard shows
+        real health and repair summaries instead of "not yet run — press d to
+        run doctor". Schema-v2 repair state is deliberately not folded into
+        the legacy health counters.
         """
 
         data_dir = self.data_dir or _data_dir_from_config(self.config)
@@ -11707,31 +11754,36 @@ class DefenseClawTUI(App[None]):
             return
         path = data_dir / "doctor_cache.json"
         if not path.exists():
+            previous = self.overview_model.doctor
+            if previous is None or previous.is_empty():
+                return
+            cache = _invalid_doctor_cache(
+                "Doctor cache no longer exists; run defenseclaw doctor to refresh it."
+            )
+            self.overview_model.set_doctor_cache(cache)
+            self._sync_setup_readiness()
             return
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return
-        captured_at = _parse_timestamp(raw.get("captured_at"))
-        checks = tuple(
-            DoctorCheck(
-                status=str(item.get("status") or ""),
-                label=str(item.get("label") or ""),
-                detail=str(item.get("detail") or ""),
+        except OSError:
+            cache = _invalid_doctor_cache(
+                "Doctor cache could not be read; run defenseclaw doctor to refresh it."
             )
-            for item in raw.get("checks", ())
-            if isinstance(item, dict)
-        )
-        self.overview_model.set_doctor_cache(
-            DoctorCache(
-                captured_at=captured_at,
-                passed=int(raw.get("passed") or 0),
-                failed=int(raw.get("failed") or 0),
-                warned=int(raw.get("warned") or 0),
-                skipped=int(raw.get("skipped") or 0),
-                checks=checks,
+        except UnicodeDecodeError:
+            cache = _invalid_doctor_cache(
+                "Doctor cache is not valid UTF-8 JSON; run defenseclaw doctor to refresh it."
             )
-        )
+        except json.JSONDecodeError:
+            cache = _invalid_doctor_cache(
+                "Doctor cache contains malformed JSON; run defenseclaw doctor to refresh it."
+            )
+        else:
+            cache = _doctor_cache_from_payload(raw)
+            if cache is None:
+                cache = _invalid_doctor_cache(
+                    "Doctor cache must contain a JSON object; run defenseclaw doctor to refresh it."
+                )
+        self.overview_model.set_doctor_cache(cache)
         # Doctor results feed several readiness rows (credential
         # presence, registry sync, sandbox check) so rebuild now.
         self._sync_setup_readiness()
@@ -12031,9 +12083,138 @@ def _parse_timestamp(value: object) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _doctor_cache_count(value: object) -> int | None:
+    if type(value) is not int or value < 0:
+        return None
+    return value
+
+
+def _invalid_doctor_cache(detail: str) -> DoctorCache:
+    """Return a visible, fail-closed replacement for an unreadable cache."""
+
+    return DoctorCache(
+        warned=1,
+        checks=(DoctorCheck(status="warn", label="Doctor cache", detail=detail),),
+        outcome="warning",
+        cache_valid=False,
+    )
+
+
+def _doctor_cache_from_payload(raw: object) -> DoctorCache | None:
+    """Parse legacy and schema-v2 cache payloads without conflating repairs."""
+
+    if not isinstance(raw, dict):
+        return None
+
+    raw_schema = raw.get("schema_version")
+    schema_version = raw_schema if type(raw_schema) is int and raw_schema > 0 else 1
+    captured_at = _parse_timestamp(raw.get("captured_at"))
+    raw_summary = raw.get("summary")
+    health_summary = raw_summary if schema_version >= 2 and isinstance(raw_summary, dict) else {}
+    cache_valid = bool(
+        raw_schema is None
+        and captured_at is not None
+        and all(
+            _doctor_cache_count(raw.get(name)) is not None
+            for name in ("passed", "failed", "warned", "skipped")
+        )
+        and isinstance(raw.get("checks"), (list, tuple))
+        and all(isinstance(item, dict) for item in raw.get("checks", ()))
+    )
+
+    def health_count(name: str) -> int:
+        value = _doctor_cache_count(health_summary.get(name))
+        if value is None:
+            value = _doctor_cache_count(raw.get(name))
+        return value or 0
+
+    raw_checks = raw.get("checks")
+    check_items = raw_checks if isinstance(raw_checks, (list, tuple)) else ()
+    checks = tuple(
+        DoctorCheck(
+            status=str(item.get("status") or ""),
+            label=str(item.get("label") or ""),
+            detail=str(item.get("detail") or ""),
+        )
+        for item in check_items
+        if isinstance(item, dict)
+    )
+
+    raw_repair_summary = raw.get("repair_summary")
+    repair_counts = raw_repair_summary if isinstance(raw_repair_summary, dict) else {}
+
+    def repair_count(name: str) -> int:
+        return _doctor_cache_count(repair_counts.get(name)) or 0
+
+    raw_repairs = raw.get("repairs")
+    repair_items = raw_repairs if isinstance(raw_repairs, (list, tuple)) else ()
+    repair_states = tuple(
+        str(item.get("state") or "").strip().lower()
+        for item in repair_items
+        if isinstance(item, dict)
+    )
+
+    raw_exit_code = raw.get("exit_code")
+    exit_code = raw_exit_code if type(raw_exit_code) is int else 0
+    if schema_version >= 2:
+        health_fields = ("passed", "failed", "warned", "skipped")
+        repair_fields = (
+            "planned",
+            "applied",
+            "failed",
+            "blocked",
+            "manual",
+            "noop",
+            "declined",
+            "requires_confirmation",
+        )
+        cache_valid = bool(
+            type(raw_schema) is int
+            and schema_version == 2
+            and captured_at is not None
+            and isinstance(raw_summary, dict)
+            and all(_doctor_cache_count(raw_summary.get(name)) is not None for name in health_fields)
+            and isinstance(raw_repair_summary, dict)
+            and all(_doctor_cache_count(raw_repair_summary.get(name)) is not None for name in repair_fields)
+            and isinstance(raw_checks, (list, tuple))
+            and all(isinstance(item, dict) for item in raw_checks)
+            and isinstance(raw_repairs, (list, tuple))
+            and all(isinstance(item, dict) for item in raw_repairs)
+            and all(str(item.get("state") or "").strip() for item in raw_repairs)
+            and str(raw.get("outcome") or "").strip().lower() in {"healthy", "warning", "failed"}
+            and type(raw_exit_code) is int
+            and raw_exit_code in {0, 1}
+        )
+    return DoctorCache(
+        captured_at=captured_at,
+        passed=health_count("passed"),
+        failed=health_count("failed"),
+        warned=health_count("warned"),
+        skipped=health_count("skipped"),
+        checks=checks,
+        schema_version=schema_version,
+        mode=str(raw.get("mode") or "").strip().lower(),
+        outcome=str(raw.get("outcome") or "").strip().lower(),
+        exit_code=exit_code,
+        repair_summary=DoctorRepairSummary(
+            planned=repair_count("planned"),
+            applied=repair_count("applied"),
+            failed=repair_count("failed"),
+            blocked=repair_count("blocked"),
+            manual=repair_count("manual"),
+            noop=repair_count("noop"),
+            declined=repair_count("declined"),
+            requires_confirmation=repair_count("requires_confirmation"),
+        ),
+        repair_states=repair_states,
+        cache_valid=cache_valid,
+    )
 
 
 def _active_connector(config: object | None) -> str:

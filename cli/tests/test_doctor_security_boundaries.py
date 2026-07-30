@@ -155,10 +155,16 @@ def test_read_exposed_dotenv_blocks_dependent_fixers_until_rotation_completes(
     dotenv = tmp_path / ".env"
     dotenv.write_text("DEFENSECLAW_GATEWAY_TOKEN=exposed-token\n", encoding="utf-8")
     os.chmod(dotenv, 0o644)
+    (tmp_path / "config.yaml").write_text("config_version: 8\n", encoding="utf-8")
     cfg = SimpleNamespace(data_dir=os.fspath(tmp_path))
     result = cmd_doctor._DoctorResult()
 
-    token = Mock(return_value=("fail", "rotation failed"))
+    def plan_then_fail(*_args, **kwargs):
+        if kwargs.get("plan_only"):
+            return ("plan", "rotate the exposed gateway token")
+        return ("fail", "rotation failed")
+
+    token = Mock(side_effect=plan_then_fail)
     token_env = Mock(return_value=("pass", "must not run"))
     token_drift = Mock(return_value=("pass", "must not run"))
     service = Mock(return_value=("pass", "must not run"))
@@ -183,20 +189,22 @@ def test_read_exposed_dotenv_blocks_dependent_fixers_until_rotation_completes(
 
     assert getattr(cfg, "_doctor_gateway_token_rotation_required", False) is True
     assert stat.S_IMODE(dotenv.stat().st_mode) == 0o644
-    token.assert_called_once_with(cfg, assume_yes=True)
+    assert token.call_count == 2
+    token.assert_any_call(cfg, assume_yes=True, plan_only=True)
+    token.assert_any_call(cfg, assume_yes=True)
     token_env.assert_not_called()
     token_drift.assert_not_called()
     service.assert_not_called()
-    rows = {row["label"]: row for row in result.checks}
-    assert rows["fix: defenseclaw dotenv perms"]["status"] == "warn"
-    assert rows["fix: gateway token"]["status"] == "fail"
+    rows = {row["label"]: row for row in result.repairs}
+    assert rows["defenseclaw dotenv perms"]["state"] == "applied"
+    assert rows["gateway token"]["state"] == "failed"
     for label in (
-        "fix: gateway token_env",
-        "fix: gateway token drift",
-        "fix: gateway service",
+        "gateway token_env",
+        "gateway token drift",
+        "gateway service",
     ):
-        assert rows[label]["status"] == "fail"
-        assert "rotation did not complete" in rows[label]["detail"]
+        assert rows[label]["state"] == "blocked"
+        assert rows[label]["blockers"]
 
 
 def test_exposed_token_rotation_repoints_legacy_provider_before_transaction(

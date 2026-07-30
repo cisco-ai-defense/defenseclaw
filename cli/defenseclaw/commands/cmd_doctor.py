@@ -28,6 +28,7 @@ import io
 import ipaddress
 import json
 import os
+import queue
 import re
 import shlex
 import shutil
@@ -36,9 +37,12 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -54,6 +58,15 @@ from defenseclaw.connector_paths import (
     omnigent_config_path,
 )
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.doctor_engine import (
+    RepairDecision,
+    RepairRecord,
+    RepairRunSummary,
+    RepairSpec,
+    default_repair_verifier,
+    legacy_outcome_state,
+    stable_doctor_id,
+)
 from defenseclaw.doctor_gateway import (
     GATEWAY_PROCESS_NAMES,
     GatewayEvidence,
@@ -71,8 +84,10 @@ from defenseclaw.doctor_hooks import (
     validate_windows_hook_registration,
 )
 from defenseclaw.envvars import active_security_overrides
+from defenseclaw.file_lock import FileLockTimeoutError, locked_file_update
 from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
+    atomic_write_private_bytes,
     darwin_acl_confidentiality_error,
     darwin_acl_write_error,
     dotenv_key_is_process_control,
@@ -175,16 +190,60 @@ def _doctor_marker(tag: str) -> str:
 
 
 class _DoctorResult:
-    __slots__ = ("passed", "failed", "warned", "skipped", "checks")
+    """One schema-v2 Doctor run with health and repairs kept separate.
 
-    def __init__(self) -> None:
+    The legacy top-level counters and ``checks`` list remain present so older
+    TUI/cache consumers continue to work.  New consumers should use
+    ``schema_version``, ``summary``, ``repairs``, and ``repair_summary``.
+    """
+
+    __slots__ = (
+        "passed",
+        "failed",
+        "warned",
+        "skipped",
+        "checks",
+        "repairs",
+        "repair_summary",
+        "section",
+        "run_id",
+        "mode",
+        "passive",
+    )
+
+    def __init__(
+        self,
+        *,
+        mode: str = "check",
+        run_id: str | None = None,
+        passive: bool = False,
+    ) -> None:
         self.passed = 0
         self.failed = 0
         self.warned = 0
         self.skipped = 0
         self.checks: list[dict] = []
+        self.repairs: list[dict] = []
+        self.repair_summary = RepairRunSummary()
+        self.section = "general"
+        self.run_id = run_id or str(uuid.uuid4())
+        self.mode = mode
+        self.passive = passive
 
-    def record(self, tag: str, label: str = "", detail: str = "") -> None:
+    def set_section(self, section: str) -> None:
+        self.section = section.strip() or "general"
+
+    def record(
+        self,
+        tag: str,
+        label: str = "",
+        detail: str = "",
+        *,
+        check_id: str = "",
+        reason_code: str = "",
+        remediation: str = "",
+        duration_ms: int = 0,
+    ) -> None:
         if tag == "pass":
             self.passed += 1
         elif tag == "fail":
@@ -194,15 +253,54 @@ class _DoctorResult:
         else:
             self.skipped += 1
         if label:
-            self.checks.append({"status": tag, "label": label, "detail": detail})
+            self.checks.append(
+                {
+                    "check_id": check_id or stable_doctor_id("check", self.section, label),
+                    "section": self.section,
+                    "status": tag,
+                    "label": label,
+                    "detail": detail,
+                    "reason_code": reason_code,
+                    "remediation": remediation,
+                    "duration_ms": max(0, int(duration_ms)),
+                }
+            )
+
+    def record_repair(self, record: RepairRecord) -> None:
+        self.repairs.append(record.to_dict())
+        self.repair_summary.record(record.state)
 
     def to_dict(self) -> dict:
+        repair_failed = bool(self.repair_summary.failed or self.repair_summary.blocked)
+        outcome = "failed" if self.failed or repair_failed else "healthy"
+        if outcome == "healthy" and (
+            self.warned
+            or self.repair_summary.planned
+            or self.repair_summary.manual
+            or self.repair_summary.declined
+            or self.repair_summary.requires_confirmation
+        ):
+            outcome = "warning"
         return {
+            "schema_version": 2,
+            "run_id": self.run_id,
+            "mode": self.mode,
+            "passive": self.passive,
+            "outcome": outcome,
+            "exit_code": 1 if outcome == "failed" else 0,
             "passed": self.passed,
             "failed": self.failed,
             "warned": self.warned,
             "skipped": self.skipped,
+            "summary": {
+                "passed": self.passed,
+                "failed": self.failed,
+                "warned": self.warned,
+                "skipped": self.skipped,
+            },
             "checks": self.checks,
+            "repair_summary": self.repair_summary.to_dict(),
+            "repairs": self.repairs,
         }
 
 
@@ -212,14 +310,10 @@ DOCTOR_CACHE_FILENAME = "doctor_cache.json"
 def _write_doctor_cache(cfg, result: _DoctorResult) -> None:
     """Persist the doctor snapshot to ``<data_dir>/doctor_cache.json``.
 
-    The Go TUI Overview panel (see ``internal/tui/doctor_cache.go``,
-    P3-#21) reads this file to show a cached pass/fail/warn/skip
-    summary without having to re-probe every network endpoint on
-    every redraw. Writing the cache from inside the CLI means the
-    two frontends never drift: anything a user sees in
-    ``defenseclaw doctor`` is exactly what the TUI will display on
-    next refresh, and operators running under cron pick up the same
-    status for Overview.
+    The Textual TUI Overview panel reads this file to show cached health and
+    repair summaries without re-probing every network endpoint on every
+    redraw. Writing the cache from inside the CLI means the command and TUI
+    share the same result contract, including failed or blocked repairs.
 
     The write is best-effort — a failure here must not break the
     actual doctor run, so we swallow and log to stderr.
@@ -229,47 +323,29 @@ def _write_doctor_cache(cfg, result: _DoctorResult) -> None:
         return
     path = os.path.join(data_dir, DOCTOR_CACHE_FILENAME)
     payload = dict(result.to_dict())
-    # Use a consistent ISO-8601 timestamp the Go side already parses
-    # as time.Time. RFC3339 in UTC avoids any TZ-confusion between
-    # CLI and TUI runs.
+    # RFC3339 in UTC avoids TZ confusion between CLI and TUI runs.
     import datetime as _dt
-    import tempfile
 
     payload["captured_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    tmp_path = ""
     try:
-        os.makedirs(data_dir, exist_ok=True)
-        # Use NamedTemporaryFile so concurrent doctor runs (e.g. a
-        # cron job plus a manual invocation) don't collide on a
-        # shared ".tmp" filename. Each writer gets a unique path,
-        # then atomically replaces the canonical cache.
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=data_dir,
-            prefix=".doctor_cache.",
-            suffix=".tmp",
-            delete=False,
-        ) as fh:
-            tmp_path = fh.name
-            json.dump(payload, fh, indent=2)
-        # Atomic replace so a concurrent TUI read never sees a
-        # half-written JSON document.
-        os.replace(tmp_path, path)
-        tmp_path = ""
+        if os.name != "nt" and getattr(os, "geteuid", lambda: -1)() == 0:
+            sudo_uid = str(os.environ.get("SUDO_UID", "") or "").strip()
+            if sudo_uid.isdecimal() and os.path.isdir(data_dir):
+                owner_uid = getattr(os.stat(data_dir, follow_symlinks=False), "st_uid", 0)
+                if owner_uid == int(sudo_uid):
+                    ux.echo(
+                        f"warning: skipped doctor cache at {path}: "
+                        "sudo would replace a user-owned cache with a root-owned file",
+                        err=True,
+                    )
+                    return
+        body = json.dumps(payload, indent=2).encode("utf-8")
+        atomic_write_private_bytes(path, body)
     except OSError as exc:
         ux.echo(
             f"warning: could not write doctor cache at {path}: {exc}",
             err=True,
         )
-    finally:
-        # Best-effort cleanup of an orphaned tempfile if replace()
-        # failed or an exception fired mid-write.
-        if tmp_path:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
 
 
 _json_mode = False
@@ -316,7 +392,16 @@ def _doctor_label_suffix(suffix: str):
         _label_suffix = prev
 
 
-def _emit(tag: str, label: str, detail: str = "", *, r: _DoctorResult | None = None) -> None:
+def _emit(
+    tag: str,
+    label: str,
+    detail: str = "",
+    *,
+    r: _DoctorResult | None = None,
+    check_id: str = "",
+    reason_code: str = "",
+    remediation: str = "",
+) -> None:
     if label and _label_suffix:
         label = f"{label} {_label_suffix}"
     if not _json_mode:
@@ -336,7 +421,14 @@ def _emit(tag: str, label: str, detail: str = "", *, r: _DoctorResult | None = N
             line += "  " + ux.dim("—") + f"  {detail}"
         ux.echo(line)
     if r is not None:
-        r.record(tag, label, detail)
+        r.record(
+            tag,
+            label,
+            detail,
+            check_id=check_id,
+            reason_code=reason_code,
+            remediation=remediation,
+        )
 
 
 def _emit_hint(text: str, *, indent: str = "      ") -> None:
@@ -565,6 +657,62 @@ def _http_probe(
     allow_truncation: bool = True,
     bypass_proxy: bool = False,
 ) -> tuple[int, str]:
+    """Run one HTTP probe with a portable total wall-clock deadline.
+
+    ``urllib`` applies its timeout to individual socket operations, so a peer
+    can otherwise keep Doctor alive indefinitely by trickling one byte before
+    every read timeout.  A daemon worker bounds the entire open/read sequence
+    on Linux, macOS, and Windows.  A timed-out worker owns no mutable Doctor
+    state and cannot delay process exit.
+    """
+
+    if timeout <= 0:
+        return 0, "probe timeout must be positive"
+    result: queue.Queue[tuple[int, str]] = queue.Queue(maxsize=1)
+
+    def _run() -> None:
+        try:
+            value = _http_probe_once(
+                url,
+                method=method,
+                headers=headers,
+                body=body,
+                timeout=timeout,
+                verify_tls=verify_tls,
+                response_limit=response_limit,
+                allow_truncation=allow_truncation,
+                bypass_proxy=bypass_proxy,
+            )
+        except Exception as exc:  # noqa: BLE001 - redact arbitrary transport detail.
+            value = (0, f"{type(exc).__name__}: probe failed")
+        try:
+            result.put_nowait(value)
+        except queue.Full:
+            pass
+
+    worker = threading.Thread(target=_run, name="defenseclaw-doctor-http", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        return 0, f"probe exceeded {timeout:g}s total deadline"
+    try:
+        return result.get_nowait()
+    except queue.Empty:
+        return 0, "probe ended without a result"
+
+
+def _http_probe_once(
+    url: str,
+    *,
+    method: str = "GET",
+    headers: dict | None = None,
+    body: bytes | None = None,
+    timeout: float = 10.0,
+    verify_tls: bool = True,
+    response_limit: int = _HTTP_PROBE_DISPLAY_BYTES,
+    allow_truncation: bool = True,
+    bypass_proxy: bool = False,
+) -> tuple[int, str]:
     """Fire an HTTP request; return (status_code, body_text). Returns (0, error) on failure.
 
     Redirects are NOT followed. Several probes attach credential-bearing
@@ -640,12 +788,43 @@ def _http_probe(
 
 def _check_config(cfg, r: _DoctorResult) -> None:
     from defenseclaw.config import config_path_for_data_dir
+    from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
 
     cfg_path = str(config_path_for_data_dir(cfg.data_dir))
-    if os.path.isfile(cfg_path):
-        _emit("pass", "Config file", cfg_path, r=r)
-    else:
+    if not os.path.isfile(cfg_path):
         _emit("fail", "Config file", "not found — run 'defenseclaw init'", r=r)
+        return
+    try:
+        validation = inspect_v8_config("validate", config_path=cfg_path)
+    except ConfigInspectError as exc:
+        _emit(
+            "fail",
+            "Config validation",
+            str(exc),
+            r=r,
+            check_id="doctor.config.canonical-v8",
+            reason_code="canonical-validation-failed",
+            remediation="defenseclaw config validate",
+        )
+        return
+    if validation.valid is not True:
+        _emit(
+            "fail",
+            "Config validation",
+            "canonical v8 validator returned no validity decision",
+            r=r,
+            check_id="doctor.config.canonical-v8",
+            reason_code="canonical-validation-unavailable",
+            remediation="defenseclaw config validate",
+        )
+        return
+    _emit(
+        "pass",
+        "Config file",
+        f"{cfg_path}; canonical schema v8 valid",
+        r=r,
+        check_id="doctor.config.canonical-v8",
+    )
 
 
 def _doctor_config_present(cfg) -> bool:
@@ -660,6 +839,50 @@ def _doctor_config_present(cfg) -> bool:
     if not str(data_dir).strip():
         return False
     return os.path.isfile(config_path_for_data_dir(data_dir))
+
+
+_CONFIG_PREFLIGHT_REPAIR_ID = "doctor.config.canonical-v8.preflight"
+
+
+def _plan_canonical_config_preflight(cfg) -> RepairDecision:
+    """Authorize mutations only from one initialized canonical-v8 config."""
+
+    from defenseclaw.config import config_path_for_data_dir
+    from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
+
+    data_dir = getattr(cfg, "data_dir", None)
+    if data_dir is None or not str(data_dir).strip():
+        reason = "authoritative DefenseClaw data directory is unavailable"
+        return RepairDecision("blocked", reason, blockers=(reason,))
+    config_path = config_path_for_data_dir(data_dir)
+    if not os.path.isfile(config_path):
+        reason = "config.yaml is missing; run `defenseclaw init` before applying repairs"
+        return RepairDecision("blocked", reason, blockers=(reason,))
+    try:
+        validation = inspect_v8_config("validate", config_path=str(config_path))
+    except (ConfigInspectError, OSError, ValueError) as exc:
+        reason = (
+            f"{type(exc).__name__}: canonical-v8 configuration preflight failed; "
+            "run `defenseclaw config validate` before applying repairs"
+        )
+        return RepairDecision("blocked", reason, blockers=("canonical-v8 validation failed",))
+    if validation.valid is not True:
+        reason = (
+            "canonical-v8 validator returned no positive validity decision; "
+            "run `defenseclaw config validate` before applying repairs"
+        )
+        return RepairDecision("blocked", reason, blockers=("canonical-v8 validation unavailable",))
+    return RepairDecision("noop", f"{config_path}; canonical schema v8 valid")
+
+
+def _fix_canonical_config_preflight(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Defense-in-depth adapter; the preflight is expected to plan as a no-op."""
+
+    del assume_yes
+    decision = _plan_canonical_config_preflight(cfg)
+    if decision.state == "noop":
+        return ("skip", decision.detail)
+    return ("fail", decision.detail)
 
 
 def _env_names_equal(left: str, right: str, *, platform_name: str | None = None) -> bool:
@@ -987,11 +1210,248 @@ def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
 
 
 def _check_audit_db(cfg, r: _DoctorResult) -> None:
-    db_path = cfg.audit_db
-    if os.path.isfile(db_path):
-        _emit("pass", "Audit database", db_path, r=r)
-    else:
-        _emit("fail", "Audit database", f"not found at {db_path}", r=r)
+    from defenseclaw.doctor_recovery import AuditDBHealthStatus, inspect_audit_db
+
+    db_path = str(getattr(cfg, "audit_db", "") or "")
+    health = inspect_audit_db(
+        db_path,
+        data_dir=str(getattr(cfg, "data_dir", "") or ""),
+    )
+    if health.status is AuditDBHealthStatus.MISSING:
+        _emit(
+            "fail",
+            "Audit database",
+            f"not found at {db_path}",
+            r=r,
+            check_id="doctor.state.audit-db",
+            reason_code="audit-db-missing",
+            remediation=("defenseclaw doctor --fix --fix-id doctor.state.audit-db.initialize"),
+        )
+        return
+    if health.status is AuditDBHealthStatus.INVALID:
+        reason = health.reason_code
+        if reason == "audit-db-schema-incomplete":
+            detail = "required schema is incomplete"
+            remediation = "defenseclaw migrations apply"
+        elif reason == "audit-db-corrupt":
+            detail = "SQLite quick_check reported corruption"
+            remediation = "restore the audit database from a trusted backup"
+        elif reason in {
+            "audit-db-integrity-unavailable",
+            "audit-db-changed-during-inspection",
+        }:
+            detail = f"read-only integrity check failed ({reason})"
+            remediation = "restore the audit database from a trusted backup"
+        else:
+            detail = f"private custody validation failed ({reason})"
+            remediation = "restore the audit database from a trusted backup"
+        _emit(
+            "fail",
+            "Audit database",
+            detail,
+            r=r,
+            check_id="doctor.state.audit-db",
+            reason_code=reason,
+            remediation=remediation,
+        )
+        return
+    _emit(
+        "pass",
+        "Audit database",
+        f"{db_path}; SQLite quick_check=ok; required schema present",
+        r=r,
+        check_id="doctor.state.audit-db",
+    )
+
+    try:
+        free_bytes = shutil.disk_usage(os.path.dirname(os.path.abspath(db_path)) or os.curdir).free
+    except OSError:
+        return
+    if free_bytes < 256 * 1024 * 1024:
+        _emit(
+            "warn",
+            "Audit storage capacity",
+            f"less than 256 MiB free ({free_bytes // (1024 * 1024)} MiB)",
+            r=r,
+            check_id="doctor.state.audit-storage-capacity",
+            reason_code="audit-storage-low",
+            remediation="free disk space before continuing gateway operation",
+        )
+
+
+def _check_device_identity(cfg, r: _DoctorResult) -> None:
+    """Validate the local Ed25519 identity and its continuity evidence."""
+
+    from defenseclaw.doctor_recovery import (
+        DeviceKeyHealthStatus,
+        inspect_device_key,
+    )
+
+    gateway = getattr(cfg, "gateway", None)
+    target = str(getattr(gateway, "device_key_file", "") or "")
+    health = inspect_device_key(
+        target,
+        data_dir=str(getattr(cfg, "data_dir", "") or ""),
+    )
+    if health.status is DeviceKeyHealthStatus.VALID:
+        _emit(
+            "pass",
+            "Device identity",
+            "Ed25519 key custody and HMAC-bound provenance are valid",
+            r=r,
+            check_id="doctor.identity.device-key",
+            reason_code=health.reason_code,
+        )
+        return
+    if health.status is DeviceKeyHealthStatus.LEGACY_UNPROVENANCED:
+        _emit(
+            "warn",
+            "Device identity",
+            "Ed25519 key is valid and private, but cryptographic provenance is unavailable",
+            r=r,
+            check_id="doctor.identity.device-key",
+            reason_code=health.reason_code,
+            remediation="review identity continuity before sandbox pairing; do not replace an in-use key",
+        )
+        return
+    if health.status is DeviceKeyHealthStatus.MISSING:
+        _emit(
+            "fail",
+            "Device identity",
+            f"device key is missing at {target}",
+            r=r,
+            check_id="doctor.identity.device-key",
+            reason_code=health.reason_code,
+            remediation=("defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize"),
+        )
+        return
+    _emit(
+        "fail",
+        "Device identity",
+        f"device key recovery is unsafe: {health.reason_code}",
+        r=r,
+        check_id="doctor.identity.device-key",
+        reason_code=health.reason_code,
+        remediation="stop the gateway and restore the identity from a trusted backup; Doctor will not overwrite it",
+    )
+
+
+def _health_remediation_text(choices: tuple[object, ...]) -> str:
+    """Render one bounded health remediation without shell interpolation."""
+
+    if not choices:
+        return ""
+    choice = choices[0]
+    argv = tuple(getattr(choice, "argv", ()) or ())
+    if argv and all(isinstance(part, str) for part in argv):
+        return " ".join(argv)
+    return str(getattr(choice, "summary", "") or "")
+
+
+def _check_component_connector_compatibility(
+    cfg,
+    connectors: list[str],
+    r: _DoctorResult,
+) -> None:
+    """Render bounded component and connector-contract evidence.
+
+    Discovery is read from the existing protected cache only.  This keeps
+    ``doctor --fix --dry-run`` read-only and prevents Doctor from executing an
+    unsupported connector binary merely to decide whether it should be
+    repaired.
+    """
+
+    from defenseclaw.doctor_health import (
+        HealthStatus,
+        build_health_report,
+        read_cached_discovery,
+    )
+
+    enabled = tuple(connector for connector in connectors if _connector_enabled(cfg, connector))
+    try:
+        discovery = read_cached_discovery(str(getattr(cfg, "data_dir", "") or ""))
+        report = build_health_report(enabled, discovery)
+    except Exception as exc:  # noqa: BLE001 - emit only the exception class.
+        _emit(
+            "warn",
+            "Compatibility evidence",
+            f"{type(exc).__name__}: bounded compatibility probes were unavailable",
+            r=r,
+            check_id="doctor.compatibility.evidence",
+            reason_code="compatibility-evidence-unavailable",
+            remediation="defenseclaw version --json --no-drift-exit",
+        )
+        return
+
+    component_required = {"cli", "gateway"}
+    if "openclaw" in enabled:
+        component_required.add("plugin")
+    for finding in report.components:
+        label = f"Component compatibility: {finding.component}"
+        remediation = _health_remediation_text(finding.remediations)
+        detail = finding.summary
+        if finding.installed_version:
+            detail += f"; installed={finding.installed_version}"
+        if finding.expected_version and finding.expected_version != finding.installed_version:
+            detail += f"; expected={finding.expected_version}"
+        if finding.component not in component_required and finding.status is HealthStatus.UNAVAILABLE:
+            tag = "skip"
+            detail = f"{finding.component} is not required by the active connector set"
+        elif finding.status is HealthStatus.SUPPORTED:
+            tag = "pass"
+        elif finding.status is HealthStatus.UNSUPPORTED:
+            tag = "fail"
+        elif finding.status is HealthStatus.UNTESTED:
+            tag = "warn"
+        else:
+            tag = "fail"
+        _emit(
+            tag,
+            label,
+            detail,
+            r=r,
+            check_id=f"doctor.component.{finding.component}.compatibility",
+            reason_code=finding.reason_code,
+            remediation=remediation,
+        )
+
+    for finding in report.connectors:
+        detail = finding.summary
+        if finding.installed_version:
+            detail += f"; installed={finding.installed_version}"
+        if finding.contract_id:
+            detail += f"; contract={finding.contract_id}"
+        if finding.supported_agent_ranges:
+            ranges = []
+            for supported in finding.supported_agent_ranges:
+                bounds = " ".join(
+                    part
+                    for part in (
+                        f">={supported.min_inclusive}" if supported.min_inclusive else "",
+                        f"<{supported.max_exclusive}" if supported.max_exclusive else "",
+                    )
+                    if part
+                )
+                ranges.append(bounds or supported.contract_id)
+            detail += f"; supported={','.join(ranges)}"
+
+        if finding.status is HealthStatus.SUPPORTED:
+            tag = "pass"
+        elif finding.status is HealthStatus.UNSUPPORTED:
+            tag = "fail"
+        elif finding.status is HealthStatus.UNAVAILABLE and finding.reason_code == "connector-agent-unavailable":
+            tag = "fail"
+        else:
+            tag = "warn"
+        _emit(
+            tag,
+            f"Connector compatibility: {finding.connector}",
+            detail,
+            r=r,
+            check_id=f"doctor.connector.{finding.connector}.compatibility",
+            reason_code=finding.reason_code,
+            remediation=_health_remediation_text(finding.remediations),
+        )
 
 
 def _check_scanners(cfg, r: _DoctorResult) -> None:
@@ -3087,7 +3547,13 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     for path in present:
         if _file_references_marker(path, markers):
             if connector == "cursor":
-                _check_cursor_configured_runtime(cfg, path, label, r)
+                _check_cursor_configured_runtime(
+                    cfg,
+                    path,
+                    label,
+                    r,
+                    probe_runtime=not r.passive,
+                )
             else:
                 _emit("pass", label, f"reachable at {path}", r=r)
             return
@@ -3579,15 +4045,23 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
     if not provider and "/" in model:
         provider = model.split("/", 1)[0].lower()
 
-    if provider == "anthropic":
-        _verify_anthropic(api_key, r, model)
+    anthropic_provider = provider == "anthropic" or (
+        provider == "" and env_name.startswith("ANTHROPIC")
+    )
+    if anthropic_provider:
+        if r.passive:
+            _emit(
+                "skip",
+                "LLM API key (Anthropic)",
+                f"{env_name} is set; passive mode avoids the inference-based authentication probe",
+                r=r,
+            )
+        else:
+            _verify_anthropic(api_key, r, model)
     elif provider == "openai":
         _verify_openai(api_key, r)
     elif provider in ("bedrock", "amazon-bedrock"):
         _verify_bedrock(api_key, r)
-    elif provider == "" and env_name.startswith("ANTHROPIC"):
-        # Model string missing — fall back to env name prefix.
-        _verify_anthropic(api_key, r, model)
     elif provider == "" and env_name.startswith("OPENAI"):
         _verify_openai(api_key, r)
     elif provider == "" and env_name.startswith("AWS_BEARER_TOKEN_BEDROCK"):
@@ -3622,6 +4096,14 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     llm = cfg.resolve_llm("guardrail")
     if not (llm.model or "").strip():
         _emit("skip", "LLM reachable", "no model configured", r=r)
+        return
+    if r.passive:
+        _emit(
+            "skip",
+            "LLM reachable",
+            "passive mode avoids the billable max_tokens=1 inference probe",
+            r=r,
+        )
         return
     try:
         from defenseclaw import llm as _llm
@@ -4133,6 +4615,14 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
         display = key_env if key_env.isupper() and len(key_env) < 50 else "(env var not configured properly)"
         _emit("fail", "Cisco AI Defense", f"{display} not set", r=r)
         return
+    if r.passive:
+        _emit(
+            "skip",
+            "Cisco AI Defense",
+            f"passive mode validated configuration and credential presence only; endpoint={endpoint}",
+            r=r,
+        )
+        return
 
     # Probe the actual inspect route the runtime scanner hits rather
     # than /health. Two reasons:
@@ -4359,6 +4849,15 @@ def _check_galileo_trace_canaries(
         for destination in status.destinations
         if destination.enabled and getattr(destination, "preset", "") == "galileo"
     ]
+    if r.passive:
+        if destinations:
+            _emit(
+                "skip",
+                "Galileo canaries",
+                f"passive mode suppresses synthetic trace export; configured={len(destinations)}",
+                r=r,
+            )
+        return
     for destination in destinations[:_DOCTOR_GALILEO_CANARY_LIMIT]:
         label = f"Galileo canary: {destination.name}"
         try:
@@ -4440,12 +4939,32 @@ def _check_observability_v8_status(
             detail += f"; health={live_state}"
             if live.reason:
                 detail += f"/{live.reason}"
-            detail += f"; queue={live.queue_label}; last={live.activity_label}"
+            detail += f"; queue={live.queue_label}; last={live.activity_label}; circuit={live.circuit_label}"
             if live_state in {"degraded", "initializing", "draining"}:
                 tag = "warn"
             elif live_state in {"failing", "stopped", "disabled"}:
                 tag = "fail"
+            if live.circuit_state == "half_open":
+                tag = "warn"
+                detail += "; one bounded recovery probe is in progress"
+            elif live.circuit_state == "open":
+                if live.last_failure_class in {
+                    "authentication",
+                    "permanent_payload",
+                    "unsafe_endpoint",
+                }:
+                    tag = "fail"
+                elif tag == "pass":
+                    tag = "warn"
+                destination_arg = shlex.quote(destination.name)
+                detail += (
+                    "; export work is automatically suppressed while local SQLite "
+                    "continues; repair credentials/endpoint and reload the gateway, "
+                    "or explicitly disable this optional route with "
+                    f"`defenseclaw setup observability disable {destination_arg}`"
+                )
         elif destination.enabled and destination.kind != "sqlite":
+            tag = "warn"
             detail += "; health=unavailable; queue=unavailable; last=unavailable"
         _emit(
             tag,
@@ -4667,16 +5186,65 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _record_doctor_action(app: AppContext, cfg, r: _DoctorResult, mode: str) -> None:
+    """Emit one canonical action fact unless the operator requested passivity."""
+
+    if r.passive:
+        return
+    from requests import RequestException
+
+    from defenseclaw.logger import CanonicalObservabilityError, Logger
+
+    try:
+        logger = app.logger
+        if logger is None and _plan_canonical_config_preflight(cfg).state == "noop":
+            # Main deliberately avoids Store.init() for Doctor so inspection
+            # cannot create a missing database. The canonical recorder is lazy
+            # and needs no Store, network, or secret lookup at construction.
+            logger = Logger.from_config(cfg)
+            app.logger = logger
+        if logger is None:
+            return
+        logger.log_action(
+            ACTION_DOCTOR,
+            mode,
+            " ".join(
+                (
+                    f"run_id={r.run_id}",
+                    f"passed={r.passed}",
+                    f"failed={r.failed}",
+                    f"warned={r.warned}",
+                    f"skipped={r.skipped}",
+                    f"repairs_applied={r.repair_summary.applied}",
+                    f"repairs_failed={r.repair_summary.failed}",
+                    f"repairs_blocked={r.repair_summary.blocked}",
+                )
+            ),
+        )
+    except (CanonicalObservabilityError, RequestException):
+        # Doctor commonly runs precisely because the local gateway is absent,
+        # unauthorized, or unhealthy. The best-effort audit fact must never
+        # replace the already-rendered health/repair result with a late crash.
+        return
+
+
 @click.command()
-@click.option("--json-output", "json_out", is_flag=True, help="Output results as JSON")
+@click.option(
+    "--json-output",
+    "--json",
+    "json_out",
+    is_flag=True,
+    help="Output the schema-v2 health and repair result as JSON",
+)
 @click.option(
     "--fix",
     "do_fix",
     is_flag=True,
     help=(
-        "Auto-repair safe issues (stale PID files, missing/token-env drift, "
-        "gateway startup, dotenv perms). NOTE: gateway repair may START or "
-        "RESTART the sidecar — preview the full set with --dry-run."
+        "Plan and repair eligible issues (missing audit state, stale PID files, "
+        "gateway token/lifecycle drift, dotenv perms). Identity and unsupported "
+        "component/connector decisions remain explicit and attended. NOTE: "
+        "gateway repair may START or RESTART the sidecar — preview with --dry-run."
     ),
 )
 @click.option("--yes", "assume_yes", is_flag=True, help="When used with --fix, apply fixes without prompting")
@@ -4690,6 +5258,25 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
         "approving a real ``--fix --yes`` run from a TUI/CI wrapper."
     ),
 )
+@click.option(
+    "--fix-id",
+    "fix_ids",
+    multiple=True,
+    metavar="REPAIR_ID",
+    help=(
+        "Apply only the named repair and its declared dependencies (repeatable). "
+        "Policy-changing or experimental repairs are never selected by a "
+        "blanket --fix --yes."
+    ),
+)
+@click.option(
+    "--passive",
+    is_flag=True,
+    help=(
+        "Skip probes that create synthetic telemetry, invoke an LLM, or submit "
+        "inspection content. --fix --dry-run is always passive."
+    ),
+)
 @pass_ctx
 def doctor(
     app: AppContext,
@@ -4697,6 +5284,8 @@ def doctor(
     do_fix: bool,
     assume_yes: bool,
     dry_run: bool,
+    fix_ids: tuple[str, ...] = (),
+    passive: bool = False,
 ) -> None:
     """Verify credentials, endpoints, and connectivity.
 
@@ -4708,21 +5297,41 @@ def doctor(
     generated trace and requires an acknowledgement from that exact runtime
     route; additional enabled routes receive a bounded coverage warning.
 
-    Use ``--fix`` to auto-repair safe issues (stale sidecar PID files,
-    missing gateway tokens, token-env drift, stopped/stale gateways, dotenv
-    permissions, pristine config backups). Gateway repair may **start or
-    restart the gateway sidecar**, which briefly interrupts in-flight
-    requests; preview the full set first with ``--fix --dry-run``. Doctor no
-    longer tears connectors down as part of ``--fix`` (it only *reports*
+    Use ``--fix`` to plan and auto-repair applicable issues (stale sidecar PID
+    files, a safely absent audit database, missing gateway tokens, token-env
+    drift, stopped/stale gateways, dotenv permissions, and pristine config
+    backups). Gateway repair may **start or restart the gateway sidecar**,
+    which briefly interrupts in-flight requests; preview the applicable set
+    first with ``--fix --dry-run``. A missing device identity is a
+    no-overwrite, custody-bound, explicitly selected attended recovery.
+    Select policy-changing work by its exact ``--fix-id``; blanket ``--yes``
+    never opts into it. Component release drift and unsupported/untested
+    connector versions appear in the repair plan but remain attended
+    upgrade/vendor decisions rather than blind unattended mutations.
+
+    ``--passive`` suppresses probes that create telemetry, invoke an LLM, or
+    submit inspection content; every dry-run is passive. Doctor no longer
+    tears connectors down as part of ``--fix`` (it only *reports*
     inactive-connector residue); run ``defenseclaw-gateway connector teardown
     --connector <name>`` to remove a specific connector. Other destructive or
     ambiguous fixes still require the relevant setup command explicitly.
 
-    Exit codes: 0 = all pass, 1 = any failure.
+    Exit codes: 0 = no hard failure, 1 = a failed health check or a
+    failed/dependency-blocked repair.
     """
     global _json_mode
+    if dry_run and not do_fix:
+        raise click.UsageError("--dry-run requires --fix")
+    if assume_yes and not do_fix:
+        raise click.UsageError("--yes requires --fix")
+    if fix_ids and not do_fix:
+        raise click.UsageError("--fix-id requires --fix")
+    if json_out and do_fix and not dry_run and not assume_yes:
+        raise click.UsageError("--json-output repair runs require --yes or --dry-run")
+
     cfg = app.cfg
-    r = _DoctorResult()
+    mode = "plan" if do_fix and dry_run else "repair" if do_fix else "check"
+    r = _DoctorResult(mode=mode, passive=passive or dry_run)
     _json_mode = json_out
 
     if not json_out:
@@ -4731,24 +5340,54 @@ def doctor(
         ux.echo(ux._style("══════════════════", fg="cyan"))
         ux.echo()
 
+    startup_diagnostics = getattr(app, "doctor_startup_diagnostics", None)
+    if startup_diagnostics is not None:
+        r.set_section("configuration")
+        if not json_out:
+            _doctor_subsection("Configuration")
+        for check in startup_diagnostics.checks:
+            _emit(check.status, check.label, check.detail, r=r)
+        if not (do_fix and dry_run):
+            _write_doctor_cache(cfg, r)
+        if json_out:
+            click.echo(json.dumps(r.to_dict(), indent=2))
+        else:
+            _doctor_subsection("Summary")
+            parts = []
+            if r.passed:
+                parts.append(ux._style(f"{r.passed} passed", fg="green", bold=True))
+            if r.failed:
+                parts.append(ux._style(f"{r.failed} failed", fg="red", bold=True))
+            if r.warned:
+                parts.append(ux._style(f"{r.warned} warnings", fg="yellow", bold=True))
+            ux.echo("  " + ", ".join(parts))
+            ux.echo()
+            ux.warn(startup_diagnostics.remediation, indent="  ")
+            ux.echo()
+        raise SystemExit(1)
+
     # Repair first, then diagnose the resulting state.  The former ordering
     # ran fixers after every check, leaving already-repaired failures in the
     # result and forcing a misleading exit 1 until the operator ran Doctor a
     # second time.
     if do_fix:
+        r.set_section("repairs")
         if not json_out:
             _doctor_subsection("Auto-fix" + (" (dry-run)" if dry_run else ""))
             _emit_hint(_auto_fix_hint(dry_run))
-        _run_fixers(
+        _run_fixers_with_lock(
             cfg,
             r,
             assume_yes=assume_yes,
             json_out=json_out,
             dry_run=dry_run,
+            fix_ids=fix_ids,
         )
 
+    r.set_section("configuration")
     _check_config(cfg, r)
     _check_audit_db(cfg, r)
+    _check_device_identity(cfg, r)
 
     # S6.5 — surface the active connector + its configured paths
     # before any scanner runs. Operators routinely point doctor at a
@@ -4757,6 +5396,7 @@ def doctor(
     # per-connector inventory pass catches that drift.
     if not json_out:
         _doctor_subsection("Connectors")
+    r.set_section("connectors")
     active_connector = _active_connector(cfg)
     # Inventory EVERY active connector uniformly — there is no separate
     # "single" vs "multi" rendering. ``_doctor_active_connectors`` returns one
@@ -4768,6 +5408,7 @@ def doctor(
     # "openclaw" row (D3) — the operator should read "nothing is set up", not a
     # never-configured OpenClaw install reported as broken.
     inventory_connectors = _doctor_active_connectors(cfg)
+    _check_component_connector_compatibility(cfg, inventory_connectors, r)
     if not inventory_connectors:
         _emit(
             "skip",
@@ -4809,11 +5450,13 @@ def doctor(
 
     if not json_out:
         _doctor_subsection("Scanners")
+    r.set_section("scanners")
     _check_scanners(cfg, r)
     _check_scan_coverage(cfg, r)
 
     if not json_out:
         _doctor_subsection("Services")
+    r.set_section("services")
     sidecar_health = _check_sidecar(cfg, r)
     _check_gateway_token_env_alignment(cfg, r)
     if not _check_windows_gateway_diagnostics(cfg, r):
@@ -4862,6 +5505,7 @@ def doctor(
     _check_guardrail_proxy(cfg, r)
     if not json_out:
         _doctor_subsection("Credentials")
+    r.set_section("credentials")
     _check_llm_api_key(cfg, r)
     _check_llm_reachable(cfg, r)
     _check_regional_provider_config(cfg, r)
@@ -4871,9 +5515,11 @@ def doctor(
     _check_registry_credentials(cfg, r)
     if not json_out:
         _doctor_subsection("Observability")
+    r.set_section("observability")
     _check_observability(cfg, r, live_health=sidecar_health)
     if not json_out:
         _doctor_subsection("Webhooks")
+    r.set_section("webhooks")
     _check_webhooks(cfg, r)
 
     # Surface any DEFENSECLAW_* env-var bypass that's currently active.
@@ -4882,9 +5528,10 @@ def doctor(
     # PASS row here.
     if not json_out:
         _doctor_subsection("Security Overrides")
+    r.set_section("security-overrides")
     _check_security_overrides(cfg, r)
 
-    # Persist the cached snapshot before exit so the Go TUI (and any
+    # Persist the cached snapshot before exit so the Textual TUI (and any
     # other cron-style caller) can pick it up without re-probing. We
     # do this *before* the SystemExit(1) below so failing runs still
     # update the cache — the TUI needs to see "doctor last reported
@@ -4905,10 +5552,19 @@ def doctor(
             parts.append(ux._style(f"{r.warned} warnings", fg="yellow", bold=True))
         if r.skipped:
             parts.append(ux._style(f"{r.skipped} skipped", fg="bright_black"))
-        ux.echo("  " + ", ".join(parts))
+        ux.echo("  Health: " + ", ".join(parts))
+        if do_fix:
+            repair_parts = []
+            for state, count in r.repair_summary.to_dict().items():
+                if count:
+                    repair_parts.append(f"{count} {state.replace('_', ' ')}")
+            ux.echo("  Repairs: " + (", ".join(repair_parts) if repair_parts else "none selected"))
         ux.echo()
 
-    if r.failed:
+    repair_failed = bool(r.repair_summary.failed or r.repair_summary.blocked)
+    _record_doctor_action(app, cfg, r, mode)
+
+    if r.failed or repair_failed:
         if not json_out:
             # Surface the remediation hint in yellow — it's the
             # primary call-to-action when doctor fails. We use
@@ -4917,13 +5573,6 @@ def doctor(
             ux.warn("Fix the failures above, then re-run: defenseclaw doctor", indent="  ")
             ux.echo()
         raise SystemExit(1)
-
-    if app.logger and not (do_fix and dry_run):
-        app.logger.log_action(
-            ACTION_DOCTOR,
-            "health-check",
-            f"passed={r.passed} failed={r.failed} warned={r.warned} skipped={r.skipped}",
-        )
 
 
 # Note: earlier revisions exposed a ``run_doctor_checks(cfg)`` helper
@@ -5014,6 +5663,934 @@ def _fixer_blocker(cfg, title: str, dotenv_safety_problem: str) -> str:
     return dotenv_safety_problem
 
 
+def _plan_existing_fixer(
+    fixer,
+    cfg,
+    *,
+    effects: tuple[str, ...],
+) -> RepairDecision:
+    """Run the read-only branch of one legacy fixer."""
+
+    try:
+        tag, detail = fixer(cfg, assume_yes=True, plan_only=True)
+    except Exception as exc:  # noqa: BLE001 - redact arbitrary exception text.
+        return RepairDecision(
+            "blocked",
+            f"{type(exc).__name__}: planner raised unexpectedly",
+            effects=effects,
+        )
+    if tag == "plan":
+        state_key = ""
+        if fixer is _fix_gateway_token:
+            if _CANONICAL_GATEWAY_TOKEN_ENV in detail:
+                state_key = "gateway-token-canonical-present"
+            elif _LEGACY_GATEWAY_TOKEN_ENV in detail:
+                state_key = "gateway-token-legacy-present"
+        return RepairDecision(
+            "applicable",
+            detail,
+            effects=effects,
+            state_key=state_key,
+        )
+    if tag == "fail":
+        return RepairDecision("blocked", detail, effects=effects, blockers=(detail,))
+    if tag == "warn":
+        return RepairDecision("blocked", detail, effects=effects, blockers=(detail,))
+    manual_markers = (
+        "externally managed",
+        "run `",
+        "run '",
+        "no backup strategy",
+        "no backup found",
+        "review ",
+    )
+    if any(marker in detail.casefold() for marker in manual_markers):
+        return RepairDecision("manual", detail, effects=effects)
+    return RepairDecision("noop", detail, effects=effects)
+
+
+def _recovery_gateway_blocker(cfg) -> str:
+    """Require positive evidence that local state is not in active use."""
+
+    projected_repairs = set(getattr(cfg, "_doctor_projected_repair_ids", ()))
+    if "doctor.gateway.pid.remove-stale" in projected_repairs:
+        # Dry-run planners do not mutate the PID file. A preceding applicable
+        # stale-PID plan has already proven that record removable and the
+        # endpoint absent, so model only that bounded effect while rechecking
+        # listener inactivity. This lets the dependent recovery produce one
+        # coherent plan without weakening the real apply-time proof.
+        listener = _verified_listener_gateway_evidence(cfg)
+        if listener.status == "missing":
+            return ""
+        if listener.status == "ok":
+            return "the verified managed gateway is running; stop it before recovering durable state"
+        return "configured gateway endpoint inactivity could not be proven" + (
+            f" ({listener.reason})" if listener.reason else ""
+        )
+
+    process = _managed_gateway_process_trust(cfg)
+    if process.trusted:
+        return "the verified managed gateway process is running; stop it before recovering durable state"
+    if process.code not in {"missing", "missing_process"}:
+        return "managed gateway process inactivity could not be proven" + (
+            f" ({process.detail})" if process.detail else ""
+        )
+
+    listener = _verified_listener_gateway_evidence(cfg)
+    if listener.status == "missing":
+        return ""
+    if listener.status == "ok":
+        return "the verified managed gateway is running; stop it before recovering durable state"
+    return "configured gateway endpoint inactivity could not be proven" + (
+        f" ({listener.reason})" if listener.reason else ""
+    )
+
+
+def _plan_audit_db_recovery(cfg) -> RepairDecision:
+    from defenseclaw.doctor_recovery import (
+        AuditDBHealthStatus,
+        RecoveryDisposition,
+        inspect_audit_db,
+        plan_missing_audit_db,
+    )
+
+    target = str(getattr(cfg, "audit_db", "") or "")
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    effects = ("initialize a verified empty audit schema without replacing an existing name",)
+    if not _doctor_config_present(cfg):
+        reason = "config.yaml is missing; refusing to create durable audit state"
+        return RepairDecision("blocked", reason, effects=effects, blockers=(reason,))
+    health = inspect_audit_db(target, data_dir=data_dir)
+    if health.status is AuditDBHealthStatus.VALID:
+        return RepairDecision(
+            "noop",
+            "audit database passed private-custody, integrity, and schema checks",
+            effects=effects,
+        )
+    if health.status is AuditDBHealthStatus.INVALID:
+        remediation = (
+            "run `defenseclaw migrations apply` after a trusted backup review"
+            if health.reason_code == "audit-db-schema-incomplete"
+            else "restore the audit database from a trusted backup"
+        )
+        detail = (
+            f"existing audit database is not safe to use ({health.reason_code}); "
+            f"{remediation}; Doctor will not replace it"
+        )
+        return RepairDecision(
+            "blocked",
+            detail,
+            effects=effects,
+            blockers=(health.reason_code,),
+        )
+
+    plan = plan_missing_audit_db(target, data_dir=data_dir)
+    if plan.disposition is RecoveryDisposition.BLOCKED:
+        return RepairDecision(
+            "blocked",
+            f"audit database recovery refused: {plan.reason_code}",
+            effects=effects,
+            blockers=(plan.reason_code,),
+        )
+    if blocker := _recovery_gateway_blocker(cfg):
+        return RepairDecision("blocked", blocker, effects=effects, blockers=(blocker,))
+    return RepairDecision(
+        "applicable",
+        f"create {target} with the current audit schema using no-overwrite publication",
+        effects=effects,
+    )
+
+
+def _fix_audit_db_recovery(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    from defenseclaw.doctor_recovery import (
+        AuditDBHealthStatus,
+        RecoveryApplyStatus,
+        RecoveryRefusedError,
+        apply_audit_db_recovery,
+        inspect_audit_db,
+        plan_missing_audit_db,
+    )
+
+    target = str(getattr(cfg, "audit_db", "") or "")
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not _doctor_config_present(cfg):
+        return ("fail", "config.yaml is missing; refusing to create durable audit state")
+    health = inspect_audit_db(target, data_dir=data_dir)
+    if health.status is AuditDBHealthStatus.VALID:
+        return ("skip", "audit database already passed integrity and schema checks")
+    if health.status is AuditDBHealthStatus.INVALID:
+        return (
+            "fail",
+            f"existing audit database is invalid ({health.reason_code}); refusing to replace it",
+        )
+    if blocker := _recovery_gateway_blocker(cfg):
+        return ("fail", blocker)
+    plan = plan_missing_audit_db(target, data_dir=data_dir)
+    if not assume_yes and not click.confirm(
+        f"    Initialize the missing audit database at {target}?",
+        default=True,
+    ):
+        return ("skip", "declined by user")
+    try:
+        result = apply_audit_db_recovery(
+            plan,
+            approved=True,
+            unattended=assume_yes,
+        )
+    except RecoveryRefusedError as exc:
+        return ("fail", f"audit database recovery refused: {exc.code}")
+    if result.status is RecoveryApplyStatus.CREATED:
+        return ("pass", f"created and verified the audit database at {target}")
+    return ("fail", f"audit database recovery failed: {result.reason_code}")
+
+
+def _plan_device_key_recovery(cfg) -> RepairDecision:
+    from defenseclaw.doctor_recovery import (
+        DeviceKeyHealthStatus,
+        RecoveryDisposition,
+        inspect_device_key,
+        plan_missing_device_key,
+    )
+
+    gateway = getattr(cfg, "gateway", None)
+    target = str(getattr(gateway, "device_key_file", "") or "")
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    effects = (
+        "mint a new Ed25519 device identity",
+        "publish HMAC-bound provenance before making the key visible",
+    )
+    if not _doctor_config_present(cfg):
+        reason = "config.yaml is missing; refusing to mint durable device identity state"
+        return RepairDecision("blocked", reason, effects=effects, blockers=(reason,))
+    health = inspect_device_key(target, data_dir=data_dir)
+    if health.status is DeviceKeyHealthStatus.VALID:
+        return RepairDecision(
+            "noop",
+            "device identity passed private-custody, payload, and provenance checks",
+            effects=effects,
+        )
+    if health.status is DeviceKeyHealthStatus.LEGACY_UNPROVENANCED:
+        return RepairDecision(
+            "noop",
+            f"existing device identity is structurally valid but uses legacy provenance "
+            f"({health.reason_code}); continuity is preserved and Doctor will not replace it",
+            effects=effects,
+        )
+    if health.status is DeviceKeyHealthStatus.INVALID:
+        detail = (
+            f"existing device identity is invalid ({health.reason_code}); restore the "
+            "identity from a trusted backup or re-pair it explicitly; Doctor will not replace it"
+        )
+        return RepairDecision(
+            "blocked",
+            detail,
+            effects=effects,
+            blockers=(health.reason_code,),
+        )
+
+    plan = plan_missing_device_key(target, data_dir=data_dir)
+    if plan.disposition is RecoveryDisposition.BLOCKED:
+        return RepairDecision(
+            "blocked",
+            f"device identity recovery refused: {plan.reason_code}",
+            effects=effects,
+            blockers=(plan.reason_code,),
+        )
+    if blocker := _recovery_gateway_blocker(cfg):
+        return RepairDecision("blocked", blocker, effects=effects, blockers=(blocker,))
+    return RepairDecision(
+        "requires_confirmation",
+        "mint a new device identity only after an attended continuity review",
+        effects=effects,
+    )
+
+
+def _fix_device_key_recovery(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    from defenseclaw.doctor_recovery import (
+        DeviceKeyHealthStatus,
+        RecoveryApplyStatus,
+        RecoveryRefusedError,
+        apply_device_key_recovery,
+        inspect_device_key,
+        plan_missing_device_key,
+    )
+
+    # The declarative engine deliberately passes assume_yes=False for
+    # experimental repairs.  Keep this defense in depth in case another caller
+    # reaches the adapter directly.
+    if assume_yes:
+        return (
+            "warn",
+            "device identity recovery requires an attended confirmation; blanket --yes was ignored",
+        )
+    gateway = getattr(cfg, "gateway", None)
+    target = str(getattr(gateway, "device_key_file", "") or "")
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not _doctor_config_present(cfg):
+        return ("fail", "config.yaml is missing; refusing to mint durable device identity state")
+    health = inspect_device_key(target, data_dir=data_dir)
+    if health.status in {
+        DeviceKeyHealthStatus.VALID,
+        DeviceKeyHealthStatus.LEGACY_UNPROVENANCED,
+    }:
+        return ("skip", "existing device identity is valid and will be preserved")
+    if health.status is DeviceKeyHealthStatus.INVALID:
+        return (
+            "fail",
+            f"existing device identity is invalid ({health.reason_code}); refusing to replace it",
+        )
+    if blocker := _recovery_gateway_blocker(cfg):
+        return ("fail", blocker)
+    plan = plan_missing_device_key(target, data_dir=data_dir)
+    if not click.confirm(
+        "    Mint a NEW device identity? Existing pairings tied to a prior key will not be recoverable.",
+        default=False,
+    ):
+        return ("skip", "declined by user")
+    try:
+        result = apply_device_key_recovery(plan, approved=True, unattended=False)
+    except RecoveryRefusedError as exc:
+        return ("fail", f"device identity recovery refused: {exc.code}")
+    if result.status is RecoveryApplyStatus.CREATED:
+        return ("pass", f"created a provenance-bound device identity at {target}")
+    return ("fail", f"device identity recovery failed: {result.reason_code}")
+
+
+def _connector_compatibility_problems(cfg) -> tuple[object, ...]:
+    """Return current unsupported/untested connector findings."""
+
+    from defenseclaw.doctor_health import (
+        HealthStatus,
+        assess_connector_health,
+        read_cached_discovery,
+    )
+
+    connectors = tuple(connector for connector in _doctor_active_connectors(cfg) if _connector_enabled(cfg, connector))
+    if not connectors:
+        return ()
+    discovery = read_cached_discovery(str(getattr(cfg, "data_dir", "") or ""))
+    findings = assess_connector_health(connectors, discovery)
+    return tuple(finding for finding in findings if finding.status is not HealthStatus.SUPPORTED)
+
+
+def _plan_connector_compatibility_review(cfg) -> RepairDecision:
+    """Offer an attended evidence refresh, never an unsupported install."""
+
+    from defenseclaw.doctor_health import RemediationKind
+
+    try:
+        problems = _connector_compatibility_problems(cfg)
+    except Exception as exc:  # noqa: BLE001 - never render cache/probe output.
+        return RepairDecision(
+            "manual",
+            f"{type(exc).__name__}: connector compatibility evidence is unavailable; "
+            "rerun bounded discovery before making a version decision",
+            effects=("refresh bounded local agent version evidence without emitting telemetry",),
+        )
+    if not problems:
+        return RepairDecision("noop", "active connector versions match registered contracts")
+    summary = ", ".join(f"{finding.connector}={finding.status.value}/{finding.reason_code}" for finding in problems)
+    refresh_argv = (
+        "defenseclaw",
+        "agent",
+        "discover",
+        "--refresh",
+        "--no-emit-otel",
+    )
+    has_bounded_refresh = any(
+        choice.kind is RemediationKind.COMMAND and choice.argv == refresh_argv
+        for finding in problems
+        for choice in finding.remediations
+    )
+    if has_bounded_refresh:
+        return RepairDecision(
+            "requires_confirmation",
+            "unsupported or untested connector evidence can be refreshed with "
+            "attended approval; Doctor will run only bounded version discovery, "
+            f"not install or launch connector workloads ({summary})",
+            effects=("refresh bounded local agent version evidence without emitting telemetry",),
+        )
+    return RepairDecision(
+        "manual",
+        "unsupported or untested external connector versions require an "
+        f"attended vendor/setup decision ({summary}); Doctor will not execute them",
+        effects=("review vendor version changes and rerun connector setup interactively",),
+    )
+
+
+def _plan_connector_compatibility_gate(cfg) -> RepairDecision:
+    """Block lifecycle only on positive unsupported connector evidence."""
+
+    from defenseclaw.doctor_health import HealthStatus
+
+    try:
+        problems = _connector_compatibility_problems(cfg)
+    except Exception as exc:  # noqa: BLE001 - never render cache/probe output.
+        return RepairDecision(
+            "noop",
+            f"{type(exc).__name__}: connector compatibility evidence is unavailable; "
+            "no unsupported version decision was inferred",
+        )
+    unsupported = tuple(
+        finding
+        for finding in problems
+        if finding.status is HealthStatus.UNSUPPORTED
+    )
+    if unsupported:
+        summary = ", ".join(
+            f"{finding.connector}={finding.reason_code}"
+            for finding in unsupported
+        )
+        return RepairDecision(
+            "manual",
+            "gateway lifecycle repair is blocked by positively unsupported "
+            f"connector compatibility evidence ({summary})",
+            blockers=("unsupported connector compatibility",),
+        )
+    if problems:
+        return RepairDecision(
+            "noop",
+            "connector version evidence is unavailable or untested, but no "
+            "positively unsupported version was observed; the separate "
+            "compatibility review remains available",
+        )
+    return RepairDecision("noop", "no unsupported active connector version was observed")
+
+
+def _fix_connector_compatibility_review(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    from defenseclaw.doctor_health import (
+        RemediationAuthorizationError,
+        RemediationKind,
+        authorize_remediation,
+    )
+
+    if assume_yes:
+        return (
+            "warn",
+            "connector compatibility review requires attended approval; blanket --yes was ignored",
+        )
+    problems = _connector_compatibility_problems(cfg)
+    if not problems:
+        return ("skip", "connector compatibility already matches registered contracts")
+    refresh_argv = (
+        "defenseclaw",
+        "agent",
+        "discover",
+        "--refresh",
+        "--no-emit-otel",
+    )
+    refresh_choice = next(
+        (
+            choice
+            for finding in problems
+            for choice in finding.remediations
+            if choice.kind is RemediationKind.COMMAND and choice.argv == refresh_argv
+        ),
+        None,
+    )
+    if refresh_choice is None:
+        return (
+            "skip",
+            "manual connector vendor/setup decision required; Doctor has no bounded executable remediation",
+        )
+    if not click.confirm(
+        "    Refresh connector version evidence now? This runs version discovery "
+        "only; it will not install, upgrade, downgrade, or launch connector workloads.",
+        default=False,
+    ):
+        return ("skip", "declined by user")
+    try:
+        argv = authorize_remediation(
+            refresh_choice,
+            confirmed=True,
+            unattended=False,
+        )
+    except RemediationAuthorizationError as exc:
+        return ("fail", f"connector evidence refresh authorization failed: {exc.code}")
+    if argv != refresh_argv:
+        return ("fail", "connector evidence refresh resolved an unexpected command")
+    try:
+        from defenseclaw.inventory import agent_discovery
+
+        agent_discovery.discover_agents(
+            use_cache=False,
+            refresh=True,
+            data_dir=str(getattr(cfg, "data_dir", "") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - do not render probe output.
+        return (
+            "fail",
+            f"{type(exc).__name__}: bounded connector version discovery failed; no version change was attempted",
+        )
+    remaining = _connector_compatibility_problems(cfg)
+    if not remaining:
+        return ("pass", "refreshed version evidence now matches registered connector contracts")
+    summary = ", ".join(f"{finding.connector}={finding.status.value}/{finding.reason_code}" for finding in remaining)
+    return (
+        "skip",
+        "manual connector vendor/setup decision remains after attended evidence "
+        f"refresh ({summary}); no version change was attempted",
+    )
+
+
+def _component_compatibility_problems(cfg) -> tuple[object, ...]:
+    from defenseclaw.doctor_health import (
+        HealthStatus,
+        assess_component_health,
+        probe_component_evidence,
+    )
+
+    required = {"cli", "gateway"}
+    enabled_connectors = {
+        connector for connector in _doctor_active_connectors(cfg) if _connector_enabled(cfg, connector)
+    }
+    if "openclaw" in enabled_connectors:
+        required.add("plugin")
+    findings = assess_component_health(probe_component_evidence())
+
+    return tuple(
+        finding
+        for finding in findings
+        if finding.component in required and finding.status is not HealthStatus.SUPPORTED
+    )
+
+
+def _plan_component_compatibility_review(cfg) -> RepairDecision:
+    """Expose component drift to ``--fix`` without launching an upgrade."""
+
+    try:
+        problems = _component_compatibility_problems(cfg)
+    except Exception as exc:  # noqa: BLE001 - never render probe output.
+        return RepairDecision(
+            "manual",
+            f"{type(exc).__name__}: component compatibility evidence is unavailable",
+            effects=("review the bounded component version report before changing releases",),
+        )
+
+    if not problems:
+        return RepairDecision("noop", "required DefenseClaw components use one supported release")
+
+    details: list[str] = []
+    for finding in problems:
+        remediation = _health_remediation_text(finding.remediations)
+        item = f"{finding.component}={finding.status.value}/{finding.reason_code}"
+        if remediation:
+            item += f" (review: {remediation})"
+        details.append(item)
+    return RepairDecision(
+        "manual",
+        "component release drift requires an attended upgrade/reinstall decision; "
+        "Doctor will not launch an upgrade from inside a repair transaction "
+        f"({'; '.join(details)})",
+        effects=("review authenticated DefenseClaw upgrade or trusted component reinstall",),
+    )
+
+
+def _plan_component_compatibility_gate(cfg) -> RepairDecision:
+    """Block lifecycle only on positive component release mismatch."""
+
+    from defenseclaw.doctor_health import HealthStatus
+
+    try:
+        problems = _component_compatibility_problems(cfg)
+    except Exception as exc:  # noqa: BLE001 - never render probe output.
+        return RepairDecision(
+            "noop",
+            f"{type(exc).__name__}: component compatibility evidence is unavailable; "
+            "no unsupported release decision was inferred",
+        )
+    unsupported = tuple(
+        finding
+        for finding in problems
+        if finding.status is HealthStatus.UNSUPPORTED
+    )
+    if unsupported:
+        summary = ", ".join(
+            f"{finding.component}={finding.reason_code}"
+            for finding in unsupported
+        )
+        return RepairDecision(
+            "manual",
+            "gateway lifecycle repair is blocked by positively unsupported "
+            f"component compatibility evidence ({summary})",
+            blockers=("unsupported component compatibility",),
+        )
+    if problems:
+        return RepairDecision(
+            "noop",
+            "component version evidence is unavailable or untested, but no "
+            "positive release mismatch was observed; the separate compatibility "
+            "review remains available",
+        )
+    return RepairDecision("noop", "no unsupported required component release was observed")
+
+
+def _fix_compatibility_gate(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    del cfg, assume_yes
+    return ("skip", "compatibility safety gate already converged")
+
+
+def _fix_component_compatibility_review(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    del cfg, assume_yes
+    return (
+        "warn",
+        "component release changes require an attended upgrade or trusted reinstall",
+    )
+
+
+def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
+    """Return the ordered declarative repair graph.
+
+    The order remains compatible with the credential A/B transaction while
+    dependencies are now visible to JSON/TUI consumers instead of existing
+    only as title-string control flow.
+    """
+
+    definitions = (
+        (
+            "doctor.credentials.dotenv.protect",
+            "defenseclaw dotenv perms",
+            "safe",
+            _fix_dotenv_perms,
+            (),
+            ("enforce owner-only credential-file custody",),
+            False,
+            False,
+        ),
+        (
+            "doctor.gateway.token.ensure",
+            "gateway token",
+            "disruptive",
+            _fix_gateway_token,
+            ("doctor.credentials.dotenv.protect",),
+            (
+                "create or rotate the locally managed gateway token",
+                "repoint a supported legacy token provider in config.yaml when exposure rotation requires it",
+            ),
+            True,
+            False,
+        ),
+        (
+            "doctor.gateway.token-env.canonicalize",
+            "gateway token_env",
+            "safe",
+            _fix_gateway_token_env,
+            ("doctor.gateway.token.ensure",),
+            ("save the canonical gateway token provider in config.yaml",),
+            False,
+            False,
+        ),
+        (
+            "doctor.gateway.token.reconcile-runtime",
+            "gateway token drift",
+            "disruptive",
+            _fix_gateway_token_drift,
+            (
+                "doctor.state.audit-db.initialize",
+                "doctor.identity.device-key.initialize",
+                "doctor.gateway.token.ensure",
+                "doctor.gateway.token-env.canonicalize",
+                "doctor.component.compatibility.gate",
+                "doctor.connector.compatibility.gate",
+            ),
+            ("restart a verified gateway generation and authenticate its replacement",),
+            True,
+            False,
+        ),
+        (
+            "doctor.gateway.service.reconcile",
+            "gateway service",
+            "disruptive",
+            _fix_gateway_service,
+            (
+                "doctor.state.audit-db.initialize",
+                "doctor.identity.device-key.initialize",
+                "doctor.gateway.pid.remove-stale",
+                "doctor.gateway.token.ensure",
+                "doctor.gateway.token-env.canonicalize",
+                "doctor.gateway.token.reconcile-runtime",
+                "doctor.component.compatibility.gate",
+                "doctor.connector.compatibility.gate",
+            ),
+            ("start or restart the verified managed gateway",),
+            True,
+            False,
+        ),
+        (
+            "doctor.connector.backup.capture",
+            "pristine config backup",
+            "safe",
+            _fix_pristine_backup,
+            (),
+            ("capture a restorable connector configuration baseline",),
+            False,
+            False,
+        ),
+        (
+            "doctor.policy.plugin-registry.clear-dead-end",
+            "plugin registry dead-end",
+            "policy",
+            _fix_plugin_registry_required,
+            (),
+            ("change explicit plugin admission policy in config.yaml",),
+            False,
+            True,
+        ),
+    )
+    specs: list[RepairSpec] = [
+        RepairSpec(
+            repair_id=_CONFIG_PREFLIGHT_REPAIR_ID,
+            label="canonical configuration preflight",
+            risk="safe",
+            plan=_plan_canonical_config_preflight,
+            apply=_fix_canonical_config_preflight,
+            effects=(),
+        ),
+        RepairSpec(
+            repair_id="doctor.gateway.pid.remove-stale",
+            label="stale gateway PID file",
+            risk="safe",
+            plan=lambda cfg: _plan_existing_fixer(
+                _fix_stale_pid,
+                cfg,
+                effects=("remove positively stale same-install PID state",),
+            ),
+            apply=_fix_stale_pid,
+            dependencies=(_CONFIG_PREFLIGHT_REPAIR_ID,),
+            effects=("remove positively stale same-install PID state",),
+        ),
+        RepairSpec(
+            repair_id="doctor.state.audit-db.initialize",
+            label="missing audit database",
+            risk="safe",
+            plan=_plan_audit_db_recovery,
+            apply=_fix_audit_db_recovery,
+            verify=lambda cfg: default_repair_verifier(_plan_audit_db_recovery, cfg),
+            dependencies=(
+                _CONFIG_PREFLIGHT_REPAIR_ID,
+                "doctor.gateway.pid.remove-stale",
+            ),
+            effects=("initialize a verified empty audit schema without replacing an existing name",),
+        ),
+        RepairSpec(
+            repair_id="doctor.identity.device-key.initialize",
+            label="missing device identity",
+            risk="experimental",
+            plan=_plan_device_key_recovery,
+            apply=_fix_device_key_recovery,
+            verify=lambda cfg: default_repair_verifier(_plan_device_key_recovery, cfg),
+            effects=(
+                "mint a new Ed25519 device identity",
+                "publish HMAC-bound provenance before making the key visible",
+            ),
+            dependencies=(
+                _CONFIG_PREFLIGHT_REPAIR_ID,
+                "doctor.gateway.pid.remove-stale",
+            ),
+            explicit_selection_required=True,
+        ),
+        RepairSpec(
+            repair_id="doctor.component.compatibility.gate",
+            label="component compatibility safety gate",
+            risk="safe",
+            plan=_plan_component_compatibility_gate,
+            apply=_fix_compatibility_gate,
+            dependencies=(_CONFIG_PREFLIGHT_REPAIR_ID,),
+            effects=(),
+        ),
+        RepairSpec(
+            repair_id="doctor.connector.compatibility.gate",
+            label="connector compatibility safety gate",
+            risk="safe",
+            plan=_plan_connector_compatibility_gate,
+            apply=_fix_compatibility_gate,
+            dependencies=(_CONFIG_PREFLIGHT_REPAIR_ID,),
+            effects=(),
+        ),
+        RepairSpec(
+            repair_id="doctor.component.compatibility.review",
+            label="component compatibility",
+            risk="experimental",
+            plan=_plan_component_compatibility_review,
+            apply=_fix_component_compatibility_review,
+            dependencies=(_CONFIG_PREFLIGHT_REPAIR_ID,),
+            effects=("review authenticated DefenseClaw upgrade or trusted component reinstall",),
+            explicit_selection_required=True,
+        ),
+        RepairSpec(
+            repair_id="doctor.connector.compatibility.review",
+            label="connector compatibility",
+            risk="experimental",
+            plan=_plan_connector_compatibility_review,
+            apply=_fix_connector_compatibility_review,
+            dependencies=(_CONFIG_PREFLIGHT_REPAIR_ID,),
+            effects=("review vendor version changes and rerun connector setup interactively",),
+            explicit_selection_required=True,
+        ),
+    ]
+    for (
+        repair_id,
+        label,
+        risk,
+        fixer,
+        dependencies,
+        effects,
+        may_restart,
+        explicit_selection_required,
+    ) in definitions:
+        specs.append(
+            RepairSpec(
+                repair_id=repair_id,
+                label=label,
+                risk=risk,
+                plan=lambda cfg, _fixer=fixer, _effects=effects: _plan_existing_fixer(
+                    _fixer,
+                    cfg,
+                    effects=_effects,
+                ),
+                apply=fixer,
+                dependencies=(
+                    (_CONFIG_PREFLIGHT_REPAIR_ID, *dependencies)
+                    if _CONFIG_PREFLIGHT_REPAIR_ID not in dependencies
+                    else dependencies
+                ),
+                effects=effects,
+                may_restart=may_restart,
+                explicit_selection_required=explicit_selection_required,
+            )
+        )
+    return tuple(specs)
+
+
+def _repair_display_tag(state: str) -> str:
+    if state == "applied":
+        return "pass"
+    if state in {"failed", "blocked"}:
+        return "fail"
+    if state in {"applicable", "manual", "requires_confirmation"}:
+        return "warn"
+    return "skip"
+
+
+def _doctor_platform_name(platform_name: str | None = None) -> str:
+    """Return the stable platform name used by repair declarations."""
+
+    current = (platform_name or sys.platform).strip().casefold()
+    if current.startswith("linux"):
+        return "linux"
+    if current in {"nt", "windows"} or current.startswith("win"):
+        return "win32"
+    return current
+
+
+def _legacy_apply_decision(
+    spec: RepairSpec,
+    tag: str,
+    detail: str,
+) -> RepairDecision:
+    """Translate a legacy fixer result without guessing that warnings succeeded."""
+
+    normalized_tag = tag.strip().casefold()
+    lowered = detail.casefold()
+    if normalized_tag == "warn":
+        # These two warnings describe a completed, bounded step.  The dotenv
+        # fixer intentionally hands an exposed file to the dependent token
+        # rotation transaction; the gateway lifecycle fixer may complete its
+        # ownership repair while a separately diagnosed upstream subsystem
+        # remains operationally degraded.
+        dotenv_handoff = (
+            spec.repair_id == "doctor.credentials.dotenv.protect"
+            and "leaving the file unchanged until" in lowered
+            and "gateway-token fixer" in lowered
+        )
+        verified_lifecycle = spec.repair_id == "doctor.gateway.service.reconcile" and "ownership verified" in lowered
+        if dotenv_handoff or verified_lifecycle:
+            return RepairDecision("applied", detail, effects=spec.effects)
+        return RepairDecision(
+            "failed",
+            detail,
+            effects=spec.effects,
+            blockers=(detail,),
+        )
+
+    state = legacy_outcome_state(normalized_tag, detail)
+    blockers = (detail,) if state in {"failed", "blocked"} else ()
+    return RepairDecision(
+        state,
+        detail,
+        effects=spec.effects,
+        blockers=blockers,
+    )
+
+
+def _stable_topological_repair_specs(
+    specs: tuple[RepairSpec, ...],
+    selected_ids: set[str],
+) -> tuple[tuple[RepairSpec, ...], tuple[str, ...]]:
+    """Order the selected repair graph and report bounded registry defects."""
+
+    first_by_id: dict[str, RepairSpec] = {}
+    declaration_order: list[str] = []
+    duplicate_ids: set[str] = set()
+    for spec in specs:
+        if spec.repair_id in first_by_id:
+            duplicate_ids.add(spec.repair_id)
+            continue
+        first_by_id[spec.repair_id] = spec
+        declaration_order.append(spec.repair_id)
+
+    active_ids = (
+        {repair_id for repair_id in selected_ids if repair_id in first_by_id}
+        if selected_ids
+        else set(first_by_id)
+    )
+    indegree = {repair_id: 0 for repair_id in active_ids}
+    dependents: dict[str, list[str]] = {repair_id: [] for repair_id in active_ids}
+    missing_edges: list[str] = []
+    for repair_id in declaration_order:
+        if repair_id not in active_ids:
+            continue
+        for dependency in first_by_id[repair_id].dependencies:
+            if dependency not in first_by_id:
+                missing_edges.append(f"{repair_id} -> {dependency}")
+                continue
+            if dependency not in active_ids:
+                missing_edges.append(f"{repair_id} -> unselected {dependency}")
+                continue
+            indegree[repair_id] += 1
+            dependents[dependency].append(repair_id)
+
+    remaining = set(active_ids)
+    ordered_ids: list[str] = []
+    while remaining:
+        ready = next(
+            (
+                repair_id
+                for repair_id in declaration_order
+                if repair_id in remaining and indegree[repair_id] == 0
+            ),
+            "",
+        )
+        if not ready:
+            break
+        remaining.remove(ready)
+        ordered_ids.append(ready)
+        for dependent in dependents[ready]:
+            indegree[dependent] -= 1
+
+    blockers: list[str] = []
+    if duplicate_ids:
+        blockers.append("duplicate repair IDs: " + ", ".join(sorted(duplicate_ids)))
+    if missing_edges:
+        blockers.append("missing repair dependencies: " + ", ".join(sorted(missing_edges)))
+    if remaining:
+        blockers.append("cyclic repair dependencies: " + ", ".join(sorted(remaining)))
+        ordered_ids.extend(
+            repair_id for repair_id in declaration_order if repair_id in remaining
+        )
+    return tuple(first_by_id[repair_id] for repair_id in ordered_ids), tuple(blockers)
+
+
 def _run_fixers(
     cfg,
     r: _DoctorResult,
@@ -5021,19 +6598,13 @@ def _run_fixers(
     assume_yes: bool,
     json_out: bool,
     dry_run: bool = False,
+    fix_ids: tuple[str, ...] = (),
 ) -> None:
-    """Run each fixer in sequence, narrating what changed.
+    """Plan or apply the declarative repair graph.
 
-    Fixers are intentionally *small* and independent. Gateway token drift may
-    restart the sidecar, and gateway service repair may start or restart it;
-    both prompt first unless ``--yes``. That blast radius is surfaced by the
-    Auto-fix banner and ``--fix`` help text (D8). Anything that needs a full
-    re-patch — or that would tear a connector down — is deferred to the human.
-
-    With ``dry_run=True`` we *list* each fixer instead of invoking it.
-    The reported tag is always ``"skip"`` and the detail explains the
-    fixer would run; this lets a TUI / CI caller render a preview
-    before granting an explicit ``--yes`` to mutate anything.
+    Dry-run executes only each fixer's explicit read-only planner.  Real runs
+    preserve the established credential ordering, while schema-v2 records
+    keep repair attempts out of post-repair health counts.
     """
     # NOTE (D7): the connector-teardown fixer was deliberately REMOVED from
     # this list. Doctor is a diagnostic — it *reports* inactive-connector
@@ -5045,16 +6616,49 @@ def _run_fixers(
     # first-class ``defenseclaw connector teardown`` CLI surface; until then,
     # operators run ``defenseclaw-gateway connector teardown --connector
     # <name>`` explicitly.
-    fixers = [
-        ("stale gateway PID file", _fix_stale_pid),
-        ("defenseclaw dotenv perms", _fix_dotenv_perms),
-        ("gateway token", _fix_gateway_token),
-        ("gateway token_env", _fix_gateway_token_env),
-        ("gateway token drift", _fix_gateway_token_drift),
-        ("gateway service", _fix_gateway_service),
-        ("pristine config backup", _fix_pristine_backup),
-        ("plugin registry dead-end", _fix_plugin_registry_required),
-    ]
+    specs = _doctor_repair_specs()
+    known_ids = {spec.repair_id for spec in specs}
+    explicit_ids = set(fix_ids)
+    selected_ids = set(explicit_ids)
+    for unknown_id in sorted(selected_ids - known_ids):
+        record = RepairRecord(
+            repair_id=unknown_id,
+            label=unknown_id,
+            state="failed",
+            risk="safe",
+            detail="unknown Doctor repair ID",
+            blockers=("repair ID is not registered",),
+            platform=sys.platform,
+        )
+        r.record_repair(record)
+        if not json_out:
+            _emit("fail", f"fix: {unknown_id}", detail=record.detail)
+
+    if selected_ids:
+        dependencies_by_id = {spec.repair_id: spec.dependencies for spec in specs}
+        pending = list(selected_ids & known_ids)
+        while pending:
+            current = pending.pop()
+            for dependency in dependencies_by_id.get(current, ()):
+                if dependency not in selected_ids:
+                    selected_ids.add(dependency)
+                    pending.append(dependency)
+
+    ordered_specs, graph_blockers = _stable_topological_repair_specs(specs, selected_ids)
+    if graph_blockers:
+        graph_record = RepairRecord(
+            repair_id="doctor.repair.graph",
+            label="repair dependency graph",
+            state="failed",
+            risk="safe",
+            detail="Doctor repair registry is invalid; affected repairs will fail closed",
+            blockers=graph_blockers,
+            platform=sys.platform,
+        )
+        r.record_repair(graph_record)
+        if not json_out:
+            _emit("fail", "fix: repair dependency graph", detail=graph_record.detail)
+
     dotenv_safety_problem = ""
     external_gateway_env_names: list[str] = []
     data_dir = str(getattr(cfg, "data_dir", "") or "")
@@ -5068,33 +6672,277 @@ def _run_fixers(
             external_gateway_env_names.append(env_name)
     setattr(cfg, "_doctor_external_gateway_env_names", tuple(external_gateway_env_names))
 
-    for title, fn in fixers:
-        blocker = "" if dry_run else _fixer_blocker(cfg, title, dotenv_safety_problem)
-        if dry_run:
-            outcome = ("skip", "would run (dry-run; no changes made)")
-        elif blocker:
-            repair_scope = "credential repair" if title == "gateway token" else "credential or lifecycle repair"
-            outcome = (
-                "fail",
-                f"blocked because {blocker}; review and securely replace .env before {repair_scope}",
+    outcomes: dict[str, str] = {}
+    outcome_state_keys: dict[str, str] = {}
+    platform_name = _doctor_platform_name()
+    for spec in ordered_specs:
+        started = time.monotonic()
+        unsupported_platform = platform_name not in spec.platforms
+        dependency_states = {dependency: outcomes.get(dependency, "not-run") for dependency in spec.dependencies}
+        acceptable_dependency_states = {"applicable", "noop", "applied"} if dry_run else {"noop", "applied"}
+        unsatisfied_dependencies = tuple(
+            dependency for dependency, state in dependency_states.items() if state not in acceptable_dependency_states
+        )
+
+        if graph_blockers:
+            decision = RepairDecision(
+                "blocked",
+                "repair registry validation failed; repair was not attempted",
+                effects=spec.effects,
+                blockers=graph_blockers,
+            )
+        elif unsupported_platform:
+            decision = RepairDecision(
+                "manual",
+                f"repair is unavailable on platform {platform_name!r}",
+                effects=spec.effects,
+                blockers=(f"supported platforms: {', '.join(spec.platforms)}",),
+            )
+        elif unsatisfied_dependencies:
+            blockers = tuple(
+                f"{dependency} ended in {dependency_states[dependency]}" for dependency in unsatisfied_dependencies
+            )
+            decision = RepairDecision(
+                "blocked",
+                "prerequisite repair did not converge; dependent repair was not attempted",
+                effects=spec.effects,
+                blockers=blockers,
             )
         else:
+            projected_attr = "_doctor_projected_repair_ids"
+            projected_state_attr = "_doctor_projected_repair_state_keys"
+            previous_projection = getattr(cfg, projected_attr, None)
+            previous_state_projection = getattr(cfg, projected_state_attr, None)
+            had_previous_projection = hasattr(cfg, projected_attr)
+            had_previous_state_projection = hasattr(cfg, projected_state_attr)
+            projected_repairs = (
+                tuple(
+                    repair_id
+                    for repair_id, state in outcomes.items()
+                    if state == "applicable"
+                )
+                if dry_run
+                else ()
+            )
+            setattr(cfg, projected_attr, projected_repairs)
+            setattr(
+                cfg,
+                projected_state_attr,
+                tuple(outcome_state_keys.values()) if dry_run else (),
+            )
             try:
-                outcome = fn(cfg, assume_yes=assume_yes)
-            except Exception as exc:  # defensive — one fixer shouldn't abort the rest
-                # ``error`` is not a Doctor schema status and used to fall
-                # through as a skipped check, allowing a broken repair to
-                # preserve exit 0. Do not render arbitrary exception text:
-                # filesystem and child-process errors can contain secrets.
-                outcome = ("fail", f"{type(exc).__name__}: fixer raised unexpectedly")
-            if title in {"defenseclaw dotenv perms", "gateway token"}:
-                dotenv_safety_problem = _gateway_dotenv_safety_problem(cfg)
+                try:
+                    plan = spec.plan(cfg)
+                except Exception as exc:  # noqa: BLE001 - preserve typed/redacted output.
+                    plan = RepairDecision(
+                        "failed",
+                        f"{type(exc).__name__}: planner raised unexpectedly",
+                        effects=spec.effects,
+                        blockers=("repair planner did not complete",),
+                    )
+            finally:
+                if had_previous_projection:
+                    setattr(cfg, projected_attr, previous_projection)
+                else:
+                    delattr(cfg, projected_attr)
+                if had_previous_state_projection:
+                    setattr(cfg, projected_state_attr, previous_state_projection)
+                else:
+                    delattr(cfg, projected_state_attr)
+            blocker = "" if dry_run else _fixer_blocker(cfg, spec.label, dotenv_safety_problem)
+            if plan.state not in {"applicable", "requires_confirmation"}:
+                decision = plan
+            elif dry_run and spec.risk == "experimental":
+                decision = RepairDecision(
+                    "requires_confirmation",
+                    f"{plan.detail}; real repair requires an attended confirmation",
+                    effects=plan.effects or spec.effects,
+                    blockers=plan.blockers,
+                    state_key=plan.state_key,
+                )
+            elif dry_run and spec.explicit_selection_required and spec.repair_id not in explicit_ids:
+                decision = RepairDecision(
+                    "requires_confirmation",
+                    f"{plan.detail}; real repair requires explicit --fix-id {spec.repair_id}",
+                    effects=plan.effects or spec.effects,
+                    blockers=plan.blockers,
+                    state_key=plan.state_key,
+                )
+            elif dry_run:
+                decision = plan
+            elif (spec.explicit_selection_required or spec.risk == "experimental") and (
+                spec.repair_id not in explicit_ids
+            ):
+                decision = RepairDecision(
+                    "manual",
+                    f"{spec.risk} repair requires explicit --fix-id {spec.repair_id}",
+                    effects=plan.effects or spec.effects,
+                )
+            elif spec.risk == "experimental" and assume_yes:
+                decision = RepairDecision(
+                    "requires_confirmation",
+                    "experimental repair requires an attended confirmation; blanket --yes was deliberately ignored",
+                    effects=plan.effects or spec.effects,
+                )
+            elif blocker:
+                repair_scope = (
+                    "credential repair" if spec.label == "gateway token" else "credential or lifecycle repair"
+                )
+                decision = RepairDecision(
+                    "blocked",
+                    f"blocked because {blocker}; review and securely replace .env before {repair_scope}",
+                    effects=spec.effects,
+                    blockers=(blocker,),
+                )
+            else:
+                try:
+                    tag, detail = spec.apply(
+                        cfg,
+                        assume_yes=False if spec.risk == "experimental" else assume_yes,
+                    )
+                    decision = _legacy_apply_decision(spec, tag, detail)
+                    if decision.state == "applied" and spec.verify is not None:
+                        try:
+                            verified = spec.verify(cfg)
+                        except Exception as exc:  # noqa: BLE001 - redact arbitrary verifier output.
+                            decision = RepairDecision(
+                                "failed",
+                                f"{type(exc).__name__}: postcondition verifier raised unexpectedly",
+                                effects=decision.effects or spec.effects,
+                                blockers=("repair postcondition could not be verified",),
+                            )
+                        else:
+                            if verified.state == "applied":
+                                decision = RepairDecision(
+                                    "applied",
+                                    f"{decision.detail}; {verified.detail}",
+                                    effects=verified.effects or decision.effects or spec.effects,
+                                    state_key=verified.state_key or decision.state_key,
+                                )
+                            else:
+                                decision = RepairDecision(
+                                    "failed",
+                                    f"postcondition verification did not converge: {verified.detail}",
+                                    effects=verified.effects or decision.effects or spec.effects,
+                                    blockers=verified.blockers
+                                    or ("repair postcondition did not converge",),
+                                    state_key=verified.state_key,
+                                )
+                except Exception as exc:  # defensive — one fixer shouldn't abort the rest
+                    # ``error`` is not a Doctor schema status and used to fall
+                    # through as a skipped check, allowing a broken repair to
+                    # preserve exit 0. Do not render arbitrary exception text:
+                    # filesystem and child-process errors can contain secrets.
+                    decision = RepairDecision(
+                        "failed",
+                        f"{type(exc).__name__}: fixer raised unexpectedly",
+                        effects=spec.effects,
+                    )
+                if spec.label in {"defenseclaw dotenv perms", "gateway token"}:
+                    dotenv_safety_problem = _gateway_dotenv_safety_problem(cfg)
 
-        tag, detail = outcome
-        if json_out:
-            r.record(tag, f"fix: {title}", detail)
-        else:
-            _emit(tag, f"fix: {title}", detail=detail, r=r)
+        record = RepairRecord(
+            repair_id=spec.repair_id,
+            label=spec.label,
+            state=decision.state,
+            risk=spec.risk,
+            detail=decision.detail,
+            dependencies=spec.dependencies,
+            effects=decision.effects or spec.effects,
+            blockers=decision.blockers,
+            may_restart=spec.may_restart,
+            explicit_selection_required=spec.explicit_selection_required,
+            platform=platform_name,
+            duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+        )
+        r.record_repair(record)
+        outcomes[spec.repair_id] = record.state
+        if dry_run and record.state == "applicable" and decision.state_key:
+            outcome_state_keys[spec.repair_id] = decision.state_key
+        if not json_out:
+            _emit(
+                _repair_display_tag(record.state),
+                f"fix: {spec.label} [{spec.repair_id}]",
+                detail=record.detail,
+            )
+
+
+def _run_fixers_with_lock(
+    cfg,
+    r: _DoctorResult,
+    *,
+    assume_yes: bool,
+    json_out: bool,
+    dry_run: bool = False,
+    fix_ids: tuple[str, ...] = (),
+) -> None:
+    """Serialize real repair transactions without making previews write state."""
+
+    if dry_run:
+        _run_fixers(
+            cfg,
+            r,
+            assume_yes=assume_yes,
+            json_out=json_out,
+            dry_run=True,
+            fix_ids=fix_ids,
+        )
+        return
+
+    data_dir = _configured_gateway_data_dir(cfg)
+    integrity_problem = _gateway_data_dir_integrity_problem(cfg)
+    if integrity_problem:
+        record = RepairRecord(
+            repair_id="doctor.repair.transaction-lock",
+            label="repair transaction",
+            state="blocked",
+            risk="safe",
+            detail=f"{integrity_problem}; no repair was attempted",
+            blockers=(integrity_problem,),
+            platform=sys.platform,
+        )
+        r.record_repair(record)
+        if not json_out:
+            _emit("fail", "fix: repair transaction", detail=record.detail)
+        return
+
+    lock_target = os.path.join(data_dir, ".doctor-repair")
+    try:
+        with locked_file_update(lock_target, timeout_seconds=0.25):
+            _run_fixers(
+                cfg,
+                r,
+                assume_yes=assume_yes,
+                json_out=json_out,
+                dry_run=False,
+                fix_ids=fix_ids,
+            )
+    except FileLockTimeoutError:
+        record = RepairRecord(
+            repair_id="doctor.repair.transaction-lock",
+            label="repair transaction",
+            state="blocked",
+            risk="safe",
+            detail="another Doctor repair owns the installation lock; retry after it completes",
+            blockers=("repair transaction lock is busy",),
+            platform=sys.platform,
+        )
+        r.record_repair(record)
+        if not json_out:
+            _emit("fail", "fix: repair transaction", detail=record.detail)
+    except OSError:
+        record = RepairRecord(
+            repair_id="doctor.repair.transaction-lock",
+            label="repair transaction",
+            state="failed",
+            risk="safe",
+            detail="the cross-platform repair lock could not be acquired; no repair was attempted",
+            blockers=("repair transaction lock is unavailable",),
+            platform=sys.platform,
+        )
+        r.record_repair(record)
+        if not json_out:
+            _emit("fail", "fix: repair transaction", detail=record.detail)
 
 
 def _active_connector(cfg) -> str:
@@ -5797,6 +7645,7 @@ def _fix_stale_pid(
     assume_yes: bool,
     evidence: GatewayEvidence | None = None,
     platform_name: str | None = None,
+    plan_only: bool = False,
 ) -> tuple[str, str]:
     """Remove only a stale PID record that has not changed since inspection."""
     data_dir = _configured_gateway_data_dir(cfg)
@@ -5857,6 +7706,9 @@ def _fix_stale_pid(
             )
         stale_reason = trust.detail
 
+    if plan_only:
+        return ("plan", f"remove stale PID record {pid_file}: {stale_reason}")
+
     if not assume_yes and not click.confirm(
         f"    Remove stale pid file {pid_file} ({stale_reason})?",
         default=True,
@@ -5875,7 +7727,12 @@ def _fix_stale_pid(
     return ("pass", f"removed {pid_file}: {stale_reason}")
 
 
-def _fix_gateway_token(cfg, *, assume_yes: bool) -> tuple[str, str]:
+def _fix_gateway_token(
+    cfg,
+    *,
+    assume_yes: bool,
+    plan_only: bool = False,
+) -> tuple[str, str]:
     """Re-sync or create the gateway token for the active connector."""
     if not _doctor_config_present(cfg):
         return ("skip", "config.yaml is missing; run `defenseclaw init` before generating a token")
@@ -5895,6 +7752,8 @@ def _fix_gateway_token(cfg, *, assume_yes: bool) -> tuple[str, str]:
             current = _gateway_dotenv_tokens(cfg.data_dir).get(env_var, "")
             if current == token:
                 return ("skip", "token already persisted and in sync")
+            if plan_only:
+                return ("plan", f"persist {env_var} from the trusted OpenClaw configuration")
             if not assume_yes and not click.confirm(
                 f"    Update {env_var} in ~/.defenseclaw/.env from OpenClaw?",
                 default=True,
@@ -5924,6 +7783,23 @@ def _fix_gateway_token(cfg, *, assume_yes: bool) -> tuple[str, str]:
         return ("skip", f"token_env={configured_env!r} is externally managed; not generating a replacement")
 
     action = "Rotate" if rotate_required else "Generate and store"
+    if plan_only:
+        verb = "rotate" if rotate_required else "generate"
+        provider_effect = ""
+        if rotate_required and _env_names_equal(
+            configured_env,
+            _LEGACY_GATEWAY_TOKEN_ENV,
+        ):
+            provider_effect = (
+                f"; repoint gateway.token_env from {_LEGACY_GATEWAY_TOKEN_ENV!r} "
+                f"to {_CANONICAL_GATEWAY_TOKEN_ENV!r} in config.yaml"
+            )
+        return (
+            "plan",
+            f"{verb} {env_var} in {os.path.join(cfg.data_dir, '.env')} "
+            f"({'restart and authenticate replacement gateway' if rotate_required else 'value remains redacted'})"
+            f"{provider_effect}",
+        )
     if not assume_yes and not click.confirm(
         f"    {action} {env_var} in {cfg.data_dir}/.env?",
         default=True,
@@ -6017,7 +7893,12 @@ def _rotate_exposed_gateway_token(cfg, token: str) -> tuple[str, str]:
     )
 
 
-def _fix_gateway_token_env(cfg, *, assume_yes: bool) -> tuple[str, str]:
+def _fix_gateway_token_env(
+    cfg,
+    *,
+    assume_yes: bool,
+    plan_only: bool = False,
+) -> tuple[str, str]:
     """Repoint ``cfg.gateway.token_env`` at the canonical var when stale.
 
     Companion to :func:`_check_gateway_token_env_alignment`. The check
@@ -6047,11 +7928,26 @@ def _fix_gateway_token_env(cfg, *, assume_yes: bool) -> tuple[str, str]:
     configured_env = getattr(gw, "token_env", "") or ""
     canonical = "DEFENSECLAW_GATEWAY_TOKEN"
     exposure_rotation = bool(getattr(cfg, "_doctor_gateway_token_was_rotated", False))
+    projected_state_keys = set(
+        getattr(cfg, "_doctor_projected_repair_state_keys", ())
+    )
+    canonical_projected = "gateway-token-canonical-present" in projected_state_keys
 
     # Already on the canonical name — nothing to do, regardless of whether
     # the value is populated. The missing-value fixer owns that case.
     if _env_names_equal(configured_env, canonical):
         return ("skip", f"token_env already set to {canonical}")
+    if (
+        plan_only
+        and canonical_projected
+        and bool(getattr(cfg, "_doctor_gateway_token_rotation_required", False))
+        and _env_names_equal(configured_env, _LEGACY_GATEWAY_TOKEN_ENV)
+    ):
+        return (
+            "skip",
+            "the preceding exposed-token rotation plan already discloses and "
+            f"performs the gateway.token_env repoint to {canonical}",
+        )
 
     # A populated configured provider is working and retains precedence. In
     # particular, do not rewrite an active OpenClaw token merely because the
@@ -6070,8 +7966,14 @@ def _fix_gateway_token_env(cfg, *, assume_yes: bool) -> tuple[str, str]:
     # Only proceed when the canonical var is actually populated —
     # otherwise we'd be repointing at another empty var, which buys
     # nothing and obscures the underlying "no token anywhere" state.
-    if not _normalized_gateway_token(os.environ.get(canonical, "")):
+    if not _normalized_gateway_token(os.environ.get(canonical, "")) and not canonical_projected:
         return ("skip", f"{canonical} is not set; nothing to repoint at")
+
+    if plan_only:
+        return (
+            "plan",
+            f"repoint gateway.token_env from {configured_env!r} to {canonical!r} in config.yaml",
+        )
 
     if not assume_yes and not click.confirm(
         f"    Repoint cfg.gateway.token_env from {configured_env!r} to {canonical!r} in config.yaml?",
@@ -6162,7 +8064,12 @@ def _repair_gateway_lifecycle(cfg, *, start_if_stopped: bool) -> tuple[bool, str
     return repaired, reason
 
 
-def _fix_gateway_token_drift(cfg, *, assume_yes: bool) -> tuple[str, str]:
+def _fix_gateway_token_drift(
+    cfg,
+    *,
+    assume_yes: bool,
+    plan_only: bool = False,
+) -> tuple[str, str]:
     """Restart the sidecar when its in-memory token != current .env.
 
     Companion to :func:`_check_gateway_token_drift`. The check just
@@ -6185,6 +8092,24 @@ def _fix_gateway_token_drift(cfg, *, assume_yes: bool) -> tuple[str, str]:
     if not _doctor_config_present(cfg):
         return ("skip", "config.yaml is missing; refusing to restart an uninitialized gateway")
 
+    projected_repairs = set(getattr(cfg, "_doctor_projected_repair_ids", ()))
+    if plan_only and "doctor.gateway.pid.remove-stale" in projected_repairs:
+        return (
+            "skip",
+            "the preceding stale-PID removal plan establishes that no managed "
+            "gateway generation remains to reconcile",
+        )
+    if (
+        plan_only
+        and "doctor.gateway.token.ensure" in projected_repairs
+        and bool(getattr(cfg, "_doctor_gateway_token_rotation_required", False))
+    ):
+        return (
+            "skip",
+            "the preceding exposed-token rotation plan already performs the "
+            "gateway A/B restart and authenticated replacement verification",
+        )
+
     pid_file = os.path.join(cfg.data_dir, "gateway.pid")
     process_trust = _managed_gateway_process_trust(cfg)
     if process_trust.code in {"missing", "missing_process"}:
@@ -6205,6 +8130,37 @@ def _fix_gateway_token_drift(cfg, *, assume_yes: bool) -> tuple[str, str]:
 
     probe_token, token_env_name, token_source = _daemon_effective_gateway_token(cfg)
     if not probe_token:
+        projected_state_keys = set(
+            getattr(cfg, "_doctor_projected_repair_state_keys", ())
+        )
+        known_token_projected = bool(
+            projected_state_keys
+            & {
+                "gateway-token-canonical-present",
+                "gateway-token-legacy-present",
+            }
+        )
+        if plan_only and known_token_projected:
+            listener_trust = _trusted_gateway_listener(cfg)
+            if listener_trust.code in {"foreign_listener", "ambiguous_listener"}:
+                return (
+                    "fail",
+                    f"{listener_trust.detail}; refusing to plan a credential-bearing restart",
+                )
+            if not listener_trust.trusted and listener_trust.code not in {
+                "missing_listener",
+                "unavailable",
+            }:
+                return (
+                    "fail",
+                    f"{listener_trust.detail}; refusing automatic authentication repair",
+                )
+            return (
+                "plan",
+                f"restart verified sidecar pid {pid} after the preceding managed "
+                "token persistence, then authenticate and verify the replacement; "
+                "no placeholder credential was sent during planning",
+            )
         return ("skip", "no configured gateway token to reconcile")
 
     # The authenticated endpoint is authoritative, but a master token is sent
@@ -6258,6 +8214,13 @@ def _fix_gateway_token_drift(cfg, *, assume_yes: bool) -> tuple[str, str]:
             return ("skip", f"sidecar pid {pid} has no inspectable {token_env_name} value")
         if process_token == probe_token:
             return ("skip", "sidecar token already matches the daemon-effective token")
+
+    if plan_only:
+        return (
+            "plan",
+            f"restart verified sidecar pid {pid} and authenticate the replacement "
+            f"with the {token_source or 'configured token'}",
+        )
 
     if not assume_yes and not click.confirm(
         f"    Restart sidecar (pid {pid}) to pick up the {token_source or 'configured token'}? "
@@ -6383,10 +8346,58 @@ def _gateway_service_health_repair_reason(cfg, health: dict) -> str:
     return detail if kind == "repairable" else ""
 
 
-def _fix_gateway_service(cfg, *, assume_yes: bool) -> tuple[str, str]:
+def _gateway_restart_cooldown_remaining(
+    trust: _GatewayTrust,
+    *,
+    now: float | None = None,
+    cooldown_seconds: float = 60.0,
+) -> int:
+    """Return a bounded cooldown for a recently started managed generation."""
+
+    record = trust.record
+    if not trust.trusted or record is None or not record.start_time:
+        return 0
+    try:
+        started_at = float(record.start_time)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    current = time.time() if now is None else now
+    age = current - started_at
+    if age < 0 or age >= cooldown_seconds:
+        return 0
+    return max(1, int(cooldown_seconds - age))
+
+
+def _fix_gateway_service(
+    cfg,
+    *,
+    assume_yes: bool,
+    plan_only: bool = False,
+) -> tuple[str, str]:
     """Start an absent gateway or restart one with stale subsystem state."""
     if not _doctor_config_present(cfg):
         return ("skip", "config.yaml is missing; run `defenseclaw init` before starting the gateway")
+
+    projected_repairs = set(getattr(cfg, "_doctor_projected_repair_ids", ()))
+    if plan_only and "doctor.gateway.token.reconcile-runtime" in projected_repairs:
+        return (
+            "skip",
+            "the preceding runtime-token reconciliation plan already restarts "
+            "and verifies the managed gateway; service health will be re-evaluated afterward",
+        )
+    if (
+        plan_only
+        and "doctor.gateway.token.ensure" in projected_repairs
+        and bool(getattr(cfg, "_doctor_gateway_token_rotation_required", False))
+    ):
+        return (
+            "skip",
+            "the preceding exposed-token rotation plan already performs and "
+            "verifies the gateway A/B restart; service health will be re-evaluated afterward",
+        )
+    stale_pid_projected = (
+        plan_only and "doctor.gateway.pid.remove-stale" in projected_repairs
+    )
 
     code, body = _http_probe(
         _gateway_api_url(cfg, "/health"),
@@ -6436,6 +8447,11 @@ def _fix_gateway_service(cfg, *, assume_yes: bool) -> tuple[str, str]:
             _gateway_api_port(cfg),
             host=_gateway_api_host(cfg),
         )
+        if stale_pid_projected:
+            process_trust = _GatewayTrust(
+                "missing",
+                "preceding repair plan removes positively stale managed PID state",
+            )
         if process_trust.trusted:
             inspected_fingerprint = pid_file_fingerprint(pid_path)
             if listener.status == "ok" and listener.pid != process_trust.pid:
@@ -6464,9 +8480,20 @@ def _fix_gateway_service(cfg, *, assume_yes: bool) -> tuple[str, str]:
             )
 
     pid = process_trust.pid if process_trust and process_trust.trusted else 0
+    if process_trust and (cooldown := _gateway_restart_cooldown_remaining(process_trust)):
+        return (
+            "warn",
+            f"managed gateway generation started recently; restart cooldown has {cooldown}s remaining",
+        )
     if pid and not inspected_fingerprint:
         return ("fail", "gateway PID record changed or is unsafe; refusing lifecycle mutation")
     action = "restart" if pid else "start"
+    if plan_only:
+        return (
+            "plan",
+            f"{action} the verified managed gateway because {reason}; "
+            "verify replacement listener ownership and complete health",
+        )
     if not assume_yes and not click.confirm(
         f"    {action.capitalize()} the gateway because {reason}?",
         default=True,
@@ -6537,6 +8564,7 @@ def _fix_dotenv_perms(
     *,
     assume_yes: bool,
     platform_name: str | None = None,
+    plan_only: bool = False,
 ) -> tuple[str, str]:
     """Protect the dotenv with POSIX 0600 or a private Windows DACL."""
     from defenseclaw.file_permissions import (
@@ -6584,6 +8612,12 @@ def _fix_dotenv_perms(
             )
         if problem is not None and "read access" in problem.lower():
             setattr(cfg, "_doctor_gateway_token_rotation_required", True)
+            if plan_only:
+                return (
+                    "plan",
+                    "replace the read-exposed dotenv through the dependent "
+                    "gateway-token rotation transaction and apply a private Windows DACL",
+                )
             return (
                 "warn",
                 "dotenv ACL exposed its contents; leaving the file unchanged until "
@@ -6598,6 +8632,8 @@ def _fix_dotenv_perms(
             if is_symlink(path) or not os.path.samestat(info, current):
                 return ("warn", "dotenv changed while its Windows DACL was inspected")
             return ("skip", "permissions already use a private Windows DACL")
+        if plan_only:
+            return ("plan", f"protect {path} with a private Windows DACL")
         if not assume_yes and not click.confirm(
             f"    Tighten the Windows ACL on {path}?",
             default=True,
@@ -6635,6 +8671,12 @@ def _fix_dotenv_perms(
     acl_read_problem = darwin_acl_confidentiality_error(path) if platform_name == "darwin" else None
     if mode & 0o044 or acl_read_problem is not None:
         setattr(cfg, "_doctor_gateway_token_rotation_required", True)
+        if plan_only:
+            return (
+                "plan",
+                "replace the read-exposed dotenv through the dependent "
+                "gateway-token rotation transaction and enforce mode 0600",
+            )
         return (
             "warn",
             "dotenv permissions exposed its contents; leaving the file unchanged "
@@ -6653,6 +8695,8 @@ def _fix_dotenv_perms(
     prompt = f"    Tighten {path} permissions from {mode:04o} to 0600?"
     if acl_read_problem:
         prompt = f"    Remove the read-capable extended ACL from {path} and enforce 0600?"
+    if plan_only:
+        return ("plan", f"enforce owner-only permissions on {path}")
     if not assume_yes and not click.confirm(prompt, default=True):
         return ("skip", "declined by user")
 
@@ -6674,7 +8718,12 @@ def _fix_dotenv_perms(
         return ("fail", f"chmod failed: {exc}")
 
 
-def _fix_pristine_backup(cfg, *, assume_yes: bool) -> tuple[str, str]:
+def _fix_pristine_backup(
+    cfg,
+    *,
+    assume_yes: bool,
+    plan_only: bool = False,
+) -> tuple[str, str]:
     """Capture a pristine backup of the active connector's config if one
     isn't recorded yet.
 
@@ -6701,6 +8750,8 @@ def _fix_pristine_backup(cfg, *, assume_yes: bool) -> tuple[str, str]:
         existing = pristine_backup_path(oc_path, cfg.data_dir)
         if existing:
             return ("skip", f"already captured at {existing}")
+        if plan_only:
+            return ("plan", f"capture a pristine OpenClaw configuration backup for {oc_path}")
         created = record_pristine_backup(oc_path, cfg.data_dir)
         if created:
             return ("pass", f"captured pristine backup at {created}")
@@ -6716,7 +8767,12 @@ def _fix_pristine_backup(cfg, *, assume_yes: bool) -> tuple[str, str]:
     return ("skip", "no backup found — run `defenseclaw setup guardrail` to create one")
 
 
-def _fix_plugin_registry_required(cfg, *, assume_yes: bool) -> tuple[str, str]:
+def _fix_plugin_registry_required(
+    cfg,
+    *,
+    assume_yes: bool,
+    plan_only: bool = False,
+) -> tuple[str, str]:
     """Clear a dead-end ``asset_policy.plugin.registry_required=true``.
 
     Companion to :func:`_check_plugin_registry_required`. Resets the flag to
@@ -6732,6 +8788,12 @@ def _fix_plugin_registry_required(cfg, *, assume_yes: bool) -> tuple[str, str]:
     if not offenders:
         return ("skip", "no plugin.registry_required flag set")
 
+    if plan_only:
+        return (
+            "plan",
+            f"clear the dead-end plugin.registry_required flag for [{', '.join(offenders)}] in config.yaml",
+        )
+
     if not assume_yes and not click.confirm(
         f"    Clear the dead-end plugin.registry_required flag for [{', '.join(offenders)}] in config.yaml?",
         default=True,
@@ -6742,18 +8804,31 @@ def _fix_plugin_registry_required(cfg, *, assume_yes: bool) -> tuple[str, str]:
         return ("skip", "config.yaml is missing; refusing to create it from an auto-fix")
 
     ap = getattr(cfg, "asset_policy", None)
+    plugin = getattr(ap, "plugin", None)
+    connector_plugins = [
+        pc_plugin
+        for pc in (getattr(ap, "connectors", None) or {}).values()
+        if pc is not None
+        and (pc_plugin := getattr(pc, "plugin", None)) is not None
+        and getattr(pc_plugin, "registry_required", None) is True
+    ]
+    original_global = getattr(plugin, "registry_required", None) if plugin is not None else None
+    original_connector_values = [
+        (pc_plugin, getattr(pc_plugin, "registry_required", None)) for pc_plugin in connector_plugins
+    ]
     try:
-        plugin = getattr(ap, "plugin", None)
         if plugin is not None and bool(getattr(plugin, "registry_required", False)):
             plugin.registry_required = False
-        for pc in (getattr(ap, "connectors", None) or {}).values():
-            pc_plugin = getattr(pc, "plugin", None) if pc is not None else None
-            if pc_plugin is not None and getattr(pc_plugin, "registry_required", None) is True:
-                # Tri-state per-connector field: None = inherit the (now
-                # cleared) global value, so reset to None rather than False.
-                pc_plugin.registry_required = None
+        for pc_plugin in connector_plugins:
+            # Tri-state per-connector field: None = inherit the (now cleared)
+            # global value, so reset to None rather than False.
+            pc_plugin.registry_required = None
         cfg.save()
     except (OSError, AttributeError) as exc:
+        if plugin is not None:
+            plugin.registry_required = original_global
+        for pc_plugin, original_value in original_connector_values:
+            pc_plugin.registry_required = original_value
         return ("fail", f"could not save config: {type(exc).__name__}: {exc}")
 
     return ("pass", f"cleared plugin.registry_required [{', '.join(offenders)}]")

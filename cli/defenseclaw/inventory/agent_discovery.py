@@ -1921,6 +1921,8 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
     except Exception:
         return None
 
+    if not isinstance(payload, dict):
+        return None
     if payload.get("version") != CACHE_SCHEMA_VERSION:
         return None
     if int(payload.get("ttl_seconds", 0) or 0) != CACHE_TTL_SECONDS:

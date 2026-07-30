@@ -26,18 +26,18 @@ func (dispatcher *Dispatcher) transitionHealth(state HealthState, reason HealthR
 	}
 	dispatcher.healthMu.Lock()
 	previous := dispatcher.health
+	previousReason := dispatcher.healthReason
 	if operational && (previous == HealthDraining || previous == HealthStopped || previous == HealthDisabled) {
 		dispatcher.healthMu.Unlock()
 		return
 	}
-	if previous == state {
-		dispatcher.healthReason = reason
+	if previous == state && previousReason == reason {
 		dispatcher.healthMu.Unlock()
 		return
 	}
 	dispatcher.health = state
 	dispatcher.healthReason = reason
-	now := time.Now().UTC()
+	now := dispatcher.nowUTC()
 	if state == HealthDegraded || state == HealthFailing {
 		dispatcher.lastFailure = now
 	}

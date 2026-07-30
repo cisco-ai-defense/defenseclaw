@@ -696,7 +696,14 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         try:
             store.init()
         except Exception as exc:  # broad: sqlite/file errors need to surface
-            setup.append(StepResult("Audit DB", "fail", str(exc), "defenseclaw doctor --fix"))
+            setup.append(
+                StepResult(
+                    "Audit DB",
+                    "fail",
+                    str(exc),
+                    "defenseclaw doctor --fix --dry-run",
+                )
+            )
         # A genuinely new/pre-v8 bootstrap has no canonical graph yet. Re-running
         # first-run against v8 must use the live owner and must not silently drop
         # ordinary v8 setup mutations.
@@ -708,7 +715,9 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
 
         bootstrap = bootstrap_env(cfg, logger)
         if bootstrap.errors:
-            setup.extend(StepResult("Bootstrap", "fail", e, "defenseclaw doctor --fix") for e in bootstrap.errors)
+            setup.extend(
+                StepResult("Bootstrap", "fail", e, "defenseclaw doctor --fix --dry-run") for e in bootstrap.errors
+            )
         else:
             setup.append(StepResult("Bootstrap", "pass", cfg.data_dir))
 
@@ -806,7 +815,11 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
             "Audit database",
             "pass" if os.path.isfile(cfg.audit_db) else "fail",
             cfg.audit_db,
-            "defenseclaw doctor --fix" if not os.path.isfile(cfg.audit_db) else "",
+            (
+                "defenseclaw doctor --fix --fix-id doctor.state.audit-db.initialize"
+                if not os.path.isfile(cfg.audit_db)
+                else ""
+            ),
         )
     )
     device_key = cfg.gateway.device_key_file
@@ -815,7 +828,11 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
             "Device key",
             "pass" if device_key and os.path.isfile(device_key) else "fail",
             device_key or "(unset)",
-            "defenseclaw doctor --fix" if not (device_key and os.path.isfile(device_key)) else "",
+            (
+                "defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize"
+                if not (device_key and os.path.isfile(device_key))
+                else ""
+            ),
         )
     )
 

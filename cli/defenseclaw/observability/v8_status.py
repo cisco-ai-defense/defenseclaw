@@ -42,6 +42,8 @@ _SIGNALS = ("logs", "traces", "metrics")
 _DESTINATION_HEALTH_STATES = frozenset(
     ("disabled", "initializing", "healthy", "degraded", "failing", "draining", "stopped")
 )
+_CIRCUIT_STATES = frozenset(("closed", "open", "half_open"))
+_FAILURE_CLASSES = frozenset(("transient", "authentication", "permanent_payload", "unsafe_endpoint"))
 _SAFE_HEALTH_TOKEN = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,127}$")
 _RFC3339_NANO = re.compile(
     r"^(?P<second>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})"
@@ -130,6 +132,10 @@ class V8DestinationHealth:
     last_success: str = ""
     last_failure: str = ""
     last_error_class: str = ""
+    circuit_state: str = ""
+    consecutive_failures: int | None = None
+    circuit_open_until: str = ""
+    last_failure_class: str = ""
 
     @property
     def queue_label(self) -> str:
@@ -163,6 +169,20 @@ class V8DestinationHealth:
         elif self.last_error_class:
             parts.append(f"error {self.last_error_class}")
         return "; ".join(parts) or "unavailable"
+
+    @property
+    def circuit_label(self) -> str:
+        if not self.circuit_state:
+            return "unavailable"
+        parts = [self.circuit_state.replace("_", " ")]
+        if self.consecutive_failures is not None:
+            noun = "failure" if self.consecutive_failures == 1 else "failures"
+            parts.append(f"{self.consecutive_failures} consecutive {noun}")
+        if self.last_failure_class:
+            parts.append(self.last_failure_class.replace("_", " "))
+        if self.circuit_open_until:
+            parts.append(f"until {self.circuit_open_until}")
+        return ", ".join(parts)
 
 
 @dataclass(frozen=True)
@@ -363,6 +383,12 @@ def destination_health_from_gateway(health: Mapping[str, Any] | None) -> dict[st
             # last_error therefore proves that its last_attempt_at was the
             # failed attempt; the raw error itself remains discarded.
             last_failure = _safe_timestamp(delivery.get("last_attempt_at"))
+        circuit_state = _safe_health_token(item.get("circuit_state"))
+        if circuit_state not in _CIRCUIT_STATES:
+            circuit_state = ""
+        last_failure_class = _safe_health_token(item.get("last_failure_class"))
+        if last_failure_class not in _FAILURE_CLASSES:
+            last_failure_class = ""
         result[name] = V8DestinationHealth(
             name=name,
             state=state,
@@ -379,6 +405,10 @@ def destination_health_from_gateway(health: Mapping[str, Any] | None) -> dict[st
             last_success=last_success,
             last_failure=last_failure,
             last_error_class=last_error_class,
+            circuit_state=circuit_state,
+            consecutive_failures=_nonnegative_int(item.get("consecutive_failures")),
+            circuit_open_until=_safe_timestamp(item.get("circuit_open_until")),
+            last_failure_class=last_failure_class,
         )
     return result
 

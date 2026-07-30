@@ -177,25 +177,52 @@ func (exporter *SpanExporter) ExportSpans(ctx context.Context, spans []sdktrace.
 	if exporter == nil || ctx == nil {
 		return newError(ErrorExport, nil)
 	}
+	events := make([]SignalEvent, 0, 4)
+	acknowledgements := make([]CanaryAcknowledgement, 0, 1)
+	eventCollector := SignalObserverFunc(func(event SignalEvent) {
+		events = append(events, event)
+	})
+	acknowledgementCollector := CanaryAcknowledgementObserverFunc(func(event CanaryAcknowledgement) {
+		acknowledgements = append(acknowledgements, event)
+	})
 	exporter.mu.RLock()
+	locked := true
+	unlock := func() {
+		if locked {
+			exporter.mu.RUnlock()
+			locked = false
+		}
+	}
+	defer unlock()
 	closed := exporter.closed
-	defer exporter.mu.RUnlock()
 	if closed {
+		unlock()
 		return newError(ErrorExport, nil)
 	}
 	spans = canarySpansForOTLPDestination(spans, exporter.destination)
 	regular, canaries := partitionOTLPCanarySpans(spans)
 	var exportErrors []error
 	if len(regular) > 0 {
-		if err := exporter.exportBatch(ctx, regular, ""); err != nil {
+		if err := exporter.exportBatch(
+			ctx, regular, "", eventCollector, acknowledgementCollector,
+		); err != nil {
 			exportErrors = append(exportErrors, err)
 		}
 	}
 	for _, canary := range canaries {
 		traceID := completeOTLPCanaryTrace(canary, exporter.destination)
-		if err := exporter.exportBatch(ctx, canary, traceID); err != nil {
+		if err := exporter.exportBatch(
+			ctx, canary, traceID, eventCollector, acknowledgementCollector,
+		); err != nil {
 			exportErrors = append(exportErrors, err)
 		}
+	}
+	unlock()
+	for _, event := range events {
+		observe(exporter.config.observer, event)
+	}
+	for _, acknowledgement := range acknowledgements {
+		observeCanaryAcknowledgement(exporter.config.canary, acknowledgement)
 	}
 	return errors.Join(exportErrors...)
 }
@@ -372,13 +399,19 @@ func otlpCanonicalScopeEqual(root, child sdktrace.ReadOnlySpan) bool {
 		semanticOK && semanticProfile == observability.RuntimeSemanticProfileID
 }
 
-func (exporter *SpanExporter) exportBatch(ctx context.Context, spans []sdktrace.ReadOnlySpan, canaryTraceID string) error {
+func (exporter *SpanExporter) exportBatch(
+	ctx context.Context,
+	spans []sdktrace.ReadOnlySpan,
+	canaryTraceID string,
+	observer SignalObserver,
+	canaryObserver CanaryAcknowledgementObserver,
+) error {
 	total := 0
 	for _, span := range spans {
 		bound, ok := conservativeSpanBytes(span)
 		if !ok || bound > exporter.maxBytes-total {
 			exporter.counters.rejectedOversize.Add(uint64(len(spans)))
-			observe(exporter.config.observer, SignalEvent{Signal: observability.SignalTraces, Outcome: SignalOutcomeRejectedOversize, Count: uint64(len(spans))})
+			observe(observer, SignalEvent{Signal: observability.SignalTraces, Outcome: SignalOutcomeRejectedOversize, Count: uint64(len(spans))})
 			return newError(ErrorExport, nil)
 		}
 		total += bound
@@ -387,19 +420,19 @@ func (exporter *SpanExporter) exportBatch(ctx context.Context, spans []sdktrace.
 	dialSequence := exporter.config.tracker.snapshot()
 	attemptContext, attempts := withAttemptCounter(ctx)
 	err := exporter.inner.ExportSpans(attemptContext, spans)
-	recordRetryAttempts(&exporter.counters, exporter.config.observer, observability.SignalTraces, uint64(len(spans)), attempts.Load())
+	recordRetryAttempts(&exporter.counters, observer, observability.SignalTraces, uint64(len(spans)), attempts.Load())
 	if err != nil {
 		exporter.counters.failed.Add(uint64(len(spans)))
-		observe(exporter.config.observer, SignalEvent{Signal: observability.SignalTraces, Outcome: SignalOutcomeExportFailed, Count: uint64(len(spans))})
+		observe(observer, SignalEvent{Signal: observability.SignalTraces, Outcome: SignalOutcomeExportFailed, Count: uint64(len(spans))})
 		if exporter.config.tracker.unsafeSince(dialSequence) {
 			return newError(ErrorUnsafeEndpoint, err)
 		}
 		return newError(ErrorExport, err)
 	}
 	exporter.counters.exported.Add(uint64(len(spans)))
-	observe(exporter.config.observer, SignalEvent{Signal: observability.SignalTraces, Outcome: SignalOutcomeExported, Count: uint64(len(spans))})
+	observe(observer, SignalEvent{Signal: observability.SignalTraces, Outcome: SignalOutcomeExported, Count: uint64(len(spans))})
 	if canaryTraceID != "" {
-		observeCanaryAcknowledgement(exporter.config.canary, CanaryAcknowledgement{
+		observeCanaryAcknowledgement(canaryObserver, CanaryAcknowledgement{
 			Destination: exporter.destination, TraceID: canaryTraceID,
 		})
 	}

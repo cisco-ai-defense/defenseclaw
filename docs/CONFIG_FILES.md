@@ -184,7 +184,7 @@ ANTHROPIC_API_KEY=sk-ant-api03-...
 
 ### `~/.defenseclaw/doctor_cache.json`
 
-Snapshot of the most recent `defenseclaw doctor` run. Used by the Go TUI's
+Snapshot of the most recent `defenseclaw doctor` run. Used by the Textual TUI's
 Overview panel to show pass/fail counts and top failures without re-running
 the (network-intensive) probes on every redraw.
 
@@ -192,26 +192,46 @@ Example contents:
 
 ```json
 {
+  "schema_version": 2,
   "captured_at": "2026-04-17T18:21:09Z",
+  "mode": "repair",
+  "outcome": "failed",
+  "exit_code": 1,
   "passed": 12,
   "failed": 0,
   "warned": 1,
   "skipped": 2,
+  "summary": {"passed": 12, "failed": 0, "warned": 1, "skipped": 2},
   "checks": [
     {"status": "warn", "label": "Splunk HEC", "detail": "queue depth 4200/5000"}
+  ],
+  "repair_summary": {
+    "planned": 0,
+    "applied": 1,
+    "failed": 0,
+    "blocked": 1,
+    "manual": 0,
+    "noop": 0,
+    "declined": 0,
+    "requires_confirmation": 0
+  },
+  "repairs": [
+    {"repair_id": "doctor.gateway.service.reconcile", "state": "blocked"}
   ]
 }
 ```
 
+The top-level and `summary` health counts retain their legacy meaning.
+`repair_summary` and `repairs` are a separate repair ledger; failed or blocked
+repairs make the aggregate outcome fail without increasing the health failure
+count.
+
 | | |
 |---|---|
-| **Created by** | Python CLI at the end of every `defenseclaw doctor` (and `setup --verify`) run via `_write_doctor_cache()` (`cli/defenseclaw/commands/cmd_doctor.py`). Atomic write — tempfile + `os.replace` — so concurrent reads never see partial JSON. |
-| **Read by** | Go TUI on startup and after every doctor invocation via `LoadDoctorCache()` (`internal/tui/doctor_cache.go`). |
+| **Created by** | Python CLI at the end of every non-dry-run `defenseclaw doctor` run via `_write_doctor_cache()` (`cli/defenseclaw/commands/cmd_doctor.py`). `doctor --fix --dry-run` is read-only and never writes the cache. Atomic write — tempfile + `os.replace` — so concurrent reads never see partial JSON. |
+| **Read by** | Python Textual TUI on startup and after every doctor invocation via `_load_doctor_cache()` (`cli/defenseclaw/tui/app.py`). |
 | **Stale threshold** | 15 minutes — older snapshots show a `(stale — [d] to rerun)` notice in the Overview panel. |
-| **Failure handling** | Cached even on non-zero exit so the Overview panel reflects current reality, not the last-successful run. Missing file is normal on first launch and is treated as "not yet run". |
-
-See [TUI.md → Cached doctor status](TUI.md#cached-doctor-status-overview-panel)
-for the user-facing behavior.
+| **Failure handling** | Cached even on non-zero exit so the Overview panel reflects current reality, not the last-successful run. Live health may mark a stale health check as recovered, but never clears a failed or blocked repair. Missing file is normal on first launch and is treated as "not yet run". |
 
 ---
 

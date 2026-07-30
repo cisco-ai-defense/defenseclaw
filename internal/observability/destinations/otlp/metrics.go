@@ -24,6 +24,8 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // ForkMetricFactory creates a claim-independent metric transport factory from
@@ -63,6 +65,10 @@ func (factory *Factory) NewMetricExporter(ctx context.Context) (*MetricExporter,
 	if err != nil {
 		return nil, err
 	}
+	circuit, err := delivery.NewCircuit(delivery.CircuitPolicy{})
+	if err != nil {
+		return nil, newError(ErrorInitialization, err)
+	}
 	if config.protocol == ProtocolHTTP {
 		initialRetry, maximumRetry := retryBounds(config.timeout)
 		client, transport := newHTTPClient(config)
@@ -84,7 +90,11 @@ func (factory *Factory) NewMetricExporter(ctx context.Context) (*MetricExporter,
 			closeHTTPTransport(transport)
 			return nil, newError(ErrorInitialization, buildErr)
 		}
-		return &MetricExporter{inner: exporter, httpTransport: transport, maxBytes: factory.config.Batch.MaxExportBatchBytes, config: config}, nil
+		return &MetricExporter{
+			inner: exporter, httpTransport: transport,
+			maxBytes: factory.config.Batch.MaxExportBatchBytes, config: config,
+			circuit: circuit, now: time.Now,
+		}, nil
 	}
 	connection, err := newGRPCConnection(config)
 	if err != nil {
@@ -106,7 +116,11 @@ func (factory *Factory) NewMetricExporter(ctx context.Context) (*MetricExporter,
 		_ = connection.Close()
 		return nil, newError(ErrorInitialization, buildErr)
 	}
-	return &MetricExporter{inner: exporter, connection: connection, maxBytes: factory.config.Batch.MaxExportBatchBytes, config: config}, nil
+	return &MetricExporter{
+		inner: exporter, connection: connection,
+		maxBytes: factory.config.Batch.MaxExportBatchBytes, config: config,
+		circuit: circuit, now: time.Now,
+	}, nil
 }
 
 // MetricReader owns one independently shutdown periodic metric pipeline. Its
@@ -302,6 +316,8 @@ type MetricExporter struct {
 	healthReason  delivery.HealthReason
 	lastSuccess   time.Time
 	lastFailure   time.Time
+	circuit       *delivery.Circuit
+	now           func() time.Time
 }
 
 func (exporter *MetricExporter) Temporality(kind sdkmetric.InstrumentKind) metricdata.Temporality {
@@ -323,16 +339,45 @@ func (exporter *MetricExporter) Export(ctx context.Context, metrics *metricdata.
 		return newError(ErrorExport, nil)
 	}
 	exporter.mu.RLock()
+	locked := true
+	probePending := false
+	unlock := func() {
+		if locked {
+			exporter.mu.RUnlock()
+			locked = false
+		}
+	}
+	defer func() {
+		if probePending && exporter.circuit.AbortProbe() {
+			exporter.setHealth(delivery.HealthFailing, delivery.HealthReasonCircuitOpen)
+		}
+		unlock()
+	}()
 	closed := exporter.closed
-	defer exporter.mu.RUnlock()
 	if closed {
+		unlock()
 		return newError(ErrorExport, nil)
+	}
+	now := exporter.nowUTC()
+	switch exporter.circuit.Admit(now) {
+	case delivery.CircuitAdmissionBlocked:
+		exporter.counters.circuitRejectedBatches.Add(1)
+		unlock()
+		return newError(ErrorExport, nil)
+	case delivery.CircuitAdmissionProbe:
+		probePending = true
+		exporter.setHealth(delivery.HealthDegraded, delivery.HealthReasonCircuitHalfOpen)
 	}
 	count := metricCount(metrics)
 	bound, ok := conservativeMetricBytes(metrics)
 	if !ok || bound > exporter.maxBytes {
+		if probePending {
+			exporter.circuit.AbortProbe()
+			probePending = false
+		}
 		exporter.counters.rejectedOversize.Add(count)
 		exporter.recordHealth(delivery.HealthFailing, delivery.HealthReasonDeliveryFailed, false)
+		unlock()
 		observe(exporter.config.observer, SignalEvent{Signal: observability.SignalMetrics, Outcome: SignalOutcomeRejectedOversize, Count: count})
 		return newError(ErrorExport, nil)
 	}
@@ -340,18 +385,25 @@ func (exporter *MetricExporter) Export(ctx context.Context, metrics *metricdata.
 	dialSequence := exporter.config.tracker.snapshot()
 	attemptContext, attempts := withAttemptCounter(ctx)
 	err := exporter.inner.Export(attemptContext, metrics)
-	recordRetryAttempts(&exporter.counters, exporter.config.observer, observability.SignalMetrics, count, attempts.Load())
 	if err != nil {
 		exporter.counters.failed.Add(count)
-		exporter.recordHealth(delivery.HealthFailing, delivery.HealthReasonDeliveryFailed, false)
+		class := metricFailureClass(exporter.config.tracker, dialSequence, err)
+		exporter.recordCircuitFailure(class, exporter.nowUTC())
+		probePending = false
+		unlock()
+		recordRetryAttempts(&exporter.counters, exporter.config.observer, observability.SignalMetrics, count, attempts.Load())
 		observe(exporter.config.observer, SignalEvent{Signal: observability.SignalMetrics, Outcome: SignalOutcomeExportFailed, Count: count})
-		if exporter.config.tracker.unsafeSince(dialSequence) {
+		if class == delivery.FailureClassUnsafeEndpoint {
 			return newError(ErrorUnsafeEndpoint, err)
 		}
 		return newError(ErrorExport, err)
 	}
 	exporter.counters.exported.Add(count)
+	exporter.circuit.RecordSuccess()
+	probePending = false
 	exporter.recordHealth(delivery.HealthHealthy, delivery.HealthReasonRecovered, true)
+	unlock()
+	recordRetryAttempts(&exporter.counters, exporter.config.observer, observability.SignalMetrics, count, attempts.Load())
 	observe(exporter.config.observer, SignalEvent{Signal: observability.SignalMetrics, Outcome: SignalOutcomeExported, Count: count})
 	return nil
 }
@@ -418,16 +470,70 @@ func (exporter *MetricExporter) recordHealth(
 	if exporter == nil {
 		return
 	}
-	now := time.Now().UTC()
+	exporter.recordHealthAt(state, reason, success, exporter.nowUTC())
+}
+
+func (exporter *MetricExporter) recordHealthAt(
+	state delivery.HealthState,
+	reason delivery.HealthReason,
+	success bool,
+	at time.Time,
+) {
 	exporter.healthMu.Lock()
 	exporter.health = state
 	exporter.healthReason = reason
 	if success {
-		exporter.lastSuccess = now
+		exporter.lastSuccess = at.UTC()
 	} else {
-		exporter.lastFailure = now
+		exporter.lastFailure = at.UTC()
 	}
 	exporter.healthMu.Unlock()
+}
+
+func (exporter *MetricExporter) setHealth(state delivery.HealthState, reason delivery.HealthReason) {
+	if exporter == nil {
+		return
+	}
+	exporter.healthMu.Lock()
+	exporter.health = state
+	exporter.healthReason = reason
+	exporter.healthMu.Unlock()
+}
+
+func (exporter *MetricExporter) nowUTC() time.Time {
+	if exporter == nil || exporter.now == nil {
+		return time.Now().UTC()
+	}
+	return exporter.now().UTC()
+}
+
+func (exporter *MetricExporter) recordCircuitFailure(class delivery.FailureClass, at time.Time) {
+	reason := delivery.HealthReasonDeliveryFailed
+	if exporter.circuit.RecordFailure(class, at) {
+		reason = delivery.HealthReasonCircuitOpen
+	}
+	exporter.recordHealthAt(delivery.HealthFailing, reason, false, at)
+}
+
+func metricFailureClass(
+	tracker *dialOutcomeTracker,
+	baseline uint64,
+	err error,
+) delivery.FailureClass {
+	switch {
+	case tracker.unsafeSince(baseline):
+		return delivery.FailureClassUnsafeEndpoint
+	case tracker.authenticationSince(baseline):
+		return delivery.FailureClassAuthentication
+	}
+	switch status.Code(err) {
+	case codes.Unauthenticated, codes.PermissionDenied:
+		return delivery.FailureClassAuthentication
+	case codes.InvalidArgument, codes.FailedPrecondition, codes.Unimplemented, codes.OutOfRange:
+		return delivery.FailureClassPermanentPayload
+	default:
+		return delivery.FailureClassTransient
+	}
 }
 
 func (exporter *MetricExporter) deliveryHealthSnapshot() delivery.HealthSnapshot {
@@ -443,9 +549,12 @@ func (exporter *MetricExporter) deliveryHealthSnapshot() delivery.HealthSnapshot
 	lastSuccess := exporter.lastSuccess
 	lastFailure := exporter.lastFailure
 	exporter.healthMu.Unlock()
+	circuit := exporter.circuit.Snapshot()
 	counters := exporter.Counters()
 	return delivery.HealthSnapshot{
 		State: state, Reason: string(reason),
+		CircuitState: circuit.State, ConsecutiveFailures: circuit.ConsecutiveFailures,
+		CircuitOpenUntil: circuit.OpenUntil, LastFailureClass: circuit.LastFailureClass,
 		Counters: delivery.Counters{
 			Accepted: counters.Accepted, Delivered: counters.Exported, Retried: counters.Retried,
 			Dropped: counters.DroppedQueueFull,

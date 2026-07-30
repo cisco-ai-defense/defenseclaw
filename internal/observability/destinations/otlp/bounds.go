@@ -23,19 +23,23 @@ import (
 
 const encodedEnvelopeAllowance = 65_536
 
-// ExportCounters are content-free, monotonic per-signal counters.
+// ExportCounters are content-free, monotonic per-signal counters. Fields count
+// records except CircuitRejectedBatches, which deliberately counts exporter
+// calls because open-circuit admission runs before inspecting metric content.
 type ExportCounters struct {
-	Accepted         uint64
-	Exported         uint64
-	Retried          uint64
-	RejectedPartial  uint64
-	RejectedOversize uint64
-	Failed           uint64
-	DroppedQueueFull uint64
+	Accepted               uint64
+	Exported               uint64
+	Retried                uint64
+	RejectedPartial        uint64
+	RejectedOversize       uint64
+	Failed                 uint64
+	DroppedQueueFull       uint64
+	CircuitRejectedBatches uint64
 }
 
 type mutableCounters struct {
-	accepted, exported, retried, rejectedPartial, rejectedOversize, failed, droppedQueueFull atomic.Uint64
+	accepted, exported, retried, rejectedPartial, rejectedOversize, failed,
+	droppedQueueFull, circuitRejectedBatches atomic.Uint64
 }
 
 func (c *mutableCounters) snapshot() ExportCounters {
@@ -47,7 +51,8 @@ func (c *mutableCounters) snapshot() ExportCounters {
 		Retried:          c.retried.Load(),
 		RejectedPartial:  c.rejectedPartial.Load(),
 		RejectedOversize: c.rejectedOversize.Load(), Failed: c.failed.Load(),
-		DroppedQueueFull: c.droppedQueueFull.Load(),
+		DroppedQueueFull:       c.droppedQueueFull.Load(),
+		CircuitRejectedBatches: c.circuitRejectedBatches.Load(),
 	}
 }
 

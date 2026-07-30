@@ -118,7 +118,7 @@ already picked).
 | `defenseclaw keys fill-missing` | Interactive loop over REQUIRED+unset entries. | Uses `click.prompt(hide_input=True)`, no value is echoed. |
 | `defenseclaw config show` | Render active config with secrets redacted. | Never writes. |
 | `defenseclaw config validate` | Load + schema-validate config.yaml. | Never writes. |
-| `defenseclaw doctor --fix` | Run modular fixers (stale PIDs, gateway token, dotenv perms, pristine openclaw.json backup). | Each fixer is independent; a failure in one does not abort the rest. Honours `--yes` / no-op otherwise. |
+| `defenseclaw doctor --fix` | Plan or apply the typed repair graph, then report post-repair health. | Dependencies block unsafe downstream work; `--dry-run` is passive/read-only, `--fix-id` selects exact work, and `--yes` cannot opt into experimental recovery. Gateway repairs can start or restart the managed sidecar. |
 | `defenseclaw uninstall --dry-run` | Preview what would be removed. | Default is dry-run. |
 | `defenseclaw uninstall --confirm` | Remove the plugin, restore pristine `openclaw.json`, delete `~/.defenseclaw/`. | Refuses if the target dir lacks DefenseClaw marker files (`config.yaml`, `audit.db`, `policies/`, `quarantine/`). |
 | `defenseclaw reset` | `uninstall` + `init` in one, for "wipe and start over" flows. | Same safety rails as `uninstall`. |
@@ -152,19 +152,20 @@ invocations don't blow up on `[[`.
 
 ### TUI surface
 
-The TUI's Overview panel already caches `defenseclaw doctor
---json-output` (P3-#21). We extend the existing cache with two
-low-cost reads:
+The Textual TUI's Overview panel reads the cache written by
+`defenseclaw doctor --json-output` (P3-#21). Schema v2 keeps
+health `checks`/`summary` and `repairs`/`repair_summary` separate.
+The Overview renders both ledgers and derives the run state from
+both, so a failed or dependency-blocked repair cannot produce an
+all-green Doctor card. Unknown or malformed schema-v2 state
+degrades to a visible warning instead of being assumed healthy.
 
-1. `DoctorCache.MissingRequiredCredentials()` scans the cached
-   checks for the `credential <ENV_NAME>` emission pattern used by
-   `_check_registry_credentials` in `cmd_doctor.py`. Returns the
-   env-name slice in emission order.
-2. The SCANNERS box gains a "keys" row derived from (1): a green
-   `all required set` line when the slice is empty, a red
-   `N missing: FOO, BAR (+2 more)` line otherwise.
-3. `buildNotices` promotes a non-empty slice into a top-of-panel
-   error notice pointing at `defenseclaw keys fill-missing`.
+`DoctorCache.missing_required_credentials()` still scans failed
+health checks for the `credential <ENV_NAME>` label emitted by
+the credential registry. The SCANNERS box shows either
+`all required set` or the bounded missing-name list, and the
+notice surface points operators to
+`defenseclaw keys fill-missing`.
 
 Because the TUI reads the cache and never re-probes the credential
 registry itself, these surfaces cost nothing at render time.
@@ -173,7 +174,7 @@ Staleness is the operator's responsibility — the existing
 
 We deliberately did not ship a TUI-native key-entry form. The CLI
 `keys fill-missing` command is the canonical interactive surface;
-recreating it inside bubbletea would require secure-input
+recreating it inside the TUI would require secure-input
 rendering, keystroke pass-through, and prompt state machines that
 duplicate Click. If telemetry later shows operators wanting an
 in-TUI entry UX, the natural follow-up is a key-binding that
@@ -220,31 +221,63 @@ messages are truncated and never include the payload.
 
 ### Doctor `--fix` scope
 
-Every fixer is explicitly scoped to a single config-owned file:
+Doctor now models each repair as a stable ID with a risk class,
+declared dependencies, effects, blockers, restart potential,
+platform support, and an explicit plan/apply state. Schema-v2
+output keeps those repair records and their summary separate from
+post-repair health checks; failed or blocked repairs participate
+in the overall exit code without inflating the health counters.
 
-- `_fix_stale_pid` — only touches `gateway.pid` when the PID is
-  dead
-- `_fix_openclaw_token` — regenerates the token we wrote, never
-  mutates other OpenClaw fields
-- `_fix_dotenv_perms` — chmod-only
-- `_fix_pristine_backup` — creates a backup if none exists; never
-  overwrites
+`--fix --dry-run` executes planners only and is always passive.
+It does not write files, restart services, emit synthetic
+telemetry, invoke an LLM, or submit inspection content.
+`--fix-id` selects exact work and expands its dependencies. A
+blanket `--yes` may approve eligible safe/disruptive repairs, but
+does not select policy or experimental work.
 
-No fixer restarts the gateway or mutates `openclaw.json` beyond
-what `setup guardrail` would do.
+The safe/disruptive graph covers stale PID cleanup, private
+dotenv custody, locally managed gateway token creation or secure
+rotation, canonical token-provider drift, managed gateway
+lifecycle reconciliation, and pristine connector backups.
+Restart-capable records say so in their plan because token or
+subsystem reconciliation can start or restart the sidecar.
+Externally managed `token_env` providers are never overwritten.
+
+Recovery has narrower boundaries:
+
+- `doctor.state.audit-db.initialize` creates and validates a new
+  empty schema only when the configured name is safely absent and
+  gateway inactivity is established. Publication is atomic and
+  no-overwrite; existing, corrupt, linked/reparsed, or ambiguous
+  state is never replaced.
+- `doctor.identity.device-key.initialize` must be selected by
+  exact ID and confirmed by an attended human. It publishes
+  HMAC-bound provenance before a new Ed25519 key becomes visible;
+  `--yes` cannot bypass continuity review.
+- `doctor.component.compatibility.review` reports release drift
+  with authenticated upgrade or trusted reinstall guidance, but
+  keeps component replacement inside the canonical upgrade flow.
+- `doctor.connector.compatibility.review` presents unsupported or
+  untested external connector versions as manual, experimental
+  guidance. Exact attended selection can refresh bounded local
+  version evidence, but never installs, upgrades, downgrades, or
+  launches the unsupported connector workload.
 
 ## Testing
 
 - **Python**: `cli/tests/test_credentials.py`, `test_bootstrap.py`,
   `test_cmd_config.py`, `test_cmd_keys.py`,
-  `test_cmd_uninstall.py`, `test_cmd_version.py` exercise each new
-  module in isolation with a `CliRunner`. The full `make
-  cli-test-cov` run stays green.
-- **Go**: new TUI tests in `overview_keys_test.go` plus the
-  unit-level `DoctorCache.MissingRequiredCredentials` suite cover
-  the all-set / missing / overflow / no-cache branches. The
-  pre-existing `cli_parity_test.go` gates that every CLI command
-  remains reachable from the TUI's command palette.
+  `test_cmd_uninstall.py`, and `test_cmd_version.py` exercise the
+  lifecycle modules with a `CliRunner`. The Doctor repair engine,
+  orchestration, health, recovery, startup-preflight, and security
+  boundary suites cover planning and platform behavior.
+- **Textual TUI**: `cli/tests/tui/test_overview_panel.py` and
+  `test_app_shell.py` cover legacy/schema-v2 cache parsing,
+  credential notices, separate repair summaries, and fail-closed
+  outcome rendering.
+- **Go observability**: delivery/runtime/gateway suites cover the
+  per-destination/signal circuit and the health fields consumed by
+  Doctor.
 - **Scripts**: `scripts/add-to-path.sh` is linted with `shellcheck`
   and exercised end-to-end via `make all` in CI (GitHub runners
   provide `bash`, `zsh`, and `dash`).
@@ -267,10 +300,10 @@ populate the credential registry surface automatically.
 
 ## Alternatives considered
 
-- **Ship a bubbletea key-entry wizard**: higher UX ceiling but
+- **Ship a TUI-native key-entry wizard**: higher UX ceiling but
   duplicates Click prompt handling, adds a secure-input surface
-  that is non-trivial to get right in lipgloss, and makes the
-  CLI ↔ TUI parity story harder. Deferred pending user demand.
+  that is non-trivial to get right, and makes the CLI ↔ TUI
+  parity story harder. Deferred pending user demand.
 - **Store secrets in the OS keychain**: attractive on macOS but
   poor fit for headless Linux CI where `keyring` falls back to
   plaintext files anyway. `.env` with `0o600` is a known quantity.

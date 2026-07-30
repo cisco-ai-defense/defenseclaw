@@ -246,6 +246,66 @@ def test_destination_health_accepts_only_bounded_content_free_fields() -> None:
     assert "secret" not in repr(health)
 
 
+def test_destination_health_exposes_only_bounded_circuit_evidence() -> None:
+    result = destination_health_from_gateway(
+        {
+            "telemetry": {
+                "details": {
+                    "destinations": [
+                        {
+                            "name": "collector",
+                            "state": "failing",
+                            "circuit_state": "open",
+                            "consecutive_failures": 3,
+                            "circuit_open_until": "2026-07-06T12:30:00Z",
+                            "last_failure_class": "authentication",
+                            "last_error": "Bearer must-not-render",
+                        }
+                    ]
+                }
+            }
+        }
+    )["collector"]
+
+    assert result.circuit_state == "open"
+    assert result.consecutive_failures == 3
+    assert result.circuit_open_until == "2026-07-06T12:30:00Z"
+    assert result.last_failure_class == "authentication"
+    assert result.circuit_label == ("open, 3 consecutive failures, authentication, until 2026-07-06T12:30:00Z")
+    assert "must-not-render" not in repr(result)
+
+
+def test_destination_health_rejects_unbounded_circuit_values() -> None:
+    result = destination_health_from_gateway(
+        {
+            "details": {
+                "destination": "collector",
+                "circuit_state": "paused forever",
+                "consecutive_failures": -1,
+                "circuit_open_until": "tomorrow",
+                "last_failure_class": "https://secret.example.test",
+            }
+        }
+    )["collector"]
+
+    assert result.circuit_state == ""
+    assert result.consecutive_failures is None
+    assert result.circuit_open_until == ""
+    assert result.last_failure_class == ""
+    assert result.circuit_label == "unavailable"
+
+
+def test_destination_health_humanizes_bounded_circuit_tokens() -> None:
+    result = V8DestinationHealth(
+        name="collector",
+        circuit_state="half_open",
+        consecutive_failures=1,
+        last_failure_class="permanent_payload",
+    )
+
+    assert result.circuit_label == "half open, 1 consecutive failure, permanent payload"
+
+
 @pytest.mark.parametrize("fraction_digits", [1, 2, 4, 5, 7, 8, 9])
 def test_destination_health_accepts_every_rfc3339nano_fraction_width(fraction_digits: int) -> None:
     timestamp = "2026-07-06T12:00:00." + ("1" * fraction_digits) + "Z"
@@ -637,12 +697,113 @@ def test_doctor_v8_renders_bounded_live_health_and_never_raw_error_text() -> Non
     assert "limits=queue=2048 items/64.0 MiB; batch=512 items/8.0 MiB; delay=5000ms" in destination["detail"]
     assert "queue=2/10 items" in destination["detail"]
     assert "last=error 2026-07-06T12:00:00Z (retryable_delivery)" in destination["detail"]
-    assert checks["Retention controller"] == {
-        "status": "warn",
-        "label": "Retention controller",
-        "detail": "degraded; failure=run_failed",
-    }
+    assert checks["Retention controller"]["status"] == "warn"
+    assert checks["Retention controller"]["detail"] == "degraded; failure=run_failed"
     assert "must-not-render" not in repr(result.checks)
+
+
+def test_doctor_v8_reports_open_auth_circuit_and_explicit_disable_command() -> None:
+    from defenseclaw.commands.cmd_doctor import (
+        _check_observability_v8_status,
+        _DoctorResult,
+    )
+
+    status = V8OperatorStatus(
+        source="/tmp/config.yaml",
+        data_dir="/tmp",
+        plan_digest="a" * 64,
+        bucket_catalog_version=1,
+        retention_days=30,
+        local_path="/tmp/audit.db",
+        judge_bodies_path="",
+        destinations=(
+            V8DestinationStatus(
+                name="collector",
+                kind="otlp",
+                enabled=True,
+                generated=False,
+                capabilities=("logs",),
+                selected_signals=("logs",),
+                policy_form="capability_default",
+                endpoint="https://collector.example.test",
+                route_count=1,
+                buckets=("platform.health",),
+                redaction_profiles=("strict",),
+            ),
+        ),
+        buckets=(V8BucketStatus("platform.health", ("logs",), "strict"),),
+        warnings=(),
+    )
+    result = _DoctorResult()
+
+    _check_observability_v8_status(
+        status,
+        result,
+        live_health={
+            "telemetry": {
+                "details": {
+                    "destinations": [
+                        {
+                            "name": "collector",
+                            "state": "failing",
+                            "reason": "circuit_open",
+                            "circuit_state": "open",
+                            "consecutive_failures": 1,
+                            "circuit_open_until": "2026-07-07T12:00:00Z",
+                            "last_failure_class": "authentication",
+                        }
+                    ]
+                }
+            }
+        },
+    )
+
+    destination = next(item for item in result.checks if item["label"] == "Destination: collector")
+    assert destination["status"] == "fail"
+    assert "circuit=open, 1 consecutive failure, authentication" in destination["detail"]
+    assert "automatically suppressed while local SQLite continues" in destination["detail"]
+    assert "defenseclaw setup observability disable collector" in destination["detail"]
+
+
+def test_doctor_v8_warns_when_enabled_remote_health_is_missing() -> None:
+    from defenseclaw.commands.cmd_doctor import (
+        _check_observability_v8_status,
+        _DoctorResult,
+    )
+
+    status = V8OperatorStatus(
+        source="/tmp/config.yaml",
+        data_dir="/tmp",
+        plan_digest="a" * 64,
+        bucket_catalog_version=1,
+        retention_days=30,
+        local_path="/tmp/audit.db",
+        judge_bodies_path="",
+        destinations=(
+            V8DestinationStatus(
+                name="collector",
+                kind="otlp",
+                enabled=True,
+                generated=False,
+                capabilities=("logs",),
+                selected_signals=("logs",),
+                policy_form="capability_default",
+                endpoint="https://collector.example.test",
+                route_count=1,
+                buckets=("platform.health",),
+                redaction_profiles=("strict",),
+            ),
+        ),
+        buckets=(V8BucketStatus("platform.health", ("logs",), "strict"),),
+        warnings=(),
+    )
+    result = _DoctorResult()
+
+    _check_observability_v8_status(status, result, live_health=None)
+
+    destination = next(item for item in result.checks if item["label"] == "Destination: collector")
+    assert destination["status"] == "warn"
+    assert "health=unavailable" in destination["detail"]
 
 
 def test_doctor_enabled_galileo_emits_and_renders_real_runtime_canary() -> None:
@@ -689,13 +850,10 @@ def test_doctor_enabled_galileo_emits_and_renders_real_runtime_canary() -> None:
         data_dir="/data",
         timeout=15.0,
     )
-    assert result.checks == [
-        {
-            "status": "pass",
-            "label": "Galileo canary: galileo",
-            "detail": ("acknowledged; trace_id=0123456789abcdef0123456789abcdef; generation=12"),
-        }
-    ]
+    assert len(result.checks) == 1
+    assert result.checks[0]["status"] == "pass"
+    assert result.checks[0]["label"] == "Galileo canary: galileo"
+    assert result.checks[0]["detail"] == ("acknowledged; trace_id=0123456789abcdef0123456789abcdef; generation=12")
 
 
 def test_doctor_observability_dispatches_canary_from_compiled_galileo_preset(tmp_path: Path) -> None:
@@ -792,13 +950,12 @@ def test_doctor_galileo_canary_fails_safely_and_skips_disabled_routes() -> None:
         )
 
     assert canary.call_count == 1
-    assert result.checks == [
-        {
-            "status": "fail",
-            "label": "Galileo canary: galileo-security",
-            "detail": ("gateway_rejected: the running gateway did not acknowledge the destination canary"),
-        }
-    ]
+    assert len(result.checks) == 1
+    assert result.checks[0]["status"] == "fail"
+    assert result.checks[0]["label"] == "Galileo canary: galileo-security"
+    assert result.checks[0]["detail"] == (
+        "gateway_rejected: the running gateway did not acknowledge the destination canary"
+    )
 
 
 def test_doctor_caps_automatic_galileo_canaries_and_warns_for_remaining_routes() -> None:
@@ -859,8 +1016,8 @@ def test_doctor_caps_automatic_galileo_canaries_and_warns_for_remaining_routes()
         "Galileo canary: galileo-3",
         "Galileo canary coverage",
     ]
-    assert result.checks[-1] == {
-        "status": "warn",
-        "label": "Galileo canary coverage",
-        "detail": ("untested=2; automatic_limit=4; remaining enabled routes retain bounded runtime-health checks"),
-    }
+    assert result.checks[-1]["status"] == "warn"
+    assert result.checks[-1]["label"] == "Galileo canary coverage"
+    assert result.checks[-1]["detail"] == (
+        "untested=2; automatic_limit=4; remaining enabled routes retain bounded runtime-health checks"
+    )
