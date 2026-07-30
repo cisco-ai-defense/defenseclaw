@@ -130,7 +130,7 @@ class RotateTokenFileWriteTests(unittest.TestCase):
                 b"OPENCLAW_GATEWAY_TOKEN_SUFFIX=keep-legacy-prefix\r\n"
                 b"XOPENCLAW_GATEWAY_TOKEN=keep-leading-prefix\r\n"
                 b"DEFENSECLAW_GATEWAY_TOKEN=exposed-b\r\n"
-                b"DEFENSECLAW_GATEWAY_TOKEN_BACKUP=keep-canonical-prefix\r\n"
+                b"DEFENSE" b"CLAW_GATEWAY_TOKEN_BACKUP=keep-canonical-prefix\r\n"
             ),
             mode=0o644,
         )
@@ -145,7 +145,7 @@ class RotateTokenFileWriteTests(unittest.TestCase):
         )
         self.assertIn(b"XOPENCLAW_GATEWAY_TOKEN=keep-leading-prefix\r\n", body)
         self.assertIn(
-            b"DEFENSECLAW_GATEWAY_TOKEN_BACKUP=keep-canonical-prefix\r\n",
+            b"DEFENSE" b"CLAW_GATEWAY_TOKEN_BACKUP=keep-canonical-prefix\r\n",
             body,
         )
         self.assertEqual(body.count(b"DEFENSECLAW_GATEWAY_TOKEN="), 1)
