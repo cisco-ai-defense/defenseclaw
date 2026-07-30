@@ -37,13 +37,13 @@ func (f fakeStats) GetCounts() (audit.Counts, error) { return f.counts, f.err }
 
 func TestSnapshotStats(t *testing.T) {
 	cases := []struct {
-		name                string
-		src                 fakeStats
-		wantAvail           pb.StatsAvailability
-		wantScans           *uint64
-		wantBlockedSkills   *uint64
-		wantErr             bool
-		checkMixedPresence  bool
+		name               string
+		src                fakeStats
+		wantAvail          pb.StatsAvailability
+		wantScans          *uint64
+		wantBlockedSkills  *uint64
+		wantErr            bool
+		checkMixedPresence bool
 	}{
 		{
 			name: "healthy DB → AVAILABLE with counters",
