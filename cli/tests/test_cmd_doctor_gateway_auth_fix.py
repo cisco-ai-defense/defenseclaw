@@ -597,6 +597,108 @@ def test_fix_stale_pid_parses_fingerprinted_a_during_a_b_a_read_swap(tmp_path):
     assert replacement.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX atomic quarantine regression")
+def test_posix_stale_pid_removal_preserves_replacement_published_after_claim(tmp_path):
+    pid_file = tmp_path / "gateway.pid"
+    pid_file.write_bytes(b"{old")
+    inspected = pid_file_fingerprint(os.fspath(pid_file))
+    assert inspected is not None
+    real_fingerprint = pid_file_fingerprint
+
+    def publish_replacement_after_claim(path):
+        pid_file.write_bytes(b"{replacement")
+        return real_fingerprint(path)
+
+    with patch(
+        "defenseclaw.commands.cmd_doctor.pid_file_fingerprint",
+        side_effect=publish_replacement_after_claim,
+    ):
+        tag, detail = _remove_stale_pid_if_unchanged(
+            os.fspath(pid_file),
+            inspected,
+            platform_name="linux",
+        )
+
+    assert (tag, detail) == ("pass", "")
+    assert pid_file.read_bytes() == b"{replacement"
+    assert not tuple(tmp_path.glob(".gateway-pid-doctor-*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX atomic quarantine regression")
+def test_posix_stale_pid_removal_does_not_delete_racing_replacement(tmp_path):
+    pid_file = tmp_path / "gateway.pid"
+    replacement = tmp_path / "replacement.pid"
+    pid_file.write_bytes(b"{old")
+    replacement.write_bytes(b"{replacement")
+    inspected = pid_file_fingerprint(os.fspath(pid_file))
+    assert inspected is not None
+    real_rename = os.rename
+
+    def publish_replacement_before_claim(source, destination):
+        os.replace(replacement, source)
+        real_rename(source, destination)
+
+    with patch(
+        "defenseclaw.commands.cmd_doctor.os.rename",
+        side_effect=publish_replacement_before_claim,
+    ):
+        tag, detail = _remove_stale_pid_if_unchanged(
+            os.fspath(pid_file),
+            inspected,
+            platform_name="linux",
+        )
+
+    assert tag == "warn"
+    assert "restored without overwrite" in detail
+    assert pid_file.read_bytes() == b"{replacement"
+    quarantine = next(tmp_path.glob(".gateway-pid-doctor-*/gateway.pid"))
+    assert quarantine.read_bytes() == b"{replacement"
+    assert os.path.samefile(pid_file, quarantine)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX atomic quarantine regression")
+def test_posix_stale_pid_removal_preserves_two_concurrent_replacements(tmp_path):
+    pid_file = tmp_path / "gateway.pid"
+    first_replacement = tmp_path / "first-replacement.pid"
+    pid_file.write_bytes(b"{old")
+    first_replacement.write_bytes(b"{replacement-b")
+    inspected = pid_file_fingerprint(os.fspath(pid_file))
+    assert inspected is not None
+    real_rename = os.rename
+    real_link = os.link
+
+    def publish_first_replacement_before_claim(source, destination):
+        os.replace(first_replacement, source)
+        real_rename(source, destination)
+
+    def publish_second_replacement_before_restore(source, destination, **kwargs):
+        with open(destination, "xb") as handle:
+            handle.write(b"{replacement-c")
+        return real_link(source, destination, **kwargs)
+
+    with (
+        patch(
+            "defenseclaw.commands.cmd_doctor.os.rename",
+            side_effect=publish_first_replacement_before_claim,
+        ),
+        patch(
+            "defenseclaw.commands.cmd_doctor.os.link",
+            side_effect=publish_second_replacement_before_restore,
+        ),
+    ):
+        tag, detail = _remove_stale_pid_if_unchanged(
+            os.fspath(pid_file),
+            inspected,
+            platform_name="darwin",
+        )
+
+    assert tag == "fail"
+    assert "both preserved" in detail
+    assert pid_file.read_bytes() == b"{replacement-c"
+    quarantine = next(tmp_path.glob(".gateway-pid-doctor-*/gateway.pid"))
+    assert quarantine.read_bytes() == b"{replacement-b"
+
+
 def test_windows_stale_pid_removal_fingerprints_and_deletes_one_claimed_handle(tmp_path):
     pid_file = tmp_path / "gateway.pid"
     pid_file.write_bytes(b"{broken")
@@ -670,7 +772,7 @@ def test_windows_stale_pid_removal_preserves_replacement_opened_by_claim(tmp_pat
         )
 
     assert tag == "warn"
-    assert "changed after inspection" in detail
+    assert "changed or disappeared after inspection" in detail
     delete.assert_not_called()
     assert pid_file.read_bytes() == b"{replacement"
 
@@ -712,7 +814,7 @@ def test_windows_stale_pid_removal_fails_on_claimed_handle_read_error(tmp_path):
 @pytest.mark.parametrize(
     ("error", "expected_tag", "expected_detail"),
     [
-        (FileNotFoundError(2, "missing"), "warn", "changed after inspection"),
+        (FileNotFoundError(2, "missing"), "warn", "changed or disappeared after inspection"),
         (OSError(32, "sharing violation"), "fail", "exclusively claim"),
     ],
 )

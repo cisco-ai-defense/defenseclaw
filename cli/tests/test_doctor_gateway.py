@@ -170,6 +170,27 @@ def test_pid_file_fingerprint_from_fd_rejects_windows_reparse_points(monkeypatch
     assert doctor_gateway.pid_file_fingerprint_from_fd(123) is None
 
 
+def test_pid_file_fingerprint_from_fd_rejects_premature_eof(monkeypatch, tmp_path):
+    path = tmp_path / "gateway.pid"
+    path.write_bytes(b"4242")
+    fd = os.open(path, os.O_RDONLY)
+    real_read = os.read
+    reads = 0
+
+    def short_read(read_fd, count):
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            return b""
+        return real_read(read_fd, min(count, 1))
+
+    monkeypatch.setattr(doctor_gateway.os, "read", short_read)
+    try:
+        assert doctor_gateway.pid_file_fingerprint_from_fd(fd) is None
+    finally:
+        os.close(fd)
+
+
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "nonregular", "oversized"])
 def test_pid_file_fingerprint_rejects_unsafe_sources(monkeypatch, tmp_path, unsafe_kind):
     path = tmp_path / "gateway.pid"

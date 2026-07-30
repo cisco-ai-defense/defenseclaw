@@ -7649,16 +7649,85 @@ def _remove_stale_pid_if_unchanged(
 ) -> tuple[str, str]:
     """Delete only the PID-file object represented by prior evidence."""
 
-    changed_detail = "gateway PID record changed after inspection; preserving the replacement"
+    changed_detail = "gateway PID record changed or disappeared after inspection; no replacement was deleted"
     platform_name = platform_name or ("win32" if os.name == "nt" else sys.platform)
     if platform_name != "win32":
-        if pid_file_fingerprint(pid_file) != inspected_fingerprint:
-            return ("warn", changed_detail)
+        parent = os.path.dirname(os.path.abspath(pid_file)) or os.curdir
         try:
-            os.unlink(pid_file)
+            quarantine_dir = tempfile.mkdtemp(
+                prefix=".gateway-pid-doctor-",
+                dir=parent,
+            )
         except OSError as exc:
-            return ("fail", f"could not remove {pid_file}: {exc}")
-        return ("pass", "")
+            return ("fail", f"could not create a private PID-file quarantine beside {pid_file}: {exc}")
+        quarantined = os.path.join(quarantine_dir, os.path.basename(pid_file))
+        try:
+            os.rename(pid_file, quarantined)
+        except FileNotFoundError:
+            with contextlib.suppress(OSError):
+                os.rmdir(quarantine_dir)
+            return ("warn", changed_detail)
+        except OSError as exc:
+            with contextlib.suppress(OSError):
+                os.rmdir(quarantine_dir)
+            return ("fail", f"could not atomically quarantine {pid_file} for safe removal: {exc}")
+
+        # The rename atomically claims whichever pathname object exists at that
+        # instant. Delete only if that claimed object is the one Doctor
+        # inspected. A publisher may create a fresh gateway.pid after the
+        # rename; it is independent and remains untouched.
+        if pid_file_fingerprint(quarantined) == inspected_fingerprint:
+            try:
+                os.unlink(quarantined)
+            except OSError as exc:
+                return (
+                    "fail",
+                    f"could not remove the verified stale PID record; it remains preserved at {quarantined}: {exc}",
+                )
+            with contextlib.suppress(OSError):
+                os.rmdir(quarantine_dir)
+            return ("pass", "")
+
+        # The claimed object is a concurrent replacement. Restore a regular
+        # replacement with a no-clobber hard link when the canonical pathname
+        # is still absent. Keep the quarantined link even after restoration:
+        # another publisher could replace the restored pathname before a
+        # cleanup unlink, otherwise making this safety copy its last link.
+        try:
+            quarantined_info = os.lstat(quarantined)
+        except OSError as exc:
+            return (
+                "fail",
+                f"{changed_detail}; the quarantined record could not be inspected at {quarantined}: {exc}",
+            )
+        if not stat.S_ISREG(quarantined_info.st_mode):
+            return (
+                "fail",
+                f"{changed_detail}; a non-regular replacement remains preserved at {quarantined}",
+            )
+        try:
+            os.link(
+                quarantined,
+                pid_file,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            return (
+                "fail",
+                f"{changed_detail}; the current pathname and quarantined "
+                f"replacement at {quarantined} were both preserved",
+            )
+        except (NotImplementedError, OSError) as exc:
+            return (
+                "fail",
+                f"{changed_detail}; the replacement remains preserved at "
+                f"{quarantined} because no-overwrite restoration failed: {exc}",
+            )
+        return (
+            "warn",
+            f"{changed_detail}; the replacement was restored without overwrite "
+            f"and a safety link remains at {quarantined}",
+        )
 
     # On Windows, a separate fingerprint followed by pathname deletion can
     # remove a replacement published in between. Hold a descriptor that denies

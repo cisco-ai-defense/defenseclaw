@@ -294,7 +294,7 @@ def pid_file_fingerprint_from_fd(fd: int) -> tuple[int, int, int, int, bytes] | 
         remaining -= len(chunk)
     raw = b"".join(chunks)
     current_info = os.fstat(fd)
-    if len(raw) > _MAX_PID_RECORD_BYTES:
+    if len(raw) > _MAX_PID_RECORD_BYTES or len(raw) != opened_info.st_size:
         return None
     if (
         not os.path.samestat(opened_info, current_info)
