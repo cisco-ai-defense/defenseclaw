@@ -22,9 +22,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"runtime"
 	"strings"
-	"syscall"
 )
 
 // DefaultEnvConfigPath is the canonical location AVC drops the DefenseClaw
@@ -167,8 +165,6 @@ func validateAIDefenseEndpoint(endpoint string) error {
 // The env_config file feeds a bearer-authenticated endpoint into the
 // gateway; a non-root or group/world-writable file at the canonical
 // path lets a compromised operator retarget those authenticated POSTs.
-// On non-Unix platforms this is a best-effort no-op — the caller can
-// still enforce path-level trust separately.
 //
 // When the gateway is NOT running as root (dev boxes, unit tests,
 // opensource local runs) the uid/mode invariants can't hold, so we
@@ -176,6 +172,10 @@ func validateAIDefenseEndpoint(endpoint string) error {
 // LoadEnvConfigEndpoint on managed_enterprise where the sidecar runs
 // as uid 0. Setting DEFENSECLAW_ENV_CONFIG_SKIP_TRUST=1 also disables
 // the check — used by tests that need to exercise the parse path.
+//
+// On non-Unix platforms (env_config trust helpers live in
+// env_config_unix.go / env_config_windows.go) the uid/mode check is
+// a best-effort no-op — the managed deploy target is macOS + Linux.
 func trustEnvConfigFile(info os.FileInfo) error {
 	if info == nil {
 		return errors.New("stat returned nil info")
@@ -183,21 +183,8 @@ func trustEnvConfigFile(info os.FileInfo) error {
 	if !info.Mode().IsRegular() {
 		return errors.New("must be a regular file")
 	}
-	if runtime.GOOS == "windows" {
+	if os.Getenv("DEFENSECLAW_ENV_CONFIG_SKIP_TRUST") == "1" {
 		return nil
 	}
-	if os.Getenv("DEFENSECLAW_ENV_CONFIG_SKIP_TRUST") == "1" || os.Geteuid() != 0 {
-		return nil
-	}
-	sys, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return errors.New("file metadata not verifiable on this platform")
-	}
-	if sys.Uid != 0 {
-		return fmt.Errorf("must be owned by root (uid %d)", sys.Uid)
-	}
-	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("must not be group- or world-writable (mode %o)", info.Mode().Perm())
-	}
-	return nil
+	return trustEnvConfigFilePlatform(info)
 }
