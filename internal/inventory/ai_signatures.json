@@ -331,7 +331,8 @@
       ],
       "local_endpoints": [],
       "rule_paths": [
-        ".windsurf/rules"
+        ".windsurf/rules",
+        ".codeium/windsurf/rules"
       ]
     },
     {
