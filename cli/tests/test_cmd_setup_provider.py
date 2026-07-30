@@ -433,12 +433,24 @@ class TestProviderAddCommand(unittest.TestCase):
 
 class TestProviderGatewayClient(unittest.TestCase):
     def test_wildcard_bind_normalizes_to_loopback(self) -> None:
-        for bind in ("", "0.0.0.0", "::", "[::]", "*"):
+        for bind in ("", "0.0.0.0", "*"):
             cfg = SimpleNamespace(gateway=SimpleNamespace(api_bind=bind))
             self.assertEqual(gateway_api_client_host(cfg), "127.0.0.1")
+        for bind in ("::", "[::]"):
+            cfg = SimpleNamespace(gateway=SimpleNamespace(api_bind=bind))
+            self.assertEqual(gateway_api_client_host(cfg), "::1")
+
+    def test_standalone_guardrail_host_is_connectable_fallback(self) -> None:
+        cfg = SimpleNamespace(
+            gateway=SimpleNamespace(api_bind=""),
+            openshell=SimpleNamespace(is_standalone=lambda: True),
+            guardrail=SimpleNamespace(host="10.200.0.1"),
+        )
+        self.assertEqual(gateway_api_client_host(cfg), "10.200.0.1")
 
     def test_provider_client_sends_token_headers(self) -> None:
         client = OrchestratorClient(host="127.0.0.1", port=29871, token="test-token")
+        self.assertFalse(client._session.trust_env)
         self.assertEqual(client._session.headers["Authorization"], "Bearer test-token")
         self.assertEqual(client._session.headers["X-DC-Auth"], "Bearer test-token")
 

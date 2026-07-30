@@ -30,6 +30,30 @@ import (
 	"time"
 )
 
+func TestKillStaleProcessesDoesNotExecutePathPgrep(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux /proc process enumeration")
+	}
+
+	binDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "path-pgrep-was-executed")
+	fakePgrep := filepath.Join(binDir, "pgrep")
+	script := fmt.Sprintf("#!/bin/sh\nprintf invoked > %q\n", marker)
+	if err := os.WriteFile(fakePgrep, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake pgrep: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "must-not-reach-helper")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "must-not-reach-helper")
+
+	if err := New(t.TempDir()).killStaleProcesses(); err != nil {
+		t.Fatalf("kill stale processes: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("PATH-resolved pgrep executed during stale cleanup: stat error = %v", err)
+	}
+}
+
 func TestProveStaleDaemonProcessRequiresExactLinuxIdentity(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux /proc identity proof")

@@ -90,9 +90,12 @@ class TestConfigSavePreservesFileMode(unittest.TestCase):
 
             mode = os.stat(cfg_path).st_mode & 0o777
         self.assertEqual(
-            mode, 0o600,
-            msg=(f"Config.save widened mode to {mode:o}; pre-fix umask-honoring "
-                 "open() leaked secrets to group/other readers"),
+            mode,
+            0o600,
+            msg=(
+                f"Config.save widened mode to {mode:o}; pre-fix umask-honoring "
+                "open() leaked secrets to group/other readers"
+            ),
         )
 
     def test_save_first_create_is_0600(self):
@@ -109,9 +112,9 @@ class TestConfigSavePreservesFileMode(unittest.TestCase):
             self.assertTrue(os.path.exists(cfg_path))
             mode = os.stat(cfg_path).st_mode & 0o777
         self.assertEqual(
-            mode, 0o600,
-            msg=(f"First-save mode = {mode:o} (want 0o600). Process umask "
-                 "must not widen the new file."),
+            mode,
+            0o600,
+            msg=(f"First-save mode = {mode:o} (want 0o600). Process umask must not widen the new file."),
         )
 
     def test_save_does_not_widen_stricter_existing_mode(self):
@@ -133,9 +136,9 @@ class TestConfigSavePreservesFileMode(unittest.TestCase):
         # 0o400 is the stricter case — `target_mode = existing & 0o600 = 0o400`
         # so the live file lands at 0o400.
         self.assertEqual(
-            mode, 0o400,
-            msg=(f"Config.save widened 0o400 to {mode:o}; mode mirror was "
-                 "supposed to narrow-only, not widen."),
+            mode,
+            0o400,
+            msg=(f"Config.save widened 0o400 to {mode:o}; mode mirror was supposed to narrow-only, not widen."),
         )
 
     def test_save_strips_world_readable_bits_on_legacy_0644(self):
@@ -157,9 +160,12 @@ class TestConfigSavePreservesFileMode(unittest.TestCase):
         # existing & 0o600 = 0o600, so the live file should narrow
         # from 0o644 to 0o600.
         self.assertEqual(
-            mode, 0o600,
-            msg=(f"Save did not narrow legacy 0o644 to 0o600; got {mode:o}. "
-                 "Upgrade path leaves credentials world-readable."),
+            mode,
+            0o600,
+            msg=(
+                f"Save did not narrow legacy 0o644 to 0o600; got {mode:o}. "
+                "Upgrade path leaves credentials world-readable."
+            ),
         )
 
 
@@ -324,8 +330,84 @@ class TestConfigSaveV8HardCutover(unittest.TestCase):
             self.assertEqual(after["claw"], {"mode": "codex"})
 
 
-class TestConfigSaveResilienceContinued(unittest.TestCase):
+class TestGatewayFleetModeRoundTrip(unittest.TestCase):
+    def test_explicit_fleet_modes_survive_load_and_noop_save_exactly(self):
+        for mode in ("enabled", "disabled", "auto"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmpdir:
+                config_path = os.path.join(tmpdir, "config.yaml")
+                original = {
+                    "config_version": 8,
+                    "data_dir": tmpdir,
+                    "environment": "linux",
+                    "claw": {"mode": "codex"},
+                    "gateway": {
+                        "fleet_mode": mode,
+                        "host": "fleet.example.test",
+                        "port": 18_790,
+                        "api_bind": "127.0.0.2",
+                        "api_port": 18_971,
+                    },
+                    "observability": {
+                        "local": {
+                            "path": "history/custom.db",
+                            "retention_days": 23,
+                        },
+                    },
+                }
+                with open(config_path, "w", encoding="utf-8") as stream:
+                    yaml.safe_dump(original, stream, sort_keys=False)
 
+                with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
+                    cfg = load()
+                    self.assertEqual(cfg.gateway.fleet_mode, mode)
+                    cfg.save()
+                    reloaded = load()
+
+                with open(config_path, encoding="utf-8") as stream:
+                    persisted = yaml.safe_load(stream)
+                self.assertEqual(reloaded.gateway.fleet_mode, mode)
+                self.assertEqual(persisted, original)
+
+    def test_absent_fleet_mode_keeps_auto_semantics_without_being_inserted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "config.yaml")
+            original = {
+                "config_version": 8,
+                "data_dir": tmpdir,
+                "environment": "macos",
+                "claw": {"mode": "codex"},
+                "gateway": {
+                    "host": "127.0.0.1",
+                    "port": 18_789,
+                    "api_bind": "127.0.0.1",
+                    "api_port": 18_970,
+                    "watcher": {"enabled": False},
+                },
+                "observability": {
+                    "local": {
+                        "path": "history/unchanged.db",
+                        "retention_days": 17,
+                    },
+                },
+            }
+            with open(config_path, "w", encoding="utf-8") as stream:
+                yaml.safe_dump(original, stream, sort_keys=False)
+
+            with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
+                cfg = load()
+                self.assertEqual(cfg.gateway.fleet_mode, "")
+                self.assertEqual(cfg.gateway.fleet_mode or "auto", "auto")
+                cfg.save()
+                reloaded = load()
+
+            with open(config_path, encoding="utf-8") as stream:
+                persisted = yaml.safe_load(stream)
+            self.assertEqual(reloaded.gateway.fleet_mode or "auto", "auto")
+            self.assertNotIn("fleet_mode", persisted["gateway"])
+            self.assertEqual(persisted, original)
+
+
+class TestConfigSaveResilienceContinued(unittest.TestCase):
     def test_corrupt_yaml_falls_back_to_dataclass_only(self):
         """Operator with a half-edited YAML must still be able to recover
         by re-running setup. We log a warning but do NOT raise."""
@@ -394,7 +476,8 @@ class TestConfigSaveAtomicity(unittest.TestCase):
             # the existence-check above still proves the write completed.
             inode_after = os.stat(cfg_path).st_ino
             self.assertNotEqual(
-                inode_before, inode_after,
+                inode_before,
+                inode_after,
                 msg="config.yaml inode unchanged — save was not atomic",
             )
 

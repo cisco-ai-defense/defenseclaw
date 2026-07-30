@@ -21,7 +21,9 @@ from __future__ import annotations
 import os
 import stat
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
 from defenseclaw import gateway
@@ -41,9 +43,13 @@ class ResolveGatewayBinaryTests(unittest.TestCase):
         # the fallback lookup inside resolve_gateway_binary().
         self._orig_install_dir = gateway._CANONICAL_INSTALL_DIR
         gateway._CANONICAL_INSTALL_DIR = self._tmp.name
-        self.addCleanup(lambda: setattr(
-            gateway, "_CANONICAL_INSTALL_DIR", self._orig_install_dir,
-        ))
+        self.addCleanup(
+            lambda: setattr(
+                gateway,
+                "_CANONICAL_INSTALL_DIR",
+                self._orig_install_dir,
+            )
+        )
 
         # Scrub the env override — real CI envs occasionally set it.
         self._env_backup = os.environ.pop("DEFENSECLAW_GATEWAY_BIN", None)
@@ -185,6 +191,93 @@ class OrchestratorClientWireFormatTests(unittest.TestCase):
       produced a malformed URL.
     """
 
+    def test_session_does_not_trust_environment_proxy_configuration(self):
+        with patch.dict(
+            os.environ,
+            {
+                "HTTP_PROXY": "http://127.0.0.1:9",
+                "HTTPS_PROXY": "http://127.0.0.1:9",
+            },
+        ):
+            client = gateway.OrchestratorClient(token="gateway-secret")
+
+        self.assertIs(client._session.trust_env, False)
+
+    def test_status_refuses_cross_origin_redirect_without_replaying_tokens(self):
+        origin_requests: list[dict[str, str | None]] = []
+        target_requests: list[dict[str, str | None]] = []
+
+        class TargetHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                target_requests.append(
+                    {
+                        "path": self.path,
+                        "authorization": self.headers.get("Authorization"),
+                        "x_dc_auth": self.headers.get("X-DC-Auth"),
+                    }
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+        target_server = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
+        target_thread = threading.Thread(target=target_server.serve_forever, daemon=True)
+        target_thread.start()
+        redirect_url = f"http://127.0.0.1:{target_server.server_port}/redirect-target"
+
+        class OriginHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                origin_requests.append(
+                    {
+                        "path": self.path,
+                        "authorization": self.headers.get("Authorization"),
+                        "x_dc_auth": self.headers.get("X-DC-Auth"),
+                    }
+                )
+                self.send_response(302)
+                self.send_header("Location", redirect_url)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+        origin_server = ThreadingHTTPServer(("127.0.0.1", 0), OriginHandler)
+        origin_thread = threading.Thread(target=origin_server.serve_forever, daemon=True)
+        origin_thread.start()
+
+        try:
+            client = gateway.OrchestratorClient(
+                host="127.0.0.1",
+                port=origin_server.server_port,
+                token="gateway-secret",
+            )
+            self.assertEqual(client.status(), {})
+        finally:
+            origin_server.shutdown()
+            origin_server.server_close()
+            origin_thread.join(timeout=2)
+            target_server.shutdown()
+            target_server.server_close()
+            target_thread.join(timeout=2)
+
+        self.assertEqual(
+            origin_requests,
+            [
+                {
+                    "path": "/status",
+                    "authorization": "Bearer gateway-secret",
+                    "x_dc_auth": "Bearer gateway-secret",
+                }
+            ],
+        )
+        self.assertEqual(target_requests, [])
+
     def _client_with_capturing_session(self):
         """Build an OrchestratorClient whose Session captures every
         outbound request. Returns ``(client, requests)`` where
@@ -198,14 +291,16 @@ class OrchestratorClientWireFormatTests(unittest.TestCase):
         captured: list = []
 
         def fake_request(method, url, **kwargs):
-            captured.append(SimpleNamespace(
-                method=method,
-                url=url,
-                headers={**kwargs.get("headers", {})},
-                json=kwargs.get("json"),
-                data=kwargs.get("data"),
-                params=kwargs.get("params"),
-            ))
+            captured.append(
+                SimpleNamespace(
+                    method=method,
+                    url=url,
+                    headers={**kwargs.get("headers", {})},
+                    json=kwargs.get("json"),
+                    data=kwargs.get("data"),
+                    params=kwargs.get("params"),
+                )
+            )
             resp = MagicMock()
             resp.status_code = 200
             resp.json = MagicMock(return_value={"valid": True, "ok": True})
@@ -299,8 +394,8 @@ class OrchestratorClientWireFormatTests(unittest.TestCase):
         client.ai_usage_component_history("py%pi", "open?ai")
 
         url = captured[0].url
-        self.assertIn("py%25pi", url)        # % → %25
-        self.assertIn("open%3Fai", url)      # ? → %3F
+        self.assertIn("py%25pi", url)  # % → %25
+        self.assertIn("open%3Fai", url)  # ? → %3F
         self.assertTrue(url.endswith("/history"))
 
     def test_validate_413_is_normalized_to_failure_payload(self):

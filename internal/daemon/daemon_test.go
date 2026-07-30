@@ -223,8 +223,34 @@ func TestWriteAndReadPIDInfo(t *testing.T) {
 	if info.Executable != "/usr/bin/defenseclaw-gateway" {
 		t.Errorf("Executable = %q, want /usr/bin/defenseclaw-gateway", info.Executable)
 	}
+	if info.DataDir != dir {
+		t.Errorf("DataDir = %q, want %q", info.DataDir, dir)
+	}
 	if info.StartTime < now-1 || info.StartTime > now+1 {
 		t.Errorf("StartTime = %d, want ~%d", info.StartTime, now)
+	}
+}
+
+func TestVerifyProcessRejectsCopiedCrossHomePIDRecord(t *testing.T) {
+	dir := t.TempDir()
+	foreignDir := t.TempDir()
+	d := New(dir)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	identity, err := processStartIdentity(os.Getpid())
+	if err != nil {
+		t.Fatalf("processStartIdentity: %v", err)
+	}
+	info := pidInfo{
+		PID:           os.Getpid(),
+		Executable:    executable,
+		DataDir:       foreignDir,
+		StartIdentity: identity,
+	}
+	if d.verifyProcess(info) {
+		t.Fatal("copied PID record from another data directory was accepted")
 	}
 }
 

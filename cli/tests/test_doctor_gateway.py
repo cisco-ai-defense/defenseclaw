@@ -1,0 +1,259 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Cross-platform tests for Doctor's native gateway evidence collectors."""
+
+from __future__ import annotations
+
+import json
+import os
+
+import pytest
+from defenseclaw import doctor_gateway
+
+
+def test_gateway_executable_name_uses_target_platform_separators() -> None:
+    assert (
+        doctor_gateway.gateway_executable_name(
+            r"C:\Program Files\DefenseClaw\defenseclaw-gateway.exe",
+            platform_name="win32",
+        )
+        == "defenseclaw-gateway.exe"
+    )
+    assert (
+        doctor_gateway.gateway_executable_name(
+            r"/tmp/attacker\defenseclaw-gateway",
+            platform_name="linux",
+        )
+        == r"attacker\defenseclaw-gateway"
+    )
+
+
+def test_read_pid_record_accepts_current_json_envelope(tmp_path):
+    path = tmp_path / "gateway.pid"
+    path.write_text(
+        json.dumps(
+            {
+                "pid": 4242,
+                "executable": "/opt/defenseclaw-gateway",
+                "start_identity": "start-1",
+                "start_time": 123,
+                "data_dir": "/var/lib/defenseclaw",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    record = doctor_gateway.read_pid_record(os.fspath(path))
+
+    assert record.status == "ok"
+    assert record.pid == 4242
+    assert record.executable == "/opt/defenseclaw-gateway"
+    assert record.start_identity == "start-1"
+    assert record.start_time == "123"
+    assert record.data_dir == "/var/lib/defenseclaw"
+
+
+def test_read_pid_record_rejects_symlink_before_open(monkeypatch, tmp_path):
+    path = tmp_path / "gateway.pid"
+    path.write_text("4242", encoding="utf-8")
+    monkeypatch.setattr(doctor_gateway, "is_symlink", lambda _path: True)
+    monkeypatch.setattr(
+        doctor_gateway.os,
+        "open",
+        lambda *_args, **_kwargs: pytest.fail("symlink PID record must not be opened"),
+    )
+
+    record = doctor_gateway.read_pid_record(os.fspath(path))
+
+    assert record.status == "malformed"
+    assert "symbolic link or reparse point" in record.reason
+
+
+def test_read_pid_record_rejects_nonregular_path(tmp_path):
+    path = tmp_path / "gateway.pid"
+    path.mkdir()
+
+    record = doctor_gateway.read_pid_record(os.fspath(path))
+
+    assert record.status == "malformed"
+    assert record.reason == "PID file is not a regular file"
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (b"\xff\xfe", "PID file is not valid UTF-8"),
+        (b"4" * 16_385, "PID file exceeds the inspection limit"),
+    ],
+)
+def test_read_pid_record_rejects_unsafe_bytes(tmp_path, payload, reason):
+    path = tmp_path / "gateway.pid"
+    path.write_bytes(payload)
+
+    record = doctor_gateway.read_pid_record(os.fspath(path))
+
+    assert record.status == "malformed"
+    assert record.reason == reason
+
+
+@pytest.mark.parametrize("field", ["executable", "data_dir"])
+def test_read_pid_record_rejects_nul_path_fields(tmp_path, field):
+    path = tmp_path / "gateway.pid"
+    path.write_text(
+        json.dumps({"pid": 4242, field: "trusted\u0000suffix"}),
+        encoding="utf-8",
+    )
+
+    record = doctor_gateway.read_pid_record(os.fspath(path))
+
+    assert record.status == "malformed"
+    assert record.reason == "PID file contains an invalid path field"
+
+
+@pytest.mark.parametrize(
+    "pid",
+    [
+        True,
+        42.5,
+        doctor_gateway.MAX_PLATFORM_PID + 1,
+    ],
+)
+def test_read_pid_record_rejects_noncanonical_json_pid(tmp_path, pid):
+    path = tmp_path / "gateway.pid"
+    path.write_text(json.dumps({"pid": pid}), encoding="utf-8")
+
+    record = doctor_gateway.read_pid_record(os.fspath(path))
+
+    assert record.status == "malformed"
+    assert "PID file" in record.reason
+
+
+def test_pid_file_fingerprint_changes_with_content(tmp_path):
+    path = tmp_path / "gateway.pid"
+    path.write_bytes(b"4242")
+    before = doctor_gateway.pid_file_fingerprint(os.fspath(path))
+
+    path.write_bytes(b"4343")
+    after = doctor_gateway.pid_file_fingerprint(os.fspath(path))
+
+    assert before is not None
+    assert before[-1] == b"4242"
+    assert after is not None
+    assert after[-1] == b"4343"
+    assert after != before
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "nonregular", "oversized"])
+def test_pid_file_fingerprint_rejects_unsafe_sources(monkeypatch, tmp_path, unsafe_kind):
+    path = tmp_path / "gateway.pid"
+    if unsafe_kind == "nonregular":
+        path.mkdir()
+    elif unsafe_kind == "oversized":
+        path.write_bytes(b"x" * 16_385)
+    else:
+        path.write_text("4242", encoding="utf-8")
+        monkeypatch.setattr(doctor_gateway, "is_symlink", lambda _path: True)
+
+    assert doctor_gateway.pid_file_fingerprint(os.fspath(path)) is None
+
+
+def test_pid_file_fingerprint_rejects_path_replacement(monkeypatch, tmp_path):
+    path = tmp_path / "gateway.pid"
+    replacement = tmp_path / "replacement.pid"
+    path.write_bytes(b"4242")
+    replacement.write_bytes(b"4343")
+    real_open = os.open
+
+    def replace_before_open(open_path, flags, *args, **kwargs):
+        os.replace(replacement, path)
+        return real_open(open_path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(doctor_gateway.os, "open", replace_before_open)
+
+    assert doctor_gateway.pid_file_fingerprint(os.fspath(path)) is None
+
+
+def test_linux_process_evidence_reads_executable_and_start_identity(tmp_path):
+    pid = 4242
+    process_root = tmp_path / str(pid)
+    process_root.mkdir()
+    (process_root / "exe").symlink_to("/opt/defenseclaw-gateway")
+    fields = ["S", *[str(index) for index in range(4, 23)]]
+    fields[19] = "987654"
+    (process_root / "stat").write_text(
+        f"{pid} (gateway worker) {' '.join(fields)}\n",
+        encoding="utf-8",
+    )
+
+    evidence = doctor_gateway._linux_process_evidence(
+        pid,
+        proc_root=os.fspath(tmp_path),
+    )
+
+    assert evidence.status == "ok"
+    assert evidence.pid == pid
+    assert evidence.executable == "/opt/defenseclaw-gateway"
+    assert evidence.start_identity == "987654"
+
+
+def test_darwin_process_evidence_uses_native_full_path_and_microsecond_identity(monkeypatch):
+    pid = 4242
+    monkeypatch.setattr(
+        doctor_gateway,
+        "_darwin_native_process_identity",
+        lambda inspected_pid: (
+            (
+                "/opt/DefenseClaw/defenseclaw-gateway",
+                "1785373323.123456",
+            )
+            if inspected_pid == pid
+            else (_ for _ in ()).throw(ProcessLookupError(inspected_pid))
+        ),
+    )
+
+    evidence = doctor_gateway._darwin_process_evidence(pid)
+
+    assert evidence.status == "ok"
+    assert evidence.executable == "/opt/DefenseClaw/defenseclaw-gateway"
+    assert evidence.start_identity == "1785373323.123456"
+
+
+@pytest.mark.parametrize(
+    ("local_address", "target_host", "expected"),
+    [
+        ("127.0.0.1", "127.0.0.1", True),
+        ("0.0.0.0", "127.0.0.1", True),
+        ("::", "127.0.0.1", False),
+        ("::1", "::1", True),
+        ("::", "::1", True),
+        ("0.0.0.0", "::1", False),
+        ("127.0.0.1", "localhost", True),
+        ("::1", "localhost", True),
+        ("0.0.0.0", "localhost", True),
+        ("::", "localhost", True),
+        ("192.0.2.10", "localhost", False),
+        ("not-an-address", "127.0.0.1", False),
+        ("127.0.0.1", "not-an-address", False),
+        ("not-an-address", "", True),
+    ],
+)
+def test_listener_address_matching_is_address_family_aware(
+    local_address,
+    target_host,
+    expected,
+):
+    assert doctor_gateway._listener_address_matches(local_address, target_host) is expected

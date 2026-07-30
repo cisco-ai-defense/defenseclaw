@@ -20,9 +20,9 @@ This file covers:
 * ``_check_gateway_token_drift`` — emits ``pass`` when tokens match,
   ``fail`` when they drift, ``skip`` when introspection can't
   decide. Driven via patching ``_read_process_env_var``.
-* ``_fix_gateway_token_drift`` — invokes ``defenseclaw-gateway
-  restart`` only when drift is confirmed AND operator confirms;
-  silently skips when there's nothing to fix.
+* ``_fix_gateway_token_drift`` — invokes the managed, readiness-aware
+  lifecycle only when drift is confirmed AND operator confirms; silently
+  skips when there's nothing to fix.
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -43,13 +42,24 @@ from defenseclaw.commands.cmd_doctor import (
     _check_gateway_token_drift,
     _DoctorResult,
     _fix_gateway_token_drift,
+    _gateway_process_trust,
+    _GatewayTrust,
     _read_pid_from_file,
     _read_process_env_var,
 )
+from defenseclaw.doctor_gateway import PIDRecord, ProcessEvidence
 
 
 def _make_cfg(data_dir: str) -> SimpleNamespace:
-    return SimpleNamespace(data_dir=data_dir, save=MagicMock())
+    with open(os.path.join(data_dir, "config.yaml"), "w", encoding="utf-8") as fh:
+        fh.write("config_version: 8\n")
+    gateway = SimpleNamespace(
+        api_bind="",
+        api_port=18_970,
+        token_env="",
+        resolved_token=lambda: "",
+    )
+    return SimpleNamespace(data_dir=data_dir, gateway=gateway, save=MagicMock())
 
 
 def _seed_dotenv(data_dir: str, token: str = "deadbeef" * 8) -> None:
@@ -64,10 +74,66 @@ def _seed_pidfile(data_dir: str, pid: int, *, json_envelope: bool = True) -> Non
     path = os.path.join(data_dir, "gateway.pid")
     if json_envelope:
         with open(path, "w") as f:
-            json.dump({"pid": pid, "executable": "/x/y/defenseclaw-gateway"}, f)
+            json.dump(
+                {
+                    "pid": pid,
+                    "executable": os.path.join(data_dir, "bin", "defenseclaw-gateway"),
+                    "start_identity": "start-1",
+                    "data_dir": data_dir,
+                },
+                f,
+            )
     else:
         with open(path, "w") as f:
             f.write(str(pid))
+
+
+def _trusted_process(
+    cfg: SimpleNamespace,
+    *,
+    pid: int,
+    start_identity: str = "start-1",
+) -> _GatewayTrust:
+    """Build trust from the same rich identity current gateways persist."""
+    executable = os.path.join(cfg.data_dir, "bin", "defenseclaw-gateway")
+    record = PIDRecord(
+        "ok",
+        pid=pid,
+        executable=executable,
+        start_identity=start_identity,
+        data_dir=cfg.data_dir,
+    )
+    process = ProcessEvidence(
+        "ok",
+        pid=pid,
+        executable=executable,
+        start_identity=start_identity,
+    )
+    trust = _gateway_process_trust(
+        cfg,
+        record,
+        process,
+        platform_name="linux",
+    )
+    if not trust.trusted:
+        raise AssertionError(f"test fixture did not establish process trust: {trust.code}")
+    return trust
+
+
+def _listener_unavailable(process_trust: _GatewayTrust) -> _GatewayTrust:
+    """Preserve rich process evidence while modelling listener uncertainty."""
+    return _GatewayTrust(
+        "unavailable",
+        "listener ownership unavailable",
+        process_trust.pid,
+        home_bound=process_trust.home_bound,
+        record=process_trust.record,
+        process=process_trust.process,
+    )
+
+
+def _status_body(cfg: SimpleNamespace, pid: int) -> str:
+    return json.dumps({"runtime": {"pid": pid, "data_dir": cfg.data_dir}})
 
 
 class ReadPidFromFileTests(unittest.TestCase):
@@ -141,6 +207,7 @@ class CheckGatewayTokenDriftTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="dclaw-drift-check-")
         self.cfg = _make_cfg(self.tmp)
+        self.process_trust = _trusted_process(self.cfg, pid=os.getpid())
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -157,8 +224,12 @@ class CheckGatewayTokenDriftTests(unittest.TestCase):
     def test_no_op_when_dotenv_missing(self):
         """No .env to read → nothing to compare against."""
         _seed_pidfile(self.tmp, os.getpid())
-        r = _DoctorResult()
-        _check_gateway_token_drift(self.cfg, r)
+        with patch(
+            "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+            return_value=self.process_trust,
+        ):
+            r = _DoctorResult()
+            _check_gateway_token_drift(self.cfg, r)
         self.assertEqual(r.passed + r.failed + r.warned, 0)
 
     def test_no_op_when_dotenv_lacks_gateway_token(self):
@@ -169,8 +240,12 @@ class CheckGatewayTokenDriftTests(unittest.TestCase):
         _seed_pidfile(self.tmp, os.getpid())
         with open(os.path.join(self.tmp, ".env"), "w") as f:
             f.write("DEFENSECLAW_LLM_KEY=something-else\n")
-        r = _DoctorResult()
-        _check_gateway_token_drift(self.cfg, r)
+        with patch(
+            "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+            return_value=self.process_trust,
+        ):
+            r = _DoctorResult()
+            _check_gateway_token_drift(self.cfg, r)
         self.assertEqual(r.passed + r.failed + r.warned, 0)
 
     def test_pass_when_process_and_dotenv_tokens_match(self):
@@ -181,9 +256,15 @@ class CheckGatewayTokenDriftTests(unittest.TestCase):
         token = "match" * 10
         _seed_dotenv(self.tmp, token)
         _seed_pidfile(self.tmp, os.getpid())
-        with patch(
-            "defenseclaw.commands.cmd_doctor._read_process_env_var",
-            return_value=token,
+        with (
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+                return_value=self.process_trust,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor._read_process_env_var",
+                return_value=token,
+            ),
         ):
             r = _DoctorResult()
             _check_gateway_token_drift(self.cfg, r)
@@ -196,9 +277,15 @@ class CheckGatewayTokenDriftTests(unittest.TestCase):
         """
         _seed_dotenv(self.tmp, "new-token-from-rewrite")
         _seed_pidfile(self.tmp, os.getpid())
-        with patch(
-            "defenseclaw.commands.cmd_doctor._read_process_env_var",
-            return_value="old-cached-token",
+        with (
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+                return_value=self.process_trust,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor._read_process_env_var",
+                return_value="old-cached-token",
+            ),
         ):
             r = _DoctorResult()
             _check_gateway_token_drift(self.cfg, r)
@@ -220,9 +307,15 @@ class CheckGatewayTokenDriftTests(unittest.TestCase):
         """
         _seed_dotenv(self.tmp, "abc123")
         _seed_pidfile(self.tmp, os.getpid())
-        with patch(
-            "defenseclaw.commands.cmd_doctor._read_process_env_var",
-            return_value=None,
+        with (
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+                return_value=self.process_trust,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor._read_process_env_var",
+                return_value=None,
+            ),
         ):
             r = _DoctorResult()
             _check_gateway_token_drift(self.cfg, r)
@@ -239,9 +332,15 @@ class CheckGatewayTokenDriftTests(unittest.TestCase):
         """
         _seed_dotenv(self.tmp, "abc123")
         _seed_pidfile(self.tmp, os.getpid())
-        with patch(
-            "defenseclaw.commands.cmd_doctor._read_process_env_var",
-            return_value="",
+        with (
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+                return_value=self.process_trust,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor._read_process_env_var",
+                return_value="",
+            ),
         ):
             r = _DoctorResult()
             _check_gateway_token_drift(self.cfg, r)
@@ -260,9 +359,15 @@ class CheckGatewayTokenDriftTests(unittest.TestCase):
             f.write(f'DEFENSECLAW_GATEWAY_TOKEN="{token}"\n')
         os.chmod(path, 0o600)
         _seed_pidfile(self.tmp, os.getpid())
-        with patch(
-            "defenseclaw.commands.cmd_doctor._read_process_env_var",
-            return_value=token,
+        with (
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+                return_value=self.process_trust,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor._read_process_env_var",
+                return_value=token,
+            ),
         ):
             r = _DoctorResult()
             _check_gateway_token_drift(self.cfg, r)
@@ -273,6 +378,13 @@ class FixGatewayTokenDriftTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="dclaw-drift-fix-")
         self.cfg = _make_cfg(self.tmp)
+        self.pid = os.getpid()
+        self.process_trust = _trusted_process(self.cfg, pid=self.pid)
+        self.replacement_trust = _trusted_process(
+            self.cfg,
+            pid=self.pid + 1,
+            start_identity="start-2",
+        )
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -282,139 +394,246 @@ class FixGatewayTokenDriftTests(unittest.TestCase):
         self.assertEqual(result[0], "skip")
 
     def test_skip_when_no_dotenv(self):
-        _seed_pidfile(self.tmp, os.getpid())
-        result = _fix_gateway_token_drift(self.cfg, assume_yes=True)
+        _seed_pidfile(self.tmp, self.pid)
+        with (
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+                return_value=self.process_trust,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            ) as listener,
+        ):
+            result = _fix_gateway_token_drift(self.cfg, assume_yes=True)
         self.assertEqual(result[0], "skip")
+        listener.assert_not_called()
 
     def test_skip_when_no_drift(self):
         token = "same" * 10
         _seed_dotenv(self.tmp, token)
-        _seed_pidfile(self.tmp, os.getpid())
-        with patch(
-            "defenseclaw.commands.cmd_doctor._read_process_env_var",
-            return_value=token,
+        _seed_pidfile(self.tmp, self.pid)
+        with (
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+                return_value=self.process_trust,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+                return_value=_listener_unavailable(self.process_trust),
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor._read_process_env_var",
+                return_value=token,
+            ),
         ):
             result = _fix_gateway_token_drift(self.cfg, assume_yes=True)
         self.assertEqual(result[0], "skip")
         self.assertIn("already matches", result[1])
 
-    def test_skip_when_gateway_binary_missing(self):
-        """If defenseclaw-gateway isn't on PATH we can't auto-restart
-        — return ``warn`` so the operator knows to restart manually.
-        """
+    def test_fail_when_managed_restart_is_unavailable(self):
         _seed_dotenv(self.tmp, "new-tok")
-        _seed_pidfile(self.tmp, os.getpid())
+        _seed_pidfile(self.tmp, self.pid)
         with (
             patch(
-                "defenseclaw.commands.cmd_doctor._read_process_env_var",
-                return_value="old-tok",
+                "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+                return_value=self.process_trust,
             ),
-            patch("defenseclaw.commands.cmd_doctor.shutil.which", return_value=None),
+            patch(
+                "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+                return_value=self.process_trust,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                return_value=(401, ""),
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle",
+                return_value=(False, "binary not found"),
+            ),
         ):
             result = _fix_gateway_token_drift(self.cfg, assume_yes=True)
-        self.assertEqual(result[0], "warn")
-        self.assertIn("restart the sidecar manually", result[1])
+        self.assertEqual(result[0], "fail")
+        self.assertIn("readiness verification failed", result[1])
 
     def test_pass_invokes_gateway_restart(self):
-        """When drift is confirmed and operator says yes, invoke
-        ``defenseclaw-gateway restart``. Mock the subprocess so the
-        test doesn't actually try to bounce anything.
-        """
+        """Confirmed drift uses the managed, readiness-aware lifecycle."""
         _seed_dotenv(self.tmp, "new-tok")
-        _seed_pidfile(self.tmp, os.getpid())
-        mock_run = MagicMock(
-            return_value=subprocess.CompletedProcess(
-                args=[],
-                returncode=0,
-                stdout="restarted",
-                stderr="",
-            ),
-        )
+        _seed_pidfile(self.tmp, self.pid)
         with (
             patch(
-                "defenseclaw.commands.cmd_doctor._read_process_env_var",
-                return_value="old-tok",
+                "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+                return_value=self.process_trust,
             ),
             patch(
-                "defenseclaw.commands.cmd_doctor.shutil.which",
-                return_value="/usr/local/bin/defenseclaw-gateway",
+                "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+                side_effect=[self.process_trust, self.replacement_trust],
+            ) as listener,
+            patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                side_effect=[
+                    (401, ""),
+                    (200, _status_body(self.cfg, self.replacement_trust.pid)),
+                ],
             ),
-            patch("defenseclaw.commands.cmd_doctor.subprocess.run", mock_run),
+            patch(
+                "defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle",
+                return_value=(True, ""),
+            ) as repair,
         ):
             result = _fix_gateway_token_drift(self.cfg, assume_yes=True)
         self.assertEqual(result[0], "pass")
-        mock_run.assert_called_once()
-        # Verify we called the restart subcommand.
-        cmd = mock_run.call_args[0][0]
-        self.assertIn("restart", cmd)
+        repair.assert_called_once_with(self.cfg, start_if_stopped=False)
+        self.assertEqual(listener.call_count, 2)
 
-    def test_fail_when_restart_returncode_nonzero(self):
+    def test_fail_when_managed_restart_returns_false(self):
         _seed_dotenv(self.tmp, "new-tok")
-        _seed_pidfile(self.tmp, os.getpid())
-        mock_run = MagicMock(
-            return_value=subprocess.CompletedProcess(
-                args=[],
-                returncode=1,
-                stdout="",
-                stderr="port in use\n",
-            ),
-        )
+        _seed_pidfile(self.tmp, self.pid)
         with (
             patch(
-                "defenseclaw.commands.cmd_doctor._read_process_env_var",
-                return_value="old-tok",
+                "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+                return_value=self.process_trust,
             ),
             patch(
-                "defenseclaw.commands.cmd_doctor.shutil.which",
-                return_value="/usr/local/bin/defenseclaw-gateway",
+                "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+                return_value=self.process_trust,
             ),
-            patch("defenseclaw.commands.cmd_doctor.subprocess.run", mock_run),
+            patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                return_value=(401, ""),
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle",
+                return_value=(False, "managed lifecycle did not reach verified readiness"),
+            ),
         ):
             result = _fix_gateway_token_drift(self.cfg, assume_yes=True)
         self.assertEqual(result[0], "fail")
-        self.assertIn("port in use", result[1])
-
-    def test_fail_when_restart_times_out(self):
-        _seed_dotenv(self.tmp, "new-tok")
-        _seed_pidfile(self.tmp, os.getpid())
-        mock_run = MagicMock(
-            side_effect=subprocess.TimeoutExpired(cmd="gw restart", timeout=30),
-        )
-        with (
-            patch(
-                "defenseclaw.commands.cmd_doctor._read_process_env_var",
-                return_value="old-tok",
-            ),
-            patch(
-                "defenseclaw.commands.cmd_doctor.shutil.which",
-                return_value="/usr/local/bin/defenseclaw-gateway",
-            ),
-            patch("defenseclaw.commands.cmd_doctor.subprocess.run", mock_run),
-        ):
-            result = _fix_gateway_token_drift(self.cfg, assume_yes=True)
-        self.assertEqual(result[0], "fail")
-        self.assertIn("timed out", result[1])
+        self.assertIn("readiness verification failed", result[1])
 
     def test_skip_when_user_declines(self):
         """Operator must explicitly confirm before we bounce a live
         sidecar (in-flight requests interrupted).
         """
         _seed_dotenv(self.tmp, "new-tok")
-        _seed_pidfile(self.tmp, os.getpid())
+        _seed_pidfile(self.tmp, self.pid)
         with (
             patch(
-                "defenseclaw.commands.cmd_doctor._read_process_env_var",
-                return_value="old-tok",
+                "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+                return_value=self.process_trust,
             ),
             patch(
-                "defenseclaw.commands.cmd_doctor.shutil.which",
-                return_value="/usr/local/bin/defenseclaw-gateway",
+                "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+                return_value=self.process_trust,
             ),
-            patch("defenseclaw.commands.cmd_doctor.click.confirm", return_value=False),
+            patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                return_value=(401, ""),
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor.click.confirm",
+                return_value=False,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle",
+            ) as repair,
         ):
             result = _fix_gateway_token_drift(self.cfg, assume_yes=False)
         self.assertEqual(result[0], "skip")
         self.assertIn("declined", result[1])
+        repair.assert_not_called()
+
+    def test_fail_closed_for_malformed_pid_record(self):
+        trust = _gateway_process_trust(
+            self.cfg,
+            PIDRecord("malformed", reason="PID file is not a safe regular file"),
+            None,
+            platform_name="linux",
+        )
+
+        with (
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+                return_value=trust,
+            ),
+            patch("defenseclaw.commands.cmd_doctor._http_probe") as probe,
+            patch(
+                "defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle",
+            ) as repair,
+        ):
+            result = _fix_gateway_token_drift(self.cfg, assume_yes=True)
+
+        self.assertEqual(result[0], "fail")
+        self.assertIn("PID file is invalid", result[1])
+        probe.assert_not_called()
+        repair.assert_not_called()
+
+    def test_fail_closed_for_legacy_pid_record(self):
+        trust = _gateway_process_trust(
+            self.cfg,
+            PIDRecord("ok", pid=self.pid, data_dir=self.tmp),
+            ProcessEvidence(
+                "ok",
+                pid=self.pid,
+                executable=os.path.join(self.tmp, "bin", "defenseclaw-gateway"),
+                start_identity="start-1",
+            ),
+            platform_name="linux",
+        )
+
+        with (
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+                return_value=trust,
+            ),
+            patch("defenseclaw.commands.cmd_doctor._http_probe") as probe,
+            patch(
+                "defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle",
+            ) as repair,
+        ):
+            result = _fix_gateway_token_drift(self.cfg, assume_yes=True)
+
+        self.assertEqual(trust.code, "legacy_identity")
+        self.assertEqual(result[0], "fail")
+        self.assertIn("legacy PID record", result[1])
+        probe.assert_not_called()
+        repair.assert_not_called()
+
+    def test_fail_closed_for_unbound_pid_record(self):
+        executable = os.path.join(self.tmp, "bin", "defenseclaw-gateway.exe")
+        trust = _gateway_process_trust(
+            self.cfg,
+            PIDRecord(
+                "ok",
+                pid=self.pid,
+                executable=executable,
+                start_identity="start-1",
+            ),
+            ProcessEvidence(
+                "ok",
+                pid=self.pid,
+                executable=executable,
+                start_identity="start-1",
+            ),
+            platform_name="win32",
+        )
+
+        with (
+            patch(
+                "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+                return_value=trust,
+            ),
+            patch("defenseclaw.commands.cmd_doctor._http_probe") as probe,
+            patch(
+                "defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle",
+            ) as repair,
+        ):
+            result = _fix_gateway_token_drift(self.cfg, assume_yes=True)
+
+        self.assertEqual(trust.code, "unbound_home")
+        self.assertEqual(result[0], "fail")
+        self.assertIn("not bound", result[1])
+        probe.assert_not_called()
+        repair.assert_not_called()
 
 
 if __name__ == "__main__":

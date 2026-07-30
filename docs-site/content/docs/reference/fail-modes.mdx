@@ -130,11 +130,29 @@ install the pinned default is
 `%USERPROFILE%\.defenseclaw\logs\hook-failures.jsonl`. Treat it as sensitive
 operational data and do not publish the whole file.
 
-If doctor identifies token drift, preview its safe repair plan with
-`defenseclaw doctor --fix --dry-run`. An intentional master-token rotation uses
-`defenseclaw setup rotate-token --yes`, reconciles all active connectors, and
-requires each agent to be restarted afterward. Never diagnose auth by printing
-or comparing token values.
+If doctor identifies a missing token or token drift, preview its safe repair
+plan with `defenseclaw doctor --fix --dry-run`. The real repair runs before the
+diagnostic pass, so the summary and exit code describe the repaired state.
+Doctor may generate a local token, start a stopped managed gateway, or restart
+a gateway whose in-memory token or subsystem state is stale; it does not
+overwrite a custom `token_env`. Generated tokens are stored with mode `0600` on
+POSIX or a private DACL on Windows and are never printed. An intentional
+master-token rotation uses `defenseclaw setup rotate-token --yes`, reconciles
+all active connectors, and requires each agent to be restarted afterward.
+Never diagnose auth by printing or comparing token values.
+
+When `.env` was readable by another local principal, Doctor does not simply
+tighten permissions around the exposed value. It crosses a verified
+stop-A/commit-B/start-B boundary and authenticates B before reporting the
+rotation as repaired. A failed activation does not intentionally revive
+compromised A. Rotate every other credential that was present in the exposed
+file separately. Doctor refuses to consume a foreign-owned, attacker-writable,
+linked/reparsed, non-regular, or oversized `.env`.
+
+Credential dotenv files cannot set process-control variables such as `PATH`,
+dynamic-loader injection variables, connector-home overrides, proxy variables,
+or DefenseClaw security opt-outs. Supply those through the trusted service
+environment instead.
 
 ## Legacy connector fields
 

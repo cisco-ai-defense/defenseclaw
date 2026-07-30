@@ -33,6 +33,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
+const maxDotEnvBytes = 1024 * 1024
+
 var (
 	cfg                          *config.Config
 	auditStore                   *audit.Store
@@ -265,7 +267,7 @@ func Execute() int {
 // token_env/bearer_env references and non-observability application secrets
 // available when the sidecar runs without an interactive shell.
 func loadDotEnvIntoOS(path string) {
-	data, err := os.ReadFile(path)
+	data, err := safefile.ReadRegularFileBounded(path, maxDotEnvBytes)
 	if err != nil {
 		return
 	}
@@ -280,6 +282,9 @@ func loadDotEnvIntoOS(path string) {
 		}
 		k = strings.TrimSpace(k)
 		v = strings.TrimSpace(v)
+		if !dotEnvKeyIsValid(k) || strings.IndexByte(v, 0) >= 0 || dotEnvKeyIsProcessControl(k) {
+			continue
+		}
 		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
 			v = v[1 : len(v)-1]
 		}
@@ -287,4 +292,50 @@ func loadDotEnvIntoOS(path string) {
 			os.Setenv(k, v)
 		}
 	}
+}
+
+func dotEnvKeyIsProcessControl(key string) bool {
+	normalized := strings.ToUpper(strings.TrimSpace(key))
+	switch normalized {
+	case "ALL_PROXY", "BASH_ENV", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "COMSPEC",
+		"DEFENSECLAW_CODEX_LOOPBACK_TRUST",
+		"DEFENSECLAW_CONFIG", "DEFENSECLAW_DATA_DIR", "DEFENSECLAW_GATEWAY_BIN",
+		"DEFENSECLAW_HOME", "DEFENSECLAW_DEV", "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
+		"DEFENSECLAW_DISABLE_REDACTION", "DEFENSECLAW_DUMP_RAW_SECRETS",
+		"DEFENSECLAW_FAIL_MODE", "DEFENSECLAW_FORCE_AWS_HTTP1_SHIM",
+		"DEFENSECLAW_JSONL_DISABLE", "DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED",
+		"DEFENSECLAW_OTEL_TLS_INSECURE", "DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA",
+		"DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY", "DEFENSECLAW_REVEAL_PII",
+		"DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP", "DEFENSECLAW_STRICT_AVAILABILITY",
+		"DEFENSECLAW_TEST", "DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN",
+		"DEFENSECLAW_TRUSTED_PROXY_CIDRS", "DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES",
+		"DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED", "DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST",
+		"ENV", "HOME", "HTTP_PROXY", "HTTPS_PROXY",
+		"LOCPATH", "NO_PROXY", "PATH", "PATHEXT", "PYTHONHOME", "PYTHONPATH",
+		"PYTHONSTARTUP", "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "USERPROFILE",
+		"WINDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+		"XDG_RUNTIME_DIR", "XDG_STATE_HOME":
+		return true
+	default:
+		return strings.HasPrefix(normalized, "LD_") ||
+			strings.HasPrefix(normalized, "DYLD_") ||
+			strings.HasPrefix(normalized, "DEFENSECLAW_ALLOW_")
+	}
+}
+
+func dotEnvKeyIsValid(key string) bool {
+	if key == "" {
+		return false
+	}
+	for index := 0; index < len(key); index++ {
+		character := key[index]
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character == '_' ||
+			index > 0 && character >= '0' && character <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
 }

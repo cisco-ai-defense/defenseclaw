@@ -81,7 +81,11 @@ from defenseclaw.connector_contracts import (
     resolve_connector_contract,
 )
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.file_permissions import atomic_write_private_bytes, delete_file_durable
+from defenseclaw.file_permissions import (
+    MAX_DOTENV_BYTES,
+    atomic_write_private_bytes,
+    delete_file_durable,
+)
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
 from defenseclaw.notification_capabilities import desktop_notification_capability
@@ -1769,9 +1773,7 @@ def _snapshot_regular_file(path: str, *, what: str) -> tuple[bytes | None, int |
         return handle.read(), mode
 
 
-def _restore_regular_file_snapshot(
-    path: str, payload: bytes | None, mode: int | None, *, what: str
-) -> None:
+def _restore_regular_file_snapshot(path: str, payload: bytes | None, mode: int | None, *, what: str) -> None:
     if payload is None:
         try:
             _ensure_regular_file(os.lstat(path).st_mode, path)
@@ -1817,10 +1819,7 @@ def _write_dotenv_locked(path: str, entries: dict[str, str]) -> None:
     creation. Tighten the open descriptor before writing so repeat runs also
     converge on POSIX 0600 or the equivalent protected Windows DACL.
     """
-    body = "".join(
-        f"{key}={sanitize_dotenv_value(value, key=key)}\n"
-        for key, value in sorted(entries.items())
-    )
+    body = "".join(f"{key}={sanitize_dotenv_value(value, key=key)}\n" for key, value in sorted(entries.items()))
     atomic_write_private_bytes(path, body.encode("utf-8"))
 
 
@@ -1834,6 +1833,7 @@ def _load_config_for_data_dir(data_dir: str):
             os.environ.pop("DEFENSECLAW_HOME", None)
         else:
             os.environ["DEFENSECLAW_HOME"] = old_home
+
 
 def _config_trusted_bin_prefixes(cfg) -> list[str]:
     ai = getattr(cfg, "ai_discovery", None)
@@ -1875,10 +1875,7 @@ def _add_trusted_bin_prefix(prefix: str, data_dir: str, cfg=None) -> bool:
     resolved, _err = agent_discovery.validate_trusted_prefix(prefix)
     entry = resolved or prefix
     prefix_key = agent_discovery._path_key(os.path.realpath(os.path.abspath(entry)))
-    added = not any(
-        agent_discovery._path_key(os.path.realpath(os.path.abspath(part))) == prefix_key
-        for part in parts
-    )
+    added = not any(agent_discovery._path_key(os.path.realpath(os.path.abspath(part))) == prefix_key for part in parts)
     if added:
         parts.append(entry)
         _set_config_trusted_bin_prefixes(cfg, parts)
@@ -2379,9 +2376,14 @@ def _rotate_token_snapshot_locked(dotenv_path: str) -> _RotateTokenDotenvSnapsho
             raise click.ClickException("Gateway dotenv identity changed while opening; refusing token rotation.")
         with os.fdopen(fd, "rb") as stream:
             fd = -1
+            body = stream.read(MAX_DOTENV_BYTES + 1)
+            if len(body) > MAX_DOTENV_BYTES:
+                raise click.ClickException(
+                    f"Gateway dotenv exceeds the {MAX_DOTENV_BYTES}-byte safety limit; refusing token rotation."
+                )
             return _RotateTokenDotenvSnapshot(
                 existed=True,
-                body=stream.read(),
+                body=body,
                 mode=stat.S_IMODE(opened.st_mode),
             )
     finally:
@@ -2389,23 +2391,82 @@ def _rotate_token_snapshot_locked(dotenv_path: str) -> _RotateTokenDotenvSnapsho
             os.close(fd)
 
 
+def _dotenv_key_is_valid(key: str) -> bool:
+    """Return whether *key* is one portable ASCII environment name."""
+    return bool(
+        key
+        and key.isascii()
+        and (key[0].isalpha() or key[0] == "_")
+        and all(character.isalnum() or character == "_" for character in key)
+    )
+
+
+def _dotenv_upsert_render(
+    snapshot: _RotateTokenDotenvSnapshot,
+    key: str,
+    value: str,
+) -> bytes:
+    """Replace one dotenv key while retaining every unrelated byte."""
+    if not _dotenv_key_is_valid(key):
+        raise DotenvValueError(f"invalid dotenv key: {key!r}")
+    safe_value = sanitize_dotenv_value(value, key=key).encode("utf-8")
+    key_bytes = key.encode("ascii")
+    requested_key = key_bytes.upper() if os.name == "nt" else key_bytes
+    replaced = False
+    lines: list[bytes] = []
+    for line in snapshot.body.splitlines(keepends=True):
+        candidate = line.rstrip(b"\r\n").strip()
+        existing_key, separator, _existing_value = candidate.partition(b"=")
+        compared_key = existing_key.strip()
+        if os.name == "nt":
+            compared_key = compared_key.upper()
+        if separator and compared_key == requested_key:
+            if replaced:
+                continue
+            terminator = line[len(line.rstrip(b"\r\n")) :]
+            lines.append(key_bytes + b"=" + safe_value + terminator)
+            replaced = True
+            continue
+        lines.append(line)
+    body = b"".join(lines)
+    newline = b"\r\n" if b"\r\n" in snapshot.body else b"\n"
+    if not replaced:
+        if body and not body.endswith((b"\r", b"\n")):
+            body += newline
+        body += key_bytes + b"=" + safe_value + newline
+    return body
+
+
 def _rotate_token_render(snapshot: _RotateTokenDotenvSnapshot, new_token: str) -> bytes:
-    """Replace only canonical token lines and retain every unrelated byte."""
+    """Canonicalize gateway-token lines and retain every unrelated byte.
+
+    Once the canonical credential is rotated, retaining a legacy
+    ``OPENCLAW_GATEWAY_TOKEN`` line leaves an exposed fallback credential on
+    disk and can silently regain precedence after a later configuration edit.
+    Remove both exact token keys (including duplicates), then append exactly
+    one canonical value. Similar-looking unrelated keys remain byte-for-byte
+    intact.
+    """
 
     safe_token = sanitize_dotenv_value(new_token, key=_GATEWAY_TOKEN_ENV).encode("utf-8")
     token_prefix = (_GATEWAY_TOKEN_ENV + "=").encode("ascii")
+    token_keys = {
+        _GATEWAY_TOKEN_ENV.encode("ascii"),
+        _LEGACY_GATEWAY_TOKEN_ENV.encode("ascii"),
+    }
 
     def is_token_line(line: bytes) -> bool:
         candidate = line.rstrip(b"\r\n").strip()
+        key, separator, _value = candidate.partition(b"=")
+        if not separator:
+            return False
+        key = key.strip()
         if os.name == "nt":
-            return candidate.upper().startswith(token_prefix)
-        return candidate.startswith(token_prefix)
+            key = key.upper()
+            return key in {candidate_key.upper() for candidate_key in token_keys}
+        return key in token_keys
 
-    lines = [
-        line
-        for line in snapshot.body.splitlines(keepends=True)
-        if not is_token_line(line)
-    ]
+    lines = [line for line in snapshot.body.splitlines(keepends=True) if not is_token_line(line)]
     body = b"".join(lines)
     newline = b"\r\n" if b"\r\n" in snapshot.body else b"\n"
     if body and not body.endswith((b"\r", b"\n")):
@@ -2629,8 +2690,16 @@ def _rotate_token_transaction(
     dotenv_path: str,
     new_token: str,
     audit_details: str,
+    *,
+    recover_previous_runtime: bool = True,
 ) -> None:
-    """Commit token B only between verified stop(A) and start(B)."""
+    """Commit token B only between verified stop(A) and start(B).
+
+    Normal operator-initiated rotation restores ready gateway A if B cannot
+    activate. Doctor passes ``recover_previous_runtime=False`` when A's token
+    was already exposed: the exact files are still restored for operator
+    recovery, but the compromised runtime is deliberately left stopped.
+    """
 
     data_dir = os.path.abspath(app.cfg.data_dir or os.path.dirname(dotenv_path))
     config_file = os.path.abspath(str(config_path_for_data_dir(data_dir)))
@@ -2661,7 +2730,7 @@ def _rotate_token_transaction(
                 # (for example while verifying listener release). If A's
                 # authenticated PID disappeared, restore and readiness-check A
                 # before returning without ever committing B.
-                if was_running and not _is_pid_alive(pid_file):
+                if was_running and not _is_pid_alive(pid_file) and recover_previous_runtime:
                     try:
                         _run_rotate_token_lifecycle(
                             data_dir,
@@ -2743,7 +2812,7 @@ def _rotate_token_transaction(
                 ) from primary_error
 
             _restore_rotate_token_environment(environment_before)
-            if was_running:
+            if was_running and recover_previous_runtime:
                 try:
                     _run_rotate_token_lifecycle(
                         data_dir,
@@ -3236,9 +3305,9 @@ def _ensure_connector_available(connector: str) -> None:
     support = platform_support.connector_platform_support(connector)
     if not support.available:
         raise click.ClickException(
-            f"connector {connector!r} is {support.status} on "
-            f"{platform_support.host_os()}: {support.reason}"
+            f"connector {connector!r} is {support.status} on {platform_support.host_os()}: {support.reason}"
         )
+
 
 _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
     "openclaw": (
@@ -3398,11 +3467,7 @@ def _detect_installed_connectors() -> list[str]:
     # inventory cache was written, so always perform a fresh shared scan.
     disc = agent_discovery.discover_agents(use_cache=False)
     order = getattr(agent_discovery, "DISCOVERY_PRECEDENCE", ()) or tuple(disc.agents)
-    found = [
-        name
-        for name in order
-        if name in disc.agents and disc.agents[name].installed
-    ]
+    found = [name for name in order if name in disc.agents and disc.agents[name].installed]
     return platform_support.supported_connectors(found)
 
 
@@ -3691,11 +3756,7 @@ def _record_windows_setup_agent_selections(
     if platform_support.host_os() != "windows":
         return
     selected = tuple(
-        dict.fromkeys(
-            connector
-            for raw in connectors
-            if (connector := normalize_connector(raw)) == "codex"
-        )
+        dict.fromkeys(connector for raw in connectors if (connector := normalize_connector(raw)) == "codex")
     )
     if not selected:
         return
@@ -3714,8 +3775,7 @@ def _record_windows_setup_agent_selections(
     if selection_errors:
         details = "; ".join(f"{name}: {detail}" for name, detail in sorted(selection_errors.items()))
         raise click.ClickException(
-            "cannot configure native hooks without a freshly verified selected agent executable "
-            f"({details})"
+            f"cannot configure native hooks without a freshly verified selected agent executable ({details})"
         )
 
 
@@ -3759,11 +3819,7 @@ def _check_guardrail_setup_connector_versions(
     trusted_prompt_cache: dict[str, bool] | None = {} if allow_prompt else None
     targets = _guardrail_setup_check_targets(app, gc, explicit_connector)
     for connector in targets:
-        mode = (
-            gc.effective_mode(connector)
-            if hasattr(gc, "effective_mode")
-            else (getattr(gc, "mode", "") or "observe")
-        )
+        mode = gc.effective_mode(connector) if hasattr(gc, "effective_mode") else (getattr(gc, "mode", "") or "observe")
         version_check_kwargs = {
             "mode": mode or "observe",
             "data_dir": getattr(app.cfg, "data_dir", None),
@@ -4784,8 +4840,7 @@ def setup_guardrail(
     _log_setup_action(
         app,
         ACTION_SETUP_GUARDRAIL,
-        f"mode={gc.mode} scanner_mode={gc.scanner_mode} port={gc.port} "
-        f"model={gc.model} hilt={bool(gc.hilt.enabled)!s}",
+        f"mode={gc.mode} scanner_mode={gc.scanner_mode} port={gc.port} model={gc.model} hilt={bool(gc.hilt.enabled)!s}",
         allow_offline=not restart,
     )
 
@@ -5417,16 +5472,10 @@ def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -
     click.echo("    • Optionally launch the bundled local stack: defenseclaw setup local-observability up")
     if os_name == "nt":
         click.echo("    • Watch decisions live: defenseclaw tui")
-        click.echo(
-            f"    • Recent alerts for this connector: "
-            f"defenseclaw alerts --limit 25 --connector {connector}"
-        )
+        click.echo(f"    • Recent alerts for this connector: defenseclaw alerts --limit 25 --connector {connector}")
         return
 
-    click.echo(
-        "    • Watch decisions live: defenseclaw tui  "
-        "(Logs and Alerts read canonical SQLite history)"
-    )
+    click.echo("    • Watch decisions live: defenseclaw tui  (Logs and Alerts read canonical SQLite history)")
     click.echo(
         f"    • Recent alerts as a table: defenseclaw alerts --limit 25  "
         f"(filter to this connector with: jq 'select(.connector == \"{connector}\")')"
@@ -5844,9 +5893,7 @@ def _run_setup_picker(app: AppContext) -> list[str]:
     """
     candidates = platform_support.supported_connectors(sorted(_HOOK_ENFORCED_CONNECTORS))
     detected = {c for c in _detect_installed_connectors() if c in _HOOK_ENFORCED_CONNECTORS}
-    configured = {
-        c for c in _configured_connector_set(app.cfg.guardrail) if c in _HOOK_ENFORCED_CONNECTORS
-    }
+    configured = {c for c in _configured_connector_set(app.cfg.guardrail) if c in _HOOK_ENFORCED_CONNECTORS}
     # Once a connector set exists, it is the source of truth for defaults:
     # discovering another installed application must not silently activate it.
     # First-time setup still preselects detected applications for convenience.
@@ -6319,9 +6366,7 @@ def _apply_setup_batch(
     # selected target, even when the gateway was stopped or the config bytes
     # were already current. Unrelated setup subcommands never set this marker.
     if restart:
-        ctx.meta[_SETUP_BATCH_READINESS_KEY] = tuple(
-            sorted({normalize_connector(name) for name in connectors if name})
-        )
+        ctx.meta[_SETUP_BATCH_READINESS_KEY] = tuple(sorted({normalize_connector(name) for name in connectors if name}))
     else:
         ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
         click.echo("  --no-restart: config updated; restart defenseclaw-gateway to wire the connector hooks.")
@@ -6363,8 +6408,7 @@ def _dispatch_bare_setup(
         support = platform_support.connector_platform_support(c)
         if not support.available:
             raise click.UsageError(
-                f"connector {c!r} is {support.status} on {platform_support.host_os()}: "
-                f"{support.reason}"
+                f"connector {c!r} is {support.status} on {platform_support.host_os()}: {support.reason}"
             )
         if c not in targets:
             targets.append(c)
@@ -7007,10 +7051,7 @@ def _make_observability_setup_command(connector: str) -> click.Command:
     platform_note = (
         ""
         if platform.status == platform_support.SUPPORTED
-        else (
-            f"\n\nPlatform status on {platform_support.host_os()}: "
-            f"{platform.status} — {platform.reason}"
-        )
+        else (f"\n\nPlatform status on {platform_support.host_os()}: {platform.status} — {platform.reason}")
     )
     short_help = f"Configure DefenseClaw for {label}."
     if platform.status != platform_support.SUPPORTED:
@@ -7376,10 +7417,7 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
     platform_note = (
         ""
         if platform.status == platform_support.SUPPORTED
-        else (
-            f"\n\nPlatform status on {platform_support.host_os()}: "
-            f"{platform.status} — {platform.reason}"
-        )
+        else (f"\n\nPlatform status on {platform_support.host_os()}: {platform.status} — {platform.reason}")
     )
     short_help = f"Configure {label} guardrail setup."
     if platform.status != platform_support.SUPPORTED:
@@ -7574,24 +7612,12 @@ def setup_notifications(
         ux.section("Notifications state")
         click.echo(f"    {ux.dim('configured (notifications.enabled):')} {'ON' if current else 'OFF'}")
         effective = capability.effective_enabled(current)
-        click.echo(
-            f"    {ux.dim('native desktop delivery:')} "
-            f"{'ACTIVE' if effective else 'INACTIVE'}"
-        )
+        click.echo(f"    {ux.dim('native desktop delivery:')} {'ACTIVE' if effective else 'INACTIVE'}")
         if not capability.supported:
-            click.echo(
-                f"    {ux.dim('capability:')} UNSUPPORTED — "
-                f"{capability.unsupported_reason}"
-            )
+            click.echo(f"    {ux.dim('capability:')} UNSUPPORTED — {capability.unsupported_reason}")
             if current:
-                click.echo(
-                    "    Legacy configured ON is retained, but native desktop "
-                    "delivery is not active."
-                )
-            click.echo(
-                "    Delivery failures use a labelled terminal fallback; "
-                "they are never desktop success."
-            )
+                click.echo("    Legacy configured ON is retained, but native desktop delivery is not active.")
+            click.echo("    Delivery failures use a labelled terminal fallback; they are never desktop success.")
         click.echo(f"    {ux.dim('block_enforced:')} {'on' if nc.block_enforced else 'off'}")
         click.echo(f"    {ux.dim('block_would_block:')} {'on' if nc.block_would_block else 'off'}")
         click.echo(f"    {ux.dim('hitl_approval:')} {'on' if nc.hitl_approval else 'off'}")
@@ -8787,22 +8813,13 @@ def _wait_for_connector_runtime(
             continue
         raw_names = state.get("names") if isinstance(state, dict) else None
         if isinstance(raw_names, list):
-            active = {
-                normalize_connector(name)
-                for name in raw_names
-                if isinstance(name, str) and name.strip()
-            }
+            active = {normalize_connector(name) for name in raw_names if isinstance(name, str) and name.strip()}
         else:
             name = state.get("name") if isinstance(state, dict) else None
             active = {normalize_connector(name)} if isinstance(name, str) and name.strip() else set()
         state_fresh = previous_state_marker is None or state_marker != previous_state_marker
         lock_fresh = previous_lock_marker is None or lock_marker != previous_lock_marker
-        if (
-            expected.issubset(active)
-            and state_fresh
-            and lock_fresh
-            and _hook_contract_lock_covers(lock, expected)
-        ):
+        if expected.issubset(active) and state_fresh and lock_fresh and _hook_contract_lock_covers(lock, expected):
             return True
         time.sleep(0.2)
     return False
@@ -8864,17 +8881,24 @@ def _gateway_pid_file_identifies_gateway(pid_file: str) -> bool:
     return process_is_gateway(pid)
 
 
-def _gateway_lifecycle_executable(*, native: bool = False) -> str | None:
+def _gateway_lifecycle_executable(
+    *,
+    native: bool = False,
+    search_path: str | None = None,
+) -> str | None:
     """Resolve one stable executable for a complete gateway lifecycle call.
 
     A packaged Windows CLI must use the gateway beside its verified embedded
     runtime.  Passing a bare executable name lets Windows search the current
     directory before ``PATH`` and allowed a stale checkout binary to shadow the
-    installed service.  Developer and non-Windows flows retain their existing
-    behavior; native Job Object callers still require a concrete executable.
+    installed service. Doctor also reaches this helper on POSIX, so every
+    lifecycle mutation uses one concrete path resolved before subprocess
+    execution rather than searching a potentially changed ``PATH`` later.
     """
 
     from defenseclaw.gateway import (
+        GATEWAY_BIN_NAME,
+        canonical_install_path,
         packaged_windows_gateway_path,
         packaged_windows_install_root,
     )
@@ -8883,15 +8907,59 @@ def _gateway_lifecycle_executable(*, native: bool = False) -> str | None:
         # A corroborated package with a missing sibling is broken; fail closed
         # instead of allowing PATH/current-directory executable shadowing.
         return packaged_windows_gateway_path()
-    if native:
-        executable = shutil.which("defenseclaw-gateway")
-        if not executable or (os.name == "nt" and Path(executable).suffix.lower() != ".exe"):
+    # Lifecycle mutations deliberately ignore DEFENSECLAW_GATEWAY_BIN. The
+    # config loader accepts credential names from .env, so an attacker who
+    # could previously write that file could otherwise plant an executable
+    # override and have Doctor run it after merely tightening permissions.
+    executable = shutil.which(GATEWAY_BIN_NAME, path=search_path)
+    if not executable:
+        canonical = canonical_install_path()
+        if os.path.isfile(canonical) and os.access(canonical, os.X_OK):
+            executable = canonical
+    if not executable:
+        return None
+    resolved = Path(executable).expanduser().resolve()
+    if native and os.name == "nt" and resolved.suffix.lower() != ".exe":
+        return None
+    return _trusted_gateway_lifecycle_executable(str(resolved))
+
+
+def _trusted_gateway_lifecycle_executable(executable: str) -> str | None:
+    """Return a custody-checked concrete executable for lifecycle mutation."""
+    if not executable or not os.path.isabs(executable):
+        return None
+    resolved = str(Path(executable).resolve())
+    if os.name != "nt":
+        from defenseclaw.file_permissions import trusted_posix_executable_path
+
+        try:
+            return trusted_posix_executable_path(resolved)
+        except OSError:
             return None
-        return str(Path(executable).resolve())
-    return "defenseclaw-gateway"
+
+    from defenseclaw.file_permissions import windows_acl_write_error
+    from defenseclaw.gateway import packaged_windows_gateway_path
+
+    packaged = packaged_windows_gateway_path()
+    if packaged:
+        try:
+            if os.path.samefile(resolved, packaged):
+                return resolved
+        except OSError:
+            pass
+    for candidate in (resolved, os.path.dirname(resolved)):
+        if windows_acl_write_error(candidate) is not None:
+            return None
+    return resolved
 
 
-def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) -> bool:
+def _restart_defense_gateway(
+    data_dir: str,
+    *,
+    start_if_stopped: bool = True,
+    child_env: dict[str, str] | None = None,
+    lifecycle_executable: str | None = None,
+) -> bool:
     # Mark the current Click context as "restart handled" so the
     # `setup` group's auto-restart result callback doesn't bounce the
     # gateway a second time on its way out. Safe to call outside Click.
@@ -8928,14 +8996,34 @@ def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) ->
     action = "restarting" if was_running else "starting"
     click.echo(f"  defenseclaw-gateway: {action}...", nl=False)
 
-    executable = _gateway_lifecycle_executable()
+    if lifecycle_executable and not was_running:
+        click.echo(" ✗ (verified running executable is no longer active)")
+        return False
+    search_path = child_env.get("PATH", os.defpath) if child_env is not None else None
+    executable = (
+        _trusted_gateway_lifecycle_executable(lifecycle_executable)
+        if lifecycle_executable
+        else _gateway_lifecycle_executable(search_path=search_path)
+    )
     if not executable:
         click.echo(" ✗ (binary not found)")
         click.echo("    Build with: make gateway")
         return False
+    if not os.path.isabs(executable) or not os.path.isfile(executable) or not os.access(executable, os.X_OK):
+        click.echo(" ✗ (binary is not a verified executable file)")
+        return False
+    executable = str(Path(executable).resolve())
     cmd = [executable, "restart"] if was_running else [executable, "start"]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=child_env,
+            timeout=30,
+        )
         if result.returncode == 0:
             if _wait_for_defense_gateway_api(data_dir):
                 click.echo(" ✓")
@@ -8964,12 +9052,12 @@ def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) ->
         # child cannot outlive the failed setup command.  On restart, preserve
         # the pre-existing generation rather than stopping an otherwise healthy
         # service whose replacement outcome is uncertain.
-        status = _gateway_lifecycle_status(executable)
+        status = _gateway_lifecycle_status(executable, child_env=child_env)
         if status:
             click.echo(" ✓ (ready after launcher timeout)")
             return True
         if not was_running:
-            _cleanup_timed_out_gateway_start(executable)
+            _cleanup_timed_out_gateway_start(executable, child_env=child_env)
         click.echo(" ✗ (timed out; final status is not healthy)")
         return False
 
@@ -9064,10 +9152,7 @@ def _restart_defense_gateway_native(
     pid_file = os.path.join(data_dir, "gateway.pid")
     pid_alive = _is_pid_alive(pid_file)
     if pid_alive and not _gateway_pid_file_identifies_gateway(pid_file):
-        click.echo(
-            "  defenseclaw-gateway: live gateway.pid did not verify as "
-            "DefenseClaw gateway."
-        )
+        click.echo("  defenseclaw-gateway: live gateway.pid did not verify as DefenseClaw gateway.")
         return False
     was_running = pid_alive
     if not was_running and not start_if_stopped:
@@ -9076,8 +9161,7 @@ def _restart_defense_gateway_native(
     action = "restart" if was_running else "start"
     runner = CommandRunner()
     click.echo(
-        f"  defenseclaw-gateway: "
-        f"{'restarting' if was_running else 'starting'}...",
+        f"  defenseclaw-gateway: {'restarting' if was_running else 'starting'}...",
         nl=False,
     )
     try:
@@ -9137,12 +9221,19 @@ def _stop_defense_gateway_native(data_dir: str) -> bool:
     return not _is_pid_alive(os.path.join(data_dir, "gateway.pid"))
 
 
-def _gateway_lifecycle_status(executable: str) -> bool:
+def _gateway_lifecycle_status(
+    executable: str,
+    *,
+    child_env: dict[str, str] | None = None,
+) -> bool:
     try:
         result = subprocess.run(
             [executable, "status"],
             capture_output=True,
             text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=child_env,
             timeout=_DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
@@ -9150,12 +9241,19 @@ def _gateway_lifecycle_status(executable: str) -> bool:
     return result.returncode == 0
 
 
-def _cleanup_timed_out_gateway_start(executable: str) -> None:
+def _cleanup_timed_out_gateway_start(
+    executable: str,
+    *,
+    child_env: dict[str, str] | None = None,
+) -> None:
     try:
         subprocess.run(
             [executable, "stop"],
             capture_output=True,
             text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=child_env,
             timeout=_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
@@ -9218,8 +9316,7 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
         click.echo("  Starting/restarting defenseclaw-gateway and verifying connector readiness…")
         primary = (
             normalize_connector(app.cfg.active_connector())
-            if hasattr(app.cfg, "active_connector")
-            and normalize_connector(app.cfg.active_connector()) in batch_targets
+            if hasattr(app.cfg, "active_connector") and normalize_connector(app.cfg.active_connector()) in batch_targets
             else batch_targets[0]
         )
         _restart_services(
@@ -11060,11 +11157,7 @@ def _disable_splunk(
                 is_local = _is_local_splunk_destination(destination)
                 if is_local and not manage_local:
                     continue
-                if (
-                    is_local
-                    and _native_windows_local_splunk()
-                    and getattr(destination, "name", "") != "local-splunk"
-                ):
+                if is_local and _native_windows_local_splunk() and getattr(destination, "name", "") != "local-splunk":
                     # Loopback alone is not ownership. Native disable manages
                     # only the exact sink created by this controller.
                     continue
@@ -11185,9 +11278,9 @@ def _save_secret_to_dotenv(key: str, value: str, data_dir: str) -> None:
         return
     dotenv_path = os.path.join(data_dir, ".env")
     with locked_file_update(dotenv_path):
-        existing = _load_dotenv(dotenv_path)
-        existing[key] = value
-        _write_dotenv_locked(dotenv_path, existing)
+        snapshot = _rotate_token_snapshot_locked(dotenv_path)
+        body = _dotenv_upsert_render(snapshot, key, value)
+        atomic_write_private_bytes(dotenv_path, body)
     os.environ[key] = value
 
 
@@ -11208,9 +11301,7 @@ def _print_splunk_status(app: AppContext) -> None:
         if destination.kind == "otlp" and _splunk_o11y_realm(destination.endpoint)
     ]
     hec_destinations = [destination for destination in destinations if destination.kind == "splunk_hec"]
-    any_route_enabled = any(
-        destination.enabled for destination in (*o11y_destinations, *hec_destinations)
-    )
+    any_route_enabled = any(destination.enabled for destination in (*o11y_destinations, *hec_destinations))
 
     for destination in o11y_destinations:
         suffix = f" [{destination.name}]" if len(o11y_destinations) > 1 else ""
@@ -11231,11 +11322,7 @@ def _print_splunk_status(app: AppContext) -> None:
         click.echo()
 
     for destination in hec_destinations:
-        hec_label = (
-            "Local Splunk (HEC)"
-            if _is_local_hec_endpoint(destination.endpoint)
-            else "Splunk Enterprise (HEC)"
-        )
+        hec_label = "Local Splunk (HEC)" if _is_local_hec_endpoint(destination.endpoint) else "Splunk Enterprise (HEC)"
         suffix = f" [{destination.name}]" if len(hec_destinations) > 1 else ""
         click.echo(f"  {hec_label}{suffix}:")
         click.echo(f"    Status:      {'enabled' if destination.enabled else 'disabled'}")
@@ -11259,10 +11346,7 @@ def _print_splunk_next_steps(did_o11y: bool, did_logs: bool, did_enterprise: boo
         click.echo("    2. Open local Splunk Web at http://127.0.0.1:8000")
         if _native_windows_local_splunk():
             click.echo("       Web authentication is disabled in Splunk Free mode.")
-            click.echo(
-                "       To view the HEC/runtime secrets explicitly: "
-                "defenseclaw setup splunk --show-credentials"
-            )
+            click.echo("       To view the HEC/runtime secrets explicitly: defenseclaw setup splunk --show-credentials")
         else:
             click.echo("       Log in with admin / the password from setup output above.")
             click.echo("       To view credentials later: defenseclaw setup splunk --show-credentials")

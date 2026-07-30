@@ -45,7 +45,9 @@ const (
 	// a per-data-dir marker, two legitimate DefenseClaw daemons
 	// running from different profiles cannot tell each other apart by
 	// executable name alone.
-	EnvDataDir = "DEFENSECLAW_DATA_DIR"
+	EnvDataDir              = "DEFENSECLAW_DATA_DIR"
+	maxGatewayDotenvBytes   = 1024 * 1024
+	maxProcessIdentityBytes = 16 * 1024
 )
 
 var gatewayTokenEnvNames = []string{
@@ -128,6 +130,11 @@ func (d *Daemon) openLogFileForChild() (*os.File, error) {
 type pidInfo struct {
 	PID        int    `json:"pid"`
 	Executable string `json:"executable"`
+	// DataDir binds the process identity to the installation that launched
+	// it. Executable + start identity prove which process owns a listener;
+	// this field additionally prevents a copied PID record from authorizing
+	// another profile to stop or restart that process.
+	DataDir string `json:"data_dir,omitempty"`
 	// StartTime is a whole-second wall-clock lower bound captured before the
 	// child was spawned (or, on Windows, before the child initializes). Kept
 	// for startup-generation/readiness diagnostics only — DO NOT use this for
@@ -136,7 +143,7 @@ type pidInfo struct {
 	StartTime int64 `json:"start_time"`
 	// StartIdentity is an opaque per-process token captured immediately
 	// after spawn (Linux: /proc/<pid>/stat field 22 starttime; Darwin:
-	// `ps -o lstart=`). Compared against the live process's identity in
+	// native kern.proc start time). Compared against the live process's identity in
 	// verifyProcess() to detect PID reuse — i.e. "this PID exists and
 	// the executable matches, but the kernel says the process started
 	// at a different time, so it's a DIFFERENT process that happens to
@@ -201,9 +208,12 @@ func (d *Daemon) ManagedProcessStartedAt(pid int) (time.Time, bool) {
 // Both the executable check and the start-identity check have been hardened
 // to fail-CLOSED when their respective metadata is genuinely unavailable for
 // a process we *can* signal: the previous implementation fell back to "true"
-// on `os.Readlink` errors (Linux) and on `ps` errors (Darwin), which let any
-// unreaped zombie pass verification.
+// on `os.Readlink` errors (Linux) and process-inspection errors (Darwin),
+// which let any unreaped zombie pass verification.
 func (d *Daemon) verifyProcess(info pidInfo) bool {
+	if info.DataDir != "" && !pathidentity.Same(info.DataDir, d.dataDir) {
+		return false
+	}
 	if !d.verifyExecutable(info) {
 		return false
 	}
@@ -232,15 +242,13 @@ func (d *Daemon) verifyExecutable(info pidInfo) bool {
 	case "darwin":
 		comm, err := processExecutableDarwin(info.PID)
 		if err != nil {
-			// Same fail-closed posture as Linux: ps must succeed for any
-			// process we can signal; if it fails, do NOT trust the PID.
+			// Same fail-closed posture as Linux: the fixed-path OS process
+			// inspector must succeed for any process we can signal; if it
+			// fails, do NOT trust the PID.
 			return false
 		}
-		if info.Executable != "" {
-			exeBase := filepath.Base(info.Executable)
-			if !strings.HasSuffix(comm, exeBase) && comm != exeBase {
-				return false
-			}
+		if info.Executable != "" && !pathidentity.Same(comm, info.Executable) {
+			return false
 		}
 		return true
 	case "windows":
@@ -313,18 +321,6 @@ func stripTokenArgs(args []string) []string {
 		out = append(out, a)
 	}
 	return out
-}
-
-func processExecutableDarwin(pid int) (string, error) {
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
-	if err != nil {
-		return "", err
-	}
-	comm := strings.TrimSpace(string(out))
-	if comm == "" {
-		return "", fmt.Errorf("daemon: ps returned empty command for pid %d", pid)
-	}
-	return comm, nil
 }
 
 // ValidateStartIdentityFiles performs the identity-file portion of the start
@@ -576,7 +572,7 @@ func (d *Daemon) childEnv(parentEnv []string) []string {
 
 func readGatewayTokenDotenv(path string) map[string]string {
 	values := map[string]string{}
-	data, err := os.ReadFile(path)
+	data, err := safefile.ReadRegularFileBounded(path, maxGatewayDotenvBytes)
 	if err != nil {
 		return values
 	}
@@ -771,7 +767,7 @@ func (d *Daemon) Restart(args []string, timeout time.Duration) (int, error) {
 }
 
 func (d *Daemon) readPIDInfo() (pidInfo, error) {
-	data, err := os.ReadFile(d.pidFile)
+	data, err := safefile.ReadRegularFileBounded(d.pidFile, maxProcessIdentityBytes)
 	if err != nil {
 		return pidInfo{}, err
 	}
@@ -832,7 +828,7 @@ func (d *Daemon) protectedDaemonPIDs() (trackedPID int, watchdogPID int, err err
 // watchdog stop/status perform the stronger fingerprint verification.
 func (d *Daemon) readWatchdogPID() (int, error) {
 	path := filepath.Join(d.dataDir, WatchdogPIDFileName)
-	data, err := os.ReadFile(path)
+	data, err := safefile.ReadRegularFileBounded(path, maxProcessIdentityBytes)
 	if err != nil {
 		return 0, err
 	}
@@ -866,6 +862,7 @@ func (d *Daemon) writePIDInfoAt(pid int, executable string, startIdentity string
 	info := pidInfo{
 		PID:           pid,
 		Executable:    executable,
+		DataDir:       d.dataDir,
 		StartTime:     startedAt.Unix(),
 		StartIdentity: startIdentity,
 	}

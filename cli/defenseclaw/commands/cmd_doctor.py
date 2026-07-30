@@ -25,22 +25,25 @@ from __future__ import annotations
 import base64
 import contextlib
 import io
+import ipaddress
 import json
 import os
 import re
 import shlex
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 
 import click
 
-from defenseclaw import ux
+from defenseclaw import credential_provenance, ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.connector_paths import (
     codex_home,
@@ -53,8 +56,13 @@ from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.doctor_gateway import (
     GATEWAY_PROCESS_NAMES,
     GatewayEvidence,
-    canonical_path,
+    ListenerEvidence,
+    PIDRecord,
+    ProcessEvidence,
     gateway_executable_name,
+    paths_same,
+    pid_file_fingerprint,
+    read_pid_record,
 )
 from defenseclaw.doctor_hooks import (
     WindowsHookCheck,
@@ -62,7 +70,18 @@ from defenseclaw.doctor_hooks import (
     validate_windows_hook_registration,
 )
 from defenseclaw.envvars import active_security_overrides
-from defenseclaw.safety import NoRedirectError, build_no_redirect_opener
+from defenseclaw.file_permissions import (
+    MAX_DOTENV_BYTES,
+    darwin_acl_confidentiality_error,
+    darwin_acl_write_error,
+    dotenv_key_is_process_control,
+    dotenv_key_is_valid,
+    read_regular_file_no_follow,
+    trusted_system_subprocess_env,
+)
+from defenseclaw.gateway import gateway_api_client_host
+from defenseclaw.process_liveness import pid_alive
+from defenseclaw.safety import NoRedirectError, build_no_redirect_opener, is_symlink
 from defenseclaw.scanner_binary import resolve_scanner_binary
 from defenseclaw.webhooks import list_webhooks, validate_webhook_url
 
@@ -79,6 +98,45 @@ _DOCTOR_MARKERS: dict[str, tuple[str, str]] = {
     "skip": ("-", "bright_black"),
 }
 _DOCTOR_GALILEO_CANARY_LIMIT = 4
+
+
+def _normalized_gateway_token(value: object) -> str:
+    """Preserve token bytes while treating whitespace-only values as empty."""
+    return value if isinstance(value, str) and value.strip() else ""
+
+
+def _gateway_api_host(cfg) -> str:
+    """Return the same connectable API host used by gateway clients/setup."""
+    return gateway_api_client_host(cfg)
+
+
+def _gateway_api_port(cfg) -> int:
+    """Return a validated gateway API port, or zero for malformed config."""
+    try:
+        port = int(getattr(getattr(cfg, "gateway", None), "api_port", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return port if 1 <= port <= 65_535 else 0
+
+
+def _gateway_api_url(cfg, path: str) -> str:
+    """Build an HTTP URL for the configured local gateway API."""
+    host = _gateway_api_host(cfg)
+    authority_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    api_port = _gateway_api_port(cfg)
+    normalized_path = path if path.startswith("/") else f"/{path}"
+    return f"http://{authority_host}:{api_port}{normalized_path}"
+
+
+def _gateway_api_host_is_loopback(cfg) -> bool:
+    """Return True only for a literal loopback gateway connect target."""
+    host = _gateway_api_host(cfg).strip("[]")
+    if host.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _doctor_subsection(title: str) -> None:
@@ -310,20 +368,32 @@ def _resolve_api_key(env_name: str, dotenv_path: str) -> str:
     """Resolve an API key from env → .env file → empty."""
     val = os.environ.get(env_name, "")
     if val:
+        data_dir = os.path.dirname(os.path.abspath(dotenv_path))
+        if credential_provenance.was_injected_from_dotenv(data_dir, env_name, val):
+            if _gateway_dotenv_safety_problem(type("_DotenvScope", (), {"data_dir": data_dir})()):
+                return ""
         return val
     try:
-        with open(dotenv_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                k, v = k.strip(), v.strip()
-                if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
-                    v = v[1:-1]
-                if k == env_name:
-                    return v
-    except FileNotFoundError:
+        data_dir = os.path.dirname(os.path.abspath(dotenv_path))
+        if _gateway_dotenv_safety_problem(type("_DotenvScope", (), {"data_dir": data_dir})()):
+            return ""
+        body = read_regular_file_no_follow(dotenv_path, max_bytes=MAX_DOTENV_BYTES)
+        expected = env_name.encode("ascii")
+        for raw_line in body.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith(b"#"):
+                continue
+            key, separator, value = line.partition(b"=")
+            if not separator or key.strip() != expected:
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[:1] == value[-1:] and value[:1] in {b'"', b"'"}:
+                value = value[1:-1]
+            try:
+                return value.decode("utf-8")
+            except UnicodeError:
+                return ""
+    except (OSError, UnicodeError):
         pass
     return ""
 
@@ -489,6 +559,7 @@ def _http_probe(
     verify_tls: bool = True,
     response_limit: int = _HTTP_PROBE_DISPLAY_BYTES,
     allow_truncation: bool = True,
+    bypass_proxy: bool = False,
 ) -> tuple[int, str]:
     """Fire an HTTP request; return (status_code, body_text). Returns (0, error) on failure.
 
@@ -500,6 +571,9 @@ def _http_probe(
     returning a redirect. We route through ``build_no_redirect_opener`` and
     surface a refused redirect as a non-following ``(0, message)`` result —
     the same shape callers already treat as "could not complete the probe".
+    Loopback requests also bypass environment-configured HTTP proxies. This
+    prevents local gateway bearer tokens from being forwarded to a proxy and
+    prevents a proxy response from impersonating local gateway health.
 
     ``response_limit`` is a byte bound, not just a post-read display slice.
     The default retains the compact diagnostic-body behavior. Structured
@@ -522,7 +596,18 @@ def _http_probe(
         context = ssl._create_unverified_context()
     # Preserve the verify_tls / SSL-context behavior by passing an
     # HTTPSHandler carrying the (possibly unverified) context to the opener.
-    opener = build_no_redirect_opener(urllib.request.HTTPSHandler(context=context))
+    # urllib does not consistently bypass proxies for 127.0.0.1 when NO_PROXY
+    # is unset, so install an explicit empty ProxyHandler for loopback.
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    try:
+        loopback_host = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback_host = host == "localhost"
+    handlers: list[urllib.request.BaseHandler] = []
+    if bypass_proxy or loopback_host:
+        handlers.append(urllib.request.ProxyHandler({}))
+    handlers.append(urllib.request.HTTPSHandler(context=context))
+    opener = build_no_redirect_opener(*handlers)
     try:
         with opener.open(req, timeout=timeout) as resp:
             return resp.status, _read_response(resp)
@@ -554,6 +639,246 @@ def _check_config(cfg, r: _DoctorResult) -> None:
         _emit("pass", "Config file", cfg_path, r=r)
     else:
         _emit("fail", "Config file", "not found — run 'defenseclaw init'", r=r)
+
+
+def _doctor_config_present(cfg) -> bool:
+    """Return whether Doctor has an initialized config it may repair."""
+    from defenseclaw.config import config_path_for_data_dir
+
+    data_dir = getattr(cfg, "data_dir", None)
+    # Compatibility for narrow config facades used by embedding callers; the
+    # real CLI Config always carries data_dir and takes the strict path below.
+    if data_dir is None:
+        return True
+    return os.path.isfile(config_path_for_data_dir(data_dir))
+
+
+def _env_names_equal(left: str, right: str, *, platform_name: str | None = None) -> bool:
+    """Compare environment names with native platform semantics."""
+    platform_name = platform_name or os.name
+    return left.casefold() == right.casefold() if platform_name == "nt" else left == right
+
+
+_CANONICAL_GATEWAY_TOKEN_ENV = "DEFENSECLAW_GATEWAY_TOKEN"
+_LEGACY_GATEWAY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN"
+
+
+def _known_gateway_token_env(name: str) -> str:
+    """Return the canonical spelling for a built-in gateway token env name."""
+    for candidate in (_CANONICAL_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
+        if _env_names_equal(name, candidate):
+            return candidate
+    return ""
+
+
+def _custom_gateway_token_env(cfg) -> str:
+    """Return an explicitly configured external token provider, if any."""
+    gateway = getattr(cfg, "gateway", None)
+    configured = str(getattr(gateway, "token_env", "") or "").strip()
+    return configured if configured and not _known_gateway_token_env(configured) else ""
+
+
+def _gateway_dotenv_tokens(data_dir: str) -> dict[str, str]:
+    """Read the token values the Go daemon will inject into its child."""
+    values: dict[str, str] = {}
+    path = os.path.join(data_dir, ".env")
+    try:
+        body = read_regular_file_no_follow(path, max_bytes=MAX_DOTENV_BYTES)
+        for raw_line in body.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith(b"#"):
+                continue
+            raw_key, separator, raw_value = line.partition(b"=")
+            if not separator:
+                continue
+            try:
+                key = raw_key.strip().decode("ascii")
+            except UnicodeError:
+                continue
+            canonical_key = _known_gateway_token_env(key)
+            if not canonical_key:
+                continue
+            value = raw_value.strip()
+            if len(value) >= 2 and value[:1] == value[-1:] and value[:1] in {b'"', b"'"}:
+                value = value[1:-1]
+            try:
+                decoded_value = value.decode("utf-8")
+            except UnicodeError:
+                continue
+            normalized = _normalized_gateway_token(decoded_value)
+            if normalized:
+                values[canonical_key] = normalized
+    except OSError:
+        return {}
+    return values
+
+
+def _gateway_data_dir_integrity_problem(cfg) -> str:
+    """Return why another local principal can replace managed state paths."""
+    data_dir = os.path.abspath(str(getattr(cfg, "data_dir", "") or ""))
+    if not data_dir:
+        return "gateway data directory is unavailable"
+    try:
+        if is_symlink(data_dir):
+            return "gateway data directory is a symbolic link or reparse point"
+        info = os.lstat(data_dir)
+        if getattr(info, "st_file_attributes", 0) & 0x400:
+            return "gateway data directory is a symbolic link or reparse point"
+        if not stat.S_ISDIR(info.st_mode):
+            return "gateway data directory is not a directory"
+        if os.name == "nt":
+            from defenseclaw.file_permissions import windows_acl_write_error
+
+            problem = windows_acl_write_error(data_dir)
+            return f"gateway data directory has unsafe ACLs ({problem})" if problem else ""
+        geteuid = getattr(os, "geteuid", None)
+        if callable(geteuid) and info.st_uid != geteuid():
+            return "gateway data directory is not owned by the current user"
+        if stat.S_IMODE(info.st_mode) & 0o022:
+            return "gateway data directory is writable by another local principal"
+        if sys.platform == "darwin":
+            acl_problem = darwin_acl_write_error(data_dir)
+            if acl_problem:
+                return f"gateway data directory has unsafe ACLs ({acl_problem})"
+    except OSError:
+        return "gateway data directory could not be safely inspected"
+    return ""
+
+
+def _gateway_dotenv_safety_problem(cfg) -> str:
+    """Return why credential/lifecycle repair must not consume ``.env``."""
+    if data_dir_problem := _gateway_data_dir_integrity_problem(cfg):
+        return data_dir_problem
+    path = os.path.join(str(getattr(cfg, "data_dir", "") or ""), ".env")
+    if not os.path.lexists(path):
+        return ""
+    try:
+        if is_symlink(path):
+            return "dotenv is a symbolic link or reparse point"
+        info = os.lstat(path)
+        if getattr(info, "st_file_attributes", 0) & 0x400:
+            return "dotenv is a symbolic link or reparse point"
+        if not stat.S_ISREG(info.st_mode):
+            return "dotenv is not a regular file"
+        read_regular_file_no_follow(path, max_bytes=MAX_DOTENV_BYTES)
+        if os.name == "nt":
+            from defenseclaw.file_permissions import windows_acl_confidentiality_error
+
+            return windows_acl_confidentiality_error(path) or ""
+        geteuid = getattr(os, "geteuid", None)
+        if callable(geteuid) and info.st_uid != geteuid():
+            return "dotenv is not owned by the current user"
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            return "dotenv permissions are not 0600"
+        if sys.platform == "darwin":
+            return darwin_acl_write_error(path) or darwin_acl_confidentiality_error(path) or ""
+    except OSError:
+        return "dotenv could not be safely inspected"
+    return ""
+
+
+def _daemon_effective_gateway_token(cfg) -> tuple[str, str, str]:
+    """Resolve the token a newly started gateway child will actually use.
+
+    The Go daemon replaces inherited canonical/legacy token variables with
+    values from ``.env`` whenever that file contains either token. A custom
+    ``gateway.token_env`` remains externally managed and retains precedence.
+    Return ``(token, env_name, source_label)`` without ever rendering the
+    token itself.
+    """
+    gateway = getattr(cfg, "gateway", None)
+    if gateway is None:
+        return "", "", ""
+
+    configured_env = str(getattr(gateway, "token_env", "") or "").strip()
+    custom_env = _custom_gateway_token_env(cfg)
+    if custom_env:
+        custom_value = _normalized_gateway_token(os.environ.get(custom_env, ""))
+        if custom_value:
+            return custom_value, custom_env, "configured token provider"
+
+    dotenv_values = _gateway_dotenv_tokens(str(getattr(cfg, "data_dir", "") or ""))
+    if dotenv_values:
+        configured_known = _known_gateway_token_env(configured_env)
+        if configured_known and dotenv_values.get(configured_known):
+            return (
+                dotenv_values[configured_known],
+                configured_known,
+                "gateway dotenv",
+            )
+        for candidate in (_CANONICAL_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
+            if dotenv_values.get(candidate):
+                return dotenv_values[candidate], candidate, "gateway dotenv"
+
+    resolved = _normalized_gateway_token(gateway.resolved_token())
+    if not resolved:
+        return "", configured_env, ""
+    if configured_env and _normalized_gateway_token(os.environ.get(configured_env, "")):
+        return resolved, configured_env, "configured environment"
+    for candidate in (_CANONICAL_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
+        if _normalized_gateway_token(os.environ.get(candidate, "")) == resolved:
+            return resolved, candidate, "process environment"
+    return resolved, "", "gateway config"
+
+
+def _missing_gateway_token_detail(cfg) -> str:
+    """Return an actionable missing-token message without false fix promises."""
+    custom_env = _custom_gateway_token_env(cfg)
+    if custom_env:
+        return (
+            f"custom token provider {custom_env!r} is empty — populate it or "
+            "explicitly change gateway.token_env; auto-fix preserves custom providers"
+        )
+    return "no gateway token is configured — run `defenseclaw doctor --fix` to generate and persist one"
+
+
+def _cli_effective_gateway_token(cfg) -> tuple[str, str]:
+    """Return the token/source normal Python gateway clients will use."""
+    gateway = getattr(cfg, "gateway", None)
+    if gateway is None:
+        return "", ""
+    configured_env = str(getattr(gateway, "token_env", "") or "").strip()
+    if configured_env:
+        value = _normalized_gateway_token(os.environ.get(configured_env, ""))
+        if value:
+            return value, configured_env
+    for name in (_CANONICAL_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
+        value = _normalized_gateway_token(os.environ.get(name, ""))
+        if value:
+            return value, name
+    literal = _normalized_gateway_token(getattr(gateway, "token", ""))
+    return (literal, "gateway.token") if literal else ("", "")
+
+
+def _gateway_cli_token_mismatch_detail(cfg, daemon_token: str) -> str:
+    """Explain a CLI-vs-daemon provider mismatch without rendering values."""
+    stale_parent_names = tuple(str(name) for name in getattr(cfg, "_doctor_stale_parent_gateway_env_names", ()) if name)
+    if stale_parent_names:
+        name = stale_parent_names[0]
+        return (
+            f"gateway accepted the repaired daemon token, but the parent shell still "
+            f"exports {name}; unset or update {name}, then start a new shell"
+        )
+
+    cli_token, source = _cli_effective_gateway_token(cfg)
+    if not cli_token or cli_token == daemon_token:
+        return ""
+    if source == "gateway.token":
+        return (
+            "gateway accepted the daemon-effective token, but normal CLI commands "
+            "resolve deprecated gateway.token differently; remove or update that "
+            "config value"
+        )
+    return (
+        f"gateway accepted the daemon-effective token, but normal CLI commands "
+        f"resolve {source} differently; unset or update {source} in the parent shell"
+    )
+
+
+def _gateway_rotated_provider_converged(cfg) -> bool:
+    """Return whether a rotated canonical token has effective precedence."""
+    configured = str(getattr(getattr(cfg, "gateway", None), "token_env", "") or "").strip()
+    return not configured or _env_names_equal(configured, _CANONICAL_GATEWAY_TOKEN_ENV)
 
 
 def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
@@ -657,6 +982,35 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
             )
 
 
+def _gateway_fleet_expected_enabled(cfg) -> bool:
+    """Mirror the gateway's connector/host fleet-loop decision."""
+    gateway = getattr(cfg, "gateway", None)
+    fleet_mode = str(getattr(gateway, "fleet_mode", "") or "").strip().lower()
+    if fleet_mode in {"enabled", "on", "true"}:
+        return True
+    if fleet_mode in {"disabled", "off", "false"}:
+        return False
+
+    if not _doctor_active_connectors(cfg):
+        return False
+    connector = _active_connector(cfg)
+    if connector in {"openclaw", "zeptoclaw"}:
+        return True
+    if connector not in {"codex", "claudecode"}:
+        return False
+    host = str(getattr(gateway, "host", "") or "").strip()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if not host or host.casefold() == "localhost":
+        return False
+    try:
+        return not ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        # The Go runtime intentionally does not resolve DNS here; a non-empty
+        # hostname expresses an external fleet endpoint.
+        return True
+
+
 def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
     """Return whether a sidecar subsystem is *expected* to be enabled
     based on the on-disk config, or ``None`` if the subsystem has no
@@ -674,29 +1028,51 @@ def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
         # is configured. The retired OTel master-switch DTO cannot describe
         # this subsystem and made doctor accept a stale disabled runtime.
         return getattr(cfg, "_source_config_version", 0) == 8
+    if sub == "gateway":
+        return _gateway_fleet_expected_enabled(cfg)
+    if sub == "watcher":
+        watcher = getattr(getattr(cfg, "gateway", None), "watcher", None)
+        return None if watcher is None else bool(getattr(watcher, "enabled", False))
     if sub == "guardrail":
-        return bool(getattr(getattr(cfg, "guardrail", None), "enabled", False))
+        guardrail = getattr(cfg, "guardrail", None)
+        if guardrail is None:
+            return None
+        if not bool(getattr(guardrail, "enabled", False)):
+            return False
+        connectors = _doctor_active_connectors(cfg)
+        if not connectors:
+            return False
+        effective_enabled = getattr(guardrail, "effective_enabled", None)
+        if callable(effective_enabled):
+            enabled_states: list[bool] = []
+            for connector in connectors:
+                try:
+                    enabled_states.append(bool(effective_enabled(connector)))
+                except Exception:  # noqa: BLE001 - fall back to global config.
+                    enabled_states = []
+                    break
+            if enabled_states:
+                return any(enabled_states)
+        return True
     if sub == "sandbox":
         oc = getattr(cfg, "openshell", None)
         if oc is None:
-            return False
+            return None
         is_standalone = getattr(oc, "is_standalone", None)
         return bool(is_standalone()) if callable(is_standalone) else False
-    # gateway / watcher / api have no on/off switch — they are
-    # unconditionally wired up by the sidecar when it boots.
+    # The local API has no off switch.
     return None
 
 
 def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
-    bind = "127.0.0.1"
-    if getattr(cfg, "openshell", None) and cfg.openshell.is_standalone():
-        bind = getattr(cfg.guardrail, "host", None) or bind
-    url = f"http://{bind}:{cfg.gateway.api_port}/health"
+    bind = _gateway_api_host(cfg)
+    url = _gateway_api_url(cfg, "/health")
     code, body = _http_probe(
         url,
         timeout=5.0,
         response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
         allow_truncation=False,
+        bypass_proxy=True,
     )
     if code == 200:
         _emit("pass", "Sidecar API", f"{bind}:{cfg.gateway.api_port}", r=r)
@@ -708,16 +1084,44 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
             subsystems = ["gateway", "watcher", "guardrail", "api", "telemetry", "sandbox"]
             stale_hint_printed = False
             for sub in subsystems:
-                info = health.get(sub, {})
-                if not info:
+                expected = _subsystem_expected_enabled(cfg, sub)
+                info = health.get(sub)
+                if info is None:
+                    if sub in {"gateway", "watcher", "guardrail", "api", "telemetry"} or expected is True:
+                        _emit("fail", f"  └─ {sub}", "absent from health response", r=r)
                     continue
-                state = info.get("state", info.get("status", "unknown"))
-                if state.lower() in ("running", "healthy"):
+                if not isinstance(info, dict) or not info:
+                    _emit("fail", f"  └─ {sub}", "malformed health entry", r=r)
+                    continue
+                raw_state = info.get("state", info.get("status", "unknown"))
+                if not isinstance(raw_state, str):
+                    _emit("fail", f"  └─ {sub}", "malformed health state", r=r)
+                    continue
+                details = info.get("details")
+                if details is not None and not isinstance(details, dict):
+                    _emit("fail", f"  └─ {sub}", "malformed health details", r=r)
+                    continue
+                state = raw_state.strip() or "unknown"
+                normalized_state = state.lower()
+                if normalized_state in ("running", "healthy"):
+                    if expected is False and sub in {
+                        "gateway",
+                        "watcher",
+                        "guardrail",
+                        "sandbox",
+                    }:
+                        _emit(
+                            "warn",
+                            f"  └─ {sub}",
+                            "running but disabled in config — sidecar is stale, restart it",
+                            r=r,
+                        )
+                        continue
                     detail = state
-                    if sub == "guardrail" and info.get("details"):
-                        detail += f" (mode={info['details'].get('mode', '?')})"
+                    if sub == "guardrail" and isinstance(details, dict):
+                        detail += f" (mode={details.get('mode', '?')})"
                     _emit("pass", f"  └─ {sub}", detail, r=r)
-                elif state.lower() in ("disabled", "stopped"):
+                elif normalized_state in ("disabled", "stopped"):
                     # Cross-check the sidecar's view against on-disk
                     # config. A divergence here is almost always a
                     # stale sidecar — the operator ran `defenseclaw
@@ -725,7 +1129,6 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     # in-memory view is out of date. Surface this as a
                     # WARN (not SKIP) so it doesn't get lost in the
                     # noise.
-                    expected = _subsystem_expected_enabled(cfg, sub)
                     if expected is True:
                         _emit(
                             "warn",
@@ -753,7 +1156,7 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                         # message when no summary is published, so
                         # other subsystems (telemetry / sandbox / …)
                         # are unaffected.
-                        details_obj = info.get("details") or {}
+                        details_obj = details or {}
                         summary = ""
                         if isinstance(details_obj, dict):
                             raw = details_obj.get("summary")
@@ -770,6 +1173,100 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
     else:
         _emit("fail", "Sidecar API", f"not reachable on port {cfg.gateway.api_port}", r=r)
     return None
+
+
+def _check_gateway_auth(cfg, r: _DoctorResult) -> bool:
+    """Verify that the CLI's resolved token authenticates to the local API.
+
+    ``/health`` is intentionally public, so a healthy response only proves
+    liveness.  Probe ``/status`` as well or Doctor can report a green sidecar
+    while every real CLI and hook request receives HTTP 401.
+    """
+    token, _token_env, _token_source = _daemon_effective_gateway_token(cfg)
+    if not token:
+        _emit(
+            "fail",
+            "Gateway authentication",
+            _missing_gateway_token_detail(cfg),
+            r=r,
+        )
+        return False
+
+    trust = _trusted_gateway_listener(cfg)
+    if not trust.trusted:
+        _emit(
+            "fail",
+            "Gateway authentication",
+            f"{trust.detail}; refusing to send the gateway token",
+            r=r,
+        )
+        return False
+
+    code, body = _http_probe(
+        _gateway_api_url(cfg, "/status"),
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=3.0,
+        response_limit=64 * 1024,
+        allow_truncation=False,
+        bypass_proxy=True,
+    )
+    if code == 200:
+        runtime_ok, runtime_detail = _authenticated_runtime_matches(cfg, trust.pid, body)
+        if not runtime_ok:
+            _emit("fail", "Gateway authentication", runtime_detail, r=r)
+            return True
+        mismatch_detail = _gateway_cli_token_mismatch_detail(cfg, token)
+        if mismatch_detail:
+            _emit("fail", "Gateway authentication", mismatch_detail, r=r)
+        else:
+            _emit("pass", "Gateway authentication", "local token accepted", r=r)
+    elif code in {401, 403, 503}:
+        _emit(
+            "fail",
+            "Gateway authentication",
+            f"local token rejected (HTTP {code}) — run `defenseclaw doctor --fix` to reconcile the running gateway",
+            r=r,
+        )
+    elif code == 0:
+        _emit(
+            "fail",
+            "Gateway authentication",
+            "gateway authentication could not be verified because the trusted status endpoint was unreachable",
+            r=r,
+        )
+    else:
+        _emit(
+            "fail",
+            "Gateway authentication",
+            f"verification unavailable (HTTP {code})",
+            r=r,
+        )
+    return True
+
+
+def _authenticated_runtime_matches(cfg, trusted_pid: int, body: str) -> tuple[bool, str]:
+    """Require authenticated runtime metadata to match local process trust."""
+    try:
+        payload = json.loads(body)
+        runtime = payload.get("runtime", {}) if isinstance(payload, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return False, "authenticated runtime metadata is malformed"
+    if not isinstance(runtime, dict):
+        return False, "authenticated runtime metadata is unavailable"
+    try:
+        runtime_pid = int(runtime.get("pid", 0) or 0)
+    except (TypeError, ValueError):
+        runtime_pid = 0
+    if runtime_pid <= 0:
+        return False, "authenticated runtime PID is unavailable"
+    if runtime_pid != trusted_pid:
+        return False, "authenticated runtime identity does not match the managed listener"
+    runtime_home = runtime.get("data_dir", "")
+    if not isinstance(runtime_home, str) or not runtime_home.strip():
+        return False, "authenticated runtime data home is unavailable"
+    if not paths_same(runtime_home, cfg.data_dir):
+        return False, "authenticated runtime uses a different canonical data home"
+    return True, ""
 
 
 def _check_openclaw_gateway(cfg, r: _DoctorResult) -> None:
@@ -826,7 +1323,7 @@ def _check_gateway_token_env_alignment(cfg, r: _DoctorResult) -> None:
         # (e.g. _check_sidecar's auth probe). Not our concern here.
         return
 
-    configured_val = os.environ.get(configured_env, "")
+    configured_val = _normalized_gateway_token(os.environ.get(configured_env, ""))
     if configured_val:
         # Configured var IS populated — happy path. Nothing to flag.
         _emit("pass", "Gateway token env", f"{configured_env} is set", r=r)
@@ -835,8 +1332,19 @@ def _check_gateway_token_env_alignment(cfg, r: _DoctorResult) -> None:
     # Stale token_env: configured var is empty. Check whether the
     # canonical DEFENSECLAW_ var is populated instead — that's the
     # drift case worth fixing.
-    canonical = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "")
+    canonical = _normalized_gateway_token(os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", ""))
     if canonical:
+        custom_env = _custom_gateway_token_env(cfg)
+        if custom_env:
+            _emit(
+                "warn",
+                "Gateway token env",
+                f"custom token provider {custom_env!r} is empty; the canonical "
+                "fallback is populated. Auto-fix preserves custom providers — "
+                "populate that provider or intentionally change gateway.token_env.",
+                r=r,
+            )
+            return
         _emit(
             "fail",
             "Gateway token env",
@@ -847,8 +1355,8 @@ def _check_gateway_token_env_alignment(cfg, r: _DoctorResult) -> None:
         )
         return
 
-    legacy = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
-    if legacy and configured_env != "OPENCLAW_GATEWAY_TOKEN":
+    legacy = _normalized_gateway_token(os.environ.get("OPENCLAW_GATEWAY_TOKEN", ""))
+    if legacy and not _env_names_equal(configured_env, "OPENCLAW_GATEWAY_TOKEN"):
         # Custom token_env that's empty, but legacy OPENCLAW_ has a
         # value. Rare; flag as warn so the operator can decide.
         _emit(
@@ -868,7 +1376,7 @@ def _check_gateway_token_env_alignment(cfg, r: _DoctorResult) -> None:
     # ``DEFENSECLAW_GATEWAY_TOKEN`` on first boot, so the only real action is
     # to repoint the stale token_env. Only when OpenClaw is genuinely active is
     # ``OPENCLAW_GATEWAY_TOKEN`` the legitimate var to set.
-    if configured_env == "OPENCLAW_GATEWAY_TOKEN" and not _openclaw_active(cfg):
+    if _env_names_equal(configured_env, "OPENCLAW_GATEWAY_TOKEN") and not _openclaw_active(cfg):
         _emit(
             "warn",
             "Gateway token env",
@@ -876,6 +1384,17 @@ def _check_gateway_token_env_alignment(cfg, r: _DoctorResult) -> None:
             "boot, but cfg.gateway.token_env still points at legacy "
             "OPENCLAW_GATEWAY_TOKEN on a non-OpenClaw install — run "
             "`defenseclaw doctor --fix` to repoint it.",
+            r=r,
+        )
+        return
+
+    custom_env = _custom_gateway_token_env(cfg)
+    if custom_env:
+        _emit(
+            "warn",
+            "Gateway token env",
+            f"custom token provider {custom_env!r} is empty — populate it or "
+            "intentionally change gateway.token_env; auto-fix preserves custom providers",
             r=r,
         )
         return
@@ -901,27 +1420,279 @@ def _read_pid_from_file(pid_file: str) -> int:
     error or when the PID is not actually alive — callers treat 0 as
     "no live sidecar to inspect".
     """
-    if not os.path.isfile(pid_file):
+    record = read_pid_record(pid_file)
+    if record.status != "ok" or not pid_alive(record.pid):
         return 0
-    try:
-        with open(pid_file, encoding="utf-8") as fh:
-            raw = fh.read().strip()
-    except OSError:
-        return 0
-    try:
-        pid = int(raw)
-    except ValueError:
-        try:
-            pid = int(json.loads(raw).get("pid", 0))
-        except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
-            return 0
-    if pid <= 0:
-        return 0
-    from defenseclaw.process_liveness import pid_alive
+    return record.pid
 
-    if not pid_alive(pid):
-        return 0
-    return pid
+
+@dataclass(frozen=True)
+class _GatewayTrust:
+    """Result of proving that the configured API target is the managed PID."""
+
+    code: str
+    detail: str
+    pid: int = 0
+    home_bound: bool = False
+    record: PIDRecord | None = None
+    process: ProcessEvidence | None = None
+
+    @property
+    def trusted(self) -> bool:
+        return self.code == "trusted" and self.pid > 0
+
+
+def _gateway_executable_matches(
+    record: PIDRecord,
+    process: ProcessEvidence,
+    *,
+    platform_name: str,
+) -> bool:
+    """Mirror the daemon's platform-specific executable comparison."""
+    if not record.executable:
+        return False
+    del platform_name
+    return paths_same(record.executable, process.executable)
+
+
+def _gateway_process_home_binding(
+    cfg,
+    record: PIDRecord,
+    process: ProcessEvidence,
+    *,
+    platform_name: str,
+) -> tuple[bool, bool]:
+    """Return ``(bound_to_this_home, positively_foreign_home)``."""
+    if record.data_dir:
+        matches = paths_same(record.data_dir, cfg.data_dir)
+        return matches, not matches
+    if not platform_name.startswith("linux"):
+        return False, False
+
+    for env_name in ("DEFENSECLAW_DATA_DIR", "DEFENSECLAW_HOME"):
+        value = _read_linux_process_env_var(process.pid, env_name)
+        if value:
+            matches = paths_same(value, cfg.data_dir)
+            return matches, not matches
+    return False, False
+
+
+def _gateway_process_trust(
+    cfg,
+    record: PIDRecord,
+    process: ProcessEvidence | None,
+    *,
+    platform_name: str,
+) -> _GatewayTrust:
+    """Prove a PID generation and bind it to this installation when possible."""
+    if record.status == "missing":
+        return _GatewayTrust("missing", "managed gateway PID file is missing", record=record)
+    if record.status == "malformed":
+        return _GatewayTrust("identity", "managed gateway PID file is invalid", record=record)
+    if record.status in {"denied", "unavailable"}:
+        return _GatewayTrust(
+            "unavailable",
+            "managed gateway PID record could not be verified",
+            record=record,
+        )
+    if process is None or process.status == "missing":
+        return _GatewayTrust(
+            "missing_process",
+            "recorded gateway process does not exist",
+            record=record,
+            process=process,
+        )
+    if process.status in {"denied", "unavailable"}:
+        return _GatewayTrust(
+            "unavailable",
+            "managed gateway process identity could not be verified",
+            record=record,
+            process=process,
+        )
+    if (
+        gateway_executable_name(
+            process.executable,
+            platform_name=platform_name,
+        )
+        not in GATEWAY_PROCESS_NAMES
+    ):
+        return _GatewayTrust(
+            "identity",
+            "recorded PID belongs to an unexpected executable",
+            record=record,
+            process=process,
+        )
+    if not record.executable or not record.start_identity:
+        return _GatewayTrust(
+            "legacy_identity",
+            "legacy PID record lacks strong executable/start identity",
+            record=record,
+            process=process,
+        )
+    if not _gateway_executable_matches(record, process, platform_name=platform_name):
+        return _GatewayTrust(
+            "identity",
+            "recorded gateway executable identity changed",
+            record=record,
+            process=process,
+        )
+    if record.start_identity != process.start_identity:
+        return _GatewayTrust(
+            "identity",
+            "recorded gateway process start identity changed",
+            record=record,
+            process=process,
+        )
+    home_bound, foreign_home = _gateway_process_home_binding(
+        cfg,
+        record,
+        process,
+        platform_name=platform_name,
+    )
+    if foreign_home:
+        return _GatewayTrust(
+            "foreign_home",
+            "managed PID record belongs to a different canonical data home",
+            record.pid,
+            record=record,
+            process=process,
+        )
+    if not home_bound:
+        return _GatewayTrust(
+            "unbound_home",
+            "gateway process identity is not bound to this canonical data home",
+            record.pid,
+            record=record,
+            process=process,
+        )
+    return _GatewayTrust(
+        "trusted",
+        "managed gateway process identity is current",
+        record.pid,
+        home_bound=home_bound,
+        record=record,
+        process=process,
+    )
+
+
+def _managed_gateway_process_trust(
+    cfg,
+    *,
+    evidence: GatewayEvidence | None = None,
+    platform_name: str | None = None,
+) -> _GatewayTrust:
+    """Collect and validate the managed process identity for this home."""
+    platform_name = platform_name or ("win32" if os.name == "nt" else sys.platform)
+    evidence = evidence or GatewayEvidence(platform_name=platform_name)
+    record = evidence.pid_record(os.path.join(cfg.data_dir, "gateway.pid"))
+    process = evidence.process(record.pid) if record.status == "ok" else None
+    return _gateway_process_trust(
+        cfg,
+        record,
+        process,
+        platform_name=platform_name,
+    )
+
+
+def _gateway_listener_trust(
+    process_trust: _GatewayTrust,
+    listener: ListenerEvidence,
+) -> _GatewayTrust:
+    """Combine strong process identity with exact endpoint ownership."""
+    if not process_trust.trusted:
+        return process_trust
+    if listener.status == "missing":
+        return _GatewayTrust(
+            "missing_listener",
+            "no listener on the configured API endpoint",
+            process_trust.pid,
+            home_bound=process_trust.home_bound,
+            record=process_trust.record,
+            process=process_trust.process,
+        )
+    if listener.status == "ambiguous":
+        return _GatewayTrust(
+            "ambiguous_listener",
+            listener.reason or "multiple processes own the configured API endpoint",
+            process_trust.pid,
+            home_bound=process_trust.home_bound,
+            record=process_trust.record,
+            process=process_trust.process,
+        )
+    if listener.status in {"denied", "unavailable"}:
+        return _GatewayTrust(
+            "unavailable",
+            listener.reason or "gateway listener ownership could not be verified",
+            process_trust.pid,
+            home_bound=process_trust.home_bound,
+            record=process_trust.record,
+            process=process_trust.process,
+        )
+    if listener.pid != process_trust.pid:
+        return _GatewayTrust(
+            "foreign_listener",
+            "configured API endpoint is owned by another process",
+            process_trust.pid,
+            home_bound=process_trust.home_bound,
+            record=process_trust.record,
+            process=process_trust.process,
+        )
+    return _GatewayTrust(
+        "trusted",
+        "managed gateway owns the configured API endpoint",
+        process_trust.pid,
+        home_bound=process_trust.home_bound,
+        record=process_trust.record,
+        process=process_trust.process,
+    )
+
+
+def _trusted_gateway_listener(
+    cfg,
+    *,
+    evidence: GatewayEvidence | None = None,
+    platform_name: str | None = None,
+) -> _GatewayTrust:
+    """Prove an exact local API target before sending a master token."""
+    host = _gateway_api_host(cfg)
+    api_port = _gateway_api_port(cfg)
+    if not api_port:
+        return _GatewayTrust("unavailable", "configured API port is invalid")
+
+    platform_name = platform_name or ("win32" if os.name == "nt" else sys.platform)
+    evidence = evidence or GatewayEvidence(platform_name=platform_name)
+    process_trust = _managed_gateway_process_trust(
+        cfg,
+        evidence=evidence,
+        platform_name=platform_name,
+    )
+    if not process_trust.trusted:
+        return process_trust
+    listener = _managed_gateway_listener_evidence(
+        api_port,
+        host=host,
+        platform_name=platform_name,
+        evidence=evidence,
+    )
+    return _gateway_listener_trust(process_trust, listener)
+
+
+def _read_linux_process_env_var(pid: int, var_name: str) -> str | None:
+    """Read one Linux process variable exactly from its NUL-delimited table."""
+    if not 0 < pid <= 2_147_483_647 or not var_name:
+        return None
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as process_environment:
+            blob = process_environment.read()
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+    for entry in blob.split(b"\x00"):
+        if not entry:
+            continue
+        key, separator, value = entry.partition(b"=")
+        if separator and key.decode("utf-8", errors="replace") == var_name:
+            return value.decode("utf-8", errors="replace")
+    return ""
 
 
 def _read_process_env_var(pid: int, var_name: str) -> str | None:
@@ -949,31 +1720,21 @@ def _read_process_env_var(pid: int, var_name: str) -> str | None:
         return None
 
     # Linux fast path: /proc/<pid>/environ is null-separated KEY=VALUE.
-    proc_environ = f"/proc/{pid}/environ"
-    if os.path.isfile(proc_environ):
-        try:
-            with open(proc_environ, "rb") as fh:
-                blob = fh.read()
-        except (OSError, PermissionError):
-            blob = b""
-        if blob:
-            for entry in blob.split(b"\x00"):
-                if not entry:
-                    continue
-                key, sep, value = entry.partition(b"=")
-                if sep and key.decode("utf-8", errors="replace") == var_name:
-                    return value.decode("utf-8", errors="replace")
-            # /proc was readable but the var isn't there — definitive
-            # absence.
-            return ""
+    if sys.platform.startswith("linux") or os.path.exists(f"/proc/{pid}"):
+        exact_value = _read_linux_process_env_var(pid, var_name)
+        if exact_value is not None:
+            return exact_value
 
     # macOS / fallback: ps eww -p <pid> prints "PID TTY STAT TIME CMD ENV...".
     # We ask for just the args (the env appears inline on macOS).
     try:
         proc = subprocess.run(
-            ["ps", "eww", "-p", str(pid)],
+            ["/bin/ps", "eww", "-p", str(pid)],
             capture_output=True,
             text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=trusted_system_subprocess_env(),
             timeout=2.0,
             check=False,
         )
@@ -1014,63 +1775,53 @@ def _check_windows_gateway_diagnostics(
     evidence = evidence or GatewayEvidence(platform_name=platform_name)
     pid_path = os.path.join(cfg.data_dir, "gateway.pid")
     record = evidence.pid_record(pid_path)
-
-    identity_ok = False
-    process = None
-    if record.status == "missing":
-        _emit("fail", "Gateway PID identity", "managed gateway PID file is missing", r=r)
-    elif record.status == "malformed":
-        _emit("fail", "Gateway PID identity", record.reason or "managed gateway PID file is invalid", r=r)
-    elif record.status in {"denied", "unavailable"}:
-        _emit("skip", "Gateway PID identity", record.reason or "PID file inspection unavailable", r=r)
+    process = evidence.process(record.pid) if record.status == "ok" else None
+    process_trust = _gateway_process_trust(
+        cfg,
+        record,
+        process,
+        platform_name="win32",
+    )
+    identity_ok = process_trust.trusted
+    if identity_ok:
+        _emit(
+            "pass",
+            "Gateway PID identity",
+            "executable, process start identity, and data home match",
+            r=r,
+        )
+    elif process_trust.code == "unavailable":
+        _emit("skip", "Gateway PID identity", process_trust.detail, r=r)
+    elif process_trust.code == "legacy_identity":
+        _emit("fail", "Gateway PID identity", process_trust.detail, r=r)
     else:
-        process = evidence.process(record.pid)
-        if process.status == "missing":
-            _emit("fail", "Gateway PID identity", "stale PID file: recorded process does not exist", r=r)
-        elif process.status in {"denied", "unavailable"}:
-            _emit("skip", "Gateway PID identity", process.reason or "process inspection unavailable", r=r)
-        else:
-            live_name = gateway_executable_name(process.executable)
-            if live_name not in GATEWAY_PROCESS_NAMES:
-                _emit("fail", "Gateway PID identity", "recorded PID belongs to an unexpected executable", r=r)
-            elif record.executable and canonical_path(record.executable) != canonical_path(process.executable):
-                _emit("fail", "Gateway PID identity", "stale or reused PID: executable path changed", r=r)
-            elif record.start_identity and record.start_identity != process.start_identity:
-                _emit("fail", "Gateway PID identity", "stale or reused PID: process start identity changed", r=r)
-            elif not record.start_identity:
-                _emit(
-                    "skip",
-                    "Gateway PID identity",
-                    "legacy PID record has no process start identity",
-                    r=r,
-                )
-            else:
-                identity_ok = True
-                _emit("pass", "Gateway PID identity", "executable and process start identity match", r=r)
+        _emit("fail", "Gateway PID identity", process_trust.detail, r=r)
 
-    try:
-        api_port = int(getattr(cfg.gateway, "api_port", 0) or 0)
-    except (TypeError, ValueError):
-        api_port = 0
-    listener = evidence.listener(api_port)
+    api_port = _gateway_api_port(cfg)
+    api_host = _gateway_api_host(cfg)
+    listener = evidence.listener(api_port, host=api_host)
 
-    # The management request is intentionally fixed to loopback. The port is
-    # the validated integer from gateway config; neither a configured remote
-    # host nor a redirect can receive the bearer token.
-    token = cfg.gateway.resolved_token()
+    # Exact native listener ownership + strong PID/home identity authorizes
+    # both loopback and documented local standalone bridge addresses. Requests
+    # never use proxy state and never follow redirects.
+    token, _token_env, _token_source = _daemon_effective_gateway_token(cfg)
     status_code = 0
     status_body = ""
-    if not 1 <= api_port <= 65_535:
+    trust = _gateway_listener_trust(process_trust, listener)
+    if not api_port:
         status_error = "configured API port is invalid"
     elif not token:
         status_error = "no local gateway authentication state is configured"
+    elif not trust.trusted:
+        status_error = f"{trust.detail}; refusing to send the gateway token"
     else:
         status_code, status_body = _http_probe(
-            f"http://127.0.0.1:{api_port}/status",
+            _gateway_api_url(cfg, "/status"),
             headers={"Authorization": f"Bearer {token}"},
             timeout=3.0,
             response_limit=64 * 1024,
             allow_truncation=False,
+            bypass_proxy=True,
         )
         status_error = ""
 
@@ -1092,6 +1843,13 @@ def _check_windows_gateway_diagnostics(
 
     if listener.status == "missing":
         _emit("fail", "Gateway listener owner", "no listener on the configured API port", r=r)
+    elif listener.status == "ambiguous":
+        _emit(
+            "fail",
+            "Gateway listener owner",
+            listener.reason or "multiple processes own the configured API endpoint",
+            r=r,
+        )
     elif listener.status in {"denied", "unavailable"}:
         _emit("skip", "Gateway listener owner", listener.reason or "listener inspection unavailable", r=r)
     elif record.status != "ok" or listener.pid != record.pid:
@@ -1103,27 +1861,48 @@ def _check_windows_gateway_diagnostics(
     else:
         _emit("pass", "Gateway listener owner", "configured API listener is owned by the managed gateway", r=r)
 
-    if status_error:
-        _emit("skip", "Gateway token drift", status_error, r=r)
+    if status_error == "no local gateway authentication state is configured":
+        _emit(
+            "fail",
+            "Gateway token drift",
+            _missing_gateway_token_detail(cfg),
+            r=r,
+        )
+    elif status_error:
+        _emit("fail", "Gateway token drift", status_error, r=r)
     elif status_code in {401, 403, 503}:
         _emit("fail", "Gateway token drift", "gateway authentication drift detected", r=r)
     elif status_code == 0:
-        _emit("skip", "Gateway token drift", "gateway is unreachable; authentication could not be inspected", r=r)
+        _emit(
+            "fail",
+            "Gateway token drift",
+            "gateway authentication could not be verified because the trusted status endpoint was unreachable",
+            r=r,
+        )
     elif status_code != 200:
-        _emit("skip", "Gateway token drift", f"authentication inspection unavailable (HTTP {status_code})", r=r)
+        _emit("fail", "Gateway token drift", f"authentication verification failed (HTTP {status_code})", r=r)
     elif not runtime:
-        _emit("skip", "Gateway token drift", "authenticated runtime metadata is unavailable", r=r)
+        _emit("fail", "Gateway token drift", "authenticated runtime metadata is unavailable", r=r)
     else:
         _emit("pass", "Gateway token drift", "local authentication state matches the live gateway", r=r)
 
     runtime_home = runtime.get("data_dir", "") if runtime else ""
-    if status_code in {401, 403, 503}:
+    if process_trust.code == "foreign_home":
+        _emit(
+            "fail",
+            "Gateway home",
+            "managed PID record is bound to a different canonical data home",
+            r=r,
+        )
+    elif status_error and status_error != "no local gateway authentication state is configured":
+        _emit("skip", "Gateway home", status_error, r=r)
+    elif status_code in {401, 403, 503}:
         _emit("skip", "Gateway home", "authentication drift prevents trusted runtime-home inspection", r=r)
     elif status_code == 0:
         _emit("skip", "Gateway home", "gateway is unreachable; runtime home could not be inspected", r=r)
     elif status_code != 200 or not isinstance(runtime_home, str) or not runtime_home.strip():
         _emit("skip", "Gateway home", "authenticated runtime-home evidence is unavailable", r=r)
-    elif canonical_path(runtime_home) != canonical_path(cfg.data_dir):
+    elif not paths_same(runtime_home, cfg.data_dir):
         _emit("fail", "Gateway home", "running gateway uses a different canonical data home", r=r)
     else:
         _emit("pass", "Gateway home", "running gateway uses this canonical data home", r=r)
@@ -1131,216 +1910,372 @@ def _check_windows_gateway_diagnostics(
 
 
 def _check_gateway_token_drift(cfg, r: _DoctorResult) -> None:
-    """Detect a stale-sidecar-token vs current-.env-token mismatch.
+    """Compare daemon-effective auth state only after strong PID/home proof.
 
-    Failure mode this closes: the sidecar caches its auth token at
-    startup (from env / dotenv). If anything later rewrites
-    ``~/.defenseclaw/.env`` — Phase 4 migration, a fresh
-    ``EnsureGatewayToken`` run, manual ``defenseclaw keys set``, an
-    install script that touches the dotenv — the running sidecar
-    keeps using the OLD token while the CLI reads the NEW one. Every
-    subsequent ``defenseclaw agent usage`` (and any other auth'd API
-    call) returns HTTP 401 with no hint of the root cause.
-
-    Triggers when ALL of these hold:
-
-    * ``gateway.pid`` exists and the recorded PID is alive.
-    * The sidecar process's ``DEFENSECLAW_GATEWAY_TOKEN`` env var is
-      readable and non-empty.
-    * The current ``.env``'s ``DEFENSECLAW_GATEWAY_TOKEN`` is non-empty.
-    * The two differ.
-
-    "fail" tag is intentional — this configuration is BROKEN at
-    runtime (every API call returns 401), not just suboptimal.
-    Operators need to know this, not a soft "warn".
-
-    Permission-denied / process-gone cases emit ``"skip"`` rather
-    than ``"warn"`` — those aren't drift, just "can't tell". Nagging
-    on indeterminacy would erode trust in the check.
+    This is a read-only fallback for platforms where endpoint ownership or the
+    authenticated status probe is unavailable.  It deliberately reuses the
+    daemon-effective provider (including custom ``token_env`` values) instead
+    of hard-coding the canonical variable, and never reads an untrusted PID's
+    environment.
     """
-    pid_file = os.path.join(cfg.data_dir, "gateway.pid")
-    pid = _read_pid_from_file(pid_file)
-    if pid == 0:
-        # No running sidecar — nothing to compare against. Other
-        # checks (e.g. _check_sidecar) handle the "sidecar down"
-        # case; this one is exclusively about drift between live
-        # process and on-disk dotenv.
+    trust = _managed_gateway_process_trust(cfg)
+    if trust.code in {"missing", "missing_process"}:
+        return
+    if not trust.trusted:
+        _emit(
+            "skip",
+            "Gateway token drift",
+            f"{trust.detail}; process authentication state was not inspected",
+            r=r,
+        )
         return
 
-    dotenv_path = os.path.join(cfg.data_dir, ".env")
-    dotenv_token = ""
-    if os.path.isfile(dotenv_path):
-        try:
-            with open(dotenv_path, encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if line.startswith("DEFENSECLAW_GATEWAY_TOKEN="):
-                        value = line[len("DEFENSECLAW_GATEWAY_TOKEN=") :]
-                        # Strip optional surrounding quotes the same
-                        # way config._load_dotenv_into_os does, so
-                        # the comparison matches the value the CLI
-                        # would actually send.
-                        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-                            value = value[1:-1]
-                        dotenv_token = value
-                        break
-        except OSError:
-            return
-    if not dotenv_token:
-        # No token in .env to compare against. _check_sidecar /
-        # _check_gateway_token_env_alignment surface the upstream
-        # "no token configured" state; nothing to report here.
+    configured_token, token_env_name, _token_source = _daemon_effective_gateway_token(cfg)
+    if not configured_token or not token_env_name:
         return
 
-    process_token = _read_process_env_var(pid, "DEFENSECLAW_GATEWAY_TOKEN")
+    process_token = _read_process_env_var(trust.pid, token_env_name)
     if process_token is None:
-        # Couldn't read the process env — permissions or process
-        # raced away. Skip silently rather than warn; "can't tell"
-        # is not drift.
         _emit(
             "skip",
             "Gateway token drift",
-            f"could not inspect sidecar (pid {pid}) env — permissions?",
+            f"could not inspect managed sidecar pid {trust.pid} authentication environment",
             r=r,
         )
         return
+    process_token = _normalized_gateway_token(process_token)
     if not process_token:
-        # Sidecar started with no DEFENSECLAW_GATEWAY_TOKEN in env.
-        # Either it's an older binary that read the dotenv directly,
-        # or the user started it manually without sourcing the
-        # dotenv. The check below would falsely flag "drift" here;
-        # treat this as inconclusive and let _check_sidecar surface
-        # the auth issue if one exists.
         _emit(
             "skip",
             "Gateway token drift",
-            f"sidecar (pid {pid}) has no DEFENSECLAW_GATEWAY_TOKEN in env; comparing dotenv to process not meaningful",
+            f"managed sidecar pid {trust.pid} has no inspectable {token_env_name} value",
             r=r,
         )
         return
 
-    if process_token == dotenv_token:
+    if process_token == configured_token:
         _emit(
             "pass",
             "Gateway token drift",
-            f"sidecar (pid {pid}) token matches ~/.defenseclaw/.env",
+            f"managed sidecar pid {trust.pid} authentication matches the daemon-effective provider",
             r=r,
         )
         return
 
-    # Mismatch confirmed. Do not render either credential, including hashes or
-    # prefixes: Doctor output is routinely cached, logged, and screenshotted.
     _emit(
         "fail",
         "Gateway token drift",
-        f"sidecar (pid {pid}) authentication differs from the configured "
-        "state. Every API call will "
-        "return HTTP 401. Run `defenseclaw doctor --fix` (or "
+        f"managed sidecar pid {trust.pid} authentication differs from the "
+        "daemon-effective provider. Run `defenseclaw doctor --fix` (or "
         "`defenseclaw-gateway restart`) to reconcile.",
         r=r,
     )
 
 
-def _gateway_listener_pid(port: int) -> int:
-    """Best-effort PID of whatever is listening on the local API *port*.
+def _lsof_gateway_listener_evidence(port: int, *, host: str = "") -> ListenerEvidence:
+    """Inspect one API listener through a fixed, trusted ``lsof`` binary.
 
-    Uses ``lsof`` (present on macOS and most Linux installs). Returns 0
-    when the listener can't be determined — callers degrade to "can't
-    tell" rather than guessing, so an absent ``lsof`` never produces a
-    false alarm.
+    Uses ``lsof`` (present on macOS and many Linux installs), then filters its
+    machine-readable endpoint records for either the exact connect address or
+    an unspecified/wildcard bind.  An exact ``lsof -iTCP@host:port`` selector
+    alone is insufficient on macOS: it omits a ``0.0.0.0``/``::`` listener
+    even though that listener receives loopback traffic.
     """
-    if port <= 0:
-        return 0
+    if not 1 <= port <= 65_535:
+        return ListenerEvidence("unavailable", reason="configured API port is invalid")
+    lsof_path = _trusted_lsof_path()
+    if not lsof_path:
+        return ListenerEvidence("unavailable", reason="trusted lsof binary is unavailable")
+    selector = f"-iTCP:{port}"
+    target_host = host.strip("[]")
+    if target_host and target_host.casefold() != "localhost":
+        try:
+            target_version = ipaddress.ip_address(target_host).version
+        except ValueError:
+            return ListenerEvidence("unavailable", reason="configured API host is not an IP literal")
+        selector = f"-i{target_version}TCP:{port}"
     try:
         proc = subprocess.run(
-            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            [
+                lsof_path,
+                "-nP",
+                "-a",
+                selector,
+                "-sTCP:LISTEN",
+                "-Fpn",
+            ],
             capture_output=True,
             text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=trusted_system_subprocess_env(),
             timeout=2.0,
             check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return 0
+        return ListenerEvidence("unavailable", reason="lsof listener inspection failed")
     if proc.returncode != 0:
-        return 0
-    for token in proc.stdout.split():
+        if proc.returncode == 1 and not proc.stdout.strip():
+            return ListenerEvidence("missing", reason="no TCP listener on the configured API endpoint")
+        return ListenerEvidence("unavailable", reason="lsof listener inspection failed")
+    listener_pids: set[int] = set()
+    current_pid = 0
+    for raw_line in proc.stdout.splitlines():
+        if raw_line.startswith("p"):
+            try:
+                current_pid = int(raw_line[1:])
+            except ValueError:
+                current_pid = 0
+        elif raw_line.startswith("n") and current_pid and _lsof_listener_address_matches(raw_line[1:], host, port):
+            listener_pids.add(current_pid)
+    if len(listener_pids) == 1:
+        return ListenerEvidence("ok", pid=next(iter(listener_pids)))
+    if len(listener_pids) > 1:
+        # Multiple owners can occur with SO_REUSEPORT. Returning an arbitrary
+        # first PID could authorize a bearer request to an attacker-controlled
+        # listener selected by the kernel, so ambiguity fails closed.
+        return ListenerEvidence(
+            "ambiguous",
+            reason="multiple processes own listeners for the configured API endpoint",
+        )
+    return ListenerEvidence("missing", reason="no TCP listener on the configured API endpoint")
+
+
+def _gateway_listener_pid(port: int, *, host: str = "") -> int:
+    """Backward-compatible PID view over the structured lsof evidence."""
+    listener = _lsof_gateway_listener_evidence(port, host=host)
+    return listener.pid if listener.status == "ok" else 0
+
+
+def _trusted_lsof_path() -> str:
+    """Return a fixed system lsof path, never a PATH-resolved executable."""
+    for candidate in ("/usr/sbin/lsof", "/usr/bin/lsof"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return ""
+
+
+def _lsof_listener_address_matches(endpoint: str, host: str, port: int) -> bool:
+    """Match an lsof listener endpoint to an exact or wildcard target."""
+    endpoint = endpoint.strip()
+    if endpoint.endswith(" (LISTEN)"):
+        endpoint = endpoint[: -len(" (LISTEN)")].rstrip()
+    address, separator, raw_port = endpoint.rpartition(":")
+    if not separator or raw_port != str(port):
+        return False
+    address = address.strip().strip("[]")
+    if not host:
+        return True
+    if address == "*":
+        return True
+    try:
+        local_address = ipaddress.ip_address(address)
+        if host.strip("[]").casefold() == "localhost":
+            return local_address.is_unspecified or local_address.is_loopback
+        target_address = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return local_address.version == target_address.version and (
+        local_address.is_unspecified or local_address == target_address
+    )
+
+
+def _linux_gateway_listener_evidence(
+    port: int,
+    *,
+    host: str = "",
+    proc_root: str = "/proc",
+) -> ListenerEvidence:
+    """Resolve one Linux TCP listener owner without optional userland tools.
+
+    Linux exposes listening socket inodes in ``/proc/net/tcp*`` and each
+    process's descriptors as ``socket:[inode]`` links.  Require every socket
+    inode for the port to resolve to the same PID; partial visibility and
+    ``SO_REUSEPORT`` ambiguity fail closed.
+    """
+    if not 1 <= port <= 65_535:
+        return ListenerEvidence("unavailable", reason="configured API port is invalid")
+
+    target_address: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None
+    target_is_localhost = False
+    if host:
+        target_host = host.strip("[]")
+        if target_host.casefold() == "localhost":
+            target_is_localhost = True
+        else:
+            try:
+                target_address = ipaddress.ip_address(target_host)
+            except ValueError:
+                return ListenerEvidence("unavailable", reason="configured API host is not an IP literal")
+
+    socket_inodes: set[str] = set()
+    table_found = False
+    for table_name in ("tcp", "tcp6"):
+        table_path = os.path.join(proc_root, "net", table_name)
         try:
-            return int(token)
-        except ValueError:
+            with open(table_path, encoding="ascii") as table:
+                rows = table.readlines()[1:]
+            table_found = True
+        except FileNotFoundError:
             continue
-    return 0
+        except (OSError, UnicodeError):
+            return ListenerEvidence("unavailable", reason="Linux listener table could not be read")
+        for row in rows:
+            fields = row.split()
+            if len(fields) < 10 or fields[3] != "0A":
+                continue
+            try:
+                local_port = int(fields[1].rsplit(":", 1)[1], 16)
+            except (IndexError, ValueError):
+                continue
+            if local_port != port or not fields[9].isdigit():
+                continue
+            try:
+                packed = bytes.fromhex(fields[1].rsplit(":", 1)[0])
+                if table_name == "tcp":
+                    local_address = ipaddress.ip_address(packed[::-1])
+                else:
+                    # Linux exposes each 32-bit IPv6 word in host byte order.
+                    network_bytes = b"".join(packed[index : index + 4][::-1] for index in range(0, len(packed), 4))
+                    local_address = ipaddress.ip_address(network_bytes)
+            except ValueError:
+                continue
+            address_matches = target_address is None or (
+                local_address.version == target_address.version
+                and (local_address.is_unspecified or local_address == target_address)
+            )
+            if target_is_localhost:
+                address_matches = local_address.is_unspecified or local_address.is_loopback
+            if not address_matches:
+                continue
+            socket_inodes.add(fields[9])
+
+    if not table_found:
+        return ListenerEvidence("unavailable", reason="Linux listener tables are unavailable")
+    if not socket_inodes:
+        return ListenerEvidence("missing", reason="no TCP listener on the configured API endpoint")
+
+    owners_by_inode: dict[str, set[int]] = {inode: set() for inode in socket_inodes}
+    try:
+        process_entries = list(os.scandir(proc_root))
+    except OSError:
+        return ListenerEvidence("unavailable", reason="Linux process descriptors could not be enumerated")
+    for process_entry in process_entries:
+        if not process_entry.name.isdigit():
+            continue
+        pid = int(process_entry.name)
+        if not 0 < pid <= 2_147_483_647:
+            continue
+        try:
+            descriptors = os.scandir(os.path.join(process_entry.path, "fd"))
+        except OSError:
+            continue
+        with descriptors:
+            for descriptor in descriptors:
+                try:
+                    target = os.readlink(descriptor.path)
+                except OSError:
+                    continue
+                if target.startswith("socket:[") and target.endswith("]"):
+                    inode = target[8:-1]
+                    if inode in owners_by_inode:
+                        owners_by_inode[inode].add(pid)
+
+    if any(not owners for owners in owners_by_inode.values()):
+        return ListenerEvidence("unavailable", reason="listener owner could not be resolved from Linux descriptors")
+    if any(len(owners) > 1 for owners in owners_by_inode.values()):
+        return ListenerEvidence(
+            "ambiguous",
+            reason="multiple processes own listeners for the configured API endpoint",
+        )
+    owners = {next(iter(inode_owners)) for inode_owners in owners_by_inode.values()}
+    if len(owners) != 1:
+        return ListenerEvidence(
+            "ambiguous",
+            reason="multiple processes own listeners for the configured API endpoint",
+        )
+    return ListenerEvidence("ok", pid=next(iter(owners)))
+
+
+def _linux_gateway_listener_pid(
+    port: int,
+    *,
+    host: str = "",
+    proc_root: str = "/proc",
+) -> int:
+    """Backward-compatible PID view over native Linux listener evidence."""
+    listener = _linux_gateway_listener_evidence(port, host=host, proc_root=proc_root)
+    return listener.pid if listener.status == "ok" else 0
+
+
+def _managed_gateway_listener_evidence(
+    port: int,
+    *,
+    host: str = "",
+    platform_name: str | None = None,
+    evidence: GatewayEvidence | None = None,
+) -> ListenerEvidence:
+    """Return structured listener ownership through the safest native path."""
+    platform_name = platform_name or ("win32" if os.name == "nt" else sys.platform)
+    if platform_name == "win32":
+        evidence = evidence or GatewayEvidence(platform_name="win32")
+        return evidence.listener(port, host=host)
+    if platform_name.startswith("linux"):
+        listener = _linux_gateway_listener_evidence(port, host=host)
+        if listener.status != "unavailable":
+            return listener
+    return _lsof_gateway_listener_evidence(port, host=host)
+
+
+def _managed_gateway_listener_pid(
+    port: int,
+    *,
+    host: str = "",
+    platform_name: str | None = None,
+) -> int:
+    """Return a listener PID through the native platform evidence path."""
+    listener = _managed_gateway_listener_evidence(
+        port,
+        host=host,
+        platform_name=platform_name,
+    )
+    return listener.pid if listener.status == "ok" else 0
 
 
 def _check_gateway_home_mismatch(cfg, r: _DoctorResult) -> None:
-    """Warn when a gateway from a DIFFERENT home is holding the API port.
-
-    Each home's hook scripts (under ``cfg.data_dir/hooks``) post to the
-    API port with that home's token. If a gateway started from another
-    ``DEFENSECLAW_HOME`` — typically a sandbox under ``/tmp`` left over
-    from testing — is squatting on that single port, every hook call
-    fails auth (401) even though each half looks healthy on its own.
-    This is invisible to :func:`_check_gateway_token_drift`, which only
-    compares process-vs-dotenv WITHIN one home.
-
-    To avoid false alarms we only warn on a POSITIVELY identified
-    foreign home: the API answers, this config's ``gateway.pid`` is not
-    a live process, AND the actual listener reports a data dir that
-    differs from ``cfg.data_dir``. When the listener can't be introspected
-    (no ``lsof``, perms, no env var) we stay silent — "can't tell" is not
-    a mismatch, same discipline as the token-drift check.
-    """
-    bind = "127.0.0.1"
-    if getattr(cfg, "openshell", None) and cfg.openshell.is_standalone():
-        bind = getattr(cfg.guardrail, "host", None) or bind
-    api_port = cfg.gateway.api_port
-    code, _ = _http_probe(f"http://{bind}:{api_port}/health", timeout=5.0)
+    """Report home ownership only from the same strong trust chain as auth."""
+    code, _ = _http_probe(
+        _gateway_api_url(cfg, "/health"),
+        timeout=5.0,
+        bypass_proxy=True,
+    )
     if code != 200:
-        # Nothing answering — `_check_sidecar` already reports "down".
         return
 
-    # Is the gateway THIS config tracks the one that's actually alive?
-    if _read_pid_from_file(os.path.join(cfg.data_dir, "gateway.pid")):
+    trust = _trusted_gateway_listener(cfg)
+    if trust.trusted:
         _emit(
             "pass",
             "Gateway home",
-            f"sidecar on :{api_port} belongs to this config ({cfg.data_dir})",
+            "managed listener is bound to this canonical data home",
             r=r,
         )
         return
-
-    # The port is served, but not by the gateway this config started
-    # (our pid file is stale/dead). Try to identify the squatter's home.
-    listener_pid = _gateway_listener_pid(api_port)
-    foreign_home = ""
-    if listener_pid:
-        foreign_home = (
-            _read_process_env_var(listener_pid, "DEFENSECLAW_DATA_DIR")
-            or _read_process_env_var(listener_pid, "DEFENSECLAW_HOME")
-            or ""
-        )
-    if not foreign_home:
-        # Couldn't positively identify a foreign home — stay silent
-        # rather than nag (the listener may simply be this home's
-        # gateway with a stale pid file and no data-dir env var).
-        return
-    if os.path.normpath(foreign_home) == os.path.normpath(cfg.data_dir):
-        # Same home after all; the pid file was just stale.
+    if trust.code == "foreign_home":
         _emit(
-            "pass",
+            "fail",
             "Gateway home",
-            f"sidecar on :{api_port} serves this config ({cfg.data_dir})",
+            "managed PID record is bound to a different canonical data home",
             r=r,
         )
         return
-
+    if trust.code in {"foreign_listener", "ambiguous_listener"}:
+        _emit("fail", "Gateway home", trust.detail, r=r)
+        return
     _emit(
-        "warn",
+        "skip",
         "Gateway home",
-        f"a gateway from {foreign_home} is holding port {api_port}, but this "
-        f"config is {cfg.data_dir} — hooks here will get HTTP 401. It is a "
-        "leftover sandbox gateway; restart from a clean shell "
-        "(`unset DEFENSECLAW_HOME DEFENSECLAW_DATA_DIR`), then "
-        "`defenseclaw-gateway restart`.",
+        f"{trust.detail}; canonical runtime-home ownership was not inferred",
         r=r,
     )
 
@@ -1616,6 +2551,57 @@ def _cursor_health_row(document: str) -> dict[str, object] | None:
     return None
 
 
+def _windows_system_powershell() -> tuple[str, str]:
+    """Resolve Windows PowerShell through the kernel's system directory.
+
+    ``SystemRoot``/``WINDIR`` and ``PATH`` are process inputs, so they cannot
+    select an executable used by Doctor's live Cursor probe. Return the
+    custody-checked absolute executable and authoritative Windows directory,
+    or two empty strings when that proof is unavailable.
+    """
+    if os.name != "nt":
+        return "", ""
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_system_directory = kernel32.GetSystemDirectoryW
+    get_system_directory.argtypes = (wintypes.LPWSTR, wintypes.UINT)
+    get_system_directory.restype = wintypes.UINT
+
+    size = 32768
+    buffer = ctypes.create_unicode_buffer(size)
+    written = int(get_system_directory(buffer, size))
+    if written <= 0 or written >= size:
+        return "", ""
+    system_directory = os.path.abspath(buffer.value)
+    windows_directory = os.path.dirname(system_directory)
+    executable = os.path.join(
+        system_directory,
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe",
+    )
+    if not os.path.isfile(executable):
+        return "", ""
+
+    from defenseclaw.file_permissions import (
+        UnsafePathError,
+        reject_reparse_path,
+        windows_acl_write_error,
+    )
+
+    try:
+        reject_reparse_path(executable)
+    except (OSError, UnsafePathError):
+        return "", ""
+    for candidate in (executable, os.path.dirname(executable)):
+        if windows_acl_write_error(candidate) is not None:
+            return "", ""
+    return executable, windows_directory
+
+
 def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
     """Exercise Cursor's real PowerShell transport and verify gateway receipt.
 
@@ -1632,12 +2618,13 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
     if api_port <= 0 or api_port > 65535:
         return False, "cannot resolve the sidecar API port for a Cursor runtime probe"
 
-    health_url = f"http://127.0.0.1:{api_port}/health"
+    health_url = _gateway_api_url(cfg, "/health")
     before_code, before_body = _http_probe(
         health_url,
         timeout=3.0,
         response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
         allow_truncation=False,
+        bypass_proxy=True,
     )
     before = _cursor_health_row(before_body) if before_code == 200 else None
     if before is None:
@@ -1674,15 +2661,32 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
         )
         encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        powershell, windows_directory = _windows_system_powershell()
+        if not powershell:
+            return False, "the custody-verified system PowerShell executable is unavailable"
+        child_env = trusted_system_subprocess_env()
+        child_env["SystemRoot"] = windows_directory
+        child_env["WINDIR"] = windows_directory
+        for name in ("HOME", "USERPROFILE"):
+            value = os.environ.get(name)
+            if value:
+                child_env[name] = value
+        data_dir = os.path.abspath(str(getattr(cfg, "data_dir", "") or ""))
+        if data_dir:
+            child_env["DEFENSECLAW_HOME"] = data_dir
+            child_env["DEFENSECLAW_DATA_DIR"] = data_dir
         proc = subprocess.run(
             [
-                "powershell.exe",
+                powershell,
                 "-NoProfile",
                 "-NonInteractive",
                 "-EncodedCommand",
                 encoded,
             ],
             capture_output=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=child_env,
             timeout=15.0,
             check=False,
             creationflags=creationflags,
@@ -1717,6 +2721,7 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
         timeout=3.0,
         response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
         allow_truncation=False,
+        bypass_proxy=True,
     )
     after = _cursor_health_row(after_body) if after_code == 200 else None
     if after is None:
@@ -1853,6 +2858,30 @@ def _check_cursor_configured_runtime(
 
     runtime_detail = ""
     if windows_adapter and (platform_name or os.name) == "nt" and probe_runtime:
+        managed_runtime_paths = _hook_runtime_paths_from_lock(cfg, "cursor")
+        if not any(paths_same(resolved, candidate) for candidate in managed_runtime_paths):
+            _emit(
+                "fail",
+                label,
+                "configured Cursor adapter is not the exact runtime recorded by "
+                "DefenseClaw setup; refusing to execute it",
+                r=r,
+            )
+            return
+        if is_symlink(resolved):
+            _emit("fail", label, "configured Cursor adapter is a symbolic link", r=r)
+            return
+        if os.name == "nt":
+            from defenseclaw.file_permissions import windows_acl_write_error
+
+            if acl_problem := windows_acl_write_error(resolved):
+                _emit(
+                    "fail",
+                    label,
+                    f"configured Cursor adapter has unsafe integrity ACLs ({acl_problem})",
+                    r=r,
+                )
+                return
         runtime_ok, runtime_detail = _probe_cursor_windows_runtime(cfg, resolved)
         if not runtime_ok:
             _emit("fail", label, runtime_detail, r=r)
@@ -3593,9 +4622,9 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
     "do_fix",
     is_flag=True,
     help=(
-        "Auto-repair safe issues (stale PID files, token-env drift, dotenv "
-        "perms). NOTE: the token-drift fixer may RESTART the gateway sidecar "
-        "to reconcile a stale token — preview the full set with --dry-run."
+        "Auto-repair safe issues (stale PID files, missing/token-env drift, "
+        "gateway startup, dotenv perms). NOTE: gateway repair may START or "
+        "RESTART the sidecar — preview the full set with --dry-run."
     ),
 )
 @click.option("--yes", "assume_yes", is_flag=True, help="When used with --fix, apply fixes without prompting")
@@ -3628,9 +4657,9 @@ def doctor(
     route; additional enabled routes receive a bounded coverage warning.
 
     Use ``--fix`` to auto-repair safe issues (stale sidecar PID files,
-    gateway token-env drift, dotenv permissions, pristine config backups).
-    One fixer — gateway token *drift* — may **restart the gateway sidecar**
-    to reconcile a stale in-memory token, which briefly interrupts in-flight
+    missing gateway tokens, token-env drift, stopped/stale gateways, dotenv
+    permissions, pristine config backups). Gateway repair may **start or
+    restart the gateway sidecar**, which briefly interrupts in-flight
     requests; preview the full set first with ``--fix --dry-run``. Doctor no
     longer tears connectors down as part of ``--fix`` (it only *reports*
     inactive-connector residue); run ``defenseclaw-gateway connector teardown
@@ -3649,6 +4678,22 @@ def doctor(
         ux.echo(ux._style("DefenseClaw Doctor", fg="cyan", bold=True))
         ux.echo(ux._style("══════════════════", fg="cyan"))
         ux.echo()
+
+    # Repair first, then diagnose the resulting state.  The former ordering
+    # ran fixers after every check, leaving already-repaired failures in the
+    # result and forcing a misleading exit 1 until the operator ran Doctor a
+    # second time.
+    if do_fix:
+        if not json_out:
+            _doctor_subsection("Auto-fix" + (" (dry-run)" if dry_run else ""))
+            _emit_hint(_auto_fix_hint(dry_run))
+        _run_fixers(
+            cfg,
+            r,
+            assume_yes=assume_yes,
+            json_out=json_out,
+            dry_run=dry_run,
+        )
 
     _check_config(cfg, r)
     _check_audit_db(cfg, r)
@@ -3723,7 +4768,9 @@ def doctor(
         # Preserve the established Linux/macOS evidence collectors. Windows
         # uses the native/injectable path above because os.kill(pid, 0), lsof,
         # /proc, and ps are not reliable evidence there.
-        _check_gateway_token_drift(cfg, r)
+        auth_attempted = _check_gateway_auth(cfg, r)
+        if not auth_attempted:
+            _check_gateway_token_drift(cfg, r)
         _check_gateway_home_mismatch(cfg, r)
     # Run the per-connector hook/health check for EVERY active connector,
     # not just the primary. ``_doctor_active_connectors`` returns the single
@@ -3785,27 +4832,13 @@ def doctor(
         _doctor_subsection("Security Overrides")
     _check_security_overrides(cfg, r)
 
-    if do_fix:
-        if not json_out:
-            _doctor_subsection("Auto-fix" + (" (dry-run)" if dry_run else ""))
-            # Blast-radius banner (D8): one fixer restarts the sidecar, so make
-            # the cost of a real --fix run explicit before it runs, and point
-            # at --dry-run as the safe preview.
-            _emit_hint(_auto_fix_hint(dry_run))
-        _run_fixers(
-            cfg,
-            r,
-            assume_yes=assume_yes,
-            json_out=json_out,
-            dry_run=dry_run,
-        )
-
     # Persist the cached snapshot before exit so the Go TUI (and any
     # other cron-style caller) can pick it up without re-probing. We
     # do this *before* the SystemExit(1) below so failing runs still
     # update the cache — the TUI needs to see "doctor last reported
     # 2 failures", not a stale green state from yesterday.
-    _write_doctor_cache(cfg, r)
+    if not (do_fix and dry_run):
+        _write_doctor_cache(cfg, r)
 
     if json_out:
         click.echo(json.dumps(r.to_dict(), indent=2))
@@ -3833,7 +4866,7 @@ def doctor(
             ux.echo()
         raise SystemExit(1)
 
-    if app.logger:
+    if app.logger and not (do_fix and dry_run):
         app.logger.log_action(
             ACTION_DOCTOR,
             "health-check",
@@ -3883,13 +4916,13 @@ def _check_registry_credentials(cfg, r: _DoctorResult) -> None:
 
 _AUTO_FIX_DRY_RUN_HINT = (
     "dry-run: previewing fixers; nothing on disk changes. A real --fix --yes "
-    "may restart the gateway sidecar for token drift; doctor never runs "
+    "may start or restart the gateway sidecar; doctor never runs "
     "connector teardown."
 )
 
 _AUTO_FIX_REAL_HINT = (
-    "blast radius: the token-drift fixer may RESTART the gateway sidecar "
-    "(interrupts in-flight requests); teardown is never run. Re-run with "
+    "blast radius: gateway repair may START or RESTART the sidecar "
+    "(a restart interrupts in-flight requests); teardown is never run. Re-run with "
     "--dry-run to preview without mutating."
 )
 
@@ -3908,14 +4941,11 @@ def _run_fixers(
 ) -> None:
     """Run each fixer in sequence, narrating what changed.
 
-    Fixers are intentionally *small* and independent. All but one are
-    non-disruptive; the lone exception is ``gateway token drift``, which may
-    **restart the gateway sidecar** to reconcile a stale in-memory token (it
-    prompts first unless ``--yes``, and briefly interrupts in-flight
-    requests). That blast radius is surfaced to the operator by the banner at
-    the Auto-fix section and the ``--fix`` help text (D8). Anything that needs
-    a full re-patch — or that would tear a connector down — is deferred to the
-    human.
+    Fixers are intentionally *small* and independent. Gateway token drift may
+    restart the sidecar, and gateway service repair may start or restart it;
+    both prompt first unless ``--yes``. That blast radius is surfaced by the
+    Auto-fix banner and ``--fix`` help text (D8). Anything that needs a full
+    re-patch — or that would tear a connector down — is deferred to the human.
 
     With ``dry_run=True`` we *list* each fixer instead of invoking it.
     The reported tag is always ``"skip"`` and the detail explains the
@@ -3934,22 +4964,88 @@ def _run_fixers(
     # <name>`` explicitly.
     fixers = [
         ("stale gateway PID file", _fix_stale_pid),
+        ("defenseclaw dotenv perms", _fix_dotenv_perms),
         ("gateway token", _fix_gateway_token),
         ("gateway token_env", _fix_gateway_token_env),
         ("gateway token drift", _fix_gateway_token_drift),
-        ("defenseclaw dotenv perms", _fix_dotenv_perms),
+        ("gateway service", _fix_gateway_service),
         ("pristine config backup", _fix_pristine_backup),
         ("plugin registry dead-end", _fix_plugin_registry_required),
     ]
+    dotenv_dependent_fixers = {
+        "gateway token",
+        "gateway token_env",
+        "gateway token drift",
+        "gateway service",
+    }
+    dotenv_safety_problem = ""
+    external_gateway_env_names: list[str] = []
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    for env_name in (_CANONICAL_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
+        value = _normalized_gateway_token(os.environ.get(env_name, ""))
+        if value and not credential_provenance.was_injected_from_dotenv(
+            data_dir,
+            env_name,
+            value,
+        ):
+            external_gateway_env_names.append(env_name)
+    setattr(cfg, "_doctor_external_gateway_env_names", tuple(external_gateway_env_names))
 
     for title, fn in fixers:
         if dry_run:
             outcome = ("skip", "would run (dry-run; no changes made)")
+        elif (
+            title in dotenv_dependent_fixers
+            and title != "gateway token"
+            and (
+                dotenv_safety_problem
+                or (
+                    getattr(cfg, "_doctor_gateway_token_rotation_required", False)
+                    and not getattr(cfg, "_doctor_gateway_token_was_rotated", False)
+                )
+                or (
+                    title in {"gateway token drift", "gateway service"}
+                    and getattr(cfg, "_doctor_gateway_token_was_rotated", False)
+                    and not _gateway_rotated_provider_converged(cfg)
+                )
+            )
+        ):
+            if getattr(cfg, "_doctor_gateway_token_was_rotated", False) and not _gateway_rotated_provider_converged(
+                cfg
+            ):
+                blocker = "gateway.token_env did not converge on the rotated canonical provider"
+            elif getattr(cfg, "_doctor_gateway_token_rotation_required", False) and not getattr(
+                cfg, "_doctor_gateway_token_was_rotated", False
+            ):
+                blocker = "required gateway token rotation did not complete"
+            else:
+                blocker = dotenv_safety_problem
+            outcome = (
+                "fail",
+                f"blocked because {blocker}; review and securely replace .env before credential or lifecycle repair",
+            )
+        elif (
+            title == "gateway token"
+            and dotenv_safety_problem
+            and not getattr(cfg, "_doctor_gateway_token_rotation_required", False)
+        ):
+            outcome = (
+                "fail",
+                f"blocked because {dotenv_safety_problem}; review and securely replace .env before credential repair",
+            )
         else:
             try:
                 outcome = fn(cfg, assume_yes=assume_yes)
             except Exception as exc:  # defensive — one fixer shouldn't abort the rest
-                outcome = ("error", f"{type(exc).__name__}: {exc}")
+                # ``error`` is not a Doctor schema status and used to fall
+                # through as a skipped check, allowing a broken repair to
+                # preserve exit 0. Do not render arbitrary exception text:
+                # filesystem and child-process errors can contain secrets.
+                outcome = ("fail", f"{type(exc).__name__}: fixer raised unexpectedly")
+            if title == "defenseclaw dotenv perms":
+                dotenv_safety_problem = _gateway_dotenv_safety_problem(cfg)
+            elif title == "gateway token":
+                dotenv_safety_problem = _gateway_dotenv_safety_problem(cfg)
 
         tag, detail = outcome
         if json_out:
@@ -4595,77 +5691,284 @@ def _check_scan_coverage(cfg, r: _DoctorResult) -> None:
             _emit("skip", f"Scanner coverage ({label})", "no categories registered", r=r)
 
 
-def _fix_stale_pid(cfg, *, assume_yes: bool) -> tuple[str, str]:
-    """Remove a ``gateway.pid`` file whose recorded PID is no longer alive."""
+def _verified_listener_gateway_evidence(
+    cfg,
+    *,
+    evidence: GatewayEvidence | None = None,
+    platform_name: str | None = None,
+) -> ListenerEvidence:
+    """Return structured endpoint evidence without trusting ``gateway.pid``."""
+    gateway = getattr(cfg, "gateway", None)
+    if gateway is None:
+        return ListenerEvidence("unavailable", reason="gateway configuration is unavailable")
+    try:
+        api_port = int(getattr(gateway, "api_port", 0) or 0)
+    except (TypeError, ValueError):
+        return ListenerEvidence("unavailable", reason="configured API port is invalid")
+    host = _gateway_api_host(cfg)
+    platform_name = platform_name or ("win32" if os.name == "nt" else sys.platform)
+    evidence = evidence or GatewayEvidence(platform_name=platform_name)
+    listener = _managed_gateway_listener_evidence(
+        api_port,
+        host=host,
+        platform_name=platform_name,
+        evidence=evidence,
+    )
+    if listener.status != "ok":
+        return listener
+    process = evidence.process(listener.pid)
+    if (
+        process.status == "ok"
+        and gateway_executable_name(
+            process.executable,
+            platform_name=platform_name,
+        )
+        in GATEWAY_PROCESS_NAMES
+    ):
+        return listener
+    return ListenerEvidence(
+        "unavailable",
+        pid=listener.pid,
+        reason="listener exists but its process identity could not be verified as DefenseClaw",
+    )
+
+
+def _verified_listener_gateway_pid(
+    cfg,
+    *,
+    evidence: GatewayEvidence | None = None,
+    platform_name: str | None = None,
+) -> int:
+    """Backward-compatible PID view over structured endpoint evidence."""
+    listener = _verified_listener_gateway_evidence(
+        cfg,
+        evidence=evidence,
+        platform_name=platform_name,
+    )
+    return listener.pid if listener.status == "ok" else 0
+
+
+def _fix_stale_pid(
+    cfg,
+    *,
+    assume_yes: bool,
+    evidence: GatewayEvidence | None = None,
+    platform_name: str | None = None,
+) -> tuple[str, str]:
+    """Remove only a stale PID record that has not changed since inspection."""
     pid_file = os.path.join(cfg.data_dir, "gateway.pid")
-    if not os.path.isfile(pid_file):
+    inspected_fingerprint = pid_file_fingerprint(pid_file)
+    record = read_pid_record(pid_file)
+    if record.status == "missing":
         return ("skip", "no pid file")
+    if not inspected_fingerprint or pid_file_fingerprint(pid_file) != inspected_fingerprint:
+        return (
+            "fail",
+            "PID record is unsafe or changed during inspection; refusing to remove it",
+        )
+    if record.status in {"denied", "unavailable"}:
+        return ("warn", record.reason or "PID record could not be safely inspected")
 
-    try:
-        with open(pid_file, encoding="utf-8") as fh:
-            raw = fh.read().strip()
-    except OSError as exc:
-        return ("warn", f"unreadable: {exc}")
+    stale_reason = ""
+    if record.status == "malformed":
+        listener = _verified_listener_gateway_evidence(
+            cfg,
+            evidence=evidence,
+            platform_name=platform_name,
+        )
+        if listener.status == "ok":
+            return (
+                "warn",
+                "PID record is malformed but a verified gateway still owns the "
+                "configured endpoint; preserving management state",
+            )
+        if listener.status != "missing":
+            return (
+                "warn",
+                f"PID record is malformed but endpoint absence is not proven "
+                f"({listener.reason or listener.status}); preserving management state",
+            )
+        stale_reason = record.reason or "PID record is malformed"
+    else:
+        platform_name = platform_name or ("win32" if os.name == "nt" else sys.platform)
+        evidence = evidence or GatewayEvidence(platform_name=platform_name)
+        process = evidence.process(record.pid)
+        trust = _gateway_process_trust(
+            cfg,
+            record,
+            process,
+            platform_name=platform_name,
+        )
+        if trust.trusted:
+            return (
+                "skip",
+                f"pid {record.pid} has current executable, start, and data-home identity",
+            )
+        if trust.code in {"legacy_identity", "unbound_home", "unavailable"}:
+            return (
+                "warn",
+                f"{trust.detail}; preserving the PID record and refusing automatic lifecycle repair",
+            )
+        stale_reason = trust.detail
 
-    try:
-        pid = int(raw)
-    except ValueError:
-        try:
-            pid = int(json.loads(raw).get("pid", 0))
-        except (json.JSONDecodeError, ValueError, TypeError):
-            pid = 0
-    if pid <= 0:
-        return ("warn", "malformed pid file — leaving in place")
-
-    try:
-        os.kill(pid, 0)
-        return ("skip", f"pid {pid} still alive")
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
-
-    if not assume_yes and not click.confirm(f"    Remove stale pid file {pid_file}?", default=True):
+    if not assume_yes and not click.confirm(
+        f"    Remove stale pid file {pid_file} ({stale_reason})?",
+        default=True,
+    ):
         return ("skip", "declined by user")
 
+    if pid_file_fingerprint(pid_file) != inspected_fingerprint:
+        return (
+            "warn",
+            "gateway PID record changed after inspection; preserving the replacement",
+        )
     try:
         os.unlink(pid_file)
-        return ("pass", f"removed {pid_file}")
     except OSError as exc:
         return ("fail", f"could not remove {pid_file}: {exc}")
+    return ("pass", f"removed {pid_file}: {stale_reason}")
 
 
 def _fix_gateway_token(cfg, *, assume_yes: bool) -> tuple[str, str]:
-    """Re-sync gateway token from the active connector's config."""
+    """Re-sync or create the gateway token for the active connector."""
+    if not _doctor_config_present(cfg):
+        return ("skip", "config.yaml is missing; run `defenseclaw init` before generating a token")
+
+    rotate_required = bool(getattr(cfg, "_doctor_gateway_token_rotation_required", False))
     active_connector = _active_connector(cfg)
 
-    if active_connector == "openclaw":
+    if active_connector == "openclaw" and not rotate_required:
         from defenseclaw.commands.cmd_setup import (
             _detect_openclaw_gateway_token,
             _save_secret_to_dotenv,
         )
 
-        token = _detect_openclaw_gateway_token(cfg.claw.config_file)
-        if not token:
-            return ("skip", "no token in openclaw.json")
-        env_var = "OPENCLAW_GATEWAY_TOKEN"
-        current = os.environ.get(env_var, "")
-        if current == token:
-            return ("skip", "token already in sync")
-        if not assume_yes and not click.confirm(
-            f"    Update {env_var} in ~/.defenseclaw/.env from OpenClaw?",
-            default=True,
-        ):
-            return ("skip", "declined by user")
-        _save_secret_to_dotenv(env_var, token, cfg.data_dir)
-        return ("pass", f"{env_var} updated from openclaw.json")
+        token = _normalized_gateway_token(_detect_openclaw_gateway_token(cfg.claw.config_file))
+        if token:
+            env_var = "OPENCLAW_GATEWAY_TOKEN"
+            current = _gateway_dotenv_tokens(cfg.data_dir).get(env_var, "")
+            if current == token:
+                return ("skip", "token already persisted and in sync")
+            if not assume_yes and not click.confirm(
+                f"    Update {env_var} in ~/.defenseclaw/.env from OpenClaw?",
+                default=True,
+            ):
+                return ("skip", "declined by user")
+            _save_secret_to_dotenv(env_var, token, cfg.data_dir)
+            return ("pass", f"{env_var} updated from openclaw.json")
+        # OpenClaw can be local and unauthenticated while the DefenseClaw
+        # sidecar still requires its own canonical token. Fall through to
+        # canonical generation instead of leaving that sidecar broken.
 
-    env_var = "DEFENSECLAW_GATEWAY_TOKEN"
-    dotenv_path = os.path.join(cfg.data_dir, ".env")
-    if not os.path.isfile(dotenv_path):
-        return ("skip", f"no .env at {dotenv_path}")
-    current = os.environ.get(env_var, "")
-    if current:
+    env_var = _CANONICAL_GATEWAY_TOKEN_ENV
+    current, _current_env, _current_source = _daemon_effective_gateway_token(cfg)
+    if current and not rotate_required:
         return ("skip", f"{env_var} already set")
-    return ("skip", f"connector {active_connector} — set {env_var} manually if needed")
+
+    configured_env = (getattr(cfg.gateway, "token_env", "") or "").strip()
+    if configured_env and not any(
+        _env_names_equal(configured_env, allowed) for allowed in (_LEGACY_GATEWAY_TOKEN_ENV, env_var)
+    ):
+        if rotate_required:
+            return (
+                "fail",
+                f"token_env={configured_env!r} is externally managed and may have "
+                "been exposed; rotate that provider manually before restarting",
+            )
+        return ("skip", f"token_env={configured_env!r} is externally managed; not generating a replacement")
+
+    action = "Rotate" if rotate_required else "Generate and store"
+    if not assume_yes and not click.confirm(
+        f"    {action} {env_var} in {cfg.data_dir}/.env?",
+        default=True,
+    ):
+        return ("skip", "declined by user")
+
+    import secrets
+
+    token = secrets.token_hex(32)
+    if rotate_required:
+        return _rotate_exposed_gateway_token(cfg, token)
+
+    from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
+
+    try:
+        _save_secret_to_dotenv(env_var, token, cfg.data_dir)
+    except OSError as exc:
+        return ("fail", f"could not persist gateway token: {exc}")
+    return ("pass", f"generated {env_var} in {os.path.join(cfg.data_dir, '.env')} (value redacted)")
+
+
+def _rotate_exposed_gateway_token(cfg, token: str) -> tuple[str, str]:
+    """Rotate an exposed token across one fail-closed A/B lifecycle boundary."""
+    from defenseclaw.commands.cmd_setup import _rotate_token_transaction
+    from defenseclaw.context import AppContext
+
+    gateway = getattr(cfg, "gateway", None)
+    configured_env = str(getattr(gateway, "token_env", "") or "").strip()
+    repointed = bool(configured_env) and _env_names_equal(
+        configured_env,
+        _LEGACY_GATEWAY_TOKEN_ENV,
+    )
+
+    # The transaction starts B from an authoritative reload of config.yaml.
+    # Repoint the one supported legacy provider before taking its snapshot so
+    # B cannot reload the still-exposed legacy value. Custom providers were
+    # rejected by _fix_gateway_token before this helper is reached.
+    if repointed:
+        try:
+            gateway.token_env = _CANONICAL_GATEWAY_TOKEN_ENV
+            cfg.save()
+        except (OSError, AttributeError):
+            gateway.token_env = configured_env
+            return (
+                "fail",
+                "could not repoint the legacy gateway token provider before the fail-closed rotation transaction",
+            )
+
+    app = AppContext()
+    app.cfg = cfg
+    dotenv_path = os.path.join(cfg.data_dir, ".env")
+    try:
+        _rotate_token_transaction(
+            app,
+            dotenv_path,
+            token,
+            "action=doctor-exposure-rotation restart=true",
+            recover_previous_runtime=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - redact transaction internals.
+        restore_failed = False
+        if repointed:
+            gateway.token_env = configured_env
+            try:
+                cfg.save()
+            except (OSError, AttributeError):
+                restore_failed = True
+        detail = (
+            "exposed-token rotation did not reach verified gateway B; "
+            "the compromised generation was not intentionally restarted"
+        )
+        if restore_failed:
+            detail += "; the prior gateway.token_env could not be restored"
+        return ("fail", f"{detail} ({type(exc).__name__})")
+
+    # Keep this Doctor process aligned with B. If the value came from a stale
+    # parent export, _doctor_stale_parent_gateway_env_names still preserves the
+    # actionable warning for subsequent shells.
+    os.environ[_CANONICAL_GATEWAY_TOKEN_ENV] = token
+    setattr(cfg, "_doctor_gateway_token_was_rotated", True)
+    setattr(cfg, "_doctor_gateway_token_activation_verified", True)
+    setattr(
+        cfg,
+        "_doctor_stale_parent_gateway_env_names",
+        tuple(getattr(cfg, "_doctor_external_gateway_env_names", ())),
+    )
+    return (
+        "pass",
+        f"rotated {_CANONICAL_GATEWAY_TOKEN_ENV} in {dotenv_path} after prior "
+        "read exposure; gateway B reached verified readiness (value redacted)",
+    )
 
 
 def _fix_gateway_token_env(cfg, *, assume_yes: bool) -> tuple[str, str]:
@@ -4692,19 +5995,27 @@ def _fix_gateway_token_env(cfg, *, assume_yes: bool) -> tuple[str, str]:
     gw = getattr(cfg, "gateway", None)
     if gw is None:
         return ("skip", "no gateway config")
+    if not _doctor_config_present(cfg):
+        return ("skip", "config.yaml is missing; refusing to create it from an auto-fix")
 
     configured_env = getattr(gw, "token_env", "") or ""
     canonical = "DEFENSECLAW_GATEWAY_TOKEN"
+    exposure_rotation = bool(getattr(cfg, "_doctor_gateway_token_was_rotated", False))
 
-    # Already on the canonical name — nothing to do, regardless of
-    # whether the var is actually populated. Other fixers handle the
-    # missing-value case.
-    if configured_env == canonical:
+    # Already on the canonical name — nothing to do, regardless of whether
+    # the value is populated. The missing-value fixer owns that case.
+    if _env_names_equal(configured_env, canonical):
         return ("skip", f"token_env already set to {canonical}")
+
+    # A populated configured provider is working and retains precedence. In
+    # particular, do not rewrite an active OpenClaw token merely because the
+    # canonical fallback is also present.
+    if not exposure_rotation and configured_env and _normalized_gateway_token(os.environ.get(configured_env, "")):
+        return ("skip", f"configured token provider {configured_env} is populated")
 
     # Don't touch a custom operator override. Only auto-repoint the
     # legacy OPENCLAW_ default.
-    if configured_env and configured_env != "OPENCLAW_GATEWAY_TOKEN":
+    if configured_env and not _env_names_equal(configured_env, "OPENCLAW_GATEWAY_TOKEN"):
         return (
             "skip",
             f"token_env={configured_env!r} is a custom override; not auto-rewriting",
@@ -4713,7 +6024,7 @@ def _fix_gateway_token_env(cfg, *, assume_yes: bool) -> tuple[str, str]:
     # Only proceed when the canonical var is actually populated —
     # otherwise we'd be repointing at another empty var, which buys
     # nothing and obscures the underlying "no token anywhere" state.
-    if not os.environ.get(canonical, ""):
+    if not _normalized_gateway_token(os.environ.get(canonical, "")):
         return ("skip", f"{canonical} is not set; nothing to repoint at")
 
     if not assume_yes and not click.confirm(
@@ -4726,9 +6037,83 @@ def _fix_gateway_token_env(cfg, *, assume_yes: bool) -> tuple[str, str]:
         gw.token_env = canonical
         cfg.save()
     except (OSError, AttributeError) as exc:
+        gw.token_env = configured_env
         return ("fail", f"could not save config: {type(exc).__name__}: {exc}")
 
     return ("pass", f"token_env repointed to {canonical}")
+
+
+def _repair_gateway_lifecycle(cfg, *, start_if_stopped: bool) -> tuple[bool, str]:
+    """Run setup's ownership-aware gateway lifecycle in the selected home.
+
+    The setup boundary resolves the verified packaged Windows sibling instead
+    of trusting PATH, validates live PID identity before a restart, and waits
+    for API readiness.  Pin all supported home/config variables so a Doctor
+    process launched from another checkout cannot repair the wrong install.
+    Presentation is captured to preserve ``doctor --json-output``.
+    """
+    from defenseclaw.commands.cmd_setup import (
+        _restart_defense_gateway,
+        _rotate_token_child_environment,
+    )
+    from defenseclaw.config import config_path_for_data_dir
+
+    data_dir = os.path.abspath(cfg.data_dir)
+    config_file = str(config_path_for_data_dir(data_dir))
+    token, token_env_name, _token_source = _daemon_effective_gateway_token(cfg)
+    child_env = _rotate_token_child_environment(data_dir, config_file, token)
+    if token_env_name and (not dotenv_key_is_valid(token_env_name) or dotenv_key_is_process_control(token_env_name)):
+        return False, "configured gateway token_env is unsafe for lifecycle execution"
+    if token and token_env_name:
+        child_env[token_env_name] = token
+
+    process_trust = _managed_gateway_process_trust(cfg)
+    lifecycle_executable: str | None = None
+    if process_trust.trusted and process_trust.record is not None:
+        candidate = process_trust.record.executable
+        if candidate and os.path.isabs(candidate) and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            lifecycle_executable = str(os.path.realpath(candidate))
+        else:
+            return False, "verified running gateway executable is unavailable"
+
+    managed_env = {
+        "DEFENSECLAW_HOME": data_dir,
+        "DEFENSECLAW_DATA_DIR": data_dir,
+        "DEFENSECLAW_CONFIG": config_file,
+    }
+    previous_env = {name: os.environ.get(name) for name in managed_env}
+    output = io.StringIO()
+    try:
+        os.environ.update(managed_env)
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            repaired = _restart_defense_gateway(
+                data_dir,
+                start_if_stopped=start_if_stopped,
+                child_env=child_env,
+                lifecycle_executable=lifecycle_executable,
+            )
+    finally:
+        for name, value in previous_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    rendered = " ".join(output.getvalue().split())
+    safe_reasons = (
+        "live gateway.pid did not verify as DefenseClaw gateway",
+        "binary not found",
+        "API health timed out",
+        "ready after launcher timeout",
+        "timed out; final status is not healthy",
+        "not running — skipping restart",
+        "verified running executable is no longer active",
+        "binary is not a verified executable file",
+    )
+    reason = next((candidate for candidate in safe_reasons if candidate in rendered), "")
+    if not repaired and not reason:
+        reason = "managed lifecycle did not reach verified readiness"
+    return repaired, reason
 
 
 def _fix_gateway_token_drift(cfg, *, assume_yes: bool) -> tuple[str, str]:
@@ -4751,92 +6136,477 @@ def _fix_gateway_token_drift(cfg, *, assume_yes: bool) -> tuple[str, str]:
     on successful restart, ``("fail", ...)`` when the restart
     invocation errors out.
     """
+    if not _doctor_config_present(cfg):
+        return ("skip", "config.yaml is missing; refusing to restart an uninitialized gateway")
+
     pid_file = os.path.join(cfg.data_dir, "gateway.pid")
-    pid = _read_pid_from_file(pid_file)
-    if pid == 0:
+    process_trust = _managed_gateway_process_trust(cfg)
+    if process_trust.code in {"missing", "missing_process"}:
         return ("skip", "no live sidecar to restart")
-
-    dotenv_path = os.path.join(cfg.data_dir, ".env")
-    if not os.path.isfile(dotenv_path):
-        return ("skip", "no .env file to compare against")
-
-    dotenv_token = ""
-    try:
-        with open(dotenv_path, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if line.startswith("DEFENSECLAW_GATEWAY_TOKEN="):
-                    value = line[len("DEFENSECLAW_GATEWAY_TOKEN=") :]
-                    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-                        value = value[1:-1]
-                    dotenv_token = value
-                    break
-    except OSError as exc:
-        return ("warn", f"could not read {dotenv_path}: {exc}")
-    if not dotenv_token:
-        return ("skip", "no DEFENSECLAW_GATEWAY_TOKEN in .env to reconcile")
-
-    process_token = _read_process_env_var(pid, "DEFENSECLAW_GATEWAY_TOKEN")
-    if process_token is None:
-        return ("skip", f"could not inspect sidecar pid {pid} env")
-    if not process_token:
-        return ("skip", f"sidecar pid {pid} has no DEFENSECLAW_GATEWAY_TOKEN in env")
-    if process_token == dotenv_token:
-        return ("skip", "sidecar token already matches .env")
-
-    # Drift confirmed. Find the gateway binary and offer to restart.
-    gw_binary = shutil.which("defenseclaw-gateway")
-    if not gw_binary:
+    if not process_trust.trusted:
         return (
-            "warn",
-            "drift detected but defenseclaw-gateway not on PATH; restart the sidecar manually to reconcile",
+            "fail",
+            f"{process_trust.detail}; refusing to send credentials or restart. "
+            "Run `defenseclaw-gateway restart` manually once if this is an "
+            "older unbound PID record.",
+        )
+    pid = process_trust.pid
+    inspected_fingerprint = pid_file_fingerprint(pid_file)
+    if not inspected_fingerprint:
+        return ("fail", "gateway PID record is unsafe or changed during inspection")
+
+    probe_token, token_env_name, token_source = _daemon_effective_gateway_token(cfg)
+    if not probe_token:
+        return ("skip", "no configured gateway token to reconcile")
+
+    # The authenticated endpoint is authoritative, but a master token is sent
+    # only after exact listener/PID/home identity is proven. Listener-only
+    # uncertainty may fall back to read-only process-environment evidence, but
+    # identity, home, foreign-owner, and ambiguity failures never authorize a
+    # lifecycle mutation.
+    auth_rejected = False
+    trust = _trusted_gateway_listener(cfg)
+    if trust.code in {"foreign_listener", "ambiguous_listener"}:
+        return (
+            "fail",
+            f"{trust.detail}; refusing to send the configured token",
+        )
+    if trust.trusted:
+        code, body = _http_probe(
+            _gateway_api_url(cfg, "/status"),
+            headers={"Authorization": f"Bearer {probe_token}"},
+            timeout=3.0,
+            response_limit=64 * 1024,
+            allow_truncation=False,
+            bypass_proxy=True,
+        )
+        if code == 200:
+            runtime_ok, runtime_detail = _authenticated_runtime_matches(cfg, trust.pid, body)
+            if runtime_ok:
+                return ("skip", "gateway already accepts the configured token")
+            return ("fail", runtime_detail)
+        auth_rejected = code in {401, 403, 503}
+        if not auth_rejected:
+            detail = "transport failure" if code == 0 else f"HTTP {code}"
+            return (
+                "fail",
+                f"trusted gateway authentication verification was unavailable ({detail}); "
+                "refusing to restart based only on process-environment evidence",
+            )
+    elif trust.code not in {"missing_listener", "unavailable"}:
+        return (
+            "fail",
+            f"{trust.detail}; refusing automatic authentication repair",
         )
 
+    if not auth_rejected:
+        if not token_env_name:
+            return ("skip", f"authentication could not be verified ({trust.detail})")
+        process_token = _read_process_env_var(pid, token_env_name)
+        if process_token is None:
+            return ("skip", f"could not inspect sidecar pid {pid} env or verify authentication")
+        process_token = _normalized_gateway_token(process_token)
+        if not process_token:
+            return ("skip", f"sidecar pid {pid} has no inspectable {token_env_name} value")
+        if process_token == probe_token:
+            return ("skip", "sidecar token already matches the daemon-effective token")
+
     if not assume_yes and not click.confirm(
-        f"    Restart sidecar (pid {pid}) to pick up the current .env token? In-flight requests will be interrupted.",
+        f"    Restart sidecar (pid {pid}) to pick up the {token_source or 'configured token'}? "
+        "In-flight requests will be interrupted.",
         default=True,
     ):
         return ("skip", "declined by user")
 
-    try:
-        result = subprocess.run(
-            [gw_binary, "restart"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
+    if pid_file_fingerprint(pid_file) != inspected_fingerprint:
+        return (
+            "fail",
+            "gateway PID record changed after verification; refusing to restart a replacement",
         )
-    except subprocess.TimeoutExpired:
-        return ("fail", "restart command timed out after 30s")
-    except OSError as exc:
-        return ("fail", f"could not invoke restart: {exc}")
+    repaired, lifecycle_detail = _repair_gateway_lifecycle(cfg, start_if_stopped=False)
+    if not repaired:
+        return (
+            "fail",
+            f"gateway restart or readiness verification failed ({lifecycle_detail}); run `defenseclaw-gateway status`",
+        )
 
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "restart failed").strip().splitlines()
-        return ("fail", detail[0] if detail else "restart failed")
+    # A public /health readiness result is not enough to claim authentication
+    # repair. Re-resolve the daemon-effective token and verify it against the
+    # replacement process using the strongest evidence available.
+    replacement_token, _replacement_env, _replacement_source = _daemon_effective_gateway_token(cfg)
+    if not replacement_token:
+        return ("fail", "gateway restarted but no daemon-effective token remains configured")
+    replacement_trust = _trusted_gateway_listener(cfg)
+    if not replacement_trust.trusted:
+        return (
+            "fail",
+            "gateway restarted but replacement endpoint ownership/authentication "
+            f"could not be verified ({replacement_trust.detail})",
+        )
+    code, body = _http_probe(
+        _gateway_api_url(cfg, "/status"),
+        headers={"Authorization": f"Bearer {replacement_token}"},
+        timeout=3.0,
+        response_limit=64 * 1024,
+        allow_truncation=False,
+        bypass_proxy=True,
+    )
+    if code != 200:
+        return ("fail", f"gateway restarted but still rejects configured authentication (HTTP {code})")
+    runtime_ok, runtime_detail = _authenticated_runtime_matches(
+        cfg,
+        replacement_trust.pid,
+        body,
+    )
+    if not runtime_ok:
+        return ("fail", runtime_detail)
+    return ("pass", "sidecar restarted and authenticated token acceptance was verified")
 
-    return ("pass", f"sidecar restarted; will now serve token from {dotenv_path}")
+
+def _gateway_service_health_assessment(cfg, health: dict) -> tuple[str, str]:
+    """Classify health without treating operational failures as stale config.
+
+    Returns ``(kind, detail)`` where kind is ``healthy``, ``repairable``,
+    ``operational``, or ``invalid``.  Only deterministic on-disk/runtime
+    divergence is repairable; reconnecting/error/starting states generally
+    depend on an upstream service and must remain diagnostics, not restart
+    loops.
+    """
+    healthy_states = {"running", "healthy"}
+    inactive_states = {"disabled", "stopped"}
+    repair_reasons: list[str] = []
+    operational_reasons: list[str] = []
+    invalid_reasons: list[str] = []
+
+    api = health.get("api")
+    if not isinstance(api, dict):
+        return ("invalid", "required api subsystem is absent from health")
+    api_state = api.get("state", api.get("status", ""))
+    if not isinstance(api_state, str):
+        return ("invalid", "required api subsystem has malformed health state")
+    api_state = api_state.strip().lower()
+    if api_state in inactive_states:
+        repair_reasons.append(f"required api subsystem reports {api_state}")
+    elif api_state not in healthy_states:
+        operational_reasons.append(f"required api subsystem reports {api_state or 'unknown'}")
+
+    for subsystem in ("gateway", "watcher", "telemetry", "guardrail", "sandbox"):
+        info = health.get(subsystem)
+        expected = _subsystem_expected_enabled(cfg, subsystem)
+        if not isinstance(info, dict):
+            if expected is True:
+                invalid_reasons.append(f"{subsystem} is enabled in config but absent from health")
+            continue
+        raw_state = info.get("state", info.get("status", ""))
+        if not isinstance(raw_state, str):
+            invalid_reasons.append(f"{subsystem} has malformed health state")
+            continue
+        state = raw_state.strip().lower()
+
+        if expected is True and state in inactive_states:
+            repair_reasons.append(f"{subsystem} is enabled in config but reports {state}")
+        elif (
+            expected is False
+            and subsystem
+            in {
+                "gateway",
+                "watcher",
+                "guardrail",
+                "sandbox",
+            }
+            and state in healthy_states
+        ):
+            repair_reasons.append(f"{subsystem} is disabled in config but reports {state}")
+        elif state not in healthy_states | inactive_states:
+            operational_reasons.append(f"{subsystem} reports {state or 'unknown'}")
+
+    if invalid_reasons:
+        return ("invalid", "; ".join(invalid_reasons))
+    if operational_reasons:
+        return ("operational", "; ".join(operational_reasons))
+    if repair_reasons:
+        return ("repairable", "; ".join(repair_reasons))
+    return ("healthy", "gateway health matches the current configuration")
 
 
-def _fix_dotenv_perms(cfg, *, assume_yes: bool) -> tuple[str, str]:
-    """Ensure the dotenv file (which holds secrets) is not world-readable."""
-    path = os.path.join(cfg.data_dir, ".env")
-    if not os.path.isfile(path):
-        return ("skip", "no dotenv file")
+def _gateway_service_health_repair_reason(cfg, health: dict) -> str:
+    """Compatibility view returning only deterministic repairable drift."""
+    kind, detail = _gateway_service_health_assessment(cfg, health)
+    return detail if kind == "repairable" else ""
 
+
+def _fix_gateway_service(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Start an absent gateway or restart one with stale subsystem state."""
+    if not _doctor_config_present(cfg):
+        return ("skip", "config.yaml is missing; run `defenseclaw init` before starting the gateway")
+
+    code, body = _http_probe(
+        _gateway_api_url(cfg, "/health"),
+        timeout=3.0,
+        response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
+        allow_truncation=False,
+        bypass_proxy=True,
+    )
+
+    reason = ""
+    process_trust: _GatewayTrust | None = None
+    inspected_fingerprint: tuple[int, int, int, int, bytes] | None = None
+    if code == 200:
+        try:
+            health = json.loads(body)
+        except (json.JSONDecodeError, TypeError):
+            return ("skip", "gateway is reachable; health details are not parseable")
+        if not isinstance(health, dict):
+            return ("skip", "gateway is reachable; health details are not an object")
+        health_kind, reason = _gateway_service_health_assessment(cfg, health)
+        if health_kind == "healthy":
+            return ("skip", "gateway service already healthy and current")
+        if health_kind in {"operational", "invalid"}:
+            return (
+                "skip",
+                f"gateway is reachable but {reason}; automatic restart was not attempted",
+            )
+        endpoint_trust = _trusted_gateway_listener(cfg)
+        if not endpoint_trust.trusted:
+            return (
+                "fail",
+                f"gateway health suggests repair, but {endpoint_trust.detail}; refusing lifecycle mutation",
+            )
+        process_trust = endpoint_trust
+        inspected_fingerprint = pid_file_fingerprint(os.path.join(cfg.data_dir, "gateway.pid"))
+    else:
+        if code != 0:
+            return (
+                "fail",
+                f"configured gateway endpoint returned HTTP {code} without a valid health document; "
+                "refusing automatic startup/restart",
+            )
+        reason = "gateway service is unreachable"
+        process_trust = _managed_gateway_process_trust(cfg)
+        pid_path = os.path.join(cfg.data_dir, "gateway.pid")
+        listener = _managed_gateway_listener_evidence(
+            _gateway_api_port(cfg),
+            host=_gateway_api_host(cfg),
+        )
+        if process_trust.trusted:
+            inspected_fingerprint = pid_file_fingerprint(pid_path)
+            if listener.status == "ok" and listener.pid != process_trust.pid:
+                return (
+                    "fail",
+                    "configured API endpoint is owned by another process; refusing to restart the managed gateway",
+                )
+            if listener.status in {"ambiguous", "denied", "unavailable"}:
+                return (
+                    "fail",
+                    f"{listener.reason or 'configured API endpoint ownership is unavailable'}; "
+                    "refusing to restart the managed gateway",
+                )
+        elif process_trust.code == "missing":
+            if listener.status != "missing":
+                return (
+                    "fail",
+                    f"{listener.reason or 'configured API endpoint ownership is unavailable'}; "
+                    "refusing to start a potentially conflicting gateway",
+                )
+        else:
+            return (
+                "fail",
+                f"{process_trust.detail}; refusing automatic gateway startup/restart. "
+                "Run `defenseclaw doctor --fix` again after reconciling gateway.pid.",
+            )
+
+    pid = process_trust.pid if process_trust and process_trust.trusted else 0
+    if pid and not inspected_fingerprint:
+        return ("fail", "gateway PID record changed or is unsafe; refusing lifecycle mutation")
+    action = "restart" if pid else "start"
+    if not assume_yes and not click.confirm(
+        f"    {action.capitalize()} the gateway because {reason}?",
+        default=True,
+    ):
+        return ("skip", "declined by user")
+
+    if pid and pid_file_fingerprint(os.path.join(cfg.data_dir, "gateway.pid")) != inspected_fingerprint:
+        return (
+            "fail",
+            "gateway PID record changed after verification; refusing to restart a replacement",
+        )
+    repaired, lifecycle_detail = _repair_gateway_lifecycle(cfg, start_if_stopped=True)
+    if not repaired:
+        return (
+            "fail",
+            f"could not {action} gateway service ({lifecycle_detail}); run `defenseclaw-gateway status`",
+        )
+
+    verified_code, verified_body = _http_probe(
+        _gateway_api_url(cfg, "/health"),
+        timeout=3.0,
+        response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
+        allow_truncation=False,
+        bypass_proxy=True,
+    )
+    if verified_code != 200:
+        return (
+            "fail",
+            f"gateway {action}ed but the complete health document is unavailable (HTTP {verified_code})",
+        )
     try:
-        mode = os.stat(path).st_mode & 0o777
-    except OSError as exc:
-        return ("warn", f"stat failed: {exc}")
+        verified_health = json.loads(verified_body)
+    except (json.JSONDecodeError, TypeError):
+        return ("fail", f"gateway {action}ed but its health document is not parseable")
+    if not isinstance(verified_health, dict):
+        return ("fail", f"gateway {action}ed but its health document is not an object")
+    verified_api = verified_health.get("api")
+    verified_api_state = (
+        verified_api.get("state", verified_api.get("status", "")) if isinstance(verified_api, dict) else ""
+    )
+    if not isinstance(verified_api_state, str) or verified_api_state.strip().lower() not in {
+        "running",
+        "healthy",
+    }:
+        return ("fail", f"gateway {action}ed but the local API is not ready")
+    verified_kind, verified_detail = _gateway_service_health_assessment(cfg, verified_health)
+    if verified_kind in {"repairable", "invalid"}:
+        return (
+            "fail",
+            f"gateway {action}ed but repair did not converge: {verified_detail}",
+        )
+    replacement_trust = _trusted_gateway_listener(cfg)
+    if not replacement_trust.trusted:
+        return (
+            "fail",
+            f"gateway {action}ed but replacement ownership did not converge: {replacement_trust.detail}",
+        )
+    if verified_kind == "operational":
+        return (
+            "warn",
+            f"gateway service {action}ed and ownership verified; {verified_detail}",
+        )
+    return ("pass", f"gateway service {action}ed: {reason}")
 
-    if mode == 0o600:
+
+def _fix_dotenv_perms(
+    cfg,
+    *,
+    assume_yes: bool,
+    platform_name: str | None = None,
+) -> tuple[str, str]:
+    """Protect the dotenv with POSIX 0600 or a private Windows DACL."""
+    from defenseclaw.file_permissions import (
+        protect_private_file,
+        windows_acl_confidentiality_error,
+        windows_acl_write_error,
+    )
+
+    if data_dir_problem := _gateway_data_dir_integrity_problem(cfg):
+        return (
+            "fail",
+            f"{data_dir_problem}; refusing to repair or consume dotenv credentials",
+        )
+    path = os.path.join(cfg.data_dir, ".env")
+    try:
+        if is_symlink(path):
+            return ("fail", "dotenv is a symbolic link or reparse point; refusing permission repair")
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return ("skip", "no dotenv file")
+    except OSError as exc:
+        return ("warn", f"dotenv could not be safely inspected: {type(exc).__name__}")
+    reparse_point = 0x400
+    if getattr(info, "st_file_attributes", 0) & reparse_point:
+        return ("fail", "dotenv is a symbolic link or reparse point; refusing permission repair")
+    if not stat.S_ISREG(info.st_mode):
+        return ("fail", "dotenv is not a regular file; refusing permission repair")
+
+    platform_name = platform_name or sys.platform
+    if platform_name in {"nt", "win32"}:
+        problem = windows_acl_confidentiality_error(path)
+        integrity_problem = windows_acl_write_error(path)
+        if integrity_problem is not None:
+            return (
+                "fail",
+                f"dotenv integrity is untrusted ({integrity_problem}); refusing to "
+                "bless or consume its contents. Review the file, replace it securely, "
+                "then rerun Doctor.",
+            )
+        if problem is not None and "read access" in problem.lower():
+            setattr(cfg, "_doctor_gateway_token_rotation_required", True)
+            return (
+                "warn",
+                "dotenv ACL exposed its contents; leaving the file unchanged until "
+                "the gateway-token fixer can atomically replace it with a rotated "
+                "token and private DACL. Rotate any other credentials stored in it.",
+            )
+        if problem is None:
+            try:
+                current = os.lstat(path)
+            except OSError:
+                return ("warn", "dotenv changed while its Windows DACL was inspected")
+            if is_symlink(path) or not os.path.samestat(info, current):
+                return ("warn", "dotenv changed while its Windows DACL was inspected")
+            return ("skip", "permissions already use a private Windows DACL")
+        if not assume_yes and not click.confirm(
+            f"    Tighten the Windows ACL on {path}?",
+            default=True,
+        ):
+            return ("skip", "declined by user")
+        try:
+            protect_private_file(path)
+            remaining_problem = windows_acl_confidentiality_error(path)
+        except OSError as exc:
+            return ("fail", f"could not protect dotenv with a private Windows DACL: {exc}")
+        if remaining_problem is not None:
+            return ("fail", f"dotenv Windows ACL remains unsafe: {remaining_problem}")
+        return ("pass", f"protected {path} with a private Windows DACL")
+
+    mode = info.st_mode & 0o777
+    geteuid = getattr(os, "geteuid", None)
+    if callable(geteuid) and info.st_uid != geteuid():
+        return (
+            "fail",
+            "dotenv is not owned by the current user; refusing permission or credential repair",
+        )
+    if mode & 0o022:
+        return (
+            "fail",
+            "dotenv was writable by another local principal; refusing to bless or "
+            "consume its contents. Review the file, replace it securely, then rerun Doctor.",
+        )
+    acl_write_problem = darwin_acl_write_error(path) if platform_name == "darwin" else None
+    if acl_write_problem is not None:
+        return (
+            "fail",
+            f"dotenv integrity is untrusted ({acl_write_problem}); refusing to bless "
+            "or consume its contents. Review the file, replace it securely, then rerun Doctor.",
+        )
+    acl_read_problem = darwin_acl_confidentiality_error(path) if platform_name == "darwin" else None
+    if mode & 0o044 or acl_read_problem is not None:
+        setattr(cfg, "_doctor_gateway_token_rotation_required", True)
+        return (
+            "warn",
+            "dotenv permissions exposed its contents; leaving the file unchanged "
+            "until the gateway-token fixer can atomically replace it with a rotated "
+            "token and mode 0600. Rotate any other credentials stored in it.",
+        )
+    if mode == 0o600 and acl_read_problem is None:
+        try:
+            current = os.lstat(path)
+        except OSError:
+            return ("warn", "dotenv changed while its permissions were inspected")
+        if is_symlink(path) or not os.path.samestat(info, current):
+            return ("warn", "dotenv changed while its permissions were inspected")
         return ("skip", "permissions already 0600")
 
-    if not assume_yes and not click.confirm(f"    Tighten {path} permissions from {mode:04o} to 0600?", default=True):
+    prompt = f"    Tighten {path} permissions from {mode:04o} to 0600?"
+    if acl_read_problem:
+        prompt = f"    Remove the read-capable extended ACL from {path} and enforce 0600?"
+    if not assume_yes and not click.confirm(prompt, default=True):
         return ("skip", "declined by user")
 
     try:
-        os.chmod(path, 0o600)
+        protect_private_file(path)
+        remaining_acl_problem = darwin_acl_confidentiality_error(path) if platform_name == "darwin" else None
+        if remaining_acl_problem is not None:
+            return ("fail", f"dotenv extended ACL remains unsafe: {remaining_acl_problem}")
         return ("pass", f"set {path} to 0600")
     except OSError as exc:
         return ("fail", f"chmod failed: {exc}")
@@ -4851,6 +6621,8 @@ def _fix_pristine_backup(cfg, *, assume_yes: bool) -> tuple[str, str]:
     the data directory.
     """
     del assume_yes  # unused: capturing a snapshot is always safe
+    if not _doctor_config_present(cfg):
+        return ("skip", "config.yaml is missing; refusing to snapshot an uninitialized install")
     active_connector = _active_connector(cfg)
 
     if active_connector == "openclaw":
@@ -4903,6 +6675,9 @@ def _fix_plugin_registry_required(cfg, *, assume_yes: bool) -> tuple[str, str]:
         default=True,
     ):
         return ("skip", "declined by user")
+
+    if not _doctor_config_present(cfg):
+        return ("skip", "config.yaml is missing; refusing to create it from an auto-fix")
 
     ap = getattr(cfg, "asset_policy", None)
     try:

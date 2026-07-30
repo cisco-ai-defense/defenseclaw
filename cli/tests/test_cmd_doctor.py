@@ -61,11 +61,7 @@ from defenseclaw.config import (
 
 class DoctorSecurityOverrideTests(unittest.TestCase):
     def test_private_upstream_config_entries_are_visible(self):
-        cfg = SimpleNamespace(
-            guardrail=SimpleNamespace(
-                allow_private_upstreams=["10.50.2.100", "172.16.0.5"]
-            )
-        )
+        cfg = SimpleNamespace(guardrail=SimpleNamespace(allow_private_upstreams=["10.50.2.100", "172.16.0.5"]))
         result = _DoctorResult()
 
         with patch.dict(os.environ, {}, clear=True):
@@ -79,9 +75,7 @@ class DoctorSecurityOverrideTests(unittest.TestCase):
         self.assertIn("config.yaml", check["detail"])
 
     def test_private_upstream_env_and_config_entries_are_merged(self):
-        cfg = SimpleNamespace(
-            guardrail=SimpleNamespace(allow_private_upstreams=["10.50.2.100"])
-        )
+        cfg = SimpleNamespace(guardrail=SimpleNamespace(allow_private_upstreams=["10.50.2.100"]))
         result = _DoctorResult()
 
         with patch.dict(
@@ -111,9 +105,9 @@ class DoctorMultiConnectorInventoryTests(unittest.TestCase):
 
         seen: dict[str, list] = {"skill": [], "plugin": [], "mcp": []}
         cfg = SimpleNamespace(
-            skill_dirs=lambda connector=None: (seen["skill"].append(connector) or []),
-            plugin_dirs=lambda connector=None: (seen["plugin"].append(connector) or []),
-            mcp_servers=lambda connector=None: (seen["mcp"].append(connector) or []),
+            skill_dirs=lambda connector=None: seen["skill"].append(connector) or [],
+            plugin_dirs=lambda connector=None: seen["plugin"].append(connector) or [],
+            mcp_servers=lambda connector=None: seen["mcp"].append(connector) or [],
         )
         r = _DoctorResult()
 
@@ -157,12 +151,15 @@ class DoctorHermesMigrationTests(unittest.TestCase):
                 fh.write(legacy_body)
 
             result = _DoctorResult()
-            with patch(
-                "defenseclaw.commands.cmd_doctor.hermes_config_path",
-                return_value=current,
-            ), patch(
-                "defenseclaw.commands.cmd_doctor.hermes_legacy_config_path",
-                return_value=legacy,
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_doctor.hermes_config_path",
+                    return_value=current,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_doctor.hermes_legacy_config_path",
+                    return_value=legacy,
+                ),
             ):
                 _check_hermes_legacy_config(result, platform_name="nt")
 
@@ -182,12 +179,15 @@ class DoctorHermesMigrationTests(unittest.TestCase):
 
             for platform_name in ("posix", "nt"):
                 result = _DoctorResult()
-                with patch(
-                    "defenseclaw.commands.cmd_doctor.hermes_config_path",
-                    return_value=path,
-                ), patch(
-                    "defenseclaw.commands.cmd_doctor.hermes_legacy_config_path",
-                    return_value=path,
+                with (
+                    patch(
+                        "defenseclaw.commands.cmd_doctor.hermes_config_path",
+                        return_value=path,
+                    ),
+                    patch(
+                        "defenseclaw.commands.cmd_doctor.hermes_legacy_config_path",
+                        return_value=path,
+                    ),
                 ):
                     _check_hermes_legacy_config(result, platform_name=platform_name)
                 self.assertEqual(result.warned, 0, result.checks)
@@ -346,14 +346,144 @@ class DoctorGuardrailTests(unittest.TestCase):
 
         _check_sidecar(cfg, result)
 
-        telemetry = [
-            row
-            for row in result.checks
-            if row.get("label", "").strip().endswith("telemetry")
-        ]
+        telemetry = [row for row in result.checks if row.get("label", "").strip().endswith("telemetry")]
         self.assertEqual(len(telemetry), 1)
         self.assertEqual(telemetry[0]["status"], "warn")
         self.assertIn("sidecar is stale", telemetry[0]["detail"])
+
+    @staticmethod
+    def _sidecar_alignment_cfg(
+        *,
+        fleet_mode: str = "disabled",
+        watcher_enabled: bool = False,
+    ) -> Config:
+        gateway = GatewayConfig(
+            host="127.0.0.1",
+            fleet_mode=fleet_mode,
+        )
+        gateway.watcher.enabled = watcher_enabled
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=False, connector="codex"),
+            gateway=gateway,
+            openshell=OpenShellConfig(),
+        )
+        cfg.claw.mode = "codex"
+        cfg._source_config_version = 8
+        return cfg
+
+    @staticmethod
+    def _complete_sidecar_health() -> dict[str, dict[str, object]]:
+        return {
+            "gateway": {"state": "disabled"},
+            "watcher": {"state": "disabled"},
+            "guardrail": {"state": "disabled"},
+            "api": {"state": "running"},
+            "telemetry": {"state": "running"},
+            "sandbox": {"state": "disabled"},
+        }
+
+    def _run_sidecar_health(
+        self,
+        cfg: Config,
+        health: object,
+    ) -> _DoctorResult:
+        result = _DoctorResult()
+        with patch(
+            "defenseclaw.commands.cmd_doctor._http_probe",
+            return_value=(200, json.dumps(health)),
+        ):
+            _check_sidecar(cfg, result)
+        return result
+
+    @staticmethod
+    def _sidecar_row(result: _DoctorResult, subsystem: str) -> dict[str, str]:
+        return next(row for row in result.checks if row.get("label", "").strip().endswith(subsystem))
+
+    def test_sidecar_check_fails_when_required_api_entry_is_missing(self):
+        health = self._complete_sidecar_health()
+        del health["api"]
+
+        result = self._run_sidecar_health(
+            self._sidecar_alignment_cfg(),
+            health,
+        )
+
+        api = self._sidecar_row(result, "api")
+        self.assertEqual(api["status"], "fail")
+        self.assertIn("absent from health response", api["detail"])
+
+    def test_sidecar_check_accepts_intentionally_disabled_fleet_gateway(self):
+        for scenario, fleet_mode in (
+            ("codex loopback standalone", ""),
+            ("explicit fleet disable", "disabled"),
+        ):
+            with self.subTest(scenario=scenario):
+                result = self._run_sidecar_health(
+                    self._sidecar_alignment_cfg(fleet_mode=fleet_mode),
+                    self._complete_sidecar_health(),
+                )
+
+                gateway = self._sidecar_row(result, "gateway")
+                self.assertEqual(gateway["status"], "skip")
+                self.assertIn("disabled", gateway["detail"])
+
+    def test_sidecar_check_aligns_disabled_watcher_with_config(self):
+        for runtime_state, expected_status in (
+            ("disabled", "skip"),
+            ("running", "warn"),
+        ):
+            with self.subTest(runtime_state=runtime_state):
+                health = self._complete_sidecar_health()
+                health["watcher"] = {"state": runtime_state}
+                result = self._run_sidecar_health(
+                    self._sidecar_alignment_cfg(watcher_enabled=False),
+                    health,
+                )
+
+                watcher = self._sidecar_row(result, "watcher")
+                self.assertEqual(watcher["status"], expected_status)
+                if runtime_state == "running":
+                    self.assertIn("sidecar is stale", watcher["detail"])
+
+    def test_sidecar_check_reports_malformed_nested_health_without_crashing(self):
+        cases = (
+            (
+                "subsystem entry",
+                "gateway",
+                [],
+                "malformed health entry",
+            ),
+            (
+                "state",
+                "watcher",
+                {"state": ["running"]},
+                "malformed health state",
+            ),
+            (
+                "details",
+                "gateway",
+                {"state": "disabled", "details": ["unexpected"]},
+                "malformed health details",
+            ),
+        )
+        for scenario, subsystem, malformed, expected_detail in cases:
+            with self.subTest(scenario=scenario):
+                health = self._complete_sidecar_health()
+                health[subsystem] = malformed
+
+                result = self._run_sidecar_health(
+                    self._sidecar_alignment_cfg(),
+                    health,
+                )
+
+                row = self._sidecar_row(result, subsystem)
+                self.assertEqual(row["status"], "fail")
+                self.assertIn(expected_detail, row["detail"])
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
     def test_codex_observability_mode_skips_proxy_port_probe(self, mock_probe):
@@ -757,9 +887,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                             "PreToolUse": [
                                 {
                                     "matcher": "*",
-                                    "hooks": [
-                                        {"type": "command", "command": "/bin/true"}
-                                    ],
+                                    "hooks": [{"type": "command", "command": "/bin/true"}],
                                 }
                             ]
                         }
@@ -1410,7 +1538,8 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
             gateway=GatewayConfig(),
             openshell=OpenShellConfig(),
             cisco_ai_defense=CiscoAIDefenseConfig(
-                endpoint=endpoint, api_key_env="CISCO_AI_DEFENSE_API_KEY",
+                endpoint=endpoint,
+                api_key_env="CISCO_AI_DEFENSE_API_KEY",
             ),
         )
 
@@ -1418,7 +1547,10 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(401, "invalid api key"))
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="fake-key")
     def test_401_emits_endpoint_and_setup_hint(
-        self, _mock_resolve, _mock_probe, mock_echo,
+        self,
+        _mock_resolve,
+        _mock_probe,
+        mock_echo,
     ):
         cfg = self._make_cfg(endpoint="https://eu.api.inspect.aidefense.security.cisco.com")
         r = _DoctorResult()
@@ -1427,9 +1559,7 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
         # Hints go through click.echo (not _emit) so they don't
         # count toward the tally. Walk the captured calls and
         # assert the operator-visible text appears.
-        printed = "\n".join(
-            call.args[0] if call.args else "" for call in mock_echo.call_args_list
-        )
+        printed = "\n".join(call.args[0] if call.args else "" for call in mock_echo.call_args_list)
         self.assertIn(
             "endpoint: https://eu.api.inspect.aidefense.security.cisco.com",
             printed,
@@ -1440,7 +1570,10 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(403, "forbidden"))
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="fake-key")
     def test_403_also_emits_region_hint(
-        self, _mock_resolve, _mock_probe, mock_echo,
+        self,
+        _mock_resolve,
+        _mock_probe,
+        mock_echo,
     ):
         # 403 is the same UX failure mode (authenticated but not
         # authorized for the route) — same hint applies.
@@ -1448,9 +1581,7 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
         r = _DoctorResult()
         _check_cisco_ai_defense(cfg, r)
         self.assertEqual(r.failed, 1, r.checks)
-        printed = "\n".join(
-            call.args[0] if call.args else "" for call in mock_echo.call_args_list
-        )
+        printed = "\n".join(call.args[0] if call.args else "" for call in mock_echo.call_args_list)
         self.assertIn("defenseclaw setup", printed)
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
@@ -1470,15 +1601,16 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(0, "DNS failure"))
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="fake-key")
     def test_unreachable_warns_and_shows_endpoint(
-        self, _mock_resolve, _mock_probe, mock_echo,
+        self,
+        _mock_resolve,
+        _mock_probe,
+        mock_echo,
     ):
         cfg = self._make_cfg(endpoint="https://preview.api.inspect.aidefense.aiteam.cisco.com")
         r = _DoctorResult()
         _check_cisco_ai_defense(cfg, r)
         self.assertEqual(r.warned, 1, r.checks)
-        printed = "\n".join(
-            call.args[0] if call.args else "" for call in mock_echo.call_args_list
-        )
+        printed = "\n".join(call.args[0] if call.args else "" for call in mock_echo.call_args_list)
         self.assertIn("preview.api.inspect.aidefense.aiteam.cisco.com", printed)
 
 
@@ -1507,7 +1639,7 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._make_cfg(tmp)
-            self._write_hook(tmp, "codex-hook.sh", "fail_response() { echo \"$1\"; }\n")
+            self._write_hook(tmp, "codex-hook.sh", 'fail_response() { echo "$1"; }\n')
             self._write_hook(tmp, "_hardening.sh", "defenseclaw_read_stdin_capped() { cat; }\n")
 
             reasons = cmd_doctor._stale_generated_hook_reasons(cfg, "codex")
@@ -1520,7 +1652,7 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._make_cfg(tmp)
-            self._write_hook(tmp, "codex-hook.sh", "fail_response() { echo \"$1\"; }\n")
+            self._write_hook(tmp, "codex-hook.sh", 'fail_response() { echo "$1"; }\n')
             self._write_hook(tmp, "_hardening.sh", "defenseclaw_read_stdin_capped() { cat; }\n")
             result = _DoctorResult()
 
@@ -1547,7 +1679,7 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
             os.makedirs(old_hook_dir, exist_ok=True)
             old_hook = os.path.join(old_hook_dir, "claude-code-hook.sh")
             with open(old_hook, "w", encoding="utf-8") as fh:
-                fh.write("fail_response() { echo \"$1\"; }\n")
+                fh.write('fail_response() { echo "$1"; }\n')
             with open(os.path.join(old_hook_dir, "_hardening.sh"), "w", encoding="utf-8") as fh:
                 fh.write("defenseclaw_read_stdin_capped() { cat; }\n")
             with open(os.path.join(settings_dir, "settings.json"), "w", encoding="utf-8") as fh:
@@ -1587,10 +1719,7 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
 
 
 class DoctorGatewayHomeMismatchTests(unittest.TestCase):
-    """`_check_gateway_home_mismatch` warns when a gateway from a different
-    DEFENSECLAW_HOME (e.g. a leftover /tmp sandbox) is holding the API port —
-    the exact failure that makes every hook 401 while each half looks healthy.
-    """
+    """Gateway-home diagnostics use the same strong trust chain as auth."""
 
     def _make_cfg(self, data_dir: str) -> Config:
         return Config(
@@ -1613,24 +1742,23 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
             result = _DoctorResult()
             with (
                 patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
-                # This home's tracked gateway is NOT alive (no/stale pid file).
-                patch.object(cmd_doctor, "_read_pid_from_file", return_value=0),
-                # A foreign gateway is the actual listener...
-                patch.object(cmd_doctor, "_gateway_listener_pid", return_value=4321),
-                # ...rooted at a /tmp sandbox home.
                 patch.object(
                     cmd_doctor,
-                    "_read_process_env_var",
-                    return_value="/tmp/defenseclaw-pr365-sandbox",
+                    "_trusted_gateway_listener",
+                    return_value=cmd_doctor._GatewayTrust(
+                        "foreign_home",
+                        "managed PID record belongs to a different canonical data home",
+                        4321,
+                    ),
                 ),
             ):
                 cmd_doctor._check_gateway_home_mismatch(cfg, result)
 
         rows = [c for c in result.checks if c["label"] == "Gateway home"]
         self.assertEqual(len(rows), 1, result.checks)
-        self.assertEqual(rows[0]["status"], "warn")
-        self.assertIn("/tmp/defenseclaw-pr365-sandbox", rows[0]["detail"])
-        self.assertIn("unset DEFENSECLAW_HOME", rows[0]["detail"])
+        self.assertEqual(rows[0]["status"], "fail")
+        self.assertIn("different canonical data home", rows[0]["detail"])
+        self.assertNotIn("/tmp/defenseclaw-pr365-sandbox", rows[0]["detail"])
 
     def test_passes_when_this_homes_gateway_is_alive(self):
         from defenseclaw.commands import cmd_doctor
@@ -1640,7 +1768,16 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
             result = _DoctorResult()
             with (
                 patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
-                patch.object(cmd_doctor, "_read_pid_from_file", return_value=999),
+                patch.object(
+                    cmd_doctor,
+                    "_trusted_gateway_listener",
+                    return_value=cmd_doctor._GatewayTrust(
+                        "trusted",
+                        "verified",
+                        999,
+                        home_bound=True,
+                    ),
+                ),
             ):
                 cmd_doctor._check_gateway_home_mismatch(cfg, result)
 
@@ -1656,16 +1793,21 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
             result = _DoctorResult()
             with (
                 patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
-                patch.object(cmd_doctor, "_read_pid_from_file", return_value=0),
-                patch.object(cmd_doctor, "_gateway_listener_pid", return_value=4321),
-                # Can't read the listener's env (perms / no var) -> "can't tell".
-                patch.object(cmd_doctor, "_read_process_env_var", return_value=None),
+                patch.object(
+                    cmd_doctor,
+                    "_trusted_gateway_listener",
+                    return_value=cmd_doctor._GatewayTrust(
+                        "missing",
+                        "managed gateway PID file is missing",
+                    ),
+                ),
             ):
                 cmd_doctor._check_gateway_home_mismatch(cfg, result)
 
-        # No mismatch row emitted — indeterminacy must not nag.
         rows = [c for c in result.checks if c["label"] == "Gateway home"]
-        self.assertEqual(rows, [], result.checks)
+        self.assertEqual(len(rows), 1, result.checks)
+        self.assertEqual(rows[0]["status"], "skip")
+        self.assertIn("not inferred", rows[0]["detail"])
 
     def test_passes_when_listener_home_matches_this_config(self):
         from defenseclaw.commands import cmd_doctor
@@ -1675,10 +1817,16 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
             result = _DoctorResult()
             with (
                 patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
-                # Stale pid file, but the live listener is THIS home's gateway.
-                patch.object(cmd_doctor, "_read_pid_from_file", return_value=0),
-                patch.object(cmd_doctor, "_gateway_listener_pid", return_value=4321),
-                patch.object(cmd_doctor, "_read_process_env_var", return_value=tmp),
+                patch.object(
+                    cmd_doctor,
+                    "_trusted_gateway_listener",
+                    return_value=cmd_doctor._GatewayTrust(
+                        "trusted",
+                        "verified",
+                        4321,
+                        home_bound=True,
+                    ),
+                ),
             ):
                 cmd_doctor._check_gateway_home_mismatch(cfg, result)
 
@@ -1732,19 +1880,25 @@ class DoctorFixDryRunTests(unittest.TestCase):
             patch.object(cmd_doctor, "_fix_gateway_token") as fix_token,
             patch.object(cmd_doctor, "_fix_gateway_token_env") as fix_token_env,
             patch.object(cmd_doctor, "_fix_gateway_token_drift") as fix_drift,
+            patch.object(cmd_doctor, "_fix_gateway_service") as fix_service,
             patch.object(cmd_doctor, "_fix_dotenv_perms") as fix_dotenv,
             patch.object(cmd_doctor, "_fix_pristine_backup") as fix_pristine,
             patch.object(cmd_doctor, "_fix_plugin_registry_required") as fix_plugin_reg,
             patch.object(cmd_doctor, "_fix_connector_residue") as fix_residue,
         ):
             cmd_doctor._run_fixers(
-                cfg, result, assume_yes=True, json_out=True, dry_run=True,
+                cfg,
+                result,
+                assume_yes=True,
+                json_out=True,
+                dry_run=True,
             )
 
             fix_pid.assert_not_called()
             fix_token.assert_not_called()
             fix_token_env.assert_not_called()
             fix_drift.assert_not_called()
+            fix_service.assert_not_called()
             fix_dotenv.assert_not_called()
             fix_pristine.assert_not_called()
             # OTHER-5: the plugin-registry dead-end fixer is wired into --fix
@@ -1760,7 +1914,7 @@ class DoctorFixDryRunTests(unittest.TestCase):
         # Stale generated hooks are detected as a warning only — there is no
         # auto-fixer for them, so they do not appear here.
         fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
-        self.assertEqual(len(fix_records), 7)
+        self.assertEqual(len(fix_records), 8)
         for record in fix_records:
             self.assertEqual(record["status"], "skip")
             self.assertIn("dry-run", record["detail"])
@@ -1780,7 +1934,9 @@ class DoctorFixDryRunTests(unittest.TestCase):
             patch.object(cmd_doctor, "_fix_gateway_token", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_gateway_token_env", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_gateway_token_drift", return_value=("pass", "ok")),
+            patch.object(cmd_doctor, "_fix_gateway_service", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_dotenv_perms", return_value=("pass", "ok")),
+            patch.object(cmd_doctor, "_gateway_dotenv_safety_problem", return_value=""),
             patch.object(cmd_doctor, "_fix_pristine_backup", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_plugin_registry_required", return_value=("pass", "ok")),
             # _fix_connector_residue is intentionally NOT wired into --fix (D7);
@@ -1788,15 +1944,19 @@ class DoctorFixDryRunTests(unittest.TestCase):
             patch.object(cmd_doctor, "_fix_connector_residue", return_value=("pass", "ok")) as fix_residue,
         ):
             cmd_doctor._run_fixers(
-                cfg, result, assume_yes=True, json_out=True, dry_run=False,
+                cfg,
+                result,
+                assume_yes=True,
+                json_out=True,
+                dry_run=False,
             )
 
         fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
-        # Seven fixers run: the connector-teardown fixer was removed (D7) and
+        # Eight fixers run: the connector-teardown fixer was removed (D7) and
         # the plugin-registry dead-end fixer was added (OTHER-5). Stale
         # generated hooks are warning-only (no auto-fixer), so they are not
         # counted here.
-        self.assertEqual(len(fix_records), 7)
+        self.assertEqual(len(fix_records), 8)
         for record in fix_records:
             self.assertEqual(record["status"], "pass")
         fix_residue.assert_not_called()
@@ -1817,7 +1977,7 @@ class DoctorFixDryRunTests(unittest.TestCase):
 
         banner = cmd_doctor._auto_fix_hint(True)
         self.assertIn("nothing on disk changes", banner)
-        self.assertIn("may restart the gateway sidecar", banner)
+        self.assertIn("may start or restart the gateway sidecar", banner)
         self.assertIn("doctor never runs connector teardown", banner)
 
 
@@ -1849,13 +2009,16 @@ class CustomProviderOverlayChecksTests(unittest.TestCase):
         import tempfile
 
         with tempfile.TemporaryDirectory() as data_dir:
-            self._write_overlay(data_dir, """{
+            self._write_overlay(
+                data_dir,
+                """{
                 "providers": [{
                     "name": "acme-internal",
                     "base_url": "https://llm.acme.internal:8443",
                     "base_provider_type": "openai"
                 }]
-            }""")
+            }""",
+            )
             r = _DoctorResult()
             _check_custom_provider_overlay(self._make_cfg(data_dir), r)
             warn_checks = [c for c in r.checks if c["status"] == "warn"]
@@ -1868,22 +2031,23 @@ class CustomProviderOverlayChecksTests(unittest.TestCase):
         import tempfile
 
         with tempfile.TemporaryDirectory() as data_dir:
-            self._write_overlay(data_dir, """{
+            self._write_overlay(
+                data_dir,
+                """{
                 "providers": [{
                     "name": "acme-internal",
                     "domains": ["llm.acme.internal"],
                     "base_url": "https://llm.acme.internal:8443",
                     "base_provider_type": "openai"
                 }]
-            }""")
+            }""",
+            )
             r = _DoctorResult()
             _check_custom_provider_overlay(self._make_cfg(data_dir), r)
-            warn_checks = [
-                c for c in r.checks
-                if c["status"] == "warn" and "not covered by domains" in c["detail"]
-            ]
+            warn_checks = [c for c in r.checks if c["status"] == "warn" and "not covered by domains" in c["detail"]]
             self.assertEqual(
-                warn_checks, [],
+                warn_checks,
+                [],
                 "domains-coverage warn should not fire when host is listed",
             )
 
@@ -1895,20 +2059,20 @@ class CustomProviderOverlayChecksTests(unittest.TestCase):
         import tempfile
 
         with tempfile.TemporaryDirectory() as data_dir:
-            self._write_overlay(data_dir, """{
+            self._write_overlay(
+                data_dir,
+                """{
                 "providers": [{
                     "name": "acme-internal",
                     "domains": ["acme.internal"],
                     "base_url": "https://llm.acme.internal:8443",
                     "base_provider_type": "openai"
                 }]
-            }""")
+            }""",
+            )
             r = _DoctorResult()
             _check_custom_provider_overlay(self._make_cfg(data_dir), r)
-            warn_checks = [
-                c for c in r.checks
-                if c["status"] == "warn" and "not covered by domains" in c["detail"]
-            ]
+            warn_checks = [c for c in r.checks if c["status"] == "warn" and "not covered by domains" in c["detail"]]
             self.assertEqual(warn_checks, [], r.checks)
 
     def test_entry_without_base_url_skips_domain_check(self):
@@ -1918,18 +2082,18 @@ class CustomProviderOverlayChecksTests(unittest.TestCase):
         import tempfile
 
         with tempfile.TemporaryDirectory() as data_dir:
-            self._write_overlay(data_dir, """{
+            self._write_overlay(
+                data_dir,
+                """{
                 "providers": [{
                     "name": "openai",
                     "env_keys": ["MY_OPENAI_KEY"]
                 }]
-            }""")
+            }""",
+            )
             r = _DoctorResult()
             _check_custom_provider_overlay(self._make_cfg(data_dir), r)
-            warn_checks = [
-                c for c in r.checks
-                if c["status"] == "warn" and "not covered by domains" in c["detail"]
-            ]
+            warn_checks = [c for c in r.checks if c["status"] == "warn" and "not covered by domains" in c["detail"]]
             self.assertEqual(warn_checks, [], r.checks)
 
 
@@ -1975,10 +2139,12 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
                 pass
 
             def _record_and_route(self):
-                recorder.append({
-                    "path": self.path,
-                    "headers": {k.lower(): v for k, v in self.headers.items()},
-                })
+                recorder.append(
+                    {
+                        "path": self.path,
+                        "headers": {k.lower(): v for k, v in self.headers.items()},
+                    }
+                )
                 if self.path == "/redirect":
                     # 302 to a different path that, if followed, would receive
                     # the replayed credential header.
@@ -2075,9 +2241,7 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
             result.checks,
         )
         subsystem_rows = {
-            c["label"].strip().removeprefix("└─ "): c["status"]
-            for c in result.checks
-            if "└─" in c["label"]
+            c["label"].strip().removeprefix("└─ "): c["status"] for c in result.checks if "└─" in c["label"]
         }
         self.assertEqual(subsystem_rows["gateway"], "pass")
         self.assertEqual(subsystem_rows["watcher"], "pass")
@@ -2147,9 +2311,7 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
             "codex": PerConnectorGuardrailConfig(mode="action"),
             "hermes": PerConnectorGuardrailConfig(mode="observe"),
         }
-        cfg.guardrail.effective_mode = lambda name: (
-            cfg.guardrail.connectors[name].mode or cfg.guardrail.mode
-        )
+        cfg.guardrail.effective_mode = lambda name: cfg.guardrail.connectors[name].mode or cfg.guardrail.mode
 
         detail = _guardrail_proxy_intentionally_closed(cfg)
 
@@ -2163,9 +2325,7 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
             _guardrail_proxy_intentionally_closed,
         )
 
-        detail = _guardrail_proxy_intentionally_closed(
-            self._cfg(["codex", "hermes"], mode="action")
-        )
+        detail = _guardrail_proxy_intentionally_closed(self._cfg(["codex", "hermes"], mode="action"))
 
         self.assertIn("hook-enforced for codex, hermes", detail)
         self.assertIn("mode=action via PreToolUse deny", detail)
@@ -2176,9 +2336,7 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
             _guardrail_proxy_intentionally_closed,
         )
 
-        detail = _guardrail_proxy_intentionally_closed(
-            self._cfg(["codex", "omnigent"], mode="action")
-        )
+        detail = _guardrail_proxy_intentionally_closed(self._cfg(["codex", "omnigent"], mode="action"))
 
         self.assertTrue(detail.startswith("enforced for"), detail)
         self.assertIn("codex (mode=action via PreToolUse deny)", detail)

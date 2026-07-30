@@ -801,6 +801,7 @@ Checks performed:
 | Audit database | SQLite database is accessible |
 | Scanner binaries | `skill-scanner` and `mcp-scanner` CLIs are on PATH |
 | Sidecar health | `GET /health` to the sidecar; reports gateway, watcher, and guardrail sub-states |
+| Gateway authentication | Authenticated `GET /status` using the locally resolved gateway token |
 | OpenClaw gateway | `GET /health` to the OpenClaw gateway (if configured) |
 | Guardrail proxy | guardrail proxy health check (if guardrail is enabled) |
 | LLM API key | Probe Anthropic or OpenAI API (if LLM analyzer is configured) |
@@ -814,7 +815,39 @@ if any check fails.
 ```bash
 # Run all checks
 defenseclaw doctor
+
+# Preview safe repairs
+defenseclaw doctor --fix --dry-run
+
+# Apply repairs without interactive confirmation
+defenseclaw doctor --fix --yes
 ```
+
+`--fix` runs repairs before diagnostics, so its summary and exit code describe
+the post-repair state. For a missing token on a locally managed non-OpenClaw
+installation, Doctor generates a 32-byte token, stores it in
+`~/.defenseclaw/.env` with mode `0600` on POSIX or a private DACL on Windows,
+and never prints its value. If the configured token is rejected by a running
+gateway, Doctor can restart the gateway to reconcile its in-memory
+authentication state. It can also start a stopped managed gateway or restart a
+stale runtime whose enabled subsystems no longer match `config.yaml`. Custom
+`token_env` providers are treated as externally managed and are never
+overwritten.
+
+If `.env` was readable by another local principal, Doctor treats the gateway
+token as compromised instead of merely running `chmod`. It verifies and stops
+gateway A, atomically replaces the token with B and private permissions, then
+starts and authenticates gateway B. If B cannot reach verified readiness, the
+compromised generation is not intentionally restarted. Rotate any other
+credentials that were present in the exposed file separately. A `.env` file
+that is foreign-owned, writable by another principal, a link/reparse point,
+non-regular, or oversized is never consumed or “fixed” in place.
+
+For safety, `.env` loading ignores environment names that can redirect or
+inject the CLI or its child processes (for example `PATH`, dynamic-loader
+variables, connector-home overrides, proxy variables, and DefenseClaw
+security opt-outs). Put those settings in the invoking service environment
+instead of the credential file.
 
 Other setup commands run a subset of these checks when `--verify` is
 enabled (the default). If verification fails, the output suggests

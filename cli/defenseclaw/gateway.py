@@ -45,7 +45,18 @@ def gateway_api_client_host(cfg: Any) -> str:
     """Return a connectable host for the configured sidecar API bind."""
     gateway = getattr(cfg, "gateway", None)
     bind = str(getattr(gateway, "api_bind", "") or "").strip()
-    if bind in {"", "0.0.0.0", "::", "[::]", "*"}:
+    if not bind:
+        openshell = getattr(cfg, "openshell", None)
+        guardrail = getattr(cfg, "guardrail", None)
+        standalone = bool(
+            openshell is not None and callable(getattr(openshell, "is_standalone", None)) and openshell.is_standalone()
+        )
+        guardrail_host = str(getattr(guardrail, "host", "") or "").strip()
+        if standalone and guardrail_host and guardrail_host != "localhost":
+            bind = guardrail_host
+    if bind in {"::", "[::]"}:
+        return "::1"
+    if bind in {"", "0.0.0.0", "*"}:
         return "127.0.0.1"
     return bind
 
@@ -70,23 +81,41 @@ class OrchestratorClient:
         self.timeout = timeout
         self.plugin_timeout = max(timeout, plugin_timeout or PLUGIN_MUTATION_TIMEOUT)
         self._session = requests.Session()
+        # This client talks to the operator-selected managed gateway, often on
+        # loopback or a local standalone bridge address. Environment proxy
+        # discovery can forward both gateway bearer headers to HTTP_PROXY and
+        # let the proxy impersonate gateway responses. Keep the management
+        # channel direct on every platform.
+        self._session.trust_env = False
         self._session.headers["X-DefenseClaw-Client"] = "python-cli"
         if token:
             self._session.headers["Authorization"] = f"Bearer {token}"
             self._session.headers["X-DC-Auth"] = f"Bearer {token}"
 
     def health(self) -> dict[str, Any]:
-        resp = self._session.get(f"{self.base_url}/health", timeout=self.timeout)
+        resp = self._session.get(
+            f"{self.base_url}/health",
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
         resp.raise_for_status()
         return resp.json()
 
     def status(self) -> dict[str, Any]:
-        resp = self._session.get(f"{self.base_url}/status", timeout=self.timeout)
+        resp = self._session.get(
+            f"{self.base_url}/status",
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
         resp.raise_for_status()
         return resp.json()
 
     def provider_registry(self) -> dict[str, Any]:
-        resp = self._session.get(f"{self.base_url}/v1/config/providers", timeout=self.timeout)
+        resp = self._session.get(
+            f"{self.base_url}/v1/config/providers",
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
         resp.raise_for_status()
         data = resp.json()
         if not isinstance(data, dict) or not isinstance(data.get("providers"), list):
@@ -98,6 +127,7 @@ class OrchestratorClient:
             f"{self.base_url}/v1/config/providers/reload",
             json={},
             timeout=self.timeout,
+            allow_redirects=False,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -165,6 +195,7 @@ class OrchestratorClient:
             f"{self.base_url}/skill/disable",
             json={"skillKey": skill_key},
             timeout=self.timeout,
+            allow_redirects=False,
         )
         resp.raise_for_status()
         return resp.json()
@@ -174,6 +205,7 @@ class OrchestratorClient:
             f"{self.base_url}/skill/enable",
             json={"skillKey": skill_key},
             timeout=self.timeout,
+            allow_redirects=False,
         )
         resp.raise_for_status()
         return resp.json()
@@ -183,17 +215,26 @@ class OrchestratorClient:
             f"{self.base_url}/config/patch",
             json={"path": path, "value": value},
             timeout=self.timeout,
+            allow_redirects=False,
         )
         resp.raise_for_status()
         return resp.json()
 
     def list_skills(self) -> dict[str, Any]:
-        resp = self._session.get(f"{self.base_url}/skills", timeout=self.timeout)
+        resp = self._session.get(
+            f"{self.base_url}/skills",
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
         resp.raise_for_status()
         return resp.json()
 
     def get_tools_catalog(self) -> dict[str, Any]:
-        resp = self._session.get(f"{self.base_url}/tools/catalog", timeout=self.timeout)
+        resp = self._session.get(
+            f"{self.base_url}/tools/catalog",
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -202,6 +243,7 @@ class OrchestratorClient:
             f"{self.base_url}/plugin/disable",
             json={"pluginName": plugin_name},
             timeout=self.plugin_timeout,
+            allow_redirects=False,
         )
         resp.raise_for_status()
         return resp.json()
@@ -211,6 +253,7 @@ class OrchestratorClient:
             f"{self.base_url}/plugin/enable",
             json={"pluginName": plugin_name},
             timeout=self.plugin_timeout,
+            allow_redirects=False,
         )
         resp.raise_for_status()
         return resp.json()
@@ -225,6 +268,7 @@ class OrchestratorClient:
             f"{self.base_url}/v1/skill/scan",
             json={"target": target, "name": name},
             timeout=120,
+            allow_redirects=False,
         )
         resp.raise_for_status()
         return resp.json()
@@ -240,17 +284,27 @@ class OrchestratorClient:
             f"{self.base_url}/api/v1/agents/discovery",
             json=report,
             timeout=self.timeout,
+            allow_redirects=False,
         )
         resp.raise_for_status()
         return resp.json()
 
     def ai_usage(self) -> dict[str, Any]:
-        resp = self._session.get(f"{self.base_url}/api/v1/ai-usage", timeout=self.timeout)
+        resp = self._session.get(
+            f"{self.base_url}/api/v1/ai-usage",
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
         resp.raise_for_status()
         return resp.json()
 
     def scan_ai_usage(self) -> dict[str, Any]:
-        resp = self._session.post(f"{self.base_url}/api/v1/ai-usage/scan", json={}, timeout=120)
+        resp = self._session.post(
+            f"{self.base_url}/api/v1/ai-usage/scan",
+            json={},
+            timeout=120,
+            allow_redirects=False,
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -263,7 +317,11 @@ class OrchestratorClient:
         a true "what SDKs and versions are on this fleet" table without
         re-implementing the join.
         """
-        resp = self._session.get(f"{self.base_url}/api/v1/ai-usage/components", timeout=self.timeout)
+        resp = self._session.get(
+            f"{self.base_url}/api/v1/ai-usage/components",
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -285,7 +343,11 @@ class OrchestratorClient:
         survives the split and the lookup hits the right row.
         """
         url = f"{self.base_url}/api/v1/ai-usage/components/{quote(ecosystem, safe='')}/{quote(name, safe='')}/locations"
-        resp = self._session.get(url, timeout=self.timeout)
+        resp = self._session.get(
+            url,
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -298,7 +360,11 @@ class OrchestratorClient:
         for the same reason as ``ai_usage_component_locations``.
         """
         url = f"{self.base_url}/api/v1/ai-usage/components/{quote(ecosystem, safe='')}/{quote(name, safe='')}/history"
-        resp = self._session.get(url, timeout=self.timeout)
+        resp = self._session.get(
+            url,
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -315,6 +381,7 @@ class OrchestratorClient:
             f"{self.base_url}/api/v1/ai-usage/confidence/policy",
             params={"source": source},
             timeout=self.timeout,
+            allow_redirects=False,
         )
         resp.raise_for_status()
         return resp.json()
@@ -338,6 +405,7 @@ class OrchestratorClient:
             f"{self.base_url}/api/v1/ai-usage/confidence/policy/validate",
             json={"yaml": yaml_text},
             timeout=self.timeout,
+            allow_redirects=False,
         )
         if resp.status_code == 413:
             return {"valid": False, "error": "policy file exceeds size limit"}

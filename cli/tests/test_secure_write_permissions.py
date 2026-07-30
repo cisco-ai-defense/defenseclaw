@@ -260,6 +260,7 @@ def test_posix_file_mode_still_uses_descriptor_api(monkeypatch):
         chmod=lambda *_args: pytest.fail("path chmod must not replace POSIX fchmod"),
     )
     monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(file_permissions.sys, "platform", "linux")
 
     file_permissions.set_file_mode(17, "/tmp/secret", 0o600)
 
@@ -439,7 +440,11 @@ def test_windows_post_replace_verification_repairs_target(monkeypatch, tmp_path)
     problems = iter(["untrusted write grant", None])
     repaired: list[str] = []
 
-    monkeypatch.setattr(file_permissions, "windows_acl_write_error", lambda _path: next(problems))
+    monkeypatch.setattr(
+        file_permissions,
+        "windows_acl_confidentiality_error",
+        lambda _path: next(problems),
+    )
     monkeypatch.setattr(file_permissions, "_windows_acl_has_required_access", lambda _path: True)
     monkeypatch.setattr(file_permissions, "_set_windows_owner_only_acl", repaired.append)
 
@@ -455,7 +460,7 @@ def test_windows_post_replace_verification_removes_unrepairable_target(monkeypat
 
     monkeypatch.setattr(
         file_permissions,
-        "windows_acl_write_error",
+        "windows_acl_confidentiality_error",
         lambda _path: "untrusted read grant",
     )
     monkeypatch.setattr(
@@ -476,7 +481,7 @@ def test_windows_post_replace_inspection_error_removes_target(monkeypatch, tmp_p
 
     monkeypatch.setattr(
         file_permissions,
-        "windows_acl_write_error",
+        "windows_acl_confidentiality_error",
         lambda _path: (_ for _ in ()).throw(OSError("inspection denied")),
     )
     monkeypatch.setattr(
@@ -489,6 +494,95 @@ def test_windows_post_replace_inspection_error_removes_target(monkeypatch, tmp_p
         file_permissions._verify_or_repair_windows_private_target(os.fspath(target))
 
     assert not target.exists()
+
+
+def test_windows_confidentiality_rejects_read_only_untrusted_sid(monkeypatch):
+    current_sid = "S-1-5-21-current"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    entries = [
+        (0x80000000, 1, 0, "S-1-5-32-545"),  # BUILTIN\Users: GENERIC_READ
+    ]
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (current_sid, False, entries),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+
+    # The existing integrity-only validator accepts this ACL; the
+    # confidentiality validator must not.
+    assert file_permissions.windows_acl_write_error("synthetic.env") is None
+    problem = file_permissions.windows_acl_confidentiality_error("synthetic.env")
+
+    assert problem == "ACL grants read access to untrusted SID S-1-5-32-545"
+
+
+def test_windows_confidentiality_accepts_owner_and_system_only(monkeypatch):
+    current_sid = "S-1-5-21-current"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    entries = [
+        (0x10000000, 1, 0, current_sid),
+        (0x10000000, 1, 0, "S-1-5-18"),
+        (0x10000000, 1, 0, "S-1-3-4"),
+    ]
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (current_sid, False, entries),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+
+    assert file_permissions.windows_acl_confidentiality_error("synthetic.env") is None
+
+
+def test_windows_confidentiality_ignores_inherit_only_grant(monkeypatch):
+    current_sid = "S-1-5-21-current"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    entries = [
+        (0x10000000, 1, 0, current_sid),
+        (0x10000000, 1, 0, "S-1-5-18"),
+        (0x80000000, 1, 0x08, "S-1-1-0"),
+    ]
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (current_sid, False, entries),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+
+    assert file_permissions.windows_acl_confidentiality_error("synthetic.env") is None
+
+
+def test_windows_confidentiality_reports_uninspectable_acl(monkeypatch):
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (_ for _ in ()).throw(OSError("access denied")),
+    )
+
+    problem = file_permissions.windows_acl_confidentiality_error("synthetic.env")
+
+    assert problem == "cannot read Windows ACL (access denied)"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows read-only DACL grants")
+@pytest.mark.allow_subprocess
+def test_windows_confidentiality_rejects_native_everyone_read_grant(tmp_path):
+    target = tmp_path / "readable-secret.env"
+    target.write_text("SECRET=synthetic\n", encoding="utf-8")
+    file_permissions._set_windows_owner_only_acl(os.fspath(target), set_owner=True)
+    assert file_permissions.windows_acl_confidentiality_error(target) is None
+
+    grant_everyone(target, "R")
+
+    assert file_permissions.windows_acl_write_error(target) is None
+    problem = file_permissions.windows_acl_confidentiality_error(target)
+    assert problem == "ACL grants read access to untrusted SID S-1-1-0"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows junction refusal")

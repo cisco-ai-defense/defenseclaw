@@ -30,6 +30,7 @@ package safefile
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -269,6 +270,52 @@ func ValidatePrivateDirectory(path string) error {
 // state before consuming it.
 func ValidatePrivateFile(path string) error {
 	return validatePrivateProtection(path, false)
+}
+
+// ReadRegularFileBounded reads one stable regular file without following a
+// leaf symlink/reparse point, blocking on a FIFO, or accepting a path swap.
+// The bytes are returned only after the opened object is re-bound to the
+// current pathname. This reader deliberately does not require owner-only
+// permissions: repair/diagnostic callers may need to inspect a drifted file
+// before they can tighten or atomically replace it.
+func ReadRegularFileBounded(path string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, errors.New("safefile: read limit must be positive")
+	}
+	expected, err := validateRegularFilePath(path)
+	if err != nil {
+		return nil, err
+	}
+	if expected.Size() > maxBytes {
+		return nil, fmt.Errorf("safefile: file exceeds %d-byte read limit: %s", maxBytes, path)
+	}
+	file, err := openRegularRead(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(expected, opened) {
+		return nil, fmt.Errorf("safefile: file changed while opening: %s", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("safefile: file exceeds %d-byte read limit: %s", maxBytes, path)
+	}
+	current, err := validateRegularFilePath(path)
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(opened, current) {
+		return nil, fmt.Errorf("safefile: file changed while reading: %s", path)
+	}
+	return data, nil
 }
 
 func validateRegularFilePath(path string) (os.FileInfo, error) {
