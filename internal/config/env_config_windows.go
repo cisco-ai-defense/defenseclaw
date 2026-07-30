@@ -28,3 +28,13 @@ import "os"
 func trustEnvConfigFilePlatform(_ os.FileInfo) error {
 	return nil
 }
+
+// openEnvConfig on Windows just does a plain read-only open; there is
+// no O_NOFOLLOW-equivalent path-level flag exposed via os.OpenFile
+// here, and the Windows managed deploy path does not source
+// env_config.json (see trustEnvConfigFilePlatform doc). The file
+// descriptor is still returned so LoadEnvConfigEndpoint stays
+// TOCTOU-consistent between stat and read from the same handle.
+func openEnvConfig(path string) (*os.File, error) {
+	return os.Open(path)
+}

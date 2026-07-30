@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
@@ -62,12 +63,25 @@ func LoadEnvConfigEndpoint(path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", ErrEnvConfigMissing
 	}
-	info, err := os.Stat(path)
+	// Open once with no-symlink-follow so trust metadata and payload
+	// come from the same inode. An attacker with write access on the
+	// parent directory can otherwise swap the file between an
+	// os.Stat trust check and a subsequent os.ReadFile call (TOCTOU),
+	// and re-check-then-re-open would still be racy. openEnvConfig
+	// is Unix-only in its strict form; Windows falls back to a
+	// permissive open (env_config trust on Windows is a no-op — see
+	// trustEnvConfigFilePlatform).
+	f, err := openEnvConfig(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", ErrEnvConfigMissing
 		}
-		return "", fmt.Errorf("env_config: stat %s: %w", path, err)
+		return "", fmt.Errorf("env_config: open %s: %w", path, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("env_config: fstat %s: %w", path, err)
 	}
 	// Trust check parallels _assert_trusted_env_config_file_or_die in
 	// packaging/macos/install.sh: a bearer-token target endpoint is
@@ -77,11 +91,8 @@ func LoadEnvConfigEndpoint(path string) (string, error) {
 	if err := trustEnvConfigFile(info); err != nil {
 		return "", fmt.Errorf("env_config: %s: %w", path, err)
 	}
-	data, err := os.ReadFile(path)
+	data, err := io.ReadAll(f)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", ErrEnvConfigMissing
-		}
 		return "", fmt.Errorf("env_config: read %s: %w", path, err)
 	}
 	var payload map[string]any
@@ -155,8 +166,9 @@ func validateAIDefenseEndpoint(endpoint string) error {
 	return fmt.Errorf("host %q is not an AI Defense endpoint (must end in .cisco.com or be a loopback address)", host)
 }
 
-// trustEnvConfigFile enforces the same on-disk trust boundary the
-// shell installer's _assert_trusted_env_config_file_or_die applies:
+// trustEnvConfigFile enforces the runtime slice of the on-disk trust
+// boundary the shell installer's _assert_trusted_env_config_file_or_die
+// applies at install time:
 //
 //   - the file must be a regular file (not a symlink target, not a dir);
 //   - it must be owned by root (uid 0);
@@ -165,6 +177,17 @@ func validateAIDefenseEndpoint(endpoint string) error {
 // The env_config file feeds a bearer-authenticated endpoint into the
 // gateway; a non-root or group/world-writable file at the canonical
 // path lets a compromised operator retarget those authenticated POSTs.
+//
+// NOT parity with the install-time check: this runtime helper checks
+// only the file itself, not the ancestor chain (parent dirs), symlink
+// components in the path, or write-capable ACLs on any parent. The
+// managed install layout under /opt/cisco/secureclient/defenseclaw is
+// owned + mode-locked by the installer's ancestor-chain trust checks;
+// once the daemon is running, our fail-closed posture is: the running
+// process trusts that layout unless the file at env_config.json is
+// itself untrusted. If AVC ever relocates env_config.json outside
+// that ancestor-checked layout, a parallel ancestor-chain check would
+// need to run here on every ConfigManager reload.
 //
 // When the gateway is NOT running as root (dev boxes, unit tests,
 // opensource local runs) the uid/mode invariants can't hold, so we

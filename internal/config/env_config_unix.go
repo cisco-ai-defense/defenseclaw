@@ -25,6 +25,19 @@ import (
 	"syscall"
 )
 
+// openEnvConfig opens path with O_NOFOLLOW so a symlinked env_config
+// (attacker replacement between stat and read on Unix) is rejected up
+// front. The returned *os.File is used both for Fstat trust checks
+// and for reading the JSON, so metadata and content come from the
+// same inode.
+func openEnvConfig(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
 // trustEnvConfigFilePlatform enforces the uid==0 + not-group/world-writable
 // check on Unix. When the process is not running as root (dev boxes,
 // unit tests, opensource local runs) the invariant can't hold, so we

@@ -105,6 +105,16 @@ type ConfigManager struct {
 	// on the next Reload"; plain field access would race on that path.
 	envConfigPath atomic.Pointer[string]
 
+	// envOverlayApplied flips to true the first time we successfully
+	// apply an endpoint from env_config.json. Once true, a subsequent
+	// "file missing" during Reload is treated the same as a malformed
+	// overlay — we RETAIN the previously-active endpoint and surface
+	// a health error, rather than silently reverting to the
+	// config.yaml default. Data-residency compliance requires an
+	// audit trail; a legitimate AVC-driven region change comes via
+	// a REWRITTEN file, not a deletion.
+	envOverlayApplied atomic.Bool
+
 	current atomic.Value // *config.Config
 	gen     atomic.Uint64
 	mu      sync.Mutex
@@ -491,13 +501,33 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 	// validate step defends against.
 	var envOverlayErr error
 	if envPath := m.getEnvConfigPath(); envPath != "" {
-		if ep, envErr := config.LoadEnvConfigEndpoint(envPath); envErr == nil {
+		ep, envErr := config.LoadEnvConfigEndpoint(envPath)
+		switch {
+		case envErr == nil:
 			// The strings.TrimRight("/", ...) call inside
 			// NewCiscoDefenseClawInspectClient tolerates a trailing
 			// slash; we don't normalise here so the diff engine can
 			// see exactly what's on disk.
 			next.CiscoAIDefense.Endpoint = ep
-		} else if !errors.Is(envErr, config.ErrEnvConfigMissing) {
+			m.envOverlayApplied.Store(true)
+		case errors.Is(envErr, config.ErrEnvConfigMissing) && m.envOverlayApplied.Load():
+			// File disappeared AFTER we had already applied an overlay
+			// endpoint. Treat this the same as a malformed overlay: a
+			// legitimate AVC region change comes via a rewritten file,
+			// not a deletion, and silently reverting to the config.yaml
+			// default would ship a data-residency violation with zero
+			// operator signal.
+			if oldCfg != nil {
+				next.CiscoAIDefense.Endpoint = oldCfg.CiscoAIDefense.Endpoint
+			}
+			fmt.Fprintf(os.Stderr, "[config] env_config overlay disappeared after prior successful apply: retaining current endpoint\n")
+			envOverlayErr = fmt.Errorf("env_config overlay disappeared after prior successful apply: %w", envErr)
+		case errors.Is(envErr, config.ErrEnvConfigMissing):
+			// Pre-arrival: env_config.json has never been present.
+			// Leave next.CiscoAIDefense.Endpoint alone, which yields
+			// the config.yaml value (a hardcoded US-prod default when
+			// env_config was also missing at install time).
+		default:
 			// Malformed / rejected env_config. Copy the currently-active
 			// endpoint (oldCfg) onto next so a bad overlay cannot revert
 			// the runtime endpoint to the config.yaml value. `next` was
