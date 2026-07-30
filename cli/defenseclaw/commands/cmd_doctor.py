@@ -750,9 +750,13 @@ def _gateway_data_dir_integrity_problem(cfg) -> str:
         if not stat.S_ISDIR(info.st_mode):
             return "gateway data directory is not a directory"
         if os.name == "nt":
-            from defenseclaw.file_permissions import windows_acl_write_error
+            from defenseclaw.file_permissions import windows_acl_custody_write_error
 
-            problem = windows_acl_write_error(data_dir)
+            problem = windows_acl_custody_write_error(
+                data_dir,
+                allow_current_user=True,
+                require_current_user_owner=True,
+            )
             return f"gateway data directory has unsafe ACLs ({problem})" if problem else ""
         geteuid = getattr(os, "geteuid", None)
         if callable(geteuid) and info.st_uid != geteuid():

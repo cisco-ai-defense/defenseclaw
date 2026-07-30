@@ -859,6 +859,7 @@ def windows_acl_custody_write_error(
     path: str | os.PathLike[str],
     *,
     allow_current_user: bool,
+    require_current_user_owner: bool = False,
 ) -> str | None:
     """Return why a path is outside trusted Windows write custody.
 
@@ -866,7 +867,9 @@ def windows_acl_custody_write_error(
     deliberately requires current-user ownership. Executable and ancestor
     custody must also admit objects owned by Windows itself. This validator
     accepts only LocalSystem, BUILTIN\\Administrators, TrustedInstaller, and
-    optionally the current user as owners or write-capable trustees.
+    optionally the current user as owners or write-capable trustees. Runtime
+    state can additionally require current-user ownership while still
+    admitting Windows system controllers as write-capable trustees.
     """
     if os.name != "nt":
         return None
@@ -878,7 +881,8 @@ def windows_acl_custody_write_error(
         return "ACL grants write access to Everyone (null DACL)"
 
     current_sid = ""
-    if allow_current_user:
+    trust_current_user = allow_current_user or require_current_user_owner
+    if trust_current_user:
         try:
             current_sid = _windows_current_user_sid()
         except OSError:
@@ -892,16 +896,18 @@ def windows_acl_custody_write_error(
         "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
     }
     trusted_owners = set(system_controllers)
-    if allow_current_user:
+    if trust_current_user:
         trusted_owners.add(current_sid)
-    if owner_sid not in trusted_owners:
+    if require_current_user_owner and owner_sid != current_sid:
+        return f"owner SID {owner_sid or '<unknown>'} is not the current user"
+    if not require_current_user_owner and owner_sid not in trusted_owners:
         return f"owner SID {owner_sid or '<unknown>'} is not a trusted custody principal"
 
     trusted_writers = system_controllers | {
         "S-1-3-4",  # OWNER RIGHTS, constrained by the owner check above
         owner_sid,
     }
-    if allow_current_user:
+    if trust_current_user:
         trusted_writers.add(current_sid)
     write_mask = 0x10000000 | 0x40000000 | 0x000D0156
     for permissions, access_mode, inheritance, sid in entries:

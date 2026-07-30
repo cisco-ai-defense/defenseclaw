@@ -243,7 +243,9 @@ def test_windows_system_powershell_checks_every_system_directory_ancestor(
     monkeypatch.setattr(
         file_permissions,
         "windows_acl_custody_write_error",
-        lambda path, *, allow_current_user: inspected.append(f"{os.fspath(path)}:{allow_current_user}"),
+        lambda path, *, allow_current_user, require_current_user_owner=False: inspected.append(
+            f"{os.fspath(path)}:{allow_current_user}:{require_current_user_owner}"
+        ),
     )
 
     resolved, windows_directory = cmd_doctor._windows_system_powershell()
@@ -251,10 +253,10 @@ def test_windows_system_powershell_checks_every_system_directory_ancestor(
     assert resolved == os.fspath(executable)
     assert windows_directory == os.fspath(system_directory.parent)
     assert inspected == [
-        f"{os.fspath(executable)}:False",
-        f"{os.fspath(executable.parent)}:False",
-        f"{os.fspath(executable.parent.parent)}:False",
-        f"{os.fspath(system_directory)}:False",
+        f"{os.fspath(executable)}:False:False",
+        f"{os.fspath(executable.parent)}:False:False",
+        f"{os.fspath(executable.parent.parent)}:False:False",
+        f"{os.fspath(system_directory)}:False:False",
     ]
 
 
@@ -266,20 +268,13 @@ def test_windows_pid_integrity_checks_every_replaceable_ancestor(
     pid_file.parent.mkdir(parents=True)
     pid_file.write_text("4242", encoding="ascii")
     info = pid_file.stat()
-    inspected_file: list[str] = []
-    inspected_ancestors: list[str] = []
-
     monkeypatch.setattr(cmd_doctor.os, "name", "nt")
-    monkeypatch.setattr(
-        file_permissions,
-        "windows_acl_write_error",
-        lambda path: inspected_file.append(os.path.normpath(os.fspath(path))),
-    )
+    inspected: list[str] = []
     monkeypatch.setattr(
         file_permissions,
         "windows_acl_custody_write_error",
-        lambda path, *, allow_current_user: inspected_ancestors.append(
-            f"{os.path.normpath(os.fspath(path))}:{allow_current_user}"
+        lambda path, *, allow_current_user, require_current_user_owner=False: inspected.append(
+            f"{os.path.normpath(os.fspath(path))}:{allow_current_user}:{require_current_user_owner}"
         ),
     )
 
@@ -289,13 +284,34 @@ def test_windows_pid_integrity_checks_every_replaceable_ancestor(
     )
 
     assert problem == ""
-    assert inspected_file == [os.path.normpath(os.fspath(pid_file))]
-    expected = []
+    expected = [f"{os.path.normpath(os.fspath(pid_file))}:True:True"]
     ancestor = pid_file.parent
     while ancestor.parent != ancestor:
-        expected.append(f"{os.path.normpath(os.fspath(ancestor))}:True")
+        expected.append(f"{os.path.normpath(os.fspath(ancestor))}:True:False")
         ancestor = ancestor.parent
-    assert inspected_ancestors == expected
+    assert inspected == expected
+
+
+def test_windows_gateway_data_dir_requires_current_user_owned_custody(
+    monkeypatch,
+    tmp_path,
+):
+    inspected: list[str] = []
+    monkeypatch.setattr(cmd_doctor.os, "name", "nt")
+    monkeypatch.setattr(
+        file_permissions,
+        "windows_acl_custody_write_error",
+        lambda path, *, allow_current_user, require_current_user_owner=False: inspected.append(
+            f"{os.path.normpath(os.fspath(path))}:{allow_current_user}:{require_current_user_owner}"
+        ),
+    )
+
+    problem = cmd_doctor._gateway_data_dir_integrity_problem(
+        SimpleNamespace(data_dir=os.fspath(tmp_path)),
+    )
+
+    assert problem == ""
+    assert inspected == [f"{os.path.normpath(os.fspath(tmp_path))}:True:True"]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows custody smoke test")

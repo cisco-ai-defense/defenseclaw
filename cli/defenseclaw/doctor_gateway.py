@@ -123,12 +123,13 @@ def _pid_record_integrity_error(path: str, info: os.stat_result) -> str:
     """Return why a PID record is mutable by a different local principal."""
     if os.name == "nt":
         try:
-            from defenseclaw.file_permissions import (
-                windows_acl_custody_write_error,
-                windows_acl_write_error,
-            )
+            from defenseclaw.file_permissions import windows_acl_custody_write_error
 
-            if file_problem := windows_acl_write_error(path):
+            if file_problem := windows_acl_custody_write_error(
+                path,
+                allow_current_user=True,
+                require_current_user_owner=True,
+            ):
                 return file_problem
             ancestor = os.path.dirname(os.path.abspath(path)) or os.curdir
             while ancestor:
