@@ -8978,6 +8978,7 @@ def _restart_defense_gateway(
     start_if_stopped: bool = True,
     child_env: dict[str, str] | None = None,
     lifecycle_executable: str | None = None,
+    lifecycle_executable_requires_running: bool = True,
 ) -> bool:
     # Mark the current Click context as "restart handled" so the
     # `setup` group's auto-restart result callback doesn't bounce the
@@ -9015,7 +9016,11 @@ def _restart_defense_gateway(
     action = "restarting" if was_running else "starting"
     click.echo(f"  defenseclaw-gateway: {action}...", nl=False)
 
-    if lifecycle_executable and not was_running:
+    if (
+        lifecycle_executable
+        and lifecycle_executable_requires_running
+        and not was_running
+    ):
         click.echo(" ✗ (verified running executable is no longer active)")
         return False
     search_path = child_env.get("PATH", os.defpath) if child_env is not None else None

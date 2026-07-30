@@ -241,6 +241,7 @@ def open_regular_file_no_follow(
     path: str | os.PathLike[str],
     *,
     expected_stat: os.stat_result | None = None,
+    _deny_write_sharing: bool = False,
 ) -> int:
     """Open one regular file without following a swapped symlink/reparse point.
 
@@ -260,7 +261,10 @@ def open_regular_file_no_follow(
     # the exact bytes on disk. Callers that bind security evidence to the
     # opened file size must therefore always receive a binary descriptor.
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    fd = os.open(target, flags)
+    if os.name == "nt" and _deny_write_sharing:
+        fd = _open_windows_stable_read_fd(target)
+    else:
+        fd = os.open(target, flags)
     try:
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode):
@@ -273,17 +277,126 @@ def open_regular_file_no_follow(
     return fd
 
 
+def _open_windows_stable_read_fd(path: str) -> int:
+    """Open a binary CRT reader backed by an NT handle that denies writers."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    generic_read = 0x80000000
+    file_share_read = 0x00000001
+    file_share_delete = 0x00000004
+    open_existing = 3
+    file_flag_open_reparse_point = 0x00200000
+    invalid_handle = ctypes.c_void_p(-1).value
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    handle = create_file(
+        _windows_extended_path(path),
+        generic_read,
+        file_share_read | file_share_delete,
+        None,
+        open_existing,
+        file_flag_open_reparse_point,
+        None,
+    )
+    if handle == invalid_handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
+    try:
+        return msvcrt.open_osfhandle(handle, flags)
+    except BaseException:
+        close_handle(handle)
+        raise
+
+
+def _windows_file_stability_times(fd: int) -> tuple[int, int]:
+    """Return handle-bound NT last-write and change times."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class _FileBasicInfo(ctypes.Structure):
+        _fields_ = [
+            ("creation_time", ctypes.c_longlong),
+            ("last_access_time", ctypes.c_longlong),
+            ("last_write_time", ctypes.c_longlong),
+            ("change_time", ctypes.c_longlong),
+            ("file_attributes", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_file_information = kernel32.GetFileInformationByHandleEx
+    get_file_information.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    get_file_information.restype = wintypes.BOOL
+    basic = _FileBasicInfo()
+    file_basic_info = 0
+    if not get_file_information(
+        msvcrt.get_osfhandle(fd),
+        file_basic_info,
+        ctypes.byref(basic),
+        ctypes.sizeof(basic),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return basic.last_write_time, basic.change_time
+
+
+def _file_stability_snapshot(fd: int) -> tuple[int, int, int, int, int]:
+    """Capture metadata that changes when an open file is mutated in place."""
+    opened = os.fstat(fd)
+    native_modified = 0
+    native_changed = 0
+    if os.name == "nt":
+        native_modified, native_changed = _windows_file_stability_times(fd)
+    return (
+        opened.st_size,
+        opened.st_mtime_ns,
+        opened.st_ctime_ns,
+        native_modified,
+        native_changed,
+    )
+
+
 def read_regular_file_no_follow(
     path: str | os.PathLike[str],
     *,
     max_bytes: int,
     expected_stat: os.stat_result | None = None,
 ) -> bytes:
-    """Read one bounded regular file without following links or blocking on FIFOs."""
+    """Read one stable bounded file without following links or blocking on FIFOs."""
     if max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
-    fd = open_regular_file_no_follow(path, expected_stat=expected_stat)
+    target = os.path.abspath(os.fspath(path))
+    fd = open_regular_file_no_follow(
+        target,
+        expected_stat=expected_stat,
+        _deny_write_sharing=True,
+    )
     try:
+        opened = os.fstat(fd)
+        before = _file_stability_snapshot(fd)
+        if before[0] > max_bytes:
+            raise UnsafePathError(f"sensitive file exceeds {max_bytes}-byte read limit")
         chunks: list[bytes] = []
         remaining = max_bytes + 1
         while remaining:
@@ -293,10 +406,18 @@ def read_regular_file_no_follow(
             chunks.append(chunk)
             remaining -= len(chunk)
         body = b"".join(chunks)
+        after = _file_stability_snapshot(fd)
     finally:
         os.close(fd)
     if len(body) > max_bytes:
         raise UnsafePathError(f"sensitive file exceeds {max_bytes}-byte read limit")
+    if before != after or len(body) != before[0]:
+        raise UnsafePathError(f"sensitive file changed while reading: {target}")
+    _reject_reparse_chain(os.path.dirname(target) or os.curdir)
+    current = _reject_reparse_path(target, allow_missing=False)
+    assert current is not None
+    if not os.path.samestat(opened, current):
+        raise UnsafePathError(f"sensitive file changed while reading: {target}")
     return body
 
 
@@ -396,10 +517,8 @@ def darwin_acl_confidentiality_error(path: str | os.PathLike[str]) -> str | None
     mode_field, acl_text = _darwin_acl_output(path)
     if not mode_field:
         return "extended ACL could not be inspected"
-    if "+" not in mode_field:
-        return None
     if not acl_text:
-        return "extended ACL could not be interpreted"
+        return "extended ACL could not be interpreted" if "+" in mode_field else None
     read_permissions = frozenset({"read", "readattr", "readextattr"})
     return "extended ACL grants additional read access" if _darwin_acl_allows(acl_text, read_permissions) else None
 
@@ -411,15 +530,16 @@ def darwin_acl_write_error(path: str | os.PathLike[str]) -> str | None:
     mode_field, acl_text = _darwin_acl_output(path)
     if not mode_field:
         return "extended ACL could not be inspected"
-    if "+" not in mode_field:
-        return None
     if not acl_text:
-        return "extended ACL could not be interpreted"
+        return "extended ACL could not be interpreted" if "+" in mode_field else None
     write_permissions = frozenset(
         {
+            "add_file",
+            "add_subdirectory",
             "append",
             "chown",
             "delete",
+            "delete_child",
             "write",
             "writeattr",
             "writeextattr",

@@ -600,6 +600,96 @@ class FixGatewayTokenDriftTests(unittest.TestCase):
         probe.assert_not_called()
         repair.assert_not_called()
 
+    def test_origin_main_darwin_start_identity_reaches_authenticated_bridge(self):
+        executable = os.path.join(self.tmp, "bin", "defenseclaw-gateway")
+        legacy_start = "Thu Jul 30 12:34:56 2026"
+        trust = _gateway_process_trust(
+            self.cfg,
+            PIDRecord(
+                "ok",
+                pid=self.pid,
+                executable=executable,
+                start_identity=legacy_start,
+                start_time="1785436495",
+            ),
+            ProcessEvidence(
+                "ok",
+                pid=self.pid,
+                executable=executable,
+                start_identity="1785436496.123456",
+            ),
+            platform_name="darwin",
+        )
+
+        self.assertEqual(trust.code, "unbound_home")
+        self.assertNotEqual(trust.code, "identity")
+
+    def test_origin_main_darwin_launch_generation_window_is_bounded(self):
+        executable = os.path.join(self.tmp, "bin", "defenseclaw-gateway")
+        trust = _gateway_process_trust(
+            self.cfg,
+            PIDRecord(
+                "ok",
+                pid=self.pid,
+                executable=executable,
+                start_identity="localized legacy identity",
+                start_time="1785436480",
+            ),
+            ProcessEvidence(
+                "ok",
+                pid=self.pid,
+                executable=executable,
+                start_identity="1785436496.123456",
+            ),
+            platform_name="darwin",
+        )
+
+        self.assertEqual(trust.code, "identity")
+
+    def test_origin_main_linux_deleted_executable_reaches_authenticated_bridge(self):
+        executable = os.path.join(self.tmp, "bin", "defenseclaw-gateway")
+        trust = _gateway_process_trust(
+            self.cfg,
+            PIDRecord(
+                "ok",
+                pid=self.pid,
+                executable=executable,
+                start_identity="start-1",
+            ),
+            ProcessEvidence(
+                "ok",
+                pid=self.pid,
+                executable=executable + " (deleted)",
+                start_identity="start-1",
+            ),
+            platform_name="linux",
+        )
+
+        self.assertEqual(trust.code, "unbound_home")
+        self.assertNotEqual(trust.code, "identity")
+
+    def test_current_linux_record_does_not_accept_deleted_executable_exception(self):
+        executable = os.path.join(self.tmp, "bin", "defenseclaw-gateway")
+        trust = _gateway_process_trust(
+            self.cfg,
+            PIDRecord(
+                "ok",
+                pid=self.pid,
+                executable=executable,
+                start_identity="start-1",
+                data_dir=self.tmp,
+            ),
+            ProcessEvidence(
+                "ok",
+                pid=self.pid,
+                executable=executable + " (deleted)",
+                start_identity="start-1",
+            ),
+            platform_name="linux",
+        )
+
+        self.assertEqual(trust.code, "identity")
+
     def test_fail_closed_for_unbound_pid_record(self):
         executable = os.path.join(self.tmp, "bin", "defenseclaw-gateway.exe")
         trust = _gateway_process_trust(

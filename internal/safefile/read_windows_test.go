@@ -8,6 +8,7 @@ package safefile
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -54,5 +55,43 @@ func TestReadRegularFileBoundedRejectsNamedPipeWithoutBlocking(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		_ = windows.CloseHandle(handle)
 		t.Fatal("ReadRegularFileBounded blocked while opening a Windows named pipe")
+	}
+}
+
+func TestReadRegularFileBoundedRejectsRetainedWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mutable")
+	original := []byte("same-length-original")
+	replacement := []byte("same-length-mutated!")
+	if len(original) != len(replacement) {
+		t.Fatal("fixture lengths differ")
+	}
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("retain writer: %v", err)
+	}
+	defer writer.Close()
+	if _, err := writer.WriteAt(replacement, 0); err != nil {
+		t.Fatalf("overwrite through retained writer: %v", err)
+	}
+	if err := writer.Sync(); err != nil {
+		t.Fatalf("sync retained writer: %v", err)
+	}
+
+	if body, err := ReadRegularFileBounded(path, 1024); err == nil {
+		t.Fatalf("protected read returned %q while a writer remained open", body)
+	}
+
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	body, err := ReadRegularFileBounded(path, 1024)
+	if err != nil {
+		t.Fatalf("read after writer closed: %v", err)
+	}
+	if string(body) != string(replacement) {
+		t.Fatalf("body after writer closed = %q", body)
 	}
 }

@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 from defenseclaw import config as config_module
-from defenseclaw.commands import cmd_doctor, cmd_setup
+from defenseclaw.commands import cmd_doctor, cmd_setup, cmd_version
 from defenseclaw.doctor_gateway import PIDRecord, ProcessEvidence
 from defenseclaw.file_permissions import UnsafePathError
 
@@ -239,7 +239,10 @@ def test_exposed_token_rotation_repoints_legacy_provider_before_transaction(
         events.append(("transaction", gateway.token_env))
 
     cfg.save = save
-    monkeypatch.delenv(canonical, raising=False)
+    # Production intentionally updates this process after activating B.
+    # Seed through monkeypatch so teardown removes that production-set value
+    # even when the variable was absent before the test.
+    monkeypatch.setenv(canonical, "restore-test-environment-after-rotation")
     monkeypatch.setattr(cmd_setup, "_rotate_token_transaction", transaction)
 
     tag, detail = cmd_doctor._rotate_exposed_gateway_token(cfg, secret)
@@ -416,4 +419,276 @@ def test_gateway_lifecycle_uses_verified_executable_and_sanitized_child_env(
     assert child_env["DEFENSECLAW_HOME"] == os.path.abspath(tmp_path)
     assert child_env["DEFENSECLAW_DATA_DIR"] == os.path.abspath(tmp_path)
     assert restart.call_args.kwargs["lifecycle_executable"] == os.path.realpath(executable)
+    assert restart.call_args.kwargs["lifecycle_executable_requires_running"] is True
     assert restart.call_args.kwargs["start_if_stopped"] is False
+
+
+@pytest.mark.parametrize(
+    ("case", "running", "expected_action"),
+    [
+        ("trusted-record", True, "restart"),
+        ("authenticated-migration", True, "restart"),
+        ("stopped-start", False, "start"),
+    ],
+)
+def test_component_diagnosis_gate_and_lifecycle_use_one_controller(
+    case,
+    running,
+    expected_action,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    suffix = ".exe" if os.name == "nt" else ""
+    recorded = tmp_path / f"recorded-gateway{suffix}"
+    current = tmp_path / f"current-gateway{suffix}"
+    wrong_default = tmp_path / f"wrong-default-gateway{suffix}"
+    for executable in (recorded, current, wrong_default):
+        executable.write_bytes(b"synthetic executable")
+        os.chmod(executable, 0o700)
+
+    cfg = SimpleNamespace(
+        data_dir=os.fspath(tmp_path),
+        gateway=SimpleNamespace(token_env=""),
+        active_connectors=lambda: [],
+    )
+    if case == "stopped-start":
+        trust = cmd_doctor._GatewayTrust("missing", "gateway is stopped")
+        expected = current
+    else:
+        record = PIDRecord(
+            "ok",
+            pid=4242,
+            executable=os.fspath(recorded),
+            start_identity="strong-start",
+            data_dir=os.fspath(tmp_path) if case == "trusted-record" else "",
+        )
+        process = ProcessEvidence(
+            "ok",
+            pid=4242,
+            executable=os.fspath(recorded),
+            start_identity="strong-start",
+        )
+        trust = cmd_doctor._GatewayTrust(
+            "trusted",
+            "verified",
+            pid=4242,
+            home_bound=True,
+            record=record,
+            process=process,
+            authenticated_migration=case == "authenticated-migration",
+        )
+        expected = recorded if case == "trusted-record" else current
+
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_managed_gateway_process_trust_for_lifecycle",
+        lambda _cfg: trust,
+    )
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_daemon_effective_gateway_token",
+        lambda _cfg: ("", "", ""),
+    )
+    monkeypatch.setattr(
+        cmd_setup,
+        "_gateway_lifecycle_executable",
+        lambda **_kwargs: os.fspath(current),
+    )
+    monkeypatch.setattr(
+        cmd_setup,
+        "_trusted_gateway_lifecycle_executable",
+        lambda executable: os.path.realpath(executable),
+    )
+    monkeypatch.setattr(cmd_setup, "_is_pid_alive", lambda _path: running)
+    monkeypatch.setattr(
+        cmd_setup,
+        "_gateway_pid_file_identifies_gateway",
+        lambda _path: True,
+    )
+    monkeypatch.setattr(
+        cmd_setup,
+        "_wait_for_defense_gateway_api",
+        lambda _data_dir: True,
+    )
+
+    ambient_resolver = Mock(return_value=os.fspath(wrong_default))
+    monkeypatch.setattr(
+        cmd_version.gateway,
+        "resolve_gateway_binary",
+        ambient_resolver,
+    )
+    probed: list[str] = []
+
+    def check_output(argv, **_kwargs):
+        probed.append(argv[0])
+        return (
+            "defenseclaw-gateway version "
+            f"{cmd_version.defenseclaw.__version__}\n"
+        )
+
+    monkeypatch.setattr(cmd_version.subprocess, "check_output", check_output)
+    executed: list[tuple[str, str]] = []
+
+    def run(argv, **_kwargs):
+        executed.append((argv[0], argv[1]))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(cmd_setup.subprocess, "run", run)
+    monkeypatch.setattr(
+        "defenseclaw.doctor_health.read_cached_discovery",
+        lambda _data_dir: None,
+    )
+
+    result = cmd_doctor._DoctorResult()
+    cmd_doctor._check_component_connector_compatibility(cfg, [], result)
+    gate = cmd_doctor._plan_component_compatibility_gate(cfg)
+    repaired, detail = cmd_doctor._repair_gateway_lifecycle(
+        cfg,
+        start_if_stopped=True,
+    )
+
+    gateway_row = next(
+        row
+        for row in result.checks
+        if row["check_id"] == "doctor.component.gateway.compatibility"
+    )
+    assert gateway_row["status"] == "pass"
+    assert gate.state == "noop"
+    assert repaired is True, detail
+    assert probed == [
+        os.fspath(expected),
+        os.fspath(expected),
+        os.fspath(expected),
+    ]
+    assert executed == [(os.fspath(expected), expected_action)]
+    ambient_resolver.assert_not_called()
+
+
+def test_action_rechecks_current_controller_after_running_record_exits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    recorded = tmp_path / "recorded-gateway"
+    current = tmp_path / "current-gateway"
+    for executable in (recorded, current):
+        executable.write_bytes(b"synthetic executable")
+        os.chmod(executable, 0o700)
+    cfg = SimpleNamespace(
+        data_dir=os.fspath(tmp_path),
+        gateway=SimpleNamespace(token_env=""),
+        active_connectors=lambda: [],
+    )
+    record = PIDRecord(
+        "ok",
+        pid=4242,
+        executable=os.fspath(recorded),
+        start_identity="strong-start",
+        data_dir=os.fspath(tmp_path),
+    )
+    process = ProcessEvidence(
+        "ok",
+        pid=4242,
+        executable=os.fspath(recorded),
+        start_identity="strong-start",
+    )
+    running = cmd_doctor._GatewayTrust(
+        "trusted",
+        "verified",
+        pid=4242,
+        home_bound=True,
+        record=record,
+        process=process,
+    )
+    stopped = cmd_doctor._GatewayTrust("missing", "gateway exited after planning")
+    trusts = iter((running, stopped))
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_managed_gateway_process_trust_for_lifecycle",
+        lambda _cfg: next(trusts),
+    )
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_daemon_effective_gateway_token",
+        lambda _cfg: ("", "", ""),
+    )
+    monkeypatch.setattr(
+        cmd_setup,
+        "_gateway_lifecycle_executable",
+        lambda **_kwargs: os.fspath(current),
+    )
+    monkeypatch.setattr(
+        cmd_setup,
+        "_trusted_gateway_lifecycle_executable",
+        lambda executable: os.path.realpath(executable),
+    )
+    probed: list[str] = []
+
+    def check_output(argv, **_kwargs):
+        probed.append(argv[0])
+        version = (
+            cmd_version.defenseclaw.__version__
+            if argv[0] == os.fspath(recorded)
+            else "0.0.1"
+        )
+        return f"defenseclaw-gateway version {version}\n"
+
+    monkeypatch.setattr(cmd_version.subprocess, "check_output", check_output)
+    restart = Mock(return_value=True)
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", restart)
+
+    gate = cmd_doctor._plan_component_compatibility_gate(cfg)
+    repaired, detail = cmd_doctor._repair_gateway_lifecycle(
+        cfg,
+        start_if_stopped=True,
+    )
+
+    assert gate.state == "noop"
+    assert repaired is False
+    assert detail == "selected lifecycle components are positively unsupported"
+    assert probed == [os.fspath(recorded), os.fspath(current)]
+    restart.assert_not_called()
+
+
+def test_selected_current_controller_is_revalidated_before_start(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    selected = tmp_path / ("gateway.exe" if os.name == "nt" else "gateway")
+    selected.write_bytes(b"synthetic executable")
+    os.chmod(selected, 0o700)
+    cfg = SimpleNamespace(
+        data_dir=os.fspath(tmp_path),
+        gateway=SimpleNamespace(token_env=""),
+    )
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_managed_gateway_process_trust_for_lifecycle",
+        lambda _cfg: cmd_doctor._GatewayTrust("missing", "gateway is stopped"),
+    )
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_daemon_effective_gateway_token",
+        lambda _cfg: ("", "", ""),
+    )
+    monkeypatch.setattr(
+        cmd_setup,
+        "_gateway_lifecycle_executable",
+        lambda **_kwargs: os.fspath(selected),
+    )
+    monkeypatch.setattr(cmd_setup, "_is_pid_alive", lambda _path: False)
+    monkeypatch.setattr(
+        cmd_setup,
+        "_trusted_gateway_lifecycle_executable",
+        lambda _path: None,
+    )
+    run = Mock()
+    monkeypatch.setattr(cmd_setup.subprocess, "run", run)
+
+    repaired, detail = cmd_doctor._repair_gateway_lifecycle(
+        cfg,
+        start_if_stopped=True,
+    )
+
+    assert repaired is False
+    assert detail == "binary not found"
+    run.assert_not_called()

@@ -1268,6 +1268,81 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
         self.assertEqual(len(recorder), 1)
         self.assertEqual(recorder[0][1], "start")
 
+    def test_windows_live_unrelated_reused_pid_does_not_suppress_start(self):
+        import subprocess
+
+        from defenseclaw.bootstrap import _start_gateway_structured
+
+        self._write_pid_file()
+        completed = subprocess.CompletedProcess(
+            args=["defenseclaw-gateway", "start"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+        with (
+            patch.object(os, "name", "nt"),
+            patch(
+                "defenseclaw.bootstrap.shutil.which",
+                return_value=r"C:\Program Files\DefenseClaw\defenseclaw-gateway.exe",
+            ),
+            patch(
+                "defenseclaw.bootstrap.subprocess.run",
+                return_value=completed,
+            ) as run,
+            patch(
+                "defenseclaw.process_liveness.read_pid_file",
+                return_value=os.getpid(),
+            ),
+            patch(
+                "defenseclaw.process_liveness.pid_alive",
+                return_value=True,
+            ),
+            patch(
+                "defenseclaw.process_liveness.process_is_gateway",
+                return_value=False,
+            ) as process_is_gateway,
+        ):
+            result = _start_gateway_structured(self.cfg)
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.detail, "started")
+        process_is_gateway.assert_called_once_with(os.getpid())
+        run.assert_called_once_with(
+            [
+                r"C:\Program Files\DefenseClaw\defenseclaw-gateway.exe",
+                "start",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def test_windows_verified_gateway_still_counts_as_running(self):
+        from defenseclaw.bootstrap import _pid_file_running
+
+        self._write_pid_file()
+        with (
+            patch.object(os, "name", "nt"),
+            patch(
+                "defenseclaw.process_liveness.read_pid_file",
+                return_value=os.getpid(),
+            ),
+            patch(
+                "defenseclaw.process_liveness.pid_alive",
+                return_value=True,
+            ),
+            patch(
+                "defenseclaw.process_liveness.process_is_gateway",
+                return_value=True,
+            ) as process_is_gateway,
+        ):
+            self.assertTrue(
+                _pid_file_running(os.path.join(self.data_dir, "gateway.pid")),
+            )
+
+        process_is_gateway.assert_called_once_with(os.getpid())
+
 
 # ---------------------------------------------------------------------------
 # _running_connector_from_state_file: the I-don't-know sentinel

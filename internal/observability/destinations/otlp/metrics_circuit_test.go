@@ -23,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
+	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"google.golang.org/grpc/codes"
@@ -153,7 +154,7 @@ func TestMetricCircuitAuthenticationAndUnsafeFailuresOpenImmediately(t *testing.
 			// If admission were checked after metric counting or bounding, this
 			// deliberately impossible bound would change the counters.
 			exporter.maxBytes = 0
-			if err := exporter.Export(t.Context(), metrics); !IsError(err, ErrorExport) {
+			if err := exporter.Export(t.Context(), metrics); err != nil {
 				t.Fatalf("blocked export error=%v", err)
 			}
 			if inner.calls.Load() != 1 {
@@ -197,7 +198,7 @@ func TestMetricCircuitTransientFailuresUseDefaultThreshold(t *testing.T) {
 			t.Fatalf("default-threshold circuit=%+v", snapshot)
 		}
 	}
-	if err := exporter.Export(t.Context(), metrics); !IsError(err, ErrorExport) {
+	if err := exporter.Export(t.Context(), metrics); err != nil {
 		t.Fatalf("blocked transient export error=%v", err)
 	}
 	if inner.calls.Load() != 3 {
@@ -269,7 +270,7 @@ func TestMetricCircuitHalfOpenAdmitsExactlyOneConcurrentProbe(t *testing.T) {
 	}
 	close(blockedErrors)
 	for err := range blockedErrors {
-		if !IsError(err, ErrorExport) {
+		if err != nil {
 			t.Fatalf("concurrent blocked export error=%v", err)
 		}
 	}
@@ -337,7 +338,7 @@ func TestMetricCircuitTracksHTTPAuthenticationWithoutRetry(t *testing.T) {
 		snapshot.Reason != string(delivery.HealthReasonCircuitOpen) {
 		t.Fatalf("HTTP authentication circuit=%+v", snapshot)
 	}
-	if err := exporter.Export(t.Context(), metrics); !IsError(err, ErrorExport) {
+	if err := exporter.Export(t.Context(), metrics); err != nil {
 		t.Fatalf("blocked HTTP export error=%v", err)
 	}
 	if calls.Load() != 1 {
@@ -348,6 +349,57 @@ func TestMetricCircuitTracksHTTPAuthenticationWithoutRetry(t *testing.T) {
 	}
 	if err := exporter.Shutdown(t.Context()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMetricCircuitBlockedPeriodicExportsAreSilentNoOps(t *testing.T) {
+	start := time.Date(2026, time.July, 30, 17, 30, 0, 0, time.UTC)
+	inner := &metricCircuitInner{
+		outcomes: []error{status.Error(codes.Unauthenticated, "denied")},
+	}
+	exporter := newMetricCircuitTestExporter(t, inner, &dialOutcomeTracker{}, func() time.Time {
+		return start
+	})
+	if err := exporter.Export(t.Context(), testMetricData("defenseclaw.metric.circuit")); !IsError(err, ErrorExport) {
+		t.Fatalf("authentication export error=%v", err)
+	}
+
+	originalHandler := otel.GetErrorHandler()
+	var handled atomic.Uint64
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(error) {
+		handled.Add(1)
+	}))
+	defer otel.SetErrorHandler(originalHandler)
+
+	reader := sdkmetric.NewPeriodicReader(
+		exporter,
+		sdkmetric.WithInterval(5*time.Millisecond),
+		sdkmetric.WithTimeout(100*time.Millisecond),
+	)
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	counter, err := provider.Meter("defenseclaw.metric.circuit.test").Int64Counter(
+		"defenseclaw.metric.circuit.periodic",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter.Add(t.Context(), 1)
+
+	deadline := time.Now().Add(time.Second)
+	for exporter.Counters().CircuitRejectedBatches < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if err := provider.Shutdown(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if rejected := exporter.Counters().CircuitRejectedBatches; rejected < 3 {
+		t.Fatalf("periodic reader made only %d blocked export attempts", rejected)
+	}
+	if calls := inner.calls.Load(); calls != 1 {
+		t.Fatalf("open circuit invoked inner exporter %d times", calls)
+	}
+	if errorsHandled := handled.Load(); errorsHandled != 0 {
+		t.Fatalf("open circuit emitted %d periodic reader errors", errorsHandled)
 	}
 }
 

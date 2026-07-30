@@ -1378,11 +1378,10 @@ def _pid_file_running(pid_file: str) -> bool:
     planted or staled gateway.pid could make ``quickstart``/``init`` skip
     starting the sidecar — generated hooks then forwarded uninspected traffic
     because the default fail mode for the inspect hook is "open" until the
-    gateway is up. We additionally require the PID's argv0 to match a known
-    gateway binary name (POSIX, via /proc or ``ps``). Windows has no equally
-    cheap argv0 probe and the Go daemon's ``processExists``
-    (internal/daemon/proc_windows.go) is liveness-only too, so there a live
-    PID is accepted.
+    gateway is up. We additionally require the PID's process image to match a
+    known gateway binary name. POSIX uses ``/proc`` or ``ps``; Windows uses
+    ``QueryFullProcessImageNameW`` through the shared fail-closed identity
+    verifier.
     """
     from defenseclaw.process_liveness import pid_alive, read_pid_file
 
@@ -1391,8 +1390,6 @@ def _pid_file_running(pid_file: str) -> bool:
         return False
     if not pid_alive(pid):
         return False
-    if os.name == "nt":
-        return True
     return _pid_looks_like_gateway(pid)
 
 

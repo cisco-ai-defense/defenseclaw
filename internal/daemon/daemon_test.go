@@ -853,6 +853,112 @@ func TestStopAndRestartRefuseLegacyPIDControl(t *testing.T) {
 	}
 }
 
+func TestStopGracefullyMigratesOriginMainStrongPIDRecordWithoutSignalFallback(t *testing.T) {
+	t.Setenv(EnvDaemon, "")
+	dataDir := t.TempDir()
+	d := New(dataDir)
+	marker := filepath.Join(t.TempDir(), "origin-main-control-probe")
+	t.Setenv(daemonRestartProbeEnv, marker)
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDaemonRestartProbe$")
+	cmd.Env = os.Environ()
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start origin/main probe: %v", err)
+	}
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	reaped := false
+	t.Cleanup(func() {
+		if reaped {
+			return
+		}
+		_ = cmd.Process.Kill()
+		select {
+		case <-waitCh:
+		case <-time.After(5 * time.Second):
+		}
+	})
+	waitForProbeMarker(t, marker)
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve origin/main executable: %v", err)
+	}
+	startIdentity, err := processStartIdentity(cmd.Process.Pid)
+	if runtime.GOOS == "darwin" {
+		// origin/main wrote the whole-second `ps -o lstart=` identity.
+		startIdentity, err = darwinLegacyProcessStartIdentity(cmd.Process.Pid)
+	}
+	if err != nil || startIdentity == "" {
+		t.Fatalf("capture origin/main start identity: identity=%q err=%v", startIdentity, err)
+	}
+	originMain := pidInfo{
+		PID:           cmd.Process.Pid,
+		Executable:    executable,
+		StartTime:     time.Now().Unix(),
+		StartIdentity: startIdentity,
+		// origin/main did not yet write data_dir.
+	}
+	raw, err := json.Marshal(originMain)
+	if err != nil {
+		t.Fatalf("marshal origin/main PID record: %v", err)
+	}
+	if err := safefile.WritePrivate(d.pidFile, raw); err != nil {
+		t.Fatalf("write origin/main PID record: %v", err)
+	}
+	if running, pid := d.IsRunning(); !running || pid != cmd.Process.Pid {
+		t.Fatalf("origin/main liveness = (%v, %d), want live PID %d", running, pid, cmd.Process.Pid)
+	}
+
+	if err := d.Stop(50 * time.Millisecond); !errors.Is(err, ErrUnsafeProcessIdentity) {
+		t.Fatalf("direct Stop error = %v, want ErrUnsafeProcessIdentity", err)
+	}
+	if !processExists(cmd.Process.Pid) {
+		t.Fatal("direct Stop signalled an unbound origin/main process")
+	}
+
+	rejected := errors.New("authenticated shutdown rejected")
+	err = d.StopGracefully(50*time.Millisecond, func(pid int) error {
+		if pid != cmd.Process.Pid {
+			t.Fatalf("graceful callback PID = %d, want %d", pid, cmd.Process.Pid)
+		}
+		return rejected
+	})
+	if !errors.Is(err, ErrUnsafeProcessIdentity) {
+		t.Fatalf("rejected authenticated stop error = %v, want ErrUnsafeProcessIdentity", err)
+	}
+	if !processExists(cmd.Process.Pid) {
+		t.Fatal("rejected authenticated stop fell back to an OS signal")
+	}
+
+	err = d.StopGracefully(50*time.Millisecond, func(int) error { return nil })
+	if !errors.Is(err, ErrStopTimeout) {
+		t.Fatalf("accepted non-exiting stop error = %v, want ErrStopTimeout", err)
+	}
+	if !processExists(cmd.Process.Pid) {
+		t.Fatal("timed-out authenticated stop fell back to an OS signal")
+	}
+	if _, err := os.Stat(d.pidFile); err != nil {
+		t.Fatalf("migration PID record was cleared before confirmed exit: %v", err)
+	}
+
+	err = d.StopGracefully(3*time.Second, func(int) error {
+		return cmd.Process.Kill()
+	})
+	if err != nil {
+		t.Fatalf("accepted authenticated migration stop: %v", err)
+	}
+	if _, err := os.Stat(d.pidFile); !os.IsNotExist(err) {
+		t.Fatalf("migration PID record remains after confirmed exit: %v", err)
+	}
+	select {
+	case <-waitCh:
+		reaped = true
+	case <-time.After(time.Second):
+		t.Fatal("origin/main probe was not reaped")
+	}
+}
+
 func TestRemovePIDFileIfStartedPreservesReplacement(t *testing.T) {
 	d := New(t.TempDir())
 	old := pidInfo{PID: 101, Executable: "old-gateway", StartIdentity: "old-start"}

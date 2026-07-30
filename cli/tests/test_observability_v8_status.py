@@ -765,7 +765,25 @@ def test_doctor_v8_reports_open_auth_circuit_and_explicit_disable_command() -> N
     assert "defenseclaw setup observability disable collector" in destination["detail"]
 
 
-def test_doctor_v8_warns_when_enabled_remote_health_is_missing() -> None:
+@pytest.mark.parametrize(
+    "live_health",
+    [
+        None,
+        {
+            "telemetry": {
+                "details": {
+                    "destinations": [
+                        {
+                            "name": "collector",
+                            "circuit_state": "closed",
+                        }
+                    ]
+                }
+            }
+        },
+    ],
+)
+def test_doctor_v8_warns_when_enabled_remote_health_is_missing(live_health: dict | None) -> None:
     from defenseclaw.commands.cmd_doctor import (
         _check_observability_v8_status,
         _DoctorResult,
@@ -799,7 +817,7 @@ def test_doctor_v8_warns_when_enabled_remote_health_is_missing() -> None:
     )
     result = _DoctorResult()
 
-    _check_observability_v8_status(status, result, live_health=None)
+    _check_observability_v8_status(status, result, live_health=live_health)
 
     destination = next(item for item in result.checks if item["label"] == "Destination: collector")
     assert destination["status"] == "warn"

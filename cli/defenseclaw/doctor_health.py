@@ -201,18 +201,34 @@ _COMPONENT_CAPABILITIES: dict[str, tuple[str, ...]] = {
 }
 
 
-def probe_component_evidence() -> tuple[ComponentEvidence, ...]:
+_AUTO_GATEWAY_EXECUTABLE = object()
+
+
+def probe_component_evidence(
+    *,
+    gateway_executable: str | None | object = _AUTO_GATEWAY_EXECUTABLE,
+) -> tuple[ComponentEvidence, ...]:
     """Run the existing CLI/gateway/plugin probes and discard unsafe detail.
 
     Origins, subprocess output, exception text, build metadata, and filesystem
-    paths intentionally do not cross this adapter.
+    paths intentionally do not cross this adapter.  Supplying
+    ``gateway_executable`` (including an explicit ``None``) makes the gateway
+    probe use exactly that lifecycle controller rather than resolving another
+    binary from the ambient environment.
     """
 
     from defenseclaw.commands import cmd_version
 
+    gateway_component = (
+        cmd_version._gateway_component()
+        if gateway_executable is _AUTO_GATEWAY_EXECUTABLE
+        else cmd_version._gateway_component_for_binary(
+            gateway_executable if isinstance(gateway_executable, str) else None
+        )
+    )
     components = (
         cmd_version._cli_component(),
-        cmd_version._gateway_component(),
+        gateway_component,
         cmd_version._plugin_component(),
     )
     return tuple(

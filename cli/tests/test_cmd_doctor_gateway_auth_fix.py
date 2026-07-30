@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 from defenseclaw.commands.cmd_doctor import (
+    _authenticated_origin_main_gateway_lifecycle_trust,
     _check_gateway_auth,
     _daemon_effective_gateway_token,
     _DoctorResult,
@@ -85,6 +86,39 @@ def _strong_gateway_trust(
         "managed gateway owns the configured API endpoint",
         pid,
         home_bound=True,
+        record=record,
+        process=process,
+    )
+
+
+def _origin_main_gateway_trust(
+    executable: str,
+    *,
+    pid: int = 4242,
+    start_identity: str = "100",
+    linux_home_bound: bool = False,
+) -> _GatewayTrust:
+    record = PIDRecord(
+        "ok",
+        pid=pid,
+        executable=executable,
+        start_identity=start_identity,
+    )
+    process = ProcessEvidence(
+        "ok",
+        pid=pid,
+        executable=executable,
+        start_identity=start_identity,
+    )
+    return _GatewayTrust(
+        "trusted" if linux_home_bound else "unbound_home",
+        (
+            "Linux process environment binds the origin/main gateway to this home"
+            if linux_home_bound
+            else "gateway process identity is not bound to this canonical data home"
+        ),
+        pid,
+        home_bound=linux_home_bound,
         record=record,
         process=process,
     )
@@ -1229,6 +1263,148 @@ def test_fix_gateway_service_restarts_deterministic_config_runtime_drift(
     assert trust.call_count == 2
 
 
+def test_origin_main_bridge_refuses_foreign_listener_before_sending_token(tmp_path):
+    executable = os.path.abspath(tmp_path / "defenseclaw-gateway")
+    trust = _origin_main_gateway_trust(executable)
+    cfg = _cfg(str(tmp_path), token="must-not-be-sent")
+
+    with (
+        patch(
+            "defenseclaw.commands.cmd_doctor._managed_gateway_listener_evidence",
+            return_value=ListenerEvidence("ok", pid=trust.pid + 1),
+        ),
+        patch("defenseclaw.commands.cmd_doctor._http_probe") as probe,
+    ):
+        result = _authenticated_origin_main_gateway_lifecycle_trust(
+            cfg,
+            trust,
+            platform_name="win32",
+        )
+
+    assert result.code == "foreign_listener"
+    assert "not bound" in result.detail
+    probe.assert_not_called()
+
+
+def test_origin_main_bridge_refuses_authenticated_foreign_runtime_home(tmp_path):
+    executable = os.path.abspath(tmp_path / "defenseclaw-gateway")
+    trust = _origin_main_gateway_trust(executable)
+    cfg = _cfg(str(tmp_path), token="configured-token")
+
+    with (
+        patch(
+            "defenseclaw.commands.cmd_doctor._managed_gateway_listener_evidence",
+            return_value=ListenerEvidence("ok", pid=trust.pid),
+        ),
+        patch(
+            "defenseclaw.commands.cmd_doctor._http_probe",
+            return_value=(200, _runtime_status(str(tmp_path / "other-home"), pid=trust.pid)),
+        ),
+    ):
+        result = _authenticated_origin_main_gateway_lifecycle_trust(
+            cfg,
+            trust,
+            platform_name="darwin",
+        )
+
+    assert not result.trusted
+    assert result.code == "unbound_home"
+    assert "different canonical data home" in result.detail
+
+
+def test_doctor_service_repair_migrates_linux_env_bound_origin_main_pid_after_approval(
+    tmp_path,
+):
+    executable = tmp_path / "defenseclaw-gateway"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o700)
+    pid = 4242
+    start_identity = "origin-main-start"
+    origin_main = _origin_main_gateway_trust(
+        os.fspath(executable),
+        pid=pid,
+        start_identity=start_identity,
+        linux_home_bound=True,
+    )
+    replacement = _strong_gateway_trust(
+        str(tmp_path),
+        pid=4343,
+        start_identity="replacement-start",
+    )
+    pid_path = tmp_path / "gateway.pid"
+    pid_path.write_text(
+        json.dumps(
+            {
+                "pid": pid,
+                "executable": os.fspath(executable),
+                "start_time": 0,
+                "start_identity": start_identity,
+            }
+        ),
+        encoding="utf-8",
+    )
+    pid_path.chmod(0o600)
+    cfg = _cfg(str(tmp_path), token="configured-token")
+    cfg.guardrail = SimpleNamespace(enabled=True)
+    current_controller = os.fspath(tmp_path / "current-defenseclaw-gateway")
+
+    with (
+        patch(
+            "defenseclaw.commands.cmd_doctor._http_probe",
+            side_effect=[
+                (200, _health(api="running", guardrail="disabled")),
+                (200, _runtime_status(str(tmp_path), pid=pid)),
+                (200, _runtime_status(str(tmp_path), pid=pid)),
+                (200, _health(api="running", guardrail="running")),
+            ],
+        ) as probe,
+        patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            side_effect=[origin_main, replacement],
+        ),
+        patch(
+            "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+            return_value=origin_main,
+        ),
+        patch(
+            "defenseclaw.commands.cmd_doctor._managed_gateway_listener_evidence",
+            return_value=ListenerEvidence("ok", pid=pid),
+        ),
+        patch(
+            "defenseclaw.commands.cmd_doctor.click.confirm",
+            return_value=True,
+        ) as confirm,
+        patch(
+            "defenseclaw.commands.cmd_setup._restart_defense_gateway",
+            return_value=True,
+        ) as restart,
+        patch(
+            "defenseclaw.commands.cmd_setup._gateway_lifecycle_executable",
+            return_value=current_controller,
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup._trusted_gateway_lifecycle_executable",
+            return_value=current_controller,
+        ),
+    ):
+        tag, detail = _fix_gateway_service(
+            cfg,
+            assume_yes=False,
+        )
+
+    assert tag == "pass", detail
+    assert "restarted" in detail
+    confirm.assert_called_once()
+    restart.assert_called_once()
+    # The record path identifies the old side-by-side image only. Doctor must
+    # select and probe the current controller rather than reuse that old image.
+    assert restart.call_args.kwargs["lifecycle_executable"] == current_controller
+    assert restart.call_args.kwargs["lifecycle_executable_requires_running"] is False
+    assert restart.call_args.kwargs["start_if_stopped"] is True
+    assert probe.call_args_list[1].kwargs["headers"] == {"Authorization": "Bearer configured-token"}
+    assert probe.call_args_list[2].kwargs["headers"] == {"Authorization": "Bearer configured-token"}
+
+
 @pytest.mark.parametrize("subsystem", ["gateway", "telemetry", "sandbox"])
 def test_fix_gateway_service_does_not_restart_operational_subsystem_errors(
     tmp_path,
@@ -1344,6 +1520,7 @@ def test_fix_dotenv_permissions_uses_private_windows_dacl(tmp_path):
 def test_fix_gateway_service_starts_unreachable_gateway(tmp_path, capsys):
     cfg = _cfg(str(tmp_path), token="configured")
     observed_env = {}
+    current_controller = os.fspath(tmp_path / "current-defenseclaw-gateway")
 
     def _restarted(
         data_dir,
@@ -1351,6 +1528,7 @@ def test_fix_gateway_service_starts_unreachable_gateway(tmp_path, capsys):
         start_if_stopped,
         child_env,
         lifecycle_executable,
+        lifecycle_executable_requires_running,
     ):
         print("captured lifecycle output")
         print("captured lifecycle error", file=sys.stderr)
@@ -1358,7 +1536,8 @@ def test_fix_gateway_service_starts_unreachable_gateway(tmp_path, capsys):
             {name: os.environ.get(name) for name in ("DEFENSECLAW_HOME", "DEFENSECLAW_DATA_DIR", "DEFENSECLAW_CONFIG")}
         )
         assert child_env["DEFENSECLAW_DATA_DIR"] == data_dir
-        assert lifecycle_executable is None
+        assert lifecycle_executable == current_controller
+        assert lifecycle_executable_requires_running is False
         return True
 
     previous = {
@@ -1383,6 +1562,14 @@ def test_fix_gateway_service_starts_unreachable_gateway(tmp_path, capsys):
             "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
             return_value=_strong_gateway_trust(str(tmp_path), pid=4343),
         ),
+        patch(
+            "defenseclaw.commands.cmd_setup._gateway_lifecycle_executable",
+            return_value=current_controller,
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup._trusted_gateway_lifecycle_executable",
+            return_value=current_controller,
+        ),
         patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", side_effect=_restarted) as restart,
     ):
         tag, detail = _fix_gateway_service(cfg, assume_yes=True)
@@ -1393,7 +1580,8 @@ def test_fix_gateway_service_starts_unreachable_gateway(tmp_path, capsys):
     restart.assert_called_once()
     assert restart.call_args.kwargs["start_if_stopped"] is True
     assert restart.call_args.kwargs["child_env"]["DEFENSECLAW_DATA_DIR"] == str(tmp_path)
-    assert restart.call_args.kwargs["lifecycle_executable"] is None
+    assert restart.call_args.kwargs["lifecycle_executable"] == current_controller
+    assert restart.call_args.kwargs["lifecycle_executable_requires_running"] is False
     assert observed_env == {
         "DEFENSECLAW_HOME": str(tmp_path),
         "DEFENSECLAW_DATA_DIR": str(tmp_path),
@@ -1433,6 +1621,10 @@ def test_fix_gateway_service_reports_started_with_operational_upstream_state(
             "defenseclaw.commands.cmd_setup._restart_defense_gateway",
             return_value=True,
         ),
+        patch(
+            "defenseclaw.commands.cmd_doctor._component_compatibility_problems_for_executable",
+            return_value=(),
+        ),
     ):
         tag, detail = _fix_gateway_service(cfg, assume_yes=True)
 
@@ -1452,6 +1644,7 @@ def test_fix_gateway_service_restarts_stale_enabled_subsystem(tmp_path):
         pid=4343,
         start_identity="101",
     )
+    current_controller = os.fspath(tmp_path / "current-defenseclaw-gateway")
 
     with (
         patch(
@@ -1469,6 +1662,14 @@ def test_fix_gateway_service_restarts_stale_enabled_subsystem(tmp_path):
             "defenseclaw.commands.cmd_setup._restart_defense_gateway",
             return_value=True,
         ) as restart,
+        patch(
+            "defenseclaw.commands.cmd_setup._gateway_lifecycle_executable",
+            return_value=current_controller,
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup._trusted_gateway_lifecycle_executable",
+            return_value=current_controller,
+        ),
     ):
         tag, detail = _fix_gateway_service(cfg, assume_yes=True)
 
@@ -1478,7 +1679,8 @@ def test_fix_gateway_service_restarts_stale_enabled_subsystem(tmp_path):
     restart.assert_called_once()
     assert restart.call_args.kwargs["start_if_stopped"] is True
     assert restart.call_args.kwargs["child_env"]["DEFENSECLAW_DATA_DIR"] == str(tmp_path)
-    assert restart.call_args.kwargs["lifecycle_executable"] is None
+    assert restart.call_args.kwargs["lifecycle_executable"] == current_controller
+    assert restart.call_args.kwargs["lifecycle_executable_requires_running"] is False
 
 
 def test_fix_gateway_service_skips_healthy_current_gateway(tmp_path):
@@ -1513,6 +1715,10 @@ def test_fix_gateway_service_surfaces_only_safe_lifecycle_reason(tmp_path):
         patch(
             "defenseclaw.commands.cmd_setup._restart_defense_gateway",
             side_effect=_failed_lifecycle,
+        ),
+        patch(
+            "defenseclaw.commands.cmd_doctor._component_compatibility_problems_for_executable",
+            return_value=(),
         ),
     ):
         tag, detail = _fix_gateway_service(cfg, assume_yes=True)

@@ -1372,7 +1372,11 @@ def _check_component_connector_compatibility(
     enabled = tuple(connector for connector in connectors if _connector_enabled(cfg, connector))
     try:
         discovery = read_cached_discovery(str(getattr(cfg, "data_dir", "") or ""))
-        report = build_health_report(enabled, discovery)
+        report = build_health_report(
+            enabled,
+            discovery,
+            components=_doctor_component_evidence(cfg),
+        )
     except Exception as exc:  # noqa: BLE001 - emit only the exception class.
         _emit(
             "warn",
@@ -1928,10 +1932,19 @@ class _GatewayTrust:
     home_bound: bool = False
     record: PIDRecord | None = None
     process: ProcessEvidence | None = None
+    authenticated_migration: bool = False
 
     @property
     def trusted(self) -> bool:
         return self.code == "trusted" and self.pid > 0
+
+
+@dataclass(frozen=True)
+class _GatewayLifecycleSelection:
+    """One custody-checked controller selected for a Doctor lifecycle call."""
+
+    executable: str | None
+    requires_running_process: bool
 
 
 def _gateway_executable_matches(
@@ -1943,7 +1956,14 @@ def _gateway_executable_matches(
     """Mirror the daemon's platform-specific executable comparison."""
     if not record.executable:
         return False
-    del platform_name
+    if (
+        platform_name.startswith("linux")
+        and not record.data_dir
+        and process.executable == record.executable + " (deleted)"
+    ):
+        # Linux marks the old mapped inode this way after an atomic binary
+        # replacement. This exact path+suffix exception is migration-only.
+        return True
     return paths_same(record.executable, process.executable)
 
 
@@ -1967,6 +1987,25 @@ def _gateway_process_home_binding(
             matches = paths_same(value, cfg.data_dir)
             return matches, not matches
     return False, False
+
+
+def _darwin_origin_main_launch_generation_matches(
+    record: PIDRecord,
+    process: ProcessEvidence,
+) -> bool:
+    """Bridge localized origin/main lstart text to the native start epoch."""
+    if record.data_dir or not record.start_time:
+        return False
+    try:
+        recorded_lower_bound = int(record.start_time)
+        native_start = int(process.start_identity.partition(".")[0])
+    except (TypeError, ValueError, OverflowError):
+        return False
+    delta = native_start - recorded_lower_bound
+    # origin/main captured StartTime immediately before cmd.Start; mirror the
+    # daemon's bounded child-registration window without trying to reproduce
+    # the inherited locale/timezone used by its `ps -o lstart=` string.
+    return 0 <= delta <= 5
 
 
 def _gateway_process_trust(
@@ -2001,9 +2040,16 @@ def _gateway_process_trust(
             record=record,
             process=process,
         )
+    deleted_linux_migration = (
+        platform_name.startswith("linux")
+        and not record.data_dir
+        and bool(record.executable)
+        and process.executable == record.executable + " (deleted)"
+    )
+    process_name_source = record.executable if deleted_linux_migration else process.executable
     if (
         gateway_executable_name(
-            process.executable,
+            process_name_source,
             platform_name=platform_name,
         )
         not in GATEWAY_PROCESS_NAMES
@@ -2028,7 +2074,10 @@ def _gateway_process_trust(
             record=record,
             process=process,
         )
-    if record.start_identity != process.start_identity:
+    start_identity_matches = record.start_identity == process.start_identity
+    if platform_name == "darwin" and _darwin_origin_main_launch_generation_matches(record, process):
+        start_identity_matches = True
+    if not start_identity_matches:
         return _GatewayTrust(
             "identity",
             "recorded gateway process start identity changed",
@@ -2089,6 +2138,154 @@ def _managed_gateway_process_trust(
     )
 
 
+def _authenticated_origin_main_gateway_lifecycle_trust(
+    cfg,
+    process_trust: _GatewayTrust,
+    *,
+    evidence: GatewayEvidence | None = None,
+    platform_name: str | None = None,
+) -> _GatewayTrust:
+    """Bridge one origin/main PID generation into current lifecycle control.
+
+    The previous release wrote executable + kernel start identity but no
+    ``data_dir``. That record remains insufficient for signal-based control.
+    For an attended Doctor lifecycle repair only, corroborate it with exact
+    listener ownership and token-authenticated runtime PID/home metadata. The
+    Go daemon then permits only the authenticated graceful shutdown request;
+    it never turns this bridge into OS-signal authority.
+    """
+    if process_trust.code not in {"trusted", "unbound_home"}:
+        return process_trust
+    record = process_trust.record
+    process = process_trust.process
+    if (
+        record is None
+        or process is None
+        or bool(record.data_dir.strip())
+        or not record.executable.strip()
+        or not record.start_identity.strip()
+    ):
+        return process_trust
+    if not _gateway_api_host_is_loopback(cfg):
+        return _GatewayTrust(
+            "unavailable",
+            "configured API target is not loopback; refusing to send gateway credentials",
+            process_trust.pid,
+            record=record,
+            process=process,
+        )
+    api_port = _gateway_api_port(cfg)
+    if not api_port:
+        return _GatewayTrust(
+            "unavailable",
+            "configured API port is invalid",
+            process_trust.pid,
+            record=record,
+            process=process,
+        )
+
+    platform_name = platform_name or ("win32" if os.name == "nt" else sys.platform)
+    evidence = evidence or GatewayEvidence(platform_name=platform_name)
+    listener = _managed_gateway_listener_evidence(
+        api_port,
+        host=_gateway_api_host(cfg),
+        platform_name=platform_name,
+        evidence=evidence,
+    )
+    strong_identity = _GatewayTrust(
+        "trusted",
+        "origin/main gateway process identity is current",
+        process_trust.pid,
+        record=record,
+        process=process,
+    )
+    endpoint_trust = _gateway_listener_trust(strong_identity, listener)
+    if not endpoint_trust.trusted:
+        return _GatewayTrust(
+            endpoint_trust.code,
+            "gateway process identity is not bound to this canonical data home; " + endpoint_trust.detail,
+            endpoint_trust.pid,
+            record=record,
+            process=process,
+        )
+
+    token, _token_env_name, _token_source = _daemon_effective_gateway_token(cfg)
+    if not token:
+        return _GatewayTrust(
+            "unbound_home",
+            "origin/main gateway identity is strong, but no token is available to authenticate its runtime home",
+            process_trust.pid,
+            record=record,
+            process=process,
+        )
+    code, body = _http_probe(
+        _gateway_api_url(cfg, "/status"),
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=3.0,
+        response_limit=64 * 1024,
+        allow_truncation=False,
+        bypass_proxy=True,
+    )
+    if code != 200:
+        detail = "transport failure" if code == 0 else f"HTTP {code}"
+        return _GatewayTrust(
+            "unbound_home",
+            f"origin/main gateway runtime-home authentication failed ({detail})",
+            process_trust.pid,
+            record=record,
+            process=process,
+        )
+    runtime_ok, runtime_detail = _authenticated_runtime_matches(
+        cfg,
+        process_trust.pid,
+        body,
+    )
+    if not runtime_ok:
+        return _GatewayTrust(
+            "unbound_home",
+            runtime_detail,
+            process_trust.pid,
+            record=record,
+            process=process,
+        )
+    return _GatewayTrust(
+        "trusted",
+        "origin/main gateway listener and authenticated runtime home are current; "
+        "eligible for one bounded graceful migration",
+        process_trust.pid,
+        home_bound=True,
+        record=record,
+        process=process,
+        authenticated_migration=True,
+    )
+
+
+def _managed_gateway_process_trust_for_lifecycle(
+    cfg,
+    *,
+    evidence: GatewayEvidence | None = None,
+    platform_name: str | None = None,
+) -> _GatewayTrust:
+    """Return process trust, allowing only the authenticated upgrade bridge."""
+    if evidence is None and platform_name is None:
+        process_trust = _managed_gateway_process_trust(cfg)
+    else:
+        process_trust = _managed_gateway_process_trust(
+            cfg,
+            evidence=evidence,
+            platform_name=platform_name,
+        )
+    record = process_trust.record
+    if record is None or bool(record.data_dir.strip()) or process_trust.code not in {"trusted", "unbound_home"}:
+        return process_trust
+    return _authenticated_origin_main_gateway_lifecycle_trust(
+        cfg,
+        process_trust,
+        evidence=evidence,
+        platform_name=platform_name,
+    )
+
+
 def _gateway_listener_trust(
     process_trust: _GatewayTrust,
     listener: ListenerEvidence,
@@ -2104,6 +2301,7 @@ def _gateway_listener_trust(
             home_bound=process_trust.home_bound,
             record=process_trust.record,
             process=process_trust.process,
+            authenticated_migration=process_trust.authenticated_migration,
         )
     if listener.status == "ambiguous":
         return _GatewayTrust(
@@ -2113,6 +2311,7 @@ def _gateway_listener_trust(
             home_bound=process_trust.home_bound,
             record=process_trust.record,
             process=process_trust.process,
+            authenticated_migration=process_trust.authenticated_migration,
         )
     if listener.status in {"denied", "unavailable"}:
         return _GatewayTrust(
@@ -2122,6 +2321,7 @@ def _gateway_listener_trust(
             home_bound=process_trust.home_bound,
             record=process_trust.record,
             process=process_trust.process,
+            authenticated_migration=process_trust.authenticated_migration,
         )
     if listener.pid != process_trust.pid:
         return _GatewayTrust(
@@ -2131,6 +2331,7 @@ def _gateway_listener_trust(
             home_bound=process_trust.home_bound,
             record=process_trust.record,
             process=process_trust.process,
+            authenticated_migration=process_trust.authenticated_migration,
         )
     return _GatewayTrust(
         "trusted",
@@ -2139,6 +2340,7 @@ def _gateway_listener_trust(
         home_bound=process_trust.home_bound,
         record=process_trust.record,
         process=process_trust.process,
+        authenticated_migration=process_trust.authenticated_migration,
     )
 
 
@@ -2170,6 +2372,35 @@ def _trusted_gateway_listener(
         evidence=evidence,
     )
     return _gateway_listener_trust(process_trust, listener)
+
+
+def _trusted_gateway_listener_for_lifecycle(
+    cfg,
+    *,
+    evidence: GatewayEvidence | None = None,
+    platform_name: str | None = None,
+) -> _GatewayTrust:
+    """Prove an endpoint, with the authenticated origin/main bridge if needed."""
+    if evidence is None and platform_name is None:
+        endpoint_trust = _trusted_gateway_listener(cfg)
+    else:
+        endpoint_trust = _trusted_gateway_listener(
+            cfg,
+            evidence=evidence,
+            platform_name=platform_name,
+        )
+    if (
+        endpoint_trust.code in {"trusted", "unbound_home"}
+        and endpoint_trust.record is not None
+        and not endpoint_trust.record.data_dir.strip()
+    ):
+        return _authenticated_origin_main_gateway_lifecycle_trust(
+            cfg,
+            endpoint_trust,
+            evidence=evidence,
+            platform_name=platform_name,
+        )
+    return endpoint_trust
 
 
 def _read_linux_process_env_var(pid: int, var_name: str) -> str | None:
@@ -4942,7 +5173,9 @@ def _check_observability_v8_status(
             if live.reason:
                 detail += f"/{live.reason}"
             detail += f"; queue={live.queue_label}; last={live.activity_label}; circuit={live.circuit_label}"
-            if live_state in {"degraded", "initializing", "draining"}:
+            if live_state == "unavailable" and destination.kind != "sqlite":
+                tag = "warn"
+            elif live_state in {"degraded", "initializing", "draining"}:
                 tag = "warn"
             elif live_state in {"failing", "stopped", "disabled"}:
                 tag = "fail"
@@ -6136,10 +6369,20 @@ def _fix_connector_compatibility_review(cfg, *, assume_yes: bool) -> tuple[str, 
 
 
 def _component_compatibility_problems(cfg) -> tuple[object, ...]:
+    selection = _gateway_lifecycle_selection(cfg)
+    return _component_compatibility_problems_for_executable(
+        cfg,
+        selection.executable,
+    )
+
+
+def _component_compatibility_problems_for_executable(
+    cfg,
+    gateway_executable: str | None,
+) -> tuple[object, ...]:
     from defenseclaw.doctor_health import (
         HealthStatus,
         assess_component_health,
-        probe_component_evidence,
     )
 
     required = {"cli", "gateway"}
@@ -6148,13 +6391,30 @@ def _component_compatibility_problems(cfg) -> tuple[object, ...]:
     }
     if "openclaw" in enabled_connectors:
         required.add("plugin")
-    findings = assess_component_health(probe_component_evidence())
+    findings = assess_component_health(
+        _doctor_component_evidence_for_executable(gateway_executable)
+    )
 
     return tuple(
         finding
         for finding in findings
         if finding.component in required and finding.status is not HealthStatus.SUPPORTED
     )
+
+
+def _doctor_component_evidence(cfg) -> tuple[object, ...]:
+    """Probe component versions through Doctor's exact lifecycle selection."""
+    selection = _gateway_lifecycle_selection(cfg)
+    return _doctor_component_evidence_for_executable(selection.executable)
+
+
+def _doctor_component_evidence_for_executable(
+    gateway_executable: str | None,
+) -> tuple[object, ...]:
+    """Probe component versions with one already-selected gateway controller."""
+    from defenseclaw.doctor_health import probe_component_evidence
+
+    return probe_component_evidence(gateway_executable=gateway_executable)
 
 
 def _plan_component_compatibility_review(cfg) -> RepairDecision:
@@ -8117,6 +8377,37 @@ def _fix_gateway_token_env(
     return ("pass", f"token_env repointed to {canonical}")
 
 
+def _gateway_lifecycle_selection(
+    cfg,
+    *,
+    search_path: str | None = None,
+) -> _GatewayLifecycleSelection:
+    """Select the exact executable used by compatibility and lifecycle work."""
+    from defenseclaw.commands.cmd_setup import (
+        _gateway_lifecycle_executable,
+        _trusted_gateway_lifecycle_executable,
+    )
+
+    process_trust = _managed_gateway_process_trust_for_lifecycle(cfg)
+    if (
+        process_trust.trusted
+        and process_trust.record is not None
+        and not process_trust.authenticated_migration
+    ):
+        candidate = process_trust.record.executable
+        if not candidate or not os.path.isabs(candidate):
+            return _GatewayLifecycleSelection(None, True)
+        executable = _trusted_gateway_lifecycle_executable(
+            str(os.path.realpath(candidate))
+        )
+        return _GatewayLifecycleSelection(executable, True)
+
+    return _GatewayLifecycleSelection(
+        _gateway_lifecycle_executable(search_path=search_path),
+        False,
+    )
+
+
 def _repair_gateway_lifecycle(cfg, *, start_if_stopped: bool) -> tuple[bool, str]:
     """Run setup's ownership-aware gateway lifecycle in the selected home.
 
@@ -8141,14 +8432,47 @@ def _repair_gateway_lifecycle(cfg, *, start_if_stopped: bool) -> tuple[bool, str
     if token and token_env_name:
         child_env[token_env_name] = token
 
-    process_trust = _managed_gateway_process_trust(cfg)
-    lifecycle_executable: str | None = None
-    if process_trust.trusted and process_trust.record is not None:
-        candidate = process_trust.record.executable
-        if candidate and os.path.isabs(candidate) and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            lifecycle_executable = str(os.path.realpath(candidate))
-        else:
+    selection = _gateway_lifecycle_selection(
+        cfg,
+        search_path=child_env.get("PATH", os.defpath),
+    )
+    if selection.executable is None:
+        if selection.requires_running_process:
             return False, "verified running gateway executable is unavailable"
+        return False, "binary not found"
+    from defenseclaw.commands.cmd_setup import _trusted_gateway_lifecycle_executable
+
+    revalidated_executable = _trusted_gateway_lifecycle_executable(
+        selection.executable
+    )
+    if (
+        revalidated_executable is None
+        or os.path.normcase(os.path.abspath(revalidated_executable))
+        != os.path.normcase(os.path.abspath(selection.executable))
+    ):
+        if selection.requires_running_process:
+            return False, "verified running gateway executable is unavailable"
+        return False, "binary not found"
+    try:
+        compatibility_problems = _component_compatibility_problems_for_executable(
+            cfg,
+            revalidated_executable,
+        )
+    except Exception:
+        # Preserve the compatibility gate's fail-open-on-unknown policy:
+        # only positive unsupported evidence blocks lifecycle work.
+        compatibility_problems = ()
+    if compatibility_problems:
+        from defenseclaw.doctor_health import HealthStatus
+
+        if any(
+            finding.status is HealthStatus.UNSUPPORTED
+            for finding in compatibility_problems
+        ):
+            return (
+                False,
+                "selected lifecycle components are positively unsupported",
+            )
 
     managed_env = {
         "DEFENSECLAW_HOME": data_dir,
@@ -8164,7 +8488,8 @@ def _repair_gateway_lifecycle(cfg, *, start_if_stopped: bool) -> tuple[bool, str
                 data_dir,
                 start_if_stopped=start_if_stopped,
                 child_env=child_env,
-                lifecycle_executable=lifecycle_executable,
+                lifecycle_executable=revalidated_executable,
+                lifecycle_executable_requires_running=selection.requires_running_process,
             )
     finally:
         for name, value in previous_env.items():
@@ -8237,7 +8562,7 @@ def _fix_gateway_token_drift(
         )
 
     pid_file = os.path.join(cfg.data_dir, "gateway.pid")
-    process_trust = _managed_gateway_process_trust(cfg)
+    process_trust = _managed_gateway_process_trust_for_lifecycle(cfg)
     if process_trust.code in {"missing", "missing_process"}:
         return ("skip", "no live sidecar to restart")
     if not process_trust.trusted:
@@ -8295,7 +8620,7 @@ def _fix_gateway_token_drift(
     # identity, home, foreign-owner, and ambiguity failures never authorize a
     # lifecycle mutation.
     auth_rejected = False
-    trust = _trusted_gateway_listener(cfg)
+    trust = _trusted_gateway_listener_for_lifecycle(cfg)
     if trust.code in {"foreign_listener", "ambiguous_listener"}:
         return (
             "fail",
@@ -8551,7 +8876,7 @@ def _fix_gateway_service(
                 "skip",
                 f"gateway is reachable but {reason}; automatic restart was not attempted",
             )
-        endpoint_trust = _trusted_gateway_listener(cfg)
+        endpoint_trust = _trusted_gateway_listener_for_lifecycle(cfg)
         if not endpoint_trust.trusted:
             return (
                 "fail",
@@ -8567,7 +8892,7 @@ def _fix_gateway_service(
                 "refusing automatic startup/restart",
             )
         reason = "gateway service is unreachable"
-        process_trust = _managed_gateway_process_trust(cfg)
+        process_trust = _managed_gateway_process_trust_for_lifecycle(cfg)
         pid_path = os.path.join(cfg.data_dir, "gateway.pid")
         listener = _managed_gateway_listener_evidence(
             _gateway_api_port(cfg),

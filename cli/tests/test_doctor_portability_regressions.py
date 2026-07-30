@@ -108,6 +108,12 @@ def test_linux_listener_evidence_accepts_ipv6_wildcard_for_ipv6_client_host(tmp_
             " 0: group:everyone allow read\n",
             "extended ACL grants additional read access",
         ),
+        (
+            "-rw-------@",
+            " 0: group:everyone allow read\n",
+            "extended ACL grants additional read access",
+        ),
+        ("-rw-------@", "", None),
         ("-rw-------", "", None),
     ],
 )
@@ -133,6 +139,73 @@ def test_darwin_acl_inspection_uses_mode_acl_marker(monkeypatch, tmp_path, mode_
     assert observed[0][1]["shell"] is False
     assert observed[0][1]["stdin"] is subprocess.DEVNULL
     assert observed[0][1]["timeout"] == 2.0
+
+
+@pytest.mark.parametrize("permission", ["add_file", "add_subdirectory", "delete_child"])
+def test_darwin_acl_write_inspection_rejects_directory_mutation_right(monkeypatch, permission):
+    monkeypatch.setattr(file_permissions.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        file_permissions,
+        "_darwin_acl_output",
+        lambda _path: (
+            "drwx------@",
+            f" 0: group:everyone allow {permission}\n",
+        ),
+    )
+
+    assert file_permissions.darwin_acl_write_error("/private/synthetic") == (
+        "extended ACL grants additional write access"
+    )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="native Darwin ACL regression")
+def test_darwin_acl_native_detects_acl_rows_with_xattr_marker_and_directory_rights(tmp_path):
+    target = tmp_path / ".env"
+    target.write_text("SECRET=synthetic\n", encoding="utf-8")
+    os.chmod(target, 0o600)
+    directory = tmp_path / "managed"
+    directory.mkdir(mode=0o700)
+    try:
+        subprocess.run(
+            ["/usr/bin/xattr", "-w", "com.defenseclaw.test", "present", os.fspath(target)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["/bin/chmod", "+a", "everyone allow read", os.fspath(target)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                "/bin/chmod",
+                "+a",
+                "everyone allow add_file,add_subdirectory,delete_child",
+                os.fspath(directory),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        mode_field, acl_text = file_permissions._darwin_acl_output(target)
+        assert "@" in mode_field
+        assert "allow read" in acl_text
+        assert file_permissions.darwin_acl_confidentiality_error(target) == (
+            "extended ACL grants additional read access"
+        )
+        assert file_permissions.darwin_acl_write_error(directory) == (
+            "extended ACL grants additional write access"
+        )
+    finally:
+        subprocess.run(["/bin/chmod", "-N", os.fspath(target)], check=False)
+        subprocess.run(["/bin/chmod", "-N", os.fspath(directory)], check=False)
+        subprocess.run(
+            ["/usr/bin/xattr", "-d", "com.defenseclaw.test", os.fspath(target)],
+            check=False,
+        )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Darwin repair uses the POSIX file-mode branch")

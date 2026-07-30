@@ -129,6 +129,55 @@ def test_open_regular_file_no_follow_requests_binary_mode(monkeypatch, tmp_path)
     assert observed_flags[0] & binary_flag
 
 
+def test_read_regular_file_no_follow_rejects_same_object_overwrite(monkeypatch, tmp_path):
+    if os.name == "nt":
+        pytest.skip("Windows denies retained writers with a native share-mode lease")
+    target = tmp_path / "mutable"
+    target.write_bytes(b"a" * (128 * 1024))
+    mutator = target.open("r+b", buffering=0)
+    real_read = os.read
+    mutated = False
+
+    def read_then_mutate(fd, size):
+        nonlocal mutated
+        chunk = real_read(fd, size)
+        if not mutated:
+            mutated = True
+            mutator.seek(0)
+            mutator.write(b"b" * (128 * 1024))
+            mutator.flush()
+            os.fsync(mutator.fileno())
+        return chunk
+
+    monkeypatch.setattr(file_permissions.os, "read", read_then_mutate)
+    try:
+        with pytest.raises(file_permissions.UnsafePathError, match="changed while reading"):
+            file_permissions.read_regular_file_no_follow(target, max_bytes=128 * 1024)
+    finally:
+        mutator.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows share-mode regression")
+def test_read_regular_file_no_follow_rejects_retained_windows_writer(tmp_path):
+    target = tmp_path / "mutable"
+    original = b"same-length-original"
+    replacement = b"same-length-mutated!"
+    assert len(original) == len(replacement)
+    target.write_bytes(original)
+
+    writer = target.open("r+b", buffering=0)
+    try:
+        writer.write(replacement)
+        writer.flush()
+        os.fsync(writer.fileno())
+        with pytest.raises(OSError):
+            file_permissions.read_regular_file_no_follow(target, max_bytes=1024)
+    finally:
+        writer.close()
+
+    assert file_permissions.read_regular_file_no_follow(target, max_bytes=1024) == replacement
+
+
 @pytest.mark.parametrize(("_name", "module", "write"), _ATOMIC_WRITERS)
 @pytest.mark.parametrize("failure_stage", ["permission", "serialize", "replace"])
 def test_atomic_writers_close_and_remove_staging_file_on_failure(

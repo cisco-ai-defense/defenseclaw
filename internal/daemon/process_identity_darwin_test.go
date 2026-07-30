@@ -11,7 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestDarwinProcessInspectionUsesFixedBinaryAndMinimalEnvironment(t *testing.T) {
@@ -49,6 +52,57 @@ func TestDarwinProcessInspectionCommandHonorsCancellation(t *testing.T) {
 	err := darwinProcessInspectionCommand(ctx, os.Getpid()).Run()
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled process-inspection command error = %v, want context.Canceled", err)
+	}
+}
+
+func TestDarwinOriginMainStartIdentityRemainsVerifiable(t *testing.T) {
+	legacyIdentity, err := darwinLegacyProcessStartIdentity(os.Getpid())
+	if err != nil {
+		t.Fatalf("read origin/main start identity: %v", err)
+	}
+	info := pidInfo{
+		PID:           os.Getpid(),
+		StartIdentity: legacyIdentity,
+	}
+	if !New(t.TempDir()).verifyStartIdentity(info) {
+		t.Fatalf("origin/main `ps -o lstart=` identity %q was not accepted", legacyIdentity)
+	}
+}
+
+func TestDarwinLocalizedOriginMainIdentityUsesBoundedLaunchGeneration(t *testing.T) {
+	nativeIdentity, err := darwinProcessStartIdentity(os.Getpid())
+	if err != nil {
+		t.Fatalf("read native start identity: %v", err)
+	}
+	secondsText, _, ok := strings.Cut(nativeIdentity, ".")
+	if !ok {
+		t.Fatalf("native identity = %q, want seconds.microseconds", nativeIdentity)
+	}
+	startedAt, err := strconv.ParseInt(secondsText, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := pidInfo{
+		PID:           os.Getpid(),
+		Executable:    executable,
+		StartTime:     startedAt,
+		StartIdentity: "localized identity that cannot be reproduced after upgrade",
+	}
+	d := New(t.TempDir())
+	if d.verifyProcess(info) {
+		t.Fatal("localized identity unexpectedly passed the general verifier")
+	}
+	if !d.verifyProcessForAuthenticatedMigration(info) {
+		t.Fatal("bounded origin/main launch generation did not qualify for authenticated migration")
+	}
+
+	info.StartTime = startedAt - int64(childPIDRegistrationTimeout/time.Second) - 1
+	if d.verifyProcessForAuthenticatedMigration(info) {
+		t.Fatal("out-of-window launch generation qualified for authenticated migration")
 	}
 }
 

@@ -24,7 +24,12 @@ func openRegularRead(path string) (*os.File, error) {
 	handle, err := windows.CreateFile(
 		pathPtr,
 		windows.GENERIC_READ,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		// Deny write sharing for the lifetime of the read. NTFS may defer
+		// LastWriteTime updates until the final writer closes, so metadata
+		// snapshots alone cannot detect an equal-length overwrite through a
+		// writer handle that was already open. Delete sharing remains enabled;
+		// the post-read pathname identity check rejects replacement.
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE,
 		nil,
 		windows.OPEN_EXISTING,
 		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,

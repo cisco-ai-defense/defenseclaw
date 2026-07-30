@@ -363,7 +363,13 @@ func (exporter *MetricExporter) Export(ctx context.Context, metrics *metricdata.
 	case delivery.CircuitAdmissionBlocked:
 		exporter.counters.circuitRejectedBatches.Add(1)
 		unlock()
-		return newError(ErrorExport, nil)
+		// The circuit health snapshot and rejection counter remain the
+		// authoritative failure signal. Returning an error here would make the
+		// SDK PeriodicReader invoke the global OTel error handler on every
+		// collection interval while the circuit is open (24 hours for an
+		// authentication failure), producing an unbounded log loop even though
+		// no export work is attempted.
+		return nil
 	case delivery.CircuitAdmissionProbe:
 		probePending = true
 		exporter.setHealth(delivery.HealthDegraded, delivery.HealthReasonCircuitHalfOpen)
