@@ -182,6 +182,9 @@ cp packaging/macos/uninstall.sh                     "${BUNDLE_DIR}/uninstall.sh"
 cp packaging/macos/lib/installer_lib.sh             "${BUNDLE_DIR}/lib/installer_lib.sh"
 cp packaging/macos/lib/scrub_agent_configs.py       "${BUNDLE_DIR}/lib/scrub_agent_configs.py"
 cp packaging/macos/lib/render-targets.sh            "${BUNDLE_DIR}/lib/render-targets.sh"
+cp LICENSE                                           "${BUNDLE_DIR}/LICENSE"
+cp NOTICE                                            "${BUNDLE_DIR}/NOTICE"
+cp THIRD_PARTY_LICENSES.txt                          "${BUNDLE_DIR}/THIRD_PARTY_LICENSES.txt"
 cp packaging/launchd/com.cisco.secureclient.defenseclaw.plist \
     "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.plist"
 cp packaging/launchd/com.cisco.secureclient.defenseclaw.hook-guardian.plist \
@@ -194,6 +197,8 @@ chmod 0755 "${BUNDLE_DIR}/lib/render-targets.sh"
 chmod 0644 "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.plist"
 chmod 0644 "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
 chmod 0644 "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
+chmod 0644 "${BUNDLE_DIR}/LICENSE" "${BUNDLE_DIR}/NOTICE" \
+  "${BUNDLE_DIR}/THIRD_PARTY_LICENSES.txt"
 
 # ---- README -------------------------------------------------------------
 
