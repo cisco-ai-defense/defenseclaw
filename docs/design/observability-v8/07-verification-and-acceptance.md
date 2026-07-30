@@ -1,5 +1,10 @@
 # Verification and Acceptance
 
+> **Status:** Implemented observability-v8 acceptance contract. The cited
+> tests and repository gates are executable evidence; operator workflows live
+> on the
+> [published observability site](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/).
+
 ## 1. Verification Strategy
 
 The implementation is accepted only when behavior is demonstrated at five levels:

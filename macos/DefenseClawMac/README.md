@@ -24,7 +24,7 @@ Native SwiftUI companion app for [Cisco DefenseClaw](https://github.com/cisco-ai
 
 ## Release package
 
-Every DefenseClaw release builds two Apple Silicon artifacts:
+The DefenseClaw release workflow can produce two Apple Silicon artifacts:
 
 - `DefenseClawMac-<version>-macos-arm64[-unverified].dmg` — the recommended unified installer. Mount it, drag `DefenseClawMac.app` to `/Applications`, launch it, then select **Install DefenseClaw Runtime** on first run.
 - `DefenseClawMac-<version>-macos-arm64[-unverified].zip` — the smaller app-only artifact. Only the verified form without `-unverified` is eligible for in-app self-update; it does not replace or reinstall the independently updating runtime.

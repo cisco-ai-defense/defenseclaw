@@ -1,5 +1,12 @@
 # Sandbox Productization Plan
 
+> **Status: historical productization plan.** Completion language, manual-step
+> inventory, filenames, versions, and future work below record the planning
+> state, not the current product. The sandbox remains explicitly experimental
+> and Linux-only in `cli/defenseclaw/commands/cmd_sandbox.py`; use the
+> [published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/)
+> for current setup.
+
 ## Overview
 
 This document covers everything required to ship DefenseClaw's OpenShell

@@ -435,7 +435,11 @@ def test_mac_app_runtime_update_exposes_only_runnable_authenticated_command() ->
     assert "copy the authenticated resolver command" in app_state
     assert "defenseclaw-upgrade.sh" in settings
     assert "checksums" in settings
-    assert "docs/CLI.md#upgrade" in settings
+    assert (
+        "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/"
+        in settings
+    )
+    assert "docs/CLI.md#upgrade" not in settings
     assert "scripts/upgrade.sh resolver" not in app_state
     assert "scripts/upgrade.sh resolver" not in settings
     resolver_source = _source()

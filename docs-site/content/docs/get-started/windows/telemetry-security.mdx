@@ -68,7 +68,8 @@ is `none`. Therefore:
 Treat the data directory and any audit export as sensitive user data. Configure
 and verify [redaction profiles](/docs/reference/redaction) before routing
 records to another system. `defenseclaw config show` masks secret values by
-default; do not add `--reveal` to diagnostic output.
+default. Configuration v8 rejects `config show --reveal`; do not rely on that
+legacy flag in diagnostic workflows.
 
 The gateway records authentication and delivery failures without putting raw
 scoped credentials into route names or operational telemetry. That does not
@@ -135,23 +136,30 @@ ownership requirements this guide does not certify.
 
 ## Release and installer trust
 
-A production native Windows release requires:
+The current `0.8.10` Windows release trust chain is:
 
-1. release checksum and Sigstore provenance validation;
-2. the exact Setup SHA-256 named by the release metadata;
-3. a valid Authenticode signature from `Cisco Systems, Inc.` on Setup;
-4. signed and verified inner product executables; and
-5. release-pipeline certification of that exact signed Setup with pinned real
-   Codex and Claude Code versions.
+1. verify the release's checksum set against its Sigstore certificate and
+   release-workflow identity;
+2. require the Setup SHA-256 named by that authenticated checksum set;
+3. require the authenticated provenance to describe the same artifact and
+   signing state; and
+4. verify that Windows observes the matching Authenticode state.
 
-Pull-request and local Setup artifacts are unsigned test builds. Passing the
-deterministic PR suite proves code and lifecycle behavior, not production
-publisher identity. The release pipeline separately signs and certifies the
-exact artifact it publishes.
+For `0.8.10`, the authenticated provenance says `unsigned: true` and
+`product_executables_authenticode_signed: false`; Windows observes the outer
+Setup as `NotSigned`. The release bytes are therefore authenticated by the
+Sigstore-signed checksum set, **not** by an Authenticode publisher. Do not
+expect or claim a `Cisco Systems, Inc.` Digital Signatures entry.
 
-The native upgrader refuses a missing or invalid signature, digest, provenance,
-publisher, or Windows source baseline. Its verification bypass is not supported
-for native Windows. See [Install and maintain](/docs/get-started/windows/install-lifecycle#upgrade-and-release-eligibility).
+Local and pull-request artifacts do not carry authenticated production release
+provenance. Passing their deterministic suites proves code and lifecycle
+behavior, not that they are a published release artifact.
+
+The native upgrader refuses a missing or invalid authenticated checksum set,
+digest, provenance, a mismatch between recorded and observed Authenticode
+state, or an unauthorized Windows source baseline. Its verification bypass is
+not supported for native Windows. See
+[Install and maintain](/docs/get-started/windows/install-lifecycle#upgrade-and-release-eligibility).
 
 ## Ownership and filesystem boundary
 
@@ -187,7 +195,7 @@ connector homes as separate supported identities.
 
 | Boundary | Proven behavior |
 | --- | --- |
-| Setup verification | Invalid architecture, launch identity, signature, payload, path, ownership, or prior state refuses before live mutation where possible. |
+| Setup verification | Invalid architecture, launch identity, authenticated digest/provenance, recorded-versus-observed Authenticode state, payload, path, ownership, or prior state refuses before live mutation where possible. |
 | Setup transaction | Pre-commit failure rolls back owned changes; ambiguous or committed phases retain a journal and require safe recovery/convergence. |
 | Hook delivery/response | Effective `closed` blocks supported events for transport and malformed/unauthorized response failures. |
 | Managed enterprise hook | The narrow administrator-managed Claude Code path fails closed when protected policy identity is invalid. |

@@ -19,7 +19,7 @@ guardrail is misconfigured.
 ### Install
 
 ```bash
-VERSION=0.8.6
+VERSION=0.8.10
 INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
 curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector claudecode
 ```
@@ -51,8 +51,9 @@ defenseclaw tui
 Or take a scripted snapshot from mandatory SQLite event history:
 
 ```bash
-defenseclaw-gateway audit export --limit 200 --output - \
-  | jq 'select(.connector == "claudecode")'
+defenseclaw-gateway audit export --output - \
+  | jq -c 'select(.connector == "claudecode")' \
+  | tail -n 200
 ```
 
 In Claude Code, ask the assistant to run any tool call (e.g. "list files in this directory"). New rows should appear within a second or two. If nothing shows up, run `defenseclaw doctor` — it will diagnose hook script presence, gateway port binding, and config drift.
@@ -109,8 +110,9 @@ Use `defenseclaw alerts --show 1` for the full record (rule path, scanner,
 evidence). For a scriptable SQLite snapshot filtered to high-severity rows:
 
 ```bash
-defenseclaw-gateway audit export --limit 200 --output - \
-  | jq 'select(.connector == "claudecode" and (.severity == "HIGH" or .severity == "CRITICAL"))'
+defenseclaw-gateway audit export --output - \
+  | jq -c 'select(.connector == "claudecode" and (.severity == "HIGH" or .severity == "CRITICAL"))' \
+  | tail -n 200
 ```
 
 </Step>

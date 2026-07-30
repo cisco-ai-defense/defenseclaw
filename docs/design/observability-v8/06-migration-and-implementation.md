@@ -1,8 +1,13 @@
 # Migration and Implementation Plan
 
+> **Status:** Implemented observability-v8 design record. This file preserves
+> the migration plan and accepted implementation contract; source and cited
+> tests are executable authority. Operator upgrades live on the
+> [published upgrade site](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/).
+
 ## 1. Current-State Baseline
 
-The implementation begins from these v7 realities:
+The implementation began from these v7 realities:
 
 - `gatewaylog.Writer` emits a structured gateway JSONL envelope, pretty console
   output, and fan-out callbacks.

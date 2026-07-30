@@ -1,5 +1,10 @@
 # Agent Lifecycle and Local-Observability Compatibility Contract
 
+> **Status:** Implemented observability-v8 compatibility contract. Dashboard
+> JSON, telemetry source, and cited tests are executable authority; dashboard
+> use is documented on the
+> [published Grafana site](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/grafana-dashboards/).
+
 ## 1. Purpose and Baseline
 
 This document prevents the v8 observability simplification from regressing the

@@ -1,5 +1,13 @@
 # OpenShell Standalone Sandbox — Design Document
 
+> **Status: historical design basis for the experimental Linux-only sandbox.**
+> Current implementation authority is `internal/sandbox/`,
+> `cli/defenseclaw/commands/cmd_*sandbox.py`, and their tests. Current operator
+> guidance is the
+> [published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/).
+> Underlying OpenShell implementation details and version-specific claims below
+> must not be treated as current without re-verifying upstream.
+
 ## Overview
 
 This document describes how DefenseClaw integrates with `openshell-sandbox`

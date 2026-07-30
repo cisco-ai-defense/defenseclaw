@@ -1,8 +1,14 @@
 # Architecture and Requirements
 
+> **Status:** Implemented observability-v8 design contract. The authored
+> schemas, generated artifacts, source, and cited tests are executable
+> authority; operator workflows live on the
+> [published observability site](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/).
+
 ## 1. Problem
 
-DefenseClaw currently has multiple partially independent observability paths:
+At the start of this design, DefenseClaw had multiple partially independent
+observability paths:
 
 - Gateway JSONL events and console rendering.
 - SQLite audit events and normalized audit tables.

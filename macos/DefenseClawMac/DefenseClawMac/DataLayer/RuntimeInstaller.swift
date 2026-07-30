@@ -889,7 +889,7 @@ extension AppState {
             return """
             Bundled runtime installation is fresh-install-only. An existing or partial DefenseClaw runtime was detected at \(marker).
 
-            No installed files or services were changed. The bundled release identifier is not canonical, so no copy/paste upgrade command was produced. Use the authenticated resolver instructions at https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade.
+            No installed files or services were changed. The bundled release identifier is not canonical, so no copy/paste upgrade command was produced. Use the authenticated resolver instructions at https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/.
             """
         }
         return """

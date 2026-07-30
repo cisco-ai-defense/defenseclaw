@@ -1,5 +1,10 @@
 # Sandbox Security Analysis
 
+> **Status: historical design-time analysis.** This document is retained as
+> threat-model input, not as certification of the current sandbox or upstream
+> OpenShell. Revalidate every control against the current code and upstream
+> version before relying on it.
+
 ## Purpose
 
 This document analyzes the security implications of integrating DefenseClaw

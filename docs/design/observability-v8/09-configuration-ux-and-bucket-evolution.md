@@ -1,5 +1,10 @@
 # Configuration UX and Bucket Evolution
 
+> **Status:** Implemented observability-v8 design contract. The configuration
+> schema, compiler, generated reference, and cited tests are executable
+> authority; operator configuration lives on the
+> [published configuration site](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/).
+
 ## 1. Design Position
 
 `config.yaml` remains the central authority, but it must not become a mandatory

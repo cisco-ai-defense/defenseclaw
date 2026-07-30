@@ -1,5 +1,10 @@
 # Rich Trace and Span Contract
 
+> **Status:** Implemented observability-v8 design contract. The telemetry
+> registry, generated builders, runtime source, and cited tests are executable
+> authority; operator behavior lives on the
+> [published observability site](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/).
+
 ## 1. Purpose
 
 This contract defines the v8 trace graph, span families, attributes, events, links,

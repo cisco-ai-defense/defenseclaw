@@ -1,6 +1,12 @@
 # CLI UX Overhaul — First-Run Quickstart, Credential Registry, Lifecycle Commands
 
-**Status:** Accepted, shipping in the `feat/cli-ux-quickstart` stack
+> **Status: historical accepted design.** Branch names, baseline behavior,
+> commands, and rollout assertions below describe the original implementation
+> stack. Current commands and workflows are maintained in the
+> [published CLI reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/cli/)
+> and current Click tests.
+
+**Original status:** Accepted, shipping in the `feat/cli-ux-quickstart` stack
 **Author:** DefenseClaw platform team
 **Target base:** `feat/tui-help-text-and-concurrency-hardening`
 **Related work:** P3-#21 (Overview Doctor cache), TUI ↔ CLI parity gate,

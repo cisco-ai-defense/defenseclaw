@@ -1892,7 +1892,7 @@ if existing_install_detected && ! interrupted_install_attempt_detected; then
   Use the authenticated release-owned upgrade resolver from the target release in latest mode:
     bash defenseclaw-upgrade.sh --yes
   Do not pass --version. Download and verify the resolver with its signed checksums:
-    https://github.com/${REPO}/blob/main/docs/CLI.md#upgrade"
+    https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/"
 fi
 
 detect_platform
@@ -1938,7 +1938,7 @@ if existing_install_detected; then
   Use the authenticated release-owned upgrade resolver from the target release in latest mode:
     bash defenseclaw-upgrade.sh --yes
   Do not pass --version. Download and verify the resolver with its signed checksums:
-    https://github.com/${REPO}/blob/main/docs/CLI.md#upgrade"
+    https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/"
 fi
 
 if [[ "${MODERN_RELEASE:-false}" == true ]]; then

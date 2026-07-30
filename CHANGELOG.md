@@ -1,8 +1,12 @@
 # DefenseClaw Changelog
 
-All notable changes to this project are documented here. The format
-follows [Keep a Changelog](https://keepachangelog.com) and the
-project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+This file preserves development rollups and historical change notes. It is not
+a complete published-release index: the release workflow stamps isolated build
+checkouts, so repository source metadata and headings can lag published tags.
+Use [GitHub Releases](https://github.com/cisco-ai-defense/defenseclaw/releases)
+for released versions and assets, and the
+[documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
+for current behavior.
 
 ## [Unreleased] — Hook collector unification
 

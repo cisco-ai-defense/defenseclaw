@@ -1,5 +1,11 @@
 # DefenseClaw Observability v8 — Codex Execution Manifest
 
+> **Status: completed implementation record.** The commit hashes and execution
+> phases below record the v8 delivery effort. Current runtime authority is the
+> authored schema/registry set under `schemas/`, generated parity checks, and
+> implementation tests; current operator guidance is the
+> [published observability documentation](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/).
+
 ```yaml
 spec_status: implemented-and-verified
 goal_status: complete

@@ -1,6 +1,6 @@
 {
-  "_source": "Hand-curated from internal/gateway/connector hook profiles plus cli/defenseclaw/inventory/hook_contracts.json. Re-extract on every connector or hook-contract change.",
-  "_lastVerified": "2026-07-01",
+  "_source": "Hand-curated from internal/gateway/connector setup paths and hook profiles plus cli/defenseclaw/inventory/hook_contracts.json. Re-extract on every connector or hook-contract change.",
+  "_lastVerified": "2026-07-29",
   "_order": "By adoption / popularity — mirrors the hero rotation (lib/hero-connectors.ts) and the docs nav (content/docs/connectors/meta.json).",
   "connectors": [
     {
@@ -9,7 +9,7 @@
       "summary": "Native lifecycle hooks, native approval, and OpenTelemetry export.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
-      "subprocessPolicy": "sandbox",
+      "subprocessPolicy": "none",
       "hooks": {
         "canBlock": true,
         "canAskNative": true,
@@ -19,7 +19,7 @@
         "scope": "user"
       },
       "hilt": "Claude Code supports native PreToolUse ask prompts. CRITICAL findings still block; HIGH findings can pause for approval.",
-      "notes": "Hook-only connector — no proxy data path. Observability and PreToolUse deny decisions both flow through the hook bus."
+      "notes": "Hook-only connector — no proxy data path and no DefenseClaw subprocess sandbox or command shims. Observability and PreToolUse deny decisions both flow through the hook bus."
     },
     {
       "id": "codex",
@@ -27,7 +27,7 @@
       "summary": "Config hooks, native OpenTelemetry, and an agent-turn completion bridge.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
-      "subprocessPolicy": "sandbox",
+      "subprocessPolicy": "none",
       "hooks": {
         "canBlock": true,
         "canAskNative": false,
@@ -37,7 +37,7 @@
         "scope": "user"
       },
       "hilt": "Codex has no native ask surface here; confirm becomes an alert/systemMessage with raw_action preserved. The TUI can review the event but cannot resume it.",
-      "notes": "Three telemetry channels at boot: hooks, native OTel, and the notify bridge for agent-turn-complete events. Hook-only connector — no proxy data path."
+      "notes": "Three telemetry channels at boot: hooks, native OTel, and the notify bridge for agent-turn-complete events. Hook-only connector — no proxy data path and no DefenseClaw subprocess sandbox or command shims."
     },
     {
       "id": "openclaw",
@@ -207,13 +207,13 @@
       "hooks": {
         "canBlock": true,
         "canAskNative": true,
-        "askEvents": ["PreToolUse"],
-        "blockEvents": ["PreToolUse"],
+        "askEvents": ["PreInvocation", "PreToolUse"],
+        "blockEvents": ["PreInvocation", "PreToolUse", "Stop"],
         "supportsFailClosed": false,
         "scope": "user"
       },
       "hilt": "Antigravity has an empirically verified native ask on PreToolUse. Returning decision=ask there overrides agy's --dangerously-skip-permissions flag; force_ask is retained only as internal raw_action telemetry.",
-      "notes": "DefenseClaw registers the full Antigravity 2.0 lifecycle (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) as separate owned keys in ~/.gemini/config/hooks.json. Only PreToolUse is currently advertised as block/ask-capable because it is empirically verified on agy v1.0.1; the other four registrations remain telemetry/spec-parity surfaces until upstream behavior is verified. MCP read/write uses ~/.gemini/config/mcp_config.json and <workspace>/.agents/mcp_config.json. AgentSkills folder form is read/write at ~/.gemini/config/skills and <workspace>/.agents/skills. Plugins install to ~/.gemini/config/plugins or <workspace>/.agents/plugins; the CLI staging path is also discovered. CLI direct markdown skills, rules, and plugin-contained agents remain discovery/scan only."
+      "notes": "DefenseClaw's default v2 contract registers the full Antigravity lifecycle (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) as separate owned keys in ~/.gemini/config/hooks.json. It advertises native ask on PreInvocation and PreToolUse, and block on PreInvocation, PreToolUse, and Stop. Only PreToolUse is empirically verified on agy v1.0.1; the other four registrations and their verdict branches remain spec-conformant surfaces gated on upstream implementation parity. MCP read/write uses ~/.gemini/config/mcp_config.json and <workspace>/.agents/mcp_config.json. AgentSkills folder form is read/write at ~/.gemini/config/skills and <workspace>/.agents/skills. Plugins install to ~/.gemini/config/plugins or <workspace>/.agents/plugins; the CLI staging path is also discovered. CLI direct markdown skills, rules, and plugin-contained agents remain discovery/scan only."
     },
     {
       "id": "windsurf",

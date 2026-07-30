@@ -27,32 +27,20 @@ from pathlib import Path
 import pytest
 from defenseclaw import install_publish
 
-from scripts import release_candidate
-
 ROOT = Path(__file__).resolve().parents[2]
+# Checked-in source fixtures intentionally retain the unstamped development
+# identity. Published documentation is allowed to advance independently.
 CURRENT_RELEASE = "0.8.6"
-STALE_RELEASES = ("0.8.0", "0.8.1", "0.8.2", "0.8.3", "0.8.4", "0.8.5")
-RELEASE_DOC_EXAMPLE_VERSION = ".".join(
-    str(component) for component in release_candidate.RELEASE_CHANNEL_BOOTSTRAP_START_VERSION
-)
+CURRENT_PUBLISHED_RELEASE = "0.8.10"
+STALE_PUBLISHED_RELEASES = tuple(f"0.8.{patch}" for patch in range(10))
 
-BASH_INSTALL_LINES = (
-    f"VERSION={CURRENT_RELEASE}",
+PUBLISHED_BASH_INSTALL_LINES = (
+    f"VERSION={CURRENT_PUBLISHED_RELEASE}",
     'INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"',
     'curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash',
 )
 DOC_INSTALL_COMMANDS = {
-    "README.md": BASH_INSTALL_LINES,
-    "docs/QUICKSTART.md": BASH_INSTALL_LINES,
-    "docs/INSTALL.md": BASH_INSTALL_LINES
-    + (
-        'curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector codex',
-        'curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector claudecode',
-        'curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector zeptoclaw',
-        'curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector none',
-        'curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --no-openclaw',
-    ),
-    "docs-site/content/docs/get-started/install.mdx": BASH_INSTALL_LINES
+    "docs-site/content/docs/get-started/install.mdx": PUBLISHED_BASH_INSTALL_LINES
     + (
         ".\\DefenseClawSetup-x64.exe",
         ".\\DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1",
@@ -60,18 +48,14 @@ DOC_INSTALL_COMMANDS = {
         "PowerShell installation command.",
     ),
     "docs-site/content/docs/get-started/first-guardrail.mdx": (
-        f"VERSION={CURRENT_RELEASE}",
+        f"VERSION={CURRENT_PUBLISHED_RELEASE}",
         'INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"',
         'curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector claudecode',
     ),
     "docs-site/components/terminal-demo.tsx": (
-        f"const INSTALL_VERSION = '{CURRENT_RELEASE}';",
+        f"const INSTALL_VERSION = '{CURRENT_PUBLISHED_RELEASE}';",
         "text: `curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${INSTALL_VERSION}/scripts/install.sh | VERSION=${INSTALL_VERSION} bash`,",
     ),
-}
-RELEASE_INSTALL_COMMANDS = {
-    **DOC_INSTALL_COMMANDS,
-    "scripts/install.sh": BASH_INSTALL_LINES,
 }
 
 INSTALLER_FILES = (
@@ -1767,42 +1751,97 @@ def test_failed_gateway_install_does_not_claim_source_ownership(tmp_path: Path) 
 
 
 def test_source_install_docs_are_developer_only_and_point_existing_hosts_to_resolver() -> None:
-    for rel in ("README.md", "docs/INSTALL.md"):
-        text = (ROOT / rel).read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
+
+    for text in (readme, install):
         normalized = " ".join(text.split())
-        assert "development tooling" in text or "developer builds" in text
-        assert "not an alternate upgrade mechanism" in normalized or "not an upgrade path" in normalized
-        assert "release-owned" in text
+        assert "development tooling" in normalized or "contributor tooling" in normalized
+        assert "not an alternate upgrade mechanism" in normalized or "not an installation or upgrade path" in normalized
+        assert "release-owned" in normalized.lower()
         assert "`scripts/upgrade.sh`" in text
+        assert "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/" in text
+
+    assert "source of truth for installation" in readme
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "`scripts/upgrade.ps1`" in readme
-    install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
-    assert "does not claim an upgrade" in install
+    assert "do not claim an upgrade" in " ".join(install.split())
 
 
 def test_public_operator_docs_never_advertise_direct_defenseclaw_package_install() -> None:
-    paths = (
+    paths = {
         "README.md",
         "docs/CLI.md",
         "docs/INSTALL.md",
         "docs/OBSERVABILITY.md",
-        "docs-site/content/docs/get-started/install.mdx",
-        "docs-site/content/docs/get-started/upgrade.mdx",
-        "docs-site/content/docs/reference/cli.mdx",
-    )
+        *(
+            path.relative_to(ROOT).as_posix()
+            for path in (ROOT / "docs-site/content/docs").rglob("*.mdx")
+        ),
+    }
     package_install = re.compile(
         r"\b(?:pipx|pip|uv\s+pip|uv\s+tool)\s+install\b[^\n`]*"
         r"\bdefenseclaw(?:\[|==|@|\s|['\"]|$)",
         re.IGNORECASE,
     )
-    for rel in paths:
+    scanner_install = re.compile(
+        r"\b(?:pipx|pip|uv\s+pip|uv\s+tool)\s+install\b[^\n`]*"
+        r"\b(?:cisco-ai-(?:skill|mcp)-scanner|skill-scanner|mcp-scanner)"
+        r"(?:==|@|\s|['\"]|$)",
+        re.IGNORECASE,
+    )
+    for rel in sorted(paths):
         text = (ROOT / rel).read_text(encoding="utf-8")
         assert "uv pip install -e ." not in text
         assert package_install.search(text) is None, rel
+        assert scanner_install.search(text) is None, rel
 
     cli = (ROOT / "docs/CLI.md").read_text(encoding="utf-8")
-    assert "only in an isolated contributor checkout" in cli
-    assert "Do not point raw `pip`, `uv`, editable-install" in cli
+    assert "published CLI reference" in cli
+    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/cli/" in cli
+
+
+def test_repository_operator_pointers_delegate_to_the_canonical_website() -> None:
+    expected = {
+        "docs/API.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/gateway-api/",
+        "docs/CLI.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/cli/",
+        "docs/CONFIG_FILES.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/",
+        "docs/CONNECTOR-MATRIX.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/compatibility/",
+        "docs/ENV-VARS.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/env-vars/",
+        "docs/INSTALL.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/install/",
+        "docs/QUICKSTART.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/quickstart/",
+        "docs/REGISTRIES.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/setup/registries/",
+        "docs/SPLUNK_APP.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/observability/splunk/",
+    }
+    for rel, canonical_url in expected.items():
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        normalized = " ".join(text.split()).lower()
+        assert canonical_url in text, rel
+        assert "website" in normalized or "published" in normalized, rel
+        assert len(text.splitlines()) <= 40, f"{rel} grew beyond a stable pointer page"
+
+
+def test_scanner_recovery_docs_match_dependency_and_registry_contracts() -> None:
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    mcp_docs = (ROOT / "docs-site/content/docs/setup/mcp-scanner.mdx").read_text(
+        encoding="utf-8"
+    )
+    registry_docs = (
+        ROOT / "docs-site/content/docs/setup/registries.mdx"
+    ).read_text(encoding="utf-8")
+    llm_source = (ROOT / "cli/defenseclaw/llm.py").read_text(encoding="utf-8")
+    mcp_source = (ROOT / "cli/defenseclaw/scanner/mcp.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "python_version>='3.11'" in pyproject
+    assert "including a POSIX release install" in mcp_docs
+    assert "Use Python 3.11 or newer" in mcp_docs
+    assert "affected skill scans fail" in registry_docs
+    assert "marked `error`" in registry_docs
+    assert "MCP entries" in registry_docs and "remain `pending`" in registry_docs
+    assert "cli extra" not in llm_source
+    assert "mcp-scan extra" not in mcp_source
 
 
 def test_quickstart_docs_do_not_pipe_main_installer() -> None:
@@ -1816,9 +1855,10 @@ def test_quickstart_docs_do_not_pipe_main_installer() -> None:
 
 def test_release_docs_use_one_dispatch_and_never_precreate_tag() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
-    install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
+    runbook = (ROOT / "docs/RELEASE_RUNBOOK.md").read_text(encoding="utf-8")
+    validation = (ROOT / "docs/RELEASE_VALIDATION.md").read_text(encoding="utf-8")
 
-    for text in (makefile, install):
+    for text in (makefile, runbook, validation):
         assert "gh workflow run release.yaml" in text
         assert "--repo cisco-ai-defense/defenseclaw" in text
         assert "--ref main" in text
@@ -1829,55 +1869,37 @@ def test_release_docs_use_one_dispatch_and_never_precreate_tag() -> None:
         assert "-f operation=certify" not in text
         assert "git tag 0.4.0" not in text
         assert "git push origin" not in text
-    assert "-f operation=release" in install
-    assert f"-f version={RELEASE_DOC_EXAMPLE_VERSION}" in install
-    assert "operation: release" in install
-    assert f"version: {RELEASE_DOC_EXAMPLE_VERSION}" in install
-    assert "Selecting **main**, the operation, and the version is the whole release" in install
-    assert "automatically freezes the run's exact `github.sha`" in install
-    normalized = " ".join(install.split())
-    assert "operators do not copy a commit SHA or confirm repository settings" in normalized
-    assert r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$" in install
-    assert "Do not create or push the tag yourself" in install
-    assert "One dispatch from a reviewed `main` commit" in normalized
-    assert "tests those exact candidate bytes, and publishes them" in normalized
-    assert "A merge to `main` is the review-and-CI boundary" in normalized
-    assert "certification receipt" not in normalized
+    assert "automatically freezes the dispatch's exact `github.sha`" in runbook
+    assert "freezes the event's exact `github.sha`" in validation
+    assert "operators do not copy a commit SHA" in validation
+    assert "Do not create or push the tag" in runbook
+    assert "Do not create or push the tag" in validation
+    assert "review-and-CI boundary" in validation
 
 
 def test_upgrade_docs_fail_closed_for_unsupported_sources_without_inferred_hops() -> None:
-    install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
-    cli = (ROOT / "docs/CLI.md").read_text(encoding="utf-8")
-    guardrail = (ROOT / "docs/GUARDRAIL.md").read_text(encoding="utf-8")
+    site = (ROOT / "docs-site/content/docs/get-started/upgrade.mdx").read_text(encoding="utf-8")
 
-    for text in (install, cli, guardrail):
-        assert "remain on the current version" in text.lower()
-        assert "contact support" in text.lower()
-    assert "newest authenticated `0.7.x`, `0.6.x`, and `0.5.x`" in install
-    assert "Sources outside the signed published-baseline policy" in install
-    assert "first native Windows release" in install
-    assert "does not claim an upgrade" in install
-    assert "no Windows hard-cut path is published" in cli
-    assert "Explicitly upgrade to `0.8.4`" not in cli
-    assert "reach tested baseline `0.4.0`" not in cli
-    assert "Upgrading from 0.2.0 to an artifact-backed release" not in install
-    assert "--version 0.4.0" not in install
+    assert "unsupported sources fail closed" in site
+    assert "`0.8.3`-or-older" in site
+    assert "current release-owned resolver" in site
+    assert "`0.8.4` bridge" in site
+    assert "without a target version" in site
+    assert "Explicitly upgrade to `0.8.4`" not in site
+    assert "reach tested baseline `0.4.0`" not in site
+    assert "--version 0.4.0" not in site
 
 
 def test_upgrade_docs_use_resolver_only_crash_recovery_without_manual_rollback() -> None:
-    install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
-    upgrade_start = install.index("## Upgrading")
-    troubleshooting_start = install.index("## Troubleshooting")
-    section = install[upgrade_start:troubleshooting_start]
+    site = (ROOT / "docs-site/content/docs/get-started/upgrade.mdx").read_text(encoding="utf-8")
+    failure_start = site.index("## Failure and rollback")
+    section = site[failure_start:]
 
-    assert "Re-run that same resolver in latest mode, without a version override" in section
-    assert "do not manually copy a backup over live state" in section
-    assert "./scripts/upgrade.sh --yes" in section
-    assert "first native Windows release is qualified as" in section
-    assert "does not claim an upgrade" in section
-    assert "upgrade.sh --version" not in section
-    assert "VERSION=0.3.0" not in section
-    assert "curl -sSfL" not in section
+    assert "retrying the same authenticated target-release resolver in latest mode" in section
+    assert "rollback outcome" in section
+    assert "upgrade.sh --version" not in site
+    assert "VERSION=0.3.0" not in site
+    assert "curl -sSfL" not in site
 
 
 def test_installed_user_upgrade_docs_require_authenticated_resolver_assets() -> None:
@@ -1886,52 +1908,34 @@ def test_installed_user_upgrade_docs_require_authenticated_resolver_assets() -> 
         authenticated_resolver_instructions,
     )
 
-    cli = (ROOT / "docs/CLI.md").read_text(encoding="utf-8")
     channel = (ROOT / "docs/RELEASE_CHANNEL.md").read_text(encoding="utf-8")
-    install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
-    quickstart = (ROOT / "docs/GUARDRAIL_QUICKSTART.md").read_text(encoding="utf-8")
     site = (ROOT / "docs-site/content/docs/get-started/upgrade.mdx").read_text(encoding="utf-8")
 
-    assert "defenseclaw upgrade --yes" in cli
-    assert "signed stable-channel record" in cli
-    assert "defenseclaw-rescue.sh" in cli
-    assert "/bin/sh ./defenseclaw-rescue.sh --yes" in cli
-    assert (
-        re.search(
-            r"(?m)^\s*(?:/usr/bin/env\s+)?(?:/bin/)?bash\b[^\n]*defenseclaw-rescue\.sh",
-            cli,
-        )
-        is None
-    )
+    assert "defenseclaw upgrade --yes" in site
     assert "--output ./defenseclaw-rescue.sh" in channel
     assert "refuses stdin or pipe execution" in channel
     assert "/bin/sh ./defenseclaw-rescue.sh --yes" in channel
     assert "bash defenseclaw-rescue.sh" not in channel
-    assert "/bin/sh ./defenseclaw-rescue.sh --yes --recover-corrupt-audit" in install
-    assert "bash defenseclaw-rescue.sh" not in install
-    assert "bash defenseclaw-upgrade.sh --yes --recover-corrupt-audit" not in install
+    assert "/bin/sh ./defenseclaw-rescue.sh --yes --recover-corrupt-audit" in channel
     assert "mutable pointer to immutable code" in channel
     assert "`release.yaml@main` Fulcio identity" in channel
     latest_assets = "releases/latest/download"
-    assert cli.count(latest_assets) == 1
-    assert re.search(r"releases/download/\d+\.\d+\.\d+/", cli) is None
-    assert f"releases/download/v{CURRENT_RELEASE}/" not in cli
-    assert "URL is only a locator" in " ".join(cli.split())
+    assert channel.count(latest_assets) == 1
+    assert re.search(r"releases/download/\d+\.\d+\.\d+/", channel) is None
+    assert f"releases/download/v{CURRENT_PUBLISHED_RELEASE}/" not in channel
+    assert "URL is only a locator" in " ".join(channel.split())
     generated = authenticated_resolver_instructions(CURRENT_RELEASE)
     assert WINDOWS_RESOLVER_BANNER in generated
     assert "Preflight refusal only" not in generated
     assert "unset VERSION" in generated
-    assert "does not require a source checkout" in quickstart
     assert "does not require a source checkout" in site
-    expected_reference = "https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade"
-    assert expected_reference in site
-    assert f"/blob/{CURRENT_RELEASE}/docs/CLI.md#upgrade" not in site
+    assert "/blob/main/docs/CLI.md#upgrade" not in site
+    assert f"/blob/{CURRENT_PUBLISHED_RELEASE}/docs/CLI.md#upgrade" not in site
     assert "/blob/v0.8.4/docs/CLI.md#upgrade" not in site
 
 
 def test_public_docs_never_direct_pre_bridge_clients_to_their_immutable_cli() -> None:
     paths = (
-        "docs/INSTALL.md",
         "docs-site/content/docs/get-started/install.mdx",
         "docs-site/content/docs/get-started/upgrade.mdx",
         "docs-site/content/docs/reference/cli.mdx",
@@ -1946,27 +1950,16 @@ def test_public_docs_never_direct_pre_bridge_clients_to_their_immutable_cli() ->
 
 
 def test_hard_cut_docs_require_target_resolver_for_frozen_controllers() -> None:
-    cli = (ROOT / "docs/CLI.md").read_text(encoding="utf-8")
-    install = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
     site = (ROOT / "docs-site/content/docs/get-started/upgrade.mdx").read_text(encoding="utf-8")
-    guardrail = (ROOT / "docs/GUARDRAIL.md").read_text(encoding="utf-8")
-    rendered = "\n".join((cli, install, site, guardrail))
+    rendered = site
 
-    assert "release-owned POSIX shell resolver performs the supported one-command path" in cli
-    assert "Every supported POSIX source uses the authenticated target-release resolver" in install
     assert "immutable `0.8.4` command cannot parse the truthful" in site
     assert "platform_tested_source_versions.windows: []" in site
-    assert "bash defenseclaw-upgrade.sh --yes" in install
     assert "bash defenseclaw-upgrade.sh --yes" in site
     assert "PowerShell resolver" in site and "refusal" in site
-    assert "first native Windows release" in install
-    assert "does not claim an upgrade" in install
-    assert "without `--version`" in cli
-    assert "Do not add `--version` to the resolver command" in install
     assert "without a target version" in site
-    assert "0.8.3` or older" in install
     assert "`0.8.3` or older" in site
-    assert rendered.count("obsolete raw") >= 3
+    assert "obsolete raw" in rendered
     assert "frozen built-in command remains usable" not in rendered
     assert "supports `0.8.4 → 0.8.5`" not in rendered
     assert "curl -fsSL https://raw.githubusercontent.com" not in rendered
@@ -1999,13 +1992,13 @@ def test_windows_bootstrap_binds_native_setup_to_authenticated_signed_outer_byte
     assert execute < main.index("} finally {") < cleanup
 
 
-def test_cli_docs_describe_authenticated_same_version_upgrade_recovery_exception() -> None:
-    cli = (ROOT / "docs/CLI.md").read_text(encoding="utf-8")
-    normalized = " ".join(cli.split())
+def test_release_channel_describes_authenticated_same_version_recovery_exception() -> None:
+    channel = (ROOT / "docs/RELEASE_CHANNEL.md").read_text(encoding="utf-8")
+    normalized = " ".join(channel.split())
 
-    assert "An authenticated same-version request is normally a no-op" in normalized
+    assert "For the two field-recovery cases" in normalized
     assert "--recover-corrupt-audit" in normalized
-    assert "field-recovery cases below are the exceptions" in normalized
+    assert "same-version rebinding and version rollback are rejected" in normalized.lower()
     assert "run automatically even during same-version upgrades" not in normalized
 
 
@@ -2015,16 +2008,17 @@ def test_installer_help_does_not_pipe_main_installer() -> None:
         assert "defenseclaw/main" not in text
 
 
-def test_install_docs_track_current_release() -> None:
-    for rel, expected_lines in RELEASE_INSTALL_COMMANDS.items():
+def test_published_install_examples_track_current_release() -> None:
+    for rel, expected_lines in DOC_INSTALL_COMMANDS.items():
         text = (ROOT / rel).read_text(encoding="utf-8")
-        versioned_lines = tuple(line for line in expected_lines if CURRENT_RELEASE in line)
+        stripped_lines = {line.strip() for line in text.splitlines()}
+        versioned_lines = tuple(line for line in expected_lines if CURRENT_PUBLISHED_RELEASE in line)
         assert versioned_lines, f"{rel} must pin at least one installer version"
         for expected in versioned_lines:
-            assert expected in text, f"{rel} is missing current install example: {expected}"
-            for stale in STALE_RELEASES:
-                stale_example = expected.replace(CURRENT_RELEASE, stale)
-                assert stale_example not in text, f"{rel} still contains stale install example: {stale_example}"
+            assert expected in stripped_lines, f"{rel} is missing current install example: {expected}"
+            for stale in STALE_PUBLISHED_RELEASES:
+                stale_example = expected.replace(CURRENT_PUBLISHED_RELEASE, stale)
+                assert stale_example not in stripped_lines, f"{rel} still contains stale install example: {stale_example}"
 
 
 def test_current_observability_docs_do_not_advertise_retired_redaction_controls() -> None:
@@ -2115,15 +2109,12 @@ def test_enterprise_example_uses_secure_managed_redaction_default() -> None:
     assert "  defaults:\n    redaction_profile: sensitive" in text
 
 
-def test_readme_observability_edit_workflow_is_fail_fast() -> None:
-    text = (ROOT / "README.md").read_text()
-    expected = "\n".join(
-        (
-            "defenseclaw config validate && \\",
-            "defenseclaw config show --effective --section observability && \\",
-            "defenseclaw observability plan && \\",
-            "defenseclaw-gateway restart && \\",
-            "defenseclaw doctor",
-        )
-    )
-    assert expected in text
+def test_readme_delegates_observability_operations_to_the_website() -> None:
+    readme = (ROOT / "README.md").read_text()
+    implementation = (ROOT / "docs/OBSERVABILITY.md").read_text()
+
+    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/observability/" in readme
+    assert "schemas/telemetry/v8/registry.yaml" in implementation
+    assert "make telemetry-generate" in implementation
+    assert "make telemetry-check" in implementation
+    assert "defenseclaw-gateway restart" not in readme

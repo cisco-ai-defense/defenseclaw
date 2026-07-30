@@ -1,5 +1,9 @@
 # DefenseClaw Local Observability Stack — moved
 
+> **Status: archived path-move notice.** For current operator instructions, use
+> the
+> [published local observability guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/local-observability/).
+
 The compose-based Prometheus / Loki / Tempo / Grafana stack has moved to
 the bundle tree so it can be shipped inside the wheel, seeded by
 `defenseclaw init`, and driven from the CLI/TUI the same way the

@@ -1,5 +1,10 @@
 # Configuration Contract
 
+> **Status:** Implemented observability-v8 design contract. The authored
+> schemas, generated artifacts, source, and cited tests are executable
+> authority; operator workflows live on the
+> [published observability site](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/).
+
 ## 1. Version and Ownership
 
 This contract applies when `config_version: 8` is present.

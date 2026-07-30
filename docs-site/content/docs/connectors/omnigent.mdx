@@ -18,12 +18,23 @@ defenseclaw setup omnigent --mode action  # enforce ALLOW / ASK / DENY
 omnigent server --config ~/.omnigent/config.yaml
 ```
 
+<Callout type="warning">
+OmniGent connector setup is supported on macOS and Linux. OmniGent has no
+supported native Windows terminal/sandbox path for this connector, so native
+Windows setup is unsupported.
+</Callout>
+
 Restart OmniGent after setup so it reloads the policy registry. DefenseClaw:
 
 - writes an owner-only `defenseclaw_omnigent_policy.py` bridge under its data directory;
 - adds that directory to OmniGent's Python environment with `defenseclaw_omnigent.pth`;
 - registers the module in OmniGent's effective `config.yaml` under `policy_modules`; and
 - enables the `defenseclaw_guardrail` server-wide policy.
+
+`setup omnigent` is the dedicated OmniGent alias. See the
+[quick-alias reference](/docs/setup/guardrail/aliases) for its common setup
+options and [full guardrail setup](/docs/setup/guardrail) for advanced scanner
+and judge configuration.
 
 When `OMNIGENT_CONFIG_HOME` is set, DefenseClaw and OmniGent both use
 `$OMNIGENT_CONFIG_HOME/config.yaml`; otherwise they use
@@ -92,7 +103,7 @@ DefenseClaw v1 does not modify OmniGent MCP, skill, rule, plugin, or agent-bundl
 ## Disable
 
 ```bash
-defenseclaw setup guardrail --disable
+defenseclaw guardrail disable --connector omnigent --yes
 ```
 
 Restart OmniGent after teardown so its running server drops the removed policy module.

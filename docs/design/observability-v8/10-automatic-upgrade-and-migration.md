@@ -1,5 +1,9 @@
 # Automatic v7-to-v8 Upgrade Migration
 
+> **Status:** Implemented migration contract. Release scripts and tests are
+> executable authority; current operator instructions live on the
+> [published upgrade site](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/).
+
 ## 1. Locked Decision
 
 For a normal locally managed installation, the complete operator workflow is:

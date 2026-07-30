@@ -22,10 +22,9 @@ The merge gate covers:
 - deterministic Codex and Claude Code connector contract tests.
 
 The packaged test artifact is built once and reused by the disposable lifecycle
-jobs. The public-bootstrap shard uses the authenticated `0.8.7` release as its
-compatibility fixture; before that release exists, it replays the immutable
-sealed candidate from the failed release run that exposed the fake-profile
-harness defect. Its child launch uses sandbox-relative arguments to stay
+jobs. The public-bootstrap shard uses the authenticated `0.8.7` release—the
+first published native Setup—as its compatibility fixture. Its child launch
+uses sandbox-relative arguments to stay
 deterministically below `CreateProcessWithLogonW`'s 1,024-character command-line
 limit even when the parent state root is deeply nested. Failure diagnostics are
 bounded, secret-redacted, retained for five days, and followed by unconditional
@@ -47,6 +46,10 @@ gateway binaries plus the x64 `DefenseClawSetup-x64.exe` from the reviewed
 4. seals the tested Windows assets with the Linux and macOS candidate before
    publication.
 
-This first native Windows release is validated as a fresh x64 install. The
+Version `0.8.7`, the first release with native Windows Setup, was validated as
+a fresh x64 install and made no Windows upgrade claim. Published releases
+`0.8.7` through `0.8.10` carry explicit unverified provenance with the outer
+Setup and DefenseClaw executables recorded as `NotSigned`; their bytes are
+authenticated by the release checksum/provenance chain, not Authenticode. The
 release gate also verifies and seals both Windows gateway architectures before
 publication.

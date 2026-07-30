@@ -1,5 +1,10 @@
 # Inbound OTLP Accepted-Record Import and Re-export Contract
 
+> **Status:** Implemented observability-v8 inbound OTLP contract. Runtime
+> source, generated bindings, and cited tests are executable authority;
+> operator configuration lives on the
+> [published observability site](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/).
+
 ## 1. Scope and non-negotiable boundary
 
 This document is the normative accepted-record contract for the authenticated

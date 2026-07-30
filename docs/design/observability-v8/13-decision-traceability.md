@@ -1,5 +1,9 @@
 # Decision Traceability Appendix
 
+> **Status:** Implemented observability-v8 traceability index. The checker and
+> cited tests are executable evidence; this appendix records their design
+> coverage.
+
 ## 1. Rule
 
 This appendix is the mechanical index for every `D-*`, `S-*`, and `P-*` decision in

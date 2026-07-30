@@ -26,12 +26,12 @@ Here are some helpful details to include in your report:
 - versions of the project that may be affected by the issue
 - if known, any mitigations for the issue
 
-A maintainer will acknowledge the report within three (3) business days, and
-will send a more detailed response within an additional three (3) business days
-indicating the next steps in handling your report.
+A maintainer will review the report and respond as promptly as practical with
+the next steps. Response time depends on maintainer availability and the
+report's scope; this repository does not publish a fixed response-time SLA.
 
-If you've been unable to successfully draft a vulnerability report via GitHub
-or have not received a response during the allotted response window, please
+If you cannot successfully draft a vulnerability report through GitHub or do
+not receive a response, please
 reach out via the [Cisco Open security contact email](mailto:oss-security@cisco.com).
 
 After the initial reply to your report, the maintainers will endeavor to keep
@@ -49,7 +49,7 @@ following steps:
 - confirming the issue
 - determining affected versions of the project
 - auditing code to find any potential similar problems
-- preparing fixes for all releases under maintenance
+- preparing appropriate fixes for affected supported releases
 
 ## Suggesting changes
 

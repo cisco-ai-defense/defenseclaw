@@ -1,5 +1,10 @@
 # Simplified Telemetry Schema Architecture
 
+> **Status:** Implemented observability-v8 schema contract. The authored
+> registry, generated runtime assets and Go APIs, and their checks are
+> executable authority; operator behavior lives on the
+> [published observability site](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/).
+
 ## 1. Decision
 
 DefenseClaw v8 uses a **composed schema**, not a DefenseClaw-only replacement and

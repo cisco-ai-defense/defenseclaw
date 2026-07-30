@@ -190,15 +190,22 @@ DefenseClaw injects it into the scanner subprocess via `inject_llm_env`, alongsi
 The MCP scanner runs each stdio server inside a subprocess sandbox with a wall-clock timeout. Servers that hang are killed; servers that try to spawn networked side processes are flagged as findings, not just terminated silently.
 </Callout>
 
-## Install if missing
+## Availability and recovery
 
-`cisco-ai-mcp-scanner` is a hard dependency of `defenseclaw` (Python ≥3.11) and is pulled in automatically by `pip install defenseclaw`. If your environment somehow lost it, reinstall it directly:
+`cisco-ai-mcp-scanner` is declared only when the runtime interpreter is Python
+3.11 or newer. DefenseClaw itself also supports Python 3.10, so a Python 3.10
+runtime—including a POSIX release install on a host where 3.10 is the selected
+interpreter—legitimately omits MCP scanning. Use Python 3.11 or newer when this
+feature is required.
 
-```bash
-pip install --upgrade cisco-ai-mcp-scanner
-```
+On Python 3.11 or newer, an absent SDK means the environment is incomplete. Do
+not patch a managed virtual environment with `pip`; use the
+[supported install or repair path](/docs/get-started/install). Source
+contributors should synchronize the checkout's locked environment with
+`uv sync`.
 
-`defenseclaw mcp` exits cleanly with a one-line install hint if the SDK isn't present — it never crashes the gateway.
+`defenseclaw mcp` exits cleanly with a concise dependency error if the SDK
+isn't present; it never crashes the gateway.
 
 ## See also
 

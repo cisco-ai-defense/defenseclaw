@@ -2,8 +2,8 @@
 
 > [!WARNING]
 > **Historical v7 closeout.** The implementation paths, toggles, limitations, and
-> status assertions below do not describe observability v8. Use
-> [DefenseClaw Observability v8](OBSERVABILITY.md), the
+> status assertions below do not describe observability v8. Use the
+> [published observability guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/), the
 > [v8 design index](design/observability-v8/README.md), and `spec.md` for current
 > runtime and acceptance status. Keep this file only for upgrade/compatibility
 > archaeology.
@@ -37,7 +37,7 @@ OTLP log record — should carry a consistent correlation envelope where
 the event type allows: `run_id`, `session_id`, `trace_id`, `request_id`,
 `agent_id`, `agent_name`, `agent_instance_id`, `sidecar_instance_id`,
 `policy_id`, `destination_app`, `tool_name`, and `tool_id`. See
-[Correlation envelope](#correlation-envelope-v6) (field list evolved in v7;
+[Correlation envelope](#correlation-envelope-v6--v7) (field list evolved in v7;
 three-tier identity in OBSERVABILITY-CONTRACT.md).
 
 | Category | Spec Section | Status | Notes |

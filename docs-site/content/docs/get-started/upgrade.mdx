@@ -9,15 +9,19 @@ keywords:
   - DefenseClaw rollback
 ---
 
-On every supported POSIX source, including an installed `0.8.4` bridge, use the
-authenticated resolver asset owned by the current target release. It
-automatically authenticates an ephemeral Cosign verifier when the host does not
-already have one, then privately acquires the exact published `0.8.4` rollback
-artifacts before backup, service stop, or target mutation:
+On every supported POSIX source, use the authenticated resolver asset owned by
+the current target release:
 
 ```bash
 bash defenseclaw-upgrade.sh --yes
 ```
+
+For a pre-hard-cut source, including the installed `0.8.4` bridge, the resolver
+authenticates an ephemeral Cosign verifier when the host does not already have
+one and privately acquires the exact published `0.8.4` bridge/rollback
+artifacts before backup, service stop, or target mutation. Supported
+post-bridge sources such as `0.8.5` through `0.8.9` do not reacquire `0.8.4`;
+they use their own normal backup and rollback contract.
 
 The frozen `0.8.4` built-in `defenseclaw upgrade --yes` cannot cross this hard
 cut, even when Cosign is already on `PATH`: its immutable manifest parser
@@ -26,19 +30,18 @@ has `platform_tested_source_versions.windows: []` because no Windows `0.8.4`
 bridge was published. Use the target-release resolver above in latest mode,
 without a version override.
 
-For `0.8.3` or older, follow the complete Sigstore and SHA-256 bootstrap in the
-linked CLI reference below, then run the authenticated target-release resolver
-asset in latest mode:
+For `0.8.3` or older, use the complete authenticated bootstrap below. It
+downloads the current release-owned resolver (`0.8.10`) and its signed checksum set into an
+owner-only temporary directory, verifies the exact release-workflow identity
+and resolver digest, validates the script, and then runs it in latest mode.
 
-```bash
-bash defenseclaw-upgrade.sh --yes
-```
-
-Release `0.8.5` was POSIX-only because `0.8.4` published no Windows gateway,
-rollback, or SBOM binaries. Its signed PowerShell resolver was a refusal
-surface, not a Windows bridge path. Release `0.8.6` now publishes signed native
-Setup, but `0.8.5` remains outside the Windows upgrade-baseline matrix. Do not
-copy POSIX artifacts onto Windows.
+Releases `0.8.5` and `0.8.6` published no native Windows Setup artifact.
+Release `0.8.7` was the first release with `DefenseClawSetup-x64.exe`.
+Every published `0.8.5` through `0.8.10` upgrade manifest declares
+`platform_tested_source_versions.windows: []`, so none declares a cross-release
+Windows upgrade baseline. The `0.8.10` Setup is authenticated by the
+Sigstore-signed release checksum set and provenance, but is explicitly not
+Authenticode-signed. Do not copy POSIX artifacts onto Windows.
 
 Do not use the built-in form to cross a manifest-required bridge. A
 `0.8.3`-or-older POSIX host must use the authenticated current release-owned
@@ -59,6 +62,72 @@ learn that orchestration retroactively; it therefore fails closed rather than
 attempting a partial hard-cut upgrade.
 </Callout>
 
+## Authenticate the current resolver on 0.8.3 or older
+
+Run this complete command on a supported macOS or Linux host. It uses an
+existing `cosign` when available; otherwise it downloads Cosign `2.6.3` for
+the detected platform and authenticates that verifier against the pinned
+SHA-256 before executing it.
+
+```bash
+(
+  set -eu
+  unset VERSION
+  umask 077
+  d="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-upgrade.XXXXXX")"
+  trap 'rm -rf "$d"' EXIT
+  cosign_bin="$(command -v cosign || true)"
+  if [ -z "$cosign_bin" ]; then
+    platform="$(uname -s | tr '[:upper:]' '[:lower:]')/$(uname -m)"
+    case "$platform" in
+      darwin/x86_64) cosign_asset='cosign-darwin-amd64'; cosign_sha='5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be' ;;
+      darwin/arm64) cosign_asset='cosign-darwin-arm64'; cosign_sha='ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e' ;;
+      linux/x86_64|linux/amd64) cosign_asset='cosign-linux-amd64'; cosign_sha='7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4' ;;
+      linux/aarch64|linux/arm64) cosign_asset='cosign-linux-arm64'; cosign_sha='b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917' ;;
+      *) echo 'Unsupported platform for automatic Cosign verification.' >&2; exit 1 ;;
+    esac
+    cosign_bin="$d/$cosign_asset"
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 --max-filesize 209715200 \
+      --output "$cosign_bin" "https://github.com/sigstore/cosign/releases/download/v2.6.3/$cosign_asset"
+    if command -v sha256sum >/dev/null; then
+      cosign_actual="$(sha256sum "$cosign_bin" | awk '{print $1}')"
+    else
+      cosign_actual="$(shasum -a 256 "$cosign_bin" | awk '{print $1}')"
+    fi
+    [ "$cosign_actual" = "$cosign_sha" ]
+    chmod 700 "$cosign_bin"
+  fi
+  asset_base='https://github.com/cisco-ai-defense/defenseclaw/releases/download/0.8.10'
+  for name in defenseclaw-upgrade.sh checksums.txt checksums.txt.sig checksums.txt.pem; do
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+      --output "$d/$name" "$asset_base/$name"
+  done
+  "$cosign_bin" verify-blob \
+    --certificate "$d/checksums.txt.pem" \
+    --signature "$d/checksums.txt.sig" \
+    --certificate-identity 'https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main' \
+    --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+    "$d/checksums.txt"
+  line="$(grep -E '^[0-9a-f]{64}  defenseclaw-upgrade[.]sh$' "$d/checksums.txt")"
+  [ "$(printf '%s\n' "$line" | wc -l | tr -d ' ')" = 1 ]
+  expected="${line%% *}"
+  if command -v sha256sum >/dev/null; then
+    actual="$(sha256sum "$d/defenseclaw-upgrade.sh" | awk '{print $1}')"
+  else
+    actual="$(shasum -a 256 "$d/defenseclaw-upgrade.sh" | awk '{print $1}')"
+  fi
+  [ "$actual" = "$expected" ]
+  [ "$(tail -n 1 "$d/defenseclaw-upgrade.sh")" = '# DefenseClaw upgrade resolver complete v1' ]
+  bash -n "$d/defenseclaw-upgrade.sh"
+  bash "$d/defenseclaw-upgrade.sh" --yes
+)
+```
+
+The version, Cosign hashes, release-workflow identity, and completion marker
+above are copied from the current release resolver's own authenticated handoff.
+When a newer release becomes the target, use that release's corresponding
+authenticated handoff rather than changing individual values by hand.
+
 ## The 0.8.4 bridge release
 
 Release `0.8.4` deliberately keeps configuration and runtime schema v7. It does
@@ -74,12 +143,12 @@ bridge. A host already on `0.8.4` uses that same target-release resolver; the
 frozen built-in parser cannot accept the truthful empty Windows matrix.
 
 Installed users must download and authenticate the release-owned resolver
-asset before running it. Use the complete POSIX `cosign` and SHA-256 bootstrap in the
-[repository CLI reference](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade);
-it does not require a source checkout. From a checkout of the current release,
-the equivalent local command is `./scripts/upgrade.sh --yes` on macOS/Linux.
-For the `0.8.5` hard cut, the signed PowerShell resolver was refusal-only because
-no Windows bridge binary had been published.
+asset before running it. The complete POSIX `cosign` and SHA-256 bootstrap is
+provided on this page and does not require a source checkout. From a checkout
+of the current release, the equivalent local command is
+`./scripts/upgrade.sh --yes` on macOS/Linux. For the `0.8.5` hard cut, the
+PowerShell resolver was refusal-only because no Windows bridge binary had been
+published.
 
 When a hard-cut manifest requires `0.8.4`, the resolver first authenticates and
 health-checks the bridge for a pre-bridge source, then hands control to its
@@ -140,9 +209,9 @@ Install scripts are for a fresh host. `defenseclaw upgrade` adds artifact
 verification, exact state backups, required migrations, atomic activation,
 service restart, local-bundle refresh, and post-upgrade health checks.
 The POSIX installer refuses an existing installation before dependency
-installation or artifact replacement. For the historical `0.8.5` hard cut, the
-PowerShell surface had no installable Windows runtime. Release `0.8.6` uses the
-signed native Setup for fresh install, repair, same-version servicing, and
+installation or artifact replacement. Releases `0.8.5` and `0.8.6` had no
+native Windows Setup. The first published Setup was `0.8.7`; the current
+`0.8.10` Setup supports fresh install, repair, same-version servicing, and
 uninstall.
 </Callout>
 
@@ -151,8 +220,8 @@ uninstall.
 | Path | Existing installation behavior |
 | --- | --- |
 | Built-in `defenseclaw upgrade` | The immutable `0.8.4` command cannot parse the truthful hard-cut manifest with an empty Windows bridge matrix, regardless of whether Cosign is installed. Frozen pre-bridge controllers also cannot learn the staged handoff. Use the target-release POSIX resolver to cross into `0.8.5`; from `0.8.5` onward, the built-in command may drive later compatible manifests and can authenticate a temporary pinned verifier. |
-| Release-owned shell resolver | Tested old POSIX sources auto-hop through `0.8.4` from one command and automatically authenticate a temporary pinned Cosign when needed; unsupported sources fail closed with the exact bridge-first path. For `0.8.5`, the signed PowerShell resolver was refusal-only because no Windows bridge was published. |
-| Fresh-install shell script | Refuses to overwrite an existing installation and points to the resolver. Release `0.8.6` publishes signed native Setup for Windows; it does not make `0.8.5` a Windows upgrade baseline. |
+| Release-owned shell resolver | Tested old POSIX sources auto-hop through `0.8.4` from one command and automatically authenticate a temporary pinned Cosign when needed; unsupported sources fail closed with the exact bridge-first path. For `0.8.5`, the PowerShell resolver was refusal-only because no Windows bridge was published. |
+| Fresh-install shell script | Refuses to overwrite an existing installation and points to the resolver. Native Windows uses the separate Setup artifact first published in `0.8.7`; no published manifest through `0.8.10` declares a cross-release Windows baseline. |
 | Package manager | No in-place package-manager hard-cut path is supported unless that package invokes the same resolver; direct replacement must be disabled. |
 | Manual wheel/gateway artifacts | Direct copying is not a supported upgrade. Use the POSIX resolver's `--plan`, then let that resolver perform the transaction. |
 
@@ -185,32 +254,34 @@ The migration cursor records success only after the atomic write. Retrying an
 interrupted upgrade is idempotent: it does not duplicate destinations, routes,
 comments, environment entries, or schema work.
 
-## Native Windows servicing in 0.8.6
+## Native Windows servicing
 
-<Callout title="0.8.5 is not a Windows upgrade baseline">
-Release `0.8.5` published no native Windows runtime. Release `0.8.6`, the first
-signed Setup release, therefore qualifies fresh install, repair, same-version
-servicing, and uninstall on Windows; it does not advertise an upgrade from
-`0.8.5`. A later manifest may enable cross-release Windows upgrades only for
-source versions whose exact published Setup artifacts passed the native
-lifecycle matrix.
+<Callout title="No published cross-release Windows baseline">
+Releases `0.8.5` and `0.8.6` published no native Windows Setup. Release `0.8.7`
+was the first published Setup release. Every published upgrade manifest from
+`0.8.5` through `0.8.10` has an empty Windows tested-source list, so the
+current release does not advertise an automatic cross-release Windows
+upgrade. Fresh install, repair, same-version servicing, and uninstall remain
+the documented Windows lifecycle.
 </Callout>
 
-`DefenseClawSetup-x64.exe` is the signed graphical and silent installation and
-servicing surface for `0.8.6`. It installs the existing CLI/TUI, gateway,
+`DefenseClawSetup-x64.exe` is the graphical and silent installation and
+servicing surface for `0.8.10`. It installs the existing CLI/TUI, gateway,
 no-console hook launcher, and embedded managed Python runtime; it is not a
-separate native DefenseClaw GUI application.
+separate native DefenseClaw GUI application. The release's Sigstore-signed
+checksum set and provenance authenticate its exact bytes and explicitly record
+that the current Setup is not Authenticode-signed.
 
-For a future manifest-authorized native Windows upgrade, `defenseclaw upgrade`
-will download the exact Setup artifact named by the signed manifest, verify its
-release checksum and exact Authenticode publisher, create the normal managed
-state backup, copy Setup to its trusted maintenance cache, and start it with the
-preserved install scope, connector, and mode. The CLI exits before replacement
-so its embedded runtime is not locked. Setup then validates and stops only the
-owned gateway/watchdog process, replaces product-owned files, applies and
-verifies required migrations with the new embedded runtime, rolls application
-files back on failure, and restarts only services that were already running or
-explicitly requested.
+If a future manifest authorizes a native Windows source, `defenseclaw upgrade`
+will download the exact Setup artifact named by that authenticated manifest,
+verify its release checksum, provenance, and matching observed Authenticode
+state, create the normal managed-state backup, copy Setup to its maintenance
+cache, and start it with the preserved install scope, connector, and mode. The
+CLI exits before replacement so its embedded runtime is not locked. Setup then
+validates and stops only the owned gateway/watchdog process, replaces
+product-owned files, applies and verifies required migrations with the new
+embedded runtime, rolls application files back on failure, and restarts only
+services that were already running or explicitly requested.
 
 Enterprise-managed Windows deployments can service through their software
 channel instead. Managed update policy prevents the self-updater from competing

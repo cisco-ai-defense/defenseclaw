@@ -3,9 +3,10 @@
 > [!WARNING]
 > **Historical v7 contract.** The JSONL writer, direct audit-sink/OTel topology,
 > schemas, gates, and runbooks below are retained for migration and compatibility
-> archaeology. They are not authoritative for `config_version: 8`. Use
-> [DefenseClaw Observability v8](OBSERVABILITY.md) for current operator policy and
-> alert runbooks, and the [v8 design index](design/observability-v8/README.md) plus
+> archaeology. They are not authoritative for `config_version: 8`. Use the
+> [published observability guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/)
+> for current operator policy and alert runbooks, and the
+> [v8 design index](design/observability-v8/README.md) plus
 > [`schemas/telemetry/v8/`](../schemas/telemetry/v8/) for current telemetry
 > contracts.
 

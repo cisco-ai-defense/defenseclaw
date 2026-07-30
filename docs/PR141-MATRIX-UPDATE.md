@@ -1,5 +1,12 @@
 # DefenseClaw Feature x Connector Support Matrix — Updated After All Claw-Agnostic Readiness Fixes
 
+> **Status: historical PR matrix.** This preserves the state of the commits
+> listed below; it is not a current support table. Use the
+> [published connector compatibility matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/compatibility/)
+> and
+> [capability matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/capability-matrix/)
+> for current behavior.
+
 **Commits covered:**
 - `d3b94fb` — Go-side sentinel elimination, polymorphic config + discovery, hook registration, tests
 - `d68974e` — Python CLI connector-aware for all 8 remaining matrix items (+409/-118 across 11 files)

@@ -267,7 +267,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 			exitCode = exitErr.ExitCode()
 		}
 		if errors.Is(err, exec.ErrNotFound) {
-			scanErr = fmt.Errorf("scanner: %s not found at %q — install with: pip install defenseclaw (the mcpscanner SDK is provided by cisco-ai-mcp-scanner)", s.Name(), s.Config.Binary)
+			scanErr = fmt.Errorf("scanner: %s not found at %q — MCP scanning requires a Python 3.11+ runtime with cisco-ai-mcp-scanner; on 3.11+ repair the managed installation, or run uv sync in a source checkout", s.Name(), s.Config.Binary)
 			return nil, scanErr
 		}
 		if stdout.Len() == 0 {

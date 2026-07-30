@@ -1,5 +1,10 @@
 # Sandbox Scanning: Skill & MCP Scanning Inside OpenShell
 
+> **Status: design proposal, not a statement of shipped coverage.** Validate
+> current behavior in `internal/sandbox/`, `internal/watcher/`,
+> `cli/defenseclaw/commands/cmd_*sandbox.py`, and their tests before
+> implementing any item below.
+
 ## Problem
 
 When OpenClaw runs inside an OpenShell sandbox, the host-side Go sidecar's

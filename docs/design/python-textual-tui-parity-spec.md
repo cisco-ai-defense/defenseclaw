@@ -2,15 +2,18 @@
 
 ## Status
 
-Draft for implementation planning.
+Historical implementation plan. The Python Textual TUI has shipped; the
+current command behavior is owned by `cli/defenseclaw/tui/` and its tests.
 
 > [!NOTE]
 > This planning snapshot predates the observability-v8 hard cut. References below
 > to implicit `gateway.jsonl` reads or a global redaction toggle describe the v7
 > baseline being replaced; they are not current runtime requirements. The shipped
 > Python TUI reads canonical v8 SQLite event history and effective destination
-> policy. JSONL exists only when an explicit destination selects it. See
-> [`docs/OBSERVABILITY.md`](../OBSERVABILITY.md) for the current contract.
+> policy. JSONL exists only when an explicit destination selects it. See the
+> [published observability guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/)
+> for current operator behavior and [`docs/OBSERVABILITY.md`](../OBSERVABILITY.md)
+> for the code ownership map.
 
 ## Summary
 

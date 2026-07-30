@@ -78,7 +78,7 @@ const cursorAdapterTimeoutMS = 10_000
 // the two values the hook scripts understand. Anything other than
 // "open" (case-sensitive — the env var contract is documented as
 // lowercase) collapses to "closed" so a typo never accidentally puts
-// the agent into fail-OPEN mode at the response-layer boundary
+// the agent into fail-OPEN mode at the hook failure boundary
 // (CodeGuard rule codeguard-0-authorization-access-control: deny by
 // default).
 func normalizeHookFailMode(mode string) string {
@@ -859,10 +859,10 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 }
 
 // WriteHookScriptsForConnectorObjectWithOpts is the setup-time variant that
-// has access to connector setup flags AND the operator's
-// chosen response-layer fail mode (opts.HookFailMode).
+// has access to connector setup flags AND the operator's chosen hook failure
+// mode (opts.HookFailMode).
 //
-// Resolution order for the response-layer FailMode template var
+// Resolution order for the FailMode template var
 // (see templateData.FailMode and defaultHookFailMode for the
 // contract):
 //
@@ -906,8 +906,8 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 	return writeHookScriptsCommonWithOptions(hookDir, opts.APIAddr, hookToken, failMode, extras, opts.ManagedEnterprise, c.Name(), scopedToken)
 }
 
-// resolveHookFailMode picks the response-layer fail mode for a hook
-// render given the operator's setup opts and the connector identity.
+// resolveHookFailMode picks the delivery/response fail mode for a hook render
+// given the operator's setup opts and the connector identity.
 // The explicit string in opts.HookFailMode always wins; an empty
 // value falls back to the connector-default and is upgraded to
 // "closed" when the operator has set the matching enforcement flag

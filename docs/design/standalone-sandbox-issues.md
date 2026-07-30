@@ -1,5 +1,10 @@
 # Standalone Sandbox Mode: Issues for Node.js/TypeScript Workloads
 
+> **Status: historical upstream research snapshot.** Source line numbers and
+> upstream runtime behavior below can change independently of DefenseClaw. They
+> are not a current support or vulnerability statement; reproduce each issue
+> against the pinned runtime before acting on it.
+
 This document catalogs known issues when running Node.js or TypeScript tooling (e.g., OpenClaw and its plugins) inside the standalone sandbox binary without the cluster-mode gateway. Each issue includes the relevant source locations and severity.
 
 ## 1. DNS: `getaddrinfo` Fails Inside Network Namespace

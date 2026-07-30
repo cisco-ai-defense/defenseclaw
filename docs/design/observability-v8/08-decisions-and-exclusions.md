@@ -1,5 +1,10 @@
 # Decisions, Assumptions, and Exclusions
 
+> **Status:** Implemented observability-v8 decision record. Source, schemas,
+> generated artifacts, and cited tests are executable authority; operator
+> workflows live on the
+> [published observability site](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/).
+
 ## 1. Locked Product Decisions
 
 These decisions came directly from the planning discussion and should not be

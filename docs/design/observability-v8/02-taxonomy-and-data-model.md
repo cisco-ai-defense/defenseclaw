@@ -1,5 +1,10 @@
 # Taxonomy and Canonical Data Model
 
+> **Status:** Implemented observability-v8 design contract. The authored
+> schemas, generated artifacts, source, and cited tests are executable
+> authority; operator workflows live on the
+> [published observability site](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/).
+
 ## 1. Classification Principle
 
 Buckets describe the semantic fact being recorded, not the vendor that produced it,

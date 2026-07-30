@@ -2,13 +2,15 @@
 
 ## Status
 
-Approved contract for spec-driven implementation. The execution ledger records
-phase-specific implementation and verification progress.
+Implemented and verified contract. The execution ledger is complete; the
+authored schemas/registries, generated artifacts, and cited tests are the
+current executable authority. Operator workflows are maintained on the
+[published observability site](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/).
 
 - Target configuration version: `8`
 - Prepared: 2026-07-02
 - Approved for implementation: 2026-07-02 at `963b1bc9f`
-- Repository baseline: DefenseClaw configuration v7
+- Historical planning baseline: DefenseClaw configuration v7
 - Repository location: `docs/design/observability-v8/`
 - Execution ledger: [`../../../spec.md`](../../../spec.md)
 - Decision registry: 24 locked product decisions, 12 semantic decisions, and 76

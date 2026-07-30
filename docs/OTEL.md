@@ -3,8 +3,8 @@
 > [!WARNING]
 > **Historical v7 reference.** This document describes the retired direct OTel
 > provider/configuration model. It is retained for migration and compatibility
-> archaeology and is not authoritative for a `config_version: 8` runtime. Use
-> [DefenseClaw Observability v8](OBSERVABILITY.md), the
+> archaeology and is not authoritative for a `config_version: 8` runtime. Use the
+> [published observability guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/), the
 > [v8 design index](design/observability-v8/README.md), and the authored registry
 > under [`schemas/telemetry/v8/`](../schemas/telemetry/v8/) for current behavior.
 

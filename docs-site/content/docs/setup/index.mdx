@@ -1,6 +1,6 @@
 ---
 title: Setup
-description: Every defenseclaw setup verb in one place — from the central guardrail wizard to the auxiliary commands that wire keys, webhooks, registries, observability, and per-connector hooks.
+description: DefenseClaw setup and configuration surfaces in one place — from the central guardrail wizard to keys, webhooks, registries, observability, sandboxing, and per-connector hooks.
 keywords:
   - defenseclaw setup
   - DefenseClaw configuration
@@ -12,10 +12,18 @@ keywords:
   - per-connector setup
 ---
 
-`defenseclaw setup` is the family of operator commands that take DefenseClaw from "binary on disk" to "actively defending an agent". Every verb writes the same `~/.defenseclaw/config.yaml`, restarts the right side-cars, and emits an audit-log entry — interactively when you are at a TTY, scripted when you pass `--non-interactive`.
+`defenseclaw setup` is the main family of operator commands that takes
+DefenseClaw from "binary on disk" to "actively defending an agent". Mutating
+commands update only the configuration or owned integration surface they
+manage; restart, prompting, and audit behavior is command-specific. The
+top-level `keys`, `registry`, and experimental `sandbox` groups are included
+here because they are part of the same operator workflow.
 
 <Callout title="The one-line summary">
-Run `defenseclaw setup guardrail` once. Reach for the auxiliary verbs only when you want to wire a chat notifier, a registry, an observability sink, or a custom LLM key into a guardrail that is already running.
+Run `defenseclaw setup guardrail` once. Reach for the auxiliary surfaces when
+you want to wire a chat notifier, registry, observability destination, custom
+LLM key, or the experimental Linux OpenShell sandbox into a guardrail that is
+already running.
 </Callout>
 
 ## The central command
@@ -28,9 +36,14 @@ Run `defenseclaw setup guardrail` once. Reach for the auxiliary verbs only when 
   />
 </Cards>
 
-## Connector aliases (thin wrappers around `setup guardrail`)
+## Connector setup aliases
 
-Each alias pre-fills `setup guardrail --connector <name>` and inherits every guardrail option. Pass `--mode observe` to run any of them in audit-only mode. On a host with another hook connector already active, the setup flow can add the new connector to the roster instead of replacing the old one.
+Each alias selects one connector and exposes a smaller connector-oriented
+option surface than `setup guardrail`. Pass `--mode observe` to run one in
+audit-only mode. On a host with another hook connector already active, the
+setup flow can add the new connector to the roster instead of replacing the
+old one. Use the central command when you need the complete guardrail flag
+surface.
 
 <Cards>
   <Card title="setup openclaw" href="/docs/setup/guardrail/aliases" description="Selects OpenClaw with --connector openclaw and installs the fetch interceptor + before_tool_call plugin." />
@@ -73,7 +86,7 @@ which ones are interactive and which ones are designed for scripts.
   <Card
     title="setup splunk"
     href="/docs/observability/splunk"
-    description="Configure the audit-sink HEC forwarder. Replays past events on enable, redacts PII before send."
+    description="Configure local Splunk, Splunk Enterprise HEC, or Splunk Observability Cloud. V8 exports use the selected routes and redaction profile; review the unredacted fresh default."
   />
   <Card
     title="setup local-observability"
@@ -89,6 +102,11 @@ which ones are interactive and which ones are designed for scripts.
     title="setup mcp-scanner"
     href="/docs/setup/mcp-scanner"
     description="Wire the cisco-ai-mcp-scanner SDK into admission. Behavioral introspection of MCP servers before they're added."
+  />
+  <Card
+    title="defenseclaw sandbox"
+    href="/docs/setup/sandbox"
+    description="Experimental Linux-only OpenClaw/OpenShell isolation. Review the current endpoint-wiring limitation and pass the sandbox-originated acceptance gate before treating it as enforcement."
   />
 </Cards>
 
@@ -127,6 +145,7 @@ below is the canonical mapping for their interactive and scripted forms.
 | `setup splunk` | yes | `--non-interactive` + flags | HEC token comes from `--hec-token <value>` or, if omitted, the `DEFENSECLAW_SPLUNK_HEC_TOKEN` env var. |
 | `setup local-observability` | yes | flags + `--non-interactive` | One-shot bring-up; `--down` tears the stack back down. |
 | `setup skill-scanner` / `setup mcp-scanner` | yes | `--non-interactive` + flags | Per-feature toggles; the underlying `cisco-ai-skill-scanner` / `cisco-ai-mcp-scanner` SDKs ship as hard dependencies of `defenseclaw`. |
+| `sandbox init` / `sandbox setup` | yes | `sandbox setup --non-interactive` | Experimental top-level Linux/OpenClaw group. `init` creates prerequisites and then runs setup; the current generated endpoint wiring must pass the documented acceptance gate. |
 
 <Callout title="Redaction is configured directly as v8 policy">
 There is no `setup` toggle for redaction. Edit
@@ -148,7 +167,7 @@ Setup and auxiliary configuration commands can write these paths under
 
 ```
 ~/.defenseclaw/
-  config.yaml          # the canonical configuration (every verb edits this)
+  config.yaml          # canonical configuration (edited by commands that own config)
   .env                 # secret values — never committed, never logged
   audit.db             # SQLite audit store (configuration changes land here too)
   gateway.jsonl        # optional only when an explicit kind: jsonl destination uses this path

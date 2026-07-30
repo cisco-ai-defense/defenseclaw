@@ -24,7 +24,7 @@ groups:
             destination delivery because they fail canonical registry validation.
             Any sustained non-zero rate means our observability contract is broken.
             Open Runtime & Reliability → "Schema violations by event type / code".
-          runbook: "https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/OBSERVABILITY.md#runbook-schema-violations"
+          runbook: "https://cisco-ai-defense.github.io/defenseclaw/docs/observability/#runbook-schema-violations"
 
       - alert: DefenseClawGatewayErrorsSpike
         expr: sum(rate(defenseclaw_gateway_errors_total[5m])) > 0.5
@@ -70,7 +70,7 @@ groups:
           description: |
             Admission-block decisions are not completing under the 2s SLO.
             Open Runtime & Reliability → "Admission block SLO compliance".
-          runbook: "https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/OBSERVABILITY.md#runbook-block-slo"
+          runbook: "https://cisco-ai-defense.github.io/defenseclaw/docs/observability/#runbook-block-slo"
 
   - name: defenseclaw.pipeline
     rules:
@@ -86,7 +86,7 @@ groups:
             At least one exporter ({{ $labels.exporter }}) has not sent a
             batch for 5+ minutes. Observability is blind; check OTel
             Collector health and network reachability.
-          runbook: "https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/OBSERVABILITY.md#runbook-exporter-stalled"
+          runbook: "https://cisco-ai-defense.github.io/defenseclaw/docs/observability/#runbook-exporter-stalled"
 
       - alert: DefenseClawOTLPExporterErrors
         expr: sum(rate(defenseclaw_telemetry_exporter_errors_total[5m])) > 0.1
@@ -118,7 +118,7 @@ groups:
             A configured observability destination is returning errors for 10 minutes.
             Compliance downstreams may be missing events. Open Runtime &
             Reliability → "Sink batches delivered vs dropped".
-          runbook: "https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/OBSERVABILITY.md#runbook-audit-sink"
+          runbook: "https://cisco-ai-defense.github.io/defenseclaw/docs/observability/#runbook-audit-sink"
 
       - alert: DefenseClawAuditSinkCircuitOpen
         expr: max by (sink_kind, sink_name) (defenseclaw_audit_sink_circuit_state) > 0.5
