@@ -153,6 +153,7 @@ def test_protect_private_file_invokes_darwin_acl_clear_seam(monkeypatch, tmp_pat
     assert fd >= 0
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Darwin repair uses POSIX file-mode semantics")
 def test_fix_dotenv_permissions_repairs_darwin_acl_at_mode_0600(monkeypatch, tmp_path):
     target = tmp_path / ".env"
     target.write_text("SECRET=synthetic\n", encoding="utf-8")

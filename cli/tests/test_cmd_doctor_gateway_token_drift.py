@@ -113,7 +113,7 @@ def _trusted_process(
         cfg,
         record,
         process,
-        platform_name="linux",
+        platform_name=sys.platform,
     )
     if not trust.trusted:
         raise AssertionError(f"test fixture did not establish process trust: {trust.code}")
@@ -547,7 +547,7 @@ class FixGatewayTokenDriftTests(unittest.TestCase):
             self.cfg,
             PIDRecord("malformed", reason="PID file is not a safe regular file"),
             None,
-            platform_name="linux",
+            platform_name=sys.platform,
         )
 
         with (
@@ -577,7 +577,7 @@ class FixGatewayTokenDriftTests(unittest.TestCase):
                 executable=os.path.join(self.tmp, "bin", "defenseclaw-gateway"),
                 start_identity="start-1",
             ),
-            platform_name="linux",
+            platform_name=sys.platform,
         )
 
         with (
