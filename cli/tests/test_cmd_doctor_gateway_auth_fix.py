@@ -989,6 +989,10 @@ def test_fix_dotenv_permissions_uses_private_windows_dacl(tmp_path):
             "defenseclaw.file_permissions.windows_acl_confidentiality_error",
             side_effect=["unsafe inherited ACL", None],
         ),
+        patch(
+            "defenseclaw.file_permissions.windows_acl_write_error",
+            return_value=None,
+        ),
         patch("defenseclaw.file_permissions.protect_private_file") as protect,
     ):
         tag, detail = _fix_dotenv_perms(
