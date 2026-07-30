@@ -28,11 +28,19 @@ from defenseclaw.commands.cmd_doctor import (
     _GatewayTrust,
     _http_probe,
     _linux_gateway_listener_pid,
+    _remove_stale_pid_if_unchanged,
     _run_fixers,
     _subsystem_expected_enabled,
     doctor,
 )
-from defenseclaw.doctor_gateway import ListenerEvidence, PIDRecord, ProcessEvidence
+from defenseclaw.doctor_gateway import (
+    ListenerEvidence,
+    PIDRecord,
+    ProcessEvidence,
+    pid_file_fingerprint,
+    pid_file_fingerprint_from_fd,
+    read_pid_record,
+)
 
 
 def _cfg(data_dir: str, *, token: str = "", token_env: str = "") -> SimpleNamespace:
@@ -524,6 +532,218 @@ def test_fix_stale_pid_removes_malformed_file(tmp_path):
     assert tag == "pass"
     assert "malformed" in detail
     assert not pid_file.exists()
+
+
+def test_fix_stale_pid_parses_fingerprinted_a_during_a_b_a_read_swap(tmp_path):
+    pid_file = tmp_path / "gateway.pid"
+    original = tmp_path / "original.pid"
+    replacement = tmp_path / "replacement.pid"
+    pid_file.write_bytes(b"{malformed-a")
+    executable = "/opt/defenseclaw/bin/defenseclaw-gateway"
+    replacement.write_text(
+        json.dumps(
+            {
+                "pid": 4242,
+                "executable": executable,
+                "start_identity": "replacement-start",
+                "data_dir": os.fspath(tmp_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = SimpleNamespace(data_dir=os.fspath(tmp_path))
+    evidence = SimpleNamespace(
+        process=lambda pid: ProcessEvidence(
+            "ok",
+            pid=pid,
+            executable=executable,
+            start_identity="replacement-start",
+        )
+    )
+    real_read = read_pid_record
+    swapped_reads = 0
+
+    def read_b_then_restore_a(path):
+        nonlocal swapped_reads
+        swapped_reads += 1
+        os.replace(pid_file, original)
+        os.replace(replacement, pid_file)
+        try:
+            return real_read(path)
+        finally:
+            os.replace(pid_file, replacement)
+            os.replace(original, pid_file)
+
+    with (
+        patch(
+            "defenseclaw.commands.cmd_doctor.read_pid_record",
+            side_effect=read_b_then_restore_a,
+        ),
+        patch(
+            "defenseclaw.commands.cmd_doctor._verified_listener_gateway_evidence",
+            return_value=ListenerEvidence("missing", reason="no listener"),
+        ),
+    ):
+        tag, detail = _fix_stale_pid(
+            cfg,
+            assume_yes=True,
+            evidence=evidence,
+            platform_name="linux",
+        )
+
+    assert tag == "pass", detail
+    assert swapped_reads == 0
+    assert not pid_file.exists()
+    assert replacement.exists()
+
+
+def test_windows_stale_pid_removal_fingerprints_and_deletes_one_claimed_handle(tmp_path):
+    pid_file = tmp_path / "gateway.pid"
+    pid_file.write_bytes(b"{broken")
+    inspected = pid_file_fingerprint(os.fspath(pid_file))
+    assert inspected is not None
+    events: list[tuple[str, int]] = []
+    claimed_fd = -1
+
+    def claim(path):
+        nonlocal claimed_fd
+        claimed_fd = os.open(path, os.O_RDONLY)
+        events.append(("claim", claimed_fd))
+        return claimed_fd
+
+    def fingerprint(fd):
+        events.append(("fingerprint", fd))
+        return pid_file_fingerprint_from_fd(fd)
+
+    def delete(fd):
+        events.append(("delete", fd))
+        assert fd == claimed_fd
+
+    with (
+        patch("defenseclaw.windows_acl.open_regular_mutation_fd", side_effect=claim),
+        patch("defenseclaw.windows_acl.delete_regular_fd", side_effect=delete),
+        patch(
+            "defenseclaw.commands.cmd_doctor.pid_file_fingerprint_from_fd",
+            side_effect=fingerprint,
+        ),
+    ):
+        tag, detail = _remove_stale_pid_if_unchanged(
+            os.fspath(pid_file),
+            inspected,
+            platform_name="win32",
+        )
+
+    assert (tag, detail) == ("pass", "")
+    assert events == [
+        ("claim", claimed_fd),
+        ("fingerprint", claimed_fd),
+        ("delete", claimed_fd),
+    ]
+    with pytest.raises(OSError):
+        os.fstat(claimed_fd)
+    assert pid_file.exists()
+
+
+def test_windows_stale_pid_removal_preserves_replacement_opened_by_claim(tmp_path):
+    pid_file = tmp_path / "gateway.pid"
+    replacement = tmp_path / "replacement.pid"
+    pid_file.write_bytes(b"{old")
+    replacement.write_bytes(b"{replacement")
+    inspected = pid_file_fingerprint(os.fspath(pid_file))
+    assert inspected is not None
+
+    def claim_replacement(path):
+        os.replace(replacement, path)
+        return os.open(path, os.O_RDONLY)
+
+    with (
+        patch(
+            "defenseclaw.windows_acl.open_regular_mutation_fd",
+            side_effect=claim_replacement,
+        ),
+        patch("defenseclaw.windows_acl.delete_regular_fd") as delete,
+    ):
+        tag, detail = _remove_stale_pid_if_unchanged(
+            os.fspath(pid_file),
+            inspected,
+            platform_name="win32",
+        )
+
+    assert tag == "warn"
+    assert "changed after inspection" in detail
+    delete.assert_not_called()
+    assert pid_file.read_bytes() == b"{replacement"
+
+
+def test_windows_stale_pid_removal_fails_on_claimed_handle_read_error(tmp_path):
+    pid_file = tmp_path / "gateway.pid"
+    pid_file.write_bytes(b"{old")
+    inspected = pid_file_fingerprint(os.fspath(pid_file))
+    assert inspected is not None
+    claimed_fd = -1
+
+    def claim(path):
+        nonlocal claimed_fd
+        claimed_fd = os.open(path, os.O_RDONLY)
+        return claimed_fd
+
+    with (
+        patch("defenseclaw.windows_acl.open_regular_mutation_fd", side_effect=claim),
+        patch("defenseclaw.windows_acl.delete_regular_fd") as delete,
+        patch(
+            "defenseclaw.commands.cmd_doctor.pid_file_fingerprint_from_fd",
+            side_effect=OSError("claimed-handle read failed"),
+        ),
+    ):
+        tag, detail = _remove_stale_pid_if_unchanged(
+            os.fspath(pid_file),
+            inspected,
+            platform_name="win32",
+        )
+
+    assert tag == "fail"
+    assert "verified handle" in detail
+    delete.assert_not_called()
+    with pytest.raises(OSError):
+        os.fstat(claimed_fd)
+    assert pid_file.read_bytes() == b"{old"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_tag", "expected_detail"),
+    [
+        (FileNotFoundError(2, "missing"), "warn", "changed after inspection"),
+        (OSError(32, "sharing violation"), "fail", "exclusively claim"),
+    ],
+)
+def test_windows_stale_pid_removal_fails_closed_when_claim_is_unavailable(
+    tmp_path,
+    error,
+    expected_tag,
+    expected_detail,
+):
+    pid_file = tmp_path / "gateway.pid"
+    pid_file.write_bytes(b"{old")
+    inspected = pid_file_fingerprint(os.fspath(pid_file))
+    assert inspected is not None
+
+    with (
+        patch(
+            "defenseclaw.windows_acl.open_regular_mutation_fd",
+            side_effect=error,
+        ),
+        patch("defenseclaw.windows_acl.delete_regular_fd") as delete,
+    ):
+        tag, detail = _remove_stale_pid_if_unchanged(
+            os.fspath(pid_file),
+            inspected,
+            platform_name="win32",
+        )
+
+    assert tag == expected_tag
+    assert expected_detail in detail
+    delete.assert_not_called()
+    assert pid_file.read_bytes() == b"{old"
 
 
 def test_fix_stale_pid_preserves_malformed_record_for_live_gateway(tmp_path):

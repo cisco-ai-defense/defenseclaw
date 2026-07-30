@@ -54,6 +54,7 @@ EvidenceStatus = Literal[
 GATEWAY_PROCESS_NAMES = frozenset({"defenseclaw-gateway", "defenseclaw-gateway.exe"})
 MAX_PLATFORM_PID = 2_147_483_647
 _MAX_PID_RECORD_BYTES = 16 * 1024
+_WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
 
 @dataclass(frozen=True)
@@ -192,8 +193,7 @@ def read_pid_record(path: str) -> PIDRecord:
         if is_symlink(path):
             return PIDRecord("malformed", reason="PID file is a symbolic link or reparse point")
         info = os.lstat(path)
-        reparse_point = 0x400
-        if getattr(info, "st_file_attributes", 0) & reparse_point:
+        if getattr(info, "st_file_attributes", 0) & _WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT:
             return PIDRecord("malformed", reason="PID file is a symbolic link or reparse point")
         if not stat.S_ISREG(info.st_mode):
             return PIDRecord("malformed", reason="PID file is not a regular file")
@@ -221,6 +221,12 @@ def read_pid_record(path: str) -> PIDRecord:
         return PIDRecord("unavailable", reason="PID file changed while it was being inspected")
     except OSError:
         return PIDRecord("unavailable", reason="PID file could not be inspected")
+
+    return parse_pid_record_bytes(raw_bytes)
+
+
+def parse_pid_record_bytes(raw_bytes: bytes) -> PIDRecord:
+    """Parse bounded PID-record bytes already bound to trusted file evidence."""
 
     try:
         raw = raw_bytes.decode("utf-8")
@@ -263,14 +269,55 @@ def read_pid_record(path: str) -> PIDRecord:
     )
 
 
+def pid_file_fingerprint_from_fd(fd: int) -> tuple[int, int, int, int, bytes] | None:
+    """Fingerprint the exact regular PID-file object bound to ``fd``.
+
+    Callers that hold an exclusive Windows mutation descriptor can compare and
+    delete the same file object without reopening its pathname in between.
+    """
+
+    opened_info = os.fstat(fd)
+    if (
+        not stat.S_ISREG(opened_info.st_mode)
+        or opened_info.st_size > _MAX_PID_RECORD_BYTES
+        or getattr(opened_info, "st_file_attributes", 0) & _WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT
+    ):
+        return None
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    remaining = _MAX_PID_RECORD_BYTES + 1
+    while remaining:
+        chunk = os.read(fd, min(64 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw = b"".join(chunks)
+    current_info = os.fstat(fd)
+    if len(raw) > _MAX_PID_RECORD_BYTES:
+        return None
+    if (
+        not os.path.samestat(opened_info, current_info)
+        or opened_info.st_size != current_info.st_size
+        or getattr(opened_info, "st_mtime_ns", 0) != getattr(current_info, "st_mtime_ns", 0)
+    ):
+        return None
+    return (
+        int(getattr(opened_info, "st_dev", 0)),
+        int(getattr(opened_info, "st_ino", 0)),
+        int(opened_info.st_size),
+        int(getattr(opened_info, "st_mtime_ns", 0)),
+        raw,
+    )
+
+
 def pid_file_fingerprint(path: str) -> tuple[int, int, int, int, bytes] | None:
     """Return a race-check fingerprint for a safe regular PID file."""
     try:
         if is_symlink(path):
             return None
         info = os.lstat(path)
-        reparse_point = 0x400
-        if getattr(info, "st_file_attributes", 0) & reparse_point:
+        if getattr(info, "st_file_attributes", 0) & _WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT:
             return None
         if not stat.S_ISREG(info.st_mode):
             return None
@@ -281,28 +328,12 @@ def pid_file_fingerprint(path: str) -> tuple[int, int, int, int, bytes] | None:
             opened_info = os.fstat(fd)
             if not os.path.samestat(info, opened_info):
                 return None
-            chunks: list[bytes] = []
-            remaining = _MAX_PID_RECORD_BYTES + 1
-            while remaining:
-                chunk = os.read(fd, min(64 * 1024, remaining))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            raw = b"".join(chunks)
+            fingerprint = pid_file_fingerprint_from_fd(fd)
         finally:
             os.close(fd)
     except OSError:
         return None
-    if len(raw) > _MAX_PID_RECORD_BYTES:
-        return None
-    return (
-        int(getattr(opened_info, "st_dev", 0)),
-        int(getattr(opened_info, "st_ino", 0)),
-        int(opened_info.st_size),
-        int(getattr(opened_info, "st_mtime_ns", 0)),
-        raw,
-    )
+    return fingerprint
 
 
 class GatewayEvidence:

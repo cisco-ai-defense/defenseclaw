@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+from types import SimpleNamespace
 
 import pytest
 from defenseclaw import doctor_gateway
@@ -155,6 +157,17 @@ def test_pid_file_fingerprint_changes_with_content(tmp_path):
     assert after is not None
     assert after[-1] == b"4343"
     assert after != before
+
+
+def test_pid_file_fingerprint_from_fd_rejects_windows_reparse_points(monkeypatch):
+    info = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600,
+        st_size=4,
+        st_file_attributes=0x400,
+    )
+    monkeypatch.setattr(doctor_gateway.os, "fstat", lambda _fd: info)
+
+    assert doctor_gateway.pid_file_fingerprint_from_fd(123) is None
 
 
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "nonregular", "oversized"])

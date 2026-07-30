@@ -16,6 +16,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from defenseclaw import windows_acl
 from defenseclaw.commands import cmd_doctor
 from defenseclaw.commands.cmd_doctor import (
     _check_windows_gateway_diagnostics,
@@ -392,6 +393,65 @@ class WindowsGatewayDoctorTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "win32", "native Windows smoke test")
 class NativeWindowsGatewayDoctorSmokeTests(unittest.TestCase):
+    def test_stale_pid_repair_serializes_replacement_through_verified_handle(self):
+        with tempfile.TemporaryDirectory(prefix="doctor-native-pid-race-") as home:
+            pid_path = os.path.join(home, "gateway.pid")
+            replacement_path = os.path.join(home, "gateway-replacement.pid")
+            with open(pid_path, "wb") as handle:
+                handle.write(b"{stale")
+            with open(replacement_path, "wb") as handle:
+                handle.write(b"{replacement")
+
+            descriptor = os.open(
+                pid_path,
+                os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            )
+            try:
+                inspected = cmd_doctor.pid_file_fingerprint_from_fd(descriptor)
+            finally:
+                os.close(descriptor)
+            self.assertIsNotNone(inspected)
+
+            real_delete = windows_acl.delete_regular_fd
+            replacement_blocked = False
+
+            def race_delete(claimed_fd):
+                nonlocal replacement_blocked
+                try:
+                    os.replace(replacement_path, pid_path)
+                except OSError as exc:
+                    self.assertIn(
+                        getattr(exc, "winerror", None) or getattr(exc, "errno", None),
+                        {5, 32},
+                    )
+                    replacement_blocked = True
+                else:
+                    self.fail("PID replacement bypassed the exclusive mutation handle")
+                real_delete(claimed_fd)
+
+            cfg = make_cfg(home, "")
+            with (
+                patch.object(cmd_doctor, "pid_file_fingerprint", return_value=inspected),
+                patch.object(cmd_doctor, "read_pid_record") as read_record,
+                patch.object(
+                    cmd_doctor,
+                    "_verified_listener_gateway_evidence",
+                    return_value=ListenerEvidence("missing", reason="no listener"),
+                ),
+                patch.object(windows_acl, "delete_regular_fd", side_effect=race_delete),
+            ):
+                tag, detail = _fix_stale_pid(cfg, assume_yes=True)
+
+            self.assertEqual(tag, "pass", detail)
+            read_record.assert_not_called()
+            self.assertTrue(replacement_blocked)
+            self.assertFalse(os.path.exists(pid_path))
+            self.assertTrue(os.path.exists(replacement_path))
+
+            os.replace(replacement_path, pid_path)
+            with open(pid_path, "rb") as handle:
+                self.assertEqual(handle.read(), b"{replacement")
+
     def test_disposable_managed_process_listener_home_and_auth(self):
         """Exercise native process/listener APIs against an isolated server.
 

@@ -74,8 +74,10 @@ from defenseclaw.doctor_gateway import (
     PIDRecord,
     ProcessEvidence,
     gateway_executable_name,
+    parse_pid_record_bytes,
     paths_same,
     pid_file_fingerprint,
+    pid_file_fingerprint_from_fd,
     read_pid_record,
 )
 from defenseclaw.doctor_hooks import (
@@ -7639,6 +7641,58 @@ def _verified_listener_gateway_pid(
     return listener.pid if listener.status == "ok" else 0
 
 
+def _remove_stale_pid_if_unchanged(
+    pid_file: str,
+    inspected_fingerprint: tuple[int, int, int, int, bytes],
+    *,
+    platform_name: str | None = None,
+) -> tuple[str, str]:
+    """Delete only the PID-file object represented by prior evidence."""
+
+    changed_detail = "gateway PID record changed after inspection; preserving the replacement"
+    platform_name = platform_name or ("win32" if os.name == "nt" else sys.platform)
+    if platform_name != "win32":
+        if pid_file_fingerprint(pid_file) != inspected_fingerprint:
+            return ("warn", changed_detail)
+        try:
+            os.unlink(pid_file)
+        except OSError as exc:
+            return ("fail", f"could not remove {pid_file}: {exc}")
+        return ("pass", "")
+
+    # On Windows, a separate fingerprint followed by pathname deletion can
+    # remove a replacement published in between. Hold a descriptor that denies
+    # both writes and delete-sharing, compare that exact object, then mark that
+    # same handle for deletion.
+    from defenseclaw.windows_acl import delete_regular_fd, open_regular_mutation_fd
+
+    try:
+        fd = open_regular_mutation_fd(pid_file)
+    except OSError as exc:
+        error = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+        if error in {2, 3}:
+            return ("warn", changed_detail)
+        return (
+            "fail",
+            f"could not exclusively claim {pid_file} for safe removal: {exc}",
+        )
+    outcome = ("pass", "")
+    try:
+        if pid_file_fingerprint_from_fd(fd) != inspected_fingerprint:
+            outcome = ("warn", changed_detail)
+        else:
+            delete_regular_fd(fd)
+    except OSError as exc:
+        outcome = ("fail", f"could not remove {pid_file} through its verified handle: {exc}")
+    try:
+        os.close(fd)
+    except OSError:
+        # A failed close leaves the delete disposition ambiguous. Never report
+        # successful convergence in that state.
+        return ("fail", f"could not close the verified PID-file handle for {pid_file}")
+    return outcome
+
+
 def _fix_stale_pid(
     cfg,
     *,
@@ -7653,10 +7707,16 @@ def _fix_stale_pid(
         return ("fail", "gateway data directory is unavailable; refusing PID-file repair")
     pid_file = os.path.join(data_dir, "gateway.pid")
     inspected_fingerprint = pid_file_fingerprint(pid_file)
-    record = read_pid_record(pid_file)
-    if record.status == "missing":
-        return ("skip", "no pid file")
-    if not inspected_fingerprint or pid_file_fingerprint(pid_file) != inspected_fingerprint:
+    if not inspected_fingerprint:
+        record = read_pid_record(pid_file)
+        if record.status == "missing":
+            return ("skip", "no pid file")
+        return (
+            "fail",
+            "PID record is unsafe or could not be bound to one inspection; refusing to remove it",
+        )
+    record = parse_pid_record_bytes(inspected_fingerprint[4])
+    if pid_file_fingerprint(pid_file) != inspected_fingerprint:
         return (
             "fail",
             "PID record is unsafe or changed during inspection; refusing to remove it",
@@ -7715,15 +7775,12 @@ def _fix_stale_pid(
     ):
         return ("skip", "declined by user")
 
-    if pid_file_fingerprint(pid_file) != inspected_fingerprint:
-        return (
-            "warn",
-            "gateway PID record changed after inspection; preserving the replacement",
-        )
-    try:
-        os.unlink(pid_file)
-    except OSError as exc:
-        return ("fail", f"could not remove {pid_file}: {exc}")
+    removal_tag, removal_detail = _remove_stale_pid_if_unchanged(
+        pid_file,
+        inspected_fingerprint,
+    )
+    if removal_tag != "pass":
+        return (removal_tag, removal_detail)
     return ("pass", f"removed {pid_file}: {stale_reason}")
 
 
