@@ -386,7 +386,16 @@ def test_gateway_lifecycle_uses_verified_executable_and_sanitized_child_env(
         "_daemon_effective_gateway_token",
         lambda _cfg: ("gateway-secret", "DEFENSECLAW_GATEWAY_TOKEN", "test"),
     )
-    monkeypatch.setattr(cmd_doctor, "_managed_gateway_process_trust", lambda _cfg: trust)
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_managed_gateway_process_trust_for_lifecycle",
+        lambda _cfg: trust,
+    )
+    monkeypatch.setattr(
+        cmd_setup,
+        "_trusted_gateway_lifecycle_executable",
+        lambda selected: os.path.realpath(selected),
+    )
     restart = Mock(return_value=True)
     monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", restart)
 

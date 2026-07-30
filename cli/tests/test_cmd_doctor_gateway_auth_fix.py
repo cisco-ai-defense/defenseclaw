@@ -555,6 +555,8 @@ def test_fix_gateway_token_generates_canonical_token_when_openclaw_has_none(tmp_
 def test_fix_stale_pid_removes_malformed_file(tmp_path):
     pid_file = tmp_path / "gateway.pid"
     pid_file.write_text("{broken", encoding="utf-8")
+    if os.name != "nt":
+        pid_file.chmod(0o600)
     cfg = SimpleNamespace(data_dir=str(tmp_path))
 
     with patch(
@@ -1596,6 +1598,7 @@ def test_fix_gateway_service_reports_started_with_operational_upstream_state(
     tmp_path,
 ):
     cfg = _cfg(str(tmp_path), token="configured")
+    current_controller = os.fspath(tmp_path / "current-defenseclaw-gateway")
 
     with (
         patch(
@@ -1606,7 +1609,7 @@ def test_fix_gateway_service_reports_started_with_operational_upstream_state(
             ],
         ),
         patch(
-            "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+            "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust_for_lifecycle",
             return_value=_GatewayTrust("missing", "managed gateway PID file is missing"),
         ),
         patch(
@@ -1620,6 +1623,14 @@ def test_fix_gateway_service_reports_started_with_operational_upstream_state(
         patch(
             "defenseclaw.commands.cmd_setup._restart_defense_gateway",
             return_value=True,
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup._gateway_lifecycle_executable",
+            return_value=current_controller,
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup._trusted_gateway_lifecycle_executable",
+            side_effect=lambda executable: os.path.realpath(executable),
         ),
         patch(
             "defenseclaw.commands.cmd_doctor._component_compatibility_problems_for_executable",

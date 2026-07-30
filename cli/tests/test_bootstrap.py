@@ -64,6 +64,16 @@ class BootstrapEnvTests(unittest.TestCase):
         self._prev_home = os.environ.get("DEFENSECLAW_HOME")
         os.environ["DEFENSECLAW_HOME"] = self._tmp.name
         self.addCleanup(self._restore_home)
+        # bootstrap_env may adopt a token from a connector config reachable on
+        # the test host and intentionally publish it into this process. Keep
+        # that production behavior inside each test so a Linux validator with
+        # OpenClaw installed cannot leak the token into later Doctor tests.
+        self._gateway_token_env = patch.dict(
+            os.environ,
+            {"DEFENSECLAW_GATEWAY_TOKEN": "", "OPENCLAW_GATEWAY_TOKEN": ""},
+        )
+        self._gateway_token_env.start()
+        self.addCleanup(self._gateway_token_env.stop)
 
     def _restore_home(self) -> None:
         if self._prev_home is None:

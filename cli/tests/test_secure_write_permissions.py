@@ -19,8 +19,10 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -289,17 +291,30 @@ def test_windows_durable_replace_supports_path_beyond_max_path(tmp_path):
     parent = tmp_path
     for index in range(18):
         parent /= f"durable-segment-{index:02d}"
-    parent.mkdir(parents=True)
     target = parent / "state.json"
     staging = parent / ".state.json.new"
     assert len(os.fspath(target)) > 260
-    target.write_bytes(b"old")
-    staging.write_bytes(b"new")
+    # The validator itself may not be long-path-aware at the process manifest
+    # level. Use the explicit Win32 namespace to create and inspect the
+    # fixture; replace_file_durable must provide that same support internally.
+    extended_parent = Path(file_permissions._windows_extended_path(parent))
+    extended_target = Path(file_permissions._windows_extended_path(target))
+    extended_staging = Path(file_permissions._windows_extended_path(staging))
+    extended_root = Path(
+        file_permissions._windows_extended_path(tmp_path / "durable-segment-00")
+    )
+    try:
+        extended_parent.mkdir(parents=True)
+        extended_target.write_bytes(b"old")
+        extended_staging.write_bytes(b"new")
 
-    file_permissions.replace_file_durable(staging, target)
+        file_permissions.replace_file_durable(staging, target)
 
-    assert target.read_bytes() == b"new"
-    assert not staging.exists()
+        assert extended_target.read_bytes() == b"new"
+        assert not extended_staging.exists()
+    finally:
+        if extended_root.exists():
+            shutil.rmtree(extended_root)
 
 
 def test_posix_file_mode_still_uses_descriptor_api(monkeypatch):

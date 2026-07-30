@@ -601,7 +601,9 @@ class FixGatewayTokenDriftTests(unittest.TestCase):
         repair.assert_not_called()
 
     def test_origin_main_darwin_start_identity_reaches_authenticated_bridge(self):
-        executable = os.path.join(self.tmp, "bin", "defenseclaw-gateway")
+        # This is deliberately Darwin evidence even when the test suite runs
+        # on Windows, so keep the synthetic executable in Darwin path syntax.
+        executable = "/opt/defenseclaw/bin/defenseclaw-gateway"
         legacy_start = "Thu Jul 30 12:34:56 2026"
         trust = _gateway_process_trust(
             self.cfg,
@@ -625,7 +627,7 @@ class FixGatewayTokenDriftTests(unittest.TestCase):
         self.assertNotEqual(trust.code, "identity")
 
     def test_origin_main_darwin_launch_generation_window_is_bounded(self):
-        executable = os.path.join(self.tmp, "bin", "defenseclaw-gateway")
+        executable = "/opt/defenseclaw/bin/defenseclaw-gateway"
         trust = _gateway_process_trust(
             self.cfg,
             PIDRecord(
@@ -647,7 +649,8 @@ class FixGatewayTokenDriftTests(unittest.TestCase):
         self.assertEqual(trust.code, "identity")
 
     def test_origin_main_linux_deleted_executable_reaches_authenticated_bridge(self):
-        executable = os.path.join(self.tmp, "bin", "defenseclaw-gateway")
+        # Keep forced-Linux evidence independent of the host path separator.
+        executable = "/opt/defenseclaw/bin/defenseclaw-gateway"
         trust = _gateway_process_trust(
             self.cfg,
             PIDRecord(
@@ -669,7 +672,7 @@ class FixGatewayTokenDriftTests(unittest.TestCase):
         self.assertNotEqual(trust.code, "identity")
 
     def test_current_linux_record_does_not_accept_deleted_executable_exception(self):
-        executable = os.path.join(self.tmp, "bin", "defenseclaw-gateway")
+        executable = "/opt/defenseclaw/bin/defenseclaw-gateway"
         trust = _gateway_process_trust(
             self.cfg,
             PIDRecord(
