@@ -3360,6 +3360,9 @@ async def test_ai_discovery_renders_models_in_separate_table_with_detail() -> No
 
         product_table = app.query_one("#panel-table", DataTable)
         model_table = app.query_one("#ai-model-table", DataTable)
+        await _wait_for_background(
+            lambda: product_table.row_count == 1 and model_table.row_count == 1
+        )
         assert product_table.row_count == 1
         assert model_table.row_count == 1
         assert "Codex" in str(product_table.get_cell_at((0, 2)))
