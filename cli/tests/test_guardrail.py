@@ -1966,7 +1966,11 @@ class TestRestartDefenseGateway(unittest.TestCase):
 
         mock_run.return_value = MagicMock(returncode=0)
         with tempfile.TemporaryDirectory() as tmpdir:
-            self.assertFalse(_restart_defense_gateway(tmpdir))
+            with patch(
+                "defenseclaw.commands.cmd_setup._gateway_lifecycle_executable",
+                return_value=sys.executable,
+            ):
+                self.assertFalse(_restart_defense_gateway(tmpdir))
             mock_ready.assert_called_once_with(tmpdir)
 
     @patch(
@@ -1991,7 +1995,12 @@ class TestRestartDefenseGateway(unittest.TestCase):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            _restart_defense_gateway(tmpdir)
+            with patch(
+                "defenseclaw.commands.cmd_setup._gateway_lifecycle_executable",
+                return_value=sys.executable,
+            ):
+                _restart_defense_gateway(tmpdir)
+        mock_run.assert_called_once()
 
 
 class TestWaitForDefenseGatewayAPI(unittest.TestCase):
@@ -2470,7 +2479,11 @@ class TestRestartDefenseGatewayEdgeCases(unittest.TestCase):
             stdout="",
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            _restart_defense_gateway(tmpdir)
+            with patch(
+                "defenseclaw.commands.cmd_setup._gateway_lifecycle_executable",
+                return_value=sys.executable,
+            ):
+                _restart_defense_gateway(tmpdir)
         mock_run.assert_called_once()
 
     @patch(
@@ -2481,7 +2494,11 @@ class TestRestartDefenseGatewayEdgeCases(unittest.TestCase):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            _restart_defense_gateway(tmpdir)
+            with patch(
+                "defenseclaw.commands.cmd_setup._gateway_lifecycle_executable",
+                return_value=sys.executable,
+            ):
+                _restart_defense_gateway(tmpdir)
 
 
 class TestCheckOpenclawGatewayEdgeCases(unittest.TestCase):
