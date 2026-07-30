@@ -97,10 +97,13 @@ def test_first_run_selects_amp_and_builds_init_command() -> None:
     panel = FirstRunPanelModel()
     panel.cursor = 0
 
-    # Amp is the penultimate option, so moving left twice from the default
-    # Codex selection exercises the same choice-cycling path as the TUI.
-    panel.handle_key("left")
-    panel.handle_key("left")
+    # Exercise the same choice-cycling path as the TUI without assuming every
+    # OS exposes the same set of connectors between Codex and Amp.
+    connector_options = panel.fields[0].options
+    assert "amp" in connector_options
+    moves = (connector_options.index("amp") - connector_options.index("codex")) % len(connector_options)
+    for _ in range(moves):
+        panel.handle_key("right")
 
     assert panel.value("Connector") == "amp"
     args = panel.args()
