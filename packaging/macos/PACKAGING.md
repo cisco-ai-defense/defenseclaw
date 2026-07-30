@@ -35,7 +35,7 @@ Common flags:
 | `--mode {observe\|action}` | `action` | Guardrail + asset_policy mode |
 | `--connector LIST` | `codex` | Comma-separated: `codex`, `claudecode`, `cursor` |
 | `--port PORT` | `18970` | Loopback API port |
-| `--config-file PATH` | `/opt/cisco/secureclient/defenseclaw/env_config.json` | Path to the AVC-authored JSON that supplies `cisco_ai_defense.endpoint` (see [AVC env_config.json](#avc-env_configjson)) |
+| `--config-file PATH` | `/opt/cisco/secureclient/defenseclaw/env_config.json` | Path to the AVC-authored JSON that supplies `cisco_ai_defense_endpoint` (see [AVC env_config.json](#avc-env_configjson)) |
 | `--override-endpoint URL` | — | Adhoc-testing seam that wins over `--config-file`; must be a full http(s) URL |
 | `--disable-redaction` | not set (redaction **on**) | Turn off audit/sink redaction |
 | `--user USER` | `$SUDO_USER` | Target user for per-user hook wiring |

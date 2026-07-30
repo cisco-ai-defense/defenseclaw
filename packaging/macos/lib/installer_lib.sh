@@ -776,6 +776,17 @@ move_legacy_aside() {
     return 2
   fi
 
+  # Reject a version string that could path-traverse the target. version
+  # flows into ${target}=${backup_root}/${base}.pre-${version}-${timestamp}
+  # verbatim; a version containing '/' or '..' (e.g. a malformed
+  # --version output captured unsanitized) would escape the backup_root.
+  # Whitespace and shell metacharacters are also refused so `printf` /
+  # `mv` cannot be steered by callers that failed to trim their input.
+  if [[ "${version}" == */* || "${version}" == *".."* ]] \
+      || [[ "${version}" =~ [[:space:][:cntrl:]\"\'\\\$\`\;\|\&\<\>] ]]; then
+    return 2
+  fi
+
   if [[ ! -e "${path}" && ! -L "${path}" ]]; then
     return 0
   fi

@@ -109,7 +109,8 @@ import time) means a typo in ``guardrail.connector`` surfaces in
 producing wrong paths.
 """
 
-KNOWN_AGENT_KINDS: tuple[str, ...] = KNOWN_CONNECTORS + (
+KNOWN_AGENT_KINDS: tuple[str, ...] = (
+    *KNOWN_CONNECTORS,
     # Discovery-only agents. These have AI-signature entries in
     # ai_signatures.json (mirrored between Go and Python copies) but no
     # DefenseClaw enforcement path, so they do NOT appear in

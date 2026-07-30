@@ -70,11 +70,11 @@ message StatsSnapshot {
   //
   //   total_scans, active_alerts — ALWAYS present on an AVAILABLE
   //     snapshot, even when the value is zero. These back AVC's
-  //     primary KPI tiles and need a non-zero rendering (e.g. "0")
-  //     on a fresh install. If either field is ABSENT on an AVAILABLE
-  //     snapshot, this DefenseClaw build does not support the counter
-  //     and consumers should render it as unsupported (em-dash or
-  //     hidden), NOT as "0".
+  //     primary KPI tiles and need an explicit numeric rendering
+  //     (e.g. "0") on a fresh install. If either field is ABSENT on
+  //     an AVAILABLE snapshot, this DefenseClaw build does not
+  //     support the counter and consumers should render it as
+  //     unsupported (em-dash or hidden), NOT as "0".
   //
   //   blocked_skills, allowed_skills, blocked_mcp_servers,
   //   allowed_mcp_servers — MAY be absent even on an AVAILABLE
@@ -84,7 +84,7 @@ message StatsSnapshot {
   //     not as "unsupported". A present zero and an absent field
   //     carry the same meaning for these fields.
   //
-  // On an ERROR / STARTING / UNAVAILABLE snapshot every counter is
+  // On an ERROR / STALE / UNAVAILABLE snapshot every counter is
   // absent; the availability enum carries the reachability signal.
 
   // Total scan count for the agreed statistics scope. Always present
