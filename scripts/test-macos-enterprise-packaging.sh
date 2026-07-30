@@ -141,6 +141,9 @@ guardrail:
 application_protection:
   enabled: false
 EOF
+sudo -n mkdir -m 0700 -- "$trusted_fixture"
+trusted_fixture_owned=true
+sudo -n cp -- "$config_source" "${trusted_fixture}/config.yaml"
 sudo -n bash -c "printf 'version: 1\ntargets: []\n' >'${trusted_fixture}/targets.yaml'"
 sudo -n chown root:wheel "${trusted_fixture}/config.yaml" "${trusted_fixture}/targets.yaml"
 sudo -n chmod 0644 "${trusted_fixture}/config.yaml" "${trusted_fixture}/targets.yaml"
