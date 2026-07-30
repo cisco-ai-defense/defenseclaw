@@ -2925,7 +2925,7 @@
       "default": "unset (trust check enforced)",
       "accepted_values": ["1", "unset"],
       "security_impact": "medium",
-      "surface_in_doctor": false,
+      "surface_in_doctor": true,
       "consumers": [
         {"location": "internal/config/env_config.go", "description": "trustEnvConfigFile short-circuits when set — production installs must leave this unset so a non-root-authored / group-writable env_config.json is refused"}
       ],
