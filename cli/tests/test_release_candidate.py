@@ -823,6 +823,7 @@ def _windows_setup_dir(
         release_candidate.WINDOWS_PYTHON_EMBED_NAME: release_candidate.WINDOWS_PYTHON_EMBED_SHA256,
         release_candidate.WINDOWS_YARA_COMPAT_WHEEL: "a" * 64,
         "site-packages.zip": "9" * 64,
+        "defenseclaw-hook-launcher.exe": "4" * 64,
         "defenseclaw-launcher.exe": "d" * 64,
         "defenseclaw-startup.exe": "e" * 64,
         "cosign.exe": release_candidate.WINDOWS_COSIGN_SHA256,
@@ -834,6 +835,7 @@ def _windows_setup_dir(
         "gateway_archive_sha256": "6" * 64,
         "embedded_gateway_archive_sha256": payload_files[gateway_archive],
         "embedded_payload_sha256": "7" * 64,
+        "hook_launcher_sha256": payload_files["defenseclaw-hook-launcher.exe"],
         "product_executables_authenticode_signed": signed,
         "wheel": wheel,
         "wheel_sha256": payload_files[wheel],
@@ -1580,6 +1582,19 @@ def test_windows_setup_provenance_rejects_inconsistent_payload_digest(
     document = json.loads(path.read_text(encoding="utf-8"))
     document["inputs"]["payload_files"][document["inputs"]["wheel"]] = "1" * 64
     path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(release_candidate.CandidateError, match="payload digests"):
+        release_candidate._validate_windows_installer_assets(windows, WINDOWS_SETUP_VERSION, COMMIT)
+
+
+def test_windows_setup_provenance_binds_hook_launcher_digest(
+    tmp_path: Path,
+) -> None:
+    windows = _windows_setup_dir(tmp_path)
+    path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.provenance.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["inputs"]["hook_launcher_sha256"] = "1" * 64
+    path.write_text(json.dumps(document), encoding="utf-8")
+
     with pytest.raises(release_candidate.CandidateError, match="payload digests"):
         release_candidate._validate_windows_installer_assets(windows, WINDOWS_SETUP_VERSION, COMMIT)
 

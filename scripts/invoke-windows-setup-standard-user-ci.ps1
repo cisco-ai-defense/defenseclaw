@@ -23,6 +23,8 @@ param(
     [Parameter(Mandatory)][string]$ArtifactRoot,
     [Parameter(Mandatory)][string]$StateRoot,
     [string]$TargetVersion = '',
+    [ValidateSet('immediate', 'deferred')]
+    [string]$BootstrapUninstallContract = 'deferred',
     [string]$DiagnosticsRoot = '',
     [ValidateRange(60, 7200)][int]$TimeoutSeconds = 4500,
     [switch]$Child,
@@ -389,6 +391,7 @@ function Invoke-ChildMode {
             & (Join-Path $PSScriptRoot 'test-fresh-install-release-windows.ps1') `
                 -ReleaseDir $artifacts `
                 -TargetVersion $TargetVersion `
+                -UninstallContract $BootstrapUninstallContract `
                 -StateRoot $state `
                 -Child
         } elseif ($Mode -eq 'contract') {
@@ -1139,7 +1142,10 @@ try {
         $arguments += @('-Connector', $Connector)
     }
     if ($Mode -eq 'bootstrap-acceptance') {
-        $arguments += @('-TargetVersion', $TargetVersion)
+        $arguments += @(
+            '-TargetVersion', $TargetVersion,
+            '-BootstrapUninstallContract', $BootstrapUninstallContract
+        )
     }
     if ($Mode -eq 'setup-acceptance') {
         $arguments += '-ExerciseWmiEscape'

@@ -4283,6 +4283,7 @@ def _validate_windows_setup_provenance(
             "gateway_archive_sha256",
             "embedded_gateway_archive_sha256",
             "embedded_payload_sha256",
+            "hook_launcher_sha256",
             "product_executables_authenticode_signed",
             "wheel",
             "wheel_sha256",
@@ -4307,6 +4308,7 @@ def _validate_windows_setup_provenance(
             "gateway_archive_sha256",
             "embedded_gateway_archive_sha256",
             "embedded_payload_sha256",
+            "hook_launcher_sha256",
             "wheel_sha256",
             "python_embed_sha256",
             "site_packages_sha256",
@@ -4341,6 +4343,7 @@ def _validate_windows_setup_provenance(
             WINDOWS_PYTHON_EMBED_NAME,
             WINDOWS_YARA_COMPAT_WHEEL,
             "site-packages.zip",
+            "defenseclaw-hook-launcher.exe",
             "defenseclaw-launcher.exe",
             "defenseclaw-startup.exe",
             "cosign.exe",
@@ -4360,6 +4363,7 @@ def _validate_windows_setup_provenance(
         WINDOWS_PYTHON_EMBED_NAME: "python_embed_sha256",
         WINDOWS_YARA_COMPAT_WHEEL: "yara_compat_wheel_sha256",
         "site-packages.zip": "site_packages_sha256",
+        "defenseclaw-hook-launcher.exe": "hook_launcher_sha256",
         "cosign.exe": "cosign_sha256",
     }
     if any(payload_files[name] != inputs[field] for name, field in payload_bindings.items()):

@@ -13,6 +13,23 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      release_candidate_replay_run_id:
+        description: Actions run ID that produced the sealed release candidate to replay.
+        required: false
+        type: string
+      release_candidate_replay_artifact:
+        description: Exact release-candidate artifact name from that run.
+        required: false
+        type: string
+      release_candidate_replay_version:
+        description: Canonical X.Y.Z version bound into the candidate.
+        required: false
+        type: string
+      release_candidate_replay_commit:
+        description: Exact lowercase 40-character commit bound into the candidate.
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -589,6 +606,7 @@ jobs:
           ./scripts/test-fresh-install-release-windows.ps1 `
             -ReleaseDir $env:DC_BOOTSTRAP_RELEASE_DIR `
             -TargetVersion $env:BOOTSTRAP_FIXTURE_VERSION `
+            -UninstallContract immediate `
             -StateRoot $bootstrapState `
             -DiagnosticsRoot $env:DC_DIAGNOSTICS
       - name: Capture bounded diagnostics
@@ -661,6 +679,113 @@ jobs:
           if-no-files-found: ignore
           retention-days: 5
       - name: Always clean isolated processes, listeners, and temp state
+        if: ${{ always() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
+
+  release-validator-replay:
+    name: Windows exact release validator replay
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.release_candidate_replay_run_id != ''
+    runs-on: windows-latest
+    timeout-minutes: 50
+    permissions:
+      # Download the sealed candidate from its producing run and check out the
+      # repository containing the replay validator and signature verifier.
+      actions: read
+      contents: read
+    env:
+      REPLAY_RUN_ID: ${{ inputs.release_candidate_replay_run_id }}
+      REPLAY_ARTIFACT: ${{ inputs.release_candidate_replay_artifact }}
+      REPLAY_VERSION: ${{ inputs.release_candidate_replay_version }}
+      REPLAY_COMMIT: ${{ inputs.release_candidate_replay_commit }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Validate exact replay identity
+        run: |
+          if ($env:REPLAY_RUN_ID -notmatch '^[1-9][0-9]*$') {
+            throw 'release candidate replay run ID must be a positive integer'
+          }
+          $escapedRunID = [regex]::Escape($env:REPLAY_RUN_ID)
+          if ($env:REPLAY_ARTIFACT -notmatch (
+              "^release-candidate-${escapedRunID}-[1-9][0-9]*$"
+          )) {
+            throw 'release candidate replay artifact must bind the exact run ID and attempt'
+          }
+          if ($env:REPLAY_VERSION -notmatch (
+              '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          )) {
+            throw 'release candidate replay version must be canonical X.Y.Z'
+          }
+          if ($env:REPLAY_COMMIT -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'release candidate replay commit must be an exact lowercase SHA'
+          }
+      - name: Initialize isolated replay paths
+        run: >-
+          ./scripts/initialize-windows-native-ci-paths.ps1
+          -Leaf release-replay
+          -DiagnosticsLeaf windows-release-validator-replay-diagnostics
+          -ArtifactLeaf windows-release-validator-replay
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.28"
+          python-version: "3.13"
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
+      - name: Download exact sealed release candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.release_candidate_replay_artifact }}
+          path: ${{ env.DC_ARTIFACT_ROOT }}\transport
+          repository: cisco-ai-defense/defenseclaw
+          run-id: ${{ inputs.release_candidate_replay_run_id }}
+          github-token: ${{ github.token }}
+      - name: Restore and authenticate exact release candidate
+        run: |
+          $candidateRoot = Join-Path $env:DC_ARTIFACT_ROOT 'candidate'
+          python scripts/release_candidate.py unpack-transport `
+            --archive (Join-Path $env:DC_ARTIFACT_ROOT 'transport\release-candidate.tar') `
+            --destination $candidateRoot
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/release_candidate.py verify `
+            --root $candidateRoot `
+            --version $env:REPLAY_VERSION `
+            --commit $env:REPLAY_COMMIT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $certificateIdentity = (
+            "https://github.com/$env:GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main"
+          )
+          python scripts/verify-sigstore-blob.py `
+            --certificate (Join-Path $candidateRoot 'dist\checksums.txt.pem') `
+            --signature (Join-Path $candidateRoot 'dist\checksums.txt.sig') `
+            --certificate-identity $certificateIdentity `
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' `
+            (Join-Path $candidateRoot 'dist\checksums.txt')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "DC_REPLAY_RELEASE_DIR=$(Join-Path $candidateRoot 'dist')" >> $env:GITHUB_ENV
+      - name: Replay current validator against exact failed candidate
+        run: |
+          $replayState = Join-Path $env:DC_STATE_ROOT (
+            'defenseclaw-bootstrap-acceptance-' + [guid]::NewGuid().ToString('N')
+          )
+          ./scripts/test-fresh-install-release-windows.ps1 `
+            -ReleaseDir $env:DC_REPLAY_RELEASE_DIR `
+            -TargetVersion $env:REPLAY_VERSION `
+            -UninstallContract deferred `
+            -StateRoot $replayState `
+            -DiagnosticsRoot $env:DC_DIAGNOSTICS
+      - name: Upload exact replay diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-release-validator-replay-diagnostics
+          path: ${{ env.DC_DIAGNOSTICS }}\**
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Always clean exact replay state
         if: ${{ always() }}
         run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
 

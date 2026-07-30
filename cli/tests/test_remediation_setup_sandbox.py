@@ -273,12 +273,18 @@ class TestInitSandboxChownTOCTOU(unittest.TestCase):
                     chown_calls.append(args)
                 return MagicMock(returncode=0, stdout="", stderr="")
 
+            # This test covers the symlink recheck, not host system-binary custody.
             with patch.object(mod.shutil, "which", return_value="openshell-sandbox"), \
                  patch.object(mod, "_create_sandbox_user"), \
                  patch.object(mod, "_integrate_openclaw_home", return_value=True), \
                  patch.object(mod, "_copy_openshell_policies"), \
                  patch.object(mod, "_pinned_openclaw_home", return_value=os.path.realpath(pinned)), \
                  patch.object(mod, "_needs_sudo", return_value=False), \
+                 patch.object(
+                     mod,
+                     "_trusted_privileged_argv",
+                     side_effect=lambda name, *args: [f"/usr/bin/{name}", *args],
+                 ), \
                  patch.object(mod.subprocess, "run", side_effect=fake_run):
                 result = mod._init_sandbox(cfg, logger)
 

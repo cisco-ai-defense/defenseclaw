@@ -229,6 +229,7 @@ jobs:
           ./scripts/test-fresh-install-release-windows.ps1 `
             -ReleaseDir "$env:GITHUB_WORKSPACE/release-candidate/dist" `
             -TargetVersion "$env:RELEASE_TAG" `
+            -UninstallContract deferred `
             -DiagnosticsRoot (Join-Path $env:RUNNER_TEMP 'defenseclaw-release-bootstrap-diagnostics')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload Windows bootstrap diagnostics on failure
