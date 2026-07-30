@@ -35,7 +35,12 @@ import (
 // The regex captures the "Cisco AI Defense:" prefix so we can rewrite
 // only that specific body shape and leave anything else (asset-policy
 // blocks, connector-native errors, service-state events) untouched.
-var ciscoAIDefenseBodyPrefix = regexp.MustCompile(`^Cisco AI Defense:\s*(.*)$`)
+//
+// `(?s)` lets `.` match newlines so a multi-line AID reason (the
+// AVC wire body can carry rule detail on subsequent lines) is fully
+// captured for downstream cleanup rather than silently degrading to
+// the generic "a policy violation" copy.
+var ciscoAIDefenseBodyPrefix = regexp.MustCompile(`(?s)^Cisco AI Defense:\s*(.*)$`)
 
 // categoryTokenPattern is the "keep" filter applied to each
 // comma-separated element of the AID findings list. Category labels

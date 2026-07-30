@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
+	"syscall"
 )
 
 // DefaultEnvConfigPath is the canonical location AVC drops the DefenseClaw
@@ -61,6 +63,21 @@ var ErrEnvConfigMissing = errors.New("env_config: file not present")
 func LoadEnvConfigEndpoint(path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", ErrEnvConfigMissing
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", ErrEnvConfigMissing
+		}
+		return "", fmt.Errorf("env_config: stat %s: %w", path, err)
+	}
+	// Trust check parallels _assert_trusted_env_config_file_or_die in
+	// packaging/macos/install.sh: a bearer-token target endpoint is
+	// only safe when the file it comes from was root-authored and not
+	// world/group writable. Non-Unix stat is skipped — the managed
+	// deploy target is macOS + Linux only.
+	if err := trustEnvConfigFile(info); err != nil {
+		return "", fmt.Errorf("env_config: %s: %w", path, err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -138,4 +155,49 @@ func validateAIDefenseEndpoint(endpoint string) error {
 		return nil
 	}
 	return fmt.Errorf("host %q is not an AI Defense endpoint (must end in .cisco.com or be a loopback address)", host)
+}
+
+// trustEnvConfigFile enforces the same on-disk trust boundary the
+// shell installer's _assert_trusted_env_config_file_or_die applies:
+//
+//   - the file must be a regular file (not a symlink target, not a dir);
+//   - it must be owned by root (uid 0);
+//   - it must not be world/group writable.
+//
+// The env_config file feeds a bearer-authenticated endpoint into the
+// gateway; a non-root or group/world-writable file at the canonical
+// path lets a compromised operator retarget those authenticated POSTs.
+// On non-Unix platforms this is a best-effort no-op — the caller can
+// still enforce path-level trust separately.
+//
+// When the gateway is NOT running as root (dev boxes, unit tests,
+// opensource local runs) the uid/mode invariants can't hold, so we
+// skip the check in that mode and rely on the caller to only wire
+// LoadEnvConfigEndpoint on managed_enterprise where the sidecar runs
+// as uid 0. Setting DEFENSECLAW_ENV_CONFIG_SKIP_TRUST=1 also disables
+// the check — used by tests that need to exercise the parse path.
+func trustEnvConfigFile(info os.FileInfo) error {
+	if info == nil {
+		return errors.New("stat returned nil info")
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("must be a regular file")
+	}
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	if os.Getenv("DEFENSECLAW_ENV_CONFIG_SKIP_TRUST") == "1" || os.Geteuid() != 0 {
+		return nil
+	}
+	sys, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return errors.New("file metadata not verifiable on this platform")
+	}
+	if sys.Uid != 0 {
+		return fmt.Errorf("must be owned by root (uid %d)", sys.Uid)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("must not be group- or world-writable (mode %o)", info.Mode().Perm())
+	}
+	return nil
 }

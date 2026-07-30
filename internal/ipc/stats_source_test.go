@@ -37,12 +37,13 @@ func (f fakeStats) GetCounts() (audit.Counts, error) { return f.counts, f.err }
 
 func TestSnapshotStats(t *testing.T) {
 	cases := []struct {
-		name              string
-		src               fakeStats
-		wantAvail         pb.StatsAvailability
-		wantScans         *uint64
-		wantBlockedSkills *uint64
-		wantErr           bool
+		name                string
+		src                 fakeStats
+		wantAvail           pb.StatsAvailability
+		wantScans           *uint64
+		wantBlockedSkills   *uint64
+		wantErr             bool
+		checkMixedPresence  bool
 	}{
 		{
 			name: "healthy DB → AVAILABLE with counters",
@@ -91,11 +92,12 @@ func TestSnapshotStats(t *testing.T) {
 			//                                stay hidden until real data).
 			// A future refactor that unifies these back into a single
 			// policy breaks this case.
-			name:              "all zero counters → AVAILABLE with KPI counters *0 + secondaries nil",
-			src:               fakeStats{counts: audit.Counts{}},
-			wantAvail:         pb.StatsAvailability_STATS_AVAILABILITY_AVAILABLE,
-			wantScans:         u64p(0),
-			wantBlockedSkills: nil,
+			name:               "all zero counters → AVAILABLE with KPI counters *0 + secondaries nil",
+			src:                fakeStats{counts: audit.Counts{}},
+			wantAvail:          pb.StatsAvailability_STATS_AVAILABILITY_AVAILABLE,
+			wantScans:          u64p(0),
+			wantBlockedSkills:  nil,
+			checkMixedPresence: true,
 		},
 	}
 
@@ -126,7 +128,7 @@ func TestSnapshotStats(t *testing.T) {
 			// nil. If any of those four regress to present-*0, the AVC
 			// UI would render "0" tiles instead of the intended
 			// "not yet observed" hidden/em-dash state.
-			if tc.name == "all zero counters → AVAILABLE with KPI counters *0 + secondaries nil" {
+			if tc.checkMixedPresence {
 				if got.ActiveAlerts == nil {
 					t.Errorf("active_alerts: expected present *0, got nil")
 				} else if *got.ActiveAlerts != 0 {

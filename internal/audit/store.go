@@ -137,9 +137,11 @@ type Event struct {
 	Enforced    bool   `json:"enforced,omitempty"`
 	RulePackDir string `json:"rule_pack_dir,omitempty"`
 
-	// Structured carries sanitized machine-readable data for sink fanout.
-	// It is intentionally not persisted in SQLite audit_events; callers that
-	// need durable structured records should use their native table/log path.
+	// Structured carries sanitized machine-readable data for sink fanout
+	// AND is persisted verbatim in the SQLite audit_events.structured_json
+	// column (see migration 14). Downstream queries — the Alerts counter
+	// via connector-hook severity, the alert-acknowledgement projection —
+	// key off this durable column.
 	Structured map[string]any `json:"structured,omitempty"`
 
 	// RedactionEnabled carries the cloud-controlled per-inspection

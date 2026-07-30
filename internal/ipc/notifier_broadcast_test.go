@@ -408,6 +408,16 @@ func TestBroadcastLateSubscriberCancelWithoutAckDoesNotDropAckedRecord(t *testin
 	// was not in pending. After the fix, pending still contains B.
 	ackC(1)
 
+	// The core invariant this test protects: R stays retained here
+	// because B is still in pending. Before the fix, the ring would
+	// have evicted R at this point since ackedByAny was already true.
+	b.mu.Lock()
+	retainedAfterCAck := len(b.retained)
+	b.mu.Unlock()
+	if retainedAfterCAck != 1 {
+		t.Fatalf("R evicted before B released its pending marker: retained=%d, want 1", retainedAfterCAck)
+	}
+
 	// Step 5: B disconnects without acking (its stream.Send never
 	// landed). cancel releases B's pending marker but does not flip
 	// ackedByAny — wait, ackedByAny is already true here (from A/C).
