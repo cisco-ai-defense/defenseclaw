@@ -215,6 +215,8 @@ class _WindowsApi(Protocol):
 
     def _open_regular_reader_shared_delete(self, path: str) -> int: ...
 
+    def _open_regular_mutator(self, path: str) -> int: ...
+
     def open_exclusive_file(self, path: str) -> int: ...
 
     def _open_regular_mutator_exclusive(self, path: str) -> int: ...
@@ -248,11 +250,15 @@ class _WindowsApi(Protocol):
 
     def move_open_regular_file_no_replace(self, handle: int, target: str) -> None: ...
 
+    def _rename_open_regular_file(
+        self,
+        handle: int,
+        target: str,
+        *,
+        replace_existing: bool,
+    ) -> None: ...
+
     def delete_open_regular_file(self, handle: int) -> None: ...
-
-    def replace_regular_file_by_handle(self, source: str, target: str) -> None: ...
-
-    def delete_regular_file_by_handle(self, path: str) -> None: ...
 
     def private_security(self, owner: bytes, *, ace_flags: int = 0) -> WindowsFileSecurity: ...
 
@@ -1083,16 +1089,13 @@ class _CtypesWindowsApi:
             self.close_handle(int(handle))
             raise
 
-    def replace_regular_file_by_handle(self, source: str, target: str) -> None:
-        """Rename the exact opened source over ``target`` atomically."""
-
-        handle = self._open_regular_mutator(source)
-        try:
-            self._rename_open_regular_file(handle, target, replace_existing=True)
-        finally:
-            self.close_handle(handle)
-
-    def _rename_open_regular_file(self, handle: int, target: str, *, replace_existing: bool) -> None:
+    def _rename_open_regular_file(
+        self,
+        handle: int,
+        target: str,
+        *,
+        replace_existing: bool,
+    ) -> None:
         encoded_target = os.path.abspath(target).encode("utf-16-le")
         name_offset = _FileRenameInformation.file_name.offset
         # FILE_RENAME_INFO is variable-length, but Win32 still requires the
@@ -1136,15 +1139,6 @@ class _CtypesWindowsApi:
             ctypes.sizeof(delete),
         ):
             self._raise_last_error("SetFileInformationByHandle(FileDispositionInfo)")
-
-    def delete_regular_file_by_handle(self, path: str) -> None:
-        """Delete the exact opened non-reparse file, never a later path swap."""
-
-        handle = self._open_regular_mutator(path)
-        try:
-            self.delete_open_regular_file(handle)
-        finally:
-            self.close_handle(handle)
 
     def _well_known_sid(self, sid_type: int) -> bytes:
         size = ctypes.c_ulong(68)
@@ -1455,12 +1449,21 @@ def _windows_directory_prefixes(path: str) -> tuple[str, ...]:
     return tuple(prefixes)
 
 
-def _held_directory_name_keys() -> set[str]:
-    keys = getattr(_directory_name_leases, "keys", None)
-    if keys is None:
-        keys = set()
-        _directory_name_leases.keys = keys
-    return keys
+@dataclass
+class _DirectoryNameLease:
+    """One same-thread owner of an exact directory namespace lease."""
+
+    path: str
+    api: _WindowsApi
+    handle: int | None
+
+
+def _held_directory_name_leases() -> dict[str, _DirectoryNameLease]:
+    leases = getattr(_directory_name_leases, "leases", None)
+    if leases is None:
+        leases = {}
+        _directory_name_leases.leases = leases
+    return leases
 
 
 @contextmanager
@@ -1470,25 +1473,35 @@ def hold_directory(path: str, *, protect_name: bool = True) -> Iterator[None]:
     if os.name != "nt":
         raise WindowsAclError("Windows directory leases require Windows")
     key = ntpath.normcase(_windows_directory_prefixes(path)[-1])
-    active_name_leases = _held_directory_name_keys()
-    if protect_name and key in active_name_leases:
-        # Handle-bound file mutators intentionally reacquire their parent
-        # chain. Reuse the already-held exact name lease in the same thread;
-        # opening another DELETE handle would correctly conflict with the
-        # first lease's missing FILE_SHARE_DELETE.
+    active_name_leases = _held_directory_name_leases()
+    existing = active_name_leases.get(key)
+    if existing is not None:
+        # A name-protecting lease is stronger than a validation-only ancestor
+        # lease. Reuse it for either nested request in the same thread; opening
+        # another handle would correctly conflict with its missing delete share.
+        if existing.handle is None:
+            raise WindowsAclError("Windows directory name lease handoff is already active")
         yield
         return
     api = _get_api()
     handle = api.open_directory_no_delete(path, protect_name=protect_name)
+    owned_lease: _DirectoryNameLease | None = None
     try:
         api.assert_real_directory(handle)
         if protect_name:
-            active_name_leases.add(key)
+            owned_lease = _DirectoryNameLease(path=path, api=api, handle=handle)
+            active_name_leases[key] = owned_lease
         yield
     finally:
-        if protect_name:
-            active_name_leases.discard(key)
-        api.close_handle(handle)
+        if owned_lease is None:
+            api.close_handle(handle)
+        else:
+            if active_name_leases.get(key) is owned_lease:
+                active_name_leases.pop(key)
+            current_handle = owned_lease.handle
+            owned_lease.handle = None
+            if current_handle is not None:
+                api.close_handle(current_handle)
 
 
 @contextmanager
@@ -1503,24 +1516,78 @@ def hold_directory_chain(path: str) -> Iterator[None]:
         yield
 
 
+@contextmanager
+def _hold_regular_mutator_with_directory_handoff(
+    parent: str,
+    member: str,
+) -> Iterator[tuple[_WindowsApi, int]]:
+    """Bridge one parent lease with its child while mutating by handle."""
+
+    with hold_directory_chain(parent):
+        key = ntpath.normcase(_windows_directory_prefixes(parent)[-1])
+        lease = _held_directory_name_leases().get(key)
+        if lease is None or lease.handle is None:
+            raise WindowsAclError("Windows directory name lease is unavailable")
+        api = lease.api
+        member_handle = api._open_regular_mutator(member)
+        try:
+            previous_handle = lease.handle
+            lease.handle = None
+            api.close_handle(previous_handle)
+            try:
+                yield api, member_handle
+            finally:
+                restored_handle: int | None = None
+                try:
+                    restored_handle = api.open_directory_no_delete(
+                        lease.path,
+                        protect_name=True,
+                    )
+                    api.assert_real_directory(restored_handle)
+                except BaseException:
+                    if restored_handle is not None:
+                        api.close_handle(restored_handle)
+                    raise
+                else:
+                    lease.handle = restored_handle
+        finally:
+            api.close_handle(member_handle)
+
+
 def replace_regular_file_by_handle(source: str, target: str) -> None:
     """Publish the exact opened source below a bound target parent chain."""
 
-    source_parent = ntpath.normcase(ntpath.dirname(ntpath.abspath(source)))
-    target_parent = ntpath.normcase(ntpath.dirname(ntpath.abspath(target)))
+    source_absolute = ntpath.abspath(source)
+    target_absolute = ntpath.abspath(target)
+    source_parent = ntpath.normcase(ntpath.dirname(source_absolute))
+    target_parent = ntpath.normcase(ntpath.dirname(target_absolute))
     if source_parent != target_parent:
         raise WindowsAclError("handle publication must remain in one held directory")
-    with hold_directory_chain(target_parent):
-        _get_api().replace_regular_file_by_handle(source, target)
+    with _hold_regular_mutator_with_directory_handoff(
+        target_parent,
+        source_absolute,
+    ) as (
+        api,
+        source_handle,
+    ):
+        api._rename_open_regular_file(
+            source_handle,
+            target_absolute,
+            replace_existing=True,
+        )
 
 
 def delete_regular_file_by_handle(path: str, *, missing_ok: bool = False) -> bool:
     """Delete the exact opened regular file rather than a path-raced replacement."""
 
     try:
-        parent = ntpath.dirname(ntpath.abspath(path))
-        with hold_directory_chain(parent):
-            _get_api().delete_regular_file_by_handle(path)
+        path_absolute = ntpath.abspath(path)
+        parent = ntpath.dirname(path_absolute)
+        with _hold_regular_mutator_with_directory_handoff(parent, path_absolute) as (
+            api,
+            member_handle,
+        ):
+            api.delete_open_regular_file(member_handle)
     except WindowsAclError as exc:
         error = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
         if missing_ok and error in {2, 3}:

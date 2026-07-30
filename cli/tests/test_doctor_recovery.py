@@ -417,6 +417,10 @@ def _inject_windows_backend(monkeypatch: pytest.MonkeyPatch):
     return writes
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="injected Windows backend is for non-Windows hosts; native recovery tests cover Windows",
+)
 def test_injected_windows_audit_backend_uses_create_new_payload_publication(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -438,6 +442,10 @@ def test_injected_windows_audit_backend_uses_create_new_payload_publication(
     assert writes[0][1].startswith(b"SQLite format 3\x00")
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="injected Windows backend is for non-Windows hosts; native recovery tests cover Windows",
+)
 def test_injected_windows_device_backend_uses_three_private_create_new_writes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -2530,6 +2530,7 @@ async def test_audit_clickable_filter_controls() -> None:
         assert app.query_one("#panel-table", DataTable).row_count == 1
 
         await pilot.click("#audit-filter-all")
+        await pilot.pause()
         await pilot.click("#audit-filter-target")
         await pilot.pause()
 
