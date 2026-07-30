@@ -255,8 +255,8 @@ def _assert_exact_v8_wheel(wheel: Path) -> None:
 
         metadata_members = [name for name in names if name.endswith(".dist-info/METADATA")]
         assert len(metadata_members) == 1
-        metadata = archive.read(metadata_members[0]).decode("utf-8")
-        assert metadata.count("License-Expression: Apache-2.0\n") == 1
+        metadata_lines = archive.read(metadata_members[0]).decode("utf-8").splitlines()
+        assert metadata_lines.count("License-Expression: Apache-2.0") == 1
         for source_name, source in EXPECTED_WHEEL_LICENSE_FILES.items():
             members = [
                 name
@@ -265,7 +265,7 @@ def _assert_exact_v8_wheel(wheel: Path) -> None:
             ]
             assert len(members) == 1
             assert archive.read(members[0]) == source.read_bytes()
-            assert f"License-File: {source_name}\n" in metadata
+            assert f"License-File: {source_name}" in metadata_lines
 
 
 def _extract_wheel_safely(wheel: Path, destination: Path) -> None:
