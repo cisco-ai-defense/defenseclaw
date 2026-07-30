@@ -179,6 +179,10 @@ def test_read_exposed_dotenv_blocks_dependent_fixers_until_rotation_completes(
         "_fix_plugin_registry_required",
         Mock(return_value=("skip", "not relevant")),
     )
+    monkeypatch.setattr(
+        "defenseclaw.config_inspect.inspect_v8_config",
+        lambda *_args, **_kwargs: SimpleNamespace(valid=True),
+    )
 
     cmd_doctor._run_fixers(
         cfg,

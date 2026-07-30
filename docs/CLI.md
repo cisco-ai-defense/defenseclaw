@@ -676,9 +676,17 @@ manual artifact URLs fail closed instead of silently bypassing the bridge.
 
 ### doctor
 
-```bash
+```text
 defenseclaw doctor [--json-output | --json] [--passive]
 defenseclaw doctor --fix [--dry-run] [--yes] [--fix-id REPAIR_ID]...
+```
+
+For example:
+
+```bash
+defenseclaw doctor --json
+defenseclaw doctor --fix --dry-run
+defenseclaw doctor --fix --fix-id doctor.gateway.token.ensure
 ```
 
 Runs connectivity and credential checks against all configured services

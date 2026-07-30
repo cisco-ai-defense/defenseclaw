@@ -32,6 +32,25 @@ from defenseclaw.doctor_health import ComponentEvidence, HealthStatus
 from defenseclaw.doctor_recovery import DeviceKeyHealthStatus, inspect_device_key
 
 
+@pytest.fixture(autouse=True)
+def _canonical_v8_validator_stub(monkeypatch):
+    """Keep repair-graph tests independent of an installed gateway binary."""
+    from defenseclaw.config_inspect import ConfigInspectError
+
+    def inspect_v8_config(operation: str, *, config_path: str, **_kwargs):
+        assert operation == "validate"
+        with open(config_path, encoding="utf-8") as stream:
+            config_text = stream.read()
+        if config_text.strip() != "config_version: 8":
+            raise ConfigInspectError("candidate field=config_version; reason=must equal 8")
+        return SimpleNamespace(valid=True)
+
+    monkeypatch.setattr(
+        "defenseclaw.config_inspect.inspect_v8_config",
+        inspect_v8_config,
+    )
+
+
 def _private_data_dir(tmp_path):
     data_dir = tmp_path / "data"
     data_dir.mkdir(mode=0o700)

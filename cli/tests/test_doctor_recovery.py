@@ -26,7 +26,7 @@ import os
 import posixpath
 import sqlite3
 import stat
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
 from pathlib import Path
 
 import pytest
@@ -103,10 +103,13 @@ def test_filesystem_root_predicate_covers_windows_drive_and_unc_roots(
     path_module,
     expected,
 ) -> None:
-    assert recovery._path_is_filesystem_root(  # noqa: SLF001 - pure policy seam.
-        path,
-        path_module=path_module,
-    ) is expected
+    assert (
+        recovery._path_is_filesystem_root(  # noqa: SLF001 - pure policy seam.
+            path,
+            path_module=path_module,
+        )
+        is expected
+    )
 
 
 def test_audit_db_inspection_distinguishes_missing_invalid_and_valid_state(
@@ -125,8 +128,9 @@ def test_audit_db_inspection_distinguishes_missing_invalid_and_valid_state(
     assert corrupt.reason_code == "audit-db-integrity-unavailable"
 
     target.unlink()
-    with sqlite3.connect(target) as connection:
+    with closing(sqlite3.connect(target)) as connection:
         connection.execute("CREATE TABLE audit_events (id INTEGER)")
+        connection.commit()
     os.chmod(target, 0o600)
     incomplete = inspect_audit_db(target, data_dir=data_dir)
     assert incomplete.status is AuditDBHealthStatus.INVALID
@@ -327,10 +331,7 @@ def test_device_key_inspection_distinguishes_missing_legacy_and_invalid_state(
     assert legacy.reason_code == "device-key-provenance-absent"
 
     provenance = Path(os.fspath(target) + ".provenance")
-    provenance.write_text(
-        "# DefenseClaw device.key provenance sentinel\nsource=gateway-existing-load\n",
-        encoding="utf-8",
-    )
+    provenance.write_bytes(b"# DefenseClaw device.key provenance sentinel\nsource=gateway-existing-load\n")
     os.chmod(provenance, 0o600)
     legacy_sentinel = inspect_device_key(target, data_dir=data_dir)
     assert legacy_sentinel.status is DeviceKeyHealthStatus.LEGACY_UNPROVENANCED
@@ -396,12 +397,9 @@ def _inject_windows_backend(monkeypatch: pytest.MonkeyPatch):
 
     def fake_private_postconditions(path: str, *, confidential: bool) -> bool:
         info = os.lstat(path)
-        return (
-            confidential
-            and stat.S_ISREG(info.st_mode)
-            and not stat.S_ISLNK(info.st_mode)
-            and stat.S_IMODE(info.st_mode) & 0o077 == 0
-        )
+        # Windows ignores the POSIX mode passed to os.open; the real backend
+        # proves confidentiality through the DACL captured above.
+        return confidential and stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
 
     monkeypatch.setattr(recovery, "_platform_name", lambda: "windows")
     monkeypatch.setattr(recovery, "_windows_directory_custody", fake_custody)

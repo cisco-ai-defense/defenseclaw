@@ -671,6 +671,10 @@ def test_fixer_exception_is_a_redacted_failure(tmp_path):
         patch("defenseclaw.commands.cmd_doctor._fix_dotenv_perms", return_value=no_op),
         patch("defenseclaw.commands.cmd_doctor._fix_pristine_backup", return_value=no_op),
         patch("defenseclaw.commands.cmd_doctor._fix_plugin_registry_required", return_value=no_op),
+        patch(
+            "defenseclaw.config_inspect.inspect_v8_config",
+            return_value=SimpleNamespace(valid=True),
+        ),
     ):
         _run_fixers(
             cfg,

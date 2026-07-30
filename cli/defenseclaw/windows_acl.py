@@ -346,10 +346,7 @@ def _acl_shape(acl: bytes | None) -> str:
             f"invalid(len={len(acl)},revision={revision},ace_count={ace_count},"
             f"parsed_aces={len(ace_shapes)},reason=trailing-bytes-{acl_size - cursor})"
         )
-    return (
-        f"len={len(acl)},revision={revision},ace_count={ace_count},"
-        f"aces=[{','.join(ace_shapes)}]"
-    )
+    return f"len={len(acl)},revision={revision},ace_count={ace_count},aces=[{','.join(ace_shapes)}]"
 
 
 def _security_mismatch_summary(
@@ -679,12 +676,18 @@ class _CtypesWindowsApi:
     def _raise_status(operation: str, status: int) -> None:
         raise WindowsAclError(status, f"{operation} failed")
 
-    def open_path(self, path: str, *, access: int, directory: bool = False) -> int:
+    def open_path(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        access: int,
+        directory: bool = False,
+    ) -> int:
         flags = _FILE_FLAG_OPEN_REPARSE_POINT
         if directory:
             flags |= _FILE_FLAG_BACKUP_SEMANTICS
         handle = self._create_file(
-            path,
+            os.fspath(path),
             access,
             _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
             None,
@@ -1344,7 +1347,11 @@ def flush_fd(fd: int) -> None:
     _get_api().flush(msvcrt.get_osfhandle(fd))
 
 
-def capture_path(path: str, *, directory: bool = False) -> WindowsFileSecurity:
+def capture_path(
+    path: str | os.PathLike[str],
+    *,
+    directory: bool = False,
+) -> WindowsFileSecurity:
     api = _get_api()
     handle = api.open_path(path, access=_READ_CONTROL, directory=directory)
     try:
