@@ -4131,8 +4131,20 @@ func (s *Sidecar) reportTelemetryHealth() {
 		s.health.SetTelemetry(StateRunning, "", details)
 		return
 	}
-	// Config validation requires at least one named destination whenever OTel
-	// is enabled, so reaching this branch indicates an invalid in-memory config.
+	// Zero user destinations is valid in managed_enterprise: the auto-provisioned
+	// Cisco AI Defense log sink carries telemetry to the AID event ingest and
+	// waives the "otel.enabled requires a named destination" rule at config
+	// validation time (see config.HasManagedAIDLogSink /
+	// OTelConfig.validateNamedDestinations). Without this branch, every
+	// managed_enterprise install running the intended zero-destinations config
+	// reports Telemetry=ERROR in `defenseclaw-gateway status` — cosmetic, but it
+	// masks real failures and confused QA into thinking env_config.json wasn't
+	// picked up when it was.
+	if s.currentConfig().HasManagedAIDLogSink() {
+		details["managed_aid_log_sink"] = true
+		s.health.SetTelemetry(StateRunning, "", details)
+		return
+	}
 	s.health.SetTelemetry(StateError, "otel enabled without named destinations", details)
 }
 
