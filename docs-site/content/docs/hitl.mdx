@@ -36,7 +36,7 @@ A HIGH-risk Claude Code action paused at `PreToolUse`, where the connector can p
 | Claude Code | `PreToolUse` | Other hook events are demoted to a non-pausing response |
 | Cursor | `beforeShellExecution`, `beforeMCPExecution` | Alert/context fallback; `raw_action` remains auditable |
 | Copilot CLI | `preToolUse` | Alert/context fallback; `raw_action` remains auditable |
-| Antigravity | `PreToolUse` (empirically verified) | Other registered lifecycle events are non-pausing telemetry/spec-parity surfaces |
+| Antigravity | `PreInvocation` (v2 contract, upstream-gated), `PreToolUse` (empirically verified on `agy` v1.0.1) | `Stop` advertises block but not ask; `PostToolUse` and `PostInvocation` are non-pausing. Only the `PreToolUse` verdict branch has end-to-end empirical verification. |
 | OmniGent | Pre-action `request`, `tool_call`, `llm_request` phases | Configured fallback for post-action phases |
 | ZeptoClaw, Codex, Hermes, Gemini CLI, Windsurf, OpenHands, OpenCode | None | Connector-specific alert/allow/context fallback; no pause or TUI resume |
 

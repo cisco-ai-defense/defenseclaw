@@ -535,7 +535,11 @@ def _print_stack_summary(
 ) -> None:
     click.echo()
     ux.section("Local observability stack is up")
-    click.echo(f"    {ux.bold('Grafana:')}    {contract.get('grafana_url', 'http://localhost:3000')}  (admin / admin)")
+    click.echo(
+        f"    {ux.bold('Grafana:')}    "
+        f"{contract.get('grafana_url', 'http://localhost:3000')}  "
+        "(anonymous Admin; login disabled)"
+    )
     click.echo(f"    {ux.bold('Prometheus:')} {contract.get('prometheus_url', 'http://localhost:9090')}")
     click.echo(f"    {ux.bold('Tempo API:')}  {contract.get('tempo_url', 'http://localhost:3200')}")
     click.echo(f"    {ux.bold('Loki API:')}   {contract.get('loki_url', 'http://localhost:3100')}")

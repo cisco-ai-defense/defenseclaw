@@ -313,8 +313,13 @@ requires successful installation plus exact CLI and gateway version
 verification. It also proves that a second fresh-installer invocation refuses
 before changing installed state.
 
-This is the first native Windows release, so release acceptance is
-fresh-install-only.
+Version `0.8.7` was the first native Windows release and first published native
+Windows Setup, so its release acceptance was fresh-install-only. The immutable
+`0.8.6` release has no native Setup or Windows runtime assets. Published
+releases `0.8.7` through `0.8.10`
+record the outer Setup and DefenseClaw executables as `NotSigned`; those bytes
+are authenticated by the signed checksums and release provenance rather than
+an Authenticode signature.
 
 The workflow places Setup, its SHA-256, provenance, and SPDX SBOM metadata in
 the same sealed candidate as the Linux and macOS assets. Candidate assembly

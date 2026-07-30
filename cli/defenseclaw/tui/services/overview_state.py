@@ -631,7 +631,12 @@ class OverviewPanelModel:
         if self.cfg is not None and guardrail_off:
             notices.append(OverviewNotice("warn", "LLM guardrail not configured - press [g] to set up"))
         if not self.skill_scanner_available:
-            notices.append(OverviewNotice("warn", "skill-scanner not on PATH - run: pip install skill-scanner"))
+            notices.append(
+                OverviewNotice(
+                    "warn",
+                    "skill-scanner unavailable - repair the DefenseClaw installation",
+                )
+            )
         if self.silent_bypass > 0:
             notices.append(
                 OverviewNotice(

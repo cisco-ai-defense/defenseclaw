@@ -354,8 +354,9 @@ from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import (  # noqa: E40
 
 # Register `defenseclaw setup webhook` (Slack/PagerDuty/Webex/generic
 # notifiers). Distinct from `setup observability add webhook` (generic
-# HTTP JSONL audit-log forwarder) — see docs/OBSERVABILITY.md for the
-# disambiguation.
+# HTTP JSONL audit-log forwarder) — see the published webhook guide for the
+# disambiguation:
+# https://cisco-ai-defense.github.io/defenseclaw/docs/setup/webhooks/
 from defenseclaw.commands.cmd_setup_webhook import webhook  # noqa: E402
 
 setup.add_command(webhook)
@@ -3215,13 +3216,13 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "label": "Claude Code",
         "description": "env var + PreToolUse hook script",
         "tool_mode": "both",
-        "subprocess_policy": "sandbox",
+        "subprocess_policy": "none",
     },
     "codex": {
         "label": "Codex",
         "description": "env var + hook script + response-scan",
         "tool_mode": "both",
-        "subprocess_policy": "sandbox",
+        "subprocess_policy": "none",
     },
     "hermes": {
         "label": "Hermes",
@@ -3262,8 +3263,8 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     "antigravity": {
         "label": "Antigravity",
         "description": (
-            "single PreToolUse hook in ~/.gemini/config/hooks.json with native "
-            "ask that overrides --dangerously-skip-permissions"
+            "five lifecycle hooks in ~/.gemini/config/hooks.json; PreToolUse "
+            "native ask is empirically verified to override --dangerously-skip-permissions"
         ),
         "tool_mode": "both",
         "subprocess_policy": "none",
@@ -3315,7 +3316,7 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.claude/settings.json hooks",
         "~/.claude/settings.json env OTEL_* / CLAUDE_CODE_ENABLE_TELEMETRY",
         "Optional CodeGuard native plugin only when explicitly installed",
-        "~/.defenseclaw/hooks/ and subprocess policy files",
+        "~/.defenseclaw/hooks/",
     ),
     "codex": (
         "~/.codex/config.toml hooks / features.hooks / hook trust state",
@@ -5434,7 +5435,7 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
             )
         elif connector == "codex":
             click.echo(
-                "    • Native OTel — logs, metrics, and traces → scoped loopback /otlp/codex/<token>/v1/<signal>"
+                "    • Native OTel — logs, metrics, and traces → scoped bearer + source header on /v1/<signal>"
             )
         else:
             click.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
@@ -6649,10 +6650,11 @@ def setup_codex(
     Wires three telemetry channels at gateway boot:
 
     \b
-      • Hooks   — SessionStart / UserPromptSubmit / PreToolUse /
-                  PostToolUse / PermissionRequest / Stop events
-      • OTel    — native Codex logs, metrics, and traces using the
-                  scoped loopback /otlp/codex/<token>/v1/<signal> route
+      • Hooks   — version-selected lifecycle contract: six events on
+                  0.124-0.128, eight on 0.129-0.132, and ten on 0.133+
+      • OTel    — native Codex logs, metrics, and traces using a
+                  connector-scoped bearer and X-DefenseClaw-Source
+                  header on the loopback /v1/<signal> routes
       • Notify  — agent-turn-complete webhooks via the bundled
                   notify-bridge.sh shim
 
@@ -6797,8 +6799,9 @@ def setup_claude_code(
     Wires two telemetry channels at gateway boot:
 
     \b
-      • Hooks — PreToolUse / PostToolUse / UserPromptSubmit / Stop /
-                PermissionRequest events via Claude Code's hook system
+      • Hooks — the supported Claude Code 2.1.152+ contract's 28
+                lifecycle, prompt, tool, subagent, task, compact,
+                elicitation, configuration, and notification events
       • OTel  — native Claude Code OTel exporter (env-driven) pointing
                 at the gateway's /v1/logs and /v1/metrics
 
@@ -7935,23 +7938,23 @@ def _prompt_hook_fail_mode(gc) -> None:
     their explicit choice silently rotated by a subsequent mode flip.
     """
     ux.section("Hook fail mode")
-    ux.subhead("How hooks behave when the gateway answers but the answer is bad")
-    ux.subhead("(4xx, malformed JSON, missing action).")
+    ux.subhead("How hooks behave when delivery/authentication fails or")
+    ux.subhead("the gateway returns 4xx, malformed JSON, or no action.")
     click.echo()
     click.echo(
         "    " + ux.bold("[1] open  ") + " — allow the tool/prompt and log the failure " + ux.dim("(recommended)")
     )
     click.echo("                 " + ux.dim("A misbehaving gateway won't brick your agent."))
-    click.echo("    " + ux.bold("[2] closed") + " — block the tool/prompt on any gateway error")
+    click.echo("    " + ux.bold("[2] closed") + " — block supported events when inspection is unavailable")
     click.echo("                 " + ux.dim("Choose for regulated workflows where every"))
     click.echo("                 " + ux.dim("prompt MUST be inspected."))
     click.echo()
     click.echo(
         "  "
         + ux.dim(
-            "Note: a fully unreachable gateway always allows unless "
-            "DEFENSECLAW_STRICT_AVAILABILITY=1 is set in the agent's "
-            "environment, regardless of this choice."
+            "Note: DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces "
+            "transport and missing-token failures closed, even when this "
+            "choice is open."
         )
     )
     current_fail = (getattr(gc, "hook_fail_mode", "") or "open").lower()
@@ -8226,7 +8229,7 @@ def _interactive_guardrail_setup(
     # operator just flipped between observe and action — those are
     # the moments where the operator is actively making policy-
     # posture decisions and most likely to want to revisit the
-    # response-layer fallback. Otherwise we leave the existing value
+    # delivery/response fallback. Otherwise we leave the existing value
     # alone (operator can change it later via
     # `defenseclaw guardrail fail-mode <open|closed>`).
     #

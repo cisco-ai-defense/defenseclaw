@@ -173,15 +173,18 @@ Under the hood DefenseClaw injects the unified key into the scanner subprocess a
 LLM mode works with any LiteLLM-supported provider. The upstream Skill Scanner SDK auto-detects the provider from the LiteLLM-shaped `provider/model` string in your unified config (e.g. `bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0`, `gemini/gemini-2.5-pro`, `vertex_ai/gemini-1.5-pro`). For self-hosted endpoints (vLLM, LM Studio, LiteLLM proxy) set `llm.base_url` in `~/.defenseclaw/config.yaml`.
 </Callout>
 
-## Install if missing
+## Availability and recovery
 
-`cisco-ai-skill-scanner` is a hard dependency of `defenseclaw` and is installed automatically by `pip install defenseclaw` (see [`pyproject.toml`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/pyproject.toml)). The wrapper detects it lazily, so an environment that managed to drop the package can be repaired by reinstalling it directly:
+`cisco-ai-skill-scanner` is a hard runtime dependency, and supported
+release-managed runtimes include it. If it is absent from a packaged runtime,
+treat the installation as damaged; do not patch its managed virtual
+environment with `pip`. Use the
+[supported install or repair path](/docs/get-started/install). Source
+contributors should synchronize the checkout's locked environment with
+`uv sync`.
 
-```bash
-pip install --upgrade cisco-ai-skill-scanner
-```
-
-If the SDK is missing when you run a scan, DefenseClaw prints the install hint and exits cleanly — it does not crash the gateway.
+If the SDK is missing when you run a scan, DefenseClaw prints a concise
+dependency error and exits cleanly; it does not crash the gateway.
 
 ## Manage individual skills
 

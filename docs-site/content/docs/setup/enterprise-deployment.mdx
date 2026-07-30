@@ -499,8 +499,13 @@ The watcher ignores its own lock-file housekeeping, and the installer preserves 
 
 - A malformed, unreadable, or untrusted service-side scoped token makes that connector's guardrail health error and rejects hook authentication.
 - Connector-scoped token failure is isolated: a Codex token problem does not authorize or invalidate Claude Code's route.
-- Response-layer failures follow the configured hook fail mode. Action-mode deployments normally use fail closed.
-- Gateway-unreachable and missing-token behavior follows the documented availability contract. The default avoids bricking the agent; `DEFENSECLAW_STRICT_AVAILABILITY=1` opts into stricter behavior but is not a durable anti-tamper control if the user can change its own environment.
+- Delivery, missing-token/authentication, and invalid-response failures follow
+  the connector's effective hook fail mode. Fresh configuration defaults to
+  fail closed; a migrated installation can retain an explicit fail-open
+  setting.
+  `DEFENSECLAW_STRICT_AVAILABILITY=1` additionally forces the transport and
+  missing-token subset closed, but is not a durable anti-tamper control if the
+  user can change its own environment.
 - A user-owned token or hook may be changed before the guardian repairs it. Use endpoint controls when the required property is prevention rather than bounded recovery.
 
 Each reconcile run writes `/var/lib/defenseclaw/hook_guardian_state.json`. `defenseclaw status` reads that file and reports the last manifest path, run time, target counts, and per-user repair failures under `Hook guardian`.

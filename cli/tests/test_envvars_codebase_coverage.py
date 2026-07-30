@@ -23,7 +23,7 @@ How it works
 False-positive handling
 -----------------------
 Code that talks ABOUT env vars (registry.json itself, env-vars.mdx,
-ENV-VARS.md, this very test, the doctor check, the doc generator, the
+env-vars.mdx, this very test, the doctor check, the doc generator, the
 registry modules) is allow-listed via path. Comments referencing env
 vars in other source files are *not* allow-listed — they're considered
 real references and contribute to the union.
@@ -94,7 +94,9 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     "cli/defenseclaw/envvars.py",
     "cli/tests/test_envvars.py",
     "cli/tests/test_envvars_codebase_coverage.py",
-    # Generators and rendered docs.
+    # Generator and canonical rendered website catalog. The repository
+    # ENV-VARS.md pointer is allow-listed because it names the prefix while
+    # explaining source ownership.
     "scripts/gen_envvars_docs.py",
     "docs/ENV-VARS.md",
     "docs-site/content/docs/reference/env-vars.mdx",
@@ -116,11 +118,6 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     # splitting trips the regex. The values are explained in the
     # registry-backed env-vars page.
     "docs-site/content/docs/reference/fail-modes.mdx",
-    # Design docs that describe future / possible env vars.
-    "docs/design/openshell-standalone-sandbox.md",
-    # Parity spec describing the Python<->Go TUI backend selector
-    # (DEFENSECLAW_TUI_BACKEND) as a design knob, not a shipped env var.
-    "docs/design/python-textual-tui-parity-spec.md",
     # Test fixtures that use synthetic env-var names as labels for
     # --auth-env / --token-env flags. The labels are example operator
     # configuration, not env vars DefenseClaw itself reads.
@@ -208,8 +205,6 @@ _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
     "DEFENSECLAW_OTEL_": frozenset(
         {
             "cli/defenseclaw/observability/v8_migration.py",
-            "docs/OBSERVABILITY.md",
-            "docs/OTEL.md",
             "docs-site/content/docs/observability/index.mdx",
             "internal/config/config.go",
             "internal/config/config_test.go",
@@ -408,7 +403,7 @@ class CoverageExtractionTests(unittest.TestCase):
 
 
 class RegistryAndDocsInSyncTests(unittest.TestCase):
-    """Run the canonical generator check for the bundle and both docs."""
+    """Run the generator check for the bundle and canonical website catalog."""
 
     def test_docs_in_sync_with_registry(self) -> None:
         import subprocess

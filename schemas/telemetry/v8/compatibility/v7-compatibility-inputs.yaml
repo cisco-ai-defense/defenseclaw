@@ -1,0 +1,412 @@
+# Machine-readable v7 compatibility inputs consumed by the telemetry-v8
+# generator. This is implementation data, not the v8 classification registry
+# or current operator documentation.
+inventory_version: 1
+
+classes:
+  gateway_event_types:
+    items:
+      EventVerdict: "verdict"
+      EventJudge: "judge"
+      EventLifecycle: "lifecycle"
+      EventError: "error"
+      EventDiagnostic: "diagnostic"
+      EventManagedAIDFailOpen: "managed_aid_fail_open"
+      EventScan: "scan"
+      EventScanFinding: "scan_finding"
+      EventActivity: "activity"
+      EventDestinationTest: "destination_test"
+      EventEgress: "egress"
+      EventLLMPrompt: "llm_prompt"
+      EventLLMResponse: "llm_response"
+      EventToolInvocation: "tool_invocation"
+      EventHookDecision: "hook_decision"
+      EventAIDiscovery: "ai_discovery"
+
+  audit_actions:
+    items:
+      ActionInit: "init"
+      ActionStop: "stop"
+      ActionReady: "ready"
+      ActionScan: "scan"
+      ActionScanStart: "scan-start"
+      ActionRescan: "rescan"
+      ActionRescanStart: "rescan-start"
+      ActionBlock: "block"
+      ActionAllow: "allow"
+      ActionWarn: "warn"
+      ActionQuarantine: "quarantine"
+      ActionRestore: "restore"
+      ActionDisable: "disable"
+      ActionEnable: "enable"
+      ActionDeploy: "deploy"
+      ActionDrift: "drift"
+      ActionNetworkEgressBlocked: "network-egress-blocked"
+      ActionNetworkEgressAllowed: "network-egress-allowed"
+      ActionGuardrailBlock: "guardrail-block"
+      ActionGuardrailWarn: "guardrail-warn"
+      ActionGuardrailAllow: "guardrail-allow"
+      ActionApprovalRequest: "approval-request"
+      ActionApprovalGranted: "approval-granted"
+      ActionApprovalDenied: "approval-denied"
+      ActionToolCall: "tool-call"
+      ActionToolResult: "tool-result"
+      ActionConfigUpdate: "config-update"
+      ActionPolicyUpdate: "policy-update"
+      ActionPolicyReload: "policy-reload"
+      ActionAction: "action"
+      ActionAckAlerts: "acknowledge-alerts"
+      ActionDismissAlerts: "dismiss-alerts"
+      ActionWebhookDelivered: "webhook-delivered"
+      ActionWebhookFailed: "webhook-failed"
+      ActionSinkFailure: "sink-failure"
+      ActionSinkRestored: "sink-restored"
+      ActionAlert: "alert"
+      ActionOTelIngestLogs: "otel.ingest.logs"
+      ActionOTelIngestMetrics: "otel.ingest.metrics"
+      ActionOTelIngestTraces: "otel.ingest.traces"
+      ActionOTelIngestMalformed: "otel.ingest.malformed"
+      ActionConnectorHook: "connector-hook"
+      ActionConnectorHookSynthetic: "connector-hook-synthetic"
+      ActionAssetPolicy: "asset-policy"
+      ActionConnectorHookTampered: "connector-hook-tampered"
+      ActionConnectorHookRepaired: "connector-hook-repaired"
+      ActionCodexNotify: "codex.notify"
+      ActionCodexNotifyAgentTurnComplete: "codex.notify.agent-turn-complete"
+      ActionCodexNotifyMalformed: "codex.notify.malformed"
+      ActionSidecarStart: "sidecar-start"
+      ActionSidecarStop: "sidecar-stop"
+      ActionSidecarConnected: "sidecar-connected"
+      ActionSidecarDisconnected: "sidecar-disconnected"
+      ActionSidecarWatcherVerdict: "sidecar-watcher-verdict"
+      ActionSidecarWatcherDisable: "sidecar-watcher-disable"
+      ActionSidecarWatcherDisablePlugin: "sidecar-watcher-disable-plugin"
+      ActionSidecarWatcherBlockMCP: "sidecar-watcher-block-mcp"
+      ActionBootstrap: "bootstrap"
+      ActionWatchStart: "watch-start"
+      ActionWatchStop: "watch-stop"
+      ActionWatcherBlock: "watcher-block"
+      ActionInstallDetected: "install-detected"
+      ActionInstallRejected: "install-rejected"
+      ActionInstallAllowed: "install-allowed"
+      ActionInstallAllowedSkipEnforce: "install-allowed-skip-enforce"
+      ActionInstallClean: "install-clean"
+      ActionInstallWarning: "install-warning"
+      ActionInstallScanError: "install-scan-error"
+      ActionInstallEnforced: "install-enforced"
+      ActionInstallBlocked: "install-blocked"
+      ActionInstallDep: "install-dep"
+      ActionGatewayReady: "gateway-ready"
+      ActionGatewaySessionMessage: "gateway-session-message"
+      ActionGatewaySessionPromptAlert: "gateway-session-prompt-alert"
+      ActionGatewaySessionError: "gateway-session-error"
+      ActionGatewayChatError: "gateway-chat-error"
+      ActionGatewayAgentStart: "gateway-agent-start"
+      ActionGatewayAgentEnd: "gateway-agent-end"
+      ActionGatewayAgentError: "gateway-agent-error"
+      ActionGatewayToolCall: "gateway-tool-call"
+      ActionGatewayToolCallBlocked: "gateway-tool-call-blocked"
+      ActionGatewayToolCallFlagged: "gateway-tool-call-flagged"
+      ActionGatewayToolCallJudgeFlagged: "gateway-tool-call-judge-flagged"
+      ActionGatewayToolResult: "gateway-tool-result"
+      ActionGatewayApprovalRequested: "gateway-approval-requested"
+      ActionGatewayApprovalDenied: "gateway-approval-denied"
+      ActionGatewayApprovalGranted: "gateway-approval-granted"
+      ActionGatewayApprovalPending: "gateway-approval-pending"
+      ActionGatewayMultiTurnInjection: "gateway-multi-turn-injection"
+      ActionGatewayDown: "gateway-down"
+      ActionGatewayRecovered: "gateway-recovered"
+      ActionGatewayDegraded: "gateway-degraded"
+      ActionToolResultPIIAlert: "tool-result-pii-alert"
+      ActionGatewayJudgeBodiesReady: "gateway.judge_bodies.ready"
+      ActionGatewayJudgeBodiesFallback: "gateway.judge_bodies.fallback"
+      ActionGatewayJudgeBodiesCloseSkipped: "gateway.judge_bodies.close_skipped"
+      ActionGatewayJudgeBodiesCloseError: "gateway.judge_bodies.close_error"
+      ActionGatewayJudgeStoreDrainTimeout: "gateway.judge_store.drain_timeout"
+      ActionGuardrailStart: "guardrail-start"
+      ActionGuardrailHealthy: "guardrail-healthy"
+      ActionGuardrailVerdict: "guardrail-verdict"
+      ActionGuardrailInspection: "guardrail-inspection"
+      ActionGuardrailOPAInspection: "guardrail-opa-inspection"
+      ActionGuardrailOPAVerdict: "guardrail-opa-verdict"
+      ActionGuardrailConfigReload: "guardrail-config-reload"
+      ActionGuardrailDegraded: "guardrail-degraded"
+      ActionGuardrailLaunder: "guardrail-launder"
+      ActionGuardrailNotifyInject: "guardrail-notify-inject"
+      ActionGuardrailToolCallParseError: "guardrail-tool-call-parse-error"
+      ActionGuardrailToolCallInspect: "guardrail-tool-call-inspect"
+      ActionGuardrailDisable: "guardrail-disable"
+      ActionGuardrailEnable: "guardrail-enable"
+      ActionGuardrailFailMode: "guardrail-fail-mode"
+      ActionGuardrailHILT: "guardrail-hilt"
+      ActionGuardrailBlockMessage: "guardrail-block-message"
+      ActionLLMJudgeResponse: "llm-judge-response"
+      ActionInspectToolConfirm: "inspect-tool-confirm"
+      ActionInspectToolBlock: "inspect-tool-block"
+      ActionInspectToolAlert: "inspect-tool-alert"
+      ActionInspectToolAllow: "inspect-tool-allow"
+      ActionInspectReveal: "inspect-reveal"
+      ActionAPIAuthFailure: "api-auth-failure"
+      ActionAPIConfigPatch: "api-config-patch"
+      ActionAPIEnforceAllow: "api-enforce-allow"
+      ActionAPIEnforceBlock: "api-enforce-block"
+      ActionAPIEnforceUnblock: "api-enforce-unblock"
+      ActionAPIMCPScan: "api-mcp-scan"
+      ActionAPIPluginDisable: "api-plugin-disable"
+      ActionAPIPluginEnable: "api-plugin-enable"
+      ActionAPIPluginScan: "api-plugin-scan"
+      ActionAPISkillDisable: "api-skill-disable"
+      ActionAPISkillEnable: "api-skill-enable"
+      ActionAPISkillFetch: "api-skill-fetch"
+      ActionAPISkillScan: "api-skill-scan"
+      ActionSinkFlushError: "sink-flush-error"
+      ActionSetupSkillScanner: "setup-skill-scanner"
+      ActionSetupMCPScanner: "setup-mcp-scanner"
+      ActionSetupGateway: "setup-gateway"
+      ActionSetupGuardrail: "setup-guardrail"
+      ActionSetupHookConnector: "setup-hook-connector"
+      ActionSetupConnectorMode: "setup-connector-mode"
+      ActionSetupRedactionToggle: "setup-redaction-toggle"
+      ActionSetupNotificationsToggle: "setup-notifications-toggle"
+      ActionSetupNotificationsSet: "setup-notifications-set"
+      ActionSetupSplunk: "setup-splunk"
+      ActionSetupObservability: "setup-observability"
+      ActionSetupLocalObservability: "setup-local-observability"
+      ActionSetupWebhook: "setup-webhook"
+      ActionDoctor: "doctor"
+      ActionUpgrade: "upgrade"
+      ActionInitGateway: "init-gateway"
+      ActionInitGuardrail: "init-guardrail"
+      ActionInitNotificationsToggle: "init-notifications-toggle"
+      ActionInitSandbox: "init-sandbox"
+      ActionInitSidecar: "init-sidecar"
+      ActionPolicyCreate: "policy-create"
+      ActionPolicyActivate: "policy-activate"
+      ActionPolicyDelete: "policy-delete"
+      ActionRegistryAdd: "registry-add"
+      ActionRegistryEdit: "registry-edit"
+      ActionRegistryRemove: "registry-remove"
+      ActionScanEnforced: "scan-enforced"
+      ActionScanFinding: "scan-finding"
+      ActionDismissAlert: "dismiss-alert"
+      ActionSkillBlock: "skill-block"
+      ActionSkillUnblock: "skill-unblock"
+      ActionSkillAllow: "skill-allow"
+      ActionSkillDisable: "skill-disable"
+      ActionSkillEnable: "skill-enable"
+      ActionSkillQuarantine: "skill-quarantine"
+      ActionSkillRestore: "skill-restore"
+      ActionPluginInstall: "plugin-install"
+      ActionPluginRemove: "plugin-remove"
+      ActionPluginBlock: "plugin-block"
+      ActionPluginAllow: "plugin-allow"
+      ActionPluginDisable: "plugin-disable"
+      ActionPluginEnable: "plugin-enable"
+      ActionPluginQuarantine: "plugin-quarantine"
+      ActionPluginRestore: "plugin-restore"
+      ActionBlockMCP: "block-mcp"
+      ActionAllowMCP: "allow-mcp"
+      ActionMCPUnblock: "mcp-unblock"
+      ActionMCPSet: "mcp-set"
+      ActionMCPSetBlocked: "mcp-set-blocked"
+      ActionMCPUnset: "mcp-unset"
+      ActionToolBlock: "tool-block"
+      ActionToolAllow: "tool-allow"
+      ActionToolUnblock: "tool-unblock"
+
+  emitted_metrics:
+    items:
+      "defenseclaw.activity.diff_entries": {type: "histogram", unit: "{entry}", labels: ["action", "actor", "target_type"]}
+      "defenseclaw.activity.total": {type: "counter", unit: "{activity}", labels: ["action", "actor", "target_type"]}
+      "defenseclaw.admission.decisions": {type: "counter", unit: "{decision}", labels: ["decision", "source", "target_type"]}
+      "defenseclaw.agent.discovery.duration": {type: "histogram", unit: "ms", labels: ["cache_hit", "result", "source"]}
+      "defenseclaw.agent.discovery.errors": {type: "counter", unit: "{error}", labels: ["connector", "reason"]}
+      "defenseclaw.agent.discovery.installed": {type: "gauge", unit: "1", labels: ["connector"]}
+      "defenseclaw.agent.discovery.runs": {type: "counter", unit: "{run}", labels: ["cache_hit", "result", "source"]}
+      "defenseclaw.agent.discovery.signals": {type: "counter", unit: "{signal}", labels: ["connector", "has_binary", "has_config", "installed", "probe_status"]}
+      "defenseclaw.agent.last_seen": {type: "gauge", unit: "s", labels: ["connector", "gen_ai.agent.type"]}
+      "defenseclaw.agent.lifecycle.transitions": {type: "counter", unit: "{transition}", labels: ["connector", "defenseclaw.agent.depth", "defenseclaw.agent.lifecycle.event", "defenseclaw.agent.lifecycle.state", "gen_ai.agent.type", "gen_ai.provider.name", "gen_ai.request.model"]}
+      "defenseclaw.agent.phase.current": {type: "gauge", unit: "1", labels: ["connector"]}
+      "defenseclaw.agent.phase.transitions": {type: "counter", unit: "{transition}", labels: ["connector", "defenseclaw.agent.phase.from", "defenseclaw.agent.phase.to"]}
+      "defenseclaw.agent.reported_cost": {type: "gauge", unit: "USD", labels: ["connector", "gen_ai.provider.name", "gen_ai.request.model"]}
+      "defenseclaw.agent.token.usage": {type: "counter", unit: "{token}", labels: ["connector", "gen_ai.provider.name", "gen_ai.request.model", "kind"]}
+      "defenseclaw.ai.components.installs": {type: "gauge", unit: "{install}", labels: ["ecosystem", "name"]}
+      "defenseclaw.ai.components.observations": {type: "counter", unit: "{observation}", labels: ["ecosystem", "identity_band", "name", "presence_band"]}
+      "defenseclaw.ai.components.workspaces": {type: "gauge", unit: "{workspace}", labels: ["ecosystem", "name"]}
+      "defenseclaw.ai.confidence.identity_score": {type: "histogram", unit: "1", labels: ["ecosystem", "framework", "name"]}
+      "defenseclaw.ai.confidence.presence_score": {type: "histogram", unit: "1", labels: ["ecosystem", "framework", "name"]}
+      "defenseclaw.ai.discovery.active_signals": {type: "gauge", unit: "{signal}", labels: ["privacy_mode", "source"]}
+      "defenseclaw.ai.discovery.dedupe_suppressed": {type: "counter", unit: "{signal}", labels: ["privacy_mode", "result", "source"]}
+      "defenseclaw.ai.discovery.duration": {type: "histogram", unit: "ms", labels: ["privacy_mode", "result", "source"]}
+      "defenseclaw.ai.discovery.errors": {type: "counter", unit: "{error}", labels: ["detector", "reason"]}
+      "defenseclaw.ai.discovery.files_scanned": {type: "counter", unit: "{file}", labels: ["privacy_mode", "result", "source"]}
+      "defenseclaw.ai.discovery.gone_signals": {type: "counter", unit: "{signal}", labels: ["ai.product", "ai.vendor", "confidence", "detector", "privacy_mode", "result", "signal.category", "source", "state"]}
+      "defenseclaw.ai.discovery.new_signals": {type: "counter", unit: "{signal}", labels: ["ai.product", "ai.vendor", "confidence", "detector", "privacy_mode", "result", "signal.category", "source", "state"]}
+      "defenseclaw.ai.discovery.runs": {type: "counter", unit: "{run}", labels: ["privacy_mode", "result", "source"]}
+      "defenseclaw.ai.discovery.signals": {type: "counter", unit: "{signal}", labels: ["ai.product", "ai.vendor", "confidence", "detector", "signal.category", "state"]}
+      "defenseclaw.alert.count": {type: "counter", unit: "{alert}", labels: ["alert.severity", "alert.source", "alert.type", "connector"]}
+      "defenseclaw.approval.count": {type: "counter", unit: "{request}", labels: ["auto", "dangerous", "result"]}
+      "defenseclaw.audit.db.errors": {type: "counter", unit: "{error}", labels: ["operation"]}
+      "defenseclaw.audit.events.total": {type: "counter", unit: "{event}", labels: ["action", "connector", "severity"]}
+      "defenseclaw.audit.sink.batches.delivered": {type: "counter", unit: "{batch}", labels: ["kind", "retry_count", "sink", "status_code"]}
+      "defenseclaw.audit.sink.batches.dropped": {type: "counter", unit: "{batch}", labels: ["kind", "retry_count", "sink", "status_code"]}
+      "defenseclaw.audit.sink.circuit.state": {type: "updowncounter", unit: "1", labels: ["sink.kind", "sink.name"]}
+      "defenseclaw.audit.sink.delivery.latency": {type: "histogram", unit: "ms", labels: ["kind", "retry_count", "sink", "status_code"]}
+      "defenseclaw.audit.sink.failures": {type: "counter", unit: "{failure}", labels: ["sink.kind", "sink.name", "sink.reason"]}
+      "defenseclaw.audit.sink.queue.depth": {type: "updowncounter", unit: "{event}", labels: ["sink.kind", "sink.name"]}
+      "defenseclaw.cisco.errors": {type: "counter", unit: "{error}", labels: ["code"]}
+      "defenseclaw.cisco_inspect.latency": {type: "histogram", unit: "ms", labels: ["outcome"]}
+      "defenseclaw.codex.notify": {type: "counter", unit: "{event}", labels: ["result", "status", "type"]}
+      "defenseclaw.codex.notify.malformed": {type: "counter", unit: "{event}", labels: ["type"]}
+      "defenseclaw.config.load.errors": {type: "counter", unit: "{error}", labels: ["error_type"]}
+      "defenseclaw.connector.hook.invocations": {type: "counter", unit: "{hook}", labels: ["connector", "event_type", "reason", "result"]}
+      "defenseclaw.connector.hook.latency": {type: "histogram", unit: "ms", labels: ["connector", "event_type", "reason", "result"]}
+      "defenseclaw.connector.hook.outcome": {type: "counter", unit: "{decision}", labels: ["action", "connector", "event_type", "severity", "would_block"]}
+      "defenseclaw.connector.hook.tokens": {type: "counter", unit: "{token}", labels: ["connector", "kind", "model"]}
+      "defenseclaw.connector.hook.unified_dispatch": {type: "counter", unit: "{invocation}", labels: ["connector"]}
+      "defenseclaw.egress.events": {type: "counter", unit: "{event}", labels: ["branch", "decision", "source"]}
+      "defenseclaw.gateway.errors": {type: "counter", unit: "{error}", labels: ["error.code", "error.subsystem"]}
+      "defenseclaw.gateway.events.emitted": {type: "counter", unit: "{event}", labels: ["event_type", "severity"]}
+      "defenseclaw.gateway.forwarded_headers": {type: "counter", unit: "{header}", labels: ["path", "result"]}
+      "defenseclaw.gateway.judge.errors": {type: "counter", unit: "{error}", labels: ["judge.kind", "judge.reason"]}
+      "defenseclaw.gateway.judge.invocations": {type: "counter", unit: "{invocation}", labels: ["judge.action", "judge.kind", "judge.severity"]}
+      "defenseclaw.gateway.judge.latency": {type: "histogram", unit: "ms", labels: ["judge.kind"]}
+      "defenseclaw.gateway.verdicts": {type: "counter", unit: "{verdict}", labels: ["destination_app", "policy_id", "verdict.action", "verdict.severity", "verdict.stage"]}
+      "defenseclaw.guardrail.cache.hits": {type: "counter", unit: "{hit}", labels: ["cache", "scanner", "ttl_bucket", "verdict"]}
+      "defenseclaw.guardrail.cache.misses": {type: "counter", unit: "{miss}", labels: ["cache", "scanner", "ttl_bucket", "verdict"]}
+      "defenseclaw.guardrail.evaluations": {type: "counter", unit: "{evaluation}", labels: ["guardrail.action_taken", "guardrail.connector", "guardrail.scanner"]}
+      "defenseclaw.guardrail.judge.latency": {type: "histogram", unit: "ms", labels: ["gen_ai.request.model", "judge.kind"]}
+      "defenseclaw.guardrail.latency": {type: "histogram", unit: "ms", labels: ["guardrail.connector", "guardrail.scanner"]}
+      "defenseclaw.http.auth.failures": {type: "counter", unit: "{failure}", labels: ["http.route", "reason"]}
+      "defenseclaw.http.rate_limit.breaches": {type: "counter", unit: "{breach}", labels: ["client.kind", "http.route"]}
+      "defenseclaw.http.request.count": {type: "counter", unit: "{request}", labels: ["http.method", "http.route", "http.status_code"]}
+      "defenseclaw.http.request.duration": {type: "histogram", unit: "ms", labels: ["http.method", "http.route", "http.status_code"]}
+      "defenseclaw.inspect.evaluations": {type: "counter", unit: "{evaluation}", labels: ["action", "connector", "severity", "tool"]}
+      "defenseclaw.inspect.latency": {type: "histogram", unit: "ms", labels: ["connector", "tool"]}
+      "defenseclaw.judge.persist.batch_size": {type: "histogram", unit: "{row}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
+      "defenseclaw.judge.persist.drops": {type: "counter", unit: "{drop}", labels: ["reason"]}
+      "defenseclaw.judge.persist.queue_depth": {type: "gauge", unit: "{item}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
+      "defenseclaw.judge.semaphore.depth": {type: "updowncounter", unit: "{slot}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
+      "defenseclaw.judge.semaphore.drops": {type: "counter", unit: "{drop}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
+      "defenseclaw.llm_bridge.latency": {type: "histogram", unit: "ms", labels: ["gen_ai.request.model", "status"]}
+      "defenseclaw.openshell.exit": {type: "counter", unit: "{exit}", labels: ["command", "exit_code"]}
+      "defenseclaw.otel.ingest.bytes": {type: "counter", unit: "By", labels: ["connector", "signal", "source"]}
+      "defenseclaw.otel.ingest.last_seen_ts": {type: "gauge", unit: "s", labels: ["connector", "signal", "source"]}
+      "defenseclaw.otel.ingest.malformed": {type: "counter", unit: "{request}", labels: ["connector", "signal", "source"]}
+      "defenseclaw.otel.ingest.records": {type: "counter", unit: "{record}", labels: ["connector", "signal", "source"]}
+      "defenseclaw.otel.ingest.requests": {type: "counter", unit: "{request}", labels: ["connector", "result", "signal", "source"]}
+      "defenseclaw.panics.total": {type: "counter", unit: "{panic}", labels: ["subsystem"]}
+      "defenseclaw.policy.evaluations": {type: "counter", unit: "{evaluation}", labels: ["policy.domain", "policy.verdict"]}
+      "defenseclaw.policy.latency": {type: "histogram", unit: "ms", labels: ["policy.domain"]}
+      "defenseclaw.policy.reloads": {type: "counter", unit: "{reload}", labels: ["policy.status"]}
+      "defenseclaw.process.uptime_seconds": {type: "gauge", unit: "s", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
+      "defenseclaw.provenance.bumps": {type: "counter", unit: "{bump}", labels: ["reason"]}
+      "defenseclaw.quarantine.actions": {type: "counter", unit: "{action}", labels: ["quarantine.op", "quarantine.result"]}
+      "defenseclaw.queue.depth": {type: "gauge", unit: "{item}", labels: ["capacity", "queue"]}
+      "defenseclaw.queue.drops": {type: "counter", unit: "{drop}", labels: ["queue", "reason"]}
+      "defenseclaw.redaction.applied": {type: "counter", unit: "{redaction}", labels: ["detector", "field"]}
+      "defenseclaw.runtime.fd.in_use": {type: "gauge", unit: "{fd}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
+      "defenseclaw.runtime.gc.pause": {type: "histogram", unit: "ns", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
+      "defenseclaw.runtime.goroutines": {type: "gauge", unit: "{goroutine}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
+      "defenseclaw.runtime.heap.alloc": {type: "gauge", unit: "By", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
+      "defenseclaw.runtime.heap.objects": {type: "gauge", unit: "{object}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
+      "defenseclaw.scan.count": {type: "counter", unit: "{scan}", labels: ["scanner", "target_type", "verdict"]}
+      "defenseclaw.scan.duration": {type: "histogram", unit: "ms", labels: ["scanner", "target_type"]}
+      "defenseclaw.scan.errors": {type: "counter", unit: "{error}", labels: ["error_type", "scanner", "target_type"]}
+      "defenseclaw.scan.findings": {type: "counter", unit: "{finding}", labels: ["connector", "scanner", "severity", "target_type"]}
+      "defenseclaw.scan.findings.by_rule": {type: "counter", unit: "{finding}", labels: ["connector", "rule_id", "scanner", "severity"]}
+      "defenseclaw.scan.findings.gauge": {type: "updowncounter", unit: "{finding}", labels: ["severity", "target_type"]}
+      "defenseclaw.scanner.queue.depth": {type: "updowncounter", unit: "{scan}", labels: ["scanner"]}
+      "defenseclaw.schema.violations": {type: "counter", unit: "{event}", labels: ["code", "event_type"]}
+      "defenseclaw.slo.block.latency": {type: "histogram", unit: "ms", labels: ["target_type"]}
+      "defenseclaw.slo.tui.refresh": {type: "histogram", unit: "ms", labels: ["panel"]}
+      "defenseclaw.sqlite.busy_retries": {type: "counter", unit: "{event}", labels: ["operation"]}
+      "defenseclaw.sqlite.checkpoint.duration": {type: "histogram", unit: "ms", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
+      "defenseclaw.sqlite.db.bytes": {type: "gauge", unit: "By", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
+      "defenseclaw.sqlite.freelist_count": {type: "gauge", unit: "{page}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
+      "defenseclaw.sqlite.page_count": {type: "gauge", unit: "{page}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
+      "defenseclaw.sqlite.wal.bytes": {type: "gauge", unit: "By", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
+      "defenseclaw.stream.bytes_sent": {type: "histogram", unit: "By", labels: ["http.route", "outcome"]}
+      "defenseclaw.stream.duration_ms": {type: "histogram", unit: "ms", labels: ["http.route", "outcome"]}
+      "defenseclaw.stream.lifecycle": {type: "counter", unit: "{transition}", labels: ["http.route", "outcome", "transition"]}
+      "defenseclaw.telemetry.destination.spans": {type: "counter", unit: "{span}", labels: ["destination", "outcome", "reason"]}
+      "defenseclaw.telemetry.destination.exports": {type: "counter", unit: "{span}", labels: ["destination", "outcome", "signal"]}
+      "defenseclaw.telemetry.exporter.errors": {type: "counter", unit: "{error}", labels: ["exporter", "reason", "signal"]}
+      "defenseclaw.telemetry.exporter.last_export_ts": {type: "gauge", unit: "s", labels: ["exporter", "signal"]}
+      "defenseclaw.tool.calls": {type: "counter", unit: "{call}", labels: ["dangerous", "gen_ai.tool.name", "tool.provider"]}
+      "defenseclaw.tool.duration": {type: "histogram", unit: "ms", labels: ["gen_ai.tool.name", "tool.provider"]}
+      "defenseclaw.tool.errors": {type: "counter", unit: "{error}", labels: ["exit_code", "gen_ai.tool.name"]}
+      "defenseclaw.tui.filter.applied": {type: "counter", unit: "{filter}", labels: ["filter_type", "panel"]}
+      "defenseclaw.watcher.errors": {type: "counter", unit: "{error}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
+      "defenseclaw.watcher.events": {type: "counter", unit: "{event}", labels: ["connector", "event_type", "target_type"]}
+      "defenseclaw.watcher.restarts": {type: "counter", unit: "{restart}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
+      "defenseclaw.webhook.circuit_breaker": {type: "counter", unit: "{transition}", labels: ["state", "webhook.target_hash"]}
+      "defenseclaw.webhook.cooldown.suppressed": {type: "counter", unit: "{event}", labels: ["webhook.kind"]}
+      "defenseclaw.webhook.dispatches": {type: "counter", unit: "{dispatch}", labels: ["outcome", "webhook.kind"]}
+      "defenseclaw.webhook.failures": {type: "counter", unit: "{failure}", labels: ["outcome", "webhook.kind"]}
+      "defenseclaw.webhook.latency": {type: "histogram", unit: "ms", labels: ["http.status_code", "webhook.kind", "webhook.target_hash"]}
+      "gen_ai.client.operation.duration": {type: "histogram", unit: "s", labels: ["gen_ai.operation.name", "gen_ai.provider.name", "gen_ai.request.model"]}
+      "gen_ai.client.token.usage": {type: "histogram", unit: "{token}", labels: ["gen_ai.operation.name", "gen_ai.provider.name", "gen_ai.request.model", "gen_ai.token.type"]}
+
+  v7_exporter_selection:
+    source: canonical telemetry families plus this v7 compatibility input
+    migration_disposition: preserve_compatibility_floor
+    schema_version: 1
+    source_config_version: 7
+    projection_profile: legacy-v7
+    collection:
+      always:
+        logs: {derive_buckets_from: local_log_producers}
+        traces: []
+        metrics: []
+      otel.logs:
+        logs: {derive_buckets_from: catalog_v1}
+        traces: []
+        metrics: []
+      otel.traces:
+        logs: []
+        traces: {derive_buckets_from: catalog_v1}
+        metrics: []
+      otel.metrics:
+        logs: []
+        traces: []
+        metrics: {derive_buckets_from: emitted_metrics}
+    exporters:
+      gateway_jsonl:
+        logs: {derive_event_names_from: gateway_event}
+      gateway_console:
+        logs: {derive_event_names_from: gateway_event}
+      audit_sink:
+        logs:
+          derive_actions_from: audit_action
+          derive_event_names_from_gateway_event_keys:
+            - verdict
+            - llm_prompt
+            - llm_response
+            - tool_invocation
+      generic_otlp:
+        logs: {derive_buckets_from: catalog_v1}
+        traces: {derive_event_names_from: span_families}
+        metrics: {derive_buckets_from: emitted_metrics}
+      galileo:
+        traces:
+          - {event_names: [span.agent.invoke, span.model.chat, span.tool.execute]}
+      local_observability:
+        logs: {derive_buckets_from: catalog_v1}
+        traces: {derive_event_names_from: span_families}
+        metrics: {derive_buckets_from: emitted_metrics}
+    features:
+      otel_individual_findings:
+        - {event_names: [finding.observed]}
+    span_filter_operations:
+      chat:
+        required_attributes: [tenant.export_allowed]
+        selectors:
+          - {event_names: [span.model.chat]}
+      retrieve:
+        required_attributes: []
+        selectors:
+          - {event_names: [span.retrieval.search]}
+    local_observability:
+      profile_id: local-observability-v1
+      complete: true

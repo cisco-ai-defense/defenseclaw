@@ -18,26 +18,13 @@ Each judge has its own `corpus.jsonl` under
 covering every category the judge detects, across multiple severity
 tiers and surface-form variations.
 
-## Latest results
+## Recorded results
 
-Two complementary rates are reported (see the metric note below):
-**Detection** = attack flagged at any tier (`>NONE`); **Block** = attack
-flagged at the blocking tier (`>=HIGH`). The gap is attacks the judge
-detects but correctly rates LOW (e.g. an IP or an email in a prompt).
-
-| Judge | Detection (>NONE) | Block (>=HIGH) | FPR | Precision |
-|:------|------------------:|---------------:|----:|----------:|
-| Injection | 90.0% | 90.0% | 0.0% | 100.0% |
-| PII | **95.0%** | 76.7% | 0.0% | 100.0% |
-| **Exfil** | **100.0%** | **100.0%** | 7.5% | 97.6% |
-| Tool-injection | 90.0% | 90.0% | 0.0% | 100.0% |
-
-Zero false positives across injection, PII, and tool-injection; 7.5% on
-exfil (all at HIGH, not CRITICAL). PII detects 95% of attacks; the 18-point
-block-rate gap is entirely context-dependent PII the judge correctly rates
-LOW, not missed detections.
-
-See [RESULTS.md](./RESULTS.md) for the full scorecard, per-category breakdowns, and the regex-layer coverage table that complements the judges.
+[`RESULTS.md`](RESULTS.md) is the dated scorecard for the recorded model run.
+It contains the run metadata, headline metrics, per-category breakdowns, and
+the complementary regex-layer coverage table. Treat it as a reproducible
+snapshot, not as a timeless claim about a different model, corpus revision, or
+judge implementation.
 
 ## Running the evaluation
 

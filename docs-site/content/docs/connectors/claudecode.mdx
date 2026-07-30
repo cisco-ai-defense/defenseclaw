@@ -25,31 +25,29 @@ defenseclaw setup claude-code                # observe (default) — record only
 defenseclaw setup claude-code --mode action  # block on policy hits via PreToolUse deny
 ```
 
-`setup claude-code` is shorthand for `setup guardrail --connector claudecode`: it adds or reconfigures Claude Code, wires hooks + native OTel, and can join an existing hook-connector roster when you choose **Add**. No proxy listener binds for Claude Code in either mode.
+`setup claude-code` is the dedicated Claude Code setup alias. It uses the same
+setup backend as `setup guardrail`, adds or reconfigures `claudecode`, wires
+hooks + native OTel, and can join an existing hook-connector roster when you
+choose **Add**. No proxy listener binds in either mode.
 
 Native OTLP uses managed loopback exporter settings with a Claude-scoped
 Authorization bearer. Logs and metrics are enabled; traces are explicitly
 disabled. The scoped credential cannot authenticate management or another
 connector and must never be printed or copied.
 
-#### What this command sets vs. leaves at defaults
+Redaction is configured through the v8 bucket/profile policy: edit
+`observability.destinations[].routes[].selector.buckets` and
+`observability.redaction_profiles`, then follow
+[Redaction → Verify policy](/docs/reference/redaction#verify-policy).
 
-Every other knob falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/defaults).
-
-| Knob | Value when omitted | Flag to override |
-| --- | --- | --- |
-| Policy mode | `observe` (record only) | `--mode observe\|action` |
-| Scanner backend | `local` (bundled regex packs, zero key) | `--scanner-mode local\|remote\|both` |
-| Rule pack | unset → built-in baseline (no overlay) | `--rule-pack default\|strict\|permissive` |
-| LLM judge | **off** (regex-only triage) | `--judge-model <model>` plus `--judge-api-key-env` |
-| Detection strategy | `regex_judge` if judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
-| HITL minimum severity | `HIGH` (when `--human-approval` is on; stored uppercase in config) | `--hilt-min-severity low\|medium\|high\|critical` (case-insensitive) |
-| Hook fail-mode | current config; `closed` on a fresh install (`open` is retained for migrated legacy configs) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
-| Block message | empty (uses built-in copy) | `--block-message "<text>"` |
-| Redaction | v8 bucket/profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`; then follow [Redaction → Verify policy](/docs/reference/redaction#verify-policy). |
-| Verify after setup | on | `--no-verify` |
-
-See [the full flag reference](/docs/setup/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
+The alias defaults to observe mode and accepts the common hook-connector
+options, including `--mode`, `--workspace`, `--rule-pack`,
+`--human-approval`, `--hilt-min-severity`, `--fail-mode`, `--block-message`,
+`--replace`, `--with-local-stack`, and restart controls. Use the
+[quick-alias reference](/docs/setup/guardrail/aliases) for that surface. Use
+the [full guardrail setup](/docs/setup/guardrail) when you also need scanner,
+detection-strategy, or judge-provider configuration. Defaults are documented
+once on the [Defaults page](/docs/defaults).
 
 ## Files DefenseClaw will modify
 
@@ -100,7 +98,7 @@ Claude Code is one of the few connectors that supports native PreToolUse ask. HI
   caption="Two telemetry channels: hooks for per-tool-call decisions and native OTel for raw model/token telemetry."
 >
   <Node id="cc" kind="agent">Claude Code</Node>
-  <Node id="hooks" kind="connector">{`PreToolUse / PostToolUse /\nUserPromptSubmit / Stop /\nPermissionRequest hooks`}</Node>
+  <Node id="hooks" kind="connector">{`Current 28-event\nhook contract`}</Node>
   <Node id="otel" kind="connector">{`Native OTel exporter\n(env-driven)`}</Node>
   <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>
   <Edge from="cc" to="hooks" />

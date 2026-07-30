@@ -216,21 +216,19 @@ class RegistryStructureTests(unittest.TestCase):
                 "`1`, `unset`",
             ),
         }
-        doc_paths = (
-            _REPO_ROOT / "docs" / "ENV-VARS.md",
+        path = (
             _REPO_ROOT
             / "docs-site"
             / "content"
             / "docs"
             / "reference"
-            / "env-vars.mdx",
+            / "env-vars.mdx"
         )
-        for path in doc_paths:
-            rows = _doc_rows_by_name(path)
-            actual = {
-                name: tuple(rows[name][1:4]) for name in expected_doc_cells
-            }
-            self.assertEqual(actual, expected_doc_cells, path)
+        rows = _doc_rows_by_name(path)
+        actual = {
+            name: tuple(rows[name][1:4]) for name in expected_doc_cells
+        }
+        self.assertEqual(actual, expected_doc_cells, path)
 
     def test_source_registry_wins_over_stale_editable_bundle(self) -> None:
         """An editable checkout must not load a leftover package-data copy."""

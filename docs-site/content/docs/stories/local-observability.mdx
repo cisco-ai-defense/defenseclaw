@@ -1,6 +1,6 @@
 ---
-title: Pin local observability in 60 seconds
-description: defenseclaw setup local-observability up brings the bundled OTel Collector + Prom/Loki/Tempo/Grafana stack online and points the gateway's OTLP exporter at it. One command, five containers, three signals.
+title: Run the local observability stack
+description: defenseclaw setup local-observability up starts the bundled OTel Collector + Prometheus, Loki, Tempo, and Grafana stack and writes its named v8 destination.
 keywords:
   - DefenseClaw local observability
   - DefenseClaw OTLP local stack
@@ -8,11 +8,12 @@ keywords:
   - DefenseClaw OTel exporter
 ---
 
-DefenseClaw's runtime is designed to land in your existing telemetry stack — Splunk, OTLP, webhooks. But for the first 60 seconds of operating it, you want to see what it's doing without wiring up production. That's the local stack.
+DefenseClaw can export to an existing telemetry stack, but the bundled local
+stack gives you a loopback-only environment for development and evaluation.
 
 <Video
   src="local-observability"
-  caption="The 60-second tour: defenseclaw setup local-observability up → containers warm up → Grafana populates with live gateway events."
+  caption="Quick tour: defenseclaw setup local-observability up → containers warm up → the named destination is written → restart the gateway → Grafana populates with live events."
 />
 
 For the full deep-dive on flags, dashboards, and tear-down, see [Observability → Local stack](/docs/observability/local-observability).
@@ -20,10 +21,10 @@ For the full deep-dive on flags, dashboards, and tear-down, see [Observability �
 ## What you get
 
 <Cards>
-  <Card title="Prometheus" description="Metrics: requests, blocks, judge latency, sandbox events." />
-  <Card title="Loki" description="Logs: every audit row, with structured labels for connector + severity." />
-  <Card title="Tempo" description="Traces: hook → gateway → policy → sink, end-to-end." />
-  <Card title="Grafana" description="Pre-built dashboard with the four signals operators actually look at." />
+  <Card title="Prometheus" description="Metrics exported through the local OTel Collector." />
+  <Card title="Loki" description="Canonical gateway logs with connector and severity attributes." />
+  <Card title="Tempo" description="Gateway and connector traces exported through OTLP." />
+  <Card title="Grafana" description="Fourteen provisioned DefenseClaw dashboards backed by Prometheus, Loki, and Tempo." />
 </Cards>
 
 ## Run it
@@ -40,25 +41,29 @@ defenseclaw setup local-observability up
 
 Brings up five containers via Docker Compose:
 
-- `otel-collector` on `:4317` (gRPC) / `:4318` (HTTP) — the OTLP receiver that fans out to Prom/Loki/Tempo
-- `prometheus:latest` on `:9090`
-- `loki:latest` on `:3100`
-- `tempo:latest` on `:3200`
-- `grafana:latest` on `:3000`
+- `otel/opentelemetry-collector-contrib:0.153.0` on `127.0.0.1:4317`
+  (gRPC) and `127.0.0.1:4318` (HTTP)
+- `prom/prometheus:v2.54.1` on `127.0.0.1:9090`
+- `grafana/loki:3.2.0` on `127.0.0.1:3100`
+- `grafana/tempo:2.6.0` on `127.0.0.1:3200`
+- `grafana/grafana:11.3.0` on `127.0.0.1:3000`
+
+The Compose file binds all published ports to loopback by default.
 
 </Step>
 
 <Step>
 
-### Point the gateway at the OTLP collector
+### Reload the gateway configuration
 
 ```bash
-defenseclaw setup guardrail \
-  --connector codex \
-  --restart
+defenseclaw-gateway restart
 ```
 
-Replace `codex` with another connector you have wired, such as `claudecode`. Setup detects the local stack on `127.0.0.1:4317` and creates or updates the named `local-observability` route in `otel.destinations[]`. On a multi-connector host, that route is shared; use `--connector` only when you also want to reconcile that connector's hook wiring.
+Unless `up` was run with `--no-config`, it already created or updated
+`observability.destinations[local-observability]` with the selected
+logs/metrics/traces signals and the collector endpoint. Restart the gateway so
+the new destination takes effect. No connector setup command is required.
 
 </Step>
 
@@ -66,12 +71,16 @@ Replace `codex` with another connector you have wired, such as `claudecode`. Set
 
 ### Open Grafana
 
-Visit http://localhost:3000 (default credentials are surfaced by the up command). The pre-installed `defenseclaw-overview` dashboard shows:
+Visit [http://localhost:3000](http://localhost:3000). The bundled Compose
+configuration disables the login form and grants anonymous Admin access
+because Grafana is loopback-only by default. If you change `HOST_BIND`, secure
+Grafana before exposing it.
 
-- Requests per second by connector
-- Block rate by severity
-- p50 / p95 / p99 judge latency
-- Recent CRITICAL findings, with click-through to the Loki log line
+Fourteen dashboards are provisioned, including Overview, Traffic, Security,
+Findings, Policy Decisions, HITL, Connectors, Connector Detail, Activity,
+Runtime, Scanners, AI Discovery, Agent Identity, and Agent 360. See
+[Grafana dashboards](/docs/observability/grafana-dashboards) for their exact
+queries and panels.
 
 </Step>
 
@@ -83,7 +92,16 @@ Visit http://localhost:3000 (default credentials are surfaced by the up command)
 defenseclaw setup local-observability down
 ```
 
-Stops the containers and unwires the OTLP endpoint. Your audit DB is untouched.
+Stops the containers while preserving their named volumes and the configured
+destination. Your audit DB is untouched. To stop the stack and disable the
+destination in config, use:
+
+```bash
+defenseclaw setup local-observability down --disable-config
+```
+
+Use `reset --yes` only when you also intend to delete the stack's
+Prometheus/Loki/Tempo/Grafana data.
 
 </Step>
 
@@ -92,18 +110,20 @@ Stops the containers and unwires the OTLP endpoint. Your audit DB is untouched.
 ## Architecture
 
 <Flow
-  direction="LR"
+  direction="TB"
   compact
   caption="The gateway exports three signals. The local stack receives all three and Grafana joins them."
 >
   <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>
+  <Node id="collector" kind="connector">{`OTel Collector\n:4317 / :4318`}</Node>
   <Node id="prom" kind="datastore">{`Prometheus\n:9090`}</Node>
   <Node id="loki" kind="datastore">{`Loki\n:3100`}</Node>
   <Node id="tempo" kind="datastore">{`Tempo\n:3200`}</Node>
   <Node id="graf" kind="datastore">{`Grafana\n:3000`}</Node>
-  <Edge from="gateway" to="prom" label="metrics" />
-  <Edge from="gateway" to="loki" label="logs" />
-  <Edge from="gateway" to="tempo" label="traces" />
+  <Edge from="gateway" to="collector" label="OTLP logs / metrics / traces" />
+  <Edge from="collector" to="prom" label="metrics" />
+  <Edge from="collector" to="loki" label="logs" />
+  <Edge from="collector" to="tempo" label="traces" />
   <Edge from="prom" to="graf" />
   <Edge from="loki" to="graf" />
   <Edge from="tempo" to="graf" />

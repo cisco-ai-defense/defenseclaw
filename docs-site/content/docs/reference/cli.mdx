@@ -35,8 +35,48 @@ Tables below tag each row with the binary that owns it.
 | --- | --- |
 | `defenseclaw init` | Interactive first-run wizard. On a TTY, pre-selects installed hook connectors and lets you choose which ones stay observe vs action. Non-interactive multi-connector flags are `--observe-all` and `--action-connectors`; an explicit `--connector` keeps the single-connector path. |
 | `defenseclaw quickstart` | Zero-prompt first-run for **one** connector with safe defaults. Pass `--connector <name>` when more than one connector is configured or detected. See [Quickstart](/docs/get-started/quickstart). |
-| `defenseclaw doctor` | Health check. Run this first whenever something feels off. |
+| `defenseclaw doctor` | Health and repair check. Run this first whenever something feels off; see [Doctor](#doctor) below. |
 | `defenseclaw status` | Enforcement flags and gateway state, plus a per-connector block for **every** active connector. Read commands like this fan out to all actives — the same layout whether one or N are wired. |
+
+## Doctor
+
+```text
+defenseclaw doctor [--json-output | --json] [--passive]
+defenseclaw doctor --fix [--dry-run] [--yes] [--fix-id REPAIR_ID]...
+```
+
+Common invocations:
+
+```bash
+defenseclaw doctor --json
+defenseclaw doctor --passive
+defenseclaw doctor --fix --dry-run
+defenseclaw doctor --fix --fix-id doctor.gateway.token.ensure
+```
+
+Doctor checks configuration, audit and identity state, component and active
+connector compatibility, scanner binaries, managed gateway health and
+authentication, configured guardrail and scanner services, credentials, and
+observability destination health.
+
+`--json-output` (also available as `--json`) emits schema v2. Health remains in
+`checks` and `summary`; repair attempts are independent records under `repairs`
+and `repair_summary`. Repair states are `applicable`, `noop`, `blocked`,
+`manual`, `requires_confirmation`, `declined`, `applied`, and `failed`. Each
+record also carries its stable repair ID, risk, dependencies, effects, blockers,
+restart potential, and platform. The top-level `outcome` and `exit_code`
+combine health and repair results without adding repair failures to health
+counters.
+
+Use `--passive` to suppress synthetic telemetry, LLM, and
+inspection-content-submitting probes. Every `--fix --dry-run` is passive and
+runs planners only, so it cannot mutate disk or restart a service.
+
+`--fix-id` is repeatable and selects exact work plus declared dependencies.
+`--yes` may approve eligible safe and disruptive repairs, but does not select
+policy or experimental work. A JSON repair must be a dry-run preview or include
+`--yes`. See [Reporting and diagnosis](/docs/reference/fail-modes#reporting-and-diagnosis)
+for token, audit, identity, compatibility, and recovery safety boundaries.
 
 ## Setup
 
@@ -78,7 +118,13 @@ Destinations** and exposes the wizard at **0 Setup → Observability / Galileo**
 | `defenseclaw setup trusted-paths list\|add\|remove` | Manage the directories trusted for connector-binary version probing (action-mode setups refuse binaries outside this allow-list). `list` shows built-in defaults plus operator additions with source and status; `add` validates the directory (world-writable / relative paths refused unless `--force`) and persists to `~/.defenseclaw/.env`; `remove` only touches operator-added entries. All verbs accept `--json`. |
 
 <Callout title="Safety gates are intentional">
-Commands that execute local binaries or fetch remote content fail closed when the trust boundary is unclear. Connector version probes only run from trusted path prefixes; registry and scanner fetches reject loopback, link-local, cloud-metadata, and private-network targets unless explicitly allowed; `defenseclaw upgrade` verifies release artifacts before stopping the running gateway.
+Commands that fetch remote content fail closed when the trust boundary is
+unclear. Connector version probes enforce trusted path prefixes when
+`ai_discovery.require_trusted_binary_paths: true`; that gate defaults to
+`false` for on-demand discovery. Registry and scanner fetches reject loopback,
+link-local, cloud-metadata, and private-network targets unless explicitly
+allowed; `defenseclaw upgrade` verifies release artifacts before stopping the
+running gateway.
 </Callout>
 
 ## Guardrail
@@ -90,7 +136,7 @@ Per-connector guardrail controls. `--connector X` is the explicit scope selector
 | `defenseclaw guardrail status [--connector X]` | Read-only. Shows the resolved guardrail posture (enabled, mode, fail mode, HILT, block message) as one per-connector block for **every** active connector by default. Pass `--connector X` to narrow the view to one active connector. |
 | `defenseclaw guardrail enable [--connector X]` | Turn the guardrail on. Global, or re-enable a single previously-disabled connector (restores its hooks with no re-prompt). |
 | `defenseclaw guardrail disable [--connector X]` | Kill switch. Global disables everything; `--connector X` drops just that connector from the active set and removes its hooks. |
-| `defenseclaw guardrail fail-mode [open\|closed] [--connector X]` | Show/set the response-layer hook fail mode. Run bare it prints the global value **plus a per-connector breakdown** of every active connector's effective value. See [Reference → Fail modes](/docs/reference/fail-modes). |
+| `defenseclaw guardrail fail-mode [open\|closed] [--connector X]` | Show/set behavior for hook delivery, authentication, and invalid-response failures. Run bare it prints the global value **plus a per-connector breakdown** of every active connector's effective value. See [Reference → Fail modes](/docs/reference/fail-modes). |
 | `defenseclaw guardrail hilt [on\|off] [--min-severity high\|medium\|low\|critical] [--connector X]` | Show/set human-in-the-loop approval policy. Run bare it prints the global value **plus a per-connector breakdown**. |
 | `defenseclaw guardrail block-message "<text>" [--connector X]` | Show/set the message the agent sees when an action is blocked. Run bare it prints the global value **plus a per-connector breakdown**. |
 
@@ -131,7 +177,7 @@ These list/inventory verbs read across the full active roster:
 | `defenseclaw alerts [--connector X]` | Snapshot of recent alerts (default 25) as a table. `--connector X` filters by per-event connector attribution; `--limit N` widens the scan window, and `--show <n>` prints the full record. |
 | `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts (writes an `audit_log_activity` mutation). `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW`. |
 | `defenseclaw audit log-activity --payload-file <f>` | Record a config/operator mutation through the gateway's audit logger. Used internally by the TUI on save. |
-| `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Flags: `--output`, `--limit`, `--include-activity` (also dumps `activity_events`). |
+| `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Rows are emitted oldest-first; `--limit N` therefore returns the earliest N matching rows, not the newest N. Omit `--limit` and pipe to `tail` for the most recent rows. `--include-activity` also dumps `activity_events`. |
 | `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | Tail the optional v8 JSONL destination when configured at that path. Mandatory local history is SQLite; JSONL is not an implicit mirror. |
 
 ## AI discovery
@@ -167,7 +213,7 @@ The Python CLI exposes one scan group per asset family — there is no top-level
 | --- | --- | --- |
 | `defenseclaw skill scan [target] [--connector X] [--all] [--path] [--remote] [--action]` | `defenseclaw` | Scan a configured skill, a path, a URL (`https://…` / `clawhub://…`), or every configured skill with `--all`. A bare skill name searches matching configured connector copies; `--connector X` narrows. |
 | `defenseclaw mcp scan [target] [--connector X] [--all] [--scan-prompts] [--scan-resources] [--scan-instructions]` | `defenseclaw` | Scan one MCP server by name or URL, every configured server with `--all`, or every server on one connector with `--connector X`. |
-| `defenseclaw plugin scan <name_or_path> [--connector X] [--profile default\|strict] [--use-llm]` | `defenseclaw` | Scan a plugin/extension package. `--connector X` narrows duplicate plugin names to one connector. |
+| `defenseclaw plugin scan [name_or_path] [--all] [--connector X] [--profile default\|strict] [--use-llm]` | `defenseclaw` | Scan one plugin/extension package, or all discovered plugins with `--all`. `--connector X` narrows discovery or duplicate plugin names to one connector. |
 | `defenseclaw aibom scan [--connector X] [--json] [--summary] [--only <cat>]` | `defenseclaw` | Build the agent SBOM (skills, MCP, plugins, models, sinks) for every active connector by default, or one connector when scoped. |
 | `defenseclaw registry sync [source...] [--all] [--scan]` | `defenseclaw` | Sync registries; with `--scan`, runs the scanner pipeline against every fetched entry. |
 | `defenseclaw codeguard {status,install,install-skill} [--connector X]` | `defenseclaw` | Manage the CodeGuard skill/rule install across active connectors by default, or one connector when scoped. |

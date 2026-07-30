@@ -70,7 +70,7 @@ type Options struct {
 	Event string
 	// APIAddr is the gateway "host:port" the hook posts to.
 	APIAddr string
-	// FailMode is "open" or "closed"; it governs response-layer failures
+	// FailMode is "open" or "closed"; it governs invalid responses
 	// (4xx / bad JSON) and transport failures. StrictAvailability forces
 	// closed independently. Empty defaults to "open".
 	FailMode string

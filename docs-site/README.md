@@ -6,8 +6,8 @@ Cisco · DefenseClaw narrative documentation, built with [Fumadocs](https://www.
 
 ```bash
 cd docs-site
-npm install
-npm run dev      # http://localhost:3000
+npm ci
+npm run dev      # http://localhost:3000/defenseclaw/
 ```
 
 The dev server picks the `BASE_PATH` env var as the basePath; if unset, it defaults to `/defenseclaw` to mirror the GitHub Pages deployment. Run with `BASE_PATH=` to develop with no basePath:
@@ -28,17 +28,19 @@ The build pre-renders every docs page, every dynamic OG image, the FlexSearch in
 ## Quality gates
 
 ```bash
-npm run lint                    # next lint
-npm run validate-links          # static link checker (next-validate-link, hermetic)
-npm run check-diagram-widths    # postbuild gate against the article-column budget
+npm run validate-links          # internal MDX links and anchors
+npm run validate-snippets       # bash syntax in docs/ and site shell fences
+npm run test:policy-creator      # policy-creator unit tests
+npm run test:feature-demos       # feature-demo data/component tests
+npm run build                    # static export plus postbuild checks
 ```
 
 `validate-links` walks every `.mdx` under `content/docs/`, builds a slug catalog, and validates every `<a href>` plus `<Card href>` reference against it. Internal-only — never hits the network — so it's safe to run in pre-merge CI.
 
 `check-diagram-widths` runs automatically as part of `postbuild` after `npm run build`. It walks every static HTML page under `out/`, extracts every `<Flow>` / `<Sequence>` natural width from the lightbox `data-natural-width` attribute, and:
 
-- Warns above **1168px** (the article column max-width on `xl:` breakpoints).
-- **Fails** above **1500px** unless the diagram opted in via `<Flow oversize />` / `<Sequence oversize />`.
+- Warns above the **840px** ideal article-canvas width.
+- **Fails** above **1168px** unless the diagram opted in via `<Flow oversize />` / `<Sequence oversize />`.
 
 Authoring contract for new diagrams lives in [`components/diagram/AUTHORING.md`](components/diagram/AUTHORING.md).
 
@@ -64,8 +66,15 @@ Authoring contract for new diagrams lives in [`components/diagram/AUTHORING.md`]
 
 ## Deployment
 
-The `docs-site.yml` workflow at the repo root builds with `BASE_PATH=/defenseclaw` and deploys via `actions/deploy-pages` on every push to `main`. Custom domain? Set `BASE_PATH=` and update `SITE_URL` in the workflow.
+The [`.github/workflows/docs-site.yml`](../.github/workflows/docs-site.yml) workflow builds with `BASE_PATH=/defenseclaw` and deploys via `actions/deploy-pages` on every push to `main`. Custom domain? Set `BASE_PATH=` and update `SITE_URL` in the workflow.
 
-## Not maintained here
+## Documentation ownership
 
-The legacy `docs/` Markdown corpus at the repo root is **not** mirrored or replaced by this site. It stays for historical reference and per-feature deep dives that have not yet been re-authored. New documentation should land under `docs-site/content/docs/`.
+End-user installation, setup, workflows, capabilities, and product reference are
+canonical under `content/docs/` and published at
+[`https://cisco-ai-defense.github.io/defenseclaw/docs/`](https://cisco-ai-defense.github.io/defenseclaw/docs/).
+Repository Markdown is reserved for contributor workflows, implementation and
+architecture details, design/history, test fixtures, and package-local context.
+It should link to the canonical site page instead of repeating user-facing
+instructions. When product behavior changes, update the relevant MDX in the
+same change.

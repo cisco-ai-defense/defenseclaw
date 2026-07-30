@@ -1,6 +1,6 @@
 ---
 title: Connectors
-description: Thirteen first-class connectors — OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, OmniGent — with a single enforcement contract.
+description: Thirteen built-in connectors share one adapter interface while exposing connector-specific proxy, hook, policy, telemetry, and approval capabilities.
 keywords:
   - DefenseClaw connectors
   - Claude Code connector
@@ -17,12 +17,16 @@ keywords:
   - OmniGent connector
 ---
 
-Connectors are the adapter layer between agent frameworks and DefenseClaw's guardrail proxy. Each connector owns all security surfaces for its agent: LLM traffic routing, tool call inspection, agent hook events, component scanning, CodeGuard file scanning, and subprocess enforcement.
+Connectors are the adapter layer between agent frameworks and DefenseClaw.
+They share one Go interface, but each connector advertises only the
+capabilities its agent actually exposes. Proxy routing, lifecycle hooks,
+custom policy callbacks, component discovery, CodeGuard, subprocess wrapping,
+native telemetry, and approval support therefore vary by connector.
 
-## The two families
+## Integration families
 
 <Cards>
-  <Card title="Proxy connectors" description="OpenClaw, ZeptoClaw. DefenseClaw sits in the LLM data path — every request and response is intercepted, scored, and forwarded." />
+  <Card title="Proxy connectors" description="OpenClaw, ZeptoClaw. Model requests routed through the DefenseClaw proxy and their responses are inspected; OpenClaw classifies recognized provider/request shapes, while ZeptoClaw rewrites configured provider api_base values." />
   <Card title="Hook connectors" description="Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, OmniGent. DefenseClaw wires into the agent's native lifecycle hooks or policy API; the agent talks directly to its upstream." />
   <Card title="Compatibility contracts" href="/docs/connectors/compatibility" description="Versioned hook contracts, setup-time connector version checks, and the runtime hook_contract_lock.json." />
 </Cards>
@@ -37,15 +41,24 @@ Connectors are the adapter layer between agent frameworks and DefenseClaw's guar
 
 ## Capability summary
 
-<CapabilityMatrix />
+| Family | Connectors | Data path | Enforcement boundary |
+| --- | --- | --- | --- |
+| Proxy | OpenClaw, ZeptoClaw | DefenseClaw receives and forwards model traffic | Request/response policy in the proxy |
+| Hook | Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode | Agent remains connected directly to its upstream | Only the blocking events declared by that connector's selected hook contract |
+| Custom policy | OmniGent | Agent remains connected directly to its upstream | Six in-process policy phases mapped to `ALLOW`, `ASK`, or `DENY` |
 
-For the full breakdown including HITL behaviour, head to the [Capability Matrix](/docs/capability-matrix). For deterministic hook version pinning, see [Connector Compatibility](/docs/connectors/compatibility).
+Native ask is event-specific: Claude Code (`PreToolUse`), Cursor
+(`beforeShellExecution`, `beforeMCPExecution`), Copilot CLI (`preToolUse`),
+Antigravity (`PreInvocation`, `PreToolUse`), and OmniGent's three pre-action
+phases. Other confirmation verdicts use the connector's documented fallback.
+For exact version ranges, supported events, and script generations, see
+[Connector Compatibility](/docs/connectors/compatibility).
 
 ## How a connector is structured
 
 <Flow
   direction="TB"
-  caption="Every connector implements the same Go interface; the gateway routes traffic generically once a connector has resolved its signals."
+  caption="Every connector implements the same Go interface; individual methods may report that an agent does not support that capability."
 >
   <Node id="setup" kind="connector">{`Setup(ctx, opts)\nwrite hook scripts,\nback up agent files,\nregister routes`}</Node>
   <Node id="auth" kind="connector">{`Authenticate(r)\nverify gateway token`}</Node>

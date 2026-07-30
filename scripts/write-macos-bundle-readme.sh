@@ -25,7 +25,10 @@ ships in this folder.
 | \`uninstall.sh\`                  | Bootout daemon + scrub agent hook configs           |
 | \`com.cisco.secureclient.defenseclaw.plist\` | LaunchDaemon plist                                  |
 | \`lib/installer_lib.sh\`          | Pure helpers (sourced by install.sh)                |
+| \`lib/render-targets.sh\`          | Hook-guardian target manifest renderer              |
 | \`lib/scrub_agent_configs.py\`    | Agent hook config scrubber (stdlib Python)          |
+| \`com.cisco.secureclient.defenseclaw.hook-guardian.plist\` | Guardian LaunchDaemon definition |
+| \`com.cisco.secureclient.defenseclaw.hook-enumerator.plist\` | Enumerator LaunchDaemon definition |
 
 ## Install
 

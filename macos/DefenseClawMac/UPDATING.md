@@ -126,6 +126,8 @@ workflow before publication.
 - Confirm every GitHub Action is pinned to an immutable commit SHA.
 - Confirm the release job downloads both the DMG and zip before regenerating `checksums.txt` and publishing the atomic GitHub release.
 - Confirm `test_update_checker_verification.sh` and `test_update_checker_safety.sh` pass, covering verified-only asset selection and pre-extraction archive rejection.
-- Confirm `python3 scripts/check-macos-upstream.py` succeeds online. The release preflight fails before signing if the pin is stale.
+- Confirm `python3 scripts/check-macos-upstream.py` succeeds online. Release
+  preflight validates the lock offline; the scheduled freshness workflow owns
+  detection of a newer upstream release.
 - Confirm the scheduled `macOS Upstream Freshness` workflow is enabled. It opens one update issue when the latest stable standalone release advances.
 - Record exact commands and observed results in the pull request test plan.

@@ -1,5 +1,11 @@
 # Antigravity MCP and Customization Contract
 
+> **Status: historical pre-implementation research contract.** Antigravity is
+> now implemented under `internal/gateway/connector/`; use the
+> [published Antigravity guide](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/antigravity/)
+> and current connector tests for supported behavior. Upstream paths and CLI
+> behavior below were observed on the stated research date only.
+
 Scope: PR #365 follow-up contract for Google's Antigravity (`agy`) connector. This pins the file paths and JSON shapes DefenseClaw should rely on before implementation.
 
 Research date: 2026-06-16. Local cross-check: `agy --version` returned `1.0.5`; the local install exposes `agy plugin ...` commands and has `~/.gemini/config/mcp_config.json` plus `~/.gemini/config/hooks.json`. No local Antigravity plugins were installed.

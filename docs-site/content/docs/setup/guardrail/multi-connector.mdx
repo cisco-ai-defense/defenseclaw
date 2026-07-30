@@ -90,7 +90,7 @@ The five fields you can override per connector mirror the global guardrail knobs
 | --- | --- | --- |
 | `enabled` | Per-connector on/off switch (`guardrail disable --connector X`). Drops it from the active set and removes its hooks; re-enable restores it with no re-prompt. | enabled |
 | `mode` | `observe` (log only) or `action` (enforce). | global `guardrail.mode` |
-| `hook_fail_mode` | `open` / `closed` — what to do on a malformed/4xx hook response for this connector. | global `guardrail.hook_fail_mode` |
+| `hook_fail_mode` | `open` / `closed` — what to do when hook delivery/authentication fails or the gateway response is invalid. | global `guardrail.hook_fail_mode` |
 | `hilt` | `{ enabled, min_severity }` — per-connector human-in-the-loop policy. | global `guardrail.hilt` |
 | `block_message` | Custom block text shown to this connector's agent. | global `guardrail.block_message` |
 | `rule_pack_dir` | Path to the rule pack this connector scans against. | global `guardrail.rule_pack_dir` |
@@ -135,7 +135,15 @@ Once a gateway protects more than one connector, the CLI splits cleanly into com
 
 ## The firewall stays global
 
-Per-connector policy is a *guardrail* concept. The egress firewall is **not** per-connector — it is one host-wide OS packet filter (pf/iptables) compiled from a single `firewall.yaml`, filtering by destination only. Each connector's allowed hosts are merged into that one allowlist at boot; the kernel can't attribute a connection to a connector. See [`docs/ARCHITECTURE.md` → Firewall scope](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/ARCHITECTURE.md) for the rationale.
+Per-connector policy is a *guardrail* concept. The egress firewall is **not**
+per-connector: DefenseClaw compiles one `firewall.yaml` into the host-wide
+pf/iptables packet filter, and merges each active connector's allowed hosts
+into that destination allowlist at boot. Those rules see network-level
+attributes, not DefenseClaw's semantic connector label, so they cannot safely
+attribute a connection to one of several agents sharing the host. A true
+per-connector egress boundary would require a separately attributable network
+context, such as a dedicated namespace; the normal multi-hook topology does not
+create one.
 
 ## See also
 
