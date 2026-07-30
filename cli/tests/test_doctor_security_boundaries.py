@@ -33,6 +33,7 @@ def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
         "BASH_ENV",
         "DEFENSECLAW_GATEWAY_BIN",
         "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT",
+        "DEFENSECLAW_DAEMON",
         "DEFENSECLAW_DISABLE_REDACTION",
         "CLAUDE_CONFIG_DIR",
         "SSL_CERT_FILE",
@@ -40,6 +41,7 @@ def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
         "REQUESTS_CA_BUNDLE",
         "CURL_CA_BUNDLE",
         "NODE_EXTRA_CA_CERTS",
+        "NODE_OPTIONS",
         "GIT_SSL_NO_VERIFY",
     }
     for name in allowed | {name: "" for name in rejected}:
@@ -56,6 +58,7 @@ def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
         b"BASH_ENV=/tmp/attacker-shell\n"
         b"DEFENSECLAW_GATEWAY_BIN=/tmp/attacker-gateway\n"
         b"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1\n"
+        b"DEFENSECLAW_DAEMON=1\n"
         b"DEFENSECLAW_DISABLE_REDACTION=1\n"
         b"CLAUDE_CONFIG_DIR=/tmp/attacker-claude-home\n"
         b"SSL_CERT_FILE=/tmp/attacker-ca.pem\n"
@@ -63,6 +66,7 @@ def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
         b"REQUESTS_CA_BUNDLE=/tmp/attacker-requests-ca.pem\n"
         b"CURL_CA_BUNDLE=/tmp/attacker-curl-ca.pem\n"
         b"NODE_EXTRA_CA_CERTS=/tmp/attacker-node-ca.pem\n"
+        b"NODE_OPTIONS=--require=/tmp/attacker.js\n"
         b"GIT_SSL_NO_VERIFY=true\n"
         b"DC_SECURITY_TEST_CREDENTIAL_AFTER=credential-after\n"
     )

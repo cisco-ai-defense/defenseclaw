@@ -22,6 +22,7 @@ import os
 import subprocess
 import tempfile
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import yaml
@@ -614,7 +615,8 @@ def test_windows_system_custody_does_not_require_current_sid(monkeypatch):
         "_windows_acl_snapshot",
         lambda _path: (system_sid, False, [(0x10000000, 1, 0, system_sid)]),
     )
-    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: "")
+    current_sid = Mock(side_effect=AssertionError("system custody must not query the current SID"))
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", current_sid)
 
     assert (
         file_permissions.windows_acl_custody_write_error(
@@ -623,6 +625,58 @@ def test_windows_system_custody_does_not_require_current_sid(monkeypatch):
         )
         is None
     )
+    current_sid.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("validator", "kwargs"),
+    [
+        (file_permissions.windows_acl_write_error, {}),
+        (
+            file_permissions.windows_acl_custody_write_error,
+            {"allow_current_user": True},
+        ),
+        (file_permissions.windows_acl_confidentiality_error, {}),
+    ],
+)
+def test_windows_user_acl_validators_reject_sid_resolution_error(
+    monkeypatch,
+    validator,
+    kwargs,
+):
+    current_sid = "S-1-5-21-current"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (current_sid, False, [(0x10000000, 1, 0, current_sid)]),
+    )
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_current_user_sid",
+        Mock(side_effect=OSError("token lookup failed")),
+    )
+
+    assert validator("synthetic-user-path", **kwargs) == "current user SID could not be resolved"
+
+
+def test_windows_required_access_rejects_sid_resolution_error(monkeypatch):
+    current_sid = "S-1-5-21-current"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (current_sid, False, [(0x10000000, 1, 0, current_sid)]),
+    )
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_current_user_sid",
+        Mock(side_effect=OSError("token lookup failed")),
+    )
+
+    assert file_permissions._windows_acl_has_required_access("synthetic-user-path") is False
 
 
 def test_windows_confidentiality_accepts_owner_and_system_only(monkeypatch):
