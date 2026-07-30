@@ -221,9 +221,13 @@
       "application_names": [],
       "local_endpoints": [],
       "skill_paths": [
+        "$HERMES_HOME/skills",
+        "$LOCALAPPDATA/hermes/skills",
         "~/.hermes/skills"
       ],
       "plugin_paths": [
+        "$HERMES_HOME/plugins",
+        "$LOCALAPPDATA/hermes/plugins",
         "~/.hermes/plugins"
       ]
     },
