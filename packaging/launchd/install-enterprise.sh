@@ -545,6 +545,16 @@ assert_existing_secure_dir_or_absent "$LOG_DIR"
 # Move legacy paths aside (best-effort, timestamped, never deleted).
 # Version tag comes from the binary source when available so the backup
 # path is distinguishable across attempts.
+#
+# Mirrors installer_lib.sh:move_legacy_aside — installer-lib is not
+# sourced here (this script deliberately stays self-contained for the
+# launchd bootstrap path), so we duplicate the loop but keep the
+# symlinked-backup-root refusal in lockstep with the shared helper's
+# rc-4 branch: /bin/mv into a symlink would relocate legacy state
+# into whatever the symlink points at.
+if [ -L "$LOG_DIR" ]; then
+    die "log dir $LOG_DIR is a symlink; refusing to move legacy state through it"
+fi
 _installer_version_tag="$("$BINARY_SOURCE" --version 2>/dev/null | /usr/bin/head -1 || true)"
 [ -z "$_installer_version_tag" ] && _installer_version_tag="unknown"
 _installer_version_tag="$(printf '%s' "$_installer_version_tag" | /usr/bin/tr -c '[:alnum:]._-' '_' | /usr/bin/head -c 32)"

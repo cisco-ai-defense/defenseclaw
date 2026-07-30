@@ -102,6 +102,32 @@ t_second_call_is_idempotent() {
   assert_status "${rc}" 0 "second move on absent path is a no-op"
 }
 
+t_invalid_argument_returns_rc2() {
+  # move_legacy_aside returns rc 2 for both an unknown flag and any
+  # empty positional. Guard that path so a future refactor cannot
+  # silently collapse rc 2 into rc 3 (missing backup_root) — the two
+  # codes drive different caller messages.
+  local case_dir legacy backup_root rc
+  case_dir="$(mktest_tmp)"
+  legacy="${case_dir}/DefenseClaw"
+  backup_root="${case_dir}/backup"
+  mkdir "${legacy}" "${backup_root}"
+  printf 'marker\n' >"${legacy}/state"
+
+  # Unknown flag → rc 2.
+  rc=0
+  move_legacy_aside "${legacy}" "${backup_root}" "0.8.4" --bogus \
+    >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "unknown flag returns error 2"
+  [[ -d "${legacy}" ]] || _fail "legacy source clobbered on rc-2 path"
+  assert_eq "$(cat "${legacy}/state")" "marker" "legacy content preserved on rc-2"
+
+  # Empty positional → rc 2.
+  rc=0
+  move_legacy_aside "" "${backup_root}" "0.8.4" >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 2 "empty PATH positional returns error 2"
+}
+
 t_missing_backup_root_returns_error() {
   local case_dir legacy
   case_dir="$(mktest_tmp)"
@@ -173,6 +199,7 @@ run_case "moves regular dir aside with timestamped backup" t_moves_regular_dir_a
 run_case "moves regular file aside"                    t_moves_regular_file_aside
 run_case "dry-run leaves disk untouched"               t_dry_run_does_not_touch_disk
 run_case "second call is idempotent"                   t_second_call_is_idempotent
+run_case "invalid argument returns error 2"            t_invalid_argument_returns_rc2
 run_case "missing backup_root returns error"           t_missing_backup_root_returns_error
 run_case "symlinked backup_root rejected (PR-579 review)" t_symlinked_backup_root_rejected
 run_case "symlink target relocated, pointee preserved" t_symlink_target_relocated
