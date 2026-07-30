@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -225,6 +226,10 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
                 "defenseclaw.gateway.canonical_install_path",
                 return_value=canonical,
             ),
+            mock.patch(
+                "defenseclaw.commands.cmd_setup._trusted_gateway_lifecycle_executable",
+                side_effect=lambda path: path,
+            ) as trust,
         ):
             executable = cmd_setup._gateway_lifecycle_executable()
 
@@ -232,6 +237,7 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
         self.assertTrue(os.path.isabs(executable))
         self.assertNotEqual(executable, "defenseclaw-gateway")
         self.assertEqual(os.path.normcase(executable or ""), os.path.normcase(canonical))
+        trust.assert_called_once_with(str(Path(canonical).resolve()))
 
     def test_lifecycle_executable_uses_only_absolute_non_current_path_entries(self) -> None:
         from tempfile import TemporaryDirectory
