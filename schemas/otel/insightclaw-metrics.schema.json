@@ -1,0 +1,565 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.dev/schemas/otel/insightclaw-metrics.schema.json",
+  "title": "InsightClaw Compatibility Metrics (openclaw.*)",
+  "description": "Metrics emitted by the DefenseClaw InsightClaw adapter for interoperability with InsightClaw dashboards and analytics. Attribute names match the current openclaw.* emitters exactly.",
+  "x-emitted-metrics": [
+    {
+      "name": "openclaw.llm.requests",
+      "type": "counter",
+      "unit": "requests",
+      "description": "Total LLM API requests.",
+      "attributes": {
+        "gen_ai.response.model": { "type": "string", "description": "Model identifier." },
+        "gen_ai.agent.id": { "type": "string", "description": "Agent identifier when emitted from hook fallback usage." },
+        "openclaw.provider": { "type": "string", "description": "Provider name from diagnostic usage events." },
+        "openclaw.channel": { "type": "string", "description": "Channel from diagnostic usage events." },
+        "openclaw.idle": { "type": "boolean", "description": "True on zero-value heartbeat points." }
+      }
+    },
+    {
+      "name": "openclaw.llm.errors",
+      "type": "counter",
+      "unit": "errors",
+      "description": "Total LLM API errors. Currently emitted only as zero-value heartbeat points.",
+      "attributes": {
+        "openclaw.idle": { "type": "boolean", "description": "True on zero-value heartbeat points." }
+      }
+    },
+    {
+      "name": "openclaw.llm.tokens.total",
+      "type": "counter",
+      "unit": "tokens",
+      "description": "Total tokens consumed.",
+      "attributes": {
+        "gen_ai.response.model": { "type": "string" },
+        "gen_ai.agent.id": { "type": "string" },
+        "openclaw.provider": { "type": "string" },
+        "openclaw.channel": { "type": "string" },
+        "openclaw.idle": { "type": "boolean", "description": "True on zero-value heartbeat points." }
+      }
+    },
+    {
+      "name": "openclaw.llm.tokens.prompt",
+      "type": "counter",
+      "unit": "tokens",
+      "description": "Prompt, input, and cache tokens consumed.",
+      "attributes": {
+        "gen_ai.response.model": { "type": "string" },
+        "gen_ai.agent.id": { "type": "string" },
+        "openclaw.provider": { "type": "string" },
+        "openclaw.channel": { "type": "string" },
+        "token.type": { "type": "string", "enum": ["cache_read", "cache_write"], "description": "Cache token subtype when diagnostic usage reports cache tokens separately." },
+        "openclaw.idle": { "type": "boolean", "description": "True on zero-value heartbeat points." }
+      }
+    },
+    {
+      "name": "openclaw.llm.tokens.completion",
+      "type": "counter",
+      "unit": "tokens",
+      "description": "Completion/output tokens consumed.",
+      "attributes": {
+        "gen_ai.response.model": { "type": "string" },
+        "gen_ai.agent.id": { "type": "string" },
+        "openclaw.provider": { "type": "string" },
+        "openclaw.channel": { "type": "string" },
+        "openclaw.idle": { "type": "boolean", "description": "True on zero-value heartbeat points." }
+      }
+    },
+    {
+      "name": "openclaw.llm.duration",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "LLM request duration.",
+      "attributes": {
+        "gen_ai.response.model": { "type": "string" },
+        "openclaw.provider": { "type": "string" },
+        "openclaw.channel": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.cost.usd",
+      "type": "counter",
+      "unit": "usd",
+      "description": "Estimated model cost in USD from diagnostic events.",
+      "attributes": {
+        "gen_ai.response.model": { "type": "string" },
+        "openclaw.provider": { "type": "string" },
+        "openclaw.channel": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.tool.calls",
+      "type": "counter",
+      "unit": "calls",
+      "description": "Total tool invocations.",
+      "attributes": {
+        "tool.name": { "type": "string", "description": "Tool name." },
+        "gen_ai.agent.id": { "type": "string", "description": "Agent identifier." },
+        "openclaw.idle": { "type": "boolean", "description": "True on zero-value heartbeat points." }
+      }
+    },
+    {
+      "name": "openclaw.tool.errors",
+      "type": "counter",
+      "unit": "errors",
+      "description": "Total tool errors.",
+      "attributes": {
+        "tool.name": { "type": "string", "description": "Tool name." },
+        "gen_ai.agent.id": { "type": "string", "description": "Agent identifier." },
+        "openclaw.idle": { "type": "boolean", "description": "True on zero-value heartbeat points." }
+      }
+    },
+    {
+      "name": "openclaw.tool.duration",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Tool execution duration.",
+      "attributes": {
+        "tool.name": { "type": "string", "description": "Tool name." },
+        "gen_ai.agent.id": { "type": "string", "description": "Agent identifier." }
+      }
+    },
+    {
+      "name": "openclaw.session.resets",
+      "type": "counter",
+      "unit": "resets",
+      "description": "Total session resets.",
+      "attributes": {
+        "command.source": { "type": "string", "description": "Source of the reset command." },
+        "openclaw.idle": { "type": "boolean", "description": "True on zero-value heartbeat points." }
+      }
+    },
+    {
+      "name": "openclaw.messages.received",
+      "type": "counter",
+      "unit": "messages",
+      "description": "Total inbound messages.",
+      "attributes": {
+        "openclaw.message.channel": { "type": "string", "description": "Connector or channel that delivered the message." },
+        "openclaw.idle": { "type": "boolean", "description": "True on zero-value heartbeat points." }
+      }
+    },
+    {
+      "name": "openclaw.messages.sent",
+      "type": "counter",
+      "unit": "messages",
+      "description": "Total outbound messages.",
+      "attributes": {
+        "openclaw.message.channel": { "type": "string", "description": "Connector or channel the message was sent through." },
+        "openclaw.idle": { "type": "boolean", "description": "True on zero-value heartbeat points." }
+      }
+    },
+    {
+      "name": "openclaw.agent.turn_duration",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Full agent turn duration.",
+      "attributes": {
+        "gen_ai.response.model": { "type": "string" },
+        "gen_ai.agent.id": { "type": "string", "description": "Agent identifier." }
+      }
+    },
+    {
+      "name": "openclaw.memory.write_events",
+      "type": "counter",
+      "unit": "events",
+      "description": "Memory write events for long-term memory file accesses.",
+      "attributes": {
+        "tool.name": { "type": "string" },
+        "gen_ai.agent.id": { "type": "string" },
+        "openclaw.idle": { "type": "boolean", "description": "True on zero-value heartbeat points." }
+      }
+    },
+    {
+      "name": "openclaw.memory.read_events",
+      "type": "counter",
+      "unit": "events",
+      "description": "Memory read events for long-term memory file accesses and memory search operations.",
+      "attributes": {
+        "tool.name": { "type": "string" },
+        "gen_ai.agent.id": { "type": "string" },
+        "openclaw.idle": { "type": "boolean", "description": "True on zero-value heartbeat points." }
+      }
+    },
+    {
+      "name": "openclaw.memory.edit_events",
+      "type": "counter",
+      "unit": "events",
+      "description": "Memory edit events for long-term memory file accesses.",
+      "attributes": {
+        "tool.name": { "type": "string" },
+        "gen_ai.agent.id": { "type": "string" },
+        "openclaw.idle": { "type": "boolean", "description": "True on zero-value heartbeat points." }
+      }
+    },
+    {
+      "name": "openclaw.memory.search_miss",
+      "type": "counter",
+      "unit": "events",
+      "description": "Memory search misses.",
+      "attributes": {
+        "tool.name": { "type": "string" },
+        "gen_ai.agent.id": { "type": "string" },
+        "openclaw.idle": { "type": "boolean", "description": "True on zero-value heartbeat points." }
+      }
+    },
+    {
+      "name": "openclaw.memory.search_hit",
+      "type": "counter",
+      "unit": "events",
+      "description": "Memory search hits.",
+      "attributes": {
+        "tool.name": { "type": "string" },
+        "gen_ai.agent.id": { "type": "string" },
+        "openclaw.idle": { "type": "boolean", "description": "True on zero-value heartbeat points." }
+      }
+    },
+    {
+      "name": "openclaw.memory.failure_rate",
+      "type": "histogram",
+      "unit": "1",
+      "description": "Session-level failure rate of long-term memory operations derived from cached spans.",
+      "attributes": {
+        "openclaw.session.key": { "type": "string", "description": "Runtime session key." },
+        "openclaw.metric.scope": { "type": "string", "enum": ["session"], "description": "Metric aggregation scope." }
+      }
+    },
+    {
+      "name": "openclaw.memory.search_fragmentation",
+      "type": "histogram",
+      "unit": "1",
+      "description": "Memory search result fragmentation ratio.",
+      "attributes": {
+        "tool.name": { "type": "string" },
+        "gen_ai.agent.id": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.memory.read_duration",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Memory read duration.",
+      "attributes": {
+        "tool.name": { "type": "string" },
+        "gen_ai.agent.id": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.memory.write_duration",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Memory write duration.",
+      "attributes": {
+        "tool.name": { "type": "string" },
+        "gen_ai.agent.id": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.memory.edit_duration",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Memory edit duration.",
+      "attributes": {
+        "tool.name": { "type": "string" },
+        "gen_ai.agent.id": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.webhook.received",
+      "type": "counter",
+      "unit": "events",
+      "description": "Diagnostic webhook ingress events.",
+      "attributes": {
+        "openclaw.channel": { "type": "string" },
+        "openclaw.webhook": { "type": "string", "description": "Diagnostic webhook update type." }
+      }
+    },
+    {
+      "name": "openclaw.webhook.error",
+      "type": "counter",
+      "unit": "errors",
+      "description": "Diagnostic webhook error events.",
+      "attributes": {
+        "openclaw.channel": { "type": "string" },
+        "openclaw.webhook": { "type": "string", "description": "Diagnostic webhook update type." }
+      }
+    },
+    {
+      "name": "openclaw.webhook.duration_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Webhook processing duration from diagnostic events.",
+      "attributes": {
+        "openclaw.channel": { "type": "string" },
+        "openclaw.webhook": { "type": "string", "description": "Diagnostic webhook update type." }
+      }
+    },
+    {
+      "name": "openclaw.message.queued",
+      "type": "counter",
+      "unit": "events",
+      "description": "Diagnostic message queued events.",
+      "attributes": {
+        "openclaw.channel": { "type": "string" },
+        "openclaw.source": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.message.processed",
+      "type": "counter",
+      "unit": "events",
+      "description": "Diagnostic message processed events.",
+      "attributes": {
+        "openclaw.channel": { "type": "string" },
+        "openclaw.outcome": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.message.duration_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Diagnostic message processing duration.",
+      "attributes": {
+        "openclaw.channel": { "type": "string" },
+        "openclaw.outcome": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.queue.depth",
+      "type": "histogram",
+      "unit": "items",
+      "description": "Queue depth snapshot from diagnostic events.",
+      "attributes": {
+        "openclaw.channel": { "type": "string" },
+        "openclaw.source": { "type": "string" },
+        "openclaw.lane": { "type": "string" },
+        "openclaw.metric": { "type": "string", "enum": ["queued", "active", "waiting"], "description": "Heartbeat queue depth dimension." }
+      }
+    },
+    {
+      "name": "openclaw.queue.wait_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Queue wait time reported by diagnostic lane dequeue events.",
+      "attributes": {
+        "openclaw.lane": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.queue.lane.enqueue",
+      "type": "counter",
+      "unit": "events",
+      "description": "Diagnostic lane enqueue events.",
+      "attributes": {
+        "openclaw.lane": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.queue.lane.dequeue",
+      "type": "counter",
+      "unit": "events",
+      "description": "Diagnostic lane dequeue events.",
+      "attributes": {
+        "openclaw.lane": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.session.state",
+      "type": "counter",
+      "unit": "events",
+      "description": "Diagnostic session state transitions.",
+      "attributes": {
+        "openclaw.state": { "type": "string" },
+        "openclaw.reason": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.session.stuck",
+      "type": "counter",
+      "unit": "events",
+      "description": "Diagnostic stuck-session events.",
+      "attributes": {
+        "openclaw.state": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.session.stuck_age_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Age of stuck sessions from diagnostic events.",
+      "attributes": {
+        "openclaw.state": { "type": "string" }
+      }
+    },
+    {
+      "name": "openclaw.run.attempt",
+      "type": "counter",
+      "unit": "attempts",
+      "description": "Diagnostic run attempt count.",
+      "attributes": {
+        "openclaw.attempt": { "type": "integer" }
+      }
+    },
+    {
+      "name": "openclaw.tool.loop",
+      "type": "counter",
+      "unit": "events",
+      "description": "Diagnostic tool loop warnings and blocks.",
+      "attributes": {
+        "openclaw.tool": { "type": "string", "description": "Tool name from the diagnostic event." },
+        "openclaw.detector": { "type": "string" },
+        "openclaw.action": { "type": "string" },
+        "openclaw.level": { "type": "string", "description": "Diagnostic severity or level." }
+      }
+    },
+    {
+      "name": "openclaw.context.system_size",
+      "type": "histogram",
+      "unit": "bytes",
+      "description": "Size of system context in bytes.",
+      "attributes": {
+        "gen_ai.agent.id": { "type": "string", "description": "Agent identifier." }
+      }
+    },
+    {
+      "name": "openclaw.context.history_memory_size",
+      "type": "histogram",
+      "unit": "bytes",
+      "description": "Size of message history memory context in bytes.",
+      "attributes": {
+        "gen_ai.agent.id": { "type": "string", "description": "Agent identifier." }
+      }
+    },
+    {
+      "name": "openclaw.context.history_tool_size",
+      "type": "histogram",
+      "unit": "bytes",
+      "description": "Size of message history tool context in bytes.",
+      "attributes": {
+        "gen_ai.agent.id": { "type": "string", "description": "Agent identifier." }
+      }
+    },
+    {
+      "name": "openclaw.context.history_user_size",
+      "type": "histogram",
+      "unit": "bytes",
+      "description": "Size of message history user context in bytes.",
+      "attributes": {
+        "gen_ai.agent.id": { "type": "string", "description": "Agent identifier." }
+      }
+    },
+    {
+      "name": "openclaw.context.history_other_size",
+      "type": "histogram",
+      "unit": "bytes",
+      "description": "Size of message history other context in bytes.",
+      "attributes": {
+        "gen_ai.agent.id": { "type": "string", "description": "Agent identifier." }
+      }
+    },
+    {
+      "name": "openclaw.context.prompt_size",
+      "type": "histogram",
+      "unit": "bytes",
+      "description": "Size of prompt context in bytes.",
+      "attributes": {
+        "gen_ai.agent.id": { "type": "string", "description": "Agent identifier." }
+      }
+    },
+    {
+      "name": "openclaw.context.preparation_duration",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Duration of context preparation in milliseconds.",
+      "attributes": {
+        "gen_ai.agent.id": { "type": "string", "description": "Agent identifier." }
+      }
+    },
+    {
+      "name": "openclaw.session.parallelisation_score",
+      "type": "histogram",
+      "unit": "1",
+      "description": "Session parallelisation score.",
+      "attributes": {
+        "openclaw.session.key": { "type": "string", "description": "Runtime session key." }
+      }
+    },
+    {
+      "name": "openclaw.session.repetition_score",
+      "type": "histogram",
+      "unit": "1",
+      "description": "Session repetition score.",
+      "attributes": {
+        "openclaw.session.key": { "type": "string", "description": "Runtime session key." }
+      }
+    },
+    {
+      "name": "openclaw.agent.novelty_score",
+      "type": "histogram",
+      "unit": "1",
+      "description": "Novelty score of sub-agent output compared to parent context.",
+      "experimental": true,
+      "attributes": {
+        "gen_ai.agent.id": { "type": "string", "description": "Agent identifier." }
+      }
+    },
+    {
+      "name": "openclaw.agent.downstream_context_sharing",
+      "type": "histogram",
+      "unit": "1",
+      "description": "Downstream context sharing score for sub-agent context compared to parent context.",
+      "experimental": true,
+      "attributes": {
+        "gen_ai.agent.id": { "type": "string", "description": "Agent identifier." }
+      }
+    },
+    {
+      "name": "openclaw.sessions.active",
+      "type": "updowncounter",
+      "unit": "sessions",
+      "description": "Currently active sessions.",
+      "attributes": {}
+    }
+  ],
+  "$defs": {
+    "metricDef": {
+      "type": "object",
+      "required": ["name", "type", "unit", "description", "attributes"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Fully qualified metric name."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["counter", "histogram", "updowncounter", "gauge"],
+          "description": "OTEL instrument type."
+        },
+        "unit": {
+          "type": "string",
+          "description": "Unit annotation used by the emitted OTel instrument."
+        },
+        "description": {
+          "type": "string"
+        },
+        "experimental": {
+          "type": "boolean",
+          "description": "True for metrics gated behind otel.insight_claw.experimental."
+        },
+        "attributes": {
+          "type": "object",
+          "description": "Attribute dimensions observed on emitted metric points.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "type": { "type": "string" },
+              "enum": { "type": "array" },
+              "description": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}
