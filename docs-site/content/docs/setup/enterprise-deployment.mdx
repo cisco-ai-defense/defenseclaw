@@ -245,7 +245,7 @@ The AI Defense endpoint (`cisco_ai_defense.endpoint` in the emitted `config.yaml
 }
 ```
 
-`install.sh` reads only the `cisco_ai_defense_endpoint` field; extra keys are ignored for forward compatibility. The file must be root-owned with no group/other write bits and no write-capable macOS ACL — the installer walks every ancestor and applies the same checks before reading. Override with `--config-file PATH` (fleet-specific staging) or `--override-endpoint URL` (adhoc / preview testing). The installer fails closed with an explicit "AVC module must drop this file" message if neither is supplied and the default path is absent.
+`install.sh` reads only the `cisco_ai_defense_endpoint` field; extra keys are ignored for forward compatibility. The file must be root-owned with no group/other write bits and no write-capable macOS ACL — the installer walks every ancestor and applies the same checks before reading. Override with `--config-file PATH` (fleet-specific staging) or `--override-endpoint URL` (adhoc / preview testing). If the default `env_config.json` is missing or malformed, the installer emits a warning and falls back to the US-production AI Defense endpoint so the enrollment is not blocked; only failed ownership, permission, or ACL trust checks on a present file still fail the installer closed.
 
 Set ownership and start the service:
 

@@ -16,7 +16,7 @@ The bundle is self-contained — no Go toolchain, no Homebrew, no repo checkout.
 
 ## 2. Install
 
-Standard install (observe mode, Codex connector only):
+Standard install (action mode, Codex connector only):
 
 ```sh
 sudo ./install.sh
@@ -35,28 +35,44 @@ Common flags:
 | `--mode {observe\|action}` | `action` | Guardrail + asset_policy mode |
 | `--connector LIST` | `codex` | Comma-separated: `codex`, `claudecode`, `cursor` |
 | `--port PORT` | `18970` | Loopback API port |
-| `--env {prod\|preview}` | `prod` | Select the built-in Cisco AI Defense HTTPS origin |
-| `--override-endpoint URL` | — | Override `--env` with an HTTPS bare origin |
+| `--config-file PATH` | `/opt/cisco/secureclient/defenseclaw/env_config.json` | Path to the AVC-authored JSON that supplies `cisco_ai_defense.endpoint` (see [AVC env_config.json](#avc-env_configjson)) |
+| `--override-endpoint URL` | — | Adhoc-testing seam that wins over `--config-file`; must be a full http(s) URL |
+| `--disable-redaction` | on | Turn off audit/sink redaction |
 | `--user USER` | `$SUDO_USER` | Target user for per-user hook wiring |
 | `--skip-connector` | — | Gateway only; skip user-space hook wiring |
 | `--skip-launchd` | — | Install files without bootstrapping the daemon |
 
+### AVC env_config.json
+
+On managed_enterprise hosts, the AI Defense endpoint the daemon
+inspects against comes from a static JSON file that the Cisco Secure
+Client (AVC) module drops at
+`/opt/cisco/secureclient/defenseclaw/env_config.json`. `install.sh`
+reads a single top-level field:
+
+```json
+{
+  "cisco_ai_defense_endpoint": "https://us.api.inspect.aidefense.security.cisco.com"
+}
+```
+
+Trust requirements (enforced by `install.sh` via the shared
+managed-installer helpers):
+
+- File must be root-owned with no group/other write bits.
+- No symlinks on the file or any ancestor directory.
+- No write-capable macOS ACL anywhere in the ancestor chain.
+- Every ancestor must be root-owned and non-writable by group/other.
+
+Any of the four checks failing → `install.sh` fails closed with a
+message naming the offending path. Extra fields in the JSON are
+ignored for forward compatibility — a later AVC drop can add keys
+without breaking older DefenseClaw builds.
+
+For adhoc / preview testing, `--override-endpoint URL` bypasses the
+file entirely.
+
 Full reference: `./install.sh --help`.
-
-`--override-endpoint` accepts only an HTTPS bare origin such as
-`https://aid.example.test` or `https://aid.example.test:8443/`. The optional
-trailing slash is removed. Plaintext HTTP, credentials/userinfo, non-root
-paths, query strings, fragments, whitespace, quotes, backslashes, and invalid
-ports are rejected before the installer performs any config or filesystem
-mutation. This boundary is mandatory because the managed daemon sends its
-CMID bearer credential to that origin.
-
-The installer writes strict `config_version: 8` with local history under
-`observability.local` and `observability.defaults.redaction_profile: sensitive`.
-The retired global `--disable-redaction` switch is not accepted. To change the
-posture, edit the administrator-owned v8 source with a global, bucket, or
-destination profile, run `defenseclaw config validate` and
-`defenseclaw observability plan`, then restart the daemon.
 
 `install.sh` is idempotent. A second run on the same host reconciles
 machine-wide state in place: the gateway binary, `config.yaml`, both plists,
@@ -162,7 +178,7 @@ Requires `sudo`. The installer:
 - Writes `/opt/cisco/secureclient/defenseclaw/etc/config.yaml` as `root:wheel 0640`.
 - Does NOT create a dedicated service user. The gateway daemon runs as root (uid 0) because the managed cloud auth provider requires root to read and re-perm its credential store on disk.
 - Wires per-user hook configs in the target user's `~/.codex/config.toml`, `~/.claude/settings.json`, and/or `~/.cursor/hooks.json` depending on `--connector`.
-- Refuses legacy pre-managed-layout install locations (`/Library/DefenseClaw/`, `/Library/Application Support/DefenseClaw/`, `/Library/Logs/DefenseClaw/`, `/Library/LaunchDaemons/com.defenseclaw.gateway.plist`, and `/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist`) and the corresponding `com.defenseclaw.gateway` / `com.defenseclaw.hook-guardian` launchd jobs before mutation. Existing deployments must use the release-owned staged upgrader; the fresh installer does not sweep or cut over legacy state.
+- Relocates legacy pre-managed-layout install locations (`/Library/DefenseClaw/`, `/Library/Application Support/DefenseClaw/`, `/Library/Logs/DefenseClaw/`, `/Library/LaunchDaemons/com.defenseclaw.gateway.plist`, and `/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist`) under `/Library/Logs/Cisco/SecureClient/DefenseClaw/` with a `.pre-<version>-<timestamp>` suffix (best-effort, never deleted), and unloads the corresponding legacy `com.defenseclaw.gateway` / `com.defenseclaw.hook-guardian` launchd jobs before mutation. Existing deployments must use the release-owned staged upgrader; the fresh installer does not sweep or cut over legacy state beyond this relocation.
 
 ### Runtime privileges
 

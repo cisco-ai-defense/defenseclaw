@@ -379,6 +379,26 @@ func parseMCPServersJSONArray(data []byte) ([]MCPServerEntry, error) {
 	return entries, nil
 }
 
+// ParseMCPServersJSON is the exported wrapper around parseMCPServersJSON
+// so packages outside `config` (e.g. inventory's AI-discovery scanner)
+// can enumerate the servers declared inside a matched `mcp.json` /
+// `.cursor/mcp.json` / claude-desktop config file without duplicating the
+// parser. The input is the raw file bytes; the output is one
+// MCPServerEntry per top-level key in the JSON object form
+// (`{"mcpServers": {...}}` callers must pass the inner `mcpServers`
+// object; plain-object callers pass their whole file). Callers that need
+// the array shape should use ParseMCPServersJSONArray.
+func ParseMCPServersJSON(data []byte) ([]MCPServerEntry, error) {
+	return parseMCPServersJSON(data)
+}
+
+// ParseMCPServersJSONArray is the exported wrapper around
+// parseMCPServersJSONArray for callers that need the alternate top-level
+// array form (`[{"name": "...", ...}, ...]`).
+func ParseMCPServersJSONArray(data []byte) ([]MCPServerEntry, error) {
+	return parseMCPServersJSONArray(data)
+}
+
 func workspaceSkillsDir(homeDir string, oc *openclawConfig) string {
 	workspace := filepath.Join(homeDir, "workspace")
 	if oc != nil && oc.Agents.Defaults.Workspace != "" {

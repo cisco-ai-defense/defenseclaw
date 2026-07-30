@@ -2,13 +2,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import plistlib
 import stat
 import subprocess
 from pathlib import Path
 
-import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -172,8 +170,16 @@ def test_launchd_hook_guardian_is_separate_privileged_job():
     # path intentionally cannot catch (SharedWriter Write/Chmod on native
     # agent configs, shared-across-connector generic scripts). Any drift in
     # this value should be a deliberate policy change, not an accidental edit.
-    assert "--interval" in payload["ProgramArguments"]
-    assert "60s" in payload["ProgramArguments"]
+    args = payload["ProgramArguments"]
+    assert "--interval" in args, "guardian must pass --interval flag"
+    interval_idx = args.index("--interval")
+    # The value must immediately follow the flag, otherwise the CLI
+    # will misparse the argv (a lone "60s" later in the vector would
+    # bind to a different flag or be ignored).
+    assert interval_idx + 1 < len(args), "--interval has no value argument"
+    assert args[interval_idx + 1] == "60s", (
+        f"guardian --interval value must be 60s, got {args[interval_idx + 1]!r}"
+    )
     assert payload["EnvironmentVariables"]["DEFENSECLAW_DEPLOYMENT_MODE"] == "managed_enterprise"
     assert (
         payload["EnvironmentVariables"]["DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"]
@@ -195,7 +201,6 @@ def test_release_archives_ship_enterprise_packaging_assets():
     assert "README*" in archive_files
 
 
-@pytest.mark.skipif(os.name == "nt", reason="launchd installer POSIX ownership and executable-bit contract")
 def test_launchd_enterprise_installer_enforces_managed_config_trust_boundary():
     installer = ROOT / "packaging" / "launchd" / "install-enterprise.sh"
 

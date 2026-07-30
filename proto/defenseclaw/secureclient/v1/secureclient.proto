@@ -63,22 +63,26 @@ message StatsSnapshot {
   // Indicates whether the statistics are current, stale, or unavailable.
   StatsAvailability availability = 2;
 
-  // Counter fields below are proto3 `optional`. A present counter is
-  // supported by this DefenseClaw build and available to the consumer,
-  // including when its value is zero. An absent counter is unsupported
-  // or unavailable — consumers should render it as such (e.g. em-dash
-  // or hidden), not as "0".
+  // Counter fields below are proto3 `optional`. Presence semantics
+  // differ by field — this matters for AVC's rendering logic.
   //
   // Server-side presence policy (see internal/ipc/stats_source.go):
   //
   //   total_scans, active_alerts — ALWAYS present on an AVAILABLE
   //     snapshot, even when the value is zero. These back AVC's
-  //     primary KPI tiles and need a "0" render on a fresh install.
+  //     primary KPI tiles and need a non-zero rendering (e.g. "0")
+  //     on a fresh install. If either field is ABSENT on an AVAILABLE
+  //     snapshot, this DefenseClaw build does not support the counter
+  //     and consumers should render it as unsupported (em-dash or
+  //     hidden), NOT as "0".
   //
   //   blocked_skills, allowed_skills, blocked_mcp_servers,
-  //   allowed_mcp_servers — omitted when the value is zero. These
-  //     feed secondary drill-down views where "not yet observed" is
-  //     a meaningful distinction from "observed zero times".
+  //   allowed_mcp_servers — MAY be absent even on an AVAILABLE
+  //     snapshot. The server omits these when the value is zero to
+  //     save wire bytes on secondary drill-down views. Consumers
+  //     should treat absent as "zero" (equivalent to a value of 0),
+  //     not as "unsupported". A present zero and an absent field
+  //     carry the same meaning for these fields.
   //
   // On an ERROR / STARTING / UNAVAILABLE snapshot every counter is
   // absent; the availability enum carries the reachability signal.

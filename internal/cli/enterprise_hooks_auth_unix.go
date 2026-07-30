@@ -13,6 +13,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"os/user"
 	"strconv"
@@ -37,7 +38,8 @@ func setEnterpriseHookAuthorizationOwnership(path string) error {
 	if err != nil {
 		// No service user on this host — the daemon runs as root and
 		// reads the 0640 file via its owner bit. Nothing to align.
-		if _, ok := err.(user.UnknownUserError); ok {
+		var unknown user.UnknownUserError
+		if errors.As(err, &unknown) {
 			return nil
 		}
 		return err

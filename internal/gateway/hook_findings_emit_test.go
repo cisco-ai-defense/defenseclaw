@@ -25,8 +25,8 @@ import (
 // a scan_results row with finding_count=0. The audit-store's
 // TotalScans counter then reflects every inspection.
 func TestEmitInspectVerdictFindings_ZeroFindingsStillCountsAsScan(t *testing.T) {
-	store, _ := testStoreAndLogger(t)
-	api := &APIServer{store: store}
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{store: store, logger: logger}
 
 	before, err := store.GetCounts()
 	if err != nil {
@@ -67,8 +67,8 @@ func TestEmitInspectVerdictFindings_ZeroFindingsStillCountsAsScan(t *testing.T) 
 // that stayed: a nil verdict means "no inspection to record", not
 // "inspection with zero findings". The counter must NOT increment.
 func TestEmitInspectVerdictFindings_NilVerdictSkipped(t *testing.T) {
-	store, _ := testStoreAndLogger(t)
-	api := &APIServer{store: store}
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{store: store, logger: logger}
 
 	_ = api.emitInspectVerdictFindings(context.Background(),
 		"hook-rules", "claudecode:PreToolUse", "tool_call",

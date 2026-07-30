@@ -109,6 +109,34 @@ import time) means a typo in ``guardrail.connector`` surfaces in
 producing wrong paths.
 """
 
+KNOWN_AGENT_KINDS: tuple[str, ...] = KNOWN_CONNECTORS + (
+    # Discovery-only agents. These have AI-signature entries in
+    # ai_signatures.json (mirrored between Go and Python copies) but no
+    # DefenseClaw enforcement path, so they do NOT appear in
+    # KNOWN_CONNECTORS (which is the enforcement-connector allow-list).
+    # They ARE first-class agents on the discovery/inventory side:
+    # ``defenseclaw agent discover`` reports them, and the wire
+    # payload's ``agent_kind`` gets populated for their signals via the
+    # promotion table in internal/inventory/ai_catalog.go.
+    #
+    # Keep this list in sync with ``promotedAgentKinds`` in the Go
+    # catalog — the connector slug values here (aider, continue, cline,
+    # claudedesktop) must match the values in that map for dashboards
+    # to join cleanly across the two sides.
+    "aider",
+    "continue",
+    "cline",
+    "claudedesktop",
+)
+"""All agent slugs the CLI's discovery / inventory paths know about.
+
+Superset of :data:`KNOWN_CONNECTORS`: adds discovery-only agents that
+have AI-signature entries but no DefenseClaw enforcement path.
+Consumers that walk *installed* connectors keep using
+:data:`KNOWN_CONNECTORS`; consumers that enumerate *known agents*
+(inventory / agent_discovery) use this.
+"""
+
 HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset(
     {
         "hermes",

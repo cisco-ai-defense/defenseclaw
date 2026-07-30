@@ -259,8 +259,8 @@ func TestMergeWithLaneVerdict_SynthesizesDetailedFindings(t *testing.T) {
 			t.Fatalf("DetailedFindings = %d, want 2 (one per AID finding)", len(merged.DetailedFindings))
 		}
 		got := merged.DetailedFindings[0]
-		if got.RuleID != "ai-defense:pii.email" {
-			t.Errorf("RuleID = %q, want ai-defense:pii.email", got.RuleID)
+		if got.RuleID != "pii.email" {
+			t.Errorf("RuleID = %q, want pii.email (raw name; lane category is in Tags)", got.RuleID)
 		}
 		if got.Title != "pii.email" {
 			t.Errorf("Title = %q, want pii.email", got.Title)
@@ -283,8 +283,8 @@ func TestMergeWithLaneVerdict_SynthesizesDetailedFindings(t *testing.T) {
 		if len(merged.DetailedFindings) != 1 {
 			t.Fatalf("DetailedFindings = %d, want 1", len(merged.DetailedFindings))
 		}
-		if got := merged.DetailedFindings[0].RuleID; got != "llm-judge:prompt_injection" {
-			t.Errorf("RuleID = %q, want llm-judge:prompt_injection", got)
+		if got := merged.DetailedFindings[0].RuleID; got != "prompt_injection" {
+			t.Errorf("RuleID = %q, want prompt_injection (raw name; lane category is in Tags)", got)
 		}
 		if got := merged.DetailedFindings[0].Tags; len(got) != 1 || got[0] != "llm-judge" {
 			t.Errorf("Tags = %v, want [llm-judge]", got)
@@ -315,7 +315,7 @@ func TestMergeWithLaneVerdict_SynthesizesDetailedFindings(t *testing.T) {
 		if merged.DetailedFindings[0].RuleID != "LOCAL-1" {
 			t.Errorf("local finding not preserved at head: %+v", merged.DetailedFindings)
 		}
-		if merged.DetailedFindings[1].RuleID != "ai-defense:pii.email" {
+		if merged.DetailedFindings[1].RuleID != "pii.email" {
 			t.Errorf("synthesized finding not appended: %+v", merged.DetailedFindings)
 		}
 	})

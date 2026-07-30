@@ -245,18 +245,17 @@ func (b *broadcast) ackSubscriber(subID uint64, seq uint64) {
 	defer b.mu.Unlock()
 	keep := b.retained[:0]
 	for i := range b.retained {
-		r := b.retained[i]
-		if r.record != nil && r.record.Sequence == seq {
-			if r.pending != nil {
-				delete(r.pending, subID)
+		if b.retained[i].record != nil && b.retained[i].record.Sequence == seq {
+			if b.retained[i].pending != nil {
+				delete(b.retained[i].pending, subID)
 			}
-			r.ackedByAny = true
-			if len(r.pending) == 0 {
+			b.retained[i].ackedByAny = true
+			if len(b.retained[i].pending) == 0 {
 				// Fully delivered — drop from the ring.
 				continue
 			}
 		}
-		keep = append(keep, r)
+		keep = append(keep, b.retained[i])
 	}
 	b.retained = keep
 }
@@ -273,17 +272,16 @@ func (b *broadcast) releasePendingLocked(subID uint64) {
 	}
 	keep := b.retained[:0]
 	for i := range b.retained {
-		r := b.retained[i]
-		if r.pending != nil {
-			delete(r.pending, subID)
+		if b.retained[i].pending != nil {
+			delete(b.retained[i].pending, subID)
 		}
-		if len(r.pending) == 0 && r.ackedByAny {
+		if len(b.retained[i].pending) == 0 && b.retained[i].ackedByAny {
 			// At least one subscriber has already acked (successful
 			// stream.Send) AND no remaining live subscriber still
 			// owes an ack — record is fully delivered, drop it.
 			continue
 		}
-		keep = append(keep, r)
+		keep = append(keep, b.retained[i])
 	}
 	b.retained = keep
 }
