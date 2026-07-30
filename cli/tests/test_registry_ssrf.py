@@ -19,9 +19,12 @@ so the suite never touches real DNS.
 from __future__ import annotations
 
 import os
+import socket
 import sys
 import unittest
 from unittest.mock import patch
+
+import anyio
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -314,8 +317,6 @@ class TestPinnedGetaddrinfo(unittest.TestCase):
     at connect time instead of honouring a urllib3-level connect pin."""
 
     def test_pinned_host_resolves_to_vetted_ip(self):
-        import socket
-
         # Inside the pin, a lookup for the vetted host returns the pinned
         # IP — NOT whatever a (rebinding) DNS would now answer.
         with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
@@ -323,27 +324,112 @@ class TestPinnedGetaddrinfo(unittest.TestCase):
         addrs = {info[4][0] for info in infos}
         self.assertEqual(addrs, {"93.184.216.34"})
 
-    def test_unexpected_host_is_refused(self):
-        import socket
+    def test_anyio_bytes_hostname_resolves_to_vetted_ip(self):
+        calls = []
 
+        def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            calls.append((host, port, family, type, proto, flags))
+            return [
+                (
+                    family,
+                    type or socket.SOCK_STREAM,
+                    proto,
+                    "",
+                    (str(host), port),
+                )
+            ]
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+                infos = anyio.run(anyio.getaddrinfo, "rebind.example", 443)
+
+        self.assertEqual(infos[0][4][0], "93.184.216.34")
+        self.assertEqual(calls[0][0], "93.184.216.34")
+
+    def test_bytes_hostname_accepts_keyword_family(self):
+        calls = []
+
+        def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            calls.append((host, port, family, type, proto, flags))
+            return [(family, type, proto, "", (str(host), port))]
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+                socket.getaddrinfo(
+                    b"rebind.example",
+                    8443,
+                    family=socket.AF_UNSPEC,
+                    type=socket.SOCK_STREAM,
+                    proto=socket.IPPROTO_TCP,
+                    flags=socket.AI_NUMERICHOST,
+                )
+
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "93.184.216.34",
+                    8443,
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    socket.AI_NUMERICHOST,
+                )
+            ],
+        )
+
+    def test_unicode_hostname_matches_anyio_alabel(self):
+        calls = []
+
+        def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            calls.append(host)
+            return [(family, type, proto, "", (str(host), port))]
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("faß.example", 443, "93.184.216.34"):
+                socket.getaddrinfo(b"xn--fa-hia.example", 443)
+
+        self.assertEqual(calls, ["93.184.216.34"])
+
+    def test_invalid_host_shapes_are_refused_before_resolving(self):
+        calls = []
+
+        def fake_getaddrinfo(*args, **kwargs):
+            calls.append((args, kwargs))
+            return []
+
+        bad_hosts = (
+            ("none", None),
+            ("non-ascii-bytes", b"\xff.example"),
+            ("nul", "bad\x00.example"),
+            ("surrogate", "\ud800.example"),
+        )
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+                for case, host in bad_hosts:
+                    with self.subTest(case=case):
+                        with self.assertRaises(SSRFError):
+                            socket.getaddrinfo(host, 443)
+
+        self.assertEqual(calls, [])
+
+    def test_unexpected_host_is_refused(self):
         # A side-channel lookup for a *different* host during the pinned
         # operation is refused, so a library cannot escape to an unvetted
         # (and possibly internal) destination mid-request.
         with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
-            with self.assertRaises(SSRFError):
-                socket.getaddrinfo("evil.internal", 443)
+            for host in ("evil.internal", b"evil.internal"):
+                with self.subTest(host=host):
+                    with self.assertRaises(SSRFError):
+                        socket.getaddrinfo(host, 443)
 
     def test_getaddrinfo_restored_after_block(self):
-        import socket
-
         original = socket.getaddrinfo
         with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
             pass
         self.assertIs(socket.getaddrinfo, original)
 
     def test_getaddrinfo_restored_on_exception(self):
-        import socket
-
         original = socket.getaddrinfo
         with self.assertRaises(RuntimeError):
             with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
@@ -351,14 +437,60 @@ class TestPinnedGetaddrinfo(unittest.TestCase):
         self.assertIs(socket.getaddrinfo, original)
 
     def test_ip_literal_matching_pin_is_allowed(self):
-        import socket
-
         # A client that pre-resolves and re-calls getaddrinfo with the IP
         # literal equal to the pin is allowed through.
         with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
-            infos = socket.getaddrinfo("93.184.216.34", 443)
-        self.assertTrue(infos)
+            for host in ("93.184.216.34", b"93.184.216.34"):
+                infos = socket.getaddrinfo(host, 443)
+                self.assertTrue(infos)
 
+    def test_different_ip_literal_is_refused(self):
+        with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+            with self.assertRaises(SSRFError):
+                socket.getaddrinfo("127.0.0.1", 443)
+
+    def test_ipv6_pin_forces_ipv6_family(self):
+        calls = []
+
+        def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            calls.append((host, port, family, type, proto, flags))
+            return [(family, type, proto, "", (str(host), port, 0, 0))]
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("v6.example", 443, "2001:4860:4860::8888"):
+                socket.getaddrinfo(
+                    "v6.example",
+                    443,
+                    socket.AF_UNSPEC,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                )
+
+        self.assertEqual(calls[0][0], "2001:4860:4860::8888")
+        self.assertEqual(calls[0][2], socket.AF_INET6)
+
+    def test_incompatible_requested_family_is_refused(self):
+        with pinned_getaddrinfo("v6.example", 443, "2001:4860:4860::8888"):
+            with self.assertRaises(socket.gaierror):
+                socket.getaddrinfo("v6.example", 443, family=socket.AF_INET)
+
+    def test_unicode_url_uses_anyio_alabel_for_validation(self):
+        seen = []
+
+        def resolver(host):
+            seen.append(host)
+            return ["93.184.216.34"]
+
+        ip, host, port = resolve_and_pin(
+            "https://faß.example/mcp",
+            resolver=resolver,
+        )
+
+        self.assertEqual(
+            (ip, host, port),
+            ("93.184.216.34", "xn--fa-hia.example", 443),
+        )
+        self.assertEqual(seen, ["xn--fa-hia.example"])
 
     # --- Private upstream allowlist tests ---
 
