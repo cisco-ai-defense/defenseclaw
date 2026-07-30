@@ -347,40 +347,30 @@ func TestMetricInstrumentEventNamesMatchGeneratedCatalog(t *testing.T) {
 	assertSameEventNameSet(t, generatedFamilyEventNames(SignalMetrics), fromCatalog)
 }
 
-func TestSpanFamilyEventNamesMatchSpecCatalog(t *testing.T) {
+func TestSpanFamilyEventNamesMatchGeneratedCatalog(t *testing.T) {
 	t.Parallel()
 
-	raw, err := os.ReadFile(repositoryFile(t, "docs/design/observability-v8/11-trace-and-span-contract.md"))
-	if err != nil {
-		t.Fatalf("read trace contract: %v", err)
+	var catalog struct {
+		Families []struct {
+			EventName EventName `json:"event_name"`
+			Signal    Signal    `json:"signal"`
+		} `json:"families"`
 	}
-	inCatalog := false
-	var fromSpec []EventName
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSuffix(line, "\r")
-		switch {
-		case line == "## 7. Span Family Catalog":
-			inCatalog = true
-		case inCatalog && strings.HasPrefix(line, "## "):
-			inCatalog = false
-		case inCatalog && strings.HasPrefix(line, "| `"):
-			columns := strings.Split(line, "|")
-			if len(columns) < 4 {
-				t.Fatalf("malformed span family table row %q", line)
-			}
-			family := strings.Trim(strings.TrimSpace(columns[2]), "`")
-			fromSpec = append(fromSpec, EventName(family))
+	if err := json.Unmarshal(publicschemas.TelemetryV8Catalog(), &catalog); err != nil {
+		t.Fatalf("decode embedded telemetry catalog: %v", err)
+	}
+
+	fromCatalog := make([]EventName, 0, len(catalog.Families))
+	for _, family := range catalog.Families {
+		if family.Signal != SignalTraces {
+			continue
+		}
+		fromCatalog = append(fromCatalog, family.EventName)
+		if !IsRegisteredEventName(family.EventName) {
+			t.Errorf("generated trace family %q is not registered", family.EventName)
 		}
 	}
-	if len(fromSpec) == 0 {
-		t.Fatal("span family catalog was not found in trace contract")
-	}
-	for _, family := range fromSpec {
-		if !IsRegisteredEventName(family) {
-			t.Errorf("declared span family %q is not registered", family)
-		}
-	}
-	assertSameEventNameSet(t, generatedFamilyEventNames(SignalTraces), fromSpec)
+	assertSameEventNameSet(t, generatedFamilyEventNames(SignalTraces), fromCatalog)
 }
 
 func TestLifecycleCompatibilityNamesMatchCanonicalSchema(t *testing.T) {

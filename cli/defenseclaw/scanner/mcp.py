@@ -932,14 +932,20 @@ class MCPScannerWrapper:
             from mcpscanner import Scanner as MCPSDKScanner
             from mcpscanner.core.models import AnalyzerEnum
         except ImportError:
-            print(
-                "error: cisco-ai-mcp-scanner not installed.\n"
-                "  Install with: pip install cisco-ai-mcp-scanner\n"
-                "\n"
-                "  Or install DefenseClaw with the mcp-scan extra:\n"
-                "  pip install defenseclaw[mcp-scan]",
-                file=sys.stderr,
-            )
+            if sys.version_info < (3, 11):
+                print(
+                    "error: MCP scanning requires Python 3.11 or newer; "
+                    "this runtime uses Python "
+                    f"{sys.version_info.major}.{sys.version_info.minor}.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "error: cisco-ai-mcp-scanner not installed.\n"
+                    "  Repair the managed DefenseClaw installation.\n"
+                    "  Source checkouts: uv sync",
+                    file=sys.stderr,
+                )
             raise SystemExit(1)
 
         pinned_target: tuple[str, str, int] | None = None

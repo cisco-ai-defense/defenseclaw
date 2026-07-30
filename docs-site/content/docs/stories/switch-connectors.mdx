@@ -7,7 +7,10 @@ keywords:
   - DefenseClaw audit history preserved
 ---
 
-The audit DB is connector-agnostic. Every audit row records its own `connector` column, so adding or replacing connector wiring does not erase history. New events land under the connector that produced them; old events stay attributable to the connector that produced them.
+The audit DB is connector-agnostic. Current canonical events persist a
+`connector` column, so adding or replacing connector wiring does not erase
+history. New events land under the connector that produced them; migrated
+legacy or unclassified rows may have an empty connector value.
 
 <Steps>
 
@@ -18,7 +21,8 @@ The audit DB is connector-agnostic. Every audit row records its own `connector` 
 ```bash
 defenseclaw status
 defenseclaw alerts --limit 25
-defenseclaw-gateway audit export --limit 200 --output - \
+defenseclaw-gateway audit export --output - \
+  | tail -n 200 \
   | jq -r 'select(.connector) | .connector' | sort | uniq -c
 ```
 
@@ -38,6 +42,14 @@ defenseclaw setup codex
 
 If another connector is already wired, choose **Add** to keep both active. Choose **Replace** only when you want DefenseClaw to tear down the previous connector's agent-side files before wiring the new one.
 
+For an unattended run, `--yes` takes the add/reconfigure path. Use
+`--replace` only when replacement is intentional:
+
+```bash
+defenseclaw setup codex --yes
+defenseclaw setup codex --yes --replace
+```
+
 Use `--mode action` when this connector should block policy hits immediately:
 
 ```bash
@@ -53,12 +65,11 @@ defenseclaw setup codex --mode action
 ```bash
 defenseclaw doctor
 defenseclaw alerts --limit 10
-defenseclaw-gateway audit export --limit 100 --output - \
-  | jq -r 'select(.connector) | .connector' | sort | uniq -c
+defenseclaw-gateway audit export --connector codex --output - | tail -n 100
 ```
 
-`doctor` confirms connector health. `alerts` and the SQLite export histogram
-show new events landing under the expected connector.
+`doctor` confirms connector health. `alerts` and the connector-filtered SQLite
+export show new events landing under `codex`.
 
 </Step>
 
@@ -74,7 +85,10 @@ show new events landing under the expected connector.
 | Historical audit attribution | Backed-up agent files for removed or replaced connectors |
 
 <Callout type="info">
-Use **Add** for multi-connector hosts. Use **Replace** only for a deliberate one-connector workstation. To retire a connector later, run `defenseclaw setup remove <connector>`.
+Use **Add** for multi-connector hosts. Use **Replace** only for a deliberate
+one-connector workstation. To retire a connector later, run
+`defenseclaw setup remove <connector>`. Removing the last configured connector
+requires `--force`.
 </Callout>
 
 ## When to change connector wiring
@@ -82,7 +96,8 @@ Use **Add** for multi-connector hosts. Use **Replace** only for a deliberate one
 - Trying a different agent. Add the second connector and compare behavior from `defenseclaw status` and `defenseclaw alerts`.
 - Promoting an agent. Re-run `defenseclaw setup <connector> --mode action` when a connector should start blocking.
 - Demoting an agent. Re-run `defenseclaw setup <connector> --mode observe` while you tune policy.
-- Retiring an agent. Run `defenseclaw setup remove <connector>` after you stop using it.
+- Retiring an agent. Run `defenseclaw setup remove <connector>` after you stop
+  using it; add `--force` only when removing the last connector is deliberate.
 
 ## Caveats
 

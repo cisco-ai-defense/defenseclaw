@@ -10,7 +10,7 @@
 
 package gateway
 
-// Three-tier agent identity (v7 correlation).
+// Three-tier agent identity used for runtime correlation.
 //
 //   - AgentID: logical agent name/id. Stable across restarts and
 //     across sidecar processes. Configured via agent.id in
@@ -41,7 +41,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// HTTP headers for inbound agent identity (v7 correlation).
+// HTTP headers for inbound agent identity correlation.
 const (
 	AgentIDHeader         = "X-DefenseClaw-Agent-Id"
 	AgentInstanceIDHeader = "X-DefenseClaw-Agent-Instance-Id"
@@ -292,8 +292,8 @@ func (r *AgentRegistry) resolve(ctx context.Context, sessionID, inboundAgentID s
 	}
 	if sessionID != "" {
 		if mint {
-			// agent_instance_id is session-scoped per the observability
-			// contract (docs/OBSERVABILITY-CONTRACT.md: "Per conversation").
+			// agent_instance_id is session-scoped so every record for one
+			// conversation resolves to the same execution identity.
 			id.AgentInstanceID = r.AgentInstanceForSession(sessionID)
 		} else {
 			id.AgentInstanceID = r.peekAgentInstance(sessionID)

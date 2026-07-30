@@ -1095,7 +1095,7 @@ final class AppState {
             releaseTag: runtimeUpdate.tag
         ) else {
             let failure = """
-            The available release identifier is not canonical, so no copy/paste command was produced. No installed files or services were changed. Follow the authenticated release-asset instructions at https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade.
+            The available release identifier is not canonical, so no copy/paste command was produced. No installed files or services were changed. Follow the authenticated release-asset instructions at https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/.
             """
             runtimeUpgradeLogTail = ""
             runtimeUpgradeLog = failure
@@ -1459,7 +1459,7 @@ final class AppState {
             notices.append(.init(level: .warn, message: "LLM guardrail not configured - set it up in Setup → Guardrail"))
         }
         if !skillScannerAvailable {
-            notices.append(.init(level: .warn, message: "skill-scanner not on PATH - run: pip install skill-scanner"))
+            notices.append(.init(level: .warn, message: "skill-scanner unavailable - repair the DefenseClaw installation"))
         }
         if silentBypassCount > 0 {
             notices.append(.init(level: .warn, message: "\(silentBypassCount) silent LLM bypass event(s) in the last 5m - see Alerts -> egress"))

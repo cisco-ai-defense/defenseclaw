@@ -287,12 +287,17 @@ The catalog publisher needs to compute and include the SHA-256 in their manifest
 
 <Accordion title="My MCP scanner / skill scanner is not installed">
 
-Both scanners ship as hard dependencies of `defenseclaw` and are installed by `pip install defenseclaw` (see [`pyproject.toml`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/pyproject.toml)). If an environment is missing them — usually after manual `pip uninstall` or a partial wheel install — sync degrades to **metadata-only**: entries are fetched and cached but no verdict is computed. They show as `pending` in `entries`. Reinstall the scanners directly:
+The skill scanner is an unconditional runtime dependency. If it is missing,
+affected skill scans fail and those entries are marked `error`. The MCP scanner
+is declared only on Python 3.11 and newer; any Python 3.10 runtime, including a
+managed POSIX install that selected 3.10, legitimately omits it. When the MCP
+SDK is unavailable, MCP entries are fetched but remain `pending` because no
+verdict is computed.
 
-```bash
-pip install --upgrade cisco-ai-skill-scanner cisco-ai-mcp-scanner
-defenseclaw registry sync --all
-```
+Do not repair a packaged runtime with `pip`. Use the
+[supported install or repair path](/docs/get-started/install), then rerun
+`defenseclaw registry sync --all`. Source contributors should run `uv sync`
+from the checkout. Use Python 3.11 or newer when MCP scanning is required.
 
 </Accordion>
 

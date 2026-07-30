@@ -755,8 +755,8 @@ def test_source_installer_go_floor_matches_go_module() -> None:
 
     module_version = next(line.removeprefix("go ") for line in go_module.splitlines() if line.startswith("go "))
     assert f'readonly MIN_GO_VERSION="{module_version}"' in installer
-    for relative in ("README.md", "docs/INSTALL.md", "docs/E2E.md"):
-        assert f"{module_version}+" in (ROOT / relative).read_text(encoding="utf-8")
+    for relative in ("README.md", "CONTRIBUTING.md"):
+        assert f"Go `{module_version}`" in (ROOT / relative).read_text(encoding="utf-8")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="parallel source install uses POSIX Make")

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import click
 from click.testing import CliRunner
+from defenseclaw.commands import cmd_setup
 from defenseclaw.main import cli
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -205,6 +206,15 @@ def _no_op_command_tree() -> click.Command:
                 # The docs use representative paths.  This check validates
                 # the CLI grammar, not whether a reader created that file.
                 parameter.type.exists = False
+            if isinstance(parameter.type, cmd_setup._PlatformConnectorChoice):
+                # Public documentation covers every supported platform. A
+                # validator running on native Windows must still parse POSIX
+                # OpenClaw examples (and vice versa), while retaining the
+                # canonical connector-choice grammar.
+                parameter.type = click.Choice(
+                    list(cmd_setup._CONNECTOR_NAMES_FALLBACK),
+                    case_sensitive=parameter.type.case_sensitive,
+                )
         if isinstance(node, click.Group):
             node._result_callback = None
             for child in node.commands.values():

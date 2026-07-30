@@ -204,6 +204,9 @@ func TestLoadLegacySplunkPointsToReleaseUpgrade(t *testing.T) {
 	if !strings.Contains(message, "defenseclaw upgrade --yes") || !strings.Contains(message, "config v8") {
 		t.Fatalf("Load() error=%q, want release-upgrade config-v8 guidance", message)
 	}
+	if !strings.Contains(message, "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/") {
+		t.Fatalf("Load() error=%q, want canonical configuration documentation URL", message)
+	}
 	if strings.Contains(message, "migrate-splunk") || strings.Contains(message, "--apply") {
 		t.Fatalf("Load() error=%q still advertises the removed migration command", message)
 	}

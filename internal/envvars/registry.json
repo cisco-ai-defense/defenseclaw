@@ -1,6 +1,6 @@
 {
   "$schema_version": "1",
-  "$description": "DefenseClaw environment-variable registry. Single source of truth for every DEFENSECLAW_* env var consumed by the codebase. Both internal/envvars (Go) and cli/defenseclaw/envvars (Python) load this file. The CI gate at cli/tests/test_envvars_codebase_coverage.py fails the build if any callsite references a DEFENSECLAW_* var not declared here. Auto-generated docs (docs/ENV-VARS.md, docs-site/content/docs/reference/env-vars.mdx) are rendered from this file.",
+  "$description": "DefenseClaw environment-variable registry. Single source of truth for every DEFENSECLAW_* env var consumed by the codebase. Both internal/envvars (Go) and cli/defenseclaw/envvars (Python) load this file. The CI gate at cli/tests/test_envvars_codebase_coverage.py fails the build if any callsite references a DEFENSECLAW_* var not declared here. The canonical website catalog at docs-site/content/docs/reference/env-vars.mdx is rendered from this file; docs/ENV-VARS.md is a stable pointer to that catalog.",
   "$categories": {
     "security_opt_out": "Toggles that weaken security defaults. Surfaced by 'defenseclaw doctor' whenever active.",
     "debug": "Verbose-logging toggles. Safe but noisy.",
@@ -23,7 +23,7 @@
       "security_impact": "high",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "cli/defenseclaw/commands/cmd_setup_sandbox.py:1759", "description": "_pre_pair_device gates the provenance fail-closed branch on this var"}
+        {"location": "cli/defenseclaw/commands/cmd_setup_sandbox.py", "description": "_pre_pair_device gates the provenance fail-closed branch on this var"}
       ],
       "since": "0.5.0",
       "security_note": "Provenance-sentinel verification — prevents acceptance of an unauthenticated device.key file (e.g. a copy left on disk by a prior install or attacker).",
@@ -38,7 +38,7 @@
       "security_impact": "high",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "internal/gateway/connector/codex.go:310", "description": "Authenticate() falls back to legacy behavior when set; emits a [SECURITY] log line"}
+        {"location": "internal/gateway/connector/codex.go", "description": "Authenticate() falls back to legacy behavior when set; emits a [SECURITY] log line"}
       ],
       "since": "0.5.0",
       "security_note": "Per-bearer Codex authentication on loopback — prevents same-host user-to-user impersonation when multiple users share an OS account."
@@ -52,8 +52,8 @@
       "security_impact": "high",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "cli/defenseclaw/commands/cmd_upgrade.py:318", "description": "Python upgrade path checks this before downloading without a checksum"},
-        {"location": "scripts/upgrade.sh:263", "description": "Shell upgrade path checks this before proceeding without verification"}
+        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Python upgrade path checks this before downloading without a checksum"},
+        {"location": "scripts/upgrade.sh", "description": "Shell upgrade path checks this before proceeding without verification"}
       ],
       "since": "0.5.0",
       "security_note": "Upgrade-artifact integrity — prevents installing a tampered tarball/wheel pulled from a hijacked release CDN or MITM."
@@ -67,7 +67,7 @@
       "security_impact": "medium",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "scripts/install-openshell-sandbox.sh:159", "description": "Skips integrity verification when set"}
+        {"location": "scripts/install-openshell-sandbox.sh", "description": "Skips integrity verification when set"}
       ],
       "since": "0.5.0",
       "security_note": "Pinned-digest sandbox install — prevents tag-mutation supply-chain attacks where an upstream tag is silently re-pointed at a malicious image.",
@@ -82,7 +82,7 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "scripts/install-openshell-sandbox.sh:151", "description": "Verifies OCI manifest digest against this pin"}
+        {"location": "scripts/install-openshell-sandbox.sh", "description": "Verifies OCI manifest digest against this pin"}
       ],
       "since": "0.5.0",
       "security_note": "Pinned-digest sandbox install — content-addressed verification of the OCI manifest before extraction."
@@ -96,8 +96,8 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "scripts/install-openshell-sandbox.sh:157", "description": "Marker check (presence enables sha256 verification path)"},
-        {"location": "scripts/install-openshell-sandbox.sh:250", "description": "Verifies extracted binary sha256 against this pin"}
+        {"location": "scripts/install-openshell-sandbox.sh", "description": "Marker check (presence enables sha256 verification path)"},
+        {"location": "scripts/install-openshell-sandbox.sh", "description": "Verifies extracted binary sha256 against this pin"}
       ],
       "since": "0.5.0",
       "security_note": "Pinned-digest sandbox install — sha256 verification of the extracted binary."
@@ -111,8 +111,8 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/commands/cmd_upgrade.py:341", "description": "Python upgrade verifier"},
-        {"location": "scripts/upgrade.sh:225", "description": "Shell upgrade verifier"}
+        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Python upgrade verifier"},
+        {"location": "scripts/upgrade.sh", "description": "Shell upgrade verifier"}
       ],
       "since": "0.5.0",
       "security_note": "Operator-supplied checksum pin for upgrade artifacts — defense-in-depth alongside the sidecar .sha256 file."
@@ -126,8 +126,8 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/commands/cmd_upgrade.py:358", "description": "Python upgrade verifier"},
-        {"location": "scripts/upgrade.sh:226", "description": "Shell upgrade verifier"}
+        {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Python upgrade verifier"},
+        {"location": "scripts/upgrade.sh", "description": "Shell upgrade verifier"}
       ],
       "since": "0.5.0",
       "security_note": "Operator-supplied checksum pin for upgrade artifacts — defense-in-depth alongside the sidecar .sha256 file."
@@ -381,7 +381,7 @@
       "security_impact": "high",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "scripts/test-e2e-full-stack.sh:1038", "description": "Dumps raw secrets in diagnostic output for test debugging"}
+        {"location": "scripts/test-e2e-full-stack.sh", "description": "Dumps raw secrets in diagnostic output for test debugging"}
       ],
       "since": "0.5.0"
     },
@@ -394,7 +394,7 @@
       "security_impact": "high",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/observability/v8_migration.py:503", "description": "Reads the captured v7 upgrade environment and materializes the equivalent v8 redaction profile"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py", "description": "Reads the captured v7 upgrade environment and materializes the equivalent v8 redaction profile"}
       ],
       "since": "0.3.0",
       "deprecated": true,
@@ -410,7 +410,7 @@
       "security_impact": "medium",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "internal/redaction/redaction.go:90", "description": "Reveal() reads this env var"}
+        {"location": "internal/redaction/redaction.go", "description": "Reveal() reads this env var"}
       ],
       "since": "0.3.0"
     },
@@ -423,9 +423,9 @@
       "security_impact": "medium",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "internal/gateway/webhook.go:139", "description": "Webhook sender SSRF gate"},
-        {"location": "internal/gateway/webhook.go:563", "description": "Webhook validate-on-add SSRF gate"},
-        {"location": "cli/defenseclaw/webhooks/writer.py:412", "description": "Python writer validate-on-add"}
+        {"location": "internal/gateway/webhook.go", "description": "Webhook sender SSRF gate"},
+        {"location": "internal/gateway/webhook.go", "description": "Webhook validate-on-add SSRF gate"},
+        {"location": "cli/defenseclaw/webhooks/writer.py", "description": "Python writer validate-on-add"}
       ],
       "since": "0.3.0"
     },
@@ -438,7 +438,7 @@
       "security_impact": "low",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/observability/v8_migration.py:1197", "description": "Reads the captured v7 upgrade environment when converting implicit JSONL behavior"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py", "description": "Reads the captured v7 upgrade environment when converting implicit JSONL behavior"}
       ],
       "since": "0.4.0",
       "deprecated": true,
@@ -454,7 +454,7 @@
       "security_impact": "medium",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts:265", "description": "JS shim bails out when set"}
+        {"location": "extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts", "description": "JS shim bails out when set"}
       ],
       "since": "0.4.0"
     },
@@ -467,9 +467,9 @@
       "security_impact": "high",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "extensions/defenseclaw/src/fetch-interceptor.ts:258", "description": "Env-var name exported for the OpenClaw interceptor and tests"},
-        {"location": "extensions/defenseclaw/src/fetch-interceptor.ts:293", "description": "isCodexResponsesPassthroughEnabled gates the explicit unguarded passthrough path"},
-        {"location": "extensions/defenseclaw/src/fetch-interceptor.ts:902", "description": "Interceptor warning names the active unguarded bypass"}
+        {"location": "extensions/defenseclaw/src/fetch-interceptor.ts", "description": "Env-var name exported for the OpenClaw interceptor and tests"},
+        {"location": "extensions/defenseclaw/src/fetch-interceptor.ts", "description": "isCodexResponsesPassthroughEnabled gates the explicit unguarded passthrough path"},
+        {"location": "extensions/defenseclaw/src/fetch-interceptor.ts", "description": "Interceptor warning names the active unguarded bypass"}
       ],
       "since": "0.5.0",
       "security_note": "Codex response guardrail enforcement — prevents model prompt/response traffic from silently bypassing observe/action policies unless the operator explicitly opts into an unguarded fallback.",
@@ -484,7 +484,7 @@
       "security_impact": "low",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts:272", "description": "JS shim forces install when set"}
+        {"location": "extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts", "description": "JS shim forces install when set"}
       ],
       "since": "0.4.0"
     },
@@ -497,7 +497,7 @@
       "security_impact": "high",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "extensions/defenseclaw/src/index.ts:98", "description": "OpenClaw plugin tool-inspect handler"}
+        {"location": "extensions/defenseclaw/src/index.ts", "description": "OpenClaw plugin tool-inspect handler"}
       ],
       "since": "0.4.0"
     },
@@ -510,7 +510,7 @@
       "security_impact": "medium",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "cli/defenseclaw/commands/cmd_policy.py:1135", "description": "Policy validate command bypass"}
+        {"location": "cli/defenseclaw/commands/cmd_policy.py", "description": "Policy validate command bypass"}
       ],
       "since": "0.4.0"
     },
@@ -523,7 +523,7 @@
       "security_impact": "low",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "internal/redaction/credentials.go:173", "description": "isCredentialScrubDevMode reads this var"}
+        {"location": "internal/redaction/credentials.go", "description": "isCredentialScrubDevMode reads this var"}
       ],
       "since": "0.3.0"
     },
@@ -536,33 +536,33 @@
       "security_impact": "low",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "internal/redaction/credentials.go:176", "description": "isCredentialScrubDevMode reads this var"}
+        {"location": "internal/redaction/credentials.go", "description": "isCredentialScrubDevMode reads this var"}
       ],
       "since": "0.3.0"
     },
     {
       "name": "DEFENSECLAW_FAIL_MODE",
       "category": "security_opt_out",
-      "purpose": "Per-shell override of guardrail.hook_fail_mode for malformed, unauthorized, or incomplete gateway responses. Transport failures are controlled separately by DEFENSECLAW_STRICT_AVAILABILITY. Templated into every *-hook.sh.",
+      "purpose": "Per-process override of guardrail.hook_fail_mode for hook delivery, missing-token/authentication, and invalid-response failures. Templated into or resolved by every managed hook.",
       "default": "(value from guardrail.hook_fail_mode in config.yaml)",
       "accepted_values": ["open", "closed", "unset"],
       "security_impact": "medium",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "internal/gateway/connector/hooks/inspect-tool.sh:83", "description": "Representative shared template; every generated hook reads the same override"}
+        {"location": "internal/gateway/connector/hooks/inspect-tool.sh", "description": "Representative shared template; every generated hook reads the same override"}
       ],
       "since": "0.4.0"
     },
     {
       "name": "DEFENSECLAW_STRICT_AVAILABILITY",
       "category": "security_opt_out",
-      "purpose": "Opt-IN to fail-closed on transport errors during hook execution. Inverse of the bypass pattern. Not a bypass; stricter than default.",
-      "default": "unset (transport failures fail-open)",
-      "accepted_values": ["1", "unset"],
+      "purpose": "Force transport and missing-token hook failures closed even when the effective fail mode is open. Invalid gateway responses still follow guardrail.hook_fail_mode.",
+      "default": "unset (no additional force-closed override)",
+      "accepted_values": ["1", "true", "TRUE", "yes", "YES", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/gateway/connector/hooks/_hardening.sh:250", "description": "Hook hardening sourced by every *-hook.sh"}
+        {"location": "internal/gateway/connector/hooks/_hardening.sh", "description": "Hook hardening sourced by every *-hook.sh"}
       ],
       "since": "0.4.0"
     },
@@ -576,7 +576,7 @@
       "security_impact": "low",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/gateway/client.go:80", "description": "Client struct gates verbose logging on this var"}
+        {"location": "internal/gateway/client.go", "description": "Client struct gates verbose logging on this var"}
       ],
       "since": "0.1.0"
     },
@@ -589,7 +589,7 @@
       "security_impact": "medium",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "internal/gateway/webhook.go:146", "description": "Webhook sender debug field"}
+        {"location": "internal/gateway/webhook.go", "description": "Webhook sender debug field"}
       ],
       "since": "0.3.0"
     },
@@ -602,7 +602,7 @@
       "security_impact": "medium",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "cli/defenseclaw/llm.py:110", "description": "LLM bridge _DEBUG flag"}
+        {"location": "cli/defenseclaw/llm.py", "description": "LLM bridge _DEBUG flag"}
       ],
       "since": "0.3.0"
     },
@@ -615,7 +615,7 @@
       "security_impact": "medium",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "internal/gateway/llm_judge.go:62", "description": "Judge debug toggle"}
+        {"location": "internal/gateway/llm_judge.go", "description": "Judge debug toggle"}
       ],
       "since": "0.4.0"
     },
@@ -628,7 +628,7 @@
       "security_impact": "medium",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "internal/gateway/sidecar.go:134", "description": "Gateway boot enables judge persistence"}
+        {"location": "internal/gateway/sidecar.go", "description": "Gateway boot enables judge persistence"}
       ],
       "since": "0.4.0"
     },
@@ -641,7 +641,7 @@
       "security_impact": "low",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/cli/sidecar.go:212", "description": "sidecarDiagEnabled helper"}
+        {"location": "internal/cli/sidecar.go", "description": "sidecarDiagEnabled helper"}
       ],
       "since": "0.4.0"
     },
@@ -655,8 +655,8 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/observability/v8_migration.py:2689", "description": "Preserves the effective v7 OTel master-toggle decision during upgrade"},
-        {"location": "internal/config/config.go:3453", "description": "Binds the variable only inside the legacy configuration loader used before v8 activation"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py", "description": "Preserves the effective v7 OTel master-toggle decision during upgrade"},
+        {"location": "internal/config/config.go", "description": "Binds the variable only inside the legacy configuration loader used before v8 activation"}
       ],
       "since": "0.4.0",
       "deprecated": true,
@@ -672,8 +672,8 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/observability/v8_migration.py:1483", "description": "Converts the captured v7 endpoint into a canonical v8 destination"},
-        {"location": "internal/config/config.go:2875", "description": "Reads the endpoint only inside the legacy configuration loader"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py", "description": "Converts the captured v7 endpoint into a canonical v8 destination"},
+        {"location": "internal/config/config.go", "description": "Reads the endpoint only inside the legacy configuration loader"}
       ],
       "since": "0.4.0",
       "deprecated": true,
@@ -689,8 +689,8 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/observability/v8_migration.py:1538", "description": "Converts the captured v7 protocol into a canonical v8 destination"},
-        {"location": "internal/config/config.go:2891", "description": "Reads the protocol only inside the legacy configuration loader"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py", "description": "Converts the captured v7 protocol into a canonical v8 destination"},
+        {"location": "internal/config/config.go", "description": "Reads the protocol only inside the legacy configuration loader"}
       ],
       "since": "0.4.0",
       "deprecated": true,
@@ -707,8 +707,8 @@
       "security_note": "Enabling this variable disables OTLP server-certificate verification after legacy configuration is migrated into a named destination.",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/observability/v8_migration.py:1580", "description": "Converts the captured v7 TLS policy into a canonical v8 destination"},
-        {"location": "internal/config/config.go:2937", "description": "Reads the TLS decision only inside the legacy configuration loader"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py", "description": "Converts the captured v7 TLS policy into a canonical v8 destination"},
+        {"location": "internal/config/config.go", "description": "Reads the TLS decision only inside the legacy configuration loader"}
       ],
       "since": "0.4.0",
       "deprecated": true,
@@ -724,8 +724,8 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/observability/v8_migration.py:1495", "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"},
-        {"location": "internal/config/config.go:2875", "description": "Reads signal-specific endpoints only inside the legacy configuration loader"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py", "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"},
+        {"location": "internal/config/config.go", "description": "Reads signal-specific endpoints only inside the legacy configuration loader"}
       ],
       "since": "0.4.0",
       "deprecated": true,
@@ -741,8 +741,8 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/observability/v8_migration.py:1547", "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"},
-        {"location": "internal/config/config.go:2891", "description": "Reads signal-specific protocols only inside the legacy configuration loader"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py", "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"},
+        {"location": "internal/config/config.go", "description": "Reads signal-specific protocols only inside the legacy configuration loader"}
       ],
       "since": "0.4.0",
       "deprecated": true,
@@ -758,8 +758,8 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/observability/v8_migration.py:1495", "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"},
-        {"location": "internal/config/config.go:2875", "description": "Reads signal-specific endpoints only inside the legacy configuration loader"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py", "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"},
+        {"location": "internal/config/config.go", "description": "Reads signal-specific endpoints only inside the legacy configuration loader"}
       ],
       "since": "0.8.0",
       "deprecated": true,
@@ -775,8 +775,8 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/observability/v8_migration.py:1547", "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"},
-        {"location": "internal/config/config.go:2891", "description": "Reads signal-specific protocols only inside the legacy configuration loader"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py", "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"},
+        {"location": "internal/config/config.go", "description": "Reads signal-specific protocols only inside the legacy configuration loader"}
       ],
       "since": "0.8.0",
       "deprecated": true,
@@ -792,8 +792,8 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/observability/v8_migration.py:1495", "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"},
-        {"location": "internal/config/config.go:2875", "description": "Reads signal-specific endpoints only inside the legacy configuration loader"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py", "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"},
+        {"location": "internal/config/config.go", "description": "Reads signal-specific endpoints only inside the legacy configuration loader"}
       ],
       "since": "0.8.0",
       "deprecated": true,
@@ -809,8 +809,8 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/observability/v8_migration.py:1547", "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"},
-        {"location": "internal/config/config.go:2891", "description": "Reads signal-specific protocols only inside the legacy configuration loader"}
+        {"location": "cli/defenseclaw/observability/v8_migration.py", "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"},
+        {"location": "internal/config/config.go", "description": "Reads signal-specific protocols only inside the legacy configuration loader"}
       ],
       "since": "0.8.0",
       "deprecated": true,
@@ -825,7 +825,7 @@
       "accepted_values": ["1", "0", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "bundles/local_observability_stack/docker-compose.yml:17", "description": "Compose-file env reference"}],
+      "consumers": [{"location": "bundles/local_observability_stack/docker-compose.yml", "description": "Compose-file env reference"}],
       "since": "0.4.0"
     },
     {
@@ -837,12 +837,12 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/gatewaylog/runid.go:58", "description": "Go reader"},
-        {"location": "internal/audit/store.go:2390", "description": "Audit store reader"},
-        {"location": "internal/gateway/sidecar.go:114", "description": "Sidecar boot"},
-        {"location": "cli/defenseclaw/logger.py:172", "description": "Python logger reader"},
-        {"location": "cli/defenseclaw/db.py:739", "description": "Python DB reader"},
-        {"location": "scripts/test-e2e-full-stack.sh:54", "description": "E2E test runner default"}
+        {"location": "internal/gatewaylog/runid.go", "description": "Go reader"},
+        {"location": "internal/audit/store.go", "description": "Audit store reader"},
+        {"location": "internal/gateway/sidecar.go", "description": "Sidecar boot"},
+        {"location": "cli/defenseclaw/logger.py", "description": "Python logger reader"},
+        {"location": "cli/defenseclaw/db.py", "description": "Python DB reader"},
+        {"location": "scripts/test-e2e-full-stack.sh", "description": "E2E test runner default"}
       ],
       "since": "0.4.0"
     },
@@ -856,12 +856,12 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/defaults.go:62", "description": "Go default-resolver"},
-        {"location": "cli/defenseclaw/config.py:98", "description": "Python config loader"},
-        {"location": "cli/defenseclaw/connector_paths.py:1305", "description": "Connector path resolver"},
-        {"location": "scripts/install.sh:50", "description": "Installer reads this"},
-        {"location": "scripts/upgrade.sh:49", "description": "Upgrader reads this"},
-        {"location": "internal/gateway/connector/hooks/inspect-tool.sh:9", "description": "Hooks read this"}
+        {"location": "internal/config/defaults.go", "description": "Go default-resolver"},
+        {"location": "cli/defenseclaw/config.py", "description": "Python config loader"},
+        {"location": "cli/defenseclaw/connector_paths.py", "description": "Connector path resolver"},
+        {"location": "scripts/install.sh", "description": "Installer reads this"},
+        {"location": "scripts/upgrade.sh", "description": "Upgrader reads this"},
+        {"location": "internal/gateway/connector/hooks/inspect-tool.sh", "description": "Hooks read this"}
       ],
       "since": "0.1.0"
     },
@@ -874,9 +874,9 @@
       "security_impact": "medium",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/config/defaults.go:78", "description": "Go config path resolver"},
-        {"location": "cli/defenseclaw/config.py:187", "description": "Python config path resolver"},
-        {"location": "cli/defenseclaw/migrations.py:145", "description": "Migration config path resolver"}
+        {"location": "internal/config/defaults.go", "description": "Go config path resolver"},
+        {"location": "cli/defenseclaw/config.py", "description": "Python config path resolver"},
+        {"location": "cli/defenseclaw/migrations.py", "description": "Migration config path resolver"}
       ],
       "since": "0.8.0",
       "security_note": "Managed config path separation — lets system services read admin-owned policy without making the runtime data directory admin-writable."
@@ -950,7 +950,7 @@
       "security_impact": "low",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "docs-site/content/docs/setup/enterprise-deployment.mdx:123", "description": "Documented systemd template override for per-user hook guardian instances"}
+        {"location": "docs-site/content/docs/setup/enterprise-deployment.mdx", "description": "Documented systemd template override for per-user hook guardian instances"}
       ],
       "since": "0.8.0",
       "security_note": "Template-scoped connector selection — avoids broad home scanning by keeping each privileged guardian instance bound to an explicit connector target."
@@ -964,7 +964,7 @@
       "security_impact": "medium",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "docs-site/content/docs/setup/enterprise-deployment.mdx:124", "description": "Documented systemd template override for action-mode hook contract validation"}
+        {"location": "docs-site/content/docs/setup/enterprise-deployment.mdx", "description": "Documented systemd template override for action-mode hook contract validation"}
       ],
       "since": "0.8.0",
       "security_note": "Action-mode hook contract validation — lets managed deployments pin the agent version the guardian validates before writing blocking hooks."
@@ -977,7 +977,7 @@
       "accepted_values": ["any-absolute-path"],
       "security_impact": "low",
       "surface_in_doctor": false,
-      "consumers": [{"location": "cli/defenseclaw/gateway.py:315", "description": "Python gateway-process spawner"}],
+      "consumers": [{"location": "cli/defenseclaw/gateway.py", "description": "Python gateway-process spawner"}],
       "since": "0.2.0"
     },
     {
@@ -989,8 +989,8 @@
       "security_impact": "low",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/scanner/plugin_test.go:177", "description": "Plugin test harness"},
-        {"location": "scripts/setup-llm.sh:51", "description": "LLM setup script"}
+        {"location": "internal/scanner/plugin_test.go", "description": "Plugin test harness"},
+        {"location": "scripts/setup-llm.sh", "description": "LLM setup script"}
       ],
       "since": "0.2.0"
     },
@@ -1003,7 +1003,7 @@
       "security_impact": "low",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "bundles/local_observability_stack/bin/openclaw-observability-bridge:7", "description": "POSIX compatibility bridge selects the lifecycle-controller executable"}
+        {"location": "bundles/local_observability_stack/bin/openclaw-observability-bridge", "description": "POSIX compatibility bridge selects the lifecycle-controller executable"}
       ],
       "since": "0.8.0",
       "security_note": "Executable selection — a non-default value changes which local program the compatibility bridge launches."
@@ -1016,7 +1016,7 @@
       "accepted_values": ["any-absolute-path", "unset"],
       "security_impact": "low",
       "surface_in_doctor": false,
-      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_provider.py:115", "description": "Provider setup overlay loader"}],
+      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_provider.py", "description": "Provider setup overlay loader"}],
       "since": "0.4.0"
     },
     {
@@ -1027,7 +1027,7 @@
       "accepted_values": ["any-absolute-path", "unset"],
       "security_impact": "low",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/configs/embed.go:71", "description": "Go embedded-providers loader"}],
+      "consumers": [{"location": "internal/configs/embed.go", "description": "Go embedded-providers loader"}],
       "since": "0.4.0"
     },
     {
@@ -1038,7 +1038,7 @@
       "accepted_values": ["host:port", "unset"],
       "security_impact": "low",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/gateway/connector/hooks/inspect-tool.sh:42", "description": "Hooks dial this"}],
+      "consumers": [{"location": "internal/gateway/connector/hooks/inspect-tool.sh", "description": "Hooks dial this"}],
       "since": "0.3.0"
     },
     {
@@ -1049,7 +1049,7 @@
       "accepted_values": ["any-http-url"],
       "security_impact": "low",
       "surface_in_doctor": false,
-      "consumers": [{"location": "skills/codeguard/main.py:35", "description": "Skill sidecar URL"}],
+      "consumers": [{"location": "skills/codeguard/main.py", "description": "Skill sidecar URL"}],
       "since": "0.4.0"
     },
     {
@@ -1060,7 +1060,7 @@
       "accepted_values": ["any-absolute-path"],
       "security_impact": "low",
       "surface_in_doctor": false,
-      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_sandbox.py:1202", "description": "Sandbox shell wrappers reference this"}],
+      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_sandbox.py", "description": "Sandbox shell wrappers reference this"}],
       "since": "0.4.0"
     },
     {
@@ -1072,8 +1072,8 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "scripts/install.sh:51", "description": "Installer venv path"},
-        {"location": "scripts/upgrade.sh:50", "description": "Upgrader venv path"}
+        {"location": "scripts/install.sh", "description": "Installer venv path"},
+        {"location": "scripts/upgrade.sh", "description": "Upgrader venv path"}
       ],
       "since": "0.2.0"
     },
@@ -1085,7 +1085,7 @@
       "accepted_values": ["any-absolute-path"],
       "security_impact": "low",
       "surface_in_doctor": false,
-      "consumers": [{"location": "scripts/setup-llm.sh:59", "description": "Install location for setup-llm"}],
+      "consumers": [{"location": "scripts/setup-llm.sh", "description": "Install location for setup-llm"}],
       "since": "0.2.0"
     },
     {
@@ -1097,8 +1097,8 @@
       "security_impact": "medium",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cmd/defenseclaw-launcher/main.go:99", "description": "Launcher appends the verified install root to the managed Python process environment"},
-        {"location": "cli/tests/test_cmd_upgrade.py:1185", "description": "Windows native-upgrade tests cover rejection of an untrusted injected install root"}
+        {"location": "cmd/defenseclaw-launcher/main.go", "description": "Launcher appends the verified install root to the managed Python process environment"},
+        {"location": "cli/tests/test_cmd_upgrade.py", "description": "Windows native-upgrade tests cover rejection of an untrusted injected install root"}
       ],
       "since": "0.8.0",
       "security_note": "Installer root selection — upgrade code must treat this inherited value as untrusted and verify it is a canonical, product-owned Windows install before handing off to the setup executable."
@@ -1111,7 +1111,7 @@
       "accepted_values": ["any-absolute-path"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "scripts/upgrade.sh:376", "description": "Upgrade-time migration runner"}],
+      "consumers": [{"location": "scripts/upgrade.sh", "description": "Upgrade-time migration runner"}],
       "since": "0.4.0"
     },
 
@@ -1123,7 +1123,7 @@
       "accepted_values": ["claudecode", "codex", "openclaw", "zeptoclaw", "inspect", "..."],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/gateway/connector/hooks/inspect-tool.sh:22", "description": "Each hook exports this"}],
+      "consumers": [{"location": "internal/gateway/connector/hooks/inspect-tool.sh", "description": "Each hook exports this"}],
       "since": "0.4.0"
     },
     {
@@ -1135,8 +1135,8 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/gateway/connector/hooks/_hardening.sh:175", "description": "Selects one unambiguous connector runtime record for shared hooks"},
-        {"location": "internal/gateway/connector/subprocess.go:664", "description": "Writes and validates the connector-scoped runtime sidecar"}
+        {"location": "internal/gateway/connector/hooks/_hardening.sh", "description": "Selects one unambiguous connector runtime record for shared hooks"},
+        {"location": "internal/gateway/connector/subprocess.go", "description": "Writes and validates the connector-scoped runtime sidecar"}
       ],
       "since": "0.7.0"
     },
@@ -1148,7 +1148,7 @@
       "accepted_values": ["inspect-tool", "inspect-request", "..."],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/gateway/connector/hooks/inspect-tool.sh:23", "description": "Each hook exports this"}],
+      "consumers": [{"location": "internal/gateway/connector/hooks/inspect-tool.sh", "description": "Each hook exports this"}],
       "since": "0.4.0"
     },
     {
@@ -1159,7 +1159,7 @@
       "accepted_values": ["absolute-path"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/gateway/connector/hooks/_hardening.sh:76", "description": "Hook hardening"}],
+      "consumers": [{"location": "internal/gateway/connector/hooks/_hardening.sh", "description": "Hook hardening"}],
       "since": "0.4.0"
     },
     {
@@ -1170,7 +1170,7 @@
       "accepted_values": ["absolute-path"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/gateway/connector/hooks/_hardening.sh:99", "description": "Hook hardening"}],
+      "consumers": [{"location": "internal/gateway/connector/hooks/_hardening.sh", "description": "Hook hardening"}],
       "since": "0.4.0"
     },
     {
@@ -1181,7 +1181,7 @@
       "accepted_values": ["colon-separated paths"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/gateway/connector/hooks/_hardening.sh:88", "description": "Hook hardening"}],
+      "consumers": [{"location": "internal/gateway/connector/hooks/_hardening.sh", "description": "Hook hardening"}],
       "since": "0.4.0"
     },
     {
@@ -1192,7 +1192,7 @@
       "accepted_values": ["positive integer"],
       "security_impact": "low",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/gateway/connector/hooks/_hardening.sh:346", "description": "Body-cap enforcement"}],
+      "consumers": [{"location": "internal/gateway/connector/hooks/_hardening.sh", "description": "Body-cap enforcement"}],
       "since": "0.4.0"
     },
     {
@@ -1204,8 +1204,7 @@
       "security_impact": "high",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/gateway/connector/hooks/*-hook.sh", "description": "Managed hook templates set and export the sentinel from trusted generated script content"},
-        {"location": "internal/gateway/connector/hooks/_hardening.sh", "description": "Missing-token and transport-failure handling forces fail-closed behavior when the sentinel is set"}
+        {"location": "internal/gateway/connector/hooks/_hardening.sh", "description": "Managed shell-hook wrappers set and export the sentinel before sourcing this shared runtime, whose missing-token and transport-failure branches then force fail-closed behavior"}
       ],
       "since": "0.8.0",
       "security_note": "Managed enforcement fail-closed boundary — the value is generated by the privileged hook installer and is not an operator security opt-out."
@@ -1218,7 +1217,7 @@
       "accepted_values": ["1"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/daemon/daemon.go:35", "description": "EnvDaemon constant"}],
+      "consumers": [{"location": "internal/daemon/daemon.go", "description": "EnvDaemon constant"}],
       "since": "0.4.0"
     },
     {
@@ -1230,8 +1229,8 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/cli/scan_v7.go:69", "description": "Go reader"},
-        {"location": "extensions/defenseclaw/src/__tests__/agent_identity.test.ts:61", "description": "JS plugin reader (tested)"}
+        {"location": "internal/cli/scan_v7.go", "description": "Go reader"},
+        {"location": "extensions/defenseclaw/src/__tests__/agent_identity.test.ts", "description": "JS plugin reader (tested)"}
       ],
       "since": "0.4.0"
     },
@@ -1243,7 +1242,7 @@
       "accepted_values": ["any-string"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/cli/scan_v7.go:70", "description": "Go reader"}],
+      "consumers": [{"location": "internal/cli/scan_v7.go", "description": "Go reader"}],
       "since": "0.4.0"
     },
     {
@@ -1254,7 +1253,7 @@
       "accepted_values": ["any-string"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "extensions/defenseclaw/src/index.ts:315", "description": "JS plugin header emit"}],
+      "consumers": [{"location": "extensions/defenseclaw/src/index.ts", "description": "JS plugin header emit"}],
       "since": "0.4.0"
     },
     {
@@ -1265,7 +1264,7 @@
       "accepted_values": ["any-string"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "extensions/defenseclaw/src/__tests__/agent_identity.test.ts:71", "description": "JS plugin reader (tested)"}],
+      "consumers": [{"location": "extensions/defenseclaw/src/__tests__/agent_identity.test.ts", "description": "JS plugin reader (tested)"}],
       "since": "0.4.0"
     },
     {
@@ -1276,7 +1275,7 @@
       "accepted_values": ["uuid-or-similar"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/cli/scan_v7.go:71", "description": "Go reader"}],
+      "consumers": [{"location": "internal/cli/scan_v7.go", "description": "Go reader"}],
       "since": "0.4.0"
     },
     {
@@ -1287,7 +1286,7 @@
       "accepted_values": ["any-string"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "extensions/defenseclaw/src/policy/enforcer.ts:156", "description": "Enforcer header"}],
+      "consumers": [{"location": "extensions/defenseclaw/src/policy/enforcer.ts", "description": "Enforcer header"}],
       "since": "0.4.0"
     },
     {
@@ -1298,7 +1297,7 @@
       "accepted_values": ["absolute-path"],
       "security_impact": "low",
       "surface_in_doctor": false,
-      "consumers": [{"location": "extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts:163", "description": "Plugin bootstrap sentinel"}],
+      "consumers": [{"location": "extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts", "description": "Plugin bootstrap sentinel"}],
       "since": "0.4.0"
     },
 
@@ -1332,7 +1331,7 @@
       "accepted_values": ["provider/model-id", "unset"],
       "security_impact": "low",
       "surface_in_doctor": false,
-      "consumers": [{"location": "cli/tests/test_config.py:667", "description": "Tested override path"}],
+      "consumers": [{"location": "cli/tests/test_config.py", "description": "Tested override path"}],
       "since": "0.4.0"
     },
     {
@@ -1355,8 +1354,8 @@
       "security_impact": "high",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/gateway/connector/hooks/inspect-tool.sh:30", "description": "Hooks present this header"},
-        {"location": "internal/cli/sidecar.go:43", "description": "Sidecar references in setup messages"}
+        {"location": "internal/gateway/connector/hooks/inspect-tool.sh", "description": "Hooks present this header"},
+        {"location": "internal/cli/sidecar.go", "description": "Sidecar references in setup messages"}
       ],
       "since": "0.4.0"
     },
@@ -1393,7 +1392,7 @@
       "accepted_values": ["HEC token", "unset"],
       "security_impact": "high",
       "surface_in_doctor": false,
-      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup.py:4911", "description": "Python Splunk wiring fallback"}],
+      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup.py", "description": "Python Splunk wiring fallback"}],
       "since": "0.4.0"
     },
     {
@@ -1404,7 +1403,7 @@
       "accepted_values": ["any-string", "unset"],
       "security_impact": "low",
       "surface_in_doctor": false,
-      "consumers": [{"location": "scripts/test-proxy-sandbox.py:940", "description": "Test proxy bearer"}],
+      "consumers": [{"location": "scripts/test-proxy-sandbox.py", "description": "Test proxy bearer"}],
       "since": "0.4.0"
     },
     {
@@ -1415,7 +1414,7 @@
       "accepted_values": ["sk-dc-<hex>"],
       "security_impact": "high",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/gateway/proxy.go:3338", "description": "deriveMasterKey"}],
+      "consumers": [{"location": "internal/gateway/proxy.go", "description": "deriveMasterKey"}],
       "since": "0.3.0"
     },
     {
@@ -1426,7 +1425,7 @@
       "accepted_values": ["any-string", "unset"],
       "security_impact": "medium",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/cli/daemon.go:211", "description": "Daemon reads from .env"}],
+      "consumers": [{"location": "internal/cli/daemon.go", "description": "Daemon reads from .env"}],
       "since": "0.3.0"
     },
     {
@@ -1437,7 +1436,7 @@
       "accepted_values": ["any-string", "unset"],
       "security_impact": "high",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/cli/daemon.go:212", "description": "Daemon reads from .env"}],
+      "consumers": [{"location": "internal/cli/daemon.go", "description": "Daemon reads from .env"}],
       "since": "0.3.0"
     },
     {
@@ -1448,7 +1447,7 @@
       "accepted_values": ["pagerduty-routing-key", "unset"],
       "security_impact": "medium",
       "surface_in_doctor": false,
-      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_webhook.py:166", "description": "Webhook setup default"}],
+      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_webhook.py", "description": "Webhook setup default"}],
       "since": "0.4.0"
     },
     {
@@ -1459,7 +1458,7 @@
       "accepted_values": ["pagerduty-key", "unset"],
       "security_impact": "medium",
       "surface_in_doctor": false,
-      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_webhook.py:166", "description": "Alternative PD key var"}],
+      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_webhook.py", "description": "Alternative PD key var"}],
       "since": "0.4.0"
     },
     {
@@ -1470,7 +1469,7 @@
       "accepted_values": ["webex-bot-token", "unset"],
       "security_impact": "medium",
       "surface_in_doctor": false,
-      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_webhook.py:166", "description": "Webhook setup default"}],
+      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_webhook.py", "description": "Webhook setup default"}],
       "since": "0.4.0"
     },
     {
@@ -1481,7 +1480,7 @@
       "accepted_values": ["provider-token", "unset"],
       "security_impact": "high",
       "surface_in_doctor": false,
-      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_observability.py:132", "description": "Click reads the setup token from the child process environment instead of argv"}],
+      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_observability.py", "description": "Click reads the setup token from the child process environment instead of argv"}],
       "since": "0.8.0"
     },
     {
@@ -1492,7 +1491,7 @@
       "accepted_values": ["any-string", "unset"],
       "security_impact": "medium",
       "surface_in_doctor": false,
-      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_webhook.py:166", "description": "Webhook setup default"}],
+      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_webhook.py", "description": "Webhook setup default"}],
       "since": "0.4.0"
     },
     {
@@ -1503,7 +1502,7 @@
       "accepted_values": ["any-string", "unset"],
       "security_impact": "medium",
       "surface_in_doctor": false,
-      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_webhook.py:166", "description": "Webhook setup default"}],
+      "consumers": [{"location": "cli/defenseclaw/commands/cmd_setup_webhook.py", "description": "Webhook setup default"}],
       "since": "0.4.0"
     },
     {
@@ -1514,7 +1513,7 @@
       "accepted_values": ["registry-token", "unset"],
       "security_impact": "medium",
       "surface_in_doctor": false,
-      "consumers": [{"location": "cli/defenseclaw/commands/cmd_registry.py:133", "description": "Registry default auth_env"}],
+      "consumers": [{"location": "cli/defenseclaw/commands/cmd_registry.py", "description": "Registry default auth_env"}],
       "since": "0.4.0"
     },
     {
@@ -1525,7 +1524,7 @@
       "accepted_values": ["registry-token", "unset"],
       "security_impact": "medium",
       "surface_in_doctor": false,
-      "consumers": [{"location": "cli/defenseclaw/commands/cmd_registry.py:334", "description": "Registry example token"}],
+      "consumers": [{"location": "cli/defenseclaw/commands/cmd_registry.py", "description": "Registry example token"}],
       "since": "0.4.0"
     },
 
@@ -1537,7 +1536,7 @@
       "accepted_values": ["os.pathsep-separated absolute paths (':' POSIX, ';' Windows)", "unset"],
       "security_impact": "medium",
       "surface_in_doctor": true,
-      "consumers": [{"location": "cli/defenseclaw/inventory/agent_discovery.py:289", "description": "Agent discovery binary probe"}, {"location": "cli/defenseclaw/commands/cmd_setup.py:1587", "description": "setup trusted-paths CLI and inline trust prompt persistence"}],
+      "consumers": [{"location": "cli/defenseclaw/inventory/agent_discovery.py", "description": "Agent discovery binary probe"}, {"location": "cli/defenseclaw/commands/cmd_setup.py", "description": "setup trusted-paths CLI and inline trust prompt persistence"}],
       "since": "0.5.0",
       "security_note": "Tight binary-discovery trust list — prevents PATH-shadow elevation where a malicious binary in a user-writable dir gets probed and treated as a real agent runtime. 'trusted-paths add' refuses world-writable and non-absolute directories unless --force."
     },
@@ -1549,7 +1548,7 @@
       "accepted_values": ["any-anthropic-model-id"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "cli/defenseclaw/commands/cmd_doctor.py:659", "description": "Doctor's Anthropic probe"}],
+      "consumers": [{"location": "cli/defenseclaw/commands/cmd_doctor.py", "description": "Doctor's Anthropic probe"}],
       "since": "0.4.0"
     },
 
@@ -1561,7 +1560,7 @@
       "accepted_values": ["any-hec-url"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "bundles/splunk_local_bridge/env/.env.example:11", "description": "Bridge .env"}],
+      "consumers": [{"location": "bundles/splunk_local_bridge/env/.env.example", "description": "Bridge .env"}],
       "since": "0.4.0"
     },
     {
@@ -1572,7 +1571,7 @@
       "accepted_values": ["hec-token"],
       "security_impact": "high",
       "surface_in_doctor": false,
-      "consumers": [{"location": "bundles/splunk_local_bridge/env/.env.example:12", "description": "Bridge .env"}],
+      "consumers": [{"location": "bundles/splunk_local_bridge/env/.env.example", "description": "Bridge .env"}],
       "since": "0.4.0"
     },
     {
@@ -1583,7 +1582,7 @@
       "accepted_values": ["splunk-index-name"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "bundles/splunk_local_bridge/env/.env.example:13", "description": "Bridge .env"}],
+      "consumers": [{"location": "bundles/splunk_local_bridge/env/.env.example", "description": "Bridge .env"}],
       "since": "0.4.0"
     },
     {
@@ -1594,7 +1593,7 @@
       "accepted_values": ["splunk-sourcetype"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "bundles/splunk_local_bridge/env/.env.example:14", "description": "Bridge .env"}],
+      "consumers": [{"location": "bundles/splunk_local_bridge/env/.env.example", "description": "Bridge .env"}],
       "since": "0.4.0"
     },
     {
@@ -1605,7 +1604,7 @@
       "accepted_values": ["any-source-string"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "bundles/splunk_local_bridge/env/.env.example:15", "description": "Bridge .env"}],
+      "consumers": [{"location": "bundles/splunk_local_bridge/env/.env.example", "description": "Bridge .env"}],
       "since": "0.4.0"
     },
     {
@@ -1616,7 +1615,7 @@
       "accepted_values": ["true", "false"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "bundles/splunk_local_bridge/env/.env.example:16", "description": "Bridge .env"}],
+      "consumers": [{"location": "bundles/splunk_local_bridge/env/.env.example", "description": "Bridge .env"}],
       "since": "0.4.0"
     },
     {
@@ -1627,7 +1626,7 @@
       "accepted_values": ["any-string"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "bundles/splunk_local_bridge/env/.env.example:17", "description": "Bridge .env"}],
+      "consumers": [{"location": "bundles/splunk_local_bridge/env/.env.example", "description": "Bridge .env"}],
       "since": "0.4.0"
     },
 
@@ -1639,7 +1638,7 @@
       "accepted_values": ["comma-separated mock responses", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/gateway/connector/codeguard_native_test.go:90", "description": "Test stub"}],
+      "consumers": [{"location": "internal/gateway/connector/codeguard_native_test.go", "description": "Test stub"}],
       "since": "0.4.0"
     },
     {
@@ -1650,7 +1649,7 @@
       "accepted_values": ["absolute-path", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "consumers": [{"location": "internal/gateway/connector/codeguard_native_test.go:116", "description": "Test stub"}],
+      "consumers": [{"location": "internal/gateway/connector/codeguard_native_test.go", "description": "Test stub"}],
       "since": "0.4.0"
     },
     {
@@ -1695,9 +1694,9 @@
       "security_impact": "high",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "internal/netguard/netguard.go:94", "description": "cgnatAllowed() omits 100.64.0.0/10 from the reserved-CIDR list when set"},
-        {"location": "cli/defenseclaw/webhooks/writer.py:415", "description": "_cgnat_allowed() gates webhook URL validation for CGNAT IPs"},
-        {"location": "cli/defenseclaw/registries/ssrf.py:52", "description": "_cgnat_allowed() gates registry/manifest SSRF resolution for CGNAT"}
+        {"location": "internal/netguard/netguard.go", "description": "cgnatAllowed() omits 100.64.0.0/10 from the reserved-CIDR list when set"},
+        {"location": "cli/defenseclaw/webhooks/writer.py", "description": "_cgnat_allowed() gates webhook URL validation for CGNAT IPs"},
+        {"location": "cli/defenseclaw/registries/ssrf.py", "description": "_cgnat_allowed() gates registry/manifest SSRF resolution for CGNAT"}
       ],
       "since": "0.7.0",
       "security_note": "CGNAT egress guard — prevents SSRF into shared carrier-grade NAT / overlay-network address space (e.g. another tenant's Tailscale node)."
@@ -1711,8 +1710,8 @@
       "security_impact": "high",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "internal/netguard/allowlist.go:53", "description": "ParseAllowedPrivateUpstreams() reads this env var and merges with config.yaml entries"},
-        {"location": "cli/defenseclaw/registries/ssrf.py:60", "description": "_allowed_private_ips() reads this env var for Python-side SSRF guard exemption"}
+        {"location": "internal/netguard/allowlist.go", "description": "ParseAllowedPrivateUpstreams() reads this env var and merges with config.yaml entries"},
+        {"location": "cli/defenseclaw/registries/ssrf.py", "description": "_allowed_private_ips() reads this env var for Python-side SSRF guard exemption"}
       ],
       "since": "0.8.1",
       "security_note": "Private-upstream SSRF guard exemption — allows operator-specified on-prem LLM gateways on RFC 1918 addresses to bypass the private-IP block. Each IP must be explicitly listed (no CIDR)."
@@ -1726,9 +1725,9 @@
       "security_impact": "high",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "internal/gateway/sidecar.go:1417", "description": "Blocks connector setup on an unverified hook contract in action mode unless set"},
-        {"location": "internal/gateway/sidecar.go:1422", "description": "Blocks connector setup on hook-contract lock drift in action mode unless set"},
-        {"location": "cli/defenseclaw/commands/cmd_setup.py:2499", "description": "Python setup path mirrors the gateway drift/contract enforcement"}
+        {"location": "internal/gateway/sidecar.go", "description": "Blocks connector setup on an unverified hook contract in action mode unless set"},
+        {"location": "internal/gateway/sidecar.go", "description": "Blocks connector setup on hook-contract lock drift in action mode unless set"},
+        {"location": "cli/defenseclaw/commands/cmd_setup.py", "description": "Python setup path mirrors the gateway drift/contract enforcement"}
       ],
       "since": "0.7.0",
       "security_note": "Hook contract verification — prevents installing an enforcing hook whose request/response contract has drifted from the verified matrix (a silent guardrail bypass)."
@@ -1742,7 +1741,7 @@
       "security_impact": "high",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "internal/scanner/mcp.go:56", "description": "validateMCPScanTargetURL() returns early without SSRF checks when set"}
+        {"location": "internal/scanner/mcp.go", "description": "validateMCPScanTargetURL() returns early without SSRF checks when set"}
       ],
       "since": "0.7.0",
       "security_note": "MCP scan-target SSRF guard — prevents a scan request from reaching IMDS / loopback / private hosts."
@@ -1756,7 +1755,7 @@
       "security_impact": "medium",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/gateway/connector/hooks/_hardening.sh:149", "description": "defenseclaw_harden_env() uses it to set the locked-down hook PATH"}
+        {"location": "internal/gateway/connector/hooks/_hardening.sh", "description": "defenseclaw_harden_env() uses it to set the locked-down hook PATH"}
       ],
       "since": "0.7.0",
       "security_note": "Hook PATH lockdown — a mis-baked value that widens PATH could re-admit attacker-writable directories to hook execution."
@@ -1770,7 +1769,7 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/daemon/daemon.go:307", "description": "Written into the gateway child env to tag the owning data directory"}
+        {"location": "internal/daemon/daemon.go", "description": "Written into the gateway child env to tag the owning data directory"}
       ],
       "since": "0.7.0"
     },
@@ -1783,8 +1782,8 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/cli/hook.go:94", "description": "Primary env resolution of the hook's gateway API address"},
-        {"location": "internal/cli/hook.go:97", "description": "Sidecar .hookcfg fallback for the same key"}
+        {"location": "internal/cli/hook.go", "description": "Primary env resolution of the hook's gateway API address"},
+        {"location": "internal/cli/hook.go", "description": "Sidecar .hookcfg fallback for the same key"}
       ],
       "since": "0.7.0",
       "security_note": "Loopback-only enforcement — a non-loopback gateway address is rejected so a hook cannot be redirected to an off-box collector."
@@ -1798,7 +1797,7 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/gateway/connector/hooks/_hardening.sh:148", "description": "unset DEFENSECLAW_HOOK_PATH_TRUSTED during env hardening (anti-consumed)"}
+        {"location": "internal/gateway/connector/hooks/_hardening.sh", "description": "unset DEFENSECLAW_HOOK_PATH_TRUSTED during env hardening (anti-consumed)"}
       ],
       "since": "0.7.0",
       "security_note": "Hook PATH lockdown — stripped so an agent-supplied 'trusted' flag cannot re-enable an attacker-controlled PATH."
@@ -1812,7 +1811,7 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/gateway/sidecar.go:364", "description": "Overrides cfg.Guardrail.JudgePersistQueueDepth at sidecar boot"}
+        {"location": "internal/gateway/sidecar.go", "description": "Overrides cfg.Guardrail.JudgePersistQueueDepth at sidecar boot"}
       ],
       "since": "0.7.0"
     },
@@ -1825,8 +1824,8 @@
       "security_impact": "medium",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "cli/defenseclaw/commands/cmd_setup_sandbox.py:1258", "description": "Embedded pre-sandbox script reads it before namespace cleanup"},
-        {"location": "cli/defenseclaw/commands/cmd_setup_sandbox.py:1481", "description": "Embedded cleanup-sandbox script reads it"}
+        {"location": "cli/defenseclaw/commands/cmd_setup_sandbox.py", "description": "Embedded pre-sandbox script reads it before namespace cleanup"},
+        {"location": "cli/defenseclaw/commands/cmd_setup_sandbox.py", "description": "Embedded cleanup-sandbox script reads it"}
       ],
       "since": "0.7.0",
       "security_note": "Namespace cleanup scope — a broad regex sweep can delete unrelated network namespaces on a shared host."
@@ -1840,7 +1839,7 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/commands/cmd_setup_splunk_o11y_dashboards.py:92", "description": "--plugin-dir Click option bound to this env var"}
+        {"location": "cli/defenseclaw/commands/cmd_setup_splunk_o11y_dashboards.py", "description": "--plugin-dir Click option bound to this env var"}
       ],
       "since": "0.7.0"
     },
@@ -1853,7 +1852,7 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/commands/cmd_setup_splunk_o11y_dashboards.py:137", "description": "--name-prefix Click option bound to this env var"}
+        {"location": "cli/defenseclaw/commands/cmd_setup_splunk_o11y_dashboards.py", "description": "--name-prefix Click option bound to this env var"}
       ],
       "since": "0.7.0"
     },
@@ -1866,7 +1865,7 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/commands/cmd_setup_splunk_o11y_dashboards.py:113", "description": "--work-dir Click option bound to this env var"}
+        {"location": "cli/defenseclaw/commands/cmd_setup_splunk_o11y_dashboards.py", "description": "--work-dir Click option bound to this env var"}
       ],
       "since": "0.7.0"
     },
@@ -1879,9 +1878,9 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/cli/hook.go:137", "description": "Native hook reads it (precedence over TRACEPARENT / OTEL_TRACEPARENT)"},
-        {"location": "internal/gateway/connector/hooks/_hardening.sh:661", "description": "Bash hook trace-context extraction"},
-        {"location": "internal/gateway/connector/codex.go:975", "description": "Codex telemetry bridge forwards it on outbound curls"}
+        {"location": "internal/cli/hook.go", "description": "Native hook reads it (precedence over TRACEPARENT / OTEL_TRACEPARENT)"},
+        {"location": "internal/gateway/connector/hooks/_hardening.sh", "description": "Bash hook trace-context extraction"},
+        {"location": "internal/gateway/connector/codex.go", "description": "Codex telemetry bridge forwards it on outbound curls"}
       ],
       "since": "0.7.0"
     },
@@ -1894,9 +1893,9 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/cli/hook.go:142", "description": "Native hook reads it alongside traceparent"},
-        {"location": "internal/gateway/connector/hooks/_hardening.sh:674", "description": "Bash hook trace-context extraction"},
-        {"location": "internal/gateway/connector/codex.go:976", "description": "Codex telemetry bridge forwards it on outbound curls"}
+        {"location": "internal/cli/hook.go", "description": "Native hook reads it alongside traceparent"},
+        {"location": "internal/gateway/connector/hooks/_hardening.sh", "description": "Bash hook trace-context extraction"},
+        {"location": "internal/gateway/connector/codex.go", "description": "Codex telemetry bridge forwards it on outbound curls"}
       ],
       "since": "0.7.0"
     },
@@ -1909,7 +1908,7 @@
       "security_impact": "medium",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "internal/gateway/requestctx.go:369", "description": "isTrustedProxyPeer() trusts X-Forwarded-For only from these peers"}
+        {"location": "internal/gateway/requestctx.go", "description": "isTrustedProxyPeer() trusts X-Forwarded-For only from these peers"}
       ],
       "since": "0.7.0",
       "security_note": "Client-IP attribution — trusting forwarded headers from an untrusted peer lets a caller spoof the source IP recorded in auth-failure and audit logs."
@@ -1923,7 +1922,7 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/tui/__init__.py:53", "description": "Gates the interactive first-run setup prompt"}
+        {"location": "cli/defenseclaw/tui/__init__.py", "description": "Gates the interactive first-run setup prompt"}
       ],
       "since": "0.7.0"
     },
@@ -1936,7 +1935,7 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/cli/daemon_executable_windows_test.go:315", "description": "PowerShell test harness invokes the isolated gateway executable"}
+        {"location": "internal/cli/daemon_executable_windows_test.go", "description": "PowerShell test harness invokes the isolated gateway executable"}
       ],
       "since": "0.8.0"
     },
@@ -1949,7 +1948,7 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/cli/daemon_executable_windows_test.go:315", "description": "PowerShell test harness passes the selected gateway lifecycle command"}
+        {"location": "internal/cli/daemon_executable_windows_test.go", "description": "PowerShell test harness passes the selected gateway lifecycle command"}
       ],
       "since": "0.8.0"
     },
@@ -1962,7 +1961,7 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/daemon/proc_windows_flags_test.go:95", "description": "Native Windows daemon test binary enters its delayed-exit helper mode"}
+        {"location": "internal/daemon/proc_windows_flags_test.go", "description": "Native Windows daemon test binary enters its delayed-exit helper mode"}
       ],
       "since": "0.8.0"
     },
@@ -1975,7 +1974,7 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/inventory/process_snapshot_windows_test.go:148", "description": "Native Windows test binary enters its named-process helper mode"}
+        {"location": "internal/inventory/process_snapshot_windows_test.go", "description": "Native Windows test binary enters its named-process helper mode"}
       ],
       "since": "0.8.0"
     },
@@ -1988,7 +1987,7 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/commands/cmd_skill.py:202", "description": "Windows ClawHub command adapter publishes the selected trusted launcher to its generated batch file"}
+        {"location": "cli/defenseclaw/commands/cmd_skill.py", "description": "Windows ClawHub command adapter publishes the selected trusted launcher to its generated batch file"}
       ],
       "since": "0.8.0"
     },
@@ -2001,7 +2000,7 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/commands/cmd_skill.py:203", "description": "Windows ClawHub command adapter publishes the selected launch directory to its generated batch file"}
+        {"location": "cli/defenseclaw/commands/cmd_skill.py", "description": "Windows ClawHub command adapter publishes the selected launch directory to its generated batch file"}
       ],
       "since": "0.8.0"
     },
@@ -2014,7 +2013,7 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/tests/test_cmd_skill.py:858", "description": "Fake Windows ClawHub launcher appends an invocation marker during command-adapter tests"}
+        {"location": "cli/tests/test_cmd_skill.py", "description": "Fake Windows ClawHub launcher appends an invocation marker during command-adapter tests"}
       ],
       "since": "0.8.0"
     },
@@ -2914,7 +2913,7 @@
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "internal/gateway/security_suite_test.go:307", "description": "TestSecuritySuiteE2E reads this to locate the gateway; uses an in-process server when unset"}
+        {"location": "internal/gateway/security_suite_test.go", "description": "TestSecuritySuiteE2E reads this to locate the gateway; uses an in-process server when unset"}
       ],
       "since": "0.7.0"
     }

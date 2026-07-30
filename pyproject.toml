@@ -93,8 +93,8 @@ dependencies = [
 # LiteLLM lazy-imports ``google-cloud-aiplatform`` for this route, and
 # the SDK pulls ~286 MB of transitive deps (BigQuery, Cloud Storage,
 # Cloud Resource Manager, gRPC, protobuf). That nearly doubles the
-# base install, so we keep it opt-in. Install with
-# ``pip install 'defenseclaw[vertex]'``. Bedrock is bundled by
+# base install, so we keep it opt-in. Source checkouts enable it with
+# ``uv sync --extra vertex``. Bedrock is bundled by
 # default — see the ``boto3`` entry under ``[project].dependencies``.
 vertex = ["google-cloud-aiplatform>=1.60", "google-auth>=2.30"]
 

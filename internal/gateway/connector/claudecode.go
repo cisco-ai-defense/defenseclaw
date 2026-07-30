@@ -63,9 +63,7 @@ func (c *ClaudeCodeConnector) Description() string {
 	return "env var + settings.json hooks (20+ events, component scanning)"
 }
 func (c *ClaudeCodeConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
-func (c *ClaudeCodeConnector) SubprocessPolicy() SubprocessPolicy {
-	return ResolveSubprocessPolicy(SubprocessSandbox)
-}
+func (c *ClaudeCodeConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
 
 func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	otlpToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeClaude, opts.OTLPPathToken)

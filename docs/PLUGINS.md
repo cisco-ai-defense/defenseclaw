@@ -1,43 +1,24 @@
-# Plugin Development
+# Plugin scanner development
 
-DefenseClaw governs OpenClaw plugins with the same scan, verdict, block, allow, and audit flow used for skills and MCP servers. The plugin scanner checks plugin directories for risky install behavior, permissions, credential access, obfuscation, and supply-chain signals.
-
-## Commands
-
-```bash
-# Scan a plugin directory
-defenseclaw plugin scan extensions/defenseclaw
-
-# Emit machine-readable findings
-defenseclaw plugin scan extensions/defenseclaw --json
-
-# Use stricter policy and optional LLM analysis
-defenseclaw plugin scan /path/to/plugin --policy strict --use-llm
-
-# Install a plugin and apply configured plugin action policy
-defenseclaw plugin install /path/to/plugin --action
-```
-
-Plugin scan policy files live under `policies/scanners/plugin-scanner/`.
-
-## Example
-
-A minimal custom scanner example lives in `plugins/examples/custom-scanner/`.
-
-```bash
-go run ./plugins/examples/custom-scanner
-```
-
-Use it as a scaffold for repository layout and wiring, then connect the real scanner behavior through the DefenseClaw plugin scan command or the Go scanner wrapper in `internal/scanner/plugin.go`.
-
-## Implementation Notes
+This file documents repository ownership for the plugin scanner. Current
+operator commands are maintained in the
+[published CLI reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/cli/).
 
 | Area | Source |
-|------|--------|
-| Python CLI command | `cli/defenseclaw/commands/cmd_plugin.py` |
-| Python scanner wrapper | `cli/defenseclaw/scanner/plugin.py` |
-| Go scanner wrapper | `internal/scanner/plugin.go` |
-| Example plugin scanner | `plugins/examples/custom-scanner/` |
-| Scanner policies | `policies/scanners/plugin-scanner/` |
+| --- | --- |
+| CLI registration, target resolution, install, and policy actions | [`../cli/defenseclaw/commands/cmd_plugin.py`](../cli/defenseclaw/commands/cmd_plugin.py) |
+| Python scanner wrapper | [`../cli/defenseclaw/scanner/plugin.py`](../cli/defenseclaw/scanner/plugin.py) |
+| Python scanner implementation | [`../cli/defenseclaw/scanner/plugin_scanner/`](../cli/defenseclaw/scanner/plugin_scanner/) |
+| Go subprocess wrapper and normalized result mapping | [`../internal/scanner/plugin.go`](../internal/scanner/plugin.go) |
+| Scanner policies | [`../policies/scanners/plugin-scanner/`](../policies/scanners/plugin-scanner/) |
+| Minimal Go example | [`../plugins/examples/custom-scanner/`](../plugins/examples/custom-scanner/) |
 
-The Go gateway invokes plugin scans through `defenseclaw plugin scan --json` unless a standalone plugin-scanner binary is configured. JSON output is normalized into the shared `ScanResult` and `Finding` types so policy decisions, audit events, telemetry, and UI rendering behave consistently across scanner types.
+The Go wrapper invokes either a configured standalone
+`defenseclaw-plugin-scanner` binary or `defenseclaw plugin scan --json`, then
+maps non-suppressed findings into the shared scanner model. The Python wrapper
+runs the repository scanner implementation in process. Changes to JSON output,
+policy/profile options, suppression, or exit behavior must update both wrappers
+and their tests.
+
+The example package is intentionally only a compilable scaffold; it prints a
+message and does not implement a scanner protocol.

@@ -15,7 +15,19 @@ defenseclaw setup zeptoclaw --mode observe --restart
 defenseclaw setup zeptoclaw --mode action --rule-pack default --restart
 ```
 
-`setup zeptoclaw` is an alias around [`defenseclaw setup guardrail --connector zeptoclaw`](/docs/setup/guardrail) and inherits every guardrail flag. Like OpenClaw the proxy is **always** in the data path: there is no observability-only branch, only `--mode observe` (log without blocking) vs `--mode action` (enforce).
+<Callout type="warning">
+ZeptoClaw connector setup is supported on macOS and Linux. ZeptoClaw publishes
+macOS/Linux builds and its DefenseClaw integration requires the guardrail
+proxy, so native Windows setup is unsupported.
+</Callout>
+
+`setup zeptoclaw` is the dedicated ZeptoClaw alias. It delegates to the shared
+guardrail setup backend and exposes the proxy connector's common setup
+options; it is not a byte-for-byte copy of every `setup guardrail` flag. See
+the [quick-alias reference](/docs/setup/guardrail/aliases) for the alias and
+[full guardrail setup](/docs/setup/guardrail) for the complete wizard. The
+proxy is always in the data path: `--mode observe` records without policy
+blocking, while `--mode action` enforces.
 
 #### What this command sets vs. leaves at defaults
 
@@ -89,7 +101,8 @@ defenseclaw setup zeptoclaw \
   --restart
 ```
 
-Adds the LLM judge as a second pass on regex-flagged prompts. Costs a few cents per turn; cuts false positives meaningfully on semantic jailbreaks regex misses.
+Adds the configured LLM judge as a second pass on regex-flagged prompts.
+Latency and provider cost depend on the selected judge model.
 
 </Tab>
 
@@ -103,7 +116,10 @@ defenseclaw setup zeptoclaw \
   --restart
 ```
 
-Block MEDIUM and above, alert on LOW, and do not offer approval for findings that have already crossed the block threshold. Pair with the OpenShell sandbox profile and a reviewed first-party allow-list for full lockdown.
+Block MEDIUM and above, alert on LOW, and do not offer approval for findings
+that have already crossed the block threshold. Pair it with the
+[OpenShell sandbox profile](/docs/setup/sandbox) and a reviewed first-party
+allow-list for additional containment.
 
 </Tab>
 
@@ -119,7 +135,7 @@ host access to the DefenseClaw data directory. A global
 only that export trust boundary. Verify the effective result with
 `defenseclaw config show --effective --section observability` and
 `defenseclaw observability plan`. See [Redaction](/docs/reference/redaction) for
-the resolution order and [Observability](/docs/observability#local-history-and-retention)
+the resolution order and [Observability](/docs/observability#local-history)
 for retention behavior.
 </Callout>
 
@@ -133,7 +149,7 @@ for retention behavior.
 </Cards>
 
 <Callout>
-Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt--flag-mapping) table gives you the CI-shaped command for the same configuration.
+Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
 </Callout>
 
 ## Files DefenseClaw will modify
@@ -153,7 +169,8 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 
 ## Hook capabilities
 
-<HookEventsList connector="zeptoclaw" />
+The proxy can block inspected requests, responses, and tool-call payloads.
+ZeptoClaw has no native ask event.
 
 <Callout>
 ZeptoClaw has no native ask surface. Confirm verdicts take an immediate fallback with `raw_action` preserved so operators can review the original request in the TUI or audit log; neither surface can resume it.
@@ -161,10 +178,11 @@ ZeptoClaw has no native ask surface. Confirm verdicts take an immediate fallback
 
 ## Subprocess policy
 
-`sandbox` — same openshell-sandbox path as OpenClaw.
+`sandbox` — see [Sandbox setup](/docs/setup/sandbox) for the
+openshell-sandbox workflow.
 
 ## Disable
 
 ```bash
-defenseclaw setup guardrail --disable
+defenseclaw guardrail disable --yes
 ```

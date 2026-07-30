@@ -999,13 +999,12 @@ func (c *WebhookConfig) ResolvedSecret() string {
 //   - GuardrailConfig.HookFailMode (yaml: guardrail.hook_fail_mode)
 //     is the SHELL-side fail-mode baked into the generated hook
 //     templates (codex-hook.sh, claude-code-hook.sh, inspect-*).
-//     It governs what those scripts do when the gateway returns a
-//     RESPONSE-LAYER failure (4xx, malformed JSON, missing
-//     `action` field). Its default is "open" because silently
-//     bricking the agent on a transient response error is worse
-//     than allowing one tool call. Transport-layer failures
-//     (gateway unreachable / 5xx) are handled separately and
-//     ALWAYS allow unless DEFENSECLAW_STRICT_AVAILABILITY=1.
+//     It governs what those scripts do when delivery, authentication,
+//     or the gateway response fails (connection/timeout/5xx, missing
+//     token, 4xx, malformed JSON, or no `action` field). "open"
+//     allows and logs; "closed" blocks where the connector exposes a
+//     block response. DEFENSECLAW_STRICT_AVAILABILITY=1 additionally
+//     forces transport and missing-token failures closed.
 //
 //   - AgentHookConfig.FailMode (yaml: <connector>.fail_mode below)
 //     is a per-connector POLICY-LAYER hint that downstream
@@ -1388,30 +1387,23 @@ type GuardrailConfig struct {
 	// Loopback, link-local, and cloud-metadata IPs are never exempted.
 	AllowPrivateUpstreams []string `mapstructure:"allow_private_upstreams" yaml:"allow_private_upstreams,omitempty"`
 
-	// HookFailMode is the operator-chosen response-layer fail mode
-	// for every generated hook script (codex-hook, claude-code-hook,
-	// inspect-*). Two values are supported:
+	// HookFailMode is the operator-chosen failure behavior for every generated
+	// hook script (codex-hook, claude-code-hook, inspect-*). It covers
+	// transport, missing-token/authentication, and invalid-response failures.
+	// Two values are supported:
 	//
-	//   - "open" (default, recommended): when the gateway answers
-	//     with a 4xx, malformed JSON, or a missing action field, the
-	//     hook ALLOWS the tool/prompt with a stderr warning and an
-	//     entry in $DEFENSECLAW_HOME/logs/hook-failures.jsonl. The
-	//     rationale: a misbehaving gateway that bricks every agent
-	//     interaction is strictly worse UX than a brief observability
-	//     gap, and the operator can detect the problem from the log.
+	//   - "open": connection failures, timeouts, 5xx/4xx responses,
+	//     missing authentication, malformed JSON, or no action ALLOW
+	//     the event with a stderr warning and an entry in
+	//     $DEFENSECLAW_HOME/logs/hook-failures.jsonl.
 	//
-	//   - "closed": the same response-layer failures BLOCK the tool/
-	//     prompt (exit 2). Choose when you'd rather take the agent
-	//     offline than miss a policy decision (e.g., regulated
-	//     workflows where every prompt MUST be inspected).
+	//   - "closed" (fresh-install default): the same failures BLOCK where
+	//     the connector/event exposes a blocking response. Migrated legacy
+	//     configs can retain an explicit "open".
 	//
-	// This field governs ONLY response-layer failures. Transport-
-	// layer failures (gateway unreachable / 5xx) are handled
-	// separately by each hook's fail_unreachable helper and ALWAYS
-	// allow unless the operator opts into strict availability via
-	// DEFENSECLAW_STRICT_AVAILABILITY=1 — regardless of this field's
-	// value. See internal/gateway/connector/hooks/_hardening.sh for
-	// the rationale.
+	// DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and
+	// missing-token failures closed. See
+	// internal/gateway/connector/hooks/_hardening.sh for the runtime contract.
 	//
 	// `defenseclaw setup guardrail` prompts for this when the install
 	// is fresh or when the operator changes guardrail.mode (observe
@@ -1766,7 +1758,7 @@ func validateAllowPrivateUpstreams(ips []string) error {
 // canonical "open" sentinel is the only way to get the legacy
 // fail-open behavior; any other value (typo, blank, malformed
 // migration row) collapses to "closed" so the agent never silently
-// fails open at the response-layer boundary. Centralized here so the
+// fails open at the hook failure boundary. Centralized here so the
 // sidecar and any future config-edit surfaces never disagree on the
 // default.
 //
@@ -2438,7 +2430,9 @@ func loadConfigSource(
 			}
 			return nil, fmt.Errorf("config: legacy `splunk:` block found in %s (key %s). "+
 				"Run `defenseclaw upgrade --yes` to migrate supported legacy observability "+
-				"configuration to config v8; see docs/OBSERVABILITY.md for the current schema",
+				"configuration to config v8; see "+
+				"https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/ "+
+				"for the current schema",
 				configFile, legacy)
 		}
 	}
@@ -3543,9 +3537,9 @@ func setDefaults(dataDir string, legacyObservability bool) {
 
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")
-	// "closed" is the safer default — response-layer failures (4xx,
-	// malformed JSON, missing action) BLOCK the tool/prompt rather
-	// than silently allowing it. Pre-existing operators are protected
+	// "closed" is the safer default — transport, authentication, and
+	// invalid-response failures BLOCK supported events rather than silently
+	// allowing them. Pre-existing operators are protected
 	// by _migrate_0_4_0_seed_hook_fail_mode (migrations.py) which
 	// writes ``hook_fail_mode: open`` to existing config.yaml so prior
 	// behavior is preserved on upgrade. Operators who explicitly want

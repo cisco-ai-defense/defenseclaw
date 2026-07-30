@@ -208,8 +208,6 @@ def _write_yaml_raw(path: Path, value: Any) -> None:
 
 
 @functools.lru_cache(maxsize=1)
-
-
 def _snapshot(
     dependency_id: str,
     repository: str,
@@ -301,13 +299,9 @@ def _snapshot(
         "full_normalized_inventory_sha256": "d" * 64,
         "selection": {
             "policy": (
-                "runtime-profile-vocabulary-v1"
-                if dependency_id == "openinference"
-                else "authored-extension-closure-v1"
+                "runtime-profile-vocabulary-v1" if dependency_id == "openinference" else "authored-extension-closure-v1"
             ),
-            "attribute_ids_sha256": _sha256(
-                json.dumps(sorted(identifiers), separators=(",", ":")).encode()
-            ),
+            "attribute_ids_sha256": _sha256(json.dumps(sorted(identifiers), separators=(",", ":")).encode()),
         },
         "source_files": source_files,
         "attributes": attributes,
@@ -500,9 +494,7 @@ def _domain_sources() -> dict[str, dict[str, Any]]:
         "defenseclaw.inventory.agent.metadata",
     ):
         operations["attributes"].append(
-            copy.deepcopy(
-                next(item for item in canonical_operations["attributes"] if item["id"] == attribute_id)
-            )
+            copy.deepcopy(next(item for item in canonical_operations["attributes"] if item["id"] == attribute_id))
         )
     operations["attribute_extensions"].append(
         copy.deepcopy(
@@ -578,7 +570,7 @@ def _domain_sources() -> dict[str, dict[str, Any]]:
             }
         )
     inventory = yaml.safe_load(
-        (ROOT / "docs/design/observability-v8/current-state-inventory.yaml").read_text(encoding="utf-8")
+        (ROOT / "schemas/telemetry/v8/compatibility/v7-compatibility-inputs.yaml").read_text(encoding="utf-8")
     )
     metric_items = inventory["classes"]["emitted_metrics"]["items"]
     for instrument_name, contract in metric_items.items():
@@ -1105,15 +1097,13 @@ def _fixture_root(tmp_path: Path) -> Path:
     compatibility_schema_target = telemetry / "compatibility/v7-exporter-selection.schema.json"
     compatibility_schema_target.parent.mkdir(parents=True)
     compatibility_schema_target.write_bytes(compatibility_schema_source.read_bytes())
-    inventory_source = ROOT / "docs/design/observability-v8/current-state-inventory.yaml"
-    inventory_target = root / "docs/design/observability-v8/current-state-inventory.yaml"
-    inventory_target.parent.mkdir(parents=True)
+    inventory_source = ROOT / "schemas/telemetry/v8/compatibility/v7-compatibility-inputs.yaml"
+    inventory_target = root / "schemas/telemetry/v8/compatibility/v7-compatibility-inputs.yaml"
+    inventory_target.parent.mkdir(parents=True, exist_ok=True)
     inventory = yaml.safe_load(inventory_source.read_text(encoding="utf-8"))
     registry_source = yaml.safe_load((ROOT / "schemas/telemetry/v8/registry.yaml").read_text(encoding="utf-8"))
     for instrument_name, contract in inventory["classes"]["emitted_metrics"]["items"].items():
         contract["labels"] = []
-        contract["callsites"] = ["internal/telemetry/metrics.go:1"]
-        contract["dropped_by_current_global_v8_gate"] = []
         contract["empty_labels_reason"] = "Fixture producer emits no instrument labels."
     for instrument_name in ("gen_ai.client.token.usage", "gen_ai.client.operation.duration"):
         contract = inventory["classes"]["emitted_metrics"]["items"][instrument_name]
@@ -1518,10 +1508,7 @@ module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 """
-        assertion = (
-            "assert module.runtime_assets is "
-            "sys.modules['scripts.generate_telemetry_registry'].runtime_assets"
-        )
+        assertion = "assert module.runtime_assets is sys.modules['scripts.generate_telemetry_registry'].runtime_assets"
     elif direction == "direct-then-package":
         setup = f"""
 spec = importlib.util.spec_from_file_location("mixed_direct_generator", {str(generator)!r})
@@ -2009,10 +1996,7 @@ def test_write_check_is_deterministic_and_offline(tmp_path: Path) -> None:
     module = _load_generator_module("telemetry_registry_direct_writer_determinism")
     first = _run(root, "--write")
     assert first.returncode == 0, first.stderr
-    first_bytes = {
-        relative: (root / relative).read_bytes()
-        for relative in module.REPOSITORY_PHYSICAL_OUTPUT_PATHS
-    }
+    first_bytes = {relative: (root / relative).read_bytes() for relative in module.REPOSITORY_PHYSICAL_OUTPUT_PATHS}
 
     offline = dict(os.environ)
     offline.update(
@@ -2028,8 +2012,7 @@ def test_write_check_is_deterministic_and_offline(tmp_path: Path) -> None:
     second = _run(root, "--write", environment=offline)
     assert second.returncode == 0, second.stderr
     assert first_bytes == {
-        relative: (root / relative).read_bytes()
-        for relative in module.REPOSITORY_PHYSICAL_OUTPUT_PATHS
+        relative: (root / relative).read_bytes() for relative in module.REPOSITORY_PHYSICAL_OUTPUT_PATHS
     }
     for logical, encoded in module.runtime_assets.LOGICAL_TO_ENCODED.items():
         decoded = module.runtime_assets.decode_canonical_gzip(first_bytes[encoded])
@@ -2040,9 +2023,7 @@ def test_write_check_is_deterministic_and_offline(tmp_path: Path) -> None:
 
 def test_crlf_snapshot_checkout_preserves_pinned_digest_and_outputs(tmp_path: Path) -> None:
     root = _fixture_root(tmp_path)
-    lock = yaml.safe_load(
-        (root / "schemas/telemetry/v8/semconv.lock.yaml").read_text(encoding="utf-8")
-    )
+    lock = yaml.safe_load((root / "schemas/telemetry/v8/semconv.lock.yaml").read_text(encoding="utf-8"))
     for dependency in lock["dependencies"]:
         snapshot = root / dependency["snapshot"]["path"]
         payload = snapshot.read_bytes()
@@ -2073,10 +2054,7 @@ def test_snapshot_tampering_fails_without_partial_output(tmp_path: Path) -> None
     root = _fixture_root(tmp_path)
     assert _run(root, "--write").returncode == 0
     module = _load_generator_module("telemetry_registry_snapshot_no_partial_output")
-    before = {
-        relative: (root / relative).read_bytes()
-        for relative in module.REPOSITORY_PHYSICAL_OUTPUT_PATHS
-    }
+    before = {relative: (root / relative).read_bytes() for relative in module.REPOSITORY_PHYSICAL_OUTPUT_PATHS}
     snapshot = root / "schemas/telemetry/v8/upstream/otel-genai.normalized.json"
     snapshot.write_bytes(snapshot.read_bytes() + b" ")
 
@@ -2084,10 +2062,7 @@ def test_snapshot_tampering_fails_without_partial_output(tmp_path: Path) -> None
 
     assert result.returncode == 1
     assert "snapshot digest mismatch" in result.stderr
-    assert before == {
-        relative: (root / relative).read_bytes()
-        for relative in module.REPOSITORY_PHYSICAL_OUTPUT_PATHS
-    }
+    assert before == {relative: (root / relative).read_bytes() for relative in module.REPOSITORY_PHYSICAL_OUTPUT_PATHS}
 
 
 def test_selected_otel_ownership_must_not_overlap(tmp_path: Path) -> None:
@@ -2261,7 +2236,7 @@ def test_metric_labels_reject_high_cardinality_or_sensitive_classes(
     metric_group["attributes"] = [{"ref": "defenseclaw.test.name", "requirement_level": "required"}]
     metric_group["metric"].pop("empty_labels_reason")
     _write_yaml(operations_path, operations)
-    inventory_path = root / "docs/design/observability-v8/current-state-inventory.yaml"
+    inventory_path = root / "schemas/telemetry/v8/compatibility/v7-compatibility-inputs.yaml"
     inventory = yaml.safe_load(inventory_path.read_text(encoding="utf-8"))
     contract = inventory["classes"]["emitted_metrics"]["items"]["defenseclaw.activity.diff_entries"]
     contract["labels"] = ["defenseclaw.test.name"]
@@ -2492,9 +2467,7 @@ def test_direct_upstream_bytes_type_compiles_losslessly(tmp_path: Path) -> None:
     attribute = "gen_ai.fixture.bytes"
 
     def mutate(snapshot: dict[str, Any]) -> None:
-        target = copy.deepcopy(
-            next(item for item in snapshot["attributes"] if item["id"] == "gen_ai.operation.name")
-        )
+        target = copy.deepcopy(next(item for item in snapshot["attributes"] if item["id"] == "gen_ai.operation.name"))
         target["id"] = attribute
         target["allowed_types"] = ["bytes"]
         snapshot["attributes"].append(target)
@@ -2535,7 +2508,7 @@ def test_metric_string_label_rejects_disallowed_normalizer(tmp_path: Path) -> No
     metric_group["attributes"] = [{"ref": "defenseclaw.test.name", "requirement_level": "required"}]
     metric_group["metric"].pop("empty_labels_reason")
     _write_yaml(operations_path, operations)
-    inventory_path = root / "docs/design/observability-v8/current-state-inventory.yaml"
+    inventory_path = root / "schemas/telemetry/v8/compatibility/v7-compatibility-inputs.yaml"
     inventory = yaml.safe_load(inventory_path.read_text(encoding="utf-8"))
     contract = inventory["classes"]["emitted_metrics"]["items"]["defenseclaw.activity.diff_entries"]
     contract["labels"] = ["defenseclaw.test.name"]
@@ -2622,7 +2595,7 @@ def test_generated_only_metric_does_not_require_legacy_inventory_duplication(tmp
     instruments = {group.instrument_name for domain in ir.domains for group in domain.groups if group.type == "metric"}
     assert "defenseclaw.additive" in instruments
     inventory = yaml.safe_load(
-        (root / "docs/design/observability-v8/current-state-inventory.yaml").read_text(encoding="utf-8"),
+        (root / "schemas/telemetry/v8/compatibility/v7-compatibility-inputs.yaml").read_text(encoding="utf-8"),
     )
     assert "defenseclaw.additive" not in inventory["classes"]["emitted_metrics"]["items"]
 
@@ -2913,8 +2886,6 @@ def test_per_use_constraints_are_preserved_in_compiler_ir(tmp_path: Path) -> Non
         "max_utf8_bytes": 64,
         "pattern": "^chat$",
     }
-
-
 
 
 def test_mapping_bearing_ir_classes_are_explicitly_equality_only() -> None:
@@ -4211,9 +4182,7 @@ def test_check_preserves_unowned_and_detects_stale_outputs(tmp_path: Path) -> No
     assert _run(root, "--check").returncode == 1
     extra.unlink()
     assert _run(root, "--check").returncode == 0
-    physical_relative = module.runtime_assets.LOGICAL_TO_ENCODED[
-        "schemas/telemetry/generated/catalog.json"
-    ]
+    physical_relative = module.runtime_assets.LOGICAL_TO_ENCODED["schemas/telemetry/generated/catalog.json"]
     physical = root / physical_relative
     physical.write_bytes(physical.read_bytes() + b" ")
     result = _run(root, "--check")
@@ -4281,9 +4250,13 @@ attributes:
             "gen-ai-tool-call-result.json",
         ):
             payload = (
-                ROOT / "schemas/telemetry/v8/upstream/otel-genai-b028dceecdad117461a785c3af35315e7184e813/"
-                f"model/gen-ai/{filename}"
-            ).read_bytes().replace(b"\r\n", b"\n")
+                (
+                    ROOT / "schemas/telemetry/v8/upstream/otel-genai-b028dceecdad117461a785c3af35315e7184e813/"
+                    f"model/gen-ai/{filename}"
+                )
+                .read_bytes()
+                .replace(b"\r\n", b"\n")
+            )
             info = tarfile.TarInfo(f"semantic-conventions-genai/model/gen-ai/{filename}")
             info.size = len(payload)
             archive.addfile(info, io.BytesIO(payload))
@@ -4334,9 +4307,13 @@ def _full_genai_upstream_archive(path: Path) -> None:
             "gen-ai-tool-call-result.json",
         ):
             payload = (
-                ROOT / "schemas/telemetry/v8/upstream/otel-genai-b028dceecdad117461a785c3af35315e7184e813/"
-                f"model/gen-ai/{filename}"
-            ).read_bytes().replace(b"\r\n", b"\n")
+                (
+                    ROOT / "schemas/telemetry/v8/upstream/otel-genai-b028dceecdad117461a785c3af35315e7184e813/"
+                    f"model/gen-ai/{filename}"
+                )
+                .read_bytes()
+                .replace(b"\r\n", b"\n")
+            )
             info = tarfile.TarInfo(f"semantic-conventions-genai/model/gen-ai/{filename}")
             info.size = len(payload)
             archive.addfile(info, io.BytesIO(payload))
@@ -4585,8 +4562,7 @@ def test_updater_rejects_malformed_yaml_with_source_context(tmp_path: Path) -> N
 def test_checked_in_otel_any_values_preserve_any_value_shape() -> None:
     snapshot = json.loads(
         (
-            ROOT
-            / "schemas/telemetry/v8/upstream/otel-genai-b028dceecdad117461a785c3af35315e7184e813.normalized.json"
+            ROOT / "schemas/telemetry/v8/upstream/otel-genai-b028dceecdad117461a785c3af35315e7184e813.normalized.json"
         ).read_bytes()
     )
     for identifier in (
@@ -6854,9 +6830,7 @@ def test_materialized_digest_is_typed_and_hash_seed_deterministic(tmp_path: Path
         environment["PYTHONHASHSEED"] = seed
         result = _run(root, "--write", environment=environment)
         assert result.returncode == 0, result.stderr
-        catalog = module.runtime_assets.LOGICAL_TO_ENCODED[
-            "schemas/telemetry/generated/catalog.json"
-        ]
+        catalog = module.runtime_assets.LOGICAL_TO_ENCODED["schemas/telemetry/generated/catalog.json"]
         payload = module.runtime_assets.decode_canonical_gzip((root / catalog).read_bytes())
         observed.append(json.loads(payload)["materialized_view_sha256"])
     assert len(set(observed)) == 1
@@ -7663,7 +7637,7 @@ def test_every_hashed_authored_input_is_read_once_for_parse_and_digest(
         "schemas/telemetry/v8/operations.yaml",
         "schemas/telemetry/v8/examples.yaml",
         "schemas/telemetry/v8/compatibility/v7-exporter-selection.schema.json",
-        "docs/design/observability-v8/current-state-inventory.yaml",
+        "schemas/telemetry/v8/compatibility/v7-compatibility-inputs.yaml",
         *(f"schemas/telemetry/v8/upstream/{dependency[5]}" for dependency in DEPENDENCIES),
         *(row["path"] for row in structural_rows),
     )
@@ -7763,7 +7737,7 @@ def test_v7_exporter_selection_derivation_tracks_mapping_identity_changes(tmp_pa
 
 def test_v7_exporter_selection_rejects_hand_maintained_gateway_selector(tmp_path: Path) -> None:
     root = _fixture_root(tmp_path)
-    inventory_path = root / "docs/design/observability-v8/current-state-inventory.yaml"
+    inventory_path = root / "schemas/telemetry/v8/compatibility/v7-compatibility-inputs.yaml"
     inventory = yaml.safe_load(inventory_path.read_text(encoding="utf-8"))
     inventory["classes"]["v7_exporter_selection"]["exporters"]["gateway_jsonl"]["logs"] = [{"buckets": ["diagnostic"]}]
     _write_yaml(inventory_path, inventory)
@@ -7805,20 +7779,6 @@ def test_structured_facts_participate_in_materialized_digest() -> None:
         ).typed_canonical_json_sha256
         != ir.materialized_view.typed_canonical_json_sha256
     )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_updater_mid_publish_failure_restores_prior_bytes_and_inodes(

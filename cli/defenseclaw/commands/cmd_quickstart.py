@@ -59,9 +59,10 @@ import click
     type=click.Choice(["open", "closed"], case_sensitive=False),
     default=None,
     help=(
-        "Hook fail-mode for response-layer failures. 'open' (default) allows + logs; "
-        "'closed' blocks. Transport failures (gateway down / 5xx) ALWAYS allow unless "
-        "DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of this setting. "
+        "Hook fail-mode for delivery, authentication, and invalid gateway responses. "
+        "'open' (default) allows + logs; 'closed' blocks where the hook supports it. "
+        "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and "
+        "missing-token failures closed. "
         "Quickstart is non-interactive — pick 'closed' here to opt the agent into a "
         "stricter posture without later running `defenseclaw guardrail fail-mode`."
     ),

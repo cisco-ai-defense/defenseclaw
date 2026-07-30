@@ -18,6 +18,12 @@ defenseclaw setup openhands --mode action  # block on policy hits via hook deny
 defenseclaw setup openhands --workspace /path/to/repo
 ```
 
+<Callout type="warning">
+OpenHands connector setup is supported on macOS and Linux. OpenHands CLI
+requires WSL on Windows, and DefenseClaw does not implement a WSL connector
+path, so native Windows setup is unsupported.
+</Callout>
+
 By default this is **global/user-scoped**: DefenseClaw writes native OpenHands hook entries into `~/.openhands/hooks.json` and installs the shared hook script at `~/.defenseclaw/hooks/openhands-hook.sh`. Pass `--workspace /path/to/repo` only when you intentionally want repo-local `.openhands/hooks.json` wiring for that repository. **There is no proxy-enforcement path** for OpenHands — blocking happens hook-side with OpenHands' documented exit code `2` deny response.
 
 <Callout type="info">
@@ -33,16 +39,22 @@ The wrapper accepts the same hook-alias flags as the other hook connectors. The 
 | `--yes / -y` | off | Skip the confirmation prompt. |
 | `--mode observe\|action` | `observe` | `observe` records only; `action` returns OpenHands' documented deny response on policy hits. |
 | `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks wire in. |
-| `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also bring up the bundled Prom/Loki/Tempo/Grafana stack via `setup local-observability up`. |
+| `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also run `setup local-observability up`; follow the command's printed gateway-restart step after it writes the export destination. |
 | `--workspace / --workspace-dir` | unset | Opt into repo-local `.openhands/hooks.json`; unset means global `~/.openhands/hooks.json`. |
 
-`setup openhands` is shorthand for `setup guardrail --connector openhands`: it adds or reconfigures OpenHands, defaults the connector to observe mode, and can join an existing hook-connector roster when you choose **Add**. `claw.workspace_dir` is cleared for global setup and set only when `--workspace` is supplied. `guardrail.mode` changes to `action` only when `--mode action` is passed. To tune OpenHands after install, keep using [`defenseclaw setup guardrail --connector openhands`](/docs/setup/guardrail).
+`setup openhands` is the dedicated OpenHands alias. It uses the shared
+guardrail setup backend, defaults to observe mode, and can join an existing
+hook-connector roster when you choose **Add**. `claw.workspace_dir` is cleared
+for global setup and set only when `--workspace` is supplied. See the
+[quick-alias reference](/docs/setup/guardrail/aliases) for common options and
+[full guardrail setup](/docs/setup/guardrail) for advanced scanner and judge
+configuration.
 
 #### Version contract
 
 DefenseClaw validates the installed OpenHands CLI version during setup when the trusted `openhands --version` probe succeeds. The OpenHands connector is documented and tested against `OpenHands CLI 1.16.0`; the hook contract remains listed as "unversioned / documented hooks" until upstream publishes a hook-version floor for `.openhands/hooks.json`.
 
-<Callout type="warn">
+<Callout type="warning">
 Global OpenHands setup observes local OpenHands sessions that load `~/.openhands/hooks.json`. A repository-local `.openhands/hooks.json` can still override or layer with that behavior depending on OpenHands' own config loading. Use `--workspace` when you want DefenseClaw to manage a repo-local file explicitly.
 </Callout>
 
@@ -58,7 +70,7 @@ DefenseClaw writes the native OpenHands shape: top-level `snake_case` event keys
       "hooks": [
         {
           "type": "command",
-          "command": "~/.defenseclaw/hooks/openhands-hook.sh",
+          "command": "/home/<you>/.defenseclaw/hooks/openhands-hook.sh",
           "timeout": 60
         }
       ]
@@ -66,6 +78,9 @@ DefenseClaw writes the native OpenHands shape: top-level `snake_case` event keys
   ]
 }
 ```
+
+The generated value is the absolute, shell-quoted hook-script path for the
+current DefenseClaw data directory; `~` is not written literally.
 
 OpenHands can block `pre_tool_use`, `user_prompt_submit`, and `stop`. Non-blocking events still feed telemetry and audit. When DefenseClaw blocks, the hook script returns JSON shaped like OpenHands expects:
 
@@ -114,7 +129,7 @@ OpenHands can block supported hook events but has no native human-approval surfa
 ## Disable
 
 ```bash
-defenseclaw setup guardrail --disable
+defenseclaw guardrail disable --connector openhands --yes
 ```
 
 Teardown removes DefenseClaw-owned hook entries from `~/.openhands/hooks.json` or the pinned workspace hook file and leaves unrelated OpenHands hooks untouched.

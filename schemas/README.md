@@ -111,7 +111,8 @@ A developer bucket change is a versioned contract change across both authorities
 4. Regenerate and review every runtime catalog, compatibility projection,
    producer fixture, route default, example, and dashboard query.
 5. Run `make telemetry-check`, `make check-schemas`,
-   `make check-observability-v8-spec`, and the affected Go/Python tests.
+   `make check-observability-v8-hard-cut`, `make check-grafana-dashboards`, and
+   the affected Go/Python tests.
 
 Do not add a bucket by editing a generated catalog or destination profile. A
 destination selects canonical families; it does not own their classification.

@@ -203,7 +203,7 @@ def default_first_run_fields() -> tuple[FirstRunField, ...]:
             "choice",
             "open",
             FAIL_MODE_CHOICES,
-            "On response-layer failure: open=allow+log (recommended), closed=block.",
+            "On delivery/auth/response failure: open=allow+log, closed=block where supported.",
         ),
         FirstRunField(
             "HITL",

@@ -1,6 +1,8 @@
 # splunk
 
 This directory contains the local-mode Splunk configuration bundle.
+Operator setup and integration behavior are maintained in the
+[published Splunk guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/splunk/).
 
 Using this bundle to start local Splunk means the operator is representing that
 they have reviewed and accepted the then-current Splunk General Terms,
@@ -54,25 +56,10 @@ long-term archival or customer-managed production path.
 
 ## Optional S3 Export
 
-The quickest demo path is:
-
-```bash
-export AWS_ACCESS_KEY_ID=...
-export AWS_SECRET_ACCESS_KEY=...
-
-defenseclaw setup splunk --s3-export \
-  --s3-bucket agentwatch-demo \
-  --s3-prefix agentwatch/defenseclaw \
-  --aws-region us-west-2 \
-  --accept-splunk-license \
-  --non-interactive
-```
-
-For a short demo loop, set `S3_EXPORT_INTERVAL_SECONDS=30` before running setup.
-The exporter writes JSONL.GZ data objects by tenant/workspace/day/hour partition
-and writes one companion manifest for each non-empty batch. See
-`../s3_exporter/README.md` for MinIO/Localstack examples, manifest shape,
-expected delay, and edge cases.
+The exporter writes JSONL.GZ data objects by tenant/workspace/day/hour
+partition and one companion manifest for each non-empty batch. Its
+environment contract, object schema, test commands, and edge cases are
+documented in [`../s3_exporter/README.md`](../s3_exporter/README.md).
 
 ## Supported Pattern
 
