@@ -27,12 +27,17 @@ without network access. :func:`guard_url` uses
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import contextvars
+import functools
 import ipaddress
 import os
 import socket
 import threading
-from collections.abc import Callable, Iterator
+import weakref
+from collections.abc import AsyncIterator, Callable, Iterator
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 # RFC 6598 carrier-grade NAT range. Python's ``ipaddress.is_private``
@@ -305,6 +310,85 @@ def resolve_and_pin(
 # :func:`socket.getaddrinfo`, so pinning there covers every client.
 
 _GETADDRINFO_PIN_LOCK = threading.Lock()
+_ANALYZER_DNS_ALLOWED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "defenseclaw_analyzer_dns_allowed",
+    default=False,
+)
+_MISSING_LOOP_RESOLVER = object()
+
+
+@dataclass
+class _AsyncResolverPinState:
+    users: int
+    original_override: object
+
+
+_ASYNC_RESOLVER_STATES: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, _AsyncResolverPinState
+] = weakref.WeakKeyDictionary()
+_ASYNC_RESOLVER_STATE_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def analyzer_dns_resolution() -> Iterator[None]:
+    """Let a configured scanner analyzer resolve its service endpoint."""
+    token = _ANALYZER_DNS_ALLOWED.set(True)
+    try:
+        yield
+    finally:
+        _ANALYZER_DNS_ALLOWED.reset(token)
+
+
+@contextlib.asynccontextmanager
+async def pinned_async_getaddrinfo() -> AsyncIterator[None]:
+    """Route the active event loop's resolver through the socket pin."""
+    loop = asyncio.get_running_loop()
+
+    async def _through_socket(
+        host,
+        port,
+        *,
+        family=0,
+        type=0,
+        proto=0,
+        flags=0,
+    ):
+        resolve = functools.partial(
+            socket.getaddrinfo,
+            host,
+            port,
+            family,
+            type,
+            proto,
+            flags,
+        )
+        return await asyncio.to_thread(resolve)
+
+    with _ASYNC_RESOLVER_STATE_LOCK:
+        state = _ASYNC_RESOLVER_STATES.get(loop)
+        if state is None:
+            original_override = vars(loop).get(
+                "getaddrinfo",
+                _MISSING_LOOP_RESOLVER,
+            )
+            loop.getaddrinfo = _through_socket  # type: ignore[method-assign]
+            state = _AsyncResolverPinState(1, original_override)
+            _ASYNC_RESOLVER_STATES[loop] = state
+        else:
+            state.users += 1
+
+    try:
+        yield
+    finally:
+        with _ASYNC_RESOLVER_STATE_LOCK:
+            state.users -= 1
+            if state.users == 0:
+                if state.original_override is _MISSING_LOOP_RESOLVER:
+                    if "getaddrinfo" in vars(loop):
+                        del loop.getaddrinfo
+                else:
+                    loop.getaddrinfo = state.original_override  # type: ignore[method-assign]
+                del _ASYNC_RESOLVER_STATES[loop]
 
 
 @contextlib.contextmanager
@@ -317,7 +401,9 @@ def pinned_getaddrinfo(host: str, port: int, ip: str) -> Iterator[None]:
     *different* port is also re-pointed at the vetted IP (clients may dial
     a derived port). A lookup for any *other* host raises :class:`SSRFError`
     so a library cannot side-channel a request to an unvetted destination
-    during the pinned operation.
+    during the pinned operation. Configured analyzers can opt into their
+    normal resolver in a task-local scope; MCP redirects and proxy lookups
+    stay pinned.
 
     Held under a process-wide lock for the duration of the block because it
     monkeypatches a module global; concurrent pinned fetches serialise on
@@ -344,6 +430,15 @@ def pinned_getaddrinfo(host: str, port: int, ip: str) -> Iterator[None]:
             except ValueError:
                 pass
             if not matches_pin:
+                if _ANALYZER_DNS_ALLOWED.get():
+                    return original(
+                        host,
+                        port,
+                        family,
+                        type,
+                        proto,
+                        flags,
+                    )
                 raise SSRFError(
                     f"unexpected DNS resolution for {asked!r} during pinned "
                     f"fetch of {target_host!r} (possible DNS rebinding)"

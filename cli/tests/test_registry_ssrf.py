@@ -18,6 +18,7 @@ so the suite never touches real DNS.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import sys
@@ -30,8 +31,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from defenseclaw.registries.ssrf import (
     SSRFError,
+    analyzer_dns_resolution,
     guard_git_url,
     guard_url,
+    pinned_async_getaddrinfo,
     pinned_getaddrinfo,
     resolve_and_pin,
 )
@@ -413,15 +416,97 @@ class TestPinnedGetaddrinfo(unittest.TestCase):
 
         self.assertEqual(calls, [])
 
-    def test_unexpected_host_is_refused(self):
-        # A side-channel lookup for a *different* host during the pinned
-        # operation is refused, so a library cannot escape to an unvetted
-        # (and possibly internal) destination mid-request.
+    def test_unexpected_public_host_is_refused(self):
+        calls = []
+
+        def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            calls.append((host, port))
+            return [
+                (
+                    socket.AF_INET,
+                    type or socket.SOCK_STREAM,
+                    proto,
+                    "",
+                    ("8.8.8.8", port),
+                )
+            ]
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+                for host in ("proxy.example", b"proxy.example"):
+                    with self.subTest(host=host):
+                        with self.assertRaises(SSRFError):
+                            socket.getaddrinfo(host, 443)
+
+        self.assertEqual(calls, [])
+
+    def test_analyzer_dns_scope_allows_unrelated_host_and_resets(self):
+        calls = []
+
+        def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            calls.append((host, port))
+            return [
+                (
+                    socket.AF_INET,
+                    type or socket.SOCK_STREAM,
+                    proto,
+                    "",
+                    ("8.8.8.8", port),
+                )
+            ]
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+                with analyzer_dns_resolution():
+                    infos = socket.getaddrinfo("analyzer.example", 443)
+                with self.assertRaises(SSRFError):
+                    socket.getaddrinfo("analyzer.example", 443)
+
+        self.assertEqual(calls, [("analyzer.example", 443)])
+        self.assertEqual({info[4][0] for info in infos}, {"8.8.8.8"})
+
+    def test_analyzer_dns_scope_resets_on_exception(self):
         with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
-            for host in ("evil.internal", b"evil.internal"):
-                with self.subTest(host=host):
-                    with self.assertRaises(SSRFError):
-                        socket.getaddrinfo(host, 443)
+            with self.assertRaises(RuntimeError):
+                with analyzer_dns_resolution():
+                    raise RuntimeError("boom")
+            with self.assertRaises(SSRFError):
+                socket.getaddrinfo("analyzer.example", 443)
+
+    def test_analyzer_dns_scope_is_task_local(self):
+        calls = []
+
+        def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            node = host.decode("ascii") if isinstance(host, bytes) else str(host)
+            calls.append(node)
+            return [
+                (
+                    socket.AF_INET,
+                    type or socket.SOCK_STREAM,
+                    proto,
+                    "",
+                    ("8.8.8.8", port),
+                )
+            ]
+
+        async def run_lookups():
+            async def analyzer_lookup():
+                with analyzer_dns_resolution():
+                    return await anyio.getaddrinfo("analyzer.example", 443)
+
+            async def transport_lookup():
+                with self.assertRaises(SSRFError):
+                    await anyio.getaddrinfo("proxy.example", 443)
+
+            async with pinned_async_getaddrinfo():
+                return await asyncio.gather(analyzer_lookup(), transport_lookup())
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+                results = anyio.run(run_lookups)
+
+        self.assertEqual(calls, ["analyzer.example"])
+        self.assertEqual({info[4][0] for info in results[0]}, {"8.8.8.8"})
 
     def test_getaddrinfo_restored_after_block(self):
         original = socket.getaddrinfo
@@ -435,6 +520,106 @@ class TestPinnedGetaddrinfo(unittest.TestCase):
             with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
                 raise RuntimeError("boom")
         self.assertIs(socket.getaddrinfo, original)
+
+    def test_async_getaddrinfo_restored_after_block(self):
+        async def check_restoration():
+            loop = asyncio.get_running_loop()
+            original = loop.getaddrinfo
+            had_override = "getaddrinfo" in vars(loop)
+            async with pinned_async_getaddrinfo():
+                self.assertNotEqual(loop.getaddrinfo, original)
+            self.assertEqual(loop.getaddrinfo, original)
+            self.assertEqual("getaddrinfo" in vars(loop), had_override)
+
+        anyio.run(check_restoration)
+
+    def test_async_getaddrinfo_restored_on_exception(self):
+        async def check_restoration():
+            loop = asyncio.get_running_loop()
+            original = loop.getaddrinfo
+            with self.assertRaises(RuntimeError):
+                async with pinned_async_getaddrinfo():
+                    raise RuntimeError("boom")
+            self.assertEqual(loop.getaddrinfo, original)
+
+        anyio.run(check_restoration)
+
+    def test_overlapping_async_pin_scopes_restore_after_last_exit(self):
+        try:
+            __import__("uvloop")
+        except ImportError:
+            self.skipTest("uvloop is not installed")
+
+        async def check_overlap():
+            loop = asyncio.get_running_loop()
+            had_override = "getaddrinfo" in vars(loop)
+            first_entered = asyncio.Event()
+            second_entered = asyncio.Event()
+            first_exited = asyncio.Event()
+
+            async def first_scope():
+                async with pinned_async_getaddrinfo():
+                    first_entered.set()
+                    await second_entered.wait()
+                first_exited.set()
+
+            async def second_scope():
+                await first_entered.wait()
+                async with pinned_async_getaddrinfo():
+                    second_entered.set()
+                    await first_exited.wait()
+                    with self.assertRaises(SSRFError):
+                        await anyio.getaddrinfo("localhost", 443)
+
+            await asyncio.gather(first_scope(), second_scope())
+            self.assertEqual("getaddrinfo" in vars(loop), had_override)
+
+        with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+            anyio.run(
+                check_overlap,
+                backend_options={"use_uvloop": True},
+            )
+
+    def test_async_pin_covers_uvloop(self):
+        try:
+            __import__("uvloop")
+        except ImportError:
+            self.skipTest("uvloop is not installed")
+        calls = []
+
+        def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            node = host.decode("ascii") if isinstance(host, bytes) else str(host)
+            calls.append(node)
+            address = "8.8.8.8" if node == "analyzer.example" else node
+            return [
+                (
+                    socket.AF_INET,
+                    type or socket.SOCK_STREAM,
+                    proto,
+                    "",
+                    (address, port),
+                )
+            ]
+
+        async def run_lookups():
+            async with pinned_async_getaddrinfo():
+                target = await anyio.getaddrinfo("rebind.example", 443)
+                with analyzer_dns_resolution():
+                    analyzer = await anyio.getaddrinfo("analyzer.example", 443)
+                with self.assertRaises(SSRFError):
+                    await anyio.getaddrinfo("proxy.example", 443)
+                return target, analyzer
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+                target, analyzer = anyio.run(
+                    run_lookups,
+                    backend_options={"use_uvloop": True},
+                )
+
+        self.assertEqual(calls, ["93.184.216.34", "analyzer.example"])
+        self.assertEqual({info[4][0] for info in target}, {"93.184.216.34"})
+        self.assertEqual({info[4][0] for info in analyzer}, {"8.8.8.8"})
 
     def test_ip_literal_matching_pin_is_allowed(self):
         # A client that pre-resolves and re-calls getaddrinfo with the IP
