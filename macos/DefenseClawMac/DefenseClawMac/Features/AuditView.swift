@@ -107,9 +107,10 @@ struct AuditView: View {
         )) {
             if let event = selectedEvent {
                 auditInspector(event)
-                    .inspectorColumnWidth(min: 360, ideal: 480)
+                    .dcInspectorColumnWidth()
             }
         }
+        .reportsDetailInspector(selectedEvent != nil)
         .searchable(text: $search, placement: .toolbar, prompt: "Search action, target, details")
         .toolbar {
             ToolbarItemGroup {

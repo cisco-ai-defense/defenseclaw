@@ -26,6 +26,57 @@ enum InventoryOutputParser {
     static let maximumCandidateCount = 64
     private static let maximumNestingDepth = 512
 
+    /// DefenseClaw 0.8.5+ serializes these expected connector limitations in
+    /// `errors` and emits a failure warning for them. They explain empty
+    /// categories; they do not represent failed inventory collection.
+    private static let nonActionableCapabilityNotes: [String: String] = [
+        "agents": "agents are not a first-class concept on this connector",
+        "tools": "tool registry is owned by each plugin's manifest",
+        "models": "model providers are configured inside the framework",
+        "memory": "memory backend is private to the framework",
+    ]
+
+    /// Prefer structured errors so known capability notes can be separated
+    /// from real subprocess, permission, and configuration failures. Older
+    /// payloads without details retain their summary count.
+    static func actionableErrorCount(in document: [String: Any]) -> Int {
+        if let errors = document["errors"] as? [Any] {
+            return errors.reduce(into: 0) { count, error in
+                if !isNonActionableCapabilityNote(error, in: document) {
+                    count += 1
+                }
+            }
+        }
+        let summary = document["summary"] as? [String: Any]
+        if let count = summary?["errors"] as? Int { return max(0, count) }
+        if let count = summary?["errors"] as? NSNumber { return max(0, count.intValue) }
+        return 0
+    }
+
+    /// Collapse per-connector aggregate warnings into one accurate warning,
+    /// preserving every unrelated diagnostic line.
+    static func userFacingDiagnostics(from result: InventoryOutputParseResult) -> String {
+        var removedAggregateWarning = false
+        var lines = result.diagnostics.components(separatedBy: .newlines).filter { line in
+            if isAggregateInventoryFailureWarning(line) {
+                removedAggregateWarning = true
+                return false
+            }
+            return !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+
+        let failureCount = result.documents.reduce(0) {
+            $0 + actionableErrorCount(in: $1)
+        }
+        if removedAggregateWarning, failureCount > 0 {
+            lines.insert(
+                "Warning: \(failureCount) connector inventory command(s) failed",
+                at: 0
+            )
+        }
+        return lines.joined(separator: "\n")
+    }
+
     /// First syntactically valid top-level JSON array in mixed CLI output.
     /// Diagnostics may contain stray brackets before the real payload.
     static func firstJSONArrayData(in output: String) -> Data? {
@@ -78,6 +129,36 @@ enum InventoryOutputParser {
         document["connector"] != nil
             || document["claw_mode"] != nil
             || document["summary"] != nil
+    }
+
+    private static func isNonActionableCapabilityNote(
+        _ value: Any,
+        in document: [String: Any]
+    ) -> Bool {
+        guard let error = value as? [String: Any],
+              let command = error["command"] as? String,
+              let message = error["error"] as? String
+        else { return false }
+
+        let connector = (document["connector"] as? String)
+            ?? (document["claw_mode"] as? String)
+            ?? ""
+        guard !connector.isEmpty else { return false }
+
+        return nonActionableCapabilityNotes.contains { category, expectedMessage in
+            command.caseInsensitiveCompare("\(connector):\(category)") == .orderedSame
+                && message == expectedMessage
+        }
+    }
+
+    private static func isAggregateInventoryFailureWarning(_ line: String) -> Bool {
+        let value = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = "Warning: "
+        let suffix = " connector inventory command(s) failed"
+        guard value.hasPrefix(prefix), value.hasSuffix(suffix) else { return false }
+        let countStart = value.index(value.startIndex, offsetBy: prefix.count)
+        let countEnd = value.index(value.endIndex, offsetBy: -suffix.count)
+        return Int(value[countStart..<countEnd]) != nil
     }
 
     private struct CandidateRange {

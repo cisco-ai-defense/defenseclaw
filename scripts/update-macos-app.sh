@@ -100,6 +100,13 @@ maintained_paths=(
     Tests
     script/build_and_run.sh
     script/test_connector_onboarding.sh
+    script/test_alert_queue_projection.sh
+    script/test_cli_cancellation.sh
+    script/test_inspector_layout_policy.sh
+    script/test_inventory_capability_warnings.sh
+    script/test_runtime_contract_surfaces.sh
+    script/test_runtime_protected_artifact.sh
+    script/test_structured_detail_parser.sh
     tools
     images
     .gitignore

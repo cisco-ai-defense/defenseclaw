@@ -26,6 +26,7 @@ mkdir -p "$MODULE_CACHE"
 
 CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" xcrun swiftc \
   -module-cache-path "$MODULE_CACHE" \
+  "$ROOT/DefenseClawMac/DataLayer/AlertDispositionCommand.swift" \
   "$ROOT/DefenseClawMac/DataLayer/CommandRegistry.swift" \
   "$ROOT/DefenseClawMac/DataLayer/InstallationContext.swift" \
   "$ROOT/DefenseClawMac/DataLayer/ConfigStore.swift" \

@@ -788,6 +788,13 @@ macos-app-build: macos-app-license-check
 
 macos-app-test:
 	macos/DefenseClawMac/script/test_connector_onboarding.sh
+	macos/DefenseClawMac/script/test_alert_queue_projection.sh
+	macos/DefenseClawMac/script/test_cli_cancellation.sh
+	macos/DefenseClawMac/script/test_inspector_layout_policy.sh
+	macos/DefenseClawMac/script/test_inventory_capability_warnings.sh
+	macos/DefenseClawMac/script/test_runtime_contract_surfaces.sh
+	macos/DefenseClawMac/script/test_runtime_protected_artifact.sh
+	macos/DefenseClawMac/script/test_structured_detail_parser.sh
 	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
 	macos/DefenseClawMac/script/test_numeric_safety.sh
 	macos/DefenseClawMac/script/test_output_safety.sh

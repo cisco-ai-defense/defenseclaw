@@ -223,6 +223,7 @@ final class AppState {
     var overviewEnforcementMetrics = OverviewEnforcementMetrics()
     /// Last `alerts acknowledge` failure, surfaced in the popover/panel.
     var ackError: String?
+    var ackInProgress = false
     var scanInFlight = false
 
     // UI state
@@ -250,6 +251,9 @@ final class AppState {
     var auditPresetRequest: String?
     var logPanelRequest: LogPanelRequest?
     var commandPalettePresented = false
+    /// Shared presentation signal for the main window's responsive
+    /// sidebar/detail/inspector layout. Only the visible panel publishes it.
+    var detailInspectorPresented = false
 
     // Settings (mirrored via @AppStorage in views; defaults here)
     @ObservationIgnored @AppStorage(SettingsKeys.pulseInterval) var pulseInterval: Double = 5
@@ -811,49 +815,65 @@ final class AppState {
         connectorSetupInFlight.contains(ConnectorOnboarding.normalizedConnector(name))
     }
 
-    /// Mirrors the TUI exactly: `defenseclaw alerts acknowledge --severity <S>`
-    /// downgrades that whole severity class to ACK in the audit DB. Audit rows
-    /// then drop out of the queue on refresh by themselves. Scan blocks and
-    /// egress rows are NOT suppressed — they come from the immutable
-    /// gateway.jsonl and the TUI re-shows them on every reload; hiding them
-    /// locally made Findings drift to zero against the TUI. Use Dismiss for a
-    /// view-local hide (also TUI parity: cleared on next app launch).
+    /// Runtime 0.8.6 accepts severity selectors directly, while current
+    /// mainline confirms those broad mutations interactively. The invocation
+    /// helper preserves the tagged-runtime argv and supplies that confirmation
+    /// over stdin for forward compatibility. Audit rows drop from the queue via
+    /// the acknowledgement projection; synthetic stream rows remain a local
+    /// hide because they have no protected audit disposition.
     func acknowledge(_ rows: [AlertRow]) async {
+        guard !rows.isEmpty, !ackInProgress else { return }
+        ackInProgress = true
+        defer { ackInProgress = false }
+
         ackError = nil
         var severities = Set<Severity>()
+        var localRows: [AlertRow] = []
         for row in rows {
             if case .audit = row {
                 severities.insert(row.severity)
             } else {
-                // Scan blocks / egress rows have no DB-side ack (they live in
-                // gateway.jsonl). An explicit Ack is still a user request to
-                // clear them, so hide them view-locally — the TUI's
-                // "Dismiss all" does the same local clear. Passive refreshes
-                // never suppress them (Findings parity).
-                dismissedIDs.insert(row.id)
+                localRows.append(row)
             }
         }
-        for severity in severities {
+        var failures: [String] = []
+        for severity in severities.sorted(by: >) {
+            let invocation = AlertDispositionCommand.acknowledge(severity: severity.rawValue)
             let result = await runCommand(
                 title: "Acknowledge \(severity.rawValue) alerts",
-                arguments: ["alerts", "acknowledge", "--severity", severity.rawValue],
+                arguments: invocation.arguments,
+                standardInput: invocation.standardInput,
                 category: "alerts",
                 origin: "Alerts",
                 successEffects: ["\(severity.rawValue) alerts acknowledged"]
             )
             if !result.succeeded {
-                ackError = "alerts acknowledge \(severity.rawValue) failed (exit \(result.exitCode))"
+                let detail = result.output
+                    .split(separator: "\n")
+                    .last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+                    .map { String($0.prefix(120)) }
+                failures.append(
+                    "\(severity.rawValue) failed (exit \(result.exitCode))"
+                        + (detail.map { ": \($0)" } ?? "")
+                )
             }
+        }
+        if failures.isEmpty {
+            for row in localRows { dismissedIDs.insert(row.id) }
+        } else {
+            ackError = "alerts acknowledge " + failures.joined(separator: "; ")
         }
         await refreshAlerts()
     }
 
-    /// `defenseclaw alerts dismiss --severity <S|all>` — same DB semantics as the TUI.
+    /// Severity-wide dismissal with the same cross-runtime confirmation bridge.
     func dismissViaCLI(severity: Severity?) async {
         ackError = nil
+        let invocation = AlertDispositionCommand.dismiss(severity: severity?.rawValue)
         let result = await runCommand(
             title: "Dismiss alerts",
-            arguments: ["alerts", "dismiss", "--severity", severity?.rawValue ?? "all"],
+            arguments: invocation.arguments,
+            standardInput: invocation.standardInput,
             category: "alerts",
             origin: "Alerts",
             successEffects: ["Alert queue updated"]

@@ -19,6 +19,36 @@
 
 import SwiftUI
 
+private struct DetailInspectorPresentationReporter: ViewModifier {
+    @Environment(AppState.self) private var appState
+    let isPresented: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { appState.detailInspectorPresented = isPresented }
+            .onChange(of: isPresented) { _, presented in
+                appState.detailInspectorPresented = presented
+            }
+            .onDisappear {
+                if isPresented { appState.detailInspectorPresented = false }
+            }
+    }
+}
+
+extension View {
+    func dcInspectorColumnWidth() -> some View {
+        inspectorColumnWidth(
+            min: InspectorLayoutPolicy.minimumWidth,
+            ideal: InspectorLayoutPolicy.idealWidth,
+            max: InspectorLayoutPolicy.maximumWidth
+        )
+    }
+
+    func reportsDetailInspector(_ isPresented: Bool) -> some View {
+        modifier(DetailInspectorPresentationReporter(isPresented: isPresented))
+    }
+}
+
 struct SeverityBadge: View {
     let severity: Severity
 
@@ -246,11 +276,19 @@ struct KeyValueGrid: View {
         Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 5) {
             ForEach(Array(pairs.enumerated()), id: \.offset) { _, pair in
                 GridRow {
-                    Text(pair.0).font(.caption).foregroundStyle(.secondary)
-                    Text(pair.1).font(.caption).textSelection(.enabled)
+                    Text(pair.0)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Text(pair.1)
+                        .font(.caption)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

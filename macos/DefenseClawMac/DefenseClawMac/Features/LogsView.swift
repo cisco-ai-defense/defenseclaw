@@ -100,9 +100,10 @@ struct LogsView: View {
         .inspector(isPresented: inspectorPresented) {
             if let selectedDisplayRow {
                 logInspector(selectedDisplayRow)
-                    .inspectorColumnWidth(min: 300, ideal: 380)
+                    .dcInspectorColumnWidth()
             }
         }
+        .reportsDetailInspector(selectedDisplayRow != nil)
         .searchable(text: $search, placement: .toolbar, prompt: "Search log lines")
         .toolbar {
             ToolbarItemGroup {
@@ -145,9 +146,13 @@ struct LogsView: View {
     private var filterBar: some View {
         @Bindable var state = appState
         return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 12) {
-                Picker("Stream", selection: $stream) {
-                    ForEach(LogStream.allCases) { s in Text(s.title).tag(s) }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    streamPicker.frame(maxWidth: 440)
+                    Spacer()
+                    redactionStatus
+                    redactionButton
+                    ConnectorFilterChip(names: appState.activeConnectorNames, selection: $state.connectorFilter)
                 }
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 440)
@@ -183,22 +188,96 @@ struct LogsView: View {
                         Text("≥ \($0.rawValue)").tag(Optional($0))
                     }
                 }
-                .frame(width: 150)
-                Picker("Action", selection: $actionFilter) {
-                    ForEach(Self.actionOptions, id: \.self) { Text($0).tag($0) }
+            }
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    FilterChipRow(
+                        "Preset",
+                        options: [("Preset: all", LogPreset.all)] +
+                            LogPreset.allCases.dropFirst().map { ($0.rawValue, $0) },
+                        selection: $preset
+                    )
+                    severityPicker.frame(width: 150)
+                    actionPicker.frame(width: 120)
+                    eventPicker.frame(width: 120)
+                    Spacer()
+                    resultCount
                 }
-                .frame(width: 120)
-                Picker("Event", selection: $eventTypeFilter) {
-                    ForEach(Self.eventTypeOptions, id: \.self) { Text($0).tag($0) }
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 10) {
+                        Picker("Preset", selection: $preset) {
+                            ForEach(LogPreset.allCases) { Text($0.rawValue).tag($0) }
+                        }
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                        severityPicker.frame(maxWidth: 170)
+                        Spacer()
+                    }
+                    HStack(spacing: 10) {
+                        actionPicker.frame(maxWidth: 130)
+                        eventPicker.frame(maxWidth: 130)
+                        Spacer()
+                        resultCount
+                    }
                 }
-                .frame(width: 120)
-                Spacer()
-                Text("\(displayRows.count) shown · \(filtered.count) matching · \(rows.count) total")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
             }
         }
         .padding(10)
+    }
+
+    private var streamPicker: some View {
+        Picker("Stream", selection: $stream) {
+            ForEach(LogStream.allCases) { Text($0.title).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        .onChange(of: stream) { _, _ in Task { await load(force: true) } }
+    }
+
+    @ViewBuilder
+    private var redactionStatus: some View {
+        if !appState.config.redactionEnabled {
+            Text("RAW — redaction off")
+                .font(.caption2.weight(.bold))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(Cisco.orange.opacity(0.18), in: Capsule())
+                .foregroundStyle(Cisco.orange)
+                .help("redaction off - `defenseclaw setup redaction on` to re-enable")
+        }
+    }
+
+    private var redactionButton: some View {
+        Button("Redaction…") { showRedactionToggle = true }
+            .controlSize(.small)
+            .help("Toggle the redaction kill-switch (runs defenseclaw setup redaction on|off)")
+    }
+
+    private var severityPicker: some View {
+        Picker("Severity ≥", selection: $severityFloor) {
+            Text("Any severity").tag(Optional<Severity>.none)
+            ForEach([Severity.critical, .high, .medium, .low], id: \.self) {
+                Text("≥ \($0.rawValue)").tag(Optional($0))
+            }
+        }
+    }
+
+    private var actionPicker: some View {
+        Picker("Action", selection: $actionFilter) {
+            ForEach(Self.actionOptions, id: \.self) { Text($0).tag($0) }
+        }
+    }
+
+    private var eventPicker: some View {
+        Picker("Event", selection: $eventTypeFilter) {
+            ForEach(Self.eventTypeOptions, id: \.self) { Text($0).tag($0) }
+        }
+    }
+
+    private var resultCount: some View {
+        Text("\(displayRows.count) shown · \(filtered.count) matching · \(rows.count) total")
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
     }
 
     private var logList: some View {
@@ -332,39 +411,43 @@ struct LogsView: View {
     }
 
     private func logInspector(_ item: DisplayLogRow) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Event Details").font(.headline)
-                Spacer()
-                Button { selectedRowID = nil } label: {
-                    Image(systemName: "xmark.circle.fill")
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Event Details").font(.headline)
+                    Spacer()
+                    Button { selectedRowID = nil } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Close Inspector")
                 }
-                .buttonStyle(.borderless)
-                .help("Close Inspector")
-            }
-            Text(item.message)
-                .font(.system(.callout, design: .monospaced))
-                .textSelection(.enabled)
-            KeyValueGrid(pairs: [
-                ("First", item.row.timestamp.formatted(date: .abbreviated, time: .standard)),
-                ("Last", item.lastTimestamp.formatted(date: .abbreviated, time: .standard)),
-                ("Stream", item.row.stream.title),
-                ("Event", item.row.eventType),
-                ("Action", item.row.action),
-                ("Severity", item.row.severity.rawValue),
-                ("Connector", item.row.connector),
-                ("Occurrences", "\(item.count)"),
-            ].filter { !$0.1.isEmpty })
-            Divider()
-            Text("Raw Event").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            ScrollView {
+                Text(item.message)
+                    .font(.system(.callout, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                KeyValueGrid(pairs: [
+                    ("First", item.row.timestamp.formatted(date: .abbreviated, time: .standard)),
+                    ("Last", item.lastTimestamp.formatted(date: .abbreviated, time: .standard)),
+                    ("Stream", item.row.stream.title),
+                    ("Event", item.row.eventType),
+                    ("Action", item.row.action),
+                    ("Severity", item.row.severity.rawValue),
+                    ("Connector", item.row.connector),
+                    ("Occurrences", "\(item.count)"),
+                ].filter { !$0.1.isEmpty })
+                Divider()
+                Text("Raw Event").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 Text(item.row.rawJSON)
                     .font(.system(.caption, design: .monospaced))
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(12)
     }
 
     /// Refreshes from the stream buffer, but only publishes when the tail

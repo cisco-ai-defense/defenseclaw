@@ -614,37 +614,6 @@ enum ConfigEditorCatalog {
         ))
 
         sections.append(ConfigEditorSection(
-            name: "OTel",
-            summary: "OpenTelemetry exporter config.",
-            fields: [
-                .init(label: ".. Process-wide policy ..", key: "", kind: .header),
-                .init(label: "Enabled", key: "otel.enabled", kind: .bool, hint: "Master OpenTelemetry export switch."),
-                .init(label: ".. Traces ..", key: "", kind: .header),
-                .init(label: "Sampler", key: "otel.traces.sampler", kind: .choice,
-                      options: ["always_on", "always_off", "traceidratio",
-                                "parentbased_always_on", "parentbased_always_off", "parentbased_traceidratio"],
-                      hint: "Trace sampler."),
-                .init(label: "Sampler Arg", key: "otel.traces.sampler_arg", hint: "Trace sampler argument."),
-                .init(label: ".. Logs ..", key: "", kind: .header),
-                .init(label: "Emit individual findings", key: "otel.logs.emit_individual_findings", kind: .bool,
-                      hint: "One record per finding."),
-                .init(label: ".. Metrics ..", key: "", kind: .header),
-                .init(label: "Export interval (s)", key: "otel.metrics.export_interval_s", kind: .int,
-                      hint: "Seconds between metric pushes."),
-                .init(label: "Temporality", key: "otel.metrics.temporality", kind: .choice,
-                      options: ["delta", "cumulative"], hint: "Metric temporality."),
-                .init(label: ".. Batch ..", key: "", kind: .header),
-                .init(label: "Max export batch size", key: "otel.batch.max_export_batch_size", kind: .int,
-                      hint: "Max records per request."),
-                .init(label: "Scheduled delay (ms)", key: "otel.batch.scheduled_delay_ms", kind: .int,
-                      hint: "Batch flush delay."),
-                .init(label: "Max queue size", key: "otel.batch.max_queue_size", kind: .int, hint: "In-memory queue size."),
-                .init(label: ".. Resource ..", key: "", kind: .header),
-                .init(label: "Attributes", key: "otel.resource.attributes", hint: "CSV resource attributes."),
-            ]
-        ))
-
-        sections.append(ConfigEditorSection(
             name: "Skill Actions", summary: "Skill admission response matrix.",
             fields: actionMatrixFields("skill_actions")
         ))

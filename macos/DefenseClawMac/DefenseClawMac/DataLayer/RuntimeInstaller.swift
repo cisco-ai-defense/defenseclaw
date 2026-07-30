@@ -25,12 +25,36 @@
 import CryptoKit
 import Foundation
 
+enum ProtectedArtifactError: Error, Equatable, LocalizedError {
+    case invalidEnvelope
+    case emptyPayload
+    case checksumMismatch
+    case invalidSize
+    case outputCreationFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidEnvelope:
+            return "Protected artifact header is invalid."
+        case .emptyPayload:
+            return "Protected artifact contains no payload."
+        case .checksumMismatch:
+            return "Protected artifact changed after verification."
+        case .invalidSize:
+            return "Protected artifact size is invalid."
+        case .outputCreationFailed:
+            return "Could not create a private decoded artifact."
+        }
+    }
+}
+
 /// The runtime release embedded in the app bundle at build time.
 struct RuntimePayload: Sendable {
     static let protectedArtifactMagic = Data(
         "DEFENSECLAW-PROTECTED-ARTIFACT-V1\n".utf8
     )
     static let protectedArtifactXORByte: UInt8 = 0xA5
+    static let maximumProtectedArtifactBytes: Int64 = 512 * 1024 * 1024
     var version: String
     var tag: String
     var arch: String
@@ -61,7 +85,7 @@ struct RuntimePayload: Sendable {
               let wheel = root["wheel"] as? [String: Any],
               let wheelFile = wheel["file"] as? String,
               let wheelSHA = wheel["sha256"] as? String,
-              wheelFile == "defenseclaw-\(version)-2-py3-none-any.dcwheel"
+              wheelFile == expectedProtectedWheelFilename(version: version)
         else { return nil }
         let overrides = root["overrides"] as? [String: Any]
         let overridesFile = overrides?["file"] as? String
@@ -113,30 +137,122 @@ struct RuntimePayload: Sendable {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         var hasher = SHA256()
-        while let chunk = try? handle.read(upToCount: 4 << 20), !chunk.isEmpty {
-            hasher.update(data: chunk)
+        do {
+            while let chunk = try handle.read(upToCount: 4 << 20), !chunk.isEmpty {
+                hasher.update(data: chunk)
+            }
+        } catch {
+            return nil
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
+    static func expectedProtectedWheelFilename(version: String) -> String {
+        "defenseclaw-\(version)-2-py3-none-any.dcwheel"
+    }
+
     static func protectedPayloadSHA256(of url: URL) -> String? {
+        guard let size = encodedArtifactSize(of: url),
+              protectedArtifactSizeIsAllowed(size) else { return nil }
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         guard (try? handle.read(upToCount: protectedArtifactMagic.count))
                 == protectedArtifactMagic else { return nil }
+
         var hasher = SHA256()
         var sawPayload = false
-        while var chunk = try? handle.read(upToCount: 4 << 20), !chunk.isEmpty {
-            sawPayload = true
-            chunk.withUnsafeMutableBytes { bytes in
-                for index in bytes.indices {
-                    bytes[index] ^= protectedArtifactXORByte
-                }
+        var encodedBytesRead = Int64(protectedArtifactMagic.count)
+        do {
+            while var chunk = try handle.read(upToCount: 4 << 20), !chunk.isEmpty {
+                encodedBytesRead += Int64(chunk.count)
+                guard encodedBytesRead <= maximumProtectedArtifactBytes else { return nil }
+                sawPayload = true
+                decodeProtectedBytes(&chunk)
+                hasher.update(data: chunk)
             }
-            hasher.update(data: chunk)
+        } catch {
+            return nil
         }
         guard sawPayload else { return nil }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Decode a protected release artifact into a private installer input.
+    /// The encoded checksum is revalidated while streaming so a development
+    /// build cannot swap the artifact between the initial integrity check and
+    /// materialization.
+    static func decodeProtectedArtifact(
+        from sourceURL: URL,
+        to destinationURL: URL,
+        expectedEncodedSHA256: String
+    ) throws {
+        guard let size = encodedArtifactSize(of: sourceURL),
+              protectedArtifactSizeIsAllowed(size) else {
+            throw ProtectedArtifactError.invalidSize
+        }
+        let source = try FileHandle(forReadingFrom: sourceURL)
+        defer { try? source.close() }
+
+        guard FileManager.default.createFile(
+            atPath: destinationURL.path,
+            contents: nil,
+            attributes: [.posixPermissions: 0o600]
+        ) else {
+            throw ProtectedArtifactError.outputCreationFailed
+        }
+
+        do {
+            let destination = try FileHandle(forWritingTo: destinationURL)
+            defer { try? destination.close() }
+
+            guard let header = try source.read(upToCount: protectedArtifactMagic.count),
+                  header == protectedArtifactMagic else {
+                throw ProtectedArtifactError.invalidEnvelope
+            }
+
+            var encodedHasher = SHA256()
+            encodedHasher.update(data: header)
+            var sawPayload = false
+            var encodedBytesRead = Int64(header.count)
+            while var chunk = try source.read(upToCount: 4 << 20), !chunk.isEmpty {
+                encodedBytesRead += Int64(chunk.count)
+                guard encodedBytesRead <= maximumProtectedArtifactBytes else {
+                    throw ProtectedArtifactError.invalidSize
+                }
+                sawPayload = true
+                encodedHasher.update(data: chunk)
+                decodeProtectedBytes(&chunk)
+                try destination.write(contentsOf: chunk)
+            }
+            guard sawPayload else { throw ProtectedArtifactError.emptyPayload }
+
+            let encodedSHA = encodedHasher.finalize()
+                .map { String(format: "%02x", $0) }
+                .joined()
+            guard encodedSHA == expectedEncodedSHA256 else {
+                throw ProtectedArtifactError.checksumMismatch
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: destinationURL)
+            throw error
+        }
+    }
+
+    private static func decodeProtectedBytes(_ data: inout Data) {
+        data.withUnsafeMutableBytes { bytes in
+            for index in bytes.indices {
+                bytes[index] ^= protectedArtifactXORByte
+            }
+        }
+    }
+
+    static func protectedArtifactSizeIsAllowed(_ size: Int64) -> Bool {
+        size >= Int64(protectedArtifactMagic.count) && size <= maximumProtectedArtifactBytes
+    }
+
+    private static func encodedArtifactSize(of url: URL) -> Int64? {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes?[.size] as? NSNumber)?.int64Value
     }
 }
 

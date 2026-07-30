@@ -504,34 +504,6 @@ struct ActivityMutation: Identifiable, Sendable, Hashable {
     var connector: String = ""
 }
 
-enum StructuredDetailParser {
-    static func pairs(_ details: String) -> [(String, String)] {
-        details.split(whereSeparator: \.isWhitespace).compactMap { token in
-            let components = token.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            guard components.count == 2 else { return nil }
-            let key = String(components[0])
-            let value = String(components[1])
-                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'`"))
-            guard !key.isEmpty, !value.isEmpty else { return nil }
-            return (label(key), value)
-        }
-    }
-
-    static func prettyJSON(_ raw: String) -> String {
-        guard let data = raw.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data),
-              JSONSerialization.isValidJSONObject(object),
-              let pretty = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
-              let text = String(data: pretty, encoding: .utf8)
-        else { return raw }
-        return text
-    }
-
-    static func label(_ key: String) -> String {
-        key.split(separator: "_").map { $0.capitalized }.joined(separator: " ")
-    }
-}
-
 // MARK: - Logs
 
 enum LogStream: String, CaseIterable, Identifiable {

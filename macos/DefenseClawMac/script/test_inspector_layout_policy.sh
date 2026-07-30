@@ -18,21 +18,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-output-tests.XXXXXX")"
+BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-inspector-layout-tests.XXXXXX")"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 MODULE_CACHE="$BUILD_DIR/ModuleCache"
 mkdir -p "$MODULE_CACHE"
 
 CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" xcrun swiftc \
   -module-cache-path "$MODULE_CACHE" \
-  "$ROOT/DefenseClawMac/DataLayer/InstallationContext.swift" \
-  "$ROOT/DefenseClawMac/DataLayer/ConfigStore.swift" \
-  "$ROOT/DefenseClawMac/DataLayer/CLIRunner.swift" \
-  "$ROOT/DefenseClawMac/DataLayer/AlertDispositionCommand.swift" \
-  "$ROOT/DefenseClawMac/DataLayer/CommandRegistry.swift" \
-  "$ROOT/DefenseClawMac/DataLayer/CommandActivityStore.swift" \
-  "$ROOT/DefenseClawMac/DataLayer/InventoryOutputParser.swift" \
-  "$ROOT/Tests/OutputSafetyTests.swift" \
-  -o "$BUILD_DIR/OutputSafetyTests"
+  "$ROOT/DefenseClawMac/DesignSystem/InspectorLayoutPolicy.swift" \
+  "$ROOT/Tests/InspectorLayoutPolicyTests.swift" \
+  -o "$BUILD_DIR/InspectorLayoutPolicyTests"
 
-"$BUILD_DIR/OutputSafetyTests"
+"$BUILD_DIR/InspectorLayoutPolicyTests"

@@ -275,6 +275,7 @@ struct MenuBarPopover: View {
             .controlSize(.small)
             .disabled(
                 appState.unackedAlerts.isEmpty
+                    || appState.ackInProgress
                     || !appState.installationMutationsAllowed
             )
             Button(appState.monitoringPaused ? "Resume" : "Pause") {

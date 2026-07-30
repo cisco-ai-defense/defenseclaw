@@ -22,6 +22,8 @@ struct MainWindow: View {
     @Environment(AppState.self) private var appState
     @Environment(\.openWindow) private var openWindow
     @SceneStorage("main.selectedPanel") private var selectedPanelRaw = PanelID.overview.rawValue
+    @State private var columnVisibility = NavigationSplitViewVisibility.all
+    @State private var inspectorCollapsedSidebar = false
 
     private let groups: [(String, [PanelID])] = [
         ("Monitor", [.overview, .alerts, .logs, .audit, .activity]),
@@ -31,29 +33,37 @@ struct MainWindow: View {
     ]
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: selectedPanelBinding) {
-                ForEach(groups, id: \.0) { group in
-                    Section(group.0) {
-                        ForEach(group.1) { panel in
-                            Label {
-                                HStack {
-                                    Text(panel.title)
-                                    Spacer()
-                                    badge(for: panel)
+        GeometryReader { geometry in
+            NavigationSplitView(columnVisibility: $columnVisibility) {
+                List(selection: selectedPanelBinding) {
+                    ForEach(groups, id: \.0) { group in
+                        Section(group.0) {
+                            ForEach(group.1) { panel in
+                                Label {
+                                    HStack {
+                                        Text(panel.title)
+                                        Spacer()
+                                        badge(for: panel)
+                                    }
+                                } icon: {
+                                    Image(systemName: panel.systemImage)
                                 }
-                            } icon: {
-                                Image(systemName: panel.systemImage)
+                                .tag(panel)
                             }
-                            .tag(panel)
                         }
                     }
                 }
+                .navigationSplitViewColumnWidth(min: 190, ideal: 210)
+            } detail: {
+                panelView(selectedPanel)
+                    .navigationTitle(selectedPanel.title)
             }
-            .navigationSplitViewColumnWidth(min: 190, ideal: 210)
-        } detail: {
-            panelView(selectedPanel)
-                .navigationTitle(selectedPanel.title)
+            .onChange(of: appState.detailInspectorPresented) { _, presented in
+                updateSidebar(for: geometry.size.width, inspectorPresented: presented)
+            }
+            .onChange(of: geometry.size.width) { _, width in
+                updateSidebar(for: width, inspectorPresented: appState.detailInspectorPresented)
+            }
         }
         .overlay(alignment: .top) {
             VStack(spacing: 6) {
@@ -111,6 +121,20 @@ struct MainWindow: View {
 
     private var selectedPanel: PanelID {
         PanelID(rawValue: selectedPanelRaw) ?? .overview
+    }
+
+    private func updateSidebar(for windowWidth: CGFloat, inspectorPresented: Bool) {
+        let shouldCollapse = InspectorLayoutPolicy.shouldCollapseSidebar(
+            windowWidth: windowWidth,
+            inspectorPresented: inspectorPresented
+        )
+        if shouldCollapse, columnVisibility == .all {
+            columnVisibility = .detailOnly
+            inspectorCollapsedSidebar = true
+        } else if !shouldCollapse, inspectorCollapsedSidebar {
+            columnVisibility = .all
+            inspectorCollapsedSidebar = false
+        }
     }
 
     private var selectedPanelBinding: Binding<PanelID> {

@@ -302,7 +302,7 @@ struct InventoryView: View {
             }
             items = parsed.documents.flatMap(Self.rows(from:))
             summaries = parsed.documents.map(Self.summary(from:))
-            warning = parsed.diagnostics.nonEmpty
+            warning = InventoryOutputParser.userFacingDiagnostics(from: parsed).nonEmpty
             lastScan = Date()
         }
     }
@@ -399,11 +399,6 @@ struct InventoryView: View {
 
     private static func summary(from doc: [String: Any]) -> InventoryConnectorSummary {
         func arrayCount(_ key: String) -> Int { (doc[key] as? [Any])?.count ?? 0 }
-        let summary = doc["summary"] as? [String: Any]
-        let errors: Int = {
-            if let value = summary?["errors"] as? Int { return value }
-            return (doc["errors"] as? [Any])?.count ?? 0
-        }()
         let connector = (doc["connector"] as? String) ?? (doc["claw_mode"] as? String) ?? "default"
         let configFiles = doc["connector_config_files"] as? [String]
         return InventoryConnectorSummary(
@@ -413,7 +408,7 @@ struct InventoryView: View {
             home: (doc["connector_home"] as? String) ?? (doc["claw_home"] as? String) ?? "",
             config: configFiles?.first ?? (doc["openclaw_config"] as? String) ?? "",
             live: (doc["live"] as? Bool) ?? false,
-            errors: errors,
+            errors: InventoryOutputParser.actionableErrorCount(in: doc),
             counts: [
                 .skills: arrayCount("skills"), .plugins: arrayCount("plugins"), .mcps: arrayCount("mcp"),
                 .agents: arrayCount("agents"), .tools: arrayCount("tools"),

@@ -64,6 +64,13 @@ actor AuditStore {
         return !rows.isEmpty
     }
 
+    private func columnNames(in table: String) -> Set<String> {
+        guard table.range(of: "^[A-Za-z0-9_]+$", options: .regularExpression) != nil else {
+            return []
+        }
+        return Set(query("PRAGMA table_info(\(table))").compactMap { $0["name"] as? String })
+    }
+
     /// Runs a query, returning rows as [column: value] dictionaries.
     private func query(_ sql: String, binds: [Any] = []) -> [[String: Any]] {
         ensureOpen()
@@ -189,6 +196,16 @@ actor AuditStore {
         ).map(decodeAuditEvent)
     }
 
+    /// Loads the complete record for an inspector selection. Alert list rows
+    /// intentionally carry only a bounded details preview.
+    func event(id: String) -> AuditEvent? {
+        guard tableExists("audit_events"), !id.isEmpty else { return nil }
+        return query(
+            "SELECT * FROM audit_events WHERE id = ? LIMIT 1",
+            binds: [id]
+        ).first.map(decodeAuditEvent)
+    }
+
     func scanFindings(runID: String? = nil, target: String? = nil, limit: Int = 20) -> [ScanFindingEvent] {
         guard tableExists("scan_results") else { return [] }
         var conditions = ["raw_json IS NOT NULL", "raw_json != ''"]
@@ -234,21 +251,37 @@ actor AuditStore {
         }
     }
 
-    /// The TUI's alert queue: db.py::list_alerts(500) loads the last 500
-    /// non-ACK rows of ANY listed severity, and the panel then counts only
-    /// the CRITICAL/HIGH/MEDIUM/LOW buckets in memory. Older severity-bearing
-    /// rows that scrolled out of the 500-row window do NOT count — replicate
-    /// that exactly: window first, filter second.
+    /// The TUI's alert queue: db.py::list_alert_summaries(500) excludes rows
+    /// hidden by the v8 acknowledgement projection and non-finding telemetry
+    /// buckets before applying the bounded window. Older schemas omit those
+    /// surfaces, so add each condition only when its table/columns exist.
     func alertQueueEvents(limit: Int = 500) -> [AuditEvent] {
         guard tableExists("audit_events") else { return [] }
+        let columns = columnNames(in: "audit_events")
+        var conditions = [
+            "UPPER(severity) IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')",
+            "action NOT LIKE 'dismiss%'",
+        ]
+        if columns.contains("bucket"), columns.contains("event_name") {
+            conditions.append("(bucket IS NULL OR (bucket = 'security.finding' AND event_name = 'finding.observed'))")
+        }
+        if tableExists("alert_acknowledgement_projection"),
+           columnNames(in: "alert_acknowledgement_projection").contains("alert_id") {
+            conditions.append("""
+                NOT EXISTS (
+                    SELECT 1 FROM alert_acknowledgement_projection AS projection
+                    WHERE projection.alert_id = audit_events.id
+                )
+                """)
+        }
         let rows = query("""
-            SELECT * FROM audit_events
-            WHERE UPPER(severity) IN ('CRITICAL','HIGH','MEDIUM','LOW','WARNING','ERROR','INFO')
-              AND action NOT LIKE 'dismiss%'
-            ORDER BY timestamp DESC LIMIT ?
-            """, binds: [limit])
+            SELECT *, substr(COALESCE(details, ''), 1, 4096) AS details
+            FROM audit_events
+            WHERE \(conditions.joined(separator: " AND "))
+            ORDER BY timestamp DESC, rowid DESC LIMIT ?
+            """, binds: [max(limit, 1)])
         return rows.map(decodeAuditEvent)
-            .filter { $0.severity != .info } // bucket filter: C/H/M/L only (WARNING→MEDIUM)
+            .filter { $0.severity != .info }
     }
 
     /// db.py::get_counts — Overview ENFORCEMENT summary.
