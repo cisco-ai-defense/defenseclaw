@@ -32,15 +32,12 @@ ROOT = Path(__file__).resolve().parents[2]
 # identity. Published documentation is allowed to advance independently.
 CURRENT_RELEASE = "0.8.6"
 CURRENT_PUBLISHED_RELEASE = "0.8.10"
-STALE_PUBLISHED_RELEASES = tuple(f"0.8.{patch}" for patch in range(10))
-
-PUBLISHED_BASH_INSTALL_LINES = (
-    f"VERSION={CURRENT_PUBLISHED_RELEASE}",
-    'INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"',
-    'curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash',
+LATEST_POSIX_INSTALL_URL = (
+    "https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh"
 )
+LATEST_POSIX_INSTALL_COMMAND = f"curl -LsSf {LATEST_POSIX_INSTALL_URL} | bash"
 DOC_INSTALL_COMMANDS = {
-    "docs-site/content/docs/get-started/install.mdx": PUBLISHED_BASH_INSTALL_LINES
+    "docs-site/content/docs/get-started/install.mdx": (LATEST_POSIX_INSTALL_COMMAND,)
     + (
         ".\\DefenseClawSetup-x64.exe",
         ".\\DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1",
@@ -48,13 +45,10 @@ DOC_INSTALL_COMMANDS = {
         "PowerShell installation command.",
     ),
     "docs-site/content/docs/get-started/first-guardrail.mdx": (
-        f"VERSION={CURRENT_PUBLISHED_RELEASE}",
-        'INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"',
-        'curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash -s -- --connector claudecode',
+        f"{LATEST_POSIX_INSTALL_COMMAND} -s -- --connector claudecode",
     ),
     "docs-site/components/terminal-demo.tsx": (
-        f"const INSTALL_VERSION = '{CURRENT_PUBLISHED_RELEASE}';",
-        "text: `curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${INSTALL_VERSION}/scripts/install.sh | VERSION=${INSTALL_VERSION} bash`,",
+        f"text: '{LATEST_POSIX_INSTALL_COMMAND}',",
     ),
 }
 
@@ -2008,17 +2002,25 @@ def test_installer_help_does_not_pipe_main_installer() -> None:
         assert "defenseclaw/main" not in text
 
 
-def test_published_install_examples_track_current_release() -> None:
+def test_published_posix_install_examples_default_to_latest_release() -> None:
     for rel, expected_lines in DOC_INSTALL_COMMANDS.items():
         text = (ROOT / rel).read_text(encoding="utf-8")
         stripped_lines = {line.strip() for line in text.splitlines()}
-        versioned_lines = tuple(line for line in expected_lines if CURRENT_PUBLISHED_RELEASE in line)
-        assert versioned_lines, f"{rel} must pin at least one installer version"
-        for expected in versioned_lines:
-            assert expected in stripped_lines, f"{rel} is missing current install example: {expected}"
-            for stale in STALE_PUBLISHED_RELEASES:
-                stale_example = expected.replace(CURRENT_PUBLISHED_RELEASE, stale)
-                assert stale_example not in stripped_lines, f"{rel} still contains stale install example: {stale_example}"
+        latest_lines = tuple(line for line in expected_lines if LATEST_POSIX_INSTALL_URL in line)
+        assert latest_lines, f"{rel} must install from the latest release asset"
+        for expected in latest_lines:
+            assert expected in stripped_lines, f"{rel} is missing latest install example: {expected}"
+        assert text.count(LATEST_POSIX_INSTALL_URL) == 1
+        assert "raw.githubusercontent.com/cisco-ai-defense/defenseclaw/" not in text
+        assert "INSTALL_URL=" not in text
+        assert "INSTALL_VERSION" not in text
+
+    install_page = (
+        ROOT / "docs-site/content/docs/get-started/install.mdx"
+    ).read_text(encoding="utf-8")
+    assert install_page.index(LATEST_POSIX_INSTALL_COMMAND) < install_page.index(
+        "## Prerequisites"
+    )
 
 
 def test_current_observability_docs_do_not_advertise_retired_redaction_controls() -> None:
