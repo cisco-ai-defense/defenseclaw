@@ -4427,7 +4427,7 @@ def _load_dotenv_into_os(data_dir: str) -> None:
     except FileNotFoundError:
         pass
     except OSError as exc:
-        _log.debug("config: cannot read %s: %s", env_path, exc)
+        _log.warning("config: ignoring unreadable or unsafe dotenv %s: %s", env_path, exc)
 
 
 def _warn_plaintext_secrets(cfg: Config) -> None:

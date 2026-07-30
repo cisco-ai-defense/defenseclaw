@@ -85,6 +85,7 @@ from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
     atomic_write_private_bytes,
     delete_file_durable,
+    dotenv_key_is_valid,
 )
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
@@ -2391,23 +2392,13 @@ def _rotate_token_snapshot_locked(dotenv_path: str) -> _RotateTokenDotenvSnapsho
             os.close(fd)
 
 
-def _dotenv_key_is_valid(key: str) -> bool:
-    """Return whether *key* is one portable ASCII environment name."""
-    return bool(
-        key
-        and key.isascii()
-        and (key[0].isalpha() or key[0] == "_")
-        and all(character.isalnum() or character == "_" for character in key)
-    )
-
-
 def _dotenv_upsert_render(
     snapshot: _RotateTokenDotenvSnapshot,
     key: str,
     value: str,
 ) -> bytes:
     """Replace one dotenv key while retaining every unrelated byte."""
-    if not _dotenv_key_is_valid(key):
+    if not dotenv_key_is_valid(key):
         raise DotenvValueError(f"invalid dotenv key: {key!r}")
     safe_value = sanitize_dotenv_value(value, key=key).encode("utf-8")
     key_bytes = key.encode("ascii")
@@ -8907,11 +8898,36 @@ def _gateway_lifecycle_executable(
         # A corroborated package with a missing sibling is broken; fail closed
         # instead of allowing PATH/current-directory executable shadowing.
         return packaged_windows_gateway_path()
+    raw_search_path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
+    current_directory = os.path.normcase(os.path.realpath(os.curdir))
+    search_directories: list[str] = []
+    seen_directories: set[str] = set()
+    for raw_directory in raw_search_path.split(os.pathsep):
+        directory = raw_directory.strip()
+        if len(directory) >= 2 and directory.startswith('"') and directory.endswith('"'):
+            directory = directory[1:-1]
+        if not directory or not os.path.isabs(directory):
+            continue
+        absolute_directory = os.path.abspath(directory)
+        normalized_directory = os.path.normcase(os.path.realpath(absolute_directory))
+        if normalized_directory == current_directory or normalized_directory in seen_directories:
+            continue
+        seen_directories.add(normalized_directory)
+        search_directories.append(absolute_directory)
+    sanitized_search_path = os.pathsep.join(search_directories)
     # Lifecycle mutations deliberately ignore DEFENSECLAW_GATEWAY_BIN. The
     # config loader accepts credential names from .env, so an attacker who
     # could previously write that file could otherwise plant an executable
     # override and have Doctor run it after merely tightening permissions.
-    executable = shutil.which(GATEWAY_BIN_NAME, path=search_path)
+    executable = shutil.which(GATEWAY_BIN_NAME, path=sanitized_search_path)
+    if executable:
+        # Older Python runtimes on Windows can prepend the current directory
+        # even when an explicit PATH is supplied. Accept only a concrete result
+        # whose parent was one of the sanitized search directories.
+        executable_parent = os.path.normcase(os.path.abspath(os.path.dirname(executable)))
+        allowed_parents = {os.path.normcase(directory) for directory in search_directories}
+        if not os.path.isabs(executable) or executable_parent not in allowed_parents:
+            executable = None
     if not executable:
         canonical = canonical_install_path()
         if os.path.isfile(canonical) and os.access(canonical, os.X_OK):

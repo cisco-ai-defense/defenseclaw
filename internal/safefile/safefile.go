@@ -40,6 +40,11 @@ import (
 // a same-name swap race against another local user.
 var ErrSymlinkRefused = errors.New("safefile: refusing to write through symlink")
 
+// MaxDotEnvBytes is the shared upper bound for credential-bearing dotenv
+// files. Keep every runtime dotenv reader on this limit so one entry point
+// cannot accept a file that another rejects.
+const MaxDotEnvBytes = 1024 * 1024
+
 // Write atomically writes data to path with mode 0600. The write
 // strategy:
 //

@@ -1263,7 +1263,8 @@ class TestPluginRegistryRequiredFixer(unittest.TestCase):
 
     def test_clears_global(self):
         cfg = self._cfg(global_required=True)
-        tag, detail = _fix_plugin_registry_required(cfg, assume_yes=True)
+        with patch("defenseclaw.commands.cmd_doctor._doctor_config_present", return_value=True):
+            tag, detail = _fix_plugin_registry_required(cfg, assume_yes=True)
         self.assertEqual(tag, "pass")
         self.assertFalse(cfg.asset_policy.plugin.registry_required)
         cfg.save.assert_called_once()
@@ -1271,7 +1272,8 @@ class TestPluginRegistryRequiredFixer(unittest.TestCase):
 
     def test_clears_per_connector_to_none(self):
         cfg = self._cfg(global_required=False, connector_required=True)
-        tag, _ = _fix_plugin_registry_required(cfg, assume_yes=True)
+        with patch("defenseclaw.commands.cmd_doctor._doctor_config_present", return_value=True):
+            tag, _ = _fix_plugin_registry_required(cfg, assume_yes=True)
         self.assertEqual(tag, "pass")
         # Tri-state field reset to None (inherit), not False.
         self.assertIsNone(cfg.asset_policy.connectors["codex"].plugin.registry_required)
@@ -1285,6 +1287,15 @@ class TestPluginRegistryRequiredFixer(unittest.TestCase):
         cfg.save.assert_not_called()
         # Flag is untouched on decline.
         self.assertTrue(cfg.asset_policy.plugin.registry_required)
+
+    def test_missing_config_refuses_to_create_it(self):
+        cfg = self._cfg(global_required=True)
+        with patch("defenseclaw.commands.cmd_doctor._doctor_config_present", return_value=False):
+            tag, detail = _fix_plugin_registry_required(cfg, assume_yes=True)
+        self.assertEqual(tag, "skip")
+        self.assertIn("config.yaml is missing", detail)
+        self.assertTrue(cfg.asset_policy.plugin.registry_required)
+        cfg.save.assert_not_called()
 
 
 if __name__ == "__main__":

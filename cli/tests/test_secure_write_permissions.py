@@ -518,6 +518,65 @@ def test_windows_confidentiality_rejects_read_only_untrusted_sid(monkeypatch):
     assert problem == "ACL grants read access to untrusted SID S-1-5-32-545"
 
 
+@pytest.mark.parametrize(
+    "owner_sid",
+    [
+        "S-1-5-18",
+        "S-1-5-32-544",
+        "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+    ],
+)
+def test_windows_custody_accepts_system_owners(monkeypatch, owner_sid):
+    current_sid = "S-1-5-21-current"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    entries = [
+        (0x10000000, 1, 0, owner_sid),
+        (0x10000000, 1, 0, "S-1-5-18"),
+        (0x10000000, 1, 0, "S-1-5-32-544"),
+    ]
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (owner_sid, False, entries),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+
+    assert (
+        file_permissions.windows_acl_custody_write_error(
+            "synthetic-system-path",
+            allow_current_user=False,
+        )
+        is None
+    )
+
+
+def test_windows_custody_distinguishes_user_and_system_paths(monkeypatch):
+    current_sid = "S-1-5-21-current"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    entries = [(0x10000000, 1, 0, current_sid)]
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (current_sid, False, entries),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+
+    assert (
+        file_permissions.windows_acl_custody_write_error(
+            "synthetic-user-path",
+            allow_current_user=True,
+        )
+        is None
+    )
+    problem = file_permissions.windows_acl_custody_write_error(
+        "synthetic-system-path",
+        allow_current_user=False,
+    )
+    assert problem == f"owner SID {current_sid} is not a trusted custody principal"
+
+
 def test_windows_confidentiality_accepts_owner_and_system_only(monkeypatch):
     current_sid = "S-1-5-21-current"
     fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
@@ -533,6 +592,7 @@ def test_windows_confidentiality_accepts_owner_and_system_only(monkeypatch):
         lambda _path: (current_sid, False, entries),
     )
     monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+    monkeypatch.setattr(file_permissions, "_windows_acl_has_required_access", lambda _path: True)
 
     assert file_permissions.windows_acl_confidentiality_error("synthetic.env") is None
 
@@ -552,6 +612,7 @@ def test_windows_confidentiality_ignores_inherit_only_grant(monkeypatch):
         lambda _path: (current_sid, False, entries),
     )
     monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+    monkeypatch.setattr(file_permissions, "_windows_acl_has_required_access", lambda _path: True)
 
     assert file_permissions.windows_acl_confidentiality_error("synthetic.env") is None
 

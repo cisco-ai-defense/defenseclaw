@@ -521,11 +521,46 @@ func TestVerifyProcessCurrentPID(t *testing.T) {
 	info := pidInfo{
 		PID:        os.Getpid(),
 		Executable: exe,
+		DataDir:    d.dataDir,
 		StartTime:  time.Now().Unix(),
 	}
 
 	if !d.verifyProcess(info) {
 		t.Error("verifyProcess should return true for current process")
+	}
+}
+
+func TestLegacyPIDIdentityIsDetectionOnly(t *testing.T) {
+	d := New(t.TempDir())
+	executable, err := os.Executable()
+	if err != nil {
+		t.Skipf("cannot determine executable: %v", err)
+	}
+	startIdentity, identityErr := processStartIdentity(os.Getpid())
+	if identityErr != nil {
+		startIdentity = ""
+	}
+	legacy := pidInfo{
+		PID:           os.Getpid(),
+		Executable:    executable,
+		StartIdentity: startIdentity,
+	}
+	if !d.verifyProcess(legacy) {
+		t.Skip("current process cannot be inspected on this platform")
+	}
+	if d.verifyProcessForControl(legacy) {
+		t.Fatal("legacy PID record without data_dir authorized process control")
+	}
+
+	current := legacy
+	current.DataDir = d.dataDir
+	if !d.verifyProcessForControl(current) {
+		t.Fatal("current data-directory-bound PID record did not authorize control")
+	}
+
+	current.DataDir = t.TempDir()
+	if d.verifyProcessForControl(current) {
+		t.Fatal("PID record bound to another data directory authorized control")
 	}
 }
 
@@ -536,6 +571,33 @@ func TestHasManagedProcessIdentityRejectsLegacyPIDRecord(t *testing.T) {
 	}
 	if d.HasManagedProcessIdentity(os.Getpid()) {
 		t.Fatal("legacy PID record must not prove managed startup identity")
+	}
+}
+
+func TestHasManagedProcessIdentityRejectsStrongRecordWithoutDataDir(t *testing.T) {
+	d := New(t.TempDir())
+	executable, err := os.Executable()
+	if err != nil {
+		t.Skipf("cannot determine executable: %v", err)
+	}
+	identity, err := processStartIdentity(os.Getpid())
+	if err != nil || identity == "" {
+		t.Skipf("strong process generation unavailable: identity=%q err=%v", identity, err)
+	}
+	data, err := json.Marshal(pidInfo{
+		PID:           os.Getpid(),
+		Executable:    executable,
+		StartTime:     time.Now().Unix(),
+		StartIdentity: identity,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.WritePrivate(d.pidFile, data); err != nil {
+		t.Fatal(err)
+	}
+	if d.HasManagedProcessIdentity(os.Getpid()) {
+		t.Fatal("strong PID record without data_dir proved managed identity")
 	}
 }
 
@@ -747,6 +809,47 @@ func TestStopReturnsErrNotRunningOnMissingPID(t *testing.T) {
 	err := d.Stop(time.Second)
 	if err != ErrNotRunning {
 		t.Errorf("Stop with no PID file: got %v, want ErrNotRunning", err)
+	}
+}
+
+func TestStopAndRestartRefuseLegacyPIDControl(t *testing.T) {
+	t.Setenv(EnvDaemon, "")
+	dataDir := t.TempDir()
+	d := New(dataDir)
+	marker := filepath.Join(t.TempDir(), "legacy-control-probe")
+	t.Setenv(daemonRestartProbeEnv, marker)
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDaemonRestartProbe$")
+	cmd.Env = os.Environ()
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start unmanaged probe: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	waitForProbeMarker(t, marker)
+
+	if err := os.WriteFile(d.pidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0o600); err != nil {
+		t.Fatalf("write legacy PID record: %v", err)
+	}
+	if running, pid := d.IsRunning(); !running || pid != cmd.Process.Pid {
+		t.Fatalf("legacy liveness = (%v, %d), want live PID %d", running, pid, cmd.Process.Pid)
+	}
+
+	if err := d.Stop(100 * time.Millisecond); !errors.Is(err, ErrUnsafeProcessIdentity) {
+		t.Fatalf("Stop legacy PID error = %v, want ErrUnsafeProcessIdentity", err)
+	}
+	if !processExists(cmd.Process.Pid) {
+		t.Fatal("Stop signalled a process identified only by a legacy PID record")
+	}
+
+	if pid, err := d.Restart(nil, 100*time.Millisecond); pid != 0 ||
+		!errors.Is(err, ErrUnsafeProcessIdentity) {
+		t.Fatalf("Restart legacy PID = (%d, %v), want (0, ErrUnsafeProcessIdentity)", pid, err)
+	}
+	if !processExists(cmd.Process.Pid) {
+		t.Fatal("Restart signalled a process identified only by a legacy PID record")
 	}
 }
 

@@ -107,6 +107,11 @@ class OrchestratorClient:
             timeout=self.timeout,
             allow_redirects=False,
         )
+        if 300 <= resp.status_code < 400:
+            raise requests.HTTPError(
+                f"gateway status redirect refused ({resp.status_code})",
+                response=resp,
+            )
         resp.raise_for_status()
         return resp.json()
 

@@ -46,7 +46,7 @@ const (
 	// running from different profiles cannot tell each other apart by
 	// executable name alone.
 	EnvDataDir              = "DEFENSECLAW_DATA_DIR"
-	maxGatewayDotenvBytes   = 1024 * 1024
+	maxGatewayDotenvBytes   = safefile.MaxDotEnvBytes
 	maxProcessIdentityBytes = 16 * 1024
 )
 
@@ -174,15 +174,16 @@ func (d *Daemon) IsRunning() (bool, int) {
 }
 
 // HasManagedProcessIdentity requires the complete PID record written by current
-// daemon versions and revalidates both executable and kernel start identity.
-// Legacy bare-PID records remain usable for stop/status compatibility but are
-// not strong enough to prove that an occupied API port is the expected daemon.
+// daemon versions and revalidates its data-directory binding, executable, and
+// kernel start identity. Legacy records may still prevent duplicate startup,
+// but never prove that an occupied API port is the expected daemon.
 func (d *Daemon) HasManagedProcessIdentity(pid int) bool {
 	info, err := d.readPIDInfo()
-	if err != nil || info.PID != pid || info.Executable == "" || info.StartIdentity == "" {
+	if err != nil || info.PID != pid || info.DataDir == "" ||
+		info.Executable == "" || info.StartIdentity == "" {
 		return false
 	}
-	return d.verifyProcess(info)
+	return d.verifyProcessForControl(info)
 }
 
 // ManagedProcessStartedAt returns the wall-clock launch generation recorded
@@ -191,19 +192,22 @@ func (d *Daemon) HasManagedProcessIdentity(pid int) bool {
 // kernel start identity have both been revalidated against the live process.
 func (d *Daemon) ManagedProcessStartedAt(pid int) (time.Time, bool) {
 	info, err := d.readPIDInfo()
-	if err != nil || info.PID != pid || info.Executable == "" || info.StartIdentity == "" || info.StartTime <= 0 {
+	if err != nil || info.PID != pid || info.DataDir == "" ||
+		info.Executable == "" || info.StartIdentity == "" || info.StartTime <= 0 {
 		return time.Time{}, false
 	}
-	if !d.verifyProcess(info) {
+	if !d.verifyProcessForControl(info) {
 		return time.Time{}, false
 	}
 	return time.Unix(info.StartTime, 0), true
 }
 
-// verifyProcess returns true when the live process at info.PID is the SAME
-// process recorded in the PID file (executable AND start identity match),
-// false when either signal indicates PID reuse, and true when neither signal
-// is available on this platform (best-effort backwards compatibility).
+// verifyProcess verifies every identity signal present in a PID record. It
+// deliberately remains usable for legacy liveness detection: accepting a
+// legacy record here prevents Start from launching a duplicate daemon during
+// an upgrade. Callers that can signal or otherwise control the process MUST
+// use verifyProcessForControl, which additionally requires the current
+// data-directory binding and an executable identity.
 //
 // Both the executable check and the start-identity check have been hardened
 // to fail-CLOSED when their respective metadata is genuinely unavailable for
@@ -221,6 +225,20 @@ func (d *Daemon) verifyProcess(info pidInfo) bool {
 		return false
 	}
 	return true
+}
+
+// verifyProcessForControl authorizes lifecycle mutations only for a record
+// bound to this Daemon's data directory and carrying an executable identity.
+// Older JSON and bare-PID records intentionally cannot authorize Stop or
+// Restart. They remain detection-only until the running daemon publishes a
+// current record; we never "upgrade" a legacy record by signalling its PID.
+func (d *Daemon) verifyProcessForControl(info pidInfo) bool {
+	if strings.TrimSpace(info.DataDir) == "" ||
+		strings.TrimSpace(info.Executable) == "" ||
+		!pathidentity.Same(info.DataDir, d.dataDir) {
+		return false
+	}
+	return d.verifyProcess(info)
 }
 
 func (d *Daemon) verifyExecutable(info pidInfo) bool {
@@ -447,7 +465,12 @@ func (d *Daemon) Start(args []string) (int, error) {
 			_ = logFile.Close()
 			return 0, fmt.Errorf("daemon: write pid: %w", err)
 		}
-		d.started = pidInfo{PID: pid, Executable: executable, StartIdentity: startIdentity}
+		d.started = pidInfo{
+			PID:           pid,
+			Executable:    executable,
+			DataDir:       d.dataDir,
+			StartIdentity: startIdentity,
+		}
 	}
 
 	// Close our copy of the file descriptors — the child holds its own dup'd
@@ -511,7 +534,7 @@ func (d *Daemon) waitForChildPIDRegistration(
 				lastErr = errors.New("pid file start identity is empty")
 			case startIdentity != "" && info.StartIdentity != startIdentity:
 				lastErr = errors.New("pid file start identity does not match the spawned process")
-			case !d.verifyProcess(info):
+			case !d.verifyProcessForControl(info):
 				lastErr = errors.New("pid file does not identify the spawned process")
 			default:
 				return info, false, nil
@@ -646,8 +669,15 @@ func (d *Daemon) stop(timeout time.Duration, request GracefulStopRequest) error 
 	// old process is still exiting; unconditionally removing the pathname here
 	// would orphan the healthy replacement daemon.
 	started, err := d.readPIDInfo()
-	if err != nil || started.PID != pid || !d.verifyProcess(started) {
+	if err != nil || started.PID != pid {
 		return ErrNotRunning
+	}
+	if !d.verifyProcessForControl(started) {
+		return fmt.Errorf(
+			"%w: daemon PID record is not bound to data directory %s",
+			ErrUnsafeProcessIdentity,
+			d.dataDir,
+		)
 	}
 
 	proc, err := os.FindProcess(pid)
@@ -702,7 +732,7 @@ func (d *Daemon) stop(timeout time.Duration, request GracefulStopRequest) error 
 // cleanup toward a foreign process.
 func (d *Daemon) StopStarted(pid int, timeout time.Duration) error {
 	info := d.started
-	if info.PID != pid || !d.verifyProcess(info) {
+	if info.PID != pid || !d.verifyProcessForControl(info) {
 		return ErrNotRunning
 	}
 	proc, err := os.FindProcess(pid)
@@ -717,14 +747,16 @@ func (d *Daemon) StopStarted(pid int, timeout time.Duration) error {
 		d.removePIDFileIfStarted(info)
 		return nil
 	}
-	if !d.verifyProcess(info) {
+	if !d.verifyProcessForControl(info) {
 		d.removePIDFileIfStarted(info)
 		return nil
 	}
-	if err := sendKillSignal(proc); err != nil && !errors.Is(err, os.ErrProcessDone) && d.verifyProcess(info) {
+	if err := sendKillSignal(proc); err != nil &&
+		!errors.Is(err, os.ErrProcessDone) &&
+		d.verifyProcessForControl(info) {
 		return fmt.Errorf("daemon: force kill started process %d: %w", pid, err)
 	}
-	if !waitForProcessExit(proc, pid, forcedStopWait) && d.verifyProcess(info) {
+	if !waitForProcessExit(proc, pid, forcedStopWait) && d.verifyProcessForControl(info) {
 		return ErrStopTimeout
 	}
 	d.removePIDFileIfStarted(info)

@@ -40,6 +40,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import click
 
@@ -366,16 +367,19 @@ def _emit_aid_hint(text: str) -> None:
 
 def _resolve_api_key(env_name: str, dotenv_path: str) -> str:
     """Resolve an API key from env → .env file → empty."""
+    data_dir = os.path.dirname(os.path.abspath(dotenv_path))
+    scope = SimpleNamespace(data_dir=data_dir)
     val = os.environ.get(env_name, "")
     if val:
-        data_dir = os.path.dirname(os.path.abspath(dotenv_path))
-        if credential_provenance.was_injected_from_dotenv(data_dir, env_name, val):
-            if _gateway_dotenv_safety_problem(type("_DotenvScope", (), {"data_dir": data_dir})()):
-                return ""
+        if credential_provenance.was_injected_from_dotenv(
+            data_dir,
+            env_name,
+            val,
+        ) and _gateway_dotenv_safety_problem(scope):
+            return ""
         return val
     try:
-        data_dir = os.path.dirname(os.path.abspath(dotenv_path))
-        if _gateway_dotenv_safety_problem(type("_DotenvScope", (), {"data_dir": data_dir})()):
+        if _gateway_dotenv_safety_problem(scope):
             return ""
         body = read_regular_file_no_follow(dotenv_path, max_bytes=MAX_DOTENV_BYTES)
         expected = env_name.encode("ascii")
@@ -590,7 +594,6 @@ def _http_probe(
             return f"response exceeds {response_limit}-byte limit"
         return raw[:response_limit].decode("utf-8", errors="replace")
 
-    req = urllib.request.Request(url, method=method, headers=headers or {}, data=body)
     context = None
     if not verify_tls and url.lower().startswith("https://"):
         context = ssl._create_unverified_context()
@@ -598,11 +601,15 @@ def _http_probe(
     # HTTPSHandler carrying the (possibly unverified) context to the opener.
     # urllib does not consistently bypass proxies for 127.0.0.1 when NO_PROXY
     # is unset, so install an explicit empty ProxyHandler for loopback.
-    host = (urllib.parse.urlsplit(url).hostname or "").lower()
     try:
-        loopback_host = ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        loopback_host = host == "localhost"
+        req = urllib.request.Request(url, method=method, headers=headers or {}, data=body)
+        host = (urllib.parse.urlsplit(url).hostname or "").lower()
+        try:
+            loopback_host = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback_host = host == "localhost"
+    except ValueError as exc:
+        return 0, str(exc)
     handlers: list[urllib.request.BaseHandler] = []
     if bypass_proxy or loopback_host:
         handlers.append(urllib.request.ProxyHandler({}))
@@ -650,6 +657,8 @@ def _doctor_config_present(cfg) -> bool:
     # real CLI Config always carries data_dir and takes the strict path below.
     if data_dir is None:
         return True
+    if not str(data_dir).strip():
+        return False
     return os.path.isfile(config_path_for_data_dir(data_dir))
 
 
@@ -678,10 +687,27 @@ def _custom_gateway_token_env(cfg) -> str:
     return configured if configured and not _known_gateway_token_env(configured) else ""
 
 
+def _configured_gateway_data_dir(cfg) -> str:
+    """Return a normalized configured data directory, never the implicit CWD."""
+    raw_data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not raw_data_dir.strip():
+        return ""
+    try:
+        return os.path.abspath(raw_data_dir)
+    except (OSError, ValueError):
+        return ""
+
+
 def _gateway_dotenv_tokens(data_dir: str) -> dict[str, str]:
     """Read the token values the Go daemon will inject into its child."""
     values: dict[str, str] = {}
-    path = os.path.join(data_dir, ".env")
+    raw_data_dir = str(data_dir or "")
+    if not raw_data_dir.strip():
+        return values
+    try:
+        path = os.path.join(os.path.abspath(raw_data_dir), ".env")
+    except (OSError, ValueError):
+        return values
     try:
         body = read_regular_file_no_follow(path, max_bytes=MAX_DOTENV_BYTES)
         for raw_line in body.splitlines():
@@ -715,7 +741,7 @@ def _gateway_dotenv_tokens(data_dir: str) -> dict[str, str]:
 
 def _gateway_data_dir_integrity_problem(cfg) -> str:
     """Return why another local principal can replace managed state paths."""
-    data_dir = os.path.abspath(str(getattr(cfg, "data_dir", "") or ""))
+    data_dir = _configured_gateway_data_dir(cfg)
     if not data_dir:
         return "gateway data directory is unavailable"
     try:
@@ -747,9 +773,12 @@ def _gateway_data_dir_integrity_problem(cfg) -> str:
 
 def _gateway_dotenv_safety_problem(cfg) -> str:
     """Return why credential/lifecycle repair must not consume ``.env``."""
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir:
+        return "gateway data directory is unavailable"
     if data_dir_problem := _gateway_data_dir_integrity_problem(cfg):
         return data_dir_problem
-    path = os.path.join(str(getattr(cfg, "data_dir", "") or ""), ".env")
+    path = os.path.join(data_dir, ".env")
     if not os.path.lexists(path):
         return ""
     try:
@@ -1582,9 +1611,12 @@ def _managed_gateway_process_trust(
     platform_name: str | None = None,
 ) -> _GatewayTrust:
     """Collect and validate the managed process identity for this home."""
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir:
+        return _GatewayTrust("unavailable", "gateway data directory is unavailable")
     platform_name = platform_name or ("win32" if os.name == "nt" else sys.platform)
     evidence = evidence or GatewayEvidence(platform_name=platform_name)
-    record = evidence.pid_record(os.path.join(cfg.data_dir, "gateway.pid"))
+    record = evidence.pid_record(os.path.join(data_dir, "gateway.pid"))
     process = evidence.process(record.pid) if record.status == "ok" else None
     return _gateway_process_trust(
         cfg,
@@ -1772,8 +1804,12 @@ def _check_windows_gateway_diagnostics(
     platform_name = platform_name or sys.platform
     if platform_name != "win32":
         return False
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir:
+        _emit("fail", "Gateway PID identity", "gateway data directory is unavailable", r=r)
+        return True
     evidence = evidence or GatewayEvidence(platform_name=platform_name)
-    pid_path = os.path.join(cfg.data_dir, "gateway.pid")
+    pid_path = os.path.join(data_dir, "gateway.pid")
     record = evidence.pid_record(pid_path)
     process = evidence.process(record.pid) if record.status == "ok" else None
     process_trust = _gateway_process_trust(
@@ -1792,8 +1828,6 @@ def _check_windows_gateway_diagnostics(
         )
     elif process_trust.code == "unavailable":
         _emit("skip", "Gateway PID identity", process_trust.detail, r=r)
-    elif process_trust.code == "legacy_identity":
-        _emit("fail", "Gateway PID identity", process_trust.detail, r=r)
     else:
         _emit("fail", "Gateway PID identity", process_trust.detail, r=r)
 
@@ -2589,15 +2623,32 @@ def _windows_system_powershell() -> tuple[str, str]:
     from defenseclaw.file_permissions import (
         UnsafePathError,
         reject_reparse_path,
-        windows_acl_write_error,
+        windows_acl_custody_write_error,
     )
 
     try:
         reject_reparse_path(executable)
     except (OSError, UnsafePathError):
         return "", ""
-    for candidate in (executable, os.path.dirname(executable)):
-        if windows_acl_write_error(candidate) is not None:
+    custody_chain = [executable]
+    parent = os.path.dirname(executable)
+    system_identity = os.path.normcase(os.path.normpath(system_directory))
+    while True:
+        custody_chain.append(parent)
+        if os.path.normcase(os.path.normpath(parent)) == system_identity:
+            break
+        next_parent = os.path.dirname(parent)
+        if not next_parent or next_parent == parent:
+            return "", ""
+        parent = next_parent
+    for candidate in custody_chain:
+        if (
+            windows_acl_custody_write_error(
+                candidate,
+                allow_current_user=False,
+            )
+            is not None
+        ):
             return "", ""
     return executable, windows_directory
 
@@ -4931,6 +4982,37 @@ def _auto_fix_hint(dry_run: bool) -> str:
     return _AUTO_FIX_DRY_RUN_HINT if dry_run else _AUTO_FIX_REAL_HINT
 
 
+def _fixer_blocker(cfg, title: str, dotenv_safety_problem: str) -> str:
+    """Return why a dotenv-dependent fixer must not run, or an empty string."""
+    dotenv_dependent_fixers = {
+        "gateway token",
+        "gateway token_env",
+        "gateway token drift",
+        "gateway service",
+    }
+    if title not in dotenv_dependent_fixers:
+        return ""
+
+    rotation_required = bool(getattr(cfg, "_doctor_gateway_token_rotation_required", False))
+    token_rotated = bool(getattr(cfg, "_doctor_gateway_token_was_rotated", False))
+    if title == "gateway token":
+        return dotenv_safety_problem if dotenv_safety_problem and not rotation_required else ""
+
+    provider_not_converged = token_rotated and not _gateway_rotated_provider_converged(cfg)
+    should_block = (
+        bool(dotenv_safety_problem)
+        or (rotation_required and not token_rotated)
+        or (title in {"gateway token drift", "gateway service"} and provider_not_converged)
+    )
+    if not should_block:
+        return ""
+    if title in {"gateway token drift", "gateway service"} and provider_not_converged:
+        return "gateway.token_env did not converge on the rotated canonical provider"
+    if rotation_required and not token_rotated:
+        return "required gateway token rotation did not complete"
+    return dotenv_safety_problem
+
+
 def _run_fixers(
     cfg,
     r: _DoctorResult,
@@ -4972,12 +5054,6 @@ def _run_fixers(
         ("pristine config backup", _fix_pristine_backup),
         ("plugin registry dead-end", _fix_plugin_registry_required),
     ]
-    dotenv_dependent_fixers = {
-        "gateway token",
-        "gateway token_env",
-        "gateway token drift",
-        "gateway service",
-    }
     dotenv_safety_problem = ""
     external_gateway_env_names: list[str] = []
     data_dir = str(getattr(cfg, "data_dir", "") or "")
@@ -4992,46 +5068,14 @@ def _run_fixers(
     setattr(cfg, "_doctor_external_gateway_env_names", tuple(external_gateway_env_names))
 
     for title, fn in fixers:
+        blocker = "" if dry_run else _fixer_blocker(cfg, title, dotenv_safety_problem)
         if dry_run:
             outcome = ("skip", "would run (dry-run; no changes made)")
-        elif (
-            title in dotenv_dependent_fixers
-            and title != "gateway token"
-            and (
-                dotenv_safety_problem
-                or (
-                    getattr(cfg, "_doctor_gateway_token_rotation_required", False)
-                    and not getattr(cfg, "_doctor_gateway_token_was_rotated", False)
-                )
-                or (
-                    title in {"gateway token drift", "gateway service"}
-                    and getattr(cfg, "_doctor_gateway_token_was_rotated", False)
-                    and not _gateway_rotated_provider_converged(cfg)
-                )
-            )
-        ):
-            if getattr(cfg, "_doctor_gateway_token_was_rotated", False) and not _gateway_rotated_provider_converged(
-                cfg
-            ):
-                blocker = "gateway.token_env did not converge on the rotated canonical provider"
-            elif getattr(cfg, "_doctor_gateway_token_rotation_required", False) and not getattr(
-                cfg, "_doctor_gateway_token_was_rotated", False
-            ):
-                blocker = "required gateway token rotation did not complete"
-            else:
-                blocker = dotenv_safety_problem
+        elif blocker:
+            repair_scope = "credential repair" if title == "gateway token" else "credential or lifecycle repair"
             outcome = (
                 "fail",
-                f"blocked because {blocker}; review and securely replace .env before credential or lifecycle repair",
-            )
-        elif (
-            title == "gateway token"
-            and dotenv_safety_problem
-            and not getattr(cfg, "_doctor_gateway_token_rotation_required", False)
-        ):
-            outcome = (
-                "fail",
-                f"blocked because {dotenv_safety_problem}; review and securely replace .env before credential repair",
+                f"blocked because {blocker}; review and securely replace .env before {repair_scope}",
             )
         else:
             try:
@@ -5042,9 +5086,7 @@ def _run_fixers(
                 # preserve exit 0. Do not render arbitrary exception text:
                 # filesystem and child-process errors can contain secrets.
                 outcome = ("fail", f"{type(exc).__name__}: fixer raised unexpectedly")
-            if title == "defenseclaw dotenv perms":
-                dotenv_safety_problem = _gateway_dotenv_safety_problem(cfg)
-            elif title == "gateway token":
+            if title in {"defenseclaw dotenv perms", "gateway token"}:
                 dotenv_safety_problem = _gateway_dotenv_safety_problem(cfg)
 
         tag, detail = outcome
@@ -5756,7 +5798,10 @@ def _fix_stale_pid(
     platform_name: str | None = None,
 ) -> tuple[str, str]:
     """Remove only a stale PID record that has not changed since inspection."""
-    pid_file = os.path.join(cfg.data_dir, "gateway.pid")
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir:
+        return ("fail", "gateway data directory is unavailable; refusing PID-file repair")
+    pid_file = os.path.join(data_dir, "gateway.pid")
     inspected_fingerprint = pid_file_fingerprint(pid_file)
     record = read_pid_record(pid_file)
     if record.status == "missing":
@@ -6147,8 +6192,10 @@ def _fix_gateway_token_drift(cfg, *, assume_yes: bool) -> tuple[str, str]:
         return (
             "fail",
             f"{process_trust.detail}; refusing to send credentials or restart. "
-            "Run `defenseclaw-gateway restart` manually once if this is an "
-            "older unbound PID record.",
+            "Stop an older unbound generation through the trusted service "
+            "manager that launched it, verify it exited, then rerun "
+            "`defenseclaw doctor --fix` to remove the stale record and start "
+            "a current bound generation.",
         )
     pid = process_trust.pid
     inspected_fingerprint = pid_file_fingerprint(pid_file)
@@ -6497,12 +6544,18 @@ def _fix_dotenv_perms(
         windows_acl_write_error,
     )
 
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir:
+        return (
+            "fail",
+            "gateway data directory is unavailable; refusing to repair or consume dotenv credentials",
+        )
     if data_dir_problem := _gateway_data_dir_integrity_problem(cfg):
         return (
             "fail",
             f"{data_dir_problem}; refusing to repair or consume dotenv credentials",
         )
-    path = os.path.join(cfg.data_dir, ".env")
+    path = os.path.join(data_dir, ".env")
     try:
         if is_symlink(path):
             return ("fail", "dotenv is a symbolic link or reparse point; refusing permission repair")
@@ -6604,9 +6657,17 @@ def _fix_dotenv_perms(
 
     try:
         protect_private_file(path)
+        repaired = os.lstat(path)
+        if is_symlink(path) or not stat.S_ISREG(repaired.st_mode) or not os.path.samestat(info, repaired):
+            return ("fail", "dotenv changed while its repaired permissions were verified")
+        if stat.S_IMODE(repaired.st_mode) != 0o600:
+            return ("fail", f"dotenv permissions on {path} are still not 0600 after repair")
         remaining_acl_problem = darwin_acl_confidentiality_error(path) if platform_name == "darwin" else None
         if remaining_acl_problem is not None:
             return ("fail", f"dotenv extended ACL remains unsafe: {remaining_acl_problem}")
+        verified = os.lstat(path)
+        if not os.path.samestat(repaired, verified) or stat.S_IMODE(verified.st_mode) != 0o600:
+            return ("fail", "dotenv changed while its repaired permissions were verified")
         return ("pass", f"set {path} to 0600")
     except OSError as exc:
         return ("fail", f"chmod failed: {exc}")

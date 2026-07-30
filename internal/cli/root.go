@@ -33,8 +33,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
-const maxDotEnvBytes = 1024 * 1024
-
 var (
 	cfg                          *config.Config
 	auditStore                   *audit.Store
@@ -267,7 +265,7 @@ func Execute() int {
 // token_env/bearer_env references and non-observability application secrets
 // available when the sidecar runs without an interactive shell.
 func loadDotEnvIntoOS(path string) {
-	data, err := safefile.ReadRegularFileBounded(path, maxDotEnvBytes)
+	data, err := safefile.ReadRegularFileBounded(path, safefile.MaxDotEnvBytes)
 	if err != nil {
 		return
 	}
@@ -298,6 +296,7 @@ func dotEnvKeyIsProcessControl(key string) bool {
 	normalized := strings.ToUpper(strings.TrimSpace(key))
 	switch normalized {
 	case "ALL_PROXY", "BASH_ENV", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "COMSPEC",
+		"CURL_CA_BUNDLE",
 		"DEFENSECLAW_CODEX_LOOPBACK_TRUST",
 		"DEFENSECLAW_CONFIG", "DEFENSECLAW_DATA_DIR", "DEFENSECLAW_GATEWAY_BIN",
 		"DEFENSECLAW_HOME", "DEFENSECLAW_DEV", "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
@@ -310,10 +309,13 @@ func dotEnvKeyIsProcessControl(key string) bool {
 		"DEFENSECLAW_TEST", "DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN",
 		"DEFENSECLAW_TRUSTED_PROXY_CIDRS", "DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES",
 		"DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED", "DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST",
-		"ENV", "HOME", "HTTP_PROXY", "HTTPS_PROXY",
-		"LOCPATH", "NO_PROXY", "PATH", "PATHEXT", "PYTHONHOME", "PYTHONPATH",
+		daemon.EnvDaemon,
+		"ENV", "GIT_SSL_NO_VERIFY", "HOME", "HTTP_PROXY", "HTTPS_PROXY",
+		"LOCPATH", "NODE_EXTRA_CA_CERTS", "NODE_OPTIONS", "NO_PROXY", "PATH", "PATHEXT",
+		"PYTHONHOME", "PYTHONPATH",
 		"PYTHONSTARTUP", "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "USERPROFILE",
-		"WINDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+		"REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "WINDIR",
+		"XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
 		"XDG_RUNTIME_DIR", "XDG_STATE_HOME":
 		return true
 	default:

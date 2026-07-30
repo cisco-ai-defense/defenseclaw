@@ -137,6 +137,7 @@ def test_doctor_fails_actionably_when_cli_env_token_differs_from_daemon_dotenv(
 )
 def test_healthy_trusted_gateway_fails_when_status_auth_cannot_be_verified(
     tmp_path,
+    monkeypatch,
     status_result,
     expected_detail,
 ):
@@ -147,6 +148,8 @@ def test_healthy_trusted_gateway_fails_when_status_auth_cannot_be_verified(
         encoding="utf-8",
     )
     os.chmod(tmp_path / ".env", 0o600)
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    monkeypatch.delenv("OPENCLAW_GATEWAY_TOKEN", raising=False)
 
     cfg = _cfg(str(tmp_path))
     result = _DoctorResult()

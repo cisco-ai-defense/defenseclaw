@@ -257,7 +257,8 @@ class OrchestratorClientWireFormatTests(unittest.TestCase):
                 port=origin_server.server_port,
                 token="gateway-secret",
             )
-            self.assertEqual(client.status(), {})
+            with self.assertRaises(gateway.requests.HTTPError):
+                client.status()
         finally:
             origin_server.shutdown()
             origin_server.server_close()

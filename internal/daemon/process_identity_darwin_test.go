@@ -6,6 +6,8 @@
 package daemon
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,7 +19,9 @@ func TestDarwinProcessInspectionUsesFixedBinaryAndMinimalEnvironment(t *testing.
 	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "must-not-reach-ps")
 	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "must-not-reach-ps")
 
-	cmd := darwinProcessInspectionCommand(os.Getpid())
+	ctx, cancel := context.WithTimeout(context.Background(), darwinPSTimeout)
+	defer cancel()
+	cmd := darwinProcessInspectionCommand(ctx, os.Getpid())
 	if cmd.Path != "/bin/ps" {
 		t.Fatalf("process-inspection helper path = %q, want /bin/ps", cmd.Path)
 	}
@@ -35,6 +39,16 @@ func TestDarwinProcessInspectionUsesFixedBinaryAndMinimalEnvironment(t *testing.
 		if slices.Contains(cmd.Env, forbidden) {
 			t.Fatalf("process-inspection helper inherited %q", forbidden)
 		}
+	}
+}
+
+func TestDarwinProcessInspectionCommandHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := darwinProcessInspectionCommand(ctx, os.Getpid()).Run()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled process-inspection command error = %v, want context.Canceled", err)
 	}
 }
 

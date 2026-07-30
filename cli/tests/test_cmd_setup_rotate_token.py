@@ -16,6 +16,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -130,7 +131,8 @@ class RotateTokenFileWriteTests(unittest.TestCase):
                 b"OPENCLAW_GATEWAY_TOKEN_SUFFIX=keep-legacy-prefix\r\n"
                 b"XOPENCLAW_GATEWAY_TOKEN=keep-leading-prefix\r\n"
                 b"DEFENSECLAW_GATEWAY_TOKEN=exposed-b\r\n"
-                b"DEFENSE" b"CLAW_GATEWAY_TOKEN_BACKUP=keep-canonical-prefix\r\n"
+                b"DEFENSE"
+                b"CLAW_GATEWAY_TOKEN_BACKUP=keep-canonical-prefix\r\n"
             ),
             mode=0o644,
         )
@@ -145,7 +147,7 @@ class RotateTokenFileWriteTests(unittest.TestCase):
         )
         self.assertIn(b"XOPENCLAW_GATEWAY_TOKEN=keep-leading-prefix\r\n", body)
         self.assertIn(
-            b"DEFENSE" b"CLAW_GATEWAY_TOKEN_BACKUP=keep-canonical-prefix\r\n",
+            b"DEFENSE" + b"CLAW_GATEWAY_TOKEN_BACKUP=keep-canonical-prefix\r\n",
             body,
         )
         self.assertEqual(body.count(b"DEFENSECLAW_GATEWAY_TOKEN="), 1)
@@ -209,14 +211,19 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
                 os.environ[name] = value
 
     def test_lifecycle_executable_never_returns_a_bare_name(self) -> None:
+        canonical = os.path.realpath(sys.executable)
         with (
             mock.patch(
                 "defenseclaw.gateway.packaged_windows_install_root",
                 return_value=None,
             ),
             mock.patch(
-                "defenseclaw.gateway.resolve_gateway_binary",
+                "defenseclaw.commands.cmd_setup.shutil.which",
                 return_value="defenseclaw-gateway",
+            ),
+            mock.patch(
+                "defenseclaw.gateway.canonical_install_path",
+                return_value=canonical,
             ),
         ):
             executable = cmd_setup._gateway_lifecycle_executable()
@@ -224,6 +231,46 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
         self.assertIsNotNone(executable)
         self.assertTrue(os.path.isabs(executable))
         self.assertNotEqual(executable, "defenseclaw-gateway")
+        self.assertEqual(os.path.normcase(executable or ""), os.path.normcase(canonical))
+
+    def test_lifecycle_executable_uses_only_absolute_non_current_path_entries(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            current = os.path.join(td, "current")
+            allowed = os.path.join(td, "allowed")
+            os.makedirs(current)
+            os.makedirs(allowed)
+            raw_search_path = os.pathsep.join(("", os.curdir, current, "relative-bin", allowed, allowed))
+            previous = os.getcwd()
+            try:
+                os.chdir(current)
+                with (
+                    mock.patch(
+                        "defenseclaw.gateway.packaged_windows_install_root",
+                        return_value=None,
+                    ),
+                    mock.patch(
+                        "defenseclaw.commands.cmd_setup.shutil.which",
+                        return_value=None,
+                    ) as which,
+                    mock.patch(
+                        "defenseclaw.gateway.canonical_install_path",
+                        return_value=os.path.join(td, "missing"),
+                    ),
+                ):
+                    self.assertIsNone(
+                        cmd_setup._gateway_lifecycle_executable(
+                            search_path=raw_search_path,
+                        )
+                    )
+            finally:
+                os.chdir(previous)
+
+        which.assert_called_once_with(
+            "defenseclaw-gateway",
+            path=os.path.abspath(allowed),
+        )
 
     def test_packaged_lifecycle_does_not_fall_back_when_sibling_is_missing(self) -> None:
         with (

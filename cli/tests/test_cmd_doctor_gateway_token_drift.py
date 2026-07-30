@@ -595,6 +595,8 @@ class FixGatewayTokenDriftTests(unittest.TestCase):
         self.assertEqual(trust.code, "legacy_identity")
         self.assertEqual(result[0], "fail")
         self.assertIn("legacy PID record", result[1])
+        self.assertIn("trusted service manager", result[1])
+        self.assertIn("defenseclaw doctor --fix", result[1])
         probe.assert_not_called()
         repair.assert_not_called()
 

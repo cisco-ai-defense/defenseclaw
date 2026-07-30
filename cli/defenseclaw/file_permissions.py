@@ -229,12 +229,23 @@ def protect_private_file(path: str | os.PathLike[str]) -> None:
         os.close(fd)
 
 
-def open_regular_file_no_follow(path: str | os.PathLike[str]) -> int:
-    """Open one regular file without following a swapped symlink/reparse point."""
+def open_regular_file_no_follow(
+    path: str | os.PathLike[str],
+    *,
+    expected_stat: os.stat_result | None = None,
+) -> int:
+    """Open one regular file without following a swapped symlink/reparse point.
+
+    ``expected_stat`` lets a caller bind this open to an identity it inspected
+    before entering the shared reader. This closes an A→B→A pathname swap in
+    callers that perform custody checks before reading the file.
+    """
     target = os.path.abspath(os.fspath(path))
     _reject_reparse_chain(os.path.dirname(target) or os.curdir)
     expected = _reject_reparse_path(target, allow_missing=False)
     assert expected is not None
+    if expected_stat is not None and not os.path.samestat(expected_stat, expected):
+        raise UnsafePathError(f"sensitive file changed before opening: {target}")
     if not stat.S_ISREG(expected.st_mode):
         raise UnsafePathError(f"refusing sensitive access to non-file: {target}")
     # Windows CRT text mode translates CRLF while ``fstat().st_size`` reports
@@ -258,11 +269,12 @@ def read_regular_file_no_follow(
     path: str | os.PathLike[str],
     *,
     max_bytes: int,
+    expected_stat: os.stat_result | None = None,
 ) -> bytes:
     """Read one bounded regular file without following links or blocking on FIFOs."""
     if max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
-    fd = open_regular_file_no_follow(path)
+    fd = open_regular_file_no_follow(path, expected_stat=expected_stat)
     try:
         chunks: list[bytes] = []
         remaining = max_bytes + 1
@@ -823,6 +835,59 @@ def windows_acl_write_error(path: str | os.PathLike[str]) -> str | None:
         if access_mode not in (1, 2) or not permissions & write_mask:
             continue
         if sid in trusted:
+            continue
+        if sid == "S-1-3-0" and inheritance & 0x08:
+            continue
+        return f"ACL grants write access to untrusted SID {sid or '<unknown>'}"
+    return None
+
+
+def windows_acl_custody_write_error(
+    path: str | os.PathLike[str],
+    *,
+    allow_current_user: bool,
+) -> str | None:
+    """Return why a path is outside trusted Windows write custody.
+
+    Private credential files use :func:`windows_acl_write_error`, which
+    deliberately requires current-user ownership. Executable and ancestor
+    custody must also admit objects owned by Windows itself. This validator
+    accepts only LocalSystem, BUILTIN\\Administrators, TrustedInstaller, and
+    optionally the current user as owners or write-capable trustees.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        owner_sid, null_dacl, entries = _windows_acl_snapshot(os.fspath(path))
+    except OSError as exc:
+        return f"cannot read Windows ACL ({exc})"
+    if null_dacl:
+        return "ACL grants write access to Everyone (null DACL)"
+
+    current_sid = _windows_current_user_sid()
+    system_controllers = {
+        "S-1-5-18",  # LocalSystem
+        "S-1-5-32-544",  # BUILTIN\Administrators
+        # NT SERVICE\TrustedInstaller
+        "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+    }
+    trusted_owners = set(system_controllers)
+    if allow_current_user:
+        trusted_owners.add(current_sid)
+    if owner_sid not in trusted_owners:
+        return f"owner SID {owner_sid or '<unknown>'} is not a trusted custody principal"
+
+    trusted_writers = system_controllers | {
+        "S-1-3-4",  # OWNER RIGHTS, constrained by the owner check above
+        owner_sid,
+    }
+    if allow_current_user:
+        trusted_writers.add(current_sid)
+    write_mask = 0x10000000 | 0x40000000 | 0x000D0156
+    for permissions, access_mode, inheritance, sid in entries:
+        if access_mode not in (1, 2) or not permissions & write_mask:
+            continue
+        if sid in trusted_writers:
             continue
         if sid == "S-1-3-0" and inheritance & 0x08:
             continue

@@ -1919,7 +1919,10 @@ class TestRestartDefenseGateway(unittest.TestCase):
                 self.assertTrue(_restart_defense_gateway(tmpdir))
             mock_run.assert_called_once()
             cmd = mock_run.call_args[0][0]
-            self.assertEqual(cmd[0], os.path.realpath(sys.executable))
+            self.assertEqual(
+                os.path.normcase(cmd[0]),
+                os.path.normcase(str(Path(sys.executable).resolve())),
+            )
             self.assertEqual(cmd[1:], ["start"])
             mock_ready.assert_called_once_with(tmpdir)
 
@@ -1952,7 +1955,10 @@ class TestRestartDefenseGateway(unittest.TestCase):
                 self.assertTrue(_restart_defense_gateway(tmpdir))
             mock_run.assert_called_once()
             cmd = mock_run.call_args[0][0]
-            self.assertEqual(cmd[0], os.path.realpath(sys.executable))
+            self.assertEqual(
+                os.path.normcase(cmd[0]),
+                os.path.normcase(str(Path(sys.executable).resolve())),
+            )
             self.assertEqual(cmd[1:], ["restart"])
             mock_ready.assert_called_once_with(tmpdir)
 

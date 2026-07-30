@@ -187,6 +187,59 @@ def test_pid_file_fingerprint_rejects_path_replacement(monkeypatch, tmp_path):
     assert doctor_gateway.pid_file_fingerprint(os.fspath(path)) is None
 
 
+def test_read_pid_record_rejects_a_b_a_path_replacement(monkeypatch, tmp_path):
+    path = tmp_path / "gateway.pid"
+    original = tmp_path / "original.pid"
+    replacement = tmp_path / "replacement.pid"
+    path.write_bytes(b"4242")
+    replacement.write_bytes(b"4343")
+    real_read = doctor_gateway.read_regular_file_no_follow
+
+    def swap_around_read(read_path, *, max_bytes, expected_stat=None):
+        os.replace(path, original)
+        os.replace(replacement, path)
+        try:
+            return real_read(
+                read_path,
+                max_bytes=max_bytes,
+                expected_stat=expected_stat,
+            )
+        finally:
+            os.replace(path, replacement)
+            os.replace(original, path)
+
+    monkeypatch.setattr(
+        doctor_gateway,
+        "read_regular_file_no_follow",
+        swap_around_read,
+    )
+
+    record = doctor_gateway.read_pid_record(os.fspath(path))
+
+    assert record.status == "unavailable"
+    assert record.pid == 0
+    assert path.read_bytes() == b"4242"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory-mode regression")
+def test_pid_readers_reject_writable_parent_directory(tmp_path):
+    parent = tmp_path / "unsafe"
+    parent.mkdir()
+    path = parent / "gateway.pid"
+    path.write_text("4242", encoding="utf-8")
+    os.chmod(path, 0o600)
+    os.chmod(parent, 0o777)
+    try:
+        record = doctor_gateway.read_pid_record(os.fspath(path))
+
+        assert record.status == "malformed"
+        assert "ancestor directory is writable" in record.reason
+        assert doctor_gateway.pid_file_fingerprint(os.fspath(path)) is None
+    finally:
+        os.chmod(parent, 0o700)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="/proc fixture uses POSIX symlinks")
 def test_linux_process_evidence_reads_executable_and_start_identity(tmp_path):
     pid = 4242
     process_root = tmp_path / str(pid)

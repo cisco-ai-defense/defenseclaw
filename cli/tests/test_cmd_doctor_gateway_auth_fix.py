@@ -260,7 +260,6 @@ def test_loopback_http_probe_never_uses_environment_proxy():
     target = socket.socket()
     target.bind(("127.0.0.1", 0))
     unused_port = target.getsockname()[1]
-    target.close()
     proxy_url = f"http://127.0.0.1:{proxy.server_port}"
     try:
         with patch.dict(
@@ -279,12 +278,20 @@ def test_loopback_http_probe_never_uses_environment_proxy():
                 timeout=0.25,
             )
     finally:
+        target.close()
         proxy.shutdown()
         proxy.server_close()
         thread.join(timeout=2)
 
     assert code == 0
     assert observed_requests == []
+
+
+def test_http_probe_normalizes_malformed_ipv6_authority() -> None:
+    code, detail = _http_probe("http://[::1/status", timeout=0.1)
+
+    assert code == 0
+    assert detail
 
 
 @pytest.mark.skipif(os.name == "nt", reason="/proc socket layout is POSIX-only")
@@ -436,7 +443,8 @@ def test_fix_gateway_token_generates_private_canonical_token(tmp_path):
     assert tag == "pass"
     assert "value redacted" in detail
     assert dotenv.read_text(encoding="utf-8").strip() == f"DEFENSECLAW_GATEWAY_TOKEN={'ab' * 32}"
-    assert stat.S_IMODE(dotenv.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(dotenv.stat().st_mode) == 0o600
 
 
 def test_fix_gateway_token_replaces_whitespace_only_canonical_value(tmp_path):

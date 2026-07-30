@@ -70,7 +70,7 @@ class TestReadPidFile(unittest.TestCase):
         self.assertIsNone(read_pid_file(self._write(json.dumps({"foo": 1}))))
 
     def test_oversized_pid_file_is_rejected(self):
-        self.assertIsNone(read_pid_file(self._write("1" * (16 * 1024 + 1))))
+        self.assertIsNone(read_pid_file(self._write("1" * (process_liveness._MAX_PID_FILE_BYTES + 1))))
 
     def test_non_utf8_pid_file_is_rejected(self):
         with tempfile.NamedTemporaryFile(suffix=".pid", delete=False) as fh:

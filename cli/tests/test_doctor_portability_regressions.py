@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import subprocess
 import sys
@@ -182,6 +183,24 @@ def test_fix_dotenv_permissions_repairs_darwin_acl_at_mode_0600(monkeypatch, tmp
     inspect_acl.assert_called_once_with(os.fspath(target))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode regression")
+def test_fix_dotenv_permissions_verifies_mode_after_repair(monkeypatch, tmp_path):
+    target = tmp_path / ".env"
+    target.write_text("SECRET=synthetic\n", encoding="utf-8")
+    os.chmod(target, 0o400)
+    cfg = SimpleNamespace(data_dir=os.fspath(tmp_path))
+    monkeypatch.setattr(file_permissions, "protect_private_file", Mock())
+
+    tag, detail = cmd_doctor._fix_dotenv_perms(
+        cfg,
+        assume_yes=True,
+        platform_name="linux",
+    )
+
+    assert tag == "fail"
+    assert "still not 0600 after repair" in detail
+
+
 def test_windows_confidentiality_rejects_empty_effective_dacl(monkeypatch):
     current_sid = "S-1-5-21-current"
     fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
@@ -191,12 +210,107 @@ def test_windows_confidentiality_rejects_empty_effective_dacl(monkeypatch):
         "_windows_acl_snapshot",
         lambda _path: (current_sid, False, []),
     )
+    monkeypatch.setattr(file_permissions, "_windows_acl_has_required_access", lambda _path: False)
     monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
 
     problem = file_permissions.windows_acl_confidentiality_error("synthetic.env")
 
-    assert problem is not None
-    assert "access" in problem.lower()
+    assert problem == "owner/SYSTEM effective access is missing"
+
+
+def test_windows_system_powershell_checks_every_system_directory_ancestor(
+    monkeypatch,
+    tmp_path,
+):
+    system_directory = tmp_path / "Windows" / "System32"
+    executable = system_directory / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"synthetic")
+
+    class StubGetSystemDirectory:
+        argtypes = None
+        restype = None
+
+        def __call__(self, buffer, _size):
+            buffer.value = os.fspath(system_directory)
+            return len(buffer.value)
+
+    kernel32 = SimpleNamespace(GetSystemDirectoryW=StubGetSystemDirectory())
+    inspected: list[str] = []
+    monkeypatch.setattr(cmd_doctor.os, "name", "nt")
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: kernel32, raising=False)
+    monkeypatch.setattr(file_permissions, "reject_reparse_path", lambda _path: None)
+    monkeypatch.setattr(
+        file_permissions,
+        "windows_acl_custody_write_error",
+        lambda path, *, allow_current_user: inspected.append(f"{os.fspath(path)}:{allow_current_user}"),
+    )
+
+    resolved, windows_directory = cmd_doctor._windows_system_powershell()
+
+    assert resolved == os.fspath(executable)
+    assert windows_directory == os.fspath(system_directory.parent)
+    assert inspected == [
+        f"{os.fspath(executable)}:False",
+        f"{os.fspath(executable.parent)}:False",
+        f"{os.fspath(executable.parent.parent)}:False",
+        f"{os.fspath(system_directory)}:False",
+    ]
+
+
+def test_windows_pid_integrity_checks_every_replaceable_ancestor(
+    monkeypatch,
+    tmp_path,
+):
+    pid_file = tmp_path / "profile" / ".defenseclaw" / "gateway.pid"
+    pid_file.parent.mkdir(parents=True)
+    pid_file.write_text("4242", encoding="ascii")
+    info = pid_file.stat()
+    inspected_file: list[str] = []
+    inspected_ancestors: list[str] = []
+
+    monkeypatch.setattr(cmd_doctor.os, "name", "nt")
+    monkeypatch.setattr(
+        file_permissions,
+        "windows_acl_write_error",
+        lambda path: inspected_file.append(os.path.normpath(os.fspath(path))),
+    )
+    monkeypatch.setattr(
+        file_permissions,
+        "windows_acl_custody_write_error",
+        lambda path, *, allow_current_user: inspected_ancestors.append(
+            f"{os.path.normpath(os.fspath(path))}:{allow_current_user}"
+        ),
+    )
+
+    problem = doctor_gateway._pid_record_integrity_error(
+        os.fspath(pid_file),
+        info,
+    )
+
+    assert problem == ""
+    assert inspected_file == [os.path.normpath(os.fspath(pid_file))]
+    expected = []
+    ancestor = pid_file.parent
+    while ancestor.parent != ancestor:
+        expected.append(f"{os.path.normpath(os.fspath(ancestor))}:True")
+        ancestor = ancestor.parent
+    assert inspected_ancestors == expected
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows custody smoke test")
+def test_windows_default_pid_and_powershell_custody(tmp_path):
+    pid_file = tmp_path / "gateway.pid"
+    pid_file.write_text("4242", encoding="ascii")
+
+    record = doctor_gateway.read_pid_record(os.fspath(pid_file))
+    powershell, windows_directory = cmd_doctor._windows_system_powershell()
+
+    assert record.status == "ok", record.reason
+    assert record.pid == 4242
+    assert os.path.isabs(powershell)
+    assert os.path.basename(powershell).casefold() == "powershell.exe"
+    assert os.path.isdir(windows_directory)
 
 
 def test_fix_dotenv_permissions_refuses_foreign_windows_owner(monkeypatch, tmp_path):

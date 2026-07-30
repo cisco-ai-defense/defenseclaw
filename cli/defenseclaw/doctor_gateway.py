@@ -36,6 +36,11 @@ import sys
 from dataclasses import dataclass
 from typing import Literal
 
+from defenseclaw.file_permissions import (
+    UnsafePathError,
+    open_regular_file_no_follow,
+    read_regular_file_no_follow,
+)
 from defenseclaw.safety import is_symlink
 
 EvidenceStatus = Literal[
@@ -48,6 +53,7 @@ EvidenceStatus = Literal[
 ]
 GATEWAY_PROCESS_NAMES = frozenset({"defenseclaw-gateway", "defenseclaw-gateway.exe"})
 MAX_PLATFORM_PID = 2_147_483_647
+_MAX_PID_RECORD_BYTES = 16 * 1024
 
 
 @dataclass(frozen=True)
@@ -117,13 +123,34 @@ def _pid_record_integrity_error(path: str, info: os.stat_result) -> str:
     """Return why a PID record is mutable by a different local principal."""
     if os.name == "nt":
         try:
-            from defenseclaw.file_permissions import windows_acl_write_error
+            from defenseclaw.file_permissions import (
+                windows_acl_custody_write_error,
+                windows_acl_write_error,
+            )
 
-            return windows_acl_write_error(path) or ""
+            if file_problem := windows_acl_write_error(path):
+                return file_problem
+            ancestor = os.path.dirname(os.path.abspath(path)) or os.curdir
+            while ancestor:
+                parent = os.path.dirname(ancestor)
+                # A drive/share root cannot itself be renamed. The generic ACL
+                # validator also treats harmless root-level create-child grants
+                # as writes, so stop after validating every replaceable
+                # ancestor below that immutable boundary.
+                if not parent or parent == ancestor:
+                    break
+                if ancestor_problem := windows_acl_custody_write_error(
+                    ancestor,
+                    allow_current_user=True,
+                ):
+                    return f"PID file ancestor directory has unsafe ACLs ({ancestor_problem})"
+                ancestor = parent
+            return ""
         except OSError:
             return "PID file ACL could not be verified"
     geteuid = getattr(os, "geteuid", None)
-    if callable(geteuid) and info.st_uid != geteuid():
+    current_uid = geteuid() if callable(geteuid) else info.st_uid
+    if info.st_uid != current_uid:
         return "PID file is not owned by the current user"
     if stat.S_IMODE(info.st_mode) & 0o022:
         return "PID file is writable by another local principal"
@@ -132,6 +159,29 @@ def _pid_record_integrity_error(path: str, info: os.stat_result) -> str:
 
         if acl_problem := darwin_acl_write_error(path):
             return acl_problem
+
+    # A protected leaf can still be replaced by renaming it from a writable
+    # directory. Walk the POSIX custody chain; sticky root-owned/current-user
+    # directories (for example /tmp) preserve ownership of existing children.
+    current = os.path.realpath(os.path.dirname(os.path.abspath(path)) or os.curdir)
+    while True:
+        directory_info = os.lstat(current)
+        if not stat.S_ISDIR(directory_info.st_mode):
+            return "PID file ancestor is not a directory"
+        if directory_info.st_uid not in {0, current_uid}:
+            return "PID file ancestor directory is not owned by a trusted principal"
+        mode = stat.S_IMODE(directory_info.st_mode)
+        if mode & 0o022 and not mode & stat.S_ISVTX:
+            return "PID file ancestor directory is writable by another local principal"
+        if sys.platform == "darwin":
+            from defenseclaw.file_permissions import darwin_acl_write_error
+
+            if acl_problem := darwin_acl_write_error(current):
+                return f"PID file ancestor directory has unsafe ACLs ({acl_problem})"
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
     return ""
 
 
@@ -148,28 +198,29 @@ def read_pid_record(path: str) -> PIDRecord:
             return PIDRecord("malformed", reason="PID file is not a regular file")
         if integrity_error := _pid_record_integrity_error(path, info):
             return PIDRecord("malformed", reason=integrity_error)
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(path, flags)
-        try:
-            opened_info = os.fstat(fd)
-            if not os.path.samestat(info, opened_info):
-                return PIDRecord("unavailable", reason="PID file changed while it was being inspected")
-            handle = os.fdopen(fd, "rb")
-            fd = -1  # fdopen owns the descriptor from this point onward.
-            with handle:
-                raw_bytes = handle.read(16_385)
-        finally:
-            if fd >= 0:
-                os.close(fd)
+        raw_bytes = read_regular_file_no_follow(
+            path,
+            max_bytes=_MAX_PID_RECORD_BYTES,
+            expected_stat=info,
+        )
+        current = os.lstat(path)
+        if not os.path.samestat(info, current):
+            return PIDRecord("unavailable", reason="PID file changed while it was being inspected")
     except FileNotFoundError:
         return PIDRecord("missing", reason="PID file is missing")
     except PermissionError:
         return PIDRecord("denied", reason="PID file access denied")
+    except UnsafePathError as exc:
+        if "exceeds" in str(exc):
+            return PIDRecord("malformed", reason="PID file exceeds the inspection limit")
+        if "non-file" in str(exc):
+            return PIDRecord("malformed", reason="PID file is not a regular file")
+        if "symlink" in str(exc) or "reparse" in str(exc):
+            return PIDRecord("malformed", reason="PID file is a symbolic link or reparse point")
+        return PIDRecord("unavailable", reason="PID file changed while it was being inspected")
     except OSError:
         return PIDRecord("unavailable", reason="PID file could not be inspected")
 
-    if len(raw_bytes) > 16_384:
-        return PIDRecord("malformed", reason="PID file exceeds the inspection limit")
     try:
         raw = raw_bytes.decode("utf-8")
     except UnicodeError:
@@ -224,22 +275,25 @@ def pid_file_fingerprint(path: str) -> tuple[int, int, int, int, bytes] | None:
             return None
         if _pid_record_integrity_error(path, info):
             return None
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(path, flags)
+        fd = open_regular_file_no_follow(path)
         try:
             opened_info = os.fstat(fd)
             if not os.path.samestat(info, opened_info):
                 return None
-            handle = os.fdopen(fd, "rb")
-            fd = -1
-            with handle:
-                raw = handle.read(16_385)
+            chunks: list[bytes] = []
+            remaining = _MAX_PID_RECORD_BYTES + 1
+            while remaining:
+                chunk = os.read(fd, min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
         finally:
-            if fd >= 0:
-                os.close(fd)
+            os.close(fd)
     except OSError:
         return None
-    if len(raw) > 16_384:
+    if len(raw) > _MAX_PID_RECORD_BYTES:
         return None
     return (
         int(getattr(opened_info, "st_dev", 0)),

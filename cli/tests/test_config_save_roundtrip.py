@@ -358,6 +358,7 @@ class TestGatewayFleetModeRoundTrip(unittest.TestCase):
                     yaml.safe_dump(original, stream, sort_keys=False)
 
                 with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
+                    os.environ.pop("DEFENSECLAW_CONFIG", None)
                     cfg = load()
                     self.assertEqual(cfg.gateway.fleet_mode, mode)
                     cfg.save()
@@ -394,6 +395,7 @@ class TestGatewayFleetModeRoundTrip(unittest.TestCase):
                 yaml.safe_dump(original, stream, sort_keys=False)
 
             with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
+                os.environ.pop("DEFENSECLAW_CONFIG", None)
                 cfg = load()
                 self.assertEqual(cfg.gateway.fleet_mode, "")
                 self.assertEqual(cfg.gateway.fleet_mode or "auto", "auto")

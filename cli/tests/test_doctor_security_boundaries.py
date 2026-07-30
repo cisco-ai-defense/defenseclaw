@@ -11,6 +11,7 @@ import pytest
 from defenseclaw import config as config_module
 from defenseclaw.commands import cmd_doctor, cmd_setup
 from defenseclaw.doctor_gateway import PIDRecord, ProcessEvidence
+from defenseclaw.file_permissions import UnsafePathError
 
 
 def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
@@ -60,6 +61,73 @@ def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
         assert os.environ.get(name) == value
     for name in rejected:
         assert name not in os.environ
+
+
+def test_python_dotenv_loader_warns_when_safe_read_is_refused(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(
+        config_module,
+        "read_regular_file_no_follow",
+        Mock(side_effect=UnsafePathError("sensitive file exceeds read limit")),
+    )
+
+    with caplog.at_level("WARNING", logger=config_module.__name__):
+        config_module._load_dotenv_into_os(os.fspath(tmp_path))
+
+    assert "ignoring unreadable or unsafe dotenv" in caplog.text
+    assert os.fspath(tmp_path / ".env") in caplog.text
+
+
+def test_empty_data_dir_never_consumes_cwd_gateway_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("DEFENSECLAW_GATEWAY_TOKEN=attacker-selected\n", encoding="utf-8")
+    os.chmod(dotenv, 0o600)
+    pid_file = tmp_path / "gateway.pid"
+    pid_file.write_text("4242\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    cfg = SimpleNamespace(
+        data_dir="",
+        gateway=SimpleNamespace(token_env="", resolved_token=lambda: ""),
+    )
+
+    assert cmd_doctor._gateway_dotenv_tokens("") == {}
+    assert cmd_doctor._daemon_effective_gateway_token(cfg) == ("", "", "")
+    assert cmd_doctor._gateway_dotenv_safety_problem(cfg) == "gateway data directory is unavailable"
+    assert cmd_doctor._fix_dotenv_perms(cfg, assume_yes=True)[0] == "fail"
+    assert cmd_doctor._fix_stale_pid(cfg, assume_yes=True)[0] == "fail"
+    assert pid_file.exists()
+
+
+def test_fixer_blocker_reports_the_blocker_applicable_to_each_stage() -> None:
+    cfg = SimpleNamespace(
+        gateway=SimpleNamespace(token_env="OPENCLAW_GATEWAY_TOKEN"),
+        _doctor_gateway_token_was_rotated=True,
+        _doctor_gateway_token_rotation_required=False,
+    )
+    dotenv_problem = "dotenv permissions are not 0600"
+
+    assert (
+        cmd_doctor._fixer_blocker(
+            cfg,
+            "gateway token_env",
+            dotenv_problem,
+        )
+        == dotenv_problem
+    )
+    assert (
+        cmd_doctor._fixer_blocker(
+            cfg,
+            "gateway token drift",
+            dotenv_problem,
+        )
+        == "gateway.token_env did not converge on the rotated canonical provider"
+    )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode/owner regression")
@@ -200,11 +268,16 @@ def test_failed_exposed_token_rotation_restores_legacy_provider_without_activati
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode regression")
-def test_write_exposed_dotenv_is_not_blessed_or_consumed(tmp_path) -> None:
+def test_write_exposed_dotenv_is_not_blessed_or_consumed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
     dotenv = tmp_path / ".env"
     dotenv.write_text("DEFENSECLAW_GATEWAY_TOKEN=attacker-selected\n", encoding="utf-8")
     os.chmod(dotenv, 0o620)
     cfg = SimpleNamespace(data_dir=os.fspath(tmp_path))
+    # Isolate the mode assertion from the separate data-directory check.
+    monkeypatch.setattr(cmd_doctor, "_gateway_data_dir_integrity_problem", lambda _cfg: "")
 
     tag, detail = cmd_doctor._fix_dotenv_perms(
         cfg,

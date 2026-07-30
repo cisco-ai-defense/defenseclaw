@@ -42,7 +42,14 @@ func TestLoadDotEnvIntoOSRejectsProcessControlAndMalformedEntries(t *testing.T) 
 		"DEFENSECLAW_GATEWAY_BIN",
 		"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT",
 		"DEFENSECLAW_DISABLE_REDACTION",
+		"DEFENSECLAW_DAEMON",
 		"CLAUDE_CONFIG_DIR",
+		"NODE_OPTIONS",
+		"SSL_CERT_FILE",
+		"NODE_EXTRA_CA_CERTS",
+		"REQUESTS_CA_BUNDLE",
+		"CURL_CA_BUNDLE",
+		"GIT_SSL_NO_VERIFY",
 	}
 	unsetEnvironmentForDotenvTest(t, append(allowed, rejected...)...)
 
@@ -59,7 +66,14 @@ func TestLoadDotEnvIntoOSRejectsProcessControlAndMalformedEntries(t *testing.T) 
 			"DEFENSECLAW_GATEWAY_BIN=/tmp/attacker-gateway\n" +
 			"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1\n" +
 			"DEFENSECLAW_DISABLE_REDACTION=1\n" +
+			"DEFENSECLAW_DAEMON=1\n" +
 			"CLAUDE_CONFIG_DIR=/tmp/attacker-claude-home\n" +
+			"NODE_OPTIONS=--require=/tmp/attacker.js\n" +
+			"SSL_CERT_FILE=/tmp/attacker-ca.pem\n" +
+			"NODE_EXTRA_CA_CERTS=/tmp/attacker-node-ca.pem\n" +
+			"REQUESTS_CA_BUNDLE=/tmp/attacker-requests-ca.pem\n" +
+			"CURL_CA_BUNDLE=/tmp/attacker-curl-ca.pem\n" +
+			"GIT_SSL_NO_VERIFY=true\n" +
 			"DC_SECURITY_TEST_CREDENTIAL_AFTER=credential-after\n",
 	)
 	if err := os.WriteFile(path, body, 0o600); err != nil {
