@@ -68,6 +68,16 @@ def _url_host(host: str) -> str:
     return host
 
 
+def _refuse_gateway_redirect(response: requests.Response, **_kwargs: Any) -> requests.Response:
+    """Reject every management-channel redirect before callers parse a body."""
+    if 300 <= response.status_code < 400:
+        raise requests.HTTPError(
+            f"gateway response redirect refused ({response.status_code})",
+            response=response,
+        )
+    return response
+
+
 class OrchestratorClient:
     def __init__(
         self,
@@ -87,6 +97,11 @@ class OrchestratorClient:
         # let the proxy impersonate gateway responses. Keep the management
         # channel direct on every platform.
         self._session.trust_env = False
+        # Requests dispatches response hooks before it follows redirects or
+        # returns the response to a method. Coupled with allow_redirects=False
+        # on every call below, this gives every present and future management
+        # endpoint one consistent fail-closed redirect policy.
+        self._session.hooks["response"].append(_refuse_gateway_redirect)
         self._session.headers["X-DefenseClaw-Client"] = "python-cli"
         if token:
             self._session.headers["Authorization"] = f"Bearer {token}"
@@ -421,7 +436,7 @@ class OrchestratorClient:
         try:
             self.health()
             return True
-        except (requests.ConnectionError, requests.Timeout):
+        except (requests.RequestException, ValueError):
             return False
 
 

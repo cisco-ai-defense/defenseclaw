@@ -44,6 +44,7 @@ _DOTENV_PROCESS_CONTROL_NAMES = frozenset(
         "CLAUDE_CONFIG_DIR",
         "CODEX_HOME",
         "COMSPEC",
+        "CURL_CA_BUNDLE",
         "DEFENSECLAW_CONFIG",
         "DEFENSECLAW_CODEX_LOOPBACK_TRUST",
         "DEFENSECLAW_DATA_DIR",
@@ -70,16 +71,21 @@ _DOTENV_PROCESS_CONTROL_NAMES = frozenset(
         "DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED",
         "DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST",
         "ENV",
+        "GIT_SSL_NO_VERIFY",
         "HOME",
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "LOCPATH",
         "NO_PROXY",
+        "NODE_EXTRA_CA_CERTS",
         "PATH",
         "PATHEXT",
         "PYTHONHOME",
         "PYTHONPATH",
         "PYTHONSTARTUP",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
         "SYSTEMROOT",
         "TEMP",
         "TMP",
@@ -826,6 +832,8 @@ def windows_acl_write_error(path: str | os.PathLike[str]) -> str | None:
         return "ACL grants write access to Everyone (null DACL)"
 
     current_sid = _windows_current_user_sid()
+    if not current_sid:
+        return "current user SID could not be resolved"
     if owner_sid != current_sid:
         return f"owner SID {owner_sid or '<unknown>'} is not the current user"
 
@@ -865,6 +873,8 @@ def windows_acl_custody_write_error(
         return "ACL grants write access to Everyone (null DACL)"
 
     current_sid = _windows_current_user_sid()
+    if allow_current_user and not current_sid:
+        return "current user SID could not be resolved"
     system_controllers = {
         "S-1-5-18",  # LocalSystem
         "S-1-5-32-544",  # BUILTIN\Administrators
@@ -917,6 +927,8 @@ def windows_acl_confidentiality_error(path: str | os.PathLike[str]) -> str | Non
         return "ACL grants read/write access to Everyone (null DACL)"
 
     current_sid = _windows_current_user_sid()
+    if not current_sid:
+        return "current user SID could not be resolved"
     if owner_sid != current_sid:
         return f"owner SID {owner_sid or '<unknown>'} is not the current user"
 
@@ -1084,7 +1096,7 @@ def _hold_windows_directory(path: str):
 def _windows_acl_has_required_access(path: str | os.PathLike[str]) -> bool:
     owner_sid, null_dacl, entries = _windows_acl_snapshot(os.fspath(path))
     current_sid = _windows_current_user_sid()
-    if null_dacl or owner_sid != current_sid:
+    if not current_sid or null_dacl or owner_sid != current_sid:
         return False
     allowed = {
         sid for permissions, access_mode, _inheritance, sid in entries if access_mode in (1, 2) and permissions != 0

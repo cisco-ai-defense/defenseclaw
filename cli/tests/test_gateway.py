@@ -203,14 +203,15 @@ class OrchestratorClientWireFormatTests(unittest.TestCase):
 
         self.assertIs(client._session.trust_env, False)
 
-    def test_status_refuses_cross_origin_redirect_without_replaying_tokens(self):
+    def test_management_methods_refuse_cross_origin_redirect_without_replaying_tokens(self):
         origin_requests: list[dict[str, str | None]] = []
         target_requests: list[dict[str, str | None]] = []
 
         class TargetHandler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:
+            def _record(self) -> None:
                 target_requests.append(
                     {
+                        "method": self.command,
                         "path": self.path,
                         "authorization": self.headers.get("Authorization"),
                         "x_dc_auth": self.headers.get("X-DC-Auth"),
@@ -221,6 +222,12 @@ class OrchestratorClientWireFormatTests(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(b"{}")
 
+            def do_GET(self) -> None:
+                self._record()
+
+            def do_POST(self) -> None:
+                self._record()
+
             def log_message(self, format: str, *args: object) -> None:
                 pass
 
@@ -230,9 +237,10 @@ class OrchestratorClientWireFormatTests(unittest.TestCase):
         redirect_url = f"http://127.0.0.1:{target_server.server_port}/redirect-target"
 
         class OriginHandler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:
+            def _redirect(self) -> None:
                 origin_requests.append(
                     {
+                        "method": self.command,
                         "path": self.path,
                         "authorization": self.headers.get("Authorization"),
                         "x_dc_auth": self.headers.get("X-DC-Auth"),
@@ -243,6 +251,12 @@ class OrchestratorClientWireFormatTests(unittest.TestCase):
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(b"{}")
+
+            def do_GET(self) -> None:
+                self._redirect()
+
+            def do_POST(self) -> None:
+                self._redirect()
 
             def log_message(self, format: str, *args: object) -> None:
                 pass
@@ -259,6 +273,11 @@ class OrchestratorClientWireFormatTests(unittest.TestCase):
             )
             with self.assertRaises(gateway.requests.HTTPError):
                 client.status()
+            with self.assertRaises(gateway.requests.HTTPError):
+                client.health()
+            with self.assertRaises(gateway.requests.HTTPError):
+                client.reload_provider_registry()
+            self.assertFalse(client.is_running())
         finally:
             origin_server.shutdown()
             origin_server.server_close()
@@ -271,10 +290,29 @@ class OrchestratorClientWireFormatTests(unittest.TestCase):
             origin_requests,
             [
                 {
+                    "method": "GET",
                     "path": "/status",
                     "authorization": "Bearer gateway-secret",
                     "x_dc_auth": "Bearer gateway-secret",
-                }
+                },
+                {
+                    "method": "GET",
+                    "path": "/health",
+                    "authorization": "Bearer gateway-secret",
+                    "x_dc_auth": "Bearer gateway-secret",
+                },
+                {
+                    "method": "POST",
+                    "path": "/v1/config/providers/reload",
+                    "authorization": "Bearer gateway-secret",
+                    "x_dc_auth": "Bearer gateway-secret",
+                },
+                {
+                    "method": "GET",
+                    "path": "/health",
+                    "authorization": "Bearer gateway-secret",
+                    "x_dc_auth": "Bearer gateway-secret",
+                },
             ],
         )
         self.assertEqual(target_requests, [])

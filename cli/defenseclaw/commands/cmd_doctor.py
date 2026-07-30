@@ -701,13 +701,10 @@ def _configured_gateway_data_dir(cfg) -> str:
 def _gateway_dotenv_tokens(data_dir: str) -> dict[str, str]:
     """Read the token values the Go daemon will inject into its child."""
     values: dict[str, str] = {}
-    raw_data_dir = str(data_dir or "")
-    if not raw_data_dir.strip():
+    normalized_data_dir = _configured_gateway_data_dir(SimpleNamespace(data_dir=data_dir))
+    if not normalized_data_dir:
         return values
-    try:
-        path = os.path.join(os.path.abspath(raw_data_dir), ".env")
-    except (OSError, ValueError):
-        return values
+    path = os.path.join(normalized_data_dir, ".env")
     try:
         body = read_regular_file_no_follow(path, max_bytes=MAX_DOTENV_BYTES)
         for raw_line in body.splitlines():

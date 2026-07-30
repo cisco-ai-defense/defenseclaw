@@ -45,6 +45,7 @@ func TestLoadDotEnvIntoOSRejectsProcessControlAndMalformedEntries(t *testing.T) 
 		"DEFENSECLAW_DAEMON",
 		"CLAUDE_CONFIG_DIR",
 		"NODE_OPTIONS",
+		"SSL_CERT_DIR",
 		"SSL_CERT_FILE",
 		"NODE_EXTRA_CA_CERTS",
 		"REQUESTS_CA_BUNDLE",
@@ -69,6 +70,7 @@ func TestLoadDotEnvIntoOSRejectsProcessControlAndMalformedEntries(t *testing.T) 
 			"DEFENSECLAW_DAEMON=1\n" +
 			"CLAUDE_CONFIG_DIR=/tmp/attacker-claude-home\n" +
 			"NODE_OPTIONS=--require=/tmp/attacker.js\n" +
+			"SSL_CERT_DIR=/tmp/attacker-ca-directory\n" +
 			"SSL_CERT_FILE=/tmp/attacker-ca.pem\n" +
 			"NODE_EXTRA_CA_CERTS=/tmp/attacker-node-ca.pem\n" +
 			"REQUESTS_CA_BUNDLE=/tmp/attacker-requests-ca.pem\n" +

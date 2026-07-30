@@ -577,6 +577,54 @@ def test_windows_custody_distinguishes_user_and_system_paths(monkeypatch):
     assert problem == f"owner SID {current_sid} is not a trusted custody principal"
 
 
+@pytest.mark.parametrize(
+    ("validator", "kwargs"),
+    [
+        (file_permissions.windows_acl_write_error, {}),
+        (
+            file_permissions.windows_acl_custody_write_error,
+            {"allow_current_user": True},
+        ),
+        (file_permissions.windows_acl_confidentiality_error, {}),
+    ],
+)
+def test_windows_user_acl_validators_reject_unresolved_current_sid(
+    monkeypatch,
+    validator,
+    kwargs,
+):
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: ("", False, [(0x10000000, 1, 0, "")]),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: "")
+
+    assert validator("synthetic-user-path", **kwargs) == "current user SID could not be resolved"
+
+
+def test_windows_system_custody_does_not_require_current_sid(monkeypatch):
+    system_sid = "S-1-5-18"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (system_sid, False, [(0x10000000, 1, 0, system_sid)]),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: "")
+
+    assert (
+        file_permissions.windows_acl_custody_write_error(
+            "synthetic-system-path",
+            allow_current_user=False,
+        )
+        is None
+    )
+
+
 def test_windows_confidentiality_accepts_owner_and_system_only(monkeypatch):
     current_sid = "S-1-5-21-current"
     fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
