@@ -15,7 +15,6 @@ This file only maps the config-v8 implementation and its authoring sources.
 | Runtime collection, local history, health, routing, and delivery | [`internal/observability/runtime/`](../internal/observability/runtime/), [`router/`](../internal/observability/router/), and [`delivery/`](../internal/observability/delivery/) |
 | Destination adapters | [`internal/observability/destinations/`](../internal/observability/destinations/) |
 | Local Grafana stack and Prometheus rules | [`bundles/local_observability_stack/`](../bundles/local_observability_stack/) |
-| Design and acceptance record | [`docs/design/observability-v8/`](design/observability-v8/) |
 
 Files named `internal/observability/zz_generated_telemetry_*.go` and the runtime
 assets under `schemas/telemetry/runtime/` are generated outputs. Edit the v8

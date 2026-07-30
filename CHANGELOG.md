@@ -163,7 +163,7 @@ boundary.
   pipeline (vs. an out-of-tree handler registration that bypasses
   audit/metrics).
 - New audit action `connector-hook-synthetic` (Go +
-  `cli/defenseclaw/audit_actions.py` + `OBSERVABILITY-CONTRACT.md`)
+  `cli/defenseclaw/audit_actions.py` + `schemas/audit-event.json`)
   for the synthetic Stop visibility row.
 
 ### F6 audit-action parity

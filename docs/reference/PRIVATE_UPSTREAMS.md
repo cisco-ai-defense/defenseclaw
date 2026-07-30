@@ -1,7 +1,7 @@
-# Requirements: allow private upstream IPs
+# Private upstream security contract
 
-**Status:** Implemented. This is an engineering contract, not operator setup
-guidance. Configuration and environment-variable usage are maintained in the
+**Status:** Current. This is the implemented engineering contract, not operator
+setup guidance. Configuration and environment-variable usage are maintained in the
 [configuration reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/)
 and
 [environment-variable catalog](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/env-vars/).

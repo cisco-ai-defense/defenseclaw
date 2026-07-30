@@ -728,9 +728,7 @@ PORTABLE_STATIC_OUTPUT_PATHS: Final = (
 # Only runtime/release inputs remain checked in under generated/. The catalog
 # report, inbound compatibility expansion, and example/OTLP corpora are useful
 # compiler products, but they are reproducible and needlessly dominate diffs.
-REPOSITORY_GENERATED_OUTPUT_PATHS: Final = frozenset(
-    runtime_assets.LOGICAL_TO_ENCODED
-)
+REPOSITORY_GENERATED_OUTPUT_PATHS: Final = frozenset(runtime_assets.LOGICAL_TO_ENCODED)
 REPOSITORY_OUTPUT_MODE: Final = 0o644
 REPOSITORY_PHYSICAL_OUTPUT_PATHS: Final = frozenset(
     {
@@ -2322,9 +2320,7 @@ def _parse_snapshot(
         raise RegistryError(f"{snapshot_relative}.source_archive: expected object")
     _exact_keys(archive, {"url", "sha256"}, set(), f"{snapshot_relative}.source_archive")
     archive_url = _string(archive["url"], f"{snapshot_relative}.source_archive.url")
-    archive_sha256 = _string(
-        archive["sha256"], f"{snapshot_relative}.source_archive.sha256", pattern=_SHA256
-    )
+    archive_sha256 = _string(archive["sha256"], f"{snapshot_relative}.source_archive.sha256", pattern=_SHA256)
     if revision not in archive_url or not archive_url.startswith(repository.rstrip("/") + "/archive/"):
         raise RegistryError(f"{snapshot_relative}.source_archive.url: must name the pinned primary revision")
     source_tree_sha256 = _string(
@@ -2366,9 +2362,7 @@ def _parse_snapshot(
         parsed_source_files.append(SourceFileIR(source_path, source_digest))
     if source_paths != sorted(set(source_paths)):
         raise RegistryError(f"{snapshot_relative}.source_files: paths must be sorted and unique")
-    if dependency_id == "openinference" and not set(source_paths).issubset(
-        EXPECTED_OPENINFERENCE_SOURCES
-    ):
+    if dependency_id == "openinference" and not set(source_paths).issubset(EXPECTED_OPENINFERENCE_SOURCES):
         raise RegistryError(f"{snapshot_relative}.source_files: non-authoritative OpenInference source")
     raw_attributes = document["attributes"]
     if not isinstance(raw_attributes, list) or not raw_attributes:
@@ -2598,12 +2592,12 @@ def _parse_producer_inventory(
     Mapping[str, FrozenJSON],
     InputDigest,
 ]:
-    relative = "docs/design/observability-v8/current-state-inventory.yaml"
+    relative = "schemas/telemetry/v8/compatibility/v7-compatibility-inputs.yaml"
     path, normalized = _safe_relative(
         root,
         relative,
         "producer_inventory",
-        prefix=Path("docs/design/observability-v8"),
+        prefix=Path("schemas/telemetry/v8/compatibility"),
     )
     raw, document = _load_yaml_strict_with_bytes(path)
     if document.get("inventory_version") != 1 or not isinstance(document.get("classes"), dict):
@@ -2637,7 +2631,7 @@ def _parse_producer_inventory(
             raise RegistryError(f"{item_path}: expected mapping")
         _exact_keys(
             item,
-            {"type", "unit", "labels", "callsites", "dropped_by_current_global_v8_gate"},
+            {"type", "unit", "labels"},
             {"empty_labels_reason"},
             item_path,
         )
@@ -2646,15 +2640,6 @@ def _parse_producer_inventory(
             raise RegistryError(f"{item_path}.type: unsupported metric instrument type")
         unit = _string(item["unit"], f"{item_path}.unit")
         labels = frozenset(_string_list(item["labels"], f"{item_path}.labels"))
-        _string_list(item["callsites"], f"{item_path}.callsites", allow_empty=False)
-        dropped = set(
-            _string_list(
-                item["dropped_by_current_global_v8_gate"],
-                f"{item_path}.dropped_by_current_global_v8_gate",
-            )
-        )
-        if not dropped.issubset(labels):
-            raise RegistryError(f"{item_path}.dropped_by_current_global_v8_gate: expected a subset of labels")
         empty_reason = None
         if "empty_labels_reason" in item:
             empty_reason = _string(item["empty_labels_reason"], f"{item_path}.empty_labels_reason")
@@ -2689,7 +2674,7 @@ def _parse_producer_inventory(
         set(),
         f"{normalized}.classes.v7_exporter_selection",
     )
-    if selection["source"] != "canonical telemetry families plus this v7 current-state inventory":
+    if selection["source"] != "canonical telemetry families plus this v7 compatibility input":
         raise RegistryError(f"{normalized}.classes.v7_exporter_selection.source: unexpected authority")
     if selection["migration_disposition"] != "preserve_compatibility_floor":
         raise RegistryError(f"{normalized}.classes.v7_exporter_selection.migration_disposition: unexpected value")
@@ -2749,7 +2734,7 @@ def _materialize_v7_exporter_selection(
 ) -> Mapping[str, FrozenJSON]:
     """Replace closed producer-derived selectors with their canonical identities.
 
-    The current-state inventory owns the v7 policy shape, while the telemetry
+    The v7 compatibility input owns the legacy policy shape, while the telemetry
     registry's exhaustive producer mappings own the actual action and event-name
     vocabulary.  Keeping only these derivation declarations in the inventory
     prevents a second hand-maintained list from silently losing new producers.
@@ -10482,8 +10467,7 @@ def compile_registry(root: Path) -> RegistryIR:
             attribute_owners[attribute.id] = _public_upstream_owner(dependency.id)
     extension_refs = {extension.ref for domain in domains for extension in domain.attribute_extensions}
     selected_by_dependency = {
-        dependency.id: {attribute.id for attribute in dependency.snapshot.attributes}
-        for dependency in dependencies
+        dependency.id: {attribute.id for attribute in dependency.snapshot.attributes} for dependency in dependencies
     }
     if selected_by_dependency["otel_core"] & selected_by_dependency["otel_genai"]:
         raise RegistryError("selected OTel semantic-convention ownership overlaps")
@@ -11203,9 +11187,7 @@ def _validate_metric_attribute_safety(
                     f"class={field_class} cardinality={cardinality}"
                 )
             if cardinality == "high":
-                raise RegistryError(
-                    f"metric {group.id}: high-cardinality label attribute {reference} is forbidden"
-                )
+                raise RegistryError(f"metric {group.id}: high-cardinality label attribute {reference} is forbidden")
             if set(field_types) & {"string", "string[]"}:
                 if normalization.id not in {"enum-v1", "bounded-v1", "identifier-v1"}:
                     raise RegistryError(
@@ -11542,9 +11524,7 @@ def check_outputs(root: Path, outputs: Mapping[Path, bytes]) -> None:
     problems = _drift(root, desired)
     if problems:
         raise RegistryError(
-            "generated output drift: "
-            + "; ".join(problems)
-            + "; run scripts/generate_telemetry_registry.py --write"
+            "generated output drift: " + "; ".join(problems) + "; run scripts/generate_telemetry_registry.py --write"
         )
 
 
@@ -11617,11 +11597,7 @@ def _remove_retired_outputs(root: Path) -> None:
 def write_outputs(root: Path, outputs: Mapping[Path, bytes]) -> None:
     root = _repository_root(root)
     desired = _physical_outputs(outputs)
-    unknown = [
-        relative
-        for relative in _extra_outputs(root)
-        if relative not in RETIRED_REPOSITORY_OUTPUT_PATHS
-    ]
+    unknown = [relative for relative in _extra_outputs(root) if relative not in RETIRED_REPOSITORY_OUTPUT_PATHS]
     if unknown:
         raise RegistryError(f"generated output drift: extra={unknown}")
     _remove_retired_outputs(root)

@@ -118,11 +118,6 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     # splitting trips the regex. The values are explained in the
     # registry-backed env-vars page.
     "docs-site/content/docs/reference/fail-modes.mdx",
-    # Design docs that describe future / possible env vars.
-    "docs/design/openshell-standalone-sandbox.md",
-    # Parity spec describing the Python<->Go TUI backend selector
-    # (DEFENSECLAW_TUI_BACKEND) as a design knob, not a shipped env var.
-    "docs/design/python-textual-tui-parity-spec.md",
     # Test fixtures that use synthetic env-var names as labels for
     # --auth-env / --token-env flags. The labels are example operator
     # configuration, not env vars DefenseClaw itself reads.
@@ -210,7 +205,6 @@ _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
     "DEFENSECLAW_OTEL_": frozenset(
         {
             "cli/defenseclaw/observability/v8_migration.py",
-            "docs/OTEL.md",
             "docs-site/content/docs/observability/index.mdx",
             "internal/config/config.go",
             "internal/config/config_test.go",

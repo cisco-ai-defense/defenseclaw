@@ -23,6 +23,24 @@ All published host ports are loopback-bound by default in
 bind address, so it is not equivalent to the managed CLI's loopback safety
 checks.
 
+## Direct Compose bind override
+
+The managed controller enforces loopback-only access. Contributors who run the
+Compose bundle directly can set `HOST_BIND` before startup:
+
+```powershell
+$env:HOST_BIND = "192.0.2.10"
+docker compose up -d
+```
+
+```bash
+HOST_BIND=192.0.2.10 docker compose up -d
+```
+
+That override bypasses the managed controller's loopback enforcement and
+exposes every published bundle port on the selected interface. Use it only in
+an explicitly secured development environment.
+
 ## Source ownership
 
 - [`otel-collector/config.yaml`](otel-collector/config.yaml): collector

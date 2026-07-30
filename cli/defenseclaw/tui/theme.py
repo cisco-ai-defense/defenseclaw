@@ -14,11 +14,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Theme tokens for the Python Textual TUI migration.
+"""Theme tokens for the Python Textual TUI.
 
-The palette follows ``docs/design/python-textual-tui-parity-spec.md``.
-Keep visual changes centralized here so panel code does not hard-code
-decorative colors.
+This module is the canonical palette. Keep visual changes centralized here so
+panel code does not hard-code decorative colors.
 """
 
 from __future__ import annotations

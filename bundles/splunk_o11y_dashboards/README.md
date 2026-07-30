@@ -19,6 +19,10 @@ workspace lifecycle are implemented in
 the Terraform files are the resource definitions, not a standalone operator
 entry point.
 
+The setup command reads the Splunk Observability access token from
+`SFX_AUTH_TOKEN`. Operators should never put the API token on the command line:
+command arguments can be exposed through process inspection and shell history.
+
 Detector changes should remain semantically aligned with the local Prometheus
 rules in
 [`bundles/local_observability_stack/prometheus/rules/alerts.yml`](../local_observability_stack/prometheus/rules/alerts.yml).
