@@ -167,7 +167,13 @@ def read_pid_file(pid_file: str) -> int | None:
 
 
 def pid_file_alive(pid_file: str) -> bool:
-    """Return True when the PID recorded in ``pid_file`` is alive."""
+    """Return True when the PID recorded in ``pid_file`` is alive.
+
+    This is a read-only compatibility observation. It does not authenticate
+    the process as DefenseClaw or authorize signaling/lifecycle mutation;
+    callers performing control actions must validate that stronger identity
+    separately.
+    """
     pid = read_pid_file(pid_file)
     if pid is None:
         return False

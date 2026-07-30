@@ -8599,6 +8599,10 @@ def _is_pid_alive(pid_file: str) -> bool:
     ``os.kill(pid, 0)`` check reported a live gateway as dead on Windows
     (signal 0 is not a liveness probe there), which made
     ``setup --restart`` no-op against the running daemon.
+
+    This predicate is observation only. A positive result never authenticates
+    the recorded process or authorizes lifecycle mutation; control paths must
+    independently prove gateway identity and custody.
     """
     from defenseclaw.process_liveness import pid_file_alive
 

@@ -1809,6 +1809,13 @@ class TestSetupGuardrailCommand(unittest.TestCase):
 
 
 class TestIsPidAlive(unittest.TestCase):
+    def _write_pid_file(self, content: str) -> str:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".pid", delete=False) as f:
+            f.write(content)
+            path = f.name
+        self.addCleanup(os.unlink, path)
+        return path
+
     def test_no_file(self):
         from defenseclaw.commands.cmd_setup import _is_pid_alive
 
@@ -1817,47 +1824,39 @@ class TestIsPidAlive(unittest.TestCase):
     def test_stale_pid(self):
         from defenseclaw.commands.cmd_setup import _is_pid_alive
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".pid", delete=False) as f:
-            f.write("999999999")
-            f.flush()
-            self.assertFalse(_is_pid_alive(f.name))
-        os.unlink(f.name)
+        self.assertFalse(_is_pid_alive(self._write_pid_file("999999999")))
 
     def test_own_pid(self):
         from defenseclaw.commands.cmd_setup import _is_pid_alive
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".pid", delete=False) as f:
-            f.write(str(os.getpid()))
-            f.flush()
-            self.assertTrue(_is_pid_alive(f.name))
-        os.unlink(f.name)
+        self.assertTrue(_is_pid_alive(self._write_pid_file(str(os.getpid()))))
 
     def test_bad_content(self):
         from defenseclaw.commands.cmd_setup import _is_pid_alive
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".pid", delete=False) as f:
-            f.write("not-a-number")
-            f.flush()
-            self.assertFalse(_is_pid_alive(f.name))
-        os.unlink(f.name)
+        self.assertFalse(_is_pid_alive(self._write_pid_file("not-a-number")))
 
     def test_json_pid_own_process(self):
         from defenseclaw.commands.cmd_setup import _is_pid_alive
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".pid", delete=False) as f:
-            json.dump({"pid": os.getpid(), "executable": "/usr/bin/test", "start_time": 0}, f)
-            f.flush()
-            self.assertTrue(_is_pid_alive(f.name))
-        os.unlink(f.name)
+        payload = json.dumps({"pid": os.getpid(), "executable": "/usr/bin/test", "start_time": 0})
+        self.assertTrue(_is_pid_alive(self._write_pid_file(payload)))
 
     def test_json_pid_stale_process(self):
         from defenseclaw.commands.cmd_setup import _is_pid_alive
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".pid", delete=False) as f:
-            json.dump({"pid": 999999999, "executable": "/usr/bin/test", "start_time": 0}, f)
-            f.flush()
-            self.assertFalse(_is_pid_alive(f.name))
-        os.unlink(f.name)
+        payload = json.dumps({"pid": 999999999, "executable": "/usr/bin/test", "start_time": 0})
+        self.assertFalse(_is_pid_alive(self._write_pid_file(payload)))
+
+    def test_live_legacy_pid_observation_does_not_authorize_lifecycle(self):
+        from defenseclaw.commands.cmd_setup import (
+            _gateway_pid_file_identifies_gateway,
+            _is_pid_alive,
+        )
+
+        pid_file = self._write_pid_file(str(os.getpid()))
+        self.assertTrue(_is_pid_alive(pid_file))
+        self.assertFalse(_gateway_pid_file_identifies_gateway(pid_file))
 
 
 class TestRestartDefenseGateway(unittest.TestCase):
