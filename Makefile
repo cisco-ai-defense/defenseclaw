@@ -821,11 +821,11 @@ macos-app-release-verify:
 	scripts/verify-macos-app-release.sh "$(VERSION)" "$(DIST_DIR)"
 
 # security-suite-test runs the deterministic security + PII coverage suite
-# (regex layer + stubbed LLM-judge layer) plus the regex severity benchmark.
+# (structured tool calls + regex + stubbed LLM judge) and severity benchmark.
 # No LLM key or running gateway required; this is the CI-safe tier and is
 # also covered by `make gateway-test`.
 security-suite-test:
-	go test ./internal/gateway/ -run 'TestSecuritySuiteRegex|TestSecuritySuiteJudge|TestSeverityBenchmark' -count=1 -v
+	go test ./internal/gateway/ -run 'TestSecuritySuiteToolCall|TestSecuritySuiteRegex|TestSecuritySuiteJudge|TestSeverityBenchmark' -count=1 -v
 
 # security-suite-eval scores the judge corpus against a live model and runs
 # the full eval corpus. Requires DEFENSECLAW_LLM_KEY. Not run in CI.

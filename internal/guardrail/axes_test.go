@@ -112,6 +112,9 @@ func TestAxesForRuleID_CoversRealScannerRules(t *testing.T) {
 		"exfil.secret_read_and_egress_oneliner": {AxisSensitiveAccess, AxisEgressExternal},
 		"exec.reverse_tunnel":                   {AxisEgressExternal},
 		"exec.agent_runtime_bypass_flags":       nil,
+		"recon.network_sweep":                   {AxisEgressExternal},
+		"source.git_remote_tamper":              nil,
+		"chain.secret_read_then_egress":         {AxisSensitiveAccess, AxisEgressExternal},
 		// Cloud metadata C2 endpoints (dual axis)
 		"C2-METADATA-AWS": {AxisSensitiveAccess, AxisEgressExternal},
 		// SRC-* network members
@@ -188,10 +191,19 @@ func TestCapabilityForRuleID_ProducerCoverage(t *testing.T) {
 		"exfil.secret_read_and_egress_oneliner": CapNetworkFetch,
 		"exec.reverse_tunnel":                   CapNetworkFetch,
 		"exec.agent_runtime_bypass_flags":       CapExecShell,
+		"recon.network_sweep":                   CapNetworkFetch,
+		"privilege.host_namespace_entry":        CapExecShell,
+		"lateral.workload_exec":                 CapExecShell,
+		"impact.mass_process_termination":       CapExecShell,
+		"tamper.detector_state_write":           CapWriteFS,
+		"persistence.shell_profile_write":       CapWriteFS,
+		"persistence.privileged_account_change": CapExecShell,
 		// No capability for a bare secret / injection finding
-		"SEC-AWS-KEY":    CapUnknown,
-		"INJ-IGNORE-ALL": CapUnknown,
-		"COG-SOUL":       CapUnknown,
+		"SEC-AWS-KEY":              CapUnknown,
+		"INJ-IGNORE-ALL":           CapUnknown,
+		"source.git_config_exec":   CapUnknown,
+		"source.git_remote_tamper": CapUnknown,
+		"COG-SOUL":                 CapUnknown,
 	}
 	for ruleID, want := range cases {
 		if got := CapabilityForRuleID(ruleID); got != want {

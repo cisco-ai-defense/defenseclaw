@@ -158,6 +158,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			LegacyText:         string(toolArgs),
 			Connector:          "claudecode",
 			EnforcementCapable: req.HookEventName != "PermissionDenied",
+			record:             toolChainRecorderFromContext(ctx),
 		})
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})

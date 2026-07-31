@@ -384,6 +384,40 @@
       ]
     },
     {
+      "id": "chain.guardrails_off_then_egress",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "chain.permission_denied_then_runtime_bypass",
+      "axes": []
+    },
+    {
+      "id": "chain.privilege_discovery_then_elevation",
+      "axes": []
+    },
+    {
+      "id": "chain.secret_manager_read_then_egress",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "chain.secret_read_then_egress",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "chain.workload_identity_then_lateral_execution",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
       "id": "exec.agent_runtime_bypass_flags",
       "axes": []
     },
@@ -397,6 +431,60 @@
       "id": "exfil.secret_read_and_egress_oneliner",
       "axes": [
         "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "impact.cryptomining_launch",
+      "axes": []
+    },
+    {
+      "id": "impact.fork_bomb",
+      "axes": []
+    },
+    {
+      "id": "impact.mass_process_termination",
+      "axes": []
+    },
+    {
+      "id": "integrity.git_hooks_bypass",
+      "axes": []
+    },
+    {
+      "id": "lateral.workload_exec",
+      "axes": []
+    },
+    {
+      "id": "persistence.git_hook_write",
+      "axes": []
+    },
+    {
+      "id": "persistence.privileged_account_change",
+      "axes": []
+    },
+    {
+      "id": "persistence.shell_profile_write",
+      "axes": []
+    },
+    {
+      "id": "persistence.ssh_authorized_keys_command",
+      "axes": []
+    },
+    {
+      "id": "privilege.container_host_escape",
+      "axes": []
+    },
+    {
+      "id": "privilege.container_runtime_socket_access",
+      "axes": []
+    },
+    {
+      "id": "privilege.host_namespace_entry",
+      "axes": []
+    },
+    {
+      "id": "recon.network_sweep",
+      "axes": [
         "egress_external"
       ]
     },
@@ -423,6 +511,22 @@
       "axes": [
         "sensitive_access"
       ]
+    },
+    {
+      "id": "source.git_config_exec",
+      "axes": []
+    },
+    {
+      "id": "source.git_remote_tamper",
+      "axes": []
+    },
+    {
+      "id": "tamper.detector_state_write",
+      "axes": []
+    },
+    {
+      "id": "tamper.guardrails_off",
+      "axes": []
     }
   ],
   "prefix_axes": [

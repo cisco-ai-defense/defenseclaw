@@ -35,9 +35,9 @@ type PatternRule struct {
 	ID         string
 	Pattern    *regexp.Regexp
 	Expression string
-	// ToolCallOnly keeps trusted-action rules out of prompt, result, and
-	// artifact text scans. The trusted dispatcher decides between Expression
-	// and Pattern; ordinary scanners never evaluate both for one owner.
+	// ToolCallOnly keeps a rule's regex out of prompt, result, and artifact
+	// text scans. Expressions are always confined to the trusted dispatcher,
+	// which decides between Expression and Pattern for one owner.
 	ToolCallOnly bool
 	Title        string
 	Severity     string
@@ -244,9 +244,6 @@ func compileRulePackGenerationWithCompiler(
 			if expression == "" {
 				continue
 			}
-			if !rule.ToolCallOnly {
-				return nil, fmt.Errorf("semantic rule %q is not tool-call-only", rule.ID)
-			}
 			program, code := compiler.Compile(expression)
 			if code != semantic.CompileOK {
 				return nil, fmt.Errorf("semantic rule %q failed admission (%s)", rule.ID, code)
@@ -436,13 +433,6 @@ func mergeRulePackCategories(
 				)
 			}
 			if expression != "" {
-				if !r.ToolCallOnly {
-					return nil, 0, 0, fmt.Errorf(
-						"rule-pack category entry %d rule %d semantic expression is not tool-call-only",
-						fileIndex,
-						ruleIndex,
-					)
-				}
 				if compiler == nil {
 					return nil, 0, 0, errors.New("semantic rule compiler is unavailable")
 				}

@@ -190,7 +190,21 @@ func (a *APIServer) correlateHookOccurrence(
 	_, sourceDigest := correlationIdentifiersForValues(instance.ConnectorInstanceID, allValues, preferredSource)
 	identifiers, _ := correlationIdentifiersForValues(instance.ConnectorInstanceID,
 		correlationMatchValuesForRail(spec, audit.CorrelationRailHook, allValues), preferredSource)
-	receipt := correlationReceiptForHook(spec, instance.ConnectorInstanceID, req, sourceDigest, fingerprintHex, now)
+	if sourceDigest == "" {
+		sourceDigest = reviewedHookToolRetryDigest(
+			spec,
+			instance.ConnectorInstanceID,
+			req,
+			lifecycle,
+		)
+	}
+	receipt := correlationReceiptForHook(
+		spec,
+		instance.ConnectorInstanceID,
+		sourceDigest,
+		fingerprintHex,
+		now,
+	)
 	matchInput := audit.CorrelationMatchInput{
 		ConnectorInstanceID: instance.ConnectorInstanceID,
 		SemanticEventID:     reportedSemantic,
@@ -833,17 +847,74 @@ func dedupeCorrelationValues(slices []connector.CorrelationValue, canonical map[
 func correlationReceiptForHook(
 	spec connector.CorrelationSpec,
 	instance audit.ConnectorInstanceID,
-	req agentHookRequest,
 	sourceDigest, fingerprint string,
 	now time.Time,
 ) *audit.CorrelationReceiptClaim {
-	if sourceDigest == "" || req.SourceEventID == "" || !spec.AllowsReceiptTarget(connector.CorrelationTargetSourceEvent) {
+	if sourceDigest == "" ||
+		!spec.AllowsReceiptTarget(connector.CorrelationTargetSourceEvent) {
 		return nil
 	}
 	return &audit.CorrelationReceiptClaim{SourceKeyDigest: correlationReceiptSourceKey(
 		instance, audit.CorrelationRailHook, string(connector.CorrelationSurfaceHook), sourceDigest,
 	), FingerprintSHA256: fingerprint,
 		ReceivedAt: now, ExpiresAt: now.Add(correlationReceiptTTL)}
+}
+
+// reviewedHookToolRetryDigest admits a provider tool invocation ID as an
+// exact same-rail delivery identity only when its precise hook field has an
+// immutable mirror proof. Session and tool values are HMAC-digested before
+// they enter the receipt key, and tool lifecycle scoping keeps the matching
+// PostToolUse occurrence distinct. Missing, minted, or generic aliases fail
+// closed to a fresh occurrence.
+func reviewedHookToolRetryDigest(
+	spec connector.CorrelationSpec,
+	instance audit.ConnectorInstanceID,
+	req agentHookRequest,
+	lifecycle connector.CorrelationLifecycle,
+) string {
+	if lifecycle != connector.CorrelationLifecycleToolStart ||
+		instance == "" ||
+		strings.TrimSpace(req.SessionID) == "" ||
+		strings.TrimSpace(req.ToolInvocationID) == "" {
+		return ""
+	}
+	session, sessionOK := req.CorrelationValues[connector.CorrelationTargetSession]
+	tool, toolOK := req.CorrelationValues[connector.CorrelationTargetTool]
+	if !sessionOK || !toolOK ||
+		session.Value != req.SessionID ||
+		tool.Value != req.ToolInvocationID ||
+		tool.Origin != connector.CorrelationOriginReported {
+		return ""
+	}
+	proofID, proven := spec.MirrorProofForValue(
+		connector.CorrelationSurfaceHook,
+		tool,
+	)
+	if !proven {
+		return ""
+	}
+	sessionDigest := correlationValueDigest(instance, session)
+	toolDigest := correlationValueDigest(instance, tool)
+	if sessionDigest == "" || toolDigest == "" {
+		return ""
+	}
+	return gatewaylog.ComputePayloadHMAC(struct {
+		Domain        string `json:"domain"`
+		Instance      string `json:"connector_instance_id"`
+		Profile       string `json:"profile_version"`
+		Lifecycle     string `json:"lifecycle"`
+		SessionDigest string `json:"session_digest"`
+		ToolDigest    string `json:"tool_digest"`
+		ProofID       string `json:"proof_id"`
+	}{
+		Domain:        "correlation-hook-tool-retry-v1",
+		Instance:      string(instance),
+		Profile:       string(spec.ProfileVersion),
+		Lifecycle:     string(lifecycle),
+		SessionDigest: sessionDigest,
+		ToolDigest:    toolDigest,
+		ProofID:       proofID,
+	})
 }
 
 // correlationReceiptSourceKey scopes delivery idempotency to one authenticated

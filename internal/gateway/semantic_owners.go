@@ -28,12 +28,13 @@ import (
 type semanticOwnerPrerequisite func(actionfacts.Facts) bool
 
 type semanticOwner struct {
-	id                 string
-	equivalentAliases  []string
-	matchedOnlyAliases []string
-	unmatchedClaims    []string
-	prerequisite       semanticOwnerPrerequisite
-	suppressFallback   semanticOwnerPrerequisite
+	id                     string
+	equivalentAliases      []string
+	matchedOnlyAliases     []string
+	fallbackAliasesOnMatch []string
+	unmatchedClaims        []string
+	prerequisite           semanticOwnerPrerequisite
+	suppressFallback       semanticOwnerPrerequisite
 }
 
 func (o semanticOwner) eligible(facts actionfacts.Facts) bool {
@@ -59,7 +60,7 @@ type compiledSemanticRule struct {
 	owner   semanticOwner
 }
 
-var semanticOwners = map[string]semanticOwner{
+var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 	"PATH-ENV-FILE": {
 		prerequisite:     pathOwnerPrerequisite(pathValueMatcher(matchesEnvironmentFile)),
 		suppressFallback: pathOwnerSafeNegative(matchesEnvironmentFile, pathValueMatcher(matchesEnvironmentFile)),
@@ -145,6 +146,32 @@ var semanticOwners = map[string]semanticOwner{
 		prerequisite:     sensitiveReadAndEgressPrerequisite,
 		suppressFallback: readAndEgressSafeNegative,
 	},
+})
+
+func buildSemanticOwners(owners map[string]semanticOwner) map[string]semanticOwner {
+	registerSemanticOwners(owners, semanticReconImpactOwners)
+	registerSemanticOwners(owners, semanticIntegrityPersistenceOwners)
+	for ownerID, aliases := range semanticIntegrityPersistenceFallbackAliasesOnMatch {
+		owner, ok := owners[ownerID]
+		if !ok {
+			panic("semantic fallback alias registered for unknown owner " + ownerID)
+		}
+		owner.fallbackAliasesOnMatch = append([]string(nil), aliases...)
+		owners[ownerID] = owner
+	}
+	return owners
+}
+
+func registerSemanticOwners(
+	owners map[string]semanticOwner,
+	additions map[string]semanticOwner,
+) {
+	for ruleID, owner := range additions {
+		if _, exists := owners[ruleID]; exists {
+			panic("duplicate semantic owner " + ruleID)
+		}
+		owners[ruleID] = owner
+	}
 }
 
 func semanticOwnerForRule(ruleID string) semanticOwner {
@@ -238,36 +265,7 @@ func staticReverseShellSafeNegative(facts actionfacts.Facts) bool {
 }
 
 func reverseTunnelPrerequisite(facts actionfacts.Facts) bool {
-	for _, command := range facts.Commands {
-		if !command.ArgvComplete || !oneOfFold(command.Program, "ssh", "ssh.exe") {
-			continue
-		}
-		hasConfigNone := false
-		hasReverse := false
-		hasPreview := false
-		for index, argument := range command.Argv {
-			switch {
-			case strings.EqualFold(argument, "-F") &&
-				index+1 < len(command.Argv) &&
-				strings.EqualFold(command.Argv[index+1], "none"):
-				hasConfigNone = true
-			case strings.EqualFold(argument, "-R"):
-				hasReverse = true
-			case strings.EqualFold(argument, "-G"):
-				hasPreview = true
-			}
-		}
-		if hasConfigNone && hasReverse && !hasPreview &&
-			hasExternalNetworkAction(
-				facts,
-				command.ID,
-				actionfacts.NetworkTunnel,
-				actionfacts.NetworkConnect,
-			) {
-			return true
-		}
-	}
-	return false
+	return reverseTunnelFallbackProof(facts)
 }
 
 func reverseTunnelPreviewPrerequisite(facts actionfacts.Facts) bool {
@@ -309,31 +307,17 @@ func reverseTunnelSafeNegative(facts actionfacts.Facts) bool {
 
 func reverseTunnelNonExternalPrerequisite(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
-		if !command.ArgvComplete || !oneOfFold(command.Program, "ssh", "ssh.exe") {
+		if command.Effect != actionfacts.EffectExecute ||
+			!command.ArgvComplete ||
+			!exactReverseTunnelArgv(command) {
 			continue
 		}
-		hasConfigNone := false
-		hasReverse := false
-		hasPreview := false
-		for index, argument := range command.Argv {
-			switch {
-			case strings.EqualFold(argument, "-F") &&
-				index+1 < len(command.Argv) &&
-				strings.EqualFold(command.Argv[index+1], "none"):
-				hasConfigNone = true
-			case strings.EqualFold(argument, "-R"):
-				hasReverse = true
-			case strings.EqualFold(argument, "-G"):
-				hasPreview = true
-			}
-		}
-		if hasConfigNone && hasReverse && !hasPreview &&
-			hasDeterminateNonExternalNetworkAction(
-				facts,
-				command.ID,
-				actionfacts.NetworkTunnel,
-				actionfacts.NetworkConnect,
-			) {
+		if hasDeterminateNonExternalNetworkAction(
+			facts,
+			command.ID,
+			actionfacts.NetworkTunnel,
+			actionfacts.NetworkConnect,
+		) {
 			return true
 		}
 	}
@@ -343,7 +327,6 @@ func reverseTunnelNonExternalPrerequisite(facts actionfacts.Facts) bool {
 func agentRuntimeBypassPrerequisite(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
 		if command.Effect == actionfacts.EffectExecute &&
-			oneOfFold(command.Program, "claude", "codex") &&
 			hasOperation(command, actionfacts.OperationPolicyBypass) {
 			return true
 		}
@@ -420,7 +403,10 @@ func semanticPathCandidates(facts actionfacts.Facts) []actionfacts.PathFact {
 			if value == "" || strings.HasPrefix(value, "-") {
 				continue
 			}
-			candidate := actionfacts.PathFact{Value: value}
+			candidate := actionfacts.PathFact{
+				CommandID: command.ID,
+				Value:     value,
+			}
 			normalized := canonicalSemanticPath(value)
 			candidate.Normalized = normalized
 			if isAbsoluteSemanticPath(normalized) {
@@ -428,7 +414,7 @@ func semanticPathCandidates(facts actionfacts.Facts) []actionfacts.PathFact {
 			} else if facts.CWD != "" {
 				candidate.Resolved = path.Clean(
 					strings.TrimRight(canonicalSemanticPath(facts.CWD), "/") +
-						"/" + strings.TrimLeft(normalized, "./"),
+						"/" + normalized,
 				)
 			}
 			candidates = append(candidates, candidate)
@@ -810,10 +796,6 @@ func environmentDumpPrerequisite(
 	return false
 }
 
-func hasSensitiveReadPath(facts actionfacts.Facts, commandID int64) bool {
-	return hasReadPath(facts, commandID, true)
-}
-
 func hasReadPath(
 	facts actionfacts.Facts,
 	commandID int64,
@@ -1118,12 +1100,10 @@ func matchesActivePackageCredentialFile(
 }
 
 func matchesGitCredentialFile(value string) bool {
-	switch pathBase(value) {
-	case ".git-credentials", ".netrc", "_netrc":
-		return true
-	default:
-		return false
-	}
+	return matchesRelativePathAtComponentBoundary(
+		value,
+		matchesDeveloperCredentialRelative,
+	)
 }
 
 func matchesActiveGitCredentialFile(
@@ -1134,9 +1114,26 @@ func matchesActiveGitCredentialFile(
 	if !ok {
 		return false
 	}
-	return relative == ".git-credentials" ||
-		relative == ".netrc" ||
-		relative == "_netrc"
+	return matchesDeveloperCredentialRelative(relative)
+}
+
+func matchesDeveloperCredentialRelative(relative string) bool {
+	switch relative {
+	case ".git-credentials",
+		".netrc",
+		"_netrc",
+		".pgpass",
+		".cache/huggingface/token",
+		".huggingface/token",
+		".config/huggingface/token",
+		".config/pypoetry/auth.toml",
+		".kaggle/kaggle.json",
+		"library/application support/pypoetry/auth.toml",
+		"appdata/roaming/pypoetry/auth.toml":
+		return true
+	default:
+		return false
+	}
 }
 
 func matchesProcEnviron(value string) bool {
@@ -1196,9 +1193,11 @@ func matchesCloudCredentialRelative(relative string) bool {
 	case ".config/gcloud/application_default_credentials.json",
 		".config/gcloud/credentials.db",
 		".config/gcloud/access_tokens.db",
+		".config/gh/hosts.yml",
 		"appdata/roaming/gcloud/application_default_credentials.json",
 		"appdata/roaming/gcloud/credentials.db",
 		"appdata/roaming/gcloud/access_tokens.db",
+		"appdata/roaming/github cli/hosts.yml",
 		".azure/azureprofile.json",
 		".azure/tokencache.dat":
 		return true
@@ -1322,7 +1321,8 @@ func userHomeRelative(value, prefix string) (string, bool) {
 
 func matchesWorkloadIdentityToken(value string) bool {
 	return value == "/var/run/secrets/kubernetes.io/serviceaccount/token" ||
-		value == "/var/run/secrets/eks.amazonaws.com/serviceaccount/token"
+		value == "/var/run/secrets/eks.amazonaws.com/serviceaccount/token" ||
+		value == "/var/run/secrets/azure/tokens/azure-identity-token"
 }
 
 func matchesWorkloadIdentityTokenCandidate(value string) bool {
@@ -1332,6 +1332,9 @@ func matchesWorkloadIdentityTokenCandidate(value string) bool {
 	) || strings.HasSuffix(
 		value,
 		"/var/run/secrets/eks.amazonaws.com/serviceaccount/token",
+	) || strings.HasSuffix(
+		value,
+		"/var/run/secrets/azure/tokens/azure-identity-token",
 	)
 }
 

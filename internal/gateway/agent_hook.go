@@ -113,6 +113,7 @@ type agentHookRequest struct {
 	Content                   string
 	Direction                 string
 	Payload                   map[string]interface{}
+	toolChain                 *toolChainHookCapture
 }
 
 type agentHookResponse struct {
@@ -200,7 +201,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			req.SuppressCorrelationEmit = true
 		} else {
 			req = correlatedReq
+			req.toolChain = &toolChainHookCapture{}
 		}
+		ctx = withToolChainHookCapture(ctx, req.toolChain)
 		ctx = enrichAgentHookContext(ctx, req)
 		t0 := time.Now()
 		// attemptedWrite covers BOTH "writeJSON returned successfully"
@@ -326,6 +329,17 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// they round-trip back to the HTTP response and onto the
 		// audit envelope without a second pass here.
 		resp, panicked := a.safeEvaluateHook(ctx, connectorName, req, b, payload, runtime)
+		var chainFinalization toolChainHookFinalization
+		if !panicked {
+			resp, chainFinalization = a.safeApplyAgentHookToolChains(
+				ctx,
+				profile,
+				req,
+				b,
+				resp,
+				time.Since(t0),
+			)
+		}
 		elapsed := time.Since(t0)
 		enrichAgentHookSpan(ctx, req, resp, elapsed)
 		if panicked {
@@ -349,6 +363,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 
 		persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookCompatibilityExtra(profile))
+		if err := chainFinalization.attach(ctx, resp.EvaluationID); err != nil {
+			fmt.Fprintf(os.Stderr, "[gateway] tool-call chain finalization failed connector=%s event=%s: %v\n",
+				connectorName, req.HookEventName, err)
+		}
 		if persisted {
 			if err := a.finalizeHookCorrelationReceipt(ctx, req.CorrelationReceipt); err != nil {
 				fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
@@ -1653,6 +1671,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			LegacyText:         string(req.ToolArgs),
 			Connector:          req.ConnectorName,
 			EnforcementCapable: enforcementCapable,
+			record:             toolChainRecorder(req.toolChain),
 		})
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}

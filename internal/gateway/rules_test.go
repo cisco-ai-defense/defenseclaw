@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -691,6 +692,35 @@ func TestHighestConfidence(t *testing.T) {
 	}
 	if got := HighestConfidence(findings, "HIGH"); got != 0.95 {
 		t.Errorf("HighestConfidence(HIGH) = %.2f, want 0.95", got)
+	}
+}
+
+func TestSemanticExpressionKeepsLegacyRegexEligible(t *testing.T) {
+	generation, err := compileRulePackGeneration([]ruleCategory{{
+		Name: "legacy-regex",
+		Rules: []PatternRule{{
+			ID:         "LEGACY-SEMANTIC",
+			Pattern:    regexp.MustCompile(`legacy-token`),
+			Expression: "false",
+			Title:      "legacy semantic regex",
+			Severity:   "HIGH",
+			Confidence: 1,
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(generation.semanticRules) != 1 {
+		t.Fatalf("semantic rules = %d, want 1", len(generation.semanticRules))
+	}
+	findings := scanRuleGeneration(
+		generation,
+		"legacy-token",
+		"message",
+		ruleScanOptions{},
+	)
+	if len(findings) != 1 || findings[0].RuleID != "LEGACY-SEMANTIC" {
+		t.Fatalf("message-lane findings = %v", FindingStrings(findings))
 	}
 }
 

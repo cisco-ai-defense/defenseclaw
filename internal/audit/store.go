@@ -1714,6 +1714,10 @@ var migrations = []migration{
 		description: "runtime assets: add durable connector session provenance state",
 		apply:       migrateRuntimeAssetState,
 	},
+	{
+		description: "guardrails: add bounded durable tool-call chain state",
+		apply:       migrateToolChainState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -1821,6 +1825,9 @@ func (s *Store) Init() error {
 		"correlation_pending_operations",
 		"correlation_receipts",
 		"correlation_identity_claims",
+		"guardrail_chain_partitions",
+		"guardrail_chain_events",
+		"guardrail_chain_deny_receipts",
 	} {
 		present, err := tableExists(s.db, table)
 		if err != nil {
@@ -2034,6 +2041,10 @@ var knownTables = map[string]bool{
 	"correlation_pending_operations":    true,
 	"correlation_receipts":              true,
 	"correlation_identity_claims":       true,
+	// Bounded, content-free state for the six fixed tool-call chains.
+	"guardrail_chain_partitions":    true,
+	"guardrail_chain_events":        true,
+	"guardrail_chain_deny_receipts": true,
 	// Connector/session selection and load provenance (WIN-AUD-070/071).
 	"runtime_asset_state": true,
 }

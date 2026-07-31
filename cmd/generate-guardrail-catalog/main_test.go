@@ -13,12 +13,11 @@ import (
 	"testing"
 )
 
-func TestValidateRuleRequiresToolCallBoundaryForExpression(t *testing.T) {
+func TestValidateRuleSeparatesExpressionFromRegexExposure(t *testing.T) {
 	rule := validGeneratorRule()
 	rule.Expression = "true"
-	if err := validateRule("commands.yaml", &rule); err == nil ||
-		!strings.Contains(err.Error(), "expression requires tool_call_only") {
-		t.Fatalf("validateRule() error = %v", err)
+	if err := validateRule("commands.yaml", &rule); err != nil {
+		t.Fatalf("validate semantic rule with message-lane regex: %v", err)
 	}
 
 	rule.ToolCallOnly = true

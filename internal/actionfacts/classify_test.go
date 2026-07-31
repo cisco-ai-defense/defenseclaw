@@ -4438,6 +4438,37 @@ func TestAgentRuntimeRawStructuredParity(t *testing.T) {
 			effect: EffectExecute, enforcing: true, bypass: true,
 		},
 		{
+			name: "npx Claude bypass",
+			argv: []string{
+				"npx", "-y", "claude",
+				"--dangerously-skip-permissions", "-p", "fixture",
+			},
+			effect: EffectExecute, enforcing: true, bypass: true,
+		},
+		{
+			name: "pnpm Codex bypass",
+			argv: []string{
+				"pnpm", "dlx", "codex",
+				"--ask-for-approval=never", "exec",
+				"--sandbox=danger-full-access",
+			},
+			effect: EffectExecute, enforcing: true, bypass: true,
+		},
+		{
+			name: "bunx Gemini bypass",
+			argv: []string{
+				"bunx", "gemini", "--yolo", "-p", "fixture",
+			},
+			effect: EffectExecute, enforcing: true, bypass: true,
+		},
+		{
+			name: "npx Codex ordinary mode",
+			argv: []string{
+				"npx", "codex", "exec", "--full-auto", "fixture",
+			},
+			effect: EffectExecute, enforcing: true,
+		},
+		{
 			name: "Claude help",
 			argv: []string{
 				"claude", "--help",
@@ -4486,6 +4517,19 @@ func TestAgentRuntimeRawStructuredParity(t *testing.T) {
 		},
 		{
 			Tool: "exec", Argv: []string{"opencode", "run", "--future-mode"},
+			DialectHint: DialectPOSIX,
+		},
+		{
+			Tool: "exec", Argv: []string{
+				"npx", "--yes", "gemini", "--yolo",
+			},
+			DialectHint: DialectPOSIX,
+		},
+		{
+			Tool: "exec", Argv: []string{
+				"pnpm", "exec", "codex",
+				"--dangerously-bypass-approvals-and-sandbox",
+			},
 			DialectHint: DialectPOSIX,
 		},
 		{

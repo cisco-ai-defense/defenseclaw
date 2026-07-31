@@ -160,10 +160,27 @@ func windowsValidatePipelineAuthority(
 	}
 	if dialect == windowsPowerShell &&
 		(windowsDirectWebExpressionPipeline(commands, edges) ||
-			windowsDirectProcessStopPipeline(commands, edges)) {
+			windowsDirectProcessStopPipeline(commands, edges) ||
+			windowsDirectACLPipeline(commands, edges)) {
 		return
 	}
 	out.markPartial(IssueUnsupportedConstruct)
+}
+
+func windowsDirectACLPipeline(
+	commands []windowsParsedCommand,
+	edges []windowsPipelineEdge,
+) bool {
+	return len(commands) == 2 && len(edges) == 1 &&
+		edges[0].from == 0 && edges[0].to == 1 &&
+		len(commands[0].words) >= 2 &&
+		len(commands[1].words) >= 3 &&
+		len(commands[0].redirects) == 0 &&
+		len(commands[1].redirects) == 0 &&
+		!commands[0].callOperator &&
+		!commands[1].callOperator &&
+		strings.EqualFold(commands[0].words[0].value, "get-acl") &&
+		strings.EqualFold(commands[1].words[0].value, "set-acl")
 }
 
 func windowsDirectWebExpressionPipeline(
@@ -1423,6 +1440,8 @@ func windowsClassifyPowerShell(
 		if environment {
 			windowsAddOperation(command, OperationEnvironmentRead)
 		}
+	case "get-acl":
+		classifyStructuredGetACL(builder.out, command)
 	case "set-content", "out-file":
 		windowsAddOperation(command, OperationWrite)
 		windowsAddPowerShellPrimaryPath(command.ID, PathAccessWrite, args, true, builder)
@@ -1503,6 +1522,10 @@ func windowsClassifyPowerShell(
 		}
 	case "clear-disk":
 		windowsClassifyClearDisk(command, args, builder)
+	case "format-volume":
+		classifyStructuredPowerShellFormatVolume(builder.out, command)
+	case "set-acl":
+		classifyStructuredSetACL(builder.out, command)
 	case "stop-process":
 		windowsClassifyStopProcess(command, args, builder)
 	case "add-localgroupmember":
@@ -1591,7 +1614,7 @@ func windowsClassifyCMD(
 		windowsClassifyTaskkill(command, args, builder)
 	case "schtasks":
 		windowsClassifySchtasks(command, args, builder)
-	case "net":
+	case "net", "net1":
 		windowsClassifyNetLocalGroup(command, args, builder)
 	case "nmap", "nmap.exe", "masscan", "masscan.exe", "fping", "fping.exe":
 		windowsClassifyNetworkScanner(command, args, builder)
@@ -1633,6 +1656,7 @@ func windowsClassifyClearDisk(
 	valid := true
 	targetSeen := false
 	removeData := false
+	removeOEM := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg.expands || arg.quote != QuoteNone {
@@ -1668,13 +1692,19 @@ func windowsClassifyClearDisk(
 				continue
 			}
 			removeData = true
+		case "-removeoem":
+			if removeOEM {
+				valid = false
+				continue
+			}
+			removeOEM = true
 		default:
 			if !windowsPowerShellConfirmControl(arg) {
 				valid = false
 			}
 		}
 	}
-	if !valid || !targetSeen || !removeData {
+	if !valid || !targetSeen || !removeData && !removeOEM {
 		builder.out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
