@@ -1627,7 +1627,23 @@ func rulePackNeedsReload(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
 	}
-	return oldCfg.Guardrail.RulePackDir != newCfg.Guardrail.RulePackDir
+	if oldCfg.Guardrail.RulePackDir != newCfg.Guardrail.RulePackDir {
+		return true
+	}
+	return effectiveActiveSidecarRulePackDir(oldCfg) != effectiveActiveSidecarRulePackDir(newCfg)
+}
+
+func effectiveActiveSidecarRulePackDir(cfg *config.Config) string {
+	active := cfg.Guardrail.RulePackDir
+	activeConnectors := cfg.ActiveConnectors()
+	if !cfg.Guardrail.Enabled || len(activeConnectors) != 1 {
+		return active
+	}
+	name := canonicalConnectorRulePackKey(activeConnectors[0])
+	if name == "" || !cfg.Guardrail.EffectiveEnabled(name) {
+		return active
+	}
+	return cfg.EffectiveRulePackDirForConnector(name)
 }
 
 func judgeNeedsReload(oldCfg, newCfg *config.Config) bool {

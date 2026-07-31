@@ -245,6 +245,136 @@ func TestRulePackCandidatePreflightChecksOnlyEnabledConnectorOverrides(t *testin
 	}
 }
 
+func TestRulePackNeedsReloadTracksEffectiveActiveSingleConnector(t *testing.T) {
+	singleConnectorConfig := func(connector, rulePackDir string) *config.Config {
+		cfg := config.DefaultConfig()
+		cfg.Guardrail.Enabled = true
+		cfg.Guardrail.RulePackDir = "/global"
+		cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+			connector: {RulePackDir: rulePackDir},
+		}
+		return cfg
+	}
+
+	t.Run("scoped pack A to B", func(t *testing.T) {
+		oldCfg := singleConnectorConfig("codex", "/scoped/a")
+		newCfg := singleConnectorConfig("codex", "/scoped/b")
+		if !rulePackNeedsReload(oldCfg, newCfg) {
+			t.Fatal("single-connector scoped rule-pack change did not require reload")
+		}
+	})
+
+	t.Run("active connector A to B", func(t *testing.T) {
+		oldCfg := singleConnectorConfig("codex", "/scoped/a")
+		newCfg := singleConnectorConfig("claudecode", "/scoped/b")
+		if !rulePackNeedsReload(oldCfg, newCfg) {
+			t.Fatal("active single-connector rule-pack change did not require reload")
+		}
+	})
+}
+
+func TestSingleConnectorScopedRulePackReloadPublishesActiveCandidate(t *testing.T) {
+	resetConnectorRuleCategories(t)
+	withLocalPatternsRestored(t)
+	priorManaged := ManagedEnterpriseActive()
+	setManagedEnterpriseRedactionPosture(false)
+	t.Cleanup(func() {
+		setManagedEnterpriseRedactionPosture(priorManaged)
+	})
+
+	writePack := func(dir, id, pattern string) {
+		writeRulePackFixtureFile(t, dir, "rules/scoped.yaml", fmt.Sprintf(`version: 1
+category: secret
+rules:
+  - id: %s
+    pattern: %q
+    title: scoped reload fixture
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`, id, pattern))
+	}
+	oldDir := t.TempDir()
+	newDir := t.TempDir()
+	writePack(oldDir, "SCOPED-A", `scoped_a_token`)
+	writePack(newDir, "SCOPED-B", `scoped_b_token`)
+
+	fixture := newSidecarV8BootstrapFixture(t, config.ObservabilityV8ConfigVersion, "")
+	rulePackRaw := func(dir string) []byte {
+		return []byte(fmt.Sprintf(
+			"config_version: 8\ndata_dir: %q\ngateway:\n  config_reload:\n    mode: hot\nguardrail:\n  enabled: true\n  rule_pack_dir: \"\"\n  connectors:\n    codex:\n      rule_pack_dir: %q\nobservability: {}\n",
+			fixture.dataDir,
+			dir,
+		))
+	}
+	oldRaw := rulePackRaw(oldDir)
+	newRaw := rulePackRaw(newDir)
+	oldCfg, err := config.LoadRuntimeV8CandidateFromBytes(fixture.configPath, oldRaw)
+	if err != nil {
+		t.Fatalf("load old scoped rule-pack config: %v", err)
+	}
+	newCfg, err := config.LoadRuntimeV8CandidateFromBytes(fixture.configPath, newRaw)
+	if err != nil {
+		t.Fatalf("load new scoped rule-pack config: %v", err)
+	}
+	fixture.sidecar.publishConfig(oldCfg)
+	oldPack := mustLoadRulePack(t, oldDir)
+	if err := ApplyRulePackOverrides(oldPack); err != nil {
+		t.Fatalf("apply old scoped rule pack: %v", err)
+	}
+	fixture.sidecar.router = routerWithDefaultRulePack(t)
+	fixture.sidecar.router.SetRulePack(oldPack)
+	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, oldRaw)
+	if err != nil || !bound {
+		t.Fatalf("bootstrap bound=%t error=%v", bound, err)
+	}
+	compiled, err := config.ParseCompileObservabilityV8(
+		fixture.configPath,
+		newRaw,
+		config.ObservabilityV8CompileOptions{DefaultDataDir: fixture.dataDir},
+	)
+	if err != nil {
+		t.Fatalf("compile new observability plan: %v", err)
+	}
+
+	err = fixture.sidecar.applyConfigReloadSnapshot(
+		context.Background(),
+		oldCfg,
+		newCfg,
+		ConfigDiff{Changed: []string{"guardrail"}},
+		configReloadSource{
+			sourceName: fixture.configPath,
+			raw:        newRaw,
+			compiledV8: compiled,
+		},
+	)
+	if err != nil {
+		t.Fatalf("apply scoped rule-pack reload: %v", err)
+	}
+
+	if ids := findingIDs(ScanAllRules("scoped_b_token", "exec")); !containsRuleID(ids, "SCOPED-B") {
+		t.Fatalf("global scanner did not receive scoped candidate: findings=%v", ids)
+	}
+	if ids := findingIDs(ScanAllRules("scoped_a_token", "exec")); containsRuleID(ids, "SCOPED-A") {
+		t.Fatalf("global scanner retained prior scoped pack: findings=%v", ids)
+	}
+	routerPack := fixture.sidecar.router.rulePack()
+	if routerPack == nil || routerPack == oldPack {
+		t.Fatal("router did not receive the new scoped rule-pack candidate")
+	}
+	foundRouterRule := false
+	for _, ruleFile := range routerPack.RuleFiles {
+		for _, rule := range ruleFile.Rules {
+			if rule.ID == "SCOPED-B" {
+				foundRouterRule = true
+			}
+		}
+	}
+	if !foundRouterRule {
+		t.Fatal("router rule pack does not contain SCOPED-B")
+	}
+}
+
 func TestConnectorRosterOnlyReloadRetiresRemovedPreviousManualConnector(t *testing.T) {
 	// This helper snapshots and restores both global and connector rule
 	// generations through t.Cleanup, including the GLOBAL-BEFORE override below.

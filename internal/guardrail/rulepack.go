@@ -1189,6 +1189,9 @@ func (rp *RulePack) validateSensitiveTools() error {
 		if _, exists := seenNames[toolName]; exists {
 			return rulePackErr(rel, "duplicate_tool", fmt.Sprintf("tool %d name duplicates another tool", index))
 		}
+		if toolName != tool.Name {
+			return rulePackErr(rel, "validation", fmt.Sprintf("tool %d name must not contain surrounding whitespace", index))
+		}
 		seenNames[toolName] = struct{}{}
 		if tool.decoded && (!tool.resultInspectionSet || !tool.judgeResultSet) {
 			return rulePackErr(rel, "validation", fmt.Sprintf("tool %d inspection booleans are required", index))
