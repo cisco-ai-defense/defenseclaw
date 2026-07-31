@@ -17,15 +17,18 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -68,10 +71,8 @@ type ToolInspectRequest struct {
 	Direction       string          `json:"direction,omitempty"`
 	SessionID       string          `json:"session_id,omitempty"`
 	ApprovalSurface string          `json:"approval_surface,omitempty"`
-	// Connector selects which connector's rule set the scan uses. The hook
-	// handlers stamp it (codex/claudecode/...) so each connector scans
-	// against its own EffectiveRulePackDir. Empty ⇒ process-global default
-	// set (single-connector installs and the generic inspect endpoint).
+	// Connector is an optional assertion. The authenticated server route
+	// selects the connector generation; a mismatched assertion is rejected.
 	Connector     string `json:"connector,omitempty"`
 	MCPServerName string `json:"mcp_server_name,omitempty"`
 }
@@ -334,6 +335,69 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 // short-circuits there exactly as the message lane does; native hook
 // callers reach this through inspectToolPolicy with context.Background().
 func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
+	action := trustedActionRequest{
+		Input: actionfacts.Input{
+			Tool: req.Tool,
+			Args: req.Args,
+		},
+		LegacyText:         string(req.Args),
+		Connector:          req.Connector,
+		EnforcementCapable: true,
+	}
+	if argv, ok := parseTrustedShimArgv(req.Tool, req.Args); ok {
+		action.Input = actionfacts.Input{Tool: req.Tool, Argv: argv}
+		action.LegacyText = serializeArgvForLegacyScan(argv)
+	}
+	return a.inspectTrustedToolPolicyCtx(ctx, req, action)
+}
+
+// parseTrustedShimArgv recognizes the exact argument envelope emitted by the
+// authenticated PATH shims. A malformed, extended, or mismatched envelope is
+// deliberately rejected so inspectToolPolicyCtx keeps its non-authoritative
+// Args projection and owner-local regex fallback.
+func parseTrustedShimArgv(tool string, raw json.RawMessage) ([]string, bool) {
+	switch tool {
+	case "curl", "wget", "ssh", "nc", "pip", "npm":
+	default:
+		return nil, false
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return nil, false
+	}
+
+	var argv []string
+	seenArgv := false
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil || key != "argv" || seenArgv {
+			return nil, false
+		}
+		if err := decoder.Decode(&argv); err != nil {
+			return nil, false
+		}
+		seenArgv = true
+	}
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim('}') {
+		return nil, false
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, false
+	}
+	if !seenArgv || len(argv) == 0 || argv[0] != tool {
+		return nil, false
+	}
+	return argv, true
+}
+
+func (a *APIServer) inspectTrustedToolPolicyCtx(
+	ctx context.Context,
+	req *ToolInspectRequest,
+	action trustedActionRequest,
+) *ToolInspectVerdict {
 	// managed_enterprise: Cisco AI Defense is the sole decision-maker.
 	// Skip static block/allow + MCP-server block, connector regex packs,
 	// CodeGuard, and the judge lane; AID inspects the tool call directly
@@ -397,9 +461,10 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 	argsStr := string(req.Args)
 	toolName := req.Tool
 
-	// Scan against the request connector's rule set so each connector
-	// enforces its own pack (empty ⇒ process-global default set).
-	ruleFindings := ScanAllRulesForConnector(req.Connector, argsStr, toolName)
+	// The calling adapter established this as a trusted action. Structured
+	// semantic evaluation and owner-local fallback share one immutable
+	// connector generation.
+	ruleFindings := dispatchTrustedAction(ctx, action)
 
 	// CodeGuard: scan file content for any file-write tool.
 	//
@@ -429,18 +494,31 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 	} else {
 		severity := HighestSeverity(ruleFindings)
 		confidence := HighestConfidence(ruleFindings, severity)
+		enforceableSeverity := HighestSeverity(enforceableRuleFindings(ruleFindings))
 
 		for _, cf := range cgFindings {
 			if cf.Severity == scanner.SeverityCritical {
 				severity = "CRITICAL"
+				enforceableSeverity = "CRITICAL"
 				break
 			}
 			if cf.Severity == scanner.SeverityHigh && severity != "CRITICAL" {
 				severity = "HIGH"
 			}
+			if cf.Severity == scanner.SeverityHigh && enforceableSeverity != "CRITICAL" {
+				enforceableSeverity = "HIGH"
+			}
 		}
 
-		action := guardrailRuntimeActionForConnector(a.scannerCfg, req.Connector, severity, true)
+		runtimeAction := "alert"
+		if enforceableSeverity != "NONE" {
+			runtimeAction = guardrailRuntimeActionForConnector(
+				a.scannerCfg,
+				req.Connector,
+				enforceableSeverity,
+				true,
+			)
+		}
 
 		reasons := make([]string, 0, minInt(len(ruleFindings), 5))
 		for i, f := range ruleFindings {
@@ -456,7 +534,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		}
 
 		verdict = &ToolInspectVerdict{
-			Action:           action,
+			Action:           runtimeAction,
 			Severity:         severity,
 			Confidence:       confidence,
 			Reason:           fmt.Sprintf("matched: %s", strings.Join(reasons, ", ")),
@@ -868,6 +946,18 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tool is required"})
 		return
 	}
+	serverConnector := authenticatedInspectConnector(r.Context())
+	if serverConnector == "" {
+		serverConnector = canonicalConnectorRulePackKey(a.connectorName())
+	}
+	requestedConnector := canonicalConnectorRulePackKey(req.Connector)
+	if requestedConnector != "" && requestedConnector != serverConnector {
+		a.writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "connector does not match authenticated scope",
+		})
+		return
+	}
+	req.Connector = serverConnector
 
 	scanTimeout := inspectScanTimeout
 	if a.inspectToolScanTimeout > 0 {
@@ -887,7 +977,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	ch := make(chan verdictResult, 1)
 	go func() {
 		var v *ToolInspectVerdict
-		if strings.ToLower(req.Tool) == "message" && (req.Content != "" || req.Direction == "outbound") {
+		if strings.EqualFold(req.Tool, "message") {
 			v = a.inspectMessageContent(ctx, &req)
 		} else {
 			// Pass the 200ms-capped ctx so the tool-call judge lane's

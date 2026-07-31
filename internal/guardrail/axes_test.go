@@ -103,7 +103,15 @@ func TestAxesForRuleID_CoversRealScannerRules(t *testing.T) {
 		"OBFUSC-UNICODE-ZWSP":  {AxisIngressUntrusted},
 		// Command rules that open an egress channel
 		"CMD-CURL-UPLOAD": {AxisEgressExternal},
-		"CMD-ENV-DUMP":    {AxisSensitiveAccess},
+		"CMD-ENV-DUMP":    {AxisSensitiveAccess, AxisEgressExternal},
+		// Structured semantic tool-call rules
+		"secrets.cloud_credential_read":         {AxisSensitiveAccess},
+		"secrets.browser_session_store_read":    {AxisSensitiveAccess},
+		"secrets.cloud_secret_manager_read":     {AxisSensitiveAccess},
+		"secrets.workload_identity_token_read":  {AxisSensitiveAccess},
+		"exfil.secret_read_and_egress_oneliner": {AxisSensitiveAccess, AxisEgressExternal},
+		"exec.reverse_tunnel":                   {AxisEgressExternal},
+		"exec.agent_runtime_bypass_flags":       nil,
 		// Cloud metadata C2 endpoints (dual axis)
 		"C2-METADATA-AWS": {AxisSensitiveAccess, AxisEgressExternal},
 		// SRC-* network members
@@ -168,9 +176,18 @@ func TestCapabilityForRuleID_ProducerCoverage(t *testing.T) {
 		"SRC-EVAL":          CapExecShell,
 		// Network fetch
 		"CMD-CURL-UPLOAD": CapNetworkFetch,
+		"CMD-ENV-DUMP":    CapNetworkFetch,
 		"SRC-FETCH":       CapNetworkFetch,
 		// Filesystem write
 		"SRC-FS-WRITE": CapWriteFS,
+		// Structured semantic tool-call rules
+		"secrets.cloud_credential_read":         CapReadFS,
+		"secrets.browser_session_store_read":    CapReadFS,
+		"secrets.cloud_secret_manager_read":     CapReadFS,
+		"secrets.workload_identity_token_read":  CapReadFS,
+		"exfil.secret_read_and_egress_oneliner": CapNetworkFetch,
+		"exec.reverse_tunnel":                   CapNetworkFetch,
+		"exec.agent_runtime_bypass_flags":       CapExecShell,
 		// No capability for a bare secret / injection finding
 		"SEC-AWS-KEY":    CapUnknown,
 		"INJ-IGNORE-ALL": CapUnknown,

@@ -190,6 +190,14 @@ func axesFromTags(tags []string) []DataAxis {
 // labels. Kept as a plain map (not YAML) so the compiler catches
 // typos and a reviewer can audit the full list in one place.
 var ruleAxes = map[string][]DataAxis{
+	"secrets.cloud_credential_read":         {AxisSensitiveAccess},
+	"secrets.browser_session_store_read":    {AxisSensitiveAccess},
+	"secrets.cloud_secret_manager_read":     {AxisSensitiveAccess},
+	"secrets.workload_identity_token_read":  {AxisSensitiveAccess},
+	"exfil.secret_read_and_egress_oneliner": {AxisSensitiveAccess, AxisEgressExternal},
+	"exec.reverse_tunnel":                   {AxisEgressExternal},
+	"exec.agent_runtime_bypass_flags":       nil,
+
 	// Sensitive data access (credentials, PII, system secrets)
 	"CRED-AWS-FILE":       {AxisSensitiveAccess},
 	"CRED-AWS-KEY":        {AxisSensitiveAccess},
@@ -253,7 +261,7 @@ var ruleAxes = map[string][]DataAxis{
 	"CMD-WGET-POST":   {AxisEgressExternal},
 	"CMD-PIPE-CURL":   {AxisEgressExternal},
 	"CMD-PIPE-WGET":   {AxisEgressExternal},
-	"CMD-ENV-DUMP":    {AxisSensitiveAccess},
+	"CMD-ENV-DUMP":    {AxisSensitiveAccess, AxisEgressExternal},
 
 	// Cloud metadata C2 endpoints read instance credentials (sensitive)
 	// over an outbound call (egress) — both axes. The C2- prefix

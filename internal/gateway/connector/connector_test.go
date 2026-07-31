@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -7358,6 +7359,91 @@ func TestShimTemplateRendering(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "10.0.0.1:9999") {
 		t.Errorf("rendered template does not contain addr: %s", rendered)
+	}
+}
+
+func TestRenderedShimsPostExecutableAndExactArgv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell shims are not installed on Windows")
+	}
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skipf("/bin/bash is required to exercise rendered shims: %v", err)
+	}
+	jqPath, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skipf("jq is required to exercise rendered shims: %v", err)
+	}
+
+	root := t.TempDir()
+	shimDir := filepath.Join(root, "shims")
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("create fake binary directory: %v", err)
+	}
+	fakeCurl := `#!/bin/bash
+set -euo pipefail
+payload=""
+while (( $# > 0 )); do
+  if [[ "$1" == "-d" && $# -ge 2 ]]; then
+    payload="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+printf '%s' "$payload" > "$DEFENSECLAW_SHIM_CAPTURE"
+printf '%s\n%s\n' '{"action":"block","reason":"captured"}' '200'
+`
+	if err := os.WriteFile(filepath.Join(binDir, "curl"), []byte(fakeCurl), 0o700); err != nil {
+		t.Fatalf("write fake curl: %v", err)
+	}
+	if err := WriteShimScripts(shimDir, "127.0.0.1:18970"); err != nil {
+		t.Fatalf("WriteShimScripts: %v", err)
+	}
+
+	inputArgv := []string{"--leading-dash", "argument with spaces", "https://collector.invalid/upload"}
+	for _, name := range shimBinaries {
+		t.Run(name, func(t *testing.T) {
+			capture := filepath.Join(root, name+".json")
+			command := exec.Command(filepath.Join(shimDir, name), inputArgv...)
+			command.Env = []string{
+				"PATH=" + strings.Join([]string{
+					shimDir, binDir, filepath.Dir(jqPath), "/usr/bin", "/bin",
+				}, string(os.PathListSeparator)),
+				"DEFENSECLAW_SHIM_CAPTURE=" + capture,
+			}
+			output, err := command.CombinedOutput()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+				t.Fatalf("shim exit = %v, want policy block (1); output=%s", err, output)
+			}
+
+			payload, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatalf("read captured request: %v", err)
+			}
+			var request struct {
+				Tool string                     `json:"tool"`
+				Args map[string]json.RawMessage `json:"args"`
+			}
+			if err := json.Unmarshal(payload, &request); err != nil {
+				t.Fatalf("decode captured request %q: %v", payload, err)
+			}
+			if request.Tool != name {
+				t.Fatalf("tool = %q, want %q", request.Tool, name)
+			}
+			if len(request.Args) != 1 {
+				t.Fatalf("args keys = %v, want only argv", request.Args)
+			}
+			var gotArgv []string
+			if err := json.Unmarshal(request.Args["argv"], &gotArgv); err != nil {
+				t.Fatalf("decode argv: %v", err)
+			}
+			wantArgv := append([]string{name}, inputArgv...)
+			if !slices.Equal(gotArgv, wantArgv) {
+				t.Fatalf("argv = %#v, want %#v", gotArgv, wantArgv)
+			}
+		})
 	}
 }
 

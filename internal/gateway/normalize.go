@@ -78,11 +78,15 @@ func NormalizeRuleFindings(findings []RuleFinding, source string) []NormalizedFi
 
 	out := make([]NormalizedFinding, 0, len(findings))
 	for _, f := range findings {
+		category := categoryFromTags(f.Tags)
+		if _, ok := canonicalDottedRuleID(f.RuleID); ok {
+			category = categoryFromFindingID(f.RuleID)
+		}
 		nf := NormalizedFinding{
 			CanonicalID: canonicalIDFromRuleID(f.RuleID),
 			Source:      source,
 			OriginalID:  f.RuleID,
-			Category:    categoryFromTags(f.Tags),
+			Category:    category,
 			Severity:    normalizeSeverity(f.Severity),
 			Title:       f.Title,
 			Confidence:  f.Confidence,
@@ -133,6 +137,9 @@ func canonicalIDFromRuleID(ruleID string) string {
 	if strings.HasPrefix(upper, "CISCO-") || strings.HasPrefix(upper, "AID-") {
 		return "CISCO-" + strings.TrimPrefix(strings.TrimPrefix(upper, "CISCO-"), "AID-")
 	}
+	if canonical, ok := canonicalDottedRuleID(ruleID); ok {
+		return canonical
+	}
 
 	// Local pattern match strings: map to canonical
 	lower := strings.ToLower(ruleID)
@@ -154,6 +161,27 @@ func canonicalIDFromRuleID(ruleID string) string {
 	}
 
 	return "UNKNOWN-" + strings.ReplaceAll(upper, " ", "-")
+}
+
+func canonicalDottedRuleID(ruleID string) (string, bool) {
+	switch strings.ToLower(ruleID) {
+	case "secrets.cloud_credential_read":
+		return "secrets.cloud_credential_read", true
+	case "secrets.browser_session_store_read":
+		return "secrets.browser_session_store_read", true
+	case "secrets.cloud_secret_manager_read":
+		return "secrets.cloud_secret_manager_read", true
+	case "secrets.workload_identity_token_read":
+		return "secrets.workload_identity_token_read", true
+	case "exfil.secret_read_and_egress_oneliner":
+		return "exfil.secret_read_and_egress_oneliner", true
+	case "exec.reverse_tunnel":
+		return "exec.reverse_tunnel", true
+	case "exec.agent_runtime_bypass_flags":
+		return "exec.agent_runtime_bypass_flags", true
+	default:
+		return "", false
+	}
 }
 
 // categoryFromTags derives a normalized category from rule tags.
@@ -187,6 +215,12 @@ func categoryFromTags(tags []string) string {
 func categoryFromFindingID(id string) string {
 	upper := strings.ToUpper(id)
 	switch {
+	case strings.HasPrefix(upper, "SECRETS."):
+		return CatCredentialLeak
+	case strings.HasPrefix(upper, "EXFIL."):
+		return CatDataExfil
+	case strings.HasPrefix(upper, "EXEC."):
+		return CatDangerousExec
 	case strings.HasPrefix(upper, "SEC-"):
 		return CatCredentialLeak
 	case strings.HasPrefix(upper, "CMD-"):

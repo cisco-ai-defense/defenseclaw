@@ -216,12 +216,38 @@ func TestCanonicalIDFromRuleID(t *testing.T) {
 		{"sk-ant-something", "LP-SECRET-MATCH"},
 		{"/etc/passwd", "LP-SYSTEM-FILE"},
 		{"base64 --decode", "LP-EXFIL"},
+		{"SECRETS.CLOUD_CREDENTIAL_READ", "secrets.cloud_credential_read"},
+		{"exfil.secret_read_and_egress_oneliner", "exfil.secret_read_and_egress_oneliner"},
+		{"exec.agent_runtime_bypass_flags", "exec.agent_runtime_bypass_flags"},
 	}
 
 	for _, tt := range tests {
 		got := canonicalIDFromRuleID(tt.input)
 		if got != tt.expected {
 			t.Errorf("canonicalIDFromRuleID(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestNormalizeDottedSemanticRuleCategories(t *testing.T) {
+	findings := []RuleFinding{
+		{RuleID: "secrets.browser_session_store_read", Tags: []string{"credential"}},
+		{
+			RuleID: "exfil.secret_read_and_egress_oneliner",
+			Tags:   []string{"credential", "exfiltration"},
+		},
+		{RuleID: "exec.reverse_tunnel", Tags: []string{"network", "tunnel"}},
+	}
+	got := NormalizeRuleFindings(findings, "rules")
+	want := []string{CatCredentialLeak, CatDataExfil, CatDangerousExec}
+	for index := range want {
+		if got[index].Category != want[index] {
+			t.Errorf(
+				"NormalizeRuleFindings(%q).Category = %q, want %q",
+				findings[index].RuleID,
+				got[index].Category,
+				want[index],
+			)
 		}
 	}
 }

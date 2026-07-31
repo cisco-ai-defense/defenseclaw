@@ -87,6 +87,14 @@ func ClassifyToolName(tool string) ToolCapabilityClass {
 // DESTRUCTIVE-FLOW pattern never escalates on a bare secret or
 // injection finding.
 var ruleCapabilities = map[string]ToolCapabilityClass{
+	"secrets.cloud_credential_read":         CapReadFS,
+	"secrets.browser_session_store_read":    CapReadFS,
+	"secrets.cloud_secret_manager_read":     CapReadFS,
+	"secrets.workload_identity_token_read":  CapReadFS,
+	"exfil.secret_read_and_egress_oneliner": CapNetworkFetch,
+	"exec.reverse_tunnel":                   CapNetworkFetch,
+	"exec.agent_runtime_bypass_flags":       CapExecShell,
+
 	// Shell / code execution (the destructive class).
 	"CMD-EVAL":               CapExecShell,
 	"CMD-BASH-C":             CapExecShell,
@@ -119,6 +127,7 @@ var ruleCapabilities = map[string]ToolCapabilityClass{
 	// Outbound network fetch / listener.
 	"CMD-CURL-UPLOAD": CapNetworkFetch,
 	"CMD-WGET-POST":   CapNetworkFetch,
+	"CMD-ENV-DUMP":    CapNetworkFetch,
 	"CMD-PIPE-CURL":   CapNetworkFetch,
 	"CMD-PIPE-WGET":   CapNetworkFetch,
 	"SRC-FETCH":       CapNetworkFetch,

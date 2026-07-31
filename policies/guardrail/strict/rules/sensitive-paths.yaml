@@ -13,12 +13,22 @@ rules:
     confidence: 0.95
     tags: [credential, file-sensitive]
   - id: PATH-SSH-KEY
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
     pattern: '(?i)(?:^|[\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])'
     title: "SSH private key file path"
     severity: CRITICAL
     confidence: 0.90
     tags: [credential, file-sensitive]
   - id: PATH-AWS-CREDS
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
     pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.aws/credentials'
     title: "AWS credentials file"
     severity: CRITICAL
@@ -31,12 +41,22 @@ rules:
     confidence: 0.85
     tags: [credential, file-sensitive]
   - id: PATH-KUBE
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
     pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.kube/config'
     title: "Kubernetes config"
     severity: HIGH
     confidence: 0.90
     tags: [credential, file-sensitive]
   - id: PATH-DOCKER
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
     pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.docker/config\.json'
     title: "Docker config"
     severity: HIGH
@@ -49,30 +69,43 @@ rules:
     confidence: 0.95
     tags: [credential, file-sensitive]
   - id: PATH-NPMRC
+    tool_call_only: true
     pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.npmrc'
     title: "npm config (may contain tokens)"
     severity: MEDIUM
     confidence: 0.80
     tags: [credential, file-sensitive]
   - id: PATH-PYPIRC
+    tool_call_only: true
     pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.pypirc'
     title: "PyPI config (may contain tokens)"
     severity: MEDIUM
     confidence: 0.80
     tags: [credential, file-sensitive]
   - id: PATH-GIT-CREDS
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
     pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.git-credentials'
     title: "Git credentials file"
     severity: CRITICAL
     confidence: 0.95
     tags: [credential, file-sensitive]
   - id: PATH-NETRC
+    tool_call_only: true
     pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.netrc'
     title: "netrc credentials file"
     severity: CRITICAL
     confidence: 0.90
     tags: [credential, file-sensitive]
   - id: PATH-ENV-FILE
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
     # Closes (parity with default pack): `;` (shell
     # command separator) added to the suffix delimiter classes.
     pattern: '(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?\s*["''\s,;\]})]*$|(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?["''\s,;\]})]'
@@ -99,11 +132,49 @@ rules:
     confidence: 0.90
     tags: [system-file, privilege]
   - id: PATH-PROC-ENVIRON
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
     pattern: '/proc/(?:\d+|self)/environ'
     title: "/proc environ access"
     severity: CRITICAL
     confidence: 0.90
     tags: [credential]
+  - id: secrets.cloud_credential_read
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
+    pattern: '(?i)(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+|[a-z]:[/\\]Users[/\\][^/\\"'']+)[/\\](?:\.config[/\\]gcloud[/\\](?:application_default_credentials\.json|(?:access_tokens|credentials)\.db)|AppData[/\\]Roaming[/\\]gcloud[/\\](?:application_default_credentials\.json|(?:access_tokens|credentials)\.db)|\.azure[/\\](?:azureProfile\.json|TokenCache\.dat|msal_token_cache[^/\\]*\.(?:json|bin)))(?:$|["''\s])'
+    title: "Cloud credential material read"
+    severity: CRITICAL
+    confidence: 0.92
+    tags: [credential, cloud, file-sensitive]
+  - id: secrets.browser_session_store_read
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
+    pattern: '(?i)(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+|[a-z]:[/\\]Users[/\\][^/\\"'']+)[/\\](?:\.config[/\\](?:google-chrome|chromium|microsoft-edge)|\.mozilla[/\\]firefox|Library[/\\]Application Support[/\\](?:google[/\\]chrome|chromium|microsoft edge|firefox[/\\]profiles)|AppData[/\\]Local[/\\](?:google[/\\]chrome|chromium|microsoft[/\\]edge)[/\\]User Data|AppData[/\\]Roaming[/\\]mozilla[/\\]firefox[/\\]profiles)[/\\](?:[^/\\"'']+[/\\])*(?:Login Data|Cookies|logins\.json|cookies\.sqlite|key4\.db)(?:$|["''\s])'
+    title: "Browser credential or session store read"
+    severity: CRITICAL
+    confidence: 0.90
+    tags: [credential, browser, file-sensitive]
+  - id: secrets.workload_identity_token_read
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
+    pattern: '/var/run/secrets/(?:kubernetes\.io|eks\.amazonaws\.com)/serviceaccount/token(?:$|["''\s])'
+    title: "Workload identity token read"
+    severity: CRITICAL
+    confidence: 0.96
+    tags: [credential, workload-identity, file-sensitive]
   - id: PATH-HISTORY
     pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.(?:bash_history|zsh_history|python_history)'
     title: "Shell history file"
