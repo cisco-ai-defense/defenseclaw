@@ -47,16 +47,35 @@ func PrivateTempDir(t *testing.T) string {
 	if err != nil || user == nil || user.User.Sid == nil {
 		t.Fatalf("current token user: %v", err)
 	}
-	if err := windows.SetNamedSecurityInfo(
+	sd, err := windows.GetNamedSecurityInfo(
 		dir,
 		windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION,
-		user.User.Sid,
-		nil,
-		nil,
-		nil,
-	); err != nil {
-		t.Fatalf("own private temp dir: %v", err)
+	)
+	if err != nil {
+		t.Fatalf("inspect private temp dir owner: %v", err)
+	}
+	if sd == nil {
+		t.Fatal("private temp dir has no security descriptor")
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		t.Fatalf("read private temp dir owner: %v", err)
+	}
+	// Rewriting even the same owner requires WRITE_OWNER. A normal user may
+	// own this directory and still intentionally lack that explicit right.
+	if owner == nil || !owner.Equals(user.User.Sid) {
+		if err := windows.SetNamedSecurityInfo(
+			dir,
+			windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION,
+			user.User.Sid,
+			nil,
+			nil,
+			nil,
+		); err != nil {
+			t.Fatalf("own private temp dir: %v", err)
+		}
 	}
 	if err := safefile.ProtectDirectory(dir); err != nil {
 		t.Fatalf("protect private temp dir: %v", err)
