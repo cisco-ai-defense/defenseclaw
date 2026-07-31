@@ -238,12 +238,43 @@ func watchdogWaitForExit(proc *os.Process, _ watchdogPIDInfo, timeout time.Durat
 // therefore never conflicts with — the locked region.
 const watchdogLockOffsetHigh = 0x4000_0000
 
+const (
+	// A Windows indexer or security scanner can retain a short-lived writer
+	// between publication and the watchdog's read-only ownership open. Keep
+	// this handoff bounded: a persistent writer or competing watchdog must
+	// still fail startup rather than weakening the sharing contract.
+	watchdogOwnershipHandoffMaxAttempts = 100
+	watchdogOwnershipHandoffRetryDelay  = 5 * time.Millisecond
+)
+
+type watchdogOwnershipOpenFunc func(string) (*os.File, error)
+type watchdogOwnershipLockFunc func(*os.File, *windows.Overlapped) error
+type watchdogOwnershipSleepFunc func(time.Duration)
+
 // acquireWatchdogPIDFile opens (creating if missing) the PID file, takes an
 // exclusive non-blocking lock on a sentinel byte via LockFileEx, and writes
-// the JSON fingerprint. The returned file MUST stay open for the watchdog's
-// whole lifetime; closing it releases the lock. Returns an error when
-// another process already holds the lock (DeepSec S3.HIGH_BUG).
+// the JSON fingerprint. It then transfers ownership to a read-only handle
+// that denies write and delete sharing. The returned file MUST stay open for
+// the watchdog's whole lifetime; closing it releases the lock. Freezing the
+// published object this way lets fail-closed stable readers inspect a live
+// watchdog without accepting an in-place writer or pathname replacement.
+// Returns an error when another process already holds the lock
+// (DeepSec S3.HIGH_BUG).
 func acquireWatchdogPIDFile(path string, info watchdogPIDInfo) (*os.File, error) {
+	return acquireWatchdogPIDFileWith(
+		path,
+		info,
+		openWatchdogOwnershipFile,
+		time.Sleep,
+	)
+}
+
+func acquireWatchdogPIDFileWith(
+	path string,
+	info watchdogPIDInfo,
+	openOwnership watchdogOwnershipOpenFunc,
+	sleep watchdogOwnershipSleepFunc,
+) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
@@ -268,14 +299,204 @@ func acquireWatchdogPIDFile(path string, info watchdogPIDInfo) (*os.File, error)
 		_ = f.Close()
 		return nil, err
 	}
-	return f, nil
+	// A handle's share mode and desired access cannot be changed in place.
+	// Close the publication writer, then reacquire the exact record as a
+	// read-only, non-write/non-delete-shared ownership handle. Another
+	// publisher can win this narrow handoff, so the new handle is locked and
+	// its complete random-capability-bearing fingerprint is revalidated
+	// before it is accepted.
+	if err := windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, ol); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
+		return nil, err
+	}
+
+	owner, err := openWatchdogOwnershipFileWithRetry(path, openOwnership, sleep)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateWatchdogOwnershipFile(path, owner); err != nil {
+		_ = owner.Close()
+		return nil, err
+	}
+	ownerLock, err := lockWatchdogOwnershipFileWithRetry(
+		owner,
+		lockWatchdogOwnershipFile,
+		sleep,
+	)
+	if err != nil {
+		_ = owner.Close()
+		return nil, err
+	}
+	current, err := readWatchdogPIDInfoFile(owner)
+	if err != nil {
+		_ = windows.UnlockFileEx(windows.Handle(owner.Fd()), 0, 1, 0, ownerLock)
+		_ = owner.Close()
+		return nil, err
+	}
+	if current != info {
+		_ = windows.UnlockFileEx(windows.Handle(owner.Fd()), 0, 1, 0, ownerLock)
+		_ = owner.Close()
+		return nil, errors.New("watchdog: PID ownership changed during publication handoff")
+	}
+	return owner, nil
+}
+
+func openWatchdogOwnershipFileWithRetry(
+	path string,
+	openOwnership watchdogOwnershipOpenFunc,
+	sleep watchdogOwnershipSleepFunc,
+) (*os.File, error) {
+	if openOwnership == nil {
+		return nil, errors.New("watchdog: nil PID ownership opener")
+	}
+	if sleep == nil {
+		return nil, errors.New("watchdog: nil PID ownership retry sleeper")
+	}
+	var lastErr error
+	for attempt := 0; attempt < watchdogOwnershipHandoffMaxAttempts; attempt++ {
+		file, err := openOwnership(path)
+		if err == nil {
+			return file, nil
+		}
+		lastErr = err
+		if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
+			attempt+1 == watchdogOwnershipHandoffMaxAttempts {
+			return nil, err
+		}
+		sleep(watchdogOwnershipHandoffRetryDelay)
+	}
+	return nil, lastErr
+}
+
+func lockWatchdogOwnershipFileWithRetry(
+	file *os.File,
+	lock watchdogOwnershipLockFunc,
+	sleep watchdogOwnershipSleepFunc,
+) (*windows.Overlapped, error) {
+	if file == nil {
+		return nil, errors.New("watchdog: nil PID ownership file")
+	}
+	if lock == nil {
+		return nil, errors.New("watchdog: nil PID ownership locker")
+	}
+	if sleep == nil {
+		return nil, errors.New("watchdog: nil PID ownership lock retry sleeper")
+	}
+	overlapped := &windows.Overlapped{OffsetHigh: watchdogLockOffsetHigh}
+	var lastErr error
+	for attempt := 0; attempt < watchdogOwnershipHandoffMaxAttempts; attempt++ {
+		err := lock(file, overlapped)
+		if err == nil {
+			return overlapped, nil
+		}
+		lastErr = err
+		// watchdogIsLocked may acquire the sentinel during the deliberate
+		// writer-to-reader handoff. It releases that observation lock
+		// immediately. A real competing watchdog retains it and exhausts this
+		// bounded window.
+		if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) ||
+			attempt+1 == watchdogOwnershipHandoffMaxAttempts {
+			return nil, err
+		}
+		sleep(watchdogOwnershipHandoffRetryDelay)
+	}
+	return nil, lastErr
+}
+
+func lockWatchdogOwnershipFile(file *os.File, overlapped *windows.Overlapped) error {
+	return windows.LockFileEx(
+		windows.Handle(file.Fd()),
+		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
+		0,
+		1,
+		0,
+		overlapped,
+	)
+}
+
+func openWatchdogOwnershipFile(path string) (*os.File, error) {
+	return openWatchdogReadFile(path, windows.FILE_SHARE_READ)
+}
+
+func openWatchdogObservationFile(path string) (*os.File, error) {
+	// A byte-range ownership lock does not make the JSON bytes immutable.
+	// Deny write/delete sharing here too: a watchdog from an older release
+	// that retains an RW handle is deliberately unreadable rather than
+	// letting stop/status trust content that could change in place.
+	return openWatchdogOwnershipFile(path)
+}
+
+func openWatchdogReadFile(path string, shareMode uint32) (*os.File, error) {
+	pathPtr, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := windows.CreateFile(
+		pathPtr,
+		windows.GENERIC_READ,
+		shareMode,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		_ = windows.CloseHandle(handle)
+		return nil, err
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {
+		_ = windows.CloseHandle(handle)
+		return nil, fmt.Errorf("watchdog: PID file is a reparse point or directory: %s", path)
+	}
+	file := os.NewFile(uintptr(handle), path)
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return nil, fmt.Errorf("watchdog: wrap PID file handle: %s", path)
+	}
+	return file, nil
+}
+
+func validateWatchdogOwnershipFile(path string, file *os.File) error {
+	if file == nil {
+		return errors.New("watchdog: nil PID ownership file")
+	}
+	// Validate the complete ancestor reparse chain plus the leaf's ownership
+	// and private DACL after the unlocked publication handoff. The ownership
+	// handle denies delete sharing, so the leaf pathname cannot be rebound
+	// between these checks and the identity comparison below.
+	if err := safefile.ValidatePrivateFile(path); err != nil {
+		return fmt.Errorf("watchdog: validate PID ownership path: %w", err)
+	}
+	if err := safefile.ValidatePrivateHandle(windows.Handle(file.Fd())); err != nil {
+		return fmt.Errorf("watchdog: validate PID ownership handle: %w", err)
+	}
+	opened, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !opened.Mode().IsRegular() || !current.Mode().IsRegular() ||
+		!os.SameFile(opened, current) {
+		return fmt.Errorf("watchdog: PID ownership path changed during handoff: %s", path)
+	}
+	return nil
 }
 
 // watchdogIsLocked reports whether the PID-file lock is currently held by
 // another process (the live watchdog). It releases any lock it acquires
 // before returning so the real watchdog child can take it.
 func watchdogIsLocked(path string) (bool, watchdogPIDInfo, error) {
-	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	f, err := openWatchdogObservationFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, watchdogPIDInfo{}, nil
@@ -283,6 +504,13 @@ func watchdogIsLocked(path string) (bool, watchdogPIDInfo, error) {
 		return false, watchdogPIDInfo{}, err
 	}
 	defer f.Close()
+	// A held sentinel proves only lock ownership. Before its JSON can become
+	// process-control authority, bind the observation to the same private,
+	// non-reparse, pathname-stable object required of a newly published
+	// watchdog record.
+	if err := validateWatchdogOwnershipFile(path, f); err != nil {
+		return false, watchdogPIDInfo{}, err
+	}
 	ol := &windows.Overlapped{OffsetHigh: watchdogLockOffsetHigh}
 	if err := windows.LockFileEx(windows.Handle(f.Fd()),
 		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,

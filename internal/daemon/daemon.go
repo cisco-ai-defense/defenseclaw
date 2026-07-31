@@ -903,7 +903,7 @@ func (d *Daemon) Restart(args []string, timeout time.Duration) (int, error) {
 }
 
 func (d *Daemon) readPIDInfo() (pidInfo, error) {
-	data, err := safefile.ReadRegularFileBounded(d.pidFile, maxProcessIdentityBytes)
+	data, err := readManagedIdentityFile(d.pidFile, maxProcessIdentityBytes)
 	if err != nil {
 		return pidInfo{}, err
 	}
@@ -949,6 +949,16 @@ func (d *Daemon) protectedDaemonPIDs() (trackedPID int, watchdogPID int, err err
 
 	watchdogPID, readErr = d.readWatchdogPID()
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		if managedIdentityHeldByWriter(readErr) {
+			return 0, 0, fmt.Errorf(
+				"%w: watchdog PID file %s is held by a legacy or live writer; "+
+					"safely stop the previous watchdog and complete the upgrade before retrying "+
+					"(do not delete the PID file while its process may be live): %w",
+				ErrUnsafeProcessIdentity,
+				filepath.Join(d.dataDir, WatchdogPIDFileName),
+				readErr,
+			)
+		}
 		return 0, 0, fmt.Errorf(
 			"%w: watchdog PID file %s cannot be trusted: %v",
 			ErrUnsafeProcessIdentity,
@@ -964,7 +974,7 @@ func (d *Daemon) protectedDaemonPIDs() (trackedPID int, watchdogPID int, err err
 // watchdog stop/status perform the stronger fingerprint verification.
 func (d *Daemon) readWatchdogPID() (int, error) {
 	path := filepath.Join(d.dataDir, WatchdogPIDFileName)
-	data, err := safefile.ReadRegularFileBounded(path, maxProcessIdentityBytes)
+	data, err := readManagedIdentityFile(path, maxProcessIdentityBytes)
 	if err != nil {
 		return 0, err
 	}

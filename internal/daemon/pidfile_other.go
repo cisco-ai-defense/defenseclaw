@@ -5,7 +5,17 @@
 
 package daemon
 
-import "os"
+import (
+	"os"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+)
+
+func readManagedIdentityFile(path string, maxBytes int64) ([]byte, error) {
+	return safefile.ReadRegularFileBounded(path, maxBytes)
+}
+
+func managedIdentityHeldByWriter(error) bool { return false }
 
 // removePIDFileIf preserves the historical Unix cleanup behavior. Windows
 // needs a handle-bound implementation because pathname replacement and delete
