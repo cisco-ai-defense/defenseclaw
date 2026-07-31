@@ -56,11 +56,13 @@ export interface GuardrailConfig {
   severity_mappings: Record<GuardrailCategory, SeverityUpper>;
 }
 
-// A single regex rule inside a guardrail rule pack file.
+// A single rule inside a guardrail rule pack file.
 export interface RuleDef {
   id: string;
   enabled?: boolean;
   pattern: string;
+  expression?: string;
+  tool_call_only?: boolean;
   title: string;
   severity: SeverityUpper;
   confidence: number; // 0..1
@@ -301,6 +303,10 @@ export type ValidationCode =
   | 'REGEX_RE2_INCOMPAT'
   | 'REGEX_REDOS'
   | 'REGEX_ANCHOR_MISSING'
+  | 'CEL_TOOL_CALL_REQUIRED'
+  | 'CEL_EXPRESSION_BLANK'
+  | 'CEL_EXPRESSION_TYPE'
+  | 'CEL_EXPRESSION_SIZE'
   | 'ID_DUPLICATE'
   | 'ID_FORMAT'
   | 'SEVERITY_OUT_OF_RANGE'

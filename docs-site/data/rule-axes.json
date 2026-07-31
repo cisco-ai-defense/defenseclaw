@@ -87,7 +87,8 @@
     {
       "id": "CMD-ENV-DUMP",
       "axes": [
-        "sensitive_access"
+        "sensitive_access",
+        "egress_external"
       ]
     },
     {
@@ -380,6 +381,47 @@
       "id": "TRUST-SAFETY-OVERRIDE",
       "axes": [
         "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "exec.agent_runtime_bypass_flags",
+      "axes": []
+    },
+    {
+      "id": "exec.reverse_tunnel",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "exfil.secret_read_and_egress_oneliner",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "secrets.browser_session_store_read",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "secrets.cloud_credential_read",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "secrets.cloud_secret_manager_read",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "secrets.workload_identity_token_read",
+      "axes": [
+        "sensitive_access"
       ]
     }
   ],
