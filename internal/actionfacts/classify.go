@@ -324,7 +324,9 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		)
 	case "sudo":
 		classifySudo(out, command)
-	case "doas", "su", "runas", "pkexec":
+	case "doas", "su", "pkexec":
+		classifyPOSIXPrivilegeShell(out, command)
+	case "runas":
 		addOperation(command, OperationPrivilege)
 		out.markPartial(IssueUnsupportedConstruct)
 	case "reg", "reg.exe":
@@ -372,7 +374,9 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyShellInvocation(out, command)
 	case "source", ".":
 		classifySourceInvocation(out, command)
-	case "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe",
+	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
+		classifyPowerShellArtifactInvocation(out, command)
+	case "cmd", "cmd.exe",
 		"echo", "printf", "pwd", "cd", "true", "false", "sleep", "date",
 		"whoami", "id", "uname", "test", "[", "expr", "read", "export",
 		"setenv", "which", "command", "exec", "eval",
@@ -382,6 +386,17 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	default:
 		if pathFlavor(command.Executable) != PathFlavorUnknown {
 			appendPath(out, command.ID, PathAccessExecute, command.Executable)
+			// A statically named executable path may be a script. Its bytes are
+			// intentionally opaque to ActionFacts, but an execution-boundary
+			// consumer can reopen and parse the exact artifact conservatively.
+			out.markPartial(IssueOpaqueArtifact)
+			if _, windowsScript := windowsScriptProgram(
+				command.Executable,
+				command.Dialect,
+			); windowsScript && len(command.Argv) != 1 {
+				out.markPartial(IssueUnsupportedConstruct)
+			}
+			break
 		}
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
@@ -405,6 +420,9 @@ func commandProgram(executable string) string {
 }
 
 func commandProgramForDialect(executable string, dialect Dialect) string {
+	if program, ok := windowsScriptProgram(executable, dialect); ok {
+		return program
+	}
 	program := commandProgram(executable)
 	if dialect != DialectCMD && dialect != DialectPowerShell {
 		return program
@@ -2798,7 +2816,7 @@ func classifyShellInvocation(out *parseOutput, command *CommandFact) {
 	}
 	// A script file, stdin, or an interactive shell carries action-bearing
 	// content that this argv classifier cannot inspect.
-	out.markPartial(IssueUnsupportedConstruct)
+	out.markPartial(IssueOpaqueArtifact)
 }
 
 func shellScriptOperand(argv []string) (string, bool) {
@@ -2826,15 +2844,83 @@ func shellScriptOperand(argv []string) (string, bool) {
 	return "", false
 }
 
+// exactPOSIXShellScriptOperand recognizes the narrow script-launch form whose
+// only unresolved semantics are the final file bytes. Options vary across
+// shells, so option-bearing forms remain non-authoritative until reviewed.
+func exactPOSIXShellScriptOperand(argv []string) (string, bool) {
+	if len(argv) < 2 {
+		return "", false
+	}
+	index := 1
+	if argv[index] == "--" {
+		index++
+	}
+	if index >= len(argv) || argv[index] == "" || argv[index] == "-" ||
+		strings.HasPrefix(argv[index], "-") || strings.HasPrefix(argv[index], "+") {
+		return "", false
+	}
+	return argv[index], true
+}
+
 func classifySourceInvocation(out *parseOutput, command *CommandFact) {
 	addOperation(command, OperationRead)
+	if command.Dialect == DialectPowerShell {
+		if len(command.Argv) < 2 {
+			out.markPartial(IssueUnsupportedConstruct)
+			return
+		}
+		target, ok := windowsStaticScriptArtifact(
+			windowsWord{value: command.Argv[1]},
+			DialectPowerShell,
+			false,
+		)
+		if !ok {
+			out.markPartial(IssueUnsupportedConstruct)
+			return
+		}
+		appendPath(out, command.ID, PathAccessRead, target)
+		out.markPartial(IssueOpaqueArtifact)
+		if len(command.Argv) != 2 {
+			out.markPartial(IssueUnsupportedConstruct)
+		}
+		return
+	}
 	operands := pathOperands(command.Argv, optionValues())
 	if len(operands) > 0 {
 		appendPath(out, command.ID, PathAccessRead, operands[0])
 	}
 	// Sourced content executes in the current shell and remains opaque even
 	// when its filename is static.
-	out.markPartial(IssueUnsupportedConstruct)
+	out.markPartial(IssueOpaqueArtifact)
+}
+
+func classifyPowerShellArtifactInvocation(out *parseOutput, command *CommandFact) {
+	if script, ok := powerShellFileOperand(command.Argv); ok {
+		appendPath(out, command.ID, PathAccessExecute, script)
+		out.markPartial(IssueOpaqueArtifact)
+	}
+}
+
+// powerShellFileOperand accepts only the explicit, profile-disabled file
+// form. A profile can run unrelated commands before -File, so it must never
+// become artifact authority without -NoProfile.
+func powerShellFileOperand(argv []string) (string, bool) {
+	if len(argv) != 4 || !strings.EqualFold(argv[1], "-NoProfile") ||
+		!strings.EqualFold(argv[2], "-File") {
+		return "", false
+	}
+	program := commandProgramForDialect(argv[0], DialectPowerShell)
+	if program != "powershell" && program != "pwsh" {
+		return "", false
+	}
+	return windowsStaticScriptArtifact(
+		windowsWord{
+			value:    argv[3],
+			wildcard: strings.ContainsAny(argv[3], "*?"),
+		},
+		DialectPowerShell,
+		true,
+	)
 }
 
 func appendPath(out *parseOutput, commandID int64, access PathAccess, value string) {
@@ -9536,7 +9622,7 @@ func classifySudo(out *parseOutput, command *CommandFact) {
 		case "-h", "--help", "-V", "--version":
 			command.Effect = EffectPreview
 			return
-		case "-l", "--list", "-s", "--shell", "-i", "--login",
+		case "-l", "-ll", "--list", "-s", "--shell", "-i", "--login",
 			"-v", "--validate":
 			addOperation(command, OperationPrivilege)
 			return
@@ -9547,6 +9633,46 @@ func classifySudo(out *parseOutput, command *CommandFact) {
 		return
 	}
 	out.markPartial(IssueUnknownOperandGrammar)
+}
+
+func classifyPOSIXPrivilegeShell(out *parseOutput, command *CommandFact) {
+	addOperation(command, OperationPrivilege)
+	exact := false
+	switch command.Program {
+	case "doas":
+		exact = len(command.Argv) == 2 &&
+			command.Argv[1] == "-s" ||
+			exactPrivilegeShellArgv(command.Argv[1:])
+	case "su":
+		exact = len(command.Argv) == 1 ||
+			len(command.Argv) == 2 &&
+				(command.Argv[1] == "root" || command.Argv[1] == "-" ||
+					command.Argv[1] == "-l" || command.Argv[1] == "--login") ||
+			len(command.Argv) == 3 &&
+				(command.Argv[1] == "-" || command.Argv[1] == "-l" ||
+					command.Argv[1] == "--login") &&
+				command.Argv[2] == "root"
+	case "pkexec":
+		exact = exactPrivilegeShellArgv(command.Argv[1:])
+	}
+	if !exact {
+		out.markPartial(IssueUnsupportedConstruct)
+	}
+}
+
+func exactPrivilegeShellArgv(argv []string) bool {
+	if len(argv) == 0 || !posixShellProgram(commandProgram(argv[0])) {
+		return false
+	}
+	for _, argument := range argv[1:] {
+		switch argument {
+		case "-i", "-l", "--login", "--noprofile", "--norc":
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func classifySchedule(out *parseOutput, command *CommandFact, program string) {

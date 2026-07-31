@@ -66,7 +66,7 @@ func analyze(input Input) Facts {
 		)
 	}
 
-	extracted := extractArgs(input.Args)
+	extracted := extractArgsForTool(input.Args, input.Tool)
 	for _, issue := range extracted.issues {
 		base.addIssue(issue)
 	}
@@ -258,6 +258,12 @@ func analyzeStructuredArgv(
 	default:
 		nested, dialect, ok, unsafe := nestedCommand(argv, program)
 		if unsafe {
+			if _, exactScript := powerShellFileOperand(argv); exactScript {
+				// The script bytes remain opaque, but -NoProfile plus an exact
+				// absolute -File operand proves there is no nested command text
+				// to parse at this boundary. Classification publishes the path.
+				return out
+			}
 			out.markUnsupported(IssueUnsupportedConstruct)
 			return out
 		}
@@ -483,7 +489,8 @@ func argsExecutionTool(tool string) bool {
 
 func addToolArgumentFacts(out *parseOutput, tool string, extracted extractedInput) {
 	if len(extracted.paths) == 0 && len(extracted.urls) == 0 &&
-		extracted.method == "" && len(extracted.payload) == 0 {
+		len(extracted.patchChanges) == 0 && extracted.method == "" &&
+		len(extracted.payload) == 0 {
 		return
 	}
 	// Malformed or conflicting argument objects may retain statically safe
@@ -543,7 +550,7 @@ func addToolArgumentFacts(out *parseOutput, tool string, extracted extractedInpu
 		return
 	}
 	command := commandFromArgv(out.nextCommandID(), toolArgv)
-	addToolOperations(&command, semantics, hasPaths, hasURLs)
+	addToolOperations(&command, semantics, extracted, projectedPaths, hasURLs)
 	addOperation(&command, OperationExecute)
 	if !out.appendCommand(command) {
 		return
@@ -637,6 +644,7 @@ const (
 	toolPathTarget
 	toolPathCopy
 	toolPathMove
+	toolPathPatch
 )
 
 type projectedToolPath struct {
@@ -675,6 +683,12 @@ func lookupToolArgumentSemantics(tool string) (toolArgumentSemantics, bool) {
 		"viewfile", "view_file", "view-file",
 		"getfile", "get_file", "get-file":
 		return pathToolSemantics(PathAccessRead, OperationRead), true
+	case "applypatch", "apply_patch", "apply-patch":
+		return toolArgumentSemantics{
+			acceptsPaths:  true,
+			pathShape:     toolPathPatch,
+			requiresPaths: true,
+		}, true
 	case "write", "edit",
 		"multiedit", "multi_edit", "multi-edit",
 		"notebookedit", "notebook_edit", "notebook-edit",
@@ -682,8 +696,7 @@ func lookupToolArgumentSemantics(tool string) (toolArgumentSemantics, bool) {
 		"fswrite", "fs_write", "fs-write", "fs.write", "fs.write_file",
 		"filewrite", "file_write", "file-write",
 		"createfile", "create_file", "create-file",
-		"editfile", "edit_file", "edit-file",
-		"applypatch", "apply_patch", "apply-patch":
+		"editfile", "edit_file", "edit-file":
 		semantics := pathToolSemantics(PathAccessWrite, OperationWrite)
 		semantics.acceptsContent = true
 		return semantics, true
@@ -886,6 +899,19 @@ func projectToolPaths(
 			})
 		}
 		return paths, true
+	case toolPathPatch:
+		if !extracted.patchSet || len(extracted.patchChanges) == 0 ||
+			len(extracted.paths) != 0 {
+			return nil, false
+		}
+		paths := make([]projectedToolPath, 0, len(extracted.patchChanges))
+		for _, change := range extracted.patchChanges {
+			paths = append(paths, projectedToolPath{
+				access: change.access,
+				value:  change.path,
+			})
+		}
+		return paths, true
 	default:
 		return nil, false
 	}
@@ -894,9 +920,23 @@ func projectToolPaths(
 func addToolOperations(
 	command *CommandFact,
 	semantics toolArgumentSemantics,
-	hasPaths, hasURLs bool,
+	extracted extractedInput,
+	paths []projectedToolPath,
+	hasURLs bool,
 ) {
-	if hasPaths {
+	if semantics.pathShape == toolPathPatch {
+		for _, candidate := range paths {
+			switch candidate.access {
+			case PathAccessWrite:
+				addOperation(command, OperationWrite)
+			case PathAccessDelete:
+				addOperation(command, OperationDelete)
+			}
+		}
+		if extracted.patchMove {
+			addOperation(command, OperationMove)
+		}
+	} else if len(paths) > 0 {
 		addOperation(command, semantics.pathOperation)
 	}
 	if hasURLs {
@@ -1233,15 +1273,25 @@ func enforceAnalyzeAuthority(out *parseOutput) {
 		}
 		switch command.Program {
 		case "source", ".":
-			out.markPartial(IssueUnsupportedConstruct)
+			out.markPartial(IssueOpaqueArtifact)
 		case "bash", "sh", "zsh", "dash", "ksh", "mksh":
-			_, ok, unsafe := posixShellCommandIndex(command.Argv)
-			if unsafe || !ok {
+			if _, commandMode, unsafe := posixShellCommandIndex(command.Argv); commandMode && !unsafe {
+				continue
+			} else if _, script := exactPOSIXShellScriptOperand(command.Argv); script {
+				out.markPartial(IssueOpaqueArtifact)
+			} else if _, script := shellScriptOperand(command.Argv); script {
+				out.markPartial(IssueOpaqueArtifact)
+				out.markPartial(IssueUnsupportedConstruct)
+			} else if unsafe || !commandMode {
 				out.markPartial(IssueUnsupportedConstruct)
 			}
 		case "fish":
 			out.markPartial(IssueUnsupportedConstruct)
 		case "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe":
+			if _, script := powerShellFileOperand(command.Argv); script {
+				out.markPartial(IssueOpaqueArtifact)
+				continue
+			}
 			_, _, ok, unsafe := nestedCommand(
 				command.Argv,
 				command.Program,

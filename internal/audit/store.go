@@ -1718,6 +1718,10 @@ var migrations = []migration{
 		description: "guardrails: add bounded durable tool-call chain state",
 		apply:       migrateToolChainState,
 	},
+	{
+		description: "guardrails: add pending tool-call predecessor lifecycle",
+		apply:       migrateToolChainPendingState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -1828,6 +1832,10 @@ func (s *Store) Init() error {
 		"guardrail_chain_partitions",
 		"guardrail_chain_events",
 		"guardrail_chain_deny_receipts",
+		"guardrail_chain_pending_actions",
+		"guardrail_chain_pending_boundaries",
+		"guardrail_chain_terminal_resets",
+		"guardrail_chain_cutoff_barriers",
 	} {
 		present, err := tableExists(s.db, table)
 		if err != nil {
@@ -2042,9 +2050,13 @@ var knownTables = map[string]bool{
 	"correlation_receipts":              true,
 	"correlation_identity_claims":       true,
 	// Bounded, content-free state for the six fixed tool-call chains.
-	"guardrail_chain_partitions":    true,
-	"guardrail_chain_events":        true,
-	"guardrail_chain_deny_receipts": true,
+	"guardrail_chain_partitions":         true,
+	"guardrail_chain_events":             true,
+	"guardrail_chain_deny_receipts":      true,
+	"guardrail_chain_pending_actions":    true,
+	"guardrail_chain_pending_boundaries": true,
+	"guardrail_chain_terminal_resets":    true,
+	"guardrail_chain_cutoff_barriers":    true,
 	// Connector/session selection and load provenance (WIN-AUD-070/071).
 	"runtime_asset_state": true,
 }

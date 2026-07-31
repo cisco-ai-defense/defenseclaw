@@ -336,7 +336,7 @@ func sudoDiscoveryOrElevationDisposition(
 			return discovery || shellMode || shellProgram(argv[index]), true
 		}
 		switch argument {
-		case "-l", "--list":
+		case "-l", "-ll", "--list":
 			discovery = true
 			continue
 		case "-s", "--shell", "-i", "--login":

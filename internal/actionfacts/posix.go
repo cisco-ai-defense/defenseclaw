@@ -623,6 +623,9 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 		case "bash", "sh", "zsh", "dash", "ksh", "mksh":
 			commandIndex, ok, unsafe := posixShellCommandIndex(command.Argv)
 			if unsafe {
+				if _, script := exactPOSIXShellScriptOperand(command.Argv); script {
+					continue
+				}
 				out.markPartial(IssueUnsupportedConstruct)
 				continue
 			}
@@ -828,7 +831,7 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 				return nil, false, false
 			}
 			switch arg {
-			case "-i", "--login", "-s", "--shell", "-l", "--list":
+			case "-i", "--login", "-s", "--shell", "-l", "-ll", "--list":
 				if i+1 == len(argv) {
 					return nil, false, false
 				}

@@ -29,6 +29,10 @@ func (c *CodexConnector) patchCodexManagedHooks(opts SetupOpts, hookScript strin
 	path := codexManagedConfigPath()
 	hooksDir := filepath.Join(opts.DataDir, "hooks")
 	hookScript = filepath.ToSlash(hookScript)
+	hookGroups, err := codexHookGroupsForOptions(opts)
+	if err != nil {
+		return err
+	}
 	if err := ensureCodexConfigDir(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("create Codex managed config directory: %w", err)
 	}
@@ -59,7 +63,10 @@ func (c *CodexConnector) patchCodexManagedHooks(opts SetupOpts, hookScript strin
 		if !exists {
 			hooks = map[string]interface{}{}
 		}
-		if err := mergeOwnedCodexHooks(hooks, path, hookScript, hooksDir, false); err != nil {
+		if err := mergeOwnedCodexHooks(
+			hooks, path, hookScript, hooksDir, false,
+			hookGroups,
+		); err != nil {
 			return err
 		}
 		cfg["hooks"] = hooks
@@ -76,7 +83,9 @@ func (c *CodexConnector) patchCodexManagedHooks(opts SetupOpts, hookScript strin
 		if !ok {
 			return fmt.Errorf("verify rendered Codex managed config: hooks has unsupported type %T", rendered["hooks"])
 		}
-		if err := verifyManagedCodexHookMatrix(renderedHooks, path, hooksDir); err != nil {
+		if err := verifyManagedCodexHookMatrixForGroups(
+			renderedHooks, path, hooksDir, hookGroups,
+		); err != nil {
 			return fmt.Errorf("verify rendered managed DefenseClaw hooks: %w", err)
 		}
 		transformed = out
@@ -135,7 +144,9 @@ func (c *CodexConnector) patchCodexManagedHooks(opts SetupOpts, hookScript strin
 		if !ok {
 			return fmt.Errorf("verify persisted Codex managed config: hooks has unsupported type %T", persistedConfig["hooks"])
 		}
-		if err := verifyManagedCodexHookMatrix(persistedHooks, path, hooksDir); err != nil {
+		if err := verifyManagedCodexHookMatrixForGroups(
+			persistedHooks, path, hooksDir, hookGroups,
+		); err != nil {
 			return fmt.Errorf("verify persisted managed DefenseClaw hooks: %w", err)
 		}
 		if !bytes.Equal(persisted, transformed) {

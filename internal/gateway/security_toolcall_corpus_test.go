@@ -56,6 +56,12 @@ func TestSecuritySuiteToolCall(t *testing.T) {
 	seen := make(map[string]struct{}, len(cases))
 	attacks := 0
 	benign := 0
+	zeroNoiseBenign := 0
+	detectionOnlyAttacks := 0
+	truePositive := 0
+	trueNegative := 0
+	falsePositive := 0
+	falseNegative := 0
 
 	for _, test := range cases {
 		test := test
@@ -70,6 +76,9 @@ func TestSecuritySuiteToolCall(t *testing.T) {
 			switch test.ExpectRoute {
 			case "none":
 				benign++
+				if test.NoOtherFinding {
+					zeroNoiseBenign++
+				}
 				if test.IsAttack {
 					t.Fatal("attack case cannot expect no owner finding")
 				}
@@ -77,6 +86,9 @@ func TestSecuritySuiteToolCall(t *testing.T) {
 				attacks++
 				if !test.IsAttack {
 					t.Fatal("benign case cannot expect an owner finding")
+				}
+				if test.DetectionOnly {
+					detectionOnlyAttacks++
 				}
 			default:
 				t.Fatalf("unsupported expect_route %q", test.ExpectRoute)
@@ -132,6 +144,17 @@ func TestSecuritySuiteToolCall(t *testing.T) {
 					break
 				}
 			}
+			actualTargetFinding := count > 0
+			switch {
+			case test.IsAttack && actualTargetFinding:
+				truePositive++
+			case test.IsAttack:
+				falseNegative++
+			case actualTargetFinding:
+				falsePositive++
+			default:
+				trueNegative++
+			}
 
 			if test.ExpectRoute == "none" {
 				if count != 0 {
@@ -185,5 +208,30 @@ func TestSecuritySuiteToolCall(t *testing.T) {
 
 	if attacks == 0 || benign == 0 {
 		t.Fatalf("corpus must contain both TP and FP guards: attacks=%d benign=%d", attacks, benign)
+	}
+	precision := corpusRatio(truePositive, truePositive+falsePositive)
+	recall := corpusRatio(truePositive, truePositive+falseNegative)
+	f1 := 0.0
+	if precision+recall > 0 {
+		f1 = 2 * precision * recall / (precision + recall)
+	}
+	t.Logf(
+		"trusted target-owner corpus: TP=%d TN=%d FP=%d FN=%d precision=%.3f recall=%.3f F1=%.3f",
+		truePositive, trueNegative, falsePositive, falseNegative,
+		precision, recall, f1,
+	)
+	t.Logf(
+		"scope: %d enforcement-eligible attacks, %d detection-only attacks; %d/%d benign cases require zero findings; curated regression cases, not a production-rate estimate",
+		attacks-detectionOnlyAttacks,
+		detectionOnlyAttacks,
+		zeroNoiseBenign,
+		benign,
+	)
+	if falsePositive != 0 || falseNegative != 0 {
+		t.Fatalf(
+			"tool-call corpus regression: FP=%d FN=%d",
+			falsePositive,
+			falseNegative,
+		)
 	}
 }

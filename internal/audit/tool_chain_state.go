@@ -66,6 +66,8 @@ type ToolChainRepository struct {
 	maxPartitions int
 	receiptTTL    time.Duration
 	maxHorizon    time.Duration
+	pendingTTL    time.Duration
+	maxPending    int
 }
 
 func (s *Store) ToolChainRepository() (*ToolChainRepository, error) {
@@ -76,6 +78,7 @@ func (s *Store) ToolChainRepository() (*ToolChainRepository, error) {
 		store: s, now: time.Now, maxEvents: guardrail.ToolChainMaxEvents,
 		maxPartitions: guardrail.ToolChainMaxPartitions,
 		receiptTTL:    guardrail.ToolChainReceiptTTL, maxHorizon: guardrail.ToolChainMaxHorizon,
+		pendingTTL: guardrail.ToolChainMaxHorizon, maxPending: guardrail.ToolChainMaxPartitions,
 	}, nil
 }
 
@@ -179,6 +182,17 @@ func (repo *ToolChainRepository) observeTx(
 	replay, ok, err := repo.loadReceiptReplay(ctx, tx, input, sessionDigest, now)
 	if err != nil || ok {
 		return replay, err
+	}
+	suppressed, err := repo.terminalResetSuppressesEvent(
+		ctx, tx, input.ConnectorInstanceID, sessionDigest, received, now,
+	)
+	if err != nil {
+		return ToolChainObserveResult{}, err
+	}
+	if suppressed {
+		return ToolChainObserveResult{
+			Status: ToolChainObserveReplay, SuppressTelemetry: true,
+		}, nil
 	}
 	existing, ok, err := repo.loadExistingEvent(ctx, tx, input, sessionDigest, now)
 	if err != nil || ok {
