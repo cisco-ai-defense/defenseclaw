@@ -103,7 +103,7 @@ endef
         upgrade-legacy-smoke upgrade-legacy-smoke-matrix upgrade-signed-protocol upgrade-signed-protocol-matrix \
         set-version \
         _bundle-data _source-install-preflight _source-install-dev-preflight _source-dev-install \
-        proto proto-tools \
+        proto proto-check proto-tools \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
@@ -380,7 +380,7 @@ dev-pycli: pycli
 # Protobuf regeneration
 # ---------------------------------------------------------------------------
 # `proto` regenerates the Go stubs for the DefenseClaw ↔ AVC (Secure
-# Client) contract at proto/defenseclaw/secureclient/v1/*.proto.
+# Client) contract and the private semantic guardrail facts.
 # Tool binaries are installed under .tools/bin so contributors do not
 # need protoc-gen-go in their global $GOPATH/bin, and the versions
 # are pinned to what the generated files were produced against.
@@ -389,7 +389,7 @@ dev-pycli: pycli
 # changes.
 PROTO_TOOLS_DIR := $(CURDIR)/.tools
 PROTO_TOOLS_BIN := $(PROTO_TOOLS_DIR)/bin
-PROTOC_GEN_GO_VERSION      := v1.36.5
+PROTOC_GEN_GO_VERSION      := v1.36.6
 PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
 
 proto-tools:
@@ -403,7 +403,16 @@ proto: proto-tools
 		--go_out=. --go_opt=paths=source_relative \
 		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
 		secureclient.proto
-	@echo "Regenerated proto/defenseclaw/secureclient/v1/*.pb.go"
+	@cd internal/guardrail/semanticpb && PATH="$(PROTO_TOOLS_BIN):$$PATH" protoc \
+		--go_out=. --go_opt=paths=source_relative \
+		facts.proto
+	@echo "Regenerated committed Go protobuf stubs"
+
+proto-check: proto
+	@git diff --exit-code -- \
+		proto/defenseclaw/secureclient/v1/secureclient.pb.go \
+		proto/defenseclaw/secureclient/v1/secureclient_grpc.pb.go \
+		internal/guardrail/semanticpb/facts.pb.go
 
 gateway: sync-openclaw-extension
 	go build $(GOFLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw

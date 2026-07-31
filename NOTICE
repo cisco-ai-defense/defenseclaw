@@ -29,11 +29,12 @@ Redistributed contents vary by artifact. GoReleaser archive Syft SBOM sidecars
 inventory the gateway archives. The Windows Setup merged SPDX 2.3 SBOM also
 derives its exact linked Go module inventory from `go version -m`.
 
-THIRD_PARTY_LICENSES.txt is a scoped attribution artifact for the mvdan shell
-parser addition, not an exhaustive dependency inventory. Its header records
-the exact covered module version, upstream license source, and license-text
-digest. Additional license details can be found in each dependency's source
-repository. Key dependencies include:
+THIRD_PARTY_LICENSES.txt is a scoped attribution artifact for dependencies
+added by the structured command and semantic tool-call analysis work, not an
+exhaustive dependency inventory. Its header records the exact covered module
+versions, upstream license sources, and license-text digests. Additional
+license details can be found in each dependency's source repository. Key
+dependencies include:
 
   - Cobra (github.com/spf13/cobra) — Apache-2.0
   - Viper (github.com/spf13/viper) — MIT
@@ -44,6 +45,10 @@ repository. Key dependencies include:
   - OPA (github.com/open-policy-agent/opa) — Apache-2.0
   - SQLite (modernc.org/sqlite) — BSD-3-Clause
   - mvdan shell parser (mvdan.cc/sh/v3) — BSD-3-Clause
+  - CEL-Go (github.com/google/cel-go) — Apache-2.0 with BSD-3-Clause component
+  - CEL expression protobufs (cel.dev/expr) — Apache-2.0
+  - ANTLR4 Go runtime (github.com/antlr4-go/antlr/v4) — BSD-3-Clause
+  - Go experimental packages (golang.org/x/exp) — BSD-3-Clause
   - OpenTelemetry Go (go.opentelemetry.io/otel) — Apache-2.0
   - Lumberjack (gopkg.in/natefinch/lumberjack.v2) — MIT
   - UUID (github.com/google/uuid) — BSD-3-Clause

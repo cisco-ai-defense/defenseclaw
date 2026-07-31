@@ -35,6 +35,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"gopkg.in/yaml.v3"
 )
 
@@ -204,16 +205,19 @@ type RulesFileYAML struct {
 
 // RuleDefYAML is a single detection rule definition in YAML.
 type RuleDefYAML struct {
-	ID         string   `yaml:"id"`
-	Enabled    *bool    `yaml:"enabled,omitempty"`
-	Pattern    string   `yaml:"pattern"`
-	Title      string   `yaml:"title"`
-	Severity   string   `yaml:"severity"`
-	Confidence float64  `yaml:"confidence"`
-	Tags       []string `yaml:"tags"`
+	ID           string   `yaml:"id"`
+	Enabled      *bool    `yaml:"enabled,omitempty"`
+	Pattern      string   `yaml:"pattern"`
+	Expression   string   `yaml:"expression,omitempty"`
+	ToolCallOnly bool     `yaml:"tool_call_only,omitempty"`
+	Title        string   `yaml:"title"`
+	Severity     string   `yaml:"severity"`
+	Confidence   float64  `yaml:"confidence"`
+	Tags         []string `yaml:"tags"`
 
 	decoded       bool `yaml:"-"`
 	confidenceSet bool `yaml:"-"`
+	expressionSet bool `yaml:"-"`
 }
 
 // SensitiveToolsConfig maps to sensitive-tools.yaml.
@@ -238,17 +242,19 @@ type SensitiveTool struct {
 // ---------------------------------------------------------------------------
 
 const (
-	maxRulePackFiles            = 64
-	maxRulePackInventoryEntries = 4096
-	maxRulePackFileBytes        = 1 << 20 // 1 MiB
-	maxRulePackAggregateBytes   = 4 << 20 // 4 MiB
-	maxRulePackRules            = 4096
-	maxRulesPerFile             = 2048
-	maxJudgeCategories          = 256
-	maxSuppressions             = 4096
-	maxSensitiveTools           = 2048
-	maxLocalPatterns            = 4096
-	maxRegexBytes               = 2048
+	maxRulePackFiles                    = 64
+	maxRulePackInventoryEntries         = 4096
+	maxRulePackFileBytes                = 1 << 20 // 1 MiB
+	maxRulePackAggregateBytes           = 4 << 20 // 4 MiB
+	maxRulePackRules                    = 4096
+	maxRulesPerFile                     = 2048
+	maxSemanticRules                    = 256
+	maxEnabledSemanticStaticCost uint64 = 32_000_000
+	maxJudgeCategories                  = 256
+	maxSuppressions                     = 4096
+	maxSensitiveTools                   = 2048
+	maxLocalPatterns                    = 4096
+	maxRegexBytes                       = 2048
 )
 
 var knownJudgeNames = []string{"exfil", "injection", "pii", "tool-injection"}
@@ -654,6 +660,7 @@ func markDecodedPresence(out any, document *yaml.Node) {
 			ruleNode := rules.Content[i]
 			typed.Rules[i].decoded = true
 			typed.Rules[i].confidenceSet = yamlMappingHas(ruleNode, "confidence")
+			typed.Rules[i].expressionSet = yamlMappingHas(ruleNode, "expression")
 		}
 	case *SensitiveToolsConfig:
 		tools := yamlMappingValue(root, "tools")
@@ -830,6 +837,9 @@ func (rp *RulePack) validateRuleFiles() error {
 	seenCategories := make(map[string]struct{}, len(rp.RuleFiles))
 	seenIDs := make(map[string]struct{})
 	totalRules := 0
+	semanticRules := 0
+	var semanticCost uint64
+	var compiler *semantic.Compiler
 	for fileIndex, ruleFile := range rp.RuleFiles {
 		rel := ruleFileValidationPath(ruleFile, fileIndex)
 		if ruleFile == nil {
@@ -867,6 +877,43 @@ func (rp *RulePack) validateRuleFiles() error {
 			seenIDs[ruleID] = struct{}{}
 			if err := validateRequiredRegex(rel, fmt.Sprintf("rule %d pattern", ruleIndex), rule.Pattern); err != nil {
 				return err
+			}
+			hasExpression := rule.Expression != "" || (rule.decoded && rule.expressionSet)
+			if hasExpression && strings.TrimSpace(rule.Expression) == "" {
+				return rulePackErr(rel, "validation", fmt.Sprintf("rule %d expression must not be blank", ruleIndex))
+			}
+			if hasExpression && strings.TrimSpace(rule.Expression) != rule.Expression {
+				return rulePackErr(rel, "validation", fmt.Sprintf("rule %d expression must not have surrounding whitespace", ruleIndex))
+			}
+			if hasExpression && !rule.ToolCallOnly {
+				return rulePackErr(rel, "validation", fmt.Sprintf("rule %d expression requires tool_call_only", ruleIndex))
+			}
+			if hasExpression {
+				semanticRules++
+				if semanticRules > maxSemanticRules {
+					return rulePackErr(rel, "semantic_rule_count_limit", "rule pack contains too many semantic rules")
+				}
+				if compiler == nil {
+					var err error
+					compiler, err = semantic.NewCompiler()
+					if err != nil {
+						return rulePackErr(rel, "semantic_unavailable", "semantic expression validation is unavailable")
+					}
+				}
+				program, code := compiler.Compile(rule.Expression)
+				if code != semantic.CompileOK {
+					return rulePackErr(
+						rel,
+						"semantic_"+string(code),
+						fmt.Sprintf("rule %d expression is invalid", ruleIndex),
+					)
+				}
+				if rule.Enabled == nil || *rule.Enabled {
+					semanticCost += program.StaticCost()
+					if semanticCost > maxEnabledSemanticStaticCost {
+						return rulePackErr(rel, "semantic_catalog_cost_limit", "enabled semantic rules exceed the catalog cost limit")
+					}
+				}
 			}
 			if strings.TrimSpace(rule.Title) == "" {
 				return rulePackErr(rel, "validation", fmt.Sprintf("rule %d title must not be blank", ruleIndex))

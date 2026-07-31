@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 )
 
 // PatternRule is a single detection rule with a compiled regex, severity,
@@ -33,10 +34,15 @@ import (
 type PatternRule struct {
 	ID         string
 	Pattern    *regexp.Regexp
-	Title      string
-	Severity   string
-	Confidence float64
-	Tags       []string
+	Expression string
+	// ToolCallOnly keeps trusted-action rules out of prompt, result, and
+	// artifact text scans. The trusted dispatcher decides between Expression
+	// and Pattern; ordinary scanners never evaluate both for one owner.
+	ToolCallOnly bool
+	Title        string
+	Severity     string
+	Confidence   float64
+	Tags         []string
 }
 
 // RuleFinding is a structured finding produced by scanning tool args or content.
@@ -52,6 +58,21 @@ type RuleFinding struct {
 	// Empty for content-only matches; the emission pipeline then
 	// falls back to a rule-id-based capability (CapabilityForRuleID).
 	ToolCapabilityClass string `json:"tool_capability_class,omitempty"`
+	enforcement         findingEnforcement
+}
+
+type findingEnforcement uint8
+
+const (
+	// findingEnforcementInherit preserves the enforcement behavior of every
+	// finding produced before trusted semantic dispatch existed.
+	findingEnforcementInherit findingEnforcement = iota
+	findingEnforcementAllowed
+	findingEnforcementDetectionOnly
+)
+
+func (f RuleFinding) contributesToEnforcement() bool {
+	return f.enforcement != findingEnforcementDetectionOnly
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +97,12 @@ type ruleCategory struct {
 // pack, or the compiled-in defaults). In multi-connector mode it is the
 // fallback used by ScanAllRulesForConnector when a connector has no
 // dedicated set registered.
-var allRuleCategories = append([]ruleCategory(nil), defaultRuleCategories...)
+var allRuleGeneration = mustCompileRulePackGeneration(defaultRuleCategories)
+
+// allRuleCategories remains a package-private compatibility view for the
+// existing lifecycle tests. Production publication and reads use the
+// immutable generation pointer. Both are replaced under ruleCategoriesMu.
+var allRuleCategories = allRuleGeneration.categories
 
 // connectorRuleCategories holds a per-connector compiled rule set so each
 // connector scans against its own EffectiveRulePackDir at runtime — the same
@@ -86,6 +112,7 @@ var allRuleCategories = append([]ruleCategory(nil), defaultRuleCategories...)
 // allRuleCategories, so this map is purely additive and leaves the
 // single-connector path untouched. Guarded by ruleCategoriesMu.
 var connectorRuleCategories = map[string][]ruleCategory{}
+var connectorRuleGenerations = map[string]*compiledRulePackCategories{}
 
 func canonicalConnectorRulePackKey(connector string) string {
 	return strings.ToLower(strings.TrimSpace(connector))
@@ -149,21 +176,129 @@ func ApplyRulePackOverrides(rp *guardrail.RulePack) error {
 }
 
 type compiledRulePackCategories struct {
-	categories []ruleCategory
-	overridden int
-	added      int
+	categories    []ruleCategory
+	semanticRules []compiledSemanticRule
+	overridden    int
+	added         int
 }
 
+const (
+	maxGenerationSemanticRules      = 256
+	maxGenerationSemanticStaticCost = uint64(32_000_000)
+)
+
 func compileRulePackCategories(rp *guardrail.RulePack) (*compiledRulePackCategories, error) {
-	merged, overridden, added, err := mergeRulePackCategories(rp)
+	compiler, err := semantic.NewCompiler()
+	if err != nil {
+		return nil, errors.New("semantic rule compiler is unavailable")
+	}
+	merged, overridden, added, err := mergeRulePackCategories(rp, compiler)
 	if err != nil {
 		return nil, err
 	}
-	return &compiledRulePackCategories{
-		categories: merged,
-		overridden: overridden,
-		added:      added,
-	}, nil
+	compiled, err := compileRulePackGenerationWithCompiler(merged, compiler)
+	if err != nil {
+		return nil, err
+	}
+	compiled.overridden = overridden
+	compiled.added = added
+	return compiled, nil
+}
+
+func mustCompileRulePackGeneration(categories []ruleCategory) *compiledRulePackCategories {
+	compiled, err := compileRulePackGeneration(categories)
+	if err != nil {
+		panic(fmt.Sprintf("compile generated guardrail catalog: %v", err))
+	}
+	return compiled
+}
+
+func compileRulePackGeneration(categories []ruleCategory) (*compiledRulePackCategories, error) {
+	compiler, err := semantic.NewCompiler()
+	if err != nil {
+		return nil, errors.New("semantic rule compiler is unavailable")
+	}
+	return compileRulePackGenerationWithCompiler(categories, compiler)
+}
+
+func compileRulePackGenerationWithCompiler(
+	categories []ruleCategory,
+	compiler *semantic.Compiler,
+) (*compiledRulePackCategories, error) {
+	if compiler == nil {
+		return nil, errors.New("semantic rule compiler is unavailable")
+	}
+	ownedCategories := cloneRuleCategories(categories)
+	compiled := &compiledRulePackCategories{categories: ownedCategories}
+	claimed := make(map[string]string)
+	var staticCost uint64
+	for _, category := range ownedCategories {
+		for _, rule := range category.Rules {
+			expression := strings.TrimSpace(rule.Expression)
+			if rule.Expression != expression {
+				return nil, fmt.Errorf(
+					"semantic rule %q expression has outer whitespace",
+					rule.ID,
+				)
+			}
+			if expression == "" {
+				continue
+			}
+			if !rule.ToolCallOnly {
+				return nil, fmt.Errorf("semantic rule %q is not tool-call-only", rule.ID)
+			}
+			program, code := compiler.Compile(expression)
+			if code != semantic.CompileOK {
+				return nil, fmt.Errorf("semantic rule %q failed admission (%s)", rule.ID, code)
+			}
+			if len(compiled.semanticRules) >= maxGenerationSemanticRules {
+				return nil, errors.New("effective semantic rule count exceeds limit")
+			}
+			staticCost += program.StaticCost()
+			if staticCost > maxGenerationSemanticStaticCost {
+				return nil, errors.New("effective semantic rule cost exceeds limit")
+			}
+			owner := semanticOwnerForRule(rule.ID)
+			for _, claimedID := range owner.claimedIDs(true) {
+				if previous, exists := claimed[claimedID]; exists && previous != rule.ID {
+					return nil, fmt.Errorf(
+						"semantic rule %q conflicts with owner %q on %q",
+						rule.ID,
+						previous,
+						claimedID,
+					)
+				}
+				claimed[claimedID] = rule.ID
+			}
+			compiled.semanticRules = append(compiled.semanticRules, compiledSemanticRule{
+				rule:    rule,
+				program: program,
+				owner:   owner,
+			})
+		}
+	}
+	return compiled, nil
+}
+
+func cloneRuleCategories(categories []ruleCategory) []ruleCategory {
+	cloned := make([]ruleCategory, len(categories))
+	for categoryIndex, category := range categories {
+		cloned[categoryIndex] = ruleCategory{
+			Name:  category.Name,
+			Rules: make([]PatternRule, len(category.Rules)),
+		}
+		for ruleIndex, rule := range category.Rules {
+			cloned[categoryIndex].Rules[ruleIndex] = rule
+			if rule.Pattern != nil {
+				cloned[categoryIndex].Rules[ruleIndex].Pattern = rule.Pattern.Copy()
+			}
+			cloned[categoryIndex].Rules[ruleIndex].Tags = append(
+				[]string(nil),
+				rule.Tags...,
+			)
+		}
+	}
+	return cloned
 }
 
 func publishRulePackOverrides(compiled *compiledRulePackCategories) {
@@ -171,6 +306,7 @@ func publishRulePackOverrides(compiled *compiledRulePackCategories) {
 		return
 	}
 	ruleCategoriesMu.Lock()
+	allRuleGeneration = compiled
 	allRuleCategories = compiled.categories
 	ruleCategoriesMu.Unlock()
 	fmt.Fprintf(os.Stderr, "[guardrail] rule pack merged: %d categories overridden, %d added, %d defaults retained\n",
@@ -208,6 +344,7 @@ func publishConnectorRulePackOverrides(connector string, compiled *compiledRuleP
 		return
 	}
 	ruleCategoriesMu.Lock()
+	connectorRuleGenerations[connector] = compiled
 	connectorRuleCategories[connector] = compiled.categories
 	ruleCategoriesMu.Unlock()
 	fmt.Fprintf(os.Stderr, "[guardrail] connector %s rule set: %d categories overridden, %d added, %d defaults retained\n",
@@ -237,10 +374,12 @@ func publishConnectorRulePackGeneration(
 			continue
 		}
 		if _, retained := canonicalNext[name]; !retained {
+			delete(connectorRuleGenerations, name)
 			delete(connectorRuleCategories, name)
 		}
 	}
 	for name, compiled := range canonicalNext {
+		connectorRuleGenerations[name] = compiled
 		connectorRuleCategories[name] = compiled.categories
 	}
 	ruleCategoriesMu.Unlock()
@@ -256,6 +395,7 @@ func RemoveConnectorRulePackOverrides(connector string) {
 		return
 	}
 	ruleCategoriesMu.Lock()
+	delete(connectorRuleGenerations, connector)
 	delete(connectorRuleCategories, connector)
 	ruleCategoriesMu.Unlock()
 }
@@ -266,7 +406,10 @@ func RemoveConnectorRulePackOverrides(connector string) {
 // (ApplyRulePackOverrides) and the per-connector store
 // (ApplyConnectorRulePackOverrides) share identical merge semantics. A nil
 // pack or one with no rule files yields a copy of defaultRuleCategories.
-func mergeRulePackCategories(rp *guardrail.RulePack) (merged []ruleCategory, overridden, added int, err error) {
+func mergeRulePackCategories(
+	rp *guardrail.RulePack,
+	compiler *semantic.Compiler,
+) (merged []ruleCategory, overridden, added int, err error) {
 	merged = make([]ruleCategory, len(defaultRuleCategories))
 	copy(merged, defaultRuleCategories)
 	if rp == nil || len(rp.RuleFiles) == 0 {
@@ -284,6 +427,34 @@ func mergeRulePackCategories(rp *guardrail.RulePack) (merged []ruleCategory, ove
 		}
 		var compiled []PatternRule
 		for ruleIndex, r := range rf.Rules {
+			expression := strings.TrimSpace(r.Expression)
+			if r.Expression != expression {
+				return nil, 0, 0, fmt.Errorf(
+					"rule-pack category entry %d rule %d semantic expression has outer whitespace",
+					fileIndex,
+					ruleIndex,
+				)
+			}
+			if expression != "" {
+				if !r.ToolCallOnly {
+					return nil, 0, 0, fmt.Errorf(
+						"rule-pack category entry %d rule %d semantic expression is not tool-call-only",
+						fileIndex,
+						ruleIndex,
+					)
+				}
+				if compiler == nil {
+					return nil, 0, 0, errors.New("semantic rule compiler is unavailable")
+				}
+				if _, code := compiler.Compile(expression); code != semantic.CompileOK {
+					return nil, 0, 0, fmt.Errorf(
+						"rule-pack category entry %d rule %d contains an invalid semantic expression (%s)",
+						fileIndex,
+						ruleIndex,
+						code,
+					)
+				}
+			}
 			re, err := compileRegexSafe(r.Pattern)
 			if err != nil {
 				return nil, 0, 0, fmt.Errorf(
@@ -297,12 +468,14 @@ func mergeRulePackCategories(rp *guardrail.RulePack) (merged []ruleCategory, ove
 				continue
 			}
 			compiled = append(compiled, PatternRule{
-				ID:         r.ID,
-				Pattern:    re,
-				Title:      r.Title,
-				Severity:   r.Severity,
-				Confidence: r.Confidence,
-				Tags:       r.Tags,
+				ID:           r.ID,
+				Pattern:      re,
+				Expression:   r.Expression,
+				ToolCallOnly: r.ToolCallOnly,
+				Title:        r.Title,
+				Severity:     r.Severity,
+				Confidence:   r.Confidence,
+				Tags:         append([]string(nil), r.Tags...),
 			})
 		}
 		if len(compiled) == 0 {
@@ -409,10 +582,8 @@ func ScanAllRules(text string, toolName string) []RuleFinding {
 	if ManagedEnterpriseActive() {
 		return nil
 	}
-	ruleCategoriesMu.RLock()
-	cats := allRuleCategories
-	ruleCategoriesMu.RUnlock()
-	return scanRuleCategories(cats, text, toolName)
+	generation := snapshotRulePackGeneration("")
+	return scanRuleGeneration(generation, text, toolName, ruleScanOptions{})
 }
 
 // ScanAllRulesForConnector scans against the named connector's registered
@@ -427,16 +598,70 @@ func ScanAllRulesForConnector(connector, text, toolName string) []RuleFinding {
 	if ManagedEnterpriseActive() {
 		return nil
 	}
+	generation := snapshotRulePackGeneration(connector)
+	return scanRuleGeneration(generation, text, toolName, ruleScanOptions{})
+}
+
+type ruleScanOptions struct {
+	includeToolCallOnly bool
+	excludedRuleIDs     map[string]struct{}
+}
+
+func (o ruleScanOptions) allows(ruleID string, toolCallOnly bool) bool {
+	if toolCallOnly && !o.includeToolCallOnly {
+		return false
+	}
+	_, excluded := o.excludedRuleIDs[ruleID]
+	return !excluded
+}
+
+func snapshotRulePackGeneration(connector string) *compiledRulePackCategories {
 	connector = canonicalConnectorRulePackKey(connector)
 	ruleCategoriesMu.RLock()
-	cats := allRuleCategories
+	generation := allRuleGeneration
+	categories := allRuleCategories
 	if connector != "" {
-		if c, ok := connectorRuleCategories[connector]; ok {
-			cats = c
+		if connectorCategories, ok := connectorRuleCategories[connector]; ok {
+			categories = connectorCategories
+			generation = connectorRuleGenerations[connector]
 		}
 	}
+	legacyView := generation == nil ||
+		!sameRuleCategoryView(generation.categories, categories)
 	ruleCategoriesMu.RUnlock()
-	return scanRuleCategories(cats, text, toolName)
+	if legacyView {
+		// Compatibility for package tests that temporarily replace the legacy
+		// category view directly. Production publication always takes the
+		// immutable-generation path above.
+		compiled, err := compileRulePackGeneration(categories)
+		if err == nil {
+			return compiled
+		}
+		return &compiledRulePackCategories{categories: categories}
+	}
+	return generation
+}
+
+func sameRuleCategoryView(a, b []ruleCategory) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	return &a[0] == &b[0]
+}
+
+func scanRuleGeneration(
+	generation *compiledRulePackCategories,
+	text string,
+	toolName string,
+	options ruleScanOptions,
+) []RuleFinding {
+	if generation == nil {
+		return nil
+	}
+	return scanRuleCategoriesWithOptions(generation.categories, text, toolName, options)
 }
 
 // scanRuleCategories runs every rule in cats against text, scanning both the
@@ -444,7 +669,16 @@ func ScanAllRulesForConnector(connector, text, toolName string) []RuleFinding {
 // shared core of ScanAllRules / ScanAllRulesForConnector — the only
 // difference between those entry points is which category set they select.
 func scanRuleCategories(cats []ruleCategory, text string, toolName string) []RuleFinding {
-	findings := windowsCommandFindings(text, toolName)
+	return scanRuleCategoriesWithOptions(cats, text, toolName, ruleScanOptions{})
+}
+
+func scanRuleCategoriesWithOptions(
+	cats []ruleCategory,
+	text string,
+	toolName string,
+	options ruleScanOptions,
+) []RuleFinding {
+	findings := windowsCommandFindingsWithOptions(text, toolName, options)
 	seen := make(map[string]bool)
 	for i := range findings {
 		findings[i] = adjustConfidence(toolName, findings[i])
@@ -454,6 +688,9 @@ func scanRuleCategories(cats []ruleCategory, text string, toolName string) []Rul
 	// Scan raw text first
 	for _, cat := range cats {
 		for _, rule := range cat.Rules {
+			if !options.allows(rule.ID, rule.ToolCallOnly) {
+				continue
+			}
 			loc := rule.Pattern.FindStringIndex(text)
 			if loc == nil {
 				continue
@@ -481,6 +718,9 @@ func scanRuleCategories(cats []ruleCategory, text string, toolName string) []Rul
 	if normalized != text {
 		for _, cat := range cats {
 			for _, rule := range cat.Rules {
+				if !options.allows(rule.ID, rule.ToolCallOnly) {
+					continue
+				}
 				if seen[rule.ID] {
 					continue // already found on raw pass
 				}
