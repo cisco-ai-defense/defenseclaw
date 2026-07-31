@@ -2076,6 +2076,16 @@ func TestPowerShellOwnedDiskAndProcessGrammar(t *testing.T) {
 			wantStatus: StatusPartial,
 		},
 		{
+			name: "format volume explicit execute", source: `Format-Volume -DriveLetter C -WhatIf:$false`,
+			wantStatus: StatusComplete, wantEffect: EffectExecute,
+			wantOp: OperationDiskWrite, wantEnforce: true,
+		},
+		{
+			name: "format volume explicit preview", source: `Format-Volume -DriveLetter C -WhatIf:$true`,
+			wantStatus: StatusComplete, wantEffect: EffectPreview,
+			wantOp: OperationDiskWrite,
+		},
+		{
 			name: "stop wildcard", source: `Stop-Process -Name * -Force`,
 			wantStatus: StatusComplete, wantEffect: EffectExecute,
 			wantOp: OperationProcessKill, wantEnforce: true,

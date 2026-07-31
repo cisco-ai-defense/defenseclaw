@@ -7032,9 +7032,13 @@ func classifyStructuredPowerShellFormatVolume(
 	if !requireCommandDialect(out, command, DialectPowerShell) {
 		return
 	}
+	controls := newStructuredPowerShellControlState()
 	selector := ""
 	complete := true
 	for index := 1; index < len(command.Argv); index++ {
+		if controls.consume(command, command.Argv[index]) {
+			continue
+		}
 		argument := strings.ToLower(command.Argv[index])
 		switch argument {
 		case "-driveletter", "-path", "-partition", "-inputobject":
@@ -7053,14 +7057,16 @@ func classifyStructuredPowerShellFormatVolume(
 				continue
 			}
 			index++
-		case "-force", "-confirm":
-		case "-whatif":
-			command.Effect = EffectPreview
+		case "-force":
 		default:
 			complete = false
 		}
 	}
-	if !complete || selector == "" {
+	if controls.help {
+		command.Effect = EffectPreview
+		return
+	}
+	if !complete || !controls.valid || selector == "" {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}

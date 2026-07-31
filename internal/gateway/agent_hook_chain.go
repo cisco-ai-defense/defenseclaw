@@ -93,6 +93,12 @@ type toolChainHookFinalization struct {
 	evaluationID string
 }
 
+type toolChainHookPanicState struct {
+	committedBlock agentHookResponse
+	finalization   toolChainHookFinalization
+	denyCommitted  bool
+}
+
 func (finalization toolChainHookFinalization) attach(
 	ctx context.Context,
 	responseEvaluationID string,
@@ -121,6 +127,7 @@ func (a *APIServer) applyAgentHookToolChains(
 	rawBody []byte,
 	resp agentHookResponse,
 	latency time.Duration,
+	panicState *toolChainHookPanicState,
 ) (agentHookResponse, toolChainHookFinalization) {
 	var finalization toolChainHookFinalization
 	// Managed enterprise policy is authoritative on hook content. Keep the
@@ -195,6 +202,26 @@ func (a *APIServer) applyAgentHookToolChains(
 	})
 	if err != nil {
 		return resp, finalization
+	}
+	if result.DeniedMask != 0 && panicState != nil {
+		// Observe commits the deny receipt before returning. Snapshot an
+		// enforcement-safe response immediately so a later connector shaper or
+		// telemetry panic cannot turn that durable denial back into an allow.
+		panicState.committedBlock = committedAgentHookChainPanicBlock(
+			profile,
+			req,
+			resp,
+			result,
+		)
+		if result.Status == audit.ToolChainObserveFresh &&
+			len(result.ReceiptIDs) != 0 {
+			panicState.finalization.repository = repository
+			panicState.finalization.receiptIDs = append(
+				[]string(nil),
+				result.ReceiptIDs...,
+			)
+		}
+		panicState.denyCommitted = true
 	}
 	if result.Status == audit.ToolChainObserveFresh &&
 		len(result.DetectedChainIDs) != 0 {
@@ -290,6 +317,7 @@ func (a *APIServer) safeApplyAgentHookToolChains(
 	latency time.Duration,
 ) (resp agentHookResponse, finalization toolChainHookFinalization) {
 	resp = original
+	var panicState toolChainHookPanicState
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			// The chain lane is additive. A local bug or sink panic must never
@@ -301,8 +329,13 @@ func (a *APIServer) safeApplyAgentHookToolChains(
 				req.HookEventName,
 				fmt.Sprintf("tool-call chain panic: %v", recovered),
 			)
-			resp = original
-			finalization = toolChainHookFinalization{}
+			if panicState.denyCommitted {
+				resp = panicState.committedBlock
+				finalization = panicState.finalization
+			} else {
+				resp = original
+				finalization = toolChainHookFinalization{}
+			}
 		}
 	}()
 	return a.applyAgentHookToolChains(
@@ -312,6 +345,7 @@ func (a *APIServer) safeApplyAgentHookToolChains(
 		rawBody,
 		original,
 		latency,
+		&panicState,
 	)
 }
 
@@ -854,6 +888,62 @@ func committedAgentHookChainBlock(
 	next.EvaluationID = resp.EvaluationID
 	next.RuleIDs = append([]string(nil), resp.RuleIDs...)
 	next.RedactionEnabled = resp.RedactionEnabled
+	return next
+}
+
+func committedAgentHookChainPanicBlock(
+	profile connector.HookProfile,
+	req agentHookRequest,
+	resp agentHookResponse,
+	result audit.ToolChainObserveResult,
+) agentHookResponse {
+	chainFindings := toolChainRuleFindings(result)
+	if severityRank[HighestSeverity(chainFindings)] > severityRank[resp.Severity] {
+		resp.Severity = HighestSeverity(chainFindings)
+	}
+	if len(chainFindings) != 0 {
+		ids := make([]string, 0, len(chainFindings))
+		for _, finding := range chainFindings {
+			ids = append(ids, finding.RuleID)
+		}
+		resp.SourceReason = appendVerdictReason(
+			hookSourceReason(resp),
+			"matched ordered safety rule: "+strings.Join(ids, ", "),
+		)
+		resp.Findings = appendUniqueStrings(
+			resp.Findings,
+			FindingStrings(chainFindings)...,
+		)
+	}
+	resp.RuleIDs = mergeBoundedRuleIDs(
+		8,
+		result.DetectedChainIDs,
+		resp.RuleIDs,
+	)
+
+	// A profile callback may be the panic source, so the recovery snapshot
+	// deliberately uses only the built-in, callback-free wire shapers.
+	safeProfile := profile
+	safeProfile.Respond = nil
+	next := committedAgentHookChainBlock(safeProfile, req, resp)
+	switch strings.ToLower(strings.TrimSpace(req.ConnectorName)) {
+	case "claudecode":
+		next.HookOutput = claudeCodeOutput(
+			claudeCodeHookRequest{HookEventName: req.HookEventName},
+			next.Action,
+			next.RawAction,
+			next.Reason,
+			next.AdditionalContext,
+		)
+	case "codex":
+		next.HookOutput = codexOutput(
+			req.HookEventName,
+			next.Action,
+			next.RawAction,
+			next.Reason,
+			next.AdditionalContext,
+		)
+	}
 	return next
 }
 

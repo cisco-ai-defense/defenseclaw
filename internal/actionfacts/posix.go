@@ -859,6 +859,12 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 				strings.HasPrefix(arg, "--command-timeout=") {
 				continue
 			}
+			if strings.HasPrefix(arg, "--preserve-env=") {
+				if strings.TrimPrefix(arg, "--preserve-env=") == "" {
+					return nil, false, true
+				}
+				continue
+			}
 			if strings.HasPrefix(arg, "-") {
 				return nil, false, true
 			}

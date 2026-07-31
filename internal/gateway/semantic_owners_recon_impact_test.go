@@ -492,6 +492,77 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 	}
 }
 
+func TestSudoFallbackDispositionRouting(t *testing.T) {
+	const connector = "sudo-fallback-disposition-test"
+	installDefaultProfileConnector(t, connector)
+
+	tests := []struct {
+		name, command  string
+		want, fallback bool
+	}{
+		{"joined preserve env shell", "sudo --preserve-env=PATH /bin/bash", true, false},
+		{"joined preserve env ordinary command", "sudo --preserve-env=PATH apt-get update", false, false},
+		{"determinate ordinary command", "sudo -n apt-get update", false, false},
+		{"unknown option ordinary command", "sudo --future-option apt-get update", false, false},
+		{"determinate privilege discovery", "sudo -l", true, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := reconImpactCommand(test.command)
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input:              input,
+				LegacyText:         test.command,
+				Connector:          connector,
+				EnforcementCapable: true,
+			})
+			var matched *RuleFinding
+			count := 0
+			for index := range findings {
+				if findings[index].RuleID == "CMD-SUDO" {
+					matched = &findings[index]
+					count++
+				}
+			}
+			wantCount := 0
+			if test.want {
+				wantCount = 1
+			}
+			if count != wantCount {
+				t.Fatalf(
+					"CMD-SUDO count=%d, want %d: %v",
+					count,
+					wantCount,
+					FindingStrings(findings),
+				)
+			}
+			if matched != nil {
+				if !matched.contributesToEnforcement() {
+					t.Fatalf("CMD-SUDO is not enforcement eligible: %+v", *matched)
+				}
+				if got := matched.Evidence != ""; got != test.fallback {
+					t.Fatalf(
+						"fallback evidence=%t, want %t: %+v",
+						got,
+						test.fallback,
+						*matched,
+					)
+				}
+			}
+		})
+	}
+
+	joinedPreserveEnv := actionfacts.Analyze(
+		reconImpactCommand("sudo --preserve-env=PATH /bin/bash"),
+	)
+	owner := semanticReconImpactOwners["CMD-SUDO"]
+	if !owner.eligible(joinedPreserveEnv) {
+		t.Fatalf(
+			"joined --preserve-env shell lost semantic ownership: %+v",
+			joinedPreserveEnv,
+		)
+	}
+}
+
 func TestSemanticReconImpactFallbackProofBoundaries(t *testing.T) {
 	t.Parallel()
 

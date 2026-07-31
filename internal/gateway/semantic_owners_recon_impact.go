@@ -358,6 +358,12 @@ func sudoDiscoveryOrElevationDisposition(
 			continue
 		}
 		key, value, joined := strings.Cut(argument, "=")
+		if key == "--preserve-env" && joined {
+			if value == "" {
+				return false, false
+			}
+			continue
+		}
 		if _, consumes := valueOptions[key]; consumes {
 			if joined {
 				if value == "" {
