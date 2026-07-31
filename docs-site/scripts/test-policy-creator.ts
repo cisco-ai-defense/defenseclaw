@@ -1019,6 +1019,14 @@ test('semantic rule fields validate and survive YAML emit', async () => {
     validatePolicy(invalid).some((f) => f.code === 'CEL_TOOL_CALL_REQUIRED'),
     'an expression without the authenticated tool-call boundary must fail',
   );
+  const compound = structuredClone(invalid);
+  compound.rule_pack.files[0].rules[0].expression = ' true';
+  const compoundCodes = validatePolicy(compound).map((f) => f.code);
+  assert.ok(
+    compoundCodes.includes('CEL_EXPRESSION_BLANK') &&
+      compoundCodes.includes('CEL_TOOL_CALL_REQUIRED'),
+    'independent expression errors must be reported in one pass',
+  );
 
   for (const expression of ['', '   ', ' true', 'true ']) {
     const malformed = makePolicy({
@@ -1040,9 +1048,12 @@ test('semantic rule fields validate and survive YAML emit', async () => {
   const nonString = structuredClone(policy);
   (nonString.rule_pack.files[0].rules[0] as unknown as { expression: unknown }).expression =
     true;
+  nonString.rule_pack.files[0].rules[0].tool_call_only = false;
+  const nonStringCodes = validatePolicy(nonString).map((f) => f.code);
   assert.ok(
-    validatePolicy(nonString).some((f) => f.code === 'CEL_EXPRESSION_TYPE'),
-    'a non-string expression must fail without crashing validation',
+    nonStringCodes.includes('CEL_EXPRESSION_TYPE') &&
+      nonStringCodes.includes('CEL_TOOL_CALL_REQUIRED'),
+    'a non-string expression must report independent errors without crashing',
   );
 });
 

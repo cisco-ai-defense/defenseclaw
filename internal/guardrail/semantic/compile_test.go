@@ -55,8 +55,16 @@ func TestCompilerAdmissionAndCache(t *testing.T) {
 			strings.Repeat("x", maxExpressionBytes+1),
 			CompileExpressionSize,
 		},
+		{
+			"parser recursion",
+			strings.Repeat("(", maxParserRecursion+1) +
+				"true" +
+				strings.Repeat(")", maxParserRecursion+1),
+			CompileSyntax,
+		},
 		{"syntax", `f.tool ==`, CompileSyntax},
 		{"unknown field", `f.unknown == "x"`, CompileType},
+		{"JSON field alias", `f.activeHome == "/home/operator"`, CompileType},
 		{"non Boolean", `f.tool`, CompileResultType},
 		{"surface", `f.tool + "x" == "y"`, CompileSurface},
 		{"message equality", `f.parse == f.parse`, CompileSurface},
@@ -145,6 +153,10 @@ func TestCompilerAdmissionAndCache(t *testing.T) {
 
 func TestDescriptorMatchesCostBoundsAndClosedSchema(t *testing.T) {
 	file := semanticpb.File_facts_proto
+	if got, want := maxOperationsPerCommand,
+		len(semanticpb.OperationKind_name)-1; got != want {
+		t.Fatalf("max operations per command = %d, want %d", got, want)
+	}
 	if got := string(file.Messages().ByName("Facts").FullName()); got != "defenseclaw.guardrail.semantic.v1.Facts" {
 		t.Fatalf("Facts full name = %q", got)
 	}

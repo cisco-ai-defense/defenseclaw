@@ -17,6 +17,11 @@
 package semantic
 
 const (
+	// MaxCatalogRules bounds semantic expressions in one effective rulepack.
+	MaxCatalogRules = 256
+	// MaxEnabledCatalogStaticCost bounds enabled semantic expression cost.
+	MaxEnabledCatalogStaticCost uint64 = 32_000_000
+
 	maxExpressionBytes           = 16 << 10
 	maxExpressionRunes           = 16 << 10
 	maxParserRecursion           = 64
@@ -35,7 +40,7 @@ const (
 	maxArgvBytes            = 65536
 	maxCommands             = 128
 	maxArgumentsPerCommand  = 256
-	maxOperationsPerCommand = 29
+	maxOperationsPerCommand = 30
 	maxRedirectsPerCommand  = 256
 	maxWrappersPerCommand   = 4
 	maxPaths                = 256

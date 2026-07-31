@@ -18,6 +18,7 @@ package semantic
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -106,6 +107,22 @@ func TestProgramEvalFailureClassification(t *testing.T) {
 	defer cancelDeadline()
 	if _, code := program.EvalBool(expired, many); code != EvalDeadline {
 		t.Fatalf("expired EvalBool() code = %q", code)
+	}
+	cancelledWithCause, cancelWithCause := context.WithCancelCause(
+		context.Background(),
+	)
+	cancelWithCause(errors.New("private cancellation cause"))
+	if _, code := program.EvalBool(cancelledWithCause, many); code != EvalCancelled {
+		t.Fatalf("cause-cancelled EvalBool() code = %q", code)
+	}
+	expiredWithCause, cancelDeadlineCause := context.WithDeadlineCause(
+		context.Background(),
+		time.Now().Add(-time.Second),
+		errors.New("private deadline cause"),
+	)
+	defer cancelDeadlineCause()
+	if _, code := program.EvalBool(expiredWithCause, many); code != EvalDeadline {
+		t.Fatalf("cause-expired EvalBool() code = %q", code)
 	}
 	if _, code := program.EvalBool(context.Background(), nil); code != EvalProjectionInvalid {
 		t.Fatalf("nil projection code = %q", code)

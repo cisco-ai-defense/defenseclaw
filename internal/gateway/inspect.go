@@ -345,7 +345,11 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		EnforcementCapable: true,
 	}
 	if argv, ok := parseTrustedShimArgv(req.Tool, req.Args); ok {
-		action.Input = actionfacts.Input{Tool: req.Tool, Argv: argv}
+		action.Input = actionfacts.Input{
+			Tool:       req.Tool,
+			Argv:       argv,
+			ActiveHome: trustedSameHostHome(),
+		}
 		action.LegacyText = serializeArgvForLegacyScan(argv)
 	}
 	return a.inspectTrustedToolPolicyCtx(ctx, req, action)

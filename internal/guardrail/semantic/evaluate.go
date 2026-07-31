@@ -58,9 +58,19 @@ func (p *Program) EvalBool(
 			return result, EvalCancelled
 		}
 		var cancelled interpreter.EvalCancelledError
-		if errors.As(err, &cancelled) &&
-			cancelled.Cause == interpreter.CostLimitExceeded {
+		isCancelled := errors.As(err, &cancelled)
+		if isCancelled && cancelled.Cause == interpreter.CostLimitExceeded {
 			return result, EvalCost
+		}
+		if (isCancelled &&
+			cancelled.Cause == interpreter.ContextCancelled) ||
+			errors.Is(err, interpreter.InterruptError{}) {
+			switch {
+			case errors.Is(ctx.Err(), context.DeadlineExceeded):
+				return result, EvalDeadline
+			case errors.Is(ctx.Err(), context.Canceled):
+				return result, EvalCancelled
+			}
 		}
 		return result, EvalError
 	}

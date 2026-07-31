@@ -28,11 +28,6 @@ import (
 
 const generatedOutput = "internal/gateway/rules_catalog_generated.go"
 
-const (
-	maxSemanticRules                    = 256
-	maxEnabledSemanticStaticCost uint64 = 32_000_000
-)
-
 var catalogSources = []struct {
 	filename string
 	category string
@@ -296,10 +291,7 @@ func validateRule(filename string, rule *ruleDef) error {
 }
 
 func validateSemanticCatalog(catalog []rulesFile) error {
-	compiler, err := semantic.NewCompiler()
-	if err != nil {
-		return errors.New("semantic expression validation is unavailable")
-	}
+	var compiler *semantic.Compiler
 	count := 0
 	var enabledCost uint64
 	for _, file := range catalog {
@@ -308,8 +300,15 @@ func validateSemanticCatalog(catalog []rulesFile) error {
 				continue
 			}
 			count++
-			if count > maxSemanticRules {
-				return errors.New("semantic rule count exceeds 256")
+			if count > semantic.MaxCatalogRules {
+				return fmt.Errorf("semantic rule count exceeds %d", semantic.MaxCatalogRules)
+			}
+			if compiler == nil {
+				var err error
+				compiler, err = semantic.NewCompiler()
+				if err != nil {
+					return errors.New("semantic expression validation is unavailable")
+				}
 			}
 			program, code := compiler.Compile(rule.Expression)
 			if code != semantic.CompileOK {
@@ -322,7 +321,7 @@ func validateSemanticCatalog(catalog []rulesFile) error {
 			}
 			if rule.Enabled == nil || *rule.Enabled {
 				enabledCost += program.StaticCost()
-				if enabledCost > maxEnabledSemanticStaticCost {
+				if enabledCost > semantic.MaxEnabledCatalogStaticCost {
 					return errors.New("enabled semantic rules exceed the catalog cost limit")
 				}
 			}

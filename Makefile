@@ -409,6 +409,10 @@ proto: proto-tools
 	@echo "Regenerated committed Go protobuf stubs"
 
 proto-check: proto
+	@git ls-files --error-unmatch -- \
+		proto/defenseclaw/secureclient/v1/secureclient.pb.go \
+		proto/defenseclaw/secureclient/v1/secureclient_grpc.pb.go \
+		internal/guardrail/semanticpb/facts.pb.go >/dev/null
 	@git diff --exit-code -- \
 		proto/defenseclaw/secureclient/v1/secureclient.pb.go \
 		proto/defenseclaw/secureclient/v1/secureclient_grpc.pb.go \

@@ -31,6 +31,9 @@ import (
 )
 
 func TestTrustedActionSemanticIsolationAndPreview(t *testing.T) {
+	const connector = "trusted-action-isolation-preview"
+	installDefaultProfileConnector(t, connector)
+
 	command := "cat /home/alice/.aws/credentials"
 	if findingWithID(ScanAllRules(command, "shell"), "PATH-AWS-CREDS") != nil {
 		t.Fatal("tool-call-only owner leaked into an ordinary text scan")
@@ -43,7 +46,7 @@ func TestTrustedActionSemanticIsolationAndPreview(t *testing.T) {
 			ActiveHome: "/home/alice",
 		},
 		LegacyText:         command,
-		Connector:          "unknown",
+		Connector:          connector,
 		EnforcementCapable: true,
 	})
 	credential := findingWithID(findings, "PATH-AWS-CREDS")
@@ -77,7 +80,7 @@ func TestTrustedActionSemanticIsolationAndPreview(t *testing.T) {
 					ActiveHome: "/home/alice",
 				},
 				LegacyText:         test.command,
-				Connector:          "unknown",
+				Connector:          connector,
 				EnforcementCapable: true,
 			})
 			if got := findingWithID(upload, "CMD-CURL-UPLOAD") != nil; got != test.want {
@@ -95,7 +98,7 @@ func TestTrustedActionSemanticIsolationAndPreview(t *testing.T) {
 			Argv: previewArgv,
 		},
 		LegacyText:         serializeArgvForLegacyScan(previewArgv),
-		Connector:          "unknown",
+		Connector:          connector,
 		EnforcementCapable: true,
 	})
 	if findingWithID(preview, "exec.reverse_tunnel") != nil {
@@ -126,7 +129,7 @@ func TestTrustedActionSemanticIsolationAndPreview(t *testing.T) {
 					Command: test.command,
 				},
 				LegacyText:         test.command,
-				Connector:          "unknown",
+				Connector:          connector,
 				EnforcementCapable: true,
 			})
 			if findingWithID(findings, test.ruleID) == nil {

@@ -248,8 +248,8 @@ const (
 	maxRulePackAggregateBytes           = 4 << 20 // 4 MiB
 	maxRulePackRules                    = 4096
 	maxRulesPerFile                     = 2048
-	maxSemanticRules                    = 256
-	maxEnabledSemanticStaticCost uint64 = 32_000_000
+	maxSemanticRules                    = semantic.MaxCatalogRules
+	maxEnabledSemanticStaticCost uint64 = semantic.MaxEnabledCatalogStaticCost
 	maxJudgeCategories                  = 256
 	maxSuppressions                     = 4096
 	maxSensitiveTools                   = 2048

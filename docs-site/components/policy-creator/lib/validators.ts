@@ -339,8 +339,9 @@ export function validatePolicy(policy: Policy): ValidationFinding[] {
           location: `rules.${file.filename}.${rule.id}`,
           fix: 'Remove the expression field or provide a trimmed Boolean CEL expression string.',
         });
-      } else if (
-        expression !== undefined &&
+      }
+      if (
+        typeof expression === 'string' &&
         (expression.trim() === '' || expression.trim() !== expression)
       ) {
         findings.push({
@@ -350,7 +351,8 @@ export function validatePolicy(policy: Policy): ValidationFinding[] {
           location: `rules.${file.filename}.${rule.id}`,
           fix: 'Remove the expression field or provide a trimmed Boolean CEL expression.',
         });
-      } else if (expression !== undefined && !rule.tool_call_only) {
+      }
+      if (expression !== undefined && !rule.tool_call_only) {
         findings.push({
           level: 'error',
           code: 'CEL_TOOL_CALL_REQUIRED',
